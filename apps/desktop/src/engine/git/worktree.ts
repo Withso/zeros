@@ -9,7 +9,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 
-import { GitError } from "./errors";
+import { GitError, isGitError } from "./errors";
 import {
   assertSafeGitRef,
   runGit as runGitCommand,
@@ -52,21 +52,21 @@ import {
   updateWorkspaceLifecycleDetails,
   updateWorkspaceLifecyclePhase,
   updateWorkspace,
-  designWorktreesRoot,
   worktreesRoot,
   legacyWorktreesRoot,
   isManagedWorktreePath,
   WORKSPACE_OWNERSHIP_META_KEY,
 } from "./state";
 import {
-  DESIGN_DIRECTORY_NAME,
-  initializeDesignDocument,
-} from "../design/document";
+  ensureDesignDocumentCommitted,
+  fenceWorkspaceDesignDirectoryIfPresent,
+} from "./design-mode";
+import { resolveDesignDirectoryForEnter } from "../design/directory";
 import {
-  lockDesignWorkspaceRoot,
-  unlockDesignWorkspaceRoot,
+  fenceDesignDirectory,
+  unfenceDesignDirectory,
+  unlockLegacyDesignWorkspaceLock,
 } from "../design/workspace-lock";
-import { setWorkingDirectories } from "./sparse-checkout";
 import {
   runSetupHooks,
   runInlineScript,
@@ -115,6 +115,7 @@ import type {
   WorkspaceKind,
   WorkspaceStatus,
 } from "./types";
+import type { RepoTaskBoundaryFactory } from "../agents/containment/types";
 
 const PROVISION_PATHS_META_KEY = "create.provision-paths.v1";
 const WORKTREE_REMOVE_TIMEOUT_MS = 30_000;
@@ -637,16 +638,17 @@ function workspaceDirectorySegment(value: string, fallback: string): string {
 function managedRepositoryDirectory(
   repoRoot: string,
   repoSlug: string,
-  kind: WorkspaceKind = "code",
 ): string {
   const preferred = workspaceDirectorySegment(
     path.basename(repoRoot),
     repoSlug,
   );
   const normalizedRoot = path.resolve(repoRoot);
-  const managedRoot = path.resolve(
-    kind === "design" ? designWorktreesRoot() : worktreesRoot(),
-  );
+  // One root for every workspace regardless of mode. Design is a reversible
+  // MODE of a workspace (see git/design-mode.ts), not a species with its own
+  // placement; designWorktreesRoot() survives only for rows created by
+  // pre-mode builds (state seeding still scans it).
+  const managedRoot = path.resolve(worktreesRoot());
   // Once an owner has any managed workspace, its repository directory is
   // durable identity. A second same-basename repository registered later must
   // not make future workspaces jump from `<basename>/…` to `<repoSlug>/…`.
@@ -697,16 +699,14 @@ export function managedWorkspacePath(
   repoRoot: string,
   repoSlug: string,
   branch: string,
-  kind: WorkspaceKind = "code",
 ): string {
   const displayBranch = branchDisplayName(branch);
-  const repoDirectory = managedRepositoryDirectory(repoRoot, repoSlug, kind);
+  const repoDirectory = managedRepositoryDirectory(repoRoot, repoSlug);
   const workspaceDirectory = workspaceDirectorySegment(
     displayBranch,
     "workspace",
   );
-  const managedRoot =
-    kind === "design" ? designWorktreesRoot() : worktreesRoot();
+  const managedRoot = worktreesRoot();
   const target = path.join(managedRoot, repoDirectory, workspaceDirectory);
   const root = path.resolve(managedRoot);
   const resolved = path.resolve(target);
@@ -1241,8 +1241,9 @@ export async function prepareWorkspaceCreate(input: {
   }
   // Reserve the branch name too — it IS the workspace's display name. Avoid a
   // stale filesystem occupant as well as a DB collision; a leaked folder from
-  // an older build must never be silently overwritten.
-  const kind: WorkspaceKind = input.kind === "design" ? "design" : "code";
+  // an older build must never be silently overwritten. (The initial mode no
+  // longer affects placement — one root for every workspace — so prepare
+  // doesn't read input.kind anymore; create still does.)
   let branch = "";
   let workspacePath = "";
   for (let attempt = 0; attempt < 20; attempt++) {
@@ -1253,7 +1254,6 @@ export async function prepareWorkspaceCreate(input: {
       input.repoRoot,
       repoSlug,
       candidate,
-      kind,
     );
     if (
       !getWorkspaceByBranch(repoSlug, candidate) &&
@@ -1399,12 +1399,7 @@ async function createWorkspaceInner(
   } else {
     workspaceId = generateWorkspaceId(input.prompt);
   }
-  const workspacePath = managedWorkspacePath(
-    input.repoRoot,
-    repoSlug,
-    branch,
-    kind,
-  );
+  const workspacePath = managedWorkspacePath(input.repoRoot, repoSlug, branch);
 
   // Sanity: branch should be unique. The 4-char hex suffix means a
   // collision is ~1/65k per adj-noun pair — vanishingly rare, but
@@ -1438,9 +1433,13 @@ async function createWorkspaceInner(
   }
 
   // Resolve the background setup command before mutating Git. A settings/read
-  // failure therefore cannot strand an unregistered linked worktree.
+  // failure therefore cannot strand an unregistered linked worktree. Design-
+  // at-birth creates resolve setup like any other workspace: design is a mode
+  // of the same full checkout, and its live-data story (dev servers next to
+  // the canvas) depends on installs running — they write gitignored paths,
+  // which the design lock deliberately leaves writable.
   const setupCommand =
-    kind === "design" || input.runRepoScripts === false
+    input.runRepoScripts === false
       ? null
       : await resolveSetupCommand({
           repoRoot: input.repoRoot,
@@ -1516,7 +1515,7 @@ async function createWorkspaceInner(
     payload: {
       copyPaths: input.copyPaths ?? [],
       symlinkPaths: input.symlinkPaths ?? [],
-      seedFiles: kind === "code" && input.runRepoScripts !== false,
+      seedFiles: input.runRepoScripts !== false,
       ...(kind === "code" && input.optimisticChatId
         ? { optimisticChatId: input.optimisticChatId }
         : {}),
@@ -1582,12 +1581,16 @@ async function createWorkspaceInner(
   // (runRepoScripts === false) skips it, since the patterns come from repo
   // settings / a committed .worktreeinclude and we don't let a paired device
   // trigger a settings-driven file copy (mirrors the setupCommand gate below).
+  // Applies to EVERY create regardless of initial mode: a design-at-birth
+  // workspace is the same full checkout (its live-data use case needs .env +
+  // .worktreeinclude seeding exactly like code), and seeded files are
+  // untracked, so the design lock below never covers them.
   let seedPaths: string[] = [];
   let seedDeferred: string[] = [];
   let seedScanComplete = true;
   let tSeeds = tAdd;
   try {
-    if (kind === "code" && input.runRepoScripts !== false) {
+    if (input.runRepoScripts !== false) {
       const ftc = await resolveFilesToCopy(input.repoRoot);
       for (const w of ftc.warnings) console.warn(`[worktree] ${w}`);
       const explicit = new Set(input.copyPaths ?? []);
@@ -1606,80 +1609,67 @@ async function createWorkspaceInner(
     }
     tSeeds = Date.now();
 
+    // Run post-create FILE provisioning ONLY (copy / symlink / seed). The
+    // setup command runs in the background. Explicit provisioning remains
+    // transactional: failure rolls back the hidden checkout.
+    await runSetupHooks({
+      workspaceId,
+      worktreePath: workspacePath,
+      repoRoot: input.repoRoot,
+      baseBranch,
+      copyPaths: input.copyPaths,
+      seedPaths,
+      symlinkPaths: input.symlinkPaths,
+    });
+    // Durably record what we seeded, so archive force-adds these even if the
+    // patterns that chose them are edited away before the workspace is
+    // archived. Cross-tool safe: a path the hooks skipped (already present from
+    // the branch checkout, or a vanished source) is simply one more entry for
+    // `git add -f`, which no-ops when the file isn't there.
+    addProvisionPaths(workspaceId, seedPaths);
+    // Every workspace gets a `.context-graph/` skeleton (Context tab canvas +
+    // composer-attachment store). Best-effort and quiet: the scaffold is
+    // self-gitignoring, and a failure here must never roll back the worktree —
+    // the attachment IPC and the Context tab both re-scaffold lazily.
+    const graph = await ensureContextGraph(workspacePath);
+    if (!graph.ok) {
+      console.warn(
+        `[worktree] context-graph scaffold skipped for ${workspaceId}: ${graph.error}`,
+      );
+    }
+
     if (kind === "design") {
-      // Design workspaces deliberately skip every repo ritual. Seed only the
-      // portable design document, force-stage the whole app-owned directory,
-      // then commit only when that produced a tree delta. The unconditional
-      // add covers files a checkout hook created untracked (including ignored
-      // files), where initialization correctly reports no writes but the
-      // sparse cone still requires a tracked top-level directory.
-      await initializeDesignDocument(workspacePath);
-      await runGit(workspacePath, [
-        "add",
-        "-f",
-        "-A",
-        "--",
-        DESIGN_DIRECTORY_NAME,
-      ]);
-      const stagedDesign = await runGit(workspacePath, [
-        "diff",
-        "--cached",
-        "--name-only",
-        "--",
-        DESIGN_DIRECTORY_NAME,
-      ]);
-      if (stagedDesign.stdout.trim()) {
-        await runGit(workspacePath, [
-          "-c",
-          "user.name=Zeros",
-          "-c",
-          "user.email=zeros@localhost",
-          "commit",
-          "--no-verify",
-          "-m",
-          "Initialize Zeros Design",
-        ]);
-      }
-      await setWorkingDirectories(workspacePath, [DESIGN_DIRECTORY_NAME], {
-        forceSparse: true,
-      });
-      await lockDesignWorkspaceRoot(workspacePath);
+      // Design-at-birth: the identical checkout opens on the design surface.
+      // Resolve WHICH folder is the design folder (the `[design] directory`
+      // pointer + committed-marker recognition, non-strict so create always
+      // succeeds), ensure + commit the portable design document, then publish
+      // its semantic identity for Zeros' actor-scoped authority. Nothing is
+      // made read-only on the shared checkout: terminals, dev servers, and
+      // other applications continue to see an ordinary worktree.
+      const designDir = await resolveDesignDirectoryForEnter(
+        { path: workspacePath, repoRoot: input.repoRoot },
+        { strict: false },
+      );
+      await ensureDesignDocumentCommitted(workspacePath, designDir);
+      await fenceDesignDirectory(workspacePath);
     } else {
-      // Run post-create FILE provisioning ONLY (copy / symlink / seed). The
-      // setup command runs in the background. Explicit provisioning remains
-      // transactional: failure rolls back the hidden checkout.
-      await runSetupHooks({
-        workspaceId,
-        worktreePath: workspacePath,
+      // Code-mode creates resolve the same identity when the base branch
+      // already carries a design folder. Provider admission—not a shared ACL—
+      // applies the territorial boundary to each Zeros code agent.
+      await fenceWorkspaceDesignDirectoryIfPresent({
+        path: workspacePath,
         repoRoot: input.repoRoot,
-        baseBranch,
-        copyPaths: input.copyPaths,
-        seedPaths,
-        symlinkPaths: input.symlinkPaths,
       });
-      // Durably record what we seeded, so archive force-adds these even if the
-      // patterns that chose them are edited away before the workspace is
-      // archived. Cross-tool safe: a path the hooks skipped (already present from
-      // the branch checkout, or a vanished source) is simply one more entry for
-      // `git add -f`, which no-ops when the file isn't there.
-      addProvisionPaths(workspaceId, seedPaths);
-      // Code workspaces get a `.context-graph/` skeleton (Context tab canvas +
-      // composer-attachment store). Design workspaces deliberately expose only
-      // `Zeros Design/`, so they skip this repo-root scaffold with every other
-      // code-workspace ritual above. Best-effort and quiet: the scaffold is
-      // self-gitignoring, and a failure here must never roll back the worktree —
-      // the attachment IPC and the Context tab both re-scaffold lazily.
-      const graph = await ensureContextGraph(workspacePath);
-      if (!graph.ok) {
-        console.warn(
-          `[worktree] context-graph scaffold skipped for ${workspaceId}: ${graph.error}`,
-        );
-      }
     }
     updateWorkspaceLifecyclePhase(workspaceId, "work-applied");
   } catch (err) {
-    if (kind === "design" && existsSync(workspacePath)) {
-      await unlockDesignWorkspaceRoot(workspacePath).catch(() => {});
+    if (existsSync(workspacePath)) {
+      // Remove ACLs that may remain from an older build before rollback.
+      if (kind === "design") {
+        await unlockLegacyDesignWorkspaceLock(workspacePath).catch(() => {});
+      } else {
+        await unfenceDesignDirectory(workspacePath).catch(() => {});
+      }
     }
     const rolledBack = await safeRollback(
       input.repoRoot,
@@ -1706,7 +1696,6 @@ async function createWorkspaceInner(
   // back workspace never gets a late pass. The setup script / run-on-create
   // actions gate on whenSeedingSettled(), so they still see the complete set.
   if (
-    kind === "code" &&
     input.runRepoScripts !== false &&
     (!seedScanComplete || seedDeferred.length > 0)
   ) {
@@ -1759,7 +1748,9 @@ export interface WorkspaceLifecycleRecoveryResult {
  * filesystem/Git work may already have completed even when its phase write did
  * not. A failed recovery keeps its journal + snapshot for the next startup or
  * explicit retry; it is never "cleaned up" into data loss. */
-export async function reconcileInterruptedWorkspaceLifecycles(): Promise<WorkspaceLifecycleRecoveryResult> {
+export async function reconcileInterruptedWorkspaceLifecycles(
+  repoTaskBoundaryFactory?: RepoTaskBoundaryFactory,
+): Promise<WorkspaceLifecycleRecoveryResult> {
   let entries: WorkspaceLifecycleJournal[];
   try {
     entries = listWorkspaceLifecycles();
@@ -1821,10 +1812,15 @@ export async function reconcileInterruptedWorkspaceLifecycles(): Promise<Workspa
           break;
         }
         case "archive":
-          await archiveWorkspaceInner({
-            workspaceId: row.id,
-            stashUncommitted: true,
-          });
+          await archiveWorkspaceInner(
+            {
+              workspaceId: row.id,
+              stashUncommitted: true,
+            },
+            undefined,
+            undefined,
+            repoTaskBoundaryFactory,
+          );
           break;
         case "restore":
           await restoreWorkspaceInner(row.id);
@@ -2040,9 +2036,14 @@ async function safeRollback(
         return false;
       }
     }
-    if (workspace.kind === "design" && existsSync(worktreePath)) {
+    if (existsSync(worktreePath)) {
+      // Remove ACLs that may remain from an older build before deletion.
       try {
-        await unlockDesignWorkspaceRoot(worktreePath);
+        if (workspace.kind === "design") {
+          await unlockLegacyDesignWorkspaceLock(worktreePath);
+        } else {
+          await unfenceDesignDirectory(worktreePath);
+        }
       } catch {
         return false;
       }
@@ -2054,9 +2055,7 @@ async function safeRollback(
       // this operation's exact registration below; never repository-wide prune
       // entries owned by another Zeros/dev/tool instance.
       if (existsSync(worktreePath)) {
-        if (workspace.kind === "design") {
-          await lockDesignWorkspaceRoot(worktreePath).catch(() => {});
-        }
+        await fenceDesignDirectory(worktreePath).catch(() => {});
         return false;
       }
     }
@@ -2273,6 +2272,7 @@ export function archiveWorkspace(
     workspaceId: string,
     worktreePath: string,
   ) => Promise<{ resume(): void; retire(): void }>,
+  repoTaskBoundaryFactory?: RepoTaskBoundaryFactory,
 ): Promise<ArchiveResult> {
   return withWorkspaceLifecycleFlight(opts.workspaceId, "archive", async () => {
     const lifecycleStartedAt = Date.now();
@@ -2283,6 +2283,7 @@ export function archiveWorkspace(
       opts,
       { lifecycleStartedAt, reaperMs },
       beforeCheckoutEviction,
+      repoTaskBoundaryFactory,
     );
   });
 }
@@ -2466,14 +2467,17 @@ async function removeManagedWorktreeForLifecycle(
   const observation = await beforeCheckoutEviction?.(ws.id, ws.path);
   let staged: PreparedDirectoryEviction;
   try {
+    // Remove ACLs that may remain from an older build before eviction.
     if (ws.kind === "design") {
-      await unlockDesignWorkspaceRoot(ws.path);
+      await unlockLegacyDesignWorkspaceLock(ws.path);
+    } else {
+      await unfenceDesignDirectory(ws.path);
     }
     staged = await prepareWorktreeDirectoryEviction(ws.path);
   } catch (cause) {
     observation?.resume();
-    if (ws.kind === "design" && existsSync(ws.path)) {
-      await lockDesignWorkspaceRoot(ws.path).catch(() => {});
+    if (existsSync(ws.path)) {
+      await fenceDesignDirectory(ws.path).catch(() => {});
     }
     throw new GitError({
       code: "GIT_COMMAND_FAILED",
@@ -2518,6 +2522,7 @@ async function archiveWorkspaceInner(
     workspaceId: string,
     worktreePath: string,
   ) => Promise<{ resume(): void; retire(): void }>,
+  repoTaskBoundaryFactory?: RepoTaskBoundaryFactory,
 ): Promise<ArchiveResult> {
   const archiveStartedAt = timing?.lifecycleStartedAt ?? Date.now();
   const reaperMs = timing?.reaperMs ?? 0;
@@ -2785,8 +2790,12 @@ async function archiveWorkspaceInner(
           worktreePath: ws.path,
           repoRoot: ws.repoRoot,
           baseBranch: ws.baseBranch ?? "",
+          boundaryFactory: repoTaskBoundaryFactory,
         });
       } catch (err) {
+        if (isGitError(err) && err.code === "CONTAINMENT_TEARDOWN_FAILED") {
+          throw err;
+        }
         console.warn(
           `[archive] archive script failed for ${ws.id} (continuing): ${
             err instanceof Error ? err.message : String(err)
@@ -3643,15 +3652,16 @@ async function restoreWorkspaceInner(
 
   // 5. Persist the (possibly adapted) state and refresh the recovery seed.
   const restoredAt = Date.now();
-  if (ws.kind === "design") {
-    // Sparse metadata is worktree-local and was removed with the archived
-    // checkout. Reapply the one design cone before publishing the restored row,
-    // then reinstate the root-file ACL boundary.
-    await setWorkingDirectories(targetPath, [DESIGN_DIRECTORY_NAME], {
-      forceSparse: true,
-    });
-    await lockDesignWorkspaceRoot(targetPath);
-  }
+  // The restored checkout is FULL (a pre-mode archive loses its cone here by
+  // design, becoming an ordinary full checkout) and nothing whole-tree locks
+  // under the concurrent model. Reinstate only the permanent design-dir
+  // FENCE — for ANY restored workspace whose checkout carries a design
+  // folder, whatever its mode. Non-strict resolution: restore always
+  // succeeds; a dangling pointer falls back to what the checkout contains.
+  await fenceWorkspaceDesignDirectoryIfPresent({
+    path: targetPath,
+    repoRoot: ws.repoRoot,
+  });
   // Folder-keyed chats, the live workspace row, and journal removal share one
   // SQLite transaction. A stop can therefore observe either the old archived
   // identity or the fully rebound live identity, never chats stranded on an

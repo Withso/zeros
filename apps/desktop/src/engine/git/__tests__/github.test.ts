@@ -306,7 +306,10 @@ describe("github", () => {
       cwd: repoRoot,
     });
 
-    const created = await createWorkspace({ repoRoot });
+    // This suite exercises GitHub API behavior, not remote fetching. An
+    // explicit local base preserves the GitHub-shaped origin used by parsing
+    // assertions while guaranteeing setup never contacts github.com.
+    const created = await createWorkspace({ repoRoot, baseBranch: "main" });
     workspaceId = created.workspaceId;
 
     store = makeMemoryTokenStore();

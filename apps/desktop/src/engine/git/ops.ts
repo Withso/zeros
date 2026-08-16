@@ -15,8 +15,12 @@ import { withStashLock } from "./stash-lock";
 import { isConflictEntry, parsePorcelainZ } from "./porcelain";
 import { getInProgressState } from "./repo";
 import { GitError } from "./errors";
-import { updateWorkspace } from "./state";
+import { getWorkspaceById, updateWorkspace } from "./state";
 import { resolveRepoGit } from "../settings/repo-git";
+import {
+  DEFAULT_DESIGN_DIRECTORY_NAME,
+  designDirectoryNameFor,
+} from "../design/directory-registry";
 
 /** `git -c core.editor=true` — neutralizes the editor so --continue /
  *  merge / cherry-pick / revert never block on an interactive prompt. */
@@ -47,11 +51,43 @@ export interface CommitOptions {
   /** Amend the previous commit instead of creating a new one. The
    *  message replaces the previous message. */
   amend?: boolean;
+  /** Narrow engine-only escape hatch for Design Mode → Save designs. Generic
+   * code commits must never set this; commit() independently verifies that the
+   * explicit pathspec is exactly the active Design directory. */
+  authority?: "code" | "design-save";
 }
 
 export interface CommitResult {
   sha: string;
   branch: string;
+}
+
+function pathInsideDesign(candidate: string, designDir: string): boolean {
+  const normalized = candidate
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/+$/, "");
+  return normalized === designDir || normalized.startsWith(`${designDir}/`);
+}
+
+async function stagedDesignPaths(
+  cwd: string,
+  designDir: string,
+): Promise<string[]> {
+  const { stdout } = await runGit(cwd, [
+    "diff",
+    "--cached",
+    "--name-only",
+    "-z",
+    // A rename ordinarily reports only its destination in --name-only
+    // output. Disable rename detection so moving a protected Design file out
+    // of the directory is represented as a protected deletion plus an add.
+    "--no-renames",
+    "--diff-filter=ACDMRTUXB",
+  ]);
+  return stdout
+    .split("\0")
+    .filter((candidate) => candidate && pathInsideDesign(candidate, designDir));
 }
 
 export async function commit(opts: CommitOptions): Promise<CommitResult> {
@@ -62,10 +98,48 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
       message: "commit: 'message' must be a non-empty string",
     });
   }
+  const designDir = getWorkspaceById(opts.workspaceId)
+    ? designDirectoryNameFor(ws.path)
+    : DEFAULT_DESIGN_DIRECTORY_NAME;
+  // An empty array does not add a Git pathspec, so it has exactly the same
+  // commit semantics as omission. Normalize it before enforcing authority.
+  const files = opts.files && opts.files.length > 0 ? opts.files : undefined;
+  const explicitDesignPaths = (files ?? []).filter((candidate) =>
+    pathInsideDesign(candidate, designDir),
+  );
+  const stagedDesign = await stagedDesignPaths(ws.path, designDir);
+  if (opts.authority === "design-save") {
+    if (!files || files.length !== 1 || files[0] !== designDir) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message:
+          "Design-save authority may commit only the active Design directory.",
+      });
+    }
+  } else if (
+    opts.authority === "code" &&
+    (explicitDesignPaths.length > 0 || (!files && stagedDesign.length > 0))
+  ) {
+    // A pathspec commit does not include unrelated staged paths. For that form
+    // inspect the explicit paths; for the ordinary no-pathspec form inspect
+    // the exact staged tree that Git will commit.
+    const blocked = [
+      ...new Set([...explicitDesignPaths, ...(!files ? stagedDesign : [])]),
+    ];
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message:
+        blocked.length === 1
+          ? `"${blocked[0]}" is inside the Design directory — a code commit cannot include it.`
+          : `${blocked.length} staged paths are inside the Design directory — a code commit cannot include them.`,
+      remediation: 'Unstage those paths and use Design Mode → "Save designs".',
+      context: { workspaceId: opts.workspaceId },
+    });
+  }
   const args = ["commit", "-m", opts.message];
   if (opts.amend) args.push("--amend");
-  if (opts.files && opts.files.length > 0) {
-    args.push("--", ...opts.files);
+  if (files) {
+    args.push("--", ...files);
   }
   const result = await runGit(ws.path, args, {
     treatAsExpected: ["nothing-to-do"],

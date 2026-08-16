@@ -1120,6 +1120,7 @@ function octoPrToPr(p: {
 async function workspaceRemote(workspaceId: string): Promise<{
   owner: string;
   repo: string;
+  remote: string;
 }> {
   const ws = getWorkspace(workspaceId);
   // The repo's configured `git.remote` (the "Remote origin" setting, default
@@ -1148,7 +1149,23 @@ async function workspaceRemote(workspaceId: string): Promise<{
       cause: err,
     });
   }
-  return parseGitHubRemote(stdout.trim());
+  return { ...parseGitHubRemote(stdout.trim()), remote };
+}
+
+/** Resolve the configured hosted-review target once at the adapter boundary.
+ * The optional pre-resolved target passed to PR operations below prevents a
+ * settings/remote TOCTOU between identity validation and the GitHub request. */
+export async function resolveGithubWorkspaceRepository(
+  workspaceId: string,
+): Promise<{ owner: string; repo: string; remote: string }> {
+  return workspaceRemote(workspaceId);
+}
+
+function githubRepositoryFor(
+  workspaceId: string,
+  repository?: { owner: string; repo: string },
+): Promise<{ owner: string; repo: string }> {
+  return repository ? Promise.resolve(repository) : workspaceRemote(workspaceId);
 }
 
 // ── Repository access preflight ──────────────────────────
@@ -1302,16 +1319,22 @@ export function setPushForTesting(fn: typeof push | null): void {
   pushImpl = fn ?? push;
 }
 
-export async function createPr(opts: CreatePrOptions): Promise<PR> {
+export async function createPr(
+  opts: CreatePrOptions,
+  repository?: { owner: string; repo: string },
+): Promise<PR> {
   const ws = getWorkspace(opts.workspaceId);
   // Validate the GitHub remote up front (clear error if there's no origin).
-  const { owner, repo } = await workspaceRemote(opts.workspaceId);
-  // Worktree branches are created locally-only (`git worktree add -b`) and there
-  // is no manual Push control anymore — so the head branch is usually absent on
-  // origin. Push it FIRST, otherwise `pulls.create` 422s with "head sha can't be
-  // found" / "No commits between base and head". Idempotent: a no-op when the
-  // branch is already pushed and up to date.
-  await pushImpl({ workspaceId: opts.workspaceId, setUpstream: true });
+  const { owner, repo } = await githubRepositoryFor(
+    opts.workspaceId,
+    repository,
+  );
+  // Legacy direct callers publish first for backward compatibility. The forge
+  // adapter passes an already-resolved repository and keeps raw Git transport
+  // outside the hosted-review operation.
+  if (!repository) {
+    await pushImpl({ workspaceId: opts.workspaceId, setUpstream: true });
+  }
 
   const wantDraft = opts.draft ?? true;
   const createWith = (draft: boolean) =>
@@ -1733,8 +1756,14 @@ export interface UpdatePrOptions {
   body?: string;
 }
 
-export async function updatePr(opts: UpdatePrOptions): Promise<PR> {
-  const { owner, repo } = await workspaceRemote(opts.workspaceId);
+export async function updatePr(
+  opts: UpdatePrOptions,
+  repository?: { owner: string; repo: string },
+): Promise<PR> {
+  const { owner, repo } = await githubRepositoryFor(
+    opts.workspaceId,
+    repository,
+  );
   const pr = await withAuthRetry((oct) =>
     oct.pulls.update({
       owner,
@@ -1757,8 +1786,14 @@ export interface MarkReadyOptions {
 /** GitHub's REST API can't toggle a PR from draft to ready — that
  *  capability is GraphQL-only via `markPullRequestReadyForReview`. We
  *  resolve the PR's node_id first, then run the mutation. */
-export async function markPrReady(opts: MarkReadyOptions): Promise<PR> {
-  const { owner, repo } = await workspaceRemote(opts.workspaceId);
+export async function markPrReady(
+  opts: MarkReadyOptions,
+  repository?: { owner: string; repo: string },
+): Promise<PR> {
+  const { owner, repo } = await githubRepositoryFor(
+    opts.workspaceId,
+    repository,
+  );
   const pr = await withAuthRetry((oct) =>
     oct.pulls.get({ owner, repo, pull_number: opts.prNumber }),
   );
@@ -1843,8 +1878,14 @@ export function resetBehindByCacheForTesting(): void {
   behindByCache.clear();
 }
 
-export async function getPr(opts: GetPrOptions): Promise<PR> {
-  const { owner, repo } = await workspaceRemote(opts.workspaceId);
+export async function getPr(
+  opts: GetPrOptions,
+  repository?: { owner: string; repo: string },
+): Promise<PR> {
+  const { owner, repo } = await githubRepositoryFor(
+    opts.workspaceId,
+    repository,
+  );
   const pr = await withAuthRetry((oct) =>
     oct.pulls.get({ owner, repo, pull_number: opts.prNumber }),
   );
@@ -2215,14 +2256,20 @@ export async function addPrComment(opts: {
   workspaceId: string;
   prNumber: number;
   body: string;
-}): Promise<{ id: number; url: string }> {
+}, repository?: { owner: string; repo: string }): Promise<{
+  id: number;
+  url: string;
+}> {
   if (!opts.body || !opts.body.trim()) {
     throw new GitError({
       code: "VALIDATION_FAILED",
       message: "Comment body is empty",
     });
   }
-  const { owner, repo } = await workspaceRemote(opts.workspaceId);
+  const { owner, repo } = await githubRepositoryFor(
+    opts.workspaceId,
+    repository,
+  );
   const r = await withAuthRetry((oct) =>
     oct.issues.createComment({
       owner,
@@ -2242,8 +2289,14 @@ export interface MergePrOptions {
   commitMessage?: string;
 }
 
-export async function mergePr(opts: MergePrOptions): Promise<{ sha: string }> {
-  const { owner, repo } = await workspaceRemote(opts.workspaceId);
+export async function mergePr(
+  opts: MergePrOptions,
+  repository?: { owner: string; repo: string },
+): Promise<{ sha: string }> {
+  const { owner, repo } = await githubRepositoryFor(
+    opts.workspaceId,
+    repository,
+  );
   const result = await withAuthRetry((oct) =>
     oct.pulls.merge({
       owner,

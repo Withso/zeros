@@ -39,6 +39,7 @@ function sampleWorkspace(overrides: Partial<Workspace> = {}): Workspace {
     kind: "code",
     organizationId: null,
     placement: "local",
+    viewMode: "code",
     status: "in-progress",
     createdAt: now,
     archivedAt: null,
@@ -295,6 +296,26 @@ describe("state", () => {
     expect(got?.prNumber).toBe(42);
     expect(got?.prState).toBe("draft");
     expect(got?.branch).toBe(ws.branch); // unchanged
+  });
+
+  it("keeps viewMode canonical while mirroring the legacy kind field", () => {
+    const ws = sampleWorkspace();
+    insertWorkspace(ws);
+
+    updateWorkspace(ws.id, { viewMode: "design" });
+    expect(getWorkspaceById(ws.id)).toMatchObject({
+      viewMode: "design",
+      kind: "design",
+    });
+
+    // A rolling-upgrade caller may still use the old spelling. The state
+    // boundary normalizes it into the same atomic pair instead of letting the
+    // two persisted fields diverge.
+    updateWorkspace(ws.id, { kind: "code" });
+    expect(getWorkspaceById(ws.id)).toMatchObject({
+      viewMode: "code",
+      kind: "code",
+    });
   });
 
   it("advanceLifecycle advances, but respects the cancelled + archived guards", () => {

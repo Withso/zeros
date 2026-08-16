@@ -23,9 +23,14 @@
 // ──────────────────────────────────────────────────────────
 
 import type { PtyService } from "../pty/service";
+import { randomUUID } from "node:crypto";
 import { getWorkspaceById, updateWorkspace, listWorkspaces } from "./state";
 import type { SetupState } from "./types";
 import { buildSetupCommandEnv } from "./setup-hooks";
+import type {
+  PreparedBoundary,
+  RepoTaskBoundaryFactory,
+} from "../agents/containment/types";
 
 const SETUP_PREFIX = "setup:";
 /** Keep at most the last 512 KB of setup output in memory (the tail is what a
@@ -69,6 +74,7 @@ export interface SetupTarget {
 }
 
 interface SetupEntry {
+  workspaceId: string;
   /** The CURRENT run's session id. appendData/handleExit ignore any event whose
    *  session id doesn't match this — that's a superseded (killed) run. */
   sessionId: string;
@@ -85,7 +91,20 @@ interface SetupEntry {
   /** Fired once if THIS run ends "passed" — the workspace-create path hangs
    *  the run-on-create actions off it (never set for manual reruns). */
   onPassed?: () => void;
+  boundary: PreparedBoundary;
+  boundaryFinalized: boolean;
+  boundaryTeardown?: Promise<void>;
 }
+
+interface BoundaryTeardownRecord {
+  readonly promise: Promise<void>;
+}
+
+const missingRepoTaskBoundary: RepoTaskBoundaryFactory = async () => {
+  throw new Error(
+    "repository setup refused: no Zeros Sandbox Runtime boundary is configured",
+  );
+};
 
 export class SetupManager {
   /** workspaceId → the CURRENT run's buffer + session id. */
@@ -96,6 +115,12 @@ export class SetupManager {
   private readonly starting = new Map<string, { cancelled: boolean }>();
   /** Monotonic run counter → a unique session id per run (rerun-race guard). */
   private gen = 0;
+  /** Failed teardown proof survives reruns for this engine lifetime so a later
+   * archive/delete cannot mistake a superseded setup entry for safe removal. */
+  private readonly boundaryTeardowns = new Map<
+    string,
+    Set<BoundaryTeardownRecord>
+  >();
 
   constructor(
     private readonly pty: PtyService,
@@ -104,7 +129,61 @@ export class SetupManager {
     /** Injectable because resolving the login-shell PATH is asynchronous; the
      *  cancellation seam must be deterministic in unit tests. */
     private readonly envBuilder: typeof buildSetupCommandEnv = buildSetupCommandEnv,
+    private readonly boundaryFactory: RepoTaskBoundaryFactory = missingRepoTaskBoundary,
   ) {}
+
+  private beginBoundaryRevocation(entry: SetupEntry): void {
+    void entry.boundary.revoke().catch((error) => {
+      console.error("[setup] failed to revoke repo-task capabilities:", error);
+    });
+  }
+
+  private finalizeBoundary(entry: SetupEntry): Promise<void> {
+    if (entry.boundaryTeardown) return entry.boundaryTeardown;
+    entry.boundaryFinalized = true;
+    const promise = Promise.resolve().then(() => entry.boundary.stopAndProve());
+    entry.boundaryTeardown = promise;
+    const records =
+      this.boundaryTeardowns.get(entry.workspaceId) ??
+      new Set<BoundaryTeardownRecord>();
+    const record = { promise } satisfies BoundaryTeardownRecord;
+    records.add(record);
+    this.boundaryTeardowns.set(entry.workspaceId, records);
+    void promise.then(
+      () => {
+        records.delete(record);
+        if (records.size === 0) {
+          this.boundaryTeardowns.delete(entry.workspaceId);
+        }
+      },
+      () => {
+        // Retain failed proof until restart recovery reaps the durable domain.
+      },
+    );
+    void promise.catch((error) => {
+      console.error("[setup] repo-task boundary teardown failed:", error);
+    });
+    return promise;
+  }
+
+  /** Lifecycle barrier used after PTY exit and before checkout removal. */
+  async proveWorkspaceBoundaryStopped(workspaceId: string): Promise<void> {
+    const entry = this.entries.get(workspaceId);
+    if (entry) void this.finalizeBoundary(entry);
+    const records = [...(this.boundaryTeardowns.get(workspaceId) ?? [])];
+    const results = await Promise.allSettled(
+      records.map((record) => record.promise),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "repository setup containment teardown was not proven",
+      );
+    }
+  }
 
   /** On engine start the in-memory buffers are empty, so any workspace row still
    *  marked "running" is an orphan from a previous process (the engine was quit
@@ -175,7 +254,9 @@ export class SetupManager {
     const prev = this.entries.get(args.workspaceId);
     if (prev) {
       this.entries.delete(args.workspaceId);
+      this.beginBoundaryRevocation(prev);
       if (this.pty.has(prev.sessionId)) this.pty.kill(prev.sessionId);
+      void this.finalizeBoundary(prev);
     }
     // Resolve the env BEFORE publishing "running". It awaits the login-shell
     // PATH probe (up to 3s cold), and with the entry already registered a Stop
@@ -192,8 +273,20 @@ export class SetupManager {
       // Stop/archive can land while the login-shell PATH probe is awaiting.
       // The request has already been acknowledged, but no child may spawn now.
       if (flight.cancelled) return;
+      const boundary = await this.boundaryFactory({
+        executionId: `repo-setup-${randomUUID()}`,
+        cwd,
+        workspaceRoot: cwd,
+        repoRoot,
+        env,
+      });
+      if (flight.cancelled) {
+        await boundary.stopAndProve();
+        return;
+      }
       const sessionId = setupSessionId(args.workspaceId, ++this.gen);
       this.entries.set(args.workspaceId, {
+        workspaceId: args.workspaceId,
         sessionId,
         command: args.command,
         log: "",
@@ -201,17 +294,44 @@ export class SetupManager {
         state: "running",
         stopRequested: false,
         onPassed: args.onPassed,
+        boundary,
+        boundaryFinalized: false,
       });
       this.setState(args.workspaceId, "running");
-      this.pty.create({
-        sessionId,
-        resolvedCwd: cwd,
-        command: args.command,
-        env,
-        cols: 120,
-        rows: 30,
-        scrubEnv: false, // env is supplied verbatim (already scrubbed)
-      });
+      try {
+        this.pty.create({
+          sessionId,
+          resolvedCwd: cwd,
+          command: args.command,
+          env,
+          cols: 120,
+          rows: 30,
+          scrubEnv: false, // env is supplied verbatim (already scrubbed)
+          wrapSpawn: (request) => {
+            const launch = boundary.wrapSpawn(request);
+            if (launch.stdio !== "inherit") {
+              throw new Error("setup boundary did not preserve PTY stdio");
+            }
+            return { ...launch, stdio: "inherit" as const };
+          },
+          onSpawned: (pid) => {
+            boundary.trackProcessGroup(pid);
+          },
+        });
+      } catch (error) {
+        this.setState(args.workspaceId, "failed");
+        const entry = this.entries.get(args.workspaceId)!;
+        this.beginBoundaryRevocation(entry);
+        try {
+          await this.finalizeBoundary(entry);
+        } catch (teardownError) {
+          throw new AggregateError(
+            [error, teardownError],
+            "setup spawn failed and containment teardown was not proven",
+          );
+        }
+        throw error;
+      }
     } finally {
       if (this.starting.get(args.workspaceId) === flight) {
         this.starting.delete(args.workspaceId);
@@ -254,11 +374,19 @@ export class SetupManager {
     if (entry && this.pty.has(entry.sessionId)) {
       entry.stopRequested = true;
       this.setState(workspaceId, "stopped");
+      this.beginBoundaryRevocation(entry);
       this.pty.kill(entry.sessionId);
+      void this.finalizeBoundary(entry);
       return;
     }
     const rowState = getWorkspaceById(workspaceId)?.setupState ?? entry?.state;
-    if (rowState === "running") this.setState(workspaceId, "stopped");
+    if (rowState === "running") {
+      this.setState(workspaceId, "stopped");
+      if (entry) {
+        this.beginBoundaryRevocation(entry);
+        void this.finalizeBoundary(entry);
+      }
+    }
   }
 
   /** Append a chunk of the CURRENT setup PTY's output (ignores non-setup AND
@@ -301,6 +429,7 @@ export class SetupManager {
         ? "passed"
         : "failed";
     this.setState(workspaceId, state);
+    void this.finalizeBoundary(entry);
     if (state === "passed" && entry.onPassed) {
       const cb = entry.onPassed;
       entry.onPassed = undefined; // fire once

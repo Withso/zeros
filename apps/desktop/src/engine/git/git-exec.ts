@@ -4,6 +4,18 @@
 // injection.
 
 import { execFile, type ExecFileException } from "node:child_process";
+import {
+  accessSync,
+  chmodSync,
+  constants as fsConstants,
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  statSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import { redactSensitive } from "@zeros/protocol/scrub";
 import { GitError, type GitErrorCode } from "./errors";
@@ -23,6 +35,8 @@ export interface RunFileOptions {
   timeoutMs?: number;
   input?: string;
   env?: Record<string, string | undefined>;
+  /** Abort the process and its request when the owning capability is revoked. */
+  signal?: AbortSignal;
 }
 
 export interface RunFileResult {
@@ -36,6 +50,7 @@ interface BunSubprocess {
   exited: Promise<number>;
   signalCode: string | null;
   killed: boolean;
+  kill(signal?: number | NodeJS.Signals): void;
 }
 
 interface BunSubprocessRuntime {
@@ -109,6 +124,11 @@ export async function runFile(
   args: string[],
   opts: RunFileOptions = {},
 ): Promise<RunFileResult> {
+  if (opts.signal?.aborted) {
+    throw opts.signal.reason instanceof Error
+      ? opts.signal.reason
+      : new DOMException("The operation was aborted", "AbortError");
+  }
   const bun = bunSubprocessRuntime();
   if (bun) {
     let child: BunSubprocess;
@@ -136,13 +156,27 @@ export async function runFile(
         { stdout: "", stderr: "" },
       );
     }
+    const abort = () => child.kill("SIGKILL");
+    opts.signal?.addEventListener("abort", abort, { once: true });
     // Drain both pipes concurrently with exit waiting. Reading after `exited`
     // can deadlock a chatty child on a full pipe.
-    const [exitCode, stdout, stderr] = await Promise.all([
-      child.exited,
-      readBunOutput(child.stdout),
-      readBunOutput(child.stderr),
-    ]);
+    let exitCode: number;
+    let stdout: string;
+    let stderr: string;
+    try {
+      [exitCode, stdout, stderr] = await Promise.all([
+        child.exited,
+        readBunOutput(child.stdout),
+        readBunOutput(child.stderr),
+      ]);
+    } finally {
+      opts.signal?.removeEventListener("abort", abort);
+    }
+    if (opts.signal?.aborted) {
+      throw opts.signal.reason instanceof Error
+        ? opts.signal.reason
+        : new DOMException("The operation was aborted", "AbortError");
+    }
     if (exitCode !== 0) {
       throw subprocessFailure({
         command,
@@ -164,6 +198,7 @@ export async function runFile(
       ? { timeout: opts.timeoutMs }
       : {}),
     ...(opts.env ? { env: opts.env } : {}),
+    ...(opts.signal ? { signal: opts.signal } : {}),
   });
   if (opts.input !== undefined && child.child.stdin) {
     child.child.stdin.write(opts.input);
@@ -199,18 +234,69 @@ export interface RunGitOptions {
   env?: Record<string, string | undefined>;
 }
 
-/** The env for a `git` child, with the launching `pnpm/npm run`'s context pruned.
+const SAFE_CALLER_GIT_ENV = new Set([
+  "GIT_AUTHOR_DATE",
+  "GIT_AUTHOR_EMAIL",
+  "GIT_AUTHOR_NAME",
+  "GIT_COMMITTER_DATE",
+  "GIT_COMMITTER_EMAIL",
+  "GIT_COMMITTER_NAME",
+  "GIT_INDEX_FILE",
+  "GIT_SSL_CAINFO",
+  "GIT_SSL_CAPATH",
+]);
+
+const EXECUTION_ENV = new Set([
+  "BASH_ENV",
+  "CDPATH",
+  "DYLD_FRAMEWORK_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "DYLD_LIBRARY_PATH",
+  "EDITOR",
+  "ENV",
+  "GPG_AGENT_INFO",
+  "LD_AUDIT",
+  "LD_LIBRARY_PATH",
+  "LD_PRELOAD",
+  "NODE_OPTIONS",
+  "PAGER",
+  "PERL5OPT",
+  "PYTHONHOME",
+  "PYTHONPATH",
+  "RUBYOPT",
+  "SHELL",
+  "SHELLOPTS",
+  "SSH_AGENT_PID",
+  "SSH_ASKPASS",
+  "SSH_ASKPASS_REQUIRE",
+  "SSH_AUTH_SOCK",
+  "VISUAL",
+  "ZDOTDIR",
+]);
+
+const LOCKED_CALLER_ENV = new Set([
+  "HOME",
+  "PATH",
+  "TMPDIR",
+  "XDG_CONFIG_HOME",
+]);
+
+function mayControlGitExecution(key: string): boolean {
+  return (
+    (key.startsWith("GIT_") && !SAFE_CALLER_GIT_ENV.has(key)) ||
+    key.startsWith("GIT_CONFIG_KEY_") ||
+    key.startsWith("GIT_CONFIG_VALUE_") ||
+    EXECUTION_ENV.has(key)
+  );
+}
+
+/** Build a deterministic environment for a privileged engine Git command.
  *
- *  git itself doesn't care, but git RUNS HOOKS: a repo's husky/lefthook
- *  `pre-commit` is a shell script executing `pnpm lint-staged` (nothing in this
- *  codebase passes `--no-verify`), and it inherited Zeros' `node_modules/.bin`
- *  first on PATH plus Zeros' `npm_config_*`. In the user's worktree that resolves
- *  their linters to Zeros' pinned copies. This fires on every commit Zeros makes,
- *  which makes it the most reachable of the engine's spawn paths.
- *
- *  Note the shape: `opts.env` is merged over the PRUNED base, never the other way
- *  round. Spreading a pruned env over `process.env` would undo the prune, because
- *  a deleted key is simply absent and process.env's value would win. */
+ * Repository programs are disabled by command/config policy below, and this
+ * removes every environment escape hatch that can independently select an
+ * editor, pager, diff, SSH/proxy command, config injection, remote helper, or
+ * dynamic loader. The narrow author/committer/index and TLS path variables are
+ * the only `GIT_*` values accepted from an internal caller. */
 function gitChildEnv(
   extra?: Record<string, string | undefined>,
 ): Record<string, string | undefined> {
@@ -218,7 +304,27 @@ function gitChildEnv(
     ...(process.env as Record<string, string>),
   };
   pruneLauncherScriptEnv(env, process.env);
-  return extra ? { ...env, ...extra } : env;
+  for (const key of Object.keys(env)) {
+    if (key.startsWith("GIT_") || EXECUTION_ENV.has(key)) delete env[key];
+  }
+  for (const [key, value] of Object.entries(extra ?? {})) {
+    if (LOCKED_CALLER_ENV.has(key) || mayControlGitExecution(key)) continue;
+    if (value === undefined) delete env[key];
+    else env[key] = value;
+  }
+  for (const key of SAFE_CALLER_GIT_ENV) {
+    const value = extra?.[key];
+    if (value !== undefined) env[key] = value;
+  }
+  return {
+    ...env,
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_EDITOR: "true",
+    GIT_NO_REPLACE_OBJECTS: "1",
+    GIT_PAGER: "cat",
+    GIT_SEQUENCE_EDITOR: "true",
+    GIT_TERMINAL_PROMPT: "0",
+  };
 }
 
 export type ExpectedCategory =
@@ -438,6 +544,719 @@ function subcommandIndex(args: string[]): number {
   return -1;
 }
 
+const ENGINE_GIT_BUILTINS = new Set([
+  "add",
+  "apply",
+  "branch",
+  "cat-file",
+  "check-attr",
+  "check-ignore",
+  "check-ref-format",
+  "checkout",
+  "cherry-pick",
+  "clean",
+  "clone",
+  "commit",
+  "commit-tree",
+  "config",
+  "diff",
+  "diff-files",
+  "diff-index",
+  "diff-tree",
+  "fetch",
+  "for-each-ref",
+  "hash-object",
+  "init",
+  "log",
+  "ls-files",
+  "ls-remote",
+  "ls-tree",
+  "merge",
+  "merge-base",
+  "merge-tree",
+  "mv",
+  "pull",
+  "push",
+  "read-tree",
+  "rebase",
+  "reflog",
+  "remote",
+  "reset",
+  "restore",
+  "revert",
+  "rev-list",
+  "rev-parse",
+  "show",
+  "show-ref",
+  "sparse-checkout",
+  "stash",
+  "status",
+  "symbolic-ref",
+  "tag",
+  "update-index",
+  "update-ref",
+  "var",
+  "worktree",
+  "write-tree",
+]);
+
+const SAFE_CALLER_CONFIG_KEYS = new Set([
+  "core.quotepath",
+  "user.email",
+  "user.name",
+]);
+
+interface ParsedEngineGitCommand {
+  globalArgs: string[];
+  command: string;
+  commandArgs: string[];
+}
+
+function unsafeGitInvocation(message: string): GitError {
+  return new GitError({
+    code: "VALIDATION_FAILED",
+    message,
+    remediation:
+      "Run repository-defined Git extensions in an agent or a “Run as me” terminal instead.",
+  });
+}
+
+function assertSafeCallerConfig(value: string): void {
+  const separator = value.indexOf("=");
+  if (separator < 1 || value.includes("\0") || value.length > 4_096) {
+    throw unsafeGitInvocation("Engine Git received an invalid -c setting.");
+  }
+  const key = value.slice(0, separator).toLowerCase();
+  const configValue = value.slice(separator + 1);
+  if (key === "core.editor") {
+    if (configValue === "true") return;
+  } else if (key === "sequence.editor") {
+    if (configValue === "true") return;
+  } else if (SAFE_CALLER_CONFIG_KEYS.has(key)) {
+    return;
+  }
+  throw unsafeGitInvocation(
+    `Engine Git refuses the authority-changing config key “${key}”.`,
+  );
+}
+
+function parseEngineGitCommand(args: string[]): ParsedEngineGitCommand {
+  const commandIndex = subcommandIndex(args);
+  if (commandIndex < 0) {
+    throw unsafeGitInvocation(
+      "Engine Git requires an explicit built-in command.",
+    );
+  }
+  for (let index = 0; index < commandIndex; index += 1) {
+    const value = args[index];
+    if (value === "-c") {
+      const setting = args[index + 1];
+      if (!setting) {
+        throw unsafeGitInvocation("Engine Git received -c without a value.");
+      }
+      assertSafeCallerConfig(setting);
+      index += 1;
+      continue;
+    }
+    if (value === "--no-pager" || value === "-P") continue;
+    throw unsafeGitInvocation(
+      `Engine Git refuses the global option “${value ?? ""}”.`,
+    );
+  }
+  const command = args[commandIndex]!;
+  if (!ENGINE_GIT_BUILTINS.has(command)) {
+    throw unsafeGitInvocation(
+      `Engine Git refuses the external or aliased command “${command}”.`,
+    );
+  }
+  return {
+    globalArgs: args.slice(0, commandIndex),
+    command,
+    commandArgs: args.slice(commandIndex + 1),
+  };
+}
+
+const OPTIONS_WITH_VALUES = new Set([
+  "--author",
+  "--branch",
+  "--date",
+  "--deepen",
+  "--depth",
+  "--file",
+  "--filter",
+  "--fixup",
+  "--format",
+  "--grep",
+  "--jobs",
+  "--max-count",
+  "--message",
+  "--negotiation-tip",
+  "--origin",
+  "--pathspec-from-file",
+  "--pretty",
+  "--push-option",
+  "--reference",
+  "--reference-if-able",
+  "--refmap",
+  "--repo",
+  "--revision",
+  "--separate-git-dir",
+  "--server-option",
+  "--shallow-exclude",
+  "--shallow-since",
+  "--since",
+  "--sort",
+  "--squash",
+  "--strategy-option",
+  "--trailer",
+  "--until",
+  "-b",
+  "-F",
+  "-j",
+  "-m",
+  "-o",
+  "-X",
+]);
+
+function optionName(value: string): string {
+  const equals = value.indexOf("=");
+  return equals < 0 ? value : value.slice(0, equals);
+}
+
+function assertNoExecutableCommandOptions(
+  command: string,
+  commandArgs: readonly string[],
+): void {
+  for (let index = 0; index < commandArgs.length; index += 1) {
+    const value = commandArgs[index]!;
+    if (value === "--") break;
+    if (!value.startsWith("-")) continue;
+    const name = optionName(value);
+    const signing =
+      (command === "commit" || command === "tag") &&
+      (name === "-S" || name === "-s" || name === "--gpg-sign");
+    const trailerCommand = command === "commit" && name === "--trailer";
+    const editor = command === "config" && (name === "-e" || name === "--edit");
+    const customStrategy =
+      (command === "merge" || command === "pull" || command === "rebase") &&
+      (name === "-s" || name === "--strategy");
+    const remoteProgram =
+      (command === "clone" ||
+        command === "fetch" ||
+        command === "pull" ||
+        command === "push") &&
+      (name === "--exec" ||
+        name === "--receive-pack" ||
+        name === "--upload-pack");
+    const cloneProgram =
+      command === "clone" &&
+      (name === "-c" ||
+        name === "--config" ||
+        name === "--template" ||
+        name === "-u");
+    const recursiveProgram =
+      (command === "checkout" ||
+        command === "clone" ||
+        command === "fetch" ||
+        command === "pull") &&
+      (name === "--recurse-submodules" ||
+        name === "--remote-submodules" ||
+        name === "--shallow-submodules");
+    const rebaseExec =
+      command === "rebase" && (name === "-x" || name === "--exec");
+    if (
+      signing ||
+      trailerCommand ||
+      editor ||
+      customStrategy ||
+      remoteProgram ||
+      cloneProgram ||
+      recursiveProgram ||
+      rebaseExec ||
+      name === "--ext-diff" ||
+      name === "--textconv"
+    ) {
+      throw unsafeGitInvocation(
+        `Engine Git refuses the executable option “${name}” for ${command}.`,
+      );
+    }
+    if (!value.includes("=") && OPTIONS_WITH_VALUES.has(name)) index += 1;
+  }
+}
+
+let emptyEngineGitDirectory: string | null = null;
+
+function engineGitEmptyDirectory(): string {
+  if (!emptyEngineGitDirectory) {
+    emptyEngineGitDirectory = mkdtempSync(
+      path.join(tmpdir(), "zeros-engine-git-empty-"),
+    );
+    chmodSync(emptyEngineGitDirectory, 0o700);
+  }
+  return emptyEngineGitDirectory;
+}
+
+interface GitConfigEntry {
+  origin: string;
+  key: string;
+  value: string;
+}
+
+function parseOriginConfigList(stdout: string): GitConfigEntry[] {
+  const fields = stdout.split("\0");
+  const entries: GitConfigEntry[] = [];
+  for (let index = 0; index + 1 < fields.length; index += 2) {
+    const origin = fields[index] ?? "";
+    const record = fields[index + 1] ?? "";
+    if (!origin || !record) continue;
+    const newline = record.indexOf("\n");
+    const key = newline < 0 ? record : record.slice(0, newline);
+    const value = newline < 0 ? "" : record.slice(newline + 1);
+    if (
+      key.length === 0 ||
+      key.length > 4_096 ||
+      /[\0\r\n=]/.test(key) ||
+      origin.length > 16_384 ||
+      /[\0\r\n]/.test(origin) ||
+      value.length > 1024 * 1024
+    ) {
+      throw unsafeGitInvocation("Engine Git produced an unsafe config entry.");
+    }
+    entries.push({
+      origin,
+      key,
+      value,
+    });
+  }
+  return entries;
+}
+
+function pathInside(candidate: string, parent: string): boolean {
+  const relative = path.relative(parent, candidate);
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
+}
+
+function findWorktreeTerritory(cwd: string): {
+  root: string;
+  metadata: string[];
+} | null {
+  let current: string;
+  try {
+    current = realpathSync(cwd);
+  } catch {
+    return null;
+  }
+  for (;;) {
+    const dotGit = path.join(current, ".git");
+    try {
+      const value = lstatSync(dotGit);
+      if (value.isDirectory()) {
+        return { root: current, metadata: [realpathSync(dotGit)] };
+      }
+      if (value.isFile()) {
+        const match = /^gitdir:\s*(.+?)\s*$/im.exec(
+          readFileSync(dotGit, "utf8").slice(0, 16_384),
+        );
+        if (match?.[1]) {
+          const gitDir = realpathSync(path.resolve(current, match[1]));
+          const metadata = [gitDir];
+          try {
+            const common = readFileSync(
+              path.join(gitDir, "commondir"),
+              "utf8",
+            ).trim();
+            if (common)
+              metadata.push(realpathSync(path.resolve(gitDir, common)));
+          } catch {
+            /* a standalone .git file has no commondir */
+          }
+          return { root: current, metadata };
+        }
+      }
+    } catch {
+      /* keep walking */
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+function configOriginPath(origin: string): string | null {
+  if (!origin.startsWith("file:")) return null;
+  const value = origin.slice("file:".length);
+  return value ? path.resolve(value) : null;
+}
+
+function resolveIncludePath(value: string, origin: string): string | null {
+  const originPath = configOriginPath(origin);
+  let candidate = value;
+  if (candidate.startsWith("~/")) {
+    const home = process.env.HOME;
+    if (!home) return null;
+    candidate = path.join(home, candidate.slice(2));
+  } else if (candidate.includes("%(prefix)")) {
+    return null;
+  } else if (!path.isAbsolute(candidate)) {
+    if (!originPath) return null;
+    candidate = path.resolve(path.dirname(originPath), candidate);
+  }
+  return path.resolve(candidate);
+}
+
+function assertNoCodeWritableConfig(
+  territory: ReturnType<typeof findWorktreeTerritory>,
+  entries: readonly GitConfigEntry[],
+): void {
+  if (!territory) return;
+  const isMetadata = (candidate: string): boolean =>
+    territory.metadata.some((metadata) => pathInside(candidate, metadata));
+  for (const entry of entries) {
+    const origin = configOriginPath(entry.origin);
+    if (origin && pathInside(origin, territory.root) && !isMetadata(origin)) {
+      throw unsafeGitInvocation(
+        `Engine Git refuses configuration loaded from code territory: ${origin}`,
+      );
+    }
+    const lower = entry.key.toLowerCase();
+    if (
+      lower === "include.path" ||
+      (lower.startsWith("includeif.") && lower.endsWith(".path"))
+    ) {
+      const includePath = resolveIncludePath(entry.value, entry.origin);
+      if (
+        includePath &&
+        pathInside(includePath, territory.root) &&
+        !isMetadata(includePath)
+      ) {
+        throw unsafeGitInvocation(
+          `Engine Git refuses a config include from code territory: ${includePath}`,
+        );
+      }
+    }
+  }
+}
+
+function neutralConfigValue(key: string): string | null {
+  const lower = key.toLowerCase();
+  if (lower.startsWith("alias.")) return "";
+  if (/^filter\..+\.(?:clean|smudge|process)$/.test(lower)) return "";
+  if (/^filter\..+\.required$/.test(lower)) return "false";
+  if (/^diff\..+\.(?:command|textconv)$/.test(lower)) return "";
+  if (/^merge\..+\.driver$/.test(lower)) return "false";
+  if (/^credential(?:\..+)?\.helper$/.test(lower)) return "";
+  if (/^(?:browser|difftool|guitool|mergetool|man)\..+\.cmd$/.test(lower)) {
+    return "false";
+  }
+  if (/^trailer\..+\.(?:cmd|command)$/.test(lower)) return "false";
+  if (/^tar\..+\.command$/.test(lower)) return "false";
+  if (/^pager\./.test(lower)) return "cat";
+  if (/^gpg(?:\..+)?\.program$/.test(lower)) return "false";
+  if (lower === "gpg.ssh.defaultkeycommand") return "false";
+  if (/^submodule\..+\.update$/.test(lower)) return "checkout";
+  if (/^remote\..+\.vcs$/.test(lower)) return "";
+  if (/^remote\..+\.uploadpack$/.test(lower)) return "git-upload-pack";
+  if (/^remote\..+\.receivepack$/.test(lower)) return "git-receive-pack";
+  if (/^remote\..+\.proxy$/.test(lower)) return "none";
+  return null;
+}
+
+function configArgs(entries: readonly (readonly [string, string])[]): string[] {
+  return entries.flatMap(([key, value]) => ["-c", `${key}=${value}`]);
+}
+
+interface EngineGitPolicyCacheEntry {
+  dynamic: Array<readonly [string, string]>;
+  fingerprints: ReadonlyMap<string, string>;
+  refreshAfter: number;
+}
+
+const engineExecutableCache = new Map<string, string>();
+
+function engineExecutable(name: string): string {
+  const enginePath = process.env.PATH ?? "";
+  const cacheKey = `${name}\0${enginePath}`;
+  const cached = engineExecutableCache.get(cacheKey);
+  if (cached) return cached;
+  for (const directory of enginePath.split(path.delimiter)) {
+    if (!directory) continue;
+    const candidate = path.join(directory, name);
+    try {
+      accessSync(candidate, fsConstants.X_OK);
+      const resolved = realpathSync(candidate);
+      if (statSync(resolved).isFile()) {
+        engineExecutableCache.set(cacheKey, resolved);
+        return resolved;
+      }
+    } catch {
+      /* keep searching the engine-authored PATH */
+    }
+  }
+  throw unsafeGitInvocation(`Engine ${name} executable is unavailable.`);
+}
+
+function engineGitBinary(): string {
+  return engineExecutable("git");
+}
+
+function engineSshBinary(): string {
+  const testCommand = process.env.ZEROS_TEST_GIT_SSH_COMMAND;
+  if (process.env.NODE_ENV === "test" && testCommand) {
+    if (
+      !path.isAbsolute(testCommand) ||
+      testCommand.includes("\0") ||
+      !statSync(testCommand).isFile()
+    ) {
+      throw unsafeGitInvocation("Engine SSH test executable is invalid.");
+    }
+    return realpathSync(testCommand);
+  }
+  return engineExecutable("ssh");
+}
+
+const ENGINE_GIT_POLICY_CACHE_MS = 5_000;
+const MAX_ENGINE_GIT_POLICY_CACHE_ENTRIES = 512;
+const engineGitPolicyCache = new Map<string, EngineGitPolicyCacheEntry>();
+const engineGitPolicyFlights = new Map<
+  string,
+  Promise<Array<readonly [string, string]>>
+>();
+
+function configContext(
+  cwd: string,
+  territory: ReturnType<typeof findWorktreeTerritory>,
+): string {
+  if (territory) {
+    return `${territory.root}\0${territory.metadata.join("\0")}`;
+  }
+  try {
+    return `nonrepo\0${realpathSync(cwd)}`;
+  } catch {
+    return `nonrepo\0${path.resolve(cwd)}`;
+  }
+}
+
+function configFileFingerprint(candidate: string): string {
+  try {
+    const link = lstatSync(candidate, { bigint: true });
+    let target = candidate;
+    try {
+      target = realpathSync(candidate);
+    } catch {
+      /* The lstat identity is sufficient for a dangling symlink. */
+    }
+    const value = statSync(target, { bigint: true });
+    return [
+      link.dev,
+      link.ino,
+      link.size,
+      link.mtimeNs,
+      link.ctimeNs,
+      target,
+      value.dev,
+      value.ino,
+      value.size,
+      value.mtimeNs,
+      value.ctimeNs,
+    ].join(":");
+  } catch {
+    return "missing";
+  }
+}
+
+function configSourcePaths(
+  territory: ReturnType<typeof findWorktreeTerritory>,
+  entries: readonly GitConfigEntry[],
+): string[] {
+  const candidates = new Set<string>();
+  for (const entry of entries) {
+    const origin = configOriginPath(entry.origin);
+    if (origin) candidates.add(origin);
+    const lower = entry.key.toLowerCase();
+    if (
+      lower === "include.path" ||
+      (lower.startsWith("includeif.") && lower.endsWith(".path"))
+    ) {
+      const includePath = resolveIncludePath(entry.value, entry.origin);
+      if (includePath) candidates.add(includePath);
+    }
+  }
+  const home = process.env.HOME;
+  if (home) {
+    candidates.add(path.join(home, ".gitconfig"));
+    candidates.add(
+      path.join(
+        process.env.XDG_CONFIG_HOME ?? path.join(home, ".config"),
+        "git",
+        "config",
+      ),
+    );
+  }
+  candidates.add("/etc/gitconfig");
+  for (const metadata of territory?.metadata ?? []) {
+    candidates.add(path.join(metadata, "config"));
+    candidates.add(path.join(metadata, "config.worktree"));
+  }
+  return [...candidates];
+}
+
+function configFingerprints(paths: readonly string[]): Map<string, string> {
+  return new Map(
+    paths.map((candidate) => [candidate, configFileFingerprint(candidate)]),
+  );
+}
+
+function policyCacheIsCurrent(entry: EngineGitPolicyCacheEntry): boolean {
+  if (Date.now() >= entry.refreshAfter) return false;
+  for (const [candidate, fingerprint] of entry.fingerprints) {
+    if (configFileFingerprint(candidate) !== fingerprint) return false;
+  }
+  return true;
+}
+
+async function dynamicEngineGitPolicy(
+  cwd: string,
+  callerGlobalArgs: readonly string[],
+  env: Record<string, string | undefined>,
+): Promise<Array<readonly [string, string]>> {
+  const territory = findWorktreeTerritory(cwd);
+  const cacheKey = configContext(cwd, territory);
+  const cached = engineGitPolicyCache.get(cacheKey);
+  if (cached && policyCacheIsCurrent(cached)) return cached.dynamic;
+  const existing = engineGitPolicyFlights.get(cacheKey);
+  if (existing) return existing;
+
+  const flight = (async (): Promise<Array<readonly [string, string]>> => {
+    const { stdout } = await runFile(
+      "git",
+      [
+        ...callerGlobalArgs,
+        "config",
+        "--show-origin",
+        "--null",
+        "--list",
+        "--includes",
+      ],
+      { cwd, env, timeoutMs: 5_000, maxBufferBytes: 4 * 1024 * 1024 },
+    );
+    const entries = parseOriginConfigList(stdout);
+    if (entries.length > 8_192) {
+      throw unsafeGitInvocation(
+        "Engine Git configuration exceeds the safety limit.",
+      );
+    }
+    assertNoCodeWritableConfig(territory, entries);
+    const dynamic = new Map<string, readonly [string, string]>();
+    for (const entry of entries) {
+      const value = neutralConfigValue(entry.key);
+      if (value !== null) {
+        dynamic.set(entry.key.toLowerCase(), [entry.key, value]);
+      }
+    }
+    const result = [...dynamic.values()];
+    if (
+      result.length > 1_024 ||
+      result.reduce(
+        (bytes, [key, value]) => bytes + key.length + value.length,
+        0,
+      ) >
+        64 * 1024
+    ) {
+      throw unsafeGitInvocation(
+        "Engine Git executable configuration exceeds the safety limit.",
+      );
+    }
+    const sources = configSourcePaths(territory, entries);
+    engineGitPolicyCache.delete(cacheKey);
+    engineGitPolicyCache.set(cacheKey, {
+      dynamic: result,
+      fingerprints: configFingerprints(sources),
+      refreshAfter: Date.now() + ENGINE_GIT_POLICY_CACHE_MS,
+    });
+    while (engineGitPolicyCache.size > MAX_ENGINE_GIT_POLICY_CACHE_ENTRIES) {
+      const oldest = engineGitPolicyCache.keys().next().value;
+      if (typeof oldest !== "string") break;
+      engineGitPolicyCache.delete(oldest);
+    }
+    return result;
+  })();
+  engineGitPolicyFlights.set(cacheKey, flight);
+  try {
+    return await flight;
+  } finally {
+    if (engineGitPolicyFlights.get(cacheKey) === flight) {
+      engineGitPolicyFlights.delete(cacheKey);
+    }
+  }
+}
+
+async function engineGitPolicyArgs(
+  cwd: string,
+  callerGlobalArgs: readonly string[],
+  env: Record<string, string | undefined>,
+  command: string,
+  allowSsh: boolean,
+): Promise<string[]> {
+  const dynamic = await dynamicEngineGitPolicy(cwd, callerGlobalArgs, env);
+  const empty = engineGitEmptyDirectory();
+  return configArgs([
+    ...dynamic,
+    ["commit.gpgSign", "false"],
+    ["core.alternateRefsCommand", ""],
+    ["core.askPass", ""],
+    ["core.editor", "true"],
+    ["core.fsmonitor", "false"],
+    ["core.gitProxy", "none"],
+    ["core.hooksPath", empty],
+    ["core.pager", "cat"],
+    ["core.sshCommand", allowSsh ? engineSshBinary() : "false"],
+    ["core.useReplaceRefs", "false"],
+    ["credential.helper", ""],
+    ["diff.external", ""],
+    ["fetch.recurseSubmodules", "false"],
+    ["gc.recentObjectsHook", ""],
+    ["gpg.program", "false"],
+    ["gpg.ssh.defaultKeyCommand", "false"],
+    ["gpg.ssh.program", "false"],
+    ["gpg.x509.program", "false"],
+    ["init.templateDir", empty],
+    ["interactive.diffFilter", ""],
+    ["merge.default", "text"],
+    [`pager.${command}`, "cat"],
+    ["protocol.allow", "never"],
+    ["protocol.bundle.allow", "always"],
+    ["protocol.ext.allow", "never"],
+    ["protocol.file.allow", "always"],
+    ["protocol.git.allow", "always"],
+    ["protocol.http.allow", "always"],
+    ["protocol.https.allow", "always"],
+    ["protocol.ssh.allow", allowSsh ? "always" : "never"],
+    ["sequence.editor", "true"],
+    ["submodule.recurse", "false"],
+    ["tag.gpgSign", "false"],
+    ["uploadpack.packObjectsHook", ""],
+  ]);
+}
+
+function safeDiffArgs(command: string, args: readonly string[]): string[] {
+  if (
+    command === "diff" ||
+    command === "diff-files" ||
+    command === "diff-index" ||
+    command === "diff-tree" ||
+    command === "log" ||
+    command === "show"
+  ) {
+    return ["--no-ext-diff", "--no-textconv", ...args];
+  }
+  return [...args];
+}
+
 function firstNetworkRemote(
   args: string[],
   commandIndex: number,
@@ -480,11 +1299,60 @@ function parseHttpRemote(value: string): URL | null {
   }
 }
 
+function parseSshRemote(value: string): URL | "scp" | null {
+  if (/^ssh:\/\//i.test(value)) {
+    try {
+      const parsed = new URL(value);
+      return parsed.protocol === "ssh:" && parsed.hostname ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  if (
+    value.length === 0 ||
+    value.length > 16_384 ||
+    value.startsWith("-") ||
+    /[\0-\x20\x7f\\]/.test(value) ||
+    value.includes("://")
+  ) {
+    return null;
+  }
+  const separator = value.indexOf(":");
+  if (separator <= 0 || separator === value.length - 1) return null;
+  const authority = value.slice(0, separator);
+  const at = authority.lastIndexOf("@");
+  const host = at < 0 ? authority : authority.slice(at + 1);
+  if (
+    authority.includes("/") ||
+    !host ||
+    (host.startsWith("[")
+      ? !/^\[[0-9A-Fa-f:.]+\]$/.test(host)
+      : !/^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$/.test(host)) ||
+    (at >= 0 && !/^[A-Za-z0-9._-]{1,255}$/.test(authority.slice(0, at)))
+  ) {
+    return null;
+  }
+  return "scp";
+}
+
+function isNetworkRemote(value: string): boolean {
+  return Boolean(parseHttpRemote(value) || parseSshRemote(value));
+}
+
+function decodedUrlComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 async function networkCredentialRequest(
   cwd: string,
   args: string[],
 ): Promise<{
   network: boolean;
+  transport: "http" | "ssh" | null;
   request: GitCredentialRequest | null;
   hasEmbeddedCredential: boolean;
 }> {
@@ -496,6 +1364,7 @@ async function networkCredentialRequest(
   if (commandIndex < 0) {
     return {
       network: false,
+      transport: null,
       request: null,
       hasEmbeddedCredential: false,
     };
@@ -505,6 +1374,7 @@ async function networkCredentialRequest(
   if (!target) {
     return {
       network: true,
+      transport: null,
       request: null,
       hasEmbeddedCredential: false,
     };
@@ -512,17 +1382,18 @@ async function networkCredentialRequest(
 
   // clone takes a URL directly. Other network commands generally take a
   // configured remote name; resolve it without crossing the broker seam.
-  if (command !== "clone" && !parseHttpRemote(target)) {
+  if (command !== "clone" && !isNetworkRemote(target)) {
     try {
       const resolved = await runFile(
         "git",
         ["-C", cwd, "remote", "get-url", target],
-        { timeoutMs: 5_000 },
+        { timeoutMs: 5_000, env: gitChildEnv() },
       );
       target = resolved.stdout.trim();
     } catch {
       return {
         network: true,
+        transport: null,
         request: null,
         hasEmbeddedCredential: false,
       };
@@ -531,26 +1402,41 @@ async function networkCredentialRequest(
 
   const parsed = parseHttpRemote(target);
   if (!parsed) {
+    const ssh = parseSshRemote(target);
     return {
       network: true,
+      transport: ssh ? "ssh" : null,
       request: null,
-      hasEmbeddedCredential: false,
+      hasEmbeddedCredential:
+        ssh instanceof URL
+          ? Boolean(ssh.password || ssh.search || ssh.hash)
+          : false,
     };
   }
   const protocol = parsed.protocol.slice(0, -1) as "http" | "https";
   return {
     network: true,
-    // Only a PASSWORD in the URL can bypass the selected method. A bare
+    transport: "http",
+    // A password, query, or fragment can bypass the selected method or carry a
+    // bearer into argv/config. A bare
     // `https://alice@github.com/o/r.git` — the common legacy form git itself
     // handles fine — carries no secret: git asks for the password, and the
     // broker answers with the selected credential. Rejecting it made push,
     // fetch, ls-remote, and Create PR all fail on those repositories.
-    hasEmbeddedCredential: Boolean(parsed.password),
+    hasEmbeddedCredential: Boolean(
+      parsed.password || parsed.search || parsed.hash,
+    ),
     request: {
       contextId: `cwd:${cwd}`,
       protocol,
       host: parsed.hostname.toLowerCase(),
       authority: parsed.host.toLowerCase(),
+      ...(parsed.username
+        ? { username: decodedUrlComponent(parsed.username) }
+        : {}),
+      ...(parsed.pathname && parsed.pathname !== "/"
+        ? { path: decodedUrlComponent(parsed.pathname.replace(/^\/+/, "")) }
+        : {}),
     },
   };
 }
@@ -600,116 +1486,157 @@ export async function runGit(
       message: `git ${args.join(" ")}: refusing to run with an empty cwd`,
     });
   }
+  const parsedCommand = parseEngineGitCommand(args);
+  assertNoExecutableCommandOptions(
+    parsedCommand.command,
+    parsedCommand.commandArgs,
+  );
   const networkTarget = await networkCredentialRequest(cwd, args);
-  const credentialInvocation = networkTarget.request
-    ? await prepareGitCredentialInvocation(networkTarget.request)
-    : null;
-  if (credentialInvocation && networkTarget.hasEmbeddedCredential) {
+  if (networkTarget.hasEmbeddedCredential) {
     throw new GitError({
       code: "VALIDATION_FAILED",
       message:
-        "This remote contains an embedded password that would bypass the selected authentication method.",
-      remediation: "Remove the password from the remote URL, then try again.",
+        "This remote contains an embedded password, query, or fragment that would bypass the credential broker.",
+      remediation:
+        "Remove credential material from the remote URL and connect the host through a supported credential method.",
     });
   }
-  const childArgs = credentialInvocation
-    ? [...credentialInvocation.gitConfigArgs, ...args]
-    : args;
+  const credentialInvocation = networkTarget.request
+    ? await prepareGitCredentialInvocation(networkTarget.request, {
+        ...(process.env.HOME && path.isAbsolute(process.env.HOME)
+          ? {
+              ambient: {
+                gitBinary: engineGitBinary(),
+                home: process.env.HOME,
+                ...(process.env.XDG_CONFIG_HOME &&
+                path.isAbsolute(process.env.XDG_CONFIG_HOME)
+                  ? { xdgConfigHome: process.env.XDG_CONFIG_HOME }
+                  : {}),
+              },
+            }
+          : {}),
+      })
+    : null;
+  const baseChildEnv = gitChildEnv(opts.env);
+  const policyArgs = await engineGitPolicyArgs(
+    cwd,
+    parsedCommand.globalArgs,
+    baseChildEnv,
+    parsedCommand.command,
+    networkTarget.transport === "ssh",
+  );
+  const childArgs = [
+    ...parsedCommand.globalArgs,
+    "--no-pager",
+    ...policyArgs,
+    ...(credentialInvocation?.gitConfigArgs ?? []),
+    parsedCommand.command,
+    ...safeDiffArgs(parsedCommand.command, parsedCommand.commandArgs),
+  ];
   const controlledEnv: Record<string, string | undefined> = {
     ...(networkTarget.network ? { GIT_TERMINAL_PROMPT: "0" } : {}),
+    ...(networkTarget.transport === "ssh" &&
+    process.env.SSH_AUTH_SOCK &&
+    path.isAbsolute(process.env.SSH_AUTH_SOCK) &&
+    !process.env.SSH_AUTH_SOCK.includes("\0")
+      ? { SSH_AUTH_SOCK: process.env.SSH_AUTH_SOCK }
+      : {}),
     ...credentialInvocation?.env,
   };
   let lockAttempt = 0;
   let retriedAuthentication = false;
-  for (;;) {
-    try {
-      const result = await runFile("git", childArgs, {
-        cwd,
-        maxBufferBytes: opts.maxBufferBytes,
-        timeoutMs: opts.timeoutMs,
-        // Both layers matter, and the order is the whole point. gitChildEnv
-        // merges its argument over a launcher-PRUNED copy of process.env, so
-        // the prune survives (spreading a pruned env over process.env would
-        // undo it — a deleted key is merely absent). Within the argument,
-        // engine-owned auth variables are spread LAST so they win over any
-        // caller-supplied value: repository/settings env can never redirect
-        // the credential helper.
-        env: gitChildEnv({ ...opts.env, ...controlledEnv }),
-        input: opts.input,
-      });
-      // Some remote helpers have returned exit 0 after their child transport
-      // printed a fatal authentication error. Never turn that into a successful
-      // push/fetch merely because the wrapper process lost the exit status.
-      if (
-        networkTarget.network &&
-        (/^fatal:/im.test(result.stderr) ||
-          /^error: failed to (?:push|fetch) /im.test(result.stderr))
-      ) {
-        throw Object.assign(new Error("git transport failed"), {
-          code: 1,
-          stdout: result.stdout,
-          stderr: result.stderr,
+  try {
+    for (;;) {
+      try {
+        const result = await runFile("git", childArgs, {
+          cwd,
+          maxBufferBytes: opts.maxBufferBytes,
+          timeoutMs: opts.timeoutMs,
+          // The caller is filtered first; the engine-owned broker coordinates
+          // are applied afterward so settings/env can never redirect askpass or
+          // the credential socket.
+          env: { ...baseChildEnv, ...controlledEnv },
+          input: opts.input,
         });
-      }
-      return result;
-    } catch (err) {
-      const e = err as ExecFileException & { stdout?: string; stderr?: string };
-      const stderr = String(e.stderr ?? "");
-      const stdout = String(e.stdout ?? "");
-      // Transient lock contention from a concurrent git process in the same
-      // checkout → wait and retry (bounded). git didn't mutate anything (it
-      // couldn't take the lock), so re-running is safe. Checked BEFORE the
-      // expected-error / mapErrorCode handling so a lock blip never surfaces.
-      if (
-        isGitLockContention(stderr) &&
-        lockAttempt < GIT_LOCK_RETRY_BACKOFF_MS.length
-      ) {
-        await sleep(GIT_LOCK_RETRY_BACKOFF_MS[lockAttempt]);
-        lockAttempt += 1;
-        continue;
-      }
-      // A rejected HTTPS credential means the remote did not authorize the
-      // operation, so retrying once after a token rotation cannot duplicate a
-      // successful mutation. The broker fetches the replacement lazily; no
-      // token is placed in this process's arguments or environment.
-      if (
-        credentialInvocation &&
-        !retriedAuthentication &&
-        classifyGitTransportError(stderr) === "NOT_AUTHENTICATED"
-      ) {
-        retriedAuthentication = true;
+        // Some remote helpers have returned exit 0 after their child transport
+        // printed a fatal authentication error. Never turn that into a successful
+        // push/fetch merely because the wrapper process lost the exit status.
         if (
-          await refreshGitCredentialAfterAuthenticationFailure(
-            credentialInvocation,
-          )
+          networkTarget.network &&
+          (/^fatal:/im.test(result.stderr) ||
+            /^error: failed to (?:push|fetch) /im.test(result.stderr))
         ) {
-          lockAttempt = 0;
+          throw Object.assign(new Error("git transport failed"), {
+            code: 1,
+            stdout: result.stdout,
+            stderr: result.stderr,
+          });
+        }
+        return result;
+      } catch (err) {
+        const e = err as ExecFileException & {
+          stdout?: string;
+          stderr?: string;
+        };
+        const stderr = String(e.stderr ?? "");
+        const stdout = String(e.stdout ?? "");
+        // Transient lock contention from a concurrent git process in the same
+        // checkout → wait and retry (bounded). git didn't mutate anything (it
+        // couldn't take the lock), so re-running is safe. Checked BEFORE the
+        // expected-error / mapErrorCode handling so a lock blip never surfaces.
+        if (
+          isGitLockContention(stderr) &&
+          lockAttempt < GIT_LOCK_RETRY_BACKOFF_MS.length
+        ) {
+          await sleep(GIT_LOCK_RETRY_BACKOFF_MS[lockAttempt]);
+          lockAttempt += 1;
           continue;
         }
-      }
-      if (opts.treatAsExpected) {
-        const category = classifyExpectedError(stderr, stdout);
-        if (category && opts.treatAsExpected.includes(category)) {
-          return { stdout, stderr, expectedError: category };
+        // A rejected HTTPS credential means the remote did not authorize the
+        // operation, so retrying once after a token rotation cannot duplicate a
+        // successful mutation. The broker fetches the replacement lazily; no
+        // token is placed in this process's arguments or environment.
+        if (
+          credentialInvocation &&
+          !retriedAuthentication &&
+          classifyGitTransportError(stderr) === "NOT_AUTHENTICATED"
+        ) {
+          retriedAuthentication = true;
+          if (
+            await refreshGitCredentialAfterAuthenticationFailure(
+              credentialInvocation,
+            )
+          ) {
+            lockAttempt = 0;
+            continue;
+          }
         }
+        if (opts.treatAsExpected) {
+          const category = classifyExpectedError(stderr, stdout);
+          if (category && opts.treatAsExpected.includes(category)) {
+            return { stdout, stderr, expectedError: category };
+          }
+        }
+        const code = opts.mapErrorCode?.(stderr) ?? "GIT_COMMAND_FAILED";
+        const remediation = gitTransportRemediation(code);
+        throw new GitError({
+          code,
+          message: `git ${redactSensitive(args.join(" "))} failed`,
+          ...(remediation ? { remediation } : {}),
+          cause: err,
+          // Redacted: this context is logged and shipped with feedback, and git's
+          // stderr can echo an authenticated remote URL or a helper's output. The
+          // scrubbers only cover `message`/`stack`, so 4 KB of raw stderr would
+          // otherwise be the one unscrubbed field on the error.
+          context: {
+            stderr: redactSensitive(stderr.slice(0, 4000)),
+            exitCode: e.code,
+          },
+        });
       }
-      const code = opts.mapErrorCode?.(stderr) ?? "GIT_COMMAND_FAILED";
-      const remediation = gitTransportRemediation(code);
-      throw new GitError({
-        code,
-        message: `git ${args.join(" ")} failed`,
-        ...(remediation ? { remediation } : {}),
-        cause: err,
-        // Redacted: this context is logged and shipped with feedback, and git's
-        // stderr can echo an authenticated remote URL or a helper's output. The
-        // scrubbers only cover `message`/`stack`, so 4 KB of raw stderr would
-        // otherwise be the one unscrubbed field on the error.
-        context: {
-          stderr: redactSensitive(stderr.slice(0, 4000)),
-          exitCode: e.code,
-        },
-      });
     }
+  } finally {
+    credentialInvocation?.release?.();
   }
 }
 

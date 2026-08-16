@@ -100,6 +100,88 @@ describe("write ops", () => {
     );
   });
 
+  it("refuses a direct code commit when a Design path was staged outside the service", async () => {
+    const ws = getWorkspace(workspaceId);
+    const designDir = path.join(ws.path, "Zeros Design");
+    await mkdir(designDir, { recursive: true });
+    await writeFile(path.join(designDir, "rogue.html"), "<main>rogue</main>\n");
+    // Simulate a shell/agent bypass of the service's git.stage guard. The
+    // commit primitive itself is the final backstop.
+    await execFileAsync("git", ["-C", ws.path, "add", "--", "Zeros Design"]);
+    const before = (
+      await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
+    ).stdout.trim();
+
+    await expect(
+      commit({
+        workspaceId,
+        message: "bypass design guard",
+        authority: "code",
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      remediation: expect.stringMatching(/Save designs/),
+    });
+    const after = (
+      await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
+    ).stdout.trim();
+    expect(after).toBe(before);
+  });
+
+  it("treats an empty code pathspec as an ordinary commit and still blocks staged Design paths", async () => {
+    const ws = getWorkspace(workspaceId);
+    const designDir = path.join(ws.path, "Zeros Design");
+    await mkdir(designDir, { recursive: true });
+    await writeFile(path.join(designDir, "rogue.html"), "<main>rogue</main>\n");
+    await execFileAsync("git", ["-C", ws.path, "add", "--", "Zeros Design"]);
+
+    await expect(
+      commit({
+        workspaceId,
+        message: "empty pathspec bypass",
+        files: [],
+        authority: "code",
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      remediation: expect.stringMatching(/Save designs/),
+    });
+  });
+
+  it("blocks the Design source of a staged rename out of the active directory", async () => {
+    const ws = getWorkspace(workspaceId);
+    const designDir = path.join(ws.path, "Zeros Design");
+    await mkdir(designDir, { recursive: true });
+    await writeFile(path.join(designDir, "frame.html"), "<main>frame</main>\n");
+    await execFileAsync("git", ["-C", ws.path, "add", "--", "Zeros Design"]);
+    await execFileAsync("git", [
+      "-C",
+      ws.path,
+      "commit",
+      "-q",
+      "-m",
+      "seed design",
+    ]);
+    await execFileAsync("git", [
+      "-C",
+      ws.path,
+      "mv",
+      "Zeros Design/frame.html",
+      "escaped-frame.html",
+    ]);
+
+    await expect(
+      commit({
+        workspaceId,
+        message: "rename out of design",
+        authority: "code",
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      remediation: expect.stringMatching(/Save designs/),
+    });
+  });
+
   it("push to new remote sets upstream and reports remoteRef", async () => {
     const ws = getWorkspace(workspaceId);
     await writeFile(path.join(ws.path, "a.txt"), "a\n");
