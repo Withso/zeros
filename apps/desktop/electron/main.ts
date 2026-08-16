@@ -84,10 +84,16 @@ import {
   nativeTheme,
   screen,
   shell,
+  type IpcMainInvokeEvent,
 } from "electron";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import {
+  isBrowserConfirmationDecision,
+  isBrowserProductId,
+  type BrowserJsonValue,
+} from "@zeros/protocol/browser-tools";
 import { registerIpcHandlers } from "./ipc/router";
 import { registerIframeSessionCommands } from "./ipc/iframe-session";
 import { registerIframePickerCommands } from "./ipc/iframe-picker";
@@ -105,11 +111,18 @@ import {
   MAIN_WINDOW_MIN_WIDTH,
   readPersistedWindowState,
 } from "./window-state";
-import { setMainWindow, emitEvent } from "./ipc/events";
+import {
+  getMainWindow,
+  setMainWindow,
+  emitEvent,
+  whenRendererReady,
+} from "./ipc/events";
+import { setCommand } from "./ipc/router";
 import {
   defaultProjectRoot,
   shutdown as shutdownSidecar,
   setEngineSpawnBarrier,
+  setBrowserServiceEnvironment,
   spawnEngine,
   startEngineCodeWatcher,
   startWatchdog,
@@ -147,6 +160,17 @@ import {
   installDesignProtocol,
   registerDesignProtocolPrivileges,
 } from "./design-protocol";
+import {
+  startZerosBrowserService,
+  type ZerosBrowserServiceHandle,
+} from "./browser/service";
+import {
+  browserRendererEventIsCurrent,
+  normalizeBrowserViewBoundsForHost,
+  shouldRevokeBrowserSurfaceForNavigation,
+} from "./browser/surface";
+
+let browserService: ZerosBrowserServiceHandle | null = null;
 
 // Custom schemes must be privileged before Electron reaches ready. The handler
 // itself is installed after ready, before the first renderer window loads.
@@ -1205,6 +1229,31 @@ app.whenReady().then(async () => {
   registerAllCommands();
   installDesignProtocol();
 
+  const trustedBrowserWindow = (event: IpcMainInvokeEvent): BrowserWindow => {
+    const current = getMainWindow();
+    if (
+      !current ||
+      current.webContents !== event.sender ||
+      event.senderFrame !== event.sender.mainFrame
+    ) {
+      throw new Error("Browser surface command rejected.");
+    }
+    return current;
+  };
+  setCommand("browser_confirmation_respond", (args, event) => {
+    trustedBrowserWindow(event);
+    const confirmationId = args.confirmationId;
+    const decision = args.decision;
+    if (
+      !isBrowserProductId(confirmationId) ||
+      !isBrowserConfirmationDecision(decision)
+    ) {
+      throw new Error("Invalid Zeros browser confirmation response.");
+    }
+    return (
+      browserService?.respondToConfirmation(confirmationId, decision) ?? false
+    );
+  });
   // PATH repair and engine startup are critical background work, not a window
   // creation prerequisite. Register a spawn barrier so the child still inherits
   // the repaired PATH, then start the single-flight boot before loading the UI.
@@ -1232,13 +1281,221 @@ app.whenReady().then(async () => {
       );
     }
   });
+  // Start the product-owned isolated browser before the engine child. The
+  // endpoint and bearer are per boot, stay in main/engine memory, and are not
+  // couriered into provider subprocesses.
+  setBrowserServiceEnvironment(null);
+  let browserRendererEpoch = 0;
+  const browserReady = startZerosBrowserService({
+    artifactRoot: path.join(zerosDataDir(), "browser-artifacts"),
+    isTrustedSurfaceAvailable: () => getMainWindow() !== null,
+    onConfirmationRequest: (request) => {
+      const confirmationWindow = getMainWindow();
+      const confirmationEpoch = browserRendererEpoch;
+      void whenRendererReady().then(() => {
+        // Never move an authorization prompt across trusted renderer
+        // lifecycles. The agent can retry after a replacement window mounts.
+        if (
+          !confirmationWindow ||
+          !browserRendererEventIsCurrent({
+            capturedEpoch: confirmationEpoch,
+            currentEpoch: browserRendererEpoch,
+            sameWindow: getMainWindow() === confirmationWindow,
+          })
+        ) {
+          browserService?.respondToConfirmation(request.id, "deny");
+          return;
+        }
+        emitEvent("browser-confirmation-request", request);
+      });
+    },
+    onConfirmationSettled: (confirmationId) => {
+      // Settlement is a revocation-only tombstone. It is safe to replay across
+      // renderer lifecycles and prevents a just-resolved snapshot request from
+      // painting a stale permission card after timeout, Stop, or session close.
+      emitEvent("browser-confirmation-settled", { confirmationId });
+    },
+    onSessionState: (state) => {
+      const stateWindow = getMainWindow();
+      const stateEpoch = browserRendererEpoch;
+      if (!stateWindow) {
+        emitEvent("browser-session-state", state);
+        return;
+      }
+      void whenRendererReady().then(() => {
+        // State is keyed to a renderer lifecycle just like confirmations. A
+        // late event from a reloading/replaced window must not bind a native
+        // page into the next document, while cold-launch events still use the
+        // existing pre-window buffer in emitEvent.
+        if (
+          !browserRendererEventIsCurrent({
+            capturedEpoch: stateEpoch,
+            currentEpoch: browserRendererEpoch,
+            sameWindow: getMainWindow() === stateWindow,
+          })
+        ) {
+          return;
+        }
+        emitEvent("browser-session-state", state);
+      });
+    },
+  })
+    .then((service) => {
+      browserService = service;
+      setBrowserServiceEnvironment({
+        url: service.baseUrl,
+        token: service.token,
+      });
+    })
+    .catch((error) => {
+      // Browser automation is optional. Keep the editor/agents usable while
+      // making the missing capability diagnosable without logging its token.
+      console.warn(
+        `[Zeros] isolated browser service unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+  const readyBrowserService = async (): Promise<ZerosBrowserServiceHandle> => {
+    await browserReady;
+    if (!browserService) {
+      throw new Error("The Zeros browser service is unavailable.");
+    }
+    return browserService;
+  };
+  setCommand("browser_session_attach", async (args, event) => {
+    const target = trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    const contentBounds = target.getContentBounds();
+    const bounds = normalizeBrowserViewBoundsForHost(
+      args.bounds,
+      event.sender.getZoomFactor(),
+      { width: contentBounds.width, height: contentBounds.height },
+    );
+    const surfaceId = args.surfaceId;
+    if (
+      !isBrowserProductId(browserSessionId) ||
+      typeof surfaceId !== "string" ||
+      !bounds
+    ) {
+      throw new Error("Invalid browser surface attachment.");
+    }
+    return (await readyBrowserService()).attach(
+      browserSessionId,
+      target,
+      bounds,
+      surfaceId,
+    );
+  });
+  setCommand("browser_session_detach", async (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    const surfaceId = args.surfaceId;
+    if (
+      !isBrowserProductId(browserSessionId) ||
+      typeof surfaceId !== "string"
+    ) {
+      throw new Error("Invalid browser surface detachment.");
+    }
+    return (await readyBrowserService()).detach(browserSessionId, surfaceId);
+  });
+  setCommand("browser_session_park", (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    const surfaceId = args.surfaceId;
+    if (
+      !isBrowserProductId(browserSessionId) ||
+      typeof surfaceId !== "string"
+    ) {
+      throw new Error("Invalid browser surface park request.");
+    }
+    return browserService?.park(browserSessionId, surfaceId) ?? false;
+  });
+  setCommand("browser_session_capture", async (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    if (!isBrowserProductId(browserSessionId)) {
+      throw new Error("Invalid browser surface capture.");
+    }
+    return {
+      dataUrl: await (await readyBrowserService()).capture(browserSessionId),
+    };
+  });
+  setCommand("browser_session_close", async (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    if (!isBrowserProductId(browserSessionId)) {
+      throw new Error("Invalid browser session close request.");
+    }
+    return (await readyBrowserService()).close(browserSessionId);
+  });
+  setCommand("browser_session_states", async (_args, event) => {
+    trustedBrowserWindow(event);
+    return (await readyBrowserService()).sessionStates();
+  });
+  setCommand("browser_confirmation_requests", async (_args, event) => {
+    trustedBrowserWindow(event);
+    return (await readyBrowserService()).confirmationRequests();
+  });
+  setCommand("browser_session_control", async (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    const tool = args.tool;
+    if (
+      !isBrowserProductId(browserSessionId) ||
+      (tool !== "open" &&
+        tool !== "back" &&
+        tool !== "forward" &&
+        tool !== "reload")
+    ) {
+      throw new Error("Invalid browser control request.");
+    }
+    const toolArguments = args.arguments;
+    if (
+      !toolArguments ||
+      typeof toolArguments !== "object" ||
+      Array.isArray(toolArguments)
+    ) {
+      throw new Error("Invalid browser control arguments.");
+    }
+    return (await readyBrowserService()).control(
+      browserSessionId,
+      tool,
+      toolArguments as BrowserJsonValue,
+    );
+  });
+  setCommand("browser_session_stop", async (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    if (!isBrowserProductId(browserSessionId)) {
+      throw new Error("Invalid browser stop request.");
+    }
+    return (await readyBrowserService()).stopBrowserAction(browserSessionId);
+  });
+  setCommand("browser_ui_preferences_update", async (args, event) => {
+    trustedBrowserWindow(event);
+    if (
+      typeof args.browserEnabled !== "boolean" ||
+      typeof args.showAgentCursor !== "boolean" ||
+      (args.navigationApproval !== "always-ask" &&
+        args.navigationApproval !== "always-allow")
+    ) {
+      throw new Error("Invalid browser UI preferences.");
+    }
+    (await readyBrowserService()).setUiPreferences({
+      browserEnabled: args.browserEnabled,
+      showAgentCursor: args.showAgentCursor,
+      navigationApproval: args.navigationApproval,
+    });
+    return true;
+  });
   const disposeGithubSessionSync = onMainAuthSessionChanged(async () => {
     await pushGithubCredentialToEngine();
     await scheduleGithubAppRefresh();
     emitEvent("github-credential-store-changed", {});
   });
   app.on("will-quit", disposeGithubSessionSync);
-  setEngineSpawnBarrier(githubAuthReady);
+  setEngineSpawnBarrier(Promise.all([githubAuthReady, browserReady]));
   const root = defaultProjectRoot();
   const engineBoot = spawnEngine(root);
 
@@ -1251,7 +1508,18 @@ app.whenReady().then(async () => {
   startEngineCodeWatcher();
 
   const win = createMainWindow();
+  browserRendererEpoch += 1;
   setMainWindow(win);
+  win.on("closed", () => {
+    browserRendererEpoch += 1;
+    void browserService?.revokeConfirmationSurface();
+  });
+  win.webContents.on("did-start-navigation", (details) => {
+    if (shouldRevokeBrowserSurfaceForNavigation(details)) {
+      browserRendererEpoch += 1;
+      void browserService?.revokeConfirmationSurface();
+    }
+  });
 
   // Main-owned update checks continue even when the macOS window is closed.
   // Start only after setMainWindow so the initial event cannot pollute the
@@ -1297,10 +1565,9 @@ app.whenReady().then(async () => {
 
   // Roll up per-process memory into main.log so a future spike is attributable.
   startProcessMetricsLogger();
-  // Workbench browser tabs are
-  // <iframe> elements (not WebContentsView). All they need from
-  // main is the ability to clear HTTP cache + cookies in the
-  // session (operations iframes can't perform themselves).
+  // User-created preview/design browser tabs remain renderer iframes and use
+  // these cache/cookie commands. Conversation-owned agent Browser tabs use the
+  // separate isolated WebContentsView service registered above.
   registerIframeSessionCommands({ mainWindow: win });
   // Element picker — install/uninstall via
   // WebFrameMain.executeJavaScript + main-window region capture
@@ -1312,7 +1579,18 @@ app.whenReady().then(async () => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       const next = createMainWindow();
+      browserRendererEpoch += 1;
       setMainWindow(next);
+      next.on("closed", () => {
+        browserRendererEpoch += 1;
+        void browserService?.revokeConfirmationSurface();
+      });
+      next.webContents.on("did-start-navigation", (details) => {
+        if (shouldRevokeBrowserSurfaceForNavigation(details)) {
+          browserRendererEpoch += 1;
+          void browserService?.revokeConfirmationSurface();
+        }
+      });
       registerIframeSessionCommands({ mainWindow: next });
       registerIframePickerCommands({ mainWindow: next });
     }
@@ -1329,6 +1607,10 @@ app.on("window-all-closed", () => {
 // if multiple windows close, so the shutdown is single-threaded.
 app.on("before-quit", () => {
   shutdownSidecar();
+  const service = browserService;
+  browserService = null;
+  setBrowserServiceEnvironment(null);
+  if (service) void service.stop().catch(() => {});
   // Interactive PTYs are now engine-owned (apps/desktop/src/renderer/platform/pty.ts → engine bridge),
   // and the engine reaps them on its own shutdown (Engine.stop → pty.killAll).
   // Killing the sidecar above tears the engine down, so there are no

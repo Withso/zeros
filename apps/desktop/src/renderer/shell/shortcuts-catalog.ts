@@ -84,6 +84,12 @@ export const SHORTCUT_CATEGORIES: ShortcutCategory[] = [
         keywords: ["column", "sidebar", "workspace", "collapse"],
       },
       {
+        id: "open-browser",
+        label: "Open Browser",
+        keys: ["⇧⌘B"],
+        keywords: ["web", "url", "site", "internet", "right panel"],
+      },
+      {
         id: "toggle-theme",
         label: "Toggle theme",
         keys: ["⌥⌘T"],

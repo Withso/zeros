@@ -11,7 +11,11 @@
 // provenance is what renders "Inherited from User" in the repo settings UI.
 // ──────────────────────────────────────────────────────────
 
-import { sanitizeLayer, type RawSettingsDoc, type SettingsLayerName } from "./schema";
+import {
+  sanitizeLayer,
+  type RawSettingsDoc,
+  type SettingsLayerName,
+} from "./schema";
 
 /** Resolver-level fallbacks. Deliberately minimal: only values the product
  *  treats as universal defaults today; behavior toggles stay undefined until
@@ -23,6 +27,17 @@ export const DEFAULT_SETTINGS: RawSettingsDoc = {
   },
   scripts: {
     run_mode: "concurrent",
+  },
+  browser: {
+    enabled: true,
+    codex_enabled: true,
+    // External Chrome shares the user's signed-in browser profile. Unlike the
+    // isolated Codex host, it is opt-in until the user explicitly enables it.
+    claude_enabled: false,
+    provider: "isolated",
+    auto_open: true,
+    show_agent_cursor: true,
+    navigation_approval: "always-ask",
   },
 };
 
@@ -76,7 +91,10 @@ function clone<T>(v: T): T {
 
 /** Remove provenance entries at and under `path` (a leaf being replaced by a
  *  table, or a table being replaced by a leaf, must not leave stale entries). */
-function clearSourcesUnder(sources: Record<string, SettingsLayerName>, path: string): void {
+function clearSourcesUnder(
+  sources: Record<string, SettingsLayerName>,
+  path: string,
+): void {
   delete sources[path];
   const prefix = `${path}.`;
   for (const key of Object.keys(sources)) {
@@ -118,15 +136,16 @@ export function resolveSettings(layers: SettingsLayers): ResolvedSettings {
   const sources: Record<string, SettingsLayerName> = {};
   const warnings: string[] = [];
 
-  const ordered: Array<[SettingsLayerName, RawSettingsDoc | null | undefined]> = [
-    ["default", DEFAULT_SETTINGS],
-    ["user", layers.user],
-    ["team", layers.team],
-    ["repo", layers.repo],
-    ["repo-local", layers.repoLocal],
-    ["workspace-local", layers.workspaceLocal],
-    ["managed", layers.managed],
-  ];
+  const ordered: Array<[SettingsLayerName, RawSettingsDoc | null | undefined]> =
+    [
+      ["default", DEFAULT_SETTINGS],
+      ["user", layers.user],
+      ["team", layers.team],
+      ["repo", layers.repo],
+      ["repo-local", layers.repoLocal],
+      ["workspace-local", layers.workspaceLocal],
+      ["managed", layers.managed],
+    ];
 
   for (const [layer, raw] of ordered) {
     if (!raw) continue;
@@ -139,5 +158,39 @@ export function resolveSettings(layers: SettingsLayers): ResolvedSettings {
     mergeLayer(effective, doc, layer, sources);
   }
 
+  materializeBrowserProviderSettings(effective, sources, ordered);
+
   return { effective, sources, warnings };
+}
+
+/** `browser.enabled` was the original isolated-browser switch. It remains a
+ * compatibility fallback for Codex and a fail-closed master disable for both
+ * providers, but a legacy true value must not silently opt users into Claude's
+ * external signed-in Chrome profile. Provider-specific leaves otherwise win at
+ * the same or a stronger layer. */
+function materializeBrowserProviderSettings(
+  effective: RawSettingsDoc,
+  sources: Record<string, SettingsLayerName>,
+  ordered: Array<[SettingsLayerName, RawSettingsDoc | null | undefined]>,
+): void {
+  const browser = effective.browser;
+  if (!isPlainObject(browser)) return;
+  const ranks = new Map(ordered.map(([layer], index) => [layer, index]));
+  const legacySource = sources["browser.enabled"];
+  const legacyRank =
+    legacySource === undefined ? -1 : (ranks.get(legacySource) ?? -1);
+  const legacyValue = browser.enabled !== false;
+
+  for (const key of ["codex_enabled", "claude_enabled"] as const) {
+    const path = `browser.${key}`;
+    const providerSource = sources[path];
+    const providerRank =
+      providerSource === undefined ? -1 : (ranks.get(providerSource) ?? -1);
+    if (providerRank >= legacyRank && typeof browser[key] === "boolean") {
+      continue;
+    }
+    if (key === "claude_enabled" && legacyValue) continue;
+    browser[key] = legacyValue;
+    if (legacySource) sources[path] = legacySource;
+  }
 }

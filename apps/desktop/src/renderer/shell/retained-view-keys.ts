@@ -59,6 +59,33 @@ export function retainRecentViewKeySet(
   return next;
 }
 
+/** Keep the physical DOM order of a retained deck stable while its MRU order
+ * changes. This distinction matters for nested browsing contexts: moving an
+ * already-connected iframe to another sibling position reloads its document in
+ * Chromium, destroying scroll, form state, and the page's JS heap. Existing
+ * keys therefore keep their relative positions; evicted keys disappear and
+ * genuinely new keys append in the retention policy's current order. */
+export function preserveRetainedViewOrder(
+  previousOrder: readonly string[],
+  retainedKeys: readonly string[],
+): string[] {
+  const retainedSet = new Set(retainedKeys);
+  const next = previousOrder.filter((key) => retainedSet.has(key));
+  const included = new Set(next);
+  for (const key of retainedKeys) {
+    if (included.has(key)) continue;
+    included.add(key);
+    next.push(key);
+  }
+  if (
+    next.length === previousOrder.length &&
+    next.every((key, index) => key === previousOrder[index])
+  ) {
+    return previousOrder as string[];
+  }
+  return next;
+}
+
 /** Collapse retained variants that represent the same mounted surface. The
  * newest key wins while unrelated identities keep their deck order. This lets
  * metadata/query changes update one React tree in place instead of mounting a

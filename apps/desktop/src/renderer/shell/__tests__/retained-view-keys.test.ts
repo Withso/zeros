@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   isRetainedViewVisible,
+  preserveRetainedViewOrder,
   retainLatestViewKeyPerIdentity,
   retainRecentViewKeys,
   retainRecentViewKeySet,
@@ -66,6 +67,43 @@ describe("retainRecentViewKeySet", () => {
         new Set(retained),
       ),
     ).toBe(retained);
+  });
+});
+
+describe("preserveRetainedViewOrder", () => {
+  it("does not move retained iframe keys during an A → B → A switch", () => {
+    const firstMru = retainRecentViewKeySet([], ["a", "b", "a"], 8);
+    const firstDomOrder = preserveRetainedViewOrder([], firstMru);
+    expect(firstMru).toEqual(["b", "a"]);
+
+    const secondMru = retainRecentViewKeySet(firstMru, ["a", "b", "b"], 8);
+    expect(secondMru).toEqual(["a", "b"]);
+    const secondDomOrder = preserveRetainedViewOrder(firstDomOrder, secondMru);
+    expect(secondDomOrder).toBe(firstDomOrder);
+
+    const thirdMru = retainRecentViewKeySet(secondMru, ["a", "b", "a"], 8);
+    expect(thirdMru).toEqual(["b", "a"]);
+    expect(preserveRetainedViewOrder(secondDomOrder, thirdMru)).toBe(
+      firstDomOrder,
+    );
+  });
+
+  it("removes evicted keys in place and appends only newly mounted keys", () => {
+    const previous = ["a", "b", "c"];
+    expect(preserveRetainedViewOrder(previous, ["c", "b", "d"])).toEqual([
+      "b",
+      "c",
+      "d",
+    ]);
+  });
+
+  it("is bounded by the retained set and discards closed keys", () => {
+    const previous = Array.from({ length: 32 }, (_, index) => `old-${index}`);
+    const retained = ["old-30", "old-31", "new-a", "new-b"];
+    const next = preserveRetainedViewOrder(previous, retained);
+    expect(next).toEqual(["old-30", "old-31", "new-a", "new-b"]);
+    expect(next).toHaveLength(retained.length);
+    expect(preserveRetainedViewOrder(next, [])).toEqual([]);
   });
 });
 

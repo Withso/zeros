@@ -151,6 +151,36 @@ function raiseQuestion(questionId: string): void {
   rt.bootOptions?.onUserInputRequest?.(request);
 }
 
+function raiseBrowserOriginQuestion(
+  questionId: string,
+  origin: string,
+  turnId = "turn-browser",
+): void {
+  const request: CodexUserInputRequest = {
+    questionId,
+    rpcRequestId: `rpc-${questionId}`,
+    method: "mcpServer/elicitation/request",
+    expiresAt: Date.now() + 30_000,
+    params: {
+      threadId: "thread-1",
+      turnId,
+      serverName: "node_repl",
+      mode: "form",
+      message: `Allow Browser use to access ${origin}?`,
+      requestedSchema: { type: "object", properties: {} },
+      _meta: {
+        codex_approval_kind: "mcp_tool_call",
+        connector_name: "Browser use",
+        tool_title: "Access browser origin",
+        tool_params_display: [
+          { name: "origin", display_name: "Origin", value: origin },
+        ],
+      },
+    },
+  };
+  rt.bootOptions?.onUserInputRequest?.(request);
+}
+
 function cancelled(): RequestPermissionResponse {
   return { outcome: { outcome: "cancelled" } } as RequestPermissionResponse;
 }
@@ -295,6 +325,120 @@ describe("codex permission settlement receipts", () => {
       session.sessionId,
       { outcome: "dismissed" },
     );
+  });
+
+  it("reuses one explicit approval for an apex-to-www redirect in the same Browser turn", async () => {
+    const { adapter, emit } = makeAdapter();
+    await adapter.newSession({ cwd: "/tmp/proj" });
+    raiseBrowserOriginQuestion("question-apex", "https://sarvam.ai");
+
+    const first = emit.onQuestionRequest.mock.calls[0]?.[2];
+    adapter.respondToQuestion({
+      questionId: "question-apex",
+      response: {
+        outcome: {
+          outcome: "answered",
+          answers: [
+            {
+              questionId: "__zeros_confirm__",
+              selectedOptionIds: ["accept"],
+            },
+          ],
+        },
+      },
+    });
+    expect(first.questions[0].approvalTarget).toBe("https://sarvam.ai");
+
+    raiseBrowserOriginQuestion("question-www", "https://www.sarvam.ai");
+
+    expect(emit.onQuestionRequest).toHaveBeenCalledTimes(1);
+    expect(rt.userInputCalls.at(-1)).toEqual({
+      questionId: "question-www",
+      response: { action: "accept", content: null, _meta: null },
+    });
+    expect(emit.onQuestionSettled).not.toHaveBeenCalledWith(
+      "codex",
+      "question-www",
+      expect.any(String),
+      expect.anything(),
+    );
+  });
+
+  it("does not reuse Browser origin approval across turns or arbitrary subdomains", async () => {
+    const { adapter, emit } = makeAdapter();
+    await adapter.newSession({ cwd: "/tmp/proj" });
+    raiseBrowserOriginQuestion("question-apex", "https://sarvam.ai");
+    adapter.respondToQuestion({
+      questionId: "question-apex",
+      response: {
+        outcome: {
+          outcome: "answered",
+          answers: [
+            {
+              questionId: "__zeros_confirm__",
+              selectedOptionIds: ["accept"],
+            },
+          ],
+        },
+      },
+    });
+
+    raiseBrowserOriginQuestion("question-docs", "https://docs.sarvam.ai");
+    raiseBrowserOriginQuestion(
+      "question-next-turn",
+      "https://www.sarvam.ai",
+      "turn-browser-next",
+    );
+
+    expect(emit.onQuestionRequest).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not silently turn Allow once into a same-origin session grant", async () => {
+    const { adapter, emit } = makeAdapter();
+    await adapter.newSession({ cwd: "/tmp/proj" });
+    raiseBrowserOriginQuestion("question-first", "https://sarvam.ai");
+    adapter.respondToQuestion({
+      questionId: "question-first",
+      response: {
+        outcome: {
+          outcome: "answered",
+          answers: [
+            {
+              questionId: "__zeros_confirm__",
+              selectedOptionIds: ["accept"],
+            },
+          ],
+        },
+      },
+    });
+
+    raiseBrowserOriginQuestion("question-repeat", "https://sarvam.ai");
+
+    expect(emit.onQuestionRequest).toHaveBeenCalledTimes(2);
+  });
+
+  it("treats equivalent spellings of the same origin as the same Allow-once target", async () => {
+    const { adapter, emit } = makeAdapter();
+    await adapter.newSession({ cwd: "/tmp/proj" });
+    raiseBrowserOriginQuestion("question-first", "https://sarvam.ai");
+    adapter.respondToQuestion({
+      questionId: "question-first",
+      response: {
+        outcome: {
+          outcome: "answered",
+          answers: [
+            {
+              questionId: "__zeros_confirm__",
+              selectedOptionIds: ["accept"],
+            },
+          ],
+        },
+      },
+    });
+
+    raiseBrowserOriginQuestion("question-repeat", "https://sarvam.ai/");
+
+    expect(emit.onQuestionRequest).toHaveBeenCalledTimes(2);
   });
 
   it("cancels and receipts parked approvals when the user stops the turn", async () => {

@@ -1070,6 +1070,17 @@ let spawnChain: Promise<unknown> = Promise.resolve();
 // it while the renderer can paint its validated boot snapshot in parallel.
 let engineSpawnBarrier: Promise<void> = Promise.resolve();
 
+/** Private main→engine capability courier. Kept outside process.env so shell,
+ * updater, and other main-process children cannot inherit the browser bearer.
+ * The engine captures and scrubs these two names before it spawns an agent. */
+let browserServiceEnvironment: { url: string; token: string } | null = null;
+
+export function setBrowserServiceEnvironment(
+  value: { url: string; token: string } | null,
+): void {
+  browserServiceEnvironment = value;
+}
+
 export function setEngineSpawnBarrier(barrier: Promise<unknown>): void {
   engineSpawnBarrier = barrier.then(
     () => undefined,
@@ -1256,6 +1267,10 @@ async function doSpawnEngine(
   }
 
   const extraEnv: Record<string, string> = {};
+  if (browserServiceEnvironment) {
+    extraEnv.ZEROS_BROWSER_SERVICE_URL = browserServiceEnvironment.url;
+    extraEnv.ZEROS_BROWSER_SERVICE_TOKEN = browserServiceEnvironment.token;
+  }
   if (secretsFile) extraEnv.ZEROS_SECRETS_FILE = secretsFile;
   if (legacyAgentDb) extraEnv.ZEROS_LEGACY_AGENT_DB = legacyAgentDb;
 
@@ -1315,6 +1330,13 @@ async function doSpawnEngine(
   // Codex native runtime. Keep the executable, version, and managed package
   // root atomic: an explicit binary override must not inherit metadata from a
   // different staged runtime.
+  // Browser Use has a separate OpenAI `cua_node` helper in desktop bundles;
+  // expose the resource root so the engine can discover a future staged copy
+  // without guessing Electron's installation layout. An explicit developer
+  // override remains authoritative.
+  if (!process.env.ZEROS_RESOURCES_PATH) {
+    extraEnv.ZEROS_RESOURCES_PATH = process.resourcesPath;
+  }
   const codexCli = resolveCodexCliPaths();
   if (codexCli.binary && !process.env.ZEROS_CODEX_CLI_PATH) {
     extraEnv.ZEROS_CODEX_CLI_PATH = codexCli.binary;

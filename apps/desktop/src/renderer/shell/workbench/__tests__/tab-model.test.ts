@@ -84,12 +84,14 @@ describe("tab factories", () => {
     const docs = createBrowserTab({
       url: "https://example.com/docs",
       title: "Docs",
+      browserConversationId: "conversation-a",
     });
     expect(blank).toMatchObject({ type: "browser", title: "Browser", url: "" });
     expect(docs).toMatchObject({
       type: "browser",
       title: "Docs",
       url: "https://example.com/docs",
+      browserConversationId: "conversation-a",
     });
     expect(blank.id).not.toBe(docs.id);
     expect(blank.pinned).toBeUndefined();
@@ -347,6 +349,49 @@ describe("normalizeWorkbenchTabs", () => {
       out
         .filter((tab) => tab.type === "files" || tab.type === "browser")
         .every((tab) => !tab.pinned),
+    ).toBe(true);
+  });
+
+  it("keeps a bounded durable conversation owner but drops malformed owners", () => {
+    const out = normalizeWorkbenchTabs([
+      {
+        id: "owned",
+        type: "browser",
+        title: "Owned",
+        url: "https://example.com/",
+        browserConversationId: "conversation-a",
+      },
+      {
+        id: "malformed",
+        type: "browser",
+        title: "Malformed",
+        url: "https://example.com/",
+        browserConversationId: "conversation/unsafe",
+      },
+      {
+        id: "file-with-stale-owner",
+        type: "files",
+        title: "a.ts",
+        filePath: "a.ts",
+        browserConversationId: "conversation-stale",
+      },
+      {
+        id: "changes-with-stale-owner",
+        type: "changes",
+        title: "Changes",
+        browserConversationId: "conversation-stale",
+      },
+    ]);
+    expect(out.find((tab) => tab.id === "owned")?.browserConversationId).toBe(
+      "conversation-a",
+    );
+    expect(
+      out.find((tab) => tab.id === "malformed")?.browserConversationId,
+    ).toBeUndefined();
+    expect(
+      out
+        .filter((tab) => tab.type !== "browser")
+        .every((tab) => tab.browserConversationId === undefined),
     ).toBe(true);
   });
 

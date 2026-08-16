@@ -24,7 +24,7 @@
 //   native :hover.
 
 import React from "react";
-import { X } from "lucide-react";
+import { CircleStop, MousePointer2, X } from "lucide-react";
 import { Tooltip } from "../../shared/ui/primitives";
 import { FileTypeIcon } from "../../features/agent/composer-editor/file-type-icon";
 import { useWorkspaceDispatch } from "../../state/store";
@@ -48,6 +48,17 @@ import {
 import { useWorkspaceChangeCount } from "./tabs/changes-tab";
 import { useGitRefreshKey } from "../use-git-refresh-key";
 import { WorkbenchNewTabMenu } from "./new-tab-menu";
+import {
+  browserSessionIsAgentActive,
+  dismissBrowserSession,
+  useConversationBrowserActivity,
+} from "../../features/browser/browser-session-activity-store";
+import { useAgentSessions } from "../../features/agent/sessions-hooks";
+import { nativeInvoke } from "../../platform/runtime";
+import {
+  forgetBrowserTabFavicon,
+  useBrowserTabFavicon,
+} from "../../features/browser/browser-tab-favicon-store";
 
 interface WorkbenchTabStripProps {
   /** The persisted workbench home + open-File tab list — see Workbench. */
@@ -81,7 +92,11 @@ export function WorkbenchTabStrip({
     tabAttr: "data-workbench-tab",
   });
 
-  const handleClose = (e: React.MouseEvent, tab: WorkbenchTab) => {
+  const handleClose = (
+    e: React.MouseEvent,
+    tab: WorkbenchTab,
+    browserSessionId?: string,
+  ) => {
     e.stopPropagation();
     if (
       tab.type === "changes" ||
@@ -89,6 +104,15 @@ export function WorkbenchTabStrip({
       tab.type === "context"
     )
       return;
+    if (tab.type === "browser") {
+      forgetBrowserTabFavicon(`zeros-browser-${tab.id}`);
+      if (browserSessionId) {
+        dismissBrowserSession(browserSessionId);
+        void nativeInvoke("browser_session_close", {
+          browserSessionId,
+        }).catch(() => undefined);
+      }
+    }
     dispatch({ type: "REMOVE_WORKBENCH_TAB", id: tab.id });
   };
 
@@ -120,7 +144,9 @@ export function WorkbenchTabStrip({
                 }
                 badge={tab.type === "changes" ? changeCount : 0}
                 onActivate={() => handleActivate(tab.id)}
-                onClose={(e) => handleClose(e, tab)}
+                onClose={(e, browserSessionId) =>
+                  handleClose(e, tab, browserSessionId)
+                }
                 registerRef={(node) => strip.registerTab(tab.id, node)}
               />
             ))}
@@ -147,7 +173,7 @@ interface TabPillProps {
   /** Count rendered after the label (the Changes pill's live change count). */
   badge: number;
   onActivate: () => void;
-  onClose: (e: React.MouseEvent) => void;
+  onClose: (e: React.MouseEvent, browserSessionId?: string) => void;
   /** Registers the pill with the sticky strip (pin math + reveal). */
   registerRef: (node: HTMLDivElement | null) => void;
 }
@@ -173,6 +199,37 @@ function TabPill({
   // A File tab wears its file's own colored type glyph (same sprite as the tree
   // and the viewer breadcrumb); everything else keeps its type's lucide glyph.
   const iconPath = workbenchTabIconPath(tab);
+  const browserActivity = useConversationBrowserActivity(
+    tab.type === "browser" ? tab.browserConversationId : undefined,
+  );
+  const ordinaryBrowserFavicon = useBrowserTabFavicon(
+    tab.type === "browser" && !tab.browserConversationId
+      ? `zeros-browser-${tab.id}`
+      : undefined,
+  );
+  const favicon =
+    tab.type === "browser"
+      ? (browserActivity?.faviconDataUrl ?? ordinaryBrowserFavicon ?? undefined)
+      : undefined;
+  const browserWorking =
+    tab.type === "browser" && browserSessionIsAgentActive(browserActivity);
+  const sessions = useAgentSessions();
+  const [stoppingBrowser, setStoppingBrowser] = React.useState(false);
+  const stopAgentBrowser = React.useCallback(
+    (event: React.MouseEvent) => {
+      event.stopPropagation();
+      const browserSessionId = browserActivity?.browserSessionId;
+      const conversationId =
+        tab.type === "browser" ? tab.browserConversationId : undefined;
+      if (!browserSessionId || !conversationId || stoppingBrowser) return;
+      setStoppingBrowser(true);
+      void sessions
+        .stopBrowserUse(conversationId, browserSessionId)
+        .catch(() => undefined)
+        .finally(() => setStoppingBrowser(false));
+    },
+    [browserActivity?.browserSessionId, sessions, stoppingBrowser, tab],
+  );
   return (
     <div
       ref={registerRef}
@@ -199,25 +256,56 @@ function TabPill({
         // Labelled tabs fit their content up to a 180px cap (then
         // truncate); icon-only (empty) pills get a tighter square footprint.
         showLabel ? "max-w-[180px] gap-1.5 px-2.5" : "px-2",
+        browserWorking ? "pr-7" : "",
         active
           ? WORKBENCH_TAB_PILL_ACTIVE_CLS
           : WORKBENCH_TAB_PILL_INACTIVE_CLS,
       ].join(" ")}
     >
-      {iconPath ? (
+      {browserWorking ? (
+        <MousePointer2
+          className="text-blue-fg size-3.5 shrink-0 fill-current drop-shadow-[0_0_5px_rgba(47,190,235,.45)]"
+          aria-hidden="true"
+        />
+      ) : favicon ? (
+        <img src={favicon} alt="" className="size-3.5 shrink-0 rounded-[2px]" />
+      ) : iconPath ? (
         // size 14 === the size-3.5 the lucide glyphs use, so swapping the glyph
         // never shifts the pill's label.
         <FileTypeIcon name={iconPath} size={14} className="shrink-0" />
       ) : (
         <Icon className="size-3.5 shrink-0" />
       )}
-      {showLabel && <span className="truncate">{tab.title}</span>}
+      {showLabel && (
+        <span
+          className={[
+            "truncate",
+            browserWorking ? "zeros-browser-tab-working" : "",
+          ].join(" ")}
+        >
+          {tab.title}
+        </span>
+      )}
       {badge > 0 && (
         // Bare count — no chip bg (saves space); the pill's gap spaces it.
         // Bare-count treatment (no chip) keeps the pill compact.
         <span className="text-fg2 text-2xxs tabular-nums">{badge}</span>
       )}
-      {canClose && (
+      {browserWorking ? (
+        <div className="from-bg2 pointer-events-none absolute inset-y-0 right-0 flex w-9 items-center justify-end bg-gradient-to-l from-55% to-transparent pr-1.5 pl-3">
+          <Tooltip label="Stop agent browser work">
+            <button
+              type="button"
+              onClick={stopAgentBrowser}
+              disabled={stoppingBrowser}
+              aria-label="Stop agent browser work"
+              className="text-fg2 hover:bg-bg2-hover hover:text-fg1 pointer-events-auto inline-flex size-5 shrink-0 items-center justify-center rounded-sm transition-[background-color,color] duration-120 ease-out disabled:opacity-50"
+            >
+              <CircleStop className="size-3.5" aria-hidden="true" />
+            </button>
+          </Tooltip>
+        </div>
+      ) : canClose ? (
         // Reveal-on-hover close overlay — the same treatment as the chat tabs
         // (conversation/chat-tabs TAB_HOVER_OVERLAY_CLS): the wrapper carries a
         // gradient fade matching the pill's bg-bg2 hover/active fill so a long
@@ -237,7 +325,7 @@ function TabPill({
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
-                onClose(e);
+                onClose(e, browserActivity?.browserSessionId);
               }}
               aria-label={`Close ${tab.title}`}
               className="text-fg2 hover:bg-bg2-hover hover:text-fg1 pointer-events-auto inline-flex size-5 shrink-0 items-center justify-center rounded-sm transition-[background-color,color] duration-120 ease-out"
@@ -246,7 +334,7 @@ function TabPill({
             </button>
           </Tooltip>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

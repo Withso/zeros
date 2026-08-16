@@ -251,7 +251,7 @@ export type Action =
       /** Exact owner for delayed/background opens. Omitted for active UI. */
       scope?: string;
     }
-  | { type: "REMOVE_WORKBENCH_TAB"; id: string }
+  | { type: "REMOVE_WORKBENCH_TAB"; id: string; scope?: string }
   | {
       type: "CLOSE_WORKBENCH_FILE_IF_MATCHES";
       id: string;
@@ -656,6 +656,43 @@ function removeWorkbenchTabs(
   return { ...cur, tabs, activeId: right?.id ?? left?.id ?? null };
 }
 
+/** Conversation-owned Browser tabs are durable descendants of the chat. A
+ * delete must remove every copy atomically, including a stale copy left in a
+ * moved workbench scope, while preserving unrelated scope references. */
+function removeConversationBrowserTabs(
+  record: WorkspaceState["workbenchByScope"],
+  conversationId: string,
+): WorkspaceState["workbenchByScope"] {
+  let next = record;
+  for (const [scope, value] of Object.entries(record)) {
+    const cleaned = removeWorkbenchTabs(
+      value,
+      (tab) => tab.browserConversationId === conversationId,
+    );
+    if (cleaned === value) continue;
+    if (next === record) next = { ...record };
+    next[scope] = cleaned;
+  }
+  return next;
+}
+
+function retainBrowserTabsForConversations(
+  record: WorkspaceState["workbenchByScope"],
+  conversationIds: ReadonlySet<string>,
+): WorkspaceState["workbenchByScope"] {
+  let next = record;
+  for (const [scope, value] of Object.entries(record)) {
+    const cleaned = removeWorkbenchTabs(value, (tab) => {
+      const owner = tab.browserConversationId;
+      return owner ? !conversationIds.has(owner) : false;
+    });
+    if (cleaned === value) continue;
+    if (next === record) next = { ...record };
+    next[scope] = cleaned;
+  }
+  return next;
+}
+
 // ──────────────────────────────────────────────────────────
 // Reducer (moved verbatim from store.tsx)
 // ──────────────────────────────────────────────────────────
@@ -983,12 +1020,18 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
     case "SET_AI_SETTINGS":
       return { ...state, aiSettings: action.settings };
     // ── Chat threads ──────────────────────────────────────
-    case "HYDRATE_CHATS":
+    case "HYDRATE_CHATS": {
+      const chats = action.chats.map(migrateChatPermission);
       return {
         ...state,
-        chats: action.chats.map(migrateChatPermission),
+        chats,
         activeChatId: action.activeChatId,
+        workbenchByScope: retainBrowserTabsForConversations(
+          state.workbenchByScope,
+          new Set(chats.map((chat) => chat.id)),
+        ),
       };
+    }
     case "MERGE_CHATS": {
       // Live cross-device sync (DB_CHANGED): fold the engine's chat list into the
       // local one — ADD chats we don't have, refresh ones the engine has a NEWER
@@ -1104,6 +1147,10 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         chatComposerDrafts: nextDrafts,
         editComposerDrafts: nextEditDrafts,
         pendingAutoSend: removeRecordKey(state.pendingAutoSend, action.id),
+        workbenchByScope: removeConversationBrowserTabs(
+          state.workbenchByScope,
+          action.id,
+        ),
       };
     }
     case "ARCHIVE_CHAT": {
@@ -1415,7 +1462,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       };
     }
     case "REMOVE_WORKBENCH_TAB": {
-      const scope = workbenchScopeKey(state);
+      const scope = action.scope ?? workbenchScopeKey(state);
       const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
       // The pinned Changes/Review/Context homes are permanent; extra File and
       // Browser tabs close normally, including blank ones.

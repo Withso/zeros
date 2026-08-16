@@ -18,11 +18,12 @@ describe("buildMcpServerOverrides — Codex -c MCP config", () => {
 
   it("emits command/args/env for a stdio server", () => {
     const args = buildMcpServerOverrides([
-      { name: "ctx7", transport: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp"], env: { DEBUG: "1" } },
+      { name: "ctx7", transport: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp"], env: { DEBUG: "1" }, startupTimeoutSec: 120 },
     ]);
     expect(args).toContain('mcp_servers.ctx7.command="npx"');
     expect(args).toContain('mcp_servers.ctx7.args=["-y", "@upstash/context7-mcp"]');
     expect(args).toContain('mcp_servers.ctx7.env={ "DEBUG" = "1" }');
+    expect(args).toContain("mcp_servers.ctx7.startup_timeout_sec=120");
   });
 
   it("skips a server whose name isn't TOML-key-safe (no injection)", () => {

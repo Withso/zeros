@@ -154,6 +154,15 @@ describe("conversation/workbench sizing bounds stay in lockstep with CSS", () =>
     expect(browserTab).toContain('data-zeros-resize-freeze=""');
   });
 
+  it("keeps retained Browser iframe siblings in stable DOM order", () => {
+    // Keyed React children retain component state when reordered, but moving an
+    // iframe DOM node itself resets Chromium's nested browsing context. The
+    // Browser deck must render a stable order, using MRU only for eviction.
+    expect(workbench).toContain("useStableRetainedViewOrder(retainedKeys)");
+    expect(workbench).toContain("return renderedKeys.map((key) => {");
+    expect(workbench).not.toContain("return retainedKeys.map((key) => {");
+  });
+
   it("visible surfaces reflow live — the shrink-side width floor is gone", () => {
     // The previous regime floored min-width on the pane bodies, so the
     // shrinking pane clipped its own live content at the moving seam (the

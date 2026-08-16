@@ -17,6 +17,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import type { AgentBrowserUse } from "../../../types";
 import {
   buildThreadStartParams,
   codexEffortFromThreadSettings,
@@ -120,6 +121,34 @@ describe("buildThreadStartParams", () => {
     expect(
       buildThreadStartParams("/tmp", undefined, "ask", ""),
     ).not.toHaveProperty("developerInstructions");
+  });
+
+  it("keeps the bundled Browser plugin off without a native host binding", () => {
+    const params = buildThreadStartParams("/tmp", undefined, "ask");
+
+    expect(params.config).toEqual({
+      "plugins.browser@openai-bundled.enabled": false,
+    });
+  });
+
+  it("uses only the official Browser plugin when a native IAB host is bound", () => {
+    const browserUse: AgentBrowserUse = {
+      kind: "codex-app-server",
+      browserSessionId: "browser-session",
+    };
+
+    const params = buildThreadStartParams(
+      "/tmp",
+      undefined,
+      "ask",
+      undefined,
+      browserUse,
+    );
+
+    expect(params.config).toEqual({
+      "plugins.browser@openai-bundled.enabled": true,
+    });
+    expect(params).not.toHaveProperty("dynamicTools");
   });
 });
 

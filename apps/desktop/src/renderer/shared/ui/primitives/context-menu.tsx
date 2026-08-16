@@ -4,13 +4,28 @@ import { ChevronRight } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus";
+import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
 // Right-click context menu — the ContextMenu sibling of dropdown-menu.tsx, same
 // Zeros Foundation surface (bg3 popover, bg3-hover items, fg1 text) and submenu
 // support. Radix's Trigger owns the `contextmenu` event and calls preventDefault
 // for us, so no native browser menu appears on the wrapped element.
 
-const ContextMenu = ContextMenuPrimitive.Root;
+function ContextMenu({
+  onOpenChange,
+  ...props
+}: React.ComponentProps<typeof ContextMenuPrimitive.Root>) {
+  const publishOverlay = useNativeSurfaceOverlayIntent();
+  return (
+    <ContextMenuPrimitive.Root
+      {...props}
+      onOpenChange={(open) => {
+        publishOverlay(open);
+        onOpenChange?.(open);
+      }}
+    />
+  );
+}
 
 const ContextMenuTrigger = ContextMenuPrimitive.Trigger;
 

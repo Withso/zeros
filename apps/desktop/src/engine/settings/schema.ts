@@ -429,6 +429,49 @@ const workspacesSchema = z
   })
   .partial();
 
+/** Browser-use policy is shared product configuration, while execution remains
+ * provider-native: Codex Browser/IAB, Claude in Chrome, and no Cursor surface
+ * until its SDK exposes one. Keep the machine trust posture in the
+ * engine-owned settings file; never turn this table into a shared MCP/tool
+ * contract. */
+const browserSchema = z
+  .object({
+    /** Compatibility policy for settings written before provider-specific
+     * switches shipped. New UI writes codex_enabled / claude_enabled. */
+    enabled: z
+      .boolean()
+      .describe(
+        "Legacy fallback for provider-specific browser integration switches.",
+      ),
+    codex_enabled: z
+      .boolean()
+      .describe("Enable Codex browser use in the in-app Chromium tab."),
+    claude_enabled: z
+      .boolean()
+      .describe("Enable Claude's official external Chrome integration."),
+    provider: z
+      .literal("isolated")
+      .describe(
+        "In-app host backend for native Codex IAB. Currently supports isolated only.",
+      ),
+    auto_open: z
+      .boolean()
+      .describe(
+        "Reveal the Browser workbench tab when an active agent opens a page.",
+      ),
+    show_agent_cursor: z
+      .boolean()
+      .describe(
+        "Show the short-lived agent pointer inside the shared browser page.",
+      ),
+    navigation_approval: z
+      .enum(["always-ask", "always-allow"])
+      .describe(
+        "Whether agents ask before opening a website. Consequential actions remain separately gated.",
+      ),
+  })
+  .partial();
+
 /** User layer = repo keys + user-only keys. A repo must never set models,
  *  approvals, machine paths, or providers: those are per-user or per-machine,
  *  and a committed repo file would silently reconfigure every teammate.
@@ -454,6 +497,7 @@ export const userSettingsSchema = repoSettingsSchema.extend({
   mcp: mcpSchema.optional(),
   models: modelsSchema.optional(),
   workspaces: workspacesSchema.optional(),
+  browser: browserSchema.optional(),
   tool_approvals_enabled: z.boolean().optional(),
   github: githubSchema.optional(),
   providers: z.record(z.string(), providerSchema).optional(),
@@ -488,6 +532,7 @@ export type SettingsLayerName =
 export const USER_ONLY_KEYS = [
   "models",
   "workspaces",
+  "browser",
   "tool_approvals_enabled",
   "github",
   "providers",
@@ -495,10 +540,15 @@ export const USER_ONLY_KEYS = [
 const USER_ONLY_BY_LAYER: Record<string, readonly string[]> = {
   team: USER_ONLY_KEYS,
   repo: USER_ONLY_KEYS,
-  "repo-local": ["models", "tool_approvals_enabled", "providers"],
+  "repo-local": ["models", "browser", "tool_approvals_enabled", "providers"],
   // workspace-local is the worktree's own gitignored file — same trust + key
   // rules as repo-local (per-machine personal config, just per-worktree).
-  "workspace-local": ["models", "tool_approvals_enabled", "providers"],
+  "workspace-local": [
+    "models",
+    "browser",
+    "tool_approvals_enabled",
+    "providers",
+  ],
 };
 
 /** Keys the COMMITTED repo settings file doesn't read (2026-07-17 slimming):
@@ -807,6 +857,7 @@ const TABLE_SHAPES: Record<string, Record<string, z.ZodType>> = {
   git: gitSchema.shape,
   prompts: promptsSchema.shape,
   workspaces: workspacesSchema.shape,
+  browser: browserSchema.shape,
   github: githubSchema.shape,
 };
 
@@ -937,7 +988,24 @@ export function sanitizeLayer(
     }
     const shape = hasOwn(TABLE_SHAPES, key) ? TABLE_SHAPES[key] : undefined;
     if (shape) {
-      const table = sanitizeTable(shape, value, key, warnings);
+      // Browser policy is a privileged product boundary. Unlike ordinary
+      // forward-compatible tables, do not project unknown browser switches
+      // (for example a hand-written raw-CDP escape hatch) into effective
+      // settings before that capability has an explicit schema and review.
+      if (key === "browser" && isPlainObject(value)) {
+        for (const nested of Object.keys(value)) {
+          if (!hasOwn(shape, nested)) {
+            warnings.push(`browser.${nested}: unsupported key — ignored`);
+          }
+        }
+      }
+      const table = sanitizeTable(
+        shape,
+        value,
+        key,
+        warnings,
+        key !== "browser",
+      );
       if (table) doc[key] = table;
       continue;
     }

@@ -231,6 +231,9 @@ describe("Codex MCP elicitation mapping", () => {
     expect(canonical.questions).toEqual([
       expect.objectContaining({
         id: "__zeros_confirm__",
+        presentation: "one_click_approval",
+        approvalKind: "tool",
+        approvalPrompt: "Allow Calendar to create an event?",
         prompt: expect.stringMatching(
           /Calendar[\s\S]*Create event[\s\S]*Calendar: Work/,
         ),
@@ -296,6 +299,38 @@ describe("Codex MCP elicitation mapping", () => {
       mapCodexQuestionToCanonical("session-1", rawParamsOnly).questions[0]
         .prompt,
     ).toMatch(/alpha: first[\s\S]*zeta: last/);
+  });
+
+  it("marks Browser origin approvals for one-click scoped presentation", () => {
+    const native = request({
+      threadId: "thread-1",
+      turnId: "turn-1",
+      serverName: "node_repl",
+      mode: "form",
+      message: "Allow Browser use to access https://www.apple.com?",
+      requestedSchema: { type: "object", properties: {} },
+      _meta: {
+        codex_approval_kind: "mcp_tool_call",
+        persist: ["always"],
+        connector_name: "Browser use",
+        tool_title: "Access browser origin",
+        tool_params_display: [
+          {
+            name: "origin",
+            display_name: "Origin",
+            value: "https://www.apple.com",
+          },
+        ],
+      },
+    });
+
+    expect(
+      mapCodexQuestionToCanonical("session-1", native).questions[0],
+    ).toMatchObject({
+      presentation: "one_click_approval",
+      approvalKind: "browser_origin",
+      approvalTarget: "https://www.apple.com",
+    });
   });
 
   it("cancels instead of sending invalid typed content to the MCP server", () => {
@@ -546,7 +581,9 @@ describe("Codex MCP elicitation mapping", () => {
     });
     const canonical = mapCodexQuestionToCanonical("session-1", native);
 
-    expect(canonical.questions.map((question) => question.id)).toEqual(["body"]);
+    expect(canonical.questions.map((question) => question.id)).toEqual([
+      "body",
+    ]);
     expect(
       mapCodexQuestionAnswer(
         native,
@@ -559,8 +596,9 @@ describe("Codex MCP elicitation mapping", () => {
   });
 
   it("receipts a fail-closed submit as skipped rather than answered", () => {
-    const submitted = answered([{ questionId: "email", freeText: "nope" }])
-      .outcome;
+    const submitted = answered([
+      { questionId: "email", freeText: "nope" },
+    ]).outcome;
 
     // A submit the server never received must not be recorded as an exchange.
     expect(

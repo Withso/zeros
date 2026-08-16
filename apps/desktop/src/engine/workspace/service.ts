@@ -204,6 +204,7 @@ import {
 import { forgetDesignSelection, setDesignSelection } from "../design/selection";
 import { scanNativeMcpConfigs } from "../agents/mcp-scan";
 import { resolveMcpServers } from "../agents/mcp-registry";
+import { releaseZerosBrowserConversation } from "../browser/browser-tool-client";
 import type { McpGateway } from "../agents/gateway/server";
 import {
   listProjects,
@@ -3521,6 +3522,11 @@ export class WorkspaceService {
         // the chat row goes — deleteChat doesn't cascade (turns has no FK), so
         // without this a deleted chat leaks its rows AND its pinned git commits.
         const loc = getChatLocation(id);
+        if (loc?.workspaceId) {
+          await releaseZerosBrowserConversation(loc.workspaceId, id).catch(
+            () => false,
+          );
+        }
         if (loc?.folder) await deleteAllChatSnapshotRefs(loc.folder, id);
         deleteTurnsForChat(id);
         deleteChat(id);

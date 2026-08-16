@@ -138,6 +138,18 @@ const commandTable: Record<string, CommandHandler> = {
   "iframe:clear-cookies": notImpl("iframe:clear-cookies", 0),
   "iframe-picker:capture-region": notImpl("iframe-picker:capture-region", 0),
   "browser:reinject-picker": notImpl("browser:reinject-picker", 0),
+  "browser:control-iframe": notImpl("browser:control-iframe", 0),
+  browser_confirmation_respond: notImpl("browser_confirmation_respond", 0),
+  browser_confirmation_requests: notImpl("browser_confirmation_requests", 0),
+  browser_session_attach: notImpl("browser_session_attach", 0),
+  browser_session_capture: notImpl("browser_session_capture", 0),
+  browser_session_close: notImpl("browser_session_close", 0),
+  browser_session_park: notImpl("browser_session_park", 0),
+  browser_session_states: notImpl("browser_session_states", 0),
+  browser_session_detach: notImpl("browser_session_detach", 0),
+  browser_session_control: notImpl("browser_session_control", 0),
+  browser_session_stop: notImpl("browser_session_stop", 0),
+  browser_ui_preferences_update: notImpl("browser_ui_preferences_update", 0),
 
   // ── Workspace lifecycle ──────────────────────────────────
   // (lifecycle list/create/archive/etc. moved to the engine bridge; only the

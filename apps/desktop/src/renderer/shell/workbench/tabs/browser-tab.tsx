@@ -2,11 +2,10 @@
 // Browser Tab — embedded browser chrome
 // ──────────────────────────────────────────────────────────
 //
-// A browser pane inside a workbench tab. The visible tree: chrome
-// (back/forward/reload + URL omnibox + Design Mode toggle + ⋯
-// menu) over an `<iframe>` element. CSS positions the iframe;
-// useIframeWebview drives src updates declaratively. No main-
-// process bounds plumbing, no native overlay.
+// Two browser panes share the workbench tab model:
+//   - ordinary preview/design tabs render their existing iframe tree;
+//   - conversation-owned agent tabs attach the exact isolated main-process
+//     WebContentsView used by the canonical browser tools.
 //
 // Per-tab state:
 //   - `tab.url`   — last navigated URL (persisted)
@@ -19,7 +18,13 @@
 //   - URL bar tracks internal navigation
 //   - ⋯ menu: Hard Reload + Clear Cache + Clear Cookies via IPC
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   ChevronLeft,
   ChevronRight,
@@ -55,7 +60,7 @@ import {
   type PendingChatSubmission,
   type PendingComposerAppend,
 } from "../../../state/store";
-import { useNativeRuntime } from "../../../platform/runtime";
+import { nativeInvoke, useNativeRuntime } from "../../../platform/runtime";
 import {
   BROWSER_DEFAULT_HEIGHT,
   BROWSER_DEFAULT_WIDTH,
@@ -65,7 +70,11 @@ import {
   type WorkbenchTab,
 } from "../tab-model";
 import { Button } from "../../../shared/ui";
-import { isLoopbackUrl, normalizeBrowserUrl } from "./localhost-url";
+import {
+  isLoopbackUrl,
+  normalizeBrowserUrl,
+  resolveBrowserAddressInput,
+} from "./localhost-url";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -77,6 +86,14 @@ import {
 import { toast } from "../../../shared/ui/primitives/elements";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import type { ComposerAttachment } from "@/renderer/features/agent/composer-attachments";
+import { useBrowserSessionAgentPresence } from "@/renderer/features/browser/browser-session-activity-store";
+import {
+  hasOpenNativeBrowserBlockingOverlay,
+  nativeBrowserOverlayShouldParkSurface,
+  NativeBrowserSurfaceCommandQueue,
+  requestImmediateNativeBrowserSurfacePark,
+} from "@/renderer/features/browser/native-browser-overlay";
+import { listenForNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
 // URL normalization lives in ./localhost-url. Browser navigation accepts
 // ordinary http(s) sites; Design/Canvas are gated separately to loopback URLs.
@@ -93,7 +110,473 @@ interface BrowserTabProps {
   scope?: string;
 }
 
-export function BrowserTab({ tab, active, scope }: BrowserTabProps) {
+export function BrowserTab(props: BrowserTabProps) {
+  return props.tab.browserConversationId ? (
+    <NativeAgentBrowserTab {...props} />
+  ) : (
+    <IframeBrowserTab {...props} />
+  );
+}
+
+/** The workbench and agent share one Electron WebContentsView. Attaching moves
+ * that view from its hidden parking window into this exact rectangle; it does
+ * not reload, copy cookies, or create a second page. */
+function NativeAgentBrowserTab({ tab, active }: BrowserTabProps) {
+  const conversationId = tab.browserConversationId;
+  const presence = useBrowserSessionAgentPresence(conversationId, active);
+  const activity = presence.activity;
+  const browserSessionId =
+    activity && activity.status !== "closed"
+      ? activity.browserSessionId
+      : undefined;
+  const surfaceIdRef = useRef(`workbench:${tab.id}`);
+  const hostRef = useRef<HTMLDivElement>(null);
+  const addressInputRef = useRef<HTMLInputElement>(null);
+  const attachedSessionRef = useRef<string | null>(null);
+  const navigationSequenceRef = useRef(0);
+  const submittedAddressRef = useRef<string | null>(null);
+  const [address, setAddress] = useState(tab.url ?? "");
+  const [editingAddress, setEditingAddress] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [surfaceError, setSurfaceError] = useState<string | null>(null);
+  const [blockingOverlayOpen, setBlockingOverlayOpen] = useState(false);
+  const [overlayCapture, setOverlayCapture] = useState<string | null>(null);
+  const lastOverlayCaptureRef = useRef<string | null>(null);
+  const lastOverlayCaptureSessionRef = useRef<string | null>(null);
+  const lastOverlayCaptureUrlRef = useRef<string | null>(null);
+  const [surfaceCommands] = useState(
+    () => new NativeBrowserSurfaceCommandQueue(),
+  );
+  if (
+    submittedAddressRef.current &&
+    activity?.url === submittedAddressRef.current
+  ) {
+    submittedAddressRef.current = null;
+  }
+  useEffect(() => {
+    if (editingAddress) return;
+    const confirmedAddress = activity?.url || tab.url || "";
+    if (
+      submittedAddressRef.current &&
+      confirmedAddress !== submittedAddressRef.current
+    ) {
+      return;
+    }
+    submittedAddressRef.current = null;
+    setAddress(confirmedAddress);
+  }, [activity?.url, editingAddress, tab.url]);
+
+  useEffect(() => {
+    if (!active || !browserSessionId) {
+      setBlockingOverlayOpen(false);
+      return;
+    }
+    const refresh = () => {
+      const next = hasOpenNativeBrowserBlockingOverlay(document);
+      setBlockingOverlayOpen((current) => (current === next ? current : next));
+    };
+    refresh();
+    const observer = new MutationObserver(refresh);
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["data-state", "role"],
+    });
+    const unlistenIntent = listenForNativeSurfaceOverlayIntent((open) => {
+      requestImmediateNativeBrowserSurfacePark(
+        {
+          overlayOpening: open,
+          browserSessionId,
+          surfaceId: surfaceIdRef.current,
+        },
+        (request) => {
+          // Main handles this non-async command synchronously, before the
+          // portal's first renderer paint. The layout effect cleanup repeats
+          // the ordinary detach as an acknowledged, serialized fallback.
+          void nativeInvoke<boolean>("browser_session_park", request).catch(
+            () => false,
+          );
+          return true;
+        },
+      );
+      setBlockingOverlayOpen(
+        open || hasOpenNativeBrowserBlockingOverlay(document),
+      );
+    });
+    return () => {
+      observer.disconnect();
+      unlistenIntent();
+    };
+  }, [active, browserSessionId]);
+
+  useEffect(() => {
+    if (!browserSessionId) {
+      setOverlayCapture(null);
+      lastOverlayCaptureRef.current = null;
+      lastOverlayCaptureSessionRef.current = null;
+      lastOverlayCaptureUrlRef.current = null;
+      return;
+    }
+    const captureUrl = activity?.url ?? tab.url ?? "";
+    if (lastOverlayCaptureSessionRef.current !== browserSessionId) {
+      lastOverlayCaptureSessionRef.current = browserSessionId;
+      lastOverlayCaptureUrlRef.current = null;
+      lastOverlayCaptureRef.current = null;
+      setOverlayCapture(null);
+    }
+    // Keep one same-session snapshot warm while the native guest is live. A
+    // portal can then park it before its first paint; the refresh below updates
+    // that retained image after each overlay intent without exposing a blank.
+    if (
+      !blockingOverlayOpen &&
+      lastOverlayCaptureRef.current &&
+      lastOverlayCaptureUrlRef.current === captureUrl
+    ) {
+      return;
+    }
+    let disposed = false;
+    void nativeInvoke<{ dataUrl?: string | null }>("browser_session_capture", {
+      browserSessionId,
+    })
+      .then((result) => {
+        if (disposed) return;
+        const captured = result?.dataUrl ?? null;
+        if (captured) {
+          lastOverlayCaptureRef.current = captured;
+          lastOverlayCaptureUrlRef.current = captureUrl;
+        }
+        setOverlayCapture(captured ?? lastOverlayCaptureRef.current);
+      })
+      .catch(() => {
+        if (!disposed) setOverlayCapture(lastOverlayCaptureRef.current);
+      })
+      .finally(() => undefined);
+    return () => {
+      disposed = true;
+    };
+  }, [activity?.url, blockingOverlayOpen, browserSessionId, tab.url]);
+
+  const parkForOverlay = nativeBrowserOverlayShouldParkSurface({
+    overlayOpen: blockingOverlayOpen,
+  });
+
+  useLayoutEffect(() => {
+    const host = hostRef.current;
+    const detach = (id: string | null) => {
+      if (!id) return;
+      void surfaceCommands
+        .enqueue(() =>
+          nativeInvoke("browser_session_detach", {
+            browserSessionId: id,
+            surfaceId: surfaceIdRef.current,
+          }),
+        )
+        .catch(() => undefined);
+      if (attachedSessionRef.current === id) attachedSessionRef.current = null;
+    };
+    if (!active || parkForOverlay || !host || !browserSessionId) {
+      detach(attachedSessionRef.current);
+      setRestoring(false);
+      return;
+    }
+
+    if (
+      attachedSessionRef.current &&
+      attachedSessionRef.current !== browserSessionId
+    ) {
+      detach(attachedSessionRef.current);
+    }
+    let disposed = false;
+    let frame = 0;
+    let request: Promise<unknown> | null = null;
+    let rerun = false;
+    const attach = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        if (disposed || !host.isConnected) return;
+        const rect = host.getBoundingClientRect();
+        if (rect.width < 1 || rect.height < 1) return;
+        if (request) {
+          rerun = true;
+          return;
+        }
+        setRestoring(true);
+        request = surfaceCommands
+          .enqueue(() =>
+            nativeInvoke("browser_session_attach", {
+              browserSessionId,
+              surfaceId: surfaceIdRef.current,
+              bounds: {
+                x: Math.round(rect.left),
+                y: Math.round(rect.top),
+                width: Math.round(rect.width),
+                height: Math.round(rect.height),
+              },
+            }),
+          )
+          .then((state) => {
+            if (disposed) return;
+            attachedSessionRef.current = state ? browserSessionId : null;
+            setRestoring(false);
+            setSurfaceError(
+              state ? null : "The live browser session is no longer available.",
+            );
+          })
+          .catch((error) => {
+            if (disposed) return;
+            attachedSessionRef.current = null;
+            setRestoring(false);
+            setSurfaceError(
+              error instanceof Error
+                ? error.message
+                : "The live browser could not be attached.",
+            );
+          })
+          .finally(() => {
+            request = null;
+            if (!disposed && rerun) {
+              rerun = false;
+              attach();
+            }
+          });
+      });
+    };
+    const observer = new ResizeObserver(attach);
+    observer.observe(host);
+    window.addEventListener("resize", attach);
+    window.addEventListener("scroll", attach, true);
+    attach();
+    return () => {
+      disposed = true;
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+      window.removeEventListener("resize", attach);
+      window.removeEventListener("scroll", attach, true);
+      detach(browserSessionId);
+    };
+  }, [active, browserSessionId, parkForOverlay, surfaceCommands]);
+
+  const control = useCallback(
+    async (
+      tool: "open" | "back" | "forward" | "reload",
+      argumentsValue: Record<string, unknown> = {},
+    ) => {
+      if (!browserSessionId) {
+        toast.error("The live browser session is unavailable.");
+        return false;
+      }
+      try {
+        const result = (await nativeInvoke("browser_session_control", {
+          browserSessionId,
+          tool,
+          arguments: argumentsValue,
+        })) as {
+          success?: boolean;
+          content?: Array<{ type?: string; text?: string }>;
+        };
+        if (result?.success === false) {
+          throw new Error(
+            result.content?.find((item) => item.type === "text")?.text ||
+              "Browser action failed.",
+          );
+        }
+        setSurfaceError(null);
+        return true;
+      } catch (error) {
+        toast.error(
+          error instanceof Error ? error.message : "Browser action failed.",
+        );
+        return false;
+      }
+    },
+    [browserSessionId],
+  );
+
+  const navigate = useCallback(() => {
+    const url = resolveBrowserAddressInput(address);
+    if (!url) {
+      toast.error("Enter a search or valid http(s) URL");
+      return;
+    }
+    const sequence = ++navigationSequenceRef.current;
+    submittedAddressRef.current = url;
+    setAddress(url);
+    addressInputRef.current?.blur();
+    const confirmedAddress = activity?.url || tab.url || "";
+    void control("open", { url }).then((succeeded) => {
+      if (!succeeded && navigationSequenceRef.current === sequence) {
+        submittedAddressRef.current = null;
+        setAddress(confirmedAddress);
+      }
+    });
+  }, [activity?.url, address, control, tab.url]);
+
+  const awaitingConfirmation = activity?.status === "awaiting-confirmation";
+  const closed = activity?.status === "closed";
+  const browserLocked = presence.active || awaitingConfirmation;
+  const placeholder = blockingOverlayOpen
+    ? null
+    : surfaceError
+      ? surfaceError
+      : closed
+        ? "This browser session has closed. The agent can open it again."
+        : !browserSessionId
+          ? "The agent’s browser will appear here when it opens a page."
+          : restoring
+            ? "Connecting to the live browser…"
+            : null;
+
+  return (
+    <div className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden">
+      <div className="border-border1 bg-bg1 flex h-9 shrink-0 items-center gap-1 border-b px-2">
+        <Tooltip label="Back">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+            disabled={
+              !browserSessionId || browserLocked || activity?.canGoBack === false
+            }
+            onClick={() => void control("back")}
+            aria-label="Back"
+          >
+            <ChevronLeft size={14} />
+          </Button>
+        </Tooltip>
+        <Tooltip label="Forward">
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+            disabled={
+              !browserSessionId ||
+              browserLocked ||
+              activity?.canGoForward === false
+            }
+            onClick={() => void control("forward")}
+            aria-label="Forward"
+          >
+            <ChevronRight size={14} />
+          </Button>
+        </Tooltip>
+        <Tooltip label={activity?.loading ? "Loading…" : "Reload"}>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            className="text-fg2 hover:text-fg1 size-6 disabled:opacity-40"
+            disabled={!browserSessionId || browserLocked}
+            onClick={() => void control("reload")}
+            aria-label="Reload"
+          >
+            {activity?.loading ? (
+              <ZerosSpinner size={16} />
+            ) : (
+              <RotateCw size={14} />
+            )}
+          </Button>
+        </Tooltip>
+        <form
+          className="min-w-0 flex-1"
+          onSubmit={(event) => {
+            event.preventDefault();
+            navigate();
+          }}
+        >
+          <div className="bg-bg2 focus-within:border-highlighted-bright flex h-6 items-center rounded-sm border border-transparent px-2">
+            {activity?.faviconDataUrl ? (
+              <img
+                src={activity.faviconDataUrl}
+                alt=""
+                className="mr-1.5 size-3.5 shrink-0 rounded-[2px]"
+              />
+            ) : (
+              <Globe
+                className="text-fg3 mr-1.5 size-3.5 shrink-0"
+                aria-hidden="true"
+              />
+            )}
+            <input
+              ref={addressInputRef}
+              aria-label="Browser URL"
+              value={address}
+              onChange={(event) => setAddress(event.target.value)}
+              onFocus={(event) => {
+                setEditingAddress(true);
+                event.currentTarget.select();
+              }}
+              onBlur={() => setEditingAddress(false)}
+              disabled={!browserSessionId || browserLocked}
+              spellCheck={false}
+              autoCorrect="off"
+              autoCapitalize="off"
+              placeholder="Search or enter URL"
+              className="text-fg1 placeholder:text-fg3 min-w-0 flex-1 border-0 bg-transparent p-0 text-sm outline-none disabled:cursor-not-allowed"
+            />
+          </div>
+        </form>
+        <DropdownMenu>
+          <Tooltip label="More">
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="text-fg2 hover:text-fg1 data-[state=open]:bg-bg2-hover data-[state=open]:text-fg1 size-6"
+                disabled={!browserSessionId || browserLocked}
+                aria-label="More browser actions"
+              >
+                <MoreHorizontal size={14} />
+              </Button>
+            </DropdownMenuTrigger>
+          </Tooltip>
+          <DropdownMenuContent align="end" className="min-w-[150px]">
+            <DropdownMenuItem onClick={() => void control("reload")}>
+              Reload
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      <div
+        ref={hostRef}
+        className="bg-bg1 relative min-h-0 flex-1"
+        aria-label="Shared agent browser content"
+        onPointerDown={() => {
+          if (blockingOverlayOpen) dismissNativeBrowserOverlay();
+        }}
+        onWheel={() => {
+          if (blockingOverlayOpen) dismissNativeBrowserOverlay();
+        }}
+      >
+        {parkForOverlay && overlayCapture ? (
+          <img
+            src={overlayCapture}
+            alt="Current browser page"
+            className="absolute inset-0 size-full object-fill"
+            draggable={false}
+          />
+        ) : null}
+        {placeholder ? (
+          <div className="text-fg2 absolute inset-0 flex items-center justify-center p-8 text-center text-sm">
+            {placeholder}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
+function dismissNativeBrowserOverlay() {
+  document.dispatchEvent(
+    new KeyboardEvent("keydown", {
+      key: "Escape",
+      code: "Escape",
+      bubbles: true,
+      cancelable: true,
+    }),
+  );
+}
+
+function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const dispatch = useWorkspaceDispatch();
   const updateTab = useCallback(
     (updates: Partial<Omit<WorkbenchTab, "id" | "type">>) => {
@@ -105,10 +588,10 @@ export function BrowserTab({ tab, active, scope }: BrowserTabProps) {
   // preload bridge (build race / HMR refresh / stale dist-electron)
   // unblocks the URL bar without a manual reload.
   const electron = useNativeRuntime().ready;
-  // Body is a plain <iframe>. CSS handles visibility (display:none
-  // for inactive tabs preserves history + scroll + JS heap). Design
-  // Mode picker is auto-injected by main on did-frame-finish-load
-  // and controlled via postMessage; only the chip's element
+  // Body is a plain <iframe>. The retained Browser deck handles inactive-tab
+  // visibility without unmounting or reordering the node, preserving history,
+  // scroll, form input, and JS heap. Design Mode is auto-injected by main on
+  // did-frame-finish-load and controlled via postMessage; only the chip's element
   // thumbnail capture takes an IPC hop. See use-iframe-webview.ts.
   // Persisted URLs are still treated as untrusted input: only canonical http(s)
   // pages are restored. External http(s) sites are valid browser content.
@@ -951,13 +1434,14 @@ function BrowserChrome({
   const handleSubmit = useCallback(
     (e: React.FormEvent<HTMLFormElement>) => {
       e.preventDefault();
-      const url = normalizeBrowserUrl(address);
+      const url = resolveBrowserAddressInput(address);
       if (!url) {
-        toast.error("Enter a valid http(s) URL");
+        toast.error("Enter a search or valid http(s) URL");
         return;
       }
       setAddress(url);
       navigate(url);
+      inputRef.current?.blur();
     },
     [address, navigate],
   );
@@ -1022,6 +1506,18 @@ function BrowserChrome({
             }
           }}
         >
+          {state.faviconDataUrl ? (
+            <img
+              src={state.faviconDataUrl}
+              alt=""
+              className="mr-1.5 size-3.5 shrink-0 rounded-[2px]"
+            />
+          ) : (
+            <Globe
+              className="text-fg3 mr-1.5 size-3.5 shrink-0"
+              aria-hidden="true"
+            />
+          )}
           <input
             ref={inputRef}
             type="text"
@@ -1035,9 +1531,8 @@ function BrowserChrome({
             }}
             onBlur={() => {
               setFocused(false);
-              setAddress(state.currentUrl);
             }}
-            placeholder={electron ? "Enter URL" : "Mac app only"}
+            placeholder={electron ? "Search or enter URL" : "Mac app only"}
             disabled={!electron}
             spellCheck={false}
             autoCorrect="off"

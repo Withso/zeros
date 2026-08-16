@@ -1,6 +1,7 @@
 import { useLayoutEffect, useMemo, useRef } from "react";
 
 import {
+  preserveRetainedViewOrder,
   retainRecentViewKeys,
   retainRecentViewKeySet,
 } from "./retained-view-keys";
@@ -67,6 +68,28 @@ export function useRetainedViewKeySet(
   }, [activeKeys, availableKeys, limit, retentionScope]);
   useLayoutEffect(() => {
     retainedRef.current = { scope: retentionScope, keys };
+  }, [keys, retentionScope]);
+  return keys;
+}
+
+/** Render a retained deck without reflecting MRU changes as sibling moves.
+ * React preserves component state across keyed reorders, but the browser does
+ * not preserve a nested browsing context when its iframe DOM node is moved. */
+export function useStableRetainedViewOrder(
+  retainedKeys: readonly string[],
+  retentionScope = "",
+): string[] {
+  const orderRef = useRef<{ scope: string; keys: string[] }>({
+    scope: retentionScope,
+    keys: [],
+  });
+  const keys = useMemo(() => {
+    const committedKeys =
+      orderRef.current.scope === retentionScope ? orderRef.current.keys : [];
+    return preserveRetainedViewOrder(committedKeys, retainedKeys);
+  }, [retainedKeys, retentionScope]);
+  useLayoutEffect(() => {
+    orderRef.current = { scope: retentionScope, keys };
   }, [keys, retentionScope]);
   return keys;
 }

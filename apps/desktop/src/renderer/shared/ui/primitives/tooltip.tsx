@@ -3,6 +3,7 @@ import * as TooltipPrimitive from "@radix-ui/react-tooltip";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
+import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
 // ──────────────────────────────────────────────────────────
 // Tooltip — the ONE tooltip for the whole app.
@@ -28,7 +29,21 @@ import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
 // ──────────────────────────────────────────────────────────
 
 const TooltipProvider = TooltipPrimitive.Provider;
-const TooltipRoot = TooltipPrimitive.Root;
+function TooltipRoot({
+  onOpenChange,
+  ...props
+}: React.ComponentProps<typeof TooltipPrimitive.Root>) {
+  const publishOverlay = useNativeSurfaceOverlayIntent();
+  return (
+    <TooltipPrimitive.Root
+      {...props}
+      onOpenChange={(open) => {
+        publishOverlay(open);
+        onOpenChange?.(open);
+      }}
+    />
+  );
+}
 
 // Radix opens a tooltip on ANY focus of its trigger — including the
 // PROGRAMMATIC focus Radix overlays perform themselves. Concretely:

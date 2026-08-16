@@ -51,12 +51,16 @@ import { migrateDefaultModelSelection } from "./features/agent/model-favorites";
 import { UpdateNotifications } from "./features/update/update-notifications";
 import { useCopyLogsHotkey } from "./shell/use-copy-logs-hotkey";
 import { useNewTabHotkeys } from "./shell/use-new-chat-hotkey";
+import { useOpenBrowserHotkey } from "./shell/use-open-browser-hotkey";
 import { useShortcutsHotkey } from "./shell/use-shortcuts-hotkey";
 import { ShortcutsPalette } from "./shell/shortcuts-palette";
 import { FeedbackDialog } from "./shell/dialogs/feedback-dialog";
 import { onFeedbackDialogRequest } from "./shell/feedback-controller";
 import { isFeedbackConfigured } from "./features/feedback/submit-feedback";
 import { ModelsSettingsSync } from "./features/agent/models-settings-sync";
+import { BrowserConfirmationController } from "./features/browser/browser-confirmation-controller";
+import { BrowserSessionController } from "./features/browser/browser-session-controller";
+import { BrowserAgentPictureInPicture } from "./features/browser/browser-agent-picture-in-picture";
 import { TopBar } from "./shell/top-bar";
 import { ConversationPane } from "./shell/conversation/conversation-pane";
 import { WorkbenchPane } from "./shell/workbench/workbench-pane";
@@ -815,6 +819,13 @@ function ShellRouter() {
       return next;
     });
   }, []);
+  const revealWorkbench = React.useCallback(() => {
+    setWorkbenchCollapsed((previous) => {
+      if (!previous) return previous;
+      setSetting(WORKBENCH_COLLAPSED_KEY, false);
+      return false;
+    });
+  }, []);
 
   // ⌥⌘B anywhere toggles Workbench. Skipped inside editable surfaces so
   // we don't steal from native text-input bindings (if any use ⌥⌘B).
@@ -916,6 +927,14 @@ function ShellRouter() {
   // drops its own full-window header and mounts embedded in that content pane.
   return (
     <div className={APP_ROOT_CLS}>
+      <BrowserSessionController
+        onRevealBrowser={revealWorkbench}
+        workbenchCollapsed={workbenchCollapsed}
+      />
+      <BrowserAgentPictureInPicture
+        visible={workbenchCollapsed}
+        onRestore={revealWorkbench}
+      />
       {/* AddProjectProvider wraps the shell so File → Open Folder and its
           dialogs stay available from every Home sub-page as well as the
           workspace view. */}
@@ -923,6 +942,7 @@ function ShellRouter() {
         <MainShellBody
           workbenchCollapsed={workbenchCollapsed}
           toggleWorkbench={toggleWorkbench}
+          revealWorkbench={revealWorkbench}
         />
       </AddProjectProvider>
       {/* ⌘/ glass shortcuts palette — floats (portalled) above everything. */}
@@ -945,9 +965,11 @@ function ShellRouter() {
 function MainShellBody({
   workbenchCollapsed,
   toggleWorkbench,
+  revealWorkbench,
 }: {
   workbenchCollapsed: boolean;
   toggleWorkbench: () => void;
+  revealWorkbench: () => void;
 }) {
   // One renderer-wide observer catches agent completions even while Workbench
   // is collapsed, Home is visible, or a missing-worktree panel replaces the
@@ -973,6 +995,12 @@ function MainShellBody({
     designWorkspacesActive && designWorkspaceRequested;
   const designWorkspaceBlocked =
     designWorkspaceRequested && !designWorkspacesActive;
+  useOpenBrowserHotkey(
+    activePage === "workspace" &&
+      Boolean(activeWorkspaceFolder) &&
+      !designWorkspaceRequested,
+    revealWorkbench,
+  );
   const shellSurfaceRef = useRef<HTMLDivElement | null>(null);
   useInstantViewSwitch(
     `${activePage}:${activeWorkspace?.id ?? activeRepoId ?? activeProject?.id ?? "none"}`,
@@ -1283,6 +1311,7 @@ export function AppShellBody() {
           <ReloadOnProjectChange />
           <ChatsPersistence />
           <ModelsSettingsSync />
+          <BrowserConfirmationController />
           <ShellRouter />
         </AgentSessionsProvider>
       </BridgeProvider>

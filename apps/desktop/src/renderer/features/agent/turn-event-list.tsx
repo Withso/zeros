@@ -7,8 +7,9 @@
 //   • the WORKING group — tools, thinking, in-between narration,
 //     sub-agents — handed to one EventStripe. While the turn is
 //     live the stripe is expanded + dimmed (the reasoning feed);
-//     once it settles the stripe collapses to a single summary
-//     chip ("<N> tool calls, <M> messages, <K> agents").
+//     once it settles ordinary work collapses to a single summary
+//     chip ("<N> tool calls, <M> messages, <K> agents"). Browser actions are
+//     nested inside that same group and reappear when it is expanded.
 //
 //   • the FINAL OUTPUT — the trailing agent text — rendered
 //     brightly below the group as the actual answer.
@@ -145,7 +146,12 @@ export const TurnEventList = memo(function TurnEventList({
   return (
     <div className="flex w-full max-w-[768px] min-w-0 flex-col self-start">
       {working.length > 0 && (
-        <EventStripe events={working} ctx={ctx} live={live} />
+        <EventStripe
+          events={working}
+          ctx={ctx}
+          live={live}
+          browserTailClosed={finalOutput.length > 0}
+        />
       )}
       {finalOutput.map((event) => (
         <MessageView key={event.id} message={event} ctx={ctx} />
@@ -156,10 +162,7 @@ export const TurnEventList = memo(function TurnEventList({
           for a running subagent that's the subagent's own start time). */}
       {showShimmer && (
         <ActivityShimmer
-          startedAt={pickStartedAt(
-            activityEvents ?? events,
-            activityStartedAt,
-          )}
+          startedAt={pickStartedAt(activityEvents ?? events, activityStartedAt)}
         />
       )}
       {/* Per-turn footer, in-lane so it hugs the answer (see prop doc). */}

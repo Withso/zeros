@@ -116,6 +116,9 @@ Finished transcript, editor, xterm, iframe, and virtualized-diff trees can be mo
 - Hidden layers use `inert`, `aria-hidden`, no pointer events, and no visibility.
 - Gate global shortcuts, focus restoration, polling, measurement, and other active-only effects.
 - Give every deck a hard entry bound. Eviction is the cold-path fallback.
+- Keep retained iframe sibling order stable. MRU order may choose eviction, but
+  physically moving an already-mounted iframe reloads its nested browsing
+  context in Chromium and destroys form, scroll, media, and JavaScript state.
 - Do not retain cheap or unbounded surfaces merely for consistency.
 
 Current deck helpers live in `apps/desktop/src/renderer/shell/retained-view-keys.ts` and `apps/desktop/src/renderer/shell/use-retained-view-keys.ts`.

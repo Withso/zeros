@@ -6,11 +6,23 @@ import { Select as SelectPrimitive } from "radix-ui"
 
 import { cn } from "@/renderer/shared/ui/cn"
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus"
+import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay"
 
 function Select({
+  onOpenChange,
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Root>) {
-  return <SelectPrimitive.Root data-slot="select" {...props} />
+  const publishOverlay = useNativeSurfaceOverlayIntent()
+  return (
+    <SelectPrimitive.Root
+      data-slot="select"
+      {...props}
+      onOpenChange={(open) => {
+        publishOverlay(open)
+        onOpenChange?.(open)
+      }}
+    />
+  )
 }
 
 function SelectGroup({
