@@ -33,7 +33,7 @@ weaker provider-native sandbox is not evidence.
 | 0 — contract and fail-closed admission | Implemented; all required deterministic repository gates pass on the final working-tree content.                                                                                                                                    | Repeat CI on the immutable commit.                                                                                                                                                                           |
 | 1 — exact pin/backend decision         | Implemented with audited `srt` `0.0.73`, patch digest, license, generated policy, native attack helper, and a secure macOS arm64 run on Darwin 25.3.0.                                                                              | First immutable-commit macOS x64 and Linux arm64 runs. This Vercel host cannot substitute because its outer sandbox denies the bubblewrap `/proc` mount and UID map.                                         |
 | 2 — supervisor/backends                | Seatbelt and bubblewrap backends plus the retained cloud-worker contract are implemented. macOS arm64 engine and signed packaged-app runtime smokes pass.                                                                           | macOS x64 packaged smoke and an actual cloud image attestation.                                                                                                                                              |
-| 3 — uniform providers                  | Claude, Codex, and Cursor use the same gateway/boundary contract; OpenCode is the whole-runtime conformance fixture. Offline startup/handshake smokes pass for the pinned Claude, Codex, Cursor Node, and Cursor Electron runtimes. | A credentialed normal-vs-contained differential on each release backend. No paid model turn was sent during this audit.                                                                                      |
+| 3 — uniform providers                  | Claude, Codex, and Cursor use the same gateway/boundary contract; OpenCode is the whole-runtime conformance fixture. Offline startup/handshake smokes pass for the pinned Claude, Codex, Cursor Node, and Cursor Electron runtimes, and a real contained Claude turn completed in Zeros Dev. | A controlled credentialed normal-vs-contained differential on each release backend; the successful user-driven contained turn does not substitute for that comparison.                                     |
 | 4 — shadow Git                         | Implemented for every admitted Git owner, cwd/`-C` dispatch, native macOS Git interposition, private metadata/brokers, CAS promotion, credentials, signing, partial clones, LFS, submodules, and linked-worktree validation.        | Repeat the live multi-owner/projection canary on each remaining release architecture/image.                                                                                                                  |
 | 5 — feature/services                   | Provider state, MCP, OAuth/open-URL, preview/HMR/WebSocket, local/Unix services, ports, and private containers are implemented. The arm64 Mac passed the real browser-preview and OrbStack normal/privileged-container matrices.    | Provision and qualify a private rootless container worker on every other graduated backend; never fall back to a host daemon socket.                                                                         |
 | 6 — tasks/lifecycle                    | Repository tasks, proof-carrying teardown, restart recovery, limits, human-terminal separation, and aggregate shutdown cleanup are implemented. macOS arm64 `smoke:engine` and teardown proof pass.                                 | macOS x64 and Linux release-host lifecycle runs; actual worker cgroup/PID-boundary evidence.                                                                                                                 |
@@ -55,10 +55,11 @@ every attached Design-bearing Git owner and does not emit it.
   secrets, preload, Electron hardening, runtime-pin, packaging-path, protocol,
   workflow, migration, license, Codex-pin, audit, Design containment, Git,
   real-browser UI smoke, UI build, provider-offline smoke, and adapter gates
-  passed. `pnpm test:git` passed 588 files and 6,466 tests with 3
+  passed. `pnpm test:git` passed 588 files and 6,481 tests with 3
   platform-gated skips. `pnpm check:design-containment` passed 20 files and
-  424 tests with the same 3 skips; the focused ZSR containment plus session-
-  admission regression run passed 26 files and 215 tests without a failure.
+  424 tests with the same 3 skips; the focused ZSR containment, engine-startup,
+  chat-title, and session-admission regression run passed 27 files and 243
+  tests without a failure.
 - On the attached Apple-silicon Mac (Darwin 25.3.0), the final synchronized
   source passed `pnpm check:zsr` with `secure: true`. The exact SRT patch,
   Seatbelt/process-domain policy, native mutation helper, port interposer,
@@ -67,20 +68,33 @@ every attached Design-bearing Git owner and does not emit it.
 - The same source passed the real Chrome preview matrix and the OrbStack 2.2.1
   normal/privileged private-container matrix. Code projection, Design denial,
   unleased-port denial, and teardown proof were green. Cold OrbStack admission
-  was approximately 70.1 seconds; no host Docker/Podman daemon socket was
-  exposed.
+  was approximately 65.4 seconds. The Mac-side `DOCKER_HOST` proxy carried each
+  connection over an exact-machine OrbStack CLI relay after a session-HMAC
+  readiness proof, so it neither depends on an unstable guest IP route nor
+  exposes a host Docker/Podman daemon socket. Relay concurrency, half-close,
+  readiness-probe escalation, and teardown are bounded, and machine deletion
+  still runs when relay cleanup fails.
 - The running development app was inspected after the final source settled. It
   had one GUI-mode Electron main process; the other process using the app
   binary was the expected Cursor host with `ELECTRON_RUN_AS_NODE=1`. The engine
-  remained healthy on port 25133 and completed Claude new-session/title
-  dispatches. The renderer now permits the qualified cold admission path up to
-  120 seconds and never overlaps another admission merely because that ceiling
-  elapsed.
+  remained healthy on port 25133, dispatched a real `AGENT_PROMPT` through the
+  staged Claude CLI, and reported the completed turn/cache update. Provider
+  failure text is rejected as a generated tab title. The renderer permits the
+  qualified cold admission path up to 120 seconds and never overlaps another
+  admission merely because that ceiling elapsed; Electron startup separately
+  waits through bounded stale-containment recovery while the exact child is
+  alive, fails promptly if it exits, and kills it before timing out.
+- Exact-admission support directories now live in engine-private scratch. The
+  only code-territory canary is a UUID-named create/read/unlink probe executed
+  synchronously, preventing the former long-lived `.zeros-zsr-admission-*`
+  entries from surfacing in Git Changes while still proving normal code writes.
 - The final arm64 sidecar passed create/archive/restore engine smoke. A
-  Developer-ID-signed directory package then passed deep/strict code-signature
-  verification, a real packaged-PTY spawn, required ZSR-resource inspection,
-  and packaged-engine execution. Notarization remains distribution-release
-  evidence because this was a directory qualification build.
+  Developer-ID-signed directory package built from the synchronized source then
+  passed deep/strict code-signature verification, a real packaged-PTY spawn,
+  exact relay/supervisor script-hash comparison, required ZSR/provider-resource
+  inspection, compiled-fix inspection, and direct packaged-engine execution.
+  Notarization remains distribution-release evidence because this was a
+  directory qualification build.
 - Offline startup/handshake smokes passed for the pinned Claude, Codex, Cursor
   Node, and Cursor Electron runtimes without a model turn. Claude's expected
   HTTP 401 authentication result was handled without exponential retry; cost
@@ -96,6 +110,10 @@ every attached Design-bearing Git owner and does not emit it.
   cloud-workspace implementation is part of this closure, and source automation
   is not counted as live evidence until it runs on the exact immutable commit
   and image.
+- `pnpm check:web-deploy` completed but reported deployment status unverified:
+  this environment had neither authenticated GitHub API access nor
+  `CLOUDFLARE_ACCOUNT_ID`. It is recorded as external release evidence, not as
+  a local ZSR failure or a green deployment claim.
 - The production dependency audit remains green under its reviewed allowlist.
   Its 12 accepted findings (2 low, 7 moderate, 3 high) are confined to
   `@cursor/sdk`'s `@connectrpc/connect-node` → `undici@5.29.0` path; the affected
