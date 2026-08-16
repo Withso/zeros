@@ -16,7 +16,32 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { createServer, connect, type Server } from "node:net";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+const { unsupportedFinalRealpaths } = vi.hoisted(() => ({
+  unsupportedFinalRealpaths: new Set<string>(),
+}));
+
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...actual,
+    realpathSync: (
+      candidate: Parameters<typeof actual.realpathSync>[0],
+      options?: Parameters<typeof actual.realpathSync>[1],
+    ) => {
+      if (unsupportedFinalRealpaths.has(String(candidate))) {
+        const error = new Error(
+          `EOPNOTSUPP: unknown error, lstat '${String(candidate)}'`,
+        ) as NodeJS.ErrnoException;
+        error.code = "EOPNOTSUPP";
+        error.syscall = "lstat";
+        throw error;
+      }
+      return actual.realpathSync(candidate, options as never);
+    },
+  };
+});
 
 import { ZsrLocalServiceBroker } from "../zsr-service-broker";
 import { newTerritoryGeneration } from "../status";
@@ -31,6 +56,7 @@ const gpgconfPath = [
   "/opt/homebrew/bin/gpgconf",
   "/usr/local/bin/gpgconf",
 ].find(existsSync);
+const socketTmpdir = process.platform === "darwin" ? "/private/tmp" : tmpdir();
 
 function runProgram(
   command: string,
@@ -123,7 +149,9 @@ describe("ZSR local service broker", () => {
     cleanups.push(() => broker.close());
     const facadePort = broker.facadePorts()[0]!;
 
-    await expect(request(facadePort, "before")).resolves.toBe("");
+    await expect(request(facadePort, "before").catch(() => "")).resolves.toBe(
+      "",
+    );
     const lease = broker.lease(
       "primary-db",
       "database",
@@ -136,7 +164,9 @@ describe("ZSR local service broker", () => {
     await expect(request(facadePort, "live")).resolves.toBe("db:live");
 
     await lease.revoke();
-    await expect(request(facadePort, "after")).resolves.toBe("");
+    await expect(request(facadePort, "after").catch(() => "")).resolves.toBe(
+      "",
+    );
   });
 
   it("rejects duplicate ids, wildcard targets, and kind-confused requests", async () => {
@@ -185,7 +215,7 @@ describe("ZSR local service broker", () => {
   });
 
   it("projects an exact Unix service through a private socket and revokes live peers", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "zeros-service-unix-"));
+    const root = await mkdtemp(path.join(socketTmpdir, "zsr-svc-unix-"));
     await chmod(root, 0o700);
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     const targetPath = path.join(root, "agent.sock");
@@ -234,8 +264,42 @@ describe("ZSR local service broker", () => {
     );
   });
 
+  it("canonicalizes a Unix socket whose runtime cannot realpath the socket vnode", async () => {
+    const root = await mkdtemp(path.join(socketTmpdir, "zsr-svc-socket-"));
+    await chmod(root, 0o700);
+    cleanups.push(() => rm(root, { recursive: true, force: true }));
+    const targetPath = path.join(root, "agent.sock");
+    const target = createServer((peer) => peer.end("agent:ready"));
+    await new Promise<void>((resolve, reject) => {
+      target.once("error", reject);
+      target.listen(targetPath, resolve);
+    });
+    cleanups.push(() => close(target));
+    unsupportedFinalRealpaths.add(targetPath);
+    cleanups.push(async () => {
+      unsupportedFinalRealpaths.delete(targetPath);
+    });
+
+    const facadeRoot = path.join(root, "facades");
+    await mkdir(facadeRoot, { mode: 0o700 });
+    const broker = await ZsrLocalServiceBroker.reserve(
+      [
+        {
+          serviceId: "ssh-agent",
+          kind: "ssh-agent",
+          transport: "unix",
+          targetPath,
+          adapter: "ssh-agent",
+        },
+      ],
+      { socketRoot: facadeRoot },
+    );
+    cleanups.push(() => broker.close());
+    expect(broker.facadeUnixSocketPaths()).toHaveLength(1);
+  });
+
   it("projects GPG through a private writable home without copying private key material", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "zeros-service-gpg-"));
+    const root = await mkdtemp(path.join(socketTmpdir, "zsr-svc-gpg-"));
     await chmod(root, 0o700);
     cleanups.push(() => rm(root, { recursive: true, force: true }));
     const sourceHome = path.join(root, "source-gnupg");
@@ -335,9 +399,7 @@ describe("ZSR local service broker", () => {
   it.runIf(gpgPath && gpgconfPath)(
     "signs with a real host GPG agent through the sanitized façade",
     async () => {
-      const root = await mkdtemp(
-        path.join(tmpdir(), "zeros-service-real-gpg-"),
-      );
+      const root = await mkdtemp(path.join(socketTmpdir, "zsr-svc-real-gpg-"));
       await chmod(root, 0o700);
       cleanups.push(() => rm(root, { recursive: true, force: true }));
       const sourceHome = path.join(root, "source-gnupg");

@@ -6,6 +6,7 @@ import {
   mkdtemp,
   readFile,
   readdir,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -46,7 +47,9 @@ describe("macOS OrbStack container worker", () => {
   let internalPeers: Set<Socket>;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(os.tmpdir(), "zeros-orbstack-worker-test-"));
+    root = await realpath(
+      await mkdtemp(path.join(os.tmpdir(), "zeros-orbstack-worker-test-")),
+    );
     workspace = path.join(root, "workspace");
     session = path.join(root, "session");
     orb = path.join(root, "orb");
@@ -103,9 +106,10 @@ describe("macOS OrbStack container worker", () => {
           disk_limit_bytes: 16 * 1024 * 1024 * 1024,
         },
       },
-      // The controller must use OrbStack's supported localhost forwarding,
-      // not this machine-private address.
-      ip4: "127.0.0.2",
+      // IPv6 loopback models OrbStack's machine-private IP in unit tests. The
+      // controller must connect to this attested address; nothing is listening
+      // on the same port at the hard-coded IPv4 loopback target used before.
+      ip6: "::1",
     };
   }
 
@@ -121,6 +125,8 @@ describe("macOS OrbStack container worker", () => {
       orbVersion?: string;
       runtimeMarker?: string;
       userReadyFailures?: number;
+      workerExitBeforeReady?: boolean;
+      workerSpawnFailure?: boolean;
     } = {},
   ): OrbStackCommandRunner & { calls: string[][] } {
     const calls: string[][] = [];
@@ -251,6 +257,14 @@ describe("macOS OrbStack container worker", () => {
       },
       spawn: (args): ChildProcess => {
         calls.push([...args]);
+        if (behavior.workerSpawnFailure) {
+          throw new Error("synthetic OrbStack exec spawn failure");
+        }
+        if (behavior.workerExitBeforeReady) {
+          return spawn(process.execPath, ["-e", "process.exit(17)"], {
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+        }
         return spawn(
           process.execPath,
           [
@@ -294,7 +308,7 @@ describe("macOS OrbStack container worker", () => {
     });
     await new Promise<void>((resolve, reject) => {
       internal!.once("error", reject);
-      internal!.listen(0, "127.0.0.1", resolve);
+      internal!.listen(0, "::1", resolve);
     });
     const address = internal.address();
     if (!address || typeof address === "string") throw new Error("no port");
@@ -409,7 +423,7 @@ describe("macOS OrbStack container worker", () => {
     });
     await new Promise<void>((resolve, reject) => {
       internal!.once("error", reject);
-      internal!.listen(0, "127.0.0.1", resolve);
+      internal!.listen(0, "::1", resolve);
     });
     const address = internal.address();
     if (!address || typeof address === "string") throw new Error("no port");
@@ -432,16 +446,99 @@ describe("macOS OrbStack container worker", () => {
     });
 
     try {
-      await expect(
-        lease.start({
+      const failure = await lease
+        .start({
           generation: generation("forwardcollisiongeneration"),
           protectedRoots: [path.join(workspace, "Zeros Design")],
           gitProjections: [],
-        }),
-      ).rejects.toThrow(/forwarding did not become ready/);
+        })
+        .catch((error: unknown) => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(
+        MacosContainerWorkerUnavailableError,
+      );
+      expect((failure as Error).message).toMatch(/attestation failed/);
     } finally {
       await lease.stopAndProve();
     }
+    expect(
+      runner.calls.some(
+        (args) => args[0] === "delete" && args.includes(machineName),
+      ),
+    ).toBe(true);
+  });
+
+  it("reports a safely retired worker exit as temporary unavailability", async () => {
+    const mounts = [workspace, session].sort();
+    const machineName = orbStackMachineName("worker-exit", mounts);
+    const runner = fakeRunner(machineName, mounts, 1, {
+      workerExitBeforeReady: true,
+    });
+    const controller = new MacosOrbStackContainerWorker({
+      orbPath: orb,
+      cloudInitPath: cloudInit,
+      hostScriptPath: host,
+      containerWorkerPath: worker,
+      orbAttestor: (candidate) => candidate,
+      runner,
+    });
+    const lease = await controller.reserve({
+      executionId: "worker-exit",
+      workspaceRoot: workspace,
+      sessionRoot: session,
+    });
+
+    try {
+      await expect(
+        lease.start({
+          generation: generation("workerexitgeneration1234"),
+          protectedRoots: [path.join(workspace, "Zeros Design")],
+          gitProjections: [],
+        }),
+      ).rejects.toMatchObject({
+        name: MacosContainerWorkerUnavailableError.name,
+        reason: "private-runtime-unavailable",
+      });
+    } finally {
+      await lease.stopAndProve();
+    }
+    expect(
+      runner.calls.some(
+        (args) => args[0] === "delete" && args.includes(machineName),
+      ),
+    ).toBe(true);
+  });
+
+  it("reports a safely retired worker spawn failure as temporary unavailability", async () => {
+    const mounts = [workspace, session].sort();
+    const machineName = orbStackMachineName("worker-spawn", mounts);
+    const runner = fakeRunner(machineName, mounts, 1, {
+      workerSpawnFailure: true,
+    });
+    const controller = new MacosOrbStackContainerWorker({
+      orbPath: orb,
+      cloudInitPath: cloudInit,
+      hostScriptPath: host,
+      containerWorkerPath: worker,
+      orbAttestor: (candidate) => candidate,
+      runner,
+    });
+    const lease = await controller.reserve({
+      executionId: "worker-spawn",
+      workspaceRoot: workspace,
+      sessionRoot: session,
+    });
+
+    await expect(
+      lease.start({
+        generation: generation("workerspawngeneration123"),
+        protectedRoots: [path.join(workspace, "Zeros Design")],
+        gitProjections: [],
+      }),
+    ).rejects.toMatchObject({
+      name: MacosContainerWorkerUnavailableError.name,
+      reason: "private-runtime-unavailable",
+    });
     expect(
       runner.calls.some(
         (args) => args[0] === "delete" && args.includes(machineName),
@@ -471,7 +568,11 @@ describe("macOS OrbStack container worker", () => {
   });
 
   it("finds only a physical executable and derives a stable mount identity", () => {
-    expect(findOrbStackCli({ PATH: root, HOME: root })).toBeNull();
+    expect(
+      findOrbStackCli({ PATH: root, HOME: root }, () => {
+        throw new Error("synthetic attestation refusal");
+      }),
+    ).toBeNull();
     expect(
       findOrbStackCli({ PATH: root, HOME: root }, (candidate) => candidate),
     ).toBe(orb);

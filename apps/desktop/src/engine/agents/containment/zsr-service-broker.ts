@@ -104,6 +104,34 @@ function pathInsideOrEqual(candidate: string, parent: string): boolean {
   );
 }
 
+/** Bun on macOS currently reports EOPNOTSUPP when realpath(2) reaches some
+ * launchd-managed Unix socket vnodes (including the standard SSH agent), even
+ * though lstat(2) and connect(2) work. Canonicalize the physical parent and
+ * then prove the requested and canonical leaf still name the same socket.
+ * This retains the no-symlink and inode-pinning contract without making an
+ * unavailable realpath operation a session-wide blocker. */
+function canonicalPhysicalUnixSocketPath(candidate: string): string {
+  const requested = path.resolve(candidate);
+  const requestedMetadata = lstatSync(requested);
+  if (!requestedMetadata.isSocket() || requestedMetadata.isSymbolicLink()) {
+    throw new Error("local Unix service target is not a physical socket");
+  }
+  const canonical = path.join(
+    realpathSync(path.dirname(requested)),
+    path.basename(requested),
+  );
+  const canonicalMetadata = lstatSync(canonical);
+  if (
+    !canonicalMetadata.isSocket() ||
+    canonicalMetadata.isSymbolicLink() ||
+    canonicalMetadata.dev !== requestedMetadata.dev ||
+    canonicalMetadata.ino !== requestedMetadata.ino
+  ) {
+    throw new Error("local Unix service target changed during validation");
+  }
+  return canonical;
+}
+
 function validPort(value: unknown): value is number {
   return (
     Number.isInteger(value) && Number(value) >= 1 && Number(value) <= 65_535
@@ -256,11 +284,7 @@ function validateCapability(
     ) {
       throw new Error("local Unix service target must be an absolute path");
     }
-    const canonical = realpathSync(capability.targetPath);
-    const stat = lstatSync(canonical);
-    if (!stat.isSocket() || stat.isSymbolicLink()) {
-      throw new Error("local Unix service target is not a physical socket");
-    }
+    const canonical = canonicalPhysicalUnixSocketPath(capability.targetPath);
     const validAdapters: readonly LocalUnixServiceAdapter[] = [
       "environment-only",
       "generic-unix",

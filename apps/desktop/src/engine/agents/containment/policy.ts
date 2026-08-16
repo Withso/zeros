@@ -153,6 +153,43 @@ async function canonicalExistingOrLexical(input: string): Promise<string> {
   }
 }
 
+/** Bun on macOS cannot realpath some Unix socket vnodes. Existing endpoints
+ * are still canonicalized without weakening identity checks: resolve the
+ * physical parent, then prove both leaf paths name the same non-symlink socket.
+ * Prospective private endpoints retain the ordinary lexical fallback. */
+async function canonicalUnixSocketOrLexical(input: string): Promise<string> {
+  if (!path.isAbsolute(input) || input.includes("\0")) {
+    throw new Error("ZSR policy paths must be absolute and NUL-free");
+  }
+  const requested = path.normalize(input);
+  let requestedMetadata;
+  try {
+    requestedMetadata = await lstat(requested);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      return canonicalExistingOrLexical(requested);
+    }
+    throw error;
+  }
+  if (!requestedMetadata.isSocket() || requestedMetadata.isSymbolicLink()) {
+    throw new Error("an admitted Unix endpoint is not a physical socket");
+  }
+  const canonical = path.join(
+    await realpath(path.dirname(requested)),
+    path.basename(requested),
+  );
+  const canonicalMetadata = await lstat(canonical);
+  if (
+    !canonicalMetadata.isSocket() ||
+    canonicalMetadata.isSymbolicLink() ||
+    canonicalMetadata.dev !== requestedMetadata.dev ||
+    canonicalMetadata.ino !== requestedMetadata.ino
+  ) {
+    throw new Error("an admitted Unix endpoint changed during validation");
+  }
+  return canonical;
+}
+
 function uniqueSorted(paths: readonly string[]): string[] {
   return [...new Set(paths.map((entry) => path.resolve(entry)))].sort((a, b) =>
     a.localeCompare(b),
@@ -429,7 +466,7 @@ export async function prepareZsrPolicy(
     [
       ...(options.allowedUnixSockets ?? []),
       ...(containerSocket ? [containerSocket] : []),
-    ].map(canonicalExistingOrLexical),
+    ].map(canonicalUnixSocketOrLexical),
   );
   for (const socket of allowedUnixSockets) {
     if (

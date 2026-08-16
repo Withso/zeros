@@ -2,6 +2,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  realpath,
   rm,
   stat,
   symlink,
@@ -9,8 +10,34 @@ import {
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { createServer } from "node:net";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+const { unsupportedSocketRealpaths } = vi.hoisted(() => ({
+  unsupportedSocketRealpaths: new Set<string>(),
+}));
+
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return {
+    ...actual,
+    realpath: async (
+      candidate: Parameters<typeof actual.realpath>[0],
+      options?: Parameters<typeof actual.realpath>[1],
+    ) => {
+      if (unsupportedSocketRealpaths.has(String(candidate))) {
+        const error = new Error(
+          `EOPNOTSUPP: unknown error, lstat '${String(candidate)}'`,
+        ) as NodeJS.ErrnoException;
+        error.code = "EOPNOTSUPP";
+        error.syscall = "lstat";
+        throw error;
+      }
+      return actual.realpath(candidate, options as never);
+    },
+  };
+});
 
 import type { AgentFilesystemTerritory } from "../../types";
 import { prepareZsrPolicy, zsrNetworkRoot } from "../policy";
@@ -21,7 +48,9 @@ describe("ZSR policy builder", () => {
   let previousDataDir: string | undefined;
 
   beforeEach(async () => {
-    temporaryRoot = await mkdtemp(path.join(tmpdir(), "zeros-zsr-policy-"));
+    temporaryRoot = await realpath(
+      await mkdtemp(path.join(tmpdir(), "zeros-zsr-policy-")),
+    );
     previousDataDir = process.env.ZEROS_DATA_DIR;
     process.env.ZEROS_DATA_DIR = path.join(temporaryRoot, "engine");
   });
@@ -333,6 +362,40 @@ describe("ZSR policy builder", () => {
       expect(prepared.document.filesystem.allowRead).toEqual(
         expect.arrayContaining([workspace, prepared.paths.home, socket]),
       );
+    }
+  });
+
+  it("canonicalizes an admitted socket when its runtime cannot realpath the socket vnode", async () => {
+    const workspace = path.join(temporaryRoot, "workspace");
+    const generation = newTerritoryGeneration();
+    const networkRoot = zsrNetworkRoot(generation);
+    const socket = path.join(networkRoot, "services", "s0.sock");
+    await Promise.all([
+      mkdir(workspace, { recursive: true }),
+      mkdir(path.dirname(socket), { recursive: true, mode: 0o700 }),
+    ]);
+    const server = createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socket, resolve);
+    });
+    unsupportedSocketRealpaths.add(socket);
+    try {
+      const prepared = await prepareZsrPolicy(
+        {
+          executionId: "execution-unix-runtime",
+          actor: "agent-code",
+          cwd: workspace,
+          workspaceRoot: workspace,
+        },
+        generation,
+        { allowedUnixSockets: [socket] },
+      );
+      expect(prepared.document.runtime.allowedUnixSockets).toEqual([socket]);
+    } finally {
+      unsupportedSocketRealpaths.delete(socket);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await rm(networkRoot, { recursive: true, force: true });
     }
   });
 });

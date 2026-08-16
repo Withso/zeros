@@ -1,9 +1,11 @@
 import { spawn } from "node:child_process";
 import {
   access,
+  copyFile,
   mkdtemp,
   mkdir,
   readFile,
+  realpath,
   rm,
   stat,
   writeFile,
@@ -16,12 +18,71 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runFile } from "../../../git/git-exec";
 import { MacosContainerWorkerUnavailableError } from "../macos-orbstack-container-worker";
-import { ZsrExecutionBoundary } from "../zsr-boundary";
+import type { MacosProcessDomainCommandRunner } from "../macos-process-domain";
+import {
+  ZsrExecutionBoundary as RuntimeZsrExecutionBoundary,
+  type ZsrBoundaryOptions,
+} from "../zsr-boundary";
 
 const NETWORK_BRIDGE_SCRIPT = path.join(
   process.cwd(),
   "apps/desktop/src/engine/agents/containment/zsr-network-bridge.mjs",
 );
+const boundaryTmpdir =
+  process.platform === "darwin" ? "/private/tmp" : tmpdir();
+
+const macosProcessDomainRunner: MacosProcessDomainCommandRunner = async (
+  _helperPath,
+  args,
+) => {
+  const command = args[0];
+  const value =
+    command === "self-test"
+      ? {
+          version: 1,
+          platform: "darwin",
+          processIdentity: true,
+          sandboxInspection: true,
+          callerSandboxed: false,
+        }
+      : command === "identity"
+        ? {
+            version: 1,
+            pid: Number(args[1]),
+            uid: process.getuid?.() ?? 501,
+            startSec: "1",
+            startUsec: "0",
+          }
+        : command === "match"
+          ? { version: 1, match: true }
+          : command === "listeners"
+            ? { version: 1, listeners: [] }
+            : command === "reap"
+              ? {
+                  version: 1,
+                  matched: 0,
+                  termSignals: 0,
+                  stopSignals: 0,
+                  killSignals: 0,
+                  remaining: 0,
+                  provedEmpty: true,
+                }
+              : null;
+  return {
+    exitCode: value ? 0 : 2,
+    stdout: value ? `${JSON.stringify(value)}\n` : "",
+    stderr: "",
+  };
+};
+
+class ZsrExecutionBoundary extends RuntimeZsrExecutionBoundary {
+  constructor(options: ZsrBoundaryOptions) {
+    super({
+      ...options,
+      ...(process.platform === "darwin" ? { macosProcessDomainRunner } : {}),
+    });
+  }
+}
 
 const PASSING_SUPERVISOR = String.raw`
 import { readFileSync, writeFileSync } from "node:fs";
@@ -51,7 +112,10 @@ if (descriptor.env.ZEROS_ADMISSION_SENTINEL) {
     gitProjectionPrivate: spec.gitProjections.map(() => true),
     privateStateWrite: true,
     engineRootWriteDenied: true,
-  }));
+    processDomainMarkerReadable: true,
+    sandboxPid: process.pid,
+    dynamicBindMapped: true,
+  }) + "\n");
   process.exit(0);
 }
 const probe = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));
@@ -77,12 +141,30 @@ describe("ZSR execution boundary", () => {
   let workspace: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "zeros-zsr-boundary-test-"));
+    root = await realpath(
+      await mkdtemp(path.join(boundaryTmpdir, "zeros-zsr-boundary-test-")),
+    );
     previousDataDir = process.env.ZEROS_DATA_DIR;
     process.env.ZEROS_DATA_DIR = path.join(root, "engine");
     supervisor = path.join(root, "fake-supervisor.mjs");
     workspace = path.join(root, "workspace");
-    await mkdir(workspace, { recursive: true });
+    await Promise.all([
+      mkdir(workspace, { recursive: true }),
+      mkdir(path.join(root, "provider-home"), { recursive: true }),
+    ]);
+    if (process.platform === "darwin") {
+      const binaries = path.join(root, "binaries");
+      await mkdir(binaries, { mode: 0o700 });
+      await Promise.all([
+        writeFile(path.join(binaries, "zsr-macos-process-domain"), "test\n", {
+          mode: 0o500,
+        }),
+        copyFile(
+          path.join(process.cwd(), "binaries", "zsr-macos-port-bind.dylib"),
+          path.join(binaries, "zsr-macos-port-bind.dylib"),
+        ),
+      ]);
+    }
     await writeFile(supervisor, PASSING_SUPERVISOR, { mode: 0o700 });
   });
 
@@ -202,6 +284,122 @@ describe("ZSR execution boundary", () => {
     await prepared.stopAndProve();
   });
 
+  it("keeps Electron in Node mode inside the behavioral canary", async () => {
+    const previousElectronRuntime = process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON;
+    process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON = "1";
+    await writeFile(
+      supervisor,
+      PASSING_SUPERVISOR.replace(
+        'const descriptor = JSON.parse(readFileSync(commandPath, "utf8"));',
+        `const descriptor = JSON.parse(readFileSync(commandPath, "utf8"));
+if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
+  process.stderr.write("behavioral canary dropped Electron Node mode\\n");
+  process.exit(70);
+}`,
+      ),
+      { mode: 0o700 },
+    );
+    try {
+      const boundary = new ZsrExecutionBoundary({
+        projectRoot: root,
+        supervisorScript: supervisor,
+        supervisorRuntime: process.execPath,
+        networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      });
+
+      await expect(
+        boundary.probe({
+          executionId: "electron-canary",
+          actor: "agent-code",
+          cwd: workspace,
+          workspaceRoot: workspace,
+        }),
+      ).resolves.toMatchObject({
+        available: true,
+        secureNestedIsolation: true,
+      });
+    } finally {
+      if (previousElectronRuntime === undefined) {
+        delete process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON;
+      } else {
+        process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON = previousElectronRuntime;
+      }
+    }
+  });
+
+  it("admits only the Electron app contents needed by an engine-private runtime", async () => {
+    const previousElectronRuntime = process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON;
+    process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON = "1";
+    const contents = path.join(
+      process.env.ZEROS_DATA_DIR!,
+      "dev-instances",
+      "Zeros Test.app",
+      "Contents",
+    );
+    const runtime = path.join(contents, "MacOS", "Zeros Test");
+    await mkdir(path.dirname(runtime), { recursive: true });
+    await mkdir(path.join(contents, "Frameworks"), { recursive: true });
+    await writeFile(
+      runtime,
+      `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+      { mode: 0o700 },
+    );
+    try {
+      const boundary = new ZsrExecutionBoundary({
+        projectRoot: root,
+        supervisorScript: supervisor,
+        supervisorRuntime: runtime,
+        networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      });
+      const prepared = await boundary.prepare({
+        executionId: "electron-runtime-read",
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+      });
+      try {
+        const launch = prepared.wrapSpawn({
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+          cwd: workspace,
+          env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+        });
+        const policyPath = launch.args[launch.args.indexOf("--policy") + 1];
+        const policy = JSON.parse(await readFile(policyPath, "utf8")) as {
+          filesystem: {
+            allowRead: string[];
+            allowWrite: string[];
+            denyRead: string[];
+            denyWrite: string[];
+          };
+        };
+        expect(policy.filesystem.allowRead).toContain(contents);
+        expect(policy.filesystem.allowRead).not.toContain(
+          path.dirname(contents),
+        );
+        expect(policy.filesystem.allowWrite).not.toContain(contents);
+        expect(
+          policy.filesystem.denyRead.some((denied) =>
+            path.relative(denied, contents).startsWith("dev-"),
+          ),
+        ).toBe(true);
+        expect(
+          policy.filesystem.denyWrite.some((denied) =>
+            path.relative(denied, contents).startsWith("dev-"),
+          ),
+        ).toBe(true);
+      } finally {
+        await prepared.stopAndProve();
+      }
+    } finally {
+      if (previousElectronRuntime === undefined) {
+        delete process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON;
+      } else {
+        process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON = previousElectronRuntime;
+      }
+    }
+  });
+
   it("keeps code usable and reports restricted parity when OrbStack is safely unavailable", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const boundary = new ZsrExecutionBoundary({
@@ -223,6 +421,7 @@ describe("ZSR execution boundary", () => {
       executionId: "orbstack-unavailable",
       actor: "agent-code",
       providerId: "codex",
+      providerStateEnv: { HOME: path.join(root, "provider-home") },
       cwd: workspace,
       workspaceRoot: workspace,
       containerWorkflowExpected: true,
@@ -241,6 +440,59 @@ describe("ZSR execution boundary", () => {
     expect(prepared.status.remediation).toMatch(/Free at least 4 GiB/);
     expect(warning).toHaveBeenCalledWith(
       "[zsr] OrbStack needs at least 4 GiB free",
+    );
+    await prepared.stopAndProve();
+    warning.mockRestore();
+  });
+
+  it("keeps code usable when a reserved OrbStack worker becomes safely unavailable", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const stopAndProve = vi.fn(async () => undefined);
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      macosContainerWorkerFactory: () => ({
+        reserve: async () => ({
+          hostPort: 42_320,
+          machineName: "zeros-zsr-abcdef0123456789abcd",
+          environment: {},
+          start: async () => {
+            throw new MacosContainerWorkerUnavailableError(
+              "private-runtime-unavailable",
+              "The private OrbStack bridge is temporarily unavailable",
+            );
+          },
+          stopAndProve,
+        }),
+      }),
+    });
+
+    const prepared = await boundary.prepare({
+      executionId: "orbstack-start-unavailable",
+      actor: "agent-code",
+      providerId: "codex",
+      providerStateEnv: { HOME: path.join(root, "provider-home") },
+      cwd: workspace,
+      workspaceRoot: workspace,
+      containerWorkflowExpected: true,
+      containerWorker: {
+        runtime: "podman",
+        backend: "orbstack-machine",
+        executable: process.execPath,
+      },
+    });
+
+    expect(stopAndProve).toHaveBeenCalledOnce();
+    expect(prepared.status.parity).toEqual({
+      level: "restricted",
+      restrictions: ["container-workflows-unavailable"],
+    });
+    expect(prepared.status.services?.kinds ?? []).not.toContain("podman");
+    expect(prepared.status.remediation).toMatch(/OrbStack runtime/i);
+    expect(warning).toHaveBeenCalledWith(
+      "[zsr] The private OrbStack bridge is temporarily unavailable",
     );
     await prepared.stopAndProve();
     warning.mockRestore();
@@ -269,6 +521,7 @@ describe("ZSR execution boundary", () => {
       executionId: "unproven-retirement-1",
       actor: "agent-code" as const,
       providerId: "codex",
+      providerStateEnv: { HOME: path.join(root, "provider-home") },
       cwd: workspace,
       workspaceRoot: workspace,
       containerWorker: {
@@ -458,10 +711,13 @@ describe("ZSR execution boundary", () => {
     });
     const lease = await prepared.requestPort({
       protocol: "tcp",
-      preferredPort: 43123,
+      ...(process.platform === "darwin" ? {} : { preferredPort: 43123 }),
       purpose: "dev-server",
     });
-    expect(lease).toMatchObject({ host: "127.0.0.1", port: 43123 });
+    expect(lease).toMatchObject({
+      host: "127.0.0.1",
+      port: process.platform === "darwin" ? expect.any(Number) : 43123,
+    });
 
     const child = spawn(
       process.execPath,
@@ -794,9 +1050,18 @@ describe("ZSR execution boundary", () => {
         denyWrite: string[];
       };
     };
-    expect(descriptor.env.GIT_DIR).toBeUndefined();
-    expect(descriptor.env.GIT_COMMON_DIR).toBeUndefined();
-    expect(descriptor.env.GIT_WORK_TREE).toBeUndefined();
+    if (process.platform === "darwin") {
+      expect(descriptor.env.GIT_DIR).toMatch(
+        /\/boundary\/[^/]+\/git\/0-[^/]+\/git$/,
+      );
+      expect(descriptor.env.GIT_COMMON_DIR).toBe(descriptor.env.GIT_DIR);
+      expect(descriptor.env.GIT_WORK_TREE).toBe(workspace);
+      expect(descriptor.env.GIT_DIR).not.toBe(path.join(workspace, ".git"));
+    } else {
+      expect(descriptor.env.GIT_DIR).toBeUndefined();
+      expect(descriptor.env.GIT_COMMON_DIR).toBeUndefined();
+      expect(descriptor.env.GIT_WORK_TREE).toBeUndefined();
+    }
     let repositoryProjection:
       | { source: string; destination: string; readOnly: boolean }
       | undefined;

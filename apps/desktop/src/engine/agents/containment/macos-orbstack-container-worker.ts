@@ -21,7 +21,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
-import { connect, createServer, type Server, type Socket } from "node:net";
+import {
+  connect,
+  createServer,
+  isIP,
+  type Server,
+  type Socket,
+} from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -606,9 +612,20 @@ export function validateOrbStackMachineInfo(
   ) {
     throw new Error("OrbStack worker attestation does not match its lease");
   }
-  if (!info.ip4 && !info.ip6) {
-    throw new Error("OrbStack worker has no private address");
-  }
+  orbStackMachineAddress(info);
+}
+
+/** OrbStack documents direct Mac-to-machine IP connectivity. Using the
+ * attested machine address avoids its global localhost port-forwarding layer,
+ * where an unrelated Mac listener can collide with the generation-private
+ * container API port. The HMAC challenge below still proves that the endpoint
+ * is the exact worker holding this lease's secret. */
+function orbStackMachineAddress(info: OrbStackMachineInfo): string {
+  const ipv4 = info.ip4?.trim();
+  if (ipv4 && isIP(ipv4) === 4) return ipv4;
+  const ipv6 = info.ip6?.trim();
+  if (ipv6 && isIP(ipv6) === 6) return ipv6;
+  throw new Error("OrbStack worker has no valid private address");
 }
 
 async function listenOnRandomLoopback(server: Server): Promise<number> {
@@ -624,36 +641,43 @@ async function listenOnRandomLoopback(server: Server): Promise<number> {
 }
 
 async function probeForwardedContainerApi(
+  host: string,
   port: number,
   sessionKey: string,
-): Promise<boolean> {
+): Promise<"ready" | "unreachable" | "invalid-attestation"> {
   const challenge = randomBytes(32).toString("hex");
   const expected = createHmac("sha256", sessionKey)
     .update(challenge)
     .digest("hex");
   return await new Promise((resolve) => {
-    const peer = connect({ host: "127.0.0.1", port, allowHalfOpen: true });
+    const peer = connect({ host, port, allowHalfOpen: true });
     let response = "";
     let settled = false;
-    const finish = (ready: boolean) => {
+    let connected = false;
+    const finish = (
+      result: "ready" | "unreachable" | "invalid-attestation",
+    ) => {
       if (settled) return;
       settled = true;
       peer.destroy();
-      resolve(ready);
+      resolve(result);
     };
     peer.setEncoding("utf8");
-    peer.setTimeout(500, () => finish(false));
-    peer.once("connect", () =>
+    peer.setTimeout(500, () =>
+      finish(connected ? "invalid-attestation" : "unreachable"),
+    );
+    peer.once("connect", () => {
+      connected = true;
       peer.end(
         `GET /_zeros_zsr/attest/${challenge} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`,
-      ),
-    );
+      );
+    });
     peer.on("data", (chunk) => {
       response = (response + chunk).slice(0, 8_192);
     });
     peer.once("end", () => {
       const separator = response.indexOf("\r\n\r\n");
-      if (separator < 0) return finish(false);
+      if (separator < 0) return finish("invalid-attestation");
       const headers = response.slice(0, separator);
       const body = response.slice(separator + 4);
       const actualProof = Buffer.from(body, "ascii");
@@ -662,10 +686,14 @@ async function probeForwardedContainerApi(
         /^HTTP\/1\.[01] 200\b/.test(headers) &&
           /(?:^|\r\n)Content-Length:\s*64\s*(?:\r\n|$)/i.test(headers) &&
           actualProof.byteLength === expectedProof.byteLength &&
-          timingSafeEqual(actualProof, expectedProof),
+          timingSafeEqual(actualProof, expectedProof)
+          ? "ready"
+          : "invalid-attestation",
       );
     });
-    peer.once("error", () => finish(false));
+    peer.once("error", () =>
+      finish(connected ? "invalid-attestation" : "unreachable"),
+    );
   });
 }
 
@@ -686,6 +714,7 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
     private readonly mountRoots: readonly string[],
     private readonly sessionKey: string,
     private readonly runtimeIdentity: OrbStackRuntimeIdentity,
+    private readonly machineAddress: string,
     private readonly runner: OrbStackCommandRunner,
     private readonly recoveryHoldPath: string,
     private readonly forwardedBridgeTimeoutMs: number,
@@ -803,16 +832,34 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
       ],
       { allowFailure: true },
     );
-    const child = this.runner.spawn([
-      "-m",
-      this.machineName,
-      "-u",
-      "root",
-      NODE_PATH,
-      HOST_VM_PATH,
-      "--descriptor",
-      this.descriptorPath,
-    ]);
+    let child: ChildProcess;
+    try {
+      child = this.runner.spawn([
+        "-m",
+        this.machineName,
+        "-u",
+        "root",
+        NODE_PATH,
+        HOST_VM_PATH,
+        "--descriptor",
+        this.descriptorPath,
+      ]);
+    } catch (error) {
+      const unavailable = new MacosContainerWorkerUnavailableError(
+        "private-runtime-unavailable",
+        "The private OrbStack container worker could not be started",
+        { cause: error },
+      );
+      try {
+        await this.stopAndProve();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [unavailable, cleanupError],
+          "OrbStack container startup failed and cleanup was not proven",
+        );
+      }
+      throw unavailable;
+    }
     this.child = child;
     let stdout = "";
     let stderr = "";
@@ -869,20 +916,47 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
       });
     });
     try {
-      const port = await ready;
-      if (port === this.hostPort) {
-        throw new Error("OrbStack forwarded port collided with its ZSR proxy");
+      let port: number;
+      try {
+        port = await ready;
+      } catch (error) {
+        throw new MacosContainerWorkerUnavailableError(
+          "private-runtime-unavailable",
+          "The private OrbStack container worker did not become ready",
+          { cause: error },
+        );
       }
       const deadline = Date.now() + this.forwardedBridgeTimeoutMs;
-      while (!(await probeForwardedContainerApi(port, this.sessionKey))) {
+      let observedInvalidAttestation = false;
+      while (true) {
+        const probe = await probeForwardedContainerApi(
+          this.machineAddress,
+          port,
+          this.sessionKey,
+        );
+        if (probe === "ready") break;
+        observedInvalidAttestation ||= probe === "invalid-attestation";
         if (Date.now() >= deadline) {
-          throw new Error("OrbStack container forwarding did not become ready");
+          if (observedInvalidAttestation) {
+            throw new Error("OrbStack container bridge attestation failed");
+          }
+          throw new MacosContainerWorkerUnavailableError(
+            "private-runtime-unavailable",
+            "OrbStack container forwarding did not become ready",
+          );
         }
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
-      this.target = { host: "127.0.0.1", port };
+      this.target = { host: this.machineAddress, port };
     } catch (error) {
-      await this.stopAndProve();
+      try {
+        await this.stopAndProve();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "OrbStack container startup failed and cleanup was not proven",
+        );
+      }
       throw error;
     }
   }
@@ -1024,12 +1098,13 @@ export class MacosOrbStackContainerWorker {
     }
     const normalizedRequest = { ...request, workspaceRoot, sessionRoot };
     const machineName = orbStackMachineName(request.executionId, mountRoots);
-    const { runtimeIdentity, recoveryHoldPath } = await this.ensureMachine(
-      machineName,
-      mountRoots,
-      sessionRoot,
-      request.executionId,
-    );
+    const { runtimeIdentity, machineAddress, recoveryHoldPath } =
+      await this.ensureMachine(
+        machineName,
+        mountRoots,
+        sessionRoot,
+        request.executionId,
+      );
     const server = createServer({ allowHalfOpen: true });
     try {
       const hostPort = await this.reserveHostPort(server);
@@ -1045,6 +1120,7 @@ export class MacosOrbStackContainerWorker {
         mountRoots,
         sessionKey,
         runtimeIdentity,
+        machineAddress,
         this.runner,
         recoveryHoldPath,
         this.forwardedBridgeTimeoutMs,
@@ -1077,6 +1153,7 @@ export class MacosOrbStackContainerWorker {
     executionId: string,
   ): Promise<{
     runtimeIdentity: OrbStackRuntimeIdentity;
+    machineAddress: string;
     recoveryHoldPath: string;
   }> {
     let version;
@@ -1186,9 +1263,10 @@ export class MacosOrbStackContainerWorker {
         }
       }
       validateOrbStackMachineInfo(info, machineName, mountRoots);
+      const machineAddress = orbStackMachineAddress(info);
       const runtimeIdentity = await this.waitForRuntimeIdentity(machineName);
       await this.provisionRuntime(machineName, sessionRoot);
-      return { runtimeIdentity, recoveryHoldPath };
+      return { runtimeIdentity, machineAddress, recoveryHoldPath };
     } catch (error) {
       if (!recoveryHoldPath) throw error;
       try {

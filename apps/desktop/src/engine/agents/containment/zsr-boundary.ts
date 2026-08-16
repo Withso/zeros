@@ -129,6 +129,60 @@ function pathInsideOrEqual(candidate: string, parent: string): boolean {
   );
 }
 
+/** Electron-as-Node still asks the dynamic loader and Electron bootstrap to
+ * read immutable files beside the executable. Dev-channel app bundles live
+ * below Zeros' otherwise unreadable engine-state root, so admit only the
+ * physical bundle contents that own the trusted runtime. The surrounding app
+ * instance and all engine state remain absent, and the engine-root write deny
+ * continues to cover this read-only carve-out. */
+function electronRuntimeReadRoot(supervisorRuntime: string): string | null {
+  if (process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON !== "1") return null;
+
+  const requestedRuntime = path.resolve(supervisorRuntime);
+  const runtime = realpathSync(requestedRuntime);
+  const runtimeMetadata = lstatSync(requestedRuntime);
+  if (
+    !runtimeMetadata.isFile() ||
+    runtimeMetadata.isSymbolicLink() ||
+    runtime !== requestedRuntime ||
+    (runtimeMetadata.mode & 0o022) !== 0
+  ) {
+    throw new Error(
+      "Electron supervisor runtime is not a trusted physical file",
+    );
+  }
+
+  const runtimeDirectory = path.dirname(runtime);
+  const contents = path.dirname(runtimeDirectory);
+  const appBundle = path.dirname(contents);
+  const isMacAppBundle =
+    path.basename(runtimeDirectory) === "MacOS" &&
+    path.basename(contents) === "Contents" &&
+    path.extname(appBundle).toLocaleLowerCase("en-US") === ".app";
+  const readRoot = isMacAppBundle ? contents : runtimeDirectory;
+  for (const directory of isMacAppBundle
+    ? [appBundle, contents, runtimeDirectory]
+    : [runtimeDirectory]) {
+    const metadata = lstatSync(directory);
+    if (
+      !metadata.isDirectory() ||
+      metadata.isSymbolicLink() ||
+      realpathSync(directory) !== directory ||
+      (metadata.mode & 0o022) !== 0
+    ) {
+      throw new Error(
+        "Electron supervisor runtime is not inside a trusted physical directory",
+      );
+    }
+  }
+  if (process.platform === "darwin" && !isMacAppBundle) {
+    throw new Error(
+      "Electron supervisor runtime is not inside a macOS app bundle",
+    );
+  }
+  return readRoot;
+}
+
 async function discoverBoundaryGitRepositories(
   request: BoundaryRequest,
 ): Promise<readonly CanonicalGitRepository[]> {
@@ -1888,11 +1942,11 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     );
   }
 
-  private async throwAfterPreparationCleanup(
+  private async provePreparationCleanup(
     generation: TerritoryGeneration,
     primaryError: unknown,
     cleanups: readonly (() => Promise<unknown>)[],
-  ): Promise<never> {
+  ): Promise<void> {
     const results = await Promise.allSettled(
       cleanups.map((cleanup) => Promise.resolve().then(cleanup)),
     );
@@ -1907,6 +1961,14 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       this.retirementFailures.set(generation, failure);
       throw failure;
     }
+  }
+
+  private async throwAfterPreparationCleanup(
+    generation: TerritoryGeneration,
+    primaryError: unknown,
+    cleanups: readonly (() => Promise<unknown>)[],
+  ): Promise<never> {
+    await this.provePreparationCleanup(generation, primaryError, cleanups);
     throw primaryError;
   }
 
@@ -2639,6 +2701,9 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
             PATH: process.env.PATH ?? "/usr/bin:/bin",
             HOME: childHome,
             TMPDIR: childHome,
+            ...(process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON === "1"
+              ? { ELECTRON_RUN_AS_NODE: "1" }
+              : {}),
           },
         })}\n`,
         { mode: 0o600, flag: "wx" },
@@ -2986,6 +3051,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       }
       reservedGitBrokers.push(reservedGitBroker);
     }
+    const requestWithoutMacosContainerWorker = request;
     let macosContainerWorker: MacosContainerWorkerLease | null = null;
     if (request.containerWorker?.backend === "orbstack-machine") {
       try {
@@ -3076,9 +3142,15 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
             repository.commonDir,
             repository.indexPath,
           ]),
-          additionalAllowRead: repositories.map(
-            (repository) => repository.objectDir,
-          ),
+          additionalAllowRead: [
+            ...repositories.map((repository) => repository.objectDir),
+            ...(() => {
+              const runtimeReadRoot = electronRuntimeReadRoot(
+                this.supervisorRuntime,
+              );
+              return runtimeReadRoot ? [runtimeReadRoot] : [];
+            })(),
+          ],
           allowedUnixSockets: localServiceBroker?.facadeUnixSocketPaths() ?? [],
           ...(this.options.cloudWorker
             ? { cloudWorker: this.options.cloudWorker }
@@ -3197,11 +3269,36 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
             })
           : null;
       if (macosContainerWorker) {
-        await macosContainerWorker.start({
-          generation,
-          protectedRoots: request.territory?.protectedDesignDirectories ?? [],
-          gitProjections: shadowGit?.filesystemProjections() ?? [],
-        });
+        try {
+          await macosContainerWorker.start({
+            generation,
+            protectedRoots: request.territory?.protectedDesignDirectories ?? [],
+            gitProjections: shadowGit?.filesystemProjections() ?? [],
+          });
+        } catch (error) {
+          if (error instanceof MacosContainerWorkerUnavailableError) {
+            networkBridgeToken.fill(0);
+            await this.provePreparationCleanup(generation, error, [
+              () => macosContainerWorker?.stopAndProve() ?? Promise.resolve(),
+              () => shadowGit?.stop() ?? Promise.resolve(),
+              ...reservedGitBrokers.map((broker) => () => broker.close()),
+              () => localTcpBroker?.close() ?? Promise.resolve(),
+              () => localServiceBroker?.close() ?? Promise.resolve(),
+              async () => {
+                macosPortPool?.release();
+              },
+              () => rm(policy.paths.root, { recursive: true, force: true }),
+              () => rm(policy.paths.network, { recursive: true, force: true }),
+            ]);
+            console.warn(`[zsr] ${error.message}`);
+            return this.prepare({
+              ...requestWithoutMacosContainerWorker,
+              containerWorker: undefined,
+              containerWorkerUnavailableReason: error.reason,
+            });
+          }
+          throw error;
+        }
       }
       if (this.options.cloudWorker) {
         await prepareCloudWorkerPrivateState(
