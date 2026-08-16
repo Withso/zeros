@@ -34,6 +34,10 @@ import type {
   ProviderBinding,
   WorkspaceId,
 } from "./identities";
+import type {
+  ExecutionBoundaryPortsSnapshot,
+  ExecutionBoundaryStatus,
+} from "./containment";
 
 export type MessageSource = "browser" | "engine";
 
@@ -242,12 +246,15 @@ export interface DbChangedMessage extends BaseMessage {
   chatIds?: string[];
 }
 
-/** Host → engine (LOCAL clients only): seed/refresh the in-memory GitHub token
+/** Host → engine (local Electron or an attested cloud-workspace owner):
+ * seed/refresh the in-memory GitHub token
  *  the engine's TokenStore reads for `gh.*` ops. The token stays encrypted at
  *  rest in Electron safeStorage on the host — this is just the working copy the
  *  engine (which can't call safeStorage) needs to talk to the GitHub API. The
- *  engine IGNORES this from a relay client: a remote device must never be able
- *  to set the host's GitHub token. `token: null` clears it. */
+ *  engine IGNORES this from a desktop relay client: a remote device must never
+ *  be able to set the host's GitHub token. A qualified cloud transport is the
+ *  workspace's owner-facing host, not that retired relay. `token: null` clears
+ *  it. */
 export interface GithubTokenSetMessage extends BaseMessage {
   type: "GITHUB_TOKEN_SET";
   token: string | null;
@@ -262,8 +269,9 @@ export interface GithubTokenChangedMessage extends BaseMessage {
   token: string | null;
 }
 
-/** Engine → local host: the selected credential was invalidated. This event is
- *  intentionally secret-free; Electron main clears the addressed durable slot. */
+/** Engine → owner credential coordinator: the selected credential was
+ * invalidated. This event is intentionally secret-free; local Electron or the
+ * qualified cloud coordinator refreshes/clears the addressed durable slot. */
 export interface GithubCredentialChangedMessage extends BaseMessage {
   type: "GITHUB_CREDENTIAL_CHANGED";
   method: "gh-cli" | "github-app" | "pat";
@@ -356,6 +364,23 @@ export interface AgentListAgentsMessage extends BaseMessage {
   force?: boolean;
 }
 
+/** Read-only admission probe used before the composer exposes a sendable
+ * Full Access posture. It starts no provider session and carries no secrets. */
+export interface AgentPreflightMessage extends BaseMessage {
+  type: "AGENT_PREFLIGHT";
+  agentId: string;
+  cwd?: string;
+  workspaceId?: WorkspaceId;
+  cliBinary?: string;
+}
+
+export interface AgentPreflightedMessage extends BaseMessage {
+  type: "AGENT_PREFLIGHTED";
+  requestId: string;
+  agentId: string;
+  status: ExecutionBoundaryStatus;
+}
+
 export interface AgentNewSessionMessage extends BaseMessage {
   type: "AGENT_NEW_SESSION";
   agentId: string;
@@ -375,6 +400,14 @@ export interface AgentNewSessionMessage extends BaseMessage {
    *  Overrides the registry default `cliBinary` for this session only.
    *  Falsy/missing = use the registry value (PATH lookup). */
   cliBinary?: string;
+}
+
+/** Exchange a redacted live-port id for a one-use browser admission URL. */
+export interface AgentOpenBoundaryPortMessage extends BaseMessage {
+  type: "AGENT_OPEN_BOUNDARY_PORT";
+  agentId: string;
+  executionId: ExecutionId;
+  portId: string;
 }
 
 export interface AgentInitAgentMessage extends BaseMessage {
@@ -768,6 +801,39 @@ export interface AgentSessionUpdateMessage extends BaseMessage {
   chatId?: string;
 }
 
+/** Owner-routed, redacted health for one live execution. This is diagnostic
+ * state only and cannot grant or replay a boundary capability. */
+export interface AgentBoundaryStatusChangedMessage extends BaseMessage {
+  type: "AGENT_BOUNDARY_STATUS_CHANGED";
+  agentId: string;
+  executionId: ExecutionId;
+  chatId?: ConversationId;
+  status: ExecutionBoundaryStatus;
+}
+
+/** Owner-routed, redacted listener state for one live execution. It is not an
+ * authority grant and intentionally carries no host endpoint or broker token. */
+export interface AgentBoundaryPortsChangedMessage extends BaseMessage {
+  type: "AGENT_BOUNDARY_PORTS_CHANGED";
+  agentId: string;
+  executionId: ExecutionId;
+  chatId?: ConversationId;
+  snapshot: ExecutionBoundaryPortsSnapshot;
+}
+
+export interface AgentBoundaryPortOpenedMessage extends BaseMessage {
+  type: "AGENT_BOUNDARY_PORT_OPENED";
+  requestId: string;
+  executionId: ExecutionId;
+  portId: string;
+  /** Safe URL retained by the Browser tab after admission. */
+  url: string;
+  /** One-use, short-lived URL. Renderer code must never persist it. */
+  admissionUrl: string;
+  /** Absolute deadline for renewing the volatile browser admission. */
+  expiresAt: number;
+}
+
 export interface AgentPermissionRequestMessage extends BaseMessage {
   type: "AGENT_PERMISSION_REQUEST";
   agentId: string;
@@ -1106,7 +1172,9 @@ export type BridgeMessage =
   | EngineErrorMessage
   // Agent (browser → engine)
   | AgentListAgentsMessage
+  | AgentPreflightMessage
   | AgentNewSessionMessage
+  | AgentOpenBoundaryPortMessage
   | AgentInitAgentMessage
   | AgentAuthenticateMessage
   | AgentPromptMessage
@@ -1127,6 +1195,7 @@ export type BridgeMessage =
   | AgentGenerateTitleMessage
   // Agent (engine → browser)
   | AgentAgentsListMessage
+  | AgentPreflightedMessage
   | AgentKeyValidatedMessage
   | AgentTitleGeneratedMessage
   | AgentSessionCreatedMessage
@@ -1134,6 +1203,9 @@ export type BridgeMessage =
   | AgentAgentInitializedMessage
   | AgentAuthCompletedMessage
   | AgentSessionUpdateMessage
+  | AgentBoundaryStatusChangedMessage
+  | AgentBoundaryPortsChangedMessage
+  | AgentBoundaryPortOpenedMessage
   | AgentPermissionRequestMessage
   | AgentPermissionSettledMessage
   | AgentQuestionRequestMessage

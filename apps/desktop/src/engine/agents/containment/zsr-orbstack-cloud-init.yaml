@@ -1,0 +1,58 @@
+#cloud-config
+package_update: true
+package_upgrade: false
+packages:
+  - bubblewrap
+  - busybox-static
+  - ca-certificates
+  - curl
+  - git
+  - nftables
+  - nodejs
+  - podman
+  - slirp4netns
+  - socat
+  - tar
+  - uidmap
+write_files:
+  - path: /etc/zeros-zsr/runtime.json
+    owner: root:root
+    permissions: "0644"
+    content: |
+      {"version":1,"backend":"orbstack-rootless-podman","distribution":"ubuntu-24.04"}
+  - path: /etc/sysctl.d/90-zeros-zsr-rootless-ports.conf
+    owner: root:root
+    permissions: "0644"
+    content: |
+      net.ipv4.ip_unprivileged_port_start=0
+runcmd:
+  - [
+      mkdir,
+      -p,
+      /var/lib/zeros-zsr/sessions,
+      /var/lib/zeros-zsr/userns,
+      /opt/zeros-zsr,
+    ]
+  - [
+      chmod,
+      "0711",
+      /var/lib/zeros-zsr,
+      /var/lib/zeros-zsr/sessions,
+      /var/lib/zeros-zsr/userns,
+    ]
+  - [chmod, "0755", /opt/zeros-zsr]
+  # OrbStack publishes its requested default user after cloud-init runcmd.
+  # newuidmap accepts a name-based range before that passwd entry appears.
+  - [
+      sh,
+      -c,
+      "grep -q '^zeros-agent:' /etc/subuid || printf 'zeros-agent:100000:65536\\n' >> /etc/subuid",
+    ]
+  - [
+      sh,
+      -c,
+      "grep -q '^zeros-agent:' /etc/subgid || printf 'zeros-agent:100000:65536\\n' >> /etc/subgid",
+    ]
+  # OrbStack intentionally denies unrelated host kernel knobs, so applying all
+  # sysctl files would turn the successful setting below into a false failure.
+  - [sysctl, -w, net.ipv4.ip_unprivileged_port_start=0]

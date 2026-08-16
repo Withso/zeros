@@ -10,3 +10,5 @@ export * from "./version";
 export * from "./schemas";
 export * from "./github-auth";
 export * from "./identities";
+export * from "./containment";
+export * from "./external-url";

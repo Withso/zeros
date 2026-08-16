@@ -74,6 +74,81 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
       parseBridgeMessage({ ...b, type: "PTY_WRITE", sessionId: "s", data: 5 }),
     ).toThrow(/data/);
     expect(() =>
+      parseBridgeMessage({ ...b, type: "GITHUB_TOKEN_SET", token: {} }),
+    ).toThrow(/token/);
+    expect(() =>
+      parseBridgeMessage({ ...b, type: "AGENT_LIST_AGENTS", force: "yes" }),
+    ).toThrow(/force/);
+    expect(() =>
+      parseBridgeMessage({ ...b, type: "AGENT_INIT_AGENT", agentId: {} }),
+    ).toThrow(/agentId/);
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_AUTHENTICATE",
+        agentId: "claude",
+        methodId: {},
+      }),
+    ).toThrow(/methodId/);
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_LIST_SESSIONS",
+        agentId: "codex",
+        cursor: {},
+      }),
+    ).toThrow(/cursor/);
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_PERMISSION_RESPONSE",
+        permissionId: "permission-1",
+        response: { outcome: { outcome: "selected", optionId: {} } },
+      }),
+    ).toThrow(/response/);
+    for (const request of [
+      { type: "AGENT_PROMPT", executionId: "execution-1", prompt: [] },
+      { type: "AGENT_STEER", executionId: "execution-1", prompt: [] },
+      { type: "AGENT_CANCEL", executionId: "execution-1" },
+      { type: "AGENT_COMPACT", executionId: "execution-1" },
+      { type: "AGENT_CLOSE_SESSION", executionId: "execution-1" },
+      {
+        type: "AGENT_STOP_BACKGROUND_TASK",
+        executionId: "execution-1",
+        taskId: "task-1",
+      },
+      {
+        type: "AGENT_SET_MODE",
+        executionId: "execution-1",
+        modeId: "default",
+      },
+      {
+        type: "AGENT_SET_MODEL",
+        executionId: "execution-1",
+        model: "model-1",
+      },
+      {
+        type: "AGENT_UPDATE_CONFIG",
+        executionId: "execution-1",
+        env: {},
+      },
+    ]) {
+      expect(() => parseBridgeMessage({ ...b, ...request })).toThrow(/agentId/);
+    }
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_QUESTION_RESPONSE",
+        questionId: "question-1",
+        response: {
+          outcome: {
+            outcome: "answered",
+            answers: [{ questionId: "q1", selectedOptionIds: "option-1" }],
+          },
+        },
+      }),
+    ).toThrow(/response/);
+    expect(() =>
       parseBridgeMessage({
         ...b,
         type: "AGENT_PROMPT",
@@ -92,6 +167,31 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
         approved: true,
       }),
     ).toThrow(/Unknown bridge message type/);
+  });
+
+  it("bounds the pre-authenticated CONNECTED handshake", () => {
+    const connected = {
+      ...base,
+      source: "browser" as const,
+      type: "CONNECTED",
+      capabilities: ["agent", "terminal"],
+      protocolVersion: 1,
+      authToken: "jwt-token",
+    };
+    expect(parseBridgeMessage(connected).type).toBe("CONNECTED");
+    for (const malformed of [
+      { ...connected, authToken: { nested: true } },
+      { ...connected, authToken: "x".repeat(64 * 1024 + 1) },
+      { ...connected, capabilities: "agent" },
+      {
+        ...connected,
+        capabilities: Array.from({ length: 257 }, () => "agent"),
+      },
+      { ...connected, capabilities: ["x".repeat(257)] },
+      { ...connected, protocolVersion: 1.5 },
+    ]) {
+      expect(() => parseBridgeMessage(malformed)).toThrow(/CONNECTED/);
+    }
   });
 
   it("accepts well-formed write payloads", () => {
@@ -142,6 +242,157 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
         taskId: "task-1",
       }).type,
     ).toBe("AGENT_STOP_BACKGROUND_TASK");
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_PERMISSION_RESPONSE",
+        permissionId: "permission-1",
+        response: {
+          outcome: { outcome: "selected", optionId: "allow-once" },
+        },
+      }).type,
+    ).toBe("AGENT_PERMISSION_RESPONSE");
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_QUESTION_RESPONSE",
+        questionId: "question-1",
+        nativeRequestId: "native-1",
+        response: {
+          outcome: {
+            outcome: "answered",
+            answers: [
+              {
+                questionId: "q1",
+                selectedOptionIds: ["option-1"],
+                freeText: "details",
+              },
+            ],
+          },
+        },
+      }).type,
+    ).toBe("AGENT_QUESTION_RESPONSE");
+  });
+
+  it("validates session-spawn environment maps at the wire boundary", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_NEW_SESSION",
+        agentId: "codex",
+        workspaceId: "workspace-1",
+        env: {
+          OPENAI_API_KEY: "secret",
+          ZEROS_THINKING_EFFORT: "high",
+        },
+      }).type,
+    ).toBe("AGENT_NEW_SESSION");
+    for (const env of [
+      [],
+      { GOOD: 1 },
+      { "BAD=NAME": "value" },
+      { GOOD: "bad\0value" },
+      { GOOD: "x".repeat(512 * 1024 + 1) },
+      Object.fromEntries(
+        Array.from({ length: 513 }, (_, index) => [`K_${index}`, "v"]),
+      ),
+    ]) {
+      expect(() =>
+        parseBridgeMessage({
+          ...b,
+          type: "AGENT_NEW_SESSION",
+          agentId: "codex",
+          workspaceId: "workspace-1",
+          env,
+        }),
+      ).toThrow(/env/);
+    }
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_LOAD_SESSION",
+        agentId: "codex",
+        chatId: "chat-1",
+        env: { GOOD: {} },
+      }),
+    ).toThrow(/env/);
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_GENERATE_TITLE",
+        agentId: "codex",
+        model: "gpt",
+        systemPrompt: "title",
+        prompt: "hello",
+        env: { GOOD: null },
+      }),
+    ).toThrow(/env/);
+  });
+
+  it("validates the read-only agent boundary preflight request", () => {
+    const b = { ...base, source: "browser" as const };
+    expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_PREFLIGHT");
+    expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_PREFLIGHTED");
+    expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_BOUNDARY_STATUS_CHANGED");
+    expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_BOUNDARY_PORTS_CHANGED");
+    expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_OPEN_BOUNDARY_PORT");
+    expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_BOUNDARY_PORT_OPENED");
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_PREFLIGHT",
+        agentId: "codex",
+        workspaceId: "workspace-1",
+      }).type,
+    ).toBe("AGENT_PREFLIGHT");
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_PREFLIGHT",
+        agentId: "codex",
+      }),
+    ).toThrow(/cwd\/workspaceId/);
+    expect(() =>
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_PREFLIGHT",
+        agentId: "codex",
+        cwd: "/repo",
+        cliBinary: {},
+      }),
+    ).toThrow(/cliBinary/);
+  });
+
+  it("accepts only exact opaque live-port open requests", () => {
+    const b = { ...base, source: "browser" as const };
+    const validPortId = "aB_9-".repeat(7).slice(0, 32);
+    expect(
+      parseBridgeMessage({
+        ...b,
+        type: "AGENT_OPEN_BOUNDARY_PORT",
+        agentId: "codex",
+        executionId: "execution-1",
+        portId: validPortId,
+      }).type,
+    ).toBe("AGENT_OPEN_BOUNDARY_PORT");
+    for (const portId of [
+      "short",
+      "x".repeat(31),
+      "x".repeat(33),
+      `${"x".repeat(31)}!`,
+      { value: "x".repeat(32) },
+    ]) {
+      expect(() =>
+        parseBridgeMessage({
+          ...b,
+          type: "AGENT_OPEN_BOUNDARY_PORT",
+          agentId: "codex",
+          executionId: "execution-1",
+          portId,
+        }),
+      ).toThrow(/portId/);
+    }
   });
 
   it("accepts the canonical execution route and rejects split aliases", () => {

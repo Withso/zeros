@@ -5,6 +5,7 @@ import { parse, parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 
 import { assertDesignComponentDefinitionIdentities } from "@zeros/design-web";
 
+import { designDirectoryNameFor } from "./directory-registry";
 import { readSafeRegularFile } from "./safe-files";
 
 const MAX_COMPONENTS_PER_FRAME = 1_024;
@@ -88,7 +89,10 @@ async function loadDefinitions(
   errors: DesignComponentExpansionError[];
 }> {
   const errors: DesignComponentExpansionError[] = [];
-  const designRoot = path.join(workspacePath, "Zeros Design");
+  const designRoot = path.join(
+    workspacePath,
+    ...designDirectoryNameFor(workspacePath).split("/"),
+  );
   const directory = path.join(designRoot, "components");
   let canonicalDirectory: string;
   try {

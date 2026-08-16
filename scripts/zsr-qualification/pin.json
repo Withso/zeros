@@ -1,0 +1,9 @@
+{
+  "package": "@anthropic-ai/sandbox-runtime",
+  "version": "0.0.73",
+  "upstreamTag": "v0.0.73",
+  "upstreamCommit": "5feb5269f1c86f49e62224ffb8297b2f01a31806",
+  "license": "Apache-2.0",
+  "tarballIntegrity": "sha512-F608iUirrCqwvInZYGRRgJWDQj0tt6fNVE9aPagpotLJ5LhC4JbrMFIIZww5MFjb+HRCkpE0+xdI79c30tdVYg==",
+  "patchSha256": "f36bb873aa12d0abd7095726b836e9d9e9f257b77bddf33793a412eb27661052"
+}

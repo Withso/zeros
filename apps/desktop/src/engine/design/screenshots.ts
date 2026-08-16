@@ -3,12 +3,15 @@
 // ──────────────────────────────────────────────────────────
 //
 // Sandboxed renderer runtimes capture real frame pixels and publish them here.
-// The first-party MCP server can then return an image content block without
-// gaining filesystem paths, renderer authority, or an Electron dependency.
+// The trusted desktop bridge can then export those pixels without giving the
+// renderer filesystem paths or native write authority.
 
 const MAX_SCREENSHOTS = 64;
 const MAX_BASE64_LENGTH = 12_000_000;
 const ALLOWED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/webp"]);
+const PNG_SIGNATURE = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
 
 export interface DesignScreenshot {
   workspaceId: string;
@@ -41,7 +44,55 @@ function finitePositive(value: number, label: string): number {
   return value;
 }
 
-export function setDesignScreenshot(input: DesignScreenshot): void {
+function hasPrefix(bytes: Buffer, prefix: Buffer): boolean {
+  return (
+    bytes.length >= prefix.length &&
+    bytes.subarray(0, prefix.length).equals(prefix)
+  );
+}
+
+function assertImageSignature(
+  mimeType: DesignScreenshot["mimeType"],
+  data: string,
+): void {
+  const bytes = Buffer.from(data, "base64");
+  if (bytes.length === 0 || bytes.toString("base64") !== data) {
+    throw new Error("Design screenshot data must be canonical base64.");
+  }
+
+  if (mimeType === "image/png" && !hasPrefix(bytes, PNG_SIGNATURE)) {
+    throw new Error("Design screenshot data is not a PNG image.");
+  }
+  if (
+    mimeType === "image/jpeg" &&
+    !(
+      bytes.length >= 4 &&
+      bytes[0] === 0xff &&
+      bytes[1] === 0xd8 &&
+      bytes.at(-2) === 0xff &&
+      bytes.at(-1) === 0xd9
+    )
+  ) {
+    throw new Error("Design screenshot data is not a JPEG image.");
+  }
+  if (
+    mimeType === "image/webp" &&
+    !(
+      bytes.length >= 12 &&
+      bytes.toString("ascii", 0, 4) === "RIFF" &&
+      bytes.toString("ascii", 8, 12) === "WEBP"
+    )
+  ) {
+    throw new Error("Design screenshot data is not a WebP image.");
+  }
+}
+
+/** Validate and normalize without publishing. Explicit exports use this before
+ * their durable artifact side effect so a later cache update cannot turn an
+ * otherwise-successful artifact write into a partial operation. */
+export function normalizeDesignScreenshot(
+  input: DesignScreenshot,
+): DesignScreenshot {
   if (!input.workspaceId.trim()) throw new Error("workspaceId is required.");
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\.html$/i.test(input.frame)) {
     throw new Error(`Invalid design frame file: ${input.frame}`);
@@ -65,6 +116,7 @@ export function setDesignScreenshot(input: DesignScreenshot): void {
   ) {
     throw new Error("Design screenshot data must be bounded base64.");
   }
+  assertImageSignature(input.mimeType, input.data);
   const next: DesignScreenshot = {
     ...input,
     width: Math.round(finitePositive(input.width, "width")),
@@ -72,6 +124,11 @@ export function setDesignScreenshot(input: DesignScreenshot): void {
     scale: finitePositive(input.scale, "scale"),
     capturedAt: finitePositive(input.capturedAt, "capturedAt"),
   };
+  return next;
+}
+
+export function setDesignScreenshot(input: DesignScreenshot): void {
+  const next = normalizeDesignScreenshot(input);
   const key = screenshotKey(next.workspaceId, next.frame, next.nodeId);
   screenshots.delete(key);
   screenshots.set(key, next);

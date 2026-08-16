@@ -30,7 +30,9 @@ export const KNOWN_MESSAGE_TYPES = [
   "GITHUB_CREDENTIAL_CHANGED",
   "ENGINE_ERROR",
   "AGENT_LIST_AGENTS",
+  "AGENT_PREFLIGHT",
   "AGENT_NEW_SESSION",
+  "AGENT_OPEN_BOUNDARY_PORT",
   "AGENT_INIT_AGENT",
   "AGENT_AUTHENTICATE",
   "AGENT_PROMPT",
@@ -51,6 +53,7 @@ export const KNOWN_MESSAGE_TYPES = [
   "AGENT_VALIDATE_KEY",
   "AGENT_GENERATE_TITLE",
   "AGENT_AGENTS_LIST",
+  "AGENT_PREFLIGHTED",
   "AGENT_KEY_VALIDATED",
   "AGENT_TITLE_GENERATED",
   "AGENT_SESSION_CREATED",
@@ -58,6 +61,9 @@ export const KNOWN_MESSAGE_TYPES = [
   "AGENT_AGENT_INITIALIZED",
   "AGENT_AUTH_COMPLETED",
   "AGENT_SESSION_UPDATE",
+  "AGENT_BOUNDARY_STATUS_CHANGED",
+  "AGENT_BOUNDARY_PORTS_CHANGED",
+  "AGENT_BOUNDARY_PORT_OPENED",
   "AGENT_PERMISSION_REQUEST",
   "AGENT_PERMISSION_SETTLED",
   "AGENT_QUESTION_REQUEST",
@@ -137,6 +143,126 @@ const isUint = (v: unknown): boolean =>
 const executionRoute = (env: Record<string, unknown>): unknown =>
   env.executionId ?? env.sessionId;
 
+/** Hard wire limits for client-supplied process environment. These sit below
+ * normal OS ARG_MAX ceilings while leaving ample room for PEMs and large MCP
+ * configuration. They prevent a validly-authenticated peer from turning a
+ * spawn request into an unbounded descriptor/allocation. */
+export const MAX_BRIDGE_FRAME_BYTES = 16 * 1024 * 1024;
+const MAX_AGENT_ENV_ENTRIES = 512;
+const MAX_AGENT_ENV_NAME_CODE_UNITS = 256;
+const MAX_AGENT_ENV_VALUE_CODE_UNITS = 512 * 1024;
+const MAX_AGENT_ENV_TOTAL_CODE_UNITS = 2 * 1024 * 1024;
+const MAX_CONNECTED_AUTH_TOKEN_CODE_UNITS = 64 * 1024;
+const MAX_CONNECTED_CAPABILITIES = 256;
+const MAX_CONNECTED_CAPABILITY_CODE_UNITS = 256;
+const MAX_GITHUB_TOKEN_CODE_UNITS = 64 * 1024;
+const MAX_INTERACTION_ID_CODE_UNITS = 4 * 1024;
+const MAX_QUESTION_ANSWERS = 256;
+const MAX_SELECTED_OPTIONS_PER_ANSWER = 256;
+const MAX_QUESTION_FREE_TEXT_CODE_UNITS = 1024 * 1024;
+const PORTABLE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const AGENT_ID_REQUIRED_CLIENT_TYPES = new Set([
+  "AGENT_PREFLIGHT",
+  "AGENT_NEW_SESSION",
+  "AGENT_OPEN_BOUNDARY_PORT",
+  "AGENT_INIT_AGENT",
+  "AGENT_AUTHENTICATE",
+  "AGENT_VALIDATE_KEY",
+  "AGENT_GENERATE_TITLE",
+  "AGENT_PROMPT",
+  "AGENT_CANCEL",
+  "AGENT_STOP_BACKGROUND_TASK",
+  "AGENT_STEER",
+  "AGENT_CLOSE_SESSION",
+  "AGENT_SET_MODE",
+  "AGENT_SET_MODEL",
+  "AGENT_COMPACT",
+  "AGENT_UPDATE_CONFIG",
+  "AGENT_LIST_SESSIONS",
+  "AGENT_FORK_CONVERSATION",
+  "AGENT_LOAD_SESSION",
+]);
+
+function isAgentEnv(value: unknown): value is Record<string, string> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return false;
+  }
+  const entries = Object.entries(value as Record<string, unknown>);
+  if (entries.length > MAX_AGENT_ENV_ENTRIES) return false;
+  let total = 0;
+  for (const [name, entry] of entries) {
+    if (
+      !PORTABLE_ENV_NAME.test(name) ||
+      name.length > MAX_AGENT_ENV_NAME_CODE_UNITS ||
+      typeof entry !== "string" ||
+      entry.includes("\0") ||
+      entry.length > MAX_AGENT_ENV_VALUE_CODE_UNITS
+    ) {
+      return false;
+    }
+    total += name.length + entry.length;
+    if (total > MAX_AGENT_ENV_TOTAL_CODE_UNITS) return false;
+  }
+  return true;
+}
+
+function isOptionalAgentEnv(value: unknown): boolean {
+  return value === undefined || isAgentEnv(value);
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isBoundedInteractionId(value: unknown): value is string {
+  return (
+    isNonEmptyStr(value) &&
+    value.length <= MAX_INTERACTION_ID_CODE_UNITS &&
+    !value.includes("\0")
+  );
+}
+
+function isPermissionResponse(value: unknown): boolean {
+  if (!isPlainRecord(value) || !isPlainRecord(value.outcome)) return false;
+  if (value.outcome.outcome === "cancelled") return true;
+  return (
+    value.outcome.outcome === "selected" &&
+    isBoundedInteractionId(value.outcome.optionId)
+  );
+}
+
+function isQuestionResponse(value: unknown): boolean {
+  if (!isPlainRecord(value) || !isPlainRecord(value.outcome)) return false;
+  const outcome = value.outcome;
+  if (outcome.outcome === "declined" || outcome.outcome === "dismissed") {
+    return true;
+  }
+  if (
+    outcome.outcome !== "answered" ||
+    !Array.isArray(outcome.answers) ||
+    outcome.answers.length > MAX_QUESTION_ANSWERS
+  ) {
+    return false;
+  }
+  return outcome.answers.every((answer) => {
+    if (
+      !isPlainRecord(answer) ||
+      !isBoundedInteractionId(answer.questionId) ||
+      !Array.isArray(answer.selectedOptionIds) ||
+      answer.selectedOptionIds.length > MAX_SELECTED_OPTIONS_PER_ANSWER ||
+      !answer.selectedOptionIds.every(isBoundedInteractionId)
+    ) {
+      return false;
+    }
+    return (
+      answer.freeText === undefined ||
+      (isStr(answer.freeText) &&
+        answer.freeText.length <= MAX_QUESTION_FREE_TEXT_CODE_UNITS &&
+        !answer.freeText.includes("\0"))
+    );
+  });
+}
+
 /** Per-type field validation for the relay-REACHABLE WRITE paths. The envelope
  *  check only guarantees id/source/timestamp/type; the engine's dispatcher then
  *  reads payload fields directly (PTY_RESIZE.cols → coerceDim, AGENT_SET_MODE
@@ -149,6 +275,12 @@ function assertInboundPayload(env: Record<string, unknown>): void {
   const bad = (field: string): never => {
     throw new Error(`Invalid ${String(env.type)} payload: ${field}`);
   };
+  if (
+    AGENT_ID_REQUIRED_CLIENT_TYPES.has(String(env.type)) &&
+    !isNonEmptyStr(env.agentId)
+  ) {
+    bad("agentId");
+  }
   // During the identity-model compatibility window clients send both names. They are two
   // spellings of one Zeros-owned route, never independent identities.
   if (
@@ -160,6 +292,67 @@ function assertInboundPayload(env: Record<string, unknown>): void {
     bad("executionId/sessionId mismatch");
   }
   switch (env.type) {
+    case "CONNECTED":
+      if (
+        !Array.isArray(env.capabilities) ||
+        env.capabilities.length > MAX_CONNECTED_CAPABILITIES ||
+        env.capabilities.some(
+          (capability) =>
+            !isNonEmptyStr(capability) ||
+            capability.length > MAX_CONNECTED_CAPABILITY_CODE_UNITS ||
+            capability.includes("\0"),
+        )
+      )
+        bad("capabilities");
+      if (
+        env.protocolVersion !== undefined &&
+        (!Number.isSafeInteger(env.protocolVersion) ||
+          Number(env.protocolVersion) < 0)
+      )
+        bad("protocolVersion");
+      if (
+        env.authToken !== undefined &&
+        (!isStr(env.authToken) ||
+          env.authToken.length > MAX_CONNECTED_AUTH_TOKEN_CODE_UNITS ||
+          /[\0\r\n]/.test(env.authToken))
+      )
+        bad("authToken");
+      break;
+    case "GITHUB_TOKEN_SET":
+      if (
+        env.token !== null &&
+        (!isStr(env.token) ||
+          env.token.length > MAX_GITHUB_TOKEN_CODE_UNITS ||
+          /[\0\r\n]/.test(env.token))
+      )
+        bad("token");
+      break;
+    case "AGENT_LIST_AGENTS":
+      if (env.force !== undefined && typeof env.force !== "boolean")
+        bad("force");
+      break;
+    case "AGENT_NEW_SESSION":
+      if (!isNonEmptyStr(env.agentId)) bad("agentId");
+      if (!isNonEmptyStr(env.cwd) && !isNonEmptyStr(env.workspaceId))
+        bad("cwd/workspaceId");
+      if (env.chatId !== undefined && !isNonEmptyStr(env.chatId)) bad("chatId");
+      if (env.cwd !== undefined && !isNonEmptyStr(env.cwd)) bad("cwd");
+      if (env.workspaceId !== undefined && !isNonEmptyStr(env.workspaceId))
+        bad("workspaceId");
+      if (!isOptionalAgentEnv(env.env)) bad("env");
+      if (env.cliBinary !== undefined && !isNonEmptyStr(env.cliBinary))
+        bad("cliBinary");
+      break;
+    case "AGENT_PREFLIGHT":
+      if (!isNonEmptyStr(env.agentId)) bad("agentId");
+      if (!isNonEmptyStr(env.cwd) && !isNonEmptyStr(env.workspaceId))
+        bad("cwd/workspaceId");
+      if (env.cwd !== undefined && !isNonEmptyStr(env.cwd)) bad("cwd");
+      if (env.workspaceId !== undefined && !isNonEmptyStr(env.workspaceId))
+        bad("workspaceId");
+      if (env.cliBinary !== undefined && !isNonEmptyStr(env.cliBinary))
+        bad("cliBinary");
+      break;
     case "AGENT_PROMPT":
     case "AGENT_STEER":
       if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
@@ -167,6 +360,19 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       // Optional correlation id — metadata only. Reject non-strings so a remote
       // client cannot smuggle structured payload into the active-turn record.
       if (env.promptId !== undefined && !isStr(env.promptId)) bad("promptId");
+      break;
+    case "AGENT_OPEN_BOUNDARY_PORT":
+      if (!isNonEmptyStr(env.agentId)) bad("agentId");
+      if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
+      if (!isNonEmptyStr(env.portId) || !/^[A-Za-z0-9_-]{32}$/.test(env.portId))
+        bad("portId");
+      break;
+    case "AGENT_INIT_AGENT":
+      if (!isNonEmptyStr(env.agentId)) bad("agentId");
+      break;
+    case "AGENT_AUTHENTICATE":
+      if (!isNonEmptyStr(env.agentId)) bad("agentId");
+      if (!isNonEmptyStr(env.methodId)) bad("methodId");
       break;
     case "AGENT_CANCEL":
     case "AGENT_COMPACT":
@@ -178,6 +384,7 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       if (env.chatId !== undefined && !isNonEmptyStr(env.chatId)) bad("chatId");
       break;
     case "AGENT_LOAD_SESSION":
+      if (!isNonEmptyStr(env.agentId)) bad("agentId");
       if (
         !isNonEmptyStr(executionRoute(env)) &&
         !isNonEmptyStr(env.chatId) &&
@@ -185,6 +392,13 @@ function assertInboundPayload(env: Record<string, unknown>): void {
           env.providerBinding === null)
       )
         bad("executionId/chatId/providerBinding");
+      if (env.chatId !== undefined && !isNonEmptyStr(env.chatId)) bad("chatId");
+      if (env.cwd !== undefined && !isNonEmptyStr(env.cwd)) bad("cwd");
+      if (env.workspaceId !== undefined && !isNonEmptyStr(env.workspaceId))
+        bad("workspaceId");
+      if (!isOptionalAgentEnv(env.env)) bad("env");
+      if (env.cliBinary !== undefined && !isNonEmptyStr(env.cliBinary))
+        bad("cliBinary");
       break;
     case "AGENT_FORK_CONVERSATION":
       if (!isNonEmptyStr(env.agentId)) bad("agentId");
@@ -206,16 +420,7 @@ function assertInboundPayload(env: Record<string, unknown>): void {
         bad("providerBinding/sessionId/executionId/lastTurnId/cwd");
       if (env.cliBinary !== undefined && !isNonEmptyStr(env.cliBinary))
         bad("cliBinary");
-      if (
-        env.env !== undefined &&
-        (typeof env.env !== "object" ||
-          env.env === null ||
-          Array.isArray(env.env) ||
-          !Object.values(env.env as Record<string, unknown>).every(
-            (v) => typeof v === "string",
-          ))
-      )
-        bad("env");
+      if (!isOptionalAgentEnv(env.env)) bad("env");
       break;
     case "AGENT_STOP_BACKGROUND_TASK":
       if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
@@ -235,18 +440,26 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       // hazardous names + clamps dirs for remote clients). It must be a plain
       // string→string object — reject arrays / nested objects / non-string vals.
       if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
-      if (
-        typeof env.env !== "object" ||
-        env.env === null ||
-        Array.isArray(env.env) ||
-        !Object.values(env.env as Record<string, unknown>).every(
-          (v) => typeof v === "string",
-        )
-      )
-        bad("env");
+      if (!isAgentEnv(env.env)) bad("env");
       break;
     case "AGENT_PERMISSION_RESPONSE":
-      if (!isNonEmptyStr(env.permissionId)) bad("permissionId");
+      if (!isBoundedInteractionId(env.permissionId)) bad("permissionId");
+      if (!isPermissionResponse(env.response)) bad("response");
+      break;
+    case "AGENT_QUESTION_RESPONSE":
+      if (!isBoundedInteractionId(env.questionId)) bad("questionId");
+      if (
+        env.nativeRequestId !== undefined &&
+        !isBoundedInteractionId(env.nativeRequestId)
+      )
+        bad("nativeRequestId");
+      if (!isQuestionResponse(env.response)) bad("response");
+      break;
+    case "AGENT_LIST_SESSIONS":
+      if (!isNonEmptyStr(env.agentId)) bad("agentId");
+      if (env.cwd !== undefined && !isStr(env.cwd)) bad("cwd");
+      if (env.cursor !== undefined && env.cursor !== null && !isStr(env.cursor))
+        bad("cursor");
       break;
     case "WORKSPACE_REQUEST":
       if (!isNonEmptyStr(env.op)) bad("op");
@@ -293,6 +506,7 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       if (!isNonEmptyStr(env.model)) bad("model");
       if (!isNonEmptyStr(env.systemPrompt)) bad("systemPrompt");
       if (!isNonEmptyStr(env.prompt)) bad("prompt");
+      if (!isOptionalAgentEnv(env.env)) bad("env");
       break;
   }
 }
@@ -319,4 +533,14 @@ export function safeParseBridgeMessage(raw: unknown): BridgeMessage | null {
     return null;
   }
   return r.data as unknown as BridgeMessage;
+}
+
+/** Parse a frame received from a renderer/device. A peer may never self-label a
+ * frame as engine-originated; retaining that direction bit at ingress avoids a
+ * future handler accidentally trusting an engine-only response as a request. */
+export function safeParseClientBridgeMessage(
+  raw: unknown,
+): BridgeMessage | null {
+  const parsed = safeParseBridgeMessage(raw);
+  return parsed?.source === "browser" ? parsed : null;
 }

@@ -11,6 +11,7 @@
 
 import {
   ADDITIONAL_DIRS_NOTICE,
+  CODE_AGENT_DESIGN_TERRITORY_NOTICE,
   SYSTEM_INSTRUCTION_CLOSE,
   SYSTEM_INSTRUCTION_OPEN,
   WORKSPACE_PREAMBLE,
@@ -27,6 +28,9 @@ export interface FirstTurnInstructionInput {
   additionalDirectories?: readonly string[];
   /** Repo/user `[prompts] general` from .zeros/settings.toml. Empty → skipped. */
   customInstructions?: string | null;
+  /** Absolute active Design directory. When present, inject the permanent
+   * code-actor territory rule independently of the UI's current view mode. */
+  designDirectory?: string | null;
 }
 
 /** Fill {WORKSPACE_DIR} + {TARGET_BRANCH} in the base preamble. */
@@ -50,6 +54,18 @@ export function buildAdditionalDirsNotice(dirs?: readonly string[]): string {
   return ADDITIONAL_DIRS_NOTICE.split("{DIRS}").join(clean.join(", "));
 }
 
+/** Code-actor Design-territory notice, or "" when this workspace has no
+ * active Design document. */
+export function buildCodeAgentDesignTerritoryNotice(
+  designDirectory?: string | null,
+): string {
+  const directory = designDirectory?.trim();
+  if (!directory) return "";
+  return CODE_AGENT_DESIGN_TERRITORY_NOTICE.split("{DESIGN_DIR}").join(
+    directory,
+  );
+}
+
 /** Wrap a non-empty body in <system_instruction>…</system_instruction>.
  *  Returns "" for an empty/whitespace body (nothing to inject). */
 export function wrapSystemInstruction(body: string): string {
@@ -66,8 +82,13 @@ export function buildFirstTurnInstructionBody(input: FirstTurnInstructionInput):
   const parts = [buildWorkspacePreamble(input)];
   const dirs = buildAdditionalDirsNotice(input.additionalDirectories);
   if (dirs) parts.push(dirs);
+  // Repository/user prose is untrusted with respect to runtime authority. Put
+  // it before the engine-owned boundary so it can never be the last word on
+  // whether the coding actor may mutate Design territory.
   const custom = input.customInstructions?.trim();
   if (custom) parts.push(custom);
+  const territory = buildCodeAgentDesignTerritoryNotice(input.designDirectory);
+  if (territory) parts.push(territory);
   return parts.join("\n\n").trim();
 }
 

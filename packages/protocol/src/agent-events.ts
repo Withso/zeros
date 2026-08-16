@@ -28,6 +28,10 @@ import type {
   ProviderBinding,
   ProviderMetadata,
 } from "./identities";
+import type {
+  ExecutionBoundaryPortsSnapshot,
+  ExecutionBoundaryStatus,
+} from "./containment";
 
 /** @deprecated Agent "session" on the Zeros wire is an execution route. */
 export type SessionId = ExecutionId;
@@ -674,6 +678,14 @@ export interface QuestionOption {
   /** Selecting this option clears every sibling selection; selecting a normal
    *  option clears any exclusive sibling. Used by MCP None/Skip sentinels. */
   exclusive?: boolean;
+  /** Trusted-client action performed only after this exact option is selected.
+   *  The engine never opens the URL itself: a local or cloud renderer hands it
+   *  to its native/browser shell, keeping Apple Events and desktop browser
+   *  authority outside every agent process and remote engine. */
+  externalAction?: {
+    kind: "open-url";
+    url: string;
+  };
 }
 
 export interface QuestionSpec {
@@ -822,6 +834,11 @@ export interface NewSessionResponse {
   providerMetadata?: ProviderMetadata;
   modes?: SessionModeState;
   models?: SessionModelState;
+  /** Redacted engine-authoritative containment state for this execution. */
+  boundary?: ExecutionBoundaryStatus;
+  /** Exact initial listener snapshot. Later changes arrive as
+   * AGENT_BOUNDARY_PORTS_CHANGED. */
+  boundaryPorts?: ExecutionBoundaryPortsSnapshot;
 }
 
 export interface LoadSessionResponse {
@@ -830,6 +847,11 @@ export interface LoadSessionResponse {
   providerMetadata?: ProviderMetadata;
   modes?: SessionModeState;
   models?: SessionModelState;
+  /** Redacted engine-authoritative containment state for this execution. */
+  boundary?: ExecutionBoundaryStatus;
+  /** Exact initial listener snapshot. Later changes arrive as
+   * AGENT_BOUNDARY_PORTS_CHANGED. */
+  boundaryPorts?: ExecutionBoundaryPortsSnapshot;
   /** The adapter could NOT resume a prior transcript and started a FRESH
    *  thread/agent instead (Codex stale rollout → `startThread`; Cursor "agent
    *  not found" → `Agent.create`; Claude with no persisted session id). The
