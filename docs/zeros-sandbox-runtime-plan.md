@@ -55,9 +55,10 @@ every attached Design-bearing Git owner and does not emit it.
   secrets, preload, Electron hardening, runtime-pin, packaging-path, protocol,
   workflow, migration, license, Codex-pin, audit, Design containment, Git,
   real-browser UI smoke, UI build, provider-offline smoke, and adapter gates
-  passed. `pnpm test:git` passed 587 files and 6,456 tests with 3
-  platform-gated skips; the focused containment gate passed 20 files and 424
-  tests with the same 3 skips.
+  passed. `pnpm test:git` passed 588 files and 6,466 tests with 3
+  platform-gated skips. `pnpm check:design-containment` passed 20 files and
+  424 tests with the same 3 skips; the focused ZSR containment plus session-
+  admission regression run passed 26 files and 215 tests without a failure.
 - On the attached Apple-silicon Mac (Darwin 25.3.0), the final synchronized
   source passed `pnpm check:zsr` with `secure: true`. The exact SRT patch,
   Seatbelt/process-domain policy, native mutation helper, port interposer,
@@ -66,8 +67,15 @@ every attached Design-bearing Git owner and does not emit it.
 - The same source passed the real Chrome preview matrix and the OrbStack 2.2.1
   normal/privileged private-container matrix. Code projection, Design denial,
   unleased-port denial, and teardown proof were green. Cold OrbStack admission
-  was approximately 69.8 seconds; no host Docker/Podman daemon socket was
+  was approximately 70.1 seconds; no host Docker/Podman daemon socket was
   exposed.
+- The running development app was inspected after the final source settled. It
+  had one GUI-mode Electron main process; the other process using the app
+  binary was the expected Cursor host with `ELECTRON_RUN_AS_NODE=1`. The engine
+  remained healthy on port 25133 and completed Claude new-session/title
+  dispatches. The renderer now permits the qualified cold admission path up to
+  120 seconds and never overlaps another admission merely because that ceiling
+  elapsed.
 - The final arm64 sidecar passed create/archive/restore engine smoke. A
   Developer-ID-signed directory package then passed deep/strict code-signature
   verification, a real packaged-PTY spawn, required ZSR-resource inspection,
