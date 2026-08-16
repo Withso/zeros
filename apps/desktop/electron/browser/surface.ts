@@ -4,6 +4,8 @@ import type {
   BrowserToolName,
 } from "@zeros/protocol/browser-tools";
 
+import { browserError } from "./errors";
+
 export interface BrowserViewBounds {
   x: number;
   y: number;
@@ -904,7 +906,7 @@ export interface BrowserDomMarkers {
  * to a different element before the first snapshot. */
 export function browserDomMarkers(token: string): BrowserDomMarkers {
   if (!/^[a-f0-9]{24}$/.test(token)) {
-    throw new Error("Invalid browser DOM marker token.");
+    throw browserError("Invalid browser DOM marker token.");
   }
   return {
     refAttribute: `data-zeros-browser-ref-${token}`,

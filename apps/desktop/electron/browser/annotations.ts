@@ -1,5 +1,7 @@
 import { isBrowserElementRef } from "@zeros/protocol/browser-tools";
 
+import { browserError } from "./errors";
+
 export interface BrowserAnnotation {
   ref: string;
   label: string;
@@ -8,10 +10,10 @@ export interface BrowserAnnotation {
 export function parseBrowserAnnotations(value: unknown): BrowserAnnotation[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) {
-    throw new Error("Browser annotations must be an array.");
+    throw browserError("Browser annotations must be an array.");
   }
   if (value.length > 20) {
-    throw new Error("A browser screenshot supports at most 20 annotations.");
+    throw browserError("A browser screenshot supports at most 20 annotations.");
   }
   return value.map((candidate, index) => {
     if (
@@ -19,17 +21,17 @@ export function parseBrowserAnnotations(value: unknown): BrowserAnnotation[] {
       typeof candidate !== "object" ||
       Array.isArray(candidate)
     ) {
-      throw new Error("Browser annotation must be an object.");
+      throw browserError("Browser annotation must be an object.");
     }
     const record = candidate as Record<string, unknown>;
     if (!isBrowserElementRef(record.ref)) {
-      throw new Error("Browser annotation ref is invalid.");
+      throw browserError("Browser annotation ref is invalid.");
     }
     if (
       record.label !== undefined &&
       (typeof record.label !== "string" || record.label.trim().length > 80)
     ) {
-      throw new Error(
+      throw browserError(
         "Browser annotation label must be at most 80 characters.",
       );
     }

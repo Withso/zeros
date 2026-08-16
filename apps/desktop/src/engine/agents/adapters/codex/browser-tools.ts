@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { readFile, readdir, realpath, stat } from "node:fs/promises";
+import {
+  open,
+  readFile,
+  readdir,
+  realpath,
+  stat,
+  type FileHandle,
+} from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -298,9 +305,11 @@ async function inspectBrowserPlugin(candidate: string): Promise<{
     join(root, "skills", "control-in-app-browser", "SKILL.md"),
   );
   if (!browserSkillPath) return null;
-  const size = (await stat(browserClientPath)).size;
-  if (size <= 0 || size > MAX_BROWSER_CLIENT_BYTES) return null;
-  const source = await readFile(browserClientPath);
+  const source = await readCappedFile(
+    browserClientPath,
+    MAX_BROWSER_CLIENT_BYTES,
+  );
+  if (!source) return null;
   return {
     root,
     version: manifest.version,
@@ -413,6 +422,35 @@ async function readJsonObject(
       : null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Read a file through a single handle, refusing anything over `maxBytes`.
+ *
+ * The size guard and the bytes we return have to describe the same inode.
+ * Checking with stat() and then reading the path again leaves a window where the
+ * plugin cache can swap the file, so the hash we pin into
+ * NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S would cover bytes that never passed
+ * the cap. Opening once and asking the handle closes it: the fstat and the read
+ * both follow the descriptor, whatever the path points at afterwards.
+ */
+async function readCappedFile(
+  path: string,
+  maxBytes: number,
+): Promise<Buffer | null> {
+  let handle: FileHandle | undefined;
+  try {
+    handle = await open(path, "r");
+    const details = await handle.stat();
+    if (!details.isFile() || details.size <= 0 || details.size > maxBytes) {
+      return null;
+    }
+    return await handle.readFile();
+  } catch {
+    return null;
+  } finally {
+    await handle?.close();
   }
 }
 

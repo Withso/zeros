@@ -4,6 +4,8 @@ import { endianness } from "node:os";
 import { join } from "node:path";
 import { createServer, type Server, type Socket } from "node:net";
 
+import { browserError, browserErrorMessage } from "./browser/errors";
+
 const MAX_FRAME_BYTES = 8 * 1024 * 1024;
 const HEADER_BYTES = 4;
 
@@ -62,7 +64,7 @@ export async function startCodexBrowserUsePipe(
     await mkdir(directory, { recursive: true, mode: 0o700 });
     const stat = await lstat(directory);
     if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      throw new Error("Codex Browser Use pipe directory is not private.");
+      throw browserError("Codex Browser Use pipe directory is not private.");
     }
     await chmod(directory, 0o700);
   }
@@ -145,7 +147,7 @@ async function handleMessage(
   try {
     const parsed: unknown = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("Invalid Browser Use JSON-RPC request.");
+      throw browserError("Invalid Browser Use JSON-RPC request.");
     }
     message = parsed as CodexBrowserUseRpcRequest;
   } catch {
@@ -231,7 +233,7 @@ export async function dispatchCodexBrowserUseRequest(
       id,
       error: {
         code: -32000,
-        message: error instanceof Error ? error.message : String(error),
+        message: browserErrorMessage(error),
       },
     };
   }
@@ -240,7 +242,7 @@ export async function dispatchCodexBrowserUseRequest(
 export function encodeCodexBrowserUseFrame(value: unknown): Buffer {
   const body = Buffer.from(JSON.stringify(value), "utf8");
   if (body.byteLength > MAX_FRAME_BYTES) {
-    throw new Error("Browser Use response exceeds frame limit.");
+    throw browserError("Browser Use response exceeds frame limit.");
   }
   const header = Buffer.alloc(HEADER_BYTES);
   if (endianness() === "LE") header.writeUInt32LE(body.byteLength, 0);

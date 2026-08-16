@@ -8,6 +8,7 @@ import {
   type WebContents,
 } from "electron";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { browserError, browserErrorMessage } from "./errors";
 import { realpath, unlink } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import {
@@ -381,7 +382,7 @@ export async function startZerosBrowserService(
   options: ZerosBrowserServiceOptions,
 ): Promise<ZerosBrowserServiceHandle> {
   if (!isAbsolute(options.artifactRoot)) {
-    throw new Error("Zeros browser artifact root must be absolute.");
+    throw browserError("Zeros browser artifact root must be absolute.");
   }
   await clearStagedBrowserUploads(options.artifactRoot);
   const token = randomBytes(32).toString("base64url");
@@ -494,7 +495,7 @@ export async function startZerosBrowserService(
         })
         .sort((left, right) => left.touchedAt - right.touchedAt)[0];
       if (!oldest) {
-        throw new Error(
+        throw browserError(
           "Every isolated browser session is currently busy or visible.",
         );
       }
@@ -620,7 +621,7 @@ export async function startZerosBrowserService(
       if (record.lease && !record.lease.view.webContents.isDestroyed()) {
         publishState(options, record, "ready", request.tool);
       }
-      return failure(error instanceof Error ? error.message : String(error));
+      return failure(browserErrorMessage(error));
     } finally {
       record.activeOperations -= 1;
       release();
@@ -665,7 +666,7 @@ export async function startZerosBrowserService(
       try {
         url = normalizeWebUrl(requireString(args.url, "url"));
       } catch (error) {
-        return failure(error instanceof Error ? error.message : String(error));
+        return failure(browserErrorMessage(error));
       }
     }
 
@@ -714,7 +715,7 @@ export async function startZerosBrowserService(
       });
     } catch (error) {
       lease.pendingUrl = null;
-      return failure(error instanceof Error ? error.message : String(error));
+      return failure(browserErrorMessage(error));
     }
     if (!dispatched) {
       lease.pendingUrl = null;
@@ -753,7 +754,7 @@ export async function startZerosBrowserService(
           !validNativeBrowserSessionId(nativeSessionId) ||
           !records.has(browserSessionId)
         ) {
-          throw new Error("Invalid native Codex browser binding.");
+          throw browserError("Invalid native Codex browser binding.");
         }
         // A conversation has one live provider session. Revoking an older
         // thread here prevents a stale app-server process from reclaiming the
@@ -786,7 +787,7 @@ export async function startZerosBrowserService(
           !browserSessionId.startsWith("browser_") ||
           !validNativeBrowserSessionId(nativeSessionId)
         ) {
-          throw new Error("Invalid native Codex turn settlement.");
+          throw browserError("Invalid native Codex turn settlement.");
         }
         const binding = codexBrowserSessions.get(nativeSessionId);
         const record = binding
@@ -839,7 +840,7 @@ export async function startZerosBrowserService(
           owner: asRecord(body.owner) as unknown as BrowserSessionOwner,
         };
         if (parsed.version !== BROWSER_SERVICE_VERSION) {
-          throw new Error("Unsupported Zeros browser service version.");
+          throw browserError("Unsupported Zeros browser service version.");
         }
         sendJson(response, 200, await acquire(parsed.owner));
         return;
@@ -861,7 +862,7 @@ export async function startZerosBrowserService(
           !isBrowserProductId(parsed.workspaceId) ||
           !isBrowserProductId(parsed.conversationId)
         ) {
-          throw new Error("Invalid Zeros browser release owner.");
+          throw browserError("Invalid Zeros browser release owner.");
         }
         const result: BrowserSessionReleaseResponse = {
           version: BROWSER_SERVICE_VERSION,
@@ -907,7 +908,7 @@ export async function startZerosBrowserService(
       });
     } catch (error) {
       sendJson(response, 400, {
-        error: error instanceof Error ? error.message : String(error),
+        error: browserErrorMessage(error),
       });
     }
   });
@@ -922,7 +923,7 @@ export async function startZerosBrowserService(
   const address = server.address();
   if (!address || typeof address === "string") {
     server.close();
-    throw new Error("Zeros browser service did not bind a loopback port.");
+    throw browserError("Zeros browser service did not bind a loopback port.");
   }
   let browserUsePipe!: CodexBrowserUsePipeHandle;
   try {
@@ -1219,15 +1220,17 @@ async function handleCodexBrowserUseRequest(
 ): Promise<unknown> {
   const binding = context.sessions.get(request.sessionId);
   if (!binding) {
-    throw new Error("Browser turn does not belong to this Zeros conversation.");
+    throw browserError(
+      "Browser turn does not belong to this Zeros conversation.",
+    );
   }
   const record = context.records.get(binding.browserSessionId);
   if (!record) {
     context.sessions.delete(request.sessionId);
-    throw new Error("The conversation browser session is unavailable.");
+    throw browserError("The conversation browser session is unavailable.");
   }
   if (binding.blockedTurnId === request.turnId) {
-    throw new Error("Browser work was stopped by the user.");
+    throw browserError("Browser work was stopped by the user.");
   }
   if (binding.blockedTurnId && binding.blockedTurnId !== request.turnId) {
     binding.blockedTurnId = null;
@@ -1241,10 +1244,10 @@ async function handleCodexBrowserUseRequest(
   }
   if (request.method === "ping") return "pong";
   if (!context.browserEnabled()) {
-    throw new Error("Browser use is disabled in Settings.");
+    throw browserError("Browser use is disabled in Settings.");
   }
   if (!context.trustedSurfaceAvailable()) {
-    throw new Error("Browser use needs an open trusted Zeros window.");
+    throw browserError("Browser use needs an open trusted Zeros window.");
   }
 
   const interruptedAtStart = record.interruptionGeneration;
@@ -1258,7 +1261,7 @@ async function handleCodexBrowserUseRequest(
   };
   const requireLease = (): BrowserLease => {
     const lease = currentLease();
-    if (!lease) throw new Error("Browser tab is no longer available.");
+    if (!lease) throw browserError("Browser tab is no longer available.");
     context.touchRecord(record);
     return lease;
   };
@@ -1361,7 +1364,7 @@ async function handleCodexBrowserUseRequest(
       case "claimUserTab": {
         const lease = requireLease();
         if (lease.actor !== "user") {
-          throw new Error(
+          throw browserError(
             "The browser tab is already controlled by the agent.",
           );
         }
@@ -1374,7 +1377,7 @@ async function handleCodexBrowserUseRequest(
             webContentsId: lease.view.webContents.id,
           })
         ) {
-          throw new Error(
+          throw browserError(
             "Browser tab does not belong to this Zeros conversation.",
           );
         }
@@ -1408,7 +1411,7 @@ async function handleCodexBrowserUseRequest(
         assertCodexBrowserTab(request.params, record, lease);
         const status = request.params.status;
         if (status !== "deliverable" && status !== "handoff") {
-          throw new Error("Unsupported browser tab disposition.");
+          throw browserError("Unsupported browser tab disposition.");
         }
         lease.codexTabDisposition = status;
         return {};
@@ -1474,7 +1477,7 @@ async function handleCodexBrowserUseRequest(
           lease.agentInputDepth = Math.max(0, lease.agentInputDepth - 1);
         }
         if (interrupted())
-          throw new Error("Browser work was stopped by the user.");
+          throw browserError("Browser work was stopped by the user.");
         return {};
       }
       case "executeCdp": {
@@ -1579,7 +1582,7 @@ async function handleCodexBrowserUseRequest(
             await waitForHostActions(lease, false);
           }
           if (interrupted()) {
-            throw new Error("Browser work was stopped by the user.");
+            throw browserError("Browser work was stopped by the user.");
           }
           return result;
         } catch (error) {
@@ -1605,7 +1608,9 @@ async function handleCodexBrowserUseRequest(
         // its exact sentinel makes the official client fall back to executeCdp
         // with the full expression, keeping semantics correct without holding
         // executable page code in a second host-side cache.
-        throw new Error(unsupportedCodexBrowserMethodMessage(request.method));
+        throw browserError(
+          unsupportedCodexBrowserMethodMessage(request.method),
+        );
       case "attachTarget":
       case "detachTarget":
         return {};
@@ -1618,7 +1623,7 @@ async function handleCodexBrowserUseRequest(
         return {};
       }
       default:
-        throw new Error(
+        throw browserError(
           `Unsupported native Codex Browser Use method: ${request.method}`,
         );
     }
@@ -1632,7 +1637,7 @@ async function ensureCodexBrowserUseReady(lease: BrowserLease): Promise<void> {
   const contents = lease.view.webContents;
   const pending = (async () => {
     if (contents.isDestroyed()) {
-      throw new Error("Browser tab is no longer available.");
+      throw browserError("Browser tab is no longer available.");
     }
     // A detached WebContentsView does not necessarily commit a renderer before
     // its first navigation. Browser-client evaluates the initial document, so
@@ -1836,7 +1841,9 @@ function assertCodexBrowserTab(
       webContentsId: lease.view.webContents.id,
     })
   ) {
-    throw new Error("Browser tab does not belong to this Zeros conversation.");
+    throw browserError(
+      "Browser tab does not belong to this Zeros conversation.",
+    );
   }
 }
 
@@ -1868,7 +1875,7 @@ function requireNativeBrowserMethod(value: unknown): string {
     value.length > 200 ||
     !/^[A-Za-z][A-Za-z0-9]*\.[A-Za-z][A-Za-z0-9]*$/.test(value)
   ) {
-    throw new Error("Invalid native browser method.");
+    throw browserError("Invalid native browser method.");
   }
   return value;
 }
@@ -1878,7 +1885,7 @@ function finiteNumberField(
   key: string,
 ): number {
   const result = Number(value[key]);
-  if (!Number.isFinite(result)) throw new Error(`Invalid ${key}.`);
+  if (!Number.isFinite(result)) throw browserError(`Invalid ${key}.`);
   return result;
 }
 
@@ -2304,7 +2311,7 @@ async function executeTool(
       });
       if (context.interrupted()) {
         await discardStagedBrowserUpload(upload);
-        throw new Error("Browser work was stopped by the user.");
+        throw browserError("Browser work was stopped by the user.");
       }
       const label = `${String(inspected.label || "Choose file")}: ${upload.name} (${upload.size} bytes)`;
       let allowed: boolean;
@@ -2370,7 +2377,7 @@ async function executeTool(
       }
       if (context.interrupted()) {
         await discardStagedBrowserUpload(upload);
-        throw new Error("Browser work was stopped by the user.");
+        throw browserError("Browser work was stopped by the user.");
       }
       lease.stagedUploads.push(upload);
       while (lease.stagedUploads.length > MAX_STAGED_UPLOADS) {
@@ -2455,7 +2462,7 @@ async function executeTool(
       });
       if (context.interrupted()) {
         await unlink(artifact.path).catch(() => undefined);
-        throw new Error("Browser work was stopped by the user.");
+        throw browserError("Browser work was stopped by the user.");
       }
       publishState(context.options, record, "ready", tool);
       return success({ artifact });
@@ -2469,7 +2476,7 @@ function assertBrowserActionNotInterrupted(context: {
   interrupted: () => boolean;
 }): void {
   if (context.interrupted())
-    throw new Error("Browser work was stopped by the user.");
+    throw browserError("Browser work was stopped by the user.");
 }
 
 function createLease(
@@ -3298,14 +3305,14 @@ async function runGuardedBrowserNavigation(
       tool,
     );
     if (!allowed) {
-      throw new Error("Opening this website was denied by the user.");
+      throw browserError("Opening this website was denied by the user.");
     }
     if (
       record.interruptionGeneration !== interruptionGeneration ||
       record.lease !== lease ||
       lease.view.webContents.isDestroyed()
     ) {
-      throw new Error("Browser work was stopped by the user.");
+      throw browserError("Browser work was stopped by the user.");
     }
     lease.preapprovedNavigationOrigin = targetOrigin;
     lease.pendingUrl = normalizedUrl;
@@ -3313,7 +3320,7 @@ async function runGuardedBrowserNavigation(
     try {
       await loadBrowserUrl(lease.view.webContents, normalizedUrl);
       if (record.interruptionGeneration !== interruptionGeneration) {
-        throw new Error("Browser work was stopped by the user.");
+        throw browserError("Browser work was stopped by the user.");
       }
       await waitForUsefulPageContent(lease.view.webContents);
     } finally {
@@ -3445,7 +3452,8 @@ async function screenshotResult(
       }
     }
     const image = await lease.view.webContents.capturePage();
-    if (interrupted()) throw new Error("Browser work was stopped by the user.");
+    if (interrupted())
+      throw browserError("Browser work was stopped by the user.");
     const jpeg = image.toJPEG(85);
     const url = normalizeWebUrl(lease.view.webContents.getURL());
     const artifact = await persistBrowserScreenshot({
@@ -3457,7 +3465,7 @@ async function screenshotResult(
     });
     if (interrupted()) {
       await unlink(artifact.path).catch(() => undefined);
-      throw new Error("Browser work was stopped by the user.");
+      throw browserError("Browser work was stopped by the user.");
     }
     return {
       version: BROWSER_SERVICE_VERSION,
@@ -3632,12 +3640,12 @@ async function dispatchAgentClick(
     Math.max(0, Math.min(Math.max(0, bounds.height - 1), yValue)),
   );
   if (!Number.isFinite(xValue) || !Number.isFinite(yValue)) {
-    throw new Error("The browser click target is outside the viewport.");
+    throw browserError("The browser click target is outside the viewport.");
   }
   lease.agentInputDepth += 1;
   try {
     if (lease.actor !== "agent" || lease.view.webContents.isDestroyed()) {
-      throw new Error("Browser work was stopped by the user.");
+      throw browserError("Browser work was stopped by the user.");
     }
     lease.view.webContents.sendInputEvent({ type: "mouseMove", x, y });
     // Hover handlers can move or cover a control. Yield once, then revalidate
@@ -3657,7 +3665,7 @@ async function dispatchAgentClick(
       ),
     );
     if (revalidated.ok !== true) {
-      throw new Error(
+      throw browserError(
         String(revalidated.error ?? "The browser click target changed."),
       );
     }
@@ -3769,12 +3777,12 @@ async function setFileInput(
       pierce: true,
     })) as { root?: { nodeId?: number } };
     const nodeId = document.root?.nodeId;
-    if (!nodeId) throw new Error("The browser document is unavailable.");
+    if (!nodeId) throw browserError("The browser document is unavailable.");
     const match = (await debug.sendCommand("DOM.querySelector", {
       nodeId,
       selector: `[${refAttribute}="${ref}"]`,
     })) as { nodeId?: number };
-    if (!match.nodeId) throw new Error("Unknown or stale browser ref.");
+    if (!match.nodeId) throw browserError("Unknown or stale browser ref.");
     await debug.sendCommand("DOM.setFileInputFiles", {
       nodeId: match.nodeId,
       files: [filePath],
@@ -3827,7 +3835,7 @@ async function normalizeOwner(
     typeof owner.workspaceRoot !== "string" ||
     !isAbsolute(owner.workspaceRoot)
   ) {
-    throw new Error("Invalid Zeros browser owner.");
+    throw browserError("Invalid Zeros browser owner.");
   }
   const workspaceRoot = await realpath(owner.workspaceRoot);
   return {
@@ -4281,14 +4289,14 @@ async function normalizeCodexPageNavigateAfterRedirect(
 }
 
 function normalizeWebUrl(value: string): string {
-  if (value.length > 8_192) throw new Error("Browser URL is too long.");
+  if (value.length > 8_192) throw browserError("Browser URL is too long.");
   const url = new URL(value);
   if (
     (url.protocol !== "http:" && url.protocol !== "https:") ||
     url.username ||
     url.password
   ) {
-    throw new Error(
+    throw browserError(
       "Browser navigation requires a credential-free HTTP(S) URL.",
     );
   }
@@ -4338,14 +4346,14 @@ function permissionLabel(permission: string): string {
 
 function requireRef(value: unknown): string {
   if (!isBrowserElementRef(value)) {
-    throw new Error("Browser element ref is invalid.");
+    throw browserError("Browser element ref is invalid.");
   }
   return value;
 }
 
 function requireString(value: unknown, name: string): string {
   if (typeof value !== "string" || !value.trim()) {
-    throw new Error(`Browser ${name} must be a non-empty string.`);
+    throw browserError(`Browser ${name} must be a non-empty string.`);
   }
   return value;
 }
@@ -4362,7 +4370,7 @@ function boundedInteger(
     value < minimum ||
     value > maximum
   ) {
-    throw new Error(
+    throw browserError(
       `Browser ${label} must be an integer from ${minimum} to ${maximum}.`,
     );
   }
@@ -4371,7 +4379,7 @@ function boundedInteger(
 
 function boundedPositiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
-    throw new Error(`Zeros browser ${label} is invalid.`);
+    throw browserError(`Zeros browser ${label} is invalid.`);
   }
   return value;
 }
@@ -4401,7 +4409,7 @@ function failure(text: string): BrowserToolResult {
 function boundedJson(value: unknown): string {
   const serialized = JSON.stringify(value);
   if (Buffer.byteLength(serialized) > MAX_RESPONSE_BYTES) {
-    throw new Error("Zeros browser response exceeded its size limit.");
+    throw browserError("Zeros browser response exceeded its size limit.");
   }
   return serialized;
 }
@@ -4418,7 +4426,7 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
     if (bytes > MAX_REQUEST_BYTES)
-      throw new Error("Zeros browser request is too large.");
+      throw browserError("Zeros browser request is too large.");
     chunks.push(buffer);
   }
   if (chunks.length === 0) return {};

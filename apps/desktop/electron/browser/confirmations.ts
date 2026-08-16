@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+
+import { browserError } from "./errors";
 import {
   isBrowserProductId,
   isBrowserConfirmationDecision,
@@ -334,7 +336,7 @@ function normalizeScope(value: string): string {
 
 function boundedPositiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
-    throw new Error(`Browser ${label} is invalid.`);
+    throw browserError(`Browser ${label} is invalid.`);
   }
   return value;
 }
