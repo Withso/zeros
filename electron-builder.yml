@@ -88,6 +88,28 @@ extraResources:
   # dependency tree + asarUnpack below.
   - from: apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs
     to: cursor-host.cjs
+  # Per-session Zeros Sandbox Runtime supervisor. Built by beforePack as one
+  # Node-compatible ESM file so the Bun-compiled engine never relies on an
+  # app.asar/node_modules lookup at the security boundary.
+  - from: binaries/zsr-supervisor.mjs
+    to: zsr-supervisor.mjs
+  - from: binaries/zsr-network-bridge.mjs
+    to: zsr-network-bridge.mjs
+  - from: binaries/zsr-container-worker.mjs
+    to: zsr-container-worker.mjs
+  - from: binaries/zsr-orbstack-container-host.mjs
+    to: zsr-orbstack-container-host.mjs
+  - from: binaries/zsr-orbstack-cloud-init.yaml
+    to: zsr-orbstack-cloud-init.yaml
+  # Native Darwin lifecycle proof for descendants that call setsid(2) and
+  # double-fork out of the supervisor's POSIX process group. Built from the
+  # reviewed C source by the same beforePack hook; signed with the app bundle.
+  - from: binaries/zsr-macos-process-domain
+    to: zsr-macos-process-domain
+  # Post-Seatbelt bind/connect virtualization for exact, immutable per-session
+  # development-port pools. The dylib is signed with the application bundle.
+  - from: binaries/zsr-macos-port-bind.dylib
+    to: zsr-macos-port-bind.dylib
   # The Claude Code CLI — the runtime `query()` actually spawns.
   #
   # @anthropic-ai/claude-agent-sdk ships NO cli.js: the executable lives in a

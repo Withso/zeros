@@ -26,6 +26,9 @@ class JsonlLocalAgentStore {
 /** Deterministic and obviously synthetic, so a test asserting on it can't be
  *  passing for the wrong reason (e.g. a real ~/.cursor path leaking in). */
 function getDefaultSdkStateRoot(workspaceRef) {
+  if (process.env.ZEROS_CURSOR_STUB_DEFAULT_STATE_ROOT) {
+    return process.env.ZEROS_CURSOR_STUB_DEFAULT_STATE_ROOT;
+  }
   return `/state-root${workspaceRef}`;
 }
 
@@ -55,4 +58,9 @@ const Agent = {
 
 const Cursor = { models: { list: async () => [] } };
 
-module.exports = { Agent, Cursor, JsonlLocalAgentStore, getDefaultSdkStateRoot };
+module.exports = {
+  Agent,
+  Cursor,
+  JsonlLocalAgentStore,
+  getDefaultSdkStateRoot,
+};

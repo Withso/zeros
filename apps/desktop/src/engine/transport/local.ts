@@ -20,6 +20,10 @@ import {
 } from "node:http";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { WebSocketServer, WebSocket } from "ws";
+import {
+  MAX_BRIDGE_FRAME_BYTES,
+  safeParseClientBridgeMessage,
+} from "@zeros/protocol/schemas";
 import { ENGINE_PORT_SPAN } from "../runtime";
 import type { EngineMessage } from "../types";
 import type { Transport, TransportClient } from "./types";
@@ -203,7 +207,7 @@ export class LocalTransport implements Transport {
   private onConnectCb: ((c: TransportClient) => void) | null = null;
   private onDisconnectCb: ((c: TransportClient) => void) | null = null;
   private onMessageCb:
-    | ((c: TransportClient, msg: EngineMessage) => void)
+    | ((c: TransportClient, msg: EngineMessage) => void | Promise<void>)
     | null = null;
 
   constructor(opts: {
@@ -234,7 +238,10 @@ export class LocalTransport implements Transport {
         res.end(JSON.stringify({ error: "internal error" }));
       });
     });
-    this.wss = new WebSocketServer({ noServer: true });
+    this.wss = new WebSocketServer({
+      noServer: true,
+      maxPayload: MAX_BRIDGE_FRAME_BYTES,
+    });
 
     this.httpServer.on("upgrade", (request, socket, head) => {
       const url = new URL(request.url ?? "", "http://localhost");
@@ -262,12 +269,14 @@ export class LocalTransport implements Transport {
       this.clients.set(ws, client);
 
       ws.on("message", (data) => {
-        let msg: EngineMessage;
+        let raw: unknown;
         try {
-          msg = JSON.parse(data.toString());
+          raw = JSON.parse(data.toString());
         } catch {
           return;
         }
+        const msg = safeParseClientBridgeMessage(raw) as EngineMessage | null;
+        if (!msg) return;
         this.onMessageCb?.(client, msg);
       });
       ws.on("close", () => {
@@ -289,7 +298,10 @@ export class LocalTransport implements Transport {
     this.onDisconnectCb = handler;
   }
   onMessage(
-    handler: (client: TransportClient, msg: EngineMessage) => void,
+    handler: (
+      client: TransportClient,
+      msg: EngineMessage,
+    ) => void | Promise<void>,
   ): void {
     this.onMessageCb = handler;
   }

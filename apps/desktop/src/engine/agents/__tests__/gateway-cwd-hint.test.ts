@@ -7,15 +7,18 @@
 // these tests pin the mechanism with a synthetic non-self-aware agent id.
 
 import os from "node:os";
+import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 import { AgentGateway } from "../gateway";
 import type { AgentAdapter, ContentBlock, PromptResponse } from "../types";
+import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
 function makeGateway() {
   return new AgentGateway({
     projectRoot: "/tmp/zeros-test",
+    executionBoundary: testExecutionBoundary(),
     events: {
       onSessionUpdate: () => {},
       onPermissionRequest: () => {},
@@ -32,6 +35,7 @@ type GwInternals = {
   executionToCwd: Map<string, string>;
   sessionsCwdHinted: Set<string>;
   sessionsInstructed: Set<string>;
+  sessionsTerritoryNoticePending: Set<string>;
   executionToInstructionCtx: Map<
     string,
     {
@@ -299,5 +303,55 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
 
     await gw.prompt("codex", executionId, [text("hi")]);
     expect(sink[0]).toEqual([text("hi")]);
+  });
+
+  it("re-asserts only the current Design territory on a true non-native resume", async () => {
+    const gw = makeGateway();
+    const gwi = gw as unknown as GwInternals;
+    const sink: ContentBlock[][] = [];
+    gwi.adapters.set("claude", resumingAdapter("claude", sink, false));
+    const designDirectory = path.join(os.tmpdir(), "Zeros Design");
+
+    // Unit seam: territory preparation is covered independently; this locks
+    // the resumed-transcript behavior without requiring a live OS sandbox.
+    (
+      gw as unknown as {
+        prepareCodeAgentTerritory: () => Promise<{
+          agentRole: "code";
+          workspaceRoot: string;
+          designDirectory: string;
+          protectedDesignDirectories: readonly string[];
+          writeCapabilities: {
+            workspace: "write";
+            deniedPaths: readonly string[];
+          };
+        }>;
+      }
+    ).prepareCodeAgentTerritory = async () => ({
+      agentRole: "code",
+      workspaceRoot: os.tmpdir(),
+      designDirectory,
+      protectedDesignDirectories: [designDirectory],
+      writeCapabilities: {
+        workspace: "write",
+        deniedPaths: [designDirectory, path.join(os.tmpdir(), ".zeros")],
+      },
+    });
+
+    const loaded = await gw.loadSession("claude", "true-territory", {
+      cwd: os.tmpdir(),
+    });
+    const executionId = loaded.executionId!;
+    expect(executionId).not.toBe("true-territory");
+    expect(gwi.sessionsInstructed.has(executionId)).toBe(true);
+    expect(gwi.sessionsTerritoryNoticePending.has(executionId)).toBe(true);
+
+    await gw.prompt("claude", executionId, [text("continue")]);
+    const head = sink[0]![0] as { text: string };
+    expect(head.text).toContain("<system_instruction>");
+    expect(head.text).toContain(designDirectory);
+    expect(head.text).toContain("never create, edit, append, truncate");
+    expect(head.text).not.toContain("target branch");
+    expect(sink[0]![1]).toEqual(text("continue"));
   });
 });

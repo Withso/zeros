@@ -7,6 +7,10 @@ import type {
   ProviderBinding,
   ProviderMetadata,
 } from "@zeros/protocol/identities";
+import type {
+  ExecutionBoundaryPortsSnapshot,
+  ExecutionBoundaryStatus,
+} from "@zeros/protocol/containment";
 
 /** Durable locator fields for a load-session recovery request.
  *
@@ -37,6 +41,8 @@ export function recoveredSessionIdentity(
     response?: {
       providerBinding?: ProviderBinding;
       providerMetadata?: ProviderMetadata;
+      boundary?: ExecutionBoundaryStatus;
+      boundaryPorts?: ExecutionBoundaryPortsSnapshot;
     };
   },
   previous: {
@@ -48,6 +54,8 @@ export function recoveredSessionIdentity(
   sessionId: string;
   providerBinding: ProviderBinding | null;
   providerMetadata: ProviderMetadata | null;
+  boundary: ExecutionBoundaryStatus | null;
+  boundaryPorts: ExecutionBoundaryPortsSnapshot | null;
 } | null {
   const executionId = loaded.executionId ?? loaded.sessionId;
   if (!executionId) return null;
@@ -60,6 +68,8 @@ export function recoveredSessionIdentity(
     providerMetadata: providerBinding
       ? (loaded.response?.providerMetadata ?? previous.providerMetadata ?? null)
       : null,
+    boundary: loaded.response?.boundary ?? null,
+    boundaryPorts: loaded.response?.boundaryPorts ?? null,
   };
 }
 

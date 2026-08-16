@@ -15,7 +15,10 @@ import {
   insertWorkspace,
 } from "../../git/state";
 import type { Workspace } from "../../git/types";
-import { PTY_AGENT_AUTH_CWD, type PtyExitReason } from "@zeros/protocol/messages";
+import {
+  PTY_AGENT_AUTH_CWD,
+  type PtyExitReason,
+} from "@zeros/protocol/messages";
 
 function makeFake() {
   const state = {
@@ -29,6 +32,9 @@ function makeFake() {
     | null = null;
   const handle: PtyHandle = {
     pid: 4242,
+    onSpawned: (cb) => {
+      cb(4242);
+    },
     onData: (cb) => {
       dataCb = cb;
     },
@@ -291,6 +297,30 @@ describe("PtyService", () => {
       expect(authCwd).toBe(fs.realpathSync(path.join(stateRoot, "agent-auth")));
       expect(authCwd.startsWith(process.cwd())).toBe(false);
       expect(fs.statSync(authCwd).mode & 0o777).toBe(0o700);
+    } finally {
+      setStateRootForTesting(null);
+      fs.rmSync(stateRoot, { recursive: true, force: true });
+    }
+  });
+
+  it("projects the isolated auth cwd read-only to a qualified cloud worker", () => {
+    const stateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-pty-auth-"));
+    setStateRootForTesting(stateRoot);
+    try {
+      const ownerUid = process.getuid?.() ?? 1_000;
+      const uid = ownerUid === 0 ? 10_001 : ownerUid;
+      const gid = process.getgid?.() ?? 1_000;
+      const svc = new PtyService(
+        process.cwd(),
+        () => makeFake().handle,
+        undefined,
+        { agentAuthIdentity: { uid, gid } },
+      );
+      const authCwd = svc.resolveCwd(PTY_AGENT_AUTH_CWD);
+      const stat = fs.statSync(authCwd);
+      expect(stat.uid).toBe(ownerUid);
+      expect(stat.gid).toBe(gid);
+      expect(stat.mode & 0o777).toBe(0o750);
     } finally {
       setStateRootForTesting(null);
       fs.rmSync(stateRoot, { recursive: true, force: true });

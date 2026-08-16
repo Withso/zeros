@@ -18,12 +18,18 @@ import {
 } from "../../git/state";
 import type { Workspace } from "../../git/types";
 import type { PtyService } from "../../pty/service";
+import type { PreparedBoundary } from "../../agents/containment/types";
 import { RunManager } from "../run-manager";
 
 /** A minimal PtyService stand-in — RunManager only calls has/kill/create. */
 function fakePty() {
   const live = new Set<string>();
-  const created: Array<{ sessionId: string; command?: string; cwd?: string }> = [];
+  const created: Array<{
+    sessionId: string;
+    command?: string;
+    cwd?: string;
+    wrapped: boolean;
+  }> = [];
   const envs: Array<Record<string, string> | undefined> = [];
   const killed: string[] = [];
   const svc = {
@@ -37,12 +43,14 @@ function fakePty() {
       resolvedCwd?: string;
       command?: string;
       env?: Record<string, string>;
+      wrapSpawn?: (request: unknown) => unknown;
     }) => {
       live.add(opts.sessionId);
       created.push({
         sessionId: opts.sessionId,
         command: opts.command,
         cwd: opts.resolvedCwd,
+        wrapped: typeof opts.wrapSpawn === "function",
       });
       envs.push(opts.env);
       return {
@@ -83,7 +91,17 @@ const WS = "ws_run111-rose";
 const FOLDER = `/tmp/worktrees/test-repo/${WS}`;
 const SID = runSessionId(FOLDER, "dev");
 
-function startArgs(overrides: Partial<Parameters<RunManager["start"]>[0]> = {}) {
+function preparedTestBoundary(): PreparedBoundary {
+  return {
+    wrapSpawn: (request: unknown) => request,
+    revoke: async () => {},
+    stopAndProve: async () => {},
+  } as unknown as PreparedBoundary;
+}
+
+function startArgs(
+  overrides: Partial<Parameters<RunManager["start"]>[0]> = {},
+) {
   return {
     sessionId: SID,
     workspaceId: WS,
@@ -123,7 +141,11 @@ describe("RunManager", () => {
   // which would make this suite spawn a login shell (slow, and dependent on
   // whatever dotfiles the machine running CI has). envCalls records what the
   // manager asked for so the wiring is still asserted.
-  let envCalls: Array<{ cwd: string; workspaceId: string | null; repoRoot?: string | null }>;
+  let envCalls: Array<{
+    cwd: string;
+    workspaceId: string | null;
+    repoRoot?: string | null;
+  }>;
   const make = (
     pty: PtyService,
     registered: string[] = [],
@@ -132,6 +154,12 @@ describe("RunManager", () => {
       workspaceId: string | null;
       repoRoot?: string | null;
     }) => Promise<Record<string, string> | undefined>,
+    boundaryFactory: (request: {
+      executionId: string;
+      cwd: string;
+      workspaceRoot: string;
+      repoRoot: string;
+    }) => Promise<PreparedBoundary> = async () => preparedTestBoundary(),
   ) =>
     new RunManager(
       pty,
@@ -145,6 +173,7 @@ describe("RunManager", () => {
           envCalls.push(ctx);
           return { PATH: "/login/bin", FORCE_COLOR: "1" };
         }),
+      boundaryFactory,
     );
 
   it("start spawns the command as the PTY's foreground process + registers it", async () => {
@@ -153,11 +182,52 @@ describe("RunManager", () => {
     const mgr = make(svc, registered);
     const res = await mgr.start(startArgs());
     expect(res.alreadyRunning).toBe(false);
-    expect(created).toEqual([{ sessionId: SID, command: "pnpm dev", cwd: FOLDER }]);
+    expect(created).toEqual([
+      {
+        sessionId: SID,
+        command: "pnpm dev",
+        cwd: FOLDER,
+        wrapped: true,
+      },
+    ]);
     expect(registered).toEqual([SID]);
-    expect(mgr.info([SID], WS).dev).toMatchObject({ state: "running", live: true });
+    expect(mgr.info([SID], WS).dev).toMatchObject({
+      state: "running",
+      live: true,
+    });
     expect(changes).toBeGreaterThan(0);
     expect(changedWorkspaceIds).toContain(WS);
+  });
+
+  it("prepares and applies a repo-code-task boundary to the PTY process root", async () => {
+    const { svc, created } = fakePty();
+    const requests: Array<{
+      executionId: string;
+      cwd: string;
+      workspaceRoot: string;
+      repoRoot: string;
+    }> = [];
+    const boundary = preparedTestBoundary();
+    const mgr = make(
+      svc,
+      [],
+      async () => ({ PATH: "/login/bin" }),
+      async (request) => {
+        requests.push(request);
+        return boundary;
+      },
+    );
+
+    await mgr.start(startArgs({ repoRoot: "/tmp/test-repo" }));
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      cwd: FOLDER,
+      workspaceRoot: FOLDER,
+      repoRoot: "/tmp/test-repo",
+    });
+    expect(requests[0]!.executionId).toMatch(/^repo-run-/);
+    expect(created[0]?.wrapped).toBe(true);
   });
 
   it("spawns with the resolved run env (login PATH), not the engine's raw env", async () => {
@@ -350,6 +420,50 @@ describe("RunManager", () => {
     expect(mgr.info([SID], WS).dev!.state).toBe("stopped");
   });
 
+  it("makes repository-task teardown proof part of workspace lifecycle", async () => {
+    const { svc, live } = fakePty();
+    const boundary = {
+      ...preparedTestBoundary(),
+      stopAndProve: async () => {
+        throw new Error("run process domain is still populated");
+      },
+    } as PreparedBoundary;
+    const mgr = make(svc, [], undefined, async () => boundary);
+    await mgr.start(startArgs());
+    live.delete(SID);
+    mgr.handleExit(SID, 137, 9);
+
+    await expect(mgr.proveWorkspaceBoundariesStopped(WS)).rejects.toThrow(
+      /repository run containment teardown was not proven/i,
+    );
+  });
+
+  it("does not stop or disclose a run when the asserted workspace owner differs", async () => {
+    const { svc, killed } = fakePty();
+    const mgr = make(svc);
+    await mgr.start(startArgs());
+    mgr.appendData(SID, "private run output\r\n");
+
+    mgr.stop(SID, "ws_other-workspace");
+
+    expect(killed).toEqual([]);
+    expect(mgr.info([SID], WS).dev).toMatchObject({
+      state: "running",
+      live: true,
+    });
+    expect(mgr.log(SID, "ws_other-workspace")).toEqual({
+      log: "",
+      truncated: false,
+    });
+    expect(mgr.log(SID, WS)).toEqual({
+      log: "private run output\r\n",
+      truncated: false,
+    });
+
+    mgr.stop(SID, WS);
+    expect(killed).toEqual([SID]);
+  });
+
   it("respawn guard: a stop→start respawn waits for the old exit to land", async () => {
     const { svc, created } = fakePty();
     const mgr = make(svc);
@@ -413,7 +527,10 @@ describe("RunManager", () => {
     await mgr.start(startArgs());
     // A caller whose sessionIds don't cover the live run (folder-key drift)
     // still reads "running" — and the durable row isn't 'repaired' under it.
-    expect(mgr.info([], WS).dev).toMatchObject({ state: "running", live: true });
+    expect(mgr.info([], WS).dev).toMatchObject({
+      state: "running",
+      live: true,
+    });
     expect(getWorkspaceMeta(WS, "run_status")).toContain('"running"');
   });
 
@@ -425,7 +542,9 @@ describe("RunManager", () => {
     svcAny.create = () => {
       throw new Error("boom");
     };
-    await expect(mgr.start(startArgs({ oneShot: true }))).rejects.toThrow("boom");
+    await expect(mgr.start(startArgs({ oneShot: true }))).rejects.toThrow(
+      "boom",
+    );
     expect(mgr.info([SID], WS).dev!.state).toBe("failed");
     // The settled entry lets the next start respawn immediately (no 3s wait).
     svcAny.create = realCreate;

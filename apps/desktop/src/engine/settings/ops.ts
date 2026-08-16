@@ -22,6 +22,7 @@ import path from "node:path";
 import { parse as parseToml } from "smol-toml";
 import { isSecretEnvName } from "./env-names";
 import {
+  applySettingsPatch,
   managedSettingsPath,
   readSettingsFile,
   repoLocalSettingsPath,
@@ -256,11 +257,17 @@ export interface SettingsWriteOpResult {
   warnings: string[];
 }
 
-export function opSettingsWrite(
+export interface SettingsWritePreview extends SettingsWriteOpResult {
+  /** Canonical file that would be replaced. Used only to project the resulting
+   * effective settings before a privileged pointer transition is committed. */
+  path: string;
+}
+
+function prepareSettingsWrite(
   layer: WritableLayer,
   patch: RawSettingsDoc,
   repoRoot?: string,
-): SettingsWriteOpResult {
+): SettingsWritePreview {
   if (!isPlainObject(patch)) {
     throw new SettingsOpError(
       "SETTINGS_BAD_PATCH",
@@ -274,12 +281,96 @@ export function opSettingsWrite(
     );
   }
   const filePath = layerPath(layer, repoRoot);
+  const current = readSettingsFile(filePath);
+  if (current.error) {
+    throw new Error(
+      `refusing to overwrite malformed settings file ${filePath}: ${current.error}`,
+    );
+  }
+  const doc = applySettingsPatch(current.doc, patch);
+  const { warnings } = sanitizeLayer(doc, layer);
+  return { layer, path: filePath, doc, warnings };
+}
+
+/** Side-effect-free projection of settings.write. Privileged settings that
+ * select an engine-owned filesystem territory use this to validate every
+ * resulting effective pointer before touching the settings file. */
+export function opSettingsPreviewWrite(
+  layer: WritableLayer,
+  patch: RawSettingsDoc,
+  repoRoot?: string,
+): SettingsWritePreview {
+  return prepareSettingsWrite(layer, patch, repoRoot);
+}
+
+/** Resolve a checkout exactly as opSettingsResolve would, replacing one layer
+ * by a preview document when that layer's physical file matches `override`.
+ * This keeps validation aligned with real layer precedence, including a
+ * worktree's committed repo file and its distinct workspace-local file. */
+export function opSettingsResolveWithOverride(
+  repoRoot: string | undefined,
+  mainRepoRoot: string | undefined,
+  override: Pick<SettingsWritePreview, "path" | "doc">,
+): ResolvedSettings {
+  const overridePath = path.resolve(override.path);
+  const read = (filePath: string): ReadSettingsResult =>
+    path.resolve(filePath) === overridePath
+      ? { doc: override.doc, exists: true }
+      : readSettingsFile(filePath);
+  const user = read(userSettingsPath());
+  const managed = read(managedSettingsPath());
+  const repo = repoRoot ? read(repoSettingsPath(repoRoot)) : undefined;
+  const repoLocalRoot = mainRepoRoot ?? repoRoot;
+  const repoLocal = repoLocalRoot
+    ? read(repoLocalSettingsPath(repoLocalRoot))
+    : undefined;
+  const isDistinctWorktree =
+    !!repoRoot &&
+    !!mainRepoRoot &&
+    path.resolve(mainRepoRoot) !== path.resolve(repoRoot);
+  const workspaceLocal = isDistinctWorktree
+    ? read(repoLocalSettingsPath(repoRoot))
+    : undefined;
+  const resolved = resolveSettings({
+    user: user.error ? null : user.doc,
+    team: getTeamDoc(),
+    managed: managed.error ? null : managed.doc,
+    repo: repo?.error ? null : repo?.doc,
+    repoLocal: repoLocal?.error ? null : repoLocal?.doc,
+    workspaceLocal: workspaceLocal?.error ? null : workspaceLocal?.doc,
+  });
+  for (const [name, result] of [
+    ["user", user],
+    ["managed", managed],
+    ["repo", repo],
+    ["repo-local", repoLocal],
+    ["workspace-local", workspaceLocal],
+  ] as const) {
+    if (result?.error) {
+      resolved.warnings.push(
+        `${name}: file is malformed and was ignored (${result.error})`,
+      );
+    }
+  }
+  return resolved;
+}
+
+export function opSettingsWrite(
+  layer: WritableLayer,
+  patch: RawSettingsDoc,
+  repoRoot?: string,
+): SettingsWriteOpResult {
+  const prepared = prepareSettingsWrite(layer, patch, repoRoot);
+  const filePath = prepared.path;
   const schemaUrl =
     layer === "user"
       ? SCHEMA_URL_USER
       : layer === "repo"
         ? SCHEMA_URL_REPO
         : null;
+  // Re-run the format-preserving read/patch/write at the commit point. The
+  // preview above is validation only; updateSettingsFile remains the atomic
+  // source of truth and refuses a concurrently malformed file.
   const doc = updateSettingsFile(filePath, patch, { schemaUrl });
   if ((layer === "repo-local" || layer === "workspace-local") && repoRoot) {
     ensureLocalSettingsIgnored(repoRoot);

@@ -26,17 +26,34 @@
 // ──────────────────────────────────────────────────────────
 
 import * as fsp from "node:fs/promises";
-import { existsSync } from "node:fs";
-import { randomUUID } from "node:crypto";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import path from "node:path";
+import { tmpdir } from "node:os";
 
 // Resolve workspaceId → cwd before spawning.
 // We import directly from the workspace state module (not the git
 // barrel) to avoid pulling GitHub auth/Octokit wiring into the engine
 // bundle.
-import { getWorkspaceById } from "../git/state";
+import { getWorkspaceById, listWorkspaces } from "../git/state";
 import { resolveWorkspaceTargetRef } from "../git/target-branch";
 import { mergeSpawnEnv } from "../settings/spawn-env";
 import { applyUserProviderConfig } from "../settings/provider-env";
+import {
+  assertSafeProspectiveDesignDirectory,
+  discoverDesignDirectories,
+  previewDesignDirectoryForEnter,
+  reserveProspectiveDesignDirectory,
+  resolveDesignDirectoryPointerState,
+} from "../design/directory";
+import { primeDesignDirectoryName } from "../design/directory-registry";
+import { fenceDesignDirectory } from "../design/workspace-lock";
+import {
+  assertDesignDirHasNoHardlinkAliases,
+  resolveDesignDirForLock,
+} from "../files/design-lock";
+import { repoSettingsPath, repoLocalSettingsPath } from "../settings/files";
+import { runGit } from "../git/git-exec";
 import {
   AGENT_MANIFEST,
   bundledRuntimeVersion,
@@ -47,8 +64,10 @@ import {
 } from "./registry";
 import { sessionsRoot } from "./session-paths";
 import {
+  buildCodeAgentDesignTerritoryNotice,
   buildFirstTurnInstructionBody,
   buildFirstTurnSystemInstruction,
+  wrapSystemInstruction,
 } from "@zeros/protocol/system-instructions";
 import {
   probeCliInstalled,
@@ -57,6 +76,7 @@ import {
   secretAccountFingerprint,
   probeCliCompatibility,
   clearVersionCache,
+  type ProbeCommandRunner,
 } from "./probes";
 import type {
   AgentAdapter,
@@ -73,6 +93,7 @@ import type {
   QuestionResponse,
   RequestPermissionResponse,
 } from "./types";
+import type { AgentFilesystemTerritory } from "./types";
 import type { AccountDetails, EnrichedRegistryAgent } from "../types";
 import { AgentFailureError } from "./types";
 import { dedupeMcpServers, resolveMcpServersForRepo } from "./mcp-registry";
@@ -81,6 +102,661 @@ import {
   legacyProviderBinding,
   type ProviderBinding,
 } from "@zeros/protocol/identities";
+import {
+  EXECUTION_BOUNDARY_PORTS_VERSION,
+  type ExecutionBoundaryPortsSnapshot,
+  type ExecutionBoundaryStatus,
+} from "@zeros/protocol/containment";
+import { unavailableBoundaryStatus } from "./containment/status";
+import type {
+  BoundaryRequest,
+  ContainerWorkerRequest,
+  ExecutionBoundary,
+  LocalServiceCapability,
+  LocalTcpServiceCapability,
+  PreparedBoundary,
+} from "./containment/types";
+import { ZsrExecutionBoundary } from "./containment/zsr-boundary";
+import { completeAgentSpawnEnv } from "./adapters/shared/config-isolation";
+import { findOrbStackCli } from "./containment/macos-orbstack-container-worker";
+import {
+  localPreviewGatewayFactory,
+  type BoundaryPreviewGateway,
+  type BoundaryPreviewGatewayFactory,
+  type ZsrPreviewTarget,
+} from "./containment/zsr-preview-gateway";
+
+const LOOPBACK_URL_ENV: Readonly<
+  Record<
+    string,
+    { kind: LocalTcpServiceCapability["kind"]; defaultPort: number }
+  >
+> = {
+  DATABASE_URL: { kind: "database", defaultPort: 5432 },
+  REDIS_URL: { kind: "database", defaultPort: 6379 },
+  MONGODB_URI: { kind: "database", defaultPort: 27017 },
+  MONGO_URL: { kind: "database", defaultPort: 27017 },
+  ELASTICSEARCH_URL: { kind: "other", defaultPort: 9200 },
+};
+
+function exactLoopbackHost(hostname: string): "127.0.0.1" | "::1" | null {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (normalized === "127.0.0.1" || normalized === "localhost") {
+    return "127.0.0.1";
+  }
+  return normalized === "::1" ? "::1" : null;
+}
+
+function urlFacadeTemplate(raw: string): string | null {
+  const scheme = raw.indexOf("://");
+  if (scheme < 1) return null;
+  const authorityStart = scheme + 3;
+  const suffixOffset = raw.slice(authorityStart).search(/[/?#]/);
+  const authorityEnd =
+    suffixOffset < 0 ? raw.length : authorityStart + suffixOffset;
+  const authority = raw.slice(authorityStart, authorityEnd);
+  if (!authority || authority.includes(",")) return null;
+  const at = authority.lastIndexOf("@");
+  const credentials = at >= 0 ? authority.slice(0, at + 1) : "";
+  return (
+    raw.slice(0, authorityStart) +
+    credentials +
+    "{host}:{port}" +
+    raw.slice(authorityEnd)
+  );
+}
+
+/** Discover only standard client variables that already name an exact local
+ * TCP dependency. Raw URLs/credentials remain trusted engine input; the
+ * returned template changes only host/port to a generation-scoped façade. */
+export function deriveLoopbackServiceCapabilities(
+  env: Readonly<Record<string, string>> | undefined,
+): LocalServiceCapability[] {
+  if (!env) return [];
+  const capabilities: LocalServiceCapability[] = [];
+  for (const [name, definition] of Object.entries(LOOPBACK_URL_ENV)) {
+    const raw = env[name]?.trim();
+    if (!raw) continue;
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      continue;
+    }
+    const targetHost = exactLoopbackHost(url.hostname);
+    const template = urlFacadeTemplate(raw);
+    const targetPort = Number(url.port || definition.defaultPort);
+    if (
+      !targetHost ||
+      !template ||
+      !Number.isInteger(targetPort) ||
+      targetPort < 1 ||
+      targetPort > 65_535
+    ) {
+      continue;
+    }
+    capabilities.push({
+      serviceId: `env-${name.toLowerCase().replaceAll("_", "-")}`,
+      kind: definition.kind,
+      transport: "tcp",
+      targetHost,
+      targetPort,
+      adapter: "environment-only",
+      environment: { [name]: template },
+    });
+  }
+
+  const hostPortPairs = [
+    {
+      hostName: "PGHOST",
+      portName: "PGPORT",
+      defaultPort: 5432,
+      kind: "database" as const,
+    },
+    {
+      hostName: "MYSQL_HOST",
+      portName: "MYSQL_TCP_PORT",
+      defaultPort: 3306,
+      kind: "database" as const,
+    },
+  ];
+  for (const pair of hostPortPairs) {
+    const rawHost = env[pair.hostName]?.trim();
+    if (!rawHost) continue;
+    const targetHost = exactLoopbackHost(rawHost);
+    const targetPort = Number(env[pair.portName] || pair.defaultPort);
+    if (
+      !targetHost ||
+      !Number.isInteger(targetPort) ||
+      targetPort < 1 ||
+      targetPort > 65_535
+    ) {
+      continue;
+    }
+    capabilities.push({
+      serviceId: `env-${pair.hostName.toLowerCase()}`,
+      kind: pair.kind,
+      transport: "tcp",
+      targetHost,
+      targetPort,
+      adapter: "environment-only",
+      environment: {
+        [pair.hostName]: "{host}",
+        [pair.portName]: "{port}",
+      },
+    });
+  }
+
+  const sshAgent = exactAbsoluteSocketPath(env.SSH_AUTH_SOCK);
+  if (sshAgent) {
+    capabilities.push({
+      serviceId: "env-ssh-auth-sock",
+      kind: "ssh-agent",
+      transport: "unix",
+      targetPath: sshAgent,
+      adapter: "ssh-agent",
+    });
+  }
+  const nixDaemon = exactUnixUrlPath(env.NIX_REMOTE);
+  if (nixDaemon) {
+    capabilities.push({
+      serviceId: "env-nix-remote",
+      kind: "nix",
+      transport: "unix",
+      targetPath: nixDaemon,
+      adapter: "nix-daemon",
+    });
+  }
+  const gpgHome = exactGpgHome(env);
+  if (gpgHome) {
+    const candidates = [
+      legacyGpgAgentSocket(env.GPG_AGENT_INFO),
+      path.join(gpgHome, "S.gpg-agent"),
+    ];
+    const gpgAgent = candidates.find(
+      (candidate): candidate is string =>
+        candidate !== null && isPhysicalUnixSocket(candidate),
+    );
+    if (gpgAgent) {
+      capabilities.push({
+        serviceId: "env-gpg-agent",
+        kind: "gpg-agent",
+        transport: "unix",
+        targetPath: gpgAgent,
+        adapter: "gpg-agent",
+        sourceHome: gpgHome,
+      });
+    }
+  }
+  return capabilities;
+}
+
+/** Select a local OCI implementation, never an ambient daemon endpoint. On
+ * Linux the worker is launched later inside the already-projected ZSR domain,
+ * so the executable has no more filesystem/network authority than the agent. */
+export function deriveContainerWorker(
+  env: Readonly<Record<string, string>> | undefined,
+): ContainerWorkerRequest | undefined {
+  if (!env) return undefined;
+  if (process.platform === "darwin") {
+    const executable = findOrbStackCli(env);
+    return executable
+      ? { runtime: "podman", backend: "orbstack-machine", executable }
+      : undefined;
+  }
+  if (process.platform !== "linux") return undefined;
+  for (const directory of (env.PATH ?? "").split(path.delimiter)) {
+    if (!directory || !path.isAbsolute(directory)) continue;
+    const candidate = path.join(directory, "podman");
+    try {
+      // Resolve symlinks before handing the path to the strict supervisor. The
+      // target still runs as untrusted worker bytes inside ZSR.
+      const executable = realpathSync(candidate);
+      const metadata = lstatSync(executable);
+      if (
+        metadata.isFile() &&
+        !metadata.isSymbolicLink() &&
+        metadata.mode & 0o111
+      ) {
+        return {
+          runtime: "podman",
+          backend: "embedded-linux",
+          executable,
+        };
+      }
+    } catch {
+      // Keep searching the exact PATH.
+    }
+  }
+  return undefined;
+}
+
+/** Whether the normal child environment advertises a container workflow that
+ * ZSR must preserve. Detection is intentionally capability-shaped: endpoint
+ * variables and familiar CLIs count, but their ambient daemon authority is
+ * never forwarded. */
+export function expectsContainerWorkflow(
+  env: Readonly<Record<string, string>> | undefined,
+): boolean {
+  if (!env) return false;
+  if (
+    ["DOCKER_HOST", "CONTAINER_HOST", "DOCKER_CONTEXT"].some((name) =>
+      Boolean(env[name]?.trim()),
+    )
+  ) {
+    return true;
+  }
+  const names = new Set([
+    "docker",
+    "podman",
+    "docker-compose",
+    "podman-compose",
+  ]);
+  for (const directory of (env.PATH ?? "").split(path.delimiter)) {
+    if (!directory || !path.isAbsolute(directory)) continue;
+    for (const name of names) {
+      try {
+        const executable = realpathSync(path.join(directory, name));
+        const metadata = lstatSync(executable);
+        if (
+          metadata.isFile() &&
+          !metadata.isSymbolicLink() &&
+          (metadata.mode & 0o111) !== 0
+        ) {
+          return true;
+        }
+      } catch {
+        // Continue through the trusted PATH snapshot.
+      }
+    }
+  }
+  return false;
+}
+
+function exactAbsoluteSocketPath(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (
+    !value ||
+    !path.isAbsolute(value) ||
+    value.includes("\0") ||
+    value.includes("?") ||
+    value.includes("#")
+  ) {
+    return null;
+  }
+  return path.normalize(value);
+}
+
+function exactUnixUrlPath(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (!value?.startsWith("unix://")) return null;
+  return exactAbsoluteSocketPath(value.slice("unix://".length));
+}
+
+function exactGpgHome(env: Readonly<Record<string, string>>): string | null {
+  const explicit = exactAbsoluteSocketPath(env.GNUPGHOME);
+  if (explicit) return explicit;
+  const home = exactAbsoluteSocketPath(env.HOME);
+  return home ? path.join(home, ".gnupg") : null;
+}
+
+function legacyGpgAgentSocket(raw: string | undefined): string | null {
+  const value = raw?.trim();
+  if (!value) return null;
+  const fields = value.split(":");
+  if (fields.length < 3) return null;
+  return exactAbsoluteSocketPath(fields.slice(0, -2).join(":"));
+}
+
+function isPhysicalUnixSocket(candidate: string): boolean {
+  try {
+    const stat = lstatSync(candidate);
+    return stat.isSocket() && !stat.isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+/** Linux must hide the ambient filesystem root before it can safely enable
+ * AF_UNIX (seccomp cannot filter socket paths). Preserve the exact PATH plus
+ * well-known user toolchain stores that PATH shims need, without reopening the
+ * whole host HOME and its control sockets. The policy builder canonicalizes
+ * every returned path before admission. */
+export function deriveToolchainReadRoots(
+  env: Readonly<Record<string, string>> | undefined,
+): string[] {
+  if (!env) return [];
+  const roots = new Set<string>();
+  const add = (candidate: string | undefined) => {
+    const value = candidate?.trim();
+    if (!value || !path.isAbsolute(value) || value.includes("\0")) return;
+    const normalized = path.normalize(value);
+    if (path.dirname(normalized) !== normalized) roots.add(normalized);
+  };
+  for (const entry of (env.PATH ?? "").split(path.delimiter)) add(entry);
+  for (const name of [
+    "NVM_DIR",
+    "VOLTA_HOME",
+    "ASDF_DATA_DIR",
+    "MISE_DATA_DIR",
+    "BUN_INSTALL",
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "PYENV_ROOT",
+    "RBENV_ROOT",
+    "PNPM_HOME",
+    "GOPATH",
+  ]) {
+    add(env[name]);
+  }
+  const home = env.HOME?.trim();
+  if (home && path.isAbsolute(home)) {
+    const normalizedHome = path.normalize(home);
+    const managerRoots = new Set([
+      ".nvm",
+      ".asdf",
+      ".volta",
+      ".fnm",
+      ".pyenv",
+      ".rbenv",
+      ".bun",
+      ".deno",
+      ".rustup",
+      ".cargo",
+    ]);
+    for (const root of [...roots]) {
+      const relative = path.relative(normalizedHome, root);
+      if (
+        !relative ||
+        relative === ".." ||
+        relative.startsWith(`..${path.sep}`) ||
+        path.isAbsolute(relative)
+      ) {
+        continue;
+      }
+      const first = relative.split(path.sep)[0];
+      if (first && managerRoots.has(first)) {
+        roots.add(path.join(normalizedHome, first));
+      }
+      for (const managed of [
+        path.join(".local", "share", "mise"),
+        path.join(".local", "share", "pnpm"),
+      ]) {
+        if (
+          relative === managed ||
+          relative.startsWith(`${managed}${path.sep}`)
+        ) {
+          roots.add(path.join(normalizedHome, managed));
+        }
+      }
+    }
+    for (const relative of [
+      ".oh-my-zsh",
+      ".zprezto",
+      ".bash_it",
+      ".zsh",
+      ".nvm",
+      ".asdf",
+      ".volta",
+      ".fnm",
+      ".pyenv",
+      ".rbenv",
+      ".bun",
+      ".deno",
+      ".rustup",
+      path.join(".cargo", "bin"),
+      path.join(".cargo", "registry"),
+      path.join(".cargo", "git"),
+      path.join(".local", "bin"),
+      path.join(".local", "share", "mise"),
+      path.join(".local", "share", "pnpm"),
+      path.join(".local", "share", "zinit"),
+    ]) {
+      const candidate = path.join(normalizedHome, relative);
+      if (existsSync(candidate)) add(candidate);
+    }
+  }
+  return [...roots].sort((left, right) => left.localeCompare(right));
+}
+
+function canonicalExecutable(candidate: string): string | null {
+  try {
+    const canonical = realpathSync(candidate);
+    const metadata = lstatSync(canonical);
+    if (
+      !metadata.isFile() ||
+      metadata.isSymbolicLink() ||
+      (process.platform !== "win32" && (metadata.mode & 0o111) === 0)
+    ) {
+      return null;
+    }
+    return canonical;
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve a provider command before the ZSR supervisor is launched. The
+ * supervisor accepts only absolute commands, and Linux's hidden-root policy
+ * must know the executable's exact read projection at admission time. */
+function resolveProviderExecutable(
+  binary: string,
+  env: Readonly<Record<string, string>> | undefined,
+): string | null {
+  const value = binary.trim();
+  if (!value || value.includes("\0")) return null;
+  if (path.isAbsolute(value)) return canonicalExecutable(value);
+  if (value.includes("/") || value.includes("\\")) return null;
+  const extensions =
+    process.platform === "win32"
+      ? (env?.PATHEXT ?? process.env.PATHEXT ?? ".EXE;.BAT;.CMD")
+          .split(";")
+          .filter(Boolean)
+      : [""];
+  for (const directory of (env?.PATH ?? process.env.PATH ?? "").split(
+    path.delimiter,
+  )) {
+    if (!directory || !path.isAbsolute(directory)) continue;
+    for (const extension of extensions) {
+      const resolved = canonicalExecutable(
+        path.join(directory, value + extension),
+      );
+      if (resolved) return resolved;
+    }
+  }
+  return null;
+}
+
+/** Read roots needed by an explicitly selected provider executable. PATH-based
+ * toolchain roots are already projected by deriveToolchainReadRoots; this
+ * closes the Advanced → Executable path case where the binary is intentionally
+ * outside PATH. A containing node_modules store is included for npm/pnpm shims
+ * whose package-relative imports otherwise resolve outside the bin directory. */
+export function deriveProviderExecutableReadRoots(
+  binary: string | undefined,
+  env?: Readonly<Record<string, string>>,
+): string[] {
+  if (!binary) return [];
+  const executable = resolveProviderExecutable(binary, env);
+  if (!executable) return [];
+  const roots = new Set<string>([path.dirname(executable)]);
+  const segments = executable.split(path.sep);
+  const nodeModules = segments.indexOf("node_modules");
+  if (nodeModules > 0) {
+    roots.add(segments.slice(0, nodeModules + 1).join(path.sep) || path.sep);
+  }
+  return [...roots].sort((left, right) => left.localeCompare(right));
+}
+
+function normalizeProviderBinary(
+  binary: string | undefined,
+  env: Readonly<Record<string, string>> | undefined,
+): string | undefined {
+  if (!binary?.trim() || !path.isAbsolute(binary.trim())) return binary;
+  return resolveProviderExecutable(binary, env) ?? binary;
+}
+
+function normalizeProviderSpawn<
+  T extends { env?: Record<string, string>; cliBinary?: string },
+>(spawn: T): T {
+  return {
+    ...spawn,
+    cliBinary: normalizeProviderBinary(spawn.cliBinary, spawn.env),
+  };
+}
+
+export function agentTerritoryIdentity(
+  territory: AgentFilesystemTerritory | undefined,
+): string | null {
+  if (!territory) return null;
+  return JSON.stringify({
+    role: territory.agentRole,
+    workspaceRoot: path.resolve(territory.workspaceRoot),
+    designDirectory: path.resolve(territory.designDirectory),
+    protectedDesignDirectories: [...territory.protectedDesignDirectories]
+      .map((candidate) => path.resolve(candidate))
+      .sort(),
+    deniedPaths: [...territory.writeCapabilities.deniedPaths]
+      .map((candidate) => path.resolve(candidate))
+      .sort(),
+  });
+}
+
+const MAX_ADDITIONAL_TERRITORY_ROOTS = 32;
+
+interface TerritoryContributionSnapshot {
+  /** Semantic Git/workspace owner whose Design pointer drives this carveout. */
+  workspaceRoot: string;
+  /** Exact user-authorized roots belonging to this owner. A secondary owner
+   * contributes only protected paths overlapping these grants. */
+  grants: readonly string[];
+  /** Primary workspace authority is always compared in full. */
+  full: boolean;
+  identity: string | null;
+}
+
+interface ResolvedTerritorySet {
+  territory: AgentFilesystemTerritory | undefined;
+  contributions: readonly TerritoryContributionSnapshot[];
+  additionalRoots: readonly string[];
+  additionalGitWorkspaceRoots: readonly string[];
+}
+
+function pathInsideOrEqual(candidate: string, root: string): boolean {
+  const relative = path.relative(path.resolve(root), path.resolve(candidate));
+  return (
+    relative === "" ||
+    (relative !== ".." &&
+      !relative.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relative))
+  );
+}
+
+function pathsOverlap(left: string, right: string): boolean {
+  return pathInsideOrEqual(left, right) || pathInsideOrEqual(right, left);
+}
+
+function territoryForGrants(
+  territory: AgentFilesystemTerritory | undefined,
+  grants: readonly string[],
+): AgentFilesystemTerritory | undefined {
+  if (!territory) return undefined;
+  const overlapsGrant = (candidate: string) =>
+    grants.some((grant) => pathsOverlap(candidate, grant));
+  const protectedDesignDirectories = territory.protectedDesignDirectories
+    .filter(overlapsGrant)
+    .map((candidate) => path.resolve(candidate))
+    .sort();
+  if (protectedDesignDirectories.length === 0) return undefined;
+  const deniedPaths = territory.writeCapabilities.deniedPaths
+    .filter(overlapsGrant)
+    .map((candidate) => path.resolve(candidate))
+    .sort();
+  const active = protectedDesignDirectories.includes(
+    path.resolve(territory.designDirectory),
+  )
+    ? path.resolve(territory.designDirectory)
+    : protectedDesignDirectories[0]!;
+  return {
+    ...territory,
+    designDirectory: active,
+    protectedDesignDirectories: [...new Set(protectedDesignDirectories)],
+    writeCapabilities: {
+      ...territory.writeCapabilities,
+      deniedPaths: [...new Set(deniedPaths)],
+    },
+  };
+}
+
+function mergeTerritories(
+  workspaceRoot: string,
+  primary: AgentFilesystemTerritory | undefined,
+  additions: readonly AgentFilesystemTerritory[],
+): AgentFilesystemTerritory | undefined {
+  if (primary && additions.length === 0) return primary;
+  const first = primary ?? additions[0];
+  if (!first) return undefined;
+  return {
+    ...first,
+    workspaceRoot,
+    designDirectory: primary?.designDirectory ?? first.designDirectory,
+    protectedDesignDirectories: [
+      ...new Set(
+        [primary, ...additions]
+          .filter((entry): entry is AgentFilesystemTerritory => Boolean(entry))
+          .flatMap((entry) => entry.protectedDesignDirectories)
+          .map((candidate) => path.resolve(candidate)),
+      ),
+    ].sort(),
+    writeCapabilities: {
+      workspace: "write",
+      deniedPaths: [
+        ...new Set(
+          [primary, ...additions]
+            .filter((entry): entry is AgentFilesystemTerritory =>
+              Boolean(entry),
+            )
+            .flatMap((entry) => entry.writeCapabilities.deniedPaths)
+            .map((candidate) => path.resolve(candidate)),
+        ),
+      ].sort(),
+    },
+  };
+}
+
+async function canonicalAdditionalTerritoryRoots(
+  candidates: readonly string[],
+): Promise<string[]> {
+  if (candidates.length > MAX_ADDITIONAL_TERRITORY_ROOTS) {
+    throw new Error(
+      `At most ${MAX_ADDITIONAL_TERRITORY_ROOTS} additional directories may be attached to one agent.`,
+    );
+  }
+  const roots: string[] = [];
+  for (const raw of candidates) {
+    if (!path.isAbsolute(raw) || raw.includes("\0")) {
+      throw new Error(
+        "Additional directories must be absolute filesystem paths.",
+      );
+    }
+    const lexical = path.resolve(raw);
+    let canonical = lexical;
+    try {
+      const metadata = await fsp.lstat(lexical);
+      if (!metadata.isDirectory()) {
+        throw new Error("An additional directory is not a directory.");
+      }
+      canonical = await fsp.realpath(lexical);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // The normal provider contract permits a user-authorized future path.
+      // It has no existing Design authority to discover yet; the immutable
+      // boundary still grants only this exact prospective lexical location.
+    }
+    roots.push(canonical);
+  }
+  return [...new Set(roots)].sort((left, right) => left.localeCompare(right));
+}
 
 /** Every agent spawn must carry an
  *  explicit, non-empty cwd. The earlier silent fallback to engine
@@ -189,6 +865,271 @@ export function shouldRepollInitialize(init: InitializeResponse): boolean {
   );
 }
 
+/** Resolve the active Design subtree for a code actor at admission time.
+ * Missing Design content means there is no territory to carve out yet. An
+ * existing target is validated segment-by-segment without following symlinks,
+ * then every recognized real subtree is added to the immutable provider
+ * profile. The provider sandbox is the promised boundary; the shared checkout
+ * receives no persistent ACL. */
+async function canonicalTerritoryWorkspaceRoot(opts: {
+  cwd: string;
+  workspaceRoot?: string;
+}): Promise<string> {
+  const cwd = path.resolve(opts.cwd);
+  let root: string;
+  if (opts.workspaceRoot) {
+    root = path.resolve(opts.workspaceRoot);
+  } else {
+    try {
+      const { stdout } = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+      root = path.resolve(stdout.trim());
+    } catch {
+      root = cwd;
+    }
+  }
+  const relative = path.relative(root, cwd);
+  if (
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error("The agent cwd is outside its canonical workspace.");
+  }
+  return root;
+}
+
+async function gitWorkspaceOwner(cwd: string): Promise<string | null> {
+  try {
+    const { stdout } = await runGit(cwd, ["rev-parse", "--show-toplevel"]);
+    const owner = stdout.trim();
+    return owner ? path.resolve(owner) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Provider profiles are keyed by physical absolute paths. Refuse a Design
+ * session reached through a symlink or case alias instead of assuming every
+ * provider canonicalizes allow and deny rules identically. Ordinary code-only
+ * workspaces keep their historical behavior because this runs only after a
+ * prospective Design subtree exists. */
+async function assertCanonicalTerritoryPaths(
+  workspaceRoot: string,
+  cwd: string,
+): Promise<void> {
+  const lexicalCwd = path.resolve(cwd);
+  const [physicalRoot, physicalCwd] = await Promise.all([
+    fsp.realpath(workspaceRoot),
+    fsp.realpath(lexicalCwd),
+  ]);
+  if (physicalRoot !== workspaceRoot || physicalCwd !== lexicalCwd) {
+    throw new Error(
+      "Design containment requires the canonical physical workspace and cwd paths; " +
+        "reopen this workspace without a symlink or case alias.",
+    );
+  }
+}
+
+async function buildCodeAgentTerritory(opts: {
+  cwd: string;
+  workspaceRoot?: string;
+  repoRoot?: string;
+}): Promise<AgentFilesystemTerritory | undefined> {
+  const workspaceRoot = await canonicalTerritoryWorkspaceRoot(opts);
+  const repoRoot = path.resolve(opts.repoRoot ?? workspaceRoot);
+  const pointer = await resolveDesignDirectoryPointerState({
+    repoRoot,
+    workspacePath: workspaceRoot,
+  });
+  if (!pointer.valid) {
+    throw new Error(
+      "The configured Design directory is not a safe repo-relative path.",
+    );
+  }
+  // Publication happens only after the complete territory has been validated.
+  // Priming before the existence check could turn a failed admission into
+  // shared mutable registry state.
+  const designName = await previewDesignDirectoryForEnter({
+    path: workspaceRoot,
+    repoRoot,
+  });
+  const designDirectory = path.join(workspaceRoot, ...designName.split("/"));
+  const recognized = await discoverDesignDirectories(workspaceRoot);
+  const hasExistingOrRecognizedDesign =
+    existsSync(designDirectory) || recognized.length > 0;
+
+  // A caller-provided outer workspace cannot erase a more-specific Git
+  // owner's Design policy. Git treats nested repositories/submodules as
+  // separate control planes, and the outer index does not enumerate their
+  // markers. Refuse the ambiguous bind whenever either owner carries Design
+  // authority; the chat must be rebound to the exact owner so settings, Git
+  // metadata, and the protected subtree are resolved as one unit. Preserve
+  // historical behavior for genuinely code-only nested folders.
+  const cwdOwner = await gitWorkspaceOwner(opts.cwd);
+  if (cwdOwner && cwdOwner !== workspaceRoot) {
+    const nestedPointer = await resolveDesignDirectoryPointerState({
+      repoRoot: cwdOwner,
+      workspacePath: cwdOwner,
+    });
+    const nestedRecognized = await discoverDesignDirectories(cwdOwner);
+    const nestedTarget = path.join(
+      cwdOwner,
+      ...nestedPointer.directory.split("/"),
+    );
+    const nestedHasDesign =
+      nestedPointer.configured ||
+      existsSync(nestedTarget) ||
+      nestedRecognized.length > 0;
+    if (
+      hasExistingOrRecognizedDesign ||
+      pointer.configured ||
+      nestedHasDesign
+    ) {
+      await assertCanonicalTerritoryPaths(workspaceRoot, opts.cwd);
+      throw new Error(
+        "The agent cwd belongs to a nested Git owner that differs from the " +
+          "declared workspace; bind the chat to that exact repository before " +
+          "starting a Design-contained code agent.",
+      );
+    }
+  }
+  if (!hasExistingOrRecognizedDesign && !pointer.configured) return undefined;
+
+  await assertCanonicalTerritoryPaths(workspaceRoot, opts.cwd);
+
+  const protectedDesignNames = [
+    ...new Set([
+      designName,
+      ...(pointer.configured ? [pointer.directory] : []),
+      ...recognized,
+    ]),
+  ];
+  const protectedDesignDirectories: string[] = [];
+  let verifiedActiveName = designName;
+  for (const candidate of protectedDesignNames) {
+    const candidatePath = path.join(workspaceRoot, ...candidate.split("/"));
+    if (!existsSync(candidatePath)) {
+      if (recognized.includes(candidate)) {
+        throw new Error(
+          `The recognized Design folder "${candidate}" is missing from this checkout; ` +
+            "finish or revert the filesystem/Git transition before starting a code agent.",
+        );
+      }
+      if (pointer.configured && candidate === pointer.directory) {
+        await assertSafeProspectiveDesignDirectory(workspaceRoot, candidate);
+        protectedDesignDirectories.push(candidatePath);
+        continue;
+      }
+      throw new Error(
+        `The active Design folder "${candidate}" is missing from this checkout.`,
+      );
+    }
+    const verified = await resolveDesignDirForLock(workspaceRoot, candidate);
+    await assertDesignDirHasNoHardlinkAliases(workspaceRoot, verified);
+    if (candidate === designName) verifiedActiveName = verified;
+    protectedDesignDirectories.push(
+      path.join(workspaceRoot, ...verified.split("/")),
+    );
+  }
+
+  // A Git index is one monolithic file: no OS sandbox can permit "stage code"
+  // while forbidding "stage Design" inside that same index. Keep the
+  // worktree/common metadata read-only to the model process. Git inspection
+  // still works; durable agent commits move to private overlays + validated
+  // ChangeSet integration instead of weakening the canonical boundary.
+  const gitMetadata = new Set<string>();
+  const dotGit = path.join(workspaceRoot, ".git");
+  if (existsSync(dotGit)) gitMetadata.add(dotGit);
+  for (const arg of ["--absolute-git-dir", "--git-common-dir"] as const) {
+    try {
+      const { stdout } = await runGit(workspaceRoot, ["rev-parse", arg]);
+      const value = stdout.trim();
+      if (value) {
+        gitMetadata.add(
+          path.resolve(
+            path.isAbsolute(value) ? value : path.join(workspaceRoot, value),
+          ),
+        );
+      }
+    } catch {
+      // discoverDesignDirectories already established the repository identity;
+      // a failure here is not safely ignorable because it would reopen Git.
+      throw new Error(
+        "Couldn't resolve read-only Git metadata for this workspace.",
+      );
+    }
+  }
+  const deniedPaths = [
+    ...protectedDesignDirectories,
+    path.dirname(repoSettingsPath(workspaceRoot)),
+    ...(repoRoot !== workspaceRoot
+      ? [path.dirname(repoLocalSettingsPath(repoRoot))]
+      : []),
+    ...gitMetadata,
+  ];
+  return {
+    agentRole: "code",
+    workspaceRoot,
+    designDirectory: path.join(workspaceRoot, ...verifiedActiveName.split("/")),
+    protectedDesignDirectories: [...protectedDesignDirectories].sort(),
+    writeCapabilities: {
+      workspace: "write",
+      deniedPaths: [
+        ...new Set(deniedPaths.map((candidate) => path.resolve(candidate))),
+      ].sort(),
+    },
+  };
+}
+
+/** Pure authority preview for lifecycle invalidations. It validates the same
+ * real tree and hard-link precondition as admission, but does not publish a
+ * pointer or mutate shared filesystem permissions. */
+export async function previewCodeAgentTerritory(opts: {
+  cwd: string;
+  workspaceRoot?: string;
+  repoRoot?: string;
+}): Promise<AgentFilesystemTerritory | undefined> {
+  return buildCodeAgentTerritory(opts);
+}
+
+export async function resolveCodeAgentTerritory(opts: {
+  cwd: string;
+  workspaceRoot?: string;
+  repoRoot?: string;
+}): Promise<AgentFilesystemTerritory | undefined> {
+  let territory = await buildCodeAgentTerritory(opts);
+  if (!territory) return undefined;
+  const absentProtectedDirectories =
+    territory.protectedDesignDirectories.filter(
+      (candidate) => !existsSync(candidate),
+    );
+  for (const candidate of absentProtectedDirectories) {
+    const relative = path
+      .relative(territory.workspaceRoot, candidate)
+      .split(path.sep)
+      .join("/");
+    await reserveProspectiveDesignDirectory(territory.workspaceRoot, relative);
+  }
+  // Reservation changes the path from prospective authority to a real vnode.
+  // Re-run every recognition, canonicalization, hard-link and Git-metadata
+  // check against that exact tree before publishing it or starting a provider.
+  if (absentProtectedDirectories.length > 0) {
+    territory = await buildCodeAgentTerritory(opts);
+    if (!territory) {
+      throw new Error(
+        "The Design territory disappeared while its isolation lease was established.",
+      );
+    }
+  }
+  const activeName = path
+    .relative(territory.workspaceRoot, territory.designDirectory)
+    .split(path.sep)
+    .join("/");
+  primeDesignDirectoryName(territory.workspaceRoot, activeName);
+  await fenceDesignDirectory(territory.workspaceRoot);
+  return territory;
+}
+
 /** TTL on the listAgents result cache. Short enough that an
  *  install/login change shows up within seconds; long enough to
  *  absorb the typical 5-10 renderer-churn calls/second that hit
@@ -250,6 +1191,8 @@ async function withTargetBranchEnv(
 export class AgentGateway {
   private readonly projectRoot: string;
   private readonly events: AgentGatewayEvents;
+  private readonly executionBoundary: ExecutionBoundary;
+  private readonly previewGatewayFactory: BoundaryPreviewGatewayFactory;
 
   /** The raw MCP registry (may hold dupes; deduped into the view below). */
   private readonly mcpServers: McpServerRegistration[] = [];
@@ -271,6 +1214,48 @@ export class AgentGateway {
    *  agent that doesn't self-report its cwd where it is. Set at
    *  newSession/loadSession, cleared on endSession/dispose. */
   private readonly executionToCwd = new Map<string, string>();
+  /** Immutable Design boundary captured when the session is admitted. A null
+   * entry is intentional: if a Design directory appears or the pointer moves
+   * later, the session must be rebuilt rather than silently gaining a new
+   * authority map. */
+  private readonly executionToDesignDirectory = new Map<
+    string,
+    string | null
+  >();
+  /** Canonical serialized write map captured at admission. The engine uses
+   * this to decide whether an external settings/Git event changed authority
+   * and therefore requires session retirement. */
+  private readonly executionToTerritoryIdentity = new Map<
+    string,
+    string | null
+  >();
+  /** Per-owner slices of a multi-root territory. The merged identity above is
+   * useful for diagnostics; these slices are what make a Design transition in
+   * an attached workspace invalidate the otherwise unrelated primary cwd. */
+  private readonly executionToTerritoryContributions = new Map<
+    string,
+    readonly TerritoryContributionSnapshot[]
+  >();
+  /** Redacted status paired with the exact execution admission. */
+  private readonly executionToBoundaryStatus = new Map<
+    string,
+    ExecutionBoundaryStatus
+  >();
+  /** Live outer boundary per Zeros execution. It is installed before adapter
+   * startup and revoked before any adapter teardown can run user code. */
+  private readonly executionBoundaries = new Map<string, PreparedBoundary>();
+  /** A rejected teardown proof is a runtime-wide admission hold. Keeping both
+   * the boundary and failure makes lifecycle retries fail closed; a restart is
+   * required so durable process-domain recovery can prove the orphan empty. */
+  private readonly failedBoundaryRetirements = new Map<string, unknown>();
+  /** Detach diagnostic observers before a session boundary is retired. */
+  private readonly boundaryPortSubscriptions = new Map<string, () => void>();
+  /** Capability-authenticated browser façades, keyed by execution then the
+   * redacted port id. Promises dedupe simultaneous Open Preview clicks. */
+  private readonly boundaryPreviews = new Map<
+    string,
+    Map<string, Promise<BoundaryPreviewGateway>>
+  >();
   /** Sessions already given the one-shot cwd hint (see CWD_SELF_AWARE_AGENTS).
    *  First prompt per session only — the agent's server keeps it in history. */
   private readonly sessionsCwdHinted = new Set<string>();
@@ -281,12 +1266,17 @@ export class AgentGateway {
   // session (loadSession) is pre-marked instructed so the block — already in the
   // resumed transcript — isn't sent twice. See system-instructions/ for the text.
   private readonly sessionsInstructed = new Set<string>();
+  /** A true resume predating the Design boundary already contains the general
+   * first-turn preamble but not necessarily the current immutable territory.
+   * Re-assert only the security notice on the first post-load turn. */
+  private readonly sessionsTerritoryNoticePending = new Set<string>();
   private readonly executionToInstructionCtx = new Map<
     string,
     {
       additionalDirectories: string[];
       targetBranch?: string;
       customInstructions?: string;
+      designDirectory?: string;
     }
   >();
   private readonly agentInitializes = new Map<string, InitializeResponse>();
@@ -350,6 +1340,822 @@ export class AgentGateway {
     }
   }
 
+  /** True when at least one live session in this workspace was admitted under
+   * a different immutable filesystem map. Used only to avoid unnecessary
+   * retirements after broad Git/settings invalidations. */
+  workspaceTerritoryChanged(
+    workspaceId: string,
+    workspaceRoot: string,
+    territory: AgentFilesystemTerritory | undefined,
+  ): boolean {
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    const next = agentTerritoryIdentity(territory);
+    for (const sessionId of this.executionToAgent.keys()) {
+      const contribution = this.executionToTerritoryContributions
+        .get(sessionId)
+        ?.find(
+          (candidate) =>
+            path.resolve(candidate.workspaceRoot) === normalizedWorkspace,
+        );
+      if (contribution) {
+        const nextContribution = contribution.full
+          ? territory
+          : territoryForGrants(territory, contribution.grants);
+        if (
+          contribution.identity !== agentTerritoryIdentity(nextContribution)
+        ) {
+          return true;
+        }
+        continue;
+      }
+      const owner = this.executionToWorkspace.get(sessionId);
+      const cwd = this.executionToCwd.get(sessionId);
+      const relative = cwd
+        ? path.relative(normalizedWorkspace, path.resolve(cwd))
+        : "..";
+      const belongsByPath =
+        relative === "" ||
+        (relative !== ".." &&
+          !relative.startsWith(`..${path.sep}`) &&
+          !path.isAbsolute(relative));
+      if (owner !== workspaceId && !belongsByPath) continue;
+      if ((this.executionToTerritoryIdentity.get(sessionId) ?? null) !== next) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Execution ids whose immutable authority depends on this workspace,
+   * including sessions that attached it through `/add-dir`. The engine uses
+   * this during a Design transition so the capability is revoked before the
+   * pointer or recognized-root set changes. */
+  workspaceSessionIds(workspaceId: string, workspaceRoot: string): string[] {
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    const sessions: string[] = [];
+    const candidates = new Set([
+      ...this.executionToAgent.keys(),
+      ...this.executionToTerritoryContributions.keys(),
+    ]);
+    for (const sessionId of candidates) {
+      if (this.executionToWorkspace.get(sessionId) === workspaceId) {
+        sessions.push(sessionId);
+        continue;
+      }
+      const contributions =
+        this.executionToTerritoryContributions.get(sessionId) ?? [];
+      if (
+        contributions.some(
+          (candidate) =>
+            path.resolve(candidate.workspaceRoot) === normalizedWorkspace,
+        )
+      ) {
+        sessions.push(sessionId);
+        continue;
+      }
+      const cwd = this.executionToCwd.get(sessionId);
+      if (cwd && pathInsideOrEqual(cwd, normalizedWorkspace)) {
+        sessions.push(sessionId);
+      }
+    }
+    return [...new Set(sessions)].sort();
+  }
+
+  workspaceHasSessions(workspaceId: string, workspaceRoot: string): boolean {
+    return this.workspaceSessionIds(workspaceId, workspaceRoot).length > 0;
+  }
+
+  /** Establish the code actor's immutable territory before an adapter starts.
+   * The instruction remains behavioral defense in depth; the provider-neutral
+   * ZSR boundary prepared below is the actual admission boundary. */
+  private async prepareCodeAgentTerritory(
+    adapter: AgentAdapter,
+    cwd: string,
+    workspaceRoot: string | undefined,
+    mainRepoRoot: string | undefined,
+    stage: "newSession" | "loadSession" | "forkSession",
+    _opts?: { cliBinary?: string },
+  ): Promise<AgentFilesystemTerritory | undefined> {
+    let territory: AgentFilesystemTerritory | undefined;
+    try {
+      territory = await resolveCodeAgentTerritory({
+        cwd,
+        workspaceRoot,
+        repoRoot: mainRepoRoot,
+      });
+    } catch (error) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        message:
+          `Code agent cannot start because the active Design territory ` +
+          `could not be resolved and protected: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        stage,
+        agentId: adapter.agentId,
+        advice:
+          "Fix the Design directory setting or its filesystem permissions, then retry.",
+      });
+    }
+    return territory;
+  }
+
+  /** Extend the primary immutable territory across every user-authorized
+   * `/add-dir` owner before a provider process exists. A second Zeros/Git
+   * workspace is not a generic writable folder: its Design roots, policy and
+   * canonical Git metadata must be subtracted too. Resolving by the physical
+   * Git owner also covers a selected subdirectory of that workspace.
+   *
+   * Contributions remain separate for lifecycle comparison. This lets a
+   * Design transition in an attached workspace retire the primary session
+   * even though its cwd belongs elsewhere. */
+  private async resolveTerritorySet(
+    primary: AgentFilesystemTerritory | undefined,
+    cwd: string,
+    workspaceRoot: string | undefined,
+    env: Record<string, string> | undefined,
+    stage: "newSession" | "loadSession" | "forkSession",
+  ): Promise<ResolvedTerritorySet> {
+    const canonicalWorkspace = path.resolve(
+      primary?.workspaceRoot ??
+        (await canonicalTerritoryWorkspaceRoot({ cwd, workspaceRoot })),
+    );
+    let additionalRoots: string[];
+    try {
+      additionalRoots = await canonicalAdditionalTerritoryRoots(
+        this.parseInstructionCtx(env).additionalDirectories,
+      );
+    } catch (error) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage,
+        message: `Code agent cannot attach the requested directories: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+        advice: "Remove the invalid linked directory and retry.",
+      });
+    }
+
+    const contributions = new Map<
+      string,
+      {
+        grants: Set<string>;
+        full: boolean;
+        territory?: AgentFilesystemTerritory;
+      }
+    >();
+    contributions.set(canonicalWorkspace, {
+      grants: new Set([canonicalWorkspace]),
+      full: true,
+      ...(primary ? { territory: primary } : {}),
+    });
+
+    let registeredWorkspaces: Array<{ path: string; repoRoot: string }> = [];
+    try {
+      registeredWorkspaces = listWorkspaces().flatMap((workspace) => {
+        try {
+          return [
+            {
+              path: realpathSync(workspace.path),
+              repoRoot: path.resolve(workspace.repoRoot),
+            },
+          ];
+        } catch {
+          return [];
+        }
+      });
+    } catch {
+      // Plain-folder/unit-test gateways may not have an initialized workspace
+      // registry. Exact Git-owner discovery below remains authoritative.
+    }
+    const ownerGrants = new Map<
+      string,
+      { grants: Set<string>; repoRoot: string }
+    >();
+    const addOwnerGrant = (owner: string, repoRoot: string, grant: string) => {
+      if (owner === canonicalWorkspace) return;
+      const current = ownerGrants.get(owner) ?? {
+        grants: new Set<string>(),
+        repoRoot,
+      };
+      current.grants.add(grant);
+      ownerGrants.set(owner, current);
+    };
+    for (const root of additionalRoots) {
+      let owner = root;
+      try {
+        owner = (await gitWorkspaceOwner(root)) ?? root;
+        owner = await fsp.realpath(owner);
+      } catch {
+        // A prospective/non-Git directory has no semantic owner yet. Its exact
+        // lexical grant is still represented so a later registered transition
+        // can invalidate a resumed execution rather than widening it.
+        owner = root;
+      }
+      const registeredOwner = registeredWorkspaces.find(
+        (workspace) => workspace.path === owner,
+      );
+      addOwnerGrant(owner, registeredOwner?.repoRoot ?? owner, root);
+      // A browsed parent can contain multiple managed workspaces. Every one is
+      // a separate Design authority even though `git rev-parse` at the parent
+      // cannot discover its nested repositories.
+      for (const workspace of registeredWorkspaces) {
+        if (pathInsideOrEqual(workspace.path, root)) {
+          addOwnerGrant(workspace.path, workspace.repoRoot, root);
+        }
+      }
+    }
+
+    const additions: AgentFilesystemTerritory[] = [];
+    const additionalGitWorkspaceRoots: string[] = [];
+    try {
+      for (const [owner, ownerGrant] of [...ownerGrants].sort(
+        ([left], [right]) => left.localeCompare(right),
+      )) {
+        const grants = [...ownerGrant.grants].sort((left, right) =>
+          left.localeCompare(right),
+        );
+        const ownerTerritory = await resolveCodeAgentTerritory({
+          cwd: owner,
+          workspaceRoot: owner,
+          repoRoot: ownerGrant.repoRoot,
+        });
+        const contribution = territoryForGrants(ownerTerritory, grants);
+        if (contribution) {
+          additions.push(contribution);
+          if (existsSync(path.join(owner, ".git"))) {
+            additionalGitWorkspaceRoots.push(owner);
+          }
+        }
+        contributions.set(owner, {
+          grants: new Set(grants),
+          full: false,
+          ...(contribution ? { territory: contribution } : {}),
+        });
+      }
+    } catch (error) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage,
+        message:
+          `Code agent cannot start because an attached directory's Design ` +
+          `territory could not be resolved and protected: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        advice:
+          "Fix the attached workspace's Design directory or remove that linked directory, then retry.",
+      });
+    }
+
+    return {
+      territory: mergeTerritories(canonicalWorkspace, primary, additions),
+      additionalRoots,
+      additionalGitWorkspaceRoots: additionalGitWorkspaceRoots.sort(
+        (left, right) => left.localeCompare(right),
+      ),
+      contributions: [...contributions]
+        .map(([owner, contribution]) => ({
+          workspaceRoot: owner,
+          grants: [...contribution.grants].sort((left, right) =>
+            left.localeCompare(right),
+          ),
+          full: contribution.full,
+          identity: agentTerritoryIdentity(contribution.territory),
+        }))
+        .sort((left, right) =>
+          left.workspaceRoot.localeCompare(right.workspaceRoot),
+        ),
+    };
+  }
+
+  private async assertAdditionalTerritorySetStillCurrent(
+    expected: ResolvedTerritorySet,
+    primary: AgentFilesystemTerritory | undefined,
+    cwd: string,
+    workspaceRoot: string | undefined,
+    env: Record<string, string> | undefined,
+    stage: "newSession" | "loadSession" | "forkSession",
+  ): Promise<void> {
+    const current = await this.resolveTerritorySet(
+      primary,
+      cwd,
+      workspaceRoot,
+      env,
+      stage,
+    );
+    const expectedIdentity = JSON.stringify({
+      territory: agentTerritoryIdentity(expected.territory),
+      contributions: expected.contributions,
+      additionalRoots: expected.additionalRoots,
+      additionalGitWorkspaceRoots: expected.additionalGitWorkspaceRoots,
+    });
+    const currentIdentity = JSON.stringify({
+      territory: agentTerritoryIdentity(current.territory),
+      contributions: current.contributions,
+      additionalRoots: current.additionalRoots,
+      additionalGitWorkspaceRoots: current.additionalGitWorkspaceRoots,
+    });
+    if (expectedIdentity !== currentIdentity) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        stage,
+        message:
+          "An attached workspace's Design territory changed while the code boundary was being prepared.",
+        advice: "Retry once the attached workspace transition finishes.",
+      });
+    }
+  }
+
+  private async boundaryRequest(
+    executionId: string,
+    cwd: string,
+    workspaceRoot: string | undefined,
+    territory: AgentFilesystemTerritory | undefined,
+    env: Record<string, string> | undefined,
+    providerId: string,
+    mcpServers: readonly McpServerRegistration[],
+    providerExecutable?: string,
+    resolvedAdditionalRoots?: readonly string[],
+    additionalGitWorkspaceRoots: readonly string[] = [],
+    includeSessionCapabilities = true,
+  ): Promise<BoundaryRequest> {
+    const canonicalWorkspace =
+      territory?.workspaceRoot ??
+      (await canonicalTerritoryWorkspaceRoot({ cwd, workspaceRoot }));
+    const additionalReadWriteRoots = resolvedAdditionalRoots
+      ? [...resolvedAdditionalRoots]
+      : await canonicalAdditionalTerritoryRoots(
+          this.parseInstructionCtx(env).additionalDirectories,
+        );
+    const providerStateEnv = Object.fromEntries(
+      [
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+      ].flatMap((name) => {
+        const value = env?.[name]?.trim();
+        return value ? [[name, value] as const] : [];
+      }),
+    );
+    const localServices = includeSessionCapabilities
+      ? deriveLoopbackServiceCapabilities(env)
+      : [];
+    const containerWorker = includeSessionCapabilities
+      ? deriveContainerWorker(env)
+      : undefined;
+    const containerWorkflowExpected = includeSessionCapabilities
+      ? expectsContainerWorkflow(env)
+      : false;
+    const additionalReadOnlyRoots = [
+      ...new Set([
+        ...deriveToolchainReadRoots(env),
+        ...deriveProviderExecutableReadRoots(providerExecutable, env),
+      ]),
+    ].sort((left, right) => left.localeCompare(right));
+    return {
+      executionId,
+      actor: "agent-code",
+      providerId,
+      ...(Object.keys(providerStateEnv).length > 0 ? { providerStateEnv } : {}),
+      cwd: path.resolve(cwd),
+      workspaceRoot: path.resolve(canonicalWorkspace),
+      ...(territory ? { territory } : {}),
+      ...(additionalReadWriteRoots.length > 0
+        ? { additionalReadWriteRoots }
+        : {}),
+      ...(additionalReadOnlyRoots.length > 0
+        ? { additionalReadOnlyRoots }
+        : {}),
+      allowedLocalPorts: includeSessionCapabilities
+        ? this.scopedLocalServicePorts(mcpServers)
+        : [],
+      trustedLocalPorts: includeSessionCapabilities
+        ? this.trustedLocalServicePorts()
+        : [],
+      ...(localServices.length > 0 ? { localServices } : {}),
+      ...(containerWorker ? { containerWorker } : {}),
+      ...(containerWorkflowExpected ? { containerWorkflowExpected: true } : {}),
+      ...(additionalGitWorkspaceRoots.length > 0
+        ? { additionalGitWorkspaceRoots }
+        : {}),
+      backendHint: this.executionBoundary.backend,
+    };
+  }
+
+  private async prepareExecutionBoundary(
+    executionId: string,
+    cwd: string,
+    workspaceRoot: string | undefined,
+    adapter: AgentAdapter,
+    territory: AgentFilesystemTerritory | undefined,
+    env: Record<string, string> | undefined,
+    mcpServers: readonly McpServerRegistration[],
+    stage: "newSession" | "loadSession" | "forkSession",
+    providerExecutable?: string,
+    resolvedAdditionalRoots?: readonly string[],
+    additionalGitWorkspaceRoots: readonly string[] = [],
+    options: { includeSessionCapabilities?: boolean } = {},
+  ): Promise<PreparedBoundary> {
+    try {
+      this.assertBoundaryRetirementHealthy();
+      const request = await this.boundaryRequest(
+        executionId,
+        cwd,
+        workspaceRoot,
+        territory,
+        env,
+        adapter.agentId,
+        mcpServers,
+        providerExecutable,
+        resolvedAdditionalRoots,
+        additionalGitWorkspaceRoots,
+        options.includeSessionCapabilities !== false,
+      );
+      const prepared = await this.executionBoundary.prepare(request);
+      try {
+        for (const service of request.localServices ?? []) {
+          await prepared.requestLocalService({
+            kind: service.kind,
+            serviceId: service.serviceId,
+          });
+        }
+        if (stage !== "forkSession") {
+          this.observeBoundaryPorts(executionId, adapter.agentId, prepared);
+        }
+        return prepared;
+      } catch (error) {
+        try {
+          await this.retirePreparedBoundary(executionId, prepared);
+        } catch (teardownError) {
+          throw new AggregateError(
+            [error, teardownError],
+            "execution boundary setup failed and teardown could not be proven",
+          );
+        }
+        throw error;
+      }
+    } catch (error) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        message:
+          `${adapter.agentId} cannot start because Zeros Sandbox Runtime ` +
+          `could not establish the execution boundary: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        stage,
+        agentId: adapter.agentId,
+        advice:
+          "Repair or enable the qualified Zeros sandbox backend for this workspace, then retry. Zeros will not run this session uncontained.",
+      });
+    }
+  }
+
+  /** A rejected stop proof is process-wide, not session-local. Preserve the
+   * exact boundary so shutdown can retry it, and reject every later admission
+   * until a fresh engine instance has run durable stale-domain recovery. */
+  private assertBoundaryRetirementHealthy(): void {
+    if (this.failedBoundaryRetirements.size === 0) return;
+    throw new Error(
+      "a prior execution boundary could not be proven stopped; restart Zeros to run stale process-domain recovery",
+    );
+  }
+
+  private async retirePreparedBoundary(
+    executionId: string,
+    boundary: PreparedBoundary,
+  ): Promise<void> {
+    try {
+      await boundary.stopAndProve();
+    } catch (error) {
+      this.executionBoundaries.set(executionId, boundary);
+      this.failedBoundaryRetirements.set(executionId, error);
+      throw error;
+    }
+    if (this.executionBoundaries.get(executionId) === boundary) {
+      this.executionBoundaries.delete(executionId);
+    }
+    this.failedBoundaryRetirements.delete(executionId);
+  }
+
+  private async retirePreparedBoundaryAfterFailure(
+    executionId: string,
+    boundary: PreparedBoundary,
+    primaryError: unknown,
+  ): Promise<never> {
+    try {
+      await this.retirePreparedBoundary(executionId, boundary);
+    } catch (teardownError) {
+      throw new AggregateError(
+        [primaryError, teardownError],
+        "execution admission failed and boundary teardown could not be proven",
+      );
+    }
+    throw primaryError;
+  }
+
+  /** Convert authority-bearing listener state into the minimal owner-facing
+   * diagnostic contract. The HMAC id is stable only for this generation and
+   * cannot reveal or be replayed as the broker lease id. */
+  private boundaryPortsSnapshot(
+    executionId: string,
+    boundary: PreparedBoundary,
+  ): ExecutionBoundaryPortsSnapshot {
+    const discovery = boundary.portDiscoveryStatus();
+    return {
+      version: EXECUTION_BOUNDARY_PORTS_VERSION,
+      discovery: {
+        state: discovery.state,
+        ...(discovery.issue ? { issue: discovery.issue } : {}),
+      },
+      ports: boundary.activePorts().map((mapping) => ({
+        id: this.boundaryPortId(executionId, boundary, mapping.leaseId),
+        protocol: "tcp" as const,
+        port: mapping.displayPort,
+        purpose: mapping.purpose,
+        source: mapping.source,
+      })),
+    };
+  }
+
+  private boundaryPortId(
+    executionId: string,
+    boundary: PreparedBoundary,
+    leaseId: string,
+  ): string {
+    return createHmac("sha256", boundary.generation)
+      .update(executionId)
+      .update("\0")
+      .update(leaseId)
+      .digest("base64url")
+      .slice(0, 32);
+  }
+
+  private sameOpaquePortId(left: string, right: string): boolean {
+    if (!/^[A-Za-z0-9_-]{32}$/.test(left) || right.length !== left.length) {
+      return false;
+    }
+    return timingSafeEqual(Buffer.from(left), Buffer.from(right));
+  }
+
+  /** Mint (or reuse) the dedicated authenticated preview façade for a live
+   * mapping. This trusted-engine method never returns the real listener. */
+  async openBoundaryPort(
+    executionId: string,
+    portId: string,
+  ): Promise<{ url: string; admissionUrl: string; expiresAt: number }> {
+    const boundary = this.executionBoundaries.get(executionId);
+    if (!boundary) throw new Error("execution boundary is unavailable");
+    const mapping = boundary
+      .activePorts()
+      .find((candidate) =>
+        this.sameOpaquePortId(
+          portId,
+          this.boundaryPortId(executionId, boundary, candidate.leaseId),
+        ),
+      );
+    if (!mapping) throw new Error("session preview is no longer active");
+    if (mapping.host !== "127.0.0.1" && mapping.host !== "::1") {
+      throw new Error("session preview target is not loopback");
+    }
+    const target: ZsrPreviewTarget = {
+      targetHost: mapping.host,
+      targetPort: mapping.port,
+      displayPort: mapping.displayPort,
+    };
+    let previews = this.boundaryPreviews.get(executionId);
+    if (!previews) {
+      previews = new Map();
+      this.boundaryPreviews.set(executionId, previews);
+    }
+    let gateway = previews.get(portId);
+    if (!gateway) {
+      gateway = this.previewGatewayFactory.open(target);
+      previews.set(portId, gateway);
+      void gateway.catch(() => {
+        if (previews?.get(portId) === gateway) previews.delete(portId);
+        if (previews?.size === 0) this.boundaryPreviews.delete(executionId);
+      });
+    }
+    const opened = await gateway;
+    // A listener can disappear while bind/start is awaiting. Never publish a
+    // façade for a retired mapping or replacement execution.
+    const stillActive =
+      this.executionBoundaries.get(executionId) === boundary &&
+      boundary
+        .activePorts()
+        .some((candidate) =>
+          this.sameOpaquePortId(
+            portId,
+            this.boundaryPortId(executionId, boundary, candidate.leaseId),
+          ),
+        );
+    if (!stillActive) {
+      previews.delete(portId);
+      if (previews.size === 0) this.boundaryPreviews.delete(executionId);
+      await opened.close().catch(() => undefined);
+      throw new Error("session preview is no longer active");
+    }
+    return opened.navigation();
+  }
+
+  private retireMissingBoundaryPreviews(
+    executionId: string,
+    activePortIds: ReadonlySet<string>,
+  ): void {
+    const previews = this.boundaryPreviews.get(executionId);
+    if (!previews) return;
+    for (const [portId, gateway] of previews) {
+      if (activePortIds.has(portId)) continue;
+      previews.delete(portId);
+      void gateway.then((opened) => opened.close()).catch(() => undefined);
+    }
+    if (previews.size === 0) this.boundaryPreviews.delete(executionId);
+  }
+
+  private async closeBoundaryPreviews(executionId: string): Promise<void> {
+    const previews = this.boundaryPreviews.get(executionId);
+    this.boundaryPreviews.delete(executionId);
+    if (!previews) return;
+    const results = await Promise.allSettled(
+      [...previews.values()].map(async (gateway) => (await gateway).close()),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "failed to revoke preview capabilities",
+      );
+    }
+  }
+
+  private observeBoundaryPorts(
+    executionId: string,
+    agentId: string,
+    boundary: PreparedBoundary,
+  ): void {
+    this.boundaryPortSubscriptions.get(executionId)?.();
+    const unsubscribe = boundary.onPortsChanged(() => {
+      const snapshot = this.boundaryPortsSnapshot(executionId, boundary);
+      this.retireMissingBoundaryPreviews(
+        executionId,
+        new Set(snapshot.ports.map((port) => port.id)),
+      );
+      this.events.onBoundaryPortsChanged?.(agentId, executionId, snapshot);
+    });
+    this.boundaryPortSubscriptions.set(executionId, unsubscribe);
+  }
+
+  private stopObservingBoundaryPorts(executionId: string): void {
+    this.boundaryPortSubscriptions.get(executionId)?.();
+    this.boundaryPortSubscriptions.delete(executionId);
+  }
+
+  /** Publish a replacement snapshot for the exact live execution. The status
+   * map is the race guard: provisional and retired executions cannot emit, and
+   * callers can update only the redacted contract already admitted here. */
+  private updateBoundaryStatus(
+    executionId: string,
+    update: (current: ExecutionBoundaryStatus) => ExecutionBoundaryStatus,
+  ): boolean {
+    const current = this.executionToBoundaryStatus.get(executionId);
+    const agentId = this.executionToAgent.get(executionId);
+    if (!current || !agentId) return false;
+    const next = update(current);
+    this.executionToBoundaryStatus.set(executionId, next);
+    this.events.onBoundaryStatusChanged?.(agentId, executionId, next);
+    return true;
+  }
+
+  /** Explain why a live execution is being retired before its capability and
+   * process tree are revoked. This is diagnostic only; the synchronous status
+   * update does not weaken or delay the fail-closed lifecycle transition. */
+  markBoundaryDraining(
+    executionId: string,
+    transition: "territory-restart",
+  ): boolean {
+    const transitionedAt = Date.now();
+    return this.updateBoundaryStatus(executionId, (current) => ({
+      ...current,
+      state: "draining",
+      lifecycle: { lastTransition: transition, transitionedAt },
+      checkedAt: transitionedAt,
+    }));
+  }
+
+  /** Read-only boundary preflight. It resolves and probes the same immutable
+   * territory as admission but does not publish a registry pointer, fence the
+   * checkout, create a provider execution, or expose host paths in its result. */
+  async preflightSession(
+    agentId: string,
+    opts: {
+      cwd?: string;
+      workspaceId?: string;
+      cliBinary?: string;
+    },
+  ): Promise<ExecutionBoundaryStatus> {
+    const checkedAt = Date.now();
+    let adapter: AgentAdapter;
+    try {
+      adapter = await this.adapterFor(agentId);
+    } catch {
+      return unavailableBoundaryStatus({
+        checkedAt,
+        remediation:
+          "Install or enable this provider runtime, then run the preflight again.",
+      });
+    }
+    let cwd: string;
+    try {
+      cwd = resolveAgentCwd(opts.cwd, "newSession", opts.workspaceId);
+    } catch (error) {
+      return unavailableBoundaryStatus({
+        checkedAt,
+        remediation:
+          error instanceof AgentFailureError
+            ? (error.failure.advice ?? error.failure.message)
+            : "Bind this chat to an existing project folder, then retry.",
+      });
+    }
+    const workspace = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)
+      : undefined;
+    const canonicalWorkspaceRoot = workspace?.path;
+    const mainRepoRoot = workspace?.repoRoot;
+    const providerSpawn = normalizeProviderSpawn(
+      applyUserProviderConfig(
+        cwd,
+        agentId,
+        { cliBinary: opts.cliBinary },
+        mainRepoRoot,
+      ),
+    );
+    let territory: AgentFilesystemTerritory | undefined;
+    try {
+      territory = await previewCodeAgentTerritory({
+        cwd,
+        workspaceRoot: canonicalWorkspaceRoot,
+        repoRoot: mainRepoRoot,
+      });
+      const mcpServers = await this.resolveSessionMcp(
+        agentId,
+        cwd,
+        mainRepoRoot,
+      );
+      this.assertBoundaryRetirementHealthy();
+      const preflightExecutionId = `preflight-${randomUUID()}`;
+      const request = await this.boundaryRequest(
+        preflightExecutionId,
+        cwd,
+        canonicalWorkspaceRoot,
+        territory,
+        undefined,
+        adapter.agentId,
+        mcpServers,
+        providerSpawn.cliBinary,
+      );
+      // A capability-only probe cannot prove that the generated profile for
+      // this workspace actually protects its exact Design aliases and engine
+      // roots. Prepare runs that request-specific live canary; tear it down
+      // before returning so preflight never publishes a session authority.
+      const prepared = await this.executionBoundary.prepare(request);
+      try {
+        for (const service of request.localServices ?? []) {
+          await prepared.requestLocalService({
+            kind: service.kind,
+            serviceId: service.serviceId,
+          });
+        }
+        return {
+          ...prepared.status,
+          designProtection: {
+            required: Boolean(territory),
+            enforced: Boolean(territory),
+            protectedDirectoryCount:
+              territory?.protectedDesignDirectories.length ?? 0,
+          },
+          checkedAt,
+        };
+      } finally {
+        await this.retirePreparedBoundary(preflightExecutionId, prepared);
+      }
+    } catch (error) {
+      const failure =
+        error instanceof AgentFailureError ? error.failure : undefined;
+      return unavailableBoundaryStatus({
+        checkedAt,
+        remediation:
+          failure?.advice ??
+          "Fix the Design directory setting or enable the qualified Zeros sandbox backend, then retry.",
+      });
+    }
+  }
+
   /** Called when a prompt succeeds — clears any prior auth-failed
    *  marker so the dot turns green again as soon as the user re-logs. */
   markAuthOk(agentId: string): void {
@@ -401,6 +2207,11 @@ export class AgentGateway {
   constructor(opts: AgentGatewayOptions) {
     this.projectRoot = opts.projectRoot;
     this.events = opts.events;
+    this.executionBoundary =
+      opts.executionBoundary ??
+      new ZsrExecutionBoundary({ projectRoot: opts.projectRoot });
+    this.previewGatewayFactory =
+      opts.previewGatewayFactory ?? localPreviewGatewayFactory;
   }
 
   /** Replace the MCP server registry. The engine boot-loads this from the
@@ -421,6 +2232,51 @@ export class AgentGateway {
   private gatewayServerUrl: string | null = null;
   setGatewayServer(url: string | null): void {
     this.gatewayServerUrl = url;
+  }
+
+  private scopedLocalServicePorts(
+    servers: readonly McpServerRegistration[] = this.mcpServers,
+  ): number[] {
+    return this.localPortsForUrls(
+      servers.flatMap((server) =>
+        server.transport === "http" && server.name !== "zeros-gateway"
+          ? [server.url]
+          : [],
+      ),
+    );
+  }
+
+  private trustedLocalServicePorts(): number[] {
+    return this.localPortsForUrls(
+      this.gatewayServerUrl ? [this.gatewayServerUrl] : [],
+    );
+  }
+
+  private localPortsForUrls(urls: readonly string[]): number[] {
+    const ports = new Set<number>();
+    for (const raw of urls) {
+      try {
+        const parsed = new URL(raw);
+        const host = parsed.hostname.toLowerCase();
+        if (host !== "localhost" && host !== "127.0.0.1" && host !== "::1") {
+          continue;
+        }
+        const port = parsed.port
+          ? Number.parseInt(parsed.port, 10)
+          : parsed.protocol === "https:"
+            ? 443
+            : parsed.protocol === "http:"
+              ? 80
+              : 0;
+        if (Number.isInteger(port) && port >= 1 && port <= 65_535) {
+          ports.add(port);
+        }
+      } catch {
+        // Registry validation owns malformed URLs; they do not become a
+        // capability merely because a session is being admitted.
+      }
+    }
+    return [...ports].sort((a, b) => a - b);
   }
   /** Recompute the shared, deduped adapter-facing view IN PLACE (the reference
    *  is shared with live adapter ctxs, so we mutate rather than reassign). */
@@ -520,13 +2376,17 @@ export class AgentGateway {
   }
 
   private async listAgentsImpl(): Promise<EnrichedRegistryAgent[]> {
+    const runtimeOverrides = this.resolveRuntimeOverrides();
+    const selectedBinaries = AGENT_MANIFEST.map(
+      (agent) => runtimeOverrides.get(agent.id) ?? agent.cliBinary,
+    );
     // Install-probe + auth-probe fan out in parallel. Version probe
     // is scoped to *installed* binaries only (running `--version` on
     // an ENOENT is slow ENOENT + noise in logs), so it waits for the
     // install probe first. probeCliVersion has its own 5min cache so
     // repeated listAgents calls are cheap.
     const [installed, authenticated] = await Promise.all([
-      probeCliInstalled(AGENT_MANIFEST.map((a) => a.cliBinary)),
+      probeCliInstalled(selectedBinaries),
       (async () => {
         const set = new Set<string>();
         await Promise.all(
@@ -539,7 +2399,14 @@ export class AgentGateway {
             // Terminal.app and the probe result is fresh again.
             if (await this.isAuthRuntimeInvalidated(m.id, m.authProbe)) return;
             try {
-              if (await evaluateAuthProbe(m.authProbe)) set.add(m.id);
+              if (
+                await evaluateAuthProbe(
+                  m.authProbe,
+                  this.providerProbeRunner(m.id),
+                )
+              ) {
+                set.add(m.id);
+              }
             } catch {
               /* probe failed — treat as unauthenticated */
             }
@@ -558,7 +2425,10 @@ export class AgentGateway {
         // version so the picker + Providers page reflect what actually runs
         // (e.g. 2.1.170), not a possibly-stale global install (e.g. 2.1.169).
         // Falls through to the PATH probe if the bundle can't be read.
-        const bundled = bundledRuntimeVersion(m.id);
+        const selectedBinary = runtimeOverrides.get(m.id) ?? m.cliBinary;
+        const bundled = runtimeOverrides.has(m.id)
+          ? null
+          : bundledRuntimeVersion(m.id);
         if (bundled) {
           versionInfo.set(m.id, {
             installedVersion: bundled,
@@ -566,13 +2436,16 @@ export class AgentGateway {
           });
           return;
         }
-        if (!installed.has(m.cliBinary)) return;
+        if (!installed.has(selectedBinary)) return;
         try {
-          const { version, compatible } = await probeCliCompatibility({
-            binary: m.cliBinary,
-            minVersion: m.minCliVersion,
-            maxVersion: m.maxCliVersion,
-          });
+          const { version, compatible } = await probeCliCompatibility(
+            {
+              binary: selectedBinary,
+              minVersion: m.minCliVersion,
+              maxVersion: m.maxCliVersion,
+            },
+            this.providerProbeRunner(m.id),
+          );
           versionInfo.set(m.id, {
             installedVersion: version ?? undefined,
             versionCompatible: compatible ?? undefined,
@@ -596,8 +2469,119 @@ export class AgentGateway {
       authenticated,
       versionInfo,
       accountByAgentId,
-      this.resolveRuntimeOverrides(),
+      runtimeOverrides,
     );
+  }
+
+  private providerProbeRunner(providerId: string): ProbeCommandRunner {
+    const configuredBinary = applyUserProviderConfig(
+      this.projectRoot,
+      providerId,
+      {},
+    ).cliBinary;
+    return {
+      cacheKey: `${this.executionBoundary.backend}:${providerId}:${configuredBinary ?? "default"}`,
+      run: (binary, args, options) =>
+        this.runProviderProbeCommand(providerId, binary, args, options),
+    };
+  }
+
+  /** A provider's auth/version command is still provider code even though it
+   * is short-lived. Give it a neutral writable root and the provider's normal
+   * private state projection, never the active checkout or engine authority. */
+  private async runProviderProbeCommand(
+    providerId: string,
+    binary: string,
+    args: string[],
+    options: { timeoutMs: number },
+  ): Promise<{ exitCode: number | null; stdout: string }> {
+    const safeProvider = providerId.replace(/[^a-z0-9_-]/gi, "-");
+    const probeRoot = await fsp.mkdtemp(
+      path.join(tmpdir(), `zeros-provider-probe-${safeProvider}-`),
+    );
+    const probeExecutionId = `probe-${safeProvider}-${randomUUID()}`;
+    let boundary: PreparedBoundary | null = null;
+    try {
+      this.assertBoundaryRetirementHealthy();
+      const ambientEnv = completeAgentSpawnEnv(undefined);
+      const configured = applyUserProviderConfig(this.projectRoot, providerId, {
+        env: ambientEnv,
+      });
+      const env = configured.env ?? ambientEnv;
+      const manifestBinary = findAgent(providerId)?.cliBinary;
+      const requestedBinary =
+        configured.cliBinary && binary === manifestBinary
+          ? configured.cliBinary
+          : binary;
+      const executable = resolveProviderExecutable(requestedBinary, env);
+      if (!executable) {
+        throw new Error("provider command probe executable is unavailable");
+      }
+      const request = await this.boundaryRequest(
+        probeExecutionId,
+        probeRoot,
+        probeRoot,
+        undefined,
+        env,
+        providerId,
+        [],
+        executable,
+        undefined,
+        [],
+        false,
+      );
+      boundary = await this.executionBoundary.prepare(request);
+      const child = await boundary.spawn({
+        command: executable,
+        args,
+        cwd: probeRoot,
+        env,
+        stdio: "pipe",
+      });
+      child.stdin?.end();
+      const MAX_PROBE_OUTPUT_BYTES = 64 * 1024;
+      let stdout = "";
+      let stdoutBytes = 0;
+      child.stdout?.on("data", (chunk: Buffer | string) => {
+        if (stdoutBytes >= MAX_PROBE_OUTPUT_BYTES) return;
+        const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
+        const remaining = MAX_PROBE_OUTPUT_BYTES - stdoutBytes;
+        const accepted = Buffer.from(text, "utf8").subarray(0, remaining);
+        stdout += accepted.toString("utf8");
+        stdoutBytes += accepted.byteLength;
+      });
+      // Drain diagnostics without retaining or logging provider/account data.
+      child.stderr?.resume();
+      const closed = child.child
+        ? child.child.exitCode !== null || child.child.signalCode !== null
+          ? Promise.resolve()
+          : new Promise<void>((resolve) => child.child?.once("close", resolve))
+        : Promise.resolve();
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        const exit = await Promise.race([
+          child.wait(),
+          new Promise<never>((_resolve, reject) => {
+            timer = setTimeout(
+              () => reject(new Error("provider command probe timed out")),
+              options.timeoutMs,
+            );
+          }),
+        ]);
+        await closed;
+        return { exitCode: exit.code, stdout };
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    } finally {
+      try {
+        if (boundary) {
+          await this.retirePreparedBoundary(probeExecutionId, boundary);
+        }
+      } finally {
+        await fsp.rm(probeRoot, { recursive: true, force: true });
+      }
+    }
   }
 
   /** Per-agent persisted `executable_path` from the user settings layer, keyed by
@@ -652,11 +2636,60 @@ export class AgentGateway {
           return;
         }
         let value: AccountDetails | null = null;
+        let preparedBoundary: PreparedBoundary | null = null;
+        let accountExecutionId: string | null = null;
         try {
           const adapter = await this.adapterFor(m.id);
-          value = (await adapter.getAccountInfo?.()) ?? null;
+          if (adapter.getAccountInfo) {
+            const cwd = path.resolve(this.projectRoot);
+            const env = applyUserProviderConfig(cwd, m.id, {
+              env: completeAgentSpawnEnv(undefined),
+            }).env;
+            const territory = await this.prepareCodeAgentTerritory(
+              adapter,
+              cwd,
+              cwd,
+              cwd,
+              "newSession",
+            );
+            accountExecutionId = `account-${randomUUID()}`;
+            preparedBoundary = await this.prepareExecutionBoundary(
+              accountExecutionId,
+              cwd,
+              cwd,
+              adapter,
+              territory,
+              env,
+              [],
+              "newSession",
+              undefined,
+              undefined,
+              [],
+              { includeSessionCapabilities: false },
+            );
+            value =
+              (await adapter.getAccountInfo({
+                env,
+                executionBoundary: preparedBoundary,
+              })) ?? null;
+          }
         } catch {
           /* best-effort — cache null, retry after the TTL / on Refresh */
+        } finally {
+          if (preparedBoundary && accountExecutionId) {
+            try {
+              await this.retirePreparedBoundary(
+                accountExecutionId,
+                preparedBoundary,
+              );
+            } catch (error) {
+              value = null;
+              console.warn(
+                `[agents] ${m.id} account boundary teardown failed: ` +
+                  (error instanceof Error ? error.message : String(error)),
+              );
+            }
+          }
         }
         this.accountInfoCache.set(m.id, { at: now, value });
         if (value) out.set(m.id, value);
@@ -744,18 +2777,63 @@ export class AgentGateway {
       env?: Record<string, string>;
     },
   ): Promise<{ title: string | null; error?: string }> {
+    let preparedBoundary: PreparedBoundary | null = null;
+    let titleExecutionId: string | null = null;
+    let result: { title: string | null; error?: string } = { title: null };
     try {
       const adapter = await this.adapterFor(agentId);
       if (!adapter.generateText) return { title: null };
-      const text = await adapter.generateText({ ...opts, timeoutMs: 30_000 });
+      const cwd = path.resolve(this.projectRoot);
+      const env = applyUserProviderConfig(cwd, agentId, {
+        env: completeAgentSpawnEnv(opts.env),
+      }).env;
+      const territory = await this.prepareCodeAgentTerritory(
+        adapter,
+        cwd,
+        cwd,
+        cwd,
+        "newSession",
+      );
+      titleExecutionId = `title-${randomUUID()}`;
+      preparedBoundary = await this.prepareExecutionBoundary(
+        titleExecutionId,
+        cwd,
+        cwd,
+        adapter,
+        territory,
+        env,
+        [],
+        "newSession",
+        undefined,
+        undefined,
+        [],
+        { includeSessionCapabilities: false },
+      );
+      const text = await adapter.generateText({
+        ...opts,
+        env,
+        timeoutMs: 30_000,
+        executionBoundary: preparedBoundary,
+      });
       const title = text.trim();
-      return { title: title.length > 0 ? title : null };
+      result = { title: title.length > 0 ? title : null };
     } catch (err) {
-      return {
+      result = {
         title: null,
         error: err instanceof Error ? err.message : String(err),
       };
     }
+    if (preparedBoundary && titleExecutionId) {
+      try {
+        await this.retirePreparedBoundary(titleExecutionId, preparedBoundary);
+      } catch (error) {
+        return {
+          title: null,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+    return result;
   }
 
   async authenticate(_agentId: string, _methodId: string): Promise<void> {
@@ -815,20 +2893,52 @@ export class AgentGateway {
     const mainRepoRoot = opts.workspaceId
       ? getWorkspaceById(opts.workspaceId)?.repoRoot
       : undefined;
+    const canonicalWorkspaceRoot = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)?.path
+      : undefined;
     const merged = await withTargetBranchEnv(
-      withWorktreeEnv(mergeSpawnEnv(cwd, opts.env, mainRepoRoot), cwd),
+      withWorktreeEnv(
+        mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env), mainRepoRoot),
+        cwd,
+      ),
       opts.workspaceId,
     );
-    const spawn = applyUserProviderConfig(
-      cwd,
-      agentId,
-      { env: merged, cliBinary: opts.cliBinary },
-      mainRepoRoot,
+    const spawn = normalizeProviderSpawn(
+      applyUserProviderConfig(
+        cwd,
+        agentId,
+        { env: merged, cliBinary: opts.cliBinary },
+        mainRepoRoot,
+      ),
     );
-    // Native-instruction adapters (Codex) take the first-turn orientation on
+    const primaryTerritory = await this.prepareCodeAgentTerritory(
+      adapter,
+      cwd,
+      canonicalWorkspaceRoot,
+      mainRepoRoot,
+      "newSession",
+      { cliBinary: spawn.cliBinary },
+    );
+    // ZSR wraps the complete provider runtime before any provider wrapper,
+    // MCP server, hook, plugin or `/add-dir` child starts. Preserve the same
+    // provider environment as a normal workspace; the boundary policy, not a
+    // provider-specific feature clamp, subtracts Design authority.
+    const sessionEnv = spawn.env;
+    const territorySet = await this.resolveTerritorySet(
+      primaryTerritory,
+      cwd,
+      canonicalWorkspaceRoot,
+      sessionEnv,
+      "newSession",
+    );
+    const territory = territorySet.territory;
+    // Native-instruction adapters (Codex and Claude) take the first-turn orientation on
     // their protocol's own channel at thread creation; everyone else gets it
     // prepended in-band on the first prompt (withSystemInstruction).
-    const instructionCtx = this.parseInstructionCtx(spawn.env);
+    const instructionCtx = this.parseInstructionCtx(
+      sessionEnv,
+      territory?.designDirectory,
+    );
     const systemInstruction = this.nativeInstructionFor(
       adapter,
       cwd,
@@ -836,16 +2946,61 @@ export class AgentGateway {
     );
     const executionId = randomUUID();
     const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
-    opts.onExecutionCreated?.(executionId);
+    const preparedBoundary = await this.prepareExecutionBoundary(
+      executionId,
+      cwd,
+      canonicalWorkspaceRoot,
+      adapter,
+      territory,
+      sessionEnv,
+      mcpServers,
+      "newSession",
+      spawn.cliBinary,
+      territorySet.additionalRoots,
+      territorySet.additionalGitWorkspaceRoots,
+    );
+    try {
+      await this.assertAdditionalTerritorySetStillCurrent(
+        territorySet,
+        primaryTerritory,
+        cwd,
+        canonicalWorkspaceRoot,
+        sessionEnv,
+        "newSession",
+      );
+    } catch (error) {
+      await this.retirePreparedBoundaryAfterFailure(
+        executionId,
+        preparedBoundary,
+        error,
+      );
+    }
+    this.executionBoundaries.set(executionId, preparedBoundary);
+    this.executionToCwd.set(executionId, cwd);
+    this.executionToTerritoryContributions.set(
+      executionId,
+      territorySet.contributions,
+    );
+    const boundary = preparedBoundary.status;
+    // Local MCP, hooks, plugins and subagents are now descendants of the same
+    // ZSR process root, so Design-bearing sessions retain the normal registry.
+    try {
+      opts.onExecutionCreated?.(executionId);
+    } catch (error) {
+      await this.disposeRejectedExecutions(adapter, [executionId]);
+      throw error;
+    }
     let session: NewSessionResponse;
     try {
       ({ session } = await adapter.newSession({
         executionId,
         cwd,
-        env: spawn.env,
+        env: sessionEnv,
         cliBinary: spawn.cliBinary,
         mcpServers,
         ...(systemInstruction ? { systemInstruction } : {}),
+        ...(territory ? { territory } : {}),
+        executionBoundary: preparedBoundary,
       }));
     } catch (err) {
       await this.disposeRejectedExecutions(adapter, [executionId]);
@@ -881,6 +3036,16 @@ export class AgentGateway {
     this.executionToAgent.set(session.executionId, agentId);
     this.executionToCwd.set(session.executionId, cwd);
     this.executionToInstructionCtx.set(session.executionId, instructionCtx);
+    this.executionToDesignDirectory.set(
+      session.executionId,
+      territory?.designDirectory ?? null,
+    );
+    this.executionToTerritoryIdentity.set(
+      session.executionId,
+      territory ? agentTerritoryIdentity(territory) : null,
+    );
+    this.executionToBoundaryStatus.set(session.executionId, boundary);
+    this.sessionsTerritoryNoticePending.delete(session.executionId);
     if (systemInstruction) {
       // Delivered natively at thread creation — the first prompt must NOT
       // also prepend the in-band block.
@@ -891,7 +3056,11 @@ export class AgentGateway {
     if (opts.workspaceId) {
       this.executionToWorkspace.set(session.executionId, opts.workspaceId);
     }
-    return session;
+    return {
+      ...session,
+      boundary,
+      boundaryPorts: this.boundaryPortsSnapshot(executionId, preparedBoundary),
+    };
   }
 
   async loadSession(
@@ -932,24 +3101,93 @@ export class AgentGateway {
     const mainRepoRoot = opts.workspaceId
       ? getWorkspaceById(opts.workspaceId)?.repoRoot
       : undefined;
+    const canonicalWorkspaceRoot = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)?.path
+      : undefined;
     const merged = await withTargetBranchEnv(
-      withWorktreeEnv(mergeSpawnEnv(cwd, opts.env, mainRepoRoot), cwd),
+      withWorktreeEnv(
+        mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env), mainRepoRoot),
+        cwd,
+      ),
       opts.workspaceId,
     );
-    const spawn = applyUserProviderConfig(
-      cwd,
-      agentId,
-      { env: merged, cliBinary: opts.cliBinary },
-      mainRepoRoot,
+    const spawn = normalizeProviderSpawn(
+      applyUserProviderConfig(
+        cwd,
+        agentId,
+        { env: merged, cliBinary: opts.cliBinary },
+        mainRepoRoot,
+      ),
     );
-    const instructionCtx = this.parseInstructionCtx(spawn.env);
+    const primaryTerritory = await this.prepareCodeAgentTerritory(
+      adapter,
+      cwd,
+      canonicalWorkspaceRoot,
+      mainRepoRoot,
+      "loadSession",
+      { cliBinary: spawn.cliBinary },
+    );
+    const sessionEnv = spawn.env;
+    const territorySet = await this.resolveTerritorySet(
+      primaryTerritory,
+      cwd,
+      canonicalWorkspaceRoot,
+      sessionEnv,
+      "loadSession",
+    );
+    const territory = territorySet.territory;
+    const instructionCtx = this.parseInstructionCtx(
+      sessionEnv,
+      territory?.designDirectory,
+    );
     const systemInstruction = this.nativeInstructionFor(
       adapter,
       cwd,
       instructionCtx,
     );
     const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
-    opts.onExecutionCreated?.(executionId);
+    const preparedBoundary = await this.prepareExecutionBoundary(
+      executionId,
+      cwd,
+      canonicalWorkspaceRoot,
+      adapter,
+      territory,
+      sessionEnv,
+      mcpServers,
+      "loadSession",
+      spawn.cliBinary,
+      territorySet.additionalRoots,
+      territorySet.additionalGitWorkspaceRoots,
+    );
+    try {
+      await this.assertAdditionalTerritorySetStillCurrent(
+        territorySet,
+        primaryTerritory,
+        cwd,
+        canonicalWorkspaceRoot,
+        sessionEnv,
+        "loadSession",
+      );
+    } catch (error) {
+      await this.retirePreparedBoundaryAfterFailure(
+        executionId,
+        preparedBoundary,
+        error,
+      );
+    }
+    this.executionBoundaries.set(executionId, preparedBoundary);
+    this.executionToCwd.set(executionId, cwd);
+    this.executionToTerritoryContributions.set(
+      executionId,
+      territorySet.contributions,
+    );
+    const boundary = preparedBoundary.status;
+    try {
+      opts.onExecutionCreated?.(executionId);
+    } catch (error) {
+      await this.disposeRejectedExecutions(adapter, [executionId]);
+      throw error;
+    }
     let response: LoadSessionResponse;
     try {
       response = await adapter.loadSession({
@@ -958,10 +3196,12 @@ export class AgentGateway {
         // Compatibility for adapters/tests that have not yet adopted bindings.
         sessionId: providerBinding.legacySessionId ?? providerBinding.resumeId,
         cwd,
-        env: spawn.env,
+        env: sessionEnv,
         cliBinary: spawn.cliBinary,
         mcpServers,
         ...(systemInstruction ? { systemInstruction } : {}),
+        ...(territory ? { territory } : {}),
+        executionBoundary: preparedBoundary,
       });
     } catch (err) {
       // Adapters may allocate a subprocess/session directory before discovering
@@ -997,6 +3237,15 @@ export class AgentGateway {
     this.executionToAgent.set(executionId, agentId);
     this.executionToCwd.set(executionId, cwd);
     this.executionToInstructionCtx.set(executionId, instructionCtx);
+    this.executionToDesignDirectory.set(
+      executionId,
+      territory?.designDirectory ?? null,
+    );
+    this.executionToTerritoryIdentity.set(
+      executionId,
+      territory ? agentTerritoryIdentity(territory) : null,
+    );
+    this.executionToBoundaryStatus.set(executionId, boundary);
     if (systemInstruction) {
       // NATIVE channel: the adapter attached the orientation on thread/resume
       // — and its degraded resume-→-fresh-thread fallback attaches it on the
@@ -1014,11 +3263,13 @@ export class AgentGateway {
       // hint.
       this.sessionsInstructed.delete(executionId);
       this.sessionsCwdHinted.delete(executionId);
+      this.sessionsTerritoryNoticePending.delete(executionId);
     } else {
       // TRUE RESUME → the first-turn <system_instruction> already rides in
       // the resumed transcript; pre-mark instructed so prompt() never
       // re-sends it.
       this.sessionsInstructed.add(executionId);
+      if (territory) this.sessionsTerritoryNoticePending.add(executionId);
     }
     if (opts.workspaceId) {
       this.executionToWorkspace.set(executionId, opts.workspaceId);
@@ -1027,6 +3278,8 @@ export class AgentGateway {
       ...response,
       executionId,
       providerBinding: response.providerBinding ?? providerBinding,
+      boundary,
+      boundaryPorts: this.boundaryPortsSnapshot(executionId, preparedBoundary),
     };
   }
 
@@ -1064,31 +3317,96 @@ export class AgentGateway {
     const mainRepoRoot = opts.workspaceId
       ? getWorkspaceById(opts.workspaceId)?.repoRoot
       : undefined;
+    const canonicalWorkspaceRoot = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)?.path
+      : undefined;
     const merged = await withTargetBranchEnv(
-      withWorktreeEnv(mergeSpawnEnv(cwd, opts.env, mainRepoRoot), cwd),
+      withWorktreeEnv(
+        mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env), mainRepoRoot),
+        cwd,
+      ),
       opts.workspaceId,
     );
-    const spawn = applyUserProviderConfig(
-      cwd,
-      agentId,
-      { env: merged, cliBinary: opts.cliBinary },
-      mainRepoRoot,
+    const spawn = normalizeProviderSpawn(
+      applyUserProviderConfig(
+        cwd,
+        agentId,
+        { env: merged, cliBinary: opts.cliBinary },
+        mainRepoRoot,
+      ),
     );
-    const instructionCtx = this.parseInstructionCtx(spawn.env);
+    const primaryTerritory = await this.prepareCodeAgentTerritory(
+      adapter,
+      cwd,
+      canonicalWorkspaceRoot,
+      mainRepoRoot,
+      "forkSession",
+      { cliBinary: spawn.cliBinary },
+    );
+    const sessionEnv = spawn.env;
+    const territorySet = await this.resolveTerritorySet(
+      primaryTerritory,
+      cwd,
+      canonicalWorkspaceRoot,
+      sessionEnv,
+      "forkSession",
+    );
+    const territory = territorySet.territory;
+    const instructionCtx = this.parseInstructionCtx(
+      sessionEnv,
+      territory?.designDirectory,
+    );
     const systemInstruction = this.nativeInstructionFor(
       adapter,
       cwd,
       instructionCtx,
     );
     const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
-    const result = await adapter.forkProviderBinding({
-      providerBinding,
+    const forkExecutionId = `fork-${randomUUID()}`;
+    const preparedBoundary = await this.prepareExecutionBoundary(
+      forkExecutionId,
       cwd,
-      env: spawn.env,
-      cliBinary: spawn.cliBinary,
+      canonicalWorkspaceRoot,
+      adapter,
+      territory,
+      sessionEnv,
       mcpServers,
-      ...(systemInstruction ? { systemInstruction } : {}),
-    });
+      "forkSession",
+      spawn.cliBinary,
+      territorySet.additionalRoots,
+      territorySet.additionalGitWorkspaceRoots,
+    );
+    try {
+      await this.assertAdditionalTerritorySetStillCurrent(
+        territorySet,
+        primaryTerritory,
+        cwd,
+        canonicalWorkspaceRoot,
+        sessionEnv,
+        "forkSession",
+      );
+    } catch (error) {
+      await this.retirePreparedBoundaryAfterFailure(
+        forkExecutionId,
+        preparedBoundary,
+        error,
+      );
+    }
+    let result: { providerBinding: ProviderBinding };
+    try {
+      result = await adapter.forkProviderBinding({
+        providerBinding,
+        cwd,
+        env: sessionEnv,
+        cliBinary: spawn.cliBinary,
+        mcpServers,
+        ...(systemInstruction ? { systemInstruction } : {}),
+        ...(territory ? { territory } : {}),
+        executionBoundary: preparedBoundary,
+      });
+    } finally {
+      await this.retirePreparedBoundary(forkExecutionId, preparedBoundary);
+    }
     const forkedBinding = coerceProviderBinding(result.providerBinding);
     if (
       !forkedBinding ||
@@ -1117,13 +3435,51 @@ export class AgentGateway {
     adapter: AgentAdapter,
     executionIds: Array<string | undefined>,
   ): Promise<void> {
-    if (!adapter.disposeSession) return;
     for (const executionId of new Set(
       executionIds.filter(Boolean) as string[],
     )) {
+      const boundary = this.executionBoundaries.get(executionId);
+      this.executionToAgent.delete(executionId);
+      this.executionToWorkspace.delete(executionId);
+      this.executionToCwd.delete(executionId);
+      this.executionToInstructionCtx.delete(executionId);
+      this.executionToDesignDirectory.delete(executionId);
+      this.executionToTerritoryIdentity.delete(executionId);
+      this.executionToTerritoryContributions.delete(executionId);
+      this.executionToBoundaryStatus.delete(executionId);
+      this.stopObservingBoundaryPorts(executionId);
+      const failures: unknown[] = [];
+      // Each step is independent and teardown is fail-closed: an adapter
+      // cleanup failure must never skip the kernel-boundary kill/proof, while
+      // a lease-revocation failure must not leave the provider process alive.
       try {
-        await adapter.disposeSession(executionId);
-      } catch (err) {
+        await this.closeBoundaryPreviews(executionId);
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        await boundary?.revoke();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        await adapter.disposeSession?.(executionId);
+      } catch (error) {
+        failures.push(error);
+      }
+      let boundaryStopped = boundary === undefined;
+      try {
+        await boundary?.stopAndProve();
+        boundaryStopped = true;
+      } catch (error) {
+        failures.push(error);
+        this.failedBoundaryRetirements.set(executionId, error);
+      }
+      if (boundaryStopped) {
+        this.executionBoundaries.delete(executionId);
+        this.failedBoundaryRetirements.delete(executionId);
+      }
+      for (const err of failures) {
         console.warn(
           `[agents] ${adapter.agentId} failed to dispose rejected execution ` +
             `${executionId}: ` +
@@ -1139,24 +3495,62 @@ export class AgentGateway {
     opts: { failClosed?: boolean } = {},
   ): Promise<void> {
     const resolvedAgentId = this.executionToAgent.get(sessionId) ?? agentId;
+    const boundary = this.executionBoundaries.get(sessionId);
+    this.stopObservingBoundaryPorts(sessionId);
     this.executionToAgent.delete(sessionId);
     this.executionToWorkspace.delete(sessionId);
     this.executionToCwd.delete(sessionId);
     this.sessionsCwdHinted.delete(sessionId);
     this.sessionsInstructed.delete(sessionId);
+    this.sessionsTerritoryNoticePending.delete(sessionId);
     this.executionToInstructionCtx.delete(sessionId);
+    this.executionToDesignDirectory.delete(sessionId);
+    this.executionToTerritoryIdentity.delete(sessionId);
+    this.executionToTerritoryContributions.delete(sessionId);
+    this.executionToBoundaryStatus.delete(sessionId);
     const adapter = this.adapters.get(resolvedAgentId);
-    if (adapter?.disposeSession) {
-      try {
-        await adapter.disposeSession(sessionId);
-      } catch (err) {
-        console.warn(
-          `[agents] ${resolvedAgentId} disposeSession(${sessionId}) failed: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-        if (opts.failClosed) throw err;
-      }
+    let failure: unknown;
+    try {
+      // Revoke broker/port credentials before asking provider code to unwind.
+      await this.closeBoundaryPreviews(sessionId);
+    } catch (err) {
+      failure = err;
     }
+    try {
+      await boundary?.revoke();
+    } catch (err) {
+      failure ??= err;
+      console.warn(
+        `[agents] ${resolvedAgentId} boundary revoke(${sessionId}) failed: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+    try {
+      await adapter?.disposeSession?.(sessionId);
+    } catch (err) {
+      failure ??= err;
+      console.warn(
+        `[agents] ${resolvedAgentId} disposeSession(${sessionId}) failed: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+    let boundaryStopped = boundary === undefined;
+    try {
+      await boundary?.stopAndProve();
+      boundaryStopped = true;
+    } catch (err) {
+      failure ??= err;
+      this.failedBoundaryRetirements.set(sessionId, err);
+      console.warn(
+        `[agents] ${resolvedAgentId} boundary teardown(${sessionId}) failed: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+    if (boundaryStopped) {
+      this.executionBoundaries.delete(sessionId);
+      this.failedBoundaryRetirements.delete(sessionId);
+    }
+    if (failure && opts.failClosed) throw failure;
   }
 
   async listSessions(
@@ -1203,10 +3597,14 @@ export class AgentGateway {
    *  optional — once the Actions settings UI + spawn-env feed them they flow
    *  through here automatically; until then the preamble + /add-dir awareness
    *  still ship. Callers stash the result in executionToInstructionCtx. */
-  private parseInstructionCtx(env: Record<string, string> | undefined): {
+  private parseInstructionCtx(
+    env: Record<string, string> | undefined,
+    designDirectory?: string,
+  ): {
     additionalDirectories: string[];
     targetBranch?: string;
     customInstructions?: string;
+    designDirectory?: string;
   } {
     const e = env ?? {};
     let dirs: string[] = [];
@@ -1227,6 +3625,7 @@ export class AgentGateway {
       additionalDirectories: dirs,
       targetBranch: e.ZEROS_TARGET_BRANCH?.trim() || undefined,
       customInstructions: e.ZEROS_PROMPTS_GENERAL || undefined,
+      ...(designDirectory ? { designDirectory } : {}),
     };
   }
 
@@ -1244,6 +3643,7 @@ export class AgentGateway {
       targetBranch: ctx.targetBranch ?? null,
       additionalDirectories: ctx.additionalDirectories,
       customInstructions: ctx.customInstructions ?? null,
+      designDirectory: ctx.designDirectory ?? null,
     });
     return body || undefined;
   }
@@ -1252,7 +3652,7 @@ export class AgentGateway {
    *  /add-dir awareness + repo `[prompts] general`) — the orientation an agent
    *  needs before its first tool call — for every agent WITHOUT a native
    *  instruction channel. Adapters
-   *  declaring `nativeSystemInstruction` (Codex) get the same body on their
+   *  declaring `nativeSystemInstruction` (Codex and Claude) get the same body on their
    *  protocol's instruction field at session create/resume instead, and are
    *  pre-marked instructed there. First prompt per NEW session only; a resumed
    *  session is pre-marked (the block already rides in its history). The text
@@ -1261,8 +3661,18 @@ export class AgentGateway {
     sessionId: string,
     prompt: ContentBlock[],
   ): ContentBlock[] {
-    if (this.sessionsInstructed.has(sessionId)) return prompt;
+    if (this.sessionsInstructed.has(sessionId)) {
+      if (!this.sessionsTerritoryNoticePending.delete(sessionId)) return prompt;
+      const ctx = this.executionToInstructionCtx.get(sessionId);
+      const territoryBlock = wrapSystemInstruction(
+        buildCodeAgentDesignTerritoryNotice(ctx?.designDirectory ?? null),
+      );
+      return territoryBlock
+        ? [{ type: "text", text: territoryBlock }, ...prompt]
+        : prompt;
+    }
     this.sessionsInstructed.add(sessionId);
+    this.sessionsTerritoryNoticePending.delete(sessionId);
     const cwd = this.executionToCwd.get(sessionId);
     if (!cwd) return prompt;
     const ctx = this.executionToInstructionCtx.get(sessionId);
@@ -1271,6 +3681,7 @@ export class AgentGateway {
       targetBranch: ctx?.targetBranch ?? null,
       additionalDirectories: ctx?.additionalDirectories ?? [],
       customInstructions: ctx?.customInstructions ?? null,
+      designDirectory: ctx?.designDirectory ?? null,
     });
     if (!block) return prompt;
     return [{ type: "text", text: block }, ...prompt];
@@ -1295,6 +3706,54 @@ export class AgentGateway {
         sessionId,
         prompt: outgoing,
       });
+      const currentGit =
+        this.executionToBoundaryStatus.get(sessionId)?.git?.state;
+      if (currentGit !== "not-applicable") {
+        this.updateBoundaryStatus(sessionId, (current) => ({
+          ...current,
+          git: { state: "synchronizing", changedAt: Date.now() },
+          checkedAt: Date.now(),
+        }));
+      }
+      try {
+        const result = await this.executionBoundaries
+          .get(sessionId)
+          ?.synchronizeGit();
+        if (result) {
+          const changedAt = Date.now();
+          this.updateBoundaryStatus(sessionId, (current) => ({
+            ...current,
+            git: {
+              state: result.state,
+              updatedRefs: result.updatedRefs,
+              indexUpdated: result.indexUpdated,
+              changedAt,
+            },
+            checkedAt: changedAt,
+          }));
+        }
+      } catch (error) {
+        const changedAt = Date.now();
+        this.updateBoundaryStatus(sessionId, (current) => ({
+          ...current,
+          git: {
+            state: "blocked",
+            issue: "promotion-conflict",
+            changedAt,
+          },
+          checkedAt: changedAt,
+        }));
+        throw new AgentFailureError({
+          kind: "protocol-error",
+          message: `Zeros could not safely promote the agent's private Git ChangeSet: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          stage: "prompt",
+          agentId: adapter.agentId,
+          advice:
+            "Review the concurrent Git or Design-impact conflict, then retry. The private Git state was preserved for recovery.",
+        });
+      }
       // A clean prompt is the strongest possible signal that auth is
       // good — clear any prior failed-auth marker so the green dot
       // re-illuminates the moment the user resolves their login.
@@ -1461,22 +3920,56 @@ export class AgentGateway {
   }
 
   async dispose(): Promise<void> {
-    const disposals = Array.from(this.adapters.values()).map((a) =>
-      a.dispose().catch((err) => {
-        console.warn(`[agents] ${a.agentId} dispose error:`, err);
-      }),
+    const boundaries = [...this.executionBoundaries.values()];
+    const failures: unknown[] = [];
+    const settle = async (operations: Array<() => unknown>) => {
+      const results = await Promise.allSettled(
+        operations.map((operation) => Promise.resolve().then(operation)),
+      );
+      for (const result of results) {
+        if (result.status === "rejected") failures.push(result.reason);
+      }
+    };
+    for (const executionId of this.boundaryPortSubscriptions.keys()) {
+      this.stopObservingBoundaryPorts(executionId);
+    }
+    await settle(
+      [...this.boundaryPreviews.keys()].map(
+        (executionId) => () => this.closeBoundaryPreviews(executionId),
+      ),
     );
-    await Promise.all(disposals);
+    await settle(boundaries.map((boundary) => () => boundary.revoke()));
+    await settle(
+      Array.from(this.adapters.values()).map(
+        (adapter) => () => adapter.dispose(),
+      ),
+    );
+    await settle(
+      boundaries.map((boundary) => () => boundary.stopAndProve()),
+    );
+    this.executionBoundaries.clear();
+    this.failedBoundaryRetirements.clear();
     this.adapters.clear();
     this.executionToAgent.clear();
     this.executionToWorkspace.clear();
     this.executionToCwd.clear();
     this.executionToInstructionCtx.clear();
+    this.executionToDesignDirectory.clear();
+    this.executionToTerritoryIdentity.clear();
+    this.executionToTerritoryContributions.clear();
+    this.executionToBoundaryStatus.clear();
+    this.sessionsTerritoryNoticePending.clear();
     this.sessionsCwdHinted.clear();
     this.sessionsInstructed.clear();
     this.agentInitializes.clear();
     this.cachedAgents = null;
     this.cachedAgentsAt = null;
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "failed to dispose agent execution boundaries",
+      );
+    }
   }
 
   // ── Internals ─────────────────────────────────────────

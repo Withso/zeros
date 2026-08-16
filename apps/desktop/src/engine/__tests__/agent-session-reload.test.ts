@@ -20,6 +20,7 @@ import {
   type ChatRow,
 } from "../db/chats";
 import { AgentFailureError } from "../agents/types";
+import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
 
 interface ActivePromptRecord {
   sessionId: string;
@@ -34,6 +35,7 @@ interface ActivePromptRecord {
 interface TestEngineInternals {
   router: MessageRouter;
   agents: {
+    cancel(agentId: string, sessionId: string): Promise<void>;
     events: {
       onSessionUpdate: (agentId: string, notification: unknown) => void;
       onAgentExit: (
@@ -56,6 +58,7 @@ interface TestEngineInternals {
   promptSessions: Set<string>;
   activePromptContexts: Map<string, ActivePromptRecord>;
   sessionLoadResponses: Map<string, LoadSessionResponse>;
+  cloudWorker: CloudWorkerConfiguration | null;
   pendingPermissionRequests: Map<
     string,
     { agentId: string; request: RequestPermissionRequest }
@@ -880,6 +883,44 @@ describe("agent session continuity across a local renderer reload", () => {
 
     state.handleDisconnect(client);
 
+    expect(state.sessionAgent.get("session-1")).toBe("claude");
+  });
+
+  it("keeps an attested cloud agent alive across a transient WSS disconnect", () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_882 });
+    const state = internals(engine);
+    state.cloudWorker = {
+      version: 1,
+      backend: "cloud-worker",
+      profile: "zeros-cloud-worker-v1",
+      uid: process.getuid?.() || 10_001,
+      gid: process.getgid?.() || 10_001,
+      cgroupParent: "/sys/fs/cgroup/zeros-agents",
+      resources: {
+        memoryBytes: 4 * 1024 ** 3,
+        cpuQuotaMicros: 200_000,
+        cpuPeriodMicros: 100_000,
+        processes: 1_024,
+      },
+      toolchain: {
+        node: "/usr/bin/node",
+        supervisor: "/opt/zeros/zsr-supervisor.mjs",
+        networkBridge: "/opt/zeros/zsr-network-bridge.mjs",
+        containerWorker: "/opt/zeros/zsr-container-worker.mjs",
+        bwrap: "/usr/bin/bwrap",
+        socat: "/usr/bin/socat",
+        setpriv: "/usr/bin/setpriv",
+      },
+    };
+    const { client } = testClient("cloud-renderer-reload", "cloud");
+    state.router.register(client);
+    state.router.setOwner("session-1", client.id);
+    state.sessionAgent.set("session-1", "claude");
+    const cancel = vi.spyOn(state.agents, "cancel").mockResolvedValue();
+
+    state.handleDisconnect(client);
+
+    expect(cancel).not.toHaveBeenCalled();
     expect(state.sessionAgent.get("session-1")).toBe("claude");
   });
 });

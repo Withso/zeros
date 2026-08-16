@@ -6,7 +6,7 @@
 // sweep semantics so a future refactor breaks the suite, not the user's disk.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -25,6 +25,9 @@ vi.mock("node:os", async (importActual) => {
 
 import {
   ensureSessionDir,
+  ORBSTACK_MACHINE_RECOVERY_HOLD_FILE,
+  removeSessionDir,
+  SHADOW_GIT_RECOVERY_HOLD_FILE,
   sessionsRoot,
   sweepDeadSessions,
   writeSessionMeta,
@@ -101,6 +104,54 @@ describe("sweepDeadSessions", () => {
 
     expect(await sweepDeadSessions()).toBe(0);
     expect((await readdir(sessionsRoot())).sort()).toEqual(["a", "b"]);
+  });
+
+  it("preserves a dead session while process-domain recovery is pending", async () => {
+    await seedSession("pending", DEAD_PID);
+    const commands = path.join(
+      sessionsRoot(),
+      "pending",
+      "boundary",
+      "generation",
+      "commands",
+    );
+    await mkdir(commands, { recursive: true });
+    await writeFile(path.join(commands, "process-domain.json"), "{}", {
+      mode: 0o600,
+    });
+
+    expect(await sweepDeadSessions()).toBe(0);
+    expect(await readdir(sessionsRoot())).toEqual(["pending"]);
+  });
+
+  it("preserves explicit and swept sessions while shadow Git recovery is pending", async () => {
+    await seedSession("git-recovery", DEAD_PID);
+    await writeFile(
+      path.join(sessionsRoot(), "git-recovery", SHADOW_GIT_RECOVERY_HOLD_FILE),
+      '{"version":2}\n',
+      { mode: 0o600 },
+    );
+
+    await removeSessionDir("git-recovery");
+    expect(await sweepDeadSessions()).toBe(0);
+    expect(await readdir(sessionsRoot())).toEqual(["git-recovery"]);
+  });
+
+  it("preserves selective mount sources while OrbStack cleanup is pending", async () => {
+    await seedSession("orb-recovery", DEAD_PID);
+    await writeFile(
+      path.join(
+        sessionsRoot(),
+        "orb-recovery",
+        ORBSTACK_MACHINE_RECOVERY_HOLD_FILE,
+      ),
+      '{"version":1}\n',
+      { mode: 0o600 },
+    );
+
+    await removeSessionDir("orb-recovery");
+    expect(await sweepDeadSessions()).toBe(0);
+    expect(await readdir(sessionsRoot())).toEqual(["orb-recovery"]);
   });
 });
 

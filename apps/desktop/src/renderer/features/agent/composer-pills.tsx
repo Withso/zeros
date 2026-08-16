@@ -38,6 +38,7 @@ import {
   permissionMenuItems,
   resolveModelOption,
 } from "./model-catalog";
+import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 import type { ModelConfiguration } from "./model-preferences";
 import { AgentModelMenu, type AgentModelSelection } from "./agent-model-menu";
 import { AgentIcon } from "./agent-icon";
@@ -383,12 +384,14 @@ const COMPOSER_TOOLBAR_ACTIONS = "[data-composer-toolbar-actions]";
 export function PermissionToggle({
   agentId,
   model,
+  boundary = null,
   currentModeId,
   onSelectMode,
 }: {
   agentId: string | null;
   /** The picked model — Claude Haiku drops "auto" from the cycle. */
   model: string | null;
+  boundary?: ExecutionBoundaryStatus | null;
   /** The active native mode id (already coerced to one this model offers —
    *  see coerceModeIdForModel). null pre-bind ⇒ the first mode shows. */
   currentModeId: string | null;
@@ -498,7 +501,7 @@ export function PermissionToggle({
     };
   }, [labelVisible, measureFeedbackPlacement]);
 
-  const items = permissionMenuItems(agentId, model);
+  const items = permissionMenuItems(agentId, model, boundary);
   // No native-mode vocabulary for this agent → no toggle. This check stays
   // below every hook because a chat can switch between supported agents.
   if (items.length === 0) return null;

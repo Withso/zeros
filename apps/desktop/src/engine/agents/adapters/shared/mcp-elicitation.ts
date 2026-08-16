@@ -357,6 +357,11 @@ function buildUrlQuestion(request: McpElicitationRequestLike): QuestionSpec {
               // MCP requires the FULL URL to be visible before consent. Never
               // prefetch it or collapse it to only the hostname.
               description: url,
+              // The renderer performs this trusted UI action after consent.
+              // Keeping it off the engine means cloud workspaces open the
+              // browser on the user's device, and code processes never receive
+              // Apple Events / xdg-open authority.
+              externalAction: { kind: "open-url" as const, url },
             },
           ]
         : []),

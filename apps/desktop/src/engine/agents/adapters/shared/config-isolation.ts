@@ -31,6 +31,74 @@ export const CONFIG_ROOT_ENV_VARS = [
   "XDG_CONFIG_HOME",
 ] as const;
 
+/** Engine-process authority must never cross into an agent subprocess. These
+ * values are useful to the trusted engine itself, but handing them to a model's
+ * shell would let it authenticate back to the loopback control surface, locate
+ * private state, or write to the host control pipe. Keep this list deliberately
+ * small and capability-oriented: ordinary ZEROS_* workspace context continues
+ * to work. */
+export const ENGINE_AUTHORITY_ENV_VARS = [
+  "ZEROS_LOCAL_WS_TOKEN",
+  "ZEROS_CLOUD_TOKEN",
+  "ZEROS_CLOUD_PORT",
+  "ZEROS_CONTROL_FD",
+  "ZEROS_SECRETS_FILE",
+  "ZEROS_DATA_DIR",
+  "ZEROS_HOME",
+  "ZEROS_SHARED_SECRETS_DIR",
+  "ZEROS_USER_SETTINGS_DIR",
+  "ZEROS_ENGINE_BASE_PORT",
+  "ZEROS_VITE_PORT",
+  "ZEROS_ACCOUNT_JWT_SECRET",
+  "ZEROS_ACCOUNT_JWT_PUBLIC_KEY",
+  "ZEROS_ACCOUNT_JWT_JWKS_URL",
+  "ZEROS_ACCOUNT_JWT_ISSUER",
+  "ZEROS_ACCOUNT_JWT_AUD",
+  "ZEROS_ACCOUNT_JWT_ISS",
+  "ZEROS_ACCOUNT_JWT_SKEW",
+  "ZEROS_REQUIRE_ACCOUNT",
+  "ZEROS_CLOUD_OWNER_SUB",
+  "CONDUCTOR_API_TOKEN",
+  "CONDUCTOR_INTERNAL_WORKSPACE_AUTH",
+] as const;
+
+function isEngineAuthorityEnvName(name: string): boolean {
+  return (
+    (ENGINE_AUTHORITY_ENV_VARS as readonly string[]).includes(name) ||
+    name.startsWith("ZEROS_ZSR_") ||
+    /^CONDUCTOR_.*(?:TOKEN|SECRET|AUTH|CREDENTIAL|COOKIE|PRIVATE_KEY)$/.test(
+      name,
+    )
+  );
+}
+
+/** Return a copy with every engine-only capability removed. Deletion happens
+ * after caller/session layering so a repo, user setting, or direct spawn option
+ * cannot put a same-named authority value back. */
+export function stripEngineAuthorityEnv(
+  env: Record<string, string>,
+): Record<string, string> {
+  const out = { ...env };
+  for (const key of Object.keys(out)) {
+    if (isEngineAuthorityEnvName(key)) delete out[key];
+  }
+  return out;
+}
+
+/** Construct the one complete ambient-compatible environment at the trusted
+ * gateway boundary. Downstream adapters and supervisors treat its result as
+ * authoritative and must not spread `process.env` again. */
+export function completeAgentSpawnEnv(
+  overrides: Record<string, string> | undefined,
+): Record<string, string> {
+  const ambient = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string",
+    ),
+  );
+  return preserveAmbientConfigRoots({ ...ambient, ...(overrides ?? {}) });
+}
+
 /** Return a copy of `env` with every config-root var forced back to its
  *  ambient `process.env` value (deleted when the ambient value is unset),
  *  so a spawned agent can never be pointed at an isolated config dir.
@@ -38,7 +106,7 @@ export const CONFIG_ROOT_ENV_VARS = [
 export function preserveAmbientConfigRoots(
   env: Record<string, string>,
 ): Record<string, string> {
-  const out = { ...env };
+  const out = stripEngineAuthorityEnv(env);
   for (const key of CONFIG_ROOT_ENV_VARS) {
     const ambient = process.env[key];
     if (ambient === undefined) delete out[key];

@@ -49,7 +49,8 @@ import { build } from "esbuild";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP_DIR = path.join(ROOT, ".zeros", "claude-smoke");
-const RESOLVER = "apps/desktop/src/engine/agents/adapters/claude-sdk/binary-resolver.ts";
+const RESOLVER =
+  "apps/desktop/src/engine/agents/adapters/claude-sdk/binary-resolver.ts";
 const TIMEOUT_MS = 90_000;
 
 /** Errors that mean the CLI never got far enough to be rejected by the server —
@@ -63,7 +64,13 @@ const AUTH_ERR_RX =
 function die(msg, detail) {
   console.error(`\n✗ FAIL — ${msg}`);
   if (detail) {
-    console.error(String(detail).split("\n").slice(0, 24).map((l) => `    ${l}`).join("\n"));
+    console.error(
+      String(detail)
+        .split("\n")
+        .slice(0, 24)
+        .map((l) => `    ${l}`)
+        .join("\n"),
+    );
   }
   process.exit(1);
 }
@@ -117,7 +124,9 @@ console.log(`▸ resolved: ${cli.path}`);
 console.log(`▸ tier:     ${cli.source} (pinned)`);
 
 // An empty HOME is the token-safety interlock — see the header.
-const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-claude-smoke-home-"));
+const fakeHome = fs.mkdtempSync(
+  path.join(os.tmpdir(), "zeros-claude-smoke-home-"),
+);
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-claude-smoke-"));
 process.env.HOME = fakeHome;
 process.env.USERPROFILE = fakeHome;
@@ -154,6 +163,7 @@ const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
 let realInference = false;
 let spend = { cost: 0, outputTokens: 0 };
 let failure = null;
+let authRejection = null;
 try {
   const q = query({
     prompt: "reply with the single word OK",
@@ -165,7 +175,27 @@ try {
     },
   });
   for await (const msg of q) {
-    if (msg?.type === "assistant" && msg.message?.model && msg.message.model !== "<synthetic>") {
+    // Current Claude Code reports a rejected request immediately as the
+    // Agent SDK's documented `system/api_retry` event, then retries it with
+    // exponential backoff before emitting the terminal result. Waiting for
+    // all ten retries made this zero-cost gate time out even though the event
+    // already proved all three seams we care about: binary launch, SDK↔CLI
+    // framing, and a server response. Stop after the first permanent auth
+    // rejection so the gate remains fast and deterministic.
+    if (
+      msg?.type === "system" &&
+      msg.subtype === "api_retry" &&
+      (msg.error_status === 401 || msg.error_status === 403) &&
+      /authentication|oauth/i.test(String(msg.error))
+    ) {
+      authRejection = `HTTP ${msg.error_status}: ${msg.error}`;
+      abort.abort();
+    }
+    if (
+      msg?.type === "assistant" &&
+      msg.message?.model &&
+      msg.message.model !== "<synthetic>"
+    ) {
       realInference = true;
     }
     if (msg?.type === "result") {
@@ -173,15 +203,17 @@ try {
         cost: msg.total_cost_usd ?? 0,
         outputTokens: msg.usage?.output_tokens ?? 0,
       };
-      if (msg.is_error) failure = msg.result ?? msg.subtype ?? "(error result, no text)";
+      if (msg.is_error)
+        failure = msg.result ?? msg.subtype ?? "(error result, no text)";
     }
   }
 } catch (err) {
   // The SDK rethrows an error result as an exception once the stream ends, so
   // this is the normal path for a rejected turn — not an exceptional one.
-  failure = err?.message ?? String(err);
+  if (!authRejection) failure = err?.message ?? String(err);
 }
 clearTimeout(timer);
+if (authRejection) failure = authRejection;
 if (spend.cost > 0 || spend.outputTokens > 0) realInference = true;
 
 for (const dir of [fakeHome, cwd]) {
@@ -201,9 +233,11 @@ if (realInference) {
   );
 }
 if (!failure) {
-  die("the query produced neither an error nor assistant output — the SDK↔CLI handshake did not complete.");
+  die(
+    "the query produced neither an error nor assistant output — the SDK↔CLI handshake did not complete.",
+  );
 }
-if (abort.signal.aborted) {
+if (abort.signal.aborted && !authRejection) {
   die(
     `no response within ${TIMEOUT_MS}ms — the CLI spawned but never answered the SDK. ` +
       "That is a handshake failure, not an auth rejection.",
@@ -231,6 +265,10 @@ if (!AUTH_ERR_RX.test(oneLine)) {
 
 console.log(`▸ rejected: ${oneLine.slice(0, 160)}`);
 console.log(`▸ spend:    $${spend.cost} / ${spend.outputTokens} output tokens`);
-console.log(`\n✓ PASS — the Agent SDK launched the pinned claude (${cli.source} tier),`);
-console.log("  completed the handshake, and reached a server auth rejection. No tokens spent.");
+console.log(
+  `\n✓ PASS — the Agent SDK launched the pinned claude (${cli.source} tier),`,
+);
+console.log(
+  "  completed the handshake, and reached a server auth rejection. No tokens spent.",
+);
 process.exit(0);

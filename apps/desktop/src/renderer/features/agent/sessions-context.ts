@@ -96,6 +96,10 @@ export interface SessionsActions {
   /** Stop one background task while leaving the foreground turn and sibling
    * tasks alone. Fire-and-forget; the next provider snapshot removes it. */
   stopBackgroundTask(chatId: string, taskId: string): void;
+  openBoundaryPort(
+    chatId: string,
+    portId: string,
+  ): Promise<{ url: string; admissionUrl: string; expiresAt: number }>;
   respondToPermission(
     chatId: string,
     response: RequestPermissionResponse,

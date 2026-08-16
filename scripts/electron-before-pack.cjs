@@ -99,4 +99,15 @@ exports.default = async function beforePack(context) {
     [path.join(projectDir, "scripts", "stage-codex-cli.mjs")],
     { cwd: projectDir, env: process.env, stdio: "inherit" },
   );
+
+  // Bundle the exact-pinned, patched ZSR supervisor and its JavaScript
+  // dependency closure into one ordinary Resources file. The engine itself is
+  // a Bun single-file executable and has no production node_modules resolver;
+  // shipping source alone would make every containment preflight fail only in
+  // packaged builds.
+  execFileSync(
+    process.execPath,
+    [path.join(projectDir, "scripts", "build-zsr-supervisor.mjs")],
+    { cwd: projectDir, env: process.env, stdio: "inherit" },
+  );
 };

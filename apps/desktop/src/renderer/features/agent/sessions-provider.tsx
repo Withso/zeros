@@ -30,10 +30,14 @@ import type {
   SessionNotification,
 } from "../../platform/bridge/agent-events";
 import type {
+  AgentBoundaryStatusChangedMessage,
+  AgentBoundaryPortsChangedMessage,
+  AgentBoundaryPortOpenedMessage,
   AgentAgentsListMessage,
   AgentAgentInitializedMessage,
   AgentErrorMessage,
   AgentModeChangedMessage,
+  AgentPreflightedMessage,
   AgentPromptBubble,
   AgentPromptCompleteMessage,
   AgentPromptFailedMessage,
@@ -81,6 +85,8 @@ import {
 import { agentAppliesConfigLive } from "./live-config-support";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import { requestUserSettingsSection } from "../settings/settings-navigation";
+import { shellOpenUrl } from "../../platform/app";
+import { externalUrlsForQuestionResponse } from "./question-external-actions";
 import {
   getClaudeIdleTimeoutMinutes,
   isClaudeWakeupBeyondIdleTimeout,
@@ -879,6 +885,38 @@ export function AgentSessionsProvider({
       schedule();
     });
 
+    const unsubBoundaryPorts = bridge.on(
+      "AGENT_BOUNDARY_PORTS_CHANGED",
+      (raw) => {
+        const msg = raw as AgentBoundaryPortsChangedMessage;
+        const state = useSessionsStore.getState();
+        const chatId =
+          msg.chatId ?? state.executionToChatId[msg.executionId];
+        if (!chatId) return;
+        const session = state.sessions[chatId];
+        // An event from a retired execution must never overwrite the exact
+        // snapshot published atomically with its replacement route.
+        if (session?.executionId !== msg.executionId) return;
+        state.patchSession(chatId, { boundaryPorts: msg.snapshot });
+      },
+    );
+
+    const unsubBoundaryStatus = bridge.on(
+      "AGENT_BOUNDARY_STATUS_CHANGED",
+      (raw) => {
+        const msg = raw as AgentBoundaryStatusChangedMessage;
+        const state = useSessionsStore.getState();
+        const chatId =
+          msg.chatId ?? state.executionToChatId[msg.executionId];
+        if (!chatId) return;
+        const session = state.sessions[chatId];
+        // Retired-execution events cannot overwrite the exact boundary
+        // published atomically with a replacement create/load response.
+        if (session?.executionId !== msg.executionId) return;
+        state.patchSession(chatId, { boundary: msg.status });
+      },
+    );
+
     const unsubPerm = bridge.on("AGENT_PERMISSION_REQUEST", (raw) => {
       const msg = raw as {
         agentId: string;
@@ -1003,6 +1041,8 @@ export function AgentSessionsProvider({
       }
       flush();
       unsubUpdate();
+      unsubBoundaryStatus();
+      unsubBoundaryPorts();
       unsubPerm();
       unsubPermissionSettled();
       unsubQuestion();
@@ -1336,17 +1376,42 @@ export function AgentSessionsProvider({
         const attemptOnce = async (): Promise<
           AgentSessionCreatedMessage | AgentErrorMessage | null
         > => {
-          const timer = new Promise<never>((_, reject) => {
-            window.setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `Request timeout: AGENT_NEW_SESSION (${ENSURE_SESSION_ATTEMPT_TIMEOUT_MS}ms cap)`,
-                  ),
-                ),
-              ENSURE_SESSION_ATTEMPT_TIMEOUT_MS,
+          const cliBinaryOverride = getProviderBinaryOverride(agentId);
+          const spawnWorkspaceId = await resolveSpawnWorkspaceId(
+            bridge,
+            resolvedCwd,
+          );
+          if (bindCancelled()) return null;
+
+          // Prove the Design boundary before reading provider/MCP/vault
+          // secrets or asking the engine to create a provider execution. The
+          // actual admission repeats the live canary; this result exists for
+          // honest pre-send UI and precise fail-closed remediation.
+          const preflight = await bridge.request<
+            AgentPreflightedMessage | AgentErrorMessage
+          >(
+            {
+              type: "AGENT_PREFLIGHT",
+              agentId,
+              cwd: resolvedCwd ?? undefined,
+              workspaceId: spawnWorkspaceId ?? undefined,
+              cliBinary: cliBinaryOverride,
+            },
+            ENSURE_SESSION_ATTEMPT_TIMEOUT_MS,
+          );
+          if (preflight.type === "AGENT_ERROR") return preflight;
+          getStore().patchSession(chatId, { boundary: preflight.status });
+          if (
+            preflight.status.state !== "ready" &&
+            preflight.status.state !== "not-required"
+          ) {
+            throw new Error(
+              preflight.status.remediation ??
+                "The Design protection boundary is not ready. Retry after the runtime is repaired.",
             );
-          });
+          }
+          if (bindCancelled()) return null;
+
           // Merge env from Settings → Providers (auth method +
           // gateway URL) with any explicit env the caller supplied.
           // Explicit env (e.g. from the AuthModal first-time flow)
@@ -1371,14 +1436,19 @@ export function AgentSessionsProvider({
                   ...(options?.env ?? {}),
                 }
               : undefined;
-          const cliBinaryOverride = getProviderBinaryOverride(agentId);
-
-          const spawnWorkspaceId = await resolveSpawnWorkspaceId(
-            bridge,
-            resolvedCwd,
-          );
           if (bindCancelled()) return null;
 
+          const timer = new Promise<never>((_, reject) => {
+            window.setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Request timeout: AGENT_NEW_SESSION (${ENSURE_SESSION_ATTEMPT_TIMEOUT_MS}ms cap)`,
+                  ),
+                ),
+              ENSURE_SESSION_ATTEMPT_TIMEOUT_MS,
+            );
+          });
           const request = bridge.request<
             AgentSessionCreatedMessage | AgentErrorMessage
           >(
@@ -1445,6 +1515,8 @@ export function AgentSessionsProvider({
               sessionId: executionId,
               providerBinding,
               providerMetadata: resp.session.providerMetadata ?? null,
+              boundary: resp.session.boundary ?? null,
+              boundaryPorts: resp.session.boundaryPorts ?? null,
               session: resp.session,
               initialize: resp.initialize,
               availableModes: resp.session.modes?.availableModes ?? [],
@@ -2846,6 +2918,21 @@ export function AgentSessionsProvider({
       const current = getStore().sessions[chatId];
       const head = current?.pendingQuestions?.[0];
       if (!head) return;
+      // URL/OAuth elicitation is a trusted UI action. Perform it from the
+      // renderer that received the user's explicit choice, never from the
+      // contained provider or a headless/cloud engine. shellOpenUrl validates
+      // again in Electron main; browser-only clients use a noopener window.
+      for (const url of externalUrlsForQuestionResponse(
+        head.request,
+        response,
+      )) {
+        void shellOpenUrl(url).catch((error) => {
+          toast.error("Couldn't open the authorization page", {
+            description:
+              error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
       bridge.send({
         type: "AGENT_QUESTION_RESPONSE",
         questionId: head.questionId,
@@ -2999,6 +3086,46 @@ export function AgentSessionsProvider({
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    },
+    [bridge, getStore],
+  );
+
+  const openBoundaryPort = useCallback<SessionsActions["openBoundaryPort"]>(
+    async (chatId, portId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const slot = getStore().sessions[chatId];
+      if (!slot?.executionId || !slot.agentId) {
+        throw new Error("This session is not ready for previews.");
+      }
+      const response = await bridge.request<
+        AgentBoundaryPortOpenedMessage | AgentErrorMessage
+      >(
+        {
+          type: "AGENT_OPEN_BOUNDARY_PORT",
+          agentId: slot.agentId,
+          executionId: slot.executionId,
+          portId,
+        },
+        10_000,
+      );
+      if (response.type === "AGENT_ERROR") {
+        throw new Error(response.message || "The preview could not be opened.");
+      }
+      const current = getStore().sessions[chatId];
+      if (
+        current?.executionId !== response.executionId ||
+        response.portId !== portId
+      ) {
+        throw new Error("The preview changed while it was opening.");
+      }
+      if (!Number.isSafeInteger(response.expiresAt) || response.expiresAt <= Date.now()) {
+        throw new Error("preview admission expiry is invalid");
+      }
+      return {
+        url: response.url,
+        admissionUrl: response.admissionUrl,
+        expiresAt: response.expiresAt,
+      };
     },
     [bridge, getStore],
   );
@@ -3701,6 +3828,44 @@ export function AgentSessionsProvider({
       });
       ensureInFlightRef.current.set(chatId, loadFlight);
       try {
+        const cliBinaryOverride = getProviderBinaryOverride(agentId);
+        const resumeWorkspaceId = await resolveSpawnWorkspaceId(
+          bridge,
+          resolvedCwd,
+        );
+        if (bindCancelled()) return true;
+        const preflight = await bridge.request<
+          AgentPreflightedMessage | AgentErrorMessage
+        >(
+          {
+            type: "AGENT_PREFLIGHT",
+            agentId,
+            cwd: resolvedCwd ?? undefined,
+            workspaceId: resumeWorkspaceId ?? undefined,
+            cliBinary: cliBinaryOverride,
+          },
+          60_000,
+        );
+        if (preflight.type === "AGENT_ERROR") {
+          const failure = failureFromAgentError(preflight, "loadSession");
+          getStore().patchSession(chatId, {
+            status: statusForFailure(failure),
+            error: failure.message,
+            failure,
+          });
+          return true;
+        }
+        getStore().patchSession(chatId, { boundary: preflight.status });
+        if (
+          preflight.status.state !== "ready" &&
+          preflight.status.state !== "not-required"
+        ) {
+          throw new Error(
+            preflight.status.remediation ??
+              "The Design protection boundary is not ready. Retry after the runtime is repaired.",
+          );
+        }
+
         // Resume must honour the same Provider prefs as new sessions:
         // env injection for API-key mode + binary-path override for the
         // /Settings → Advanced disclosure.
@@ -3719,12 +3884,6 @@ export function AgentSessionsProvider({
                 ...(options?.env ?? {}),
               }
             : undefined;
-        const cliBinaryOverride = getProviderBinaryOverride(agentId);
-
-        const resumeWorkspaceId = await resolveSpawnWorkspaceId(
-          bridge,
-          resolvedCwd,
-        );
         if (bindCancelled()) return true;
 
         const resp = await bridge.request<
@@ -3820,6 +3979,8 @@ export function AgentSessionsProvider({
             resp.response.providerMetadata ??
             existing?.providerMetadata ??
             null,
+          boundary: resp.response.boundary ?? null,
+          boundaryPorts: resp.response.boundaryPorts ?? null,
           availableModes: resp.response.modes?.availableModes ?? [],
           currentModeId: resp.response.modes?.currentModeId ?? null,
           error: null,
@@ -4040,6 +4201,7 @@ export function AgentSessionsProvider({
       sendPrompt,
       cancel,
       stopBackgroundTask,
+      openBoundaryPort,
       respondToPermission,
       respondToQuestion,
       setMode,
@@ -4068,6 +4230,7 @@ export function AgentSessionsProvider({
       sendPrompt,
       cancel,
       stopBackgroundTask,
+      openBoundaryPort,
       respondToPermission,
       respondToQuestion,
       setMode,

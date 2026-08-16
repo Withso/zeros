@@ -261,7 +261,7 @@ describe("repository layout contracts", () => {
     const generator = read("scripts/generate-third-party-licenses.mjs");
 
     for (const packageName of [
-      "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.221",
+      "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.231",
       "@cursor/sdk-darwin-arm64@1.0.26",
       "@vscode/ripgrep-darwin-arm64@1.18.0",
       // The staged Codex runtime is redistributed inside Contents/Resources,
@@ -326,6 +326,8 @@ describe("repository layout contracts", () => {
     const engineSmoke = read("scripts/smoke-engine.mjs");
 
     expect(engineSmoke).toContain('ZEROS_PARENT_PID: ""');
+    expect(engineSmoke).toContain('source: "browser"');
+    expect(engineSmoke).not.toContain('source: "client"');
   });
 
   it("threads the active session's live model capabilities into the unified menu", () => {
@@ -393,19 +395,68 @@ describe("repository layout contracts", () => {
     const image = read("scripts/cloud-workspace-validation/image.ts");
     const lifecycle = read("scripts/cloud-workspace-validation/lifecycle.ts");
     const dockerfile = read("scripts/cloud-workspace-validation/Dockerfile");
+    const launcher = read(
+      "scripts/cloud-workspace-validation/sandbox/start-engine.sh",
+    );
+    const attester = read(
+      "scripts/cloud-workspace-validation/sandbox/attest-cloud-worker.mjs",
+    );
+    const admission = read(
+      "scripts/cloud-workspace-validation/sandbox/consume-cloud-admission.mjs",
+    );
+    const runtime = read("scripts/cloud-workspace-validation/runtime.ts");
 
     expect(config).toContain("mode: 0o700");
     expect(config).toContain("mode: 0o600");
     expect(config).toContain("fs.renameSync(temporary, stateFile)");
     expect(config).toContain('u.searchParams.delete("token")');
-    expect(client).toContain('headers["x-zeros-cloud-token"]');
+    expect(client).toContain('"zeros-v1"');
+    expect(client).toContain("zeros-cloud-token.${Buffer.from");
+    expect(client).toContain('source: "browser" as const');
+    expect(client).not.toContain('source: "client"');
     expect(client).toContain('from "../../../packages/protocol/src/version"');
     expect(client).not.toMatch(/const PROTOCOL_VERSION\s*=\s*\d/);
     expect(lifecycle).toContain("clearState()");
     expect(dockerfile).toContain("&& pnpm rebuild better-sqlite3");
     expect(dockerfile).not.toContain("pnpm rebuild better-sqlite3 || true");
+    expect(dockerfile).toContain(
+      'if [ "${#ZEROS_REPO_COMMIT}" -ne 40 ] && [ "${#ZEROS_REPO_COMMIT}" -ne 64 ]',
+    );
     expect(image).toContain("&& pnpm rebuild better-sqlite3`");
     expect(image).not.toContain("pnpm rebuild better-sqlite3 || true");
+    expect(config).toContain('SANDBOX_ENGINE_DIR = "/opt/zeros"');
+    expect(config).toContain('SANDBOX_REPO_DIR = "/workspace/zeros"');
+    expect(config).toMatch(/node:22[^"\n]+@sha256:[a-f0-9]{64}/);
+    expect(image).toContain("acl bubblewrap busybox-static ca-certificates");
+    expect(image).toContain('"/etc/zeros/cloud-worker.json"');
+    expect(dockerfile).toContain("bubblewrap");
+    expect(dockerfile).toContain("podman");
+    expect(image).toContain("podman");
+    expect(dockerfile).toContain(
+      "COPY sandbox/cloud-worker.json /etc/zeros/cloud-worker.json",
+    );
+    expect(dockerfile).toContain(
+      "COPY sandbox/consume-cloud-admission.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs",
+    );
+    expect(dockerfile).toContain(
+      "COPY sandbox/prepare-zsr-cgroups.mjs /usr/local/lib/zeros/prepare-zsr-cgroups.mjs",
+    );
+    expect(dockerfile).not.toMatch(/curl[^\n|]*\|\s*(?:ba)?sh/);
+    expect(image).not.toMatch(/curl[^\n|]*\|\s*(?:ba)?sh/);
+    expect(dockerfile).not.toMatch(/mutagen/i);
+    expect(image).not.toMatch(/mutagen/i);
+    expect(attester).toContain("cloud-worker-admission.json");
+    expect(attester).toContain("rootControlledTree(ENGINE)");
+    expect(admission).toContain("renameSync(PROOF, consumed)");
+    expect(admission).toContain("containerInitStartTicks");
+    expect(launcher).toContain("consume-cloud-admission.mjs");
+    expect(runtime).toContain("attestCloudWorker(");
+    expect(runtime).toContain("relaunchQualifiedCloudEngine");
+    expect(lifecycle).toContain("relaunchQualifiedCloudEngine");
+    expect(launcher).toContain(
+      'node "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR"',
+    );
+    expect(launcher).not.toContain('node "$REPO_DIR/dist-engine/cli.js"');
   });
 
   it("keeps private delivery ledgers out of tracked design references", () => {

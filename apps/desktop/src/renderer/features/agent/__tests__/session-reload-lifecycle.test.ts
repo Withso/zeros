@@ -499,6 +499,8 @@ describe("send-time session recovery", () => {
     ).toEqual({
       executionId: "replacement-execution",
       sessionId: "replacement-execution",
+      boundary: null,
+      boundaryPorts: null,
       providerBinding: replacementBinding,
       providerMetadata: { version: 1 },
     });

@@ -174,6 +174,21 @@ describe("toBridgeAgents — runtime availability gates 'Connected'", () => {
     expect(agent.installed).toBe(true);
     expect(agent.runtimeUnavailableReason).toBeUndefined();
   });
+
+  it("uses an installed custom executable for a non-bundled provider", () => {
+    const override = "/opt/custom/codex";
+    const [agent] = toBridgeAgents(
+      new Set([override]),
+      new Set(["codex"]),
+      undefined,
+      undefined,
+      new Map([["codex", override]]),
+      [entry({ id: "codex", cliBinary: "codex" })],
+    );
+
+    expect(agent.installed).toBe(true);
+    expect(agent.authenticated).toBe(true);
+  });
 });
 
 describe("the REAL Claude manifest entry", () => {

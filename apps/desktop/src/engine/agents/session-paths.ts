@@ -21,6 +21,10 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { zerosDataDir } from "../db/paths";
 
+export const SHADOW_GIT_RECOVERY_HOLD_FILE = ".shadow-git-recovery-hold.json";
+export const ORBSTACK_MACHINE_RECOVERY_HOLD_FILE =
+  ".zsr-orbstack-machine-recovery.json";
+
 function baseDir(): string {
   return zerosDataDir();
 }
@@ -71,7 +75,67 @@ export async function writeSessionMeta(
 
 /** Remove the entire session dir. Called on graceful session end. */
 export async function removeSessionDir(sessionId: string): Promise<void> {
-  await fsp.rm(sessionDir(sessionId), { recursive: true, force: true });
+  const root = sessionDir(sessionId);
+  if (
+    (await hasPendingShadowGitRecovery(root)) ||
+    (await hasPendingOrbStackMachineRecovery(root))
+  )
+    return;
+  await fsp.rm(root, { recursive: true, force: true });
+}
+
+async function hasPendingShadowGitRecovery(sessionRoot: string) {
+  try {
+    const metadata = await fsp.lstat(
+      path.join(sessionRoot, SHADOW_GIT_RECOVERY_HOLD_FILE),
+    );
+    // Any entry is a conservative hold. A malformed/symlinked marker must not
+    // turn a recoverable linked worktree into a broken pointer via GC.
+    return !metadata.isDirectory();
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
+async function hasPendingOrbStackMachineRecovery(sessionRoot: string) {
+  try {
+    const metadata = await fsp.lstat(
+      path.join(sessionRoot, ORBSTACK_MACHINE_RECOVERY_HOLD_FILE),
+    );
+    // Any non-directory entry is a conservative hold. The trusted recovery
+    // parser decides whether it is valid; generic session GC never deletes a
+    // selective-mount source while an OrbStack machine may still reference it.
+    return !metadata.isDirectory();
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+}
+
+async function hasPendingProcessDomainRecovery(sessionRoot: string) {
+  const boundaryRoot = path.join(sessionRoot, "boundary");
+  let generations: import("node:fs").Dirent[];
+  try {
+    generations = await fsp.readdir(boundaryRoot, { withFileTypes: true });
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT";
+  }
+  for (const generation of generations) {
+    if (!generation.isDirectory() || generation.isSymbolicLink()) continue;
+    try {
+      const descriptor = await fsp.lstat(
+        path.join(
+          boundaryRoot,
+          generation.name,
+          "commands",
+          "process-domain.json",
+        ),
+      );
+      if (descriptor.isFile() && !descriptor.isSymbolicLink()) return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return true;
+    }
+  }
+  return false;
 }
 
 /** Boot-time GC. Graceful teardown (`removeSessionDir`) cleans session dirs,
@@ -101,7 +165,15 @@ export async function sweepDeadSessions(): Promise<number> {
       } catch {
         return; // no/unreadable meta (mid-write or legacy) — leave it
       }
-      if (!pid || pid <= 0 || isProcessAlive(pid)) return;
+      if (
+        !pid ||
+        pid <= 0 ||
+        isProcessAlive(pid) ||
+        (await hasPendingProcessDomainRecovery(dir)) ||
+        (await hasPendingShadowGitRecovery(dir)) ||
+        (await hasPendingOrbStackMachineRecovery(dir))
+      )
+        return;
       try {
         await fsp.rm(dir, { recursive: true, force: true });
         removed++;

@@ -28,15 +28,31 @@
 //
 // ──────────────────────────────────────────────────────────
 
-import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import {
+  spawn,
+  type ChildProcess,
+  type SpawnOptions,
+} from "node:child_process";
+
+import type {
+  BoundaryProcess,
+  PreparedBoundary,
+} from "../../containment/types";
 
 const DEFAULT_GRACEFUL_SHUTDOWN_MS = 2_000;
+const DEFAULT_FORCE_SHUTDOWN_MS = 1_000;
+const PROCESS_GROUP_POLL_MS = 20;
 
 export interface SpawnStdioAgentOptions {
   command: string;
   args: string[];
   cwd: string;
+  /** Complete child environment. Callers that need ambient variables must
+   * construct and scrub that environment before this process boundary. */
   env?: Record<string, string>;
+  /** Prepared ZSR capability for this execution. When present the real child
+   * is the supervisor and every provider descendant shares its boundary. */
+  executionBoundary?: PreparedBoundary;
   /** Tag used for diagnostics (no behavioural effect). */
   logTag?: string;
 }
@@ -48,18 +64,61 @@ export interface StdioAgentProcess {
    *  (Windows or unusual platforms). */
   readonly processGroupId: number | null;
   /** Resolves with `{code, signal}` once the subprocess exits. */
-  readonly exited: Promise<{ code: number | null; signal: NodeJS.Signals | null }>;
-  /** SIGTERM the whole group; on grace-timeout, SIGKILL the whole group.
-   *  Idempotent: calling stop() after the child has already exited
-   *  resolves immediately. */
-  stop(opts?: { gracefulMs?: number }): Promise<void>;
+  readonly exited: Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+  }>;
+  /** SIGTERM the whole group; on grace-timeout, SIGKILL the whole group and
+   * prove the group is empty. A dead leader is not sufficient: a descendant
+   * may survive and retain the old filesystem authority. */
+  stop(opts?: { gracefulMs?: number; forceMs?: number }): Promise<void>;
+}
+
+function processGroupExists(processGroupId: number): boolean {
+  try {
+    process.kill(-processGroupId, 0);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ESRCH") return false;
+    if (code === "EPERM") return true;
+    throw error;
+  }
+}
+
+async function waitForProcessGroupExit(
+  processGroupId: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processGroupExists(processGroupId)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>((resolve) =>
+      setTimeout(resolve, PROCESS_GROUP_POLL_MS),
+    );
+  }
+  return true;
 }
 
 /** Spawn a stdio agent in its own process group. */
-export function spawnStdioAgent(opts: SpawnStdioAgentOptions): StdioAgentProcess {
-  const spawnOpts: SpawnOptions = {
+export function spawnStdioAgent(
+  opts: SpawnStdioAgentOptions,
+): StdioAgentProcess {
+  if (opts.executionBoundary && !opts.env) {
+    throw new Error(
+      "a contained stdio process requires a complete environment",
+    );
+  }
+  const launch = opts.executionBoundary?.wrapSpawn({
+    command: opts.command,
+    args: opts.args,
     cwd: opts.cwd,
-    env: opts.env ? { ...process.env, ...opts.env } : process.env,
+    env: opts.env ?? {},
+    stdio: "pipe",
+  });
+  const spawnOpts: SpawnOptions = {
+    cwd: launch?.cwd ?? opts.cwd,
+    env: launch?.env ?? opts.env ?? process.env,
     stdio: ["pipe", "pipe", "pipe"],
     // POSIX: child becomes a process-group leader (setpgid(0,0))
     // → all its descendants share its pgid → kill(-pgid) reaches all.
@@ -67,11 +126,18 @@ export function spawnStdioAgent(opts: SpawnStdioAgentOptions): StdioAgentProcess
     // process.kill on Windows goes through the job object equivalent.
     detached: true,
   };
-  const child = spawn(opts.command, opts.args, spawnOpts);
+  const child = spawn(
+    launch?.command ?? opts.command,
+    launch?.args ?? opts.args,
+    spawnOpts,
+  );
+  const boundaryProcess: BoundaryProcess | undefined =
+    opts.executionBoundary?.trackProcess(child);
 
   // On POSIX, child.pid IS the new process-group id (because the child
   // is the group leader). On Windows there is no group id, just a pid.
-  const processGroupId = process.platform === "win32" ? null : (child.pid ?? null);
+  const processGroupId =
+    process.platform === "win32" ? null : (child.pid ?? null);
 
   const exited = new Promise<{
     code: number | null;
@@ -80,21 +146,52 @@ export function spawnStdioAgent(opts: SpawnStdioAgentOptions): StdioAgentProcess
     child.once("exit", (code, signal) => resolve({ code, signal }));
   });
 
-  const stop = async (stopOpts: { gracefulMs?: number } = {}) => {
-    if (child.exitCode !== null || child.signalCode !== null) return;
-    const gracefulMs = stopOpts.gracefulMs ?? DEFAULT_GRACEFUL_SHUTDOWN_MS;
+  let stopPromise: Promise<void> | null = null;
+  const stop = (
+    stopOpts: { gracefulMs?: number; forceMs?: number } = {},
+  ): Promise<void> => {
+    if (stopPromise) return stopPromise;
+    stopPromise = (async () => {
+      if (boundaryProcess) {
+        await boundaryProcess.stopAndProve();
+        return;
+      }
+      const gracefulMs = stopOpts.gracefulMs ?? DEFAULT_GRACEFUL_SHUTDOWN_MS;
+      const forceMs = stopOpts.forceMs ?? DEFAULT_FORCE_SHUTDOWN_MS;
 
-    sendSignal(child, processGroupId, "SIGTERM");
+      // A wrapper may exit while leaving a command descendant in its process
+      // group. Check the group itself before treating an exited leader as done.
+      if (processGroupId == null) {
+        if (child.exitCode !== null || child.signalCode !== null) return;
+        sendSignal(child, processGroupId, "SIGTERM");
+        const graceful = await Promise.race([
+          exited.then(() => true),
+          new Promise<boolean>((resolve) =>
+            setTimeout(() => resolve(false), gracefulMs),
+          ),
+        ]);
+        if (!graceful) {
+          sendSignal(child, processGroupId, "SIGKILL");
+          await exited;
+        }
+        return;
+      }
 
-    const graceful = await Promise.race([
-      exited.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), gracefulMs)),
-    ]);
-    if (graceful) return;
+      if (!processGroupExists(processGroupId)) return;
 
-    sendSignal(child, processGroupId, "SIGKILL");
-    // Wait for the actual exit so callers can rely on resource teardown.
-    await exited;
+      sendSignal(child, processGroupId, "SIGTERM");
+      if (await waitForProcessGroupExit(processGroupId, gracefulMs)) return;
+
+      sendSignal(child, processGroupId, "SIGKILL");
+      if (!(await waitForProcessGroupExit(processGroupId, forceMs))) {
+        throw new Error(
+          `Agent process group ${processGroupId} survived SIGKILL`,
+        );
+      }
+      // Reap the direct child once the complete group is known to be gone.
+      await exited;
+    })();
+    return stopPromise;
   };
 
   return { child, processGroupId, exited, stop };

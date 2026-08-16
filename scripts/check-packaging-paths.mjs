@@ -52,6 +52,15 @@ const CODEX_STAGED = [
   "binaries/codex-runtime",
   "binaries/codex-cli-version.txt",
 ];
+const ZSR_STAGED = [
+  "binaries/zsr-supervisor.mjs",
+  "binaries/zsr-network-bridge.mjs",
+  "binaries/zsr-container-worker.mjs",
+  "binaries/zsr-orbstack-container-host.mjs",
+  "binaries/zsr-orbstack-cloud-init.yaml",
+  "binaries/zsr-macos-process-domain",
+  "binaries/zsr-macos-port-bind.dylib",
+];
 const LEGAL_RESOURCES = [
   "LICENSE",
   "THIRD-PARTY-NOTICES.md",
@@ -62,6 +71,8 @@ const beforePackSource = readFileSync(
   "scripts/electron-before-pack.cjs",
   "utf8",
 );
+const zsrBuildSource = readFileSync("scripts/build-zsr-supervisor.mjs", "utf8");
+const sidecarSource = readFileSync("apps/desktop/electron/sidecar.ts", "utf8");
 
 const froms = [...yml.matchAll(/^\s*-?\s*from:\s*(.+)$/gm)].map((m) =>
   unquote(m[1]),
@@ -163,7 +174,12 @@ for (const from of froms) {
   }
   // Staged at pack time by scripts/stage-claude-cli.mjs (gitignored, like the
   // engine binary) — name-matched against that script's constants below.
-  if (CLAUDE_STAGED.includes(from) || CODEX_STAGED.includes(from)) continue;
+  if (
+    CLAUDE_STAGED.includes(from) ||
+    CODEX_STAGED.includes(from) ||
+    ZSR_STAGED.includes(from)
+  )
+    continue;
   if (!existsSync(from))
     errs.push(`extraResources from: "${from}" does not exist`);
 }
@@ -218,6 +234,53 @@ if (!/stage-codex-cli\.mjs/.test(beforePackSource)) {
   errs.push(
     "scripts/electron-before-pack.cjs no longer invokes stage-codex-cli.mjs — " +
       "the packaged engine would silently fall back to an unpinned Codex on PATH",
+  );
+}
+if (!/build-zsr-supervisor\.mjs/.test(beforePackSource)) {
+  errs.push(
+    "beforePack must build the ZSR supervisor so its generated extraResources input cannot be absent",
+  );
+}
+for (const staged of ZSR_STAGED) {
+  if (!froms.includes(staged)) {
+    errs.push(
+      `electron-builder.yml has no extraResources \`from: ${staged}\` — packaged agent containment would be unavailable`,
+    );
+  }
+}
+if (
+  !/zsr-macos-process-domain\.c/.test(zsrBuildSource) ||
+  !/zsr-macos-port-bind\.c/.test(zsrBuildSource) ||
+  !/-dynamiclib/.test(zsrBuildSource) ||
+  !/\/usr\/bin\/xcrun/.test(zsrBuildSource)
+) {
+  errs.push(
+    "build-zsr-supervisor must compile the reviewed Darwin process-domain and bind-port C sources with the Apple toolchain",
+  );
+}
+if (!/ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER/.test(sidecarSource)) {
+  errs.push(
+    "the Electron sidecar must pass the packaged macOS process-domain helper to the engine",
+  );
+}
+if (!/ZEROS_ZSR_MACOS_PORT_BIND_LIBRARY/.test(sidecarSource)) {
+  errs.push(
+    "the Electron sidecar must pass the packaged macOS bind-port interposer to the engine",
+  );
+}
+if (!/ZEROS_ZSR_CONTAINER_WORKER_SCRIPT/.test(sidecarSource)) {
+  errs.push(
+    "the Electron sidecar must pass the packaged container-worker launcher to the engine",
+  );
+}
+if (
+  !/ZEROS_ZSR_ORBSTACK_CONTAINER_HOST_SCRIPT/.test(sidecarSource) ||
+  !/ZEROS_ZSR_ORBSTACK_CLOUD_INIT/.test(sidecarSource) ||
+  !/zsr-orbstack-container-host\.mjs/.test(zsrBuildSource) ||
+  !/zsr-orbstack-cloud-init\.yaml/.test(zsrBuildSource)
+) {
+  errs.push(
+    "the packaged macOS container backend must stage and pass its immutable OrbStack host and cloud-init assets",
   );
 }
 // The npm copy of the ~250 MiB platform package must stay OUT of the asar: it is

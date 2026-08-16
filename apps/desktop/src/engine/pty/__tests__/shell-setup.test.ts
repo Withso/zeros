@@ -29,6 +29,25 @@ const PLANTED = [
 const ENGINE_INTERNAL_SECRETS = [
   "ZEROS_GITHUB_TOKEN",
   "ZEROS_LOCAL_WS_TOKEN",
+  "ZEROS_CLOUD_TOKEN",
+  "ZEROS_CLOUD_PORT",
+  "ZEROS_DATA_DIR",
+  "ZEROS_HOME",
+  "ZEROS_SHARED_SECRETS_DIR",
+  "ZEROS_USER_SETTINGS_DIR",
+  "ZEROS_ACCOUNT_JWT_SECRET",
+  "ZEROS_ACCOUNT_JWT_PUBLIC_KEY",
+  "ZEROS_ACCOUNT_JWT_JWKS_URL",
+  "ZEROS_ACCOUNT_JWT_ISSUER",
+  "ZEROS_ACCOUNT_JWT_AUD",
+  "ZEROS_ACCOUNT_JWT_ISS",
+  "ZEROS_ACCOUNT_JWT_SKEW",
+  "ZEROS_REQUIRE_ACCOUNT",
+  "ZEROS_CLOUD_OWNER_SUB",
+  "ZEROS_ZSR_SUPERVISOR_SCRIPT",
+  "CONDUCTOR_API_TOKEN",
+  "CONDUCTOR_INTERNAL_WORKSPACE_AUTH",
+  "CONDUCTOR_FUTURE_SECRET",
   "ZEROS_GIT_AUTH_SOCKET",
   "ZEROS_GIT_AUTH_CONTEXT",
   "ZEROS_GIT_AUTH_PROTOCOL",
@@ -71,7 +90,7 @@ describe("buildPtyEnv env scrubbing (remote = allowlist)", () => {
     expect(buildPtyEnv({ scrub: false }).ANTHROPIC_API_KEY).toBe("local-key");
   });
 
-  it("never exposes engine-owned auth channels, even to a local shell", () => {
+  it("never exposes engine-owned authority, even to a full-parity shell", () => {
     for (const key of ENGINE_INTERNAL_SECRETS) {
       process.env[key] = "engine-secret";
     }

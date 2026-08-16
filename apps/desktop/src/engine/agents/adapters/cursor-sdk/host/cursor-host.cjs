@@ -67,6 +67,9 @@
 
 "use strict";
 
+const fs = require("node:fs");
+const path = require("node:path");
+
 // @cursor/sdk wires several AbortSignal listeners per run (its connect-node
 // HTTP/2 client + tool/subagent plumbing) onto a single shared signal — ~11 on
 // a turn that spawns subagents. Node's default cap is 10, so it prints a
@@ -101,7 +104,10 @@ try {
   // node_modules walk in source/dev mode and (b) can be statically bundled by
   // esbuild/tsup if a future build inlines the SDK into this host. Don't fold
   // them into one `require(<ternary>)` — that would defeat static bundling.
-  sdk = sdkEntry && sdkEntry.length > 0 ? require(sdkEntry) : require("@cursor/sdk");
+  sdk =
+    sdkEntry && sdkEntry.length > 0
+      ? require(sdkEntry)
+      : require("@cursor/sdk");
 } catch (err) {
   try {
     process.stdout.write(
@@ -122,6 +128,69 @@ const Agent = sdk && sdk.Agent;
 const Cursor = sdk && sdk.Cursor;
 const JsonlLocalAgentStore = sdk && sdk.JsonlLocalAgentStore;
 const getDefaultSdkStateRoot = sdk && sdk.getDefaultSdkStateRoot;
+
+/** A contained session gets a Zeros-owned, workspace/provider-scoped store.
+ * Seed it once from Cursor's normal store so existing conversations resume;
+ * all later writes stay on the explicit capability instead of the user's
+ * broader HOME. This code runs inside ZSR, where the source is read-only and
+ * the destination is the sole writable provider-state root. */
+function initializeContainedStateRoot() {
+  const target = process.env.ZEROS_CURSOR_STATE_ROOT;
+  if (!target) return null;
+  if (!path.isAbsolute(target)) {
+    throw new Error("ZEROS_CURSOR_STATE_ROOT must be absolute");
+  }
+  fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+  fs.chmodSync(target, 0o700);
+  if (
+    fs.readdirSync(target).length === 0 &&
+    typeof getDefaultSdkStateRoot === "function"
+  ) {
+    const source = getDefaultSdkStateRoot(process.cwd());
+    if (
+      path.isAbsolute(source) &&
+      path.resolve(source) !== path.resolve(target) &&
+      fs.existsSync(source)
+    ) {
+      try {
+        fs.cpSync(source, target, {
+          recursive: true,
+          errorOnExist: false,
+          force: false,
+        });
+      } catch (error) {
+        // Migration failure must not make Cursor unusable: start with a clean
+        // private store and surface a redacted diagnostic. Resume will use the
+        // adapter's established fresh-session recovery path.
+        process.stderr.write(
+          `[cursor-host] existing state migration skipped: ${
+            error && error.code ? String(error.code) : "copy failed"
+          }\n`,
+        );
+      }
+    }
+  }
+  return target;
+}
+
+let containedStateRoot = null;
+try {
+  containedStateRoot = initializeContainedStateRoot();
+} catch (error) {
+  try {
+    process.stdout.write(
+      JSON.stringify({
+        k: "fatal",
+        message: `contained Cursor state initialization failed: ${
+          error && error.message ? error.message : String(error)
+        }`,
+      }) + "\n",
+    );
+  } catch {
+    /* parent stdout already gone */
+  }
+  process.exit(1);
+}
 
 /** runId → { run, done } ; sdk agentId → SdkAgent ; storeId → store */
 const runs = new Map();
@@ -211,6 +280,7 @@ function storeRefFor(cwd) {
 }
 
 function localStoreFor(cwd) {
+  if (containedStateRoot) return jsonlStoreAt(containedStateRoot);
   if (!getDefaultSdkStateRoot) return null;
   try {
     return jsonlStoreAt(getDefaultSdkStateRoot(storeRefFor(cwd)));
@@ -229,8 +299,7 @@ function withLocalStore(opts) {
   const out = { ...(opts || {}) };
   const local = { ...(out.local || {}) };
   if (local.store) return out;
-  const cwd =
-    typeof local.cwd === "string" && local.cwd ? local.cwd : out.cwd;
+  const cwd = typeof local.cwd === "string" && local.cwd ? local.cwd : out.cwd;
   const store = localStoreFor(cwd);
   if (!store) return out;
   local.store = store;
@@ -277,7 +346,12 @@ function serializeErr(e) {
 }
 
 function ok(id, result) {
-  send({ k: "res", id, ok: true, result: result === undefined ? null : result });
+  send({
+    k: "res",
+    id,
+    ok: true,
+    result: result === undefined ? null : result,
+  });
 }
 function fail(id, e) {
   send({ k: "res", id, ok: false, error: serializeErr(e) });
@@ -347,10 +421,7 @@ async function handle(m) {
       return;
     }
     case "agent.resume": {
-      const agent = await Agent.resume(
-        args.agentId,
-        withLocalStore(args.opts),
-      );
+      const agent = await Agent.resume(args.agentId, withLocalStore(args.opts));
       agents.set(agent.agentId, agent);
       ok(id, { agentId: agent.agentId });
       return;
@@ -358,7 +429,11 @@ async function handle(m) {
     case "agent.list": {
       const res = await Agent.list(withListStore(args.opts));
       // Normalize to a plain {items} shape the engine tolerates either way.
-      const items = Array.isArray(res) ? res : res && res.items ? res.items : [];
+      const items = Array.isArray(res)
+        ? res
+        : res && res.items
+          ? res.items
+          : [];
       ok(id, { items });
       return;
     }
@@ -444,9 +519,11 @@ async function handle(m) {
       // opened the SDK's `SqliteLocalAgentStore`; 1.0.26 stopped exporting that
       // symbol altogether, which silently turned every store.open into
       // {storeId: null} and left the adapter's terminal-error recovery dead.
-      const store = args.stateRoot
-        ? jsonlStoreAt(args.stateRoot)
-        : localStoreFor(args.workspaceRef);
+      const store = containedStateRoot
+        ? jsonlStoreAt(containedStateRoot)
+        : args.stateRoot
+          ? jsonlStoreAt(args.stateRoot)
+          : localStoreFor(args.workspaceRef);
       if (!store) {
         ok(id, { storeId: null });
         return;
@@ -539,7 +616,8 @@ async function shutdown() {
   }
   for (const agent of agents.values()) {
     try {
-      if (typeof agent.close === "function") pending.push(Promise.resolve(agent.close()));
+      if (typeof agent.close === "function")
+        pending.push(Promise.resolve(agent.close()));
     } catch {
       /* ignore */
     }

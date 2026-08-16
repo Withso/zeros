@@ -6,11 +6,14 @@
 import { describe, expect, it } from "vitest";
 
 import { AgentGateway } from "../gateway";
+import type { PreparedBoundary } from "../containment/types";
 import type { AgentAdapter } from "../types";
+import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
 function makeGateway() {
   return new AgentGateway({
     projectRoot: "/tmp/zeros-test",
+    executionBoundary: testExecutionBoundary(),
     events: {
       onSessionUpdate: () => {},
       onPermissionRequest: () => {},
@@ -104,5 +107,132 @@ describe("AgentGateway.endSession", () => {
     // Routing still clears even when the resource teardown could not be
     // confirmed. Archive retains its separate lifecycle tombstone and aborts.
     expect(gw.executionToAgent.has("s4")).toBe(false);
+  });
+
+  it("still disposes the adapter and proves process death when revocation fails", async () => {
+    const gw = makeGateway() as unknown as {
+      adapters: Map<string, AgentAdapter>;
+      executionToAgent: Map<string, string>;
+      executionBoundaries: Map<string, PreparedBoundary>;
+      endSession(
+        agentId: string,
+        sessionId: string,
+        opts: { failClosed: true },
+      ): Promise<void>;
+    };
+    const calls: string[] = [];
+    gw.adapters.set("strict", {
+      agentId: "strict",
+      disposeSession: async () => {
+        calls.push("dispose");
+      },
+    } as unknown as AgentAdapter);
+    gw.executionToAgent.set("s5", "strict");
+    gw.executionBoundaries.set("s5", {
+      revoke: async () => {
+        calls.push("revoke");
+        throw new Error("lease registry unavailable");
+      },
+      stopAndProve: async () => {
+        calls.push("stop");
+      },
+    } as unknown as PreparedBoundary);
+
+    await expect(
+      gw.endSession("strict", "s5", { failClosed: true }),
+    ).rejects.toThrow("lease registry unavailable");
+    expect(calls).toEqual(["revoke", "dispose", "stop"]);
+  });
+
+  it("retains a failed boundary proof so a lifecycle retry cannot forget a detached descendant", async () => {
+    const gw = makeGateway() as unknown as {
+      adapters: Map<string, AgentAdapter>;
+      executionToAgent: Map<string, string>;
+      executionBoundaries: Map<string, PreparedBoundary>;
+      endSession(
+        agentId: string,
+        sessionId: string,
+        opts: { failClosed: true },
+      ): Promise<void>;
+      newSession(
+        agentId: string,
+        opts: { cwd: string },
+      ): Promise<{ executionId: string }>;
+    };
+    let stopAttempts = 0;
+    gw.adapters.set("strict", {
+      agentId: "strict",
+      disposeSession: async () => {},
+      newSession: async (opts: { executionId: string }) => ({
+        session: {
+          executionId: opts.executionId,
+          sessionId: opts.executionId,
+        },
+        initialize: {},
+      }),
+    } as unknown as AgentAdapter);
+    gw.executionToAgent.set("s6", "strict");
+    gw.executionBoundaries.set("s6", {
+      revoke: async () => {},
+      stopAndProve: async () => {
+        stopAttempts += 1;
+        throw new Error("detached descendant remains");
+      },
+    } as unknown as PreparedBoundary);
+
+    await expect(
+      gw.endSession("strict", "s6", { failClosed: true }),
+    ).rejects.toThrow("detached descendant remains");
+    expect(gw.executionBoundaries.has("s6")).toBe(true);
+
+    await expect(
+      gw.endSession("strict", "s6", { failClosed: true }),
+    ).rejects.toThrow("detached descendant remains");
+    expect(stopAttempts).toBe(2);
+
+    await expect(gw.newSession("strict", { cwd: "/tmp" })).rejects.toThrow(
+      /prior execution boundary could not be proven stopped/i,
+    );
+  });
+});
+
+describe("AgentGateway.dispose", () => {
+  it("runs every teardown stage and reports failed boundary proof", async () => {
+    const gw = makeGateway() as unknown as {
+      adapters: Map<string, AgentAdapter>;
+      executionBoundaries: Map<string, PreparedBoundary>;
+      dispose(): Promise<void>;
+    };
+    const calls: string[] = [];
+    gw.adapters.set("strict", {
+      agentId: "strict",
+      dispose: async () => {
+        calls.push("adapter-dispose");
+        throw new Error("adapter child remains");
+      },
+    } as unknown as AgentAdapter);
+    gw.executionBoundaries.set("s7", {
+      revoke: async () => {
+        calls.push("revoke");
+        throw new Error("lease revocation failed");
+      },
+      stopAndProve: async () => {
+        calls.push("stop");
+        throw new Error("process proof failed");
+      },
+    } as unknown as PreparedBoundary);
+
+    const error = await gw.dispose().catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AggregateError);
+    expect((error as AggregateError).errors).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ message: "lease revocation failed" }),
+        expect.objectContaining({ message: "adapter child remains" }),
+        expect.objectContaining({ message: "process proof failed" }),
+      ]),
+    );
+    expect(calls).toEqual(["revoke", "adapter-dispose", "stop"]);
+    expect(gw.adapters.size).toBe(0);
+    expect(gw.executionBoundaries.size).toBe(0);
   });
 });

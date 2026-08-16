@@ -154,6 +154,15 @@
         }
       }
     },
+    "design": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string",
+          "description": "Repo-relative folder the design surface reads and writes (default \"Zeros Design\"). The folder is committed content; this key just selects which design folder is active."
+        }
+      }
+    },
     "env": {
       "description": "Non-secret environment variables passed to agents.",
       "type": "object",

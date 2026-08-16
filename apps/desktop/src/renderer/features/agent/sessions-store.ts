@@ -238,6 +238,8 @@ export const BLANK: AgentSessionState = {
   sessionId: null,
   providerBinding: null,
   providerMetadata: null,
+  boundary: null,
+  boundaryPorts: null,
   cwd: null,
   initialize: null,
   session: null,

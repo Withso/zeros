@@ -33,6 +33,9 @@ const WORKSPACE_MUTATIONS = new Set([
   // Workspace metadata, worktree lifecycle, and local-main Git bootstrap.
   "workspace.create",
   "workspace.setStatus",
+  // Mode switch (code ⇄ design) — flips the row's mode AND rewrites the
+  // checkout's writability, so surfaces keyed on either must re-read.
+  "workspace.setMode",
   "workspace.setRemoteRestricted",
   "workspace.reassignLocalOrganization",
   // Rewrites the worktree — folders appear/disappear on disk — so every
@@ -138,6 +141,9 @@ export const LONG_LIFECYCLE_OPS = new Set([
   // too: if its request times out, that client is otherwise the only one left
   // with a stale tree for a change it made itself.
   "workspace.setWorkingDirectories",
+  // Mode switch may initialize/commit Design files and dissolve a legacy cone
+  // (materializing folders), so retain the lifecycle request budget.
+  "workspace.setMode",
   "workspace.create",
   "workspace.createFromBranch",
   "workspace.restore",
@@ -193,6 +199,10 @@ export function dbChangedKinds(op: string, result?: unknown): string[] | null {
   // chats as well as the workspace row or they keep spawning against the old
   // missing cwd.
   if (op === "workspace.restore") return ["workspaces", "chats"];
+  // Renames the committed design folder AND the committed `[design] directory`
+  // pointer in the repo's main checkout — git state and settings provenance
+  // both change, so both collections re-read.
+  if (op === "design.renameDirectory") return ["workspaces", "settings"];
   // The periodic PR detector is a read until it actually finds and persists a
   // PR. Avoid turning a once-per-minute null probe into a global Git refresh.
   if (op === "gh.prSync" && result == null) return null;

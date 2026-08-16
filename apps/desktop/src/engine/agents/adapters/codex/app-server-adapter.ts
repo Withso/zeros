@@ -45,6 +45,7 @@ import {
 import type {
   AgentAdapter,
   AgentAdapterContext,
+  AgentFilesystemTerritory,
   ContentBlock,
   InitializeResponse,
   ListSessionsResponse,
@@ -74,7 +75,6 @@ import {
   type McpElicitationRequestLike,
 } from "../shared/mcp-elicitation";
 import { isDevRuntime } from "../../../runtime";
-import { openExternalUrl } from "../../gateway/open-url";
 
 import {
   bootCodexAppServerRuntime,
@@ -107,6 +107,13 @@ import type { GetAccountResponse } from "./generated/v2/GetAccountResponse";
 import type { GetAccountParams } from "./generated/v2/GetAccountParams";
 import type { ThreadDeletedNotification } from "./generated/v2/ThreadDeletedNotification";
 import type { ThreadForkResponse } from "./generated/v2/ThreadForkResponse";
+import {
+  CODEX_CODE_TERRITORY_PROFILE,
+  codexConfiguredMcpNames,
+  codexTerritoryConfig,
+  probeCodexTerritoryRuntime,
+} from "./territory";
+import type { PreparedBoundary } from "../../containment/types";
 
 const AGENT_ID = "codex";
 const CLIENT_INFO = { name: "Zeros", version: "0.0.5", title: "Zeros Mac App" };
@@ -226,11 +233,15 @@ export interface PendingApproval {
   params: Record<string, unknown>;
 }
 
-interface CodexSession {
+export interface CodexSession {
   zerosSessionId: string;
   cwd: string;
   env?: Record<string, string>;
   cliBinary?: string;
+  territory?: AgentFilesystemTerritory;
+  /** Authoritative outer ZSR boundary. When present, Codex keeps its normal
+   * per-mode sandbox/approval posture; the kernel projection subtracts Design. */
+  executionBoundary?: PreparedBoundary;
   runtime: CodexAppServerHandle;
   translator: CodexAppServerTranslator;
   /** Codex threadId — captured from thread/start (new) or thread/resume (load). */
@@ -321,6 +332,15 @@ interface CodexSession {
 
 export class CodexAppServerAdapter implements AgentAdapter {
   readonly agentId = AGENT_ID;
+  readonly enforcesFilesystemTerritory = true;
+  readonly filesystemTerritoryBackend = "provider-native" as const;
+  readonly filesystemTerritoryRestrictions = [
+    "additional-directories-disabled",
+    "local-mcp-disabled",
+    "plugins-disabled",
+    "shadow-git-unavailable",
+    "local-services-unavailable",
+  ] as const;
   /** Zeros' first-turn instruction rides the app-server's NATIVE channel
    *  (`thread/start|resume.developerInstructions`) instead of an in-band
    *  <system_instruction> first user turn — it survives compaction and never
@@ -346,8 +366,29 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  the app's lifetime, so we don't re-query it per session. */
   private modelsDiscovered = false;
 
-  constructor(ctx: AgentAdapterContext) {
+  private readonly territoryProbe: (
+    territory: AgentFilesystemTerritory,
+    opts?: { cliBinary?: string },
+  ) => Promise<void>;
+
+  constructor(
+    ctx: AgentAdapterContext,
+    opts?: {
+      territoryProbe?: (
+        territory: AgentFilesystemTerritory,
+        probeOpts?: { cliBinary?: string },
+      ) => Promise<void>;
+    },
+  ) {
     this.ctx = ctx;
+    this.territoryProbe = opts?.territoryProbe ?? probeCodexTerritoryRuntime;
+  }
+
+  async prepareFilesystemTerritory(
+    territory: AgentFilesystemTerritory,
+    opts?: { cliBinary?: string },
+  ): Promise<void> {
+    await this.territoryProbe(territory, opts);
   }
 
   async initialize(): Promise<InitializeResponse> {
@@ -444,6 +485,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
     const { session } = await this.bootSession({
       cwd: opts.cwd,
@@ -451,6 +494,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       cliBinary: opts.cliBinary,
       mcpServers: opts.mcpServers,
       systemInstruction: opts.systemInstruction,
+      territory: opts.territory,
+      executionBoundary: opts.executionBoundary,
       kind: "new",
       zerosSessionId: opts.executionId,
     });
@@ -488,6 +533,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
   }): Promise<LoadSessionResponse> {
     // Resume the provider thread into a separately-minted Zeros execution. The
     // native thread id never keys the live runtime or its attachment directory.
@@ -509,6 +556,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       cliBinary: opts.cliBinary,
       mcpServers: opts.mcpServers,
       systemInstruction: opts.systemInstruction,
+      territory: opts.territory,
+      executionBoundary: opts.executionBoundary,
       kind: "resume",
       resumeThreadId,
       zerosSessionId: executionId,
@@ -547,6 +596,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
   }): Promise<{ providerBinding: ProviderBinding }> {
     const source = coerceProviderBinding(opts.providerBinding);
     if (!source || source.providerId !== AGENT_ID || source.kind !== "native") {
@@ -558,10 +609,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
       });
     }
 
-    const liveSource = Array.from(this.sessions.values()).find(
-      (candidate) =>
-        candidate.runtimeAlive && candidate.threadId === source.resumeId,
-    );
+    // A live source runtime may have been admitted with a different cwd,
+    // binary, MCP registry, or filesystem authority. Never reuse it for a
+    // territory-bound fork; boot the exact, already-qualified target runtime
+    // and keep the fork RPC turnless instead.
+    const liveSource =
+      opts.executionBoundary || opts.territory
+        ? undefined
+        : Array.from(this.sessions.values()).find(
+            (candidate) =>
+              candidate.runtimeAlive && candidate.threadId === source.resumeId,
+          );
     let runtime = liveSource?.runtime;
     let ownsRuntime = false;
     if (!runtime) {
@@ -571,7 +629,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
           env: opts.env,
           cliBinary: opts.cliBinary,
           clientInfo: CLIENT_INFO,
-          mcpServers: opts.mcpServers ?? this.ctx.mcpServers,
+          executionBoundary: opts.executionBoundary,
+          mcpServers:
+            opts.territory && !opts.executionBoundary
+              ? []
+              : (opts.mcpServers ?? this.ctx.mcpServers),
           logTag: `codex-app-server:fork:${source.resumeId.slice(0, 8)}`,
           onStderr: (line) => this.ctx.emit.onAgentStderr(this.agentId, line),
         });
@@ -720,7 +782,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
           threadId: session.threadId,
           input,
           approvalPolicy,
-          sandboxPolicy,
+          ...codexTurnAuthority(
+            session.territory,
+            session.executionBoundary,
+            sandboxPolicy,
+          ),
           ...(model ? { model } : {}),
           ...(effort ? { effort } : {}),
           // ZEROS_FAST_MODE → Codex "fast" service tier (priority inference, GPT-5.x).
@@ -1152,9 +1218,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
           pending.request,
           response,
         );
-        if ("openUrl" in mapped && mapped.openUrl) {
-          openExternalUrl(mapped.openUrl);
-        }
         if (isMcpElicitationResponse(mapped.response)) {
           delivered = deliveredQuestionOutcome(outcome, mapped.response);
           // Only a fail-closed `cancel` is a surprise. Picking a Decline row
@@ -1191,7 +1254,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  RPC. Prefers a live session's runtime; otherwise boots a short-lived
    *  one and disposes it. Best-effort — returns null on any failure or for
    *  non-ChatGPT (API-key) auth, so the panel shows "—". */
-  async getAccountInfo(): Promise<AccountDetails | null> {
+  async getAccountInfo(opts?: {
+    env?: Record<string, string>;
+    executionBoundary?: PreparedBoundary;
+  }): Promise<AccountDetails | null> {
     // Fast path: reuse a live session's runtime — no extra boot.
     for (const s of this.sessions.values()) {
       const acct = await this.readAccount(s.runtime).catch(() => null);
@@ -1206,6 +1272,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
       clientInfo: CLIENT_INFO,
       mcpServers: [],
       logTag: "codex-app-server:account",
+      ...(opts?.env ? { env: opts.env } : {}),
+      ...(opts?.executionBoundary
+        ? { executionBoundary: opts.executionBoundary }
+        : {}),
     });
     try {
       const runtime = await Promise.race([
@@ -1235,6 +1305,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     prompt: string;
     env?: Record<string, string>;
     timeoutMs?: number;
+    executionBoundary?: PreparedBoundary;
   }): Promise<string> {
     const boot = bootCodexAppServerRuntime({
       cwd: this.ctx.projectRoot,
@@ -1242,6 +1313,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
       mcpServers: [],
       logTag: "codex-app-server:title",
       ...(opts.env ? { env: opts.env } : {}),
+      ...(opts.executionBoundary
+        ? { executionBoundary: opts.executionBoundary }
+        : {}),
     });
     try {
       const runtime = await Promise.race([
@@ -1409,6 +1483,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     /** Zeros' first-turn instruction body → `developerInstructions` on
      *  thread/start AND thread/resume (see `nativeSystemInstruction`). */
     systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
     kind: "new" | "resume";
     /** Required when kind === "resume". */
     resumeThreadId?: string;
@@ -1435,6 +1511,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // reconcile over AGENT_SET_MODE. This makes the first turn truthful even
     // when it is dispatched immediately after session creation.
     const initialMode = codexModeFromEnv(opts.env);
+    // ZSR is the authoritative outer sandbox. Feeding the same territory into
+    // Codex's provider-native profile would reintroduce the migration-only MCP,
+    // plugin and additional-root restrictions and create a conflicting nested
+    // policy. Keep that profile solely for direct legacy adapter callers.
+    const providerNativeTerritory = opts.executionBoundary
+      ? undefined
+      : opts.territory;
 
     // Boot the runtime first; we pass an onApprovalRequest closure that
     // will mutate `session.pendingApprovals` once the session object
@@ -1449,7 +1532,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
         env: opts.env,
         cliBinary: opts.cliBinary,
         clientInfo: CLIENT_INFO,
-        mcpServers: opts.mcpServers ?? this.ctx.mcpServers,
+        executionBoundary: opts.executionBoundary,
+        // Provider MCP tools execute with authority separate from the command
+        // sandbox. Never inject them into a code-territory runtime.
+        mcpServers:
+          opts.territory && !opts.executionBoundary
+            ? []
+            : (opts.mcpServers ?? this.ctx.mcpServers),
         logTag: `codex-app-server:${zerosSessionId.slice(0, 8)}`,
         onApprovalRequest: (request) =>
           this.handleApprovalRequest(session, request),
@@ -1483,6 +1572,27 @@ export class CodexAppServerAdapter implements AgentAdapter {
     let threadId: string;
     let providerSessionId: string;
     let threadModel: string | null = null;
+    let territoryConfig:
+      | Record<string, import("./generated/serde_json/JsonValue").JsonValue>
+      | undefined;
+    try {
+      if (opts.territory && !opts.executionBoundary) {
+        // Disable MCP servers inherited from every Codex config layer. Read
+        // only the identifiers; values may contain credentials and are never
+        // retained or logged. This occurs before any model thread exists.
+        const effective = await runtime.request<{ config?: unknown }>(
+          "config/read",
+          { cwd: opts.cwd, includeLayers: false },
+        );
+        territoryConfig = codexTerritoryConfig(
+          opts.territory,
+          codexConfiguredMcpNames(effective.config),
+        );
+      }
+    } catch (error) {
+      await runtime.dispose();
+      throw error;
+    }
     // True when a `kind:"resume"` could not load the rollout and fell through to
     // a fresh thread below — the gateway re-injects the first-turn
     // <system_instruction> in that case (the fresh thread has no history).
@@ -1501,6 +1611,15 @@ export class CodexAppServerAdapter implements AgentAdapter {
           const result = await runtime.resumeThread({
             threadId: opts.resumeThreadId,
             cwd: opts.cwd,
+            ...(providerNativeTerritory
+              ? {
+                  permissions: CODEX_CODE_TERRITORY_PROFILE,
+                  config: territoryConfig,
+                  runtimeWorkspaceRoots: [
+                    providerNativeTerritory.workspaceRoot,
+                  ],
+                }
+              : {}),
             ...(opts.systemInstruction
               ? { developerInstructions: opts.systemInstruction }
               : {}),
@@ -1532,6 +1651,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
               opts.env,
               initialMode,
               opts.systemInstruction,
+              providerNativeTerritory,
+              territoryConfig,
             ),
           );
           threadId = fresh.threadId;
@@ -1546,6 +1667,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
             opts.env,
             initialMode,
             opts.systemInstruction,
+            providerNativeTerritory,
+            territoryConfig,
           ),
         );
         threadId = result.threadId;
@@ -1585,6 +1708,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       cwd: opts.cwd,
       env: opts.env,
       cliBinary: opts.cliBinary,
+      territory: opts.territory,
+      executionBoundary: opts.executionBoundary,
       runtime,
       translator,
       threadId,
@@ -1927,6 +2052,22 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session: CodexSession,
     request: CodexApprovalRequest,
   ): void {
+    if (session.territory && territoryApprovalMustBeDenied(session, request)) {
+      // A territory profile is immutable authority, not something Ask/Auto or
+      // a user click may widen. Legacy exec/apply-patch approvals predate named
+      // profiles, while permissions requests explicitly ask to expand them;
+      // both fail closed. Modern ordinary in-profile gates may still proceed.
+      session.runtime.respondToPermission(
+        request.permissionId,
+        defaultMethodResponse(request.method, "decline"),
+      );
+      this.ctx.emit.onPermissionSettled?.(
+        this.agentId,
+        request.permissionId,
+        session.zerosSessionId,
+      );
+      return;
+    }
     // Approve for me auto-settles in-sandbox tool gates only. Permission-profile
     // escalations (network / out-of-workspace paths) still require a user card.
     if (session.modeId === "auto-edit" && autoEditCanAutoApprove(request)) {
@@ -2322,6 +2463,63 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 }
 
+function pathIsWriteDeniedByTerritory(
+  territory: AgentFilesystemTerritory,
+  candidate: string,
+): boolean {
+  const absolute = path.isAbsolute(candidate)
+    ? path.resolve(candidate)
+    : path.resolve(territory.workspaceRoot, candidate);
+  return territory.writeCapabilities.deniedPaths.some((directory) => {
+    const denied = path.resolve(directory);
+    return absolute === denied || absolute.startsWith(denied + path.sep);
+  });
+}
+
+/** Defense in depth around provider approval RPCs. The OS permission profile
+ * remains the boundary; this prevents Zeros itself from issuing an approval
+ * that asks Codex to widen or bypass that profile. */
+export function territoryApprovalMustBeDenied(
+  session: Pick<
+    CodexSession,
+    "territory" | "executionBoundary" | "fileEditPathsByItemId"
+  >,
+  request: Pick<CodexApprovalRequest, "method" | "params">,
+): boolean {
+  const territory = session.territory;
+  if (!territory) return false;
+  const providerNativeTerritory = !session.executionBoundary;
+  if (
+    providerNativeTerritory &&
+    (request.method === "item/permissions/requestApproval" ||
+      request.method === "execCommandApproval" ||
+      request.method === "applyPatchApproval")
+  ) {
+    return true;
+  }
+  if (request.method === "item/commandExecution/requestApproval") {
+    // A request carrying additional filesystem authority or a persistent rule
+    // is not an ordinary in-profile command gate.
+    if (
+      providerNativeTerritory &&
+      (request.params.additionalPermissions != null ||
+        request.params.proposedExecpolicyAmendment != null ||
+        request.params.proposedNetworkPolicyAmendments != null)
+    ) {
+      return true;
+    }
+  }
+  const itemId = stringField(request.params, "itemId");
+  const paths = itemId ? (session.fileEditPathsByItemId.get(itemId) ?? []) : [];
+  const grantRoot = stringField(request.params, "grantRoot");
+  return (
+    (grantRoot ? pathIsWriteDeniedByTerritory(territory, grantRoot) : false) ||
+    paths.some((candidate) =>
+      pathIsWriteDeniedByTerritory(territory, candidate),
+    )
+  );
+}
+
 // ── Helpers ──────────────────────────────────────────────────
 
 function buildInitializeResponse(): InitializeResponse {
@@ -2364,16 +2562,48 @@ export function buildThreadStartParams(
    *  (the native channel — layers on Codex's built-in system prompt; never
    *  baseInstructions, which would REPLACE it). */
   systemInstruction?: string,
+  territory?: AgentFilesystemTerritory,
+  territoryConfig?: Record<
+    string,
+    import("./generated/serde_json/JsonValue").JsonValue
+  >,
 ): CodexThreadStartParams {
   const model = env?.OPENAI_MODEL;
   const { approvalPolicy, sandboxMode } = modePolicyFor(modeId);
   return {
     cwd,
+    ...(territory
+      ? {
+          runtimeWorkspaceRoots: [territory.workspaceRoot],
+          permissions: CODEX_CODE_TERRITORY_PROFILE,
+          config: territoryConfig ?? codexTerritoryConfig(territory),
+        }
+      : { sandbox: sandboxMode }),
     ...(model ? { model } : {}),
     ...(systemInstruction ? { developerInstructions: systemInstruction } : {}),
     approvalPolicy,
-    sandbox: sandboxMode,
   };
+}
+
+/** Preserve the exact normal Codex mode inside a uniform outer ZSR boundary.
+ * The provider-native territory profile remains only for direct legacy adapter
+ * callers that have no outer kernel boundary. */
+export function codexTurnAuthority(
+  territory: AgentFilesystemTerritory | undefined,
+  executionBoundary: PreparedBoundary | undefined,
+  sandboxPolicy: CodexSandboxPolicy,
+):
+  | { sandboxPolicy: CodexSandboxPolicy }
+  | {
+      permissions: typeof CODEX_CODE_TERRITORY_PROFILE;
+      runtimeWorkspaceRoots: string[];
+    } {
+  return territory && !executionBoundary
+    ? {
+        permissions: CODEX_CODE_TERRITORY_PROFILE,
+        runtimeWorkspaceRoots: [territory.workspaceRoot],
+      }
+    : { sandboxPolicy };
 }
 
 export interface CodexModePolicy {

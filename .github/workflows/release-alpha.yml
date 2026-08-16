@@ -167,6 +167,9 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Qualify ZSR on the shipping kernel
+        run: pnpm check:zsr
+
       # ── Gates ────────────────────────────────────────────
       #
       # These run as STEPS in this job rather than a separate `needs:` job on
@@ -205,6 +208,7 @@ jobs:
           pnpm models:verify --strict
           pnpm check:cursor-asar
           pnpm check:licenses
+          pnpm check:audit
           pnpm check:packaging-paths
           pnpm check:vite-env
           pnpm check:codex-pin

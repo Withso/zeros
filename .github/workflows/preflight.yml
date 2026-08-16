@@ -146,6 +146,11 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install contained-execution runtime
+        # Codex uses bubblewrap; Claude's strict sandbox also requires socat.
+        # The containment gate executes the real provider profile on Linux.
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap socat
+
       - name: Fetch origin/main (for the migration forward-only guard)
         run: git fetch --no-tags origin main || echo "origin/main unavailable — guard runs HEAD-only"
 
@@ -162,6 +167,15 @@ jobs:
 
       - name: Run vitest suite
         run: pnpm test:git
+
+      - name: Code + Design containment matrix
+        # Stable release gate for the promise shipped today: provider profiles,
+        # real Linux sandbox attacks (including ignored drafts), hard-link
+        # refusal, transactional Design writes, lifecycle
+        # reconciliation, and absence of a coding-agent Design API/MCP path.
+        env:
+          ZEROS_REQUIRE_CONTAINMENT_RUNTIME: "1"
+        run: pnpm check:design-containment
 
       - name: Verify model catalog (strict)
         # Structural validation + the CLI-version gate: a curated model whose
@@ -227,6 +241,9 @@ jobs:
 
       - name: Third-party license inventory is current
         run: pnpm check:licenses
+
+      - name: Production dependency audit has no unreviewed high advisory
+        run: pnpm check:audit
 
       - name: Prod VITE_* env-set is wired into release.yml
         # A VITE_ var the app uses but release.yml doesn't inject ships a DMG
@@ -370,6 +387,11 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install Playwright Chromium headless shell
+        # The named containment gate also proves the real headless Design
+        # export path. macOS does not need Playwright's Linux system packages.
+        run: pnpm exec playwright install --only-shell chromium
+
       - name: Bundled agent runtime pins (darwin artifact)
         # The `test` job runs this too, but on ubuntu it can only prove the
         # linux-x64 platform package. The binary that actually SHIPS is
@@ -389,6 +411,12 @@ jobs:
         # Node runtime but not Electron's bundled runtime. None need credentials.
         run: pnpm agents:smoke:offline
 
+      - name: ZSR kernel, parity, and detached-lifecycle qualification
+        # Compiles the package-owned Darwin helper, exercises real Seatbelt/SRT
+        # policy, then proves setsid + double-fork teardown and next-engine
+        # recovery after an intentionally abrupt engine exit.
+        run: pnpm check:zsr
+
       - name: Packaged engine health + workspace lifecycle
         # Source-mode tests do not reproduce Bun --compile runtime failures.
         # Build the actual macOS sidecar, require sustained external /health,
@@ -402,6 +430,15 @@ jobs:
         # delete concurrency, base-branch changes, WIP recovery, process/session
         # teardown, confirmed UI transitions, and the target-OS FSEvents watcher.
         run: pnpm test:workspace-lifecycle
+
+      - name: Design-directory guard on the shipping platform
+        # The same named gate as Linux, now on the shipping OS. This includes
+        # Codex's real Seatbelt profile, Claude's native sandbox matrix,
+        # territory resolution, immutable-session lifecycle, and
+        # provider process-tree teardown. No credentials are required.
+        env:
+          ZEROS_REQUIRE_CONTAINMENT_RUNTIME: "1"
+        run: pnpm check:design-containment
 
       - name: GitHub credential and review-provider contracts
         # The credential broker uses the target OS's process, socket, helper,
@@ -453,6 +490,83 @@ jobs:
           apps/desktop/electron/ipc/commands/__tests__/files.test.ts
           apps/desktop/electron/ipc/commands/__tests__/image-dimensions.test.ts
 
+  zsr-macos-intel:
+    name: ZSR qualification (macOS Intel)
+    runs-on: macos-15-intel
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright Chromium headless shell
+        run: pnpm exec playwright install --only-shell chromium
+
+      - name: Resolve and boot the Intel agent runtimes
+        # macOS platform packages are architecture-gated optional dependencies.
+        # An arm64 pass cannot prove the Claude, Codex, or Cursor x64 artifacts.
+        run: |
+          test "$(uname -m)" = "x86_64"
+          pnpm check:runtime-pins
+          pnpm agents:smoke:offline
+
+      - name: Qualify Intel Seatbelt, parity, and detached lifecycle
+        run: pnpm check:zsr
+
+      - name: Build and smoke-test the Intel packaged engine
+        # This proves the historical x86_64 sidecar path still bundles and can
+        # sustain health plus create/archive/restore. Private OrbStack worker
+        # qualification remains a separate virtualization-capable host gate.
+        run: |
+          pnpm build:sidecar
+          pnpm smoke:engine
+
+      - name: Design containment on Intel
+        env:
+          ZEROS_REQUIRE_CONTAINMENT_RUNTIME: "1"
+        run: pnpm check:design-containment
+
+  zsr-linux-arm64:
+    name: ZSR qualification (Linux arm64)
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install contained-execution runtime
+        run: sudo apt-get update && sudo apt-get install --yes bubblewrap socat
+
+      - name: Resolve and boot the arm64 agent runtimes
+        run: |
+          test "$(uname -m)" = "aarch64"
+          pnpm check:runtime-pins
+          pnpm agents:smoke:offline
+
+      - name: Qualify arm64 bubblewrap, parity, and detached lifecycle
+        # This proves the generic Linux backend on real arm64. The production
+        # cloud image separately supplies rootless Podman, delegated memory/PID
+        # cgroups, and its signed cloud-worker admission artifact.
+        run: pnpm check:zsr
+
   control-plane:
     name: control plane
     runs-on: ubuntu-latest
@@ -497,6 +611,11 @@ jobs:
       - name: Typecheck control plane
         working-directory: apps/control-plane
         run: pnpm typecheck
+      - name: Audit control-plane production dependencies
+        # This service deploys from its independent lockfile, so the root audit
+        # cannot prove the graph Railway actually installs.
+        working-directory: apps/control-plane
+        run: pnpm audit:prod
       - name: Control-plane tests (migrations + auth/invite contracts)
         working-directory: apps/control-plane
         env:

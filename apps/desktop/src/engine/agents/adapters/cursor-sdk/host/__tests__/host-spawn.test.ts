@@ -10,16 +10,23 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import type { ChildProcess } from "node:child_process";
 
 const { spawnSpy } = vi.hoisted(() => ({ spawnSpy: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn: spawnSpy }));
 
 import { resolveHostCwd, spawnSubprocessTransport } from "../host-client";
+import type {
+  BoundaryProcess,
+  PreparedBoundary,
+  TerritoryGeneration,
+} from "../../../../containment/types";
 
 /** Minimal ChildProcess stand-in: only the members touched right after spawn. */
 function fakeChild() {
   const stream = () => ({ setEncoding: vi.fn(), on: vi.fn() });
   return {
+    pid: 43_210,
     stdout: stream(),
     stderr: stream(),
     stdin: { write: vi.fn(), end: vi.fn(), destroyed: false },
@@ -75,5 +82,68 @@ describe("spawnSubprocessTransport — host cwd safety", () => {
     expect(opts.cwd).toBe(resolveHostCwd());
     // The exact regression: the host must not inherit the engine repo root.
     expect(opts.cwd).not.toBe(process.cwd());
+  });
+
+  it("runs a session host through its prepared boundary with no ambient authority", () => {
+    const stopAndProve = vi.fn(async () => undefined);
+    const tracked = {
+      pid: 43_210,
+      stdin: null,
+      stdout: null,
+      stderr: null,
+      wait: vi.fn(),
+      signal: vi.fn(),
+      stopAndProve,
+    } as unknown as BoundaryProcess;
+    const wrapSpawn = vi.fn((request) => ({
+      command: "/sandbox/supervisor",
+      args: ["--contained"],
+      cwd: request.cwd,
+      env: { BOOTSTRAP_ONLY: "1" },
+      stdio: "pipe" as const,
+    }));
+    const trackProcess = vi.fn(() => tracked);
+    const boundary = {
+      generation: "test-generation" as TerritoryGeneration,
+      status: {},
+      wrapSpawn,
+      trackProcess,
+    } as unknown as PreparedBoundary;
+
+    const transport = spawnSubprocessTransport({
+      executionBoundary: boundary,
+      cwd: "/worktree",
+      env: {
+        HOME: "/user/home",
+        SAFE: "visible",
+        ZEROS_LOCAL_WS_TOKEN: "engine-secret",
+      },
+    });
+
+    expect(wrapSpawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: expect.stringMatching(/^\//),
+        cwd: "/worktree",
+        env: {
+          HOME: "/user/home",
+          SAFE: "visible",
+        },
+      }),
+    );
+    expect(spawnSpy).toHaveBeenCalledWith(
+      "/sandbox/supervisor",
+      ["--contained"],
+      expect.objectContaining({
+        cwd: "/worktree",
+        env: { BOOTSTRAP_ONLY: "1" },
+        detached: true,
+      }),
+    );
+    expect(trackProcess).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: 43_210 }) as ChildProcess,
+    );
+
+    transport?.dispose();
+    expect(stopAndProve).toHaveBeenCalledOnce();
   });
 });

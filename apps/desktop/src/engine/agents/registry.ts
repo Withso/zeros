@@ -454,13 +454,14 @@ export function toBridgeAgents(
     // to whether chats work.
     const runtimeUnavailableReason =
       m.runtimeUnavailable?.(runtimeOverrides?.get(m.id)) ?? undefined;
+    const selectedBinary = runtimeOverrides?.get(m.id) ?? m.cliBinary;
     // SDK-backed agents (bundledRuntime) ship with the app, so they're
     // always "installed" — no `cliBinary` on PATH required — UNLESS the shipped
     // runtime is actually missing, which is a packaging defect we must surface
     // rather than paper over.
     const installed = runtimeUnavailableReason
       ? false
-      : m.bundledRuntime === true || installedBinaries.has(m.cliBinary);
+      : m.bundledRuntime === true || installedBinaries.has(selectedBinary);
     const vinfo = versionInfoByAgentId?.get(m.id);
     return {
       id: m.id,

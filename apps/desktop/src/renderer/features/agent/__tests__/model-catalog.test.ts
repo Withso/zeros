@@ -35,6 +35,21 @@ import {
   CLAUDE_IDLE_TIMEOUT_ENV_VAR,
 } from "../model-catalog";
 import type { SessionMode } from "../../../platform/bridge/agent-events";
+import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
+
+const protectedBoundary: ExecutionBoundaryStatus = {
+  version: 1,
+  actor: "agent-code",
+  state: "ready",
+  backend: "provider-native",
+  designProtection: {
+    required: true,
+    enforced: true,
+    protectedDirectoryCount: 1,
+  },
+  parity: { level: "restricted", restrictions: [] },
+  checkedAt: 1,
+};
 
 describe("agentFamily", () => {
   const cases: Array<[string, string]> = [
@@ -604,6 +619,40 @@ describe("permissionMenuItems (native permission modes shown in the '+' menu)", 
     const items = permissionMenuItems("cursor", "composer-2.5");
     expect(items.map((i) => i.modeId)).toEqual(["plan", "auto", "agent"]);
     expect(items.map((i) => i.label)).toEqual(["Ask", "Auto", "Full access"]);
+  });
+  it("labels dangerous autonomy truthfully when Design is protected", () => {
+    expect(
+      permissionMenuItems("codex", "gpt-5.6-sol", protectedBoundary),
+    ).toContainEqual({
+      modeId: "full-access",
+      label: "Full Access — Design protected",
+    });
+    expect(
+      permissionMenuItems("cursor", "composer-2.5", protectedBoundary),
+    ).toContainEqual({
+      modeId: "agent",
+      label: "Full Access — Design protected",
+    });
+  });
+  it("does not offer provider bypass when the admitted backend cannot preserve it", () => {
+    const restricted: ExecutionBoundaryStatus = {
+      ...protectedBoundary,
+      parity: {
+        level: "restricted",
+        restrictions: ["provider-bypass-mode-disabled"],
+      },
+    };
+    expect(
+      permissionMenuItems("claude", "claude-opus-4-8[1m]", restricted),
+    ).not.toContainEqual(expect.objectContaining({ modeId: "bypass" }));
+    expect(
+      coerceModeIdForModel(
+        "claude",
+        "claude-opus-4-8[1m]",
+        "bypass",
+        restricted,
+      ),
+    ).toBe("accept-edits");
   });
   it("agentHasPermissionMenu is true for every native family, false otherwise", () => {
     expect(agentHasPermissionMenu("claude", "claude-haiku-4-5")).toBe(true);

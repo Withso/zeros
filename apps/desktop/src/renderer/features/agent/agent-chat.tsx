@@ -32,7 +32,7 @@ import {
 } from "./chat-scroll-anchor";
 import { useOpenPrUrlInReviewTab } from "@/renderer/shell/pr/use-open-review-tab";
 import { warmWorkspaceFiles } from "@/renderer/shell/workspace-files-cache";
-import { useNativeRuntime } from "@/renderer/platform/runtime";
+import { nativeInvoke, useNativeRuntime } from "@/renderer/platform/runtime";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import {
   useWorkspaceStore,
@@ -128,6 +128,14 @@ import {
   ComposerConcealedContext,
 } from "./composer-pills";
 import { ContextGauge } from "./context-gauge";
+import { BoundaryPortsPill } from "./boundary-ports";
+import { BoundaryStatusPill } from "./boundary-status";
+import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
+import { createBrowserTab } from "@/renderer/shell/workbench/tab-model";
+import {
+  clearPreviewRuntimeForTab,
+  stagePreviewNavigation,
+} from "@/renderer/features/browser/preview-navigation";
 import { ChatProvenance } from "./chat-provenance";
 import {
   ChatTranscriptPills,
@@ -986,6 +994,7 @@ export function AgentChat({
         chatAgentId,
       )?.id ??
       null,
+    session.boundary,
   );
 
   // Show the composer permission toggle when the agent has a native-mode
@@ -1186,6 +1195,7 @@ export function AgentChat({
           <PermissionToggle
             agentId={chatAgentId}
             model={chatThread.model}
+            boundary={session.boundary}
             currentModeId={currentPermissionModeId}
             onSelectMode={selectNativeMode}
           />
@@ -1200,6 +1210,7 @@ export function AgentChat({
   }, [
     chatThread,
     session.initialize,
+    session.boundary,
     session.setModel,
     session.updateConfig,
     updateChatSettings,
@@ -1211,6 +1222,54 @@ export function AgentChat({
     selectNativeMode,
     maybeShowCostBumpToast,
   ]);
+
+  const openBoundaryPort = session.openBoundaryPort;
+  const openBoundaryPreview = useCallback(
+    (port: ExecutionBoundaryPortStatus) => {
+      void (async () => {
+        try {
+          if (!openBoundaryPort) {
+            throw new Error("preview opening is unavailable");
+          }
+          const opened = await openBoundaryPort(port.id);
+          const tab = createBrowserTab({
+            url: opened.url,
+            title: `localhost:${port.port}`,
+            ...(chatId ? { previewSource: { chatId, port: port.port } } : {}),
+          });
+          const staged = stagePreviewNavigation(tab.id, opened);
+          if (nativeReady && staged.volatileOrigin) {
+            try {
+              const authorized = await nativeInvoke<{ ok: boolean }>(
+                "browser:authorize-preview-origin",
+                {
+                  frameName: `zeros-browser-${tab.id}`,
+                  origin: staged.runtimeOrigin,
+                  expiresAt: staged.expiresAt,
+                },
+              );
+              if (!authorized.ok) {
+                throw new Error("preview origin was not authorized");
+              }
+            } catch (error) {
+              clearPreviewRuntimeForTab(tab.id);
+              throw error;
+            }
+          }
+          dispatch({
+            type: "ADD_WORKBENCH_TAB",
+            ...(chatThread?.folder ? { scope: chatThread.folder } : {}),
+            tab,
+          });
+        } catch {
+          toast.error("Preview could not be opened", {
+            description: "Restart the server or session, then try again.",
+          });
+        }
+      })();
+    },
+    [chatId, chatThread?.folder, dispatch, nativeReady, openBoundaryPort],
+  );
 
   // 2026-05-21: handleAgentSwitch + folderLabel removed. The
   // agent-switch flow lived behind AgentPill's "switch agent" menu,
@@ -4321,6 +4380,11 @@ export function AgentChat({
                       (also used in the edit composer). Effort/Fast are part of
                       the model label and edited in its popover. */}
                       {editToolbarPills}
+                      <BoundaryStatusPill status={session.boundary} />
+                      <BoundaryPortsPill
+                        snapshot={session.boundaryPorts}
+                        onOpenPort={openBoundaryPreview}
+                      />
                     </PromptInputTools>
                     {/* Right cluster: [context ring] [send] (+ save tick while
                     editing a queued message). Grouped so the toolbar's

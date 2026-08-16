@@ -28,7 +28,10 @@ export interface Transport {
   onConnect(handler: (client: TransportClient) => void): void;
   onDisconnect(handler: (client: TransportClient) => void): void;
   onMessage(
-    handler: (client: TransportClient, msg: EngineMessage) => void,
+    handler: (
+      client: TransportClient,
+      msg: EngineMessage,
+    ) => void | Promise<void>,
   ): void;
   /** Send to every client on this transport. */
   broadcast(msg: EngineMessage): void;

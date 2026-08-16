@@ -10,19 +10,25 @@
 
 import { spawn } from "node:child_process";
 import type { EventEmitter } from "node:events";
+import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
 
 /** Open `url` in the default browser via the OS. Best-effort — a failure is
  *  logged, never thrown (the caller's auth flow surfaces the timeout instead). */
 export function openExternalUrl(url: string): void {
+  const normalized = normalizeExternalHttpUrl(url);
+  if (!normalized) {
+    console.warn("[mcp-gateway] refused invalid external browser URL");
+    return;
+  }
   const platform = process.platform;
   const [cmd, args]: [string, string[]] =
     platform === "darwin"
-      ? ["open", [url]]
+      ? ["open", [normalized]]
       : platform === "win32"
         // Quote the URL: cmd.exe re-parses its own command line, so an unquoted
         // `&` in the URL would be treated as a command separator (injection).
-        ? ["cmd", ["/c", "start", "", `"${url}"`]]
-        : ["xdg-open", [url]];
+        ? ["cmd", ["/c", "start", "", `"${normalized}"`]]
+        : ["xdg-open", [normalized]];
   try {
     const child = spawn(cmd, args, { stdio: "ignore", detached: true });
     // Attach via EventEmitter (ChildProcess's inherited .on isn't seen by this

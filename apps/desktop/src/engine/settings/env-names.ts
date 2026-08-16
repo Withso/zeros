@@ -82,7 +82,11 @@ const DANGEROUS_ENV_NAMES = new Set([
   "NODE_PATH",
 ]);
 
-export function isDangerousEnvName(name: string): boolean {
+/** Names that can execute or redirect host code when a provider process starts.
+ * This narrower classifier deliberately excludes Zeros' own control prefix so
+ * a territory admission path can remove generic process injection while still
+ * carrying engine-authored model/effort/workspace context. */
+export function isRuntimeInjectionEnvName(name: string): boolean {
   return (
     DANGEROUS_ENV_NAMES.has(name) ||
     name.startsWith("DYLD_") ||
@@ -90,7 +94,13 @@ export function isDangerousEnvName(name: string): boolean {
     // GIT_CONFIG / _GLOBAL / _SYSTEM redirect git at an attacker config file,
     // and GIT_CONFIG_COUNT/_KEY_n/_VALUE_n inject config inline — either can set
     // core.sshCommand / core.pager / core.editor to an arbitrary command (exec).
-    name.startsWith("GIT_CONFIG") ||
+    name.startsWith("GIT_CONFIG")
+  );
+}
+
+export function isDangerousEnvName(name: string): boolean {
+  return (
+    isRuntimeInjectionEnvName(name) ||
     // Our OWN control surface, and the whole prefix is blocked rather than the
     // exec-shaped members. Several ZEROS_* vars name a script or runtime the
     // engine then EXECUTES — ZEROS_CURSOR_HOST_SCRIPT, ZEROS_PTY_HOST_SCRIPT,
@@ -148,7 +158,10 @@ export function isCredentialRedirectEnvName(name: string): boolean {
   return CREDENTIAL_REDIRECT_ENV_NAMES.has(name);
 }
 
-export type SpawnEnvHazard = "code-injection" | "credential-redirect" | "secret-shaped";
+export type SpawnEnvHazard =
+  | "code-injection"
+  | "credential-redirect"
+  | "secret-shaped";
 
 /** The union the agent-spawn path drops from the settings `env` table /
  *  `env_files`. Returns the hazard class (for a precise warning) or null when

@@ -34,6 +34,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { PtyService } from "../pty/service";
+import { randomUUID } from "node:crypto";
 import { buildRunCommandEnv } from "../pty/shell-setup";
 import { isRunSessionId } from "@zeros/protocol/run-actions";
 import {
@@ -41,6 +42,10 @@ import {
   getWorkspaceMeta,
   setWorkspaceMeta,
 } from "../git/state";
+import type {
+  PreparedBoundary,
+  RepoTaskBoundaryFactory,
+} from "../agents/containment/types";
 
 export type RunState = "running" | "finished" | "failed" | "stopped";
 
@@ -120,7 +125,22 @@ interface RunEntry {
    *  fast-exit replay source. Retained after exit until the next same-id run. */
   log: string;
   truncated: boolean;
+  /** Present for every newly-spawned repo task. Adopted pre-migration PTYs are
+   * deliberately the only entries without one. */
+  boundary?: PreparedBoundary;
+  boundaryFinalized: boolean;
+  boundaryTeardown?: Promise<void>;
 }
+
+interface BoundaryTeardownRecord {
+  readonly promise: Promise<void>;
+}
+
+const missingRepoTaskBoundary: RepoTaskBoundaryFactory = async () => {
+  throw new Error(
+    "repository task refused: no Zeros Sandbox Runtime boundary is configured",
+  );
+};
 
 /** How long start() waits for a previous same-id run's exit to settle before
  *  respawning anyway (a wedged exit callback must not brick the action). */
@@ -149,6 +169,12 @@ export class RunManager {
     string,
     { workspaceId: string | null; cancelled: boolean }
   >();
+  /** Failed teardown proof is durable for this engine lifetime. A later
+   * archive/delete must still see it even when the run entry was superseded. */
+  private readonly boundaryTeardowns = new Map<
+    string,
+    Set<BoundaryTeardownRecord>
+  >();
 
   constructor(
     private readonly pty: PtyService,
@@ -157,13 +183,78 @@ export class RunManager {
     /** Register a freshly-spawned run terminal in the SHARED terminal registry
      *  (so every device's tab strip discovers it, like a renderer-spawned
      *  terminal). Wired by the engine; optional for unit tests. */
-    private readonly registerTerminal?: (sessionId: string, cwd: string) => void,
+    private readonly registerTerminal?: (
+      sessionId: string,
+      cwd: string,
+    ) => void,
     /** The child env for a run's shell. Injectable so unit tests don't pay (or
      *  depend on) the real `$SHELL -ilc` PATH probe buildRunCommandEnv runs. */
     private readonly envBuilder: (
       ctx: RunEnvContext,
     ) => Promise<Record<string, string> | undefined> = buildRunCommandEnv,
+    private readonly boundaryFactory: RepoTaskBoundaryFactory = missingRepoTaskBoundary,
   ) {}
+
+  private beginBoundaryRevocation(entry: RunEntry): void {
+    if (!entry.boundary) return;
+    void entry.boundary.revoke().catch((error) => {
+      console.error("[run] failed to revoke repo-task capabilities:", error);
+    });
+  }
+
+  private finalizeBoundary(entry: RunEntry): Promise<void> {
+    if (!entry.boundary) return Promise.resolve();
+    if (entry.boundaryTeardown) return entry.boundaryTeardown;
+    entry.boundaryFinalized = true;
+    const promise = Promise.resolve().then(() =>
+      entry.boundary!.stopAndProve(),
+    );
+    entry.boundaryTeardown = promise;
+    const workspaceId = entry.workspaceId;
+    const record = { promise } satisfies BoundaryTeardownRecord;
+    if (workspaceId) {
+      const records = this.boundaryTeardowns.get(workspaceId) ?? new Set();
+      records.add(record);
+      this.boundaryTeardowns.set(workspaceId, records);
+      void promise.then(
+        () => {
+          records.delete(record);
+          if (records.size === 0) this.boundaryTeardowns.delete(workspaceId);
+        },
+        () => {
+          // Keep failed proof in the set. Only an engine restart can run the
+          // durable stale-domain recovery that makes removal safe again.
+        },
+      );
+    }
+    void promise.catch((error) => {
+      console.error("[run] repo-task boundary teardown failed:", error);
+    });
+    return promise;
+  }
+
+  /** Lifecycle barrier used after PTY exit has been observed and before a
+   * worktree can be snapshotted or removed. */
+  async proveWorkspaceBoundariesStopped(workspaceId: string): Promise<void> {
+    for (const entry of this.entries.values()) {
+      if (entry.workspaceId === workspaceId && entry.boundary) {
+        void this.finalizeBoundary(entry);
+      }
+    }
+    const records = [...(this.boundaryTeardowns.get(workspaceId) ?? [])];
+    const results = await Promise.allSettled(
+      records.map((record) => record.promise),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "repository run containment teardown was not proven",
+      );
+    }
+  }
 
   /** The run's child env, never fatal: an env-builder failure must not block
    *  the run — the spawn layer then falls back to the standard terminal env,
@@ -255,6 +346,17 @@ export class RunManager {
     // server appearing post-Stop, or worse, holding open a worktree the
     // archive reaper is about to `git worktree remove`.
     if (flight.cancelled) return { alreadyRunning: false, cancelled: true };
+    const boundary = await this.boundaryFactory({
+      executionId: `repo-run-${randomUUID()}`,
+      cwd: args.cwd,
+      workspaceRoot: args.cwd,
+      repoRoot: args.repoRoot ?? args.cwd,
+      ...(env ? { env } : {}),
+    });
+    if (flight.cancelled) {
+      await boundary.stopAndProve();
+      return { alreadyRunning: false, cancelled: true };
+    }
     let resolveExit = () => {};
     const exitSettled = new Promise<void>((resolve) => {
       resolveExit = resolve;
@@ -273,6 +375,8 @@ export class RunManager {
       settled: false,
       log: "",
       truncated: false,
+      boundary,
+      boundaryFinalized: false,
     };
     entry.settleExit = () => {
       entry.settled = true;
@@ -301,6 +405,16 @@ export class RunManager {
         interactive: true,
         cols: 120,
         rows: 30,
+        wrapSpawn: (request) => {
+          const launch = boundary.wrapSpawn(request);
+          if (launch.stdio !== "inherit") {
+            throw new Error("run boundary did not preserve PTY stdio");
+          }
+          return { ...launch, stdio: "inherit" as const };
+        },
+        onSpawned: (pid) => {
+          boundary.trackProcessGroup(pid);
+        },
       });
     } catch (err) {
       // Spawn failed (worktree gone, node-pty fault) — settle the entry so
@@ -308,6 +422,14 @@ export class RunManager {
       // stall), then surface the error to the op caller.
       this.setState(entry, "failed");
       entry.settleExit();
+      try {
+        await this.finalizeBoundary(entry);
+      } catch (teardownError) {
+        throw new AggregateError(
+          [err, teardownError],
+          "run spawn failed and containment teardown was not proven",
+        );
+      }
       throw err;
     }
     this.registerTerminal?.(args.sessionId, args.cwd);
@@ -337,6 +459,7 @@ export class RunManager {
       settled: false,
       log: "",
       truncated: false,
+      boundaryFinalized: false,
     };
     entry.settleExit = () => {
       entry.settled = true;
@@ -349,8 +472,20 @@ export class RunManager {
 
   /** Stop a live run without treating it as a failure. With no live PTY it
    *  just settles a stale "running" marker (engine restarted mid-run). */
-  stop(sessionId: string): void {
+  stop(sessionId: string, expectedWorkspaceId?: string): void {
     if (!isRunSessionId(sessionId)) return;
+    const knownWorkspaceId =
+      this.entries.get(sessionId)?.workspaceId ??
+      this.starting.get(sessionId)?.workspaceId;
+    // Cloud callers carry the opaque managed owner as well as the deterministic
+    // session id. Refuse a guessed/cross-workspace id before touching a pending
+    // flight or PTY. Local engine lifecycle callers omit the expectation.
+    if (
+      expectedWorkspaceId !== undefined &&
+      knownWorkspaceId !== expectedWorkspaceId
+    ) {
+      return;
+    }
     // A start still resolving its env has no entry and no PTY yet — mark it so
     // it aborts instead of spawning behind the user's Stop, and RETIRE the slot
     // so an immediate Rerun isn't told "already running" by a flight that is
@@ -368,12 +503,15 @@ export class RunManager {
         this.setState(entry, "stopped");
       }
       // Untracked live PTY (pre-migration run terminal) → still honor Stop.
+      if (entry) this.beginBoundaryRevocation(entry);
       this.pty.kill(sessionId);
       return;
     }
     if (entry && entry.state === "running") {
       this.setState(entry, "stopped");
       entry.settleExit();
+      this.beginBoundaryRevocation(entry);
+      void this.finalizeBoundary(entry);
     }
   }
 
@@ -439,6 +577,7 @@ export class RunManager {
       );
     }
     entry.settleExit();
+    void this.finalizeBoundary(entry);
   }
 
   /** Buffer a chunk of a run PTY's output into its entry (no-op for non-run or
@@ -460,8 +599,17 @@ export class RunManager {
   /** The buffered output of the run under `sessionId` — the terminal replays
    *  this when it mounts too late to attach to a fast-exiting run PTY. Empty
    *  when no run is tracked (unknown id, or the buffer dropped by a restart). */
-  log(sessionId: string): { log: string; truncated: boolean } {
+  log(
+    sessionId: string,
+    expectedWorkspaceId?: string,
+  ): { log: string; truncated: boolean } {
     const entry = this.entries.get(sessionId);
+    if (
+      expectedWorkspaceId !== undefined &&
+      entry?.workspaceId !== expectedWorkspaceId
+    ) {
+      return { log: "", truncated: false };
+    }
     return { log: entry?.log ?? "", truncated: entry?.truncated ?? false };
   }
 
@@ -518,7 +666,8 @@ export class RunManager {
     // Rowless (trunk) runs have workspaceId null — matched by session id.
     for (const sessionId of sessionIds) {
       const entry = this.entries.get(sessionId);
-      if (!entry || (workspaceId && entry.workspaceId === workspaceId)) continue;
+      if (!entry || (workspaceId && entry.workspaceId === workspaceId))
+        continue;
       actions[entry.actionId] = {
         state: entry.state,
         live: true,
@@ -539,14 +688,19 @@ export class RunManager {
 
   // ── Durable per-(workspace, action) map (workspace_meta) ──
 
-  private readDurable(workspaceId: string): Record<string, DurableActionStatus> {
+  private readDurable(
+    workspaceId: string,
+  ): Record<string, DurableActionStatus> {
     try {
       const raw = getWorkspaceMeta(workspaceId, RUN_STATUS_META_KEY);
       if (!raw) return {};
       const parsed = JSON.parse(raw) as unknown;
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+        return {};
       const out: Record<string, DurableActionStatus> = {};
-      for (const [actionId, v] of Object.entries(parsed as Record<string, unknown>)) {
+      for (const [actionId, v] of Object.entries(
+        parsed as Record<string, unknown>,
+      )) {
         if (!v || typeof v !== "object") continue;
         const s = v as Partial<DurableActionStatus>;
         if (

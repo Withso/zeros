@@ -35,6 +35,10 @@ import type {
   ProviderBinding,
   ProviderMetadata,
 } from "@zeros/protocol/identities";
+import type {
+  ExecutionBoundaryPortsSnapshot,
+  ExecutionBoundaryStatus,
+} from "@zeros/protocol/containment";
 
 // The agent message model + the pure SessionNotification→message folder moved to
 // @zeros/protocol so the engine can run the same coalescer it does. Re-
@@ -113,6 +117,11 @@ export interface AgentSessionState {
    * the live routing/cache key. */
   providerBinding: ProviderBinding | null;
   providerMetadata: ProviderMetadata | null;
+  /** Engine-authoritative, redacted preflight/admission health. */
+  boundary: ExecutionBoundaryStatus | null;
+  /** Exact live listener state for this execution. Never persisted across an
+   * execution replacement. */
+  boundaryPorts: ExecutionBoundaryPortsSnapshot | null;
   /** The chat's folder, captured
    *  on first ensureSession + restored on rebuilds. Without this, the
    *  silent-retry path called ensureSession({ force:true })
@@ -244,6 +253,11 @@ export interface AgentSessionControls {
   cancel(): Promise<void>;
   /** Stop one background task without cancelling the foreground turn. */
   stopBackgroundTask(taskId: string): void;
+  /** Exchange one redacted live-port id for an ephemeral browser admission.
+   * The caller must keep `admissionUrl` out of persisted state. */
+  openBoundaryPort?(
+    portId: string,
+  ): Promise<{ url: string; admissionUrl: string; expiresAt: number }>;
   /** Resolve a pending permission request. */
   respondToPermission(response: RequestPermissionResponse): void;
   /** Answer the head pending question (queue front). */

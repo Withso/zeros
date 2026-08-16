@@ -10,6 +10,8 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,10 +30,28 @@ class Host {
   >();
   private readyPromise: Promise<void>;
 
-  constructor() {
+  constructor(
+    options: {
+      cwd?: string;
+      stateRoot?: string;
+      defaultStateRoot?: string;
+    } = {},
+  ) {
     this.child = spawn(process.execPath, [HOST], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ZEROS_CURSOR_SDK_ENTRY: STUB },
+      cwd: options.cwd,
+      env: {
+        ...process.env,
+        ZEROS_CURSOR_SDK_ENTRY: STUB,
+        ...(options.stateRoot
+          ? { ZEROS_CURSOR_STATE_ROOT: options.stateRoot }
+          : {}),
+        ...(options.defaultStateRoot
+          ? {
+              ZEROS_CURSOR_STUB_DEFAULT_STATE_ROOT: options.defaultStateRoot,
+            }
+          : {}),
+      },
     });
     let signalReady = () => {};
     this.readyPromise = new Promise<void>((r) => (signalReady = () => r()));
@@ -88,8 +108,8 @@ class Host {
 }
 
 let host: Host | null = null;
-function startHost(): Host {
-  host = new Host();
+function startHost(options?: ConstructorParameters<typeof Host>[0]): Host {
+  host = new Host(options);
   return host;
 }
 
@@ -109,6 +129,44 @@ describe("cursor host — local agent store injection", () => {
     // Not "none": the SDK must never be left to resolve its own default, which
     // is the node:sqlite default that caused the historical packaged failure.
     expect(res.agentId).toBe("create:store1@/state-root/w/alpha");
+  });
+
+  it("seeds and exclusively uses the ZSR private provider-state root", async () => {
+    const temporary = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-cursor-host-state-"),
+    );
+    try {
+      const workspace = path.join(temporary, "workspace");
+      const source = path.join(temporary, "normal-state");
+      const privateState = path.join(temporary, "private-state");
+      await Promise.all([
+        mkdir(workspace, { recursive: true }),
+        mkdir(source, { recursive: true }),
+        mkdir(privateState, { recursive: true }),
+      ]);
+      await writeFile(
+        path.join(source, "agents.ndjson"),
+        '{"agentId":"existing"}\n',
+      );
+      const h = startHost({
+        cwd: workspace,
+        stateRoot: privateState,
+        defaultStateRoot: source,
+      });
+      await h.ready();
+      expect(
+        await readFile(path.join(privateState, "agents.ndjson"), "utf8"),
+      ).toBe('{"agentId":"existing"}\n');
+      const res = await h.req<{ agentId: string }>("agent.create", {
+        cwd: workspace,
+        local: { cwd: workspace },
+      });
+      expect(res.agentId).toBe(`create:store1@${privateState}`);
+    } finally {
+      host?.dispose();
+      host = null;
+      await rm(temporary, { recursive: true, force: true });
+    }
   });
 
   it("attaches a store for agent.resume too — resume hits the same default-store path as create", async () => {
@@ -207,7 +265,10 @@ describe("cursor host — local agent store injection", () => {
     // overridden, so it is pinned rather than left to chance.
     const res = await h.req<{ agentId: string }>("agent.create", {
       cwd: "/w/alpha",
-      local: { cwd: "/w/alpha", store: { instanceId: "mine", rootDir: "/mine" } },
+      local: {
+        cwd: "/w/alpha",
+        store: { instanceId: "mine", rootDir: "/mine" },
+      },
     });
     expect(res.agentId).toBe("create:mine@/mine");
   });

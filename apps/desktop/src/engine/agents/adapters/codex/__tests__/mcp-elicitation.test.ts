@@ -797,6 +797,10 @@ describe("Codex MCP elicitation mapping", () => {
               label: "Open github.com",
               description:
                 "https://github.com/login/oauth/authorize?client_id=123",
+              externalAction: {
+                kind: "open-url",
+                url: "https://github.com/login/oauth/authorize?client_id=123",
+              },
             },
           ],
         },

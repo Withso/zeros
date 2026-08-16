@@ -18,6 +18,7 @@
 // ──────────────────────────────────────────────────────────
 
 import * as fsp from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
@@ -38,7 +39,11 @@ function pathExtensions(): string[] {
 async function isFileExecutable(full: string): Promise<boolean> {
   try {
     const stat = await fsp.stat(full);
-    return stat.isFile();
+    if (!stat.isFile()) return false;
+    if (process.platform !== "win32") {
+      await fsp.access(full, fsConstants.X_OK);
+    }
+    return true;
   } catch {
     return false;
   }
@@ -46,6 +51,10 @@ async function isFileExecutable(full: string): Promise<boolean> {
 
 /** Is `binary` on PATH on this machine? Does not execute it. */
 export async function isOnPath(binary: string): Promise<boolean> {
+  if (path.isAbsolute(binary)) return isFileExecutable(binary);
+  if (binary.includes("/") || binary.includes("\\") || binary.includes("\0")) {
+    return false;
+  }
   const paths = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
   const exts = pathExtensions();
   for (const dir of paths) {
@@ -101,12 +110,29 @@ interface VersionCacheEntry {
 }
 const versionCache = new Map<string, VersionCacheEntry>();
 
+/** Process-execution seam for provider-owned discovery commands. Production
+ * supplies a ZSR-backed runner; direct execution remains only as a compatibility
+ * fallback for isolated tests and non-engine consumers. */
+export interface ProbeCommandRunner {
+  /** Distinguishes contained/runtime contexts in the version cache. */
+  cacheKey: string;
+  run(
+    binary: string,
+    args: string[],
+    options: { timeoutMs: number },
+  ): Promise<{ exitCode: number | null; stdout: string }>;
+}
+
 /** Run `<bin> --version` and return the first semver-ish substring.
  *  Returns null on timeout, non-zero exit, or unparseable output.
  *  Cached for 5min and de-duped across concurrent callers. */
-export async function probeCliVersion(binary: string): Promise<string | null> {
+export async function probeCliVersion(
+  binary: string,
+  runner?: ProbeCommandRunner,
+): Promise<string | null> {
   const now = Date.now();
-  const cached = versionCache.get(binary);
+  const cacheKey = `${runner?.cacheKey ?? "host-fallback"}\0${binary}`;
+  const cached = versionCache.get(cacheKey);
   if (cached && now - cached.at < VERSION_CACHE_TTL_MS && !cached.inFlight) {
     return cached.value;
   }
@@ -114,24 +140,32 @@ export async function probeCliVersion(binary: string): Promise<string | null> {
 
   const inFlight = (async () => {
     try {
-      const { stdout } = await execFileP(binary, ["--version"], {
-        timeout: VERSION_PROBE_TIMEOUT_MS,
-        killSignal: "SIGKILL",
-      });
+      const { stdout, exitCode } = runner
+        ? await runner.run(binary, ["--version"], {
+            timeoutMs: VERSION_PROBE_TIMEOUT_MS,
+          })
+        : {
+            ...(await execFileP(binary, ["--version"], {
+              timeout: VERSION_PROBE_TIMEOUT_MS,
+              killSignal: "SIGKILL",
+            })),
+            exitCode: 0,
+          };
+      if (exitCode !== 0) throw new Error("version probe exited non-zero");
       const trimmed = stdout.trim();
       const match = trimmed.match(/\b\d+\.\d+(?:\.\d+)?(?:-[\w.]+)?\b/);
       const value = match?.[0] ?? (trimmed || null);
-      versionCache.set(binary, { value, at: Date.now() });
+      versionCache.set(cacheKey, { value, at: Date.now() });
       return value;
     } catch {
       // Cache the failure too — repeating it spawns more processes
       // on every listAgents call. 5 min is short enough that an
       // upgrade gets picked up reasonably soon.
-      versionCache.set(binary, { value: null, at: Date.now() });
+      versionCache.set(cacheKey, { value: null, at: Date.now() });
       return null;
     }
   })();
-  versionCache.set(binary, {
+  versionCache.set(cacheKey, {
     value: cached?.value ?? null,
     at: cached?.at ?? 0,
     inFlight,
@@ -183,12 +217,15 @@ export interface VersionCompatibility {
 
 /** Check the installed version against a compatibility range. Either
  *  bound is optional. */
-export async function probeCliCompatibility(args: {
-  binary: string;
-  minVersion?: string;
-  maxVersion?: string;
-}): Promise<VersionCompatibility> {
-  const version = await probeCliVersion(args.binary);
+export async function probeCliCompatibility(
+  args: {
+    binary: string;
+    minVersion?: string;
+    maxVersion?: string;
+  },
+  runner?: ProbeCommandRunner,
+): Promise<VersionCompatibility> {
+  const version = await probeCliVersion(args.binary, runner);
   if (!version) return { version: null, compatible: null };
   if (args.minVersion && compareVersions(version, args.minVersion) < 0) {
     return { version, compatible: false };
@@ -290,11 +327,19 @@ async function keychainEntryExists(service: string): Promise<boolean> {
 async function commandExitsZero(
   binary: string,
   args: string[],
+  runner?: ProbeCommandRunner,
 ): Promise<boolean> {
   try {
     // SIGKILL on timeout — heavy Node-based CLIs ignore SIGTERM during
     // startup and would otherwise outlive the probe budget.
-    await execFileP(binary, args, { timeout: 5000, killSignal: "SIGKILL" });
+    if (runner) {
+      return (
+        await runner.run(binary, args, {
+          timeoutMs: 5_000,
+        })
+      ).exitCode === 0;
+    }
+    await execFileP(binary, args, { timeout: 5_000, killSignal: "SIGKILL" });
     return true;
   } catch {
     return false;
@@ -413,7 +458,10 @@ export async function latestAuthFileMtimeMs(probe: AuthProbe): Promise<number> {
 
 /** Evaluate a single probe spec. See the file-top doc for the
  *  token-handling policy that constrains what each kind can read. */
-export async function evaluateAuthProbe(probe: AuthProbe): Promise<boolean> {
+export async function evaluateAuthProbe(
+  probe: AuthProbe,
+  runner?: ProbeCommandRunner,
+): Promise<boolean> {
   switch (probe.kind) {
     case "file": {
       for (const raw of probe.paths) {
@@ -434,10 +482,10 @@ export async function evaluateAuthProbe(probe: AuthProbe): Promise<boolean> {
     case "keychain":
       return keychainEntryExists(probe.service);
     case "command":
-      return commandExitsZero(probe.binary, probe.args);
+      return commandExitsZero(probe.binary, probe.args, runner);
     case "any-of": {
       for (const inner of probe.probes) {
-        if (await evaluateAuthProbe(inner)) return true;
+        if (await evaluateAuthProbe(inner, runner)) return true;
       }
       return false;
     }

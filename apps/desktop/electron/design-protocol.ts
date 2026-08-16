@@ -94,6 +94,7 @@ export function installDesignProtocol(): void {
     }
     try {
       const port = await ensureEngineRunning();
+      const token = currentLocalToken();
       const encodedPath = parsed.path
         .split("/")
         .map((segment) => encodeURIComponent(segment))
@@ -105,7 +106,7 @@ export function installDesignProtocol(): void {
       return await net.fetch(target, {
         method: "GET",
         redirect: "error",
-        headers: { "X-Zeros-Engine-Token": currentLocalToken() },
+        headers: { "X-Zeros-Engine-Token": token },
       });
     } catch {
       return new Response("Design renderer unavailable.", {

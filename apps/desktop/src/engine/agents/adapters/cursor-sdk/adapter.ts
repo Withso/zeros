@@ -39,12 +39,19 @@ import {
   findSubagentByPrompt,
 } from "./subagent-transcript";
 import {
+  createCursorHostRuntime,
   getCursorHostModule,
   CURSOR_HOST_EXITED_CODE,
   CURSOR_HOST_CRASH_LOOP_CODE,
   CURSOR_HOST_CRASH_LOOP_ADVICE,
 } from "./host/host-client";
 import { wrapSdkWithLocalStore, type RawCursorSdk } from "./local-store";
+import type { PreparedBoundary } from "../../containment/types";
+import {
+  prepareCursorStateOverlay,
+  promoteCursorStateOverlay,
+  type CursorStateOverlay,
+} from "./state-overlay";
 
 const AGENT_ID = "cursor";
 /** Cursor LOCAL SDK agents (we always run `local: { cwd }`) require an
@@ -457,6 +464,12 @@ interface Session {
   modelId: string;
   modeId: CursorSdkModeId;
   agent: SdkAgent;
+  /** Per-session SDK transport. Production always points at a dedicated
+   * Cursor host below this session's prepared ZSR boundary. */
+  sdk: CursorSdkModule;
+  disposeRuntime?: () => Promise<void>;
+  stateOverlay?: CursorStateOverlay;
+  store?: Promise<CursorLocalStore | null>;
   activeRun: SdkRun | null;
   /** Set by cancel() so the prompt loop can distinguish a user-requested
    *  abort (benign — keep the translator's `cancelled` stop reason) from a
@@ -489,14 +502,6 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  check, which can't predict it. resolveModel skips these so a denied
    *  default (e.g. composer-2.5 on a gated plan) isn't re-tried every turn. */
   private readonly deniedModels = new Set<string>();
-  /** Lazily-opened SDK SQLite stores, one per cwd, reused across turns and
-   *  disposed on adapter dispose. Used only to recover a run's real terminal
-   *  error after wait() reports a detail-less failure. */
-  private readonly storeByCwd = new Map<
-    string,
-    Promise<CursorLocalStore | null>
-  >();
-
   constructor(ctx: AgentAdapterContext) {
     this.ctx = ctx;
   }
@@ -546,11 +551,14 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  picks (resolveValidModelId) and feeds the picker via
    *  cachedInitialize._meta.models. Best-effort — failures leave the bundled
    *  catalog in place. */
-  private async discoverModels(apiKey: string): Promise<void> {
+  private async discoverModels(
+    apiKey: string,
+    sessionSdk?: CursorSdkModule,
+  ): Promise<void> {
     if (this.modelDiscovery) return this.modelDiscovery;
     this.modelDiscovery = (async () => {
       try {
-        const sdk = await loadSdk();
+        const sdk = sessionSdk ?? (await loadSdk());
         if (!sdk.Cursor?.models?.list) return;
         const list = await sdk.Cursor.models.list({ apiKey });
         const ids = new Set<string>();
@@ -587,6 +595,44 @@ export class CursorSdkAdapter implements AgentAdapter {
       }
     })();
     return this.modelDiscovery;
+  }
+
+  /** Production gateway sessions never load @cursor/sdk in the trusted engine
+   * and never share a host. The direct/in-process fallback remains for narrow
+   * adapter unit tests and non-session provider probes. */
+  private async createSessionRuntime(opts: {
+    cwd: string;
+    env?: Record<string, string>;
+    executionBoundary?: PreparedBoundary;
+  }): Promise<{
+    sdk: CursorSdkModule;
+    dispose?: () => Promise<void>;
+    stateOverlay?: CursorStateOverlay;
+  }> {
+    await ensureRipgrep();
+    if (!opts.executionBoundary) return { sdk: await loadSdk() };
+    if (!opts.env) {
+      throw new Error(
+        "a contained Cursor host requires a complete environment",
+      );
+    }
+    const env = { ...opts.env };
+    if (process.env.CURSOR_RIPGREP_PATH && !env.CURSOR_RIPGREP_PATH) {
+      env.CURSOR_RIPGREP_PATH = process.env.CURSOR_RIPGREP_PATH;
+    }
+    const localState = opts.executionBoundary.privateStateDirectory("cursor");
+    const stateOverlay = await prepareCursorStateOverlay(localState, opts.cwd);
+    env.ZEROS_CURSOR_STATE_ROOT = localState;
+    const runtime = createCursorHostRuntime({
+      executionBoundary: opts.executionBoundary,
+      cwd: opts.cwd,
+      env,
+    });
+    return {
+      sdk: runtime.module,
+      dispose: runtime.dispose,
+      stateOverlay,
+    };
   }
 
   /** Resolve CURSOR_MODEL → a concrete id, then validate it against the
@@ -648,14 +694,13 @@ export class CursorSdkAdapter implements AgentAdapter {
   /** Lazily open (and cache) the on-disk local agent store for a cwd. The store
    *  defaults its state root to the same place the SDK writes runs, so reads
    *  see the agent's own rows. Best-effort: null when unavailable. */
-  private async openStore(cwd: string): Promise<CursorLocalStore | null> {
-    let p = this.storeByCwd.get(cwd);
-    if (!p) {
-      p = (async () => {
+  private async openStore(session: Session): Promise<CursorLocalStore | null> {
+    if (!session.store) {
+      session.store = (async () => {
         try {
-          const sdk = await loadSdk();
+          const sdk = session.sdk;
           if (!sdk.localStore?.open) return null;
-          return await sdk.localStore.open({ workspaceRef: cwd });
+          return await sdk.localStore.open({ workspaceRef: session.cwd });
         } catch (err) {
           this.ctx.emit.onAgentStderr(
             AGENT_ID,
@@ -664,9 +709,8 @@ export class CursorSdkAdapter implements AgentAdapter {
           return null;
         }
       })();
-      this.storeByCwd.set(cwd, p);
     }
-    return p;
+    return session.store;
   }
 
   /** Recover the REAL terminal error the SDK persisted to its local store but
@@ -678,7 +722,7 @@ export class CursorSdkAdapter implements AgentAdapter {
   ): Promise<string | null> {
     if (!runId) return null;
     try {
-      const store = await this.openStore(session.cwd);
+      const store = await this.openStore(session);
       if (!store) return null;
       const doc = await store.runs.get({
         agentId: session.agent.agentId,
@@ -703,16 +747,18 @@ export class CursorSdkAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    executionBoundary?: PreparedBoundary;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
     const apiKey = this.resolveApiKey(opts.env);
+    const runtime = await this.createSessionRuntime(opts);
     // Discover the account's catalog (cached, once per process) so the model
     // is validated BEFORE create/resume — otherwise a stale id (e.g. the old
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
     // model: <id>". resolveModel falls back to a known-good model when the
     // selection isn't offered by this account.
-    await this.discoverModels(apiKey);
+    await this.discoverModels(apiKey, runtime.sdk);
     const modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env);
-    const sdk = await loadSdk();
+    const sdk = runtime.sdk;
     const sessionMcp = this.mcpServers(opts.mcpServers);
     let agent: SdkAgent;
     try {
@@ -735,6 +781,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
       });
     } catch (err) {
+      await runtime.dispose?.();
       throw this.classify(err, "newSession");
     }
 
@@ -746,6 +793,9 @@ export class CursorSdkAdapter implements AgentAdapter {
       modelId,
       modeId: CURSOR_DEFAULT_MODE,
       agent,
+      sdk,
+      ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
+      ...(runtime.stateOverlay ? { stateOverlay: runtime.stateOverlay } : {}),
       activeRun: null,
       cancelRequested: false,
       env: opts.env,
@@ -776,6 +826,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    executionBoundary?: PreparedBoundary;
   }): Promise<LoadSessionResponse> {
     const apiKey = this.resolveApiKey(opts.env);
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
@@ -787,14 +838,15 @@ export class CursorSdkAdapter implements AgentAdapter {
         message: "Cursor resume requires a provider agent binding.",
       });
     }
+    const runtime = await this.createSessionRuntime(opts);
     // Discover the account's catalog (cached, once per process) so the model
     // is validated BEFORE create/resume — otherwise a stale id (e.g. the old
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
     // model: <id>". resolveModel falls back to a known-good model when the
     // selection isn't offered by this account.
-    await this.discoverModels(apiKey);
+    await this.discoverModels(apiKey, runtime.sdk);
     const modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env);
-    const sdk = await loadSdk();
+    const sdk = runtime.sdk;
     // Per-session MCP registry (gateway-resolved for this cwd). `Agent.resume`
     // takes a Partial<AgentOptions>, which accepts `mcpServers` — so we re-inject
     // on resume too. Without this, a resumed chat kept whatever MCP set it was
@@ -846,7 +898,10 @@ export class CursorSdkAdapter implements AgentAdapter {
       // case recovers this way; auth / transport failures still throw so
       // the UI can prompt re-auth or retry instead of silently dropping
       // the user's context.
-      if (failure.failure.kind !== "session-expired") throw failure;
+      if (failure.failure.kind !== "session-expired") {
+        await runtime.dispose?.();
+        throw failure;
+      }
       this.ctx.emit.onAgentStderr(
         AGENT_ID,
         `[cursor-sdk] resume of ${providerResumeId} failed (${
@@ -870,6 +925,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         });
         resumedFresh = true;
       } catch (createErr) {
+        await runtime.dispose?.();
         throw this.classify(createErr, "loadSession");
       }
     }
@@ -880,6 +936,9 @@ export class CursorSdkAdapter implements AgentAdapter {
       modelId,
       modeId: CURSOR_DEFAULT_MODE,
       agent,
+      sdk,
+      ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
+      ...(runtime.stateOverlay ? { stateOverlay: runtime.stateOverlay } : {}),
       activeRun: null,
       cancelRequested: false,
       env: opts.env,
@@ -1251,7 +1310,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     const want = autoReviewFor(session.modeId);
     if (want === session.appliedAutoReview) return;
     try {
-      const sdk = await loadSdk();
+      const sdk = session.sdk;
       const sessionMcp = this.mcpServers(session.mcpServers);
       session.agent = await sdk.Agent.resume(session.agent.agentId, {
         apiKey: session.apiKey,
@@ -1314,26 +1373,30 @@ export class CursorSdkAdapter implements AgentAdapter {
     } catch {
       /* ignore */
     }
+    try {
+      await (await session.store)?.dispose();
+    } catch {
+      /* best-effort store flush; boundary teardown remains authoritative */
+    }
+    await session.disposeRuntime?.();
+    if (session.stateOverlay) {
+      const promotion = await promoteCursorStateOverlay(session.stateOverlay);
+      if (promotion.conflicts.length > 0) {
+        this.ctx.emit.onAgentStderr(
+          AGENT_ID,
+          `[cursor-sdk] preserved ${promotion.conflicts.length} concurrent ` +
+            `state conflict(s) in the provider-state recovery directory`,
+        );
+      }
+    }
   }
 
   async dispose(): Promise<void> {
-    for (const session of this.sessions.values()) {
-      try {
-        session.agent.close?.();
-      } catch {
-        /* ignore */
-      }
-    }
-    this.sessions.clear();
-    // Close any SQLite stores we opened for error recovery.
-    for (const p of this.storeByCwd.values()) {
-      try {
-        await (await p)?.dispose();
-      } catch {
-        /* ignore */
-      }
-    }
-    this.storeByCwd.clear();
+    await Promise.allSettled(
+      [...this.sessions.keys()].map((sessionId) =>
+        this.disposeSession(sessionId),
+      ),
+    );
   }
 
   /** Save-time key check for Settings → Providers → Cursor: one cheap
@@ -1381,24 +1444,31 @@ export class CursorSdkAdapter implements AgentAdapter {
     prompt: string;
     env?: Record<string, string>;
     timeoutMs?: number;
+    executionBoundary?: PreparedBoundary;
   }): Promise<string> {
     const apiKey = this.resolveApiKey(opts.env);
-    const sdk = await loadSdk();
+    const cwd = this.ctx.projectRoot;
+    const runtime = await this.createSessionRuntime({
+      cwd,
+      env: opts.env,
+      executionBoundary: opts.executionBoundary,
+    });
+    const sdk = runtime.sdk;
     // Validate the pick against discovered ids like a real send would —
     // an unknown id falls back to the account's best composer.
     const modelId = this.resolveModel(opts.model, opts.env);
-    const cwd = this.ctx.projectRoot;
-    const agent = await sdk.Agent.create({
-      apiKey,
-      model: { id: modelId },
-      cwd,
-      local: this.buildLocalOpts(cwd, opts.env),
-      mode: "plan",
-    });
+    let agent: SdkAgent | null = null;
     // The throwaway agent is never registered in this.sessions, so the
     // session-teardown paths can't reach it — close it here on every exit
     // (success, error, timeout) or each title call leaks a local agent.
     try {
+      agent = await sdk.Agent.create({
+        apiKey,
+        model: { id: modelId },
+        cwd,
+        local: this.buildLocalOpts(cwd, opts.env),
+        mode: "plan",
+      });
       const run = await agent.send(
         { text: `${opts.systemPrompt}\n\n${opts.prompt}` },
         { mode: "plan", model: { id: modelId }, local: { force: true } },
@@ -1415,10 +1485,11 @@ export class CursorSdkAdapter implements AgentAdapter {
       return typeof waitResult?.result === "string" ? waitResult.result : "";
     } finally {
       try {
-        agent.close?.();
+        agent?.close?.();
       } catch {
         /* ignore */
       }
+      await runtime.dispose?.().catch(() => undefined);
     }
   }
 
