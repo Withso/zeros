@@ -423,17 +423,24 @@ export async function discoverCanonicalGitRepository(
   };
 }
 
-function parseRefs(output: string, oidLength: number): Map<string, string> {
+interface RefSnapshot {
+  readonly refs: Map<string, string>;
+  readonly symbolicRefs: Map<string, string>;
+}
+
+function parseRefSnapshot(output: string, oidLength: number): RefSnapshot {
   const refs = new Map<string, string>();
+  const symbolicRefs = new Map<string, string>();
   for (const line of output.split("\n")) {
     if (!line) continue;
-    const separator = line.indexOf("\0");
-    const ref = separator >= 0 ? line.slice(0, separator) : "";
-    const oid = separator >= 0 ? line.slice(separator + 1) : "";
+    const [ref = "", oid = "", symbolicTarget = "", ...extra] =
+      line.split("\0");
     if (
+      extra.length > 0 ||
       !ref?.startsWith("refs/") ||
       !oid ||
-      !new RegExp(`^[0-9a-f]{${oidLength}}$`).test(oid)
+      !new RegExp(`^[0-9a-f]{${oidLength}}$`).test(oid) ||
+      (symbolicTarget !== "" && !symbolicTarget.startsWith("refs/"))
     ) {
       throw new ShadowGitPromotionError(
         "invalid-shadow-repository",
@@ -441,6 +448,7 @@ function parseRefs(output: string, oidLength: number): Map<string, string> {
       );
     }
     refs.set(ref, oid);
+    if (symbolicTarget) symbolicRefs.set(ref, symbolicTarget);
     if (refs.size > MAX_REFS) {
       throw new ShadowGitPromotionError(
         "quota-exceeded",
@@ -448,7 +456,17 @@ function parseRefs(output: string, oidLength: number): Map<string, string> {
       );
     }
   }
-  return refs;
+  return { refs, symbolicRefs };
+}
+
+function sameStringMap(
+  left: ReadonlyMap<string, string>,
+  right: ReadonlyMap<string, string>,
+): boolean {
+  return (
+    left.size === right.size &&
+    [...left].every(([key, value]) => right.get(key) === value)
+  );
 }
 
 async function readBoundedRegularFile(
@@ -2895,6 +2913,7 @@ export class ShadowGitSession {
   private readonly validatorGitDir: string;
   private readonly protectedPaths: readonly string[];
   private refs = new Map<string, string>();
+  private symbolicRefs = new Map<string, string>();
   private headRef: string | null = null;
   private headOid: string | null = null;
   private canonicalHeadDigest: string | null = null;
@@ -3030,24 +3049,31 @@ export class ShadowGitSession {
     });
   }
 
-  private async snapshotRefs(
+  private async snapshotRefState(
     gitDir = this.options.shadowRoot,
     signal?: AbortSignal,
-  ): Promise<Map<string, string>> {
+  ): Promise<RefSnapshot> {
     const { stdout } = await runTrustedGit({
       repository: this.options.repository,
       privateHome: this.options.privateHome,
       emptyHooks: this.emptyHooks,
       cwd: this.options.repository.workspaceRoot,
-      args: ["for-each-ref", "--format=%(refname)%00%(objectname)"],
+      args: ["for-each-ref", "--format=%(refname)%00%(objectname)%00%(symref)"],
       gitDir,
       workTree: this.options.repository.workspaceRoot,
       signal,
     });
-    return parseRefs(
+    return parseRefSnapshot(
       stdout,
       this.options.repository.objectFormat === "sha1" ? 40 : 64,
     );
+  }
+
+  private async snapshotRefs(
+    gitDir = this.options.shadowRoot,
+    signal?: AbortSignal,
+  ): Promise<Map<string, string>> {
+    return (await this.snapshotRefState(gitDir, signal)).refs;
   }
 
   private async importCanonicalReflogs(): Promise<void> {
@@ -3129,10 +3155,24 @@ export class ShadowGitSession {
       const expected =
         ref === "HEAD" ? this.headOid : (this.refs.get(ref) ?? null);
       if (!expected || entries[0]!.oid !== expected) {
-        throw new ShadowGitPromotionError(
-          "concurrent-git-change",
-          `Canonical Git reflog ${ref} changed during session admission`,
-        );
+        const symbolicTarget = this.symbolicRefs.get(ref);
+        let admittedTrailingSymbolicReflog = false;
+        if (expected && symbolicTarget) {
+          const current = await this.snapshotRefState(repository.gitDir);
+          admittedTrailingSymbolicReflog =
+            current.refs.get(ref) === expected &&
+            current.symbolicRefs.get(ref) === symbolicTarget;
+        }
+        if (!admittedTrailingSymbolicReflog) {
+          throw new ShadowGitPromotionError(
+            "concurrent-git-change",
+            `Canonical Git reflog ${ref} changed during session admission`,
+          );
+        }
+        // A symbolic ref's own reflog records changes to the symbolic pointer,
+        // not updates to its target. `origin/HEAD` therefore commonly trails
+        // `origin/main`. Re-attest both the resolved OID and pointer ownership,
+        // then preserve that canonical trailing reflog in the private view.
       }
       let oldOid = zero;
       const records: string[] = [];
@@ -3743,7 +3783,9 @@ export class ShadowGitSession {
       flag: "w",
     });
 
-    this.refs = await this.snapshotRefs(repository.gitDir);
+    const canonicalRefState = await this.snapshotRefState(repository.gitDir);
+    this.refs = canonicalRefState.refs;
+    this.symbolicRefs = canonicalRefState.symbolicRefs;
     const zero = repository.objectFormat === "sha1" ? ZERO_SHA1 : ZERO_SHA256;
     if (this.refs.size > 0) {
       const commands = [
@@ -3754,6 +3796,9 @@ export class ShadowGitSession {
         "",
       ].join("\n");
       await this.git(["update-ref", "--stdin"], { input: commands });
+    }
+    for (const [ref, target] of this.symbolicRefs) {
+      await this.git(["symbolic-ref", ref, target]);
     }
     const canonicalHead = await this.readHead(repository.gitDir);
     this.canonicalHeadDigest = digest(
@@ -8478,17 +8523,26 @@ export class ShadowGitSession {
     changedRefs: Array<readonly [string, string | null, string | null]>;
   }> {
     assertCapabilityActive(signal);
-    const candidateRefs = await this.snapshotRefs(
+    const candidateRefState = await this.snapshotRefState(
       this.options.shadowRoot,
       signal,
     );
+    const candidateRefs = candidateRefState.refs;
+    if (!sameStringMap(candidateRefState.symbolicRefs, this.symbolicRefs)) {
+      throw new ShadowGitPromotionError(
+        "invalid-shadow-repository",
+        "Shadow Git attempted to change symbolic ref ownership",
+      );
+    }
     const allNames = new Set([...this.refs.keys(), ...candidateRefs.keys()]);
     const changedRefs: Array<readonly [string, string | null, string | null]> =
       [];
     for (const ref of [...allNames].sort()) {
       const before = this.refs.get(ref) ?? null;
       const after = candidateRefs.get(ref) ?? null;
-      if (before !== after) changedRefs.push([ref, before, after]);
+      if (before !== after && !this.symbolicRefs.has(ref)) {
+        changedRefs.push([ref, before, after]);
+      }
     }
     const candidateHead = await this.readHead(this.options.shadowRoot, signal);
     for (const [ref] of changedRefs) {

@@ -8,6 +8,7 @@ import {
   readFile,
   readlink,
   readdir,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -253,7 +254,9 @@ describe("ZSR shadow Git", () => {
   let previousDataDir: string | undefined;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "zeros-shadow-git-"));
+    root = await realpath(
+      await mkdtemp(path.join(tmpdir(), "zeros-shadow-git-")),
+    );
     workspace = path.join(root, "workspace");
     design = path.join(workspace, "Zeros Design");
     privateRoot = path.join(root, "private");
@@ -899,6 +902,72 @@ describe("ZSR shadow Git", () => {
         ...childEnv,
       }),
     ).toBe("previous-branch");
+  });
+
+  it("admits a symbolic remote HEAD whose own reflog trails its target", async () => {
+    await git(workspace, [
+      "update-ref",
+      "refs/remotes/origin/main",
+      initialHead,
+    ]);
+    await git(workspace, [
+      "update-ref",
+      "--create-reflog",
+      "refs/remotes/origin/HEAD",
+      initialHead,
+    ]);
+    await git(workspace, [
+      "symbolic-ref",
+      "-m",
+      "set remote default",
+      "refs/remotes/origin/HEAD",
+      "refs/remotes/origin/main",
+    ]);
+    await writeFile(path.join(workspace, "code.txt"), "after\n");
+    await git(workspace, ["add", "--", "code.txt"]);
+    await git(workspace, ["commit", "-m", "advance remote main"]);
+    const current = await git(workspace, ["rev-parse", "HEAD"]);
+    await git(workspace, [
+      "update-ref",
+      "refs/remotes/origin/main",
+      current,
+      initialHead,
+    ]);
+    expect(
+      await git(workspace, [
+        "reflog",
+        "show",
+        "--max-count=1",
+        "--format=%H",
+        "refs/remotes/origin/HEAD",
+      ]),
+    ).toBe(initialHead);
+
+    const shadow = await session();
+    const childEnv = shadow.childEnvironment(process.env.PATH);
+    expect(
+      await git(workspace, ["rev-parse", "refs/remotes/origin/HEAD"], {
+        ...childEnv,
+      }),
+    ).toBe(current);
+    expect(
+      await git(workspace, ["symbolic-ref", "refs/remotes/origin/HEAD"], {
+        ...childEnv,
+      }),
+    ).toBe("refs/remotes/origin/main");
+    expect(
+      await git(
+        workspace,
+        [
+          "reflog",
+          "show",
+          "--max-count=1",
+          "--format=%H",
+          "refs/remotes/origin/HEAD",
+        ],
+        { ...childEnv },
+      ),
+    ).toBe(initialHead);
   });
 
   it("fails old-OID CAS instead of overwriting a concurrent human ref", async () => {
