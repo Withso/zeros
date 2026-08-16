@@ -37,6 +37,7 @@ import type {
   AgentPromptBubble,
   AgentPromptCompleteMessage,
   AgentPromptFailedMessage,
+  AgentSessionClosedMessage,
   AgentSessionCreatedMessage,
   AgentSessionLoadedMessage,
   AgentSessionsListMessage,
@@ -75,6 +76,7 @@ import {
 import { findMatchingPolicy } from "./policies";
 import {
   agentModeForPermission,
+  agentFamily,
   chatEnvDriftKey,
   envForChat,
 } from "./model-catalog";
@@ -94,6 +96,8 @@ import { resolveBridgeWorkspaceIdForCwd } from "../../platform/bridge/workspace-
 import { synthesizeReplayPrompt } from "./replay";
 import { activeProviderTurnId } from "./turn-grouping";
 import { ActionsCtx, type SessionsActions } from "./sessions-context";
+import { questionRequestIsBrowserApproval } from "./pending-question-tools";
+import { nativeInvoke } from "../../platform/runtime";
 import {
   bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
@@ -102,6 +106,8 @@ import {
   cancelledSince,
   loadedSessionStatus,
   markPrebindDirty,
+  providerCapabilityRefreshCanRun,
+  providerCapabilityRefreshExecution,
   queuedSendNowAction,
   queueReleaseAction,
   recoveredSessionIdentity,
@@ -418,6 +424,12 @@ export function AgentSessionsProvider({
   // the existing promise instead of starting a duplicate. Force=true
   // bypasses (model swap intends a rebuild).
   const ensureInFlightRef = useRef(new Map<string, Promise<void>>());
+  // Browser/plugin capability changes are boot-scoped in native providers.
+  // Share one close→resume transaction per chat so a settings broadcast and a
+  // store-settle notification cannot both restart the same provider thread.
+  const capabilityRefreshInFlightRef = useRef(
+    new Map<string, Promise<boolean>>(),
+  );
 
   // Chats whose disk hydrate could NOT be trusted: the bridge was absent /
   // mid-reconnect (an engine respawn, a cold boot racing the socket, a dev
@@ -2841,7 +2853,7 @@ export function AgentSessionsProvider({
   );
 
   const respondToQuestion = useCallback<SessionsActions["respondToQuestion"]>(
-    (chatId, response) => {
+    (chatId, response, options) => {
       if (!bridge) return;
       const current = getStore().sessions[chatId];
       const head = current?.pendingQuestions?.[0];
@@ -2898,7 +2910,12 @@ export function AgentSessionsProvider({
       // skip deadline also emit the settled echo (both shipped together). An
       // OLDER engine delivers answers fine but never echoes — arming the
       // watchdog against it would report "stuck" on every healthy answer.
-      if (typeof head.request.expiresAt !== "number") return;
+      if (
+        options?.deliveryWatchdog === false ||
+        typeof head.request.expiresAt !== "number"
+      ) {
+        return;
+      }
       const questionId = head.questionId;
       const answeredAt = Date.now();
       const armWatchdog = () => {
@@ -2959,6 +2976,34 @@ export function AgentSessionsProvider({
       armWatchdog();
     },
     [bridge, getStore, cancel],
+  );
+
+  const stopBrowserUse = useCallback<SessionsActions["stopBrowserUse"]>(
+    async (chatId, browserSessionId) => {
+      let stopError: unknown;
+      try {
+        await nativeInvoke("browser_session_stop", { browserSessionId });
+      } catch (error) {
+        stopError = error;
+      } finally {
+        // Browser-origin and Browser consequence approvals park the provider
+        // before another pipe command can report the revoked lease. Settle
+        // only that Browser question; never cancel or steer the whole turn.
+        const head = getStore().sessions[chatId]?.pendingQuestions?.[0];
+        if (head && questionRequestIsBrowserApproval(head.request)) {
+          respondToQuestion(
+            chatId,
+            { outcome: { outcome: "dismissed" } },
+            // Scoped Browser Stop must never fall through the generic answer
+            // recovery path, whose final fallback intentionally interrupts the
+            // whole turn. The native Browser lease is already revoked here.
+            { deliveryWatchdog: false },
+          );
+        }
+      }
+      if (stopError) throw stopError;
+    },
+    [getStore, respondToQuestion],
   );
 
   const setMode = useCallback<SessionsActions["setMode"]>(
@@ -3947,6 +3992,145 @@ export function AgentSessionsProvider({
     ],
   );
 
+  const refreshProviderCapabilities = useCallback<
+    SessionsActions["refreshProviderCapabilities"]
+  >(
+    async (chatId) => {
+      const shared = capabilityRefreshInFlightRef.current.get(chatId);
+      if (shared) return shared;
+      if (!bridge) return false;
+
+      const initial = getStore().sessions[chatId];
+      if (!initial?.agentId || !initial.providerBinding) return true;
+      const agentId = initial.agentId;
+      const providerBinding = initial.providerBinding;
+      const initialActivity = closeActivityForSession(initial, {
+        localSendInFlight: sendingChatsRef.current.has(chatId),
+        queuedCount: sendQueueRef.current.get(chatId)?.length ?? 0,
+      });
+      const executionId = providerCapabilityRefreshExecution({
+        providerFamily: agentFamily(initial.agentId),
+        agentId,
+        executionId: initial.executionId,
+        sessionId: initial.sessionId,
+        providerBinding,
+      });
+      if (!executionId) return true;
+      if (
+        !providerCapabilityRefreshCanRun({
+          status: initial.status,
+          ...initialActivity,
+        })
+      ) {
+        return false;
+      }
+
+      const work = (async (): Promise<boolean> => {
+        // Publish a non-sendable state synchronously. If the user presses Enter
+        // during the close acknowledgement window, normal sendPrompt queues it
+        // and loadIntoChat drains it after the same durable thread is resumed.
+        getStore().patchSession(chatId, {
+          status: "warming",
+          error: null,
+          failure: null,
+        });
+        try {
+          const closed = await bridge.request<
+            AgentSessionClosedMessage | AgentErrorMessage
+          >(
+            {
+              type: "AGENT_CLOSE_SESSION",
+              agentId,
+              chatId,
+              executionId,
+              sessionId: executionId,
+            },
+            { timeoutMs: 30_000 },
+          );
+          if (closed.type === "AGENT_ERROR") {
+            throw new Error(closed.message);
+          }
+
+          const current = getStore().sessions[chatId];
+          // A replacement lifecycle won the slot while the close was pending.
+          // Never resume over it. A send queued behind our warming state keeps
+          // the same execution identity and is deliberately allowed through.
+          if (
+            !current ||
+            current.agentId !== agentId ||
+            (current.executionId !== executionId &&
+              current.sessionId !== executionId)
+          ) {
+            return true;
+          }
+
+          const chat = useWorkspaceStore
+            .getState()
+            .chats.find((candidate) => candidate.id === chatId);
+          const adopted = await loadIntoChat(chatId, agentId, providerBinding, {
+            agentName: initial.agentName ?? agentId,
+            cwd: initial.cwd ?? chat?.folder ?? undefined,
+            env: chat ? envForChat(chat, initial.initialize) : undefined,
+          });
+          // A native binding that disappeared is handled by loadIntoChat's
+          // existing session-expired path. Do not create a cold replacement:
+          // that would violate the user's durable-conversation boundary.
+          if (!adopted) {
+            const slot = getStore().sessions[chatId];
+            if (slot?.status === "warming") {
+              const providerName = initial.agentName ?? agentId;
+              const message = `${providerName} could not resume this conversation.`;
+              getStore().patchSession(chatId, {
+                status: "failed",
+                error: message,
+                failure: {
+                  kind: "session-expired",
+                  stage: "loadSession",
+                  message,
+                },
+              });
+              drainOrDropQueue(chatId);
+            }
+          }
+          return true;
+        } catch (error) {
+          const current = getStore().sessions[chatId];
+          if (
+            current &&
+            current.agentId === agentId &&
+            (current.executionId === executionId ||
+              current.sessionId === executionId)
+          ) {
+            const failure = classifyRpcError({
+              agentId,
+              stage: "loadSession",
+              error,
+            });
+            getStore().patchSession(chatId, {
+              status: statusForFailure(failure),
+              error: failure.message,
+              failure,
+            });
+            drainOrDropQueue(chatId);
+          }
+          // The transaction was attempted and produced a visible/recoverable
+          // session state. Returning true prevents a settings subscriber from
+          // retrying it in a tight loop on every Zustand mutation.
+          return true;
+        }
+      })();
+      capabilityRefreshInFlightRef.current.set(chatId, work);
+      try {
+        return await work;
+      } finally {
+        if (capabilityRefreshInFlightRef.current.get(chatId) === work) {
+          capabilityRefreshInFlightRef.current.delete(chatId);
+        }
+      }
+    },
+    [bridge, drainOrDropQueue, getStore, loadIntoChat],
+  );
+
   const getSession = useCallback<SessionsActions["getSession"]>(
     (chatId) => getStore().sessions[chatId],
     [getStore],
@@ -3967,6 +4151,7 @@ export function AgentSessionsProvider({
     pendingHydratesRef.current.clear();
     hydrateInFlightRef.current.clear();
     reconcileInFlightRef.current.clear();
+    capabilityRefreshInFlightRef.current.clear();
     persistedMessageRefsRef.current.clear();
     // Note: we deliberately do NOT clear the disk transcript here.
     // disposeAll is called on engine respawn (in-place project swap),
@@ -4039,6 +4224,7 @@ export function AgentSessionsProvider({
       ensureSession,
       sendPrompt,
       cancel,
+      stopBrowserUse,
       stopBackgroundTask,
       respondToPermission,
       respondToQuestion,
@@ -4054,6 +4240,7 @@ export function AgentSessionsProvider({
       reset,
       listSessionsFor,
       loadIntoChat,
+      refreshProviderCapabilities,
       hydrateChat,
       setRetainedChatIds,
       closeSession,
@@ -4067,6 +4254,7 @@ export function AgentSessionsProvider({
       ensureSession,
       sendPrompt,
       cancel,
+      stopBrowserUse,
       stopBackgroundTask,
       respondToPermission,
       respondToQuestion,
@@ -4082,6 +4270,7 @@ export function AgentSessionsProvider({
       reset,
       listSessionsFor,
       loadIntoChat,
+      refreshProviderCapabilities,
       hydrateChat,
       setRetainedChatIds,
       closeSession,

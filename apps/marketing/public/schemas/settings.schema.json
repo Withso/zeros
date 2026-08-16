@@ -523,12 +523,36 @@
       "properties": {
         "enabled": {
           "type": "boolean",
-          "description": "Expose the isolated Zeros browser tools to local agents."
+          "description": "Legacy fallback for provider-specific browser integration switches."
+        },
+        "codex_enabled": {
+          "type": "boolean",
+          "description": "Enable Codex browser use in the in-app Chromium tab."
+        },
+        "claude_enabled": {
+          "type": "boolean",
+          "description": "Enable Claude's official external Chrome integration."
         },
         "provider": {
           "type": "string",
           "const": "isolated",
-          "description": "Browser execution backend. Currently supports isolated only."
+          "description": "In-app host backend for native Codex IAB. Currently supports isolated only."
+        },
+        "auto_open": {
+          "type": "boolean",
+          "description": "Reveal the Browser workbench tab when an active agent opens a page."
+        },
+        "show_agent_cursor": {
+          "type": "boolean",
+          "description": "Show the short-lived agent pointer inside the shared browser page."
+        },
+        "navigation_approval": {
+          "type": "string",
+          "enum": [
+            "always-ask",
+            "always-allow"
+          ],
+          "description": "Whether agents ask before opening a website. Consequential actions remain separately gated."
         }
       }
     },

@@ -1478,6 +1478,17 @@ export function buildMcpServerOverrides(
       if (s.env && Object.keys(s.env).length > 0) {
         args.push("-c", `${base}.env=${tomlInlineTable(s.env)}`);
       }
+      if (
+        typeof s.startupTimeoutSec === "number" &&
+        Number.isInteger(s.startupTimeoutSec) &&
+        s.startupTimeoutSec > 0 &&
+        s.startupTimeoutSec <= 3_600
+      ) {
+        args.push(
+          "-c",
+          `${base}.startup_timeout_sec=${s.startupTimeoutSec}`,
+        );
+      }
     }
   }
   return args;

@@ -53,7 +53,7 @@ try {
     );
   }
   console.log(
-    "✓ smoke:browser-service — identity, workspace relocation, loopback auth, isolation, confirmations, uploads, snapshots, screenshots, traces, and close passed",
+    "✓ smoke:browser-service — identity, workspace relocation, owner release, loopback auth, isolation, agent and ordinary-tab favicon publication, ordinary-tab live Back/Forward/Reload, tokenized stale-ref rejection, trusted/occlusion-safe clicks, explicit/script/redirect cross-site confirmations and denial, consequential confirmations, cancellable downloads/navigation, visible scroll, uploads, clean screenshots, traces, retained close handoff, and browsing-data reset passed",
   );
 } finally {
   rmSync(scratch, { recursive: true, force: true });

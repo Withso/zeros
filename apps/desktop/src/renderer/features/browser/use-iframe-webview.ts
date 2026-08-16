@@ -14,9 +14,9 @@
 //   - No setBounds. CSS positions the iframe; pan / zoom in a
 //     parent React Flow canvas works naturally because
 //     iframes inherit transforms.
-//   - No setVisible. Inactive tabs use CSS `display: none` —
-//     iframes preserve their state (JS heap, scroll position,
-//     form input) across display:none toggles.
+//   - No setVisible. The bounded Browser deck keeps inactive tabs mounted in
+//     stable DOM positions and makes their wrapper inert + invisible, which
+//     preserves history, JS heap, scroll position, and form input.
 //   - No screenshot backdrop. DOM popovers (dropdowns, chips,
 //     tooltips) z-index above the iframe naturally; the iframe
 //     is a sibling, not an OS overlay.
@@ -25,9 +25,10 @@
 // scoped operations the iframe can't perform itself). See
 // apps/desktop/electron/ipc/iframe-session.ts.
 //
-// Cross-origin caveat: renderer DOM cannot read an external iframe's URL/title.
-// Electron therefore observes top-level frame navigations and emits a trusted,
-// iframe-name-scoped event back here. Picker postMessages remain loopback-only.
+// Cross-origin caveat: renderer DOM cannot read an external iframe's
+// URL/title/favicon. Electron therefore observes frame navigation and resolves
+// favicon artwork in main, then emits trusted iframe-name-scoped events here.
+// Picker postMessages remain loopback-only.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
@@ -43,10 +44,16 @@ import {
   snapshotIframeHistory,
   type IframeHistorySnapshot,
 } from "./iframe-history";
+import {
+  beginBrowserTabFaviconNavigation,
+  publishBrowserTabFavicon,
+  useBrowserTabFavicon,
+} from "./browser-tab-favicon-store";
 
 export interface IframeWebviewState {
   currentUrl: string;
   title: string;
+  faviconDataUrl: string | null;
   canGoBack: boolean;
   canGoForward: boolean;
   isLoading: boolean;
@@ -125,8 +132,8 @@ export interface UseIframeWebviewResult {
   /** Last renderer-requested iframe src. Observed internal navigation updates
    *  `state.currentUrl`, not this value, so React never reloads SPA/link moves. */
   frameSrc: string;
-  /** Incremented for explicit address/back/forward navigation. A key change
-   *  guarantees navigation when the requested URL equals an older src value. */
+  /** Incremented only for the browser-only fallback navigation path. Electron
+   *  controls the existing named frame, so its node and history stay intact. */
   frameNavigationKey: number;
   /** Latest known state. Updated on iframe load events. */
   state: IframeWebviewState;
@@ -163,6 +170,7 @@ export interface UseIframeWebviewResult {
 const EMPTY_STATE: IframeWebviewState = {
   currentUrl: "",
   title: "",
+  faviconDataUrl: null,
   canGoBack: false,
   canGoForward: false,
   isLoading: false,
@@ -264,17 +272,20 @@ export function useIframeWebview(
   // including cross-origin navigations renderer DOM cannot inspect.
   const historyRef = useRef<string[]>(initialUrl ? [initialUrl] : []);
   const indexRef = useRef<number>(initialUrl ? 0 : -1);
-  // A renderer-requested address/back/forward load already owns a history
-  // entry. If it redirects, replace that entry with the committed destination
-  // instead of appending both URLs (which traps Back in a redirect loop).
+  // A renderer-requested address load already owns a history entry; live-frame
+  // Back/Forward identify their expected destination through the same slot. If
+  // either redirects, replace that entry with the committed destination instead
+  // of appending both URLs (which traps Back in a redirect loop).
   const pendingFrameNavigationRef = useRef<{
     requestedUrl: string;
     previousHistory: IframeHistorySnapshot;
+    replaceFrameOnCancel: boolean;
   } | null>(
     initialUrl
       ? {
           requestedUrl: initialUrl,
           previousHistory: { entries: [], index: -1 },
+          replaceFrameOnCancel: false,
         }
       : null,
   );
@@ -291,6 +302,7 @@ export function useIframeWebview(
     currentUrl: initialUrl,
     isLoading: Boolean(initialUrl),
   }));
+  const faviconDataUrl = useBrowserTabFavicon(frameName);
 
   // ── State sync helper ───────────────────────────────────
   const updateState = useCallback((patch: Partial<IframeWebviewState>) => {
@@ -304,14 +316,18 @@ export function useIframeWebview(
     });
   }, [updateState]);
 
+  useEffect(() => {
+    updateState({ faviconDataUrl });
+  }, [faviconDataUrl, updateState]);
+
   // Electron can observe top-level child-frame navigation without violating
   // cross-origin DOM rules. The iframe `name` makes those trusted events
   // unambiguous across multiple mounted Browser tabs.
   useEffect(() => {
     if (!frameName || !nativeReady) return;
     let disposed = false;
-    let unsubscribe: (() => void) | null = null;
-    void nativeListen<{
+    const unsubscribers: Array<() => void> = [];
+    const onNavigation = (payload: {
       frameName?: unknown;
       url?: unknown;
       title?: unknown;
@@ -319,7 +335,7 @@ export function useIframeWebview(
       cancelled?: unknown;
       cancelledUrl?: unknown;
       inPage?: unknown;
-    }>("browser-frame-navigated", (payload) => {
+    }) => {
       if (payload?.frameName !== frameName || typeof payload.url !== "string")
         return;
 
@@ -349,6 +365,7 @@ export function useIframeWebview(
         const restoredUrl = pending
           ? (historyRef.current[indexRef.current] ?? payload.url.trim())
           : payload.url.trim();
+        beginBrowserTabFaviconNavigation(frameName, restoredUrl);
         let restoredTitle = "";
         if (restoredUrl) {
           try {
@@ -364,10 +381,10 @@ export function useIframeWebview(
         });
         recomputeNav();
 
-        // Explicit address/back/forward navigation remounts the iframe. If that
-        // new frame cancelled before commit, reload the restored entry into a
-        // fresh frame; an internally-cancelled link leaves the old frame intact.
-        if (pending) {
+        // Browser-only fallback address/back/forward navigation remounts the
+        // iframe. If that new frame cancelled before commit, reload the restored
+        // entry into a fresh frame; Electron controls its existing named frame.
+        if (pending?.replaceFrameOnCancel) {
           setFrameRequest((prev) => ({
             src: restoredUrl,
             key: prev.key + 1,
@@ -388,6 +405,7 @@ export function useIframeWebview(
 
       const url = parsed.href;
       const loading = payload.loading === true;
+      beginBrowserTabFaviconNavigation(frameName, url);
       if (loading) documentGenerationRef.current += 1;
       // `will-frame-navigate` is provisional: a redirect chain can report
       // several URLs. Commit only the finished/failure URL to Back history.
@@ -411,33 +429,46 @@ export function useIframeWebview(
         isLoading: loading,
       });
       recomputeNav();
-    }).then((off) => {
-      if (disposed) off();
-      else unsubscribe = off;
+    };
+    const onFavicon = (payload: {
+      frameName?: unknown;
+      pageUrl?: unknown;
+      faviconDataUrl?: unknown;
+    }) => {
+      if (
+        disposed ||
+        payload?.frameName !== frameName ||
+        typeof payload.pageUrl !== "string" ||
+        typeof payload.faviconDataUrl !== "string"
+      ) {
+        return;
+      }
+      publishBrowserTabFavicon(
+        frameName,
+        payload.pageUrl,
+        payload.faviconDataUrl,
+      );
+    };
+    // Install both subscriptions before asking main for a catch-up snapshot;
+    // otherwise a cached iframe can publish its favicon between two effects.
+    void Promise.all([
+      nativeListen("browser-frame-navigated", onNavigation),
+      nativeListen("browser-frame-favicon", onFavicon),
+    ]).then((off) => {
+      if (disposed) {
+        for (const unsubscribe of off) unsubscribe();
+        return;
+      }
+      unsubscribers.push(...off);
+      void nativeInvoke<{ ok: boolean }>("browser:reinject-picker", {
+        frameName,
+      }).catch(() => {});
     });
     return () => {
       disposed = true;
-      unsubscribe?.();
+      for (const unsubscribe of unsubscribers) unsubscribe();
     };
   }, [frameName, nativeReady, updateState, recomputeNav]);
-
-  // The reactive preload bridge can appear after an iframe already loaded (or
-  // an unusually fast cached load can beat effect subscription). Once renderer
-  // load state settles without a title, ask main for this one frame's canonical
-  // URL/title. Waiting avoids falsely marking an in-flight redirect complete.
-  useEffect(() => {
-    if (
-      !nativeReady ||
-      !frameName ||
-      state.isLoading ||
-      state.title ||
-      !state.currentUrl
-    )
-      return;
-    void nativeInvoke<{ ok: boolean }>("browser:reinject-picker", {
-      frameName,
-    }).catch(() => {});
-  }, [nativeReady, frameName, state.isLoading, state.title, state.currentUrl]);
 
   // ── Iframe load/error → state update ────────────────────
   //
@@ -459,17 +490,45 @@ export function useIframeWebview(
   // observed SPA URL would turn every pushState/link into an unwanted reload.
   // reload/hardReload remain imperative because their URL does not change.
 
-  /** Drive an explicit renderer navigation without coupling iframe src to the
+  /** Browser-only/detached-frame fallback without coupling iframe src to the
    *  observed URL main reports for internal links and redirects. */
   const requestFrameNavigation = useCallback(
     (url: string, previousHistory: IframeHistorySnapshot) => {
       pendingFrameNavigationRef.current = {
         requestedUrl: url,
         previousHistory,
+        replaceFrameOnCancel: true,
       };
       setFrameRequest((prev) => ({ src: url, key: prev.key + 1 }));
     },
     [],
+  );
+
+  const controlNativeFrame = useCallback(
+    (
+      action: "navigate" | "back" | "forward" | "reload",
+      url?: string,
+      fallback?: () => void,
+    ): boolean => {
+      if (!frameName || !isElectron()) return false;
+      const generation = documentGenerationRef.current;
+      const handleFailure = () => {
+        if (documentGenerationRef.current !== generation) return;
+        if (fallback) fallback();
+        else updateState({ isLoading: false });
+      };
+      void nativeInvoke<{ ok: boolean }>("browser:control-iframe", {
+        frameName,
+        action,
+        ...(url ? { url } : {}),
+      })
+        .then((result) => {
+          if (!result.ok) handleFailure();
+        })
+        .catch(handleFailure);
+      return true;
+    },
+    [frameName, updateState],
   );
 
   const navigate = useCallback(
@@ -486,11 +545,33 @@ export function useIframeWebview(
         indexRef.current = historyRef.current.length - 1;
       }
       documentGenerationRef.current += 1;
-      requestFrameNavigation(url, previousHistory);
+      if (frameName) beginBrowserTabFaviconNavigation(frameName, url);
+      pendingFrameNavigationRef.current = {
+        requestedUrl: url,
+        previousHistory,
+        replaceFrameOnCancel: false,
+      };
+      if (
+        !controlNativeFrame("navigate", url, () =>
+          requestFrameNavigation(
+            url,
+            pendingFrameNavigationRef.current?.previousHistory ??
+              previousHistory,
+          ),
+        )
+      ) {
+        requestFrameNavigation(url, previousHistory);
+      }
       updateState({ currentUrl: url, isLoading: true, title: "" });
       recomputeNav();
     },
-    [requestFrameNavigation, updateState, recomputeNav],
+    [
+      controlNativeFrame,
+      frameName,
+      requestFrameNavigation,
+      updateState,
+      recomputeNav,
+    ],
   );
 
   const back = useCallback(() => {
@@ -502,10 +583,31 @@ export function useIframeWebview(
     indexRef.current -= 1;
     const url = historyRef.current[indexRef.current];
     documentGenerationRef.current += 1;
-    requestFrameNavigation(url, previousHistory);
+    if (frameName) beginBrowserTabFaviconNavigation(frameName, url);
+    pendingFrameNavigationRef.current = {
+      requestedUrl: url,
+      previousHistory,
+      replaceFrameOnCancel: false,
+    };
+    if (
+      !controlNativeFrame("back", undefined, () =>
+        requestFrameNavigation(
+          url,
+          pendingFrameNavigationRef.current?.previousHistory ?? previousHistory,
+        ),
+      )
+    ) {
+      requestFrameNavigation(url, previousHistory);
+    }
     updateState({ currentUrl: url, isLoading: true, title: "" });
     recomputeNav();
-  }, [requestFrameNavigation, updateState, recomputeNav]);
+  }, [
+    controlNativeFrame,
+    frameName,
+    requestFrameNavigation,
+    updateState,
+    recomputeNav,
+  ]);
 
   const forward = useCallback(() => {
     if (indexRef.current >= historyRef.current.length - 1) return;
@@ -516,16 +618,38 @@ export function useIframeWebview(
     indexRef.current += 1;
     const url = historyRef.current[indexRef.current];
     documentGenerationRef.current += 1;
-    requestFrameNavigation(url, previousHistory);
+    if (frameName) beginBrowserTabFaviconNavigation(frameName, url);
+    pendingFrameNavigationRef.current = {
+      requestedUrl: url,
+      previousHistory,
+      replaceFrameOnCancel: false,
+    };
+    if (
+      !controlNativeFrame("forward", undefined, () =>
+        requestFrameNavigation(
+          url,
+          pendingFrameNavigationRef.current?.previousHistory ?? previousHistory,
+        ),
+      )
+    ) {
+      requestFrameNavigation(url, previousHistory);
+    }
     updateState({ currentUrl: url, isLoading: true, title: "" });
     recomputeNav();
-  }, [requestFrameNavigation, updateState, recomputeNav]);
+  }, [
+    controlNativeFrame,
+    frameName,
+    requestFrameNavigation,
+    updateState,
+    recomputeNav,
+  ]);
 
   const reload = useCallback(() => {
     const iframe = ref.current;
     if (!iframe) return;
     documentGenerationRef.current += 1;
     updateState({ isLoading: true });
+    if (controlNativeFrame("reload")) return;
     // Same-origin: reload() preserves form state; cross-origin
     // falls back to re-setting src (forces a fresh load).
     try {
@@ -543,7 +667,7 @@ export function useIframeWebview(
         }, 0);
       }
     }
-  }, [updateState]);
+  }, [controlNativeFrame, updateState]);
 
   const hardReload = useCallback(() => {
     const iframe = ref.current;

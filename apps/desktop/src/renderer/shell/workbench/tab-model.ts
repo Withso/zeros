@@ -3,6 +3,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type { BrowserTabVariant } from "../../features/browser/variant-types";
+import { isBrowserProductId } from "@zeros/protocol/browser-tools";
 import {
   Diff as DiffIcon,
   Globe,
@@ -90,6 +91,9 @@ export interface WorkbenchTab {
    * Blank tabs are always visible/tree-only; direct path tabs start collapsed. */
   fileTreeVisible?: boolean;
   url?: string;
+  /** Durable Zeros conversation that owns an agent-controlled browser tab.
+   * The per-process browserSessionId lives only in the activity store. */
+  browserConversationId?: string;
   canvasMode?: boolean;
   viewportWidth?: number;
   viewportHeight?: number;
@@ -138,7 +142,7 @@ function baseName(p: string): string {
 /** Canonical persisted browser URLs are always explicit http(s), bounded, and
  *  credential-free. Unlike address-bar normalization this never guesses a
  *  scheme: persistence is a trust boundary, not user input assistance. */
-function canonicalBrowsableHttpUrl(raw: unknown): string {
+export function canonicalBrowsableHttpUrl(raw: unknown): string {
   if (typeof raw !== "string") return "";
   try {
     const url = new URL(raw.trim());
@@ -321,13 +325,18 @@ export function planWorkbenchFileOpen(
 export function createBrowserTab(opts?: {
   url?: string;
   title?: string;
+  browserConversationId?: string;
 }): WorkbenchTab {
   const url = canonicalBrowsableHttpUrl(opts?.url);
+  const browserConversationId = isBrowserProductId(opts?.browserConversationId)
+    ? opts.browserConversationId
+    : undefined;
   return {
     id: nextId("browser"),
     type: "browser",
     title: url ? opts?.title?.trim().slice(0, 512) || "Browser" : "Browser",
     url,
+    ...(browserConversationId ? { browserConversationId } : {}),
   };
 }
 
@@ -563,6 +572,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         filePath: changesFilePath,
         reviewSubtab: undefined,
         changesView: validChangesView(firstChanges.changesView),
+        browserConversationId: undefined,
         fileTreeVisible: undefined,
         viewerMode: changesFilePath
           ? validViewerMode(firstChanges.viewerMode)
@@ -576,6 +586,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         pinned: true,
         reviewSubtab: validReviewSubtab(firstReview.reviewSubtab),
         changesView: undefined,
+        browserConversationId: undefined,
         viewerMode: undefined,
         fileTreeVisible: undefined,
       }
@@ -589,6 +600,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         filePath: undefined,
         reviewSubtab: undefined,
         changesView: undefined,
+        browserConversationId: undefined,
         viewerMode: undefined,
       }
     : { ...createContextTab(), pinned: true };
@@ -606,6 +618,7 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
           filePath,
           reviewSubtab: undefined,
           changesView: undefined,
+          browserConversationId: undefined,
           fileTreeVisible: filePath
             ? typeof tab.fileTreeVisible === "boolean"
               ? tab.fileTreeVisible
@@ -631,12 +644,18 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         };
       }
       const url = canonicalBrowsableHttpUrl(tab.url);
+      const browserConversationId = isBrowserProductId(
+        tab.browserConversationId,
+      )
+        ? tab.browserConversationId
+        : undefined;
       return {
         ...tab,
         pinned: false,
         fixed: undefined,
         title: url ? tab.title.trim().slice(0, 512) || "Browser" : "Browser",
         url,
+        browserConversationId,
         canvasMode: url ? tab.canvasMode : false,
         variants: Array.isArray(tab.variants) ? tab.variants : undefined,
         reviewSubtab: undefined,

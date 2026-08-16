@@ -33,12 +33,6 @@ import type {
   TurnUsage,
 } from "@zeros/protocol/agent-events";
 import type { ExecutionId, ProviderBinding } from "@zeros/protocol/identities";
-import type {
-  BrowserJsonValue,
-  BrowserToolDefinition,
-  BrowserToolName,
-  BrowserToolResult,
-} from "@zeros/protocol/browser-tools";
 import type { AccountDetails } from "@zeros/protocol/messages";
 
 // ── Failure taxonomy ─────────────────────────────────────
@@ -166,6 +160,8 @@ export type McpServerRegistration =
       command: string;
       args?: string[];
       env?: Record<string, string>;
+      /** Provider startup allowance for heavyweight local MCP runtimes. */
+      startupTimeoutSec?: number;
     }
   | {
       name: string;
@@ -197,18 +193,23 @@ export interface AgentAdapterContext {
   emit: AgentGatewayEvents;
 }
 
-/** Zeros-owned browser capability attached to one product conversation.
- * Provider adapters may translate this contract into their native tool
- * transport, but must treat the browser session id as opaque and must never
- * derive it from a provider thread/session or a live execution id. */
-export interface AgentBrowserTools {
-  readonly browserSessionId: string;
-  readonly definitions: readonly BrowserToolDefinition[];
-  execute(
-    tool: BrowserToolName,
-    args: BrowserJsonValue,
-  ): Promise<BrowserToolResult>;
-}
+/** Provider-native browser capability for one agent session.
+ *
+ * Codex uses its official bundled Browser plugin and app-server tool surface;
+ * `browserSessionId` binds that plugin's IAB pipe traffic to the durable Zeros
+ * browser tab owned by the conversation. Claude uses Claude Code's official
+ * Chrome integration through the Agent SDK. Cursor intentionally has no entry
+ * until its SDK exposes a native browser contract. This descriptor never
+ * contains tool definitions or an execute callback, so adapters cannot turn it
+ * into a Zeros MCP/custom-tool namespace. */
+export type AgentBrowserUse =
+  | {
+      readonly kind: "codex-app-server";
+      readonly browserSessionId: string;
+    }
+  | {
+      readonly kind: "claude-agent-sdk";
+    };
 
 export interface AgentAdapter {
   readonly agentId: string;
@@ -241,7 +242,7 @@ export interface AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
-    browserTools?: AgentBrowserTools;
+    browserUse?: AgentBrowserUse;
     systemInstruction?: string;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }>;
 
@@ -259,7 +260,7 @@ export interface AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
-    browserTools?: AgentBrowserTools;
+    browserUse?: AgentBrowserUse;
     systemInstruction?: string;
   }): Promise<LoadSessionResponse>;
 
@@ -287,6 +288,16 @@ export interface AgentAdapter {
     sessionId: string;
     prompt: ContentBlock[];
   }): Promise<{ stopReason: StopReason; response: PromptResponse }>;
+
+  /** Reconcile a provider-owned, process-scoped browser capability before a
+   * turn. Claude uses this to stage the current `--chrome`/`--no-chrome`
+   * choice on a cold execution whose durable binding does not exist yet.
+   * Optional because Codex binds its native Browser plugin at thread start and
+   * Cursor exposes no native browser contract. */
+  updateBrowserUse?(opts: {
+    sessionId: string;
+    browserUse?: AgentBrowserUse;
+  }): Promise<void> | void;
 
   /** Abort the current turn. */
   cancel(opts: { sessionId: string }): Promise<void>;

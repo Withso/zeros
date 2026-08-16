@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  isBrowserProductId,
   isBrowserConfirmationDecision,
   type BrowserConfirmationDecision,
   type BrowserConfirmationRequest,
@@ -32,6 +33,7 @@ interface PendingConfirmation {
 
 interface BrowserConfirmationBrokerOptions {
   onRequest?: (request: BrowserConfirmationRequest) => void;
+  onSettled?: (confirmationId: string) => void;
   timeoutMs?: number;
   maxPending?: number;
 }
@@ -49,11 +51,13 @@ export class BrowserConfirmationBroker {
   private readonly pending = new Map<string, PendingConfirmation>();
   private readonly siteGrants = new Set<string>();
   private readonly onRequest?: (request: BrowserConfirmationRequest) => void;
+  private readonly onSettled?: (confirmationId: string) => void;
   private readonly timeoutMs: number;
   private readonly maxPending: number;
 
   constructor(options: BrowserConfirmationBrokerOptions = {}) {
     this.onRequest = options.onRequest;
+    this.onSettled = options.onSettled;
     this.timeoutMs = boundedPositiveInteger(
       options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       "confirmation timeout",
@@ -98,13 +102,28 @@ export class BrowserConfirmationBroker {
       );
       timer.unref?.();
       this.pending.set(request.id, { request, resolve, timer });
-      this.onRequest?.(request);
+      try {
+        this.onRequest?.(request);
+      } catch {
+        // Delivery is advisory; authorization remains main-owned. If the
+        // trusted event channel breaks synchronously, deny and remove the
+        // request instead of leaving its host action parked until timeout.
+        this.settle(request.id, "deny");
+      }
     });
   }
 
   respond(id: string, decision: BrowserConfirmationDecision): boolean {
     if (!isBrowserConfirmationDecision(decision)) return false;
     return this.settle(id, decision);
+  }
+
+  /** Read-only recovery snapshot for a trusted renderer that subscribed after
+   * a request was emitted. Requests remain main-owned and can only be settled
+   * through `respond`; returning a fresh array prevents renderer-side mutation
+   * from changing authorization state. */
+  pendingRequests(): BrowserConfirmationRequest[] {
+    return [...this.pending.values()].map((pending) => pending.request);
   }
 
   isSiteAllowed(
@@ -129,6 +148,12 @@ export class BrowserConfirmationBroker {
     return removed;
   }
 
+  clearAllSiteApprovals(): number {
+    const count = this.siteGrants.size;
+    this.siteGrants.clear();
+    return count;
+  }
+
   clearSession(browserSessionId: string): void {
     this.clearSiteApprovals(browserSessionId);
     for (const [id, pending] of this.pending) {
@@ -146,7 +171,7 @@ export class BrowserConfirmationBroker {
 
   revokeConfirmationSurface(): number {
     const denied = this.denyPending();
-    this.siteGrants.clear();
+    this.clearAllSiteApprovals();
     return denied;
   }
 
@@ -167,6 +192,12 @@ export class BrowserConfirmationBroker {
         pending.request.scope,
       );
       if (key) this.siteGrants.add(key);
+    }
+    try {
+      this.onSettled?.(id);
+    } catch {
+      // The authorization has already settled. A renderer tombstone is only
+      // cache invalidation and must never roll back or reject that decision.
     }
     // A disallowed persistent decision still authorizes this exact action once.
     pending.resolve(decision === "allow-site" ? "allow-once" : decision);
@@ -226,13 +257,22 @@ export function classifyBrowserInput(
 }
 
 function canPersistSiteGrant(request: BrowserConfirmationRequest): boolean {
-  return request.category === "browser-permission" && Boolean(request.scope);
+  return (
+    (request.category === "browser-permission" ||
+      request.category === "navigation") &&
+    Boolean(request.scope)
+  );
 }
 
 function normalizeInput(
   input: BrowserConfirmationInput,
 ): BrowserConfirmationInput | null {
-  if (!SESSION_ID_PATTERN.test(input.browserSessionId)) return null;
+  if (
+    !SESSION_ID_PATTERN.test(input.browserSessionId) ||
+    !isBrowserProductId(input.workspaceId) ||
+    !isBrowserProductId(input.conversationId)
+  )
+    return null;
   const scope = input.scope ? normalizeScope(input.scope) : undefined;
   if (input.scope && !scope) return null;
   let origin: string;
@@ -244,6 +284,10 @@ function normalizeInput(
       (parsedOrigin.protocol !== "http:" &&
         parsedOrigin.protocol !== "https:") ||
       (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") ||
+      parsedOrigin.username ||
+      parsedOrigin.password ||
+      parsedUrl.username ||
+      parsedUrl.password ||
       parsedOrigin.origin !== parsedUrl.origin
     ) {
       return null;
@@ -269,7 +313,8 @@ function grantKey(
   scope?: string,
 ): string | null {
   if (!SESSION_ID_PATTERN.test(browserSessionId)) return null;
-  if (category !== "browser-permission") return null;
+  if (category !== "browser-permission" && category !== "navigation")
+    return null;
   const normalizedScope = scope ? normalizeScope(scope) : "";
   if (!normalizedScope) return null;
   try {

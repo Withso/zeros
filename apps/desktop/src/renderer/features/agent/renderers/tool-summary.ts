@@ -33,12 +33,15 @@ import {
 import type { ComponentType } from "react";
 
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
+import { browserToolActivity } from "../../browser/browser-tool-activity";
 
 /** Three-bucket roll-up of a working group's events, shown to the user
  *  as "<N> tool calls, <M> messages, <K> agents". A "tool call" is any
  *  non-sub-agent tool; an "agent" is a delegated sub-agent (`subagent`
  *  tool); a "message" is any non-tool event (reasoning / thinking /
- *  in-between narration). `toolCalls + agents + messages === length`. */
+ *  in-between narration). Canonical browser batches render as one nested
+ *  Browser group in the UI, while every underlying batch remains one real
+ *  tool call in this accounting. */
 export interface EventSummaryCounts {
   toolCalls: number;
   messages: number;
@@ -53,8 +56,14 @@ export function countEventSummary(events: AgentMessage[]): EventSummaryCounts {
   let agents = 0;
   let tools = 0;
   for (const e of events) {
-    if (e.kind !== "tool") continue;
+    if (e.kind !== "tool") {
+      continue;
+    }
     tools++;
+    if (browserToolActivity(e)) {
+      toolCalls++;
+      continue;
+    }
     const tk = (e as AgentToolMessage).toolKind;
     if (tk === "subagent" || tk === "task") agents++;
     else toolCalls++;
@@ -96,6 +105,13 @@ export function summaryIcons(
   let hasThinking = false;
   for (const e of events) {
     if (e.kind === "tool") {
+      if (browserToolActivity(e)) {
+        if (!seenKinds.has("browser")) {
+          seenKinds.add("browser");
+          out.push(Globe);
+        }
+        continue;
+      }
       const tk = (e as AgentToolMessage).toolKind;
       if (tk === "subagent" || tk === "task") {
         hasAgent = true;

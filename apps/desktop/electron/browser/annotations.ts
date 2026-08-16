@@ -1,3 +1,5 @@
+import { isBrowserElementRef } from "@zeros/protocol/browser-tools";
+
 export interface BrowserAnnotation {
   ref: string;
   label: string;
@@ -20,7 +22,7 @@ export function parseBrowserAnnotations(value: unknown): BrowserAnnotation[] {
       throw new Error("Browser annotation must be an object.");
     }
     const record = candidate as Record<string, unknown>;
-    if (typeof record.ref !== "string" || !/^b[1-9]\d{0,8}$/.test(record.ref)) {
+    if (!isBrowserElementRef(record.ref)) {
       throw new Error("Browser annotation ref is invalid.");
     }
     if (

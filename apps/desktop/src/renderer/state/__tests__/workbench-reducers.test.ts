@@ -98,7 +98,11 @@ describe("workbench default slice", () => {
 
   it("bounds the live per-worktree tab map and retains the newest scope", () => {
     const prefix = `/repo/bounded-${sequence}-`;
-    for (let index = 0; index < MAX_PERSISTED_WORKBENCH_SCOPES + 12; index += 1) {
+    for (
+      let index = 0;
+      index < MAX_PERSISTED_WORKBENCH_SCOPES + 12;
+      index += 1
+    ) {
       dispatch({
         type: "SET_NEW_AGENT_FOLDER",
         folder: `${prefix}${index}`,
@@ -213,6 +217,27 @@ describe("ADD_WORKBENCH_TAB", () => {
 });
 
 describe("REMOVE/UPDATE/ACTIVATE_WORKBENCH_TAB", () => {
+  it("removes a delayed browser tab from its explicit scope without touching the active workspace", () => {
+    const scopeA = "/workspace/a";
+    const scopeB = "/workspace/b";
+    const browserA = createBrowserTab({
+      url: "https://example.com/a",
+      title: "A",
+    });
+    const browserB = createBrowserTab({
+      url: "https://example.com/b",
+      title: "B",
+    });
+    dispatch({ type: "ADD_WORKBENCH_TAB", scope: scopeA, tab: browserA });
+    dispatch({ type: "ADD_WORKBENCH_TAB", scope: scopeB, tab: browserB });
+    dispatch({ type: "REMOVE_WORKBENCH_TAB", scope: scopeA, id: browserA.id });
+    expect(
+      useWorkspaceStore.getState().workbenchByScope[scopeA]?.tabs,
+    ).not.toContainEqual(browserA);
+    expect(
+      useWorkspaceStore.getState().workbenchByScope[scopeB]?.tabs,
+    ).toContainEqual(browserB);
+  });
   it("updates a nested destination and activates its tab in one notification", () => {
     freshScope();
     const review = slice().tabs.find((tab) => tab.type === "review")!;

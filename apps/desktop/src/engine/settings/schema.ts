@@ -429,19 +429,46 @@ const workspacesSchema = z
   })
   .partial();
 
-/** Browser automation is a Zeros product service, not an agent-provider
- * setting. Keep its machine trust posture in the engine-owned user settings
- * file so Claude, Codex, Cursor, and future adapters resolve the same value.
- * External/signed-in providers are intentionally not accepted until their
- * credential and isolation models have a common host contract. */
+/** Browser-use policy is shared product configuration, while execution remains
+ * provider-native: Codex Browser/IAB, Claude in Chrome, and no Cursor surface
+ * until its SDK exposes one. Keep the machine trust posture in the
+ * engine-owned settings file; never turn this table into a shared MCP/tool
+ * contract. */
 const browserSchema = z
   .object({
+    /** Compatibility policy for settings written before provider-specific
+     * switches shipped. New UI writes codex_enabled / claude_enabled. */
     enabled: z
       .boolean()
-      .describe("Expose the isolated Zeros browser tools to local agents."),
+      .describe(
+        "Legacy fallback for provider-specific browser integration switches.",
+      ),
+    codex_enabled: z
+      .boolean()
+      .describe("Enable Codex browser use in the in-app Chromium tab."),
+    claude_enabled: z
+      .boolean()
+      .describe("Enable Claude's official external Chrome integration."),
     provider: z
       .literal("isolated")
-      .describe("Browser execution backend. Currently supports isolated only."),
+      .describe(
+        "In-app host backend for native Codex IAB. Currently supports isolated only.",
+      ),
+    auto_open: z
+      .boolean()
+      .describe(
+        "Reveal the Browser workbench tab when an active agent opens a page.",
+      ),
+    show_agent_cursor: z
+      .boolean()
+      .describe(
+        "Show the short-lived agent pointer inside the shared browser page.",
+      ),
+    navigation_approval: z
+      .enum(["always-ask", "always-allow"])
+      .describe(
+        "Whether agents ask before opening a website. Consequential actions remain separately gated.",
+      ),
   })
   .partial();
 

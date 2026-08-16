@@ -48,6 +48,9 @@
 //      flash. Only a real browser can prove this: the editor is mounted inside
 //      flushSync (CodeMirror's creating layout effect runs before paint) and the
 //      DOM is inspected in that same task, so no paint can have intervened.
+//  15. Browser-tab A → B → A switching retains each iframe document in its
+//      original DOM position, preserving form state, scroll, and JS heap without
+//      another load.
 //
 // Usage:  node scripts/ui-smoke-composer.mjs   (pnpm test:ui-smoke)
 // ============================================================
@@ -2373,7 +2376,98 @@ try {
       .catch(() => false),
   );
 
-  // 7. Whole-run invariant.
+  // 15. The Browser deck's MRU changes on every activation. Rendering that MRU
+  // order directly moves keyed iframe DOM nodes, which Chromium treats as a new
+  // browsing context load. Exercise the real hooks and real Chromium frames.
+  await page.goto(`${harnessBase}/harness-browser-retention.html`, {
+    waitUntil: "networkidle",
+  });
+  await page.waitForFunction(
+    () =>
+      window.__zerosBrowserRetentionLoads?.a === 1 &&
+      window.__zerosBrowserRetentionLoads?.b === 1,
+  );
+  const browserFrame = (id) =>
+    page.locator(`iframe[data-browser-id="${id}"]`).contentFrame();
+  await browserFrame("a").getByLabel("State A").fill("typed-a");
+  await browserFrame("a")
+    .locator("body")
+    .evaluate(() => {
+      window.__zerosBrowserRetentionHeap.token = "heap-a";
+      window.scrollTo(0, 700);
+    });
+  await page.getByRole("button", { name: "Browser B" }).click();
+  await browserFrame("b").getByLabel("State B").fill("typed-b");
+  await browserFrame("b")
+    .locator("body")
+    .evaluate(() => {
+      window.__zerosBrowserRetentionHeap.token = "heap-b";
+      window.scrollTo(0, 900);
+    });
+  // Repeat the switch to catch both list-reorder directions, then return to A.
+  await page.getByRole("button", { name: "Browser A" }).click();
+  await page.getByRole("button", { name: "Browser B" }).click();
+  await page.getByRole("button", { name: "Browser A" }).click();
+  const browserRetention = await page.evaluate(() => {
+    const frames = [...document.querySelectorAll("iframe[data-browser-id]")];
+    return {
+      loads: window.__zerosBrowserRetentionLoads,
+      order: frames.map((frame) => frame.getAttribute("data-browser-id")),
+      active: [...document.querySelectorAll("[data-browser-layer]")].map(
+        (layer) => ({
+          id: layer.getAttribute("data-browser-layer"),
+          hidden: layer.getAttribute("aria-hidden"),
+          inert: layer.hasAttribute("inert"),
+        }),
+      ),
+      state: Object.fromEntries(
+        frames.map((frame) => {
+          const id = frame.getAttribute("data-browser-id");
+          const child = frame.contentWindow;
+          return [
+            id,
+            {
+              input: frame.contentDocument?.querySelector("input")?.value,
+              heap: child?.__zerosBrowserRetentionHeap?.token,
+              scrollY: child?.scrollY,
+            },
+          ];
+        }),
+      ),
+    };
+  });
+  check(
+    "Browser tab switches do not reload either iframe",
+    browserRetention.loads?.a === 1 && browserRetention.loads?.b === 1,
+    JSON.stringify(browserRetention.loads),
+  );
+  check(
+    "Browser tab switches retain form, heap, and scroll state",
+    browserRetention.state.a?.input === "typed-a" &&
+      browserRetention.state.a?.heap === "heap-a" &&
+      browserRetention.state.a?.scrollY >= 600 &&
+      browserRetention.state.b?.input === "typed-b" &&
+      browserRetention.state.b?.heap === "heap-b" &&
+      browserRetention.state.b?.scrollY >= 800,
+    JSON.stringify(browserRetention.state),
+  );
+  check(
+    "Browser iframe DOM order remains stable across A → B → A",
+    browserRetention.order.join(",") === "b,a",
+    browserRetention.order.join(","),
+  );
+  check(
+    "Only the active Browser layer is interactive and accessibility-visible",
+    browserRetention.active.some(
+      (layer) => layer.id === "a" && layer.hidden === "false" && !layer.inert,
+    ) &&
+      browserRetention.active.some(
+        (layer) => layer.id === "b" && layer.hidden === "true" && layer.inert,
+      ),
+    JSON.stringify(browserRetention.active),
+  );
+
+  // Whole-run invariant.
   check(
     "no uncaught page errors",
     pageErrors.length === 0,

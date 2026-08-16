@@ -19,6 +19,9 @@ import { X } from "lucide-react";
 import { toast as sonnerToast } from "sonner";
 
 import { Button } from "@/renderer/shared/ui/primitives/button";
+import { createNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
+
+const publishUpdateOverlay = createNativeSurfaceOverlayIntent();
 
 /** Stable id so repeat calls UPDATE the one update toast in place (rather than
  *  stacking duplicates) and so <UpdateNotifications/> can dismiss it by id. */
@@ -89,13 +92,16 @@ function UpdateToastCard({
 
 /** Show — or update in place — the single persistent update toast. */
 export function showUpdateToast(props: UpdateToastProps): void {
+  publishUpdateOverlay(true);
   sonnerToast.custom((id) => <UpdateToastCard id={id} {...props} />, {
     id: UPDATE_TOAST_ID,
     duration: Infinity,
+    onDismiss: () => publishUpdateOverlay(false),
   });
 }
 
 /** Tear down the update toast (no-op if it isn't showing). */
 export function dismissUpdateToast(): void {
+  publishUpdateOverlay(false);
   sonnerToast.dismiss(UPDATE_TOAST_ID);
 }

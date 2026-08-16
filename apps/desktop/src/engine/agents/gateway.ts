@@ -38,7 +38,8 @@ import { resolveWorkspaceTargetRef } from "../git/target-branch";
 import { mergeSpawnEnv } from "../settings/spawn-env";
 import { applyUserProviderConfig } from "../settings/provider-env";
 import {
-  acquireZerosBrowserTools,
+  acquireZerosBrowserHost,
+  browserUseEnabledForWorkspace,
   stripBrowserServiceCredentials,
 } from "../browser/browser-tool-client";
 import {
@@ -64,6 +65,7 @@ import {
 } from "./probes";
 import type {
   AgentAdapter,
+  AgentBrowserUse,
   AgentAdapterContext,
   AgentGatewayEvents,
   AgentGatewayOptions,
@@ -275,6 +277,9 @@ export class AgentGateway {
    *  agent that doesn't self-report its cwd where it is. Set at
    *  newSession/loadSession, cleared on endSession/dispose. */
   private readonly executionToCwd = new Map<string, string>();
+  /** Main-checkout root used by layered settings for each live execution.
+   * Plain-folder chats have no entry. */
+  private readonly executionToMainRepoRoot = new Map<string, string>();
   /** Sessions already given the one-shot cwd hint (see CWD_SELF_AWARE_AGENTS).
    *  First prompt per session only — the agent's server keeps it in history. */
   private readonly sessionsCwdHinted = new Set<string>();
@@ -490,29 +495,57 @@ export class AgentGateway {
     }
   }
 
-  /** Resolve the optional product-owned browser capability independently from
-   * provider configuration. Browser startup failures degrade only this
-   * capability; they never prevent the selected agent from starting. */
-  private async resolveBrowserTools(
+  /** Resolve only browser capabilities the selected provider exposes natively.
+   * Codex receives an opaque IAB host id for its official Browser plugin;
+   * Claude receives its official Agent SDK/Chrome flag; Cursor receives none.
+   * Browser startup failures degrade only this capability. */
+  private async resolveBrowserUse(
     agentId: string,
+    cwd: string,
     workspaceId: string | undefined,
     conversationId: string | undefined,
     mainRepoRoot?: string,
-  ) {
-    if (!workspaceId || !conversationId) return undefined;
+  ): Promise<AgentBrowserUse | undefined> {
+    if (agentId !== "claude" && agentId !== "codex") return undefined;
+    // Claude's Chrome integration is provider-owned and needs no Zeros browser
+    // lease, so it also works for chats bound directly to a folder. Codex's
+    // in-app host still needs durable workspace/conversation ownership.
+    if (agentId === "codex" && (!workspaceId || !conversationId)) {
+      return undefined;
+    }
     try {
-      const workspaceRoot = getWorkspaceById(workspaceId)?.path;
+      const workspaceRoot =
+        agentId === "claude"
+          ? cwd
+          : workspaceId
+            ? getWorkspaceById(workspaceId)?.path
+            : undefined;
       if (!workspaceRoot) {
         throw new Error("The owning Zeros workspace path is unavailable.");
       }
-      return (
-        (await acquireZerosBrowserTools({
-          workspaceId,
-          conversationId,
+      const browserProvider = agentId === "claude" ? "claude" : "codex";
+      if (
+        !browserUseEnabledForWorkspace(
           workspaceRoot,
           mainRepoRoot,
-        })) ?? undefined
-      );
+          browserProvider,
+        )
+      ) {
+        return undefined;
+      }
+      if (agentId === "claude") return { kind: "claude-agent-sdk" };
+      const browser = await acquireZerosBrowserHost({
+        workspaceId: workspaceId!,
+        conversationId: conversationId!,
+        workspaceRoot,
+        mainRepoRoot,
+      });
+      return browser
+        ? {
+            kind: "codex-app-server",
+            browserSessionId: browser.browserSessionId,
+          }
+        : undefined;
     } catch (error) {
       this.events.onAgentStderr(
         agentId,
@@ -877,8 +910,9 @@ export class AgentGateway {
     );
     const executionId = randomUUID();
     const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
-    const browserTools = await this.resolveBrowserTools(
+    const browserUse = await this.resolveBrowserUse(
       agentId,
+      cwd,
       opts.workspaceId,
       opts.conversationId,
       mainRepoRoot,
@@ -892,7 +926,7 @@ export class AgentGateway {
         env: spawn.env,
         cliBinary: spawn.cliBinary,
         mcpServers,
-        ...(browserTools ? { browserTools } : {}),
+        ...(browserUse ? { browserUse } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
       }));
     } catch (err) {
@@ -928,6 +962,9 @@ export class AgentGateway {
     );
     this.executionToAgent.set(session.executionId, agentId);
     this.executionToCwd.set(session.executionId, cwd);
+    if (mainRepoRoot) {
+      this.executionToMainRepoRoot.set(session.executionId, mainRepoRoot);
+    }
     this.executionToInstructionCtx.set(session.executionId, instructionCtx);
     if (systemInstruction) {
       // Delivered natively at thread creation — the first prompt must NOT
@@ -999,8 +1036,9 @@ export class AgentGateway {
       instructionCtx,
     );
     const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
-    const browserTools = await this.resolveBrowserTools(
+    const browserUse = await this.resolveBrowserUse(
       agentId,
+      cwd,
       opts.workspaceId,
       opts.conversationId,
       mainRepoRoot,
@@ -1017,7 +1055,7 @@ export class AgentGateway {
         env: spawn.env,
         cliBinary: spawn.cliBinary,
         mcpServers,
-        ...(browserTools ? { browserTools } : {}),
+        ...(browserUse ? { browserUse } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
       });
     } catch (err) {
@@ -1053,6 +1091,9 @@ export class AgentGateway {
     );
     this.executionToAgent.set(executionId, agentId);
     this.executionToCwd.set(executionId, cwd);
+    if (mainRepoRoot) {
+      this.executionToMainRepoRoot.set(executionId, mainRepoRoot);
+    }
     this.executionToInstructionCtx.set(executionId, instructionCtx);
     if (systemInstruction) {
       // NATIVE channel: the adapter attached the orientation on thread/resume
@@ -1200,6 +1241,7 @@ export class AgentGateway {
     this.executionToAgent.delete(sessionId);
     this.executionToWorkspace.delete(sessionId);
     this.executionToCwd.delete(sessionId);
+    this.executionToMainRepoRoot.delete(sessionId);
     this.sessionsCwdHinted.delete(sessionId);
     this.sessionsInstructed.delete(sessionId);
     this.executionToInstructionCtx.delete(sessionId);
@@ -1340,6 +1382,35 @@ export class AgentGateway {
     prompt: ContentBlock[],
   ): Promise<PromptResponse> {
     const adapter = this.adapterForSession(sessionId, agentId);
+    if (adapter.updateBrowserUse) {
+      const cwd = this.executionToCwd.get(sessionId);
+      if (cwd) {
+        let enabled = false;
+        try {
+          enabled = browserUseEnabledForWorkspace(
+            cwd,
+            this.executionToMainRepoRoot.get(sessionId),
+            "claude",
+          );
+        } catch (error) {
+          // Browser is optional. A malformed/transient settings read must not
+          // block an ordinary Claude turn, but it must fail the external,
+          // signed-in browser capability closed for this query generation.
+          this.events.onAgentStderr(
+            adapter.agentId,
+            `[zeros-browser] capability unavailable: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        await adapter.updateBrowserUse({
+          sessionId,
+          ...(enabled
+            ? { browserUse: { kind: "claude-agent-sdk" as const } }
+            : {}),
+        });
+      }
+    }
     // First-turn orientation for EVERY agent (workspace preamble + /add-dir +
     // repo prompts.general), then the cwd hint for agents that don't self-report
     // their cwd. Both one-shot per session; system instruction goes outermost so
@@ -1529,6 +1600,7 @@ export class AgentGateway {
     this.executionToAgent.clear();
     this.executionToWorkspace.clear();
     this.executionToCwd.clear();
+    this.executionToMainRepoRoot.clear();
     this.executionToInstructionCtx.clear();
     this.sessionsCwdHinted.clear();
     this.sessionsInstructed.clear();

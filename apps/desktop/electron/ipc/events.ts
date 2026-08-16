@@ -23,6 +23,7 @@
 //   browser-confirmation-request { ... } (trusted consequence prompt)
 //   browser-session-state { ... } (Zeros-owned browser activity)
 //   browser-frame-navigated { frameName, url, title, loading, inPage?, cancelled?, cancelledUrl? }
+//   browser-frame-favicon { frameName, pageUrl, faviconDataUrl }
 // ──────────────────────────────────────────────────────────
 
 import type { BrowserWindow } from "electron";

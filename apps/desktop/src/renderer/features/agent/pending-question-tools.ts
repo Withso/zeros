@@ -10,6 +10,24 @@ export interface PendingQuestionLike {
   request: QuestionRequest;
 }
 
+/** True only for a provider-native Browser-use approval. Scoped Browser Stop
+ * uses this to release an MCP elicitation without dismissing an unrelated
+ * AskUserQuestion that happens to be queued in the same Codex turn. */
+export function questionRequestIsBrowserApproval(
+  request: QuestionRequest,
+): boolean {
+  return (
+    request.questions.length > 0 &&
+    request.questions.every(
+      (question) =>
+        question.presentation === "one_click_approval" &&
+        (question.approvalKind === "browser_origin" ||
+          (question.approvalKind === "tool" &&
+            question.header?.trim().toLowerCase() === "browser use")),
+    )
+  );
+}
+
 function addIfString(ids: Set<string>, value: unknown): void {
   if (typeof value === "string" && value.length > 0) ids.add(value);
 }
@@ -21,7 +39,11 @@ function questionPromptsFromToolInput(input: unknown): string[] {
   return rawQuestions
     .map((q) => {
       if (!q || typeof q !== "object") return "";
-      const rec = q as { prompt?: unknown; question?: unknown; header?: unknown };
+      const rec = q as {
+        prompt?: unknown;
+        question?: unknown;
+        header?: unknown;
+      };
       const prompt =
         typeof rec.prompt === "string"
           ? rec.prompt

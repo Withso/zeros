@@ -65,6 +65,12 @@ import {
 import { EmbeddedTerminalCommand } from "./embedded-terminal-command";
 import { AddedDirectories } from "./added-directories";
 import { PermissionCard } from "./permission-card";
+import {
+  browserConfirmationShouldTakeComposer,
+  browserConfirmationToPermissionRequest,
+  respondToBrowserConfirmation,
+  useBrowserConfirmation,
+} from "../browser/browser-confirmation-store";
 import { PlanReviewCard } from "./plan-review-card";
 import { QuestionCard } from "./question-card";
 import { readPlan, isPlanReviewRequest } from "./renderers/plan-body";
@@ -323,6 +329,7 @@ export function AgentChat({
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
+  const browserConfirmation = useBrowserConfirmation(chatId);
   const workflows = session.workflows;
   const activeWorkflow = useMemo(
     () => pickActiveWorkflow(workflows),
@@ -2676,7 +2683,47 @@ export function AgentChat({
   // EXCEPT Claude's plan review, which keeps the composer live (planReview →
   // <PlanReviewCard>). Codex's bodiless switch_mode escalation is a real gate,
   // so it still routes here.
-  const permissionCardActive = !!session.pendingPermission && !planReview;
+  const browserPermissionCardActive = browserConfirmationShouldTakeComposer({
+    browserPending: Boolean(browserConfirmation),
+    providerPermissionPending: Boolean(session.pendingPermission),
+    providerIsPlanReview: Boolean(planReview),
+  });
+  const providerPermissionCardActive =
+    !!session.pendingPermission && !planReview && !browserPermissionCardActive;
+  // Browser confirmations are main-process gates owned by the exact chat that
+  // started the browser session. They reuse this existing card instead of a
+  // global dialog. A provider-native hard permission remains ahead of them;
+  // non-blocking plan review yields so asynchronous browser work cannot stall
+  // with no visible decision surface.
+  const permissionCardActive =
+    providerPermissionCardActive || browserPermissionCardActive;
+  const permissionRequest = useMemo(
+    () =>
+      browserPermissionCardActive && browserConfirmation
+        ? browserConfirmationToPermissionRequest(browserConfirmation)
+        : (session.pendingPermission?.request ?? null),
+    [
+      browserConfirmation,
+      browserPermissionCardActive,
+      session.pendingPermission,
+    ],
+  );
+  const respondToVisiblePermission = useCallback(
+    (
+      response: import("../../platform/bridge/agent-events").RequestPermissionResponse,
+    ) => {
+      if (browserPermissionCardActive && browserConfirmation) {
+        void respondToBrowserConfirmation(browserConfirmation, response).catch(
+          () => {
+            toast.error("Couldn't respond to the browser permission request.");
+          },
+        );
+        return;
+      }
+      if (session.pendingPermission) session.respondToPermission(response);
+    },
+    [browserConfirmation, browserPermissionCardActive, session],
+  );
 
   // Blocking user-input question at the queue head. Precedence: a permission
   // (harder gate) shows first; the question surfaces once it's answered. Like
@@ -4134,10 +4181,10 @@ export function AgentChat({
             inline card, no fallback bar. Claude's plan review is the ONE
             exception (planReview → <PlanReviewCard>): it's not a gate, so it
             keeps the composer live for follow-ups instead of routing here. */}
-          {permissionCardActive && (
+          {permissionCardActive && permissionRequest && (
             <PermissionCard
-              request={session.pendingPermission!.request}
-              onRespond={(response) => session.respondToPermission(response)}
+              request={permissionRequest}
+              onRespond={respondToVisiblePermission}
               onRecordPolicy={messageCtx.recordPolicy}
               chatId={chatId}
               cwd={session.cwd ?? chatThread?.folder ?? null}
@@ -4159,7 +4206,7 @@ export function AgentChat({
             NOT a bar fused into the composer. Approve allows the gate + exits
             Plan mode; typing a follow-up below refines the plan (see
             handleSend's plan-review branch). */}
-          {planReview && (
+          {planReview && !browserPermissionCardActive && (
             <PlanReviewCard
               planText={readPlan(planReview.request.toolCall.rawInput)}
               onApprove={approvePlan}

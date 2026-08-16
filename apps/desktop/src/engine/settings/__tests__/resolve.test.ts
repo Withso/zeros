@@ -8,7 +8,12 @@ describe("resolveSettings — precedence", () => {
     expect(r.effective.scripts).toEqual({ run_mode: "concurrent" });
     expect(r.effective.browser).toEqual({
       enabled: true,
+      codex_enabled: true,
+      claude_enabled: false,
       provider: "isolated",
+      auto_open: true,
+      show_agent_cursor: true,
+      navigation_approval: "always-ask",
     });
     expect(r.sources["git.remote"]).toBe("default");
     expect(r.sources["scripts.run_mode"]).toBe("default");
@@ -145,20 +150,53 @@ describe("resolveSettings — layer hygiene", () => {
     expect(r.warnings.some((w) => w.startsWith("repo: workspaces"))).toBe(true);
   });
 
-  it("resolves one engine-owned browser posture for every agent", () => {
+  it("keeps external Claude Chrome opt-in while honoring legacy disablement", () => {
+    const legacyEnabled = resolveSettings({
+      user: { browser: { enabled: true } },
+    });
+    expect(legacyEnabled.effective.browser).toMatchObject({
+      enabled: true,
+      codex_enabled: true,
+      claude_enabled: false,
+    });
+    expect(legacyEnabled.sources["browser.codex_enabled"]).toBe("user");
+    expect(legacyEnabled.sources["browser.claude_enabled"]).toBe("default");
+
     const disabled = resolveSettings({
-      user: { browser: { enabled: false } },
+      user: {
+        browser: { enabled: false, codex_enabled: true },
+      },
       repo: { browser: { enabled: true, provider: "isolated" } },
     });
     expect(disabled.effective.browser).toEqual({
       enabled: false,
+      codex_enabled: true,
+      claude_enabled: false,
       provider: "isolated",
+      auto_open: true,
+      show_agent_cursor: true,
+      navigation_approval: "always-ask",
     });
     expect(disabled.sources["browser.enabled"]).toBe("user");
+    expect(disabled.sources["browser.codex_enabled"]).toBe("user");
+    expect(disabled.sources["browser.claude_enabled"]).toBe("user");
     expect(disabled.sources["browser.provider"]).toBe("default");
     expect(
       disabled.warnings.some((warning) => warning.startsWith("repo: browser")),
     ).toBe(true);
+  });
+
+  it("lets a managed shared browser policy override weaker provider settings", () => {
+    const resolved = resolveSettings({
+      user: { browser: { codex_enabled: true, claude_enabled: true } },
+      managed: { browser: { enabled: false } },
+    });
+    expect(resolved.effective.browser).toMatchObject({
+      codex_enabled: false,
+      claude_enabled: false,
+    });
+    expect(resolved.sources["browser.codex_enabled"]).toBe("managed");
+    expect(resolved.sources["browser.claude_enabled"]).toBe("managed");
   });
 
   it("drops invalid leaves with warnings but keeps valid siblings", () => {

@@ -2,11 +2,23 @@ import * as React from "react";
 import { HoverCard as HoverCardPrimitive } from "radix-ui";
 
 import { cn } from "@/renderer/shared/ui/cn";
+import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
 function HoverCard({
+  onOpenChange,
   ...props
 }: React.ComponentProps<typeof HoverCardPrimitive.Root>) {
-  return <HoverCardPrimitive.Root data-slot="hover-card" {...props} />;
+  const publishOverlay = useNativeSurfaceOverlayIntent();
+  return (
+    <HoverCardPrimitive.Root
+      data-slot="hover-card"
+      {...props}
+      onOpenChange={(open) => {
+        publishOverlay(open);
+        onOpenChange?.(open);
+      }}
+    />
+  );
 }
 
 const HoverCardTrigger = React.forwardRef<

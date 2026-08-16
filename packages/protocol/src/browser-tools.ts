@@ -1,20 +1,29 @@
-// Provider-neutral Zeros browser tool contract.
+// Internal Zeros browser-host contract.
 //
-// The Electron main process owns the browser runtime, while the engine's agent
-// adapters advertise and invoke these tools. Keeping the manifest and wire
-// shapes here gives every adapter the same product contract without making MCP,
-// Codex threads, Claude sessions, or Cursor agents the owner of browser state.
+// Electron main owns the browser runtime. The session/confirmation/state wire
+// shapes cross only trusted Zeros boundaries. The semantic tool inventory is
+// retained for browser-chrome compatibility, smoke tests, and old transcript
+// decoding; provider adapters MUST NOT advertise it. Codex uses OpenAI's
+// Browser plugin/IAB contract, Claude uses its official Chrome integration,
+// and Cursor receives no browser tools.
 
 import type { ConversationId, WorkspaceId } from "./identities";
 
 export const BROWSER_SERVICE_VERSION = 1 as const;
 export const BROWSER_TOOL_NAMESPACE = "zeros_browser" as const;
+/** The suffix is a fresh random scope for every semantic snapshot. Keeping it
+ * in the public ref prevents an older `b1` from silently selecting whatever
+ * happens to be first in a newer DOM walk. */
+export const BROWSER_ELEMENT_REF_PATTERN =
+  "^b[1-9][0-9]{0,8}_[a-f0-9]{24}$" as const;
+const BROWSER_ELEMENT_REF = new RegExp(BROWSER_ELEMENT_REF_PATTERN);
 
 export const BROWSER_TOOL_NAMES = [
   "open",
   "snapshot",
   "click",
   "type",
+  "scroll",
   "upload",
   "resize",
   "back",
@@ -52,10 +61,9 @@ const EMPTY_OBJECT_SCHEMA = {
   additionalProperties: false,
 } as const;
 
-/** The one canonical tool manifest. Provider adapters translate this exact
- * inventory into their native tool-definition shape; they do not maintain
- * separate browser schemas. Raw CDP and host-computer control are deliberately
- * absent from the product contract. */
+/** Internal semantic executor manifest. This is not an agent capability and
+ * must never be translated into an MCP, dynamic-tool, or SDK custom-tool
+ * namespace. Raw CDP and host-computer control are deliberately absent. */
 export const BROWSER_TOOL_DEFINITIONS: readonly BrowserToolDefinition[] = [
   {
     name: "open",
@@ -75,7 +83,7 @@ export const BROWSER_TOOL_DEFINITIONS: readonly BrowserToolDefinition[] = [
   {
     name: "snapshot",
     description:
-      "Read the visible page text and interactive elements, assigning stable refs such as b1 for later actions.",
+      "Read the visible page text and interactive elements, assigning tokenized snapshot-scoped refs such as b1_0123456789abcdef01234567 for later actions. A newer snapshot invalidates earlier refs.",
     inputSchema: EMPTY_OBJECT_SCHEMA,
   },
   {
@@ -84,7 +92,9 @@ export const BROWSER_TOOL_DEFINITIONS: readonly BrowserToolDefinition[] = [
       "Click an element from the latest browser snapshot. Consequential controls pause for a Zeros confirmation.",
     inputSchema: {
       type: "object",
-      properties: { ref: { type: "string", pattern: "^b[1-9][0-9]{0,8}$" } },
+      properties: {
+        ref: { type: "string", pattern: BROWSER_ELEMENT_REF_PATTERN },
+      },
       required: ["ref"],
       additionalProperties: false,
     },
@@ -96,11 +106,24 @@ export const BROWSER_TOOL_DEFINITIONS: readonly BrowserToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        ref: { type: "string", pattern: "^b[1-9][0-9]{0,8}$" },
+        ref: { type: "string", pattern: BROWSER_ELEMENT_REF_PATTERN },
         text: { type: "string", maxLength: 20_000 },
         clear: { type: "boolean" },
       },
       required: ["ref", "text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "scroll",
+    description:
+      "Visibly scroll the shared page by a bounded horizontal and/or vertical distance, then return a fresh semantic snapshot.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        x: { type: "integer", minimum: -10_000, maximum: 10_000 },
+        y: { type: "integer", minimum: -10_000, maximum: 10_000 },
+      },
       additionalProperties: false,
     },
   },
@@ -111,7 +134,7 @@ export const BROWSER_TOOL_DEFINITIONS: readonly BrowserToolDefinition[] = [
     inputSchema: {
       type: "object",
       properties: {
-        ref: { type: "string", pattern: "^b[1-9][0-9]{0,8}$" },
+        ref: { type: "string", pattern: BROWSER_ELEMENT_REF_PATTERN },
         path: { type: "string", maxLength: 4_096 },
       },
       required: ["ref", "path"],
@@ -161,7 +184,10 @@ export const BROWSER_TOOL_DEFINITIONS: readonly BrowserToolDefinition[] = [
           items: {
             type: "object",
             properties: {
-              ref: { type: "string", pattern: "^b[1-9][0-9]{0,8}$" },
+              ref: {
+                type: "string",
+                pattern: BROWSER_ELEMENT_REF_PATTERN,
+              },
               label: { type: "string", maxLength: 80 },
             },
             required: ["ref"],
@@ -181,7 +207,7 @@ export const BROWSER_TOOL_DEFINITIONS: readonly BrowserToolDefinition[] = [
   {
     name: "close",
     description:
-      "Close the current page and clear its ephemeral profile while retaining the Zeros browser-session identity for a later open.",
+      "Finish agent control and hand the current page to the user. The page, URL, history, cookies, and scroll position remain open until the conversation or Browser use is closed by Zeros.",
     inputSchema: EMPTY_OBJECT_SCHEMA,
   },
 ] as const;
@@ -201,6 +227,23 @@ export interface BrowserSessionAcquireRequest {
 export interface BrowserSessionAcquireResponse {
   version: typeof BROWSER_SERVICE_VERSION;
   browserSessionId: string;
+  /** Proves that this main-process build owns the private IAB socket consumed
+   * by OpenAI's bundled Browser plugin. Older Zeros browser hosts exposed only
+   * the legacy canonical-tool service and must fail closed for Codex. */
+  capabilities: {
+    codexIab: true;
+  };
+}
+
+export interface BrowserSessionReleaseRequest {
+  version: typeof BROWSER_SERVICE_VERSION;
+  workspaceId: WorkspaceId;
+  conversationId: ConversationId;
+}
+
+export interface BrowserSessionReleaseResponse {
+  version: typeof BROWSER_SERVICE_VERSION;
+  released: boolean;
 }
 
 export interface BrowserToolInvokeRequest {
@@ -221,6 +264,7 @@ export interface BrowserToolResult {
 }
 
 export const BROWSER_RISK_CATEGORIES = [
+  "navigation",
   "authentication",
   "payment",
   "publishing",
@@ -245,12 +289,31 @@ export type BrowserConfirmationDecision =
 export interface BrowserConfirmationRequest {
   id: string;
   browserSessionId: string;
+  /** Durable Zeros owners used to route the prompt into the exact chat. */
+  workspaceId: WorkspaceId;
+  conversationId: ConversationId;
   category: BrowserRiskCategory;
   scope?: string;
   origin: string;
   url: string;
   label: string;
   createdAt: number;
+}
+
+export interface BrowserAgentPointer {
+  x: number;
+  y: number;
+  action: "move" | "click" | "type" | "scroll";
+  updatedAt: number;
+}
+
+/** Host-authored presentation state for one browser action. Labels are
+ * deliberately concise and must never contain typed values or upload paths. */
+export interface BrowserSessionAction {
+  sequence: number;
+  kind: BrowserToolName | "permission" | "download";
+  label: string;
+  startedAt: number;
 }
 
 export interface BrowserSessionState {
@@ -260,8 +323,48 @@ export interface BrowserSessionState {
   url: string;
   title: string;
   loading: boolean;
+  /** Native Chromium history availability for trusted browser chrome. */
+  canGoBack?: boolean;
+  canGoForward?: boolean;
   status: "working" | "awaiting-confirmation" | "ready" | "closed";
   tool?: BrowserToolName | "permission" | "download" | "renderer-crash";
+  /** Last controller of the shared page. Trusted browser chrome actions and
+   * direct keyboard/pointer input inside the attached guest publish `user`. */
+  actor?: "agent" | "user";
+  /** Host-computed agent pointer position in guest viewport coordinates. */
+  pointer?: BrowserAgentPointer;
+  /** Bounded data URL fetched through the isolated browser session. */
+  faviconDataUrl?: string;
+  /** Last full browser viewport before the live native page was rehosted into
+   * compact PiP. Presentation uses this aspect ratio instead of turning the
+   * site into a tiny mobile layout. */
+  sourceViewport?: { width: number; height: number };
+  /** Current/recent high-level activity shown in trusted browser chrome. */
+  action?: BrowserSessionAction;
+  /** True only while Stop can interrupt active browser work. */
+  cancellable?: boolean;
+  /** Pointer presence over the currently attached native guest. This is
+   * presentation-only state used by the compact PiP host because native
+   * WebContentsView mouse events do not bubble through the renderer DOM. */
+  surfaceHovered?: boolean;
+  /** Compatibility field retained for older renderer builds. Current Browser
+   * UI follows `actor` for the full provider-owned session instead of expiring
+   * between individual actions. */
+  agentActivityUntil?: number;
+}
+
+/** Browser origin permission identity shared by the official-provider adapter
+ * and native host. Only apex/www redirects coalesce; subdomains, schemes, and
+ * non-default ports retain independent grants. */
+export function canonicalBrowserOriginGrantKey(value: string): string | null {
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "http:" && url.protocol !== "https:") return null;
+    const hostname = url.hostname.toLocaleLowerCase().replace(/^www\./, "");
+    return `${url.protocol}//${hostname}${url.port ? `:${url.port}` : ""}`;
+  } catch {
+    return null;
+  }
 }
 
 const BOUNDED_ID = /^[A-Za-z0-9._:-]{1,200}$/;
@@ -271,6 +374,10 @@ export function isBrowserToolName(value: unknown): value is BrowserToolName {
     typeof value === "string" &&
     (BROWSER_TOOL_NAMES as readonly string[]).includes(value)
   );
+}
+
+export function isBrowserElementRef(value: unknown): value is string {
+  return typeof value === "string" && BROWSER_ELEMENT_REF.test(value);
 }
 
 export function isBrowserConfirmationDecision(

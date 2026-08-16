@@ -38,6 +38,7 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { publishNativeSurfaceOverlayIntent } from "../shared/ui/native-surface-overlay";
 
 // How long the pointer must sit still over a seam before the hint shows.
 // Short enough to read as a direct response to hovering, long enough not
@@ -165,15 +166,19 @@ export function useResizeHint(label: ReactNode): UseResizeHint {
   const bump = useCallback(
     (x: number, y: number, buttons: number) => {
       lastRef.current = { x, y };
+      if (pos) publishNativeSurfaceOverlayIntent(false);
       setPos(null);
       clearTimer();
       if (buttons !== 0) return;
       timerRef.current = window.setTimeout(() => {
         timerRef.current = null;
-        if (insideRef.current) setPos({ ...lastRef.current });
+        if (insideRef.current) {
+          publishNativeSurfaceOverlayIntent(true);
+          setPos({ ...lastRef.current });
+        }
       }, IDLE_MS);
     },
-    [clearTimer],
+    [clearTimer, pos],
   );
 
   const onPointerEnter = useCallback(
@@ -205,10 +210,18 @@ export function useResizeHint(label: ReactNode): UseResizeHint {
   const onPointerLeave = useCallback(() => {
     insideRef.current = false;
     clearTimer();
+    if (pos) publishNativeSurfaceOverlayIntent(false);
     setPos(null);
-  }, [clearTimer]);
+  }, [clearTimer, pos]);
 
   useEffect(() => clearTimer, [clearTimer]);
+
+  useEffect(
+    () => () => {
+      if (pos) publishNativeSurfaceOverlayIntent(false);
+    },
+    [pos],
+  );
 
   const hint =
     pos && label != null && label !== "" ? (

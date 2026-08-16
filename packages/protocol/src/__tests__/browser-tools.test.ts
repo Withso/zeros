@@ -5,6 +5,7 @@ import {
   BROWSER_TOOL_DEFINITIONS,
   BROWSER_TOOL_NAMES,
   BROWSER_TOOL_NAMESPACE,
+  isBrowserElementRef,
   isBrowserConfirmationDecision,
   isBrowserProductId,
   isBrowserToolName,
@@ -41,5 +42,22 @@ describe("Zeros browser tool contract", () => {
     ]);
     expect(isBrowserConfirmationDecision("allow-once")).toBe(true);
     expect(isBrowserConfirmationDecision("auto-approve")).toBe(false);
+  });
+
+  it("makes element refs unique to one semantic snapshot", () => {
+    expect(isBrowserElementRef("b1_0123456789abcdef01234567")).toBe(true);
+    expect(isBrowserElementRef("b300_abcdefabcdefabcdefabcdef")).toBe(true);
+    expect(isBrowserElementRef("b1")).toBe(false);
+    expect(isBrowserElementRef("b0_0123456789abcdef01234567")).toBe(false);
+    expect(isBrowserElementRef("b1_0123456789abcdef0123456g")).toBe(false);
+  });
+
+  it("advertises the native Codex IAB host on acquired sessions", () => {
+    const response = {
+      version: 1,
+      browserSessionId: "browser_native",
+      capabilities: { codexIab: true },
+    } satisfies import("../browser-tools").BrowserSessionAcquireResponse;
+    expect(response.capabilities.codexIab).toBe(true);
   });
 });

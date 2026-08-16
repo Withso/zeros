@@ -765,6 +765,164 @@ describe("CodexAppServerTranslator", () => {
       expect((update!.update as { status: string }).status).toBe("failed");
     });
 
+    it("respects native MCP failed status even when no error object is present", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "mcpToolCall",
+          id: "mcp-status-failed",
+          server: "node_repl",
+          tool: "js",
+          arguments: { title: "Browse", code: "await work();" },
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "mcpToolCall",
+          id: "mcp-status-failed",
+          server: "node_repl",
+          tool: "js",
+          status: "failed",
+          arguments: { title: "Browse", code: "await work();" },
+          error: null,
+          result: null,
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+
+      const update = env.out.emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call_update",
+      );
+      expect(update?.update).toMatchObject({ status: "failed" });
+    });
+
+    it("marks the official node_repl timeout result as failed", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "mcpToolCall",
+          id: "browser-timeout",
+          server: "node_repl",
+          tool: "js",
+          arguments: { title: "Follow public links", code: "await walk();" },
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "mcpToolCall",
+          id: "browser-timeout",
+          server: "node_repl",
+          tool: "js",
+          status: "completed",
+          arguments: { title: "Follow public links", code: "await walk();" },
+          error: null,
+          result: {
+            content: [
+              {
+                type: "text",
+                text: "js execution timed out; kernel reset, rerun your request",
+              },
+            ],
+            structuredContent: null,
+            _meta: { "codex/browserUse": true },
+          },
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+
+      const update = env.out.emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call_update",
+      );
+      expect(update?.update).toMatchObject({ status: "failed" });
+    });
+
+    it("uses the official node_repl title for native Browser tool calls", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "mcpToolCall",
+          id: "browser-1",
+          server: "node_repl",
+          tool: "js",
+          arguments: {
+            title: "Browse nammatn.in",
+            code: "await iab.tabs.new();",
+            timeout_ms: 30_000,
+          },
+        },
+        threadId: "t1",
+        turnId: "u1",
+        startedAtMs: 0,
+      });
+
+      const call = env.out.emitted.find(
+        (notification) => notification.update.sessionUpdate === "tool_call",
+      );
+      expect(call?.update).toMatchObject({
+        title: "Browse nammatn.in",
+        kind: "mcp",
+        rawInput: {
+          server: "node_repl",
+          tool: "js",
+        },
+      });
+    });
+
+    it("preserves official Browser metadata when it is nested in the MCP raw result", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "mcpToolCall",
+          id: "browser-meta",
+          server: "node_repl",
+          tool: "js",
+          arguments: { title: "Inspect example", code: "await tab.url();" },
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "mcpToolCall",
+          id: "browser-meta",
+          server: "node_repl",
+          tool: "js",
+          status: "completed",
+          result: {
+            content: [{ type: "text", text: "done" }],
+            raw: {
+              content: [{ type: "text", text: "done" }],
+              _meta: {
+                browser_use: { url: "https://example.com/dashboard" },
+                "codex/browserUse": true,
+              },
+            },
+          },
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+
+      const update = env.out.emitted.find(
+        (notification) =>
+          notification.update.sessionUpdate === "tool_call_update",
+      );
+      expect(update?.update).toMatchObject({
+        rawOutput: {
+          raw: {
+            _meta: {
+              browser_use: { url: "https://example.com/dashboard" },
+              "codex/browserUse": true,
+            },
+          },
+        },
+      });
+    });
+
     it("unknown item type still emits a generic tool_call so the UI shows it", () => {
       env.t.handle("item/started", {
         item: { type: "futureToolKind", id: "x-1" },

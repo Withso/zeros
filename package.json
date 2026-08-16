@@ -48,7 +48,7 @@
     "electron:compile:watch": "tsup --config apps/desktop/electron/tsup.config.ts --watch",
     "electron:rename-dev": "node scripts/rename-electron-dev-binary.cjs",
     "electron:dev:prep": "pnpm electron:rebuild && pnpm build:engine && pnpm electron:compile",
-    "electron:dev": "pnpm electron:dev:prep && node scripts/dev-instance.mjs",
+    "electron:dev": "pnpm electron:dev:prep && node scripts/dev-instance.mjs --watch",
     "electron:dev:watch": "pnpm electron:dev:prep && node scripts/dev-instance.mjs --watch",
     "electron:run": "pnpm electron:dev:prep && node scripts/dev-instance.mjs --run-only",
     "electron:rebuild": "node scripts/electron-rebuild-sqlite.cjs",

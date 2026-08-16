@@ -14,6 +14,7 @@ import {
   selectMostRecentChatForFolder,
 } from "../workspace-store";
 import type { ChatThread, WorkspaceState } from "../store";
+import { createBrowserTab } from "../../shell/workbench/tab-model";
 
 // Node test env has no DOM — same polyfill rationale as
 // active-chat-per-workspace.test.ts (the store's persistence subscriber
@@ -354,6 +355,59 @@ describe("DELETE_CHAT stays in the same workspace", () => {
   it("does not touch the selection when a non-active chat is deleted", () => {
     dispatch()({ type: "DELETE_CHAT", id: "b1" });
     expect(state().activeChatId).toBe("a1");
+  });
+
+  it("atomically prunes every workbench tab owned by the deleted conversation", () => {
+    dispatch()({
+      type: "ADD_WORKBENCH_TAB",
+      scope: A,
+      activate: false,
+      tab: createBrowserTab({
+        url: "https://example.com/a1",
+        browserConversationId: "a1",
+      }),
+    });
+    dispatch()({
+      type: "ADD_WORKBENCH_TAB",
+      scope: B,
+      activate: false,
+      tab: createBrowserTab({
+        url: "https://example.com/stale-copy",
+        browserConversationId: "a1",
+      }),
+    });
+
+    dispatch()({ type: "DELETE_CHAT", id: "a1" });
+
+    expect(
+      Object.values(state().workbenchByScope)
+        .flatMap((scope) => scope.tabs)
+        .some((tab) => tab.browserConversationId === "a1"),
+    ).toBe(false);
+  });
+
+  it("prunes an orphaned browser tab when authoritative chat hydration omits its owner", () => {
+    dispatch()({
+      type: "ADD_WORKBENCH_TAB",
+      scope: A,
+      activate: false,
+      tab: createBrowserTab({
+        url: "https://example.com/orphan",
+        browserConversationId: "remote-deleted-chat",
+      }),
+    });
+
+    dispatch()({
+      type: "HYDRATE_CHATS",
+      chats: [chat("a1", A, 100)],
+      activeChatId: "a1",
+    });
+
+    expect(
+      Object.values(state().workbenchByScope)
+        .flatMap((scope) => scope.tabs)
+        .some((tab) => tab.browserConversationId === "remote-deleted-chat"),
+    ).toBe(false);
   });
 });
 

@@ -71,6 +71,23 @@ describe("repository layout contracts", () => {
     expect(smoke).toContain("fs.mkdirSync(codexHome, { recursive: true })");
   });
 
+  it("keeps Electron main in sync during the default Conductor dev run", () => {
+    const rootPackage = JSON.parse(read("package.json")) as {
+      scripts: Record<string, string>;
+    };
+    const launcher = read("scripts/dev-instance.mjs");
+    const supervisor = read("scripts/dev-main-supervisor.mjs");
+
+    // Conductor's repository-local Dev action invokes `pnpm electron:dev`.
+    // Renderer HMR without a matching main/preload restart creates a split
+    // runtime where newly-rendered IPC calls fail as "unknown command".
+    expect(rootPackage.scripts["electron:dev"]).toContain(
+      "dev-instance.mjs --watch",
+    );
+    expect(launcher).toContain("useMainSupervisor");
+    expect(supervisor).toContain('new Set(["main.cjs", "preload.cjs"])');
+  });
+
   it("explains when an agent sandbox blocks the macOS engine smoke listener", () => {
     const smoke = read("scripts/smoke-engine.mjs");
 

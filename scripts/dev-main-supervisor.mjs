@@ -26,11 +26,11 @@
 // range on boot — so the restart self-heals, exactly as the primary's
 // electronmon path already relies on.
 //
-// Best-effort throughout: if the watcher can't be established the app still runs
-// (you just don't get auto-restart, i.e. today's behavior). Opt-in — only
-// `pnpm electron:dev:watch` routes a named instance through here; plain
-// `pnpm electron:dev` keeps the direct launch. Set ZEROS_NO_MAIN_HMR=1 to force
-// the direct launch even under :watch (mirrors ZEROS_NO_ENGINE_HMR).
+// Best-effort throughout: if the watcher can't be established the app still
+// runs without main-process hot restart. The default `electron:dev` and its
+// explicit `:watch` alias both route named instances through here so renderer
+// HMR can never outrun main/preload IPC. `electron:run` remains the no-HMR path.
+// Set ZEROS_NO_MAIN_HMR=1 to force a direct launch while diagnosing restarts.
 // ──────────────────────────────────────────────────────────
 
 import { spawn } from "node:child_process";

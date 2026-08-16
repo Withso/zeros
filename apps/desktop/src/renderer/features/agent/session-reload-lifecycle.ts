@@ -8,6 +8,76 @@ import type {
   ProviderMetadata,
 } from "@zeros/protocol/identities";
 
+/** Resolve the exact live route that may be torn down and resumed to pick up a
+ * provider boot capability. This is intentionally narrower than ordinary
+ * session recovery: only native Codex and Claude bindings for the same adapter
+ * are safe. A legacy locator could mint a different conversation, while
+ * Cursor's browser lifecycle is outside Zeros and must never enter this path. */
+export function providerCapabilityRefreshExecution(input: {
+  providerFamily: string;
+  agentId: string | null;
+  executionId?: string | null;
+  sessionId?: string | null;
+  providerBinding?: ProviderBinding | null;
+}): string | null {
+  const binding = input.providerBinding;
+  if (
+    (input.providerFamily !== "codex" && input.providerFamily !== "claude") ||
+    !input.agentId ||
+    binding?.kind !== "native" ||
+    binding.providerId !== input.agentId ||
+    !binding.resumeId.trim()
+  ) {
+    return null;
+  }
+  return input.executionId ?? input.sessionId ?? null;
+}
+
+/** Decide whether a Browser setting edge changes provider boot arguments.
+ * Claude requires an explicit `--chrome`/`--no-chrome` process argument on
+ * both edges. Codex only needs a reboot when enabling its boot-time plugin;
+ * disabling is enforced immediately by Zeros' browser policy gate. */
+export function providerCapabilityRefreshNeeded(input: {
+  providerFamily: string;
+  previousEnabled: boolean | null;
+  enabled: boolean;
+}): boolean {
+  if (
+    input.previousEnabled === null ||
+    input.previousEnabled === input.enabled
+  ) {
+    return false;
+  }
+  if (input.providerFamily === "claude") return true;
+  return (
+    input.providerFamily === "codex" &&
+    input.previousEnabled === false &&
+    input.enabled
+  );
+}
+
+/** A queued boot-capability refresh belongs to the provider family that
+ * observed the setting edge. If the chat switches agents before it becomes
+ * idle, refreshing the replacement provider would apply an unrelated setting
+ * and could unnecessarily tear down a newly-created session. */
+export function providerCapabilityRefreshStillTargetsFamily(input: {
+  requestedFamily: "codex" | "claude";
+  currentFamily: string;
+}): boolean {
+  return input.requestedFamily === input.currentFamily;
+}
+
+/** A boot-capability refresh waits behind every kind of work. Keeping queued
+ * sends on the old execution until it is truly idle avoids closing a provider
+ * between a user's send and the engine's turn-start acknowledgement. */
+export function providerCapabilityRefreshCanRun(input: {
+  status: SessionStatus;
+  running: boolean;
+  queuedCount: number;
+}): boolean {
+  return input.status === "ready" && !input.running && input.queuedCount === 0;
+}
+
 /** Durable locator fields for a load-session recovery request.
  *
  * A failed execution id is intentionally not accepted here: after an engine

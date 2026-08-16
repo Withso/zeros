@@ -3,8 +3,23 @@ import * as PopoverPrimitive from "@radix-ui/react-popover";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus";
+import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
-const Popover = PopoverPrimitive.Root;
+function Popover({
+  onOpenChange,
+  ...props
+}: React.ComponentProps<typeof PopoverPrimitive.Root>) {
+  const publishOverlay = useNativeSurfaceOverlayIntent();
+  return (
+    <PopoverPrimitive.Root
+      {...props}
+      onOpenChange={(open) => {
+        publishOverlay(open);
+        onOpenChange?.(open);
+      }}
+    />
+  );
+}
 
 const PopoverTrigger = PopoverPrimitive.Trigger;
 
@@ -54,6 +69,7 @@ const PopoverContent = React.forwardRef<
           className,
         )}
         {...props}
+        data-zeros-native-overlay="popover"
       />
     </PopoverPrimitive.Portal>
   ),

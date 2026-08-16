@@ -42,6 +42,17 @@ import { Toaster as SonnerToaster, toast as sonnerToast } from "sonner";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { Button } from "@/renderer/shared/ui/primitives/button";
+import { createNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
+
+const toastOverlayIntents = new Map<
+  string | number,
+  ReturnType<typeof createNativeSurfaceOverlayIntent>
+>();
+
+function releaseToastOverlay(id: string | number): void {
+  toastOverlayIntents.get(id)?.(false);
+  toastOverlayIntents.delete(id);
+}
 
 /** Variants. `default` is the plain dark card from the screenshots; the
  *  others add a left status icon + tint the ring/border subtly. */
@@ -168,9 +179,11 @@ function emit(
   message: React.ReactNode,
   opts?: ToastOptions,
 ) {
+  const publishOverlay = createNativeSurfaceOverlayIntent();
+  publishOverlay(true);
   const defaultDuration =
     variant === "error" ? 6000 : variant === "success" ? 3000 : 4000;
-  return sonnerToast.custom(
+  const id = sonnerToast.custom(
     (id) => (
       <ToastCard
         id={id}
@@ -182,9 +195,15 @@ function emit(
     ),
     {
       duration: opts?.duration ?? defaultDuration,
+      onDismiss: () => releaseToastOverlay(id),
+      onAutoClose: () => releaseToastOverlay(id),
       ...(opts?.id !== undefined ? { id: opts.id } : {}),
     },
   );
+  const replaced = toastOverlayIntents.get(id);
+  if (replaced && replaced !== publishOverlay) replaced(false);
+  toastOverlayIntents.set(id, publishOverlay);
+  return id;
 }
 
 /** The single allowed entry point for transient feedback. */
@@ -203,7 +222,16 @@ baseToast.success = (m, o) => emit("success", m, o);
 baseToast.error = (m, o) => emit("error", m, o);
 baseToast.warning = (m, o) => emit("warning", m, o);
 baseToast.info = (m, o) => emit("info", m, o);
-baseToast.dismiss = (id) => sonnerToast.dismiss(id);
+baseToast.dismiss = (id) => {
+  if (id === undefined) {
+    for (const toastId of toastOverlayIntents.keys()) {
+      releaseToastOverlay(toastId);
+    }
+  } else {
+    releaseToastOverlay(id);
+  }
+  sonnerToast.dismiss(id);
+};
 
 export const toast: ToastApi = baseToast;
 

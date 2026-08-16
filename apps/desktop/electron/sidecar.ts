@@ -1330,6 +1330,13 @@ async function doSpawnEngine(
   // Codex native runtime. Keep the executable, version, and managed package
   // root atomic: an explicit binary override must not inherit metadata from a
   // different staged runtime.
+  // Browser Use has a separate OpenAI `cua_node` helper in desktop bundles;
+  // expose the resource root so the engine can discover a future staged copy
+  // without guessing Electron's installation layout. An explicit developer
+  // override remains authoritative.
+  if (!process.env.ZEROS_RESOURCES_PATH) {
+    extraEnv.ZEROS_RESOURCES_PATH = process.resourcesPath;
+  }
   const codexCli = resolveCodexCliPaths();
   if (codexCli.binary && !process.env.ZEROS_CODEX_CLI_PATH) {
     extraEnv.ZEROS_CODEX_CLI_PATH = codexCli.binary;

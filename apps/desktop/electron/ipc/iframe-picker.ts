@@ -5,11 +5,11 @@
 // Replaces the deleted WebContentsView preload-script lifecycle.
 // Two pieces:
 //
-// 1. Auto-inject. We hook `did-frame-finish-load` on the main
-//    window. Every time a named Browser-tab iframe finishes a LOOPBACK
-//    navigation, we execute the picker script in that frame's main world via
-//    `WebFrameMain.executeJavaScript`. Public pages are tracked for browser
-//    chrome/history, but never receive privileged picker code.
+// 1. Browser metadata + auto-inject. We hook `did-frame-finish-load` on the
+//    main window. Every named Browser-tab iframe publishes trusted URL/title
+//    metadata and a validated favicon. LOOPBACK pages additionally receive the
+//    picker script through `WebFrameMain.executeJavaScript`; public pages never
+//    receive that privileged interaction code.
 //
 //    The picker IIFE is idempotent (sentinel-guarded). Repeat
 //    injection on SPA navigations / hot-reloads is harmless.
@@ -20,8 +20,8 @@
 //    to produce the picker chip's element thumbnail.
 //
 // Frame identification: each Browser iframe has a stable, tab-derived `name`.
-// Main includes it in trusted navigation events so several mounted browsers
-// cannot update one another's address/title state.
+// Main includes it in trusted navigation/favicon events so several mounted
+// browsers cannot update one another's address/title/artwork state.
 
 import { webFrameMain, type BrowserWindow, type WebFrameMain } from "electron";
 import { setCommand } from "./router";
@@ -29,12 +29,23 @@ import { emitEvent } from "./events";
 import { PICKER_SCRIPT } from "../iframe-picker-script";
 import { isLoopbackUrl } from "../../src/renderer/shell/workbench/tabs/localhost-url";
 import { PendingIframeNavigations } from "../iframe-navigation-state";
+import {
+  declaredIframeFaviconUrls,
+  iframeFaviconNavigationDisposition,
+  resolveIframeFaviconDataUrl,
+} from "../iframe-favicon";
+import {
+  controlBrowserIframe,
+  parseBrowserIframeControl,
+} from "../iframe-frame-control";
 
 let mainWindowRef: BrowserWindow | null = null;
 // `window.name` is page-mutable. Pin the DOM iframe's original React-assigned
 // name to Chromium's stable frame-tree id before visited code can change it.
 const browserFrameNames = new Map<number, string>();
 const pendingBrowserNavigations = new PendingIframeNavigations();
+const iframeFaviconGenerationByName = new Map<string, number>();
+const iframeFaviconUrlByName = new Map<string, string>();
 
 interface CaptureRegionArgs {
   x?: unknown;
@@ -171,6 +182,77 @@ async function emitFinishedBrowserNavigation(
   emitBrowserNavigation(frame, url, title, false, inPage);
 }
 
+function browserFrameStillCurrent(frame: WebFrameMain): boolean {
+  const frameName = browserFrameName(frame);
+  return Boolean(
+    frameName &&
+    !frame.isDestroyed() &&
+    pendingBrowserNavigations.isCurrentFrame(frameName, frame.frameTreeNodeId),
+  );
+}
+
+function nextIframeFaviconGeneration(frameName: string): number {
+  const generation = (iframeFaviconGenerationByName.get(frameName) ?? 0) + 1;
+  iframeFaviconGenerationByName.set(frameName, generation);
+  return generation;
+}
+
+function beginIframeFaviconNavigation(frame: WebFrameMain, targetUrl: string) {
+  const frameName = browserFrameName(frame);
+  if (!frameName) return;
+  const currentUrl = iframeFaviconUrlByName.get(frameName) ?? frame.url;
+  if (iframeFaviconNavigationDisposition(currentUrl, targetUrl) === "reset") {
+    nextIframeFaviconGeneration(frameName);
+  }
+  iframeFaviconUrlByName.set(frameName, targetUrl);
+}
+
+async function emitIframeFavicon(
+  win: BrowserWindow,
+  frame: WebFrameMain,
+): Promise<void> {
+  const frameName = browserFrameName(frame);
+  if (
+    !frameName ||
+    !browserFrameStillCurrent(frame) ||
+    !/^https?:\/\//i.test(frame.url)
+  )
+    return;
+  const pageUrl = frame.url;
+  iframeFaviconUrlByName.set(frameName, pageUrl);
+  const generation = nextIframeFaviconGeneration(frameName);
+  const advertised = await declaredIframeFaviconUrls((code, userGesture) =>
+    frame.executeJavaScript(code, userGesture),
+  );
+  if (
+    iframeFaviconGenerationByName.get(frameName) !== generation ||
+    iframeFaviconUrlByName.get(frameName) !== pageUrl ||
+    !browserFrameStillCurrent(frame) ||
+    frame.url !== pageUrl
+  ) {
+    return;
+  }
+  const faviconDataUrl = await resolveIframeFaviconDataUrl({
+    browserSession: win.webContents.session,
+    pageUrl,
+    advertised,
+  });
+  if (
+    !faviconDataUrl ||
+    iframeFaviconGenerationByName.get(frameName) !== generation ||
+    iframeFaviconUrlByName.get(frameName) !== pageUrl ||
+    !browserFrameStillCurrent(frame) ||
+    frame.url !== pageUrl
+  ) {
+    return;
+  }
+  emitEvent("browser-frame-favicon", {
+    frameName,
+    pageUrl,
+    faviconDataUrl,
+  });
+}
+
 async function injectPicker(frame: WebFrameMain): Promise<void> {
   try {
     await frame.executeJavaScript(PICKER_SCRIPT, true);
@@ -194,12 +276,31 @@ export async function reinjectBrowserPicker(
     if (targetFrameName && browserFrameName(child) !== targetFrameName)
       continue;
     await emitFinishedBrowserNavigation(child);
+    await emitIframeFavicon(win, child);
     if (isLoopbackUrl(child.url)) {
       await injectPicker(child);
       injected = true;
     }
   }
   return injected;
+}
+
+function currentBrowserFrame(
+  win: BrowserWindow,
+  targetFrameName: string,
+): WebFrameMain | null {
+  if (win.isDestroyed()) return null;
+  const mainFrame = win.webContents.mainFrame;
+  for (const frame of mainFrame.framesInSubtree) {
+    if (
+      isBrowserTabFrame(frame, mainFrame) &&
+      browserFrameName(frame) === targetFrameName &&
+      browserFrameStillCurrent(frame)
+    ) {
+      return frame;
+    }
+  }
+  return null;
 }
 
 function attachAutoInject(win: BrowserWindow): void {
@@ -218,6 +319,7 @@ function attachAutoInject(win: BrowserWindow): void {
       frame.url,
     );
     if (!pending) return;
+    beginIframeFaviconNavigation(frame, event.url);
     emitBrowserNavigation(frame, event.url, "", true);
   });
 
@@ -239,7 +341,10 @@ function attachAutoInject(win: BrowserWindow): void {
       frame.frameTreeNodeId,
       details.url,
     );
-    if (pending) emitBrowserNavigation(frame, details.url, "", true);
+    if (pending) {
+      beginIframeFaviconNavigation(frame, details.url);
+      emitBrowserNavigation(frame, details.url, "", true);
+    }
   });
 
   win.webContents.on(
@@ -263,6 +368,7 @@ function attachAutoInject(win: BrowserWindow): void {
       )
         return;
       void emitFinishedBrowserNavigation(frame);
+      void emitIframeFavicon(win, frame);
       // Picker code is privileged main-world injection: external pages never
       // receive it, even if they forge renderer postMessages or redirects.
       if (isLoopbackUrl(frame.url)) void injectPicker(frame);
@@ -437,6 +543,8 @@ export function registerIframePickerCommands(opts: {
 }): void {
   browserFrameNames.clear();
   pendingBrowserNavigations.clear();
+  iframeFaviconGenerationByName.clear();
+  iframeFaviconUrlByName.clear();
   mainWindowRef = opts.mainWindow;
   attachAutoInject(opts.mainWindow);
   setCommand("iframe-picker:capture-region", (a) =>
@@ -452,12 +560,28 @@ export function registerIframePickerCommands(opts: {
     const ok = await reinjectBrowserPicker(opts.mainWindow, frameName);
     return { ok };
   });
+  setCommand("browser:control-iframe", async (args) => {
+    const request = parseBrowserIframeControl(args);
+    if (!request) return { ok: false, frameTreeNodeId: null };
+    const frame = currentBrowserFrame(opts.mainWindow, request.frameName);
+    if (!frame) return { ok: false, frameTreeNodeId: null };
+    const control =
+      request.action === "navigate"
+        ? { action: request.action, url: request.url }
+        : { action: request.action };
+    return {
+      ok: await controlBrowserIframe(frame, control),
+      frameTreeNodeId: frame.frameTreeNodeId,
+    };
+  });
 
   opts.mainWindow.on("closed", () => {
     if (mainWindowRef === opts.mainWindow) {
       mainWindowRef = null;
       browserFrameNames.clear();
       pendingBrowserNavigations.clear();
+      iframeFaviconGenerationByName.clear();
+      iframeFaviconUrlByName.clear();
     }
   });
 }

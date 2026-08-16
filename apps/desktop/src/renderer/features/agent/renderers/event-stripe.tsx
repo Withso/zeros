@@ -10,20 +10,25 @@
 //     individual item collapsed to one line. The user watches
 //     the agent reason + act in real time.
 //
-//   • Once the turn settles (live=false): the whole group
+//   • Once the turn settles (live=false): ordinary work
 //     COLLAPSES into one chip —
 //
 //       ▸ 📄 >_ 🔍 🤖  6 tool calls, 2 messages, 3 agents
 //
 //     — and the agent's final answer (rendered by the parent,
 //     bright) sits below it. Click the chip to re-expand the
-//     dimmed history.
+//     dimmed history, including its nested Browser activity group.
 //
 // Borderless. No card. No shadow. Just rows.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useState } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
+import { Fragment, memo, useState } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Globe2,
+  SquareMousePointer,
+} from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
@@ -34,6 +39,18 @@ import {
   summaryIcons,
 } from "./tool-summary";
 import { MessageView } from "./message-view";
+import {
+  browserActivityTailClosed,
+  browserActivityUsesWebsiteIcon,
+  groupBrowserToolActivity,
+  partitionBrowserActivityForSummary,
+  resolveBrowserActivityPresentation,
+} from "../../browser/browser-tool-activity";
+import { BrowserActivityCard } from "./browser-activity-card";
+import {
+  cachedBrowserFavicon,
+  useConversationBrowserActivity,
+} from "../../browser/browser-session-activity-store";
 
 interface EventStripeProps {
   events: AgentMessage[];
@@ -45,6 +62,9 @@ interface EventStripeProps {
   /** Sub-agent bodies pass this: always render the (dimmed) children, never
    *  the collapse chip — the SubagentCard row is the collapse boundary. */
   alwaysExpanded?: boolean;
+  /** A final/result message rendered outside this feed is still a real
+   * chronological boundary for its trailing Browser subgroup. */
+  browserTailClosed?: boolean;
 }
 
 // Brightness split inside the feed (styles/global/runtime-content.css,
@@ -61,6 +81,7 @@ export const EventStripe = memo(function EventStripe({
   ctx,
   live,
   alwaysExpanded = false,
+  browserTailClosed = false,
 }: EventStripeProps) {
   const [userExpanded, setUserExpanded] = useState(false);
 
@@ -100,17 +121,14 @@ export const EventStripe = memo(function EventStripe({
 
   if (events.length === 0) return null;
 
-  // The collapse chip is the only place a header appears. It shows once the
-  // turn is done (not live), this isn't a sub-agent body, and nothing is
-  // forcing the rows open for a pending permission/question. A LONE event is
-  // NOT special-cased: even a single tool call folds into the same summary
-  // chip ("1 tool call") once the turn settles, so every settled turn's
-  // working feed reads uniformly. Otherwise a one-edit turn renders a bare Edit
-  // row while multi-event turns get the group chip.
-  const showHeader =
+  const canCollapse =
     !live && !alwaysExpanded && !hasPendingPermission && !hasPendingQuestion;
+  const showHeader = canCollapse && events.length > 0;
   const expanded = !showHeader || userExpanded;
   const Chev = expanded ? ChevronDown : ChevronRight;
+  const displayEvents = groupBrowserToolActivity(events, {
+    closeTail: browserActivityTailClosed(live, browserTailClosed),
+  });
 
   return (
     <div className="flex flex-col">
@@ -134,7 +152,7 @@ export const EventStripe = memo(function EventStripe({
           {/* Activity icons at the END, after the text: deduped tool kinds +
               Bot (any sub-agent) + Brain (any
               reasoning), capped at 5, visible. */}
-          <StripeIcons events={events} />
+          <StripeIcons events={events} chatId={ctx.chatId} />
         </button>
       )}
       {expanded && (
@@ -155,26 +173,80 @@ export const EventStripe = memo(function EventStripe({
             showHeader && "py-1",
           )}
         >
-          {events.map((event) =>
-            alwaysExpanded ? (
-              <MessageView key={event.id} message={event} ctx={ctx} />
+          {displayEvents.map((item) => {
+            const content =
+              item.kind === "browser-activity" ? (
+                <BrowserActivityCard
+                  events={item.events}
+                  actions={item.actions}
+                  closed={item.closed}
+                  ctx={ctx}
+                />
+              ) : (
+                <MessageView message={item.event} ctx={ctx} />
+              );
+            return alwaysExpanded ? (
+              <Fragment key={item.id}>{content}</Fragment>
             ) : (
-              <div key={event.id}>
-                <MessageView message={event} ctx={ctx} />
-              </div>
-            ),
-          )}
+              <div key={item.id}>{content}</div>
+            );
+          })}
         </div>
       )}
     </div>
   );
 });
 
-function StripeIcons({ events }: { events: AgentMessage[] }) {
-  const icons = summaryIcons(events);
-  if (icons.length === 0) return null;
+function StripeIcons({
+  events,
+  chatId,
+}: {
+  events: AgentMessage[];
+  chatId: string | null;
+}) {
+  const session = useConversationBrowserActivity(chatId ?? undefined);
+  const {
+    browserEvents,
+    actions: browserActions,
+    otherEvents,
+  } = partitionBrowserActivityForSummary(events);
+  const hasBrowser = browserEvents.length > 0;
+  const browserRunning = browserEvents.some(
+    (event) =>
+      event.kind === "tool" &&
+      (event.status === "pending" || event.status === "in_progress"),
+  );
+  const presentation = resolveBrowserActivityPresentation(
+    browserActions,
+    browserRunning,
+    session,
+  );
+  const browserFavicon =
+    presentation.faviconDataUrl ??
+    cachedBrowserFavicon(
+      [...browserActions].reverse().find((activity) => activity.url)?.url,
+    );
+  const hasWebsiteActivity = browserActions.some(
+    browserActivityUsesWebsiteIcon,
+  );
+  const icons = summaryIcons(hasBrowser ? otherEvents : events).slice(
+    0,
+    hasBrowser ? 4 : 5,
+  );
+  if (!hasBrowser && icons.length === 0) return null;
   return (
     <div className="flex shrink-0 items-center gap-1" aria-hidden="true">
+      {hasBrowser ? (
+        <span className="text-fg2 inline-flex size-3 items-center justify-center">
+          {browserFavicon ? (
+            <img src={browserFavicon} alt="" className="size-3 rounded-[2px]" />
+          ) : hasWebsiteActivity ? (
+            <Globe2 className="size-3" />
+          ) : (
+            <SquareMousePointer className="size-3" />
+          )}
+        </span>
+      ) : null}
       {icons.map((Icon, i) => (
         <span
           key={i}

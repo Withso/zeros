@@ -240,10 +240,11 @@ if (RUN_ONLY && env.ZEROS_NO_ENGINE_HMR == null) env.ZEROS_NO_ENGINE_HMR = "1";
 // renderer HMR + engine HMR kept working. Under --watch we now wrap that binary
 // in scripts/dev-main-supervisor.mjs, which watches dist-electron and restarts
 // the main process on rebuild — electronmon's behavior, minus electronmon, so
-// the dedicated binary survives. Plain `pnpm electron:dev` keeps the direct
-// launch (today's no-auto-restart behavior); ZEROS_NO_MAIN_HMR=1 forces the
-// direct launch even under --watch (mirrors ZEROS_NO_ENGINE_HMR). The primary
-// (no binPath) still uses electronmon under --watch.
+// the dedicated binary survives. Both `pnpm electron:dev` and the explicit
+// `electron:dev:watch` alias use this path; `electron:run` remains the
+// low-overhead no-HMR launch. ZEROS_NO_MAIN_HMR=1 forces a direct launch when
+// diagnosing restart behavior (mirrors ZEROS_NO_ENGINE_HMR). The primary
+// (no binPath) uses electronmon under --watch.
 const NO_MAIN_HMR = process.env.ZEROS_NO_MAIN_HMR === "1";
 const useMainSupervisor =
   Boolean(binPath) && WATCH && !RUN_ONLY && !NO_MAIN_HMR;

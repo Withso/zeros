@@ -84,11 +84,16 @@ import {
   nativeTheme,
   screen,
   shell,
+  type IpcMainInvokeEvent,
 } from "electron";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { isBrowserConfirmationDecision } from "@zeros/protocol/browser-tools";
+import {
+  isBrowserConfirmationDecision,
+  isBrowserProductId,
+  type BrowserJsonValue,
+} from "@zeros/protocol/browser-tools";
 import { registerIpcHandlers } from "./ipc/router";
 import { registerIframeSessionCommands } from "./ipc/iframe-session";
 import { registerIframePickerCommands } from "./ipc/iframe-picker";
@@ -159,6 +164,11 @@ import {
   startZerosBrowserService,
   type ZerosBrowserServiceHandle,
 } from "./browser/service";
+import {
+  browserRendererEventIsCurrent,
+  normalizeBrowserViewBoundsForHost,
+  shouldRevokeBrowserSurfaceForNavigation,
+} from "./browser/surface";
 
 let browserService: ZerosBrowserServiceHandle | null = null;
 
@@ -1219,11 +1229,23 @@ app.whenReady().then(async () => {
   registerAllCommands();
   installDesignProtocol();
 
-  setCommand("browser_confirmation_respond", (args) => {
+  const trustedBrowserWindow = (event: IpcMainInvokeEvent): BrowserWindow => {
+    const current = getMainWindow();
+    if (
+      !current ||
+      current.webContents !== event.sender ||
+      event.senderFrame !== event.sender.mainFrame
+    ) {
+      throw new Error("Browser surface command rejected.");
+    }
+    return current;
+  };
+  setCommand("browser_confirmation_respond", (args, event) => {
+    trustedBrowserWindow(event);
     const confirmationId = args.confirmationId;
     const decision = args.decision;
     if (
-      typeof confirmationId !== "string" ||
+      !isBrowserProductId(confirmationId) ||
       !isBrowserConfirmationDecision(decision)
     ) {
       throw new Error("Invalid Zeros browser confirmation response.");
@@ -1263,22 +1285,60 @@ app.whenReady().then(async () => {
   // endpoint and bearer are per boot, stay in main/engine memory, and are not
   // couriered into provider subprocesses.
   setBrowserServiceEnvironment(null);
+  let browserRendererEpoch = 0;
   const browserReady = startZerosBrowserService({
     artifactRoot: path.join(zerosDataDir(), "browser-artifacts"),
     isTrustedSurfaceAvailable: () => getMainWindow() !== null,
     onConfirmationRequest: (request) => {
       const confirmationWindow = getMainWindow();
+      const confirmationEpoch = browserRendererEpoch;
       void whenRendererReady().then(() => {
         // Never move an authorization prompt across trusted renderer
         // lifecycles. The agent can retry after a replacement window mounts.
-        if (!confirmationWindow || getMainWindow() !== confirmationWindow) {
+        if (
+          !confirmationWindow ||
+          !browserRendererEventIsCurrent({
+            capturedEpoch: confirmationEpoch,
+            currentEpoch: browserRendererEpoch,
+            sameWindow: getMainWindow() === confirmationWindow,
+          })
+        ) {
           browserService?.respondToConfirmation(request.id, "deny");
           return;
         }
         emitEvent("browser-confirmation-request", request);
       });
     },
-    onSessionState: (state) => emitEvent("browser-session-state", state),
+    onConfirmationSettled: (confirmationId) => {
+      // Settlement is a revocation-only tombstone. It is safe to replay across
+      // renderer lifecycles and prevents a just-resolved snapshot request from
+      // painting a stale permission card after timeout, Stop, or session close.
+      emitEvent("browser-confirmation-settled", { confirmationId });
+    },
+    onSessionState: (state) => {
+      const stateWindow = getMainWindow();
+      const stateEpoch = browserRendererEpoch;
+      if (!stateWindow) {
+        emitEvent("browser-session-state", state);
+        return;
+      }
+      void whenRendererReady().then(() => {
+        // State is keyed to a renderer lifecycle just like confirmations. A
+        // late event from a reloading/replaced window must not bind a native
+        // page into the next document, while cold-launch events still use the
+        // existing pre-window buffer in emitEvent.
+        if (
+          !browserRendererEventIsCurrent({
+            capturedEpoch: stateEpoch,
+            currentEpoch: browserRendererEpoch,
+            sameWindow: getMainWindow() === stateWindow,
+          })
+        ) {
+          return;
+        }
+        emitEvent("browser-session-state", state);
+      });
+    },
   })
     .then((service) => {
       browserService = service;
@@ -1296,6 +1356,139 @@ app.whenReady().then(async () => {
         }`,
       );
     });
+  const readyBrowserService = async (): Promise<ZerosBrowserServiceHandle> => {
+    await browserReady;
+    if (!browserService) {
+      throw new Error("The Zeros browser service is unavailable.");
+    }
+    return browserService;
+  };
+  setCommand("browser_session_attach", async (args, event) => {
+    const target = trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    const contentBounds = target.getContentBounds();
+    const bounds = normalizeBrowserViewBoundsForHost(
+      args.bounds,
+      event.sender.getZoomFactor(),
+      { width: contentBounds.width, height: contentBounds.height },
+    );
+    const surfaceId = args.surfaceId;
+    if (
+      !isBrowserProductId(browserSessionId) ||
+      typeof surfaceId !== "string" ||
+      !bounds
+    ) {
+      throw new Error("Invalid browser surface attachment.");
+    }
+    return (await readyBrowserService()).attach(
+      browserSessionId,
+      target,
+      bounds,
+      surfaceId,
+    );
+  });
+  setCommand("browser_session_detach", async (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    const surfaceId = args.surfaceId;
+    if (
+      !isBrowserProductId(browserSessionId) ||
+      typeof surfaceId !== "string"
+    ) {
+      throw new Error("Invalid browser surface detachment.");
+    }
+    return (await readyBrowserService()).detach(browserSessionId, surfaceId);
+  });
+  setCommand("browser_session_park", (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    const surfaceId = args.surfaceId;
+    if (
+      !isBrowserProductId(browserSessionId) ||
+      typeof surfaceId !== "string"
+    ) {
+      throw new Error("Invalid browser surface park request.");
+    }
+    return browserService?.park(browserSessionId, surfaceId) ?? false;
+  });
+  setCommand("browser_session_capture", async (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    if (!isBrowserProductId(browserSessionId)) {
+      throw new Error("Invalid browser surface capture.");
+    }
+    return {
+      dataUrl: await (await readyBrowserService()).capture(browserSessionId),
+    };
+  });
+  setCommand("browser_session_close", async (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    if (!isBrowserProductId(browserSessionId)) {
+      throw new Error("Invalid browser session close request.");
+    }
+    return (await readyBrowserService()).close(browserSessionId);
+  });
+  setCommand("browser_session_states", async (_args, event) => {
+    trustedBrowserWindow(event);
+    return (await readyBrowserService()).sessionStates();
+  });
+  setCommand("browser_confirmation_requests", async (_args, event) => {
+    trustedBrowserWindow(event);
+    return (await readyBrowserService()).confirmationRequests();
+  });
+  setCommand("browser_session_control", async (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    const tool = args.tool;
+    if (
+      !isBrowserProductId(browserSessionId) ||
+      (tool !== "open" &&
+        tool !== "back" &&
+        tool !== "forward" &&
+        tool !== "reload")
+    ) {
+      throw new Error("Invalid browser control request.");
+    }
+    const toolArguments = args.arguments;
+    if (
+      !toolArguments ||
+      typeof toolArguments !== "object" ||
+      Array.isArray(toolArguments)
+    ) {
+      throw new Error("Invalid browser control arguments.");
+    }
+    return (await readyBrowserService()).control(
+      browserSessionId,
+      tool,
+      toolArguments as BrowserJsonValue,
+    );
+  });
+  setCommand("browser_session_stop", async (args, event) => {
+    trustedBrowserWindow(event);
+    const browserSessionId = args.browserSessionId;
+    if (!isBrowserProductId(browserSessionId)) {
+      throw new Error("Invalid browser stop request.");
+    }
+    return (await readyBrowserService()).stopBrowserAction(browserSessionId);
+  });
+  setCommand("browser_ui_preferences_update", async (args, event) => {
+    trustedBrowserWindow(event);
+    if (
+      typeof args.browserEnabled !== "boolean" ||
+      typeof args.showAgentCursor !== "boolean" ||
+      (args.navigationApproval !== "always-ask" &&
+        args.navigationApproval !== "always-allow")
+    ) {
+      throw new Error("Invalid browser UI preferences.");
+    }
+    (await readyBrowserService()).setUiPreferences({
+      browserEnabled: args.browserEnabled,
+      showAgentCursor: args.showAgentCursor,
+      navigationApproval: args.navigationApproval,
+    });
+    return true;
+  });
   const disposeGithubSessionSync = onMainAuthSessionChanged(async () => {
     await pushGithubCredentialToEngine();
     await scheduleGithubAppRefresh();
@@ -1315,14 +1508,18 @@ app.whenReady().then(async () => {
   startEngineCodeWatcher();
 
   const win = createMainWindow();
+  browserRendererEpoch += 1;
   setMainWindow(win);
   win.on("closed", () => {
+    browserRendererEpoch += 1;
     void browserService?.revokeConfirmationSurface();
   });
-  win.webContents.on(
-    "did-start-loading",
-    () => void browserService?.revokeConfirmationSurface(),
-  );
+  win.webContents.on("did-start-navigation", (details) => {
+    if (shouldRevokeBrowserSurfaceForNavigation(details)) {
+      browserRendererEpoch += 1;
+      void browserService?.revokeConfirmationSurface();
+    }
+  });
 
   // Main-owned update checks continue even when the macOS window is closed.
   // Start only after setMainWindow so the initial event cannot pollute the
@@ -1368,10 +1565,9 @@ app.whenReady().then(async () => {
 
   // Roll up per-process memory into main.log so a future spike is attributable.
   startProcessMetricsLogger();
-  // Workbench browser tabs are
-  // <iframe> elements (not WebContentsView). All they need from
-  // main is the ability to clear HTTP cache + cookies in the
-  // session (operations iframes can't perform themselves).
+  // User-created preview/design browser tabs remain renderer iframes and use
+  // these cache/cookie commands. Conversation-owned agent Browser tabs use the
+  // separate isolated WebContentsView service registered above.
   registerIframeSessionCommands({ mainWindow: win });
   // Element picker — install/uninstall via
   // WebFrameMain.executeJavaScript + main-window region capture
@@ -1383,14 +1579,18 @@ app.whenReady().then(async () => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
       const next = createMainWindow();
+      browserRendererEpoch += 1;
       setMainWindow(next);
       next.on("closed", () => {
+        browserRendererEpoch += 1;
         void browserService?.revokeConfirmationSurface();
       });
-      next.webContents.on(
-        "did-start-loading",
-        () => void browserService?.revokeConfirmationSurface(),
-      );
+      next.webContents.on("did-start-navigation", (details) => {
+        if (shouldRevokeBrowserSurfaceForNavigation(details)) {
+          browserRendererEpoch += 1;
+          void browserService?.revokeConfirmationSurface();
+        }
+      });
       registerIframeSessionCommands({ mainWindow: next });
       registerIframePickerCommands({ mainWindow: next });
     }

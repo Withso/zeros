@@ -93,6 +93,10 @@ export interface SessionsActions {
     autoAction?: string,
   ): Promise<void>;
   cancel(chatId: string): Promise<void>;
+  /** Revoke only the active native Browser lease. If the official Browser
+   * plugin is parked on an approval, dismiss that approval so Codex can
+   * observe the stopped tool and continue the surrounding chat turn. */
+  stopBrowserUse(chatId: string, browserSessionId: string): Promise<void>;
   /** Stop one background task while leaving the foreground turn and sibling
    * tasks alone. Fire-and-forget; the next provider snapshot removes it. */
   stopBackgroundTask(chatId: string, taskId: string): void;
@@ -100,7 +104,11 @@ export interface SessionsActions {
     chatId: string,
     response: RequestPermissionResponse,
   ): void;
-  respondToQuestion(chatId: string, response: QuestionResponse): void;
+  respondToQuestion(
+    chatId: string,
+    response: QuestionResponse,
+    options?: { deliveryWatchdog?: boolean },
+  ): void;
   setMode(chatId: string, modeId: string): Promise<void>;
   /** Change a live session's model without rebuilding it. Fire-and-forget:
    *  the chat's persisted model is already updated via the store; this just
@@ -155,6 +163,12 @@ export interface SessionsActions {
     providerBinding: ProviderBinding | null,
     options?: StartForChatOptions,
   ): Promise<boolean>;
+  /** Restart one idle native provider execution and resume the same durable
+   * thread. Codex Browser registration and Claude's Chrome CLI flags are
+   * boot-scoped, so a settings transition needs this narrow refresh to become
+   * effective without replacing the conversation. Returns false while work is
+   * active so the caller can retry after the slot settles. */
+  refreshProviderCapabilities(chatId: string): Promise<boolean>;
   /** Load an explicitly cold transcript from disk. Idempotent and shared per
    *  exact chat; resident slots only receive a background reconcile, while a
    *  retained cold slot publishes `loading` until its authoritative window is

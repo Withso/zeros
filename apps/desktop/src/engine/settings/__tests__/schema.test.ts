@@ -107,7 +107,14 @@ describe("sanitizeLayer", () => {
     const doc = {
       models: { default: "fable-5" },
       workspaces: { path: "/x" },
-      browser: { enabled: true, provider: "isolated" },
+      browser: {
+        enabled: true,
+        codex_enabled: false,
+        claude_enabled: true,
+        provider: "isolated",
+        auto_open: false,
+        show_agent_cursor: false,
+      },
       tool_approvals_enabled: true,
       github: {
         auth_method: "github-app",
@@ -129,11 +136,29 @@ describe("sanitizeLayer", () => {
   it("keeps browser posture engine-owned and rejects provider escape hatches", () => {
     expect(
       sanitizeLayer(
-        { browser: { enabled: false, provider: "isolated" } },
+        {
+          browser: {
+            enabled: false,
+            codex_enabled: true,
+            claude_enabled: false,
+            provider: "isolated",
+            auto_open: false,
+            show_agent_cursor: true,
+          },
+        },
         "user",
       ),
     ).toEqual({
-      doc: { browser: { enabled: false, provider: "isolated" } },
+      doc: {
+        browser: {
+          enabled: false,
+          codex_enabled: true,
+          claude_enabled: false,
+          provider: "isolated",
+          auto_open: false,
+          show_agent_cursor: true,
+        },
+      },
       warnings: [],
     });
 
