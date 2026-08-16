@@ -18,10 +18,22 @@ boundaries.
 5. The engine validates that binding before accepting privileged bridge
    messages.
 
-The current validation harness uses a provider preview token and a separate
-Zeros bridge token. That is adequate only for an operator-controlled,
-single-purpose experiment. A shared bridge token without account/workspace
-binding is a production blocker.
+The current validation harness uses a revocable provider preview capability, a
+separate mandatory Zeros bridge token, and a required asymmetric account JWT
+whose subject must match the immutable worker owner. A privileged cloud-worker
+cannot start with HS256, optional binding, or malformed verifier material. The
+JWT remains in the client `CONNECTED` frame and never enters image/sandbox
+creation state. This is adequate for provider qualification, but its operator
+owner binding is not the production control-plane grant bound to tenant,
+workspace, purpose, and revocable lifecycle. That production binding remains a
+release blocker.
+
+The production lifecycle foundation now stores only a SHA-256 digest for each
+future endpoint grant, revokes grants before delete intent dispatch, and keeps
+provider resource ids out of user-facing API documents. This is storage and
+lifecycle scaffolding, not issuance: no setup worker currently mints or installs
+a workspace-bound engine grant, so a provisioned provider resource is never
+reported as ready.
 
 ## Sandbox requirements
 
@@ -60,6 +72,27 @@ authentication flow, license, and redistribution rights are approved.
 - Resume from bounded acknowledged state; never trust an arbitrary client
   revision without server validation.
 
+The implemented cloud listener requires a bounded `CONNECTED` frame first,
+waits for asynchronous account verification before releasing later messages,
+expires silent handshakes, caps HTTP/WebSocket peers and the pre-auth queue,
+and requires exactly one canonical credential carrier. Authenticated work is
+bounded across the transport—not multiplied per socket—to 32 ordinary handlers
+plus an 8-handler control lane. Ordinary and control queues, per-peer shares,
+aggregate retained bytes, frame size, and per-peer/aggregate outbound buffers
+all have package-owned ceilings. The control lane keeps cancellation, steering,
+close, permission, and question settlement actionable under long-running
+ordinary work without allowing those messages to bypass earlier work for their
+own session. WebSocket and partial-HTTP shutdown are bounded, and disconnect
+state finalizes once.
+
+JWKS verification coalesces concurrent lookups and enforces separate fetch and
+streamed-body deadlines. It cancels a decompressed response once it crosses
+1 MiB, caps key count and `kid`, rejects duplicate/incompatible signing keys,
+disallows HS256 fallback on the JWKS path, and bounds configured clock skew.
+Provider ingress must additionally rate-limit attempts before they reach the
+worker; the signed preview capability is not a substitute for production edge
+abuse controls.
+
 ## Multi-tenant data
 
 All control-plane and durable-record queries require tenant-scoped
@@ -72,7 +105,7 @@ context and keep audit records for privileged operations.
 - no account/workspace-bound engine grant;
 - unverified tenant isolation or deletion behavior;
 - secrets appearing in images, snapshots, URLs, logs, or transcripts;
-- provider lifecycle races that can expose or orphan a workspace;
+- an unqualified provider lifecycle or unresolved reconciliation/orphan race;
 - missing backup restoration and disaster-recovery exercise;
 - unsupported agent/runtime redistribution or authentication;
 - unresolved high-impact reachable dependency findings; or

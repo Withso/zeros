@@ -2,10 +2,11 @@
 // verify-jwt — engine-side JWT verification (account-binding)
 // ──────────────────────────────────────────────────────────
 //
-// OPTIONAL account-binding for remote clients: a cloud client may present an
-// access token inside the CONNECTED handshake. The engine verifies it before
-// allowing privileged messages. This adds verified multi-client identity +
-// audit, and can be made mandatory (require=true).
+// Account-binding for remote clients: a cloud client may present an access
+// token inside the CONNECTED handshake. The engine verifies it before allowing
+// privileged messages. Qualified cloud workers make this asymmetric binding
+// mandatory; non-qualified/local deployments may configure optional legacy
+// behavior.
 //
 // PROVIDER-AGNOSTIC. This is a plain JWT verifier configured entirely from
 // ZEROS_ACCOUNT_JWT_* env (see buildAccountAuthFromEnv) — it has no dependency
@@ -17,9 +18,9 @@
 //   • HS256 — a shared JWT secret (legacy / still supported)
 //   • ES256 / RS256 — asymmetric, via a configured public key (PEM or JWK)
 //
-// Offline by design: no JWKS network fetch (the operator configures the secret
-// or public key). That keeps it deterministic + unit-testable and avoids a
-// startup network dependency.
+// Static PEM/JWK verification is offline. The production rotation path may
+// resolve a public key by `kid` from an explicitly configured HTTPS JWKS URL;
+// token verification itself remains in this module and is deterministic.
 // ──────────────────────────────────────────────────────────
 
 import {
@@ -88,6 +89,24 @@ export interface JwtVerifyConfig {
   clockSkewSec?: number;
 }
 
+const DEFAULT_CLOCK_SKEW_SEC = 30;
+const MAX_CLOCK_SKEW_SEC = 300;
+
+function checkedClockSkewSec(value: number | undefined): number {
+  const resolved = value ?? DEFAULT_CLOCK_SKEW_SEC;
+  if (
+    !Number.isSafeInteger(resolved) ||
+    resolved < 0 ||
+    resolved > MAX_CLOCK_SKEW_SEC
+  ) {
+    throw new JwtError(
+      "MALFORMED",
+      `clock skew must be an integer from 0 through ${MAX_CLOCK_SKEW_SEC} seconds`,
+    );
+  }
+  return resolved;
+}
+
 function b64urlToBuf(s: string): Buffer {
   // Node's "base64url" is lenient about padding; normalize defensively anyway.
   return Buffer.from(s, "base64url");
@@ -119,6 +138,7 @@ export function verifyAccountJwt(
   if (typeof token !== "string" || !token) {
     throw new JwtError("MALFORMED", "token must be a non-empty string");
   }
+  const clockSkewSec = checkedClockSkewSec(config.clockSkewSec);
   const parts = token.split(".");
   if (parts.length !== 3) {
     throw new JwtError(
@@ -189,7 +209,7 @@ export function verifyAccountJwt(
   }
 
   // ── 2. Claims ─────────────────────────────────────────────
-  const skewMs = (config.clockSkewSec ?? 30) * 1000;
+  const skewMs = clockSkewSec * 1000;
   // An access token must carry an expiry; a validly signed token without
   // `exp` would otherwise be accepted forever (fail-open for a security
   // boundary). A conformant IdP always sets `exp`, so this rejects only malformed tokens.
@@ -252,9 +272,66 @@ let jwksCache: {
   keys: Map<string, JwkLike>;
   fetchedAt: number;
 } | null = null;
-let jwksLastFetchAttempt = 0;
+let jwksLastFetchAttempt: { url: string; at: number } | null = null;
+const jwksFetchFlights = new Map<string, Promise<Map<string, JwkLike>>>();
 const JWKS_TTL_MS = 10 * 60_000;
 const JWKS_COOLDOWN_MS = 30_000;
+const JWKS_FETCH_TIMEOUT_MS = 5_000;
+const MAX_JWKS_BODY_BYTES = 1024 * 1024;
+const MAX_JWKS_KEYS = 128;
+const MAX_JWKS_KID_CODE_UNITS = 256;
+
+async function readBoundedJwksJson(
+  response: Response,
+  signal: AbortSignal,
+): Promise<{ keys?: JwkLike[] }> {
+  if (!response.body) {
+    throw new JwtError("NO_KEY", "JWKS response has no body");
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!(value instanceof Uint8Array)) {
+        throw new JwtError("NO_KEY", "JWKS response body is invalid");
+      }
+      totalBytes += value.byteLength;
+      if (totalBytes > MAX_JWKS_BODY_BYTES) {
+        try {
+          await reader.cancel();
+        } catch {
+          // The byte limit is already decisive; cancellation is best-effort.
+        }
+        throw new JwtError("NO_KEY", "JWKS response is too large");
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof JwtError) throw error;
+    throw new JwtError(
+      "NO_KEY",
+      signal.aborted
+        ? "JWKS response timed out"
+        : "JWKS response body could not be read",
+    );
+  }
+
+  const encoded = Buffer.allocUnsafe(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    encoded.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(encoded);
+    return JSON.parse(text) as { keys?: JwkLike[] };
+  } catch {
+    throw new JwtError("NO_KEY", "JWKS response is not valid JSON");
+  }
+}
 
 function decodeHeader(token: string): { alg?: string; kid?: string } {
   const parts = token.split(".");
@@ -271,32 +348,107 @@ function decodeHeader(token: string): { alg?: string; kid?: string } {
   }
   return {
     alg: typeof header.alg === "string" ? header.alg : undefined,
-    kid: typeof header.kid === "string" ? header.kid : undefined,
+    kid:
+      typeof header.kid === "string" &&
+      header.kid.length <= MAX_JWKS_KID_CODE_UNITS &&
+      !/[\0\r\n]/.test(header.kid)
+        ? header.kid
+        : undefined,
   };
 }
 
-async function fetchJwks(
-  url: string,
-  nowMs: number,
-): Promise<Map<string, JwkLike>> {
+function fetchJwks(url: string, nowMs: number): Promise<Map<string, JwkLike>> {
+  const existingFlight = jwksFetchFlights.get(url);
+  if (existingFlight) return existingFlight;
   // Cooldown: don't hammer the endpoint when a forged/unknown kid keeps missing.
   if (
-    nowMs - jwksLastFetchAttempt < JWKS_COOLDOWN_MS &&
-    jwksCache?.url === url
+    jwksLastFetchAttempt?.url === url &&
+    nowMs - jwksLastFetchAttempt.at < JWKS_COOLDOWN_MS
   ) {
-    return jwksCache.keys;
+    if (jwksCache?.url === url) return Promise.resolve(jwksCache.keys);
+    return Promise.reject(
+      new JwtError("NO_KEY", "JWKS endpoint is cooling down after a failure"),
+    );
   }
-  jwksLastFetchAttempt = nowMs;
-  const res = await fetch(url, { headers: { Accept: "application/json" } });
-  if (!res.ok)
-    throw new JwtError("NO_KEY", `JWKS fetch failed (${res.status})`);
-  const body = (await res.json()) as { keys?: JwkLike[] };
-  const keys = new Map<string, JwkLike>();
-  for (const k of body.keys ?? []) {
-    if (typeof k.kid === "string") keys.set(k.kid, k);
-  }
-  jwksCache = { url, keys, fetchedAt: nowMs };
-  return keys;
+  jwksLastFetchAttempt = { url, at: nowMs };
+  const flight = (async (): Promise<Map<string, JwkLike>> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), JWKS_FETCH_TIMEOUT_MS);
+    timeout.unref?.();
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        headers: { Accept: "application/json" },
+        signal: controller.signal,
+      });
+    } catch (error) {
+      const timedOut = controller.signal.aborted;
+      throw new JwtError(
+        "NO_KEY",
+        timedOut
+          ? "JWKS fetch timed out"
+          : `JWKS fetch failed: ${error instanceof Error ? error.message : "network error"}`,
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (!res.ok) {
+      throw new JwtError("NO_KEY", `JWKS fetch failed (${res.status})`);
+    }
+    const contentLength = Number(res.headers?.get?.("content-length"));
+    if (Number.isFinite(contentLength) && contentLength > MAX_JWKS_BODY_BYTES) {
+      throw new JwtError("NO_KEY", "JWKS response is too large");
+    }
+    let body: { keys?: JwkLike[] };
+    const bodyTimeout = setTimeout(
+      () => controller.abort(),
+      JWKS_FETCH_TIMEOUT_MS,
+    );
+    bodyTimeout.unref?.();
+    try {
+      body = await readBoundedJwksJson(res, controller.signal);
+    } finally {
+      clearTimeout(bodyTimeout);
+    }
+    let encoded: string;
+    try {
+      encoded = JSON.stringify(body);
+    } catch {
+      throw new JwtError("NO_KEY", "JWKS response is not serializable");
+    }
+    if (
+      !body ||
+      typeof body !== "object" ||
+      Array.isArray(body) ||
+      Buffer.byteLength(encoded, "utf8") > MAX_JWKS_BODY_BYTES ||
+      !Array.isArray(body.keys) ||
+      body.keys.length > MAX_JWKS_KEYS
+    ) {
+      throw new JwtError("NO_KEY", "JWKS response is invalid or too large");
+    }
+    const keys = new Map<string, JwkLike>();
+    for (const key of body.keys) {
+      if (
+        !key ||
+        typeof key !== "object" ||
+        typeof key.kid !== "string" ||
+        key.kid.length < 1 ||
+        key.kid.length > MAX_JWKS_KID_CODE_UNITS ||
+        /[\0\r\n]/.test(key.kid) ||
+        keys.has(key.kid)
+      ) {
+        throw new JwtError("NO_KEY", "JWKS response contains an invalid key");
+      }
+      keys.set(key.kid, key);
+    }
+    jwksCache = { url, keys, fetchedAt: nowMs };
+    return keys;
+  })();
+  const tracked = flight.finally(() => {
+    if (jwksFetchFlights.get(url) === tracked) jwksFetchFlights.delete(url);
+  });
+  jwksFetchFlights.set(url, tracked);
+  return tracked;
 }
 
 /** Resolve the JWK for `kid` from `url`, fetching/refreshing as needed. */
@@ -334,13 +486,34 @@ export async function verifyAccountJwtViaJwks(
     );
   if (typeof token !== "string" || !token)
     throw new JwtError("MALFORMED", "token must be a non-empty string");
-  const { kid } = decodeHeader(token);
+  const { alg, kid } = decodeHeader(token);
+  if (alg !== "ES256" && alg !== "RS256") {
+    throw new JwtError(
+      "UNSUPPORTED_ALG",
+      `JWKS verification requires ES256 or RS256 (got ${alg ?? "none"})`,
+    );
+  }
   if (!kid)
     throw new JwtError(
       "NO_KEY",
       "token header has no kid (cannot resolve a JWKS key)",
     );
   const jwk = await resolveJwk(config.jwksUrl, kid, nowMs);
+  const keyOps = jwk.key_ops;
+  const metadataMatches =
+    (jwk.alg === undefined || jwk.alg === alg) &&
+    (jwk.use === undefined || jwk.use === "sig") &&
+    (keyOps === undefined ||
+      (Array.isArray(keyOps) && keyOps.includes("verify"))) &&
+    (alg === "ES256"
+      ? jwk.kty === "EC" && jwk.crv === "P-256"
+      : jwk.kty === "RSA");
+  if (!metadataMatches) {
+    throw new JwtError(
+      "NO_KEY",
+      `JWKS key metadata is incompatible with ${alg}`,
+    );
+  }
   // Hand the resolved JWK to the proven sync verifier as the public key.
   return verifyAccountJwt(
     token,
@@ -352,13 +525,60 @@ export async function verifyAccountJwtViaJwks(
 /** Test/reset hook — drop the in-process JWKS cache. */
 export function resetJwksCache(): void {
   jwksCache = null;
-  jwksLastFetchAttempt = 0;
+  jwksLastFetchAttempt = null;
+  jwksFetchFlights.clear();
 }
 
 export interface AccountAuth {
   config: JwtVerifyConfig;
   /** When true, a remote client MUST present a valid token (else rejected). */
   required: boolean;
+}
+
+/** A privileged cloud worker gives its remote owner the same authority as the
+ * local desktop, so bearer-only or symmetric account admission is never a
+ * qualified deployment. Keep this assertion in the engine as well as the
+ * operator harness: a custom launcher must not be able to omit the second,
+ * owner-bound asymmetric gate. */
+export function assertQualifiedCloudAccountBinding(
+  accountAuth: AccountAuth | null,
+): AccountAuth {
+  const config = accountAuth?.config;
+  let secureJwks = false;
+  let secureStaticKey = false;
+  if (config?.jwksUrl) {
+    try {
+      const url = new URL(config.jwksUrl);
+      secureJwks =
+        url.protocol === "https:" &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash;
+    } catch {
+      secureJwks = false;
+    }
+  }
+  if (config?.publicKey?.trim()) {
+    try {
+      loadPublicKey(config.publicKey);
+      secureStaticKey = true;
+    } catch {
+      secureStaticKey = false;
+    }
+  }
+  if (
+    !accountAuth?.required ||
+    !config ||
+    Boolean(config.hs256Secret) ||
+    (!secureJwks && !secureStaticKey) ||
+    !config.audience?.trim()
+  ) {
+    throw new Error(
+      "qualified cloud worker requires mandatory asymmetric account binding",
+    );
+  }
+  return accountAuth;
 }
 
 /** Whether a remote client's message must be DROPPED because account-binding is
@@ -438,6 +658,22 @@ export function nextOwnerAccount(
   return event.sub ?? current;
 }
 
+/** Immutable account owner provisioned alongside a qualified cloud worker.
+ * A cloud coordinator has no trusted local renderer from which to learn the
+ * desktop owner, so required account binding must start with an orchestrator-
+ * supplied subject instead of becoming permanently `desktop-unbound`. */
+export function cloudOwnerSubjectFromEnv(
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const raw = env.ZEROS_CLOUD_OWNER_SUB;
+  if (raw === undefined) return null;
+  const subject = raw.trim();
+  if (subject.length < 1 || subject.length > 512 || /[\0\r\n]/.test(subject)) {
+    throw new Error("provisioned cloud owner subject is invalid");
+  }
+  return subject;
+}
+
 /** Build account-binding config from the environment, or null when not
  *  configured (no secret and no public key → account-binding is off and the
  *  engine stays pairing-only). */
@@ -460,9 +696,21 @@ export function buildAccountAuthFromEnv(
       ? `${env.ZEROS_ACCOUNT_JWT_ISSUER.replace(/\/+$/, "")}/.well-known/jwks.json`
       : undefined);
   if (!hs256Secret && !publicKey && !jwksUrl) return null;
-  const skewRaw = env.ZEROS_ACCOUNT_JWT_SKEW
-    ? Number(env.ZEROS_ACCOUNT_JWT_SKEW)
-    : undefined;
+  const skewSource = env.ZEROS_ACCOUNT_JWT_SKEW?.trim();
+  let clockSkewSec: number | undefined;
+  if (skewSource) {
+    if (!/^(?:0|[1-9][0-9]{0,2})$/.test(skewSource)) {
+      throw new Error(
+        `account JWT clock skew must be an integer from 0 through ${MAX_CLOCK_SKEW_SEC} seconds`,
+      );
+    }
+    clockSkewSec = Number(skewSource);
+    if (clockSkewSec > MAX_CLOCK_SKEW_SEC) {
+      throw new Error(
+        `account JWT clock skew must be an integer from 0 through ${MAX_CLOCK_SKEW_SEC} seconds`,
+      );
+    }
+  }
   return {
     config: {
       hs256Secret,
@@ -476,7 +724,7 @@ export function buildAccountAuthFromEnv(
       // direction. Replace the sentinel only together with making aud required.
       audience: env.ZEROS_ACCOUNT_JWT_AUD || "authenticated",
       issuer: env.ZEROS_ACCOUNT_JWT_ISS || undefined,
-      clockSkewSec: Number.isFinite(skewRaw) ? skewRaw : undefined,
+      clockSkewSec,
     },
     required:
       env.ZEROS_REQUIRE_ACCOUNT === "1" || env.ZEROS_REQUIRE_ACCOUNT === "true",

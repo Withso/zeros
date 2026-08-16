@@ -14,11 +14,13 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "migrate": "tsx src/migrate.ts",
+    "audit:prod": "pnpm audit --prod --audit-level=high",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@daytona/api-client": "0.190.1",
     "@hono/node-server": "^2.1.0",
     "hono": "^4.13.0",
     "jose": "^6.0.0",

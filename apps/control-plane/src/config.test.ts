@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { generateKeyPairSync } from "node:crypto";
 
 import { loadConfig } from "./config.js";
 
@@ -19,6 +20,20 @@ function validEnv(): NodeJS.ProcessEnv {
     GITHUB_APP_SLUG: "zeros-test",
     GITHUB_OAUTH_CALLBACK_URL:
       "https://api.example.com/v1/github/oauth/callback",
+  };
+}
+
+function cloudEnv(): NodeJS.ProcessEnv {
+  const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
+    .privateKey.export({ type: "pkcs8", format: "pem" })
+    .toString();
+  return {
+    ...validEnv(),
+    GITHUB_APP_PRIVATE_KEY: privateKey,
+    CLOUD_WORKSPACES_ENABLED: "true",
+    DAYTONA_API_KEY: "daytona-api-key-for-control-plane-tests",
+    DAYTONA_SNAPSHOT_ID: "snap_immutable_123",
+    ZEROS_CLOUD_SOURCE_COMMIT: "a".repeat(40),
   };
 }
 
@@ -44,6 +59,18 @@ describe("GitHub backend configuration", () => {
           "https://preview.example.com/github/connected",
       }).github?.completionPageUrl,
     ).toBe("https://preview.example.com/github/connected");
+  });
+
+  it("accepts an optional backend-only RSA key for cloud installation tokens", () => {
+    const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048 })
+      .privateKey.export({ type: "pkcs8", format: "pem" })
+      .toString();
+    expect(
+      loadConfig({
+        ...validEnv(),
+        GITHUB_APP_PRIVATE_KEY: privateKey.replaceAll("\n", "\\n"),
+      }).github?.privateKey,
+    ).toBe(privateKey.trim());
   });
 
   // The regression this guards is a whole-service outage: loadConfig() runs at
@@ -275,6 +302,70 @@ describe("feedback backend configuration", () => {
     expect(feedback?.posthogProjectUrl).toBeNull();
     expect(error).toHaveBeenCalled();
     error.mockRestore();
+  });
+});
+
+describe("cloud workspace backend configuration", () => {
+  it("stays disabled unless the paid-resource gate is explicit", () => {
+    expect(
+      loadConfig({
+        ...validEnv(),
+        DAYTONA_API_KEY: "daytona-api-key-for-control-plane-tests",
+        DAYTONA_SNAPSHOT_ID: "snap_immutable_123",
+      }).cloudWorkspaces,
+    ).toBeNull();
+  });
+
+  it("loads one pinned Daytona provider contract behind the gate", () => {
+    expect(loadConfig(cloudEnv()).cloudWorkspaces).toEqual({
+      provider: "daytona",
+      apiKey: "daytona-api-key-for-control-plane-tests",
+      apiUrl: "https://app.daytona.io/api",
+      target: "eu",
+      snapshotId: "snap_immutable_123",
+      imageRef: "snap_immutable_123",
+      architecture: "linux/amd64",
+      cpuMillicores: 2_000,
+      memoryMiB: 4_096,
+      storageMiB: 20_480,
+      sourceCommit: "a".repeat(40),
+      operationTimeoutSeconds: 180,
+      autoArchiveMinutes: 10_080,
+      reconcileIntervalMs: 5_000,
+    });
+  });
+
+  it("fails boot when the explicit gate lacks provider or GitHub mint authority", () => {
+    expect(() =>
+      loadConfig({
+        ...validEnv(),
+        CLOUD_WORKSPACES_ENABLED: "true",
+      }),
+    ).toThrow(/DAYTONA_API_KEY/);
+
+    const env = cloudEnv();
+    delete env.GITHUB_APP_PRIVATE_KEY;
+    expect(() => loadConfig(env)).toThrow(/GITHUB_APP_PRIVATE_KEY/);
+
+    const wrongKey = generateKeyPairSync("ed25519").privateKey.export({
+      type: "pkcs8",
+      format: "pem",
+    });
+    expect(() =>
+      loadConfig({ ...cloudEnv(), GITHUB_APP_PRIVATE_KEY: String(wrongKey) }),
+    ).toThrow(/valid RSA private key/);
+  });
+
+  it("rejects credential-bearing provider URLs and ambiguous gate values", () => {
+    expect(() =>
+      loadConfig({
+        ...cloudEnv(),
+        DAYTONA_API_URL: "https://user:secret@app.daytona.io/api",
+      }),
+    ).toThrow(/DAYTONA_API_URL/);
+    expect(() =>
+      loadConfig({ ...validEnv(), CLOUD_WORKSPACES_ENABLED: "yes" }),
+    ).toThrow(/must be true or false/);
   });
 });
 

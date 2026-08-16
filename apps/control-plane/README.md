@@ -169,6 +169,39 @@ Webhooks are unnecessary until a webhook consumer exists. A partial or invalid
 configuration is logged and leaves the GitHub routes unavailable while the
 rest of the control plane remains healthy.
 
+## Gated cloud-workspace lifecycle
+
+Cloud workspace lifecycle is a disabled-by-default, pre-production surface.
+Setting a provider key does not enable it: `CLOUD_WORKSPACES_ENABLED=true`, a
+complete exact-pinned cloud block, and a valid GitHub App RSA private key are
+all required at boot. Each approved Organization additionally needs a quota row
+created under system authority; there is deliberately no permissive default.
+
+The authenticated Organization surface is:
+
+| Route | Purpose |
+| --- | --- |
+| `GET/POST /v1/organizations/:id/cloud-workspaces` | List authorized workspaces or request an idempotent create |
+| `GET /v1/organizations/:id/cloud-workspaces/:workspace` | Read one team-authorized workspace |
+| `POST .../:workspace/stop` | Request a durable stop intent |
+| `POST .../:workspace/wake` | Request wake after rechecking current eligibility and quota |
+| `POST .../:workspace/archive` | Request stop-plus-archive reconciliation |
+| `DELETE .../:workspace` | Revoke endpoint grants, then request verified deletion |
+
+Mutating requests require an `Idempotency-Key`; replaying the same key and
+semantic request returns the original workspace/intent, while reusing it for
+different parameters returns `409`. Public documents contain the stable Zeros
+workspace id, never Daytona's resource id. PostgreSQL records the immutable
+image, architecture, source commit, and resource allocation per generation.
+The provider reconciler uses leases, observes before mutating, recovers lost
+create responses, converges drift, and only deletes a managed true orphan after
+repeat observation plus a grace period.
+
+Provider creation currently queues a setup run and leaves the workspace in
+`setting_up`. Until the Phase 2 non-root setup worker and workspace-bound engine
+grant issuer exist, this API is not a shipping remote workspace experience.
+Configuration and safe defaults are documented in [`.env.example`](.env.example).
+
 ## Optional feedback destinations
 
 The desktop posts authenticated reports to `POST /v1/feedback` on this service.
@@ -226,6 +259,7 @@ pnpm check:control-plane-migrations
 pnpm test:control-plane
 pnpm --dir apps/control-plane typecheck
 pnpm --dir apps/control-plane build
+pnpm --dir apps/control-plane audit:prod
 pnpm check:secrets
 pnpm check:licenses
 ```

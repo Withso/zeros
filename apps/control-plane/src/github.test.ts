@@ -1,4 +1,9 @@
-import { randomUUID } from "node:crypto";
+import {
+  createPublicKey,
+  generateKeyPairSync,
+  randomUUID,
+  verify,
+} from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Hono } from "hono";
 import pg from "pg";
@@ -12,6 +17,7 @@ import {
   createGithubRoutes,
   createGithubUnconfiguredRoutes,
   GITHUB_HANDOFF_TTL_MS,
+  createGithubAppJwt,
   githubCompletionUrl,
   resolveGithubOauthFlowKind,
   type GithubRouteDependencies,
@@ -144,6 +150,9 @@ const githubConfig: GithubBackendConfig = {
   appId: 123456,
   clientId: "Iv1.test-client",
   clientSecret: "test-client-secret",
+  privateKey: generateKeyPairSync("rsa", { modulusLength: 2048 })
+    .privateKey.export({ type: "pkcs8", format: "pem" })
+    .toString(),
   refreshBindingSecret: "test-binding-secret",
   appSlug: "zeros-test",
   oauthCallbackUrl: "https://api.example.test/v1/github/oauth/callback",
@@ -153,6 +162,31 @@ const githubConfig: GithubBackendConfig = {
   variantKey: "github.com",
   desktopSchemes: ["zeros", "zeros-alpha", "zeros-beta", "zeros-dev"],
 };
+
+describe("GitHub App installation JWT", () => {
+  it("uses a short-lived RS256 app identity without embedding secrets", () => {
+    const now = 1_800_000_000_000;
+    const token = createGithubAppJwt(githubConfig, now);
+    const [header, payload, signature] = token.split(".");
+    expect(JSON.parse(Buffer.from(header, "base64url").toString("utf8"))).toEqual(
+      { alg: "RS256", typ: "JWT" },
+    );
+    expect(JSON.parse(Buffer.from(payload, "base64url").toString("utf8"))).toEqual({
+      iat: Math.floor(now / 1_000) - 60,
+      exp: Math.floor(now / 1_000) + 9 * 60,
+      iss: githubConfig.clientId,
+    });
+    expect(
+      verify(
+        "RSA-SHA256",
+        Buffer.from(`${header}.${payload}`),
+        createPublicKey(githubConfig.privateKey!),
+        Buffer.from(signature, "base64url"),
+      ),
+    ).toBe(true);
+    expect(token).not.toContain(githubConfig.clientSecret);
+  });
+});
 
 type FetchCall = { url: string; init?: RequestInit };
 
@@ -208,6 +242,17 @@ function githubFetch(calls: FetchCall[]): typeof fetch {
     }
     if (url.includes("/user/installations/987654/repositories")) {
       return Response.json({ total_count: 3, repositories: [] });
+    }
+    if (url.endsWith("/app/installations/987654/access_tokens")) {
+      return Response.json(
+        {
+          token: "ghs_cloud-installation-working-copy",
+          expires_at: new Date(Date.now() + 60 * 60_000).toISOString(),
+          permissions: { contents: "write", metadata: "read" },
+          repository_selection: "selected",
+        },
+        { status: 201 },
+      );
     }
     if (
       url.includes("/applications/") &&
@@ -568,6 +613,48 @@ dbDescribe("GitHub App OAuth handoff", () => {
        WHERE owner_user_id = $1`,
       [userA.id],
     );
+  });
+
+  it("mints a short-lived, repository-scoped cloud installation token for its owner only", async () => {
+    const before = calls.length;
+    const response = await appA.request(
+      "/v1/github/installations/987654/token",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repositories: ["zeros"] }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      method: "github-app",
+      accessToken: "ghs_cloud-installation-working-copy",
+      gitHost: "github.com",
+      gitHttpUsername: "x-access-token",
+      variantKey: "github.com",
+      ownerSubjectSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    const mint = calls.slice(before).find((call) =>
+      call.url.endsWith("/app/installations/987654/access_tokens"),
+    );
+    expect(mint?.init?.headers).toMatchObject({
+      accept: "application/vnd.github+json",
+      "x-github-api-version": "2026-03-10",
+    });
+    expect(String((mint?.init?.headers as Record<string, string>).authorization)).toMatch(
+      /^Bearer eyJ/,
+    );
+    expect(JSON.parse(String(mint?.init?.body))).toEqual({
+      repositories: ["zeros"],
+    });
+
+    const foreignCalls = calls.length;
+    const foreign = await appB.request(
+      "/v1/github/installations/987654/token",
+      { method: "POST" },
+    );
+    expect(foreign.status).toBe(404);
+    expect(calls).toHaveLength(foreignCalls);
   });
 
   // Enumerating installations costs up to 60 outbound GitHub calls. Doing that

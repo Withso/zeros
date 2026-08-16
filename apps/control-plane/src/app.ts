@@ -56,7 +56,7 @@ export function createApp(
     cors({
       origin: "*",
       allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-      allowHeaders: ["authorization", "content-type"],
+      allowHeaders: ["authorization", "content-type", "idempotency-key"],
       maxAge: 86400,
     }),
   );
@@ -135,7 +135,7 @@ export function createApp(
   app.use("/v1/feedback", feedbackBodyLimit);
 
   app.route("/", createFeedbackRoutes(config.feedback));
-  app.route("/", createRoutes(pool, emailConfig));
+  app.route("/", createRoutes(pool, emailConfig, config.cloudWorkspaces));
   if (config.github) app.route("/", createGithubRoutes(pool, config.github));
 
   app.onError((err, c) => {

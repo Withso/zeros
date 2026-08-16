@@ -21,6 +21,15 @@ export function normalizeOrganizationSummary(
   value: OrganizationSummaryWire,
 ): OrganizationSummary {
   const isPersonal = value.isPersonal === true;
+  // A pre-hierarchy server returns none of the additive ownership fields. Its
+  // one flat Team historically owned the same local collection now represented
+  // by null organization ids, so the renderer must keep those rows visible
+  // until a hierarchy-aware snapshot can normalize to Personal.
+  const legacyFlat =
+    value.isPersonal == null &&
+    value.defaultTeamId == null &&
+    value.workspaceCapabilities == null &&
+    value.teamCapabilities == null;
   return {
     id: value.id,
     slug: value.slug,
@@ -28,6 +37,7 @@ export function normalizeOrganizationSummary(
     logo: value.logo ?? null,
     role: value.role,
     isPersonal,
+    ...(legacyFlat ? { legacyFlat: true } : {}),
     defaultTeamId: value.defaultTeamId ?? null,
     workspaceCapabilities: {
       local: true,
