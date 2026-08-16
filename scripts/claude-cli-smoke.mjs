@@ -59,6 +59,8 @@ const LAUNCH_ERR_RX =
 /** Errors that mean we DID reach the server and it said no. That is a pass. */
 const AUTH_ERR_RX =
   /401|403|invalid.{0,20}api.?key|authentication|unauthorized|invalid.{0,20}token|credit balance|OAuth/i;
+/** `api_retry` statuses that are themselves proof the server saw us and said no. */
+const AUTH_RETRY_STATUSES = new Set([401, 403]);
 
 function die(msg, detail) {
   console.error(`\n✗ FAIL — ${msg}`);
@@ -137,13 +139,23 @@ process.env.CLAUDE_CONFIG_DIR = path.join(fakeHome, ".claude");
 process.env.ANTHROPIC_API_KEY = "sk-ant-xxxxxxxxxxxxxxxxxxxxxxxx";
 delete process.env.ANTHROPIC_AUTH_TOKEN;
 delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+// Claude Code treats a 401 as retryable: ten attempts with exponential backoff
+// (~0.5s doubling past 35s) push the rejection this gate asserts on well beyond
+// the 90s budget, and the timeout then reports a handshake failure that never
+// happened. Retrying auth is right for a real session and wrong for a gate whose
+// expected outcome IS the rejection, so make the first 401 terminal.
+process.env.CLAUDE_CODE_MAX_RETRIES = "0";
 
 console.log(`▸ home:     ${fakeHome} (empty — no ambient credentials)\n`);
 
 const { query } = await import("@anthropic-ai/claude-agent-sdk");
 
 const abort = new AbortController();
-const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
+let timedOut = false;
+const timer = setTimeout(() => {
+  timedOut = true;
+  abort.abort();
+}, TIMEOUT_MS);
 
 // Token safety is MEASURED, not assumed. The CLI reports an auth rejection by
 // emitting an `assistant` message with `model: "<synthetic>"` — a local
@@ -154,6 +166,7 @@ const timer = setTimeout(() => abort.abort(), TIMEOUT_MS);
 let realInference = false;
 let spend = { cost: 0, outputTokens: 0 };
 let failure = null;
+let authRetry = null;
 try {
   const q = query({
     prompt: "reply with the single word OK",
@@ -165,6 +178,20 @@ try {
     },
   });
   for await (const msg of q) {
+    // Belt and braces for CLAUDE_CODE_MAX_RETRIES: if a future CLI stops
+    // honouring it, the retry stream still carries everything this gate asserts —
+    // the SDK drove the CLI far enough to reach the server and be rejected. Take
+    // that as the answer and stop, rather than idling out the budget and blaming
+    // the handshake for a rejection that plainly arrived.
+    if (
+      msg?.type === "system" &&
+      msg.subtype === "api_retry" &&
+      AUTH_RETRY_STATUSES.has(msg.error_status)
+    ) {
+      authRetry = `${msg.error_status} ${msg.error ?? "(no error text)"}`;
+      abort.abort();
+      continue;
+    }
     if (msg?.type === "assistant" && msg.message?.model && msg.message.model !== "<synthetic>") {
       realInference = true;
     }
@@ -182,6 +209,9 @@ try {
   failure = err?.message ?? String(err);
 }
 clearTimeout(timer);
+// An observed rejection outranks the "aborted by user" message our own abort
+// produced: the retry line is what actually happened, the abort is how we left.
+if (authRetry) failure = authRetry;
 if (spend.cost > 0 || spend.outputTokens > 0) realInference = true;
 
 for (const dir of [fakeHome, cwd]) {
@@ -203,7 +233,7 @@ if (realInference) {
 if (!failure) {
   die("the query produced neither an error nor assistant output — the SDK↔CLI handshake did not complete.");
 }
-if (abort.signal.aborted) {
+if (timedOut) {
   die(
     `no response within ${TIMEOUT_MS}ms — the CLI spawned but never answered the SDK. ` +
       "That is a handshake failure, not an auth rejection.",
