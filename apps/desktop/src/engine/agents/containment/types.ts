@@ -104,6 +104,9 @@ export interface RepoTaskBoundaryRequest {
   /** Complete task environment, used only to discover exact local services and
    * read-only toolchain roots before HOME/network isolation is compiled. */
   env?: Readonly<Record<string, string>>;
+  /** PATH/login-shell discovery uses the normal contained filesystem/network
+   * baseline but must not provision local-service or container capabilities. */
+  serviceCapabilities?: "full" | "none";
 }
 
 export type RepoTaskBoundaryFactory = (

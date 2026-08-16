@@ -406,6 +406,50 @@ async function bridge(socketPath, sessionKey) {
   });
 }
 
+/** Carry one Mac-side proxy connection over OrbStack's signed command channel.
+ * Isolated machines intentionally do not promise a stable Mac-routable IP when
+ * another isolated machine is created or removed. The command channel remains
+ * bound to the exact machine name selected by the signed `orb` client. */
+async function relay(rawPort) {
+  if (!/^[1-9]\d{0,4}$/.test(rawPort)) {
+    fail("private bridge relay port is invalid");
+  }
+  const port = Number(rawPort);
+  if (!Number.isInteger(port) || port > 65_535) {
+    fail("private bridge relay port is invalid");
+  }
+  const upstream = connect({
+    host: "127.0.0.1",
+    port,
+    allowHalfOpen: true,
+  });
+  await new Promise((resolve, reject) => {
+    const failRelay = (error) => {
+      upstream.destroy();
+      reject(error);
+    };
+    upstream.once("error", failRelay);
+    process.stdin.once("error", failRelay);
+    process.stdout.once("error", failRelay);
+    upstream.once("connect", () => {
+      process.stdin.pipe(upstream);
+      upstream.pipe(process.stdout, { end: false });
+    });
+    upstream.once("end", () => {
+      // A Docker HTTP server may close its response half while the client
+      // keeps the request half open for connection reuse. Complete that
+      // half-close here so the relay exits and the Mac proxy can deliver EOF
+      // instead of leaving both endpoints waiting on one another forever.
+      process.stdin.unpipe(upstream);
+      process.stdin.pause();
+      upstream.end();
+    });
+    upstream.once("close", (hadError) => {
+      if (!hadError) resolve();
+    });
+  });
+}
+
 function workerArguments(descriptor, workerState, usernsState, usernsRuntime) {
   const mountDestinations = [
     ...descriptor.writeRoots,
@@ -804,6 +848,10 @@ async function main() {
   const args = process.argv.slice(2);
   if (args.length === 3 && args[0] === "--bridge") {
     await bridge(args[1], args[2]);
+    return;
+  }
+  if (args.length === 2 && args[0] === "--relay") {
+    await relay(args[1]);
     return;
   }
   if (args.length === 2 && args[0] === "--descriptor") {

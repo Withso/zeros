@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash, createHmac } from "node:crypto";
+import { EventEmitter } from "node:events";
 import {
   chmod,
   mkdir,
@@ -13,6 +14,7 @@ import {
 import { createServer, connect, type Server, type Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { PassThrough } from "node:stream";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
@@ -45,6 +47,7 @@ describe("macOS OrbStack container worker", () => {
   let worker: string;
   let internal: Server | null;
   let internalPeers: Set<Socket>;
+  let forceRelayCleanup: Array<() => void>;
 
   beforeEach(async () => {
     root = await realpath(
@@ -68,9 +71,11 @@ describe("macOS OrbStack container worker", () => {
     await chmod(orb, 0o700);
     internal = null;
     internalPeers = new Set();
+    forceRelayCleanup = [];
   });
 
   afterEach(async () => {
+    for (const cleanup of forceRelayCleanup) cleanup();
     if (internal) {
       for (const peer of internalPeers) peer.destroy();
       await new Promise<void>((resolve) => internal!.close(() => resolve()));
@@ -82,6 +87,7 @@ describe("macOS OrbStack container worker", () => {
     name: string,
     mounts: readonly string[],
     state = "running",
+    machineAddress = "::1",
   ) {
     return {
       record: {
@@ -106,10 +112,9 @@ describe("macOS OrbStack container worker", () => {
           disk_limit_bytes: 16 * 1024 * 1024 * 1024,
         },
       },
-      // IPv6 loopback models OrbStack's machine-private IP in unit tests. The
-      // controller must connect to this attested address; nothing is listening
-      // on the same port at the hard-coded IPv4 loopback target used before.
-      ip6: "::1",
+      ...(machineAddress.includes(":")
+        ? { ip6: machineAddress }
+        : { ip4: machineAddress }),
     };
   }
 
@@ -122,18 +127,28 @@ describe("macOS OrbStack container worker", () => {
       createRpcFailureAfterCreation?: boolean;
       infoMissingFailures?: number;
       initialMachineState?: "stopped";
+      machineAddress?: string;
       orbVersion?: string;
+      relayExitsBeforeStdoutDrain?: string;
+      relayProbeHangs?: boolean;
+      stubbornProbeRelay?: boolean;
+      stubbornRelayAfterProbe?: boolean;
       runtimeMarker?: string;
       userReadyFailures?: number;
       workerExitBeforeReady?: boolean;
       workerSpawnFailure?: boolean;
     } = {},
-  ): OrbStackCommandRunner & { calls: string[][] } {
+  ): OrbStackCommandRunner & {
+    calls: string[][];
+    relayKillSignals: NodeJS.Signals[];
+  } {
     const calls: string[][] = [];
+    const relayKillSignals: NodeJS.Signals[] = [];
     let cloudInitChecks = 0;
     let infoChecks = 0;
     let machineDeleted = false;
     let machineStarted = behavior.initialMachineState !== "stopped";
+    let relaySpawns = 0;
     let userReadyChecks = 0;
     const assetByDestination = new Map([
       ["/opt/zeros-zsr/zsr-orbstack-container-host.mjs", host],
@@ -141,6 +156,7 @@ describe("macOS OrbStack container worker", () => {
     ]);
     return {
       calls,
+      relayKillSignals,
       run: async (args, options = {}) => {
         calls.push([...args]);
         if (args[0] === "status") {
@@ -173,7 +189,16 @@ describe("macOS OrbStack container worker", () => {
           return {
             code: 0,
             stdout: JSON.stringify(
-              machineDeleted ? [] : [machineInfo(machineName, mounts)],
+              machineDeleted
+                ? []
+                : [
+                    machineInfo(
+                      machineName,
+                      mounts,
+                      "running",
+                      behavior.machineAddress,
+                    ),
+                  ],
             ),
             stderr: "",
           };
@@ -190,6 +215,7 @@ describe("macOS OrbStack container worker", () => {
                 machineName,
                 mounts,
                 machineStarted ? "running" : "stopped",
+                behavior.machineAddress,
               ),
             ),
             stderr: "",
@@ -257,6 +283,139 @@ describe("macOS OrbStack container worker", () => {
       },
       spawn: (args): ChildProcess => {
         calls.push([...args]);
+        if (args.includes("--relay")) {
+          relaySpawns += 1;
+          if (behavior.stubbornProbeRelay && relaySpawns === 1) {
+            const stdin = new PassThrough();
+            const stdout = new PassThrough();
+            const stderr = new PassThrough();
+            const relay = new EventEmitter() as unknown as ChildProcess;
+            const exitCode: number | null = null;
+            let signalCode: NodeJS.Signals | null = null;
+            Object.defineProperties(relay, {
+              exitCode: { configurable: true, get: () => exitCode },
+              signalCode: { configurable: true, get: () => signalCode },
+              stdin: { configurable: true, value: stdin },
+              stdout: { configurable: true, value: stdout },
+              stderr: { configurable: true, value: stderr },
+            });
+            Object.defineProperty(relay, "kill", {
+              configurable: true,
+              value: (signal: NodeJS.Signals = "SIGTERM") => {
+                relayKillSignals.push(signal);
+                if (signal === "SIGKILL" && signalCode === null) {
+                  signalCode = signal;
+                  relay.emit("exit", null, signal);
+                  stdout.end();
+                  relay.emit("close", null, signal);
+                }
+                return true;
+              },
+            });
+            return relay;
+          }
+          if (behavior.relayExitsBeforeStdoutDrain) {
+            const stdin = new PassThrough();
+            const stdout = new PassThrough();
+            const stderr = new PassThrough();
+            const relay = new EventEmitter() as unknown as ChildProcess;
+            let exitCode: number | null = null;
+            let signalCode: NodeJS.Signals | null = null;
+            Object.defineProperties(relay, {
+              exitCode: { configurable: true, get: () => exitCode },
+              signalCode: { configurable: true, get: () => signalCode },
+              stdin: { configurable: true, value: stdin },
+              stdout: { configurable: true, value: stdout },
+              stderr: { configurable: true, value: stderr },
+            });
+            Object.defineProperty(relay, "kill", {
+              configurable: true,
+              value: (signal: NodeJS.Signals = "SIGTERM") => {
+                if (exitCode === null && signalCode === null) {
+                  signalCode = signal;
+                  relay.emit("exit", null, signal);
+                  stdout.end();
+                  relay.emit("close", null, signal);
+                }
+                return true;
+              },
+            });
+            let request = "";
+            stdin.setEncoding("utf8");
+            stdin.on("data", (chunk) => {
+              request += chunk;
+            });
+            stdin.once("finish", () => {
+              const challenge =
+                /\/_zeros_zsr\/attest\/([a-f0-9]{64})/.exec(request)?.[1];
+              if (!challenge) {
+                signalCode = "SIGABRT";
+                relay.emit("exit", null, signalCode);
+                stdout.end();
+                relay.emit("close", null, signalCode);
+                return;
+              }
+              const proof = createHmac(
+                "sha256",
+                behavior.relayExitsBeforeStdoutDrain!,
+              )
+                .update(challenge)
+                .digest("hex");
+              const response =
+                `HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n${proof}`;
+              exitCode = 0;
+              // Node documents that `exit` may precede stdio drain. Model that
+              // ordering deterministically so readiness never validates an
+              // incomplete response.
+              relay.emit("exit", 0, null);
+              setImmediate(() => {
+                stdout.end(response);
+                relay.emit("close", 0, null);
+              });
+            });
+            return relay;
+          }
+          if (behavior.relayProbeHangs) {
+            return spawn(
+              process.execPath,
+              ["-e", "process.stdin.resume(); setInterval(()=>{},1000)"],
+              { stdio: ["pipe", "pipe", "pipe"] },
+            );
+          }
+          if (behavior.stubbornRelayAfterProbe && relaySpawns > 1) {
+            const relay = spawn(
+              process.execPath,
+              ["-e", "process.stdin.resume(); setInterval(()=>{},1000)"],
+              { stdio: ["pipe", "pipe", "pipe"] },
+            );
+            const forceKill = relay.kill.bind(relay);
+            Object.defineProperty(relay, "kill", {
+              configurable: true,
+              value: () => true,
+            });
+            forceRelayCleanup.push(() => {
+              Object.defineProperty(relay, "kill", {
+                configurable: true,
+                value: forceKill,
+              });
+              forceKill("SIGKILL");
+            });
+            return relay;
+          }
+          return spawn(
+            process.execPath,
+            [
+              "-e",
+              `const {connect}=require("node:net");
+const peer=connect({host:"127.0.0.1",port:Number(process.argv[1]),allowHalfOpen:true});
+peer.once("connect",()=>{process.stdin.pipe(peer);peer.pipe(process.stdout,{end:false});});
+peer.once("close",()=>process.exit(0));
+peer.once("error",()=>process.exit(125));`,
+              String(internalPort),
+            ],
+            { stdio: ["pipe", "pipe", "pipe"] },
+          );
+        }
         if (behavior.workerSpawnFailure) {
           throw new Error("synthetic OrbStack exec spawn failure");
         }
@@ -308,7 +467,7 @@ describe("macOS OrbStack container worker", () => {
     });
     await new Promise<void>((resolve, reject) => {
       internal!.once("error", reject);
-      internal!.listen(0, "::1", resolve);
+      internal!.listen(0, "127.0.0.1", resolve);
     });
     const address = internal.address();
     if (!address || typeof address === "string") throw new Error("no port");
@@ -415,6 +574,432 @@ describe("macOS OrbStack container worker", () => {
     );
   });
 
+  it("refuses pre-start proxy connections without emitting an engine error", async () => {
+    const mounts = [workspace, session].sort();
+    const machineName = orbStackMachineName("pre-start-proxy", mounts);
+    const runner = fakeRunner(machineName, mounts, 1);
+    const controller = new MacosOrbStackContainerWorker({
+      orbPath: orb,
+      cloudInitPath: cloudInit,
+      hostScriptPath: host,
+      containerWorkerPath: worker,
+      orbAttestor: (candidate) => candidate,
+      runner,
+    });
+    const lease = await controller.reserve({
+      executionId: "pre-start-proxy",
+      workspaceRoot: workspace,
+      sessionRoot: session,
+    });
+    const peer = connect({ host: "127.0.0.1", port: lease.hostPort });
+    peer.on("error", () => undefined);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(
+          () => reject(new Error("pre-start proxy connection stayed open")),
+          1_000,
+        );
+        peer.once("close", () => {
+          clearTimeout(timeout);
+          resolve();
+        });
+      });
+    } finally {
+      peer.destroy();
+      await lease.stopAndProve();
+    }
+  });
+
+  it("uses an exact-HMAC signed-CLI relay when the private machine address cannot reply", async () => {
+    const sessionKey = "d".repeat(32);
+    internal = createServer({ allowHalfOpen: true }, (peer) => {
+      internalPeers.add(peer);
+      peer.once("close", () => internalPeers.delete(peer));
+      let request = "";
+      peer.setEncoding("utf8");
+      peer.on("data", (chunk) => {
+        request += chunk;
+      });
+      peer.once("end", () => {
+        const attestation =
+          /^GET \/_zeros_zsr\/attest\/([a-f0-9]{64}) HTTP\/1\.[01]/.exec(
+            request,
+          );
+        if (attestation) {
+          const proof = createHmac("sha256", sessionKey)
+            .update(attestation[1])
+            .digest("hex");
+          peer.end(`HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n${proof}`);
+          return;
+        }
+        peer.end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      internal!.once("error", reject);
+      internal!.listen(0, "127.0.0.1", resolve);
+    });
+    const address = internal.address();
+    if (!address || typeof address === "string") throw new Error("no port");
+
+    const mounts = [workspace, session].sort();
+    const machineName = orbStackMachineName("localhost-forward", mounts);
+    const runner = fakeRunner(machineName, mounts, address.port, {
+      machineAddress: "127.0.0.2",
+    });
+    const controller = new MacosOrbStackContainerWorker({
+      orbPath: orb,
+      cloudInitPath: cloudInit,
+      hostScriptPath: host,
+      containerWorkerPath: worker,
+      orbAttestor: (candidate) => candidate,
+      runner,
+      forwardedBridgeTimeoutMs: 100,
+      sessionKeyFactory: () => sessionKey,
+    });
+    const lease = await controller.reserve({
+      executionId: "localhost-forward",
+      workspaceRoot: workspace,
+      sessionRoot: session,
+    });
+
+    try {
+      await expect(
+        lease.start({
+          generation: generation("localhostforwardgeneration"),
+          protectedRoots: [path.join(workspace, "Zeros Design")],
+          gitProjections: [],
+        }),
+      ).resolves.toBeUndefined();
+
+      const response = await new Promise<string>((resolve, reject) => {
+        const peer = connect({ host: "127.0.0.1", port: lease.hostPort });
+        let value = "";
+        peer.setEncoding("utf8");
+        peer.once("connect", () => peer.end("GET /_ping HTTP/1.1\r\n\r\n"));
+        peer.on("data", (chunk) => {
+          value += chunk;
+        });
+        peer.once("end", () => resolve(value));
+        peer.once("error", reject);
+      });
+      expect(response).toMatch(/\r\n\r\nOK$/);
+      expect(runner.calls.some((args) => args.includes("--relay"))).toBe(
+        true,
+      );
+    } finally {
+      await lease.stopAndProve();
+    }
+  });
+
+  it("bounds relay admission per lease", async () => {
+    const sessionKey = "e".repeat(32);
+    internal = createServer({ allowHalfOpen: true }, (peer) => {
+      internalPeers.add(peer);
+      peer.once("close", () => internalPeers.delete(peer));
+      let request = "";
+      peer.setEncoding("utf8");
+      peer.on("data", (chunk) => {
+        request += chunk;
+      });
+      peer.once("end", () => {
+        const attestation =
+          /^GET \/_zeros_zsr\/attest\/([a-f0-9]{64}) HTTP\/1\.[01]/.exec(
+            request,
+          );
+        if (attestation) {
+          const proof = createHmac("sha256", sessionKey)
+            .update(attestation[1])
+            .digest("hex");
+          peer.end(`HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n${proof}`);
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      internal!.once("error", reject);
+      internal!.listen(0, "127.0.0.1", resolve);
+    });
+    const address = internal.address();
+    if (!address || typeof address === "string") throw new Error("no port");
+
+    const mounts = [workspace, session].sort();
+    const machineName = orbStackMachineName("relay-cap", mounts);
+    const runner = fakeRunner(machineName, mounts, address.port);
+    const controller = new MacosOrbStackContainerWorker({
+      orbPath: orb,
+      cloudInitPath: cloudInit,
+      hostScriptPath: host,
+      containerWorkerPath: worker,
+      orbAttestor: (candidate) => candidate,
+      runner,
+      forwardedBridgeTimeoutMs: 100,
+      maxActiveRelays: 1,
+      sessionKeyFactory: () => sessionKey,
+    });
+    const lease = await controller.reserve({
+      executionId: "relay-cap",
+      workspaceRoot: workspace,
+      sessionRoot: session,
+    });
+
+    let first: Socket | null = null;
+    let second: Socket | null = null;
+    try {
+      await lease.start({
+        generation: generation("relaycapgeneration123456"),
+        protectedRoots: [path.join(workspace, "Zeros Design")],
+        gitProjections: [],
+      });
+      const relayCallsBeforeConnections = runner.calls.filter((args) =>
+        args.includes("--relay"),
+      ).length;
+
+      first = connect({ host: "127.0.0.1", port: lease.hostPort });
+      first.on("error", () => undefined);
+      const firstRelayDeadline = Date.now() + 1_000;
+      while (
+        runner.calls.filter((args) => args.includes("--relay")).length <
+        relayCallsBeforeConnections + 1
+      ) {
+        if (Date.now() >= firstRelayDeadline) {
+          throw new Error("first relay was not admitted");
+        }
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      }
+      second = connect({ host: "127.0.0.1", port: lease.hostPort });
+      second.on("error", () => undefined);
+      const secondClosed = await Promise.race([
+        new Promise<boolean>((resolve) =>
+          second!.once("close", () => resolve(true)),
+        ),
+        new Promise<boolean>((resolve) =>
+          setTimeout(() => resolve(second?.destroyed ?? true), 200),
+        ),
+      ]);
+
+      expect(secondClosed).toBe(true);
+      expect(
+        runner.calls.filter((args) => args.includes("--relay")),
+      ).toHaveLength(relayCallsBeforeConnections + 1);
+    } finally {
+      first?.destroy();
+      second?.destroy();
+      await lease.stopAndProve();
+    }
+  });
+
+  it("bounds an unreachable relay probe by the forwarded-bridge deadline", async () => {
+    const mounts = [workspace, session].sort();
+    const machineName = orbStackMachineName("relay-deadline", mounts);
+    const runner = fakeRunner(machineName, mounts, 1, {
+      relayProbeHangs: true,
+    });
+    const controller = new MacosOrbStackContainerWorker({
+      orbPath: orb,
+      cloudInitPath: cloudInit,
+      hostScriptPath: host,
+      containerWorkerPath: worker,
+      orbAttestor: (candidate) => candidate,
+      runner,
+      forwardedBridgeTimeoutMs: 50,
+    });
+    const lease = await controller.reserve({
+      executionId: "relay-deadline",
+      workspaceRoot: workspace,
+      sessionRoot: session,
+    });
+
+    const startedAt = Date.now();
+    await expect(
+      lease.start({
+        generation: generation("relaydeadlinegeneration12"),
+        protectedRoots: [path.join(workspace, "Zeros Design")],
+        gitProjections: [],
+      }),
+    ).rejects.toMatchObject({
+      name: MacosContainerWorkerUnavailableError.name,
+      reason: "private-runtime-unavailable",
+    });
+    expect(Date.now() - startedAt).toBeLessThan(750);
+  });
+
+  it("force-kills an attestation relay that ignores graceful teardown", async () => {
+    const mounts = [workspace, session].sort();
+    const machineName = orbStackMachineName("stubborn-probe", mounts);
+    const runner = fakeRunner(machineName, mounts, 1, {
+      stubbornProbeRelay: true,
+    });
+    const controller = new MacosOrbStackContainerWorker({
+      orbPath: orb,
+      cloudInitPath: cloudInit,
+      hostScriptPath: host,
+      containerWorkerPath: worker,
+      orbAttestor: (candidate) => candidate,
+      runner,
+      forwardedBridgeTimeoutMs: 50,
+    });
+    const lease = await controller.reserve({
+      executionId: "stubborn-probe",
+      workspaceRoot: workspace,
+      sessionRoot: session,
+    });
+
+    await expect(
+      lease.start({
+        generation: generation("stubbornprobegeneration12"),
+        protectedRoots: [path.join(workspace, "Zeros Design")],
+        gitProjections: [],
+      }),
+    ).rejects.toMatchObject({
+      name: MacosContainerWorkerUnavailableError.name,
+      reason: "private-runtime-unavailable",
+    });
+    expect(runner.relayKillSignals).toEqual(["SIGTERM", "SIGKILL"]);
+    expect(
+      runner.calls.some(
+        (args) => args[0] === "delete" && args.includes(machineName),
+      ),
+    ).toBe(true);
+  });
+
+  it("waits for relay stdout to drain after the CLI child exits", async () => {
+    const sessionKey = "1".repeat(32);
+    const mounts = [workspace, session].sort();
+    const machineName = orbStackMachineName("relay-stdout-drain", mounts);
+    const runner = fakeRunner(machineName, mounts, 1, {
+      relayExitsBeforeStdoutDrain: sessionKey,
+    });
+    const controller = new MacosOrbStackContainerWorker({
+      orbPath: orb,
+      cloudInitPath: cloudInit,
+      hostScriptPath: host,
+      containerWorkerPath: worker,
+      orbAttestor: (candidate) => candidate,
+      runner,
+      forwardedBridgeTimeoutMs: 100,
+      sessionKeyFactory: () => sessionKey,
+    });
+    const lease = await controller.reserve({
+      executionId: "relay-stdout-drain",
+      workspaceRoot: workspace,
+      sessionRoot: session,
+    });
+
+    try {
+      await expect(
+        lease.start({
+          generation: generation("relayoutputdrain12345678"),
+          protectedRoots: [path.join(workspace, "Zeros Design")],
+          gitProjections: [],
+        }),
+      ).resolves.toBeUndefined();
+    } finally {
+      await lease.stopAndProve();
+    }
+  });
+
+  it("deletes the private machine even when a relay survives forced teardown", async () => {
+    const sessionKey = "f".repeat(32);
+    internal = createServer({ allowHalfOpen: true }, (peer) => {
+      internalPeers.add(peer);
+      peer.once("close", () => internalPeers.delete(peer));
+      let request = "";
+      peer.setEncoding("utf8");
+      peer.on("data", (chunk) => {
+        request += chunk;
+      });
+      peer.once("end", () => {
+        const attestation =
+          /^GET \/_zeros_zsr\/attest\/([a-f0-9]{64}) HTTP\/1\.[01]/.exec(
+            request,
+          );
+        if (attestation) {
+          const proof = createHmac("sha256", sessionKey)
+            .update(attestation[1])
+            .digest("hex");
+          peer.end(`HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n${proof}`);
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      internal!.once("error", reject);
+      internal!.listen(0, "127.0.0.1", resolve);
+    });
+    const address = internal.address();
+    if (!address || typeof address === "string") throw new Error("no port");
+
+    const mounts = [workspace, session].sort();
+    const machineName = orbStackMachineName("stubborn-relay", mounts);
+    const runner = fakeRunner(machineName, mounts, address.port, {
+      stubbornRelayAfterProbe: true,
+    });
+    const controller = new MacosOrbStackContainerWorker({
+      orbPath: orb,
+      cloudInitPath: cloudInit,
+      hostScriptPath: host,
+      containerWorkerPath: worker,
+      orbAttestor: (candidate) => candidate,
+      runner,
+      forwardedBridgeTimeoutMs: 100,
+      sessionKeyFactory: () => sessionKey,
+      stopTimeoutMs: 10,
+    });
+    const lease = await controller.reserve({
+      executionId: "stubborn-relay",
+      workspaceRoot: workspace,
+      sessionRoot: session,
+    });
+    await lease.start({
+      generation: generation("stubbornrelaygeneration12"),
+      protectedRoots: [path.join(workspace, "Zeros Design")],
+      gitProjections: [],
+    });
+    const probeRelays = runner.calls.filter((args) =>
+      args.includes("--relay"),
+    ).length;
+    const peer = connect({ host: "127.0.0.1", port: lease.hostPort });
+    peer.on("error", () => undefined);
+    const relayDeadline = Date.now() + 1_000;
+    while (
+      runner.calls.filter((args) => args.includes("--relay")).length <
+      probeRelays + 1
+    ) {
+      if (Date.now() >= relayDeadline) {
+        throw new Error("stubborn relay was not admitted");
+      }
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+
+    let outcome: "pending" | "resolved" | "rejected" = "pending";
+    let cleanupFailure: unknown;
+    const stopping = lease.stopAndProve().then(
+      () => {
+        outcome = "resolved";
+      },
+      (error: unknown) => {
+        outcome = "rejected";
+        cleanupFailure = error;
+      },
+    );
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    const deletedBeforeForcedRelayExit = runner.calls.some(
+      (args) => args[0] === "delete" && args.includes(machineName),
+    );
+    const outcomeBeforeForcedRelayExit = outcome;
+    for (const cleanup of forceRelayCleanup.splice(0)) cleanup();
+    peer.destroy();
+    await stopping;
+
+    expect(deletedBeforeForcedRelayExit).toBe(true);
+    expect(outcomeBeforeForcedRelayExit).toBe("rejected");
+    expect(cleanupFailure).toBeInstanceOf(AggregateError);
+    expect((cleanupFailure as Error).message).toMatch(/cleanup was not proven/);
+    expect(await readdir(session)).not.toContain(
+      ORBSTACK_MACHINE_RECOVERY_HOLD_FILE,
+    );
+  });
+
   it("rejects a loopback collision that only mimics Podman ping", async () => {
     internal = createServer({ allowHalfOpen: true }, (peer) => {
       internalPeers.add(peer);
@@ -423,7 +1008,7 @@ describe("macOS OrbStack container worker", () => {
     });
     await new Promise<void>((resolve, reject) => {
       internal!.once("error", reject);
-      internal!.listen(0, "::1", resolve);
+      internal!.listen(0, "127.0.0.1", resolve);
     });
     const address = internal.address();
     if (!address || typeof address === "string") throw new Error("no port");

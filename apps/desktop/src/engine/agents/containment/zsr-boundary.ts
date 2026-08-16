@@ -482,7 +482,15 @@ const result = {
   privateStateWrite: false,
   engineRootWriteDenied: false,
 };
-try { fs.writeFileSync(spec.codeFile, "ok\n", { flag: "wx" }); result.codeWrite = true; } catch {}
+try {
+  fs.writeFileSync(spec.codeFile, "ok\n", { flag: "wx" });
+  result.codeWrite = fs.readFileSync(spec.codeFile, "utf8") === "ok\n";
+  fs.unlinkSync(spec.codeFile);
+  result.codeWrite = result.codeWrite && !fs.existsSync(spec.codeFile);
+} catch {}
+finally {
+  try { fs.unlinkSync(spec.codeFile); } catch {}
+}
 try { fs.writeFileSync(spec.privateWriteFile, "private\n", { flag: "wx" }); result.privateStateWrite = true; } catch {}
 try { fs.writeFileSync(spec.engineWriteFile, "escaped\n", { flag: "wx" }); }
 catch { result.engineRootWriteDenied = true; }
@@ -2127,7 +2135,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     projections: readonly ShadowGitFilesystemProjection[],
   ): Promise<string[]> {
     const canaryRoot = await mkdtemp(
-      path.join(policy.document.cwd, ".zeros-zsr-admission-"),
+      path.join(policy.paths.scratch, "admission-"),
     );
     if (this.options.cloudWorker) {
       await chown(
@@ -2137,7 +2145,14 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       );
       await chmod(canaryRoot, 0o700);
     }
-    const codeFile = path.join(canaryRoot, "code-write");
+    // Keep the only workspace mutation shorter than a Git-status debounce:
+    // the untrusted canary creates, reads, and unlinks this exact code probe
+    // synchronously. Longer-lived aliases and process-domain coordination stay
+    // in engine-private scratch so they never surface as repository changes.
+    const codeFile = path.join(
+      policy.document.cwd,
+      `.zeros-zsr-code-write-${randomUUID()}`,
+    );
     const privateWriteFile = path.join(
       policy.paths.scratch,
       `.private-write-${randomUUID()}`,
@@ -2386,7 +2401,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         engineRootWriteDenied?: boolean;
       };
       const reasons: string[] = [];
-      if (!result.codeWrite || (await readFile(codeFile, "utf8")) !== "ok\n") {
+      if (!result.codeWrite || existsSync(codeFile)) {
         reasons.push("exact policy cannot write normal code territory");
       }
       if (
@@ -2509,6 +2524,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       throw error;
     } finally {
       await rm(canaryRoot, { recursive: true, force: true });
+      await rm(codeFile, { force: true });
     }
   }
 

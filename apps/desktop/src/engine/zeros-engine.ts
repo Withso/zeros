@@ -834,6 +834,7 @@ export class ZerosEngine {
           workspaceRoot: this.root,
           repoRoot: this.root,
           env,
+          serviceCapabilities: "none",
         });
         try {
           const child = await prepared.spawn({

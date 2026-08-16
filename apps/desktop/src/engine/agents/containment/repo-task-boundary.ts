@@ -58,9 +58,16 @@ export function createRepoTaskBoundaryFactory(
             workspaceRoot,
           }
         : undefined;
-    const localServices = deriveLoopbackServiceCapabilities(request.env);
-    const containerWorker = deriveContainerWorker(request.env);
-    const containerWorkflowExpected = expectsContainerWorkflow(request.env);
+    const includeServiceCapabilities = request.serviceCapabilities !== "none";
+    const localServices = includeServiceCapabilities
+      ? deriveLoopbackServiceCapabilities(request.env)
+      : [];
+    const containerWorker = includeServiceCapabilities
+      ? deriveContainerWorker(request.env)
+      : undefined;
+    const containerWorkflowExpected = includeServiceCapabilities
+      ? expectsContainerWorkflow(request.env)
+      : false;
     const additionalReadOnlyRoots = deriveToolchainReadRoots(request.env);
     const providerStateEnv = Object.fromEntries(
       [

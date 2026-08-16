@@ -5,6 +5,7 @@ import {
   mkdtemp,
   mkdir,
   readFile,
+  readdir,
   realpath,
   rm,
   stat,
@@ -85,12 +86,13 @@ class ZsrExecutionBoundary extends RuntimeZsrExecutionBoundary {
 }
 
 const PASSING_SUPERVISOR = String.raw`
-import { readFileSync, writeFileSync } from "node:fs";
+import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 const commandPath = process.argv[process.argv.indexOf("--command") + 1];
 const descriptor = JSON.parse(readFileSync(commandPath, "utf8"));
 if (descriptor.env.ZEROS_ADMISSION_SENTINEL) {
   const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));
   writeFileSync(spec.codeFile, "ok\n", { flag: "wx" });
+  unlinkSync(spec.codeFile);
   writeFileSync(spec.privateWriteFile, "private\n", { flag: "wx" });
   for (const projection of spec.gitProjections) {
     writeFileSync(
@@ -282,6 +284,68 @@ describe("ZSR execution boundary", () => {
       JSON.parse(await readFile(commandPath, "utf8")).env.ZEROS_LOCAL_WS_TOKEN,
     ).toBeUndefined();
     await prepared.stopAndProve();
+  });
+
+  it("keeps exact-admission support paths out of the Git worktree", async () => {
+    const design = path.join(workspace, "Zeros Design");
+    const witness = path.join(root, "admission-paths.json");
+    await mkdir(design, { recursive: true });
+    await writeFile(
+      supervisor,
+      PASSING_SUPERVISOR.replace(
+        'const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));',
+        `const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));
+  writeFileSync(${JSON.stringify(witness)}, JSON.stringify({
+    codeFile: spec.codeFile,
+    designAlias: spec.designAlias,
+    releaseFile: spec.processDomain?.releaseFile ?? null,
+  }));`,
+      ),
+      { mode: 0o700 },
+    );
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+    });
+
+    const prepared = await boundary.prepare({
+      executionId: "private-admission-support",
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      territory: {
+        agentRole: "code",
+        workspaceRoot: workspace,
+        designDirectory: design,
+        protectedDesignDirectories: [design],
+        writeCapabilities: {
+          workspace: "write",
+          deniedPaths: [design, path.join(workspace, ".git")],
+        },
+      },
+    });
+    try {
+      const paths = JSON.parse(await readFile(witness, "utf8")) as {
+        codeFile: string;
+        designAlias: string;
+        releaseFile: string | null;
+      };
+      expect(path.dirname(paths.codeFile)).toBe(workspace);
+      expect(path.relative(workspace, paths.designAlias)).toMatch(/^\.\./);
+      if (paths.releaseFile) {
+        expect(path.relative(workspace, paths.releaseFile)).toMatch(/^\.\./);
+      }
+      expect(await readdir(workspace)).not.toContainEqual(
+        expect.stringMatching(/^\.zeros-zsr-admission-/),
+      );
+      await expect(stat(paths.codeFile)).rejects.toMatchObject({
+        code: "ENOENT",
+      });
+    } finally {
+      await prepared.stopAndProve();
+    }
   });
 
   it("keeps Electron in Node mode inside the behavioral canary", async () => {

@@ -148,4 +148,95 @@ describe("ZSR OrbStack container host bridge", () => {
     expect(result.code).toBe(125);
     expect(result.stderr).toContain("absolute path");
   });
+
+  it("relays one exact control-channel stream to the guest bridge", async () => {
+    upstream = createServer({ allowHalfOpen: true }, (peer) => {
+      let request = "";
+      peer.setEncoding("utf8");
+      peer.on("data", (chunk) => {
+        request += chunk;
+      });
+      peer.once("end", () => {
+        peer.end(
+          `HTTP/1.1 200 OK\r\nContent-Length: ${Buffer.byteLength(request)}\r\n\r\n${request}`,
+        );
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream!.once("error", reject);
+      upstream!.listen(0, "127.0.0.1", resolve);
+    });
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("no port");
+
+    const relay = spawn(
+      process.execPath,
+      [HOST, "--relay", String(address.port)],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    const request = "GET /_ping HTTP/1.1\r\nHost: localhost\r\n\r\n";
+    let stdout = "";
+    let stderr = "";
+    relay.stdout.setEncoding("utf8");
+    relay.stderr.setEncoding("utf8");
+    relay.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    relay.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    relay.stdin.end(request);
+    const code = await new Promise<number | null>((resolve) =>
+      relay.once("exit", resolve),
+    );
+
+    expect(code, stderr).toBe(0);
+    expect(stdout).toBe(
+      `HTTP/1.1 200 OK\r\nContent-Length: ${Buffer.byteLength(request)}\r\n\r\n${request}`,
+    );
+  });
+
+  it("propagates an upstream half-close without waiting for client input to close", async () => {
+    upstream = createServer((peer) => {
+      peer.once("data", () => {
+        peer.end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      upstream!.once("error", reject);
+      upstream!.listen(0, "127.0.0.1", resolve);
+    });
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("no port");
+
+    const relay = spawn(
+      process.execPath,
+      [HOST, "--relay", String(address.port)],
+      { stdio: ["pipe", "pipe", "pipe"] },
+    );
+    let stdout = "";
+    relay.stdout.setEncoding("utf8");
+    relay.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    relay.stdin.write("GET /_ping HTTP/1.1\r\nHost: localhost\r\n\r\n");
+
+    try {
+      const outcome = await Promise.race([
+        new Promise<"exited">((resolve) =>
+          relay.once("exit", () => resolve("exited")),
+        ),
+        new Promise<"timed-out">((resolve) =>
+          setTimeout(() => resolve("timed-out"), 300),
+        ),
+      ]);
+      expect(outcome).toBe("exited");
+      expect(stdout).toBe("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
+    } finally {
+      relay.stdin.end();
+      if (relay.exitCode === null && relay.signalCode === null) {
+        relay.kill("SIGKILL");
+      }
+    }
+  });
 });
