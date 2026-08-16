@@ -41,4 +41,13 @@ describe("sanitizeAiTitle", () => {
     expect(sanitizeAiTitle("   \n  ")).toBeNull();
     expect(sanitizeAiTitle('"…"')).toBeNull();
   });
+
+  it("rejects provider diagnostics instead of naming the chat after them", () => {
+    expect(sanitizeAiTitle("Failed to authenticate")).toBeNull();
+    expect(sanitizeAiTitle("User authentication failed")).toBeNull();
+    expect(sanitizeAiTitle("Error: Unauthorized")).toBeNull();
+    expect(sanitizeAiTitle("Please sign in")).toBeNull();
+    expect(sanitizeAiTitle("Request timed out")).toBeNull();
+    expect(sanitizeAiTitle("Connection refused")).toBeNull();
+  });
 });

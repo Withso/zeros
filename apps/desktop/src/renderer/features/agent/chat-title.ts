@@ -41,6 +41,11 @@ const MAX_PROMPT_CHARS = 4_000;
  *  before its turn, so this is deliberately roomier than the UI feels. */
 const REQUEST_TIMEOUT_MS = 45_000;
 
+/** A provider can occasionally return its own failure text through a nominal
+ * success/result channel. Never persist that diagnostic as the chat title. */
+const PROVIDER_DIAGNOSTIC_TITLE_RX =
+  /^(?:error\b|fatal\b|failed\s+to\b|(?:user\s+)?authentication\s+(?:failed|error)\b|unauthori[sz]ed\b|please\s+(?:sign|log)\s+in\b|request\s+(?:failed|timed\s+out|timeout)\b|connection\s+(?:closed|failed|refused|reset)\b)/i;
+
 /** The model's reply is used as the tab title — enforce the 2–3 word
  *  contract defensively (small models occasionally add quotes, a trailing
  *  period, or a second line). Null = unusable reply, keep the snippet. */
@@ -48,6 +53,7 @@ export function sanitizeAiTitle(raw: string): string | null {
   let t = (raw.split("\n")[0] ?? "").trim();
   // Strip wrapping quotes/backticks and trailing sentence punctuation.
   t = t.replace(/^["'`“”‘’]+/, "").replace(/["'`“”‘’.!?:…]+$/, "").trim();
+  if (PROVIDER_DIAGNOSTIC_TITLE_RX.test(t)) return null;
   const words = t.split(/\s+/).filter(Boolean);
   if (words.length === 0) return null;
   // Clamp to 3 words; the rejoin also collapses internal whitespace.
