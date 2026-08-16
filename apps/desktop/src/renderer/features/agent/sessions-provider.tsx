@@ -88,6 +88,11 @@ import { requestUserSettingsSection } from "../settings/settings-navigation";
 import { shellOpenUrl } from "../../platform/app";
 import { externalUrlsForQuestionResponse } from "./question-external-actions";
 import {
+  AGENT_NEW_SESSION_TIMEOUT_MS,
+  AGENT_PREFLIGHT_TIMEOUT_MS,
+  shouldRetrySessionAdmission,
+} from "./session-admission-policy";
+import {
   getClaudeIdleTimeoutMinutes,
   isClaudeWakeupBeyondIdleTimeout,
 } from "./reliability-settings";
@@ -303,13 +308,10 @@ const HYDRATE_WINDOW = 200;
 // to keep its HMR boundary clean. Consumers import the constant
 // directly from `./sessions-store`.)
 
-/** User-visible ceiling for session creation. Three attempts with
- *  exponential backoff so transient flakes (cold-start lock, brief
- *  network hiccup, slow process spawn) don't immediately surface as
- *  "Session failed". 10s per attempt gives Claude Agent and Codex
- *  enough room for their cold newSession RPC. Retrying avoids surfacing a
- *  transient first-spawn failure that succeeds after the runtime settles. */
-const ENSURE_SESSION_ATTEMPT_TIMEOUT_MS = 10_000;
+/** Three attempts with exponential backoff for failures that prove the prior
+ *  request is no longer running (transport replacement or an expired durable
+ *  binding). Admission timeouts deliberately do not retry; see
+ *  session-admission-policy.ts. */
 const ENSURE_SESSION_ATTEMPTS = 3;
 const ENSURE_SESSION_BACKOFF_MS = [0, 800, 2_000];
 
@@ -1397,7 +1399,7 @@ export function AgentSessionsProvider({
               workspaceId: spawnWorkspaceId ?? undefined,
               cliBinary: cliBinaryOverride,
             },
-            ENSURE_SESSION_ATTEMPT_TIMEOUT_MS,
+            AGENT_PREFLIGHT_TIMEOUT_MS,
           );
           if (preflight.type === "AGENT_ERROR") return preflight;
           getStore().patchSession(chatId, { boundary: preflight.status });
@@ -1438,15 +1440,16 @@ export function AgentSessionsProvider({
               : undefined;
           if (bindCancelled()) return null;
 
+          let timeout: number | undefined;
           const timer = new Promise<never>((_, reject) => {
-            window.setTimeout(
+            timeout = window.setTimeout(
               () =>
                 reject(
                   new Error(
-                    `Request timeout: AGENT_NEW_SESSION (${ENSURE_SESSION_ATTEMPT_TIMEOUT_MS}ms cap)`,
+                    `Request timeout: AGENT_NEW_SESSION (${AGENT_NEW_SESSION_TIMEOUT_MS}ms cap)`,
                   ),
                 ),
-              ENSURE_SESSION_ATTEMPT_TIMEOUT_MS,
+              AGENT_NEW_SESSION_TIMEOUT_MS,
             );
           });
           const request = bridge.request<
@@ -1461,9 +1464,13 @@ export function AgentSessionsProvider({
               env: mergedEnv,
               cliBinary: cliBinaryOverride,
             },
-            ENSURE_SESSION_ATTEMPT_TIMEOUT_MS,
+            AGENT_NEW_SESSION_TIMEOUT_MS,
           );
-          return Promise.race([request, timer]);
+          try {
+            return await Promise.race([request, timer]);
+          } finally {
+            if (timeout !== undefined) window.clearTimeout(timeout);
+          }
         };
 
         for (let attempt = 1; attempt <= ENSURE_SESSION_ATTEMPTS; attempt++) {
@@ -1495,7 +1502,7 @@ export function AgentSessionsProvider({
                 bindWasSuperseded = true;
                 return;
               }
-              if (!failureIsRecoverable(lastFailure)) break;
+              if (!shouldRetrySessionAdmission(lastFailure.kind)) break;
               continue;
             }
             const executionId =
@@ -1573,7 +1580,7 @@ export function AgentSessionsProvider({
               bindWasSuperseded = true;
               return;
             }
-            if (!failureIsRecoverable(lastFailure)) break;
+            if (!shouldRetrySessionAdmission(lastFailure.kind)) break;
           }
         }
 

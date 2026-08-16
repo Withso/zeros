@@ -1,0 +1,23 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  AGENT_NEW_SESSION_TIMEOUT_MS,
+  AGENT_PREFLIGHT_TIMEOUT_MS,
+  shouldRetrySessionAdmission,
+} from "../session-admission-policy";
+
+describe("agent session admission policy", () => {
+  it("allows the qualified cold OrbStack path to finish", () => {
+    expect(AGENT_PREFLIGHT_TIMEOUT_MS).toBe(30_000);
+    expect(AGENT_NEW_SESSION_TIMEOUT_MS).toBeGreaterThanOrEqual(120_000);
+    expect(AGENT_NEW_SESSION_TIMEOUT_MS).toBeGreaterThan(
+      AGENT_PREFLIGHT_TIMEOUT_MS,
+    );
+  });
+
+  it("never automatically overlaps an admission that timed out", () => {
+    expect(shouldRetrySessionAdmission("timeout")).toBe(false);
+    expect(shouldRetrySessionAdmission("transport-closed")).toBe(true);
+    expect(shouldRetrySessionAdmission("protocol-error")).toBe(false);
+  });
+});
