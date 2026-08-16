@@ -61,6 +61,8 @@ import {
   shouldReapRangeListener,
 } from "./orphan-engines";
 import {
+  ENGINE_STARTUP_TIMEOUT_MS,
+  engineStartupWaitDecision,
   isExpectedEngineHealth,
   parseOwnedEngineManifest,
   zeroContactRespawnBackoffMs,
@@ -1166,9 +1168,9 @@ async function reapOrphanEngines(skipPid?: number): Promise<void> {
 }
 
 /**
- * Spawn the engine with `projectRoot` as its working directory. Kills
- * any previous child first, then polls for `<root>/.zeros/.port` (up
- * to 10 s) to discover the actually-bound port.
+ * Spawn the engine with `projectRoot` as its working directory. Kills any
+ * previous child first, then waits through bounded stale-containment recovery
+ * for the exact child to publish and answer through its owned manifest.
  */
 // Single-flight chain across ALL respawn drivers: the HMR code-watcher, the
 // crash watchdog, IPC engineRestart/openProjectFolder, and deep-link handling
@@ -1747,8 +1749,26 @@ async function doSpawnEngine(
     }
   });
 
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
+  const startupBeganAt = Date.now();
+  while (true) {
+    const waitDecision = engineStartupWaitDecision({
+      elapsedMs: Date.now() - startupBeganAt,
+      childExited: child.exitCode !== null || child.signalCode !== null,
+    });
+    if (waitDecision === "child-exited") {
+      throw new Error(
+        `engine child exited before binding ` +
+          `(code=${child.exitCode ?? "none"}, signal=${child.signalCode ?? "none"})`,
+      );
+    }
+    if (waitDecision === "timed-out") {
+      // A child that binds just after its supervisor gives up must not race the
+      // next generation for the manifest or a channel-owned port.
+      await killCurrentChild();
+      throw new Error(
+        `engine did not bind within ${ENGINE_STARTUP_TIMEOUT_MS / 60_000} minutes`,
+      );
+    }
     let manifest: ReturnType<typeof parseOwnedEngineManifest> = null;
     try {
       const raw = readFileSync(manifestFile, "utf-8");
@@ -1797,8 +1817,6 @@ async function doSpawnEngine(
     }
     await new Promise<void>((r) => setTimeout(r, 100));
   }
-
-  throw new Error("engine did not bind within 10 seconds");
 }
 
 /** Idempotent engine shutdown. Flips the shutting-down flag so the
