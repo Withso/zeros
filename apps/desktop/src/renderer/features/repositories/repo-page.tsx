@@ -93,6 +93,7 @@ const CONFIG_VIEW_IDS = [
   "git",
   "actions",
   "files",
+  "design",
   "paths",
 ] as const satisfies readonly RepoSectionId[];
 
@@ -168,12 +169,16 @@ function RepoWorkspaceRow({
   const w = row.workspace;
   const archiveWorkspace = useArchiveWorkspace();
   const archiving = useWorkspaceArchiving(w.id);
+  // Gates only the ENTER item in the context menu; exit is never gated.
+  const designModeSwitchAvailable =
+    useInternalFeatureActive("designWorkspaces");
   const stop = (e: React.MouseEvent) => e.stopPropagation();
   return (
     <WorkspaceContextMenu
       workspace={w}
       onArchive={() => void archiveWorkspace(w, { label: row.title })}
       archiveDisabled={archiving}
+      designModeSwitchAvailable={designModeSwitchAvailable}
     >
       <div
         role="button"
@@ -394,11 +399,18 @@ export function RepoPage({ project }: { project: Project }) {
   const pageActive = useActivePage() === "repo";
   const dispatch = useWorkspaceDispatch();
   const { projects } = useProjects();
+  const designSettingsActive = useInternalFeatureActive("designWorkspaces");
   // The active hub tab is owned by this exact repository and restored from the
   // synchronous Zustand snapshot on its first render.
-  const view = useWorkspaceStore((state) =>
+  const persistedView = useWorkspaceStore((state) =>
     selectRepoPageView(state, project.id),
   );
+  // A persisted Design tab can outlive the Internal flag; fall back to
+  // Workspaces rather than rendering a tabless body.
+  const view =
+    persistedView === "design" && !designSettingsActive
+      ? "workspaces"
+      : persistedView;
 
   // Recently visited repo/view trees survive repository and section switches.
   // This retains local form state and Keychain-backed rows; the shared settings
@@ -509,7 +521,11 @@ export function RepoPage({ project }: { project: Project }) {
                 <TabsTrigger value="workspaces" className="text-xs">
                   Workspaces
                 </TabsTrigger>
-                {CONFIG_VIEWS.map((s) => (
+                {CONFIG_VIEWS.filter(
+                  // The Design tab (the committed design-folder pointer) is an
+                  // Internal surface; every other section is always offered.
+                  (s) => s.id !== "design" || designSettingsActive,
+                ).map((s) => (
                   <TabsTrigger
                     key={s.id}
                     value={s.id}

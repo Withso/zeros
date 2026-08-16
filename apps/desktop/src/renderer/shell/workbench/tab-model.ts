@@ -27,6 +27,13 @@ export type ReviewSubtab =
 export type ChangesViewMode = "flat" | "tree";
 export type ViewerMode = "diff" | "preview" | "edit";
 
+/** Persistable, non-authority identity used to re-admit a live ZSR preview.
+ * The current opaque port id and provider URL stay volatile. */
+export interface BrowserPreviewSource {
+  chatId: string;
+  port: number;
+}
+
 export interface WorkbenchTab {
   id: string;
   type: WorkbenchTabType;
@@ -90,6 +97,7 @@ export interface WorkbenchTab {
    * Blank tabs are always visible/tree-only; direct path tabs start collapsed. */
   fileTreeVisible?: boolean;
   url?: string;
+  previewSource?: BrowserPreviewSource;
   canvasMode?: boolean;
   viewportWidth?: number;
   viewportHeight?: number;
@@ -152,6 +160,41 @@ function canonicalBrowsableHttpUrl(raw: unknown): string {
   } catch {
     return "";
   }
+}
+
+function isLoopbackBrowserUrl(raw: string): boolean {
+  if (!raw) return false;
+  try {
+    const hostname = new URL(raw).hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return (
+      hostname === "localhost" ||
+      hostname === "127.0.0.1" ||
+      hostname === "::1"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizedPreviewSource(
+  raw: unknown,
+  url: string,
+): BrowserPreviewSource | undefined {
+  if (!isLoopbackBrowserUrl(url) || !raw || typeof raw !== "object") {
+    return undefined;
+  }
+  const value = raw as { chatId?: unknown; port?: unknown };
+  const chatId = typeof value.chatId === "string" ? value.chatId.trim() : "";
+  if (
+    !chatId ||
+    chatId.length > 256 ||
+    !Number.isInteger(value.port) ||
+    Number(value.port) < 1 ||
+    Number(value.port) > 65_535
+  ) {
+    return undefined;
+  }
+  return { chatId, port: Number(value.port) };
 }
 
 /** Build a closable File tab for a real repo-relative path. `opts` carries the
@@ -321,6 +364,7 @@ export function planWorkbenchFileOpen(
 export function createBrowserTab(opts?: {
   url?: string;
   title?: string;
+  previewSource?: BrowserPreviewSource;
 }): WorkbenchTab {
   const url = canonicalBrowsableHttpUrl(opts?.url);
   return {
@@ -328,6 +372,7 @@ export function createBrowserTab(opts?: {
     type: "browser",
     title: url ? opts?.title?.trim().slice(0, 512) || "Browser" : "Browser",
     url,
+    previewSource: normalizedPreviewSource(opts?.previewSource, url),
   };
 }
 
@@ -631,12 +676,14 @@ export function normalizeWorkbenchTabs(parsed: WorkbenchTab[]): WorkbenchTab[] {
         };
       }
       const url = canonicalBrowsableHttpUrl(tab.url);
+      const previewSource = normalizedPreviewSource(tab.previewSource, url);
       return {
         ...tab,
         pinned: false,
         fixed: undefined,
         title: url ? tab.title.trim().slice(0, 512) || "Browser" : "Browser",
         url,
+        previewSource,
         canvasMode: url ? tab.canvasMode : false,
         variants: Array.isArray(tab.variants) ? tab.variants : undefined,
         reviewSubtab: undefined,

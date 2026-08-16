@@ -49,11 +49,9 @@ function EffectNumberField({
     if (document.activeElement !== inputRef.current) setDraft(String(value));
   }, [value]);
 
-  const publishDraft = (next: string) => {
-    setDraft(next);
-    const parsed = Number(next);
-    if (next.trim() && Number.isFinite(parsed)) onChange(parsed);
-  };
+  /** Typed text is a draft; blur and Enter are what reach the canvas. Arrow
+   * steps stay drafts too, so one rule holds for the whole field. */
+  const publishDraft = (next: string) => setDraft(next);
 
   return (
     <label className="zd-design-control-applied flex h-7 min-w-0 items-center overflow-hidden rounded-sm">
@@ -279,8 +277,17 @@ export function DesignShadowControl({
               value={shadow.color}
               className="zd-design-control-applied h-7 min-w-0 font-mono text-[11px]"
               aria-label={`${label} color value`}
-              onChange={(event) => update({ color: event.currentTarget.value })}
+              // A draft until Enter or blur. The picker beside it is the live
+              // surface; a half-typed colour is not a colour.
+              onChange={(event) =>
+                setShadow({ ...shadow, color: event.currentTarget.value })
+              }
               onBlur={() => commit()}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                event.currentTarget.blur();
+              }}
             />
           </div>
           <div className="grid grid-cols-[40px_minmax(0,1fr)_40px] items-center gap-2">
@@ -471,10 +478,12 @@ export function DesignTransformControl({
               className="zd-design-control-applied h-7 min-w-0 font-mono text-[11px]"
               aria-label="Transform CSS value"
               onChange={(event) => {
+                // Raw CSS is a draft until Enter or blur: a half-typed
+                // `rotate(1` is not a transform, and applying every keystroke
+                // reflowed the element through every intermediate state.
                 const next = event.currentTarget.value;
                 setRawTransform(next);
                 setTransform(parseDesignTransform(next));
-                onPreview?.(next.trim() || "none");
               }}
               onBlur={commitRawTransform}
               onKeyDown={(event) => {

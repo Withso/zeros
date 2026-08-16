@@ -49,6 +49,7 @@ const VALID_REPO_VIEWS = new Set<RepoPageView>([
   "git",
   "actions",
   "files",
+  "design",
   "paths",
 ]);
 /** Persisted navigation identity is useful, but must not grow forever. */

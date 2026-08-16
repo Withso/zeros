@@ -67,8 +67,11 @@ describe("selectLiveVisible", () => {
   });
 });
 
-describe("internal design-workspace visibility", () => {
-  it("removes design rows and pending creates while preserving code identity", () => {
+describe("design-mode workspace visibility", () => {
+  it("keeps design-MODE rows and pending creates visible regardless of the flag", () => {
+    // One workspace, two modes: hiding a design-mode row when the Internal
+    // flag is off would strand a real worktree (no archive, no way back to
+    // code mode). The flag gates the design SURFACE, never list membership.
     const code = ws({ id: "code", kind: "code" });
     const design = ws({ id: "design", kind: "design" });
     const codePending = pending({ token: "code-pending", kind: "code" });
@@ -78,21 +81,24 @@ describe("internal design-workspace visibility", () => {
     });
 
     expect(
-      filterWorkspacesForDesignAccess([code, design], false).map((row) =>
-        row.id,
+      filterWorkspacesForDesignAccess([code, design], false).map(
+        (row) => row.id,
       ),
-    ).toEqual(["code"]);
+    ).toEqual(["code", "design"]);
     expect(
       filterPendingCreatesForDesignAccess(
         [codePending, designPending],
         false,
       ).map((row) => row.token),
-    ).toEqual(["code-pending"]);
+    ).toEqual(["code-pending", "design-pending"]);
   });
 
-  it("returns the original references when enabled or when no design rows exist", () => {
-    const rows = [ws({ id: "code", kind: "code" })];
-    const pendingRows = [pending({ token: "code-pending", kind: "code" })];
+  it("returns the original references untouched in both flag states", () => {
+    const rows = [
+      ws({ id: "code", kind: "code" }),
+      ws({ id: "design", kind: "design" }),
+    ];
+    const pendingRows = [pending({ token: "design-pending", kind: "design" })];
     expect(filterWorkspacesForDesignAccess(rows, false)).toBe(rows);
     expect(filterWorkspacesForDesignAccess(rows, true)).toBe(rows);
     expect(filterPendingCreatesForDesignAccess(pendingRows, false)).toBe(

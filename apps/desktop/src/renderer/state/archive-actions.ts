@@ -36,6 +36,7 @@ import { trackGitOp } from "../platform/observability/analytics/agent-events";
 import { toast } from "../shared/ui/primitives/elements";
 import { clearChatPaneFolders, moveChatPaneFolder } from "./chat-panes-store";
 import { forgetDesignWorkspaceView } from "../features/design-workspace/state/design-workspace-ui";
+import { forgetDesignLayerDisclosure } from "../features/design-workspace/state/design-layer-disclosure";
 import { forgetDesignRuntimeWorkspace } from "../features/design-workspace/state/design-runtime-store";
 import { isLocalMainWorkspace } from "./local-main-workspace";
 import { loadProjects, type Project } from "./projects-store";
@@ -128,6 +129,8 @@ function detachWorkspaceRuntimeState(
   }
   clearTerminalFolders([workspace.path], project?.id);
   forgetDesignRuntimeWorkspace(workspace.id);
+  // Layer disclosure names runtime nodes that just went away with the frames.
+  forgetDesignLayerDisclosure(workspace.id);
 }
 
 /** If we just archived/deleted the workspace whose chat is the active target,
@@ -602,9 +605,6 @@ function commitConfirmedRestore(
   opts?: RestoreFeedbackOptions,
 ): void {
   const restored = result.workspace;
-  const mayPublishNavigation =
-    restored.kind !== "design" ||
-    isInternalFeatureActive("designWorkspaces");
   unstable_batchedUpdates(() => {
     if (restored.path !== original.path) {
       moveChatPaneFolder(original.path, restored.path, original.repoRoot);
@@ -616,7 +616,10 @@ function commitConfirmedRestore(
       });
     }
     commitWorkspaceRestored(restored);
-    if (mayPublishNavigation) opts?.onRestored?.(result);
+    // Navigation publishes for design-mode rows too: with the flag off the
+    // route mounts the "design mode is disabled" placeholder (un-gated exit)
+    // instead of a dead surface, so there's nothing to protect against.
+    opts?.onRestored?.(result);
   });
   notifyWorkspacesChanged(original.repoSlug);
 }
@@ -772,13 +775,10 @@ export async function restoreWorkspaceWithFeedback(
   workspace: Workspace,
   opts?: RestoreFeedbackOptions,
 ): Promise<void> {
-  if (
-    workspace.kind === "design" &&
-    !isInternalFeatureActive("designWorkspaces")
-  ) {
-    opts?.onSettled?.();
-    return;
-  }
+  // Design-MODE workspaces restore regardless of the Internal flag: under the
+  // mode model they're ordinary workspaces (the blocked route renders a
+  // placeholder with an un-gated exit), and refusing here would strand them
+  // in History with a dead Restore button.
   if (restoringIds.has(workspace.id)) {
     opts?.onSettled?.(); // another restore owns this id — clear the caller's spinner
     return;

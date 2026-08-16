@@ -1,13 +1,15 @@
-import React, { useRef, type MouseEvent, type ReactNode } from "react";
-import { Archive, Check } from "lucide-react";
+import React, { useRef, useState, type MouseEvent, type ReactNode } from "react";
+import { Archive, Check, Code2, PenTool } from "lucide-react";
 
 import {
+  workspaceSetMode,
   workspaceSetStatus,
   type Workspace,
   type WorkspaceStatus,
 } from "@/renderer/platform/git";
 import { notifyWorkspacesChanged } from "@/renderer/state/use-projects";
 import { useWorkspaceArchiving } from "@/renderer/state/pending-workspaces";
+import { isLocalMainWorkspace } from "@/renderer/state/local-main-workspace";
 import { LIFECYCLE_STATUSES } from "@/renderer/shared/lib/workspace-status";
 import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
@@ -29,6 +31,12 @@ export interface WorkspaceContextMenuProps {
   onArchive?: () => void;
   /** Show the Archive item greyed-out and inert for a caller-owned reason. */
   archiveDisabled?: boolean;
+  /** Whether "Switch to Design Mode" is offered (callers pass the
+   *  `designWorkspaces` Internal gate — shared/ cannot import features/).
+   *  Only ENTERING is gated; "Switch to Code Mode" always shows for a
+   *  design-mode row, so a disabled flag can never trap a workspace in a mode
+   *  whose surface no longer renders. */
+  designModeSwitchAvailable?: boolean;
   /** The right-click target — wrapped as the menu trigger via `asChild`. */
   children: ReactNode;
   /** Top-bar tabs anchor their context menu to the trigger's bottom-left rather
@@ -55,6 +63,7 @@ export function WorkspaceContextMenu({
   workspace,
   onArchive,
   archiveDisabled = false,
+  designModeSwitchAvailable = false,
   children,
   placement = "pointer",
 }: WorkspaceContextMenuProps) {
@@ -69,6 +78,32 @@ export function WorkspaceContextMenu({
           err instanceof Error ? err.message : "Couldn't update status",
         );
       });
+  };
+
+  // Mode switch — one workspace, two modes. ENTERING design mode is an
+  // Internal feature (the caller passes the gate — see the prop); EXITING is
+  // never gated so a disabled flag can't trap a workspace in a mode whose
+  // surface no longer renders. Hidden for the synthetic local-main trunk (no
+  // managed row to flip) and while a lifecycle operation owns the row
+  // (archive shares that signal).
+  const inDesignMode = workspace.kind === "design";
+  const showModeSwitch =
+    !isLocalMainWorkspace(workspace) &&
+    (inDesignMode ? true : designModeSwitchAvailable);
+  const [switchingMode, setSwitchingMode] = useState(false);
+  const setMode = (mode: "code" | "design") => {
+    if (switchingMode) return;
+    setSwitchingMode(true);
+    void workspaceSetMode({ workspaceId: workspace.id, mode })
+      .then(() => notifyWorkspacesChanged(workspace.repoSlug))
+      .catch((err: unknown) => {
+        toast.error(
+          err instanceof Error
+            ? err.message
+            : `Couldn't switch to ${mode} mode`,
+        );
+      })
+      .finally(() => setSwitchingMode(false));
   };
 
   // Timestamp of the most recent menu close, used to eat the phantom click above.
@@ -155,6 +190,20 @@ export function WorkspaceContextMenu({
             ))}
           </ContextMenuSubContent>
         </ContextMenuSub>
+        {showModeSwitch && (
+          <>
+            <ContextMenuSeparator />
+            <ContextMenuItem
+              onSelect={() => setMode(inDesignMode ? "code" : "design")}
+              disabled={switchingMode || archiving}
+            >
+              {inDesignMode ? <Code2 /> : <PenTool />}
+              <span>
+                {inDesignMode ? "Switch to Code Mode" : "Switch to Design Mode"}
+              </span>
+            </ContextMenuItem>
+          </>
+        )}
         {onArchive && (
           <>
             <ContextMenuSeparator />

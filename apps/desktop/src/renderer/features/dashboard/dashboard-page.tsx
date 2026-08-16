@@ -566,6 +566,9 @@ function DashboardCard({
   const archiveWorkspace = useArchiveWorkspace();
   const dispatch = useWorkspaceDispatch();
   const mutating = useWorkspaceArchiving(w.id);
+  // Gates only the ENTER item in the context menu; exit is never gated.
+  const designModeSwitchAvailable =
+    useInternalFeatureActive("designWorkspaces");
   const [busy, setBusy] = useState<null | "merge">(null);
   // Lazy, tri-state dirtiness probe (replaces the removed heavy withChanges list
   // column). `undefined` until the first probe resolves → resolveCardActionKind
@@ -699,6 +702,7 @@ function DashboardCard({
       workspace={w}
       onArchive={archive}
       archiveDisabled={mutating}
+      designModeSwitchAvailable={designModeSwitchAvailable}
     >
       <div
         role="button"

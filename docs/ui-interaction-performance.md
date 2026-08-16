@@ -128,6 +128,69 @@ Current deck helpers live in `apps/desktop/src/renderer/shell/retained-view-keys
 - Memoized list rows receive row-local booleans such as `isSelected`; passing the whole selected id causes every row to fail memo equality.
 - Virtualize unbounded files, transcript, and diff content. Keep syntax highlighting off the main thread where supported.
 
+### 5.1 Direct manipulation: one authority per pixel
+
+A drag on the design canvas has two sources of truth for the same geometry — the
+pointer, which the host can paint immediately, and the real element inside the
+sandboxed runtime, which only layout can answer. Any surface that draws over live
+content inherits these rules.
+
+- **Author whole pixels, then paint what you authored.** A gesture writes integer
+  CSS values; painting the pointer's own fractional rectangle leaves the overlay
+  half a pixel from the element at 1× and four at 4×. Worse, rounding an offset
+  and a size independently makes the edge the user is *holding still* oscillate a
+  full pixel twice per pixel of travel. Quantize the two **edges** of an axis, not
+  the (position, size) pair — an edge the pointer is not moving must not move at
+  all (`designAuthoredResizeAxis`).
+- **One request in flight, newest input wins the next slot.** Never queue a
+  backlog of pointer samples. With a single flight the runtime holds exactly the
+  styles of the request that just answered, so its measurement *is* the element as
+  it stands and painting it is always safe — which is what lets an overlay settle
+  onto the truth instead of racing ahead of it
+  (`design-workspace/design-gesture-loop.ts`).
+- **Ask the pointer-path question, not the inspector's.** A gesture repaints one
+  outline, four padding hatches and the gap handles: a dozen values. Reuse of a
+  full node-details call costs ~130 computed properties per node per frame, and a
+  second child-enumeration call behind it doubles the round trip. Give the gesture
+  path its own lean method, measured synchronously in the same task as the write —
+  no animation frame between applying a style and reading the result
+  (`previewGeometry` in `packages/protocol/src/design-runtime.ts`).
+- **Never read layout on the pointer path.** One `getBoundingClientRect()` in a
+  `pointermove` handler forces a full style+layout pass on a document that also
+  hosts every live iframe. Containment and hover questions belong to CSS.
+- **A gesture must not publish to a store.** The surface being dragged paints
+  itself; publishing per frame re-renders every subscriber for values nobody is
+  reading yet. Mirror them into panels at a readable rate (~10 Hz) and always
+  publish the released value, so what a panel shows is exactly what the commit
+  will prune (`publishDesignGestureLivePreview`).
+- **Imperative paints must respect React's nodes.** `replaceChildren` and
+  `textContent` detach the text node React's fiber points at; React's next update
+  then writes into a node that is no longer in the document and the label silently
+  freezes. Write `firstChild.nodeValue`, and render such labels as a single
+  interpolated child. Any property a paint may set (`visibility`) must also appear
+  in the React style object, or a transient value outlives the gesture.
+- **A gesture's own modifiers must not unmount what it is painting.** Option means
+  "resize from center" *and* "measure"; if the measure overlay replaces the
+  constraint guides mid-drag, the gesture paints into a detached node. Gate such
+  swaps on there being no active gesture, and never key a live overlay by array
+  index.
+
+### 5.2 Typed input is a draft; commit is the event
+
+An input in an inspector is not a slider. Applying a value per keystroke reflows
+the document through every intermediate string — including the empty one a
+backspace leaves behind, which *removes* the declaration — and makes the element
+and its chrome disagree for a frame each time.
+
+- Typing (and arrow-stepping) updates local state only. `Enter` commits, `Escape`
+  restores the focus-time baseline, and blur commits as the standard fallback.
+- The commit paints once, immediately, before the source round trip settles, so
+  the confirmation is in the same frame as the keypress.
+- Direct manipulation stays live: label scrubs, sliders, colour-area drags, and
+  canvas gestures preview continuously and commit on release.
+- A single click on a select, segment, or preset *is* an explicit change: apply it
+  immediately.
+
 ### 6. Motion must not mask readiness
 
 Global fades delay a ready UI and expose blank intermediate states. Context switches suppress incidental layout/color transitions for the replacement paint, so persisted widths, text, and rows snap to their destination together. Scope that suppression to the changing surface; a document-wide class forces style recalculation across unrelated columns.

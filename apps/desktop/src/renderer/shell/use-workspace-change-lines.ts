@@ -146,14 +146,11 @@ export function changeLineCountsForGeneration(
 export function workspaceChangeLinesTarget(
   workspace: Workspace | null,
 ): string | null {
-  // Design tabs intentionally have no Git-status affordances. Keep this guard
-  // inside the hook so the established code-workspace call path stays exact,
-  // while a design tab cannot start any of the relatively expensive Git reads.
-  if (
-    !workspace ||
-    workspace.kind === "design" ||
-    workspace.present === false
-  ) {
+  // Concurrent duality: a design-MODE workspace's code territory stays live
+  // (agents keep committing there), so its tab shows the same ± badge as any
+  // other workspace — the design surface being open doesn't stop the branch
+  // from changing.
+  if (!workspace || workspace.present === false) {
     return null;
   }
   if (isLocalMainWorkspace(workspace)) return workspace.repoRoot || null;

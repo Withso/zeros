@@ -480,6 +480,9 @@ function WorkspaceTab({
   onArchive,
   tabRef,
 }: WorkspaceTabProps) {
+  // Gates only the ENTER item in the context menu; exit is never gated.
+  const designModeSwitchAvailable =
+    useInternalFeatureActive("designWorkspaces");
   const designWorkspace = workspace.kind === "design";
   const agentChatIds = designWorkspace ? EMPTY_WORKSPACE_CHAT_IDS : chatIds;
   const streaming = useAnyChatStreaming(agentChatIds);
@@ -581,6 +584,7 @@ function WorkspaceTab({
       workspace={workspace}
       onArchive={() => onArchive(workspace)}
       archiveDisabled={archiving}
+      designModeSwitchAvailable={designModeSwitchAvailable}
       placement="below-trigger"
     >
       {tab}
@@ -1578,7 +1582,8 @@ export function TopBar() {
 
   const handlePrefetchWorkspace = useCallback(
     (workspace: Workspace) => {
-      if (workspace.kind === "design" && !designWorkspacesActive) return;
+      // Design-mode rows stay openable even with the Internal flag off (the
+      // route mounts a placeholder), so warm them like any other workspace.
       prefetchWorkspaceSurface(workspace);
       if (workspace.kind === "design") return;
       const chatId = selectChatToRestoreForFolder(
@@ -1590,7 +1595,7 @@ export function TopBar() {
         prepareChatView(chatId);
       }
     },
-    [designWorkspacesActive, sessions],
+    [sessions],
   );
 
   /** Create directly in the selected repository, then move into the new

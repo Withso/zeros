@@ -24,19 +24,24 @@ vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
 }));
 
 import {
+  captureDesignRuntimeScreenshot,
   hoverDesignNode,
+  inspectDesignNodesInRect,
   inspectDesignNodeStyleProvenance,
   reconcileDesignRuntimeSnapshot,
   previewDesignNodeStylesTransient,
   resetDesignSelectionWorkflowsForTests,
+  selectDesignFrame,
   selectDesignNode,
   selectDesignNodes,
   selectDesignNodeAtLocation,
+  setDesignNodeVisibility,
   toggleDesignNodeSelection,
 } from "../state/design-selection";
 import {
   designRuntimeFrameState,
   resetDesignRuntimeStoreForTests,
+  useDesignRuntimeStore,
 } from "../state/design-runtime-store";
 import {
   designLivePreviewValue,
@@ -46,6 +51,10 @@ import {
   designWorkspaceView,
   resetDesignWorkspaceUiForTests,
 } from "../state/design-workspace-ui";
+import {
+  designFrameDisclosure,
+  resetDesignLayerDisclosureForTests,
+} from "../state/design-layer-disclosure";
 
 function details(
   oid: string,
@@ -87,7 +96,67 @@ describe("design selection workflows", () => {
     resetDesignRuntimeStoreForTests();
     resetDesignLivePreviewForTests();
     resetDesignWorkspaceUiForTests();
+    resetDesignLayerDisclosureForTests();
     vi.clearAllMocks();
+  });
+
+  it("makes confirmed frame pixels available before durable screenshot persistence settles", async () => {
+    const screenshot = {
+      sourceVersion: FRAME.sourceVersion,
+      nodeId: null,
+      mimeType: "image/png" as const,
+      dataUrl: "data:image/png;base64,iVBORw==",
+      width: 1440,
+      height: 900,
+      scale: 1,
+    };
+    useDesignRuntimeStore.getState().publishSnapshot(
+      "workspace-a",
+      "/design/a",
+      FRAME.file,
+      {
+        sourceVersion: FRAME.sourceVersion,
+        revision: 1,
+        tree: [],
+        frame: details("frame"),
+        warnings: [],
+        viewport: {
+          width: FRAME.width,
+          height: FRAME.height,
+          scrollX: 0,
+          scrollY: 0,
+        },
+      },
+      FRAME.sourceVersion,
+    );
+    mocks.designFrameRuntime.mockReturnValue({
+      captureScreenshot: vi.fn(async () => screenshot),
+    });
+    let finishPersistence!: () => void;
+    mocks.designSetScreenshot.mockReturnValue(
+      new Promise<void>((resolve) => {
+        finishPersistence = () => resolve();
+      }),
+    );
+
+    const capture = captureDesignRuntimeScreenshot(
+      "workspace-a",
+      "/design/a",
+      FRAME.file,
+      FRAME.sourceVersion,
+      null,
+      1,
+    );
+    await vi.waitFor(() =>
+      expect(mocks.designSetScreenshot).toHaveBeenCalledTimes(1),
+    );
+
+    expect(
+      designRuntimeFrameState("workspace-a", FRAME.file)?.screenshotsByNode[""],
+    ).toMatchObject(screenshot);
+
+    finishPersistence();
+    await expect(capture).resolves.toMatchObject(screenshot);
   });
 
   it("bounds persisted key styles without discarding full inspector details", async () => {
@@ -122,6 +191,71 @@ describe("design selection workflows", () => {
       designRuntimeFrameState("workspace-a", "home.html")?.detailsByNode.heading
         ?.styles,
     ).toEqual(computedStyles);
+  });
+
+  it("keeps the current local selection when durable publication loses an exact-source race", async () => {
+    mocks.designSetSelection.mockRejectedValueOnce(
+      new Error(
+        "Design selection source changed before publication: home.html",
+      ),
+    );
+
+    await expect(
+      selectDesignFrame("workspace-a", FRAME),
+    ).resolves.toBeUndefined();
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedFrame: FRAME.file,
+      selectedNodeId: null,
+    });
+
+    mocks.designSetSelection.mockRejectedValueOnce(
+      new Error(
+        "Design selection source changed before publication: home.html",
+      ),
+    );
+    await expect(
+      selectDesignNode({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME,
+        nodeId: "heading",
+        details: details("heading"),
+      }),
+    ).resolves.toMatchObject({ oid: "heading" });
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedFrame: FRAME.file,
+      selectedNodeId: "heading",
+    });
+  });
+
+  it("separates selecting a frame from merely activating it", async () => {
+    // Label/Layers-row selection paints frame chrome…
+    await selectDesignFrame("workspace-a", FRAME, { selected: true });
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedFrame: FRAME.file,
+      frameSelected: true,
+      selectedNodeId: null,
+    });
+    // …an empty-canvas click activates the same frame with nothing selected…
+    await selectDesignFrame("workspace-a", FRAME);
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedFrame: FRAME.file,
+      frameSelected: false,
+      selectedNodeId: null,
+    });
+    // …and selecting a node always steals the selection from the frame.
+    await selectDesignFrame("workspace-a", FRAME, { selected: true });
+    await selectDesignNode({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      nodeId: "heading",
+      details: details("heading"),
+    });
+    expect(designWorkspaceView("workspace-a")).toMatchObject({
+      selectedNodeId: "heading",
+      frameSelected: false,
+    });
   });
 
   it("rejects an old node response after a newer exact selection wins", async () => {
@@ -173,6 +307,66 @@ describe("design selection workflows", () => {
       expect.objectContaining({ nodeIds: ["second"] }),
       expect.any(Number),
     );
+  });
+
+  it("opens the Layers path to a selection in the same transition", async () => {
+    // A canvas click has to leave its layer row reachable; the panel must not
+    // repair a half-published destination in a later effect.
+    useDesignRuntimeStore.getState().publishSnapshot(
+      "workspace-a",
+      "/design/a",
+      FRAME.file,
+      {
+        sourceVersion: FRAME.sourceVersion,
+        revision: 1,
+        warnings: [],
+        tree: [
+          {
+            oid: "body",
+            tag: "body",
+            name: "body",
+            text: null,
+            visible: true,
+            children: [
+              {
+                oid: "main",
+                tag: "main",
+                name: "main",
+                text: null,
+                visible: true,
+                children: [
+                  {
+                    oid: "heading",
+                    tag: "h1",
+                    name: "heading",
+                    text: "Hello",
+                    visible: true,
+                    children: [],
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+        frame: details("body", FRAME.sourceVersion),
+        viewport: { width: 1440, height: 900, scrollX: 0, scrollY: 0 },
+      },
+      FRAME.sourceVersion,
+    );
+
+    await selectDesignNode({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME,
+      nodeId: "heading",
+      details: details("heading"),
+    });
+
+    // The frame opens and the path down to the row opens with it.
+    expect(designFrameDisclosure("workspace-a", FRAME.file)).toEqual({
+      treeExpanded: true,
+      expandedNodeIds: ["body", "main"],
+    });
   });
 
   it("publishes one atomic bounded selection for multiple runtime nodes", async () => {
@@ -380,6 +574,36 @@ describe("design selection workflows", () => {
     ).toBe("64px");
   });
 
+  it("accepts child geometry from the mounted runtime generation during a hot style commit", async () => {
+    const hotSourceVersion = "222222222222222222222222";
+    const getElementsInRect = vi.fn(async () => [
+      details("heading", hotSourceVersion),
+      details("copy", FRAME.sourceVersion),
+    ]);
+    mocks.designFrameRuntime.mockReturnValue({
+      sourceVersion: hotSourceVersion,
+      getElementsInRect,
+    });
+
+    await expect(
+      inspectDesignNodesInRect({
+        workspaceId: "workspace-a",
+        frame: FRAME,
+        rect: { x: 0, y: 0, width: 400, height: 400 },
+        scopeNodeId: "main",
+      }),
+    ).resolves.toEqual([
+      expect.objectContaining({
+        oid: "heading",
+        sourceVersion: hotSourceVersion,
+      }),
+    ]);
+    expect(getElementsInRect).toHaveBeenCalledWith(
+      { x: 0, y: 0, width: 400, height: 400 },
+      "main",
+    );
+  });
+
   it("collapses an additive selection when its primary layer is clicked", async () => {
     await selectDesignNodes({
       workspaceId: "workspace-a",
@@ -492,6 +716,37 @@ describe("design selection workflows", () => {
     expect(mocks.designSetSelection).not.toHaveBeenCalled();
   });
 
+  it("hides a layer on the mounted generation while a replacement iframe loads", async () => {
+    const mountedSourceVersion = "111111111111111111111111";
+    const hidden = {
+      ...details("copy", mountedSourceVersion),
+      visible: false,
+    };
+    const setNodeVisibility = vi.fn(async () => hidden);
+    mocks.designFrameRuntime.mockReturnValue({
+      sourceVersion: mountedSourceVersion,
+      setNodeVisibility,
+    });
+
+    // The workspace snapshot already names the incoming generation; the write
+    // lands on the painted one, so it must not be reported as a failure.
+    await expect(
+      setDesignNodeVisibility({
+        workspaceId: "workspace-a",
+        folder: "/design/a",
+        frame: FRAME.file,
+        sourceVersion: "222222222222222222222222",
+        nodeId: "copy",
+        visible: false,
+      }),
+    ).resolves.toEqual(hidden);
+    expect(setNodeVisibility).toHaveBeenCalledWith("copy", false);
+    expect(
+      designRuntimeFrameState("workspace-a", FRAME.file)?.detailsByNode["copy"]
+        ?.visible,
+    ).toBe(false);
+  });
+
   it("treats a disappearing hover target as transient", async () => {
     mocks.designFrameRuntime.mockReturnValue({
       getNodeDetails: vi.fn(async () => {
@@ -508,6 +763,50 @@ describe("design selection workflows", () => {
         nodeId: "removed",
       }),
     ).resolves.toBeUndefined();
+  });
+
+  it("coalesces rapid uncached layer hovers to the active and latest runtime reads", async () => {
+    let resolveFirst!: (value: DesignRuntimeNodeDetails) => void;
+    const first = new Promise<DesignRuntimeNodeDetails>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const getNodeDetails = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockImplementation(async (nodeId: string) => details(nodeId));
+    mocks.designFrameRuntime.mockReturnValue({ getNodeDetails });
+
+    const hoveringFirst = hoverDesignNode({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME.file,
+      sourceVersion: FRAME.sourceVersion,
+      nodeId: "first",
+    });
+    const hoveringMiddle = hoverDesignNode({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME.file,
+      sourceVersion: FRAME.sourceVersion,
+      nodeId: "middle",
+    });
+    const hoveringLatest = hoverDesignNode({
+      workspaceId: "workspace-a",
+      folder: "/design/a",
+      frame: FRAME.file,
+      sourceVersion: FRAME.sourceVersion,
+      nodeId: "latest",
+    });
+
+    expect(getNodeDetails).toHaveBeenCalledTimes(1);
+    resolveFirst(details("first"));
+    await Promise.all([hoveringFirst, hoveringMiddle, hoveringLatest]);
+
+    expect(getNodeDetails).toHaveBeenCalledTimes(2);
+    expect(getNodeDetails.mock.calls.map(([nodeId]) => nodeId)).toEqual([
+      "first",
+      "latest",
+    ]);
   });
 
   it("correlates exact-source runtime matches through authored provenance", async () => {

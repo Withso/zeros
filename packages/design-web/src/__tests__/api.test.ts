@@ -6,6 +6,8 @@ import {
   DesignApiAuthorizationError,
   DesignApiRepositoryConflictError,
   InMemoryDesignDocumentRepository,
+  type DesignApiOptions,
+  type DesignDocumentRepository,
   type DesignHeadlessRenderer,
 } from "../api";
 import { designWebTransactionAdapter } from "../adapter";
@@ -24,6 +26,16 @@ function repository() {
   ]);
 }
 
+function trustedApi(
+  storage: DesignDocumentRepository,
+  options: Omit<DesignApiOptions, "authorization"> = {},
+): DesignApi {
+  return new DesignApi(storage, {
+    ...options,
+    authorization: { kind: "trusted-in-process" },
+  });
+}
+
 function styleTransaction() {
   const state = webState();
   return webTransaction(state, "api-style-edit", [
@@ -40,9 +52,24 @@ function styleTransaction() {
 }
 
 describe("headless Design API", () => {
-  it("paginates projections and applies the same adapter operation as a direct caller", async () => {
+  it("fails closed for mutations when a caller does not declare its authority", async () => {
     const storage = repository();
     const api = new DesignApi(storage);
+
+    await expect(api.open("document-1")).rejects.toBeInstanceOf(
+      DesignApiAuthorizationError,
+    );
+    await expect(api.apply(styleTransaction())).rejects.toBeInstanceOf(
+      DesignApiAuthorizationError,
+    );
+    expect((await storage.read("document-1")).files["styles.css"]).toBe(
+      FRAME_CSS,
+    );
+  });
+
+  it("paginates projections and applies the same adapter operation as a direct caller", async () => {
+    const storage = repository();
+    const api = trustedApi(storage);
     const opened = await api.open("document-1");
     const firstPage = await api.readProjection({
       documentId: "document-1",
@@ -76,7 +103,7 @@ describe("headless Design API", () => {
   });
 
   it("validates untrusted read inputs and bounds runtime provenance evidence", async () => {
-    const api = new DesignApi(repository());
+    const api = trustedApi(repository());
     await expect(api.open("../outside")).rejects.toThrow("ID must be portable");
     await expect(
       api.readSource({ documentId: "document-1", file: "toString" }),
@@ -97,7 +124,7 @@ describe("headless Design API", () => {
 
   it("dry-runs without writing and supports API undo and redo", async () => {
     const storage = repository();
-    const api = new DesignApi(storage);
+    const api = trustedApi(storage);
     const transaction = styleTransaction();
     const dryRun = await api.apply(transaction, { dryRun: true });
     expect(dryRun.dryRun).toBe(true);
@@ -138,7 +165,7 @@ describe("headless Design API", () => {
         frames: initial.frames,
       },
     ]);
-    const api = new DesignApi(storage);
+    const api = trustedApi(storage);
     const result = await api.apply(
       webTransaction(initial, "no-op-style", [
         {
@@ -170,7 +197,7 @@ describe("headless Design API", () => {
         },
       },
     ]);
-    const api = new DesignApi(storage);
+    const api = trustedApi(storage);
     const opened = await api.open("bounded-document");
     const transaction = {
       schemaVersion: 1 as const,
@@ -219,13 +246,19 @@ describe("headless Design API", () => {
         frames: state.frames,
       },
     ]);
-    const denied = new DesignApi(deniedStorage, { authorize: () => false });
+    const denied = new DesignApi(deniedStorage, {
+      authorization: {
+        kind: "authorize",
+        actor: { kind: "agent", id: "denied-agent" },
+        authorize: () => false,
+      },
+    });
     await expect(denied.apply(styleTransaction())).rejects.toBeInstanceOf(
       DesignApiAuthorizationError,
     );
     expect(deniedStorage.reads).toBe(0);
 
-    const api = new DesignApi(repository());
+    const api = trustedApi(repository());
     await expect(
       api.apply(
         webTransaction(state, "internal-splice", [
@@ -242,9 +275,35 @@ describe("headless Design API", () => {
     ).rejects.toBeInstanceOf(DesignApiAuthorizationError);
   });
 
+  it("binds an authorized API to one actor and rejects actor self-escalation", async () => {
+    const storage = repository();
+    const seen: Array<{ actor: string; operations: string[] }> = [];
+    const api = new DesignApi(storage, {
+      authorization: {
+        kind: "authorize",
+        actor: { kind: "agent", id: "design-child" },
+        authorize: ({ actor, operationTypes }) => {
+          seen.push({ actor: `${actor.kind}:${actor.id}`, operations: operationTypes });
+          return true;
+        },
+      },
+    });
+
+    await api.open("document-1");
+    await expect(api.apply(styleTransaction())).rejects.toBeInstanceOf(
+      DesignApiAuthorizationError,
+    );
+    expect((await storage.read("document-1")).files["styles.css"]).toBe(
+      FRAME_CSS,
+    );
+    expect(seen).toEqual([
+      { actor: "agent:design-child", operations: ["document.open"] },
+    ]);
+  });
+
   it("clears unsafe history after an external edit and rejects stale callers", async () => {
     const storage = repository();
-    const api = new DesignApi(storage);
+    const api = trustedApi(storage);
     const applied = await api.apply(styleTransaction());
     storage.replace({
       documentId: "document-1",
@@ -290,7 +349,7 @@ describe("headless Design API", () => {
         frames: initial.frames,
       },
     ]);
-    const api = new DesignApi(storage);
+    const api = trustedApi(storage);
     await api.apply(styleTransaction());
     const beforeFailure = await api.open("document-1");
     expect(beforeFailure.history.undoDepth).toBe(1);
@@ -366,7 +425,7 @@ describe("headless Design API", () => {
         frames: initial.frames,
       },
     ]);
-    const api = new DesignApi(storage);
+    const api = trustedApi(storage);
 
     await expect(api.apply(styleTransaction())).rejects.toThrow(
       "simulated commit failure",
@@ -412,7 +471,7 @@ describe("headless Design API", () => {
         frames: initial.frames,
       },
     ]);
-    const api = new DesignApi(storage);
+    const api = trustedApi(storage);
 
     const applying = api.apply(styleTransaction());
     await commitStarted;
@@ -448,7 +507,7 @@ describe("headless Design API", () => {
         },
       })),
     );
-    const api = new DesignApi(storage, {
+    const api = trustedApi(storage, {
       maxSessions: 32,
       maxSessionBytes: 4 * 1024 * 1024,
     });
@@ -468,8 +527,12 @@ describe("headless Design API", () => {
 
   it("authorizes history actions and restores the session when denied", async () => {
     const api = new DesignApi(repository(), {
-      authorize: ({ operationTypes }) =>
-        !operationTypes.some((operation) => operation.startsWith("history.")),
+      authorization: {
+        kind: "authorize",
+        actor: { kind: "human", id: "tester" },
+        authorize: ({ operationTypes }) =>
+          !operationTypes.some((operation) => operation.startsWith("history.")),
+      },
     });
     await api.apply(styleTransaction());
 
@@ -500,7 +563,7 @@ describe("headless Design API", () => {
         revision: state.revision,
       }),
     );
-    const api = new DesignApi(repository(), { renderer: { render } });
+    const api = trustedApi(repository(), { renderer: { render } });
     const opened = await api.open("document-1");
     const artifact = await api.render({
       documentId: "document-1",
@@ -530,7 +593,7 @@ describe("headless Design API", () => {
   });
 
   it("rejects a renderer artifact that is not pinned to the requested viewport", async () => {
-    const api = new DesignApi(repository(), {
+    const api = trustedApi(repository(), {
       renderer: {
         render: async ({ state, viewport }) => ({
           mimeType: "image/png",
@@ -561,7 +624,7 @@ describe("headless Design API", () => {
         revision: state.revision,
       }),
     );
-    const api = new DesignApi(storage, { renderer: { render } });
+    const api = trustedApi(storage, { renderer: { render } });
     const valid = await api.open("document-1");
     storage.replace({
       documentId: "document-1",

@@ -109,6 +109,7 @@ export type RepoPageView =
   | "git"
   | "actions"
   | "files"
+  | "design"
   | "paths";
 
 // Current providers use CLI-subprocess backends. Legacy values

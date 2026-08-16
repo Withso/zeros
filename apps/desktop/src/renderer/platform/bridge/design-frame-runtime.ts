@@ -8,6 +8,7 @@
 // requests stay on that per-document channel.
 
 import {
+  DESIGN_RUNTIME_GEOMETRY_CHILD_LIMIT,
   DESIGN_RUNTIME_PROTOCOL,
   DESIGN_RUNTIME_VERSION,
   isDesignRuntimeFrameMessage,
@@ -20,10 +21,15 @@ import {
   type DesignRuntimeMatchedStyles,
   type DesignRuntimeMethod,
   type DesignRuntimeHitMode,
+  type DesignRuntimeGenerationPatch,
   type DesignRuntimeMotionPreview,
   type DesignRuntimeNodeDetails,
+  type DesignRuntimeNodeGeometry,
+  type DesignRuntimeRect,
   type DesignRuntimeScreenshot,
   type DesignRuntimeSnapshot,
+  type DesignRuntimeStyleCommit,
+  type DesignRuntimeStyleUpdate,
 } from "@zeros/protocol/design-runtime";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
@@ -51,6 +57,12 @@ export interface DesignFrameRuntimeCallbacks {
 }
 
 export interface DesignFrameRuntimeConnection {
+  /** Semantic generation currently owned by this mounted document/port. */
+  readonly sourceVersion: string;
+  /** Whether the mounted runtime implements one method. A document painted by
+   * an older engine build negotiates its capabilities at handshake time, so a
+   * caller can choose a leaner path without risking a rejected request. */
+  supports(method: DesignRuntimeMethod): boolean;
   getSnapshot(signal?: AbortSignal): Promise<DesignRuntimeSnapshot>;
   getElementAtLoc(
     x: number,
@@ -89,6 +101,29 @@ export interface DesignFrameRuntimeConnection {
     styles: Record<string, string | null>,
     signal?: AbortSignal,
   ): Promise<DesignRuntimeNodeDetails>;
+  /** Apply a gesture's styles and measure only what the canvas paints from.
+   * One round trip, measured in the same task as the write. */
+  previewGeometry(
+    nodeId: string,
+    styles: Record<string, string | null> | null,
+    options?: { children?: boolean },
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeGeometry>;
+  previewText(
+    nodeId: string,
+    text: string,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails>;
+  clearPreviewText(
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails>;
+  commitStyles(
+    updates: DesignRuntimeStyleUpdate[],
+    nextSourceVersion: string,
+    patch?: DesignRuntimeGenerationPatch,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeStyleCommit>;
   previewMotion(
     nodeId: string,
     motion: DesignRuntimeMotionPreview,
@@ -101,6 +136,11 @@ export interface DesignFrameRuntimeConnection {
   captureScreenshot(
     nodeId?: string | null,
     scale?: number,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeScreenshot>;
+  captureViewportScreenshot(
+    crop: DesignRuntimeRect,
+    outputSize: { width: number; height: number },
     signal?: AbortSignal,
   ): Promise<DesignRuntimeScreenshot>;
   destroy(): void;
@@ -151,12 +191,58 @@ function isNodeDetails(value: unknown): value is DesignRuntimeNodeDetails {
     typeof details.tag === "string" &&
     (details.textEditable === undefined ||
       typeof details.textEditable === "boolean") &&
+    (details.textSizing === undefined ||
+      (typeof details.textSizing === "object" &&
+        details.textSizing !== null &&
+        ["fixed", "auto", "min-content", "max-content", "fit-content"].includes(
+          details.textSizing.width,
+        ) &&
+        ["fixed", "auto"].includes(details.textSizing.height) &&
+        typeof details.textSizing.availableWidth === "number" &&
+        Number.isFinite(details.textSizing.availableWidth))) &&
     typeof details.selector === "string" &&
     Array.isArray(details.breadcrumb) &&
     !!details.rect &&
     typeof details.rect === "object" &&
     !!details.styles &&
     typeof details.styles === "object"
+  );
+}
+
+function isRuntimeRect(value: unknown): value is DesignRuntimeRect {
+  if (!value || typeof value !== "object") return false;
+  const rect = value as Partial<DesignRuntimeRect>;
+  return (
+    typeof rect.x === "number" &&
+    typeof rect.y === "number" &&
+    typeof rect.width === "number" &&
+    typeof rect.height === "number"
+  );
+}
+
+function isNodeGeometry(value: unknown): value is DesignRuntimeNodeGeometry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const geometry = value as Partial<DesignRuntimeNodeGeometry>;
+  return (
+    typeof geometry.sourceVersion === "string" &&
+    typeof geometry.oid === "string" &&
+    isRuntimeRect(geometry.rect) &&
+    !!geometry.box &&
+    typeof geometry.box === "object" &&
+    typeof geometry.box.rotation === "number" &&
+    typeof geometry.box.scaleX === "number" &&
+    !!geometry.styles &&
+    typeof geometry.styles === "object" &&
+    Array.isArray(geometry.children) &&
+    geometry.children.length <= DESIGN_RUNTIME_GEOMETRY_CHILD_LIMIT &&
+    geometry.children.every(
+      (child) =>
+        typeof child.oid === "string" &&
+        typeof child.name === "string" &&
+        isRuntimeRect(child.rect) &&
+        !!child.styles &&
+        typeof child.styles === "object",
+    )
   );
 }
 
@@ -171,6 +257,19 @@ function isRuntimeScreenshot(value: unknown): value is DesignRuntimeScreenshot {
     typeof screenshot.width === "number" &&
     typeof screenshot.height === "number" &&
     typeof screenshot.scale === "number"
+  );
+}
+
+function isStyleCommit(value: unknown): value is DesignRuntimeStyleCommit {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const commit = value as Partial<DesignRuntimeStyleCommit>;
+  return (
+    typeof commit.sourceVersion === "string" &&
+    typeof commit.treeUnchanged === "boolean" &&
+    isRuntimeSnapshot(commit.snapshot) &&
+    Array.isArray(commit.details) &&
+    commit.details.length <= 32 &&
+    commit.details.every(isNodeDetails)
   );
 }
 
@@ -208,14 +307,17 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
   private readonly channel = new MessageChannel();
   private readonly pending = new Map<string, PendingRequest>();
   private destroyed = false;
+  private expectedSourceVersion: string;
+  private methods: ReadonlySet<DesignRuntimeMethod> | null = null;
 
   constructor(
     source: MessageEventSource,
-    private readonly expectedSourceVersion: string,
+    expectedSourceVersion: string,
     private readonly host: RuntimeHostWindow,
     private readonly callbacks: DesignFrameRuntimeCallbacks,
   ) {
     this.source = source;
+    this.expectedSourceVersion = expectedSourceVersion;
     this.channel.port1.addEventListener("message", this.handleMessage);
     this.channel.port1.start();
     const handshake: DesignRuntimeHostHandshake = {
@@ -228,6 +330,15 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       targetOrigin: "*",
       transfer: [this.channel.port2],
     });
+  }
+
+  get sourceVersion(): string {
+    return this.expectedSourceVersion;
+  }
+
+  supports(method: DesignRuntimeMethod): boolean {
+    // Before the handshake nothing is known; a caller must keep its fallback.
+    return this.methods?.has(method) ?? false;
   }
 
   private readonly handleMessage = (event: MessageEvent): void => {
@@ -247,6 +358,7 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
           this.destroy();
           return;
         }
+        this.methods = new Set(message.payload.capabilities.methods);
         this.callbacks.onReady?.(message.payload.capabilities);
         this.callbacks.onSnapshot?.(message.payload.snapshot, "ready");
       } else if (
@@ -506,6 +618,89 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
     return result;
   }
 
+  async previewGeometry(
+    nodeId: string,
+    styles: Record<string, string | null> | null,
+    options: { children?: boolean } = {},
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeGeometry> {
+    const result = await this.request(
+      "previewGeometry",
+      {
+        nodeId,
+        ...(styles ? { styles } : {}),
+        ...(options.children ? { children: true } : {}),
+      },
+      signal,
+    );
+    if (
+      !isNodeGeometry(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
+      throw runtimeError("previewGeometry returned malformed data");
+    }
+    return result;
+  }
+
+  async commitStyles(
+    updates: DesignRuntimeStyleUpdate[],
+    nextSourceVersion: string,
+    patch?: DesignRuntimeGenerationPatch,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeStyleCommit> {
+    const previousSourceVersion = this.expectedSourceVersion;
+    if (!/^[a-f0-9]{24}$/.test(nextSourceVersion)) {
+      throw runtimeError("invalid next source generation", "BAD_REQUEST");
+    }
+    const result = await this.request(
+      "commitStyles",
+      { updates, nextSourceVersion, ...(patch ? { patch } : {}) },
+      signal,
+    );
+    if (
+      this.expectedSourceVersion !== previousSourceVersion ||
+      !isStyleCommit(result) ||
+      result.sourceVersion !== nextSourceVersion ||
+      result.snapshot.sourceVersion !== nextSourceVersion ||
+      result.details.some(
+        (details) => details.sourceVersion !== nextSourceVersion,
+      )
+    ) {
+      throw runtimeError("commitStyles returned malformed data");
+    }
+    this.expectedSourceVersion = nextSourceVersion;
+    return result;
+  }
+
+  async previewText(
+    nodeId: string,
+    text: string,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails> {
+    const result = await this.request("previewText", { nodeId, text }, signal);
+    if (
+      !isNodeDetails(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
+      throw runtimeError("previewText returned malformed data");
+    }
+    return result;
+  }
+
+  async clearPreviewText(
+    nodeId: string,
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeNodeDetails> {
+    const result = await this.request("clearPreviewText", { nodeId }, signal);
+    if (
+      !isNodeDetails(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
+      throw runtimeError("clearPreviewText returned malformed data");
+    }
+    return result;
+  }
+
   async previewMotion(
     nodeId: string,
     motion: DesignRuntimeMotionPreview,
@@ -557,6 +752,25 @@ class DesignRuntimeConnectionImpl implements DesignFrameRuntimeConnection {
       result.sourceVersion !== this.expectedSourceVersion
     ) {
       throw runtimeError("captureScreenshot returned malformed data");
+    }
+    return result;
+  }
+
+  async captureViewportScreenshot(
+    crop: DesignRuntimeRect,
+    outputSize: { width: number; height: number },
+    signal?: AbortSignal,
+  ): Promise<DesignRuntimeScreenshot> {
+    const result = await this.request(
+      "captureScreenshot",
+      { crop, outputSize },
+      signal,
+    );
+    if (
+      !isRuntimeScreenshot(result) ||
+      result.sourceVersion !== this.expectedSourceVersion
+    ) {
+      throw runtimeError("captureScreenshot returned malformed viewport data");
     }
     return result;
   }

@@ -9,13 +9,18 @@
 
 import type {
   DesignRuntimeNodeDetails,
+  DesignRuntimeNodeGeometry,
   DesignRuntimeHitMode,
   DesignRuntimeMotionPreview,
+  DesignRuntimeRect,
   DesignRuntimeScreenshot,
   DesignRuntimeSnapshot,
   DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
-import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
+import {
+  DESIGN_RUNTIME_GEOMETRY_CHILD_LIMIT,
+  DESIGN_SELECTION_NODE_LIMIT,
+} from "@zeros/protocol/design-runtime";
 import type { DesignStyleProvenance } from "@zeros/design-web";
 
 import {
@@ -39,10 +44,49 @@ import {
   isValidDesignNodeId,
   useDesignWorkspaceUiStore,
 } from "./design-workspace-ui";
+import { revealDesignLayerPath } from "./design-layer-disclosure";
+import { designLayerAncestorIdsFor } from "../design-layer-tree";
+
+/** Open the Layers path down to a selection in the same transition that
+ * publishes it, so a canvas click can never leave its row folded away. The
+ * user stays free to collapse those containers again afterwards; a snapshot
+ * that lands later re-selects and reveals the path from the fresh tree. */
+function revealDesignSelectionPath(
+  workspaceId: string,
+  frame: string,
+  nodeIds: readonly string[],
+): void {
+  const tree = designRuntimeFrameState(workspaceId, frame)?.snapshot?.tree;
+  if (!tree) return;
+  revealDesignLayerPath(
+    workspaceId,
+    frame,
+    designLayerAncestorIdsFor(tree, nodeIds),
+  );
+}
 
 const selectionGenerationByWorkspace = new Map<string, number>();
 const hoverGenerationByWorkspace = new Map<string, number>();
-const runtimeAuditFingerprintByFrame = new Map<string, string>();
+interface PendingDesignHoverRead {
+  input: {
+    workspaceId: string;
+    folder: string;
+    frame: string;
+    sourceVersion: string;
+    nodeId: string;
+  };
+  generation: number;
+  resolve: () => void;
+}
+interface DesignHoverReadQueue {
+  active: boolean;
+  pending: PendingDesignHoverRead | null;
+}
+const hoverReadQueueByWorkspace = new Map<string, DesignHoverReadQueue>();
+const runtimeAuditPublicationByFrame = new Map<
+  string,
+  { fingerprint: string; result: Promise<boolean> }
+>();
 const MAX_PERSISTED_KEY_STYLES = 64;
 const PERSISTED_KEY_STYLE_PRIORITY = [
   "position",
@@ -123,6 +167,34 @@ function nextGeneration(map: Map<string, number>, workspaceId: string): number {
 function nextSelectionVersion(): number {
   selectionVersion = Math.max(selectionVersion + 1, Date.now() * 1_024);
   return selectionVersion;
+}
+
+/** Selection persistence is exact-source optimistic metadata. A local
+ * mutation can advance the frame between runtime readback and the engine
+ * write; the current local selection remains authoritative and the next
+ * exact-generation ready event republishes it. Other failures still surface. */
+function selectionPublicationLostSourceRace(error: unknown): boolean {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : "";
+  return message.includes(
+    "Design selection source changed before publication:",
+  );
+}
+
+async function publishDurableDesignSelection(
+  workspaceId: string,
+  selection: Parameters<typeof designSetSelection>[1],
+  version: number,
+): Promise<void> {
+  try {
+    await designSetSelection(workspaceId, selection, version);
+  } catch (error) {
+    if (!selectionPublicationLostSourceRace(error)) throw error;
+  }
 }
 
 function treeContainsOid(
@@ -263,6 +335,13 @@ export async function captureDesignRuntimeScreenshot(
     return null;
   }
   const capturedAt = Date.now();
+  // The renderer already validated the runtime generation and image payload.
+  // Publish those confirmed pixels synchronously before the durable bridge
+  // write so an unavoidable document navigation can use them as its cover
+  // even when engine persistence is briefly back-pressured.
+  useDesignRuntimeStore
+    .getState()
+    .publishScreenshot(workspaceId, folder, frame, screenshot, sourceVersion);
   await designSetScreenshot(workspaceId, {
     frame,
     nodeId,
@@ -274,15 +353,17 @@ export async function captureDesignRuntimeScreenshot(
     capturedAt,
     sourceVersion,
   });
-  useDesignRuntimeStore
-    .getState()
-    .publishScreenshot(workspaceId, folder, frame, screenshot, sourceVersion);
   return screenshot;
 }
 
+/** Make a frame the workspace's active frame, clearing any node selection.
+ * `options.selected` marks the frame itself as the selection target (label
+ * click, Layers row, Escape from a root child); without it the frame is only
+ * activated — the Figma-like "nothing selected" resting state. */
 export async function selectDesignFrame(
   workspaceId: string,
   frame: DesignCanvasFrameWire | null,
+  options?: { selected?: boolean },
 ): Promise<void> {
   nextGeneration(selectionGenerationByWorkspace, workspaceId);
   const version = nextSelectionVersion();
@@ -293,13 +374,24 @@ export async function selectDesignFrame(
     await designSetSelection(workspaceId, null, version);
     return;
   }
+  const frameSelected = options?.selected === true;
   const current = designWorkspaceView(workspaceId);
-  if (current.selectedFrame !== frame.file || current.selectedNodeId !== null) {
+  if (
+    current.selectedFrame !== frame.file ||
+    current.selectedNodeId !== null ||
+    current.frameSelected !== frameSelected
+  ) {
     useDesignWorkspaceUiStore
       .getState()
-      .setSelection(workspaceId, frame.file, null);
+      .setSelection(workspaceId, frame.file, null, undefined, {
+        frameSelected,
+      });
   }
-  await designSetSelection(workspaceId, frameSelection(frame), version);
+  await publishDurableDesignSelection(
+    workspaceId,
+    frameSelection(frame),
+    version,
+  );
 }
 
 export async function selectDesignNode(input: {
@@ -328,6 +420,7 @@ export async function selectDesignNode(input: {
       .getState()
       .setSelection(workspaceId, frame.file, nodeId);
   }
+  revealDesignSelectionPath(workspaceId, frame.file, [nodeId]);
 
   const cachedCandidate = designRuntimeFrameState(workspaceId, frame.file)
     ?.detailsByNode[nodeId];
@@ -358,7 +451,7 @@ export async function selectDesignNode(input: {
       frame.sourceVersion,
     );
   clearDesignLivePreview(workspaceId, frame.file, nodeId);
-  await designSetSelection(
+  await publishDurableDesignSelection(
     workspaceId,
     elementSelection(frame, details),
     version,
@@ -417,6 +510,7 @@ export async function selectDesignNodes(input: {
   useDesignWorkspaceUiStore
     .getState()
     .setSelection(input.workspaceId, input.frame.file, primary, nodeIds);
+  revealDesignSelectionPath(input.workspaceId, input.frame.file, nodeIds);
 
   const supplied = new Map(
     input.details?.map((details) => [details.oid, details]) ?? [],
@@ -468,7 +562,7 @@ export async function selectDesignNodes(input: {
       );
     clearDesignLivePreview(input.workspaceId, input.frame.file, candidate.oid);
   }
-  await designSetSelection(
+  await publishDurableDesignSelection(
     input.workspaceId,
     multiElementSelection(input.frame, details),
     version,
@@ -589,13 +683,127 @@ export async function inspectDesignNodesInRect(input: {
 }): Promise<DesignRuntimeNodeDetails[]> {
   const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
   if (!runtime) return [];
+  const runtimeSourceVersion =
+    runtime.sourceVersion ?? input.frame.sourceVersion;
   const details = await runtime.getElementsInRect(
     input.rect,
     input.scopeNodeId,
   );
   return details.filter(
-    (candidate) => candidate.sourceVersion === input.frame.sourceVersion,
+    (candidate) => candidate.sourceVersion === runtimeSourceVersion,
   );
+}
+
+/** Everything one gesture frame paints from, in one round trip.
+ *
+ * The overlay, its padding hatches and its gap affordances are the only things a
+ * drag repaints, and they read a dozen values. Asking for a node's whole
+ * computed catalog sixty times a second is what left the element trailing the
+ * outline that describes it, so gestures ask for this instead — and get an
+ * answer measured in the same task the styles were applied in, with no
+ * animation frame in between.
+ *
+ * A document painted by an older engine build has no `previewGeometry`; the
+ * fallback below produces the identical shape from the calls it does have, so
+ * every caller has exactly one code path. */
+export async function previewDesignNodeGeometry(input: {
+  workspaceId: string;
+  frame: DesignCanvasFrameWire;
+  nodeId: string;
+  /** Omitted or null measures without authoring anything. */
+  styles?: Record<string, string | null> | null;
+  children?: boolean;
+}): Promise<DesignRuntimeNodeGeometry> {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame.file);
+  if (!runtime) throw new Error("The design frame is not ready.");
+  const runtimeSourceVersion =
+    runtime.sourceVersion ?? input.frame.sourceVersion;
+  const geometry = runtime.supports("previewGeometry")
+    ? await runtime.previewGeometry(input.nodeId, input.styles ?? null, {
+        children: input.children === true,
+      })
+    : await legacyDesignNodeGeometry(runtime, input);
+  if (geometry.sourceVersion !== runtimeSourceVersion) {
+    throw new Error("The design frame changed before the preview was applied.");
+  }
+  return geometry;
+}
+
+/** The pre-`previewGeometry` shape of the same answer. */
+async function legacyDesignNodeGeometry(
+  runtime: NonNullable<ReturnType<typeof designFrameRuntime>>,
+  input: {
+    workspaceId: string;
+    frame: DesignCanvasFrameWire;
+    nodeId: string;
+    styles?: Record<string, string | null> | null;
+    children?: boolean;
+  },
+): Promise<DesignRuntimeNodeGeometry> {
+  const details = input.styles
+    ? await runtime.previewStyles(input.nodeId, input.styles)
+    : await runtime.getNodeDetails(input.nodeId);
+  const children = input.children
+    ? await runtime.getElementsInRect(
+        designNodeChildInspectionRect(details.rect),
+        input.nodeId,
+      )
+    : [];
+  return designNodeGeometryFromDetails(details, children);
+}
+
+/** Over-scan a container's own box so a child placed outside it (a negative
+ * margin, an overflowing grid item) is still measured. */
+export function designNodeChildInspectionRect(rect: DesignRuntimeRect) {
+  const overscan = Math.max(
+    256,
+    Math.min(25_000, Math.max(rect.width, rect.height)),
+  );
+  const width = Math.min(100_000, rect.width + overscan * 2);
+  const height = Math.min(100_000, rect.height + overscan * 2);
+  return {
+    x: rect.x - (width - rect.width) / 2,
+    y: rect.y - (height - rect.height) / 2,
+    width,
+    height,
+  };
+}
+
+/** Narrow full details down to the gesture shape, so the fallback path and the
+ * lean path are indistinguishable to every caller. */
+export function designNodeGeometryFromDetails(
+  details: DesignRuntimeNodeDetails,
+  children: readonly DesignRuntimeNodeDetails[] = [],
+): DesignRuntimeNodeGeometry {
+  return {
+    sourceVersion: details.sourceVersion,
+    oid: details.oid,
+    rect: details.rect,
+    box: details.box ?? {
+      x: details.rect.x,
+      y: details.rect.y,
+      width: details.rect.width,
+      height: details.rect.height,
+      rotation: 0,
+      scaleX: 1,
+      scaleY: 1,
+      originX: 0.5,
+      originY: 0.5,
+    },
+    styles: details.styles,
+    children: children
+      .filter(
+        (child) =>
+          child.visible && child.rect.width > 0 && child.rect.height > 0,
+      )
+      .slice(0, DESIGN_RUNTIME_GEOMETRY_CHILD_LIMIT)
+      .map((child) => ({
+        oid: child.oid,
+        rect: child.rect,
+        name: child.name,
+        styles: child.styles,
+      })),
+  };
 }
 
 /** Resolve canvas hover through the same opaque runtime without changing the
@@ -654,25 +862,97 @@ export async function hoverDesignNode(input: {
   useDesignRuntimeStore
     .getState()
     .setHoveredNode(workspaceId, nodeId ? frame : null, nodeId);
-  if (!nodeId) return;
+  if (!nodeId) {
+    const queue = hoverReadQueueByWorkspace.get(workspaceId);
+    if (queue?.pending) {
+      queue.pending.resolve();
+      queue.pending = null;
+    }
+    return;
+  }
   const cachedCandidate = designRuntimeFrameState(workspaceId, frame)
     ?.detailsByNode[nodeId];
   const cached =
     cachedCandidate?.sourceVersion === input.sourceVersion
       ? cachedCandidate
       : undefined;
-  let details = input.details ?? cached;
-  if (!details) {
-    const runtime = designFrameRuntime(workspaceId, frame);
-    if (!runtime) return;
-    try {
-      details = await runtime.getNodeDetails(nodeId);
-    } catch {
-      // Hover is speculative. A source reload or mutation may remove the node
-      // between pointer entry and readback; the next hover/runtime event wins.
-      return;
-    }
+  const suppliedDetails = input.details ?? cached;
+  if (!suppliedDetails) {
+    return new Promise<void>((resolve) => {
+      const entry: PendingDesignHoverRead = {
+        input: {
+          workspaceId,
+          folder,
+          frame,
+          sourceVersion: input.sourceVersion,
+          nodeId,
+        },
+        generation,
+        resolve,
+      };
+      const queue = hoverReadQueueByWorkspace.get(workspaceId) ?? {
+        active: false,
+        pending: null,
+      };
+      hoverReadQueueByWorkspace.set(workspaceId, queue);
+      if (queue.active) {
+        // Pointer traversal only cares about the newest unopened row. Resolve a
+        // superseded waiter immediately and retain one latest pending read.
+        queue.pending?.resolve();
+        queue.pending = entry;
+        return;
+      }
+      queue.active = true;
+      const drain = async (first: PendingDesignHoverRead) => {
+        let current: PendingDesignHoverRead | null = first;
+        while (current) {
+          const request = current;
+          let details: DesignRuntimeNodeDetails | null = null;
+          const runtime = designFrameRuntime(
+            request.input.workspaceId,
+            request.input.frame,
+          );
+          if (runtime) {
+            try {
+              details = await runtime.getNodeDetails(request.input.nodeId);
+            } catch {
+              // Hover is speculative. A mutation may remove a row between
+              // pointer entry and readback; the newest queued hover still runs.
+            }
+          }
+          const runtimeWorkspace =
+            useDesignRuntimeStore.getState().byWorkspace[
+              request.input.workspaceId
+            ];
+          if (
+            details?.sourceVersion === request.input.sourceVersion &&
+            hoverGenerationByWorkspace.get(request.input.workspaceId) ===
+              request.generation &&
+            runtimeWorkspace?.hoveredFrame === request.input.frame &&
+            runtimeWorkspace.hoveredNodeId === request.input.nodeId
+          ) {
+            useDesignRuntimeStore
+              .getState()
+              .publishNodeDetails(
+                request.input.workspaceId,
+                request.input.folder,
+                request.input.frame,
+                details,
+                request.input.sourceVersion,
+              );
+          }
+          request.resolve();
+          current = queue.pending;
+          queue.pending = null;
+        }
+      };
+      void drain(entry).finally(() => {
+        queue.active = false;
+        if (!queue.pending) hoverReadQueueByWorkspace.delete(workspaceId);
+      });
+    });
   }
+  const details = suppliedDetails;
   const runtimeWorkspace =
     useDesignRuntimeStore.getState().byWorkspace[workspaceId];
   if (
@@ -705,8 +985,12 @@ export async function setDesignNodeVisibility(input: {
 }): Promise<DesignRuntimeNodeDetails> {
   const runtime = designFrameRuntime(input.workspaceId, input.frame);
   if (!runtime) throw new Error("The design frame is not ready.");
+  // The painted document is the connected generation. While a replacement
+  // iframe loads, the workspace snapshot already names the newer one, and
+  // rejecting on that difference would report a landed write as a failure.
+  const runtimeSourceVersion = runtime.sourceVersion ?? input.sourceVersion;
   const details = await runtime.setNodeVisibility(input.nodeId, input.visible);
-  if (details.sourceVersion !== input.sourceVersion) {
+  if (details.sourceVersion !== runtimeSourceVersion) {
     throw new Error("The design frame changed before visibility was updated.");
   }
   useDesignRuntimeStore
@@ -716,7 +1000,7 @@ export async function setDesignNodeVisibility(input: {
       input.folder,
       input.frame,
       details,
-      input.sourceVersion,
+      runtimeSourceVersion,
     );
   return details;
 }
@@ -759,6 +1043,7 @@ export async function previewDesignNodeStylesTransient(input: {
 }): Promise<DesignRuntimeNodeDetails> {
   const runtime = designFrameRuntime(input.workspaceId, input.frame);
   if (!runtime) throw new Error("The design frame is not ready.");
+  const runtimeSourceVersion = runtime.sourceVersion ?? input.sourceVersion;
   const publication = publishDesignLivePreviewStyles(
     input.workspaceId,
     input.frame,
@@ -767,7 +1052,7 @@ export async function previewDesignNodeStylesTransient(input: {
   );
   try {
     const details = await runtime.previewStyles(input.nodeId, input.styles);
-    if (details.sourceVersion !== input.sourceVersion) {
+    if (details.sourceVersion !== runtimeSourceVersion) {
       throw new Error(
         "The design frame changed before the preview was applied.",
       );
@@ -782,6 +1067,44 @@ export async function previewDesignNodeStylesTransient(input: {
     );
     throw error;
   }
+}
+
+/** Live text stays inside the opaque runtime and intentionally bypasses the
+ * React store. The uncontrolled editor already owns the draft; publishing each
+ * keystroke would rerender the canvas and inspector for no semantic change. */
+export async function previewDesignNodeTextTransient(input: {
+  workspaceId: string;
+  frame: string;
+  sourceVersion: string;
+  nodeId: string;
+  text: string;
+}): Promise<DesignRuntimeNodeDetails> {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame);
+  if (!runtime) throw new Error("The design frame is not ready.");
+  const runtimeSourceVersion = runtime.sourceVersion ?? input.sourceVersion;
+  const details = await runtime.previewText(input.nodeId, input.text);
+  if (details.sourceVersion !== runtimeSourceVersion) {
+    throw new Error("The design frame changed before text was previewed.");
+  }
+  return details;
+}
+
+export async function clearDesignNodeTextPreviewTransient(input: {
+  workspaceId: string;
+  frame: string;
+  sourceVersion: string;
+  nodeId: string;
+}): Promise<DesignRuntimeNodeDetails> {
+  const runtime = designFrameRuntime(input.workspaceId, input.frame);
+  if (!runtime) throw new Error("The design frame is not ready.");
+  const runtimeSourceVersion = runtime.sourceVersion ?? input.sourceVersion;
+  const details = await runtime.clearPreviewText(input.nodeId);
+  if (details.sourceVersion !== runtimeSourceVersion) {
+    throw new Error(
+      "The design frame changed before text preview was cleared.",
+    );
+  }
+  return details;
 }
 
 export async function previewDesignNodeMotionTransient(input: {
@@ -809,8 +1132,9 @@ export async function clearDesignNodeStylePreviewTransient(input: {
   clearDesignLivePreview(input.workspaceId, input.frame, input.nodeId);
   const runtime = designFrameRuntime(input.workspaceId, input.frame);
   if (!runtime) throw new Error("The design frame is not ready.");
+  const runtimeSourceVersion = runtime.sourceVersion ?? input.sourceVersion;
   const details = await runtime.clearPreviewStyles(input.nodeId);
-  if (details.sourceVersion !== input.sourceVersion) {
+  if (details.sourceVersion !== runtimeSourceVersion) {
     throw new Error("The design frame changed before the preview was cleared.");
   }
   return details;
@@ -898,28 +1222,12 @@ export function reconcileDesignRuntimeSnapshot(input: {
       snapshot,
       frame.sourceVersion,
     );
-  const auditKey = `${workspaceId}\u0000${frame.file}`;
-  const auditFingerprint = `${snapshot.sourceVersion}\u0000${JSON.stringify(snapshot.warnings)}`;
-  if (runtimeAuditFingerprintByFrame.get(auditKey) !== auditFingerprint) {
-    runtimeAuditFingerprintByFrame.delete(auditKey);
-    runtimeAuditFingerprintByFrame.set(auditKey, auditFingerprint);
-    while (runtimeAuditFingerprintByFrame.size > 256) {
-      const oldest = runtimeAuditFingerprintByFrame.keys().next().value as
-        | string
-        | undefined;
-      if (!oldest) break;
-      runtimeAuditFingerprintByFrame.delete(oldest);
-    }
-    void designSetRuntimeAudit(workspaceId, {
-      frame: frame.file,
-      sourceVersion: frame.sourceVersion,
-      warnings: snapshot.warnings,
-    }).catch(() => {
-      // Keep the attempted exact fingerprint. A deterministic validation
-      // failure must not turn every runtime snapshot into another bridge
-      // request; a changed source/warning set naturally produces a new key.
-    });
-  }
+  void persistDesignRuntimeAuditSnapshot({
+    workspaceId,
+    frame: frame.file,
+    sourceVersion: frame.sourceVersion,
+    warnings: snapshot.warnings,
+  });
   const view = designWorkspaceView(workspaceId);
   if (view.selectedFrame !== frame.file) return;
   const nodeId = view.selectedNodeId;
@@ -967,9 +1275,47 @@ export function reconcileDesignRuntimeSnapshot(input: {
   }
 }
 
+/** Share one exact-generation runtime-audit publication between ready events,
+ * mutation events, and the post-adoption idle reconciliation. Failed,
+ * deterministic payloads remain memoized so an observer cannot turn them into
+ * an unbounded bridge loop. */
+export function persistDesignRuntimeAuditSnapshot(input: {
+  workspaceId: string;
+  frame: string;
+  sourceVersion: string;
+  warnings: DesignRuntimeSnapshot["warnings"];
+}): Promise<boolean> {
+  const key = `${input.workspaceId}\u0000${input.frame}`;
+  const fingerprint = `${input.sourceVersion}\u0000${JSON.stringify(input.warnings)}`;
+  const existing = runtimeAuditPublicationByFrame.get(key);
+  if (existing?.fingerprint === fingerprint) return existing.result;
+  const result = designSetRuntimeAudit(input.workspaceId, {
+    frame: input.frame,
+    sourceVersion: input.sourceVersion,
+    warnings: input.warnings,
+  }).then(
+    () => true,
+    () => false,
+  );
+  runtimeAuditPublicationByFrame.delete(key);
+  runtimeAuditPublicationByFrame.set(key, { fingerprint, result });
+  while (runtimeAuditPublicationByFrame.size > 256) {
+    const oldest = runtimeAuditPublicationByFrame.keys().next().value as
+      | string
+      | undefined;
+    if (!oldest) break;
+    runtimeAuditPublicationByFrame.delete(oldest);
+  }
+  return result;
+}
+
 export function resetDesignSelectionWorkflowsForTests(): void {
   selectionGenerationByWorkspace.clear();
   hoverGenerationByWorkspace.clear();
-  runtimeAuditFingerprintByFrame.clear();
+  for (const queue of hoverReadQueueByWorkspace.values()) {
+    queue.pending?.resolve();
+  }
+  hoverReadQueueByWorkspace.clear();
+  runtimeAuditPublicationByFrame.clear();
   selectionVersion = 0;
 }

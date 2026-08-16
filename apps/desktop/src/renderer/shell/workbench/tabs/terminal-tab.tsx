@@ -84,6 +84,7 @@ import { useInstantViewSwitch } from "../../../shared/ui/use-instant-view-switch
 import {
   RUN_ADD_SUBTAB,
   resolveTerminalPanelTab,
+  terminalTabAuthority,
 } from "../../terminal/terminal-tab-selection";
 import { useTerminalPanelLayoutStore } from "../../terminal/terminal-panel-layout";
 import {
@@ -432,15 +433,19 @@ export function TerminalPanel({
   // miss replays the engine's buffered output instead of showing a blank pane.
   const replayRunOnMiss = useCallback(
     (sessionId: string) =>
-      workspaceRunLog({ sessionId })
+      workspaceRunLog({ workspaceId: activeWs?.id, sessionId })
         .then((r) => r.log || null)
         .catch(() => null),
-    [],
+    [activeWs?.id],
   );
 
   const activePlainId = plainTerminals.some((t) => t.id === activeSubTab)
     ? activeSubTab
     : null;
+  const activeAuthority = terminalTabAuthority(
+    activeSubTab,
+    plainTerminals.map((terminal) => terminal.id),
+  );
 
   // The Setup tab's status dot (off-tab signal only — see useSetupTabDot).
   const setupStatus = useSetupStatus(activeWs);
@@ -492,6 +497,17 @@ export function TerminalPanel({
         onAdd={handleAddTerminal}
         trailing={
           <>
+            {activeAuthority === "human-user" ? (
+              <Tooltip label="Human terminal — runs with your user authority outside agent Design protection">
+                <Badge
+                  variant="outline"
+                  data-terminal-authority="human-user"
+                  className="text-fg2 h-6 shrink-0 px-2 text-xs font-medium select-none"
+                >
+                  Run as me
+                </Badge>
+              </Tooltip>
+            ) : null}
             <RunControl
               folderKey={folderKey}
               chatCwd={chatCwd}

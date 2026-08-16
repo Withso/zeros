@@ -359,6 +359,170 @@ export function scrubDesignNumericValue(
   return `${formatDesignNumber(parsed.number + delta)}${parsed.unit}`;
 }
 
+const DESIGN_PX_DEFAULT_PROPERTIES = new Set([
+  "top",
+  "right",
+  "bottom",
+  "left",
+  "width",
+  "height",
+  "min-width",
+  "min-height",
+  "max-width",
+  "max-height",
+  "padding",
+  "padding-top",
+  "padding-right",
+  "padding-bottom",
+  "padding-left",
+  "margin",
+  "margin-top",
+  "margin-right",
+  "margin-bottom",
+  "margin-left",
+  "gap",
+  "row-gap",
+  "column-gap",
+  "flex-basis",
+  "grid-auto-columns",
+  "grid-auto-rows",
+  "border-width",
+  "border-top-width",
+  "border-right-width",
+  "border-bottom-width",
+  "border-left-width",
+  "border-radius",
+  "border-top-left-radius",
+  "border-top-right-radius",
+  "border-bottom-right-radius",
+  "border-bottom-left-radius",
+  "outline-width",
+  "outline-offset",
+  "font-size",
+  "letter-spacing",
+  "word-spacing",
+  "text-indent",
+  "perspective",
+  "transform-origin",
+  "object-position",
+  "background-position",
+  "background-size",
+]);
+
+const DESIGN_MS_DEFAULT_PROPERTIES = new Set([
+  "transition-duration",
+  "transition-delay",
+  "animation-duration",
+  "animation-delay",
+]);
+
+const DESIGN_LAYOUT_PROPERTIES = new Set([
+  "position",
+  "top",
+  "right",
+  "bottom",
+  "left",
+  "inset",
+  "width",
+  "height",
+  "min-width",
+  "min-height",
+  "max-width",
+  "max-height",
+  "aspect-ratio",
+  "box-sizing",
+  "margin",
+  "padding",
+  "border-width",
+  "border-style",
+  "display",
+  "flex",
+  "flex-direction",
+  "flex-wrap",
+  "flex-grow",
+  "flex-shrink",
+  "flex-basis",
+  "align-items",
+  "align-self",
+  "align-content",
+  "justify-content",
+  "justify-items",
+  "justify-self",
+  "order",
+  "gap",
+  "row-gap",
+  "column-gap",
+  "grid",
+  "grid-template-columns",
+  "grid-template-rows",
+  "grid-auto-flow",
+  "grid-auto-columns",
+  "grid-auto-rows",
+  "grid-column",
+  "grid-row",
+  "float",
+  "clear",
+  "font",
+  "font-family",
+  "font-size",
+  "font-weight",
+  "font-style",
+  "font-stretch",
+  "line-height",
+  "letter-spacing",
+  "word-spacing",
+  "text-indent",
+  "text-overflow",
+  "text-wrap",
+  "word-break",
+  "overflow-wrap",
+  "text-transform",
+  "white-space",
+  "vertical-align",
+  "writing-mode",
+  "hyphens",
+  "transform",
+  "transform-origin",
+  "perspective",
+  "perspective-origin",
+]);
+
+/** Design tools treat a bare spatial value as pixels and a bare timing value
+ * as milliseconds. CSS itself rejects values such as `width: 320`, so apply
+ * the editor convention before both speculative preview and source commit. */
+export function normalizeDesignStyleFieldInput(
+  property: string,
+  input: string,
+  baseline: string,
+): string {
+  const normalizedProperty = cssStyleProperty(property);
+  const resolved = resolveDesignNumericExpression(input, baseline);
+  const parsed = parseDesignNumericValue(resolved);
+  if (!parsed || parsed.unit) return resolved;
+  if (DESIGN_PX_DEFAULT_PROPERTIES.has(normalizedProperty)) {
+    return `${formatDesignNumber(parsed.number)}px`;
+  }
+  if (DESIGN_MS_DEFAULT_PROPERTIES.has(normalizedProperty)) {
+    return `${formatDesignNumber(parsed.number)}ms`;
+  }
+  return resolved;
+}
+
+/** Whether a preview needs browser layout readback to keep the selected box,
+ * spacing controls, and child gap bands aligned with the painted element. */
+export function designStylePropertyAffectsLayout(property: string): boolean {
+  const normalized = cssStyleProperty(property);
+  return (
+    normalized.startsWith("--") ||
+    DESIGN_LAYOUT_PROPERTIES.has(normalized) ||
+    /^(?:margin|padding|border)-(?:top|right|bottom|left)(?:-width)?$/.test(
+      normalized,
+    ) ||
+    /^(?:margin|padding|inset)-(?:block|inline)/.test(normalized) ||
+    /^grid-(?:column|row)(?:-|$)/.test(normalized)
+  );
+}
+
 class NumericExpressionParser {
   private index = 0;
 

@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { shouldLeaveBlockedDesignWorkspace } from "../design-workspace-access";
+import { shouldShowBlockedDesignModePlaceholder } from "../design-workspace-access";
 
-describe("blocked design-workspace route", () => {
-  it("waits fail-closed while the staff identity is unresolved", () => {
+describe("blocked design-mode route", () => {
+  it("stays inert (no placeholder, no design UI) while staff identity is unresolved", () => {
     expect(
-      shouldLeaveBlockedDesignWorkspace({
+      shouldShowBlockedDesignModePlaceholder({
         workspaceRoute: true,
         designRequested: true,
         designActive: false,
@@ -14,9 +14,9 @@ describe("blocked design-workspace route", () => {
     ).toBe(false);
   });
 
-  it("leaves only after access has authoritatively settled off", () => {
+  it("shows the placeholder only after access has authoritatively settled off", () => {
     expect(
-      shouldLeaveBlockedDesignWorkspace({
+      shouldShowBlockedDesignModePlaceholder({
         workspaceRoute: true,
         designRequested: true,
         designActive: false,
@@ -25,9 +25,9 @@ describe("blocked design-workspace route", () => {
     ).toBe(true);
   });
 
-  it("never leaves an enabled design route or an unrelated route", () => {
+  it("never covers an enabled design route or an unrelated route", () => {
     expect(
-      shouldLeaveBlockedDesignWorkspace({
+      shouldShowBlockedDesignModePlaceholder({
         workspaceRoute: true,
         designRequested: true,
         designActive: true,
@@ -35,7 +35,7 @@ describe("blocked design-workspace route", () => {
       }),
     ).toBe(false);
     expect(
-      shouldLeaveBlockedDesignWorkspace({
+      shouldShowBlockedDesignModePlaceholder({
         workspaceRoute: false,
         designRequested: true,
         designActive: false,

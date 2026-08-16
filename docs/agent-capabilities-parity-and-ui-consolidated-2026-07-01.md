@@ -1,6 +1,6 @@
 # Zeros Agents — Open tasks (Claude Code · Codex · Cursor)
 
-**Updated 2026-08-09.** Checked tasks are implemented; unchecked tasks remain open. Each task says what the user gets, in plain language. Re-verified against the repository's pinned agent platforms on 2026-08-09 (Claude Agent SDK 0.3.221 · Codex 0.146.0 · Cursor SDK 1.0.26). The latest published releases reviewed were Claude 0.3.226, Codex 0.147.0, and Cursor 1.0.27; the repository pins remain deliberate because these pre-1.0 APIs change their event/types surface and Codex's generated app-server schema is version-coupled to its binary. Upgrade each pin as a separately generated and regression-tested migration.
+**Updated 2026-08-13.** Checked tasks are implemented; unchecked tasks remain open. Each task says what the user gets, in plain language. Re-verified against the repository's pinned agent platforms on 2026-08-13 (Claude Agent SDK 0.3.231 · Codex 0.146.0 · Cursor SDK 1.0.26). Claude was raised specifically to its Claude Code 2.1.231 runtime because built-in Write path enforcement requires 2.1.228 or later. These pre-1.0 APIs change their event/types surface and Codex's generated app-server schema is version-coupled to its binary; upgrade each pin as a separately generated and regression-tested migration.
 
 > **Retention:** This is the actively maintained agent-capability backlog, not a
 > completed historical plan. Keep it until every remaining item is implemented,

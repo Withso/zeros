@@ -1789,6 +1789,24 @@ export async function bridgeWorkspaceReassignLocalOrganization(
   )) as { changes: number; repoSlugs: string[] };
 }
 
+export async function bridgeWorkspaceSetMode(
+  bridge: RuntimeClient,
+  args: { workspaceId: string; mode: "code" | "design" },
+): Promise<{ ok: true; mode: "code" | "design" }> {
+  // Entering Design ensures + commits its foundation; exit may materialize a
+  // legacy sparse cone. Either can take seconds, so use the lifecycle budget
+  // rather than the 10s default.
+  return (await workspaceOp(
+    bridge,
+    "workspace.setMode",
+    { ...args },
+    60_000,
+  )) as {
+    ok: true;
+    mode: "code" | "design";
+  };
+}
+
 export async function bridgeWorkspaceArchive(
   bridge: RuntimeClient,
   args: { workspaceId: string; stashUncommitted?: boolean },
@@ -2003,7 +2021,7 @@ export async function bridgeWorkspaceStartRun(
 /** Stop a live run action — records "stopped", not "failed". */
 export async function bridgeWorkspaceStopRun(
   bridge: RuntimeClient,
-  args: { sessionId: string },
+  args: { workspaceId: string; sessionId: string },
 ): Promise<{ ok: boolean }> {
   return (await workspaceOp(bridge, "workspace.stopRun", {
     ...args,
@@ -2014,7 +2032,7 @@ export async function bridgeWorkspaceStopRun(
  *  too late to attach to a fast-exiting run PTY (its live mirror is gone). */
 export async function bridgeWorkspaceRunLog(
   bridge: RuntimeClient,
-  args: { sessionId: string },
+  args: { workspaceId?: string; sessionId: string },
 ): Promise<{ log: string; truncated: boolean }> {
   return (await workspaceOp(bridge, "workspace.runLog", {
     ...args,
@@ -2364,9 +2382,9 @@ export async function bridgeMcpGatewayDisconnect(
 }
 
 /** Store a static auth-header secret for an auth:"header" gateway backend. The
- *  value transits the LOCAL bridge once, then lives engine-only (the gateway
- *  vault + safeStorage) — never settings.toml, the renderer keychain, or the
- *  relay. Desktop-only. */
+ *  value transits the authenticated bridge once, then lives engine-only (the
+ *  gateway vault + platform credential store) — never settings.toml or the
+ *  renderer's durable state. Works identically for local and cloud engines. */
 export async function bridgeMcpGatewaySetHeaderSecret(
   bridge: RuntimeClient,
   url: string,
@@ -2418,11 +2436,15 @@ export async function bridgeSettingsWrite(
   layer: Exclude<SettingsLayer, "managed">,
   patch: SettingsDoc,
   repoRoot?: string,
+  options: { confirmDesignDirectoryChange?: boolean } = {},
 ): Promise<SettingsWriteWire> {
   return (await workspaceOp(bridge, "settings.write", {
     layer,
     patch,
     ...(repoRoot ? { repoRoot } : {}),
+    ...(options.confirmDesignDirectoryChange
+      ? { confirmDesignDirectoryChange: true }
+      : {}),
   })) as SettingsWriteWire;
 }
 

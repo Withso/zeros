@@ -74,6 +74,7 @@ import {
   bridgeWorkspaceList,
   bridgeWorkspaceDelete,
   bridgeWorkspaceArchive,
+  bridgeWorkspaceSetMode,
   bridgeWorkspaceSetStatus,
   bridgeWorkspaceReassignLocalOrganization,
   bridgeWorkspaceRestore,
@@ -120,9 +121,11 @@ import {
   bridgeDesignWriteHtml,
   bridgeDesignInsertAsset,
   type DesignFrameDocumentWire,
+  type DesignFoundationRevisionWire,
   type DesignFoundationOpenWire,
   type DesignApiMutationReplyWire,
   type DesignFrameGeometryWire,
+  type DesignTextFrameSeedWire,
   type DesignFrameSummaryWire,
   type DesignLintReportWire,
   type DesignMutationReplyWire,
@@ -153,7 +156,9 @@ export type {
   DesignCanvasFrameWire,
   DesignFrameDocumentWire,
   DesignFrameGeometryWire,
+  DesignTextFrameSeedWire,
   DesignFrameSummaryWire,
+  DesignFoundationRevisionWire,
   DesignFoundationOpenWire,
   DesignApiMutationReplyWire,
   DesignFrameTreeNodeWire,
@@ -530,6 +535,7 @@ export async function designUpdateToken(
 ): Promise<{
   mutation: DesignTokenMutationWire;
   snapshot: DesignWorkspaceSnapshotWire;
+  foundationRevision?: DesignFoundationRevisionWire;
 }> {
   return bridgeDesignUpdateToken(
     requireBridge("update a design token"),
@@ -587,6 +593,8 @@ export async function designSetRuntimeAudit(
 export async function designCreateFrame(
   workspaceId: string,
   title?: string,
+  geometry?: DesignFrameGeometryWire,
+  seed?: DesignTextFrameSeedWire,
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
@@ -595,6 +603,8 @@ export async function designCreateFrame(
     requireBridge("create a design frame"),
     workspaceId,
     title,
+    geometry,
+    seed,
   );
 }
 
@@ -621,6 +631,7 @@ export async function designUpdateCanvas(
 ): Promise<{
   geometry: DesignFrameGeometryWire;
   snapshot: DesignWorkspaceSnapshotWire;
+  foundationRevision?: DesignFoundationRevisionWire;
 }> {
   return bridgeDesignUpdateCanvas(
     requireBridge("move a design frame"),
@@ -870,6 +881,21 @@ export async function workspaceSetStatus(args: {
   );
 }
 
+/** Switch a workspace between code and design modes (right-click → Switch to
+ *  … Mode). One workspace, two views: entering Design keeps the same checkout
+ *  and code processes live. On first Design initialization the engine retires
+ *  code-agent sessions admitted before that territory existed; Setup, runs,
+ *  and human terminals do not block the view transition. */
+export async function workspaceSetMode(args: {
+  workspaceId: string;
+  mode: "code" | "design";
+}): Promise<void> {
+  await bridgeWorkspaceSetMode(
+    requireBridge("switch the workspace mode"),
+    args,
+  );
+}
+
 /** Restore (unarchive) a workspace. The engine adapts the path/branch when the
  *  originals are taken or missing. `adaptations` carries user-facing notes;
  *  `conflicts` reports any checkpoint-application conflict markers. */
@@ -1005,6 +1031,7 @@ export async function workspaceStartRun(args: {
 
 /** Stop a live run action — records "stopped", not "failed" (Run tab). */
 export async function workspaceStopRun(args: {
+  workspaceId: string;
   sessionId: string;
 }): Promise<{ ok: boolean }> {
   return bridgeWorkspaceStopRun(requireBridge("stop run"), args);
@@ -1013,6 +1040,7 @@ export async function workspaceStopRun(args: {
 /** Read a run action's buffered output. The terminal replays this when it
  *  mounts too late to attach to a fast-exiting run PTY (Run tab). */
 export async function workspaceRunLog(args: {
+  workspaceId?: string;
   sessionId: string;
 }): Promise<{ log: string; truncated: boolean }> {
   return bridgeWorkspaceRunLog(requireBridge("read run output"), args);
