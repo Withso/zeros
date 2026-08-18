@@ -42,12 +42,6 @@ function Hero() {
         Design and code, <span className="text-fg3">in parallel.</span>
       </h1>
 
-      <p className="mx-auto mt-6 max-w-[60ch] text-[15px] leading-[1.6] text-fg2 sm:text-[16px]">
-        Zeros is a Mac workspace where parallel AI agents design, build, and ship
-        across isolated git worktrees. Watch them work, review every change, then
-        merge — all in one place.
-      </p>
-
       <div className="mt-9 flex flex-col items-center gap-4">
         <DownloadButton size="lg" />
         <span className="text-[12px] tracking-tight text-fg3">{DOWNLOAD_META}</span>
