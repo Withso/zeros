@@ -1,10 +1,9 @@
-import { ArrowRight } from 'lucide-react'
 import { Nav } from '../components/Nav'
 import { Footer } from '../components/Footer'
 import { ProductPreview } from '../components/ProductPreview'
 import { DownloadButton } from '../components/DownloadButton'
 import { AgentLogoImg, type AgentName } from '../components/AgentLogos'
-import { CURRENT_VERSION, DOWNLOAD_META } from '../lib/site'
+import { DOWNLOAD_META } from '../lib/site'
 
 export function HomePage() {
   return (
@@ -29,16 +28,7 @@ export function HomePage() {
 function Hero() {
   return (
     <section className="mx-auto w-full max-w-[1240px] px-5 pt-20 pb-4 text-center sm:px-8 sm:pt-28 lg:px-10 lg:pt-32">
-      <a
-        href="/changelog"
-        className="group inline-flex items-center gap-2 rounded-full border border-border2 bg-bg2 px-3.5 py-1.5 text-[12.5px] text-fg2 transition-colors hover:border-border3 hover:text-fg1"
-      >
-        <span className="h-1.5 w-1.5 rounded-full bg-success shadow-[0_0_6px_var(--success)]" />
-        Public beta — v{CURRENT_VERSION} is live
-        <ArrowRight className="h-3.5 w-3.5 transition-transform group-hover:translate-x-0.5" />
-      </a>
-
-      <h1 className="mx-auto mt-7 max-w-[16ch] text-[40px] leading-[1.05] font-medium tracking-[-0.03em] text-balance text-fg1 sm:text-[56px] lg:text-[68px]">
+      <h1 className="mx-auto max-w-[16ch] text-[40px] leading-[1.05] font-medium tracking-[-0.03em] text-balance text-fg1 sm:text-[56px] lg:text-[68px]">
         Design and code, <span className="text-fg3">in parallel.</span>
       </h1>
 
