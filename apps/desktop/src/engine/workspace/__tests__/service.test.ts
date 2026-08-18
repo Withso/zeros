@@ -17,6 +17,10 @@ import { insertWorkspace } from "../../git/state";
 import type { Workspace } from "../../git/types";
 import { getDesignRuntimeAudit } from "../../design/runtime-audits";
 import {
+  forgetDesignDirectoryName,
+  primeDesignDirectoryName,
+} from "../../design/directory-registry";
+import {
   getWorkspaceDesignApi,
   resetWorkspaceDesignApisForTests,
 } from "../../design/design-api";
@@ -1115,6 +1119,101 @@ describe("WorkspaceService", () => {
         }),
       ).resolves.toEqual({ ok: true });
     } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: created.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("recognizes renamed, nested, and multiple design folders by marker with nothing primed", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const created = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-markers",
+      kind: "code",
+    });
+    try {
+      // A code-mode workspace primes nothing: not Design mode, not an agent
+      // territory, not a settings change. The guard therefore used to compare
+      // against the DEFAULT name, match none of these folders, and allow every
+      // write below. Recognition is by marker, so no priming is required.
+      const renamed = "designs";
+      const nested = "apps/web/canvas";
+      for (const relative of [renamed, nested]) {
+        fs.mkdirSync(path.join(created.path, ...relative.split("/")), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(created.path, ...relative.split("/"), ".zeros-canvas.json"),
+          "{}\n",
+        );
+      }
+      fs.writeFileSync(path.join(created.path, renamed, "tokens.css"), "a{}\n");
+      const saveDesigns = expect.stringContaining("Save designs");
+      for (const designPath of [
+        `${renamed}/tokens.css`,
+        `${nested}/frame.html`,
+        renamed, // the folder itself, not just files inside it
+      ]) {
+        await expect(
+          svc.handle("file.write", {
+            workspaceId: created.workspaceId,
+            path: designPath,
+            content: "nope\n",
+          }),
+        ).rejects.toMatchObject({
+          code: "VALIDATION_FAILED",
+          remediation: saveDesigns,
+        });
+        await expect(
+          svc.handle("git.stage", {
+            workspaceId: created.workspaceId,
+            paths: [designPath],
+          }),
+        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      }
+
+      // A sibling under the same parent as a nested design folder stays
+      // writable — recognition is per-folder, never per-ancestor, and the
+      // workspace root is deliberately never probed.
+      await expect(
+        svc.handle("file.write", {
+          workspaceId: created.workspaceId,
+          path: "apps/web/server.ts",
+          content: "export const ok = true;\n",
+        }),
+      ).resolves.toBeTruthy();
+
+      // The viewer is told, so it renders read-only instead of offering an
+      // Edit action the write path is going to refuse.
+      await expect(
+        svc.handle("file.read", {
+          workspaceId: created.workspaceId,
+          path: `${renamed}/tokens.css`,
+        }),
+      ).resolves.toMatchObject({ designPath: true });
+      const codeRead = (await svc.handle("file.read", {
+        workspaceId: created.workspaceId,
+        path: "apps/web/server.ts",
+      })) as { designPath?: boolean };
+      expect(codeRead.designPath).toBeUndefined();
+
+      // A folder reserved for first use has no marker yet. The primed pointer
+      // is unioned in — never intersected — so it is still refused.
+      primeDesignDirectoryName(created.path, "reserved-designs");
+      await expect(
+        svc.handle("file.write", {
+          workspaceId: created.workspaceId,
+          path: "reserved-designs/document.json",
+          content: "nope\n",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    } finally {
+      forgetDesignDirectoryName(created.path);
       await svc.handle("workspace.delete", {
         workspaceId: created.workspaceId,
         includeBranch: true,

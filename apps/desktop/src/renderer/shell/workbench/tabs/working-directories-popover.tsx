@@ -153,14 +153,20 @@ export function WorkingDirectoriesPopover({
   // when Save was clicked, and the response overwrites `draft` with what the
   // engine actually applied — so a toggle made mid-flight would be silently
   // discarded and then confirmed with a success toast.
+  // Design territory can never be hidden: excluding it takes the canvas off
+  // disk, so Design mode would open onto nothing. The engine force-includes
+  // these regardless of what we send, so refusing the toggle here only keeps
+  // the UI honest about an outcome that is already fixed.
+  const locked = useMemo(() => new Set(state?.locked ?? []), [state]);
+
   const toggle = useCallback(
     (dir: string) => {
-      if (saving) return;
+      if (saving || locked.has(dir)) return;
       setDraft((prev) =>
         prev.includes(dir) ? prev.filter((d) => d !== dir) : [...prev, dir],
       );
     },
-    [saving],
+    [saving, locked],
   );
 
   const dirty = useMemo(
@@ -282,11 +288,13 @@ export function WorkingDirectoriesPopover({
                     trigger's tooltip and cost a row of vertical space. */}
                 <CommandGroup>
                   {dirs.map((dir) => {
-                    const on = draft.includes(dir);
+                    const isLocked = locked.has(dir);
+                    const on = isLocked || draft.includes(dir);
                     return (
                       <CommandItem
                         key={dir}
                         value={dir}
+                        disabled={isLocked}
                         onSelect={() => toggle(dir)}
                       >
                         {on ? (
@@ -295,6 +303,11 @@ export function WorkingDirectoriesPopover({
                           <span className="size-3.5 shrink-0" />
                         )}
                         <span className="truncate">{dir}</span>
+                        {isLocked && (
+                          <span className="text-fg3 ml-auto shrink-0 pl-2 text-xs">
+                            Design
+                          </span>
+                        )}
                       </CommandItem>
                     );
                   })}
@@ -319,8 +332,8 @@ export function WorkingDirectoriesPopover({
             <button
               type="button"
               className="text-fg2 hover:text-fg1 text-xs disabled:opacity-40"
-              disabled={saving || draft.length === 0}
-              onClick={() => setDraft([])}
+              disabled={saving || draft.every((dir) => locked.has(dir))}
+              onClick={() => setDraft(dirs.filter((dir) => locked.has(dir)))}
             >
               Deselect all
             </button>

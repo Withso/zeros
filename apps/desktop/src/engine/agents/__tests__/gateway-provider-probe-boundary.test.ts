@@ -114,4 +114,41 @@ describe("AgentGateway provider command probes", () => {
 
     await gateway.dispose();
   });
+
+  it("reports a failed contained auth probe as unavailable, not signed out", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-probe-status-"));
+    temporaryDirectories.push(root);
+    const binary = path.join(root, "codex");
+    await writeFile(binary, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(binary, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${root}${path.delimiter}${previousPath ?? ""}`;
+    const gateway = new AgentGateway({
+      projectRoot: root,
+      executionBoundary: testExecutionBoundary({
+        prepareError: new Error("provider boundary could not be prepared"),
+      }),
+      events: {
+        onSessionUpdate: () => {},
+        onPermissionRequest: () => {},
+        onQuestionRequest: () => {},
+        onAgentStderr: () => {},
+        onAgentExit: () => {},
+      },
+    });
+
+    try {
+      const agents = await gateway.listAgents();
+      const codex = agents.find((agent) => agent.id === "codex");
+      expect(codex).toMatchObject({
+        installed: true,
+        authenticationUnavailableReason:
+          "Zeros Sandbox Runtime could not verify this CLI's sign-in state.",
+      });
+      expect(codex?.authenticated).toBeUndefined();
+    } finally {
+      process.env.PATH = previousPath;
+      await gateway.dispose();
+    }
+  });
 });

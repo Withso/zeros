@@ -50,6 +50,11 @@ const macosProcessDomainOutput = path.join(
   root,
   "binaries/zsr-macos-process-domain",
 );
+const gitDispatchEntry = path.join(
+  root,
+  "apps/desktop/src/engine/agents/containment/zsr-git-dispatch.c",
+);
+const gitDispatchOutput = path.join(root, "binaries/zsr-git-dispatch");
 const macosPortBindEntry = path.join(
   root,
   "apps/desktop/src/engine/agents/containment/zsr-macos-port-bind.c",
@@ -131,6 +136,41 @@ if (process.platform === "darwin") {
   }
   await chmod(temporaryOutput, 0o555);
   await rename(temporaryOutput, macosProcessDomainOutput);
+  // The shadow-Git dispatcher. It replaces a per-Git-command runtime start, so
+  // it is built with the same flags and the same -Werror as every other helper
+  // that runs inside the fence.
+  const gitDispatchTemporaryOutput = `${gitDispatchOutput}.tmp-${process.pid}`;
+  await rm(gitDispatchTemporaryOutput, { force: true });
+  const gitDispatchCompiled = spawnSync(
+    "/usr/bin/xcrun",
+    [
+      "--sdk",
+      "macosx",
+      "clang",
+      "-std=c11",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      "-O2",
+      "-mmacosx-version-min=11.0",
+      "-arch",
+      architecture,
+      gitDispatchEntry,
+      "-o",
+      gitDispatchTemporaryOutput,
+    ],
+    { cwd: root, encoding: "utf8" },
+  );
+  if (gitDispatchCompiled.status !== 0) {
+    await rm(gitDispatchTemporaryOutput, { force: true });
+    throw new Error(
+      `could not compile shadow-Git dispatcher: ${(
+        gitDispatchCompiled.stderr || gitDispatchCompiled.stdout
+      ).trim()}`,
+    );
+  }
+  await chmod(gitDispatchTemporaryOutput, 0o555);
+  await rename(gitDispatchTemporaryOutput, gitDispatchOutput);
   const portBindTemporaryOutput = `${macosPortBindOutput}.tmp-${process.pid}`;
   await rm(portBindTemporaryOutput, { force: true });
   const portBindCompiled = spawnSync(
@@ -168,7 +208,7 @@ if (process.platform === "darwin") {
 console.log(
   `[build-zsr-supervisor] wrote ${output}, ${bridgeOutput}, ${containerWorkerOutput}, ${orbStackHostOutput}, ${orbStackCloudInitOutput}${
     process.platform === "darwin"
-      ? `, ${macosProcessDomainOutput}, and ${macosPortBindOutput}`
+      ? `, ${macosProcessDomainOutput}, ${gitDispatchOutput}, and ${macosPortBindOutput}`
       : ""
   }`,
 );

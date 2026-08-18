@@ -46,7 +46,14 @@ import {
   reserveProspectiveDesignDirectory,
   resolveDesignDirectoryPointerState,
 } from "../design/directory";
-import { primeDesignDirectoryName } from "../design/directory-registry";
+import {
+  DESIGN_CANVAS_FILE,
+  primeDesignDirectoryName,
+} from "../design/directory-registry";
+import {
+  rememberRecognizedDesignDirectories,
+  stickyRecognizedDesignDirectories,
+} from "../design/recognition-store";
 import { fenceDesignDirectory } from "../design/workspace-lock";
 import {
   assertDesignDirHasNoHardlinkAliases,
@@ -62,7 +69,7 @@ import {
   type AgentVersionInfo,
   type AuthProbe,
 } from "./registry";
-import { sessionsRoot } from "./session-paths";
+import { removeSessionDir, sessionsRoot } from "./session-paths";
 import {
   buildCodeAgentDesignTerritoryNotice,
   buildFirstTurnInstructionBody,
@@ -104,11 +111,14 @@ import {
 } from "@zeros/protocol/identities";
 import {
   EXECUTION_BOUNDARY_PORTS_VERSION,
+  type ExecutionBoundaryActor,
   type ExecutionBoundaryPortsSnapshot,
   type ExecutionBoundaryStatus,
 } from "@zeros/protocol/containment";
+import { redactSensitive } from "@zeros/protocol/scrub";
 import { unavailableBoundaryStatus } from "./containment/status";
 import type {
+  AdmissionPriority,
   BoundaryRequest,
   ContainerWorkerRequest,
   ExecutionBoundary,
@@ -117,6 +127,8 @@ import type {
   PreparedBoundary,
 } from "./containment/types";
 import { ZsrExecutionBoundary } from "./containment/zsr-boundary";
+import { AdmissionCancelledError } from "./containment/admission-gate";
+import { UtilityBoundaryPool } from "./containment/utility-boundary-pool";
 import { completeAgentSpawnEnv } from "./adapters/shared/config-isolation";
 import { findOrbStackCli } from "./containment/macos-orbstack-container-worker";
 import {
@@ -125,6 +137,82 @@ import {
   type BoundaryPreviewGatewayFactory,
   type ZsrPreviewTarget,
 } from "./containment/zsr-preview-gateway";
+
+/** Provider startup is a control-plane operation, not a model turn. Keep its
+ * deadline below the renderer's 120s admission ceiling so the gateway still
+ * has time to revoke capabilities, stop the adapter, and prove the kernel
+ * boundary retired. Boundary preparation is intentionally outside this clock:
+ * a qualified cold private-container path may take longer but is itself
+ * bounded by its backend. */
+const ADAPTER_START_TIMEOUT_MS = 90_000;
+
+async function awaitAdapterStartup<T>(options: {
+  readonly agentId: string;
+  readonly stage: "newSession" | "loadSession" | "forkSession";
+  readonly operation: Promise<T>;
+  /** Promise.race does not cancel provider work. Reap any adapter allocation
+   * that settles after the caller already received a timeout. */
+  readonly onLateSettlement?: () => Promise<void>;
+}): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let timedOut = false;
+  const operation = options.operation.then(
+    (value) => {
+      if (timedOut && options.onLateSettlement) {
+        void Promise.resolve()
+          .then(options.onLateSettlement)
+          .catch((error) => {
+            console.warn(
+              `[agents] ${options.agentId} ${options.stage} late-settlement ` +
+                `cleanup failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+            );
+          });
+      }
+      return value;
+    },
+    (error: unknown) => {
+      if (timedOut && options.onLateSettlement) {
+        void Promise.resolve()
+          .then(options.onLateSettlement)
+          .catch((cleanupError) => {
+            console.warn(
+              `[agents] ${options.agentId} ${options.stage} late-settlement ` +
+                `cleanup failed: ${
+                  cleanupError instanceof Error
+                    ? cleanupError.message
+                    : String(cleanupError)
+                }`,
+            );
+          });
+      }
+      throw error;
+    },
+  );
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(
+        new AgentFailureError({
+          kind: "timeout",
+          stage: options.stage,
+          agentId: options.agentId,
+          message:
+            `${options.agentId} ${options.stage} startup timed out after ` +
+            `${Math.round(ADAPTER_START_TIMEOUT_MS / 1_000)} seconds.`,
+          advice:
+            "Retry once. If startup times out again, open the engine log and check the provider's contained-host diagnostics.",
+        }),
+      );
+    }, ADAPTER_START_TIMEOUT_MS);
+  });
+  try {
+    return await Promise.race([operation, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
 
 const LOOPBACK_URL_ENV: Readonly<
   Record<
@@ -164,6 +252,41 @@ function urlFacadeTemplate(raw: string): string | null {
     "{host}:{port}" +
     raw.slice(authorityEnd)
   );
+}
+
+function preflightBoundaryRemediation(error: unknown): string {
+  if (error instanceof AgentFailureError && error.failure.advice) {
+    return error.failure.advice;
+  }
+  const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (
+    message.includes("provider overlay") ||
+    message.includes("provider home") ||
+    message.includes("provider state") ||
+    message.includes("provider keychain")
+  ) {
+    return "Zeros could not prepare the private provider state. Restart Zeros and retry; the session will remain blocked rather than run uncontained.";
+  }
+  if (
+    message.includes("design") ||
+    message.includes("territory") ||
+    message.includes("workspace root")
+  ) {
+    return "Fix the Design directory setting or its filesystem permissions, then retry.";
+  }
+  return "Repair or enable the qualified Zeros sandbox backend for this workspace, then retry. Zeros will not run this session uncontained.";
+}
+
+function boundaryRequiresProviderAuthentication(
+  agentId: string,
+  error: unknown,
+): boolean {
+  if (agentId !== "claude" || !(error instanceof Error)) return false;
+  return [
+    "Claude OAuth refresh request was rejected",
+    "Claude OAuth refresh token is unavailable",
+    "Claude OAuth credential was invalid",
+  ].some((message) => error.message.includes(message));
 }
 
 /** Discover only standard client variables that already name an exact local
@@ -507,6 +630,15 @@ export function deriveToolchainReadRoots(
       path.join(".cargo", "bin"),
       path.join(".cargo", "registry"),
       path.join(".cargo", "git"),
+      // Keep in step with readOnlyCompatibilityLinks in
+      // containment/provider-home-overlay.ts: that list decides what a session's
+      // projected HOME can SEE, this one decides what the policy admits it to
+      // READ, and a path present in only one of them is either an unreadable
+      // symlink or an unreachable grant. See that file for why npm's caches are
+      // the difference between an `npx`-declared MCP server starting in ~3s and
+      // timing out after 60s on every session.
+      path.join(".npm", "_npx"),
+      path.join(".npm", "_cacache"),
       path.join(".local", "bin"),
       path.join(".local", "share", "mise"),
       path.join(".local", "share", "pnpm"),
@@ -616,6 +748,12 @@ export function agentTerritoryIdentity(
     protectedDesignDirectories: [...territory.protectedDesignDirectories]
       .map((candidate) => path.resolve(candidate))
       .sort(),
+    // Part of the authority, so a change here must invalidate a resumed session
+    // exactly like a change to the protected set: the recognition inputs are
+    // what decide whether that set is still complete.
+    designRecognitionPaths: [...territory.designRecognitionPaths]
+      .map((candidate) => path.resolve(candidate))
+      .sort(),
     deniedPaths: [...territory.writeCapabilities.deniedPaths]
       .map((candidate) => path.resolve(candidate))
       .sort(),
@@ -681,6 +819,16 @@ function territoryForGrants(
     ...territory,
     designDirectory: active,
     protectedDesignDirectories: [...new Set(protectedDesignDirectories)],
+    // Filtered by the same grant test as everything else. Carrying this list
+    // through unfiltered would deny paths belonging to an owner the user did not
+    // authorize for this session.
+    designRecognitionPaths: [
+      ...new Set(
+        territory.designRecognitionPaths
+          .filter(overlapsGrant)
+          .map((candidate) => path.resolve(candidate)),
+      ),
+    ].sort(),
     writeCapabilities: {
       ...territory.writeCapabilities,
       deniedPaths: [...new Set(deniedPaths)],
@@ -705,6 +853,17 @@ function mergeTerritories(
         [primary, ...additions]
           .filter((entry): entry is AgentFilesystemTerritory => Boolean(entry))
           .flatMap((entry) => entry.protectedDesignDirectories)
+          .map((candidate) => path.resolve(candidate)),
+      ),
+    ].sort(),
+    // Unioned, not inherited from `first`: a secondary Git owner brings its own
+    // `.zeros` settings directory and canvas markers, and spreading only the
+    // primary's would leave that owner's Design folders de-registerable.
+    designRecognitionPaths: [
+      ...new Set(
+        [primary, ...additions]
+          .filter((entry): entry is AgentFilesystemTerritory => Boolean(entry))
+          .flatMap((entry) => entry.designRecognitionPaths)
           .map((candidate) => path.resolve(candidate)),
       ),
     ].sort(),
@@ -946,15 +1105,29 @@ async function buildCodeAgentTerritory(opts: {
       "The configured Design directory is not a safe repo-relative path.",
     );
   }
+  // Engine memory of what previous admissions protected here. Both halves of the
+  // repository evidence — the marker in Git's index/HEAD and the `[design]
+  // directory` pointer — are agent-writable under host parity, so an agent that
+  // removes them would otherwise hand the NEXT session an unprotected Design
+  // folder. Sticky names are reported only while their directory still exists on
+  // disk (see design/recognition-store.ts), so remembering can protect real
+  // content but can never demand a folder the user legitimately deleted.
+  const sticky = await stickyRecognizedDesignDirectories(workspaceRoot);
   // Publication happens only after the complete territory has been validated.
   // Priming before the existence check could turn a failed admission into
-  // shared mutable registry state.
-  const designName = await previewDesignDirectoryForEnter({
-    path: workspaceRoot,
-    repoRoot,
-  });
+  // shared mutable registry state. The sticky names go in so the ACTIVE Design
+  // name and the protected set are resolved from one universe.
+  const designName = await previewDesignDirectoryForEnter(
+    { path: workspaceRoot, repoRoot },
+    { additionalRecognized: sticky },
+  );
   const designDirectory = path.join(workspaceRoot, ...designName.split("/"));
-  const recognized = await discoverDesignDirectories(workspaceRoot);
+  const recognized = [
+    ...new Set([
+      ...(await discoverDesignDirectories(workspaceRoot)),
+      ...sticky,
+    ]),
+  ].sort((left, right) => left.localeCompare(right));
   const hasExistingOrRecognizedDesign =
     existsSync(designDirectory) || recognized.length > 0;
 
@@ -1033,10 +1206,18 @@ async function buildCodeAgentTerritory(opts: {
   }
 
   // A Git index is one monolithic file: no OS sandbox can permit "stage code"
-  // while forbidding "stage Design" inside that same index. Keep the
-  // worktree/common metadata read-only to the model process. Git inspection
-  // still works; durable agent commits move to private overlays + validated
-  // ChangeSet integration instead of weakening the canonical boundary.
+  // while forbidding "stage Design" inside that same index.
+  //
+  // The ISOLATED/cloud profile resolves that by denying the worktree/common
+  // metadata outright — inspection still works, and durable agent commits go
+  // through private overlays plus validated ChangeSet integration rather than
+  // weakening the canonical boundary. Local host parity deliberately applies NONE
+  // of the carveouts below (policy.ts keeps only Design content and its own
+  // sticky-recognition store): the agent commits, pulls and pushes with the
+  // workspace's own Git, which is the whole point of the profile. The consequences
+  // are recorded rather than hidden — a commit can carry Design-path CONTENT into
+  // history, and a mixed `reset --hard`/`clean` half-completes instead of being
+  // refused whole. Design bytes in the worktree stay unwritable in both profiles.
   const gitMetadata = new Set<string>();
   const dotGit = path.join(workspaceRoot, ".git");
   if (existsSync(dotGit)) gitMetadata.add(dotGit);
@@ -1059,12 +1240,26 @@ async function buildCodeAgentTerritory(opts: {
       );
     }
   }
-  const deniedPaths = [
-    ...protectedDesignDirectories,
+  // What decides, for the NEXT session, whether these folders are Design at all:
+  // the `.zeros` settings directories that hold the `[design] directory` pointer,
+  // and the `.zeros-canvas.json` markers Git recognition reads. Named separately
+  // from `deniedPaths` because the two profiles protect them differently — the
+  // isolated profile denies them along with the rest of Git and policy, while host
+  // parity leaves them writable (they are committed repository content; denying
+  // `.zeros/settings.toml` broke any `git pull` that had to rewrite it) and closes
+  // de-registration in engine state instead, via design/recognition-store.ts.
+  const designRecognitionPaths = [
     path.dirname(repoSettingsPath(workspaceRoot)),
     ...(repoRoot !== workspaceRoot
       ? [path.dirname(repoLocalSettingsPath(repoRoot))]
       : []),
+    ...protectedDesignDirectories.map((directory) =>
+      path.join(directory, DESIGN_CANVAS_FILE),
+    ),
+  ];
+  const deniedPaths = [
+    ...protectedDesignDirectories,
+    ...designRecognitionPaths,
     ...gitMetadata,
   ];
   return {
@@ -1072,6 +1267,9 @@ async function buildCodeAgentTerritory(opts: {
     workspaceRoot,
     designDirectory: path.join(workspaceRoot, ...verifiedActiveName.split("/")),
     protectedDesignDirectories: [...protectedDesignDirectories].sort(),
+    designRecognitionPaths: [
+      ...new Set(designRecognitionPaths.map((entry) => path.resolve(entry))),
+    ].sort(),
     writeCapabilities: {
       workspace: "write",
       deniedPaths: [
@@ -1127,6 +1325,20 @@ export async function resolveCodeAgentTerritory(opts: {
     .join("/");
   primeDesignDirectoryName(territory.workspaceRoot, activeName);
   await fenceDesignDirectory(territory.workspaceRoot);
+  // Remember what this admission actually protected, so a later session still
+  // protects it after the repository evidence is edited away. Only the resolve
+  // path records — a preview must leave engine state alone — and the store drops
+  // names whose directory no longer exists, so this cannot accumulate demands for
+  // folders the user has deleted.
+  await rememberRecognizedDesignDirectories(
+    territory.workspaceRoot,
+    territory.protectedDesignDirectories.map((directory) =>
+      path
+        .relative(territory!.workspaceRoot, directory)
+        .split(path.sep)
+        .join("/"),
+    ),
+  );
   return territory;
 }
 
@@ -1135,6 +1347,14 @@ export async function resolveCodeAgentTerritory(opts: {
  *  absorb the typical 5-10 renderer-churn calls/second that hit
  *  this code path. force-refresh (via refreshRegistry) bypasses. */
 const LIST_AGENTS_FRESHNESS_MS = 5_000;
+
+/** TTLs on preflight boundary results. Preflight is diagnostic — admission
+ *  re-runs the request-specific canary before any provider byte — but each
+ *  live preflight costs a boundary prepare + proven teardown, so mounted-view
+ *  storms must coalesce. Failures stay short so "repair backend, retry" is
+ *  seen quickly; refreshRegistry drops both unconditionally. */
+const PREFLIGHT_SUCCESS_FRESHNESS_MS = 15_000;
+const PREFLIGHT_FAILURE_FRESHNESS_MS = 5_000;
 
 // Account details (provider / plan / org / email) are far more expensive to
 // fetch than the install/auth/version probes — each can spawn a short-lived
@@ -1293,6 +1513,33 @@ export class AgentGateway {
    *  clearing this cache implicitly — see refreshRegistry below. */
   private cachedAgents: EnrichedRegistryAgent[] | null = null;
   private cachedAgentsAt: number | null = null;
+
+  /** Adapter startups still in flight, keyed by executionId. The engine
+   *  publishes an executionId (and the renderer may persist or reuse it)
+   *  before the adapter finishes registering the live session, so a prompt
+   *  can legally arrive during that window — most visibly for Cursor, whose
+   *  host boot is the slowest and whose prompt path refuses ids it has not
+   *  registered ("no live session"). Prompt-shaped calls await the flight
+   *  instead of failing on that transient gap. */
+  private readonly adapterStartupFlights = new Map<
+    string,
+    { readonly promise: Promise<void>; readonly settle: () => void }
+  >();
+
+  /** Preflight results are diagnostic (they paint the pre-send UI) while a
+   *  full preflight costs a real boundary prepare + teardown, three per-repo
+   *  promotion-lock sections included. A cold boot mounts many chat views at
+   *  once and each fires preflights, so identical requests share one in-flight
+   *  run and a short-lived result. Real admission re-proves everything, so a
+   *  briefly stale card never weakens enforcement. */
+  private readonly preflightResults = new Map<
+    string,
+    { at: number; status: ExecutionBoundaryStatus }
+  >();
+  private readonly preflightFlights = new Map<
+    string,
+    Promise<ExecutionBoundaryStatus>
+  >();
 
   /** Per-agent account-details cache (provider / plan / org / email), keyed
    *  by agent id. Long TTL (ACCOUNT_INFO_TTL_MS) because each miss can spawn
@@ -1672,12 +1919,22 @@ export class AgentGateway {
     workspaceRoot: string | undefined,
     territory: AgentFilesystemTerritory | undefined,
     env: Record<string, string> | undefined,
-    providerId: string,
+    providerId: string | undefined,
     mcpServers: readonly McpServerRegistration[],
     providerExecutable?: string,
     resolvedAdditionalRoots?: readonly string[],
     additionalGitWorkspaceRoots: readonly string[] = [],
     includeSessionCapabilities = true,
+    providerResumeId?: string,
+    providerStateScope?: string,
+    // Everything the gateway admits today is a code actor. A design actor
+    // reaches the same boundary with code authority subtracted instead of
+    // Design authority; the policy builder owns that difference, so the only
+    // thing the caller chooses is which side of the contract it is on.
+    actor: ExecutionBoundaryActor = "agent-code",
+    // Engine-initiated admissions pass "background" so a chat the user is
+    // starting is never queued behind a chat title or a provider probe.
+    admissionPriority: AdmissionPriority = "interactive",
   ): Promise<BoundaryRequest> {
     const canonicalWorkspace =
       territory?.workspaceRoot ??
@@ -1718,8 +1975,11 @@ export class AgentGateway {
     ].sort((left, right) => left.localeCompare(right));
     return {
       executionId,
-      actor: "agent-code",
-      providerId,
+      actor,
+      ...(admissionPriority !== "interactive" ? { admissionPriority } : {}),
+      ...(providerId ? { providerId } : {}),
+      ...(providerResumeId ? { providerResumeId } : {}),
+      ...(providerStateScope ? { providerStateScope } : {}),
       ...(Object.keys(providerStateEnv).length > 0 ? { providerStateEnv } : {}),
       cwd: path.resolve(cwd),
       workspaceRoot: path.resolve(canonicalWorkspace),
@@ -1758,7 +2018,16 @@ export class AgentGateway {
     providerExecutable?: string,
     resolvedAdditionalRoots?: readonly string[],
     additionalGitWorkspaceRoots: readonly string[] = [],
-    options: { includeSessionCapabilities?: boolean } = {},
+    options: {
+      includeSessionCapabilities?: boolean;
+      providerResumeId?: string;
+      actor?: ExecutionBoundaryActor;
+      admissionPriority?: AdmissionPriority;
+      /** Cancels the admission while it is still queued in the gate (the chat
+       * was closed before any world was built). Never interrupts a granted
+       * slot — see AdmissionControl in containment/types.ts. */
+      admissionSignal?: AbortSignal;
+    } = {},
   ): Promise<PreparedBoundary> {
     try {
       this.assertBoundaryRetirementHealthy();
@@ -1774,8 +2043,16 @@ export class AgentGateway {
         resolvedAdditionalRoots,
         additionalGitWorkspaceRoots,
         options.includeSessionCapabilities !== false,
+        options.providerResumeId,
+        undefined,
+        options.actor,
+        options.admissionPriority,
       );
-      const prepared = await this.executionBoundary.prepare(request);
+      const prepared = options.admissionSignal
+        ? await this.executionBoundary.prepare(request, {
+            signal: options.admissionSignal,
+          })
+        : await this.executionBoundary.prepare(request);
       try {
         for (const service of request.localServices ?? []) {
           await prepared.requestLocalService({
@@ -1799,18 +2076,149 @@ export class AgentGateway {
         throw error;
       }
     } catch (error) {
-      throw new AgentFailureError({
-        kind: "protocol-error",
-        message:
-          `${adapter.agentId} cannot start because Zeros Sandbox Runtime ` +
-          `could not establish the execution boundary: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
+      throw this.boundaryAdmissionFailure(adapter.agentId, stage, error);
+    }
+  }
+
+  /** One translation of "the boundary could not be established" for every
+   * admission path — sessions and pooled one-shots alike — so a stale provider
+   * login is detected, recorded, and advised identically wherever it surfaces. */
+  private boundaryAdmissionFailure(
+    providerId: string,
+    stage: "newSession" | "loadSession" | "forkSession",
+    error: unknown,
+  ): AgentFailureError {
+    if (error instanceof AdmissionCancelledError) {
+      // The chat was closed while its admission was still queued. Nothing was
+      // built, nothing failed, and the provider's durable thread is untouched
+      // — this must route exactly like losing the conversation-bind race, not
+      // like a boundary defect.
+      return new AgentFailureError({
+        kind: "lifecycle-superseded",
         stage,
-        agentId: adapter.agentId,
-        advice:
-          "Repair or enable the qualified Zeros sandbox backend for this workspace, then retry. Zeros will not run this session uncontained.",
+        agentId: providerId,
+        message:
+          "The conversation was closed before its execution boundary left the admission queue.",
       });
+    }
+    const authenticationRequired = boundaryRequiresProviderAuthentication(
+      providerId,
+      error,
+    );
+    if (authenticationRequired) {
+      this.markAuthFailed(providerId);
+    }
+    return new AgentFailureError({
+      kind: authenticationRequired ? "auth-required" : "protocol-error",
+      message:
+        `${providerId} cannot start because Zeros Sandbox Runtime ` +
+        `could not establish the execution boundary: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      stage,
+      agentId: providerId,
+      advice: authenticationRequired
+        ? "Sign in to Claude again, then retry this message. The stored OAuth session is no longer accepted by Claude."
+        : "Repair or enable the qualified Zeros sandbox backend for this workspace, then retry. Zeros will not run this session uncontained.",
+    });
+  }
+
+  /** Warm background boundaries shared by engine-owned one-shots (chat titles,
+   * provider probes, key validation, session listing). See
+   * containment/utility-boundary-pool.ts for the reuse contract. Created lazily
+   * so a gateway that never runs a one-shot never holds one. */
+  private utilityBoundariesInstance: UtilityBoundaryPool | null = null;
+
+  private get utilityBoundaries(): UtilityBoundaryPool {
+    if (!this.utilityBoundariesInstance) {
+      this.utilityBoundariesInstance = new UtilityBoundaryPool({
+        prepare: (request) => this.executionBoundary.prepare(request),
+        retire: (executionId, boundary) =>
+          this.retirePreparedBoundary(executionId, boundary),
+        assertHealthy: () => this.assertBoundaryRetirementHealthy(),
+      });
+    }
+    return this.utilityBoundariesInstance;
+  }
+
+  /** Run an engine-owned background one-shot inside a reusable boundary.
+   *
+   * The boundary is shared with any other one-shot whose BoundaryRequest is
+   * byte-identical (executionId excluded) and released back to the pool on
+   * success, so a burst of probes/titles pays ONE admission instead of one each.
+   * A failure retires it rather than reusing it. Local services declared by the
+   * request are leased once, at admission, exactly as the per-call path did.
+   *
+   * Admission failures are translated exactly as the per-session path translates
+   * them (auth-required detection included), so a Claude OAuth session that has
+   * gone stale still marks the provider's dot and still gets its advice. */
+  private async withUtilityBoundary<T>(
+    providerId: string,
+    stage: "newSession" | "loadSession" | "forkSession",
+    request: BoundaryRequest,
+    operation: (context: {
+      boundary: PreparedBoundary;
+      executionId: string;
+      reused: boolean;
+    }) => Promise<T>,
+  ): Promise<T> {
+    let lease;
+    try {
+      lease = await this.utilityBoundaries.acquire(request);
+    } catch (error) {
+      throw this.boundaryAdmissionFailure(providerId, stage, error);
+    }
+    let releaseStarted = false;
+    try {
+      if (!lease.reused) {
+        try {
+          for (const service of request.localServices ?? []) {
+            await lease.boundary.requestLocalService({
+              kind: service.kind,
+              serviceId: service.serviceId,
+            });
+          }
+        } catch (error) {
+          throw this.boundaryAdmissionFailure(providerId, stage, error);
+        }
+      }
+      const result = await operation({
+        boundary: lease.boundary,
+        executionId: lease.executionId,
+        reused: lease.reused,
+      });
+      releaseStarted = true;
+      await lease.release("ok");
+      return result;
+    } catch (error) {
+      // Already releasing: this IS the release's own failure (an unprovable
+      // teardown at dispose time). Surface it as-is.
+      if (releaseStarted) throw error;
+      releaseStarted = true;
+      // The operation failed. Retire the boundary rather than reuse it, keeping
+      // the SAME shape the per-call path had: an unprovable teardown is reported
+      // alongside the original failure, never instead of it.
+      try {
+        await lease.release("failed");
+      } catch (teardownError) {
+        throw new AggregateError(
+          [error, teardownError],
+          "provider one-shot failed and its boundary could not be proven stopped",
+        );
+      }
+      throw error;
+    }
+  }
+
+  /** Prove every idle pooled utility boundary stopped. Called on a Design
+   * territory transition (the pooled policy was compiled under the OLD
+   * generation) and on gateway dispose. */
+  async retirePooledUtilityBoundaries(): Promise<void> {
+    if (!this.utilityBoundariesInstance) return;
+    try {
+      await this.utilityBoundariesInstance.disposeAll();
+    } finally {
+      this.utilityBoundariesInstance.reopen();
     }
   }
 
@@ -1839,6 +2247,7 @@ export class AgentGateway {
       this.executionBoundaries.delete(executionId);
     }
     this.failedBoundaryRetirements.delete(executionId);
+    await this.removeRetiredSessionDir(executionId);
   }
 
   private async retirePreparedBoundaryAfterFailure(
@@ -2048,6 +2457,21 @@ export class AgentGateway {
     }));
   }
 
+  /** Undo markBoundaryDraining for a session that SURVIVED a failed retire
+   * (e.g. a streaming turn would not settle inside the territory transition's
+   * bounded cancel). The session stays live and routable, so leaving it
+   * `draining` would spin the renderer's boundary pill forever with no repair
+   * path — a drain that will never complete is a lie. Diagnostic only, exactly
+   * like the mark it reverses. */
+  markBoundaryDrainingCleared(executionId: string): boolean {
+    const current = this.executionToBoundaryStatus.get(executionId);
+    if (!current || current.state !== "draining") return false;
+    return this.updateBoundaryStatus(executionId, (status) => {
+      const { lifecycle: _lifecycle, ...rest } = status;
+      return { ...rest, state: "ready", checkedAt: Date.now() };
+    });
+  }
+
   /** Read-only boundary preflight. It resolves and probes the same immutable
    * territory as admission but does not publish a registry pointer, fence the
    * checkout, create a provider execution, or expose host paths in its result. */
@@ -2059,10 +2483,46 @@ export class AgentGateway {
       cliBinary?: string;
     },
   ): Promise<ExecutionBoundaryStatus> {
+    const key = [
+      agentId,
+      opts.cwd ?? "",
+      opts.workspaceId ?? "",
+      opts.cliBinary ?? "",
+    ].join("\0");
+    const cached = this.preflightResults.get(key);
+    if (cached) {
+      const freshFor =
+        cached.status.state === "unavailable"
+          ? PREFLIGHT_FAILURE_FRESHNESS_MS
+          : PREFLIGHT_SUCCESS_FRESHNESS_MS;
+      if (Date.now() - cached.at <= freshFor) return cached.status;
+      this.preflightResults.delete(key);
+    }
+    const inFlight = this.preflightFlights.get(key);
+    if (inFlight) return inFlight;
+    const flight = this.preflightSessionUncached(agentId, opts)
+      .then((status) => {
+        this.preflightResults.set(key, { at: Date.now(), status });
+        return status;
+      })
+      .finally(() => {
+        this.preflightFlights.delete(key);
+      });
+    this.preflightFlights.set(key, flight);
+    return flight;
+  }
+
+  private async preflightSessionUncached(
+    agentId: string,
+    opts: {
+      cwd?: string;
+      workspaceId?: string;
+      cliBinary?: string;
+    },
+  ): Promise<ExecutionBoundaryStatus> {
     const checkedAt = Date.now();
-    let adapter: AgentAdapter;
     try {
-      adapter = await this.adapterFor(agentId);
+      await this.adapterFor(agentId);
     } catch {
       return unavailableBoundaryStatus({
         checkedAt,
@@ -2102,11 +2562,6 @@ export class AgentGateway {
         workspaceRoot: canonicalWorkspaceRoot,
         repoRoot: mainRepoRoot,
       });
-      const mcpServers = await this.resolveSessionMcp(
-        agentId,
-        cwd,
-        mainRepoRoot,
-      );
       this.assertBoundaryRetirementHealthy();
       const preflightExecutionId = `preflight-${randomUUID()}`;
       const request = await this.boundaryRequest(
@@ -2115,9 +2570,23 @@ export class AgentGateway {
         canonicalWorkspaceRoot,
         territory,
         undefined,
-        adapter.agentId,
-        mcpServers,
+        // Preflight proves the request-specific filesystem/process profile but
+        // starts no provider byte. Do not clone/reconcile provider HOME (which
+        // may include credential material), reserve MCP/local-service leases,
+        // or start a private container worker merely to paint the pre-send UI.
+        // The real admission repeats the same territory canary with those
+        // capabilities after the renderer has explicitly couriered secrets.
+        undefined,
+        [],
         providerSpawn.cliBinary,
+        undefined,
+        [],
+        false,
+        undefined,
+        undefined,
+        undefined,
+        // Diagnostic only; no session path awaits it any more.
+        "background",
       );
       // A capability-only probe cannot prove that the generated profile for
       // this workspace actually protects its exact Design aliases and engine
@@ -2145,13 +2614,9 @@ export class AgentGateway {
         await this.retirePreparedBoundary(preflightExecutionId, prepared);
       }
     } catch (error) {
-      const failure =
-        error instanceof AgentFailureError ? error.failure : undefined;
       return unavailableBoundaryStatus({
         checkedAt,
-        remediation:
-          failure?.advice ??
-          "Fix the Design directory setting or enable the qualified Zeros sandbox backend, then retry.",
+        remediation: preflightBoundaryRemediation(error),
       });
     }
   }
@@ -2209,7 +2674,14 @@ export class AgentGateway {
     this.events = opts.events;
     this.executionBoundary =
       opts.executionBoundary ??
-      new ZsrExecutionBoundary({ projectRoot: opts.projectRoot });
+      new ZsrExecutionBoundary({
+        projectRoot: opts.projectRoot,
+        // The gateway's production owner (ZerosEngine) always injects its
+        // already-qualified boundary. This fallback is for a directly hosted
+        // desktop gateway and must select the local filesystem-only profile
+        // explicitly.
+        localHostParity: true,
+      });
     this.previewGatewayFactory =
       opts.previewGatewayFactory ?? localPreviewGatewayFactory;
   }
@@ -2385,10 +2857,11 @@ export class AgentGateway {
     // an ENOENT is slow ENOENT + noise in logs), so it waits for the
     // install probe first. probeCliVersion has its own 5min cache so
     // repeated listAgents calls are cheap.
-    const [installed, authenticated] = await Promise.all([
+    const [installed, authentication] = await Promise.all([
       probeCliInstalled(selectedBinaries),
       (async () => {
-        const set = new Set<string>();
+        const authenticated = new Set<string>();
+        const unavailable = new Map<string, string>();
         await Promise.all(
           AGENT_MANIFEST.map(async (m) => {
             // Runtime invalidation wins. If the agent's CLI itself
@@ -2405,16 +2878,21 @@ export class AgentGateway {
                   this.providerProbeRunner(m.id),
                 )
               ) {
-                set.add(m.id);
+                authenticated.add(m.id);
               }
             } catch {
-              /* probe failed — treat as unauthenticated */
+              unavailable.set(
+                m.id,
+                "Zeros Sandbox Runtime could not verify this CLI's sign-in state.",
+              );
             }
           }),
         );
-        return set;
+        return { authenticated, unavailable };
       })(),
     ]);
+    const { authenticated, unavailable: authenticationUnavailable } =
+      authentication;
 
     const versionInfo = new Map<string, AgentVersionInfo>();
     const versionProbe = Promise.all(
@@ -2470,6 +2948,8 @@ export class AgentGateway {
       versionInfo,
       accountByAgentId,
       runtimeOverrides,
+      AGENT_MANIFEST,
+      authenticationUnavailable,
     );
   }
 
@@ -2486,6 +2966,26 @@ export class AgentGateway {
     };
   }
 
+  /** One unpredictable-but-remembered neutral probe root per provider. Created
+   * on first use with `mkdtemp` and reused for the life of the engine process, so
+   * the probe's BoundaryRequest is stable (poolable) without publishing a
+   * guessable path. Concurrent first probes for the same provider share one
+   * creation rather than racing two roots into existence. */
+  private readonly providerProbeRoots = new Map<string, Promise<string>>();
+
+  private providerProbeRoot(safeProvider: string): Promise<string> {
+    const existing = this.providerProbeRoots.get(safeProvider);
+    if (existing) return existing;
+    const created = fsp
+      .mkdtemp(path.join(tmpdir(), `zeros-provider-probe-${safeProvider}-`))
+      .catch((error: unknown) => {
+        this.providerProbeRoots.delete(safeProvider);
+        throw error;
+      });
+    this.providerProbeRoots.set(safeProvider, created);
+    return created;
+  }
+
   /** A provider's auth/version command is still provider code even though it
    * is short-lived. Give it a neutral writable root and the provider's normal
    * private state projection, never the active checkout or engine authority. */
@@ -2496,13 +2996,23 @@ export class AgentGateway {
     options: { timeoutMs: number },
   ): Promise<{ exitCode: number | null; stdout: string }> {
     const safeProvider = providerId.replace(/[^a-z0-9_-]/gi, "-");
-    const probeRoot = await fsp.mkdtemp(
-      path.join(tmpdir(), `zeros-provider-probe-${safeProvider}-`),
-    );
-    const probeExecutionId = `probe-${safeProvider}-${randomUUID()}`;
-    let boundary: PreparedBoundary | null = null;
+    // A neutral root that is STABLE per (engine process, provider) rather than
+    // fresh per probe. Consecutive probes must produce the identical
+    // BoundaryRequest for the utility pool to reuse one warm boundary instead of
+    // admitting — and proving torn down — one each, and the request carries this
+    // path as both cwd and workspaceRoot.
+    //
+    // Still created with `mkdtemp`, deliberately: a predictable /tmp path could
+    // be pre-created by another local user, and the probe would then treat an
+    // attacker-owned directory as its writable root. Minting once and REMEMBERING
+    // it keeps mkdtemp's unpredictability and gets stability from the cache.
+    const probeRoot = await this.providerProbeRoot(safeProvider);
+    for (const entry of await fsp.readdir(probeRoot)) {
+      await fsp
+        .rm(path.join(probeRoot, entry), { recursive: true, force: true })
+        .catch(() => undefined);
+    }
     try {
-      this.assertBoundaryRetirementHealthy();
       const ambientEnv = completeAgentSpawnEnv(undefined);
       const configured = applyUserProviderConfig(this.projectRoot, providerId, {
         env: ambientEnv,
@@ -2517,8 +3027,11 @@ export class AgentGateway {
       if (!executable) {
         throw new Error("provider command probe executable is unavailable");
       }
+      // Probes run in throwaway temp roots; pin their durable provider-state
+      // scope so every probe reuses one warm projection per provider instead
+      // of minting and orphaning a fresh full copy of host provider state.
       const request = await this.boundaryRequest(
-        probeExecutionId,
+        `probe-${safeProvider}-${randomUUID()}`,
         probeRoot,
         probeRoot,
         undefined,
@@ -2529,57 +3042,78 @@ export class AgentGateway {
         undefined,
         [],
         false,
+        undefined,
+        `zeros-provider-probe\0${providerId}`,
+        undefined,
+        // A registry refresh paints dots in the UI; it must not delay a chat.
+        "background",
       );
-      boundary = await this.executionBoundary.prepare(request);
-      const child = await boundary.spawn({
-        command: executable,
-        args,
-        cwd: probeRoot,
-        env,
-        stdio: "pipe",
-      });
-      child.stdin?.end();
-      const MAX_PROBE_OUTPUT_BYTES = 64 * 1024;
-      let stdout = "";
-      let stdoutBytes = 0;
-      child.stdout?.on("data", (chunk: Buffer | string) => {
-        if (stdoutBytes >= MAX_PROBE_OUTPUT_BYTES) return;
-        const text = Buffer.isBuffer(chunk) ? chunk.toString("utf8") : chunk;
-        const remaining = MAX_PROBE_OUTPUT_BYTES - stdoutBytes;
-        const accepted = Buffer.from(text, "utf8").subarray(0, remaining);
-        stdout += accepted.toString("utf8");
-        stdoutBytes += accepted.byteLength;
-      });
-      // Drain diagnostics without retaining or logging provider/account data.
-      child.stderr?.resume();
-      const closed = child.child
-        ? child.child.exitCode !== null || child.child.signalCode !== null
-          ? Promise.resolve()
-          : new Promise<void>((resolve) => child.child?.once("close", resolve))
-        : Promise.resolve();
-      let timer: NodeJS.Timeout | undefined;
-      try {
-        const exit = await Promise.race([
-          child.wait(),
-          new Promise<never>((_resolve, reject) => {
-            timer = setTimeout(
-              () => reject(new Error("provider command probe timed out")),
-              options.timeoutMs,
-            );
-          }),
-        ]);
-        await closed;
-        return { exitCode: exit.code, stdout };
-      } finally {
-        if (timer) clearTimeout(timer);
-      }
+      return await this.withUtilityBoundary(
+        providerId,
+        "newSession",
+        request,
+        async ({ boundary }) => {
+          const child = await boundary.spawn({
+            command: executable,
+            args,
+            cwd: probeRoot,
+            env,
+            stdio: "pipe",
+          });
+          child.stdin?.end();
+          const MAX_PROBE_OUTPUT_BYTES = 64 * 1024;
+          let stdout = "";
+          let stdoutBytes = 0;
+          child.stdout?.on("data", (chunk: Buffer | string) => {
+            if (stdoutBytes >= MAX_PROBE_OUTPUT_BYTES) return;
+            const text = Buffer.isBuffer(chunk)
+              ? chunk.toString("utf8")
+              : chunk;
+            const remaining = MAX_PROBE_OUTPUT_BYTES - stdoutBytes;
+            const accepted = Buffer.from(text, "utf8").subarray(0, remaining);
+            stdout += accepted.toString("utf8");
+            stdoutBytes += accepted.byteLength;
+          });
+          // Drain diagnostics without retaining or logging provider/account data.
+          child.stderr?.resume();
+          const closed = child.child
+            ? child.child.exitCode !== null || child.child.signalCode !== null
+              ? Promise.resolve()
+              : new Promise<void>((resolve) =>
+                  child.child?.once("close", resolve),
+                )
+            : Promise.resolve();
+          let timer: NodeJS.Timeout | undefined;
+          try {
+            const exit = await Promise.race([
+              child.wait(),
+              new Promise<never>((_resolve, reject) => {
+                timer = setTimeout(
+                  () => reject(new Error("provider command probe timed out")),
+                  options.timeoutMs,
+                );
+              }),
+            ]);
+            await closed;
+            return { exitCode: exit.code, stdout };
+          } finally {
+            if (timer) clearTimeout(timer);
+            // The pooled boundary outlives this probe, so its child must not:
+            // prove THIS process domain empty now rather than leaving a stray
+            // provider child alive under a boundary the next probe will reuse.
+            await child.stopAndProve();
+          }
+        },
+      );
     } finally {
-      try {
-        if (boundary) {
-          await this.retirePreparedBoundary(probeExecutionId, boundary);
-        }
-      } finally {
-        await fsp.rm(probeRoot, { recursive: true, force: true });
+      // The directory itself stays (a pooled boundary's policy names it); only
+      // this probe's leftovers go. The next probe empties it again on entry.
+      for (const entry of await fsp
+        .readdir(probeRoot)
+        .catch(() => [] as string[])) {
+        await fsp
+          .rm(path.join(probeRoot, entry), { recursive: true, force: true })
+          .catch(() => undefined);
       }
     }
   }
@@ -2617,11 +3151,11 @@ export class AgentGateway {
   }
 
   /** Account details (provider / plan / org / email) for each authenticated
-   *  agent whose adapter implements `getAccountInfo`. Cached behind
-   *  ACCOUNT_INFO_TTL_MS (and `refreshRegistry` clears it) because each miss
-   *  can spawn a short-lived child. Unauthenticated agents and those without
-   *  the capability (Cursor) are skipped. Failures cache as null so a
-   *  logged-out agent doesn't re-probe every call. */
+   *  agent whose adapter already has a live runtime. Registry discovery is a
+   *  hot, best-effort UI path: it must never spawn provider code, clone a
+   *  provider HOME, rotate OAuth, or mutate the authoritative auth result.
+   *  Successful details are cached; null is deliberately not cached so the
+   *  next registry read after a real session starts can enrich the panel. */
   private async fetchAccountInfo(
     authenticated: Set<string>,
   ): Promise<Map<string, AccountDetails>> {
@@ -2636,63 +3170,22 @@ export class AgentGateway {
           return;
         }
         let value: AccountDetails | null = null;
-        let preparedBoundary: PreparedBoundary | null = null;
-        let accountExecutionId: string | null = null;
         try {
           const adapter = await this.adapterFor(m.id);
           if (adapter.getAccountInfo) {
-            const cwd = path.resolve(this.projectRoot);
-            const env = applyUserProviderConfig(cwd, m.id, {
-              env: completeAgentSpawnEnv(undefined),
-            }).env;
-            const territory = await this.prepareCodeAgentTerritory(
-              adapter,
-              cwd,
-              cwd,
-              cwd,
-              "newSession",
-            );
-            accountExecutionId = `account-${randomUUID()}`;
-            preparedBoundary = await this.prepareExecutionBoundary(
-              accountExecutionId,
-              cwd,
-              cwd,
-              adapter,
-              territory,
-              env,
-              [],
-              "newSession",
-              undefined,
-              undefined,
-              [],
-              { includeSessionCapabilities: false },
-            );
-            value =
-              (await adapter.getAccountInfo({
-                env,
-                executionBoundary: preparedBoundary,
-              })) ?? null;
+            value = (await adapter.getAccountInfo({ liveOnly: true })) ?? null;
           }
         } catch {
-          /* best-effort — cache null, retry after the TTL / on Refresh */
-        } finally {
-          if (preparedBoundary && accountExecutionId) {
-            try {
-              await this.retirePreparedBoundary(
-                accountExecutionId,
-                preparedBoundary,
-              );
-            } catch (error) {
-              value = null;
-              console.warn(
-                `[agents] ${m.id} account boundary teardown failed: ` +
-                  (error instanceof Error ? error.message : String(error)),
-              );
-            }
-          }
+          // Decorative account metadata is not an authentication oracle.
+          // Admission/prompt failures carry the provider's authoritative
+          // auth-required signal and update runtimeAuthFailed themselves.
         }
-        this.accountInfoCache.set(m.id, { at: now, value });
-        if (value) out.set(m.id, value);
+        if (value) {
+          this.accountInfoCache.set(m.id, { at: now, value });
+          out.set(m.id, value);
+        } else {
+          this.accountInfoCache.delete(m.id);
+        }
       }),
     );
     return out;
@@ -2716,9 +3209,12 @@ export class AgentGateway {
     // global CLI (cursor) shows its new version immediately on
     // a user-triggered Refresh instead of waiting out the TTL.
     clearVersionCache();
-    // Drop cached account details so a user-triggered Refresh actually
-    // re-fetches them (the re-probe re-spawns the child — exactly the intent).
+    // Drop cached account details so a user-triggered Refresh can reuse a
+    // currently live runtime. Refresh never creates provider work by itself.
     this.accountInfoCache.clear();
+    // A user-triggered Refresh is also the retry path after repairing the
+    // sandbox backend — never serve it a remembered preflight verdict.
+    this.preflightResults.clear();
     return this.listAgents();
   }
 
@@ -2747,6 +3243,76 @@ export class AgentGateway {
     return this.initializeAgent(agentId);
   }
 
+  /** Run provider-owned one-shot bytes under the same ZSR contract as a
+   * session, then prove the boundary retired before returning. These calls do
+   * not need MCP, local-service, or container capabilities, but they may load
+   * arbitrary provider SDK code and therefore must never use an engine-global
+   * host. */
+  private async runProviderOneShot<T>(opts: {
+    agentId: string;
+    executionPrefix: string;
+    cwd?: string;
+    env?: Record<string, string>;
+    operation: (context: {
+      adapter: AgentAdapter;
+      cwd: string;
+      env: Record<string, string>;
+      executionBoundary: PreparedBoundary;
+    }) => Promise<T>;
+  }): Promise<T> {
+    const adapter = await this.adapterFor(opts.agentId);
+    const cwd = resolveAgentCwd(
+      opts.cwd ?? this.projectRoot,
+      "newSession",
+      undefined,
+    );
+    const merged = mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env));
+    const spawn = normalizeProviderSpawn(
+      applyUserProviderConfig(cwd, opts.agentId, { env: merged }),
+    );
+    const env = spawn.env ?? completeAgentSpawnEnv(opts.env);
+    const territory = await this.prepareCodeAgentTerritory(
+      adapter,
+      cwd,
+      cwd,
+      undefined,
+      "newSession",
+      { cliBinary: spawn.cliBinary },
+    );
+    // Pooled, not per-call (§5.1 "reusable utility boundary"): key validation
+    // and session listing are engine-owned, background, and identical from one
+    // call to the next, so they share one warm boundary instead of each paying a
+    // provider-HOME projection + shadow Git + canary + proven teardown. The pool
+    // keys on this exact request, serializes leases, and retires on failure.
+    const request = await this.boundaryRequest(
+      // Replaced by the pool with the pooled boundary's own id; only the shape
+      // of the rest of this request decides whether a warm one may be reused.
+      `${opts.executionPrefix}-${opts.agentId}-${randomUUID()}`,
+      cwd,
+      cwd,
+      territory,
+      env,
+      adapter.agentId,
+      [],
+      spawn.cliBinary,
+      [],
+      [],
+      false,
+      undefined,
+      undefined,
+      undefined,
+      // No person is blocked on these, so they yield to real session admissions.
+      "background",
+    );
+    return this.withUtilityBoundary(
+      adapter.agentId,
+      "newSession",
+      request,
+      ({ boundary }) =>
+        opts.operation({ adapter, cwd, env, executionBoundary: boundary }),
+    );
+  }
+
   /** Save-time provider-key validation (AGENT_VALIDATE_KEY). Delegates to
    *  the adapter's optional validateApiKey; agents without one (Claude /
    *  Codex CLI-auth paths) return ok=null so the renderer saves normally. */
@@ -2755,9 +3321,37 @@ export class AgentGateway {
     apiKey: string,
   ): Promise<{ ok: boolean | null; error?: string }> {
     try {
+      // Most providers use native CLI login and expose no candidate-key
+      // validator. Preserve their cheap compatibility no-op without preparing
+      // an otherwise unused provider boundary.
       const adapter = await this.adapterFor(agentId);
       if (!adapter.validateApiKey) return { ok: null };
-      return await adapter.validateApiKey(apiKey);
+      const result = await this.runProviderOneShot({
+        agentId,
+        executionPrefix: "validate-key",
+        env: { CURSOR_API_KEY: apiKey },
+        operation: async ({
+          adapter: containedAdapter,
+          cwd,
+          env,
+          executionBoundary,
+        }) => {
+          if (!containedAdapter.validateApiKey) return { ok: null };
+          return containedAdapter.validateApiKey(apiKey, {
+            cwd,
+            env,
+            executionBoundary,
+          });
+        },
+      });
+      if (!result.error) return result;
+      const withoutCandidate = apiKey
+        ? result.error.split(apiKey).join("[redacted]")
+        : result.error;
+      return {
+        ...result,
+        error: redactSensitive(withoutCandidate).slice(0, 1_000),
+      };
     } catch {
       return { ok: null };
     }
@@ -2777,9 +3371,6 @@ export class AgentGateway {
       env?: Record<string, string>;
     },
   ): Promise<{ title: string | null; error?: string }> {
-    let preparedBoundary: PreparedBoundary | null = null;
-    let titleExecutionId: string | null = null;
-    let result: { title: string | null; error?: string } = { title: null };
     try {
       const adapter = await this.adapterFor(agentId);
       if (!adapter.generateText) return { title: null };
@@ -2794,46 +3385,50 @@ export class AgentGateway {
         cwd,
         "newSession",
       );
-      titleExecutionId = `title-${randomUUID()}`;
-      preparedBoundary = await this.prepareExecutionBoundary(
-        titleExecutionId,
+      // Pooled (§5.1). Every title for a given provider builds the identical
+      // request, so the second and later titles in a session reuse one warm
+      // boundary. This is where the old per-title prepare+prove-teardown showed
+      // up as five background admissions racing the user's own sends, and as the
+      // recurring concurrent provider-HOME promotion conflicts.
+      const request = await this.boundaryRequest(
+        `title-${randomUUID()}`,
         cwd,
         cwd,
-        adapter,
         territory,
         env,
+        adapter.agentId,
         [],
-        "newSession",
         undefined,
         undefined,
         [],
-        { includeSessionCapabilities: false },
+        false,
+        undefined,
+        undefined,
+        undefined,
+        // Nobody watches a tab rename. In a real 4-minute engine log five of
+        // these queued in front of the sessions the user was starting.
+        "background",
       );
-      const text = await adapter.generateText({
-        ...opts,
-        env,
-        timeoutMs: 30_000,
-        executionBoundary: preparedBoundary,
-      });
+      const text = await this.withUtilityBoundary(
+        adapter.agentId,
+        "newSession",
+        request,
+        ({ boundary }) =>
+          adapter.generateText!({
+            ...opts,
+            env,
+            timeoutMs: 30_000,
+            executionBoundary: boundary,
+          }),
+      );
       const title = text.trim();
-      result = { title: title.length > 0 ? title : null };
+      return { title: title.length > 0 ? title : null };
     } catch (err) {
-      result = {
+      return {
         title: null,
         error: err instanceof Error ? err.message : String(err),
       };
     }
-    if (preparedBoundary && titleExecutionId) {
-      try {
-        await this.retirePreparedBoundary(titleExecutionId, preparedBoundary);
-      } catch (error) {
-        return {
-          title: null,
-          error: error instanceof Error ? error.message : String(error),
-        };
-      }
-    }
-    return result;
   }
 
   async authenticate(_agentId: string, _methodId: string): Promise<void> {
@@ -2859,6 +3454,9 @@ export class AgentGateway {
       cliBinary?: string;
       /** Publish the engine-owned route before adapter.newSession can emit. */
       onExecutionCreated?: (executionId: string) => void;
+      /** Aborted when the owning conversation is closed or superseded, so an
+       * admission that is still queued is cancelled instead of burned. */
+      admissionSignal?: AbortSignal;
     } = {},
   ): Promise<NewSessionResponse> {
     const adapter = await this.adapterFor(agentId);
@@ -2958,6 +3556,7 @@ export class AgentGateway {
       spawn.cliBinary,
       territorySet.additionalRoots,
       territorySet.additionalGitWorkspaceRoots,
+      opts.admissionSignal ? { admissionSignal: opts.admissionSignal } : {},
     );
     try {
       await this.assertAdditionalTerritorySetStillCurrent(
@@ -2992,7 +3591,7 @@ export class AgentGateway {
     }
     let session: NewSessionResponse;
     try {
-      ({ session } = await adapter.newSession({
+      const startup = adapter.newSession({
         executionId,
         cwd,
         env: sessionEnv,
@@ -3001,6 +3600,14 @@ export class AgentGateway {
         ...(systemInstruction ? { systemInstruction } : {}),
         ...(territory ? { territory } : {}),
         executionBoundary: preparedBoundary,
+      });
+      this.trackAdapterStartup(executionId, startup);
+      ({ session } = await awaitAdapterStartup({
+        agentId,
+        stage: "newSession",
+        operation: startup,
+        onLateSettlement: () =>
+          this.disposeRejectedExecutions(adapter, [executionId]),
       }));
     } catch (err) {
       await this.disposeRejectedExecutions(adapter, [executionId]);
@@ -3034,6 +3641,7 @@ export class AgentGateway {
         (systemInstruction ? " sysInstr=native" : ""),
     );
     this.executionToAgent.set(session.executionId, agentId);
+    this.settleAdapterStartup(session.executionId);
     this.executionToCwd.set(session.executionId, cwd);
     this.executionToInstructionCtx.set(session.executionId, instructionCtx);
     this.executionToDesignDirectory.set(
@@ -3074,6 +3682,9 @@ export class AgentGateway {
       /** Publish the engine-owned route before adapter.loadSession can emit
        * updates. The caller must remove provisional routing if load rejects. */
       onExecutionCreated?: (executionId: string) => void;
+      /** Aborted when the owning conversation is closed or superseded, so an
+       * admission that is still queued is cancelled instead of burned. */
+      admissionSignal?: AbortSignal;
     } = {},
   ): Promise<LoadSessionResponse> {
     const providerBinding =
@@ -3158,6 +3769,12 @@ export class AgentGateway {
       spawn.cliBinary,
       territorySet.additionalRoots,
       territorySet.additionalGitWorkspaceRoots,
+      {
+        providerResumeId: providerBinding.resumeId,
+        ...(opts.admissionSignal
+          ? { admissionSignal: opts.admissionSignal }
+          : {}),
+      },
     );
     try {
       await this.assertAdditionalTerritorySetStillCurrent(
@@ -3190,7 +3807,7 @@ export class AgentGateway {
     }
     let response: LoadSessionResponse;
     try {
-      response = await adapter.loadSession({
+      const startup = adapter.loadSession({
         executionId,
         providerBinding,
         // Compatibility for adapters/tests that have not yet adopted bindings.
@@ -3202,6 +3819,14 @@ export class AgentGateway {
         ...(systemInstruction ? { systemInstruction } : {}),
         ...(territory ? { territory } : {}),
         executionBoundary: preparedBoundary,
+      });
+      this.trackAdapterStartup(executionId, startup);
+      response = await awaitAdapterStartup({
+        agentId,
+        stage: "loadSession",
+        operation: startup,
+        onLateSettlement: () =>
+          this.disposeRejectedExecutions(adapter, [executionId]),
       });
     } catch (err) {
       // Adapters may allocate a subprocess/session directory before discovering
@@ -3235,6 +3860,7 @@ export class AgentGateway {
         (systemInstruction ? " sysInstr=native" : ""),
     );
     this.executionToAgent.set(executionId, agentId);
+    this.settleAdapterStartup(executionId);
     this.executionToCwd.set(executionId, cwd);
     this.executionToInstructionCtx.set(executionId, instructionCtx);
     this.executionToDesignDirectory.set(
@@ -3295,6 +3921,9 @@ export class AgentGateway {
       env?: Record<string, string>;
       workspaceId?: string;
       cliBinary?: string;
+      /** Aborted when the destination conversation is closed or superseded,
+       * so an admission that is still queued is cancelled instead of burned. */
+      admissionSignal?: AbortSignal;
     },
   ): Promise<ProviderBinding> {
     const providerBinding = coerceProviderBinding(binding);
@@ -3375,6 +4004,12 @@ export class AgentGateway {
       spawn.cliBinary,
       territorySet.additionalRoots,
       territorySet.additionalGitWorkspaceRoots,
+      {
+        providerResumeId: providerBinding.resumeId,
+        ...(opts.admissionSignal
+          ? { admissionSignal: opts.admissionSignal }
+          : {}),
+      },
     );
     try {
       await this.assertAdditionalTerritorySetStillCurrent(
@@ -3394,15 +4029,21 @@ export class AgentGateway {
     }
     let result: { providerBinding: ProviderBinding };
     try {
-      result = await adapter.forkProviderBinding({
-        providerBinding,
-        cwd,
-        env: sessionEnv,
-        cliBinary: spawn.cliBinary,
-        mcpServers,
-        ...(systemInstruction ? { systemInstruction } : {}),
-        ...(territory ? { territory } : {}),
-        executionBoundary: preparedBoundary,
+      result = await awaitAdapterStartup({
+        agentId,
+        stage: "forkSession",
+        operation: adapter.forkProviderBinding({
+          providerBinding,
+          cwd,
+          env: sessionEnv,
+          cliBinary: spawn.cliBinary,
+          mcpServers,
+          ...(systemInstruction ? { systemInstruction } : {}),
+          ...(territory ? { territory } : {}),
+          executionBoundary: preparedBoundary,
+        }),
+        onLateSettlement: () =>
+          this.retirePreparedBoundary(forkExecutionId, preparedBoundary),
       });
     } finally {
       await this.retirePreparedBoundary(forkExecutionId, preparedBoundary);
@@ -3425,8 +4066,10 @@ export class AgentGateway {
 
   /** Tear down a single session's resources when its chat tab is closed.
    *  Clears the gateway's routing maps and asks the owning adapter to
-   *  release the session's subprocess / server child / SDK agent +
-   *  session dir. Without this, every started session leaked an
+   *  release the session's subprocess / server child / SDK agent. The shared
+   *  session dir remains held by its process-domain descriptor until the
+   *  gateway proves the kernel boundary stopped, then is removed here. Without
+   *  this, every started session leaked an
    *  on-disk session dir (+ a per-session Codex server child) until app
    *  quit. Best-effort by default so closing a tab can't surface an error.
    *  Lifecycle callers use failClosed: archive/delete must abort when the
@@ -3439,6 +4082,9 @@ export class AgentGateway {
       executionIds.filter(Boolean) as string[],
     )) {
       const boundary = this.executionBoundaries.get(executionId);
+      // Every path that abandons a startup lands here, so this is where a
+      // prompt still waiting on that startup is released.
+      this.settleAdapterStartup(executionId);
       this.executionToAgent.delete(executionId);
       this.executionToWorkspace.delete(executionId);
       this.executionToCwd.delete(executionId);
@@ -3478,6 +4124,7 @@ export class AgentGateway {
       if (boundaryStopped) {
         this.executionBoundaries.delete(executionId);
         this.failedBoundaryRetirements.delete(executionId);
+        await this.removeRetiredSessionDir(executionId);
       }
       for (const err of failures) {
         console.warn(
@@ -3496,7 +4143,18 @@ export class AgentGateway {
   ): Promise<void> {
     const resolvedAgentId = this.executionToAgent.get(sessionId) ?? agentId;
     const boundary = this.executionBoundaries.get(sessionId);
+    this.settleAdapterStartup(sessionId);
     this.stopObservingBoundaryPorts(sessionId);
+    // Publish the terminal state BEFORE the map deletes below make publishing
+    // impossible. Without this, a retire that followed markBoundaryDraining
+    // (territory restart) left `draining` as the LAST status the renderer
+    // would ever receive for this execution — the composer's boundary pill
+    // spun forever on a restart that had long since finished. `revoked` is
+    // the honest terminal value; the lifecycle annotation goes with it.
+    this.updateBoundaryStatus(sessionId, (current) => {
+      const { lifecycle: _lifecycle, ...rest } = current;
+      return { ...rest, state: "revoked", checkedAt: Date.now() };
+    });
     this.executionToAgent.delete(sessionId);
     this.executionToWorkspace.delete(sessionId);
     this.executionToCwd.delete(sessionId);
@@ -3549,6 +4207,7 @@ export class AgentGateway {
     if (boundaryStopped) {
       this.executionBoundaries.delete(sessionId);
       this.failedBoundaryRetirements.delete(sessionId);
+      await this.removeRetiredSessionDir(sessionId);
     }
     if (failure && opts.failClosed) throw failure;
   }
@@ -3557,8 +4216,18 @@ export class AgentGateway {
     agentId: string,
     opts: { cwd?: string; cursor?: string | null } = {},
   ): Promise<ListSessionsResponse> {
-    const adapter = await this.adapterFor(agentId);
-    return adapter.listSessions({ cwd: opts.cwd, cursor: opts.cursor });
+    return this.runProviderOneShot({
+      agentId,
+      executionPrefix: "list-sessions",
+      cwd: opts.cwd,
+      operation: ({ adapter, env, executionBoundary }) =>
+        adapter.listSessions({
+          cwd: opts.cwd,
+          cursor: opts.cursor,
+          env,
+          executionBoundary,
+        }),
+    });
   }
 
   /** Prepend a one-shot working-directory note for agents that don't tell
@@ -3687,12 +4356,56 @@ export class AgentGateway {
     return [{ type: "text", text: block }, ...prompt];
   }
 
+  /** Track an in-flight adapter startup so prompt-shaped traffic for its
+   *  executionId waits for registration instead of racing it.
+   *
+   *  The flight deliberately outlives the adapter's own promise: the gateway
+   *  registers this execution's route AFTER that promise resolves, and a
+   *  prompt released in between finds no route — indistinguishable from an id
+   *  left over from a previous engine. Every abandonment path runs through
+   *  disposeRejectedExecutions, and a rejected startup settles itself, so no
+   *  outcome can strand a waiter. */
+  private trackAdapterStartup(
+    executionId: string,
+    operation: Promise<unknown>,
+  ): void {
+    let settle!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+    const flight = { promise, settle };
+    this.adapterStartupFlights.set(executionId, flight);
+    void operation.catch(() => this.settleAdapterStartup(executionId, flight));
+  }
+
+  /** Release anything waiting on this execution's startup. */
+  private settleAdapterStartup(
+    executionId: string,
+    expected?: { readonly promise: Promise<void>; readonly settle: () => void },
+  ): void {
+    const flight = this.adapterStartupFlights.get(executionId);
+    if (!flight || (expected && flight !== expected)) return;
+    this.adapterStartupFlights.delete(executionId);
+    flight.settle();
+  }
+
+  /** Wait for this execution's adapter startup to settle, if one is running.
+   *  After the wait the session is either registered (the prompt proceeds) or
+   *  its startup failed (the prompt fails on the adapter's real state). */
+  private async awaitAdapterStartupSettled(sessionId: string): Promise<void> {
+    const flight = this.adapterStartupFlights.get(sessionId);
+    if (flight) await flight.promise;
+  }
+
   async prompt(
     agentId: string,
     sessionId: string,
     prompt: ContentBlock[],
   ): Promise<PromptResponse> {
-    const adapter = this.adapterForSession(sessionId, agentId);
+    await this.awaitAdapterStartupSettled(sessionId);
+    const adapter = this.adapterForSession(sessionId, agentId, {
+      requireLiveRoute: true,
+    });
     // First-turn orientation for EVERY agent (workspace preamble + /add-dir +
     // repo prompts.general), then the cwd hint for agents that don't self-report
     // their cwd. Both one-shot per session; system instruction goes outermost so
@@ -3708,7 +4421,14 @@ export class AgentGateway {
       });
       const currentGit =
         this.executionToBoundaryStatus.get(sessionId)?.git?.state;
-      if (currentGit !== "not-applicable") {
+      // `native` sessions commit straight into the workspace's own repository,
+      // so there is no promotion to narrate and nothing a "Promoting changes…"
+      // row could describe. Reporting the boundary's own promotion result over it
+      // would also demote the row back to "not a Git workspace" after the first
+      // turn, since a boundary with no private projection has nothing to report.
+      const promotes =
+        currentGit !== "not-applicable" && currentGit !== "native";
+      if (promotes) {
         this.updateBoundaryStatus(sessionId, (current) => ({
           ...current,
           git: { state: "synchronizing", changedAt: Date.now() },
@@ -3719,7 +4439,7 @@ export class AgentGateway {
         const result = await this.executionBoundaries
           .get(sessionId)
           ?.synchronizeGit();
-        if (result) {
+        if (result && promotes) {
           const changedAt = Date.now();
           this.updateBoundaryStatus(sessionId, (current) => ({
             ...current,
@@ -3820,7 +4540,10 @@ export class AgentGateway {
     sessionId: string,
     prompt: ContentBlock[],
   ): Promise<void> {
-    const adapter = this.adapterForSession(sessionId, agentId);
+    await this.awaitAdapterStartupSettled(sessionId);
+    const adapter = this.adapterForSession(sessionId, agentId, {
+      requireLiveRoute: true,
+    });
     if (!adapter.steer) {
       throw new Error(`agent ${adapter.agentId} does not support steering`);
     }
@@ -3920,7 +4643,8 @@ export class AgentGateway {
   }
 
   async dispose(): Promise<void> {
-    const boundaries = [...this.executionBoundaries.values()];
+    const boundaryEntries = [...this.executionBoundaries.entries()];
+    const boundaries = boundaryEntries.map(([, boundary]) => boundary);
     const failures: unknown[] = [];
     const settle = async (operations: Array<() => unknown>) => {
       const results = await Promise.allSettled(
@@ -3933,6 +4657,21 @@ export class AgentGateway {
     for (const executionId of this.boundaryPortSubscriptions.keys()) {
       this.stopObservingBoundaryPorts(executionId);
     }
+    // Pooled one-shot boundaries are not in `executionBoundaries` (nothing owns
+    // them by execution id), so shutdown has to prove them stopped explicitly.
+    // Their neutral probe roots are removed AFTER, since a pooled boundary names
+    // one as its workspace root until it is retired.
+    await settle([() => this.retirePooledUtilityBoundaries()]);
+    const probeRoots = [...this.providerProbeRoots.values()];
+    this.providerProbeRoots.clear();
+    await settle(
+      probeRoots.map(
+        (pending) => () =>
+          pending
+            .then((root) => fsp.rm(root, { recursive: true, force: true }))
+            .catch(() => undefined),
+      ),
+    );
     await settle(
       [...this.boundaryPreviews.keys()].map(
         (executionId) => () => this.closeBoundaryPreviews(executionId),
@@ -3944,9 +4683,17 @@ export class AgentGateway {
         (adapter) => () => adapter.dispose(),
       ),
     );
-    await settle(
-      boundaries.map((boundary) => () => boundary.stopAndProve()),
+    const stopResults = await Promise.allSettled(
+      boundaryEntries.map(([, boundary]) => boundary.stopAndProve()),
     );
+    for (let index = 0; index < stopResults.length; index += 1) {
+      const result = stopResults[index]!;
+      if (result.status === "rejected") {
+        failures.push(result.reason);
+      } else {
+        await this.removeRetiredSessionDir(boundaryEntries[index]![0]);
+      }
+    }
     this.executionBoundaries.clear();
     this.failedBoundaryRetirements.clear();
     this.adapters.clear();
@@ -3968,6 +4715,17 @@ export class AgentGateway {
       throw new AggregateError(
         failures,
         "failed to dispose agent execution boundaries",
+      );
+    }
+  }
+
+  private async removeRetiredSessionDir(executionId: string): Promise<void> {
+    try {
+      await removeSessionDir(executionId);
+    } catch (error) {
+      console.warn(
+        `[agents] session-dir cleanup(${executionId}) failed after boundary retirement: ` +
+          (error instanceof Error ? error.message : String(error)),
       );
     }
   }
@@ -4012,8 +4770,34 @@ export class AgentGateway {
    *  (e.g. after a close/reopen). The `?? agentId` fallback still covers the
    *  pre-session window before the map has an entry. Mirrors endSession so
    *  prompt/cancel/setMode and teardown all resolve a session identically. */
-  private adapterForSession(sessionId: string, agentId?: string): AgentAdapter {
-    const resolvedId = this.executionToAgent.get(sessionId) ?? agentId;
+  private adapterForSession(
+    sessionId: string,
+    agentId?: string,
+    opts: { requireLiveRoute?: boolean } = {},
+  ): AgentAdapter {
+    const routedId = this.executionToAgent.get(sessionId);
+    if (!routedId && opts.requireLiveRoute) {
+      // Every live session registers a route in newSession/loadSession, so a
+      // missing route means this execution belongs to a previous engine
+      // process — the caller's agentId only says which adapter it WOULD have
+      // used. Without this the id falls through to a freshly created adapter
+      // that has never registered it; Claude and Codex quietly rebuild, but
+      // Cursor refuses with a hard "no live session (load it first)" and the
+      // user's message is lost. session-expired is recoverable, so the
+      // renderer re-establishes the session and resends instead.
+      console.warn(
+        `[agents] prompt for an execution this engine never admitted: ` +
+          `sessionId=${sessionId} agentId=${agentId ?? "(unset)"} ` +
+          `routes=${this.executionToAgent.size}`,
+      );
+      throw new AgentFailureError({
+        kind: "session-expired",
+        message: `session ${sessionId} belongs to a previous engine`,
+        stage: "prompt",
+        agentId: agentId ?? "claude",
+      });
+    }
+    const resolvedId = routedId ?? agentId;
     if (!resolvedId) {
       // No route AND no caller agentId — the renderer is holding a
       // sessionId we have no record of (almost always: the engine

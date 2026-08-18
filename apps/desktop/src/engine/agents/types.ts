@@ -241,10 +241,29 @@ export interface AgentFilesystemTerritory {
    * workspace. Kept explicit so lifecycle reconciliation can compare semantic
    * authority without guessing which denied path is Design, Git, or policy. */
   protectedDesignDirectories: readonly string[];
-  /** Complete immutable read-only carveouts for this process. Includes every
-   * recognized Design document, workspace policy, and Git metadata. Raw Git
-   * metadata must be read-only because one index file cannot enforce a
-   * path-scoped "code only" staging policy. */
+  /** The files that decide whether those folders are recognized as Design at
+   * all — the repo `.zeros` settings directories holding the `[design] directory`
+   * pointer, plus each folder's `.zeros-canvas.json` marker. An agent that edits
+   * these cannot touch Design content, but can de-register a Design folder so the
+   * NEXT admission protects nothing.
+   *
+   * Named separately because the two profiles protect this differently. The
+   * isolated/cloud profile denies them along with the rest of the policy
+   * carveouts. Host parity does NOT: `.zeros/settings.toml` is committed
+   * repository content, and denying it made every `git pull` that had to rewrite
+   * it fail. There, de-registration is closed in engine state instead
+   * (design/recognition-store.ts), and the marker stays unwritable anyway because
+   * it lives inside a protected directory. */
+  designRecognitionPaths: readonly string[];
+  /** The complete carveout set the ISOLATED/cloud profile withholds: every
+   * recognized Design document, the workspace policy directories, and raw Git
+   * metadata — the last because one index file cannot enforce a path-scoped
+   * "code only" staging policy.
+   *
+   * Local host parity applies a strict SUBSET of this: Design content and
+   * `designRecognitionPaths` only, leaving Git metadata writable so the agent uses
+   * the workspace's own repository. Read this field as the maximum authority a
+   * profile may withhold, not as what every profile does withhold. */
   writeCapabilities: AgentWriteCapabilities;
 }
 
@@ -346,6 +365,10 @@ export interface AgentAdapter {
   listSessions(opts: {
     cwd?: string;
     cursor?: string | null;
+    /** Provider-backed discovery is a code actor too. The gateway supplies a
+     * fresh one-shot boundary; direct adapter tests may omit it. */
+    env?: Record<string, string>;
+    executionBoundary?: PreparedBoundary;
   }): Promise<ListSessionsResponse>;
 
   /** Send a turn. Streaming events fan out via emit.onSessionUpdate. */
@@ -390,6 +413,12 @@ export interface AgentAdapter {
    *  must never be logged or stored by the implementation. */
   validateApiKey?(
     apiKey: string,
+    opts?: {
+      cwd: string;
+      env?: Record<string, string>;
+      /** Save-time validation must not create a shared/global provider host. */
+      executionBoundary?: PreparedBoundary;
+    },
   ): Promise<{ ok: boolean | null; error?: string }>;
 
   /** Background one-shot text generation (the AI chat-title call): send ONE
@@ -463,10 +492,11 @@ export interface AgentAdapter {
   /** Read the signed-in account's details (provider / plan / org / email)
    *  for the Providers panel's connection block. Optional — only providers
    *  with a queryable account implement it (Claude via the SDK, Codex via
-   *  the app-server); others (Cursor) omit it. May spawn a short-lived
-   *  runtime, so the gateway caches the result behind a long TTL. Returns
-   *  null when unavailable (not signed in, API-key mode, or fetch failed). */
+   *  the app-server); others (Cursor) omit it. Returns null when unavailable
+   *  (not signed in, API-key mode, no live runtime, or fetch failed). */
   getAccountInfo?(opts?: {
+    /** Never create provider work merely to decorate registry UI. */
+    liveOnly?: boolean;
     /** Complete provider environment prepared at the trusted gateway edge. */
     env?: Record<string, string>;
     /** Fresh boundary for any fallback/throwaway provider runtime. */

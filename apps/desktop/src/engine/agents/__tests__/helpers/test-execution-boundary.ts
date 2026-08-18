@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type {
+  AdmissionControl,
   BoundaryProcess,
   BoundaryProcessExit,
   BoundaryProbeResult,
@@ -25,7 +26,8 @@ export interface TestExecutionBoundaryOptions {
   localServiceError?: Error;
   stopError?: Error;
   onProbe?: (request: BoundaryRequest) => void;
-  onPrepare?: (request: BoundaryRequest) => void;
+  onPrepare?: (request: BoundaryRequest, control?: AdmissionControl) => void;
+  onStop?: (request: BoundaryRequest) => void;
 }
 
 function trackedProcess(child: ChildProcess): BoundaryProcess {
@@ -134,7 +136,10 @@ export function testExecutionBoundary(
         }
       );
     },
-    prepare: async (request: BoundaryRequest): Promise<PreparedBoundary> => {
+    prepare: async (
+      request: BoundaryRequest,
+      control?: AdmissionControl,
+    ): Promise<PreparedBoundary> => {
       options.onProbe?.(request);
       if (
         options.probeResult &&
@@ -146,7 +151,13 @@ export function testExecutionBoundary(
             "test execution boundary is unavailable",
         );
       }
-      options.onPrepare?.(request);
+      if (options.onPrepare) {
+        // Preserve arity for the many callers asserting
+        // `toHaveBeenCalledWith(request)` — an explicit trailing `undefined`
+        // would fail those.
+        if (control === undefined) options.onPrepare(request);
+        else options.onPrepare(request, control);
+      }
       if (options.prepareError) throw options.prepareError;
       const generation = `test-${randomUUID()}` as TerritoryGeneration;
       const restrictions = boundaryParityRestrictions(request);
@@ -307,6 +318,7 @@ export function testExecutionBoundary(
             [...processes].map((process) => process.stopAndProve()),
           );
           if (options.stopError) throw options.stopError;
+          options.onStop?.(request);
         },
       };
     },

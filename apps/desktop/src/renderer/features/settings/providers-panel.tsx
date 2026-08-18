@@ -83,6 +83,7 @@ import {
   type ProviderAuthMethod,
   type ProviderPrefs,
 } from "./provider-prefs";
+import { providerConnectionStatus } from "./provider-connection-status";
 import { InlineLoginTerminal } from "./inline-login-terminal";
 
 // ──────────────────────────────────────────────────────────
@@ -775,6 +776,7 @@ function ProviderCard({
   // failed with "AGENT RESPONSE FAILURE". Surface the engine's reason verbatim —
   // it names the fix (set an Executable path, or reinstall).
   const runtimeMissing = agent.runtimeUnavailableReason;
+  const connectionStatus = providerConnectionStatus(agent);
 
   // Embedded login terminal (CLI mode, not connected): the user runs the
   // agent's login command inline (`claude /login`, `codex login`). Naming
@@ -1011,16 +1013,8 @@ function ProviderCard({
         <section className="flex flex-col gap-3">
           <div className="flex flex-row items-center justify-between gap-4">
             <StatusBadge
-              label={
-                cliConnected
-                  ? "Connected"
-                  : runtimeMissing
-                    ? "Runtime missing"
-                    : agent.installed
-                      ? "CLI not authenticated"
-                      : "CLI not found"
-              }
-              tone={cliConnected ? "success" : "error"}
+              label={connectionStatus.label}
+              tone={connectionStatus.tone}
             />
             <Tooltip label="Refresh">
               <Button
@@ -1064,6 +1058,11 @@ function ProviderCard({
                   path below, or reinstall). */}
               {runtimeMissing && (
                 <p className="text-red-fg m-0 text-sm">{runtimeMissing}</p>
+              )}
+              {!runtimeMissing && connectionStatus.detail && (
+                <p className="text-yellow-fg m-0 text-sm">
+                  {connectionStatus.detail}
+                </p>
               )}
               {cliConnected && (
                 <dl className="border-border1 flex flex-col gap-1.5 rounded-md border px-4 py-3">
@@ -1250,14 +1249,14 @@ function AuthMethodSegmented({
 // Status helper
 // ──────────────────────────────────────────────────────────
 
-/** Status pill for the connection block: green when connected, red
- *  (destructive) for the error states (not authenticated / not found). */
+/** Status pill for the connection block: green when connected, yellow when a
+ * check could not run, and red for confirmed error states. */
 function StatusBadge({
   label,
   tone,
 }: {
   label: string;
-  tone: "success" | "error";
+  tone: "success" | "warning" | "error";
 }) {
   return (
     <span
@@ -1265,7 +1264,9 @@ function StatusBadge({
         "inline-flex items-center rounded-sm border px-2.5 py-1 text-xs font-medium",
         tone === "success"
           ? "bg-green-bg text-green-fg border-transparent"
-          : "bg-red-bg text-red-fg border-transparent",
+          : tone === "warning"
+            ? "bg-yellow-bg text-yellow-fg border-transparent"
+            : "bg-red-bg text-red-fg border-transparent",
       )}
     >
       {label}

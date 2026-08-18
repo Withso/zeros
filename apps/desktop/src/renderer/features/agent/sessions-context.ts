@@ -38,6 +38,12 @@ export interface StartForChatOptions extends StartSessionOptions {
   /** Force a fresh session even when one is already ready. Used when
    *  the user changes model/effort. */
   force?: boolean;
+  /** `loadIntoChat` only: re-adopt a live engine execution but never mint one.
+   *  A miss resolves `false` with the chat left `idle` (transcript intact,
+   *  provider binding intact) — no boundary is admitted. Used by the lazy boot
+   *  resume for surfaced-but-unfocused chats; see
+   *  AgentLoadSessionMessage.adoptOnly. */
+  adoptOnly?: boolean;
 }
 
 /** Full replacement payload for a still-queued send — the same pieces

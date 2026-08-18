@@ -27,3 +27,16 @@ export async function cleanupZsrRuntime(options) {
   }
   if (failed) throw new Error("sandbox runtime cleanup failed");
 }
+
+/** Keep teardown attached to every post-initialization exit, including a
+ * validation failure that occurs after SRT has produced its wrapper but before
+ * the provider process exists. The options object may hold mutable runtime
+ * state (for example a cgroup allocated by `action`); cleanup reads it only
+ * after the action settles. */
+export async function withZsrRuntimeCleanup(options, action) {
+  try {
+    return await action();
+  } finally {
+    await cleanupZsrRuntime(options);
+  }
+}

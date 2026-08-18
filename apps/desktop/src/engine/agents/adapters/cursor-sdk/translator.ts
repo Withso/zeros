@@ -170,6 +170,7 @@ export class CursorSdkTranslator {
 
   private hasSeenTerminal = false;
   private hasSeenError = false;
+  private hasSeenAssistantText = false;
   private errorMessage: string | null = null;
   private lastStopReason: StopReason = "end_turn";
 
@@ -191,6 +192,13 @@ export class CursorSdkTranslator {
    *  user cancelled), so a failed turn never reports as a clean end_turn. */
   get sawError(): boolean {
     return this.hasSeenError;
+  }
+  /** Whether this turn emitted any visible assistant text. Cursor's stream can
+   *  occasionally finish without an assistant event even though wait().result
+   *  contains the complete final answer; the adapter uses this to apply that
+   *  result only as a non-duplicating fallback. */
+  get sawAssistantText(): boolean {
+    return this.hasSeenAssistantText;
   }
   /** Error detail from the in-band ERROR/EXPIRED status message
    *  (SDKStatusMessage.message), when the CLI provided one — so the adapter
@@ -263,6 +271,7 @@ export class CursorSdkTranslator {
         typeof block.text === "string" &&
         block.text.length > 0
       ) {
+        this.hasSeenAssistantText = true;
         this.emit({
           sessionId: this.sessionId,
           update: {

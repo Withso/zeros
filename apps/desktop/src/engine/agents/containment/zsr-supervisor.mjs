@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import { isIP } from "node:net";
 import path from "node:path";
+import * as tls from "node:tls";
 
 import {
   ZSR_RESOURCE_LIMITS,
@@ -28,7 +29,11 @@ import {
   wrapWithZsrCgroup,
 } from "./zsr-cgroup.mjs";
 import { startZsrPortPolicyControl } from "./zsr-port-policy-control.mjs";
-import { cleanupZsrRuntime } from "./zsr-runtime-cleanup.mjs";
+import { withZsrRuntimeCleanup } from "./zsr-runtime-cleanup.mjs";
+import {
+  credentialInjectionAuthorities,
+  schemaIssueSummary,
+} from "./zsr-credential-authority.mjs";
 
 const POLICY_VERSION = 1;
 const COMMAND_VERSION = 5;
@@ -54,6 +59,7 @@ const PROVIDER_CREDENTIAL_NAMES = new Set([
   "CURSOR_API_KEY",
 ]);
 const CA_TRUST_VARS = [
+  "CODEX_CA_CERTIFICATE",
   "NODE_EXTRA_CA_CERTS",
   "SSL_CERT_FILE",
   "CURL_CA_BUNDLE",
@@ -188,6 +194,12 @@ function validatePolicy(policy) {
     throw new Error("unsupported network policy");
   }
   if (
+    policy.runtime.localHostParity !== undefined &&
+    policy.runtime.localHostParity !== true
+  ) {
+    throw new Error("invalid local host-parity policy");
+  }
+  if (
     !Array.isArray(policy.runtime.deniedLocalPorts) ||
     policy.runtime.deniedLocalPorts.some(
       (port) => !Number.isInteger(port) || port < 1 || port > 65535,
@@ -204,6 +216,9 @@ function validatePolicy(policy) {
     throw new Error("invalid allowed local port policy");
   }
   const cloudWorker = policy.runtime.cloudWorker;
+  if (cloudWorker !== undefined && policy.runtime.localHostParity) {
+    throw new Error("cloud workers cannot use local host parity");
+  }
   if (cloudWorker !== undefined) {
     const expectedCloudKeys = [
       "cgroupParent",
@@ -706,7 +721,6 @@ function snapshotCaTrust(command, policyPath) {
     const value = command.env[name]?.trim();
     return value ? [{ name, value }] : [];
   });
-  if (configured.length === 0) return undefined;
   if (configured.length > MAX_CA_INPUT_FILES) {
     throw new Error("too many configured CA trust files");
   }
@@ -729,6 +743,23 @@ function snapshotCaTrust(command, policyPath) {
 
   let totalBytes = 0;
   const certificates = new Map();
+  const systemRoots = [...tls.rootCertificates];
+  if (typeof tls.getCACertificates === "function") {
+    try {
+      systemRoots.push(...tls.getCACertificates("system"));
+    } catch {
+      // Older/embedded Node runtimes may not expose an OS root snapshot. The
+      // bundled Mozilla roots remain a safe baseline; configured site-local
+      // roots are still appended below.
+    }
+  }
+  for (const block of systemRoots) {
+    const certificate = new X509Certificate(block);
+    certificates.set(certificate.fingerprint256, block.trim());
+    if (certificates.size > MAX_CA_CERTIFICATES) {
+      throw new Error("system CA trust exceeds its bounded certificate quota");
+    }
+  }
   for (const [file, name] of files) {
     let descriptor;
     try {
@@ -866,7 +897,10 @@ function completeConfig(
     path.dirname(policyPath),
     policy.runtime.cloudWorker,
   );
-  const seccompPath = process.env.ZEROS_ZSR_SECCOMP_PATH;
+  const localHostParity = policy.runtime.localHostParity === true;
+  const seccompPath = localHostParity
+    ? undefined
+    : process.env.ZEROS_ZSR_SECCOMP_PATH;
   const deniedDomains = [
     // Cloud metadata/link-local credentials are never part of ordinary
     // internet parity. Numeric aliases are canonicalized by SRT before match.
@@ -879,12 +913,16 @@ function completeConfig(
       `[::1]:${port}`,
     ]),
   ];
-  const credentials = command.credentialCapabilities?.map((capability) => ({
-    name: capability.name,
-    mode: "mask",
-    injectHosts: capability.injectAuthorities,
-    ...(capability.allowPlaintext ? { allowPlaintextInject: true } : {}),
-  }));
+  const credentials = localHostParity
+    ? undefined
+    : command.credentialCapabilities?.map((capability) => ({
+        name: capability.name,
+        mode: "mask",
+        injectHosts: credentialInjectionAuthorities(
+          capability.injectAuthorities,
+        ),
+        ...(capability.allowPlaintext ? { allowPlaintextInject: true } : {}),
+      }));
   const credentialAuthorities = [
     ...new Set(
       command.credentialCapabilities?.flatMap(
@@ -893,6 +931,7 @@ function completeConfig(
     ),
   ];
   return {
+    ...(localHostParity ? { hostParity: true } : {}),
     filesystem: {
       denyRead: [...policy.filesystem.denyRead, policyPath, commandPath],
       allowRead: policy.filesystem.allowRead,
@@ -916,46 +955,58 @@ function completeConfig(
         ? { bindMounts: command.filesystemProjections }
         : {}),
     },
-    network: {
-      allowedDomains: ["*"],
-      deniedDomains,
-      allowedLocalPorts: [
-        ...new Set([
-          ...policy.runtime.allowedLocalPorts,
-          ...command.portPolicy.initialPorts,
-          ...command.portPolicy.bindPorts,
-        ]),
-      ].sort((left, right) => left - right),
-      allowedBindPorts: [...command.portPolicy.bindPorts],
-      strictAllowlist: true,
-      // macOS can filter by exact pathname. Linux's seccomp switch is global,
-      // so policy validation requires a root read allowlist before AF_UNIX is
-      // enabled; only generation-private façade paths remain visible.
-      ...(process.platform === "darwin"
-        ? {
-            allowUnixSockets: policy.runtime.allowedUnixSockets,
-            allowAllUnixSockets: false,
-          }
-        : {
-            allowAllUnixSockets:
-              Boolean(policy.runtime.cloudWorker) ||
-              policy.runtime.allowedUnixSockets.length > 0,
-          }),
-      allowLocalBinding: process.platform !== "darwin",
-      ...(credentialAuthorities.length > 0
-        ? {
-            tlsTerminate: {
-              includeDomains: credentialAuthorities,
-              ...(extraCaCertPath
-                ? { extraCaCertPaths: [extraCaCertPath] }
-                : {}),
-            },
-          }
-        : {}),
-    },
+    network: localHostParity
+      ? {
+          disabled: true,
+          allowedDomains: [],
+          deniedDomains: [],
+          allowedLocalPorts: [],
+          allowedBindPorts: [],
+          allowAllUnixSockets: true,
+          allowLocalBinding: true,
+        }
+      : {
+          allowedDomains: ["*"],
+          deniedDomains,
+          allowedLocalPorts: [
+            ...new Set([
+              ...policy.runtime.allowedLocalPorts,
+              ...command.portPolicy.initialPorts,
+              ...command.portPolicy.bindPorts,
+            ]),
+          ].sort((left, right) => left - right),
+          allowedBindPorts: [...command.portPolicy.bindPorts],
+          strictAllowlist: true,
+          // macOS can filter by exact pathname. Linux's seccomp switch is global,
+          // so policy validation requires a root read allowlist before AF_UNIX is
+          // enabled; only generation-private façade paths remain visible.
+          ...(process.platform === "darwin"
+            ? {
+                allowUnixSockets: policy.runtime.allowedUnixSockets,
+                allowAllUnixSockets: false,
+              }
+            : {
+                allowAllUnixSockets:
+                  Boolean(policy.runtime.cloudWorker) ||
+                  policy.runtime.allowedUnixSockets.length > 0,
+              }),
+          allowLocalBinding: process.platform !== "darwin",
+          ...(credentialAuthorities.length > 0
+            ? {
+                tlsTerminate: {
+                  includeDomains: credentialAuthorities,
+                  ...(extraCaCertPath
+                    ? { extraCaCertPaths: [extraCaCertPath] }
+                    : {}),
+                },
+              }
+            : {}),
+        },
     ...(credentials?.length ? { credentials: { envVars: credentials } } : {}),
     allowPty: policy.runtime.allowPty,
-    git: { safeDirectories: [policy.workspaceRoot] },
+    ...(localHostParity
+      ? { allowAppleEvents: true }
+      : { git: { safeDirectories: [policy.workspaceRoot] } }),
     ...helpers,
     ...(seccompPath ? { seccomp: { applyPath: seccompPath } } : {}),
   };
@@ -967,10 +1018,12 @@ function scrubSupervisorEnvironment() {
   }
 }
 
-function installSrtPolicyEnvironment(command) {
+function installSrtPolicyEnvironment(command, policy) {
   const bridge = command.networkBridge;
   const values = {
-    ZEROS_ZSR_DENY_SECURITY_SERVER: "1",
+    ...(policy.runtime.localHostParity
+      ? {}
+      : { ZEROS_ZSR_DENY_SECURITY_SERVER: "1" }),
     ZEROS_ZSR_INTERNAL_HTTP_PORT: String(command.internalProxyPorts.http),
     ZEROS_ZSR_INTERNAL_SOCKS_PORT: String(command.internalProxyPorts.socks),
     ...(bridge
@@ -1030,10 +1083,20 @@ function assertNoRawCredentialInWrapper(wrapped, credentials) {
  * child LD_PRELOAD, DYLD_*, BASH_ENV, NODE_OPTIONS, or PATH value cannot run
  * code before containment. `env -i` also makes the supplied child environment
  * authoritative instead of ambient-merging it back in. */
-function containedTarget(command) {
-  const environment = Object.entries(command.env).map(
-    ([name, value]) => `${name}=${value}`,
-  );
+function containedTarget(command, localHostParity = false) {
+  const environment = Object.entries(command.env).map(([name, value]) => {
+    // Rendering is interpolation, so a non-string that reached this map would
+    // become a plausible-looking literal (`undefined`, `null`, `[object
+    // Object]`) in the child environment rather than an error. validateCommand()
+    // proves this for the descriptor as it arrived; re-prove it here because the
+    // CA-trust rewrite between the two once broke exactly this invariant, and a
+    // silently mistyped TLS/proxy variable fails as an unattributable
+    // certificate error inside the session.
+    if (typeof value !== "string") {
+      throw new Error("child environment value is not a string");
+    }
+    return `${name}=${value}`;
+  });
   const exact = ["/usr/bin/env", "-i", ...environment]
     .map(shellQuote)
     .join(" ");
@@ -1042,12 +1105,18 @@ function containedTarget(command) {
   // never merge arbitrary supervisor/host variables back into the provider.
   // Local/private HTTP requests intentionally use the authenticated proxy so
   // its exact loopback/metadata policy applies instead of bypassing it.
-  const runtimeNames = command.credentialCapabilities?.length
+  const hasCredentialCapabilities = Boolean(
+    command.credentialCapabilities?.length,
+  );
+  const runtimeNames = hasCredentialCapabilities
     ? [...SRT_CHILD_ENV, ...CA_TRUST_VARS]
     : SRT_CHILD_ENV;
-  const runtime = runtimeNames
-    .map((name) => `${name}="\${${name}-}"`)
-    .join(" ");
+  const runtime = [
+    ...runtimeNames.map((name) => `${name}="\${${name}-}"`),
+    ...(hasCredentialCapabilities
+      ? ['CODEX_CA_CERTIFICATE="${SSL_CERT_FILE-}"']
+      : []),
+  ].join(" ");
   const credentials = (command.credentialCapabilities ?? [])
     .map(({ name }) => `${name}="\${${name}-}"`)
     .join(" ");
@@ -1067,6 +1136,7 @@ function containedTarget(command) {
       ]
     : [command.command, ...command.args];
   const argv = targetArgv.map(shellQuote).join(" ");
+  if (localHostParity) return `${exact} ${argv}`;
   return `${resourceLimitShell()}${exact} ${runtime} ${credentials} NO_PROXY='' no_proxy='' ${argv}`;
 }
 
@@ -1083,9 +1153,10 @@ async function run() {
   const command = readJson(commandPath, "command");
   validatePolicy(policy);
   validateCommand(command, policy.generation, policy, policyPath);
-  const caSnapshot = command.credentialCapabilities?.length
-    ? snapshotCaTrust(command, policyPath)
-    : undefined;
+  const localHostParity = policy.runtime.localHostParity === true;
+  const caSnapshot = localHostParity
+    ? { path: undefined, sourceNames: [], dispose() {} }
+    : snapshotCaTrust(command, policyPath);
   let config;
   try {
     config = completeConfig(
@@ -1093,22 +1164,36 @@ async function run() {
       policyPath,
       commandPath,
       command,
-      caSnapshot?.path,
+      caSnapshot.path,
     );
   } catch (error) {
-    caSnapshot?.dispose();
+    caSnapshot.dispose();
     throw error;
   }
-  // The child receives SRT's combined trust bundle, not the original path.
-  // Removing these before containedTarget() also keeps host pathnames out of
-  // the wrapper argv and prevents duplicate env assignments.
-  for (const name of caSnapshot?.sourceNames ?? []) delete command.env[name];
+  // Replace host trust paths with a private immutable bundle before entering
+  // Seatbelt/bwrap. File-authenticated CLIs (notably Codex) have no masked env
+  // credential, but their native root-store APIs are unavailable after the
+  // macOS Keychain services are denied; they still need ordinary TLS parity.
+  //
+  // `caSnapshot.path` is REQUIRED here, not optional: local host parity takes no
+  // snapshot at all (the host's own trust configuration is the contract), and
+  // containedTarget() renders the child environment by interpolation — so
+  // assigning an absent path would export the literal string `undefined` to
+  // every TLS-honoring tool in the session (`git clone https://…`, `curl`,
+  // `pip install` all fail with certificate errors). Leave the host's names
+  // exactly as they arrived whenever there is no private bundle to point at.
+  for (const name of caSnapshot.sourceNames) delete command.env[name];
+  if (caSnapshot.path && !command.credentialCapabilities?.length) {
+    for (const name of CA_TRUST_VARS) command.env[name] = caSnapshot.path;
+  }
   // The one-shot command descriptor may contain provider arguments. Remove it
   // before any untrusted code starts; the parsed object remains only in this
   // supervisor's memory and cannot be replayed by a later generation.
   unlinkSync(commandPath);
   scrubSupervisorEnvironment();
-  const providerCredentials = installProviderCredentialEnvironment(command);
+  const providerCredentials = localHostParity
+    ? { values: new Map(), clear() {} }
+    : installProviderCredentialEnvironment(command);
   let wrapped;
   let sandboxManager;
   let portPolicyControl;
@@ -1118,36 +1203,58 @@ async function run() {
     sandboxManager = SandboxManager;
     const parsedConfig = SandboxRuntimeConfigSchema.safeParse(config);
     if (!parsedConfig.success) {
-      throw new Error("generated sandbox configuration is invalid");
+      // Schema messages echo hosts and paths, so only issue codes cross this
+      // boundary — which leaves a credential-shaped rejection unattributable
+      // from a user's log. Name the invariant this supervisor is responsible
+      // for instead, using counts rather than values.
+      const declared = config.credentials?.envVars?.length ?? 0;
+      const authorities = config.network.tlsTerminate?.includeDomains?.length;
+      const credentialShape = schemaIssueSummary(parsedConfig.error).includes(
+        "credentials.",
+      )
+        ? `; ${declared} masked credential(s) over ` +
+          `${authorities ?? 0} TLS-terminated authority(ies), ` +
+          `allowedDomains=${config.network.allowedDomains.length}`
+        : "";
+      throw new Error(
+        `generated sandbox configuration is invalid (${schemaIssueSummary(
+          parsedConfig.error,
+        )})${credentialShape}`,
+      );
     }
     await SandboxManager.initialize(parsedConfig.data, undefined, true);
-    const portPolicyToken = Buffer.from(command.portPolicy.token, "base64url");
-    try {
-      portPolicyControl = await startZsrPortPolicyControl({
-        socketPath: command.portPolicy.socketPath,
-        generation: policy.generation,
-        token: portPolicyToken,
-        staticPorts: config.network.allowedLocalPorts,
-        deniedPorts: policy.runtime.deniedLocalPorts,
-        onPorts(effectivePorts) {
-          config = {
-            ...config,
-            network: {
-              ...config.network,
-              allowedLocalPorts: [...effectivePorts],
-            },
-          };
-          SandboxManager.updateConfig(config);
-        },
-      });
-    } finally {
-      portPolicyToken.fill(0);
+    if (!localHostParity) {
+      const portPolicyToken = Buffer.from(
+        command.portPolicy.token,
+        "base64url",
+      );
+      try {
+        portPolicyControl = await startZsrPortPolicyControl({
+          socketPath: command.portPolicy.socketPath,
+          generation: policy.generation,
+          token: portPolicyToken,
+          staticPorts: config.network.allowedLocalPorts,
+          deniedPorts: policy.runtime.deniedLocalPorts,
+          onPorts(effectivePorts) {
+            config = {
+              ...config,
+              network: {
+                ...config.network,
+                allowedLocalPorts: [...effectivePorts],
+              },
+            };
+            SandboxManager.updateConfig(config);
+          },
+        });
+      } finally {
+        portPolicyToken.fill(0);
+      }
     }
-    // createMitmCA synchronously copied certificate blocks into its private
-    // trust bundle during initialize(); the source snapshot is no longer used.
-    caSnapshot?.dispose();
-    const target = containedTarget(command);
-    const clearSrtPolicyEnvironment = installSrtPolicyEnvironment(command);
+    const target = containedTarget(command, localHostParity);
+    const clearSrtPolicyEnvironment = installSrtPolicyEnvironment(
+      command,
+      policy,
+    );
     try {
       wrapped = await SandboxManager.wrapWithSandboxArgv(
         target,
@@ -1171,77 +1278,86 @@ async function run() {
         // boot recovery proves its process domain empty before re-admission.
       }
     }
+    caSnapshot.dispose();
     throw error;
   } finally {
-    caSnapshot?.dispose();
     providerCredentials.clear();
-  }
-  assertNoRawCredentialInWrapper(wrapped, providerCredentials.values);
-  for (const capability of command.credentialCapabilities ?? []) {
-    delete wrapped.env[capability.name];
-  }
-  for (const name of Object.keys(wrapped.env)) {
-    if (name.startsWith(INTERNAL_ENV_PREFIX)) delete wrapped.env[name];
   }
   const cloudWorker = policy.runtime.cloudWorker;
   let cgroupScope = null;
-  let child;
   let parentWatch;
   let exit;
+  const runtimeState = {
+    portPolicyControl,
+    sandboxManager,
+    get cgroupScope() {
+      return cgroupScope;
+    },
+    killCgroup: killAndRemoveZsrCgroup,
+  };
   try {
-    cgroupScope = cloudWorker
-      ? createZsrCgroupScope({
-          parent: cloudWorker.cgroupParent,
-          generation: `${policy.generation}:${process.pid}:${randomUUID()}`,
-          limits: cloudWorker.resources,
-        })
-      : null;
-    const launchArgv = cgroupScope
-      ? wrapWithZsrCgroup(cgroupScope, wrapped.argv)
-      : wrapped.argv;
-    child = spawn(launchArgv[0], launchArgv.slice(1), {
-      cwd: command.cwd,
-      env: wrapped.env,
-      stdio: "inherit",
-    });
+    exit = await withZsrRuntimeCleanup(runtimeState, async () => {
+      assertNoRawCredentialInWrapper(wrapped, providerCredentials.values);
+      for (const capability of command.credentialCapabilities ?? []) {
+        delete wrapped.env[capability.name];
+      }
+      for (const name of Object.keys(wrapped.env)) {
+        if (name.startsWith(INTERNAL_ENV_PREFIX)) delete wrapped.env[name];
+      }
 
-    let stopping = false;
-    const stop = (signal = "SIGTERM") => {
-      if (stopping && signal !== "SIGKILL") return;
-      stopping = true;
+      cgroupScope = cloudWorker
+        ? createZsrCgroupScope({
+            parent: cloudWorker.cgroupParent,
+            generation: `${policy.generation}:${process.pid}:${randomUUID()}`,
+            limits: cloudWorker.resources,
+          })
+        : null;
+      const launchArgv = cgroupScope
+        ? wrapWithZsrCgroup(cgroupScope, wrapped.argv)
+        : wrapped.argv;
+      const child = spawn(launchArgv[0], launchArgv.slice(1), {
+        cwd: command.cwd,
+        env: wrapped.env,
+        stdio: "inherit",
+      });
+
+      let stopping = false;
+      const stop = (signal = "SIGTERM") => {
+        if (stopping && signal !== "SIGKILL") return;
+        stopping = true;
+        try {
+          child.kill(signal);
+        } catch {
+          // Already gone.
+        }
+      };
+      for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+        process.on(signal, () => stop(signal));
+      }
+      const originalParent = process.ppid;
+      parentWatch = setInterval(() => {
+        if (process.ppid !== originalParent) {
+          // The engine disappeared without performing normal revocation. The
+          // supervisor is the process-group leader, so killing the group reaches
+          // ordinary macOS descendants too. Linux bwrap additionally uses a PID
+          // namespace plus --die-with-parent for descendants that call setsid().
+          if (process.platform !== "win32")
+            process.kill(-process.pid, "SIGKILL");
+          else stop("SIGKILL");
+        }
+      }, 250);
+
       try {
-        child.kill(signal);
-      } catch {
-        // Already gone.
+        return await new Promise((resolve, reject) => {
+          child.once("error", reject);
+          child.once("exit", (code, signal) => resolve({ code, signal }));
+        });
+      } finally {
+        if (parentWatch) clearInterval(parentWatch);
       }
-    };
-    for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
-      process.on(signal, () => stop(signal));
-    }
-    const originalParent = process.ppid;
-    parentWatch = setInterval(() => {
-      if (process.ppid !== originalParent) {
-        // The engine disappeared without performing normal revocation. The
-        // supervisor is the process-group leader, so killing the group reaches
-        // ordinary macOS descendants too. Linux bwrap additionally uses a PID
-        // namespace plus --die-with-parent for descendants that call setsid().
-        if (process.platform !== "win32") process.kill(-process.pid, "SIGKILL");
-        else stop("SIGKILL");
-      }
-    }, 250);
-
-    exit = await new Promise((resolve, reject) => {
-      child.once("error", reject);
-      child.once("exit", (code, signal) => resolve({ code, signal }));
     });
   } finally {
-    if (parentWatch) clearInterval(parentWatch);
-    await cleanupZsrRuntime({
-      portPolicyControl,
-      sandboxManager,
-      cgroupScope,
-      killCgroup: killAndRemoveZsrCgroup,
-    });
+    caSnapshot.dispose();
   }
   if (typeof exit.code === "number") process.exitCode = exit.code;
   else if (exit.signal) process.exitCode = 128;

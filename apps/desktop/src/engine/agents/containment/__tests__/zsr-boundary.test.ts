@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import {
   access,
+  chmod,
   copyFile,
   mkdtemp,
   mkdir,
@@ -18,12 +19,22 @@ import { connect, createServer } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runFile } from "../../../git/git-exec";
+import {
+  armCursorStateRecovery,
+  prepareCursorStateOverlay,
+} from "../../adapters/cursor-sdk/state-overlay";
+import { AdmissionGate } from "../admission-gate";
 import { MacosContainerWorkerUnavailableError } from "../macos-orbstack-container-worker";
 import type { MacosProcessDomainCommandRunner } from "../macos-process-domain";
+import {
+  armProviderHomeRecovery,
+  prepareProviderHomeOverlay,
+} from "../provider-home-overlay";
 import {
   ZsrExecutionBoundary as RuntimeZsrExecutionBoundary,
   type ZsrBoundaryOptions,
 } from "../zsr-boundary";
+import { sessionDir } from "../../session-paths";
 
 const NETWORK_BRIDGE_SCRIPT = path.join(
   process.cwd(),
@@ -80,6 +91,10 @@ class ZsrExecutionBoundary extends RuntimeZsrExecutionBoundary {
   constructor(options: ZsrBoundaryOptions) {
     super({
       ...options,
+      // Most tests below exercise the separately retained cloud/isolated
+      // machinery. Production desktop constructors select host parity
+      // explicitly; tests opt into that contract where it is material.
+      localHostParity: options.localHostParity ?? false,
       ...(process.platform === "darwin" ? { macosProcessDomainRunner } : {}),
     });
   }
@@ -89,6 +104,29 @@ const PASSING_SUPERVISOR = String.raw`
 import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
 const commandPath = process.argv[process.argv.indexOf("--command") + 1];
 const descriptor = JSON.parse(readFileSync(commandPath, "utf8"));
+if (descriptor.env.HOST_PARITY_CANARY) {
+  const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));
+  const designWritable = spec.actor === "design-agent";
+  const result = {
+    codeWrite: !designWritable,
+    designWrite: spec.designDirectories.map(() => designWritable),
+    designAliasWrite: spec.designDirectories.length > 0 ? designWritable : true,
+    hostRead: true,
+    canonicalGitRead: true,
+    environmentExact: Object.entries(spec.expectedEnv).every(
+      ([name, value]) => descriptor.env[name] === value,
+    ),
+    // The real supervisor rewrites TLS-trust variables only when it snapshotted a
+    // private bundle, which host parity never does. This stub stands in for that
+    // decision, so it answers from the descriptor the engine actually wrote.
+    environmentUninjected: spec.absentEnv.every(
+      (name) => descriptor.env[name] === undefined,
+    ),
+    sandboxPid: process.pid,
+  };
+  process.stdout.write(JSON.stringify(result) + "\n");
+  process.exit(0);
+}
 if (descriptor.env.ZEROS_ADMISSION_SENTINEL) {
   const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));
   writeFileSync(spec.codeFile, "ok\n", { flag: "wx" });
@@ -139,6 +177,7 @@ process.stdout.write(JSON.stringify({
 describe("ZSR execution boundary", () => {
   let root: string;
   let previousDataDir: string | undefined;
+  let previousSrtDebug: string | undefined;
   let supervisor: string;
   let workspace: string;
 
@@ -147,6 +186,7 @@ describe("ZSR execution boundary", () => {
       await mkdtemp(path.join(boundaryTmpdir, "zeros-zsr-boundary-test-")),
     );
     previousDataDir = process.env.ZEROS_DATA_DIR;
+    previousSrtDebug = process.env.SRT_DEBUG;
     process.env.ZEROS_DATA_DIR = path.join(root, "engine");
     supervisor = path.join(root, "fake-supervisor.mjs");
     workspace = path.join(root, "workspace");
@@ -173,10 +213,13 @@ describe("ZSR execution boundary", () => {
   afterEach(async () => {
     if (previousDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
     else process.env.ZEROS_DATA_DIR = previousDataDir;
+    if (previousSrtDebug === undefined) delete process.env.SRT_DEBUG;
+    else process.env.SRT_DEBUG = previousSrtDebug;
     await rm(root, { recursive: true, force: true });
   });
 
   it("admits only after a behavioral canary and emits one-shot private descriptors", async () => {
+    process.env.SRT_DEBUG = "1";
     const hostHome = path.join(root, "host-home");
     await mkdir(hostHome, { recursive: true });
     const boundary = new ZsrExecutionBoundary({
@@ -199,6 +242,19 @@ describe("ZSR execution boundary", () => {
     });
 
     const prepared = await boundary.prepare(request);
+    await expect(
+      readFile(path.join(sessionDir(request.executionId), "meta.json"), "utf8"),
+    ).resolves.toSatisfy((raw: string) => {
+      const meta = JSON.parse(raw) as Record<string, unknown>;
+      return (
+        meta.agentId === request.providerId &&
+        meta.actor === request.actor &&
+        meta.cwd === request.cwd &&
+        meta.pid === process.pid &&
+        typeof meta.createdAt === "number" &&
+        meta.createdAt > 0
+      );
+    });
     const launch = prepared.wrapSpawn({
       command: process.execPath,
       args: ["-e", "process.exit(0)"],
@@ -224,6 +280,10 @@ describe("ZSR execution boundary", () => {
     expect(launch.env.LD_PRELOAD).toBeUndefined();
     expect(launch.env.ZEROS_LOCAL_WS_TOKEN).toBeUndefined();
     expect(launch.env.OPENAI_API_KEY).toBeUndefined();
+    // Debugging is a trusted-supervisor concern: operators can turn on SRT's
+    // redacted proxy diagnostics, but the provider child still receives only
+    // its explicit descriptor environment below.
+    expect(launch.env.SRT_DEBUG).toBe("1");
     const commandPath = launch.args[launch.args.indexOf("--command") + 1];
     expect((await stat(commandPath)).mode & 0o777).toBe(0o600);
     const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
@@ -262,6 +322,7 @@ describe("ZSR execution boundary", () => {
     );
     expect(descriptor.env.CONTAINER_HOST).toBe(descriptor.env.DOCKER_HOST);
     expect(descriptor.env.DOCKER_CONTEXT).toBeUndefined();
+    expect(descriptor.env.SRT_DEBUG).toBeUndefined();
     expect(descriptor.internalProxyPorts.http).toBeGreaterThanOrEqual(20_000);
     expect(descriptor.internalProxyPorts.socks).toBeGreaterThanOrEqual(20_000);
     expect(descriptor.internalProxyPorts.http).not.toBe(
@@ -284,6 +345,735 @@ describe("ZSR execution boundary", () => {
       JSON.parse(await readFile(commandPath, "utf8")).env.ZEROS_LOCAL_WS_TOKEN,
     ).toBeUndefined();
     await prepared.stopAndProve();
+    await expect(access(sessionDir(request.executionId))).rejects.toMatchObject(
+      {
+        code: "ENOENT",
+      },
+    );
+  });
+
+  it("keeps the canonical host environment and Git in local host-parity mode", async () => {
+    await runFile("git", ["init", "-b", "main"], { cwd: workspace });
+    const design = path.join(workspace, "Zeros Design");
+    const secondDesign = path.join(workspace, "examples", "Design");
+    const hostHome = path.join(root, "real-home");
+    await Promise.all([
+      mkdir(design, { recursive: true }),
+      mkdir(secondDesign, { recursive: true }),
+      mkdir(hostHome, { recursive: true }),
+    ]);
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      localHostParity: true,
+    });
+    const prepared = await boundary.prepare({
+      executionId: "execution-host-parity",
+      actor: "agent-code",
+      providerId: "codex",
+      providerStateEnv: { HOME: hostHome },
+      cwd: workspace,
+      workspaceRoot: workspace,
+      territory: {
+        agentRole: "code",
+        workspaceRoot: workspace,
+        designDirectory: design,
+        protectedDesignDirectories: [design, secondDesign],
+        designRecognitionPaths: [
+          path.join(workspace, ".zeros"),
+          path.join(design, ".zeros-canvas.json"),
+        ],
+        writeCapabilities: {
+          workspace: "write",
+          deniedPaths: [design, secondDesign, path.join(workspace, ".git")],
+        },
+      },
+    });
+    expect(prepared.providerHomePath).toBe(hostHome);
+    // A parity session in a real repository reports `native`, not
+    // `not-applicable`: it uses the workspace's own Git with nothing to promote,
+    // and the chat's boundary row renders the two differently.
+    expect(prepared.status.git?.state).toBe("native");
+
+    const childEnv = {
+      PATH: process.env.PATH ?? "/usr/bin:/bin",
+      HOME: hostHome,
+      GH_TOKEN: "host-gh-token",
+      GITHUB_TOKEN: "host-github-token",
+      SSH_AUTH_SOCK: path.join(root, "ssh-agent.sock"),
+      GIT_CONFIG_COUNT: "1",
+      GIT_CONFIG_KEY_0: "user.name",
+      GIT_CONFIG_VALUE_0: "Host User",
+    };
+    const launch = prepared.wrapSpawn({
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: workspace,
+      env: childEnv,
+    });
+    const commandPath = launch.args[launch.args.indexOf("--command") + 1];
+    const policyPath = launch.args[launch.args.indexOf("--policy") + 1];
+    const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
+      env: Record<string, string>;
+      credentialCapabilities?: unknown[];
+      filesystemProjections?: unknown[];
+      networkBridge?: unknown;
+    };
+    const policy = JSON.parse(await readFile(policyPath, "utf8")) as {
+      filesystem: { denyRead: string[]; denyWrite: string[] };
+      runtime: { localHostParity?: boolean };
+    };
+
+    expect(descriptor.env).toMatchObject(childEnv);
+    expect(descriptor.env.GIT_DIR).toBeUndefined();
+    expect(descriptor.env.DOCKER_HOST).toBeUndefined();
+    expect(descriptor.credentialCapabilities).toBeUndefined();
+    expect(descriptor.filesystemProjections).toBeUndefined();
+    expect(descriptor.networkBridge).toBeUndefined();
+    expect(policy.runtime.localHostParity).toBe(true);
+    expect(policy.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([design, secondDesign]),
+    );
+    expect(policy.filesystem.denyWrite).not.toContain(
+      path.join(workspace, ".git"),
+    );
+    // Recognition inputs are NOT denied under parity: `.zeros/settings.toml` is
+    // committed repository content, and denying it broke every `git pull` that
+    // had to rewrite it. Engine-side sticky recognition covers de-registration
+    // instead — so the memory itself is denied, since nothing checks that out.
+    expect(policy.filesystem.denyWrite).not.toContain(
+      path.join(workspace, ".zeros"),
+    );
+    expect(policy.filesystem.denyWrite).toContain(
+      path.join(process.env.ZEROS_DATA_DIR ?? "", "design-recognition.json"),
+    );
+    // The canvas marker needs no rule of its own: it lives inside a protected
+    // directory, so the Design content deny already covers it.
+    expect(policy.filesystem.denyWrite).not.toContain(
+      path.join(design, ".zeros-canvas.json"),
+    );
+    expect(policy.filesystem.denyRead).not.toContain(
+      process.env.ZEROS_DATA_DIR,
+    );
+
+    await expect(
+      prepared.requestPort({
+        protocol: "udp",
+        preferredPort: 80,
+        purpose: "dev-server",
+      }),
+    ).resolves.toMatchObject({ port: 80, targetPort: 80 });
+    await prepared.stopAndProve();
+  });
+
+  it("reports no repository when a local host-parity workspace has none", async () => {
+    const bare = path.join(root, "not-a-repo");
+    await mkdir(bare, { recursive: true });
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      localHostParity: true,
+    });
+    const prepared = await boundary.prepare({
+      executionId: "execution-host-parity-no-git",
+      actor: "agent-code",
+      providerId: "codex",
+      cwd: bare,
+      workspaceRoot: bare,
+    });
+    expect(prepared.status.git?.state).toBe("not-applicable");
+    await prepared.stopAndProve();
+  });
+
+  it("cancels a local host-parity admission and leaves nothing behind", async () => {
+    const design = path.join(workspace, "Zeros Design");
+    await mkdir(design, { recursive: true });
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      localHostParity: true,
+    });
+    const controller = new AbortController();
+    // Aborted before `prepare` runs, so the very first checkpoint fires. The
+    // signal used to be read once and then dropped, which meant a chat closed
+    // mid-admission still got a fully-built boundary handed to nobody.
+    controller.abort();
+    const executionId = "execution-host-parity-cancelled";
+    await expect(
+      boundary.prepare(
+        {
+          executionId,
+          actor: "agent-code",
+          providerId: "codex",
+          cwd: workspace,
+          workspaceRoot: workspace,
+          territory: {
+            agentRole: "code",
+            workspaceRoot: workspace,
+            designDirectory: design,
+            protectedDesignDirectories: [design],
+            designRecognitionPaths: [],
+            writeCapabilities: { workspace: "write", deniedPaths: [design] },
+          },
+        },
+        { signal: controller.signal },
+      ),
+    ).rejects.toThrow(/cancelled/);
+    await expect(access(sessionDir(executionId))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  (process.platform === "linux" ? it : it.skip)(
+    "enforces the host-parity write fence in the real Linux runtime",
+    async () => {
+      const design = path.join(workspace, "Zeros Design");
+      const protectedFile = path.join(design, "protected.txt");
+      const hostVisibleFile = path.join(root, "host-visible.log");
+      const hostHome = path.join(root, "host-home-parity");
+      const hookMarker = path.join(root, "pre-push-ran");
+      const remote = path.join(root, "remote.git");
+      await Promise.all([
+        mkdir(design, { recursive: true }),
+        mkdir(hostHome, { recursive: true }),
+      ]);
+      await Promise.all([
+        writeFile(protectedFile, "original\n"),
+        writeFile(hostVisibleFile, "host-log\n"),
+      ]);
+      await runFile("git", ["init", "-b", "main"], { cwd: workspace });
+      await runFile("git", ["config", "user.name", "Host User"], {
+        cwd: workspace,
+      });
+      await runFile("git", ["config", "user.email", "host@example.test"], {
+        cwd: workspace,
+      });
+      await writeFile(path.join(workspace, "code.txt"), "initial\n");
+      await runFile("git", ["add", "code.txt"], { cwd: workspace });
+      await runFile("git", ["commit", "-m", "initial"], { cwd: workspace });
+      await runFile("git", ["init", "--bare", remote], { cwd: root });
+      await runFile("git", ["remote", "add", "origin", remote], {
+        cwd: workspace,
+      });
+      const prePushHook = path.join(workspace, ".git", "hooks", "pre-push");
+      await writeFile(
+        prePushHook,
+        `#!/bin/sh\nprintf 'ran\\n' > ${JSON.stringify(hookMarker)}\n`,
+      );
+      await chmod(prePushHook, 0o700);
+      const boundary = new RuntimeZsrExecutionBoundary({
+        projectRoot: process.cwd(),
+        localHostParity: true,
+      });
+      const prepared = await boundary.prepare({
+        executionId: "execution-real-host-parity",
+        actor: "agent-code",
+        providerId: "codex",
+        providerStateEnv: { HOME: hostHome },
+        cwd: workspace,
+        workspaceRoot: workspace,
+        territory: {
+          agentRole: "code",
+          workspaceRoot: workspace,
+          designDirectory: design,
+          protectedDesignDirectories: [design],
+          designRecognitionPaths: [],
+          writeCapabilities: {
+            workspace: "write",
+            deniedPaths: [design, path.join(workspace, ".git")],
+          },
+        },
+      });
+      try {
+        const child = await prepared.spawn({
+          command: process.execPath,
+          args: [
+            "-e",
+            String.raw`
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const [hostFile, codeFile, designFile] = process.argv.slice(1);
+let designDenied = false;
+try { fs.writeFileSync(designFile, "mutated\n"); } catch { designDenied = true; }
+fs.writeFileSync(codeFile, "code\n");
+const commands = [
+  ["-c", "core.abbrev=12", "status", "--porcelain"],
+  ["add", "code.txt"],
+  ["commit", "-m", "host parity"],
+  ["reset", "--hard", "HEAD"],
+  ["push", "-u", "origin", "main"],
+];
+const git = commands.map((args) => spawnSync("git", args, { encoding: "utf8" }));
+process.stdout.write(JSON.stringify({
+  host: fs.readFileSync(hostFile, "utf8"),
+  designDenied,
+  design: fs.readFileSync(designFile, "utf8"),
+  gh: process.env.GH_TOKEN,
+  ssh: process.env.SSH_AUTH_SOCK,
+  home: process.env.HOME,
+  gitStatuses: git.map((result) => result.status),
+  gitStderr: git.map((result) => result.stderr).join(""),
+}) + "\n");`,
+            hostVisibleFile,
+            path.join(workspace, "code.txt"),
+            protectedFile,
+          ],
+          cwd: workspace,
+          env: {
+            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            HOME: hostHome,
+            GH_TOKEN: "real-host-token",
+            SSH_AUTH_SOCK: path.join(root, "real-host-agent.sock"),
+          },
+          stdio: "pipe",
+        });
+        let stdout = "";
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        await expect(child.wait()).resolves.toMatchObject({ code: 0 });
+        const result = JSON.parse(stdout.trim()) as {
+          gitStderr: string;
+          [key: string]: unknown;
+        };
+        expect(result.gitStderr).not.toContain("[zsr");
+        expect(result).toMatchObject({
+          host: "host-log\n",
+          designDenied: true,
+          design: "original\n",
+          gh: "real-host-token",
+          ssh: path.join(root, "real-host-agent.sock"),
+          home: hostHome,
+          gitStatuses: [0, 0, 0, 0, 0],
+        });
+        await expect(readFile(hookMarker, "utf8")).resolves.toBe("ran\n");
+      } finally {
+        await prepared.stopAndProve();
+      }
+    },
+  );
+
+  // The two fence tests above run `git reset --hard` with the Design tree already
+  // matching HEAD, so git never actually tries to write a Design path and the
+  // kernel deny is never exercised THROUGH git. This one diverges the tracked
+  // Design file from HEAD first, from outside the fence, so the restore genuinely
+  // attempts the write the boundary must refuse.
+  (process.platform === "linux" ? it : it.skip)(
+    "preserves Design bytes when git itself tries to restore them",
+    async () => {
+      const design = path.join(workspace, "Zeros Design");
+      const designFile = path.join(design, "canvas.json");
+      const codeFile = path.join(workspace, "code.txt");
+      const hostHome = path.join(root, "host-home-git-restore");
+      await Promise.all([
+        mkdir(design, { recursive: true }),
+        mkdir(hostHome, { recursive: true }),
+      ]);
+      await runFile("git", ["init", "-b", "main"], { cwd: workspace });
+      await runFile("git", ["config", "user.name", "Host User"], {
+        cwd: workspace,
+      });
+      await runFile("git", ["config", "user.email", "host@example.test"], {
+        cwd: workspace,
+      });
+      await Promise.all([
+        writeFile(codeFile, "committed-code\n"),
+        writeFile(designFile, '{"generation":1}\n'),
+      ]);
+      await runFile("git", ["add", "--", "code.txt", "Zeros Design"], {
+        cwd: workspace,
+      });
+      await runFile("git", ["commit", "-m", "committed"], { cwd: workspace });
+      // Divergence created by the trusted side, which is exactly how it happens
+      // in production: the Design canvas is edited by Zeros itself while a code
+      // agent works in the same checkout.
+      await Promise.all([
+        writeFile(codeFile, "working-tree-code\n"),
+        writeFile(designFile, '{"generation":2}\n'),
+      ]);
+      const boundary = new RuntimeZsrExecutionBoundary({
+        projectRoot: process.cwd(),
+        localHostParity: true,
+      });
+      const prepared = await boundary.prepare({
+        executionId: "execution-parity-git-restore",
+        actor: "agent-code",
+        providerId: "codex",
+        providerStateEnv: { HOME: hostHome },
+        cwd: workspace,
+        workspaceRoot: workspace,
+        territory: {
+          agentRole: "code",
+          workspaceRoot: workspace,
+          designDirectory: design,
+          protectedDesignDirectories: [design],
+          designRecognitionPaths: [
+            path.join(workspace, ".zeros"),
+            path.join(design, ".zeros-canvas.json"),
+          ],
+          writeCapabilities: {
+            workspace: "write",
+            deniedPaths: [design, path.join(workspace, ".git")],
+          },
+        },
+      });
+      try {
+        const child = await prepared.spawn({
+          command: process.execPath,
+          args: [
+            "-e",
+            String.raw`
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const [designFile, codeFile] = process.argv.slice(1);
+const reset = spawnSync("git", ["reset", "--hard", "HEAD"], { encoding: "utf8" });
+const checkout = spawnSync("git", ["checkout", "--", "."], { encoding: "utf8" });
+process.stdout.write(JSON.stringify({
+  resetStatus: reset.status,
+  resetStderr: reset.stderr,
+  checkoutStatus: checkout.status,
+  design: fs.readFileSync(designFile, "utf8"),
+  code: fs.readFileSync(codeFile, "utf8"),
+}) + "\n");`,
+            designFile,
+            codeFile,
+          ],
+          cwd: workspace,
+          env: {
+            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            HOME: hostHome,
+          },
+          stdio: "pipe",
+        });
+        let stdout = "";
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        await expect(child.wait()).resolves.toMatchObject({ code: 0 });
+        const result = JSON.parse(stdout.trim()) as {
+          resetStatus: number | null;
+          resetStderr: string;
+          checkoutStatus: number | null;
+          design: string;
+          code: string;
+        };
+        // The invariant: git ran as the agent's own native git, tried to write a
+        // protected path, and failed on that path alone. Design bytes are
+        // untouched and the failure is git's own — not a Zeros wrapper message.
+        expect(result.design).toBe('{"generation":2}\n');
+        expect(result.resetStatus).not.toBe(0);
+        expect(result.checkoutStatus).not.toBe(0);
+        expect(result.resetStderr).not.toContain("[zsr");
+        expect(result.resetStderr).toContain("Zeros Design/canvas.json");
+        // And the accepted trade (see the pivot decision): the operation is not
+        // atomic any more. The code half of the same command is free to have
+        // applied, which is why this asserts the Design guarantee rather than
+        // whole-command rollback.
+        expect(["committed-code\n", "working-tree-code\n"]).toContain(
+          result.code,
+        );
+        // Nothing outside the fence changed the file either.
+        await expect(readFile(designFile, "utf8")).resolves.toBe(
+          '{"generation":2}\n',
+        );
+      } finally {
+        await prepared.stopAndProve();
+      }
+    },
+  );
+
+  // The decision that replaced denying the recognition inputs: `.zeros` is
+  // ordinary committed repository content, so a fenced checkout or pull that has
+  // to rewrite the Design pointer must succeed like any other file. De-recognition
+  // is covered by engine-side sticky recognition instead. Denying this path made
+  // every `git pull` that touched team settings fail on it, which is exactly the
+  // "works like before ZSR" promise being broken for a narrow gain.
+  (process.platform === "linux" ? it : it.skip)(
+    "lets git restore the Design pointer like any other tracked file",
+    async () => {
+      const design = path.join(workspace, "Zeros Design");
+      const settings = path.join(workspace, ".zeros");
+      const settingsFile = path.join(settings, "settings.toml");
+      const codeFile = path.join(workspace, "code.txt");
+      await Promise.all([
+        mkdir(design, { recursive: true }),
+        mkdir(settings, { recursive: true }),
+      ]);
+      await runFile("git", ["init", "-b", "main"], { cwd: workspace });
+      await runFile("git", ["config", "user.name", "Host User"], {
+        cwd: workspace,
+      });
+      await runFile("git", ["config", "user.email", "host@example.test"], {
+        cwd: workspace,
+      });
+      await Promise.all([
+        writeFile(path.join(design, ".zeros-canvas.json"), "{}\n"),
+        writeFile(settingsFile, '[design]\ndirectory = "Zeros Design"\n'),
+        writeFile(codeFile, "v1\n"),
+      ]);
+      await runFile("git", ["add", "-A"], { cwd: workspace });
+      await runFile("git", ["commit", "-m", "one"], { cwd: workspace });
+      const base = (
+        await runFile("git", ["rev-parse", "HEAD"], { cwd: workspace })
+      ).stdout.trim();
+      await Promise.all([
+        writeFile(
+          settingsFile,
+          '[design]\ndirectory = "Zeros Design"\n[agents]\nfoo = "bar"\n',
+        ),
+        writeFile(codeFile, "v2\n"),
+      ]);
+      await runFile("git", ["add", "-A"], { cwd: workspace });
+      await runFile("git", ["commit", "-m", "two"], { cwd: workspace });
+      const boundary = new RuntimeZsrExecutionBoundary({
+        projectRoot: process.cwd(),
+        localHostParity: true,
+      });
+      const prepared = await boundary.prepare({
+        executionId: "execution-parity-settings-checkout",
+        actor: "agent-code",
+        providerId: "codex",
+        cwd: workspace,
+        workspaceRoot: workspace,
+        territory: {
+          agentRole: "code",
+          workspaceRoot: workspace,
+          designDirectory: design,
+          protectedDesignDirectories: [design],
+          designRecognitionPaths: [
+            settings,
+            path.join(design, ".zeros-canvas.json"),
+          ],
+          writeCapabilities: {
+            workspace: "write",
+            deniedPaths: [design, settings],
+          },
+        },
+      });
+      try {
+        const child = await prepared.spawn({
+          command: process.execPath,
+          args: [
+            "-e",
+            String.raw`
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const base = process.argv[1];
+const checkout = spawnSync("git", ["checkout", base, "--", ".zeros/settings.toml", "code.txt"], { encoding: "utf8" });
+let markerDenied = false;
+try { fs.writeFileSync("Zeros Design/.zeros-canvas.json", "de-registered\n"); }
+catch { markerDenied = true; }
+process.stdout.write(JSON.stringify({
+  status: checkout.status,
+  stderr: checkout.stderr,
+  code: fs.readFileSync("code.txt", "utf8"),
+  settings: fs.readFileSync(".zeros/settings.toml", "utf8"),
+  markerDenied,
+}) + "\n");`,
+            base,
+          ],
+          cwd: workspace,
+          env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+          stdio: "pipe",
+        });
+        let stdout = "";
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        await expect(child.wait()).resolves.toMatchObject({ code: 0 });
+        const result = JSON.parse(stdout.trim()) as {
+          status: number | null;
+          stderr: string;
+          code: string;
+          settings: string;
+          markerDenied: boolean;
+        };
+        // The whole command succeeds — pointer and code both restored. This is
+        // the `git pull` case that the earlier deny turned into a hard failure.
+        expect(result.status).toBe(0);
+        expect(result.stderr).toBe("");
+        expect(result.settings).not.toContain('foo = "bar"');
+        expect(result.code).toBe("v1\n");
+        // And the marker is still unwritable, because it lives inside protected
+        // Design territory. Dropping the recognition deny gave up the `.zeros`
+        // pointer, not the Design tree.
+        expect(result.markerDenied).toBe(true);
+      } finally {
+        await prepared.stopAndProve();
+      }
+    },
+  );
+
+  (process.platform === "linux" ? it : it.skip)(
+    "enforces the inverse design-agent write fence in the real Linux runtime",
+    async () => {
+      const design = path.join(workspace, "Zeros Design");
+      const designFile = path.join(design, "canvas.json");
+      const outside = path.join(root, "outside-cache");
+      await mkdir(design, { recursive: true });
+      await writeFile(designFile, "before\n");
+      await runFile("git", ["init", "-b", "main"], { cwd: workspace });
+      await runFile("git", ["config", "user.name", "Zeros Test"], {
+        cwd: workspace,
+      });
+      await runFile("git", ["config", "user.email", "zeros@example.invalid"], {
+        cwd: workspace,
+      });
+      await writeFile(path.join(workspace, "tracked-code.txt"), "before\n");
+      await runFile("git", ["add", "--", "tracked-code.txt"], {
+        cwd: workspace,
+      });
+      await runFile("git", ["commit", "-m", "initial"], { cwd: workspace });
+      const boundary = new RuntimeZsrExecutionBoundary({
+        projectRoot: process.cwd(),
+        localHostParity: true,
+      });
+      const prepared = await boundary.prepare({
+        executionId: "execution-real-design-parity",
+        actor: "design-agent",
+        cwd: workspace,
+        workspaceRoot: workspace,
+        territory: {
+          agentRole: "code",
+          workspaceRoot: workspace,
+          designDirectory: design,
+          protectedDesignDirectories: [design],
+          designRecognitionPaths: [],
+          writeCapabilities: {
+            workspace: "write",
+            deniedPaths: [design, path.join(workspace, ".git")],
+          },
+        },
+      });
+      try {
+        const child = await prepared.spawn({
+          command: process.execPath,
+          args: [
+            "-e",
+            String.raw`
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const [codeFile, designFile, outsideFile] = process.argv.slice(1);
+let codeDenied = false;
+try { fs.writeFileSync(codeFile, "code\n", { flag: "wx" }); } catch { codeDenied = true; }
+fs.writeFileSync(designFile, "after\n");
+fs.writeFileSync(outsideFile, "cache\n");
+const git = spawnSync("git", ["add", "Zeros Design/canvas.json"], { encoding: "utf8" });
+process.stdout.write(JSON.stringify({
+  codeDenied,
+  design: fs.readFileSync(designFile, "utf8"),
+  gitStatus: git.status,
+  gitStderr: git.stderr,
+}));`,
+            path.join(workspace, "forbidden-code.txt"),
+            designFile,
+            outside,
+          ],
+          cwd: workspace,
+          env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+          stdio: "pipe",
+        });
+        let stdout = "";
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        await expect(child.wait()).resolves.toMatchObject({ code: 0 });
+        expect(JSON.parse(stdout)).toEqual({
+          codeDenied: true,
+          design: "after\n",
+          gitStatus: 0,
+          gitStderr: "",
+        });
+        await expect(readFile(outside, "utf8")).resolves.toBe("cache\n");
+      } finally {
+        await prepared.stopAndProve();
+      }
+    },
+  );
+
+  it("shares one credential-free OrbStack worker per local workspace", async () => {
+    const design = path.join(workspace, "Zeros Design");
+    await mkdir(design, { recursive: true });
+    let reservations = 0;
+    let starts = 0;
+    let stops = 0;
+    let reservedExecutionId = "";
+    let reservedSessionRoot = "";
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      localHostParity: true,
+      macosContainerWorkerFactory: () => ({
+        reserve: async (request) => {
+          reservations += 1;
+          reservedExecutionId = request.executionId;
+          reservedSessionRoot = request.sessionRoot;
+          return {
+            hostPort: 43_219,
+            machineName: "zeros-zsr-workspace-shared",
+            environment: {
+              DOCKER_HOST: "tcp://127.0.0.1:43219",
+              CONTAINER_HOST: "tcp://127.0.0.1:43219",
+            },
+            start: async () => {
+              starts += 1;
+            },
+            stopAndProve: async () => {
+              stops += 1;
+            },
+          };
+        },
+      }),
+    });
+    const request = (executionId: string) => ({
+      executionId,
+      actor: "agent-code" as const,
+      cwd: workspace,
+      workspaceRoot: workspace,
+      territory: {
+        agentRole: "code" as const,
+        workspaceRoot: workspace,
+        designDirectory: design,
+        protectedDesignDirectories: [design],
+        designRecognitionPaths: [],
+        writeCapabilities: {
+          workspace: "write" as const,
+          deniedPaths: [design, path.join(workspace, ".git")],
+        },
+      },
+      containerWorker: {
+        runtime: "podman" as const,
+        backend: "orbstack-machine" as const,
+        executable: process.execPath,
+      },
+      containerWorkflowExpected: true,
+    });
+
+    const first = await boundary.prepare(request("workspace-worker-one"));
+    const second = await boundary.prepare(request("workspace-worker-two"));
+    expect(reservations).toBe(1);
+    expect(starts).toBe(2);
+    expect(reservedExecutionId).toMatch(/^zsrw-[a-f0-9]{20}$/);
+    expect(path.basename(reservedSessionRoot)).toBe(reservedExecutionId);
+    expect(reservedSessionRoot).not.toContain("workspace-worker-one");
+    expect(reservedSessionRoot).not.toContain("workspace-worker-two");
+
+    await first.stopAndProve();
+    expect(stops).toBe(0);
+    await second.stopAndProve();
+    expect(stops).toBe(1);
   });
 
   it("keeps exact-admission support paths out of the Git worktree", async () => {
@@ -293,8 +1083,9 @@ describe("ZSR execution boundary", () => {
     await writeFile(
       supervisor,
       PASSING_SUPERVISOR.replace(
-        'const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));',
-        `const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));
+        'if (descriptor.env.ZEROS_ADMISSION_SENTINEL) {\n  const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));',
+        `if (descriptor.env.ZEROS_ADMISSION_SENTINEL) {
+  const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));
   writeFileSync(${JSON.stringify(witness)}, JSON.stringify({
     codeFile: spec.codeFile,
     designAlias: spec.designAlias,
@@ -320,6 +1111,7 @@ describe("ZSR execution boundary", () => {
         workspaceRoot: workspace,
         designDirectory: design,
         protectedDesignDirectories: [design],
+        designRecognitionPaths: [],
         writeCapabilities: {
           workspace: "write",
           deniedPaths: [design, path.join(workspace, ".git")],
@@ -403,6 +1195,17 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
     const runtime = path.join(contents, "MacOS", "Zeros Test");
     await mkdir(path.dirname(runtime), { recursive: true });
     await mkdir(path.join(contents, "Frameworks"), { recursive: true });
+    // The trusted-runtime check rejects group/world-writable ancestors, and a
+    // permissive host umask (0002 on some CI/sandbox images) would leak into
+    // the recursive mkdir above. Pin the bundle chain explicitly.
+    for (const directory of [
+      path.dirname(contents),
+      contents,
+      path.dirname(runtime),
+      path.join(contents, "Frameworks"),
+    ]) {
+      await chmod(directory, 0o755);
+    }
     await writeFile(
       runtime,
       `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
@@ -466,18 +1269,19 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
 
   it("keeps code usable and reports restricted parity when OrbStack is safely unavailable", async () => {
     const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const reserve = vi.fn(async () => {
+      throw new MacosContainerWorkerUnavailableError(
+        "insufficient-disk-space",
+        "OrbStack needs at least 4 GiB free",
+      );
+    });
     const boundary = new ZsrExecutionBoundary({
       projectRoot: root,
       supervisorScript: supervisor,
       supervisorRuntime: process.execPath,
       networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
       macosContainerWorkerFactory: () => ({
-        reserve: async () => {
-          throw new MacosContainerWorkerUnavailableError(
-            "insufficient-disk-space",
-            "OrbStack needs at least 4 GiB free",
-          );
-        },
+        reserve,
       }),
     });
 
@@ -504,6 +1308,61 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
     expect(prepared.status.remediation).toMatch(/Free at least 4 GiB/);
     expect(warning).toHaveBeenCalledWith(
       "[zsr] OrbStack needs at least 4 GiB free",
+    );
+    expect(reserve).toHaveBeenCalledWith(
+      expect.objectContaining({ executionId: "orbstack-unavailable" }),
+      { activation: "on-first-connection" },
+    );
+    await prepared.stopAndProve();
+    warning.mockRestore();
+  });
+
+  it("re-admits after a container-worker fallback without re-entering the admission gate", async () => {
+    // The fallback re-runs admission from inside an admission that already
+    // holds a gate slot. Taking the gate again there would deadlock the moment
+    // the slot count is exhausted — which in production is two. A gate of one
+    // makes that failure deterministic instead of load-dependent.
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const stopAndProve = vi.fn(async () => undefined);
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      admissionGate: new AdmissionGate({ limit: 1 }),
+      macosContainerWorkerFactory: () => ({
+        reserve: async () => ({
+          hostPort: 42_321,
+          machineName: "zeros-zsr-abcdef0123456789abce",
+          environment: {},
+          start: async () => {
+            throw new MacosContainerWorkerUnavailableError(
+              "private-runtime-unavailable",
+              "The private OrbStack bridge is temporarily unavailable",
+            );
+          },
+          stopAndProve,
+        }),
+      }),
+    });
+
+    const prepared = await boundary.prepare({
+      executionId: "orbstack-gate-reentry",
+      actor: "agent-code",
+      providerId: "codex",
+      providerStateEnv: { HOME: path.join(root, "provider-home") },
+      cwd: workspace,
+      workspaceRoot: workspace,
+      containerWorkflowExpected: true,
+      containerWorker: {
+        runtime: "podman",
+        backend: "orbstack-machine",
+        executable: process.execPath,
+      },
+    });
+
+    expect(prepared.status.parity.restrictions).toContain(
+      "container-workflows-unavailable",
     );
     await prepared.stopAndProve();
     warning.mockRestore();
@@ -596,8 +1455,32 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
     };
 
     const prepared = await boundary.prepare(request);
+    const launch = prepared.wrapSpawn({
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: workspace,
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        HOME: path.join(root, "provider-home"),
+      },
+    });
+    const commandPath = launch.args[launch.args.indexOf("--command") + 1];
+    const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
+      env: Record<string, string>;
+    };
+    const recoverySentinel = path.join(
+      descriptor.env.HOME,
+      ".codex",
+      "recovery-sentinel",
+    );
+    await mkdir(path.dirname(recoverySentinel), { recursive: true });
+    await writeFile(recoverySentinel, "must remain until proof\n");
+
     await expect(prepared.stopAndProve()).rejects.toThrow(
       "failed to revoke boundary capabilities",
+    );
+    await expect(readFile(recoverySentinel, "utf8")).resolves.toBe(
+      "must remain until proof\n",
     );
     await expect(
       boundary.prepare({ ...request, executionId: "unproven-retirement-2" }),
@@ -675,6 +1558,240 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
     expect(probe.available).toBe(false);
     expect(probe.reasons.join(" ")).toMatch(/protected Design/);
     await expect(boundary.prepare(request)).rejects.toThrow(/protected Design/);
+  });
+
+  it("refuses a container engine to a design actor and says why", async () => {
+    // A container engine is a shared namespace, so it must never be a place
+    // where design and code authority can meet. The refusal is by rule: it
+    // happens before any backend/platform validation, and it degrades to the
+    // ordinary parity restriction rather than failing the session.
+    await writeFile(
+      supervisor,
+      // A design actor must prove it CANNOT write code territory.
+      PASSING_SUPERVISOR.replace("codeWrite: true,", "codeWrite: false,"),
+      { mode: 0o700 },
+    );
+    const hostHome = path.join(root, "host-home");
+    await mkdir(hostHome, { recursive: true });
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+    });
+    const prepared = await boundary.prepare({
+      executionId: "design-container-refusal",
+      actor: "design-agent",
+      providerId: "codex",
+      providerStateEnv: { HOME: hostHome },
+      cwd: workspace,
+      workspaceRoot: workspace,
+      containerWorkflowExpected: true,
+      containerWorker: {
+        runtime: "podman",
+        backend: "embedded-linux",
+        executable: "/bin/sh",
+      },
+    });
+    try {
+      expect(prepared.status.parity.restrictions).toContain(
+        "container-workflows-unavailable",
+      );
+      expect(prepared.status.remediation).toMatch(
+        /Design sessions never run containers/,
+      );
+      expect(prepared.status.services?.kinds ?? []).not.toContain("podman");
+      expect(prepared.status.services?.activeCount).toBe(0);
+    } finally {
+      await prepared.stopAndProve();
+    }
+
+    // The rule is scoped to design actors: a code actor's invalid worker still
+    // reaches validation instead of being silently dropped.
+    await expect(
+      boundary.prepare({
+        executionId: "code-container-validated",
+        actor: "agent-code",
+        providerId: "codex",
+        providerStateEnv: { HOME: hostHome },
+        cwd: workspace,
+        workspaceRoot: workspace,
+        containerWorker: {
+          runtime: "docker" as unknown as "podman",
+          backend: "embedded-linux",
+          executable: "/bin/sh",
+        },
+      }),
+    ).rejects.toThrow(/container-worker request is invalid/);
+  });
+
+  it("reports the canary's own phase timings and ignores implausible ones", async () => {
+    // canary-attest is ~half of a median admission but spans three process
+    // starts AND every in-sandbox probe. The canary therefore reports its own
+    // split. That report comes from inside the fence, so it is logging-only
+    // input: a hostile or broken value must be dropped or clamped, never
+    // trusted and never able to invent a stage name.
+    process.env.SRT_DEBUG = "1";
+    await writeFile(
+      supervisor,
+      PASSING_SUPERVISOR.replace(
+        "dynamicBindMapped: true,",
+        "dynamicBindMapped: true,\n" +
+          "    timings: { boot: 1234, probes: 5, git: 678, bind: 9," +
+          ' "canary-release": 99999, hostile: 42, negative: -5, nan: "slow" },',
+      ),
+      { mode: 0o700 },
+    );
+    const hostHome = path.join(root, "host-home");
+    await mkdir(hostHome, { recursive: true });
+    const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const boundary = new ZsrExecutionBoundary({
+        projectRoot: root,
+        supervisorScript: supervisor,
+        supervisorRuntime: process.execPath,
+        networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      });
+      const prepared = await boundary.prepare({
+        executionId: "canary-timings-1",
+        actor: "agent-code",
+        providerId: "codex",
+        providerStateEnv: { HOME: hostHome },
+        cwd: workspace,
+        workspaceRoot: workspace,
+      });
+      const line = logged.mock.calls
+        .map((call) => String(call[0]))
+        .find((text) => text.includes("[zsr] admitted"));
+      expect(line).toBeDefined();
+      expect(line).toContain("canary-boot=1234ms");
+      expect(line).toContain("canary-probes=5ms");
+      expect(line).toContain("canary-git=678ms");
+      expect(line).toContain("canary-bind=9ms");
+      // Only the four known phases are read: no injected stage name, no
+      // negative or non-numeric value, and nothing above the probe timeout.
+      expect(line).not.toContain("hostile=");
+      expect(line).not.toContain("negative=");
+      expect(line).not.toContain("nan=");
+      expect(line).not.toContain("canary-release=99999ms");
+      await prepared.stopAndProve();
+    } finally {
+      logged.mockRestore();
+    }
+  });
+
+  it("cleans up in-flight shadow Git when the overlapped provider overlay fails", async () => {
+    // Shadow Git and the provider HOME overlay are prepared concurrently, so
+    // an overlay failure has to stop a collection that is still being built
+    // rather than leaving it — and the next admission must stay admissible,
+    // which it would not be if teardown had gone unproven.
+    await runFile("git", ["init", "-b", "main"], { cwd: workspace });
+    await runFile("git", ["config", "user.name", "Zeros Test"], {
+      cwd: workspace,
+    });
+    await runFile("git", ["config", "user.email", "zeros@example.invalid"], {
+      cwd: workspace,
+    });
+    await writeFile(path.join(workspace, "code.txt"), "initial\n");
+    await runFile("git", ["add", "--", "code.txt"], { cwd: workspace });
+    await runFile("git", ["commit", "-m", "initial"], { cwd: workspace });
+
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+    });
+    await expect(
+      boundary.prepare({
+        executionId: "overlay-failure-1",
+        actor: "agent-code",
+        providerId: "codex",
+        // The filesystem root is a rejected host HOME, so the overlay throws
+        // while the collection is still in flight.
+        providerStateEnv: { HOME: path.parse(workspace).root },
+        cwd: workspace,
+        workspaceRoot: workspace,
+      }),
+    ).rejects.toThrow(/host HOME cannot be the filesystem root/);
+    await expect(access(sessionDir("overlay-failure-1"))).rejects.toMatchObject(
+      { code: "ENOENT" },
+    );
+
+    const hostHome = path.join(root, "host-home");
+    await mkdir(hostHome, { recursive: true });
+    const prepared = await boundary.prepare({
+      executionId: "overlay-failure-2",
+      actor: "agent-code",
+      providerId: "codex",
+      providerStateEnv: { HOME: hostHome },
+      cwd: workspace,
+      workspaceRoot: workspace,
+    });
+    await prepared.stopAndProve();
+  });
+
+  it("admits a design actor only when the live canary proves code writes are denied", async () => {
+    // The design actor's guarantee is the inverse of the code actor's, so the
+    // canary that proves it is the same probe read the other way round.
+    await writeFile(
+      supervisor,
+      PASSING_SUPERVISOR.replace(
+        '  writeFileSync(spec.codeFile, "ok\\n", { flag: "wx" });\n' +
+          "  unlinkSync(spec.codeFile);\n",
+        "",
+      ).replace("    codeWrite: true,", "    codeWrite: false,"),
+      { mode: 0o700 },
+    );
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+    });
+    const prepared = await boundary.prepare({
+      executionId: "design-actor-1",
+      actor: "design-agent",
+      cwd: workspace,
+      workspaceRoot: workspace,
+    });
+    const descriptor = JSON.parse(
+      await readFile(
+        path.join(
+          sessionDir("design-actor-1"),
+          "boundary",
+          prepared.generation,
+          "policy.json",
+        ),
+        "utf8",
+      ),
+    ) as {
+      actor: string;
+      filesystem: { allowWrite: string[]; denyWrite: string[] };
+    };
+    expect(descriptor.actor).toBe("design-agent");
+    expect(descriptor.filesystem.allowWrite).not.toContain(workspace);
+    expect(descriptor.filesystem.denyWrite).toContain(workspace);
+    await prepared.stopAndProve();
+  });
+
+  it("fails closed when a design actor can still write code territory", async () => {
+    // PASSING_SUPERVISOR reports the ordinary code-actor result, which is
+    // exactly the failure a design admission must refuse.
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+    });
+    await expect(
+      boundary.prepare({
+        executionId: "design-actor-2",
+        actor: "design-agent",
+        cwd: workspace,
+        workspaceRoot: workspace,
+      }),
+    ).rejects.toThrow(/design actor write code territory/);
   });
 
   it("fails closed when a live canary can create a Design hard-link alias", async () => {
@@ -1029,6 +2146,16 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
         "utf8",
       ),
     ).toBe("model='host'\n");
+    expect(
+      (
+        await stat(
+          path.join(
+            path.dirname(firstDescriptor.env.HOME),
+            ".provider-home-recovery.json",
+          ),
+        )
+      ).isFile(),
+    ).toBe(true);
     await writeFile(
       path.join(firstDescriptor.env.HOME, ".codex", "config.toml"),
       "model='private'\n",
@@ -1060,6 +2187,225 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
       await readFile(path.join(hostHome, ".codex", "config.toml"), "utf8"),
     ).toBe("model='host'\n");
     await second.stopAndProve();
+  });
+
+  it("defers mutable crash recovery until container retirement is complete", async () => {
+    const hostHome = path.join(root, "crash-host-home");
+    const generationRoot = path.join(
+      process.env.ZEROS_DATA_DIR!,
+      "sessions",
+      "crashed-provider",
+      "boundary",
+      "generation",
+    );
+    const localHome = path.join(generationRoot, "home");
+    await Promise.all([
+      mkdir(path.join(hostHome, ".codex"), { recursive: true }),
+      mkdir(localHome, { recursive: true }),
+    ]);
+    const overlay = await prepareProviderHomeOverlay({
+      providerId: "codex",
+      workspaceRoot: workspace,
+      localHome,
+      ambientEnv: { HOME: hostHome },
+    });
+    await armProviderHomeRecovery(overlay);
+    await writeFile(
+      path.join(localHome, ".codex", "crashed-session.jsonl"),
+      "survived\n",
+    );
+    const cursorGenerationRoot = path.join(
+      process.env.ZEROS_DATA_DIR!,
+      "sessions",
+      "crashed-cursor",
+      "boundary",
+      "generation",
+    );
+    const cursorLocalRoot = path.join(
+      cursorGenerationRoot,
+      "provider",
+      "cursor",
+    );
+    await mkdir(cursorLocalRoot, { recursive: true, mode: 0o700 });
+    const cursorOverlay = await armCursorStateRecovery(
+      await prepareCursorStateOverlay(cursorLocalRoot, workspace),
+    );
+    await writeFile(
+      path.join(cursorOverlay.localRoot, "agents.ndjson"),
+      '{"agentId":"survived","name":"Recovered"}\n',
+    );
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+    });
+
+    await boundary.recoverStaleProcesses();
+    await expect(
+      stat(path.join(generationRoot, ".provider-home-recovery.json")),
+    ).resolves.toBeDefined();
+    await expect(boundary.recoverStaleMutableState()).resolves.toMatchObject({
+      discovered: 2,
+      recovered: 2,
+      preserved: 0,
+    });
+    await expect(
+      stat(path.join(generationRoot, ".provider-home-recovery.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      stat(path.join(cursorGenerationRoot, ".cursor-state-recovery.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(
+        path.join(cursorOverlay.persistentRoot, "agents.ndjson"),
+        "utf8",
+      ),
+    ).resolves.toContain('"agentId":"survived"');
+  });
+
+  it("reclaims pre-parity provider/Git state roots and then stops scanning them", async () => {
+    const dataDir = process.env.ZEROS_DATA_DIR!;
+    const shadowGitRecovery = path.join(dataDir, "recovery", "shadow-git");
+    const providerHome = path.join(dataDir, "provider-home", "codex");
+    const parked = path.join(dataDir, "provider-home-parked", "codex");
+    await Promise.all([
+      mkdir(shadowGitRecovery, { recursive: true }),
+      mkdir(providerHome, { recursive: true }),
+      mkdir(parked, { recursive: true }),
+    ]);
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      localHostParity: true,
+    });
+
+    await boundary.recoverStaleMutableState();
+
+    // A parity session writes none of this, so once the sweeps have nothing left
+    // to recover the roots go away — which is also what makes every later boot
+    // skip the walk instead of re-scanning trees that can no longer grow.
+    for (const directory of [shadowGitRecovery, providerHome, parked]) {
+      await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+    }
+    await expect(
+      stat(path.join(dataDir, "provider-home")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    // Idempotent: a second boot with nothing there does no work and does not fail.
+    await expect(
+      boundary.recoverStaleMutableState(),
+    ).resolves.toMatchObject({ discovered: 0, recovered: 0, preserved: 0 });
+  });
+
+  it("keeps sweeping pre-parity roots that still hold unrecovered state", async () => {
+    const dataDir = process.env.ZEROS_DATA_DIR!;
+    const preserved = path.join(
+      dataDir,
+      "recovery",
+      "shadow-git",
+      "unfinished",
+    );
+    await mkdir(preserved, { recursive: true });
+    await writeFile(path.join(preserved, "manifest.json"), "{ truncated");
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      localHostParity: true,
+    });
+
+    const result = await boundary.recoverStaleMutableState();
+
+    // The sweep could not prove this entry safe to discard, so it retained it —
+    // and the root must survive so the next boot tries again. Reclaiming here
+    // would make the tidy-up the thing that loses a user's unmerged work.
+    expect(result.preserved).toBeGreaterThan(0);
+    await expect(stat(preserved)).resolves.toBeDefined();
+  });
+
+  it("retains the boundary root when provider HOME recovery cannot be proven", async () => {
+    const hostHome = path.join(root, "host-home-recovery-failure");
+    await mkdir(path.join(hostHome, ".codex"), { recursive: true });
+    await writeFile(
+      path.join(hostHome, ".codex", "config.toml"),
+      "model='host'\n",
+    );
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+    });
+    const prepared = await boundary.prepare({
+      executionId: "execution-provider-home-recovery-failure",
+      actor: "agent-code",
+      providerId: "codex",
+      providerStateEnv: { HOME: hostHome },
+      cwd: workspace,
+      workspaceRoot: workspace,
+    });
+    const launch = prepared.wrapSpawn({
+      command: process.execPath,
+      args: ["-e", "process.exit(0)"],
+      cwd: workspace,
+      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: hostHome },
+    });
+    const commandPath = launch.args[launch.args.indexOf("--command") + 1];
+    const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
+      env: Record<string, string>;
+    };
+    const projectedHome = descriptor.env.HOME;
+    await writeFile(path.join(projectedHome, ".codex", "unsaved.jsonl"), "x\n");
+
+    const providerBase = path.join(
+      process.env.ZEROS_DATA_DIR!,
+      "provider-home",
+      "codex",
+    );
+    const [persistentKey] = await readdir(providerBase);
+    if (!persistentKey) throw new Error("missing provider persistence root");
+    const persistentRoot = path.join(providerBase, persistentKey);
+    await rm(persistentRoot, { recursive: true, force: true });
+    await writeFile(persistentRoot, "blocks promotion and recovery\n");
+
+    await expect(prepared.stopAndProve()).rejects.toBeDefined();
+    await expect(
+      readFile(path.join(projectedHome, ".codex", "unsaved.jsonl"), "utf8"),
+    ).resolves.toBe("x\n");
+  });
+
+  it("retains the boundary root while Cursor state promotion is pending", async () => {
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+    });
+    const prepared = await boundary.prepare({
+      executionId: "execution-cursor-state-recovery",
+      actor: "agent-code",
+      providerId: "cursor",
+      cwd: workspace,
+      workspaceRoot: workspace,
+    });
+    const localState = prepared.privateStateDirectory("cursor");
+    const generationRoot = path.dirname(path.dirname(localState));
+    const sentinel = path.join(localState, "agents.ndjson");
+    await writeFile(sentinel, '{"agentId":"unsaved"}\n');
+    await writeFile(
+      path.join(generationRoot, ".cursor-state-recovery.json"),
+      '{"version":1}\n',
+      { mode: 0o600 },
+    );
+
+    await expect(prepared.stopAndProve()).rejects.toThrow(
+      "Cursor provider-state promotion is pending recovery",
+    );
+    await expect(readFile(sentinel, "utf8")).resolves.toContain("unsaved");
   });
 
   it("projects a private Git repository and denies canonical control metadata", async () => {
@@ -1211,6 +2557,7 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
       workspaceRoot: workspace,
       designDirectory: primaryDesign,
       protectedDesignDirectories: [primaryDesign, secondaryDesign],
+      designRecognitionPaths: [],
       writeCapabilities: {
         workspace: "write" as const,
         deniedPaths: [

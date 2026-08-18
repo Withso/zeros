@@ -2,7 +2,14 @@ import type { AgentFailure } from "../../platform/bridge/failure";
 
 /** The exact Design-boundary preflight runs no provider or container worker,
  * but a cold native helper/Seatbelt probe can exceed the old generic 10s RPC
- * cap on a busy Mac. */
+ * cap on a busy Mac.
+ *
+ * No session path calls AGENT_PREFLIGHT any more, and none should: it is a
+ * real boundary prepare plus proven teardown, so awaiting it before
+ * newSession/loadSession made every cold start admit twice back to back. It
+ * proved nothing the admission does not re-prove, and both responses already
+ * carry the real `boundary` status. This budget stays for the RPC itself,
+ * which remains a valid standalone diagnostic. */
 export const AGENT_PREFLIGHT_TIMEOUT_MS = 30_000;
 
 /** A real, first-use OrbStack 2.2.1 admission is qualified at roughly 70s.
@@ -17,4 +24,15 @@ export function shouldRetrySessionAdmission(
   kind: AgentFailure["kind"],
 ): boolean {
   return kind === "transport-closed" || kind === "session-expired";
+}
+
+/** A renderer RPC timeout does not cancel work already accepted by the
+ * engine. Invalidate that exact conversation bind so a boundary/provider that
+ * finishes late is torn down instead of becoming an invisible orphan. Other
+ * failures either have an engine response (and completed cleanup) or are safe
+ * application-level retries. */
+export function shouldCancelStalledSessionAdmission(
+  kind: AgentFailure["kind"],
+): boolean {
+  return kind === "timeout";
 }

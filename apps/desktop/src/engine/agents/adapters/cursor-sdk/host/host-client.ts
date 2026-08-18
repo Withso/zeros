@@ -109,6 +109,12 @@ const RESPAWN_BACKOFF_CAP_MS = 30_000;
 const MAX_QUEUED_MSGS = 10_000;
 /** Ceiling for a partial (un-newline-terminated) protocol line — see onLine. */
 const MAX_PARTIAL_LINE_CHARS = 32 * 1024 * 1024;
+/** A control-plane reply (create/resume/list/send/store) should arrive well
+ * before a model turn completes. Bound it independently so a lost NDJSON
+ * response or wedged HTTP/2 CONNECT cannot leave session admission in
+ * `warming` forever. `run.wait` explicitly opts out because it spans the
+ * user-visible model turn and is cancelled by the owning prompt lifecycle. */
+const CONTROL_REQUEST_TIMEOUT_MS = 30_000;
 
 export function toHostError(e: SerializedHostError | undefined): Error {
   const err = new Error(e?.message ?? "cursor host error") as Error & {
@@ -188,6 +194,12 @@ export interface HostTransport {
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (err: unknown) => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+function clearPendingTimer(pending: Pending): void {
+  if (pending.timer) clearTimeout(pending.timer);
+  pending.timer = undefined;
 }
 
 /** Drives one Cursor host subprocess: correlates request/response, routes run
@@ -295,6 +307,7 @@ export class CursorHostClient {
         const p = this.pending.get(id);
         if (!p) return;
         this.pending.delete(id);
+        clearPendingTimer(p);
         if (m.ok) p.resolve(m.result);
         else p.reject(toHostError(m.error as SerializedHostError | undefined));
         return;
@@ -367,13 +380,20 @@ export class CursorHostClient {
     // identically) stays untagged.
     if (crashLooping) err.code = CURSOR_HOST_CRASH_LOOP_CODE;
     else if (!fatal) err.code = CURSOR_HOST_EXITED_CODE;
-    for (const p of this.pending.values()) p.reject(err);
+    for (const p of this.pending.values()) {
+      clearPendingTimer(p);
+      p.reject(err);
+    }
     this.pending.clear();
     for (const q of this.queues.values()) q.fail(err);
     this.queues.clear();
   }
 
-  request<T = unknown>(op: string, args: unknown): Promise<T> {
+  request<T = unknown>(
+    op: string,
+    args: unknown,
+    timeoutMs = CONTROL_REQUEST_TIMEOUT_MS,
+  ): Promise<T> {
     if (!this.ensure()) {
       // Respawn hold-off (crash-loop guard): fail fast without spawning.
       // Below the loop threshold the rejection stays RECOVERABLE (a blip the
@@ -415,14 +435,28 @@ export class CursorHostClient {
     }
     const id = this.nextReqId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, {
+      const pending: Pending = {
         resolve: resolve as (v: unknown) => void,
         reject,
-      });
+      };
+      this.pending.set(id, pending);
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        pending.timer = setTimeout(() => {
+          if (this.pending.get(id) !== pending) return;
+          this.pending.delete(id);
+          pending.timer = undefined;
+          reject(
+            new Error(
+              `cursor host request ${op} timed out after ${timeoutMs}ms`,
+            ),
+          );
+        }, timeoutMs);
+      }
       try {
         this.transport!.send(JSON.stringify({ k: "req", id, op, args }));
       } catch (err) {
         this.pending.delete(id);
+        clearPendingTimer(pending);
         reject(err);
       }
     });
@@ -431,8 +465,10 @@ export class CursorHostClient {
   async dispose(): Promise<void> {
     const t = this.transport;
     this.transport = null;
-    for (const p of this.pending.values())
+    for (const p of this.pending.values()) {
+      clearPendingTimer(p);
       p.reject(new Error("cursor host: disposed"));
+    }
     this.pending.clear();
     for (const q of this.queues.values()) q.end();
     this.queues.clear();
@@ -450,9 +486,11 @@ export class CursorHostClient {
       id: sdkRunId ?? undefined,
       stream: () => queue[Symbol.asyncIterator](),
       wait: () =>
-        this.request<{ status?: string; result?: string } | null>("run.wait", {
-          runId,
-        }).then((r) => r ?? undefined),
+        this.request<{ status?: string; result?: string } | null>(
+          "run.wait",
+          { runId },
+          0,
+        ).then((r) => r ?? undefined),
       cancel: () => this.request<void>("run.cancel", { runId }).then(() => {}),
     };
   }
@@ -543,6 +581,18 @@ export class CursorHostClient {
           );
           return this.makeStore(res?.storeId ?? null);
         },
+      },
+      platform: {
+        // Building the workspace executor can outlast the ordinary control
+        // budget on a cold contained host — that IS the cost being moved off
+        // the turn — and nothing waits on the reply, so it opts out of the
+        // 30s timeout the way `run.wait` does.
+        prewarm: (opts) =>
+          this.request<{ prewarmed: boolean; elapsedMs?: number }>(
+            "platform.prewarm",
+            opts,
+            Number.POSITIVE_INFINITY,
+          ),
       },
     };
   }
@@ -649,6 +699,15 @@ export function spawnSubprocessTransport(
     : preserveAmbientConfigRoots({
         ...(process.env as Record<string, string>),
       });
+  if (options) {
+    // Cursor's SDK uses global fetch plus Node's HTTP/1 transport during
+    // Agent.create. Node does not consult HTTP(S)_PROXY by default, so a
+    // contained host otherwise attempts a direct socket that the kernel fence
+    // correctly denies before SRT can authenticate and inspect the request.
+    // Electron 43 embeds Node 24, whose built-in proxy support covers fetch,
+    // http.request and https.request when enabled at process startup.
+    env.NODE_USE_ENV_PROXY = "1";
+  }
   if (runtime.electron) env.ELECTRON_RUN_AS_NODE = "1";
 
   // cwd is deliberately a non-repo dir — see resolveHostCwd(). NEVER inherit the

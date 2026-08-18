@@ -23,6 +23,60 @@ afterEach(async () => {
 });
 
 describe("AgentGateway boundary port publication", () => {
+  it("surfaces a rejected host OAuth refresh as authentication-required", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-boundary-auth-"));
+    temporaryDirectories.push(root);
+    const gateway = new AgentGateway({
+      projectRoot: root,
+      executionBoundary: {
+        ...testExecutionBoundary(),
+        prepare: async () => {
+          throw new Error("Claude OAuth refresh request was rejected");
+        },
+      },
+      events: {
+        onSessionUpdate: () => {},
+        onPermissionRequest: () => {},
+        onQuestionRequest: () => {},
+        onAgentStderr: () => {},
+        onAgentExit: () => {},
+      },
+    });
+    const internal = gateway as unknown as {
+      runtimeAuthFailed: Map<string, unknown>;
+      prepareExecutionBoundary(
+        executionId: string,
+        cwd: string,
+        workspaceRoot: string,
+        adapter: AgentAdapter,
+        territory: undefined,
+        env: undefined,
+        mcpServers: [],
+        stage: "newSession",
+      ): Promise<PreparedBoundary>;
+    };
+
+    await expect(
+      internal.prepareExecutionBoundary(
+        "execution-auth",
+        root,
+        root,
+        { agentId: "claude" } as unknown as AgentAdapter,
+        undefined,
+        undefined,
+        [],
+        "newSession",
+      ),
+    ).rejects.toMatchObject({
+      failure: {
+        kind: "auth-required",
+        advice: expect.stringMatching(/sign in/i),
+      },
+    });
+    expect(internal.runtimeAuthFailed.has("claude")).toBe(true);
+    await gateway.dispose();
+  });
+
   it("publishes an initial snapshot and redacts live port mappings", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-port-events-"));
     temporaryDirectories.push(root);

@@ -163,8 +163,8 @@ import {
   permissionModeShowsFrame,
   staticModesForAgent,
 } from "./model-catalog";
-import { sendNeedsSessionRecovery } from "./session-reload-lifecycle";
-import { requestAiChatTitle } from "./chat-title";
+import { sendSessionRecoveryMode } from "./session-reload-lifecycle";
+import { requestAiChatTitle, settledFirstPromptForTitle } from "./chat-title";
 import {
   newChatBornDefaults,
   rememberModelConfiguration,
@@ -331,6 +331,10 @@ export function AgentChat({
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
   const chatThread = useChatById(chatId);
+  const titleRequestRef = useRef<{
+    chatId: string;
+    messageId: string;
+  } | null>(null);
   const workflows = session.workflows;
   const activeWorkflow = useMemo(
     () => pickActiveWorkflow(workflows),
@@ -477,6 +481,42 @@ export function AgentChat({
   const backgroundContinuationActive = shouldKeepTurnLiveForBackgroundTasks(
     backgroundTaskOptions,
   );
+  useEffect(() => {
+    if (
+      !chatId ||
+      !chatThread ||
+      backgroundContinuationActive ||
+      (chatThread.title !== "Untitled" && chatThread.title !== "New chat")
+    )
+      return;
+    const candidate = settledFirstPromptForTitle({
+      status: session.status,
+      messages: session.messages,
+    });
+    if (!candidate) return;
+    const prior = titleRequestRef.current;
+    if (prior?.chatId === chatId && prior.messageId === candidate.messageId) {
+      return;
+    }
+    const launched = requestAiChatTitle({
+      chatId,
+      agentId: chatThread.agentId ?? session.agentId ?? null,
+      prompt: candidate.prompt,
+      expectedTitle: chatThread.title,
+      dispatch,
+    });
+    if (launched) {
+      titleRequestRef.current = { chatId, messageId: candidate.messageId };
+    }
+  }, [
+    backgroundContinuationActive,
+    chatId,
+    chatThread,
+    dispatch,
+    session.agentId,
+    session.messages,
+    session.status,
+  ]);
   // A quiet Claude background continuation is still part of the active turn:
   // keep its working stripe/shimmer and withhold the final answer/footer until
   // the provider's authoritative active-task set becomes empty.
@@ -2973,12 +3013,24 @@ export function AgentChat({
     // A disconnected/failed cold read deliberately leaves the composer intact.
     // Never append a new user bubble to an empty partial transcript — reconnect
     // will retry the exact hydrate and the same draft can then be sent.
-    if (
-      chatId &&
-      useSessionsStore.getState().sessions[chatId]?.transcriptState !==
-        "resident"
-    ) {
-      return;
+    //
+    // A chat with NO slot at all is different from a partial cold read: a
+    // provisioning workspace never hydrates (chat-view returns before
+    // hydrateChat), so bailing here would silently swallow the send BEFORE the
+    // provisioning branch below could queue it and say so. Let that one case
+    // fall through — the provisioning branch keeps the draft and queues an
+    // auto-send; every other missing/partial state still returns untouched.
+    {
+      const storeTranscriptState = chatId
+        ? useSessionsStore.getState().sessions[chatId]?.transcriptState
+        : "resident";
+      if (
+        chatId &&
+        storeTranscriptState !== "resident" &&
+        !(storeTranscriptState === undefined && workspaceProvisioning)
+      ) {
+        return;
+      }
     }
     // Normal send → snapshot the editor (text + inline pills); the hand-off
     // path (override) supplies the text + pre-built blocks directly.
@@ -3110,7 +3162,32 @@ export function AgentChat({
     // hostage — text intact, no bubble, nothing to read as progress — for the
     // whole spawn. The provider parks the send instead (visible immediately in
     // the queued card) and dispatches it when the session lands.
-    if (sendNeedsSessionRecovery(session.status)) {
+    //
+    // 2026-08-17 (§5.0 "a send is always accepted instantly"): only a chat that
+    // ENDED BADLY still blocks here. A chat that merely has no session yet
+    // (`idle` — first send, engine respawn — or `reconnecting`) starts its
+    // session in the BACKGROUND and falls straight through to sendPrompt, which
+    // sees the synchronous `warming` flip and parks the message in the queued
+    // card. Same queue UX the user already knows, but the composer clears at
+    // once and no send ever watches a spinner, whatever admission costs.
+    const recoveryMode = sendSessionRecoveryMode(session.status);
+    if (recoveryMode === "park") {
+      const targetAgentId = session.agentId ?? chatThread?.agentId;
+      if (!targetAgentId) return;
+      // Deliberately NOT awaited. ensureSession publishes `warming` before its
+      // first await, so the sendPrompt below already sees a warming chat.
+      // Failures are published on the slot (and release the parked queue), so
+      // there is nothing to catch here that the chat does not already show.
+      void session
+        .startSession(targetAgentId, {
+          env: chatThread
+            ? envForChat(chatThread, session.initialize)
+            : undefined,
+        })
+        .catch(() => {
+          /* surfaces via session.error / the queued-card release */
+        });
+    } else if (recoveryMode === "await") {
       const targetAgentId = session.agentId ?? chatThread?.agentId;
       if (!targetAgentId) return;
       setSendPreparing(true);
@@ -3186,29 +3263,6 @@ export function AgentChat({
             localBubbleAttachmentById,
           )
         : extras?.bubbleSegments;
-    // Auto-title from the first user message. Only runs once per chat: the
-    // tab keeps the seeded default ("Untitled"; "New chat" on legacy
-    // persisted chats) until a hidden background one-shot to the chat-title
-    // model (Settings → Models → "Custom models") returns a 2–3 word AI
-    // title. Deliberately NO instant prompt-snippet stage: slow is fine, and
-    // the prompt text is not a title. The
-    // swap is compare-and-swap against the seeded default, so a manual
-    // rename while it generates always wins, and a failed call simply
-    // leaves "Untitled".
-    if (
-      chatId &&
-      chatThread &&
-      (chatThread.title === "Untitled" || chatThread.title === "New chat") &&
-      displayText
-    ) {
-      requestAiChatTitle({
-        chatId,
-        agentId: chatThread.agentId ?? session.agentId ?? null,
-        prompt: displayText,
-        expectedTitle: chatThread.title,
-        dispatch,
-      });
-    }
     if (override === undefined) {
       clearComposer();
     }

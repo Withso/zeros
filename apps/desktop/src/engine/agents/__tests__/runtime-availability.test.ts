@@ -100,6 +100,28 @@ describe("toBridgeAgents — runtime availability gates 'Connected'", () => {
     expect(agent.installed).toBe(true);
   });
 
+  it("does not misreport a sandbox probe failure as missing credentials", () => {
+    const [agent] = toBridgeAgents(
+      new Set(["claude"]),
+      new Set(),
+      undefined,
+      undefined,
+      undefined,
+      [entry({ bundledRuntime: true, runtimeUnavailable: () => null })],
+      new Map([
+        [
+          "claude",
+          "Zeros Sandbox Runtime could not verify this CLI's sign-in state.",
+        ],
+      ]),
+    );
+
+    expect(agent.installed).toBe(true);
+    expect(agent.authenticated).toBeUndefined();
+    expect(agent.authenticationUnavailableReason).toMatch(/could not verify/i);
+    expect(agent.runtimeUnavailableReason).toBeUndefined();
+  });
+
   it("honours the persisted Executable-path override, clearing the missing state", () => {
     // The missing-runtime message tells the user to set Settings → Agents →
     // Executable path. Before this the probe ignored that value, so setting it

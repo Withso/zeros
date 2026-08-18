@@ -13,6 +13,7 @@ const territory: AgentFilesystemTerritory = {
   workspaceRoot: "/private/work/repo",
   designDirectory: "/private/work/repo/Zeros Design",
   protectedDesignDirectories: ["/private/work/repo/Zeros Design"],
+  designRecognitionPaths: [],
   writeCapabilities: {
     workspace: "write",
     deniedPaths: [

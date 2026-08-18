@@ -8,7 +8,10 @@ import type {
 } from "@zeros/protocol/containment";
 
 import type { AgentFilesystemTerritory } from "../types";
+import type { AdmissionPriority } from "./admission-gate";
 import type { ShadowGitPromotionResult } from "./shadow-git";
+
+export type { AdmissionPriority };
 
 /** Opaque generation carried by every broker request. A prepared boundary
  * mints a fresh value even when the path set is unchanged, so credentials
@@ -20,8 +23,23 @@ export type TerritoryGeneration = string & {
 export interface BoundaryRequest {
   executionId: string;
   actor: ExecutionBoundaryActor;
+  /** Scheduling hint only — it never reaches the policy document and cannot
+   * change what this boundary is allowed to do. Engine-initiated admissions
+   * (chat titles, provider probes, session listing, diagnostics) mark
+   * themselves `background` so they queue behind, and never starve, an
+   * admission a person is waiting on. Defaults to `interactive`. */
+  admissionPriority?: AdmissionPriority;
   /** Provider namespace for purpose-specific persistent state. */
   providerId?: string;
+  /** Opaque native provider binding for an exact legacy-history import. This
+   * is trusted routing metadata, never interpreted as a filesystem path. */
+  providerResumeId?: string;
+  /** Stable durable-state scope for provider HOME projections that outlive a
+   * throwaway working root (version/auth probes run in fresh temp dirs). The
+   * default scope is the canonical workspace root; a request whose root is
+   * ephemeral must pin one so each run does not mint — and then orphan — a
+   * full private copy of the provider's host state. Opaque key, never a path. */
+  providerStateScope?: string;
   /** Trusted provider discovery inputs captured before HOME is virtualized.
    * Only HOME/XDG/provider config path variables belong here; this object is
    * never copied wholesale into the child or persisted. */
@@ -54,7 +72,11 @@ export interface BoundaryRequest {
    * `container-workflows-unavailable`. */
   containerWorkerUnavailableReason?:
     | "insufficient-disk-space"
-    | "private-runtime-unavailable";
+    | "private-runtime-unavailable"
+    /** A design actor asked for one. Refused by rule, not by capability: a
+     * container engine is a shared namespace, so it must never be a place
+     * where design and code authority can meet. */
+    | "design-actor-refused";
   /** The equivalent normal workspace exposes a Docker/Podman CLI or endpoint.
    * If no private worker can satisfy it, diagnostics must report a parity
    * restriction instead of silently pointing that CLI at a dead socket. */
@@ -107,6 +129,14 @@ export interface RepoTaskBoundaryRequest {
   /** PATH/login-shell discovery uses the normal contained filesystem/network
    * baseline but must not provision local-service or container capabilities. */
   serviceCapabilities?: "full" | "none";
+  /** Scheduling class for the admission gate. Omitting it used to default the
+   * whole repo-task family — including the engine's own boot login-shell PATH
+   * probe and every git hook — to `interactive`, so background work could not
+   * be jumped by a real user session: exactly the head-of-line blocking the
+   * gate's priority classes exist to prevent. Callers now say which they are;
+   * user-clicked Setup/Run stay interactive. Never reaches a policy document
+   * (see BoundaryPrepareRequest.admissionPriority). */
+  admissionPriority?: "interactive" | "background";
 }
 
 export type RepoTaskBoundaryFactory = (
@@ -315,6 +345,28 @@ export interface PreparedBoundary {
    * The returned root persists across execution generations; no sibling
    * provider or engine control path is exposed. */
   privateStateDirectory(namespace: string): string;
+  /** The effective HOME this session's provider actually runs with — the same
+   * path the boundary injects as `HOME` at spawn. Local desktop host-parity
+   * boundaries return the user's canonical HOME; isolated/cloud boundaries
+   * return their generation-private projection.
+   *
+   * Engine-side readers need it because a contained provider writes its state
+   * THERE, not in the user's real home: an adapter that reads
+   * `homedir()/<provider dir>` while its session writes to the projection is
+   * silently looking at the wrong tree (this is what stopped Cursor subagent
+   * transcripts from being found under ZSR). Diagnostic/read capability for the
+   * trusted engine only; nothing an agent can reach is widened by it. */
+  readonly providerHomePath?: string;
+  /** True when this is the local host-parity profile: the provider runs with the
+   * user's real HOME and there is no per-generation state projection to promote.
+   *
+   * Adapters that maintain their OWN provider-state overlay use this to skip that
+   * machinery. Under parity the durable per-workspace store IS the live store —
+   * the pre-ZSR arrangement, where concurrent sessions in one workspace shared one
+   * on-disk store — so a per-session copy-and-merge hop would be state the "real
+   * HOME" contract says does not exist. The isolated/cloud profile still needs it:
+   * there, HOME is a projection that disappears at teardown. */
+  readonly localHostParity?: boolean;
   wrapSpawn(request: BoundarySpawnRequest): BoundaryLaunchSpec;
   trackProcess(child: ChildProcess): BoundaryProcess;
   /** Adopt a PTY/supervisor process group spawned by the shared Node PTY host.
@@ -343,12 +395,33 @@ export interface ExecutionBoundary {
   /** Boot-time recovery runs before the engine publishes any local authority.
    * Implementations must fail closed when a prior process domain cannot be
    * proven empty. */
-  recoverStaleProcesses?(): Promise<{
-    readonly discovered: number;
-    readonly recovered: number;
-    readonly active: number;
-    readonly preserved: number;
-  }>;
+  recoverStaleProcesses?(): Promise<ExecutionBoundaryRecoveryResult>;
+  /** Recover mutable Git/provider state only after external container mounts
+   * have also been retired. Keeping this separate from process recovery makes
+   * the boot ordering explicit and prevents copying a tree a surviving VM can
+   * still mutate. */
+  recoverStaleMutableState?(): Promise<ExecutionBoundaryRecoveryResult>;
   probe(request: BoundaryRequest): Promise<BoundaryProbeResult>;
-  prepare(request: BoundaryRequest): Promise<PreparedBoundary>;
+  prepare(
+    request: BoundaryRequest,
+    control?: AdmissionControl,
+  ): Promise<PreparedBoundary>;
+}
+
+/** Out-of-band scheduling control for one admission. Deliberately NOT part of
+ * BoundaryRequest: the request is plain serializable data (the utility pool
+ * hashes it for reuse keys), while this carries a live handle. */
+export interface AdmissionControl {
+  /** Cancels the admission only while it still sits in the gate queue —
+   * nothing is built yet, so nothing needs teardown. Once a slot is granted
+   * the admission runs to completion and a superseded result is retired
+   * through the normal proven-teardown path. */
+  readonly signal?: AbortSignal;
+}
+
+export interface ExecutionBoundaryRecoveryResult {
+  readonly discovered: number;
+  readonly recovered: number;
+  readonly active: number;
+  readonly preserved: number;
 }

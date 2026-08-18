@@ -2,8 +2,8 @@
 // chat-title — background AI title for a chat's first prompt
 // ──────────────────────────────────────────────────────────
 //
-// Fire-and-forget: when the FIRST user message of an "Untitled" chat is
-// sent, this module asks the chat-title model (Settings → Models →
+// Fire-and-forget: after the FIRST user message of an "Untitled" chat has
+// actually been admitted and its turn settles, this module asks the chat-title model (Settings → Models →
 // "Custom models") for a 2–3 word title over the engine bridge
 // (AGENT_GENERATE_TITLE) and renames the tab when it lands. There is
 // deliberately no instant prompt-snippet stage: the tab
@@ -21,6 +21,8 @@
 //     if the user can chat with the provider at all, the title call works.
 // ──────────────────────────────────────────────────────────
 
+import type { AgentMessage } from "@zeros/protocol/agent-messages";
+
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { deriveProviderEnv } from "../settings/provider-prefs";
 import { getAgentsSnapshot } from "./agents-cache";
@@ -32,6 +34,7 @@ import {
 } from "./new-chat-defaults";
 import type { AgentTitleGeneratedMessage } from "../../platform/bridge/messages";
 import type { Action } from "../../state/workspace-store";
+import type { SessionStatus } from "./use-agent-session";
 
 /** Ceiling on the prompt text sent to the title model — a title needs the
  *  gist, not a 100k-char paste, and small models are faster on less. */
@@ -46,13 +49,33 @@ const REQUEST_TIMEOUT_MS = 45_000;
 const PROVIDER_DIAGNOSTIC_TITLE_RX =
   /^(?:error\b|fatal\b|failed\s+to\b|(?:user\s+)?authentication\s+(?:failed|error)\b|unauthori[sz]ed\b|please\s+(?:sign|log)\s+in\b|request\s+(?:failed|timed\s+out|timeout)\b|connection\s+(?:closed|failed|refused|reset)\b)/i;
 
+/** Select the first real user prompt only after admission and turn teardown
+ * have returned the session to ready. A queued placeholder is renderer-local
+ * intent, not proof that the provider received anything; generating a title
+ * from it made the tab look successful while the actual prompt was stalled. */
+export function settledFirstPromptForTitle(input: {
+  status: SessionStatus;
+  messages: readonly AgentMessage[];
+}): { messageId: string; prompt: string } | null {
+  if (input.status !== "ready") return null;
+  for (const message of input.messages) {
+    if (message.kind !== "text" || message.role !== "user") continue;
+    if (message.queued || !message.text.trim()) return null;
+    return { messageId: message.id, prompt: message.text };
+  }
+  return null;
+}
+
 /** The model's reply is used as the tab title — enforce the 2–3 word
  *  contract defensively (small models occasionally add quotes, a trailing
  *  period, or a second line). Null = unusable reply, keep the snippet. */
 export function sanitizeAiTitle(raw: string): string | null {
   let t = (raw.split("\n")[0] ?? "").trim();
   // Strip wrapping quotes/backticks and trailing sentence punctuation.
-  t = t.replace(/^["'`“”‘’]+/, "").replace(/["'`“”‘’.!?:…]+$/, "").trim();
+  t = t
+    .replace(/^["'`“”‘’]+/, "")
+    .replace(/["'`“”‘’.!?:…]+$/, "")
+    .trim();
   if (PROVIDER_DIAGNOSTIC_TITLE_RX.test(t)) return null;
   const words = t.split(/\s+/).filter(Boolean);
   if (words.length === 0) return null;
@@ -63,8 +86,10 @@ export function sanitizeAiTitle(raw: string): string | null {
   return /[\p{L}\p{N}]/u.test(t) ? t : null;
 }
 
-/** Kick off the background AI title for a chat's first prompt. Synchronous
- *  and non-throwing by contract — call it inline in the send path. */
+/** Kick off the background AI title for a chat's settled first prompt.
+ *  Synchronous and non-throwing by contract. Returns true only when a bridge
+ *  request was launched, allowing the caller to retain an exact-message
+ *  single-flight guard without suppressing a later bridge-ready retry. */
 export function requestAiChatTitle(args: {
   chatId: string;
   agentId: string | null;
@@ -74,7 +99,7 @@ export function requestAiChatTitle(args: {
    *  expectation; a manual rename while generating wins. */
   expectedTitle: string;
   dispatch: (action: Action) => void;
-}): void {
+}): boolean {
   // Connectivity snapshot → the resolver's fallback chain (Haiku → Luna →
   // Composer 2.5). Null (registry not loaded yet) = trust the saved pick.
   const agents = getAgentsSnapshot();
@@ -87,9 +112,9 @@ export function requestAiChatTitle(args: {
       )
     : null;
   const resolved = resolveChatTitleModel(args.agentId, connectedFamilies);
-  if (!resolved || !args.prompt.trim()) return;
+  if (!resolved || !args.prompt.trim()) return false;
   const bridge = getActiveBridge();
-  if (!bridge) return;
+  if (!bridge) return false;
   void (async () => {
     // Family === engine agent id (claude/codex/cursor) — the same identity
     // mapping new-chat-defaults' settings mirror relies on.
@@ -134,4 +159,5 @@ export function requestAiChatTitle(args: {
     // (restart needed) surfaces here as "Unknown bridge message type".
     console.warn("[chat-title] request failed:", err);
   });
+  return true;
 }

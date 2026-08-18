@@ -118,6 +118,10 @@ export interface BridgeRegistryAgent {
    *  every send failed with "AGENT RESPONSE FAILURE". Credentials present ≠
    *  agent usable. */
   authenticated?: boolean;
+  /** Present when Zeros could not execute the authentication probe. This is an
+   * infrastructure result, not proof that the provider rejected credentials;
+   * `authenticated` is intentionally absent in this state. */
+  authenticationUnavailableReason?: string;
   /** Set when the agent's RUNTIME cannot be started at all, carrying a
    *  user-actionable reason. Distinguishes "you need to sign in" from "this
    *  build is missing the Claude Code binary" — previously indistinguishable,
@@ -188,6 +192,8 @@ export interface EnrichedRegistryAgent extends RegistryAgent {
     docsUrl?: string;
   };
   authenticated?: boolean;
+  /** See BridgeRegistryAgent.authenticationUnavailableReason. */
+  authenticationUnavailableReason?: string;
   /** See BridgeRegistryAgent.runtimeUnavailableReason — set when the agent's own
    *  runtime can't be started, which is a different failure from "not signed
    *  in" and must not render as either "Connected" or "CLI not authenticated". */
@@ -364,8 +370,18 @@ export interface AgentListAgentsMessage extends BaseMessage {
   force?: boolean;
 }
 
-/** Read-only admission probe used before the composer exposes a sendable
- * Full Access posture. It starts no provider session and carries no secrets. */
+/** Read-only admission probe. It starts no provider session and carries no
+ * secrets.
+ *
+ * DIAGNOSTIC-ONLY, and deliberately so. It is a real boundary prepare plus a
+ * proven teardown — the same policy / private-Git / live-canary work an
+ * admission does — so awaiting it before AGENT_NEW_SESSION / AGENT_LOAD_SESSION
+ * made every cold start admit twice back to back while proving nothing the
+ * admission does not re-prove. No session path may call it: both session
+ * responses already carry the real `boundary` status, and a refused admission
+ * returns AGENT_ERROR with the gateway's own advice. Remaining callers are the
+ * cloud-workspace validation smoke and hand-run diagnostics; the engine admits
+ * it at BACKGROUND priority so it can never sit in front of a real send. */
 export interface AgentPreflightMessage extends BaseMessage {
   type: "AGENT_PREFLIGHT";
   agentId: string;
@@ -700,6 +716,15 @@ export interface AgentLoadSessionMessage extends BaseMessage {
   /** Optional CLI binary path override (Settings → Providers →
    *  Advanced). Mirrors AgentNewSessionMessage.cliBinary. */
   cliBinary?: string;
+  /** Re-adopt a live engine execution for this conversation, but do NOT mint one
+   *  if there is none. A surfaced-but-unfocused chat restored at app start uses
+   *  this: adoption is free (the engine already owns the execution), while
+   *  minting is a full boundary admission for a pane nobody has touched. On a
+   *  miss the engine answers `session-expired` without preparing anything and
+   *  the renderer keeps the persisted transcript on screen, re-asking without
+   *  the flag on focus / keystroke / send. Older engines ignore the field and
+   *  simply behave as before (they mint). */
+  adoptOnly?: boolean;
 }
 
 /** Fork a durable provider conversation into a Zeros-owned destination

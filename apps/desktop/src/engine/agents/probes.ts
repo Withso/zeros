@@ -329,16 +329,18 @@ async function commandExitsZero(
   args: string[],
   runner?: ProbeCommandRunner,
 ): Promise<boolean> {
+  // A contained runner reports a normal provider rejection as a non-zero exit
+  // code. A rejection of the Promise means the ZSR probe itself could not run
+  // and must propagate so callers can render "check unavailable" truthfully.
+  if (runner) {
+    const result = await runner.run(binary, args, {
+      timeoutMs: 5_000,
+    });
+    return result.exitCode === 0;
+  }
   try {
     // SIGKILL on timeout — heavy Node-based CLIs ignore SIGTERM during
     // startup and would otherwise outlive the probe budget.
-    if (runner) {
-      return (
-        await runner.run(binary, args, {
-          timeoutMs: 5_000,
-        })
-      ).exitCode === 0;
-    }
     await execFileP(binary, args, { timeout: 5_000, killSignal: "SIGKILL" });
     return true;
   } catch {

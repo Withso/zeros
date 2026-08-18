@@ -106,6 +106,10 @@ extraResources:
   # reviewed C source by the same beforePack hook; signed with the app bundle.
   - from: binaries/zsr-macos-process-domain
     to: zsr-macos-process-domain
+  # The shadow-Git dispatcher, compiled. It is installed as `<toolsRoot>/git`
+  # inside a boundary so a Git command costs an exec instead of a runtime start.
+  - from: binaries/zsr-git-dispatch
+    to: zsr-git-dispatch
   # Post-Seatbelt bind/connect virtualization for exact, immutable per-session
   # development-port pools. The dylib is signed with the application bundle.
   - from: binaries/zsr-macos-port-bind.dylib

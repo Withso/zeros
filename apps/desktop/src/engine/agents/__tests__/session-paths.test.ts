@@ -6,7 +6,14 @@
 // sweep semantics so a future refactor breaks the suite, not the user's disk.
 
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -24,6 +31,7 @@ vi.mock("node:os", async (importActual) => {
 });
 
 import {
+  CURSOR_STATE_RECOVERY_HOLD_FILE,
   ensureSessionDir,
   ORBSTACK_MACHINE_RECOVERY_HOLD_FILE,
   removeSessionDir,
@@ -80,6 +88,74 @@ afterEach(async () => {
 });
 
 describe("sweepDeadSessions", () => {
+  it("rejects path-like ids instead of aliasing them onto another session", async () => {
+    await expect(ensureSessionDir("../victim")).rejects.toThrow(
+      /invalid session id/,
+    );
+    await expect(removeSessionDir("../victim")).rejects.toThrow(
+      /invalid session id/,
+    );
+  });
+
+  it("refuses a symbolic-link session root instead of writing outside engine state", async () => {
+    const external = path.join(fakeHome, "external-session-target");
+    await mkdir(external, { recursive: true });
+    await mkdir(sessionsRoot(), { recursive: true });
+    await symlink(external, path.join(sessionsRoot(), "linked-session"));
+
+    await expect(ensureSessionDir("linked-session")).rejects.toThrow(
+      /physical directory/,
+    );
+    await expect(removeSessionDir("linked-session")).rejects.toThrow(
+      /physical directory/,
+    );
+    expect(await readdir(external)).toEqual([]);
+  });
+
+  it("removes a marker-free legacy ZSR directory that predates owner metadata", async () => {
+    await ensureSessionDir("legacy-boundary");
+    await mkdir(
+      path.join(
+        sessionsRoot(),
+        "legacy-boundary",
+        "boundary",
+        "retired-generation",
+        "home",
+      ),
+      { recursive: true },
+    );
+
+    expect(await sweepDeadSessions()).toBe(1);
+    expect(await readdir(sessionsRoot())).toEqual([]);
+  });
+
+  it("removes physical empty and retired OrbStack-descriptor session shapes", async () => {
+    await mkdir(path.join(sessionsRoot(), "partial-empty"), {
+      recursive: true,
+    });
+    await ensureSessionDir("retired-orbstack");
+    await writeFile(
+      path.join(
+        sessionsRoot(),
+        "retired-orbstack",
+        "orbstack-container-generation-lease.json",
+      ),
+      "{}\n",
+    );
+
+    expect(await sweepDeadSessions()).toBe(2);
+    expect(await readdir(sessionsRoot())).toEqual([]);
+  });
+
+  it("preserves an unowned directory whose contents are not a known ZSR shape", async () => {
+    const unknown = path.join(sessionsRoot(), "unknown");
+    await mkdir(unknown, { recursive: true });
+    await writeFile(path.join(unknown, "user-data.txt"), "do not delete\n");
+
+    expect(await sweepDeadSessions()).toBe(0);
+    expect(await readdir(unknown)).toEqual(["user-data.txt"]);
+  });
+
   it("removes a dir whose recorded pid is dead, keeps live + pid-less dirs", async () => {
     await seedSession("dead", DEAD_PID);
     await seedSession("alive", process.pid);
@@ -91,6 +167,19 @@ describe("sweepDeadSessions", () => {
     // dead → swept; alive (this very process) → kept; nopid → kept
     // (conservative: never delete a dir we can't prove is orphaned).
     expect((await readdir(sessionsRoot())).sort()).toEqual(["alive", "nopid"]);
+  });
+
+  it("never follows a symbolic-link metadata file as deletion authority", async () => {
+    await ensureSessionDir("linked-meta");
+    const external = path.join(fakeHome, "external-meta.json");
+    await writeFile(external, JSON.stringify({ pid: DEAD_PID }));
+    await symlink(
+      external,
+      path.join(sessionsRoot(), "linked-meta", "meta.json"),
+    );
+
+    expect(await sweepDeadSessions()).toBe(0);
+    expect((await readdir(sessionsRoot())).sort()).toEqual(["linked-meta"]);
   });
 
   it("returns 0 when the sessions root does not exist yet", async () => {
@@ -124,6 +213,25 @@ describe("sweepDeadSessions", () => {
     expect(await readdir(sessionsRoot())).toEqual(["pending"]);
   });
 
+  it("preserves an explicitly closed session while process-domain recovery is pending", async () => {
+    await seedSession("closing", process.pid);
+    const commands = path.join(
+      sessionsRoot(),
+      "closing",
+      "boundary",
+      "generation",
+      "commands",
+    );
+    await mkdir(commands, { recursive: true });
+    await writeFile(path.join(commands, "process-domain.json"), "{}", {
+      mode: 0o600,
+    });
+
+    await removeSessionDir("closing");
+
+    expect(await readdir(sessionsRoot())).toEqual(["closing"]);
+  });
+
   it("preserves explicit and swept sessions while shadow Git recovery is pending", async () => {
     await seedSession("git-recovery", DEAD_PID);
     await writeFile(
@@ -152,6 +260,77 @@ describe("sweepDeadSessions", () => {
     await removeSessionDir("orb-recovery");
     expect(await sweepDeadSessions()).toBe(0);
     expect(await readdir(sessionsRoot())).toEqual(["orb-recovery"]);
+  });
+
+  it("preserves an unpromoted provider HOME after its owning engine dies", async () => {
+    await seedSession("provider-recovery", DEAD_PID);
+    const generation = path.join(
+      sessionsRoot(),
+      "provider-recovery",
+      "boundary",
+      "generation",
+    );
+    await mkdir(path.join(generation, "home", ".codex"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(generation, ".provider-home-recovery.json"),
+      '{"version":1}\n',
+      { mode: 0o600 },
+    );
+    await writeFile(
+      path.join(generation, "home", ".codex", "unsaved.jsonl"),
+      "must survive crash recovery\n",
+    );
+
+    await removeSessionDir("provider-recovery");
+    expect(await sweepDeadSessions()).toBe(0);
+    expect(await readdir(sessionsRoot())).toEqual(["provider-recovery"]);
+  });
+
+  it("preserves an unpromoted Cursor state overlay after its owning engine dies", async () => {
+    await seedSession("cursor-recovery", DEAD_PID);
+    const generation = path.join(
+      sessionsRoot(),
+      "cursor-recovery",
+      "boundary",
+      "generation",
+    );
+    await mkdir(path.join(generation, "provider", "cursor"), {
+      recursive: true,
+    });
+    await writeFile(
+      path.join(generation, CURSOR_STATE_RECOVERY_HOLD_FILE),
+      '{"version":1}\n',
+      { mode: 0o600 },
+    );
+    await writeFile(
+      path.join(generation, "provider", "cursor", "agents.ndjson"),
+      "must survive crash recovery\n",
+    );
+
+    await removeSessionDir("cursor-recovery");
+    expect(await sweepDeadSessions()).toBe(0);
+    expect(await readdir(sessionsRoot())).toEqual(["cursor-recovery"]);
+  });
+
+  it("treats a malformed recovery-marker directory as a conservative GC hold", async () => {
+    await seedSession("malformed-recovery-marker", DEAD_PID);
+    const generation = path.join(
+      sessionsRoot(),
+      "malformed-recovery-marker",
+      "boundary",
+      "generation",
+    );
+    await mkdir(path.join(generation, CURSOR_STATE_RECOVERY_HOLD_FILE), {
+      recursive: true,
+    });
+
+    await removeSessionDir("malformed-recovery-marker");
+    expect(await sweepDeadSessions()).toBe(0);
+    expect(await readdir(sessionsRoot())).toEqual([
+      "malformed-recovery-marker",
+    ]);
   });
 });
 

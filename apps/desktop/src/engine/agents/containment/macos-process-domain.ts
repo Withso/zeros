@@ -90,35 +90,54 @@ function boundedAppend(current: string, chunk: Buffer): string {
   return next.length <= OUTPUT_LIMIT ? next : next.slice(-OUTPUT_LIMIT);
 }
 
-const runCommand: MacosProcessDomainCommandRunner = (helperPath, args) =>
-  new Promise((resolve, reject) => {
-    const child = spawn(helperPath, [...args], {
-      env: {
-        HOME: "/var/empty",
-        PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
-        TMPDIR: "/tmp",
-      },
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (chunk: Buffer) => {
-      stdout = boundedAppend(stdout, chunk);
-    });
-    child.stderr.on("data", (chunk: Buffer) => {
-      stderr = boundedAppend(stderr, chunk);
-    });
-    child.once("error", reject);
-    const timer = setTimeout(() => child.kill("SIGKILL"), COMMAND_TIMEOUT_MS);
-    child.once("exit", (code, signal) => {
-      clearTimeout(timer);
-      resolve({
-        exitCode: code ?? (signal ? 128 : 125),
-        stdout,
-        stderr,
+/** The production helper runner. Exported so its output contract can be
+ * tested directly; callers inject their own only in tests. */
+export const macosProcessDomainCommandRunner: MacosProcessDomainCommandRunner =
+  (helperPath, args) =>
+    new Promise((resolve, reject) => {
+      const child = spawn(helperPath, [...args], {
+        env: {
+          HOME: "/var/empty",
+          PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+          TMPDIR: "/tmp",
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let stdout = "";
+      let stderr = "";
+      let timedOut = false;
+      child.stdout.on("data", (chunk: Buffer) => {
+        stdout = boundedAppend(stdout, chunk);
+      });
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr = boundedAppend(stderr, chunk);
+      });
+      child.once("error", reject);
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, COMMAND_TIMEOUT_MS);
+      // "close", not "exit": exit fires when the process ends, which can be
+      // before its stdout pipe has been drained. Resolving there truncated the
+      // helper's JSON under concurrent admissions and surfaced as the
+      // misleading "returned invalid JSON" refusal.
+      child.once("close", (code, signal) => {
+        clearTimeout(timer);
+        if (timedOut) {
+          reject(
+            new Error(
+              `macOS process-domain helper timed out after ${COMMAND_TIMEOUT_MS}ms`,
+            ),
+          );
+          return;
+        }
+        resolve({
+          exitCode: code ?? (signal ? 128 : 125),
+          stdout,
+          stderr,
+        });
       });
     });
-  });
 
 function isUnsignedInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) >= 0;
@@ -171,7 +190,11 @@ function parseTcpListeners(stdout: string): readonly MacosTcpListener[] {
   let previous = 0;
   const listeners: MacosTcpListener[] = [];
   for (const candidate of value.listeners) {
-    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) {
+    if (
+      !candidate ||
+      typeof candidate !== "object" ||
+      Array.isArray(candidate)
+    ) {
       throw new Error("macOS process-domain helper returned invalid listeners");
     }
     const listener = candidate as Record<string, unknown>;
@@ -260,7 +283,7 @@ async function assertTrustedHelper(helperPath: string): Promise<string> {
 
 export async function probeMacosProcessDomainHelper(
   helperPath: string,
-  runner: MacosProcessDomainCommandRunner = runCommand,
+  runner: MacosProcessDomainCommandRunner = macosProcessDomainCommandRunner,
 ): Promise<void> {
   const canonical = await assertTrustedHelper(helperPath);
   const selfTest = parseObject(
@@ -318,7 +341,7 @@ export class MacosProcessDomain {
     options: MacosProcessDomainOptions,
   ): Promise<MacosProcessDomain> {
     const helperPath = await assertTrustedHelper(options.helperPath);
-    const runner = options.runner ?? runCommand;
+    const runner = options.runner ?? macosProcessDomainCommandRunner;
     await probeMacosProcessDomainHelper(helperPath, runner);
     const enginePid = options.enginePid ?? process.pid;
     const identityResult = await invoke(
@@ -383,6 +406,24 @@ export class MacosProcessDomain {
     ) {
       throw new Error("macOS process-domain helper returned invalid match");
     }
+    if (!value.match) {
+      const decisions = [
+        ["eligible", value.eligible],
+        ["sandboxed", value.sandboxed],
+        ["allowRead", value.allowRead],
+        ["allowWrite", value.allowWrite],
+        ["denyRead", value.denyRead],
+        ["denyWrite", value.denyWrite],
+      ]
+        .filter(([, decision]) =>
+          ["boolean", "number"].includes(typeof decision),
+        )
+        .map(([name, decision]) => `${name}=${String(decision)}`)
+        .join(" ");
+      if (decisions) {
+        console.error(`[zsr] macOS process-domain mismatch (${decisions})`);
+      }
+    }
     return value.match;
   }
 
@@ -439,7 +480,7 @@ async function safeDirectoryEntries(directory: string) {
 export async function recoverMacosProcessDomains(
   options: RecoverMacosProcessDomainsOptions,
 ): Promise<MacosProcessDomainRecoveryResult> {
-  const runner = options.runner ?? runCommand;
+  const runner = options.runner ?? macosProcessDomainCommandRunner;
   const descriptorPaths: string[] = [];
   for (const session of await safeDirectoryEntries(options.sessionsRoot)) {
     if (!session.isDirectory() || session.isSymbolicLink()) continue;

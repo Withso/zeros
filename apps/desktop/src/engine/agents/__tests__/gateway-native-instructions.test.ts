@@ -20,12 +20,15 @@ import type {
   PromptResponse,
 } from "../types";
 import type { ProviderBinding } from "@zeros/protocol/identities";
+import type { BoundaryRequest, ExecutionBoundary } from "../containment/types";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
-function makeGateway() {
+function makeGateway(
+  executionBoundary: ExecutionBoundary = testExecutionBoundary(),
+) {
   return new AgentGateway({
     projectRoot: "/tmp/zeros-test",
-    executionBoundary: testExecutionBoundary(),
+    executionBoundary,
     events: {
       onSessionUpdate: () => {},
       onPermissionRequest: () => {},
@@ -177,6 +180,7 @@ describe("gateway native system-instruction routing", () => {
       workspaceRoot: CWD,
       designDirectory: `${CWD}/Zeros Design`,
       protectedDesignDirectories: [`${CWD}/Zeros Design`],
+      designRecognitionPaths: [],
       writeCapabilities: {
         workspace: "write",
         deniedPaths: [`${CWD}/Zeros Design`, `${CWD}/.git`],
@@ -308,6 +312,7 @@ describe("gateway native system-instruction routing", () => {
       workspaceRoot: CWD,
       designDirectory: `${CWD}/Zeros Design`,
       protectedDesignDirectories: [`${CWD}/Zeros Design`],
+      designRecognitionPaths: [],
       writeCapabilities: {
         workspace: "write",
         deniedPaths: [`${CWD}/Zeros Design`, `${CWD}/.git`],
@@ -410,13 +415,17 @@ describe("gateway native system-instruction routing", () => {
   });
 
   it("keeps MCP inside ZSR for a Design-contained resumed session", async () => {
-    const gw = makeGateway();
+    const requests: BoundaryRequest[] = [];
+    const gw = makeGateway(
+      testExecutionBoundary({ onPrepare: (request) => requests.push(request) }),
+    );
     const c = calls();
     const territory: AgentFilesystemTerritory = {
       agentRole: "code",
       workspaceRoot: CWD,
       designDirectory: `${CWD}/Zeros Design`,
       protectedDesignDirectories: [`${CWD}/Zeros Design`],
+      designRecognitionPaths: [],
       writeCapabilities: {
         workspace: "write",
         deniedPaths: [`${CWD}/Zeros Design`, `${CWD}/.git`],
@@ -448,6 +457,8 @@ describe("gateway native system-instruction routing", () => {
       { name: "unsafe-local", transport: "stdio", command: "helper" },
     ]);
     expect(c.loadSessionOpts[0]!.executionBoundary).toBeDefined();
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.providerResumeId).toBe("s-contained-resume");
     expect(loaded.boundary).toMatchObject({
       state: "ready",
       backend: "zeros-srt",

@@ -332,6 +332,12 @@ const LEGACY_DESIGN_SELECTOR_INDEX_ENABLED = false;
  *  cost the engine its life is on the record before it does. */
 const SLOW_WORKSPACE_OP_MS = 2_000;
 
+/** How long after engine construction the login-shell PATH probe waits before
+ *  admitting its boundary. Long enough for boot rehydration and the focused
+ *  chat's own admission to clear the gate, short enough that the first Setup/Run
+ *  of a session still finds the PATH cached. Nothing awaits this. */
+const BOOT_LOGIN_SHELL_PATH_WARM_DELAY_MS = 20_000;
+
 /** Renderer-authored Zeros controls with a documented session-scoped meaning.
  * Every other `ZEROS_*` name is engine authority or an implementation detail
  * and therefore remains engine-derived for cloud clients. */
@@ -633,6 +639,13 @@ export class ZerosEngine {
    * lifecycle intent has already changed. Tokens are process-monotonic. */
   private conversationBindSerial = 0;
   private readonly conversationBindTokens = new Map<string, number>();
+  /** One admission-cancellation controller per live bind. Aborted when the
+   * conversation is closed or its bind superseded, so a session admission
+   * still queued in the gate is cancelled instead of built for nobody. */
+  private readonly conversationBindAborts = new Map<
+    string,
+    { token: number; controller: AbortController }
+  >();
   /** Source conversations currently being snapshotted by a native provider
    * fork. Prompt dispatch checks this synchronously so a new turn cannot race
    * a "latest completed state" fork after its initial idle check. */
@@ -809,7 +822,7 @@ export class ZerosEngine {
               cloudWorker,
               cloudWorkerToolchain: cloudWorker.toolchain,
             }
-          : {}),
+          : { localHostParity: true }),
       });
     const repoTaskBoundaryFactory = createRepoTaskBoundaryFactory(
       this.executionBoundary,
@@ -835,6 +848,11 @@ export class ZerosEngine {
           repoRoot: this.root,
           env,
           serviceCapabilities: "none",
+          // Nobody is blocked on the engine learning its own login PATH. This
+          // used to admit as `interactive` (the factory's omitted default) and
+          // therefore could not be jumped by the session the user was actually
+          // starting — the boot burst's `admitted generic in 6410ms` line.
+          admissionPriority: "background",
         });
         try {
           const child = await prepared.spawn({
@@ -909,14 +927,24 @@ export class ZerosEngine {
         ? { agentAuthIdentity: { uid: cloudWorker.uid, gid: cloudWorker.gid } }
         : undefined,
     );
-    // Warm the login-shell PATH probe (`$SHELL -ilc 'echo $PATH'`) now, off the
+    // Warm the login-shell PATH probe (`$SHELL -ilc 'echo $PATH'`) off the
     // critical path. It's cached process-wide and every one-shot command shell
     // — Setup script, Run action — awaits it before spawning; resolving it here
     // keeps that from showing up as a stall on the FIRST Run of a session.
     // Fire-and-forget: the resolver already falls back to the inherited PATH.
-    void getLoginShellPath().catch(() => {
-      /* probe failures are handled inside the resolver */
-    });
+    //
+    // DEFERRED, not immediate (§5.1): it admits a real boundary, and starting
+    // that at engine construction put it in the middle of the boot burst —
+    // ahead of the chats the user was opening. Nothing needs it until the first
+    // Setup/Run, so let boot settle first. The timer is unref'd so it can never
+    // hold the process open, and `admissionPriority: "background"` above means
+    // even a late overlap yields to a real session.
+    const loginShellWarmTimer = setTimeout(() => {
+      void getLoginShellPath().catch(() => {
+        /* probe failures are handled inside the resolver */
+      });
+    }, BOOT_LOGIN_SHELL_PATH_WARM_DELAY_MS);
+    loginShellWarmTimer.unref?.();
     // Background setup runner (Setup tab): owns the worktree setup PTY, buffers
     // its output, and flips workspaces.setup_state on exit. It rides the same
     // pty.onData/onExit callbacks below (setup sessions are id-prefixed "setup:").
@@ -1980,6 +2008,18 @@ export class ZerosEngine {
         );
       }
     }
+    const mutableRecovery =
+      await this.executionBoundary.recoverStaleMutableState?.();
+    if (mutableRecovery?.recovered) {
+      console.log(
+        `[Zeros] recovered ${mutableRecovery.recovered} crashed mutable runtime state entr${mutableRecovery.recovered === 1 ? "y" : "ies"}`,
+      );
+    }
+    if (mutableRecovery?.preserved) {
+      console.warn(
+        `[Zeros] retained ${mutableRecovery.preserved} mutable runtime recovery entr${mutableRecovery.preserved === 1 ? "y" : "ies"} for a later retry`,
+      );
+    }
     const swept = await sweepDeadSessions();
     if (swept > 0) {
       console.log(`[Zeros] swept ${swept} crashed session dir(s)`);
@@ -2616,31 +2656,56 @@ export class ZerosEngine {
         sessionIds.add(sessionId);
       }
     }
+    // A pooled background boundary (chat titles, provider probes, key
+    // validation) compiled its policy under the OUTGOING territory generation,
+    // exactly like a session boundary. Retire the pool here too, so no one-shot
+    // can keep running against the old Design authority after the pointer moves.
+    await this.agents.retirePooledUtilityBoundaries();
     // Publish the semantic cause while the old execution route is still
     // owner-bound. Cancellation/revocation immediately follows; this status is
     // never an authority gate and cannot postpone the transition.
     for (const sessionId of sessionIds) {
       this.agents.markBoundaryDraining(sessionId, "territory-restart");
     }
+    // A failed retire must not leave SURVIVORS wearing a `draining` status
+    // that nothing will ever complete or clear — the renderer's boundary pill
+    // would spin forever on a session that is still live and routable. The
+    // sessions endSession already retired publish their own terminal state;
+    // everything still routable gets its pre-drain `ready` back before the
+    // failure propagates. Fail-closed enforcement is untouched: the transition
+    // itself still fails, and admission health still gates new boundaries.
+    const undrainSurvivors = () => {
+      for (const sessionId of sessionIds) {
+        this.agents.markBoundaryDrainingCleared(sessionId);
+      }
+    };
     if (!(await this.cancelLiveAgentSessions(sessionIds))) {
+      undrainSurvivors();
       throw new Error(
         "Couldn't stop agents admitted under the old Design territory.",
       );
     }
-    for (const sessionId of sessionIds) {
-      const agentId = this.sessionAgent.get(sessionId);
-      if (agentId) {
-        await this.agents.endSession(agentId, sessionId, { failClosed: true });
+    try {
+      for (const sessionId of sessionIds) {
+        const agentId = this.sessionAgent.get(sessionId);
+        if (agentId) {
+          await this.agents.endSession(agentId, sessionId, {
+            failClosed: true,
+          });
+        }
+        this.router.clearOwner(sessionId);
+        this.sessionAgent.delete(sessionId);
+        this.sessionWorkspace.delete(sessionId);
+        this.sessionMessages.delete(sessionId);
+        this.sessionLoadResponses.delete(sessionId);
+        this.activePromptContexts.delete(sessionId);
+        this.promptSessions.delete(sessionId);
+        this.cancelRequested.delete(sessionId);
+        this.clearPendingAgentInteractions(sessionId);
       }
-      this.router.clearOwner(sessionId);
-      this.sessionAgent.delete(sessionId);
-      this.sessionWorkspace.delete(sessionId);
-      this.sessionMessages.delete(sessionId);
-      this.sessionLoadResponses.delete(sessionId);
-      this.activePromptContexts.delete(sessionId);
-      this.promptSessions.delete(sessionId);
-      this.cancelRequested.delete(sessionId);
-      this.clearPendingAgentInteractions(sessionId);
+    } catch (error) {
+      undrainSurvivors();
+      throw error;
     }
   }
 
@@ -2657,7 +2722,7 @@ export class ZerosEngine {
       repoRoot: string;
       archivedAt?: number | null;
     }[],
-    source: "settings" | "git-refs",
+    source: "settings" | "git-refs" | "design-init",
   ): void {
     const targets = [
       ...new Map(
@@ -2837,7 +2902,27 @@ export class ZerosEngine {
     if (!conversationId) return null;
     const token = ++this.conversationBindSerial;
     this.conversationBindTokens.set(conversationId, token);
+    // A newer bind supersedes the older one's admission the same way a close
+    // does: if the superseded operation is still queued in the admission gate,
+    // cancel it there so it never burns a slot building a world nobody wants.
+    this.conversationBindAborts.get(conversationId)?.controller.abort();
+    this.conversationBindAborts.set(conversationId, {
+      token,
+      controller: new AbortController(),
+    });
     return token;
+  }
+
+  /** The gate-cancellation signal for a bind minted by beginConversationBind.
+   * Undefined when the bind was already superseded — the caller's own
+   * stale-bind check is about to throw anyway. */
+  private conversationAdmissionSignal(
+    conversationId: string | undefined,
+    token: number | null,
+  ): AbortSignal | undefined {
+    if (!conversationId || token === null) return undefined;
+    const entry = this.conversationBindAborts.get(conversationId);
+    return entry?.token === token ? entry.controller.signal : undefined;
   }
 
   /** Release a completed/failed bind token without deleting a newer bind or a
@@ -2852,6 +2937,13 @@ export class ZerosEngine {
       this.conversationBindTokens.get(conversationId) === token
     ) {
       this.conversationBindTokens.delete(conversationId);
+    }
+    if (
+      conversationId &&
+      token !== null &&
+      this.conversationBindAborts.get(conversationId)?.token === token
+    ) {
+      this.conversationBindAborts.delete(conversationId);
     }
   }
 
@@ -2967,7 +3059,13 @@ export class ZerosEngine {
   }
 
   private invalidateConversationBind(conversationId: string | undefined): void {
-    if (conversationId) this.conversationBindTokens.delete(conversationId);
+    if (!conversationId) return;
+    this.conversationBindTokens.delete(conversationId);
+    const abortEntry = this.conversationBindAborts.get(conversationId);
+    if (abortEntry) {
+      this.conversationBindAborts.delete(conversationId);
+      abortEntry.controller.abort();
+    }
   }
 
   private async waitForConversationClose(
@@ -3561,6 +3659,10 @@ export class ZerosEngine {
                   env: spawnOpts.env,
                   workspaceId: spawnOpts.workspaceId,
                   cliBinary: spawnOpts.cliBinary,
+                  admissionSignal: this.conversationAdmissionSignal(
+                    msg.chatId,
+                    bindToken,
+                  ),
                   onExecutionCreated: (executionId) => {
                     if (
                       !this.conversationBindIsCurrent(msg.chatId, bindToken)
@@ -4558,6 +4660,10 @@ export class ZerosEngine {
               env: forkSpawnOpts.env,
               workspaceId: forkSpawnOpts.workspaceId,
               cliBinary: forkSpawnOpts.cliBinary,
+              admissionSignal: this.conversationAdmissionSignal(
+                msg.destinationChatId,
+                bindToken,
+              ),
             }),
           );
           if (
@@ -4770,6 +4876,20 @@ export class ZerosEngine {
             this.replayPendingAgentInteractions(liveExecution, client);
             return;
           }
+          // Lazy boot resume (§5.1). The caller asked to re-adopt only, and
+          // there is nothing live to adopt. Answer now — before any teardown,
+          // territory resolution, spawn-option derivation or boundary admission
+          // runs — so restoring a surfaced-but-unfocused chat costs the engine
+          // nothing. This is not a user-visible failure: the renderer keeps the
+          // persisted transcript on screen and re-asks without `adoptOnly` the
+          // moment the chat is focused, typed into, or sent to.
+          if (msg.adoptOnly) {
+            throw new AgentFailureError({
+              kind: "session-expired",
+              stage: "loadSession",
+              message: "adopt-only load found no live execution to adopt.",
+            });
+          }
           // A reverse mapping without an owning agent route is not adoptable.
           // Dispose the gateway's possible leftover before minting a replacement
           // so partial bookkeeping loss cannot leak a duplicate provider child.
@@ -4932,6 +5052,10 @@ export class ZerosEngine {
                     env: loadOpts.env,
                     workspaceId: loadOpts.workspaceId,
                     cliBinary: loadOpts.cliBinary,
+                    admissionSignal: this.conversationAdmissionSignal(
+                      msg.chatId,
+                      bindToken,
+                    ),
                     onExecutionCreated: (executionId) => {
                       if (
                         !this.conversationBindIsCurrent(msg.chatId, bindToken)
@@ -5972,6 +6096,31 @@ export class ZerosEngine {
         DESIGN_DIR_REWRITE_OPS.has(op) && lifecycleMutationWorkspaceId
           ? getWorkspaceById(lifecycleMutationWorkspaceId)
           : null;
+      // A design write can INITIALIZE the design document on disk (design
+      // root + canvas marker, document.ts initializeDesignDocumentUnlocked —
+      // reachable from design.frame.create and every design write-back). That
+      // is a territory identity flip for live CODE sessions, but it moves no
+      // git ref and touches no settings file, so neither reconcile trigger
+      // fires until the NEXT unrelated ref move — leaving already-admitted
+      // code sandboxes with write authority over the newborn Design subtree
+      // and, once the late restart finally landed, a composer pill that spun
+      // with no repair. Snapshot existence before dispatch; a birth observed
+      // after success schedules the reconcile immediately.
+      const designInitTarget =
+        op.startsWith("design.") &&
+        this.workspace.isWriteOp(op) &&
+        typeof params.workspaceId === "string"
+          ? getWorkspaceById(params.workspaceId)
+          : null;
+      const designDirOf = (target: { path: string }) =>
+        path.join(
+          target.path,
+          ...designDirectoryNameFor(target.path).split("/"),
+        );
+      const designDirExistedBefore =
+        !designInitTarget ||
+        designInitTarget.archivedAt != null ||
+        fs.existsSync(designDirOf(designInitTarget));
       const rewriteHasDesign =
         rewriteTarget &&
         fs.existsSync(rewriteTarget.path) &&
@@ -6040,6 +6189,16 @@ export class ZerosEngine {
           result,
         }),
       );
+      if (
+        designInitTarget &&
+        !designDirExistedBefore &&
+        fs.existsSync(designDirOf(designInitTarget))
+      ) {
+        this.scheduleDesignTerritoryReconcile(
+          [designInitTarget],
+          "design-init",
+        );
+      }
       // Kick off BACKGROUND setup for a freshly-created workspace: the
       // worktree already exists (create returned), so a slow `pnpm install` runs
       // in a PTY surfaced by the Setup tab — never on the create RPC. Local and

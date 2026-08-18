@@ -190,6 +190,69 @@ export function sendNeedsSessionRecovery(status: SessionStatus): boolean {
   return status !== "ready" && status !== "warming" && status !== "streaming";
 }
 
+/** How a send that needs a session should pay for it.
+ *
+ * `await` is the old universal behavior: block the send, spinner on the button,
+ * the user's text hostage in the composer for the whole admission. It is kept
+ * for exactly one case — a chat whose last spawn ENDED BADLY
+ * (`failed` / `auth-required`). There the send is the user's explicit retry
+ * after fixing something, the likely outcome is another failure, and the honest
+ * place for that failure is the send itself rather than a queued card that
+ * would be dropped a second later.
+ *
+ * `park` is the new default for a chat that simply has no session yet
+ * (`idle` — first send in a fresh chat, or a chat whose engine restarted, or
+ * `reconnecting` after a transport bounce). Nothing failed; the session just
+ * has to be built. So: kick the build in the background, accept the message
+ * into the queued card immediately, and let the existing readiness drain
+ * dispatch it. That makes EVERY send accepted in <100 ms regardless of what
+ * admission costs — the pre-ZSR feeling, without weakening admission. */
+export function sendSessionRecoveryMode(
+  status: SessionStatus,
+): "none" | "park" | "await" {
+  if (!sendNeedsSessionRecovery(status)) return "none";
+  return status === "failed" || status === "auth-required" ? "await" : "park";
+}
+
+/** Whether a send that has already passed shouldQueuePrompt still needs an
+ * ADMISSION before it can dispatch — and must therefore park in the queued
+ * card rather than fall into the turn body.
+ *
+ * The turn body used to pay for these inline: "!sessionId → await
+ * ensureSession" and the settings-drift force-respawn each awaited a FULL ZSR
+ * admission after runSend had already cleared the composer and before any
+ * bubble was appended. The user's first send into a new chat was invisible for
+ * the whole admission, while a SECOND send — queueing behind the first's local
+ * send lock — rendered a queued card immediately. Deciding it here, before the
+ * local send lock is taken, gives every admission-needing send the same
+ * visible park.
+ *
+ * `session-build` — no live session (fresh chat whose spawn is still
+ * admitting, an engine restart, a pristine agent switch racing the
+ * keystroke-armed spawn). `drift-respawn` — a live session whose recorded env
+ * stamp no longer matches the composer pills (model/effort changed while it
+ * was warming); the respawn resumes the provider thread. An unstamped
+ * (legacy) slot never reads as drift, mirroring the in-turn reconcile. */
+export function sendAdmissionPark(input: {
+  hasAgent: boolean;
+  hasSession: boolean;
+  status: SessionStatus;
+  appliedChatEnvKey: string | undefined;
+  /** chatEnvDriftKey(composer env), undefined when the chat has no thread. */
+  expectedEnvKey: string | undefined;
+}): "session-build" | "drift-respawn" | null {
+  if (!input.hasAgent || input.status === "streaming") return null;
+  if (!input.hasSession) return "session-build";
+  if (
+    input.expectedEnvKey !== undefined &&
+    input.appliedChatEnvKey !== undefined &&
+    input.appliedChatEnvKey !== input.expectedEnvKey
+  ) {
+    return "drift-respawn";
+  }
+  return null;
+}
+
 /** The counterpart to shouldQueuePrompt: what becomes of a parked queue once
  * whatever it was parked behind has finished.
  *

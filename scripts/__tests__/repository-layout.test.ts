@@ -262,7 +262,7 @@ describe("repository layout contracts", () => {
 
     for (const packageName of [
       "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.231",
-      "@cursor/sdk-darwin-arm64@1.0.26",
+      "@cursor/sdk-darwin-arm64@1.0.28",
       "@vscode/ripgrep-darwin-arm64@1.18.0",
       // The staged Codex runtime is redistributed inside Contents/Resources,
       // so its platform package must carry terms — not just the JS wrapper.

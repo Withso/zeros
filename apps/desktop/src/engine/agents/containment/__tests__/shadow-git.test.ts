@@ -323,6 +323,7 @@ describe("ZSR shadow Git", () => {
       workspaceRoot: workspace,
       designDirectory: design,
       protectedDesignDirectories: [design],
+      designRecognitionPaths: [],
       writeCapabilities: {
         workspace: "write",
         deniedPaths: [design, path.join(workspace, ".git")],
@@ -904,6 +905,82 @@ describe("ZSR shadow Git", () => {
     ).toBe("previous-branch");
   });
 
+  it("imports every ref's reflog when many refs are read concurrently", async () => {
+    // `git reflog show` used to run once per ref, awaited one at a time, which
+    // made git-reflogs the largest phase of the largest engine-side admission
+    // stage (1693ms measured on a workspace with many refs). The reads now
+    // overlap at a bound; every ref must still arrive, with its own entries and
+    // its own newest-first ordering preserved.
+    const branches = Array.from({ length: 12 }, (_, index) => `topic-${index}`);
+    const heads = new Map<string, string>();
+    for (const branch of branches) {
+      await git(workspace, ["checkout", "-b", branch]);
+      await writeFile(path.join(workspace, "code.txt"), `${branch} one\n`);
+      await git(workspace, ["commit", "-am", `${branch} one`]);
+      await writeFile(path.join(workspace, "code.txt"), `${branch} two\n`);
+      await git(workspace, ["commit", "-am", `${branch} two`]);
+      heads.set(branch, await git(workspace, ["rev-parse", "HEAD"]));
+    }
+    await git(workspace, ["checkout", "main"]);
+
+    const shadow = await session();
+    const shadowRoot = shadow.env.GIT_DIR;
+    expect(shadowRoot).toBeTruthy();
+    for (const branch of branches) {
+      const log = await readFile(
+        path.join(shadowRoot!, "logs", "refs", "heads", branch),
+        "utf8",
+      );
+      const lines = log.split("\n").filter(Boolean);
+      // Two commits on this branch plus its creation, oldest record first, and
+      // the newest record must name the branch's canonical tip.
+      expect(lines.length).toBeGreaterThanOrEqual(2);
+      expect(lines.at(-1)).toContain(heads.get(branch));
+      expect(lines[0]).toMatch(/^0{40,64} [0-9a-f]{40,64} Zeros Sandbox /);
+    }
+  });
+
+  it("applies ordinary and symbolic refs in one update-ref transaction", async () => {
+    // Ordinary refs were already batched; each symbolic ref used to cost its own
+    // `symbolic-ref` spawn, and git-refs measured 95-1087ms on the admission
+    // path. Both kinds now go in one `update-ref --stdin` transaction via
+    // `symref-update`, with the previous two-step path as the fallback. Several
+    // of each must survive, resolved and still symbolic.
+    const targets = ["alpha", "beta", "gamma"] as const;
+    for (const name of targets) {
+      await git(workspace, [
+        "update-ref",
+        `refs/remotes/${name}/main`,
+        initialHead,
+      ]);
+      await git(workspace, [
+        "symbolic-ref",
+        `refs/remotes/${name}/HEAD`,
+        `refs/remotes/${name}/main`,
+      ]);
+    }
+
+    const shadow = await session();
+    const childEnv = shadow.childEnvironment(process.env.PATH);
+    for (const name of targets) {
+      expect(
+        await git(workspace, ["symbolic-ref", `refs/remotes/${name}/HEAD`], {
+          ...childEnv,
+        }),
+      ).toBe(`refs/remotes/${name}/main`);
+      expect(
+        await git(workspace, ["rev-parse", `refs/remotes/${name}/HEAD`], {
+          ...childEnv,
+        }),
+      ).toBe(initialHead);
+      expect(
+        await git(workspace, ["rev-parse", `refs/remotes/${name}/main`], {
+          ...childEnv,
+        }),
+      ).toBe(initialHead);
+    }
+  });
+
   it("admits a symbolic remote HEAD whose own reflog trails its target", async () => {
     await git(workspace, [
       "update-ref",
@@ -1130,6 +1207,49 @@ describe("ZSR shadow Git", () => {
         ...shadow.childEnvironment(process.env.PATH),
       }),
     ).toMatch(/^git version /);
+  });
+
+  it("reproduces awkward config values byte-for-byte through the direct write", async () => {
+    // The private config is written as ONE file instead of one `git config --add`
+    // subprocess per entry (~17 spawns per repository, on the admission path).
+    // These are the values whose escaping the shortcut has to get exactly right;
+    // a mismatch falls back to the spawn path, so the assertion is that the
+    // contained Git reads back precisely what the host had — read through
+    // `--null --list` and compared UNTRIMMED, since the interesting cases are
+    // about whitespace the ordinary helper would eat.
+    const awkward: Array<readonly [string, string]> = [
+      ["alias.spaced", "  status --short  "],
+      ["alias.hash", "log --format=#%h ; done"],
+      ["alias.quoted", 'log --pretty="%an <%ae>"'],
+      ["alias.backslash", "log --format=C:\\path\\to"],
+      ["alias.tabbed", "log\t--oneline"],
+      ["alias.empty", ""],
+      // Git normalizes section/name case in `--list`; the subsection case above
+      // is preserved. Both round-trips have to survive the direct write.
+      ["core.excludesfile", "/tmp/a b/ignore"],
+      ["branch.feature/deep.description", "multi\nline"],
+    ];
+    for (const [key, value] of awkward) {
+      await git(workspace, ["config", key, value]);
+    }
+
+    const shadow = await session();
+    const listed = (
+      await runFile("git", ["config", "--null", "--list"], {
+        cwd: workspace,
+        env: {
+          ...process.env,
+          ...shadow.childEnvironment(process.env.PATH),
+        },
+        timeoutMs: 30_000,
+      })
+    ).stdout;
+    const records = new Set(
+      listed.split("\0").filter((record) => record.length > 0),
+    );
+    for (const [key, value] of awkward) {
+      expect(records).toContain(`${key}\n${value}`);
+    }
   });
 
   it("rejects broad or helper-selecting push syntax before credential use", () => {

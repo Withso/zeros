@@ -133,6 +133,25 @@ describe("agent local-service discovery", () => {
     ]);
   });
 
+  it("admits npm's caches read-only so an npx MCP server can resolve offline", async () => {
+    // The projected HOME links ~/.npm/_npx and ~/.npm/_cacache (see
+    // readOnlyCompatibilityLinks); the policy has to admit the same two paths or
+    // the links are unreadable and every `npx <package>` MCP server re-downloads
+    // its package on the user's first message. Only existing paths are added, so
+    // the roots are materialised before deriving.
+    const home = await mkdtemp(path.join(tmpdir(), "zeros-npm-read-roots-"));
+    try {
+      await mkdir(path.join(home, ".npm", "_npx"), { recursive: true });
+      await mkdir(path.join(home, ".npm", "_cacache"), { recursive: true });
+      expect(deriveToolchainReadRoots({ HOME: home, PATH: "" })).toEqual([
+        path.join(home, ".npm", "_cacache"),
+        path.join(home, ".npm", "_npx"),
+      ]);
+    } finally {
+      await rm(home, { recursive: true, force: true });
+    }
+  });
+
   it("selects a physical Podman binary instead of an ambient daemon", async () => {
     if (process.platform !== "linux") return;
     const root = await mkdtemp(path.join(tmpdir(), "zeros-podman-discovery-"));

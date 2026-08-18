@@ -15,7 +15,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import {
   AgentGateway,
@@ -171,6 +179,26 @@ async function prospectiveDesignFixture(): Promise<string> {
   return root;
 }
 
+// resolveCodeAgentTerritory persists sticky Design recognition into the engine
+// data dir. Redirect it per file so admissions in this suite never touch the
+// developer's real Zeros state, and so each run starts with an empty memory.
+let previousDataDir: string | undefined;
+let engineDataRoot: string;
+
+beforeAll(async () => {
+  previousDataDir = process.env.ZEROS_DATA_DIR;
+  engineDataRoot = await realpath(
+    await mkdtemp(path.join(tmpdir(), "zeros-territory-engine-")),
+  );
+  process.env.ZEROS_DATA_DIR = engineDataRoot;
+});
+
+afterAll(async () => {
+  if (previousDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
+  else process.env.ZEROS_DATA_DIR = previousDataDir;
+  await rm(engineDataRoot, { recursive: true, force: true });
+});
+
 afterEach(async () => {
   await Promise.all(
     roots.splice(0).map((root) => rm(root, { recursive: true, force: true })),
@@ -178,6 +206,128 @@ afterEach(async () => {
 });
 
 describe("code-agent territory resolution", () => {
+  it("names the recognition inputs separately from Design content", async () => {
+    const root = await singleDesignFixture();
+    const design = path.join(root, "Zeros Design");
+    const territory = await previewCodeAgentTerritory({
+      cwd: path.join(root, "src"),
+      workspaceRoot: root,
+      repoRoot: root,
+    });
+
+    // The pointer's settings directory and the folder's own marker — what decides
+    // whether this folder is still Design on the NEXT admission. Named explicitly
+    // because the two profiles treat them differently: the isolated profile denies
+    // them with the rest of the policy carveouts, while host parity subtracts them
+    // (denying `.zeros` broke `git pull`, and sticky recognition covers
+    // de-registration instead — see containment/policy.ts).
+    expect(territory!.designRecognitionPaths).toEqual([
+      path.join(root, ".zeros"),
+      path.join(design, ".zeros-canvas.json"),
+    ]);
+    for (const entry of territory!.designRecognitionPaths) {
+      expect(territory!.writeCapabilities.deniedPaths).toContain(entry);
+    }
+  });
+
+  it("keeps protecting a Design folder after its Git recognition is removed", async () => {
+    const root = await realpath(
+      await mkdtemp(path.join(tmpdir(), "zeros-territory-sticky-")),
+    );
+    roots.push(root);
+    const design = path.join(root, "Product Design");
+    await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: root });
+    await execFileAsync("git", ["config", "user.email", "test@test"], {
+      cwd: root,
+    });
+    await execFileAsync("git", ["config", "user.name", "test"], { cwd: root });
+    await Promise.all([
+      mkdir(path.join(root, "src"), { recursive: true }),
+      mkdir(design, { recursive: true }),
+      mkdir(path.join(root, ".zeros"), { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(path.join(root, "src", "code.ts"), "export {};\n"),
+      writeFile(path.join(design, ".zeros-canvas.json"), "{}\n"),
+      writeFile(path.join(design, "frame.html"), "design\n"),
+      writeFile(
+        path.join(root, ".zeros", "settings.toml"),
+        '[design]\ndirectory = "Product Design"\n',
+      ),
+    ]);
+    await execFileAsync("git", ["add", "-A"], { cwd: root });
+    await execFileAsync("git", ["commit", "-q", "-m", "fixture"], { cwd: root });
+
+    // One real admission: this is what teaches the engine that "Product Design"
+    // is a Design document here.
+    const admitted = await resolveCodeAgentTerritory({
+      cwd: path.join(root, "src"),
+      workspaceRoot: root,
+      repoRoot: root,
+    });
+    expect(admitted?.protectedDesignDirectories).toEqual([design]);
+
+    // Now do exactly what a deliberate agent would: erase both halves of the
+    // repository evidence. The marker leaves the index and HEAD, and the pointer
+    // leaves settings. Nothing about the Design CONTENT changes — that stayed
+    // write-denied throughout — so the folder is still on disk.
+    await execFileAsync(
+      "git",
+      ["rm", "-q", "--cached", "--", "Product Design/.zeros-canvas.json"],
+      { cwd: root },
+    );
+    await writeFile(path.join(root, ".zeros", "settings.toml"), "");
+    await execFileAsync("git", ["add", "-A"], { cwd: root });
+    await execFileAsync("git", ["commit", "-q", "-m", "de-register"], {
+      cwd: root,
+    });
+    expect(
+      existsSync(path.join(design, ".zeros-canvas.json")),
+      "the marker file itself is untouched on disk",
+    ).toBe(true);
+
+    const afterDeregistration = await previewCodeAgentTerritory({
+      cwd: path.join(root, "src"),
+      workspaceRoot: root,
+      repoRoot: root,
+    });
+    expect(afterDeregistration?.protectedDesignDirectories).toEqual([design]);
+    expect(afterDeregistration?.designDirectory).toBe(design);
+    expect(afterDeregistration!.writeCapabilities.deniedPaths).toContain(design);
+  });
+
+  it("forgets a remembered Design folder the user actually deleted", async () => {
+    const root = await singleDesignFixture();
+    const design = path.join(root, "Zeros Design");
+    expect(
+      (
+        await resolveCodeAgentTerritory({
+          cwd: path.join(root, "src"),
+          workspaceRoot: root,
+          repoRoot: root,
+        })
+      )?.protectedDesignDirectories,
+    ).toEqual([design]);
+
+    // A user removing their Design folder for real. Sticky recognition must not
+    // turn that into "the recognized Design folder is missing from this
+    // checkout" on every future session — remembering may only ever protect
+    // content that still exists.
+    await rm(design, { recursive: true, force: true });
+    await execFileAsync("git", ["add", "-A"], { cwd: root });
+    await execFileAsync("git", ["commit", "-q", "-m", "remove design"], {
+      cwd: root,
+    });
+
+    await expect(
+      previewCodeAgentTerritory({
+        cwd: path.join(root, "src"),
+        workspaceRoot: root,
+        repoRoot: root,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
   it("protects an explicitly configured Design destination before it exists", async () => {
     const root = await prospectiveDesignFixture();
     const designRoot = path.join(root, "Future Design");
@@ -708,6 +858,15 @@ describe("code-agent territory resolution", () => {
         }),
       }),
     );
+    const request = onProbe.mock.calls[0]?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(request).toBeDefined();
+    expect(request).not.toHaveProperty("providerId");
+    expect(request).not.toHaveProperty("providerStateEnv");
+    expect(request).not.toHaveProperty("containerWorker");
+    expect(request?.localServices ?? []).toEqual([]);
+    expect(request?.allowedLocalPorts ?? []).toEqual([]);
     expect(designDirectoryNameFor(root)).toBe("Zeros Design");
   });
 
@@ -739,5 +898,28 @@ describe("code-agent territory resolution", () => {
       designProtection: { required: true, enforced: false },
     });
     expect(status.remediation).toMatch(/qualified Zeros sandbox backend/i);
+  });
+
+  it("does not blame Design settings when private provider state admission fails", async () => {
+    const root = await fixture();
+    const gw = gateway(
+      testExecutionBoundary({
+        prepareError: new Error(
+          "provider overlay exceeds its bounded snapshot quota",
+        ),
+      }),
+    );
+    (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
+      "contained",
+      { agentId: "contained" } as AgentAdapter,
+    );
+
+    const status = await gw.preflightSession("contained", {
+      cwd: path.join(root, "src"),
+    });
+
+    expect(status.state).toBe("unavailable");
+    expect(status.remediation).toMatch(/private provider state/i);
+    expect(status.remediation).not.toMatch(/Design directory/i);
   });
 });

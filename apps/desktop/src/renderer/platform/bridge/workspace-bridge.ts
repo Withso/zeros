@@ -371,6 +371,12 @@ export const WORKING_DIRECTORIES_UNSUPPORTED_COPY: Record<
 export interface WorkingDirectoriesWire {
   /** Every top-level tracked directory — the full candidate set. */
   all: string[];
+  /** Top-level directories holding Design territory. They can never be
+   *  excluded — hiding one takes the canvas off disk — so the picker renders
+   *  them checked and non-interactive. The engine force-includes them anyway,
+   *  so an older renderer that ignores this is corrected server-side rather
+   *  than able to hide the canvas. */
+  locked: string[];
   /** The subset currently materialized on disk. */
   included: string[];
   /** Whether sparse-checkout is active right now. */
@@ -388,6 +394,7 @@ export interface WorkingDirectoriesWire {
 
 const EMPTY_WORKING_DIRS: WorkingDirectoriesWire = {
   all: [],
+  locked: [],
   included: [],
   sparse: false,
   supported: false,
@@ -406,6 +413,11 @@ function toWorkingDirs(r: unknown): WorkingDirectoriesWire {
       : undefined;
   return {
     all: v.all.filter((d): d is string => typeof d === "string"),
+    // An engine that predates the field sends nothing; an empty lock set is
+    // the pre-existing behaviour, and the engine still force-includes.
+    locked: Array.isArray(v.locked)
+      ? v.locked.filter((d): d is string => typeof d === "string")
+      : [],
     included: v.included.filter((d): d is string => typeof d === "string"),
     sparse: v.sparse === true,
     supported: v.supported === true,

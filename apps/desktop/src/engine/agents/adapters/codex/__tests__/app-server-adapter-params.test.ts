@@ -138,6 +138,7 @@ describe("buildThreadStartParams", () => {
         workspaceRoot,
         designDirectory,
         protectedDesignDirectories: [designDirectory],
+        designRecognitionPaths: [],
         writeCapabilities: {
           workspace: "write",
           deniedPaths: [
@@ -185,6 +186,7 @@ describe("uniform ZSR turn authority", () => {
     workspaceRoot,
     designDirectory,
     protectedDesignDirectories: [designDirectory],
+    designRecognitionPaths: [],
     writeCapabilities: {
       workspace: "write",
       deniedPaths: [designDirectory],

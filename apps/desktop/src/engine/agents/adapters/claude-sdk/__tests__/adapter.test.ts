@@ -49,6 +49,7 @@ function codeTerritory(
     workspaceRoot,
     designDirectory,
     protectedDesignDirectories: [designDirectory],
+    designRecognitionPaths: [],
     writeCapabilities: {
       workspace: "write",
       deniedPaths: [
@@ -927,6 +928,68 @@ describe("ClaudeSdkAdapter", () => {
     });
 
     expect(captured[0]?.pathToClaudeCodeExecutable).toBe(process.execPath);
+    await adapter.dispose();
+  });
+
+  it("answers the SDK OAuth refresh control channel from the trusted host", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-oauth"), assistantText("ok"), resultOk("sdk-oauth")],
+    ]);
+    const oauthTokenProvider = vi.fn(async () => "host-access-token");
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn,
+      oauthTokenProvider,
+    });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+
+    const getOAuthToken = (
+      captured[0] as typeof captured[number] & {
+        getOAuthToken?: (options: { signal: AbortSignal }) => Promise<string | null>;
+      }
+    ).getOAuthToken;
+    expect(getOAuthToken).toBeTypeOf("function");
+    const abort = new AbortController();
+    await expect(getOAuthToken?.({ signal: abort.signal })).resolves.toBe(
+      "host-access-token",
+    );
+    expect(oauthTokenProvider).toHaveBeenCalledWith({
+      forceRefresh: true,
+      signal: abort.signal,
+    });
+    await adapter.dispose();
+  });
+
+  it.each([
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ])("does not override an explicit %s credential", async (credentialName) => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-explicit-auth"), assistantText("ok"), resultOk("sdk-explicit-auth")],
+    ]);
+    const oauthTokenProvider = vi.fn(async () => "host-access-token");
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
+      queryFn,
+      oauthTokenProvider,
+    });
+    const { session } = await adapter.newSession({
+      cwd: "/tmp",
+      env: { [credentialName]: "explicit-credential" },
+    });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+
+    expect(
+      (captured[0] as typeof captured[number] & { getOAuthToken?: unknown })
+        .getOAuthToken,
+    ).toBeUndefined();
+    expect(oauthTokenProvider).not.toHaveBeenCalled();
     await adapter.dispose();
   });
 
@@ -2438,6 +2501,7 @@ describe("ClaudeSdkAdapter", () => {
       ...territory,
       designDirectory: unsafeDesign,
       protectedDesignDirectories: [unsafeDesign],
+      designRecognitionPaths: [],
       writeCapabilities: {
         workspace: "write",
         deniedPaths: [

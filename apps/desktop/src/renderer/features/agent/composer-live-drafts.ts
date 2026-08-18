@@ -22,15 +22,52 @@ import type { ComposerDraft } from "../../state/store";
 
 const liveChatDrafts = new Map<string, ComposerDraft>();
 
+/** Keystroke observers. Deliberately NOT a store subscription: these fire on
+ *  every keystroke, so a listener must do something cheap and must not cause a
+ *  render by itself. The one consumer today is the chat view, which uses the
+ *  first keystroke as the signal that a deferred session spawn should start —
+ *  typing is the earliest honest evidence that the user means to use this
+ *  chat, and starting there keeps the admission overlapped with typing instead
+ *  of stacked in front of Send. */
+type LiveChatDraftListener = (
+  chatId: string,
+  draft: ComposerDraft | null,
+) => void;
+
+const liveChatDraftListeners = new Set<LiveChatDraftListener>();
+
+export function subscribeToLiveChatDrafts(
+  listener: LiveChatDraftListener,
+): () => void {
+  liveChatDraftListeners.add(listener);
+  return () => {
+    liveChatDraftListeners.delete(listener);
+  };
+}
+
 export function setLiveChatDraft(
   chatId: string,
   draft: ComposerDraft | null,
 ): void {
   if (draft === null) {
     liveChatDrafts.delete(chatId);
-    return;
+  } else {
+    liveChatDrafts.set(chatId, draft);
   }
-  liveChatDrafts.set(chatId, draft);
+  for (const listener of liveChatDraftListeners) {
+    // One listener throwing must not stop the others, and must never break the
+    // keystroke it rode in on.
+    try {
+      listener(chatId, draft);
+    } catch (error) {
+      console.warn("[composer-live-drafts] listener failed:", error);
+    }
+  }
+}
+
+/** Whether a draft carries anything the user actually typed. */
+export function liveChatDraftHasText(draft: ComposerDraft | null): boolean {
+  return (draft?.text ?? "").trim().length > 0;
 }
 
 /** The composer's CURRENT draft for a chat — the keystroke-fresh mirror,

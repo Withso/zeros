@@ -17,6 +17,7 @@
 
 import { useSyncExternalStore } from "react";
 import type { BridgeRegistryAgent } from "../../platform/bridge/messages";
+import { isTransportShaped } from "../../platform/bridge/failure";
 
 type LoadFn = (force?: boolean) => Promise<BridgeRegistryAgent[]>;
 
@@ -186,7 +187,14 @@ async function runLoad(
       agents = [];
     }
     lastError = err instanceof Error ? err : new Error(String(err));
-    console.warn(`[agents-cache] listAgents failed: ${lastError.message}`);
+    // An engine swap aborts every in-flight request by design and the next
+    // call retries. Warning about it once per swap per caller buried the
+    // failures that actually need looking at.
+    if (isTransportShaped(lastError.message)) {
+      console.info(`[agents-cache] listAgents deferred: ${lastError.message}`);
+    } else {
+      console.warn(`[agents-cache] listAgents failed: ${lastError.message}`);
+    }
     emit();
     throw lastError;
   } finally {

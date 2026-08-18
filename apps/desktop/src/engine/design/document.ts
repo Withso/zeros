@@ -48,6 +48,7 @@ import postcss from "postcss";
 import { expandDesignComponents } from "./components";
 import {
   DEFAULT_DESIGN_DIRECTORY_NAME,
+  DESIGN_CANVAS_FILE as CANVAS_MARKER_FILE,
   designDirectoryNameFor,
 } from "./directory-registry";
 import { getDesignRuntimeAudit } from "./runtime-audits";
@@ -59,7 +60,7 @@ import { inspectSafeRegularFile, readSafeRegularFile } from "./safe-files";
  *  for defaults, seeds, and pre-pointer compatibility. */
 export const DESIGN_DIRECTORY_NAME = DEFAULT_DESIGN_DIRECTORY_NAME;
 export { designDirectoryNameFor } from "./directory-registry";
-export const DESIGN_CANVAS_FILE = ".zeros-canvas.json";
+export const DESIGN_CANVAS_FILE = CANVAS_MARKER_FILE;
 export const DESIGN_TOKENS_FILE = "tokens.css";
 export const DESIGN_TRANSACTION_JOURNAL_FILE = ".zeros-transaction.json";
 

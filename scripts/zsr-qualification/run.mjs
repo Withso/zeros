@@ -37,6 +37,7 @@ import {
   killAndRemoveZsrCgroup,
   wrapWithZsrCgroup,
 } from "../../apps/desktop/src/engine/agents/containment/zsr-cgroup.mjs";
+import { buildQualificationCommand, shellQuote } from "./command.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const probeChild = path.join(here, "probe-child.mjs");
@@ -48,6 +49,7 @@ const containerWorkerLauncher = path.join(
   "apps/desktop/src/engine/agents/containment/zsr-container-worker.mjs",
 );
 const macosEngineBoundaryProbe = path.join(here, "macos-engine-boundary.ts");
+const localHostParityProbe = path.join(here, "local-host-parity.ts");
 const dynamicPortProbe = path.join(here, "dynamic-ports.ts");
 const packageJsonPath = fileURLToPath(
   new URL(
@@ -61,6 +63,52 @@ const workerMode = args.has("--worker");
 
 function result(name, status, detail) {
   return { name, status, ...(detail ? { detail } : {}) };
+}
+
+/** The JSON report a fixture wrote, out of a stdout that may also carry engine
+ * diagnostics.
+ *
+ * A fixture builds a real boundary, so the engine legitimately logs while it
+ * runs — `[zsr] admitted …` on a slow admission, `[zsr] retired …` on a slow
+ * teardown. Requiring stdout to be *nothing but* the report made every such line
+ * present as a fence failure with the useless detail "fixture produced no
+ * parseable report", and it did exactly that twice on 2026-08-17: first for
+ * `macos-detached-process-domain` (attributed at the time to a live dev app, then
+ * to transience — both wrong), and again for it plus `macos-dynamic-dev-ports`
+ * the moment a retirement report was added. The report is the LAST balanced JSON
+ * object on stdout; nothing about the checks themselves is loosened, because the
+ * checks are the parsed fields. */
+function fixtureReport(stdout) {
+  const text = String(stdout ?? "");
+  for (let start = text.lastIndexOf("{"); start >= 0; ) {
+    const candidate = text.slice(start);
+    try {
+      const parsed = JSON.parse(candidate.trim());
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      // Not a complete document from here; try the previous opening brace.
+    }
+    start = text.lastIndexOf("{", start - 1);
+  }
+  throw new Error("fixture produced no parseable report");
+}
+
+/** Why a spawned fixture failed, in a form a human can act on.
+ *
+ * The old form was `error ?? stderr ?? "fixture exited N"`, and `??` only falls
+ * through on null/undefined — so a fixture that exited cleanly with a report
+ * whose fields simply did not match produced an EMPTY stderr, an omitted
+ * `detail`, and a `--require-secure` failure with no stated reason at all. That
+ * happened for real on 2026-08-17. Always say the exit status and what the
+ * fixture actually reported. */
+function fixtureFailureDetail(spawned, observed) {
+  const parts = [
+    spawned.error ? safeError(spawned.error) : "",
+    `status=${spawned.status === null ? `signal ${spawned.signal}` : spawned.status}`,
+    observed ? `observed: ${observed}` : "",
+    spawned.stderr ? `stderr: ${safeError(spawned.stderr)}` : "",
+  ].filter(Boolean);
+  return parts.join("; ").slice(0, 1_000);
 }
 
 function safeError(error) {
@@ -84,8 +132,222 @@ function executableOnPath(name) {
   return null;
 }
 
-function shellQuote(value) {
-  return `'${String(value).replaceAll("'", `'"'"'`)}'`;
+function packagedFixtureEnvironment() {
+  return {
+    ...process.env,
+    ZEROS_ZSR_SUPERVISOR_SCRIPT: path.resolve(
+      here,
+      "../../binaries/zsr-supervisor.mjs",
+    ),
+    ZEROS_ZSR_NETWORK_BRIDGE_SCRIPT: path.resolve(
+      here,
+      "../../binaries/zsr-network-bridge.mjs",
+    ),
+    ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER: path.resolve(
+      here,
+      "../../binaries/zsr-macos-process-domain",
+    ),
+    ZEROS_ZSR_MACOS_PORT_BIND_LIBRARY: path.resolve(
+      here,
+      "../../binaries/zsr-macos-port-bind.dylib",
+    ),
+  };
+}
+
+async function localHostParityMain() {
+  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
+  const report = {
+    schemaVersion: 1,
+    runtime: {
+      name: packageJson.name,
+      version: packageJson.version,
+      expectedVersion,
+      license: packageJson.license,
+    },
+    platform: process.platform,
+    arch: process.arch,
+    backend: "local-host-parity+srt",
+    secure: false,
+    checks: [
+      result(
+        "exact-pin",
+        packageJson.version === expectedVersion ? "pass" : "fail",
+        `${packageJson.name}@${packageJson.version}`,
+      ),
+      result("license", packageJson.license === "Apache-2.0" ? "pass" : "fail"),
+    ],
+  };
+  if (process.platform !== "darwin" && process.platform !== "linux") {
+    report.checks.push(result("platform", "unsupported", process.platform));
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    if (args.has("--require-secure")) process.exitCode = 1;
+    return;
+  }
+
+  const fixture = spawnSync(
+    process.execPath,
+    ["--import", "tsx", localHostParityProbe],
+    {
+      cwd: path.resolve(here, "../.."),
+      env: packagedFixtureEnvironment(),
+      encoding: "utf8",
+      timeout: 120_000,
+      maxBuffer: 256 * 1024,
+    },
+  );
+  let observed;
+  try {
+    observed = fixtureReport(fixture.stdout);
+  } catch (error) {
+    report.checks.push(
+      result(
+        "local-host-parity-canary",
+        "fail",
+        fixtureFailureDetail(fixture, safeError(error)),
+      ),
+    );
+  }
+  if (observed) {
+    const code = observed.code ?? {};
+    const design = observed.design ?? {};
+    const checks = [
+      ["host-machine-read", code.hostRead === true],
+      ["code-workspace-write", code.codeWrite === true],
+      [
+        "multiple-design-write-denial",
+        Array.isArray(code.designDenied) &&
+          code.designDenied.length === 3 &&
+          code.designDenied.every(Boolean),
+      ],
+      [
+        "native-git-all-subcommands",
+        code.canonicalGit === true &&
+          Array.isArray(code.gitStatuses) &&
+          code.gitStatuses.length === 5 &&
+          code.gitStatuses.every((status) => status === 0),
+      ],
+      [
+        "native-git-stderr",
+        typeof code.rawGitErrors === "string" &&
+          !code.rawGitErrors.includes("[zsr"),
+      ],
+      ["pre-push-hook", observed.prePushHook === true],
+      ["real-home", observed.hostHomePreserved === true],
+      ["provider-home", observed.providerHomePreserved === true],
+      ["gh-token", observed.ghTokenPreserved === true],
+      ["github-token", observed.githubTokenPreserved === true],
+      ["ssh-agent", observed.sshAgentPreserved === true],
+      ["gh-cli", code.ghAvailable === true],
+      ["keychain", code.keychainAvailable === true],
+      ["direct-local-service", code.directService === true],
+      ["direct-agent-port", code.directPort === true],
+      ["direct-requested-port", observed.directRequestedPort === true],
+      [
+        "host-network-environment",
+        code.proxyUnchanged === true && code.noNetworkBridge === true,
+      ],
+      // Named separately from `host-network-environment` (which covers proxy
+      // variables only) because TLS trust is what actually breaks `git clone
+      // https://…`, `curl`, and `pip install` when the supervisor rewrites it.
+      ["host-tls-trust-environment", code.caTrustExact === true],
+      // The recognition split. The canvas marker is unwritable because it sits
+      // inside protected Design territory; the `.zeros` pointer stays writable
+      // because it is committed repository content and denying it broke every
+      // `git pull` that had to rewrite it. De-registration is covered by
+      // engine-side sticky recognition, which is deliberately NOT a filesystem
+      // rule — both halves are asserted so neither can drift silently.
+      ["design-marker-write-denial", code.markerDenied === true],
+      ["repo-settings-host-parity-write", code.repoSettingsWritable === true],
+      // The one case a matching Design tree hides: git itself writing a protected
+      // path. Refused on that path, with the bytes intact.
+      [
+        "design-git-restore-denial",
+        code.designRestoreRefused === true &&
+          code.designRestoreBytes === '{"mode":"code-protected-v2"}\n',
+      ],
+      ["design-code-write-denial", design.codeDenied === true],
+      ["design-primary-write", design.primaryWrite === true],
+      ["design-secondary-write", design.secondaryWrite === true],
+      ["design-outside-cache-write", design.outsideWrite === true],
+      ["design-canonical-git-write", design.canonicalGitWrite === true],
+      ["design-preserves-code", observed.codeFileUnchangedByDesign === true],
+      [
+        "local-admission-fast-path",
+        Number.isFinite(observed.codeAdmissionMs) &&
+          Number.isFinite(observed.designAdmissionMs),
+      ],
+    ];
+    const detailFor = (name) => {
+      if (name === "local-admission-fast-path") {
+        return `code=${observed.codeAdmissionMs}ms design=${observed.designAdmissionMs}ms`;
+      }
+      // Name the variables, not just the verdict: the failure this check exists
+      // for is a rewritten TLS-trust path, and "which one" is the whole
+      // remediation. Values are engine/host paths, never credentials.
+      if (
+        name === "host-tls-trust-environment" &&
+        Array.isArray(code.caTrustDrift) &&
+        code.caTrustDrift.length > 0
+      ) {
+        return code.caTrustDrift.slice(0, 16).join(" ");
+      }
+      return undefined;
+    };
+    for (const [name, passed] of checks) {
+      report.checks.push(
+        result(
+          name,
+          fixture.status === 0 && passed ? "pass" : "fail",
+          detailFor(name),
+        ),
+      );
+    }
+  }
+
+  if (process.platform === "darwin") {
+    const lifecycle = spawnSync(
+      process.execPath,
+      ["--import", "tsx", macosEngineBoundaryProbe],
+      {
+        cwd: path.resolve(here, "../.."),
+        env: packagedFixtureEnvironment(),
+        encoding: "utf8",
+        timeout: 60_000,
+        maxBuffer: 128 * 1024,
+      },
+    );
+    let passed = false;
+    let detail = "";
+    try {
+      const lifecycleReport = fixtureReport(lifecycle.stdout);
+      passed =
+        lifecycle.status === 0 &&
+        lifecycleReport.normalTeardown === true &&
+        lifecycleReport.crashRecovery === true &&
+        lifecycleReport.recovered === 1;
+      detail =
+        `normalTeardown=${lifecycleReport.normalTeardown} ` +
+        `crashRecovery=${lifecycleReport.crashRecovery} ` +
+        `recovered=${lifecycleReport.recovered}`;
+    } catch (error) {
+      detail = safeError(error);
+    }
+    report.checks.push(
+      result(
+        "macos-detached-process-domain",
+        passed ? "pass" : "fail",
+        passed ? undefined : fixtureFailureDetail(lifecycle, detail),
+      ),
+    );
+  } else {
+    report.checks.push(result("macos-detached-process-domain", "not-required"));
+  }
+
+  report.secure = report.checks.every((check) =>
+    ["pass", "not-required"].includes(check.status),
+  );
+  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+  if (args.has("--require-secure") && !report.secure) process.exitCode = 1;
 }
 
 async function reserveTcpServer(handler) {
@@ -230,12 +492,17 @@ async function worker() {
     const containerEnvironment = descriptor.containerWorker
       ? `DOCKER_HOST=${shellQuote(`unix://${descriptor.containerWorker.socket}`)} CONTAINER_HOST=${shellQuote(`unix://${descriptor.containerWorker.socket}`)} `
       : "";
-    const targetCommand = `${resourceLimitShell()}${containerEnvironment}exec ${commandParts
-      .map(shellQuote)
-      .join(" ")}`;
-    const command = process.env.SRT_DEBUG
-      ? `id >&2; namei -l ${shellQuote(descriptor.probeChild)} >&2; stat ${shellQuote(descriptor.probeChild)} >&2; exec ${targetCommand}`
-      : targetCommand;
+    const command = buildQualificationCommand({
+      debug: Boolean(process.env.SRT_DEBUG),
+      diagnostics: [
+        "id >&2",
+        `namei -l ${shellQuote(descriptor.probeChild)} >&2`,
+        `stat ${shellQuote(descriptor.probeChild)} >&2`,
+      ],
+      resourcePrelude: resourceLimitShell(),
+      environmentPrelude: containerEnvironment,
+      argv: commandParts,
+    });
     process.env.ZEROS_ZSR_DENY_SECURITY_SERVER = "1";
     if (process.platform === "linux") {
       localServiceBridge = createServer((peer) => {
@@ -350,9 +617,7 @@ async function worker() {
           value.includes("allow mach-lookup"),
       );
     if (!securityServerDenied || !securitydXpcDenied) {
-      throw new Error(
-        "macOS profile exposes ambient Keychain Mach authority",
-      );
+      throw new Error("macOS profile exposes ambient Keychain Mach authority");
     }
     process.stdout.write(
       `${JSON.stringify({
@@ -585,10 +850,7 @@ async function main() {
   );
   const resultFile = path.join(code, ".zsr-probe-result.json");
   const privateProbeChild = path.join(privateState, "probe-child.mjs");
-  const privateNativeAttackHelper = path.join(
-    privateState,
-    "native-attacks",
-  );
+  const privateNativeAttackHelper = path.join(privateState, "native-attacks");
   const privateOpenCodeFixture = path.join(
     privateState,
     "opencode-runtime-fixture.mjs",
@@ -1240,15 +1502,20 @@ async function main() {
         },
       );
       let lifecyclePassed = false;
+      let lifecycleObserved = "";
       try {
-        const parsed = JSON.parse(lifecycle.stdout.trim());
+        const parsed = fixtureReport(lifecycle.stdout);
         lifecyclePassed =
           lifecycle.status === 0 &&
           parsed.normalTeardown === true &&
           parsed.crashRecovery === true &&
           parsed.recovered === 1;
+        lifecycleObserved =
+          `normalTeardown=${parsed.normalTeardown} ` +
+          `crashRecovery=${parsed.crashRecovery} recovered=${parsed.recovered}`;
       } catch {
         lifecyclePassed = false;
+        lifecycleObserved = "fixture produced no parseable report";
       }
       report.checks.push(
         result(
@@ -1256,11 +1523,7 @@ async function main() {
           lifecyclePassed ? "pass" : "fail",
           lifecyclePassed
             ? undefined
-            : safeError(
-                lifecycle.error ??
-                  lifecycle.stderr ??
-                  `fixture exited ${lifecycle.status}`,
-              ),
+            : fixtureFailureDetail(lifecycle, lifecycleObserved),
         ),
       );
       const dynamicPorts = spawnSync(
@@ -1293,8 +1556,13 @@ async function main() {
         },
       );
       let dynamicPortsPassed = false;
+      let dynamicPortsObserved = "";
       try {
-        const parsed = JSON.parse(dynamicPorts.stdout.trim());
+        const parsed = fixtureReport(dynamicPorts.stdout);
+        dynamicPortsObserved = Object.entries(parsed)
+          .filter(([, value]) => value !== true)
+          .map(([name, value]) => `${name}=${value}`)
+          .join(" ");
         dynamicPortsPassed =
           dynamicPorts.status === 0 &&
           parsed.randomPort === true &&
@@ -1307,6 +1575,7 @@ async function main() {
           parsed.revoked === true;
       } catch {
         dynamicPortsPassed = false;
+        dynamicPortsObserved = "fixture produced no parseable report";
       }
       report.checks.push(
         result(
@@ -1314,11 +1583,7 @@ async function main() {
           dynamicPortsPassed ? "pass" : "fail",
           dynamicPortsPassed
             ? undefined
-            : safeError(
-                dynamicPorts.error ??
-                  dynamicPorts.stderr ??
-                  `fixture exited ${dynamicPorts.status}`,
-              ),
+            : fixtureFailureDetail(dynamicPorts, dynamicPortsObserved),
         ),
       );
     } else {
@@ -1356,6 +1621,11 @@ async function main() {
 
 if (workerMode) {
   await worker().catch((error) => {
+    process.stderr.write(`${safeError(error)}\n`);
+    process.exitCode = 1;
+  });
+} else if (!args.has("--cloud-worker") && !args.has("--isolated")) {
+  await localHostParityMain().catch((error) => {
     process.stderr.write(`${safeError(error)}\n`);
     process.exitCode = 1;
   });

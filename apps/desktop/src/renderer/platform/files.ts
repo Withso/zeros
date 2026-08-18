@@ -29,6 +29,12 @@ export interface ReadFileResult {
   dataUrl?: string;
   /** Present when kind === "error" — a human-readable reason. */
   error?: string;
+  /** Engine-tagged Design territory. Design files have exactly one write path
+   *  (the design surface), so the viewer renders them read-only instead of
+   *  offering an Edit action `file.write` would refuse. Absent on transports
+   *  that don't tag it — the editor then behaves as before and the engine
+   *  still refuses the save, so the failure direction stays safe. */
+  designPath?: boolean;
 }
 
 export interface ReadImageThumbnailResult {

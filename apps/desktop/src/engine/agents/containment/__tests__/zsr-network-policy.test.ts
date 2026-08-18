@@ -14,7 +14,15 @@ import {
   SandboxManager,
   SandboxRuntimeConfigSchema,
 } from "@anthropic-ai/sandbox-runtime";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+
+import { createBodySubstitutionTransform } from "../../../../../../../node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/body-substitution.js";
+import {
+  AwsPairRegistry,
+  createSigv4Planner,
+  type Sigv4Plan,
+} from "../../../../../../../node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/credential-aws-pairs.js";
+import { matchesDomainPatternWithPort } from "../../../../../../../node_modules/@anthropic-ai/sandbox-runtime/dist/sandbox/domain-pattern.js";
 
 import {
   createMitmCA,
@@ -36,6 +44,39 @@ async function listen(server: Server): Promise<number> {
   if (!address || typeof address === "string") throw new Error("missing port");
   return address.port;
 }
+
+it("keeps exact host:port grants on the AWS SigV4 re-signing path", () => {
+  const sentinel = "fake_value_00000000-0000-4000-8000-000000000001";
+  const registry = new AwsPairRegistry();
+  registry.register({
+    accessKeyIdSentinel: sentinel,
+    realAccessKeyId: "AKIAEXAMPLE",
+    realSecretAccessKey: "real-secret",
+    injectHosts: ["s3.example.test:443"],
+  });
+  const planner = createSigv4Planner(
+    registry,
+    undefined,
+    matchesDomainPatternWithPort,
+  ) as unknown as (
+    method: string,
+    requestTarget: string,
+    headers: Record<string, string>,
+    destHost: string,
+    destPort: number,
+  ) => Sigv4Plan | undefined;
+  const headers = {
+    authorization:
+      `AWS4-HMAC-SHA256 Credential=${sentinel}/20260816/us-east-1/s3/aws4_request, ` +
+      `SignedHeaders=host;x-amz-date, Signature=${"0".repeat(64)}`,
+    "x-amz-date": "20260816T000000Z",
+  };
+
+  expect(planner("GET", "/", headers, "s3.example.test", 443)?.action).toBe(
+    "resign",
+  );
+  expect(planner("GET", "/", headers, "s3.example.test", 8443)).toBeUndefined();
+});
 
 async function close(server: Server): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -531,6 +572,164 @@ describe.sequential("ZSR exact loopback network policy", () => {
       if (previous === undefined) delete process.env.ZEROS_TEST_PROVIDER_KEY;
       else process.env.ZEROS_TEST_PROVIDER_KEY = previous;
     }
+  });
+
+  it("does not hold a short HTTP/2 request frame while a bidirectional peer responds", async () => {
+    const realCredential = "zsr-real-http2-bidi-credential";
+    const upstreamCa = createMitmCA({});
+    certificateAuthorities.push(upstreamCa);
+    const leaf = mintLeafCert(upstreamCa, "127.0.0.1");
+    const target = createHttp2SecureServer({
+      allowHTTP1: true,
+      cert: leaf.certPem,
+      key: leaf.keyPem,
+    });
+    servers.push(target);
+
+    const observed = new Promise<{ authorization: string; frame: string }>(
+      (resolve, reject) => {
+        target.on("stream", (stream, headers) => {
+          stream.once("error", reject);
+          stream.once("data", (chunk: Buffer) => {
+            resolve({
+              authorization: String(headers.authorization ?? ""),
+              frame: chunk.toString("utf8"),
+            });
+            // Cursor's AgentService/Run is bidirectional: the server responds
+            // after an initial protobuf frame while the request half remains
+            // open for tool results. The proxy must not wait for request EOF.
+            stream.respond({ ":status": 200, "content-type": "text/plain" });
+            stream.end("bidi-ready");
+          });
+        });
+      },
+    );
+    const targetPort = await listen(target);
+    const previous = process.env.ZEROS_TEST_PROVIDER_KEY;
+    process.env.ZEROS_TEST_PROVIDER_KEY = realCredential;
+
+    let tls: TLSSocket | undefined;
+    let client: ReturnType<typeof connectHttp2> | undefined;
+    try {
+      await SandboxManager.initialize(
+        {
+          filesystem: {
+            denyRead: [],
+            allowRead: [],
+            allowWrite: [],
+            denyWrite: [],
+            allowGitConfig: true,
+            disableMandatoryWriteProtection: true,
+          },
+          network: {
+            allowedDomains: ["*"],
+            deniedDomains: [],
+            strictAllowlist: true,
+            allowedLocalPorts: [targetPort],
+            tlsTerminate: {
+              includeDomains: [`127.0.0.1:${targetPort}`],
+              extraCaCertPaths: [upstreamCa.certPath],
+            },
+            filterRequest: async () => ({ action: "allow" as const }),
+          },
+          credentials: {
+            envVars: [
+              {
+                name: "ZEROS_TEST_PROVIDER_KEY",
+                mode: "mask",
+                injectHosts: [`127.0.0.1:${targetPort}`],
+              },
+            ],
+          },
+        },
+        undefined,
+        false,
+      );
+      const projection = sandboxTrustBundleAndSentinel(
+        await SandboxManager.wrapWithSandboxArgv("/usr/bin/true"),
+      );
+      tls = await openTlsProxyTunnel({
+        targetPort,
+        trustBundlePath: projection.trustBundlePath,
+        alpnProtocols: ["h2"],
+      });
+      client = connectHttp2(`https://127.0.0.1:${targetPort}`, {
+        createConnection: () => tls!,
+      });
+
+      const req = client.request({
+        ":method": "POST",
+        ":path": "/bidirectional",
+        authorization: `Bearer ${projection.sentinel}`,
+        "content-type": "application/connect+proto",
+      });
+      const response = new Promise<{ status: number; body: string }>(
+        (resolve, reject) => {
+          let status = 0;
+          let body = "";
+          req.setEncoding("utf8");
+          req.once("response", (headers) => {
+            status = Number(headers[":status"] ?? 0);
+          });
+          req.on("data", (chunk) => (body += chunk));
+          req.once("error", reject);
+          req.once("end", () => resolve({ status, body }));
+        },
+      );
+      req.write("cursor-bidi-frame");
+
+      await expect(
+        Promise.race([
+          response,
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error("bidirectional response timed out")),
+              2_000,
+            ),
+          ),
+        ]),
+      ).resolves.toEqual({ status: 200, body: "bidi-ready" });
+      await expect(observed).resolves.toEqual({
+        authorization: `Bearer ${realCredential}`,
+        frame: "cursor-bidi-frame",
+      });
+      req.close();
+    } finally {
+      client?.destroy();
+      tls?.destroy();
+      if (previous === undefined) delete process.env.ZEROS_TEST_PROVIDER_KEY;
+      else process.env.ZEROS_TEST_PROVIDER_KEY = previous;
+    }
+  });
+
+  it("bounds suffix matching work for adversarial credential prefixes", async () => {
+    const prefixBytes = 4_096;
+    const sentinel = Buffer.from(`${"a".repeat(prefixBytes)}b`);
+    const input = Buffer.from(`${"a".repeat(prefixBytes - 1)}c`);
+    const replacement = Buffer.alloc(sentinel.length, "x");
+    const equalityChecks = vi.spyOn(Buffer.prototype, "equals");
+    let output = Buffer.alloc(0);
+    let comparisons = 0;
+    try {
+      const transform = createBodySubstitutionTransform([
+        { sentinel, realValue: replacement },
+      ]);
+      const chunks: Buffer[] = [];
+      transform.on("data", (chunk: Buffer) => chunks.push(chunk));
+      const completed = new Promise<void>((resolve, reject) => {
+        transform.once("end", resolve);
+        transform.once("error", reject);
+      });
+      transform.end(input);
+      await completed;
+      output = Buffer.concat(chunks);
+      comparisons = equalityChecks.mock.calls.length;
+    } finally {
+      equalityChecks.mockRestore();
+    }
+
+    expect(output).toEqual(input);
+    expect(comparisons).toBeLessThan(64);
   });
 
   it("preserves HTTP/2 extended CONNECT as an opaque bidirectional stream", async () => {

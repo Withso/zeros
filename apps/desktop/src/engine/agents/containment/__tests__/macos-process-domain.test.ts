@@ -1,4 +1,12 @@
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -6,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   MacosProcessDomain,
+  macosProcessDomainCommandRunner,
   recoverMacosProcessDomains,
   type MacosProcessDomainCommandRunner,
 } from "../macos-process-domain";
@@ -29,7 +38,9 @@ describe("macOS ZSR process domain", () => {
   let metadataPath: string;
 
   beforeEach(async () => {
-    root = await mkdtemp(path.join(tmpdir(), "zeros-macos-domain-"));
+    root = await realpath(
+      await mkdtemp(path.join(tmpdir(), "zeros-macos-domain-")),
+    );
     helperPath = path.join(root, "zsr-macos-process-domain");
     markerPath = path.join(root, "tools", "process-domain.marker");
     policyPath = path.join(root, "policy.json");
@@ -47,6 +58,24 @@ describe("macOS ZSR process domain", () => {
 
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });
+  });
+
+  it("collects the helper's whole answer, not whatever arrived before it exited", async () => {
+    // The helper's verdict is parsed as JSON, so a partially drained stdout is
+    // indistinguishable from a corrupt helper and fails admission with
+    // "returned invalid JSON". Waiting on process exit alone allows exactly
+    // that; this script makes the gap deterministic by emitting from a
+    // grandchild that outlives the process the runner spawned.
+    const script = path.join(root, "late-writer");
+    await writeFile(
+      script,
+      `#!/bin/sh\n( sleep 0.2; printf '%s' '${identity(4242)}' ) &\nexit 0\n`,
+      { mode: 0o755 },
+    );
+
+    await expect(
+      macosProcessDomainCommandRunner(script, []),
+    ).resolves.toMatchObject({ exitCode: 0, stdout: identity(4242) });
   });
 
   it("persists an engine identity and proves an exact live fingerprint", async () => {
@@ -154,7 +183,10 @@ describe("macOS ZSR process domain", () => {
   });
 
   it("fails closed on malformed or unproved helper output", async () => {
-    const badRunner: MacosProcessDomainCommandRunner = async (_helper, args) => {
+    const badRunner: MacosProcessDomainCommandRunner = async (
+      _helper,
+      args,
+    ) => {
       if (args[0] === "self-test") {
         return {
           exitCode: 0,

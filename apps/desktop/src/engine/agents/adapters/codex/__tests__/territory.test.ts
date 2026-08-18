@@ -41,6 +41,7 @@ async function fixture(): Promise<{
     workspaceRoot: root,
     designDirectory: path.join(root, "Zeros Design"),
     protectedDesignDirectories: [path.join(root, "Zeros Design")],
+    designRecognitionPaths: [],
     writeCapabilities: {
       workspace: "write",
       deniedPaths: [

@@ -1,25 +1,157 @@
 # Zeros Sandbox Runtime — uniform code/Design isolation plan
 
-**Status:** Local implementation closure and cross-platform qualification audit,
-2026-08-16. The uniform ZSR contract is implemented and fails closed. Every
-deterministic repository gate and every live gate supported by the available
-Mac host is green, and the final synchronized source has passed the complete
-macOS arm64 Seatbelt matrix,
-private OrbStack container matrix, browser-preview matrix, engine smoke, and a
-Developer-ID-signed packaged-app runtime smoke. Release-wide graduation remains
-withheld until the same immutable source is green on macOS x64, Linux arm64,
-and an actual production cloud-worker image. No production cloud-workspace
-feature work is in the current closure scope: the existing cloud code is
-retained without expansion and its unqualified work is recorded, not inferred. See the
-[qualification ledger](zeros-sandbox-runtime-qualification.md) for exact run
-results and deferrals. Keep this document until every remaining qualification
-item below is delivered, explicitly cancelled, or folded into
-[design-mode.md](design-mode.md) and
-[autonomous-code-design-foundation.md](autonomous-code-design-foundation.md).
+**Status:** Dual-profile implementation, 2026-08-18. Local desktop sessions now
+use a host-parity filesystem fence: the agent keeps the ordinary host HOME,
+credentials, Git, network, ports, processes, tools, and readable filesystem,
+while ZSR changes only the actor's write authority for recognized Design
+territory. Root-controlled cloud workers retain the pre-existing tenant-isolated
+profile. The packaged local profile passed its live Linux x64 and Apple-silicon
+macOS host-parity matrices; macOS x64, Linux arm64, and a production cloud image
+remain separate release qualifications.
 
 **Protected-document relationship:** this plan does not modify
 `autonomous-code-design-foundation.md`. Changes to that protected document
 remain separate maintainer-approved work.
+
+## Current two-profile contract
+
+This section supersedes the older local private-HOME/shadow-Git plan retained
+below as historical design evidence and as the cloud-worker implementation.
+
+| Deployment / actor           | Filesystem write policy                                                                                                                                                                                                                                                                                      | Everything else                                                                                                                                                                                                                                                                                       |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local code agent             | Host filesystem writable except every recognized active, prospective, or additional Design directory and generation-private ZSR control descriptors. Design remains readable.                                                                                                                                | The exact normal child environment is preserved (minus engine bearer/control variables). HOME/XDG state, Keychain, GH/GitHub tokens, SSH agent, Git configuration, hooks, native Git stderr/exit codes, network, Unix sockets, processes, logs, package managers, and direct ports use host behavior. |
+| Local design agent substrate | Active workspace and admitted additional repository roots are read-only; every recognized Design directory is reopened writable. The minimal canonical Git metadata directories are writable so native Git can replace indexes and refs atomically. Host paths outside those repository roots remain normal. | Same host-parity runtime. The boundary actor exists and is qualified, but no production Design-agent feature selects it yet.                                                                                                                                                                          |
+| Root-controlled cloud worker | Existing private HOME, private/shadow Git, credential projection, network/service brokers, namespaces, cgroups, seccomp, and tenant identity remain in force.                                                                                                                                                | This is a different deployment trust boundary and never falls back to local host parity.                                                                                                                                                                                                              |
+
+Local host parity is selected explicitly by `ZerosEngine`; omission selects the
+older isolated profile. A validated cloud deployment marker and local host parity
+are mutually exclusive. This makes a future unconfigured cloud caller fail
+closed instead of inheriting desktop authority.
+
+The local fast path deletes work instead of caching it: no provider-HOME copy,
+shadow repository, Git dispatcher/checkpoint, remote broker, network bridge,
+port interposer, credential mask, admission queue, or parked-world refill is on
+the session path. The earlier boot-burst and two-phase-canary proposals are
+therefore unnecessary for local sessions: their expensive inputs no longer
+exist, and the remaining exact filesystem canary is already below one second on
+the measured Linux and Apple-silicon Mac hosts. They remain relevant only if the
+isolated/cloud path needs the same latency target.
+
+On macOS, private container capability is shared per canonical workspace and
+actor-policy key rather than provisioned once per chat. The stable VM control
+root contains no provider credentials, Git projection, command descriptor, or
+session HOME. Per-session references keep the worker alive while in use; the
+last release proves deletion. This changes the container memory shape from one
+3 GiB machine per container-using chat to one machine per concurrently active
+workspace key.
+
+The filesystem fence governs the admitted process tree. Unrestricted access to
+an already-running same-user service is, by definition, delegated authority of
+that service rather than a syscall by the fenced process. Known container
+workflows use an actor-scoped private worker for this reason. Any future local
+automation/deputy integration that can write host paths must preserve the same
+actor policy; it cannot be treated as a transparent byte tunnel.
+
+### Design recognition is protected, not only Design content
+
+Recognition of a Design directory comes from two pieces of ordinary repository
+content: a `.zeros-canvas.json` marker in Git's index or `HEAD`, and the
+`[design] directory` pointer in `.zeros/settings*.toml`. Host parity hands a code
+actor the rest of the machine, so leaving recognition unprotected would let an
+agent un-register a Design folder — the current session's fence is unaffected, but
+the NEXT admission would protect nothing.
+
+**This is closed in engine state, not with a filesystem rule.** Recognition is
+remembered in `design/recognition-store.ts` and unioned into every later territory
+build, so a folder Zeros has admitted stays protected no matter what the pointer or
+the marker say afterwards. Two properties make that safe rather than brittle:
+
+- A remembered name is honoured only while its directory still exists on disk.
+  Otherwise sticky protection would turn a legitimately deleted Design folder into
+  a permanent `the recognized Design folder is missing from this checkout` failure
+  — the tidy-up bricking the workspace.
+- The store file itself IS write-denied under parity. It is engine data, not
+  repository content, so nothing pulls or checks it out; leaving it writable would
+  make the backstop as editable as the evidence it backs up.
+
+The canvas marker needs no rule of its own: it lives inside the protected
+directory, so Design content denial already covers it.
+
+`designRecognitionPaths` on the territory names the recognition inputs explicitly.
+The isolated/cloud profile denies them (through `writeCapabilities.deniedPaths`);
+host parity deliberately does not — see the measured reason below.
+
+Design **content** protection is unchanged and remains kernel-enforced and
+re-proven every admission, now including the case where Git itself attempts the
+write: `check:zsr`'s `design-git-restore-denial` diverges a tracked Design file
+through history so a fenced `git checkout <commit> -- <design>` really tries to
+write protected territory. Mixed code/Design destructive commands are no longer
+atomic — the code half may apply while the Design half is refused path-by-path —
+which is an accepted trade of removing the brokered checkpoint, and is pinned by
+test rather than left to discovery.
+
+**Why `.zeros` is not write-denied under parity — measured, then decided.** It was
+denied first, and the cost was real: repositories commit `.zeros/settings.toml`, so
+a fenced `git checkout`/`pull`/`reset --hard` that had to rewrite it failed on that
+path with git's own `unable to unlink old '.zeros/settings.toml': Read-only file
+system` while the code paths in the same command still applied. Recurring friction
+on the most ordinary Git operations there is, in direct conflict with "code
+workspaces work like before ZSR".
+
+What the deny bought was narrow, because sticky recognition already covers
+de-registration on its own. The only case it added was a Design folder that arrives
+mid-session — an agent runs `git pull` — and is de-registered before any admission
+has recorded it. **Maintainer decision (2026-08-18): drop the deny, keep sticky
+recognition.** That case is the accepted residual.
+
+Both halves of the resulting split are gate-asserted so neither can drift:
+`repo-settings-host-parity-write` proves the pointer is writable,
+`design-marker-write-denial` proves the marker is not, and
+`lets git restore the Design pointer like any other tracked file` proves a real
+in-fence checkout of that file succeeds whole while Design stays protected.
+
+Re-enabling is one line if the threat model changes: add
+`...designRecognitionPaths` back to the parity `denyWrite` in `policy.ts`. The
+isolated/cloud profile is unaffected either way — it keeps denying them through
+`territoryDenies`.
+
+### Retained-but-unreachable local machinery — keep-or-prune decision
+
+**Decision: keep, do not prune.** The private-HOME overlay and parked-world pool,
+shadow Git and its collection/remote broker, the macOS Git interposer and the
+compiled `zsr-git-dispatch` helper, the network bridge and port interposer, the
+credential projection, and the admission gate are all unreachable on a local
+desktop session now that macOS and Linux desktops always select host parity. They
+are NOT dead code: they are the entire implementation of the root-controlled
+cloud-worker profile, which is a different trust boundary that never falls back to
+parity. Deleting them would delete the cloud profile.
+
+What that decision costs and what is done about it:
+
+- **Bundle size.** The retained modules ship in the desktop app (shadow Git alone
+  is ~355 KB of source). Accepted: they are the same artifact the cloud worker
+  runs, and a separate cloud-only bundle would create two supervisors to qualify
+  instead of one.
+- **Boot work.** The sweeps that recover this machinery scan trees a parity
+  session can no longer create. Under parity they now run only while pre-pivot
+  residue is still present on disk, reclaim what they can prove is safe, and then
+  remove the emptied roots — so a steady-state local boot does no work here and the
+  pre-pivot stores stop occupying disk. A root holding state the sweep could not
+  prove safe is left alone and retried next boot; tidy-up must never be the thing
+  that loses unmerged work.
+- **Provider state.** Cursor's per-session state overlay was the one adapter still
+  routing provider state through a boundary-private directory under parity. It now
+  writes the durable per-workspace store directly — one store per workspace shared
+  by concurrent sessions, the pre-ZSR arrangement, at the location Zeros already
+  used so existing chats keep their history. The overlay, its merge baseline, and
+  its crash-recovery hold remain for the isolated/cloud profile, whose HOME is a
+  projection that does not survive teardown.
+
+Re-evaluate this decision if the cloud worker ever ships as a separate binary or
+image; until then the correct action is to keep the machinery reachable by the
+cloud profile and to keep it off the local hot path, which is what the parity
+branches enforce.
 
 ### Current implementation ledger
 
@@ -28,17 +160,17 @@ means source and deterministic tests are present. “Qualified” requires the l
 matrix on the exact shipped OS/image/architecture; a nearby CI container or a
 weaker provider-native sandbox is not evidence.
 
-| Phase                                  | Current state                                                                                                                                                                                                                       | Graduation evidence still required                                                                                                                                                                           |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 0 — contract and fail-closed admission | Implemented; all required deterministic repository gates pass on the final working-tree content.                                                                                                                                    | Repeat CI on the immutable commit.                                                                                                                                                                           |
-| 1 — exact pin/backend decision         | Implemented with audited `srt` `0.0.73`, patch digest, license, generated policy, native attack helper, and a secure macOS arm64 run on Darwin 25.3.0.                                                                              | First immutable-commit macOS x64 and Linux arm64 runs. This Vercel host cannot substitute because its outer sandbox denies the bubblewrap `/proc` mount and UID map.                                         |
-| 2 — supervisor/backends                | Seatbelt and bubblewrap backends plus the retained cloud-worker contract are implemented. macOS arm64 engine and signed packaged-app runtime smokes pass.                                                                           | macOS x64 packaged smoke and an actual cloud image attestation.                                                                                                                                              |
-| 3 — uniform providers                  | Claude, Codex, and Cursor use the same gateway/boundary contract; OpenCode is the whole-runtime conformance fixture. Offline startup/handshake smokes pass for the pinned Claude, Codex, Cursor Node, and Cursor Electron runtimes, and a real contained Claude turn completed in Zeros Dev. | A controlled credentialed normal-vs-contained differential on each release backend; the successful user-driven contained turn does not substitute for that comparison.                                     |
-| 4 — shadow Git                         | Implemented for every admitted Git owner, cwd/`-C` dispatch, native macOS Git interposition, private metadata/brokers, CAS promotion, credentials, signing, partial clones, LFS, submodules, and linked-worktree validation.        | Repeat the live multi-owner/projection canary on each remaining release architecture/image.                                                                                                                  |
-| 5 — feature/services                   | Provider state, MCP, OAuth/open-URL, preview/HMR/WebSocket, local/Unix services, ports, and private containers are implemented. The arm64 Mac passed the real browser-preview and OrbStack normal/privileged-container matrices.    | Provision and qualify a private rootless container worker on every other graduated backend; never fall back to a host daemon socket.                                                                         |
-| 6 — tasks/lifecycle                    | Repository tasks, proof-carrying teardown, restart recovery, limits, human-terminal separation, and aggregate shutdown cleanup are implemented. macOS arm64 `smoke:engine` and teardown proof pass.                                 | macOS x64 and Linux release-host lifecycle runs; actual worker cgroup/PID-boundary evidence.                                                                                                                 |
-| 7 — cloud backend/qualification        | The existing admission, transport, validation, cleanup, and control-plane foundation is retained. No new cloud-workspace implementation is part of this closure.                                                                    | Actual provider image, delegated cgroups, tenant/workspace identity, live provider differential, lifecycle/soak/SSH, and verified deletion. Existing DB/provider integration tests remain environment-gated. |
-| 8 — rollout/design agent               | Boundary diagnostics, ports/services, territory restart state, and pin-maintenance gates are implemented.                                                                                                                           | Remaining backend graduation, a real Design-agent consumer, and explicit per-edit maintainer approval before any protected-foundation change.                                                                |
+| Phase                                  | Current state                                                                                                                                                                                                                                                                                | Graduation evidence still required                                                                                                                                                                           |
+| -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 0 — contract and fail-closed admission | Implemented; all required deterministic repository gates pass on the final working-tree content.                                                                                                                                                                                             | Repeat CI on the immutable commit.                                                                                                                                                                           |
+| 1 — exact pin/backend decision         | Implemented with audited `srt` `0.0.73`, patch digest, license, generated policy, native attack helper, and a secure macOS arm64 run on Darwin 25.3.0.                                                                                                                                       | First immutable-commit macOS x64 and Linux arm64 runs. This Vercel host cannot substitute because its outer sandbox denies the bubblewrap `/proc` mount and UID map.                                         |
+| 2 — supervisor/backends                | Seatbelt and bubblewrap backends plus the retained cloud-worker contract are implemented. macOS arm64 engine and signed packaged-app runtime smokes pass.                                                                                                                                    | macOS x64 packaged smoke and an actual cloud image attestation.                                                                                                                                              |
+| 3 — uniform providers                  | Claude, Codex, and Cursor use the same gateway/boundary contract; OpenCode is the whole-runtime conformance fixture. Offline startup/handshake smokes pass for the pinned Claude, Codex, Cursor Node, and Cursor Electron runtimes, and a real contained Claude turn completed in Zeros Dev. | A controlled credentialed normal-vs-contained differential on each release backend; the successful user-driven contained turn does not substitute for that comparison.                                       |
+| 4 — shadow Git                         | Implemented for every admitted Git owner, cwd/`-C` dispatch, native macOS Git interposition, private metadata/brokers, CAS promotion, credentials, signing, partial clones, LFS, submodules, and linked-worktree validation.                                                                 | Repeat the live multi-owner/projection canary on each remaining release architecture/image.                                                                                                                  |
+| 5 — feature/services                   | Provider state, MCP, OAuth/open-URL, preview/HMR/WebSocket, local/Unix services, ports, and private containers are implemented. The arm64 Mac passed the real browser-preview and OrbStack normal/privileged-container matrices.                                                             | Provision and qualify a private rootless container worker on every other graduated backend; never fall back to a host daemon socket.                                                                         |
+| 6 — tasks/lifecycle                    | Repository tasks, proof-carrying teardown, restart recovery, limits, human-terminal separation, and aggregate shutdown cleanup are implemented. macOS arm64 `smoke:engine` and teardown proof pass.                                                                                          | macOS x64 and Linux release-host lifecycle runs; actual worker cgroup/PID-boundary evidence.                                                                                                                 |
+| 7 — cloud backend/qualification        | The existing admission, transport, validation, cleanup, and control-plane foundation is retained. No new cloud-workspace implementation is part of this closure.                                                                                                                             | Actual provider image, delegated cgroups, tenant/workspace identity, live provider differential, lifecycle/soak/SSH, and verified deletion. Existing DB/provider integration tests remain environment-gated. |
+| 8 — rollout/design agent               | Boundary diagnostics, ports/services, territory restart state, and pin-maintenance gates are implemented.                                                                                                                                                                                    | Remaining backend graduation, a real Design-agent consumer, and explicit per-edit maintainer approval before any protected-foundation change.                                                                |
 
 The runtime publishes a machine-readable `container-workflows-unavailable`
 restriction instead of claiming full parity when the safe private container
@@ -48,6 +180,29 @@ unconditional “only Design differs” release claim is used. The protocol keep
 the former `additional-repository-git-read-only` value only for v1 compatibility
 with older engines; current ZSR admission provisions a shadow repository for
 every attached Design-bearing Git owner and does not emit it.
+
+### Post-audit hardening evidence (2026-08-18 UTC, Linux x64)
+
+Executed on the synchronized source after the host-parity audit, on this Vercel
+Linux x64 host:
+
+- `pnpm check:zsr`: `secure: true`, 31 checks — 30 pass, 1 macOS-only
+  not-required, 0 failures. Includes the four new checks
+  (`host-tls-trust-environment`, `design-marker-write-denial`,
+  `repo-settings-host-parity-write`, `design-git-restore-denial`) and measures the
+  local admission fast path at 264 ms code / 376 ms design.
+- Full matrix: 602 files / 6,734 tests passed, 1 file skipped (the macOS-only
+  compiled-dispatcher suite) with 31 platform skips. `pnpm typecheck`, `pnpm
+  lint`, `pnpm check:design-containment` (20 files / 433 tests) and
+  `check:packaging-paths` all pass.
+- The TLS-trust fix was proven in both directions: reintroducing the defect makes
+  admission refuse with `host-parity injected TLS-trust variables the engine did
+  not request`, so the canary now blocks the broken session instead of leaving it
+  to fail later on a `git clone https://…`.
+- Remaining macOS-only evidence for this change set: rerun `check:zsr` and the
+  focused containment matrix on Apple silicon, since Seatbelt (not bubblewrap)
+  enforces the two new Design denials there, and the compiled-dispatcher suite
+  cannot run on Linux at all.
 
 ### Latest live evidence (2026-08-16 UTC)
 
@@ -490,6 +645,12 @@ territory unless a separate explicit authority rule protects them.
 - Give mutable provider caches, transcripts, downloads, plugin installs, and
   SDK stores a private session overlay backed by an engine-owned persistence
   service where normal persistence is expected.
+- Admission cost stays proportional to what changed, not to how much history a
+  workspace has accumulated. Per-conversation transcript stores are durable but
+  projected only for the conversation a session actually resumes, and content
+  digests are remembered against exact filesystem identity so an unchanged
+  provider tree is not re-hashed. Both are caches over the same three-way
+  merge, never a second source of truth about what a session may write.
 - User-global authority-changing writes use the existing permission UI and a
   typed provider-state operation; they never require an unsandboxed child.
 - Authentication uses provider-native API credentials through masked/env or

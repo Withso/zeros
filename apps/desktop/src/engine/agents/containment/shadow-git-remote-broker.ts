@@ -63,6 +63,17 @@ const BROKER_OPERATIONS = new Set<ShadowGitBrokerOperation>([
 
 export interface ShadowGitRemoteBrokerOptions {
   readonly toolsRoot: string;
+  /** The repository's private Git root, passed rather than derived.
+   *
+   * It used to be computed as `dirname(toolsRoot)/git`, which is only the layout
+   * a standalone session happens to have. Under a `ShadowGitCollection` the two
+   * roots are siblings of different parents — `<shadow>/<id>/git` against
+   * `<tools>/git-repositories/<id>` — so the derived path named a directory that
+   * does not exist, `realpathSync` threw, and the client's linked-worktree
+   * branch could never match. Every production boundary is a collection, and the
+   * overrides that branch exists to drop are set only on darwin, so the whole
+   * failure was invisible to a suite that runs on Linux. */
+  readonly shadowRoot: string;
   readonly runtime: string;
   readonly gitBinary: string;
   readonly generation: string;
@@ -170,6 +181,9 @@ export class ShadowGitRemoteBroker {
     ) {
       throw new Error("shadow Git broker executables must be absolute");
     }
+    if (!path.isAbsolute(options.shadowRoot)) {
+      throw new Error("shadow Git broker private root must be absolute");
+    }
     this.options = options;
     try {
       await this.installClient();
@@ -198,7 +212,7 @@ export class ShadowGitRemoteBroker {
       token: this.token.toString("hex"),
       generation: options.generation,
       gitBinary: options.gitBinary,
-      shadowRoot: path.dirname(options.toolsRoot) + path.sep + "git",
+      shadowRoot: options.shadowRoot,
       maxResponseBytes: MAX_RESPONSE_BYTES,
       requestTimeoutMs: REQUEST_TIMEOUT_MS,
     });

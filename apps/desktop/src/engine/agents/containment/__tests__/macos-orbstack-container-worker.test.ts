@@ -27,6 +27,7 @@ import {
   MacosOrbStackContainerWorker,
   orbStackMachineName,
   recoverOrphanedOrbStackMachines,
+  resetAttestedOrbStackBundlesForTesting,
   validateOrbStackMachineInfo,
   type OrbStackCommandRunner,
 } from "../macos-orbstack-container-worker";
@@ -346,8 +347,9 @@ describe("macOS OrbStack container worker", () => {
               request += chunk;
             });
             stdin.once("finish", () => {
-              const challenge =
-                /\/_zeros_zsr\/attest\/([a-f0-9]{64})/.exec(request)?.[1];
+              const challenge = /\/_zeros_zsr\/attest\/([a-f0-9]{64})/.exec(
+                request,
+              )?.[1];
               if (!challenge) {
                 signalCode = "SIGABRT";
                 relay.emit("exit", null, signalCode);
@@ -361,8 +363,7 @@ describe("macOS OrbStack container worker", () => {
               )
                 .update(challenge)
                 .digest("hex");
-              const response =
-                `HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n${proof}`;
+              const response = `HTTP/1.1 200 OK\r\nContent-Length: 64\r\n\r\n${proof}`;
               exitCode = 0;
               // Node documents that `exit` may precede stdio drain. Model that
               // ordering deterministically so readiness never validates an
@@ -485,11 +486,14 @@ peer.once("error",()=>process.exit(125));`,
       forwardedBridgeTimeoutMs: 100,
       sessionKeyFactory: () => sessionKey,
     });
-    const lease = await controller.reserve({
-      executionId: "execution",
-      workspaceRoot: workspace,
-      sessionRoot: session,
-    });
+    const lease = await controller.reserve(
+      {
+        executionId: "execution",
+        workspaceRoot: workspace,
+        sessionRoot: session,
+      },
+      { activation: "on-first-connection" },
+    );
     await lease.start({
       generation: generation("abcdefghijklmnopqrstuvwx"),
       protectedRoots: [path.join(workspace, "Zeros Design")],
@@ -501,19 +505,34 @@ peer.once("error",()=>process.exit(125));`,
         },
       ],
     });
+    expect(runner.calls).toEqual([]);
+    expect(await readdir(session)).not.toContain(
+      ORBSTACK_MACHINE_RECOVERY_HOLD_FILE,
+    );
 
-    const response = await new Promise<string>((resolve, reject) => {
-      const peer = connect({ host: "127.0.0.1", port: lease.hostPort });
-      let value = "";
-      peer.setEncoding("utf8");
-      peer.once("connect", () => peer.end("GET /_ping HTTP/1.1\r\n\r\n"));
-      peer.on("data", (chunk) => {
-        value += chunk;
+    const requestPing = () =>
+      new Promise<string>((resolve, reject) => {
+        const peer = connect({ host: "127.0.0.1", port: lease.hostPort });
+        let value = "";
+        peer.setEncoding("utf8");
+        peer.once("connect", () => peer.end("GET /_ping HTTP/1.1\r\n\r\n"));
+        peer.on("data", (chunk) => {
+          value += chunk;
+        });
+        peer.once("end", () => resolve(value));
+        peer.once("error", reject);
       });
-      peer.once("end", () => resolve(value));
-      peer.once("error", reject);
-    });
-    expect(response).toMatch(/\r\n\r\nOK$/);
+    const responses = await Promise.all([requestPing(), requestPing()]);
+    expect(responses).toEqual([
+      expect.stringMatching(/\r\n\r\nOK$/),
+      expect.stringMatching(/\r\n\r\nOK$/),
+    ]);
+    expect(runner.calls.filter((args) => args[0] === "version")).toHaveLength(
+      1,
+    );
+    expect(
+      runner.calls.filter((args) => args.includes("--descriptor")),
+    ).toHaveLength(1);
     expect(lease.environment).toEqual({
       DOCKER_HOST: `tcp://127.0.0.1:${lease.hostPort}`,
       CONTAINER_HOST: `tcp://127.0.0.1:${lease.hostPort}`,
@@ -569,6 +588,40 @@ peer.once("error",()=>process.exit(125));`,
         entry.startsWith("orbstack-runtime-asset-"),
       ),
     ).toEqual([]);
+    expect(await readdir(session)).not.toContain(
+      ORBSTACK_MACHINE_RECOVERY_HOLD_FILE,
+    );
+  });
+
+  it("retires an unused on-demand lease without creating or deleting a machine", async () => {
+    const mounts = [workspace, session].sort();
+    const machineName = orbStackMachineName("unused-on-demand", mounts);
+    const runner = fakeRunner(machineName, mounts, 1);
+    const controller = new MacosOrbStackContainerWorker({
+      orbPath: orb,
+      cloudInitPath: cloudInit,
+      hostScriptPath: host,
+      containerWorkerPath: worker,
+      orbAttestor: (candidate) => candidate,
+      runner,
+    });
+    const lease = await controller.reserve(
+      {
+        executionId: "unused-on-demand",
+        workspaceRoot: workspace,
+        sessionRoot: session,
+      },
+      { activation: "on-first-connection" },
+    );
+
+    await lease.start({
+      generation: generation("unusedondemandgeneratio"),
+      protectedRoots: [path.join(workspace, "Zeros Design")],
+      gitProjections: [],
+    });
+    await lease.stopAndProve();
+
+    expect(runner.calls).toEqual([]);
     expect(await readdir(session)).not.toContain(
       ORBSTACK_MACHINE_RECOVERY_HOLD_FILE,
     );
@@ -685,9 +738,7 @@ peer.once("error",()=>process.exit(125));`,
         peer.once("error", reject);
       });
       expect(response).toMatch(/\r\n\r\nOK$/);
-      expect(runner.calls.some((args) => args.includes("--relay"))).toBe(
-        true,
-      );
+      expect(runner.calls.some((args) => args.includes("--relay"))).toBe(true);
     } finally {
       await lease.stopAndProve();
     }
@@ -1039,9 +1090,7 @@ peer.once("error",()=>process.exit(125));`,
         })
         .catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(Error);
-      expect(failure).not.toBeInstanceOf(
-        MacosContainerWorkerUnavailableError,
-      );
+      expect(failure).not.toBeInstanceOf(MacosContainerWorkerUnavailableError);
       expect((failure as Error).message).toMatch(/attestation failed/);
     } finally {
       await lease.stopAndProve();
@@ -1213,6 +1262,116 @@ peer.once("error",()=>process.exit(125));`,
     expect(() =>
       attestOrbStackCli(candidate, spoofedVerifier, "darwin"),
     ).toThrow(/code-signing identity is untrusted/);
+  });
+
+  it("memoizes only the whole-bundle sweep, per exact on-disk identity", async () => {
+    // `codesign --verify --deep --strict` over OrbStack.app measured 570-900ms
+    // on a 680 MiB bundle and ran once per admission — the whole of the
+    // container-reserve stage. It is cached; the trust decision is not.
+    resetAttestedOrbStackBundlesForTesting();
+    const bundle = path.join(root, "Memo.app");
+    const candidate = path.join(
+      bundle,
+      "Contents",
+      "MacOS",
+      "scli.app",
+      "Contents",
+      "MacOS",
+      "scli",
+    );
+    const codeResources = path.join(
+      bundle,
+      "Contents",
+      "_CodeSignature",
+      "CodeResources",
+    );
+    await mkdir(path.dirname(candidate), { recursive: true });
+    await mkdir(path.dirname(codeResources), { recursive: true });
+    await writeFile(candidate, "#!/bin/sh\n", { mode: 0o700 });
+    await chmod(candidate, 0o700);
+    await writeFile(codeResources, "<plist>v1</plist>\n", { mode: 0o644 });
+    // The real bundle path ends in OrbStack.app; point the attestor at this
+    // fixture by giving it that exact suffix.
+    const orbStackBundle = path.join(root, "OrbStack.app");
+    await rm(orbStackBundle, { recursive: true, force: true });
+    await mkdir(path.dirname(orbStackBundle), { recursive: true });
+    const { rename } = await import("node:fs/promises");
+    await rename(bundle, orbStackBundle);
+    const real = path.join(
+      orbStackBundle,
+      "Contents",
+      "MacOS",
+      "scli.app",
+      "Contents",
+      "MacOS",
+      "scli",
+    );
+    const realCodeResources = path.join(
+      orbStackBundle,
+      "Contents",
+      "_CodeSignature",
+      "CodeResources",
+    );
+
+    const calls: string[][] = [];
+    const verifier = (_command: string, args: readonly string[]) => {
+      calls.push([...args]);
+      return {
+        status: 0,
+        stdout: "",
+        stderr:
+          args[0] === "-d"
+            ? "Identifier=dev.kdrag0n.MacVirt.scli\nTeamIdentifier=HUAQ24HBR6\n"
+            : "",
+      };
+    };
+    const deepSweeps = () =>
+      calls.filter((args) => args.includes("--deep")).length;
+    const trustChecks = () =>
+      calls.filter((args) => args.some((arg) => arg.startsWith("-R="))).length;
+
+    expect(attestOrbStackCli(real, verifier, "darwin")).toBe(real);
+    expect(deepSweeps()).toBe(1);
+    expect(trustChecks()).toBe(1);
+
+    // Second admission, unchanged bundle: sweep memoized, trust decision re-run.
+    expect(attestOrbStackCli(real, verifier, "darwin")).toBe(real);
+    expect(deepSweeps()).toBe(1);
+    expect(trustChecks()).toBe(2);
+
+    // Tampering with any nested file must change CodeResources, which re-sweeps.
+    await writeFile(realCodeResources, "<plist>v2 tampered</plist>\n", {
+      mode: 0o644,
+    });
+    expect(attestOrbStackCli(real, verifier, "darwin")).toBe(real);
+    expect(deepSweeps()).toBe(2);
+    expect(trustChecks()).toBe(3);
+
+    // Replacing the CLI itself re-sweeps too.
+    await writeFile(real, "#!/bin/sh\n# changed\n", { mode: 0o700 });
+    await chmod(real, 0o700);
+    expect(attestOrbStackCli(real, verifier, "darwin")).toBe(real);
+    expect(deepSweeps()).toBe(3);
+
+    // A rejected identity must not leave a memo behind: the next admission
+    // sweeps again rather than inheriting a verdict recorded beside a failure.
+    const rejecting = (_command: string, args: readonly string[]) => {
+      calls.push([...args]);
+      return {
+        status: args.some((arg) => arg.startsWith("-R=")) ? 1 : 0,
+        stdout: "",
+        stderr:
+          args[0] === "-d"
+            ? "Identifier=dev.kdrag0n.MacVirt.scli\nTeamIdentifier=HUAQ24HBR6\n"
+            : "",
+      };
+    };
+    expect(() => attestOrbStackCli(real, rejecting, "darwin")).toThrow(
+      /code-signing identity is untrusted/,
+    );
+    const sweepsBefore = deepSweeps();
+    expect(attestOrbStackCli(real, verifier, "darwin")).toBe(real);
+    expect(deepSweeps()).toBe(sweepsBefore + 1);
   });
 
   it("reports only the safe OrbStack operation when a command fails", async () => {

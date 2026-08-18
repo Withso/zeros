@@ -382,4 +382,39 @@ describe("applyBridgeAgentExit — evicts parked questions", () => {
     expect(s?.pendingQuestions).toHaveLength(0);
     expect(s?.status).toBe("streaming");
   });
+
+  it("drops the dead execution's boundary snapshot with the execution", () => {
+    // The boundary belonged to the exact execution that died. With
+    // executionId nulled, the status-changed guard drops any late engine
+    // publish — so a stale snapshot here (e.g. `draining` from a territory
+    // restart) would render, and spin, forever.
+    seed("chatA", "claude", "sidA", "ready");
+    useSessionsStore.getState().patchSession("chatA", {
+      boundary: {
+        version: 1,
+        actor: "agent-code",
+        state: "draining",
+        backend: "zeros-srt",
+        designProtection: {
+          required: false,
+          enforced: true,
+          protectedDirectoryCount: 0,
+        },
+        parity: { level: "full", restrictions: [] },
+        lifecycle: {
+          lastTransition: "territory-restart",
+          transitionedAt: 1,
+        },
+        checkedAt: 1,
+      } as never,
+      boundaryPorts: { ports: [] } as never,
+    });
+
+    useSessionsStore.getState().applyBridgeAgentExit("claude", "sidA");
+
+    const s = useSessionsStore.getState().sessions["chatA"];
+    expect(s?.executionId ?? null).toBeNull();
+    expect(s?.boundary).toBeNull();
+    expect(s?.boundaryPorts).toBeNull();
+  });
 });

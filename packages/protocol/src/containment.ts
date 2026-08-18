@@ -92,7 +92,15 @@ export interface ExecutionBoundaryServicesStatus {
 }
 
 export type ExecutionBoundaryGitState =
+  /** No repository is involved in this session at all. */
   | "not-applicable"
+  /** The session uses the workspace's own repository directly, with no private
+   * projection to promote. This is the local desktop contract: there is nothing
+   * to synchronize because the agent's commits already landed in the real repo.
+   * Distinct from `not-applicable` because the difference is user-visible — a
+   * local session in a real Git repo must not be labelled "not a Git
+   * workspace". */
+  | "native"
   | "ready"
   | "synchronizing"
   | "clean"

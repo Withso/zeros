@@ -188,6 +188,7 @@ import {
   createDesignFrame,
   deleteDesignFrame,
   designDirectoryNameFor,
+  DESIGN_CANVAS_FILE,
   DESIGN_TOKENS_FILE,
   duplicateDesignFrame,
   lintDesignDocument,
@@ -611,13 +612,95 @@ const DESIGN_WORKSPACE_BLOCKED_MUTATIONS = new Set<string>([
   "workspace.setWorkingDirectories",
 ]);
 
-/** Is `candidate` (a repo-relative path) the design directory or inside it? */
-function isDesignPath(candidate: string, designDir: string): boolean {
-  const normalized = candidate
-    .replace(/\\/g, "/")
-    .replace(/^\.\//, "")
-    .replace(/\/+$/, "");
-  return normalized === designDir || normalized.startsWith(`${designDir}/`);
+/** Recognizes design territory the way the agent boundary does: by MARKER, not
+ *  by name.
+ *
+ *  The pointer name alone was never sufficient. `designDirectoryNameFor` is an
+ *  in-memory registry primed by entering Design mode, resolving the pointer,
+ *  building an agent territory, or changing the setting — none of which run on
+ *  a plain code-mode workspace load. Until something primed it the registry
+ *  answered with the DEFAULT name, so a renamed or nested design folder
+ *  (`apps/web/designs`) matched nothing and every code-side write into it was
+ *  allowed. A repo may also hold SEVERAL design folders, of which the pointer
+ *  names only the active one; the others are design territory too.
+ *
+ *  `.zeros-canvas.json` is the same evidence `discoverDesignDirectories` uses,
+ *  so recognition needs no priming, survives renames, and covers every design
+ *  folder at once. The file has to exist on disk to be written, so its marker
+ *  is on disk as well — the git-based discovery stays the authority for the
+ *  territory/boundary, which additionally needs the HEAD-and-index view.
+ *
+ *  The primed pointer is UNIONED in, never intersected: a folder reserved for
+ *  first use has no marker yet, and more evidence may only refuse more. The
+ *  workspace root itself is never probed — a marker there would otherwise turn
+ *  the whole repository read-only. */
+function makeDesignPathRecognizer(
+  workspacePath: string,
+  pointerName: string,
+): (candidate: string) => boolean {
+  // One `git.stage` can carry thousands of paths that share a handful of
+  // directories, so each directory is probed at most once per operation.
+  const probed = new Map<string, boolean>();
+  const hasMarker = (relativeDir: string): boolean => {
+    const cached = probed.get(relativeDir);
+    if (cached !== undefined) return cached;
+    const found = fs.existsSync(
+      nodePath.join(
+        workspacePath,
+        ...relativeDir.split("/"),
+        DESIGN_CANVAS_FILE,
+      ),
+    );
+    probed.set(relativeDir, found);
+    return found;
+  };
+  return (candidate: string): boolean => {
+    const normalized = candidate
+      .replace(/\\/g, "/")
+      .replace(/^\.\//, "")
+      .replace(/\/+$/, "");
+    if (!normalized || normalized.startsWith("../")) return false;
+    if (
+      pointerName &&
+      (normalized === pointerName || normalized.startsWith(`${pointerName}/`))
+    ) {
+      return true;
+    }
+    const segments = normalized.split("/").filter((segment) => segment.length > 0);
+    // Depth 0 is the workspace root and is deliberately skipped.
+    for (let depth = segments.length; depth >= 1; depth -= 1) {
+      if (hasMarker(segments.slice(0, depth).join("/"))) return true;
+    }
+    return false;
+  };
+}
+
+/** Every Design folder the Working Folders picker must lock.
+ *
+ *  Deliberately GIT-based rather than the on-disk marker walk used by the write
+ *  guard: this is the one place that has to see a design folder which is
+ *  already excluded from the checkout, so that unticking it can never be the
+ *  thing that hides it from every later check. `discoverDesignDirectories`
+ *  reads the index and HEAD, so a folder off disk is still found. The primed
+ *  pointer is unioned in for a folder reserved before its first save.
+ *
+ *  Discovery failure yields the pointer alone rather than an empty list: fewer
+ *  locks would be the unsafe direction. */
+async function designRootsForWorkingDirectories(
+  cwd: string,
+): Promise<string[]> {
+  const roots = new Set<string>();
+  const pointer = designDirectoryNameFor(cwd);
+  if (pointer) roots.add(pointer);
+  try {
+    for (const discovered of await discoverDesignDirectories(cwd)) {
+      roots.add(discovered);
+    }
+  } catch {
+    // A non-Git or unborn checkout has no Working Folders feature at all, so
+    // there is nothing left to protect here.
+  }
+  return [...roots];
 }
 
 /** Hard-refuse code-side writes aimed at the design directory. Design files
@@ -633,10 +716,11 @@ function assertNoDesignPathWrites(
 ): void {
   const workspace = getWorkspaceById(workspaceId);
   if (!workspace) return;
-  const designDir = designDirectoryNameFor(workspace.path);
-  const offending = paths.filter((candidate) =>
-    isDesignPath(candidate, designDir),
+  const isDesignPath = makeDesignPathRecognizer(
+    workspace.path,
+    designDirectoryNameFor(workspace.path),
   );
+  const offending = paths.filter(isDesignPath);
   if (offending.length === 0) return;
   throw new GitError({
     code: "VALIDATION_FAILED",
@@ -2946,9 +3030,10 @@ export class WorkspaceService {
       // the worktree's own `.git` config and it survives restarts. A second
       // copy in settings could only drift from the real thing.
       case "workspace.listWorkingDirectories": {
-        return getWorkingDirectories(
-          this.resolveReadCwd(reqStr(params, "workspaceId"), remote),
-        );
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        return getWorkingDirectories(cwd, {
+          designRoots: await designRootsForWorkingDirectories(cwd),
+        });
       }
       case "workspace.setWorkingDirectories": {
         const raw = params.directories;
@@ -2993,7 +3078,9 @@ export class WorkspaceService {
           cwd,
         );
         try {
-          return await setWorkingDirectories(cwd, directories);
+          return await setWorkingDirectories(cwd, directories, {
+            designRoots: await designRootsForWorkingDirectories(cwd),
+          });
         } finally {
           // Always resume, including after a throw: the checkout is still live
           // (unlike archive/delete, nothing moved it), so leaving it unwatched
@@ -4211,7 +4298,13 @@ export class WorkspaceService {
         }
         // readWorkspaceFile re-checks the RESOLVED + realpath target so a
         // collapsing path ('.env/.') or an innocuously-named symlink can't leak.
-        return readWorkspaceFile(cwd, rel, { remote });
+        const read = await readWorkspaceFile(cwd, rel, { remote });
+        // Tag Design territory with the SAME recognizer file.write refuses by,
+        // so the viewer never advertises an Edit action the write path will
+        // reject. This is presentation only — the guard below is the authority.
+        return makeDesignPathRecognizer(cwd, designDirectoryNameFor(cwd))(rel)
+          ? { ...read, designPath: true }
+          : read;
       }
       case "file.write": {
         const targetWorkspaceId = reqStr(params, "workspaceId");
@@ -4799,10 +4892,13 @@ export class WorkspaceService {
           // write them without an unfence). Refuse while any exist rather
           // than silently destroying unsaved design work.
           const target = getWorkspaceById(workspaceId)!;
-          const designDir = designDirectoryNameFor(target.path);
-          const untrackedDesign = (await status(workspaceId)).untracked.filter(
-            (candidate) => isDesignPath(candidate, designDir),
+          const isDesignPath = makeDesignPathRecognizer(
+            target.path,
+            designDirectoryNameFor(target.path),
           );
+          const untrackedDesign = (
+            await status(workspaceId)
+          ).untracked.filter(isDesignPath);
           if (untrackedDesign.length > 0) {
             throw new GitError({
               code: "VALIDATION_FAILED",

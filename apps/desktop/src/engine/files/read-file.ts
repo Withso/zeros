@@ -39,6 +39,12 @@ export interface ReadFileResult {
   content?: string;
   dataUrl?: string;
   error?: string;
+  /** True when this path is Design territory, so the viewer must not offer an
+   *  Edit affordance that `file.write` is going to refuse. Advisory only: the
+   *  engine guard remains the authority, and a transport that omits this flag
+   *  simply shows an editor whose save is refused — the pre-existing
+   *  behaviour, never a false read-only. */
+  designPath?: boolean;
 }
 
 function fail(rel: string, message: string): ReadFileResult {

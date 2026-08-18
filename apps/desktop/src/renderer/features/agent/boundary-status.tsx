@@ -68,6 +68,8 @@ export function boundaryGitCopy(
 ): string {
   if (!git || git.state === "not-applicable") return "Not a Git workspace";
   switch (git.state) {
+    case "native":
+      return "This repository, directly";
     case "ready":
       return "Private ChangeSet ready";
     case "synchronizing":
@@ -128,7 +130,13 @@ export function boundaryStatusRows(
     });
   }
   if (status.git) {
-    rows.push({ label: "Private Git", value: boundaryGitCopy(status.git) });
+    // "Private Git" describes a projection that gets promoted. A native session
+    // has none, so the row is just "Git" — the label and the value have to agree
+    // or the row reads as a contradiction.
+    rows.push({
+      label: status.git.state === "native" ? "Git" : "Private Git",
+      value: boundaryGitCopy(status.git),
+    });
   }
   if (status.lifecycle?.lastTransition === "territory-restart") {
     rows.push({

@@ -47,6 +47,7 @@ describe("ZSR shadow Git remote broker", () => {
     });
     const broker = await ShadowGitRemoteBroker.start({
       toolsRoot,
+      shadowRoot: path.join(root, "git"),
       runtime: process.execPath,
       gitBinary: executable("git"),
       generation: newTerritoryGeneration(),
@@ -91,6 +92,7 @@ describe("ZSR shadow Git remote broker", () => {
     await writeFile(nativeGit, "#!/bin/sh\nexit 37\n", { mode: 0o700 });
     const broker = await ShadowGitRemoteBroker.start({
       toolsRoot,
+      shadowRoot: path.join(root, "git"),
       runtime: process.execPath,
       gitBinary: nativeGit,
       generation: newTerritoryGeneration(),

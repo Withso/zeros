@@ -1,12 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  realpath,
-  rm,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -17,10 +11,7 @@ const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../..",
 );
-const supervisorScript = path.join(
-  projectRoot,
-  "binaries/zsr-supervisor.mjs",
-);
+const supervisorScript = path.join(projectRoot, "binaries/zsr-supervisor.mjs");
 const networkBridgeScript = path.join(
   projectRoot,
   "binaries/zsr-network-bridge.mjs",
@@ -34,6 +25,7 @@ const fixturePath = fileURLToPath(import.meta.url);
 function boundary() {
   return new ZsrExecutionBoundary({
     projectRoot,
+    localHostParity: true,
     supervisorScript,
     networkBridgeScript,
     macosProcessDomainHelper: processDomainHelper,
@@ -137,7 +129,8 @@ async function run(): Promise<void> {
     networkBridgeScript,
     processDomainHelper,
   ]) {
-    if (!existsSync(required)) throw new Error("ZSR packaged helper is missing");
+    if (!existsSync(required))
+      throw new Error("ZSR packaged helper is missing");
   }
   const root = await realpath(
     await mkdtemp(path.join(os.tmpdir(), "zeros-zsr-macos-engine-")),

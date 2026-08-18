@@ -79,6 +79,56 @@ describe("working directories (sparse-checkout)", () => {
     expect(restored.sparse).toBe(false);
   });
 
+  it("never lets a Design root leave the checkout, whatever the caller asks", async () => {
+    // Hiding Design territory takes the canvas off disk: Design mode would
+    // open onto nothing, and the on-disk marker every code-side write guard
+    // recognizes would go with it.
+    const designRoots = ["drop"];
+    const listed = await getWorkingDirectories(repo, { designRoots });
+    expect(listed.locked).toEqual(["drop"]);
+
+    // Deselecting it explicitly — a stale renderer, an older client, or a
+    // direct op — is corrected by the engine rather than honoured.
+    const applied = await setWorkingDirectories(repo, ["keep"], {
+      designRoots,
+    });
+    expect(applied.locked).toEqual(["drop"]);
+    expect(applied.included).toEqual(["drop", "keep"]);
+    expect(await exists(path.join(repo, "drop", "b.txt"))).toBe(true);
+    expect(await exists(path.join(repo, "nested"))).toBe(false);
+
+    // "Deselect all" keeps it too, and cannot strip the worktree bare.
+    const emptied = await setWorkingDirectories(repo, [], { designRoots });
+    expect(emptied.included).toEqual(["drop"]);
+    expect(await exists(path.join(repo, "drop", "b.txt"))).toBe(true);
+  });
+
+  it("locks the TOP-LEVEL segment of a nested Design folder", async () => {
+    // Excluding `nested` would take `nested/deep` with it, so the ancestor is
+    // what has to be locked.
+    const designRoots = ["nested/deep"];
+    const state = await getWorkingDirectories(repo, { designRoots });
+    expect(state.locked).toEqual(["nested"]);
+    const applied = await setWorkingDirectories(repo, ["keep"], {
+      designRoots,
+    });
+    expect(applied.included).toEqual(["keep", "nested"]);
+    expect(await exists(path.join(repo, "nested", "deep", "d.txt"))).toBe(true);
+  });
+
+  it("locks nothing when no Design root is a tracked top-level candidate", async () => {
+    // A Design pointer naming a folder this feature cannot reach needs no
+    // protection here, and must not invent a phantom row.
+    const state = await getWorkingDirectories(repo, {
+      designRoots: ["Zeros Design"],
+    });
+    expect(state.locked).toEqual([]);
+    const applied = await setWorkingDirectories(repo, ["keep"], {
+      designRoots: ["Zeros Design"],
+    });
+    expect(applied.included).toEqual(["keep"]);
+  });
+
   it("can preserve a sparse cone when every tracked directory is selected", async () => {
     const applied = await setWorkingDirectories(
       repo,

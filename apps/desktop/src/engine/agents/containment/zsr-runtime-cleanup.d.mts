@@ -11,3 +11,8 @@ export interface ZsrCleanupOptions {
 }
 
 export function cleanupZsrRuntime(options: ZsrCleanupOptions): Promise<void>;
+
+export function withZsrRuntimeCleanup<T>(
+  options: ZsrCleanupOptions,
+  action: () => Promise<T>,
+): Promise<T>;

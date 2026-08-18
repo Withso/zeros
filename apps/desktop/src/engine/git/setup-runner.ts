@@ -279,6 +279,9 @@ export class SetupManager {
         workspaceRoot: cwd,
         repoRoot,
         env,
+        // Stated, not inherited: the user is watching the Setup tab, so this
+        // stays in the interactive class even if the factory's default changes.
+        admissionPriority: "interactive",
       });
       if (flight.cancelled) {
         await boundary.stopAndProve();

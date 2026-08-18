@@ -3,11 +3,20 @@
 // disposeSession (the fix for the "live hook token + session dir + server
 // child leak until app quit" finding).
 
+import { lstat, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { AgentGateway } from "../gateway";
 import type { PreparedBoundary } from "../containment/types";
 import type { AgentAdapter } from "../types";
+import {
+  ensureSessionDir,
+  removeSessionDir,
+  sessionsRoot,
+} from "../session-paths";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
 function makeGateway() {
@@ -25,6 +34,50 @@ function makeGateway() {
 }
 
 describe("AgentGateway.endSession", () => {
+  it("removes a transient session directory only after its boundary stop proof succeeds", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-gateway-retire-proof-"));
+    const previousDataDir = process.env.ZEROS_DATA_DIR;
+    process.env.ZEROS_DATA_DIR = path.join(root, "engine");
+    const executionId = "transient-retirement";
+    try {
+      await ensureSessionDir(executionId);
+      const boundaryRoot = path.join(
+        sessionsRoot(),
+        executionId,
+        "boundary",
+        "generation",
+      );
+      const descriptor = path.join(
+        boundaryRoot,
+        "commands",
+        "process-domain.json",
+      );
+      await mkdir(path.dirname(descriptor), { recursive: true });
+      await writeFile(descriptor, "{}", { mode: 0o600 });
+
+      const gw = makeGateway() as unknown as {
+        retirePreparedBoundary(
+          executionId: string,
+          boundary: PreparedBoundary,
+        ): Promise<void>;
+      };
+      await gw.retirePreparedBoundary(executionId, {
+        stopAndProve: async () => {
+          await expect(lstat(descriptor)).resolves.toBeDefined();
+          await rm(boundaryRoot, { recursive: true });
+        },
+      } as unknown as PreparedBoundary);
+
+      await expect(
+        lstat(path.join(sessionsRoot(), executionId)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (previousDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
+      else process.env.ZEROS_DATA_DIR = previousDataDir;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("clears routing maps and calls the adapter's disposeSession", async () => {
     const gw = makeGateway() as unknown as {
       adapters: Map<string, AgentAdapter>;
@@ -142,6 +195,63 @@ describe("AgentGateway.endSession", () => {
       gw.endSession("strict", "s5", { failClosed: true }),
     ).rejects.toThrow("lease registry unavailable");
     expect(calls).toEqual(["revoke", "dispose", "stop"]);
+  });
+
+  it("keeps process-domain proof state until stop succeeds, then removes the session", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-gateway-stop-proof-"));
+    const previousDataDir = process.env.ZEROS_DATA_DIR;
+    process.env.ZEROS_DATA_DIR = path.join(root, "engine");
+    const sessionId = "proof-before-cleanup";
+    try {
+      await ensureSessionDir(sessionId);
+      const boundaryRoot = path.join(
+        sessionsRoot(),
+        sessionId,
+        "boundary",
+        "generation",
+      );
+      const descriptor = path.join(
+        boundaryRoot,
+        "commands",
+        "process-domain.json",
+      );
+      await mkdir(path.dirname(descriptor), { recursive: true });
+      await writeFile(descriptor, "{}", { mode: 0o600 });
+
+      const gw = makeGateway() as unknown as {
+        adapters: Map<string, AgentAdapter>;
+        executionToAgent: Map<string, string>;
+        executionBoundaries: Map<string, PreparedBoundary>;
+        endSession(
+          agentId: string,
+          executionId: string,
+          opts: { failClosed: true },
+        ): Promise<void>;
+      };
+      gw.adapters.set("strict", {
+        agentId: "strict",
+        disposeSession: async () => removeSessionDir(sessionId),
+      } as unknown as AgentAdapter);
+      gw.executionToAgent.set(sessionId, "strict");
+      gw.executionBoundaries.set(sessionId, {
+        revoke: async () => {},
+        stopAndProve: async () => {
+          await expect(lstat(descriptor)).resolves.toBeDefined();
+          await rm(boundaryRoot, { recursive: true });
+        },
+      } as unknown as PreparedBoundary);
+
+      await expect(
+        gw.endSession("strict", sessionId, { failClosed: true }),
+      ).resolves.toBeUndefined();
+      await expect(
+        lstat(path.join(sessionsRoot(), sessionId)),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      if (previousDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
+      else process.env.ZEROS_DATA_DIR = previousDataDir;
+      await rm(root, { recursive: true, force: true });
+    }
   });
 
   it("retains a failed boundary proof so a lifecycle retry cannot forget a detached descendant", async () => {

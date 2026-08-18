@@ -4,6 +4,7 @@ import {
   readFile,
   readdir,
   rm,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -12,8 +13,11 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  armCursorStateRecovery,
+  durableCursorStateRoot,
   prepareCursorStateOverlay,
   promoteCursorStateOverlay,
+  recoverCursorStateOverlays,
 } from "../state-overlay";
 
 let root: string;
@@ -60,6 +64,24 @@ afterEach(async () => {
 });
 
 describe("Cursor provider-state overlay", () => {
+  it("hands host parity the durable store itself, not a per-session copy", async () => {
+    const cwd = path.join(root, "workspace");
+    const durable = await durableCursorStateRoot(cwd);
+    // Same root the overlay path promotes INTO, so existing chats keep resuming
+    // against their own history — and it is stable across sessions, which is what
+    // makes concurrent parity sessions share one store the way they did pre-ZSR.
+    const overlay = await prepareCursorStateOverlay(await local("overlay"), cwd);
+    expect(durable).toBe(overlay.persistentRoot);
+    expect(await durableCursorStateRoot(cwd)).toBe(durable);
+    // Directly writable, with no baseline or recovery hold to reconcile.
+    await writeRecords(durable, "agents.ndjson", [
+      { agentId: "agent-live", name: "written in place" },
+    ]);
+    expect(await readRecords(durable, "agents.ndjson")).toEqual([
+      { agentId: "agent-live", name: "written in place" },
+    ]);
+  });
+
   it("persists records and seeds the next execution without exposing the durable root", async () => {
     const cwd = path.join(root, "workspace");
     const first = await prepareCursorStateOverlay(await local("first"), cwd);
@@ -133,5 +155,155 @@ describe("Cursor provider-state overlay", () => {
         "agents.ndjson",
       ),
     ).toEqual([{ agentId: "shared", name: "B" }]);
+  });
+
+  it("never follows an agent-created store symlink during trusted promotion", async () => {
+    const cwd = path.join(root, "workspace");
+    const overlay = await prepareCursorStateOverlay(
+      await local("symlink"),
+      cwd,
+    );
+    const outside = path.join(root, "outside.ndjson");
+    await writeRecords(root, "outside.ndjson", [
+      { agentId: "outside", name: "must-not-be-read" },
+    ]);
+    await symlink(outside, path.join(overlay.localRoot, "agents.ndjson"));
+
+    await expect(promoteCursorStateOverlay(overlay)).rejects.toThrow(
+      "agents.ndjson is not a bounded regular file",
+    );
+    await expect(
+      readFile(path.join(overlay.persistentRoot, "agents.ndjson"), "utf8"),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects an unbounded tiny-record store before trusted promotion", async () => {
+    const cwd = path.join(root, "workspace");
+    const overlay = await prepareCursorStateOverlay(
+      await local("record-count"),
+      cwd,
+    );
+    await writeFile(
+      path.join(overlay.localRoot, "run_events.ndjson"),
+      `${Array.from({ length: 250_001 }, (_, seq) =>
+        JSON.stringify({ runId: "run-1", seq }),
+      ).join("\n")}\n`,
+    );
+
+    await expect(promoteCursorStateOverlay(overlay)).rejects.toThrow(
+      "run_events.ndjson exceeded its record limit",
+    );
+  });
+
+  it("rejects an oversized individual record before trusted promotion", async () => {
+    const cwd = path.join(root, "workspace");
+    const overlay = await prepareCursorStateOverlay(
+      await local("record-size"),
+      cwd,
+    );
+    await writeRecords(overlay.localRoot, "agents.ndjson", [
+      { agentId: "agent-large", name: "x".repeat(2 * 1024 * 1024) },
+    ]);
+
+    await expect(promoteCursorStateOverlay(overlay)).rejects.toThrow(
+      "agents.ndjson contains an oversized record",
+    );
+  });
+
+  it("never follows a symlink substituted into durable state while seeding", async () => {
+    const cwd = path.join(root, "workspace");
+    const first = await prepareCursorStateOverlay(await local("durable"), cwd);
+    await writeRecords(first.localRoot, "agents.ndjson", [
+      { agentId: "seed", name: "safe" },
+    ]);
+    await promoteCursorStateOverlay(first);
+    const durableFile = path.join(first.persistentRoot, "agents.ndjson");
+    const outside = path.join(root, "outside.ndjson");
+    await writeRecords(root, "outside.ndjson", [
+      { agentId: "outside", name: "must-not-be-read" },
+    ]);
+    await rm(durableFile);
+    await symlink(outside, durableFile);
+
+    await expect(
+      prepareCursorStateOverlay(await local("after-substitution"), cwd),
+    ).rejects.toThrow("agents.ndjson is not a bounded regular file");
+  });
+
+  it("promotes a generation-private store after an engine crash", async () => {
+    const cwd = path.join(root, "workspace");
+    const generationRoot = path.join(
+      process.env.ZEROS_DATA_DIR!,
+      "sessions",
+      "cursor-crash",
+      "boundary",
+      "generation",
+    );
+    const localRoot = path.join(generationRoot, "provider", "cursor");
+    await mkdir(localRoot, { recursive: true, mode: 0o700 });
+    const crashed = await armCursorStateRecovery(
+      await prepareCursorStateOverlay(localRoot, cwd),
+    );
+    await writeRecords(crashed.localRoot, "agents.ndjson", [
+      { agentId: "survived", name: "Recovered" },
+    ]);
+
+    await expect(
+      recoverCursorStateOverlays({
+        sessionsRoot: path.join(process.env.ZEROS_DATA_DIR!, "sessions"),
+      }),
+    ).resolves.toEqual({
+      discovered: 1,
+      recovered: 1,
+      preserved: 0,
+      conflicts: 0,
+    });
+    const next = await prepareCursorStateOverlay(
+      await local("after-crash"),
+      cwd,
+    );
+    expect(await readRecords(next.localRoot, "agents.ndjson")).toEqual([
+      { agentId: "survived", name: "Recovered" },
+    ]);
+  });
+
+  it("does not fail a durable promotion when disposable baseline cleanup fails", async () => {
+    const cwd = path.join(root, "workspace");
+    const generationRoot = path.join(
+      process.env.ZEROS_DATA_DIR!,
+      "sessions",
+      "cursor-cleanup",
+      "boundary",
+      "generation",
+    );
+    const localRoot = path.join(generationRoot, "provider", "cursor");
+    await mkdir(localRoot, { recursive: true, mode: 0o700 });
+    const armed = await armCursorStateRecovery(
+      await prepareCursorStateOverlay(localRoot, cwd),
+    );
+    await writeRecords(armed.localRoot, "agents.ndjson", [
+      { agentId: "durable", name: "Promoted" },
+    ]);
+    const blockedParent = path.join(root, "blocked-cleanup");
+    const blockedBaseline = path.join(blockedParent, "baseline");
+    await writeFile(blockedParent, "not a directory");
+
+    await expect(
+      promoteCursorStateOverlay({
+        ...armed,
+        recovery: {
+          ...armed.recovery!,
+          baselineRoot: blockedBaseline,
+        },
+      }),
+    ).resolves.toEqual({ conflicts: [] });
+
+    const next = await prepareCursorStateOverlay(
+      await local("after-cleanup-failure"),
+      cwd,
+    );
+    expect(await readRecords(next.localRoot, "agents.ndjson")).toEqual([
+      { agentId: "durable", name: "Promoted" },
+    ]);
   });
 });

@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import {
   accessSync,
   constants as fsConstants,
@@ -64,6 +64,43 @@ const MAX_CONFIG_VALUE_BYTES = 1024 * 1024;
 const MAX_STAGED_FETCHES = 32;
 const MAX_REFLOGS = 4_096;
 const MAX_REFLOG_ENTRIES = 100_000;
+/** How many independent `git` reads of canonical state run at once inside one
+ * repository's build. Same bound the collection uses across repositories: a
+ * queue deep enough to hide spawn latency, shallow enough that a workspace with
+ * many refs cannot fork a storm. */
+const SHADOW_GIT_READ_CONCURRENCY = 4;
+
+/** Run `work` over `items` with at most `SHADOW_GIT_READ_CONCURRENCY` in flight.
+ * Every worker settles before the first rejection is rethrown, so a failure
+ * cannot leave a sibling read half-applied and unobserved — the same ordering
+ * the collection's builder relies on. */
+async function mapBoundedShadowGit<T, R>(
+  items: readonly T[],
+  work: (item: T) => Promise<R>,
+): Promise<R[]> {
+  if (items.length <= 1) {
+    return items.length === 0 ? [] : [await work(items[0]!)];
+  }
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const settled = await Promise.allSettled(
+    Array.from(
+      { length: Math.min(SHADOW_GIT_READ_CONCURRENCY, items.length) },
+      async () => {
+        for (;;) {
+          const index = next;
+          next += 1;
+          if (index >= items.length) return;
+          results[index] = await work(items[index]!);
+        }
+      },
+    ),
+  );
+  for (const worker of settled) {
+    if (worker.status === "rejected") throw worker.reason;
+  }
+  return results;
+}
 const ZERO_SHA1 = "0".repeat(40);
 const ZERO_SHA256 = "0".repeat(64);
 const UUID_V4_PATTERN =
@@ -157,6 +194,13 @@ export interface ShadowGitOptions {
   readonly remoteBroker?: ShadowGitRemoteBroker;
   /** Absolute fake SSH transport used only by the integration suite. */
   readonly trustedSshCommandForTesting?: string;
+  /** Optional per-phase recorder for the private-Git build. `private-git` was
+   * 509-2585ms in the 2026-08-17 measurements — frequently the largest
+   * engine-side admission stage — and had never been looked inside, which is
+   * exactly how the canary stayed a mystery for two rounds. Summed across a
+   * workspace's repositories by the caller. Timing only: it can never change
+   * what the build does. */
+  readonly onPhase?: (name: string, ms: number) => void;
   /** Deterministic crash-point injection for the recovery suite. Production
    * callers must omit it. Throw an error carrying `zsrSimulatedCrash: true` to
    * emulate abrupt process death without running in-process cleanup. */
@@ -243,6 +287,69 @@ function executableOnTrustedHostPath(name: string): string | null {
     }
   }
   return null;
+}
+
+let resolvedRealGitBinary: string | null | undefined;
+
+/** The git binary the engine and every contained child should actually exec.
+ *
+ * `/usr/bin/git` on macOS is not git. It is Apple's `xcode-select`
+ * multiplexer — one 118 KiB stub hard-linked under 78 tool names — which
+ * resolves the active developer directory and then execs the real binary.
+ * Measured on an M-series Mac, same command, same repository:
+ *
+ * | | shim `/usr/bin/git` | real binary |
+ * |---|---|---|
+ * | bare, warm | 8.6-9.4 ms/spawn | **2.8 ms/spawn** |
+ * | nested inside a live ZSR boundary | 176-189 ms | **5-6 ms** |
+ *
+ * The indirection is ~3x engine-side and **~35x inside the fence**, and both
+ * matter a great deal: an admission makes tens of git spawns per repository
+ * while building the private view, the admission canary makes one inside the
+ * fence, and a contained agent makes one for every shell command it runs.
+ *
+ * Resolution is by attempt and never trusts the environment: `DEVELOPER_DIR` is
+ * ignored, the active developer directory is read from `xcode-select` once per
+ * process, and the candidate must be a physical executable file that reports a
+ * git version. Anything unexpected keeps the binary the caller found on `PATH`,
+ * so nothing changes on Linux, with a Homebrew git, or on a machine whose
+ * developer directory is missing or broken. */
+function realGitBinary(found: string): string {
+  if (process.platform !== "darwin") return found;
+  if (resolvedRealGitBinary !== undefined)
+    return resolvedRealGitBinary ?? found;
+  resolvedRealGitBinary = null;
+  try {
+    // `xcode-select` is itself one of the 78 hard links, so this costs one
+    // shim invocation for the whole process lifetime.
+    const developerDir = spawnSync("/usr/bin/xcode-select", ["-p"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (developerDir.status !== 0) return found;
+    const directory = developerDir.stdout.trim();
+    if (!path.isAbsolute(directory)) return found;
+    const candidate = path.join(directory, "usr", "bin", "git");
+    const metadata = lstatSync(candidate);
+    if (!metadata.isFile() || metadata.isSymbolicLink()) return found;
+    accessSync(candidate, fsConstants.X_OK);
+    const version = spawnSync(candidate, ["--version"], {
+      encoding: "utf8",
+      timeout: 5_000,
+    });
+    if (version.status !== 0 || !/^git version /.test(version.stdout)) {
+      return found;
+    }
+    resolvedRealGitBinary = realpathSync(candidate);
+    return resolvedRealGitBinary;
+  } catch {
+    return found;
+  }
+}
+
+/** Test-only: forget the memoized developer-directory resolution. */
+export function resetRealGitBinaryForTesting(): void {
+  resolvedRealGitBinary = undefined;
 }
 
 function absoluteFrom(base: string, value: string): string {
@@ -353,8 +460,12 @@ async function runDiscoveryGit(
 export async function discoverCanonicalGitRepository(
   workspaceRoot: string,
 ): Promise<CanonicalGitRepository | null> {
-  const gitBinary = executableOnPath("git");
-  if (!gitBinary) throw new Error("Git is unavailable for the ZSR shadow view");
+  const found = executableOnPath("git");
+  if (!found) throw new Error("Git is unavailable for the ZSR shadow view");
+  // Resolved once here, at the source, because this value is what the engine
+  // spawns for every phase of the private view, what the admission canary
+  // spawns inside the fence, and what a contained child's git resolves to.
+  const gitBinary = realGitBinary(found);
   try {
     const inside = await runDiscoveryGit(gitBinary, workspaceRoot, [
       "rev-parse",
@@ -898,24 +1009,121 @@ function sanitizedConfigEntry(
   return [key, value];
 }
 
+/** Render one sanitized entry as a `[section]`/`key = value` pair, or null when
+ * the key or value cannot be represented in Git's config file syntax (which
+ * sends the caller to the per-entry `git config --add` path instead of guessing).
+ *
+ * The value is ALWAYS double-quoted and escaped. Git's parser strips the quotes
+ * and interprets `\\`, `\"`, `\n`, `\t`, `\b`, so quoting unconditionally is both
+ * valid and the only form that needs no case analysis for leading/trailing
+ * whitespace, `#`, or `;`. */
+function renderConfigEntry(key: string, value: string): string | null {
+  const firstDot = key.indexOf(".");
+  const lastDot = key.lastIndexOf(".");
+  if (firstDot <= 0 || lastDot === key.length - 1) return null;
+  const section = key.slice(0, firstDot);
+  const name = key.slice(lastDot + 1);
+  const subsection =
+    firstDot === lastDot ? null : key.slice(firstDot + 1, lastDot);
+  if (!/^[A-Za-z][A-Za-z0-9.-]*$/.test(section)) return null;
+  if (!/^[A-Za-z][A-Za-z0-9-]*$/.test(name)) return null;
+  if (subsection !== null && /[\0\r\n]/.test(subsection)) return null;
+  // Backspace, tab and newline are the only control characters Git's config
+  // syntax can escape (`\b`, `\t`, `\n`). Anything else — carriage return
+  // included — has no representation that reads back as written, so such a value
+  // goes to the `git config --add` fallback rather than being silently mangled.
+  const ESCAPABLE_CONTROL = new Set([0x08, 0x09, 0x0a]);
+  for (const unit of value) {
+    const code = unit.codePointAt(0)!;
+    if (ESCAPABLE_CONTROL.has(code)) continue;
+    if (code < 0x20 || code === 0x7f) return null;
+  }
+  const escapedValue = [...value]
+    .map((unit) => {
+      if (unit === "\\") return "\\\\";
+      if (unit === '"') return '\\"';
+      if (unit === "\n") return "\\n";
+      if (unit === "\t") return "\\t";
+      if (unit.codePointAt(0) === 0x08) return "\\b";
+      return unit;
+    })
+    .join("");
+  const header =
+    subsection === null
+      ? `[${section}]`
+      : `[${section} "${subsection.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`;
+  return `${header}\n\t${name} = "${escapedValue}"\n`;
+}
+
+/** Materialize the sanitized private Git config.
+ *
+ * This used to be one `git config --add` SUBPROCESS PER ENTRY — ~17 spawns on an
+ * ordinary developer's global config, per repository, on the admission path.
+ * Write the file directly instead, then PROVE the shortcut with a single
+ * read-back: parse `git config --file <dest> --null --list` with the same parser
+ * the entries came from and require an exact match. Any mismatch (an escaping
+ * case this renderer got wrong, a Git version that reads something back
+ * differently) falls back to the original spawn-per-entry path, so the fast path
+ * can never silently change what a contained Git sees. Two spawns instead of
+ * seventeen, with the old behavior as the floor. */
 async function writeSanitizedConfig(opts: {
   repository: CanonicalGitRepository;
   privateHome: string;
   destination: string;
   entries: readonly (readonly [string, string])[];
 }): Promise<void> {
+  const sanitized = opts.entries.flatMap((entry) => {
+    const kept = sanitizedConfigEntry(entry[0], entry[1]);
+    return kept ? [kept] : [];
+  });
+  const env = trustedGitEnvironment(opts.privateHome);
+  const rendered = sanitized.map(([key, value]) =>
+    renderConfigEntry(key, value),
+  );
+  if (sanitized.length > 0 && rendered.every((line) => line !== null)) {
+    await writeFile(opts.destination, rendered.join(""), {
+      mode: 0o600,
+      flag: "w",
+    });
+    let readBack: Array<readonly [string, string]> | null = null;
+    try {
+      const { stdout } = await runFile(
+        opts.repository.gitBinary,
+        ["config", "--file", opts.destination, "--null", "--list"],
+        {
+          cwd: opts.repository.workspaceRoot,
+          timeoutMs: 10_000,
+          maxBufferBytes: MAX_CONFIG_BYTES,
+          env,
+        },
+      );
+      readBack = parseConfigList(stdout);
+    } catch {
+      readBack = null;
+    }
+    const matches =
+      readBack !== null &&
+      readBack.length === sanitized.length &&
+      readBack.every(
+        (entry, index) =>
+          entry[0] === sanitized[index]![0] &&
+          entry[1] === sanitized[index]![1],
+      );
+    if (matches) {
+      await chmod(opts.destination, 0o600);
+      return;
+    }
+  }
   await writeFile(opts.destination, "", { mode: 0o600, flag: "w" });
-  for (const [rawKey, rawValue] of opts.entries) {
-    const entry = sanitizedConfigEntry(rawKey, rawValue);
-    if (!entry) continue;
+  for (const [key, value] of sanitized) {
     await runFile(
       opts.repository.gitBinary,
-      ["config", "--file", opts.destination, "--add", entry[0], entry[1]],
+      ["config", "--file", opts.destination, "--add", key, value],
       {
         cwd: opts.repository.workspaceRoot,
         timeoutMs: 10_000,
         maxBufferBytes: MAX_GIT_OUTPUT,
-        env: trustedGitEnvironment(opts.privateHome),
+        env,
       },
     );
   }
@@ -2692,19 +2900,30 @@ async function copyShadowRecoveryTree(
 }
 
 function sessionRootForShadowRoot(shadowRoot: string): string {
-  const generationRoot = path.dirname(shadowRoot);
-  const boundaryRoot = path.dirname(generationRoot);
-  const sessionRoot = path.dirname(boundaryRoot);
-  const sessions = path.join(zerosDataDir(), "sessions");
+  const sessions = path.resolve(zerosDataDir(), "sessions");
+  const relative = path.relative(sessions, path.resolve(shadowRoot));
+  const segments = relative.split(path.sep);
+  const isSingleRepositoryLayout =
+    segments.length === 4 &&
+    segments[1] === "boundary" &&
+    segments[3] === "git";
+  const isCollectionLayout =
+    segments.length === 6 &&
+    segments[1] === "boundary" &&
+    segments[3] === "git" &&
+    segments[5] === "git";
   if (
-    path.basename(shadowRoot) !== "git" ||
-    path.basename(boundaryRoot) !== "boundary" ||
-    !pathInside(sessionRoot, sessions) ||
-    sessionRoot === sessions
+    (!isSingleRepositoryLayout && !isCollectionLayout) ||
+    !segments[0] ||
+    !segments[2] ||
+    (isCollectionLayout && !segments[4]) ||
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
   ) {
     throw new Error("Shadow Git recovery source is outside session state");
   }
-  return sessionRoot;
+  return path.join(sessions, segments[0]);
 }
 
 async function writeRecoveryHold(
@@ -2984,6 +3203,7 @@ export class ShadowGitSession {
       await session.initialize();
       await remoteBroker.activate({
         toolsRoot: options.toolsRoot,
+        shadowRoot: options.shadowRoot,
         runtime: options.toolRuntime,
         gitBinary: options.repository.gitBinary,
         generation: options.generation,
@@ -3098,18 +3318,27 @@ export class ShadowGitSession {
         "Canonical Git contains too many reflogs for a bounded session view",
       );
     }
-    let remainingEntries = MAX_REFLOG_ENTRIES;
     const width = repository.objectFormat === "sha1" ? 40 : 64;
     const zero = repository.objectFormat === "sha1" ? ZERO_SHA1 : ZERO_SHA256;
     const timestamp = Math.floor(Date.now() / 1_000);
-    for (const ref of refs) {
-      if (ref !== "HEAD" && !allowedPromotedRef(ref)) continue;
-      if (remainingEntries <= 0) {
-        throw new ShadowGitPromotionError(
-          "quota-exceeded",
-          "Canonical Git reflogs exceed the session entry limit",
-        );
-      }
+    const promoted = refs.filter(
+      (ref) => ref === "HEAD" || allowedPromotedRef(ref),
+    );
+    // One `reflog show` per ref, previously awaited one at a time. That made
+    // this the largest phase of the largest engine-side admission stage:
+    // `git-reflogs` measured 1693ms on a real Mac (against 312-352ms on
+    // repositories with fewer refs), because a workspace with dozens of
+    // branches and remotes pays dozens of serial `git` spawns. The spawns are
+    // independent reads of canonical state, so they overlap at the same bound
+    // the collection already uses for whole repositories.
+    //
+    // The entry quota moves with them: each ref is still fetched under a hard
+    // per-ref cap, and the TOTAL is enforced below exactly as before. What
+    // changes is only that a ref no longer sees how much budget earlier refs
+    // consumed — which was never a security property, just an artifact of
+    // doing this in a loop.
+    let totalEntries = 0;
+    const imported = await mapBoundedShadowGit(promoted, async (ref) => {
       const shown = await runTrustedGit({
         repository,
         privateHome: this.options.privateHome,
@@ -3119,7 +3348,7 @@ export class ShadowGitSession {
           "--no-pager",
           "reflog",
           "show",
-          `--max-count=${remainingEntries + 1}`,
+          `--max-count=${MAX_REFLOG_ENTRIES + 1}`,
           "--format=%H%x09%gs",
           ref,
         ],
@@ -3144,14 +3373,14 @@ export class ShadowGitSession {
             message: message.replaceAll(/[\0\r\n\t]/g, " ").slice(0, 4_096),
           };
         });
-      if (entries.length > remainingEntries) {
+      totalEntries += entries.length;
+      if (totalEntries > MAX_REFLOG_ENTRIES) {
         throw new ShadowGitPromotionError(
           "quota-exceeded",
           "Canonical Git reflogs exceed the session entry limit",
         );
       }
-      remainingEntries -= entries.length;
-      if (entries.length === 0) continue;
+      if (entries.length === 0) return;
       const expected =
         ref === "HEAD" ? this.headOid : (this.refs.get(ref) ?? null);
       if (!expected || entries[0]!.oid !== expected) {
@@ -3190,7 +3419,10 @@ export class ShadowGitSession {
         mode: 0o600,
         flag: "w",
       });
-    }
+    });
+    // Nothing is returned; `imported` exists so a rejection cannot be silently
+    // dropped and so the shape stays obvious if this ever needs per-ref results.
+    void imported;
   }
 
   private async readHead(
@@ -3647,6 +3879,13 @@ export class ShadowGitSession {
 
   private async initialize(): Promise<void> {
     const repository = this.options.repository;
+    let phaseCursor = Date.now();
+    const phase = (name: string): void => {
+      if (!this.options.onPhase) return;
+      const now = Date.now();
+      this.options.onPhase(name, now - phaseCursor);
+      phaseCursor = now;
+    };
     await Promise.all([
       mkdir(this.emptyHooks, { recursive: true, mode: 0o700 }),
       mkdir(this.options.privateHome, { recursive: true, mode: 0o700 }),
@@ -3656,6 +3895,7 @@ export class ShadowGitSession {
     await withPromotionLock(this.options.repository, () =>
       this.recoverPendingPromotions(),
     );
+    phase("recover");
     await Promise.all([
       writeFile(
         path.join(this.options.toolsRoot, "git-askpass-denied"),
@@ -3728,36 +3968,38 @@ export class ShadowGitSession {
         ])
       ).stdout,
     );
-    await writeSanitizedConfig({
-      repository,
-      privateHome: this.options.privateHome,
-      destination: shadowConfigPath,
-      entries: [...initializedConfig, ...canonicalConfigEntries],
-    });
-    for (const [key, value] of [
+    // These used to be four (plus one per promisor remote) `git config
+    // --replace-all` spawns AFTER the config file was written — on the admission
+    // path, serially, in a phase measured at 292-721ms. They are folded into the
+    // single file write instead: every key they set is stripped from the inherited
+    // entries first, so appending one value each is exactly what --replace-all
+    // did, and the write's own read-back verification still compares the file
+    // against the intended list. If rendering a key ever fails, the writer's
+    // per-entry `git config --add` fallback applies these same entries, so the
+    // settings cannot be silently lost.
+    const shadowConfigOverrides: Array<readonly [string, string]> = [
       ["core.bare", "false"],
       ["core.worktree", repository.workspaceRoot],
       ["core.logAllRefUpdates", "true"],
       ["extensions.worktreeConfig", "false"],
-    ] as const) {
-      await this.git([
-        "config",
-        "--local",
-        "--no-includes",
-        "--replace-all",
-        key,
-        value,
-      ]);
-    }
-    for (const [name] of promisorRemotes) {
-      await this.git([
-        "config",
-        "--local",
-        "--replace-all",
-        `remote.${name}.vcs`,
-        "zeros-zsr",
-      ]);
-    }
+      ...[...promisorRemotes].map(
+        ([name]) => [`remote.${name}.vcs`, "zeros-zsr"] as const,
+      ),
+    ];
+    const overriddenKeys = new Set(
+      shadowConfigOverrides.map(([key]) => key.toLowerCase()),
+    );
+    await writeSanitizedConfig({
+      repository,
+      privateHome: this.options.privateHome,
+      destination: shadowConfigPath,
+      entries: [
+        ...[...initializedConfig, ...canonicalConfigEntries].filter(
+          ([key]) => !overriddenKeys.has(key.toLowerCase()),
+        ),
+        ...shadowConfigOverrides,
+      ],
+    });
     // Credentials and host execution programs are brokered separately. The
     // repository's hooks/filters remain available and execute only inside ZSR.
     await this.git([
@@ -3783,22 +4025,59 @@ export class ShadowGitSession {
       flag: "w",
     });
 
+    phase("config");
     const canonicalRefState = await this.snapshotRefState(repository.gitDir);
     this.refs = canonicalRefState.refs;
     this.symbolicRefs = canonicalRefState.symbolicRefs;
     const zero = repository.objectFormat === "sha1" ? ZERO_SHA1 : ZERO_SHA256;
-    if (this.refs.size > 0) {
-      const commands = [
-        "start",
-        ...[...this.refs].map(([ref, oid]) => `update ${ref} ${oid} ${zero}`),
-        "prepare",
-        "commit",
-        "",
-      ].join("\n");
-      await this.git(["update-ref", "--stdin"], { input: commands });
+    // Ordinary refs were already one batched `update-ref --stdin` transaction,
+    // but each symbolic ref cost its own `symbolic-ref` spawn — and `git-refs`
+    // measured 95-1087ms (546ms median) on the admission path. Git 2.45 added
+    // `symref-update` to the same transaction, so both kinds go in one spawn.
+    //
+    // Support is discovered by attempting it rather than by parsing
+    // `git --version`: a version probe is the very spawn this is removing, and
+    // the transaction protocol makes the attempt free of side effects — an
+    // unrecognized command aborts before `commit`, so nothing is applied. On any
+    // failure the original two-step path runs and ITS error is the one that
+    // surfaces, so a genuine bad ref is still reported from the code that has
+    // always reported it.
+    const refUpdates = [...this.refs].map(
+      ([ref, oid]) => `update ${ref} ${oid} ${zero}`,
+    );
+    const symrefUpdates = [...this.symbolicRefs].map(
+      ([ref, target]) => `symref-update ${ref} ${target}`,
+    );
+    let appliedInOneTransaction = false;
+    if (
+      symrefUpdates.length > 0 &&
+      refUpdates.length + symrefUpdates.length > 0
+    ) {
+      try {
+        await this.git(["update-ref", "--stdin"], {
+          input: [
+            "start",
+            ...refUpdates,
+            ...symrefUpdates,
+            "prepare",
+            "commit",
+            "",
+          ].join("\n"),
+        });
+        appliedInOneTransaction = true;
+      } catch {
+        appliedInOneTransaction = false;
+      }
     }
-    for (const [ref, target] of this.symbolicRefs) {
-      await this.git(["symbolic-ref", ref, target]);
+    if (!appliedInOneTransaction) {
+      if (refUpdates.length > 0) {
+        await this.git(["update-ref", "--stdin"], {
+          input: ["start", ...refUpdates, "prepare", "commit", ""].join("\n"),
+        });
+      }
+      for (const [ref, target] of this.symbolicRefs) {
+        await this.git(["symbolic-ref", ref, target]);
+      }
     }
     const canonicalHead = await this.readHead(repository.gitDir);
     this.canonicalHeadDigest = digest(
@@ -3811,7 +4090,9 @@ export class ShadowGitSession {
     } else if (canonicalHead.oid) {
       await this.git(["update-ref", "--no-deref", "HEAD", canonicalHead.oid]);
     }
+    phase("refs");
     await this.importCanonicalReflogs();
+    phase("reflogs");
 
     const shadowIndex = path.join(this.options.shadowRoot, "index");
     const canonicalIndex = await readBoundedRegularFile(
@@ -3832,11 +4113,13 @@ export class ShadowGitSession {
     } else if (canonicalHead.oid) {
       await this.git(["read-tree", canonicalHead.oid]);
     }
+    phase("index");
     await copySelectedGitState(repository.gitDir, this.options.shadowRoot);
     await copyContainedHooks(
       path.join(repository.commonDir, "hooks"),
       path.join(this.options.shadowRoot, "hooks"),
     );
+    phase("state");
 
     await runTrustedGit({
       repository,
@@ -3860,6 +4143,7 @@ export class ShadowGitSession {
       `${path.join(this.options.shadowRoot, "objects")}\n${repository.objectDir}\n`,
       { mode: 0o600 },
     );
+    phase("validator");
   }
 
   private async protectedSnapshot(

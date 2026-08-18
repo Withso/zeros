@@ -352,6 +352,8 @@ export class RunManager {
       workspaceRoot: args.cwd,
       repoRoot: args.repoRoot ?? args.cwd,
       ...(env ? { env } : {}),
+      // Stated, not inherited: a Run action is a click the user is watching.
+      admissionPriority: "interactive",
     });
     if (flight.cancelled) {
       await boundary.stopAndProve();

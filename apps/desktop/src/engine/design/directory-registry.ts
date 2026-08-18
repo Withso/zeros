@@ -28,6 +28,14 @@ import path from "node:path";
  *  as the public constant.) */
 export const DEFAULT_DESIGN_DIRECTORY_NAME = "Zeros Design";
 
+/** The marker that makes a folder a recognized Design document in Git's index or
+ *  HEAD. Lives here for the same reason as the default name: code-agent admission
+ *  has to name this file (it is write-denied so a fenced agent cannot
+ *  de-register a Design folder), and admission must not drag document.ts —
+ *  parse5, postcss, @zeros/design-web — into its import graph to learn one
+ *  filename. design/document.ts re-exports it as the public constant. */
+export const DESIGN_CANVAS_FILE = ".zeros-canvas.json";
+
 const names = new Map<string, string>();
 
 function keyFor(workspacePath: string): string {

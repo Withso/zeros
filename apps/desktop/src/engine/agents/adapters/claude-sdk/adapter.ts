@@ -133,6 +133,7 @@ import {
   type ContainedClaudeProcess,
 } from "./contained-process";
 import type { PreparedBoundary } from "../../containment/types";
+import { defaultMacClaudeOAuthAuthority } from "../../containment/claude-oauth-authority";
 
 /** Which CLI tier we last logged, so the breadcrumb lands once per engine boot
  *  (and again if the tier ever changes mid-run) instead of once per turn. */
@@ -151,6 +152,28 @@ const claudeRuntimeVersionByPath = new Map<string, Promise<string>>();
 type ClaudeSettingsResolver = (
   opts?: ResolveSettingsOptions,
 ) => Promise<ResolvedSettings>;
+
+type ClaudeOAuthTokenProvider = (options: {
+  readonly forceRefresh: true;
+  readonly signal: AbortSignal;
+}) => Promise<string | null>;
+
+/** Runtime 0.3.231 supports this host-auth control channel but its generated
+ * declaration currently omits the property. Keep the augmentation exact and
+ * local so a future SDK declaration can replace it without an ambient patch. */
+type ClaudeOptionsWithOAuthRefresh = Options & {
+  getOAuthToken?: (options: {
+    readonly signal: AbortSignal;
+  }) => Promise<string | null>;
+};
+
+function hasExplicitClaudeCredential(env: Record<string, string> | undefined) {
+  return [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ].some((name) => Boolean(env?.[name]?.trim()));
+}
 
 function hasEntries(value: readonly unknown[] | undefined): boolean {
   return Boolean(value?.length);
@@ -1110,6 +1133,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   private readonly sandboxProbe: (platform?: NodeJS.Platform) => Promise<void>;
   private readonly runtimeVersionProbe: (cliPath: string) => Promise<string>;
   private readonly settingsResolver: ClaudeSettingsResolver;
+  private readonly oauthTokenProvider: ClaudeOAuthTokenProvider | undefined;
   /** Test-only millisecond override; production always uses the bounded env. */
   private readonly idleTimeoutOverrideMs: number | undefined;
 
@@ -1121,6 +1145,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       sandboxProbe?: (platform?: NodeJS.Platform) => Promise<void>;
       runtimeVersionProbe?: (cliPath: string) => Promise<string>;
       settingsResolver?: ClaudeSettingsResolver;
+      oauthTokenProvider?: ClaudeOAuthTokenProvider;
     },
   ) {
     this.ctx = ctx;
@@ -1130,6 +1155,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     this.runtimeVersionProbe =
       opts?.runtimeVersionProbe ?? qualifiedClaudeRuntimeVersion;
     this.settingsResolver = opts?.settingsResolver ?? resolveSettings;
+    const oauthAuthority = defaultMacClaudeOAuthAuthority(homedir());
+    this.oauthTokenProvider =
+      opts?.oauthTokenProvider ??
+      (oauthAuthority
+        ? ({ forceRefresh, signal }) =>
+            oauthAuthority.getAccessToken({ forceRefresh, signal })
+        : undefined);
   }
 
   async prepareFilesystemTerritory(
@@ -3447,6 +3479,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    *  failure (or an API-key / 3P backend, which carries no account identity)
    *  returns null so the panel shows "—". */
   async getAccountInfo(opts?: {
+    liveOnly?: boolean;
     env?: Record<string, string>;
     executionBoundary?: PreparedBoundary;
   }): Promise<AccountDetails | null> {
@@ -3460,6 +3493,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       }
       break;
     }
+    if (opts?.liveOnly) return null;
     // No live query → spin a throwaway one. accountInfo() is a control
     // request, so we keep an empty (never-fed) input open so no turn runs,
     // then close it. NOTE: that accountInfo() resolves on a pre-turn query is
@@ -3858,7 +3892,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       );
     }
 
-    const options: Options = {
+    const options: ClaudeOptionsWithOAuthRefresh = {
       cwd: state.cwd,
       // The SDK REPLACES the subprocess env entirely when `env` is set, so
       // we MUST spread process.env (PATH/HOME/keychain access depend on it).
@@ -3899,6 +3933,16 @@ export class ClaudeSdkAdapter implements AgentAdapter {
                 },
                 state.executionBoundary,
               ),
+          }
+        : {}),
+      ...(this.oauthTokenProvider && !hasExplicitClaudeCredential(state.env)
+        ? {
+            // The pinned CLI emits this control request only when it needs an
+            // OAuth refresh. The trusted engine serializes the rotating
+            // Keychain token and returns only the access token; neither the
+            // refresh token nor Keychain Mach service enters the sandbox.
+            getOAuthToken: ({ signal }: { signal: AbortSignal }) =>
+              this.oauthTokenProvider!({ forceRefresh: true, signal }),
           }
         : {}),
       // `bypassPermissions` is INERT without this companion flag — the SDK

@@ -1255,6 +1255,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  one and disposes it. Best-effort — returns null on any failure or for
    *  non-ChatGPT (API-key) auth, so the panel shows "—". */
   async getAccountInfo(opts?: {
+    liveOnly?: boolean;
     env?: Record<string, string>;
     executionBoundary?: PreparedBoundary;
   }): Promise<AccountDetails | null> {
@@ -1264,6 +1265,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       if (acct) return acct;
       break;
     }
+    if (opts?.liveOnly) return null;
     // No live runtime → boot a throwaway just to read the account. Spawns a
     // `codex app-server` child; disposed in finally even if the race below
     // times out. Verify on a Mac with codex signed in (not in the sandbox).

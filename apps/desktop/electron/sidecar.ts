@@ -422,6 +422,14 @@ function resolveZsrMacosProcessDomainHelperPath(): string | null {
   return existsSync(candidate) ? candidate : null;
 }
 
+function resolveZsrGitDispatchBinaryPath(): string | null {
+  if (process.platform !== "darwin") return null;
+  const candidate = IS_PACKAGED
+    ? path.join(process.resourcesPath, "zsr-git-dispatch")
+    : path.resolve(__dirname, "..", "binaries", "zsr-git-dispatch");
+  return existsSync(candidate) ? candidate : null;
+}
+
 function resolveZsrMacosPortBindLibraryPath(): string | null {
   if (process.platform !== "darwin") return null;
   const candidate = IS_PACKAGED
@@ -907,7 +915,7 @@ async function killCurrentChild(): Promise<void> {
   // whole group so the hosts get their own SIGTERM too, not just via the engine.
   signalEngineTree(current, pid, "SIGTERM");
 
-  // Wait up to 5 s for graceful exit. The `exit` event fires when
+  // Wait up to 15 s for graceful exit. The `exit` event fires when
   // the process actually terminates (whether from SIGTERM or any
   // other cause). Resolve early if it lands within the window.
   //
@@ -917,9 +925,14 @@ async function killCurrentChild(): Promise<void> {
   // 1-2 s end-to-end. At 2 s we were SIGKILLing on every HMR
   // respawn ("engine PID … ignored SIGTERM; SIGKILLed") which left
   // half-flushed SQLite writes and in-flight
-  // permission promises in undefined states. 5 s is comfortably
-  // longer than the slowest observed dispose path while still bounded
-  // enough that a genuinely-hung engine doesn't block respawn forever.
+  // permission promises in undefined states.
+  //
+  // 2026-08-17: bumped from 5 s → 15 s to stay above the engine's own 12 s
+  // shutdown cap (apps/desktop/src/cli.ts). ZSR session teardown promotes
+  // provider-HOME/shadow-Git state and retires process-domain descriptors;
+  // SIGKILLing through that is what turned every dev restart into a
+  // "recovered N crashed process domain(s)" boot. A clean exit still
+  // resolves this wait immediately, so fast restarts stay fast.
   await new Promise<void>((resolve) => {
     let done = false;
     const t = setTimeout(() => {
@@ -927,7 +940,7 @@ async function killCurrentChild(): Promise<void> {
         done = true;
         resolve();
       }
-    }, 5000);
+    }, 15_000);
     current.once("exit", () => {
       if (!done) {
         done = true;
@@ -1416,6 +1429,10 @@ async function doSpawnEngine(
   const zsrMacosPortBind = resolveZsrMacosPortBindLibraryPath();
   if (zsrMacosPortBind) {
     extraEnv.ZEROS_ZSR_MACOS_PORT_BIND_LIBRARY = zsrMacosPortBind;
+  }
+  const zsrGitDispatch = resolveZsrGitDispatchBinaryPath();
+  if (zsrGitDispatch) {
+    extraEnv.ZEROS_ZSR_GIT_DISPATCH_BINARY = zsrGitDispatch;
   }
 
   // Parent-death watchdog opt-in: the engine self-exits (bounded graceful

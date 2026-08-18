@@ -368,7 +368,17 @@ export async function previewDesignDirectoryForEnter(
     path: string;
     repoRoot: string;
   },
-  opts: { strict?: boolean } = {},
+  opts: {
+    strict?: boolean;
+    /** Folders Zeros already knows are Design documents even though the
+     * repository no longer says so — engine-side sticky recognition, from
+     * design/recognition-store.ts. Code-agent admission passes it so the ACTIVE
+     * name and the protected set are chosen from the same universe: without it a
+     * Git de-registration would leave the fence protecting a folder that this
+     * resolver has decided is missing, and the session would refuse to start
+     * with a confusing "Design folder is missing from this checkout". */
+    additionalRecognized?: readonly string[];
+  } = {},
 ): Promise<string> {
   const strict = opts.strict !== false;
   const pointerState = await resolveDesignDirectoryPointerState({
@@ -380,7 +390,14 @@ export async function previewDesignDirectoryForEnter(
   const pointerExists = existsSync(
     path.join(workspace.path, ...pointer.split("/")),
   );
-  const discovered = await discoverDesignDirectories(workspace.path);
+  const discovered = [
+    ...new Set([
+      ...(await discoverDesignDirectories(workspace.path)),
+      ...(opts.additionalRecognized ?? []).filter((name) =>
+        existsSync(path.join(workspace.path, ...name.split("/"))),
+      ),
+    ]),
+  ].sort((left, right) => left.localeCompare(right));
   if (pointerExists) {
     // A worktree settings file is ordinary repository content. It may select
     // among recognized Design documents, but it must never be able to redirect

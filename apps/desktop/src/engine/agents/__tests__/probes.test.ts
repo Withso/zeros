@@ -331,4 +331,20 @@ describe("contained command probes", () => {
       timeoutMs: 8_000,
     });
   });
+
+  it("propagates a contained-runner failure instead of calling it signed out", async () => {
+    const runner: ProbeCommandRunner = {
+      cacheKey: "unavailable-boundary",
+      run: async () => {
+        throw new Error("provider boundary could not be prepared");
+      },
+    };
+
+    await expect(
+      evaluateAuthProbe(
+        { kind: "command", binary: "codex", args: ["login", "status"] },
+        runner,
+      ),
+    ).rejects.toThrow(/boundary could not be prepared/i);
+  });
 });

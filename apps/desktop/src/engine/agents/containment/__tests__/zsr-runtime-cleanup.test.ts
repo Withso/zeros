@@ -1,8 +1,48 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { cleanupZsrRuntime } from "../zsr-runtime-cleanup.mjs";
+import {
+  cleanupZsrRuntime,
+  withZsrRuntimeCleanup,
+} from "../zsr-runtime-cleanup.mjs";
 
 describe("ZSR supervisor cleanup", () => {
+  it("tears down initialized runtime state when post-wrap validation rejects", async () => {
+    const calls: string[] = [];
+    const state = {
+      portPolicyControl: {
+        close: vi.fn(async () => {
+          calls.push("port-control");
+        }),
+      },
+      sandboxManager: {
+        cleanupAfterCommand: vi.fn(() => {
+          calls.push("srt-cleanup");
+        }),
+        reset: vi.fn(async () => {
+          calls.push("srt-reset");
+        }),
+      },
+      cgroupScope: null as unknown,
+      killCgroup: vi.fn(async () => {
+        calls.push("cgroup");
+      }),
+    };
+
+    await expect(
+      withZsrRuntimeCleanup(state, async () => {
+        calls.push("post-wrap-validation");
+        throw new Error("sandbox wrapper retained a raw credential");
+      }),
+    ).rejects.toThrow("sandbox wrapper retained a raw credential");
+    expect(calls).toEqual([
+      "post-wrap-validation",
+      "port-control",
+      "srt-cleanup",
+      "srt-reset",
+      "cgroup",
+    ]);
+  });
+
   it("resets SRT and removes the cgroup when port-control cleanup fails", async () => {
     const calls: string[] = [];
     const portPolicyControl = {

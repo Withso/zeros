@@ -101,6 +101,9 @@ export function createRepoTaskBoundaryFactory(
       ...(repoRoot !== workspaceRoot && repoTerritory
         ? { additionalGitWorkspaceRoots: [repoRoot] }
         : {}),
+      ...(request.admissionPriority
+        ? { admissionPriority: request.admissionPriority }
+        : {}),
       backendHint: executionBoundary.backend,
     });
     try {

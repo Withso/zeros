@@ -50,6 +50,7 @@ async function fixture(designName = "Zeros Design"): Promise<Fixture> {
       workspaceRoot: root,
       designDirectory: design,
       protectedDesignDirectories: [design],
+      designRecognitionPaths: [],
       writeCapabilities: {
         workspace: "write",
         deniedPaths: [

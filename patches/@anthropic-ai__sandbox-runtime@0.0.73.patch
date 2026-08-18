@@ -1,7 +1,21 @@
+diff --git a/dist/cli.js b/dist/cli.js
+old mode 100644
+new mode 100755
 diff --git a/dist/sandbox/body-substitution.d.ts b/dist/sandbox/body-substitution.d.ts
-index 0cce60dd791c76286bddf24ddb6435ca372707a8..f24453a4a5a933b39f4249757099ccce8dba8fcc 100644
+index 0cce60dd791c76286bddf24ddb6435ca372707a8..78005321a8912681b8d6f18b3a42439a78aedd75 100644
 --- a/dist/sandbox/body-substitution.d.ts
 +++ b/dist/sandbox/body-substitution.d.ts
+@@ -7,8 +7,8 @@
+  * the useless fake. Sentinels are exact-match strings over `[a-z0-9_-]`, so
+  * they survive JSON, form-urlencoded, multipart, and XML verbatim — a raw
+  * byte scan needs no format parsing. Bodies are never buffered whole:
+- * memory is bounded by one chunk plus a hold-back of `maxSentinelLength - 1`
+- * bytes carried across chunk boundaries.
++ * memory is bounded by one chunk plus the longest trailing byte sequence that
++ * is an actual proper prefix of a sentinel.
+  *
+  * Fail-safe direction: substitution is fake→real, so a missed sentinel
+  * (compressed body, base64-wrapped, split by an encoder) means the FAKE
 @@ -28,7 +28,7 @@ export interface SentinelBufferPair {
   * no credential is injectable at the host — the caller must keep the
   * existing bare pipe, byte-identical.
@@ -11,7 +25,7 @@ index 0cce60dd791c76286bddf24ddb6435ca372707a8..f24453a4a5a933b39f4249757099ccce
  /** True when substitution cannot change the body length. */
  export declare function allLengthMatched(pairs: readonly SentinelBufferPair[]): boolean;
  /**
-@@ -42,7 +42,7 @@ export declare function allLengthMatched(pairs: readonly SentinelBufferPair[]):
+@@ -42,17 +42,19 @@ export declare function allLengthMatched(pairs: readonly SentinelBufferPair[]):
   * fake), Content-Length is deleted from `fwdHeaders` so the outbound
   * request re-frames as chunked; otherwise Content-Length stays verbatim.
   */
@@ -20,10 +34,40 @@ index 0cce60dd791c76286bddf24ddb6435ca372707a8..f24453a4a5a933b39f4249757099ccce
  /**
   * Transform that replaces every occurrence of each pair's sentinel bytes
   * with its real-value bytes.
+  *
+- * Boundary-safe: the last `maxSentinelLength - 1` bytes of each chunk are
+- * held back and prepended to the next chunk, so a sentinel split across any
+- * chunk boundary is still seen whole; the hold-back is flushed on stream
+- * end. Replacement is left-to-right, resuming after each replacement — the
+- * substituted real value is never rescanned. Backpressure propagates
+- * through normal Transform semantics.
++ * Boundary-safe: only a trailing byte sequence that is an actual proper
++ * prefix of a sentinel is held back and prepended to the next chunk, so a
++ * sentinel split across any chunk boundary is still seen whole. Unrelated
++ * short frames are emitted immediately, which is required for bidirectional
++ * protocols whose peer responds before request EOF. The hold-back is flushed
++ * on stream end. Replacement is left-to-right, resuming after each
++ * replacement — the substituted real value is never rescanned. Backpressure
++ * propagates through normal Transform semantics.
+  */
+ export declare function createBodySubstitutionTransform(pairs: readonly SentinelBufferPair[]): Transform;
+ //# sourceMappingURL=body-substitution.d.ts.map
+\ No newline at end of file
 diff --git a/dist/sandbox/body-substitution.js b/dist/sandbox/body-substitution.js
-index 900379823b8933b02e401730a6a50f6ddeb7aa15..f3c32a02b61ed52830fa386ff1ccf06c41157754 100644
+index 900379823b8933b02e401730a6a50f6ddeb7aa15..72fcaba3a198aa4065d2e96af997f56253d04377 100644
 --- a/dist/sandbox/body-substitution.js
 +++ b/dist/sandbox/body-substitution.js
+@@ -7,8 +7,8 @@
+  * the useless fake. Sentinels are exact-match strings over `[a-z0-9_-]`, so
+  * they survive JSON, form-urlencoded, multipart, and XML verbatim — a raw
+  * byte scan needs no format parsing. Bodies are never buffered whole:
+- * memory is bounded by one chunk plus a hold-back of `maxSentinelLength - 1`
+- * bytes carried across chunk boundaries.
++ * memory is bounded by one chunk plus the longest trailing byte sequence that
++ * is an actual proper prefix of a sentinel.
+  *
+  * Fail-safe direction: substitution is fake→real, so a missed sentinel
+  * (compressed body, base64-wrapped, split by an encoder) means the FAKE
 @@ -16,7 +16,7 @@
   */
  import { Transform } from 'node:stream';
@@ -55,6 +99,138 @@ index 900379823b8933b02e401730a6a50f6ddeb7aa15..f3c32a02b61ed52830fa386ff1ccf06c
      if (!pairs?.length)
          return undefined;
      if (req.headers['content-encoding'] !== undefined) {
+@@ -66,21 +65,26 @@ export function prepareBodySubstitution(getBodySubstitutions, req, fwdHeaders, d
+  * Transform that replaces every occurrence of each pair's sentinel bytes
+  * with its real-value bytes.
+  *
+- * Boundary-safe: the last `maxSentinelLength - 1` bytes of each chunk are
+- * held back and prepended to the next chunk, so a sentinel split across any
+- * chunk boundary is still seen whole; the hold-back is flushed on stream
+- * end. Replacement is left-to-right, resuming after each replacement — the
+- * substituted real value is never rescanned. Backpressure propagates
+- * through normal Transform semantics.
++ * Boundary-safe: only a trailing byte sequence that is an actual proper
++ * prefix of a sentinel is held back and prepended to the next chunk, so a
++ * sentinel split across any chunk boundary is still seen whole. Unrelated
++ * short frames are emitted immediately, which is required for bidirectional
++ * protocols whose peer responds before request EOF. The hold-back is flushed
++ * on stream end. Replacement is left-to-right, resuming after each
++ * replacement — the substituted real value is never rescanned. Backpressure
++ * propagates through normal Transform semantics.
+  */
+ export function createBodySubstitutionTransform(pairs) {
+-    const maxLen = Math.max(...pairs.map(p => p.sentinel.length));
++    const matchers = pairs.map(pair => ({
++        ...pair,
++        prefixTable: buildPrefixTable(pair.sentinel),
++    }));
+     let carry;
+     return new Transform({
+         transform(chunk, encoding, callback) {
+             const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding);
+             const work = carry?.length ? Buffer.concat([carry, buf]) : buf;
+-            const { out, tail } = substitute(work, pairs, maxLen);
++            const { out, tail } = substitute(work, matchers);
+             carry = tail;
+             callback(null, out);
+         },
+@@ -91,7 +95,37 @@ export function createBodySubstitutionTransform(pairs) {
+         },
+     });
+ }
+-function substitute(work, pairs, maxLen) {
++function buildPrefixTable(pattern) {
++    const table = new Uint32Array(pattern.length);
++    let matched = 0;
++    for (let index = 1; index < pattern.length; index += 1) {
++        while (matched > 0 && pattern[index] !== pattern[matched]) {
++            matched = table[matched - 1];
++        }
++        if (pattern[index] === pattern[matched])
++            matched += 1;
++        table[index] = matched;
++    }
++    return table;
++}
++function trailingPrefixLength(work, start, matcher) {
++    const { sentinel, prefixTable } = matcher;
++    let matched = 0;
++    for (let index = start; index < work.length; index += 1) {
++        while (matched > 0 && work[index] !== sentinel[matched]) {
++            matched = prefixTable[matched - 1];
++        }
++        if (work[index] === sentinel[matched])
++            matched += 1;
++        // `substitute` has already consumed every complete sentinel in this
++        // range. Retaining only its proper overlapping suffix is defensive and
++        // keeps the carry strictly shorter than the sentinel.
++        if (matched === sentinel.length)
++            matched = prefixTable[matched - 1];
++    }
++    return matched;
++}
++function substitute(work, pairs) {
+     const parts = [];
+     let pos = 0;
+     for (;;) {
+@@ -113,12 +147,16 @@ function substitute(work, pairs, maxLen) {
+         parts.push(work.subarray(pos, matchIdx), matchPair.realValue);
+         pos = matchIdx + matchPair.sentinel.length;
+     }
+-    // Hold back the longest suffix that could still be a proper prefix of a
+-    // sentinel completed by the next chunk. A partial match of a sentinel of
+-    // length L occupies at most L-1 trailing bytes, so maxLen-1 always covers
+-    // it. Copied (not a subarray view) so the carry never aliases a buffer
+-    // the stream may reuse.
+-    const tailStart = Math.max(pos, work.length - (maxLen - 1));
++    // Hold back only the longest suffix that is an actual proper prefix of a
++    // sentinel. Retaining maxSentinelLength-1 bytes unconditionally deadlocks
++    // short bidirectional frames: the peer cannot respond until it sees the
++    // frame, while the transform waits for another chunk or request EOF.
++    let carryLength = 0;
++    for (const pair of pairs)
++        carryLength = Math.max(carryLength, trailingPrefixLength(work, pos, pair));
++    // Copy (rather than retain a subarray view) so carry never aliases a
++    // buffer the stream implementation may reuse.
++    const tailStart = work.length - carryLength;
+     parts.push(work.subarray(pos, tailStart));
+     return {
+         out: Buffer.concat(parts),
+diff --git a/dist/sandbox/credential-aws-pairs.d.ts b/dist/sandbox/credential-aws-pairs.d.ts
+index b7ef4021619741a8d64c6154e9d16d66382688f5..8e931799270d516ad1135d5941ae5b65d10de8c1 100644
+--- a/dist/sandbox/credential-aws-pairs.d.ts
++++ b/dist/sandbox/credential-aws-pairs.d.ts
+@@ -114,7 +114,7 @@ export type Sigv4Plan = {
+  * substitution: detection matches the fake access key id, which
+  * substitution would have already replaced.
+  */
+-export type PlanSigv4 = (method: string, requestTarget: string, headers: IncomingHttpHeaders, destHost: string) => Sigv4Plan | undefined;
++export type PlanSigv4 = (method: string, requestTarget: string, headers: IncomingHttpHeaders, destHost: string, destPort: number) => Sigv4Plan | undefined;
+ /**
+  * Build the {@link PlanSigv4} hook from the session's pair registry and
+  * configured policies. `matches` is the same host matcher used for
+diff --git a/dist/sandbox/credential-aws-pairs.js b/dist/sandbox/credential-aws-pairs.js
+index 419949a006680ec9043f171f44348fa853fcc21a..eef5356416e532dac394e3b7066dd8b25994a8c8 100644
+--- a/dist/sandbox/credential-aws-pairs.js
++++ b/dist/sandbox/credential-aws-pairs.js
+@@ -151,7 +151,7 @@ export function resolveSigv4Policies(config) {
+  */
+ export function createSigv4Planner(registry, config, matches) {
+     const policies = resolveSigv4Policies(config);
+-    return (method, requestTarget, headers, destHost) => {
++    return (method, requestTarget, headers, destHost, destPort) => {
+         if (registry.size === 0)
+             return undefined;
+         const detected = detectSigv4(headers, requestTarget);
+@@ -162,7 +162,7 @@ export function createSigv4Planner(registry, config, matches) {
+         // never rewritten and never denied.
+         if (pair === undefined)
+             return undefined;
+-        if (!pair.injectHosts.some(p => matches(destHost, p)))
++        if (!pair.injectHosts.some(p => matches(destHost, destPort, p)))
+             return undefined;
+         if (detected.kind !== 'header-sigv4') {
+             if (policies[detected.kind] === 'passthrough') {
 diff --git a/dist/sandbox/credential-mask-env.d.ts b/dist/sandbox/credential-mask-env.d.ts
 index e30c0b44d5d37b9b7c9caac6f5662ad4dc0ca0de..dabc70e451afb123fb19986ede2e8d560cab4984 100644
 --- a/dist/sandbox/credential-mask-env.d.ts
@@ -485,10 +661,10 @@ index 4b954d49549511f9712b3b011731b8f99c35d1e7..125d5b75bd4353ac75aca40efd9ece4c
                  res.writeHead(500, { 'Content-Type': 'text/plain' });
                  res.end('Internal Server Error');
 diff --git a/dist/sandbox/linux-sandbox-utils.d.ts b/dist/sandbox/linux-sandbox-utils.d.ts
-index d3a3efdf46d039b24317cda40acc8ba3e5a424bb..05c86563f6956f4bf2fc1b56d7899764414d5ced 100644
+index d3a3efdf46d039b24317cda40acc8ba3e5a424bb..3b11204f649a4a2ffc7f5160eb55156fcb1cbf24 100644
 --- a/dist/sandbox/linux-sandbox-utils.d.ts
 +++ b/dist/sandbox/linux-sandbox-utils.d.ts
-@@ -43,6 +43,13 @@ export interface LinuxSandboxParams {
+@@ -43,7 +43,17 @@ export interface LinuxSandboxParams {
       */
      maskedFileStoreDir?: string;
      enableWeakerNestedSandbox?: boolean;
@@ -500,9 +676,13 @@ index d3a3efdf46d039b24317cda40acc8ba3e5a424bb..05c86563f6956f4bf2fc1b56d7899764
 +        setprivPath: string;
 +    };
      allowAllUnixSockets?: boolean;
++    /** Preserve the host PID, device, socket, and network views while applying
++     * only the requested filesystem mount policy. */
++    hostParity?: boolean;
      binShell?: string;
      ripgrepConfig?: {
-@@ -53,6 +60,14 @@ export interface LinuxSandboxParams {
+         command: string;
+@@ -53,6 +63,14 @@ export interface LinuxSandboxParams {
      mandatoryDenySearchDepth?: number;
      /** Allow writes to .git/config files (default: false) */
      allowGitConfig?: boolean;
@@ -518,9 +698,18 @@ index d3a3efdf46d039b24317cda40acc8ba3e5a424bb..05c86563f6956f4bf2fc1b56d7899764
       * Directories to emit as `safe.directory` via `GIT_CONFIG_*` env
       * vars (see {@link buildPosixGitSafeDirEnv}). Under `--unshare-user`
 diff --git a/dist/sandbox/linux-sandbox-utils.js b/dist/sandbox/linux-sandbox-utils.js
-index 4c521f62da435e7de02d1a69ceda617ea51cca08..050a92b33097bbccd417f8d3875ea562765cbdaf 100644
+index 4c521f62da435e7de02d1a69ceda617ea51cca08..d5c1505d7cc587191dc18cf5fbd3df659c0e7d8a 100644
 --- a/dist/sandbox/linux-sandbox-utils.js
 +++ b/dist/sandbox/linux-sandbox-utils.js
+@@ -29,7 +29,7 @@ function findSymlinkInPath(targetPath, allowedWritePaths) {
+             const stats = fs.lstatSync(nextPath);
+             if (stats.isSymbolicLink()) {
+                 // Check if this symlink is within an allowed write path
+-                const isWithinAllowedPath = allowedWritePaths.some(allowedPath => nextPath.startsWith(allowedPath + '/') || nextPath === allowedPath);
++                const isWithinAllowedPath = allowedWritePaths.some(allowedPath => allowedPath === '/' || nextPath.startsWith(allowedPath + '/') || nextPath === allowedPath);
+                 if (isWithinAllowedPath) {
+                     return nextPath;
+                 }
 @@ -168,7 +168,9 @@ function findFirstNonExistentComponent(targetPath) {
   * Uses a SINGLE ripgrep call with multiple glob patterns for efficiency.
   * With --max-depth limiting, this is fast enough to run on each command without memoization.
@@ -719,7 +908,13 @@ index 4c521f62da435e7de02d1a69ceda617ea51cca08..050a92b33097bbccd417f8d3875ea562
      const args = [];
      // fs already imported
      // Collect normalized allowed write paths. Populated in the writeConfig
-@@ -859,7 +958,7 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+@@ -854,12 +953,12 @@ async function generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds,
+         // directory missing from the record only costs an abort). No spelling
+         // handling is needed here: allowedWritePaths entries are recorded with
+         // trailing slashes stripped, and candidates are resolved deny dests.
+-        const isWithinAnyAllowedWritePath = (candidatePath) => allowedWritePaths.some(allowedPath => candidatePath.startsWith(allowedPath + '/') ||
++        const isWithinAnyAllowedWritePath = (candidatePath) => allowedWritePaths.some(allowedPath => allowedPath === '/' || candidatePath.startsWith(allowedPath + '/') ||
+             candidatePath === allowedPath);
          // Deny writes within allowed paths (user-specified + mandatory denies)
          const denyPaths = [
              ...(writeConfig.denyWithinAllow || []),
@@ -807,7 +1002,7 @@ index 4c521f62da435e7de02d1a69ceda617ea51cca08..050a92b33097bbccd417f8d3875ea562
   */
  export async function wrapCommandWithSandboxLinux(params) {
 -    const { command, commandId, needsNetworkRestriction, httpSocketPath, socksSocketPath, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, readConfig, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, maskedFileStoreDir, enableWeakerNestedSandbox, allowAllUnixSockets, binShell, ripgrepConfig = { command: 'rg' }, mandatoryDenySearchDepth = DEFAULT_MANDATORY_DENY_SEARCH_DEPTH, allowGitConfig = false, gitSafeDirectories, seccompConfig, bwrapPath, socatPath, observeSocketPath, abortSignal, } = params;
-+    const { command, commandId, needsNetworkRestriction, httpSocketPath, socksSocketPath, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, readConfig, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, maskedFileStoreDir, enableWeakerNestedSandbox, linuxPrivilegedWorker, allowAllUnixSockets, binShell, ripgrepConfig = { command: 'rg' }, mandatoryDenySearchDepth = DEFAULT_MANDATORY_DENY_SEARCH_DEPTH, allowGitConfig = false, disableMandatoryWriteProtection = false, bindMounts, gitSafeDirectories, seccompConfig, bwrapPath, socatPath, observeSocketPath, abortSignal, } = params;
++    const { command, commandId, needsNetworkRestriction, httpSocketPath, socksSocketPath, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, readConfig, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, maskedFileStoreDir, enableWeakerNestedSandbox, linuxPrivilegedWorker, allowAllUnixSockets, hostParity = false, binShell, ripgrepConfig = { command: 'rg' }, mandatoryDenySearchDepth = DEFAULT_MANDATORY_DENY_SEARCH_DEPTH, allowGitConfig = false, disableMandatoryWriteProtection = false, bindMounts, gitSafeDirectories, seccompConfig, bwrapPath, socatPath, observeSocketPath, abortSignal, } = params;
      // Determine if we have restrictions to apply
      // Read: denyOnly pattern - empty array means no restrictions
      // Write: allowOnly pattern - undefined means no restrictions, any config means restrictions
@@ -867,13 +1062,15 @@ index 4c521f62da435e7de02d1a69ceda617ea51cca08..050a92b33097bbccd417f8d3875ea562
                  caCertPath, proxyAuthToken, writeConfig === undefined, encodeSandboxedCommand(commandId ?? command));
                  bwrapArgs.push(...proxyEnv.flatMap((env) => {
                      const firstEq = env.indexOf('=');
-@@ -1477,8 +1660,18 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1477,10 +1660,24 @@ export async function wrapCommandWithSandboxLinux(params) {
              // If no sockets provided, network is completely blocked (--unshare-net without proxy)
          }
          // ========== FILESYSTEM RESTRICTIONS ==========
 -        const fsArgs = await generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds, maskedFileStoreDir, ripgrepConfig, mandatoryDenySearchDepth, allowGitConfig, abortSignal);
 +        const fsArgs = await generateFilesystemArgs(readConfig, writeConfig, maskedFileBinds, maskedFileStoreDir, ripgrepConfig, mandatoryDenySearchDepth, allowGitConfig, disableMandatoryWriteProtection, bindMounts, abortSignal);
          bwrapArgs.push(...fsArgs);
+-        // Always bind /dev
+-        bwrapArgs.push('--dev', '/dev');
 +        // A broad denyRead (notably Zeros' AF_UNIX root isolation) can mount a
 +        // tmpfs over the proxy sockets after the early network setup binds were
 +        // emitted. Re-bind the two manager-owned endpoints last so remote
@@ -884,15 +1081,24 @@ index 4c521f62da435e7de02d1a69ceda617ea51cca08..050a92b33097bbccd417f8d3875ea562
 +                bwrapArgs.push('--bind', socksSocketPath, socksSocketPath);
 +            }
 +        }
-         // Always bind /dev
-         bwrapArgs.push('--dev', '/dev');
++        // Host-parity mode is a mount-only write fence. Preserve the caller's
++        // real /dev and /proc views instead of creating new device/PID worlds.
++        if (hostParity)
++            bwrapArgs.push('--dev-bind', '/dev', '/dev');
++        else
++            bwrapArgs.push('--dev', '/dev');
          // ========== PID NAMESPACE ISOLATION ==========
-@@ -1489,7 +1682,22 @@ export async function wrapCommandWithSandboxLinux(params) {
+         // IMPORTANT: These must come AFTER filesystem binds for nested bwrap to work
+         // By default, always unshare PID namespace and mount fresh /proc.
+@@ -1488,8 +1685,24 @@ export async function wrapCommandWithSandboxLinux(params) {
+         // If we don't have --proc, it is possible to read host /proc and leak information about code running
          // outside the sandbox. But, --proc is not available when running in unprivileged docker containers
          // so we support running without it if explicitly requested.
-         bwrapArgs.push('--unshare-pid');
+-        bwrapArgs.push('--unshare-pid');
 -        if (!enableWeakerNestedSandbox) {
-+        if (linuxPrivilegedWorker) {
++        if (!hostParity)
++            bwrapArgs.push('--unshare-pid');
++        if (!hostParity && linuxPrivilegedWorker) {
 +            // The trusted root supervisor performs only namespace/mount setup.
 +            // The outer shell keeps SETUID/SETGID/SETPCAP just long enough for
 +            // setpriv to lock securebits, empty every capability set and enter
@@ -907,11 +1113,20 @@ index 4c521f62da435e7de02d1a69ceda617ea51cca08..050a92b33097bbccd417f8d3875ea562
 +            }
 +            bwrapArgs.push('--proc', '/proc');
 +        }
-+        else if (!enableWeakerNestedSandbox) {
++        else if (!hostParity && !enableWeakerNestedSandbox) {
              // Mount fresh /proc if PID namespace is isolated (secure mode).
              // --unshare-user + --cap-drop ALL: bwrap only auto-creates a userns
              // when EUID != 0, so a root parent would otherwise leave the sandboxed
-@@ -1529,15 +1737,16 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1500,7 +1713,7 @@ export async function wrapCommandWithSandboxLinux(params) {
+             // userns to obtain CAP_SYS_ADMIN for its PID+mount unshare (see below).
+             bwrapArgs.push('--unshare-user', '--cap-drop', 'ALL', '--proc', '/proc');
+         }
+-        else {
++        else if (!hostParity) {
+             // --unshare-user: bwrap only auto-adds this when EUID != 0. In an
+             // unprivileged container (Docker's default: EUID=0 without
+             // CAP_SYS_ADMIN), bwrap assumes it has caps, tries direct clone,
+@@ -1529,15 +1742,16 @@ export async function wrapCommandWithSandboxLinux(params) {
          // so socat starts before seccomp is applied. Otherwise invoke apply-seccomp
          // directly if we have a binary.
          if (needsNetworkRestriction && httpSocketPath && socksSocketPath) {
@@ -931,7 +1146,7 @@ index 4c521f62da435e7de02d1a69ceda617ea51cca08..050a92b33097bbccd417f8d3875ea562
          }
          const wrappedCommand = quote([bwrapPath ?? 'bwrap', ...bwrapArgs]);
          const restrictions = [];
-@@ -1549,6 +1758,8 @@ export async function wrapCommandWithSandboxLinux(params) {
+@@ -1549,6 +1763,8 @@ export async function wrapCommandWithSandboxLinux(params) {
              restrictions.push('env');
          if (applySeccompPrefix)
              restrictions.push('seccomp(unix-block)');
@@ -941,7 +1156,7 @@ index 4c521f62da435e7de02d1a69ceda617ea51cca08..050a92b33097bbccd417f8d3875ea562
          return wrappedCommand;
      }
 diff --git a/dist/sandbox/macos-sandbox-utils.d.ts b/dist/sandbox/macos-sandbox-utils.d.ts
-index 819c56a3f6bfb89fbacc008e6b0fcf6bf40901ed..abd3a0b53b22346569c0ca16cf047840dd1a31ee 100644
+index 819c56a3f6bfb89fbacc008e6b0fcf6bf40901ed..229bff0bda430ef715aa7b391444baa8aa134d43 100644
 --- a/dist/sandbox/macos-sandbox-utils.d.ts
 +++ b/dist/sandbox/macos-sandbox-utils.d.ts
 @@ -21,6 +21,12 @@ export interface MacOSSandboxParams {
@@ -965,7 +1180,16 @@ index 819c56a3f6bfb89fbacc008e6b0fcf6bf40901ed..abd3a0b53b22346569c0ca16cf047840
      /**
       * Directories to emit as `safe.directory` via `GIT_CONFIG_*` env
       * vars — see {@link buildPosixGitSafeDirEnv}.
-@@ -53,7 +60,7 @@ export interface MacOSSandboxParams {
+@@ -47,13 +54,16 @@ export interface MacOSSandboxParams {
+     gitSafeDirectories?: readonly string[];
+     enableWeakerNetworkIsolation?: boolean;
+     allowAppleEvents?: boolean;
++    /** Preserve ordinary host process, Mach, Keychain, and application access;
++     * only explicit filesystem deny rules subtract authority. */
++    hostParity?: boolean;
+     binShell?: string;
+ }
+ /**
   * Get mandatory deny patterns as glob patterns (no filesystem scanning).
   * macOS sandbox profile supports regex/glob matching directly via globToRegex().
   */
@@ -975,7 +1199,7 @@ index 819c56a3f6bfb89fbacc008e6b0fcf6bf40901ed..abd3a0b53b22346569c0ca16cf047840
      line: string;
      command?: string;
 diff --git a/dist/sandbox/macos-sandbox-utils.js b/dist/sandbox/macos-sandbox-utils.js
-index c3b6bd388235dccb965697cc07035d08aa9666eb..5259afe31bc2431256a0cb27cc22d4a349b63b60 100644
+index c3b6bd388235dccb965697cc07035d08aa9666eb..80d61317e98fdd3b48c7b403a120e931608c5664 100644
 --- a/dist/sandbox/macos-sandbox-utils.js
 +++ b/dist/sandbox/macos-sandbox-utils.js
 @@ -9,7 +9,9 @@ import { shouldIgnoreViolation } from './sandbox-violation-store.js';
@@ -989,7 +1213,51 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..5259afe31bc2431256a0cb27cc22d4a3
      const cwd = process.cwd();
      const denyPaths = [];
      // Dangerous files - static paths in CWD + glob patterns for subtree
-@@ -418,7 +420,7 @@ function generateReadRules(resolved, logTag) {
+@@ -122,7 +124,9 @@ function resolveReadConfig(config, writeAllowPaths) {
+  * them. Each comes back as the SBPL filter to emit:
+  *
+  * - A literal deny nested inside a literal allow (`~/proj/secrets` under
+- *   `~/proj`), re-emitted as-is.
++ *   `~/proj`), minus any still-more-specific allow beneath that deny. This
++ *   preserves the explicit nested deny while keeping intentional leaf
++ *   carve-outs such as the generated TLS trust bundle readable.
+  * - Every glob deny, minus (`require-not`) each allow entry the glob's own
+  *   regex covers. A leaf-shaped glob (`**\/.env`, `/**\/*.key`) covers no
+  *   directory allow, so it comes back whole and beats the directory allows
+@@ -139,11 +143,10 @@ function resolveReadConfig(config, writeAllowPaths) {
+  * that way — the moment an `(allow file-read* …)` is appended after this
+  * block, every deny above it has to be re-audited against it.
+  *
+- * The coverage test (denyGlobCovers) fails closed by construction: every
+- * carve-out is an entry the allow block above already allows, so an
+- * unnecessary carve-out only reproduces today's behavior for that entry,
+- * and a missed one (e.g. a glob allow whose sample path the deny regex
+- * happens not to match) leaves the deny wider — never opens anything.
++ * The coverage tests (isStrictlyUnder / denyGlobCovers) fail closed by
++ * construction: every carve-out is an entry the allow block above already
++ * allows, so an unnecessary carve-out only reproduces today's behavior for
++ * that entry, and a missed one leaves the deny wider — never opens anything.
+  */
+ function lateReadDenyFilters(resolved) {
+     const filters = [];
+@@ -151,8 +154,14 @@ function lateReadDenyFilters(resolved) {
+     const literalAllowDirs = resolved.allows.filter(a => !a.glob).map(a => a.path);
+     for (const deny of resolved.denies) {
+         if (!deny.glob) {
+-            if (literalAllowDirs.some(a => deny.path.startsWith(a + '/'))) {
+-                filters.push(denyPathFilter(deny.path));
++            // `a + '/'` becomes `//` for the filesystem root, so a root read
++            // grant used by host-parity mode would otherwise re-open every
++            // explicit nested deny (including the private policy descriptor).
++            if (literalAllowDirs.some(a => isStrictlyUnder(deny, a))) {
++                const carveOuts = resolved.allows
++                    .filter(a => isStrictlyUnder(a, deny.path))
++                    .map(a => pathFilter(a.path));
++                filters.push(carveFilter(denyPathFilter(deny.path), carveOuts));
+             }
+             continue;
+         }
+@@ -418,7 +427,7 @@ function generateReadRules(resolved, logTag) {
  /**
   * Generate filesystem write rules for sandbox profile
   */
@@ -998,7 +1266,7 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..5259afe31bc2431256a0cb27cc22d4a3
      if (!config) {
          return [`(allow file-write*)`];
      }
-@@ -432,7 +434,7 @@ function generateWriteRules(config, logTag, allowGitConfig = false) {
+@@ -432,7 +441,7 @@ function generateWriteRules(config, logTag, allowGitConfig = false) {
      // Combine user-specified and mandatory deny patterns (no ripgrep needed on macOS)
      const denyPaths = [
          ...(config.denyWithinAllow || []),
@@ -1007,7 +1275,7 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..5259afe31bc2431256a0cb27cc22d4a3
      ];
      const denyFilters = new Set();
      for (const pathPattern of denyPaths) {
-@@ -441,12 +443,36 @@ function generateWriteRules(config, logTag, allowGitConfig = false) {
+@@ -441,13 +450,43 @@ function generateWriteRules(config, logTag, allowGitConfig = false) {
      rules.push(...renderRule('deny', ['file-write*'], denyFilters, logTag));
      // Block file movement to prevent bypass via mv/rename
      rules.push(...generateMoveBlockingRules(denyPaths, logTag));
@@ -1041,11 +1309,19 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..5259afe31bc2431256a0cb27cc22d4a3
   * Generate complete sandbox profile
   */
 -function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksProxyPort, needsNetworkRestriction, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, allowPty, allowGitConfig = false, enableWeakerNetworkIsolation = false, allowAppleEvents = false, logTag, }) {
-+function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksProxyPort, needsNetworkRestriction, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowedLocalPorts, allowedBindPorts, deniedLocalPorts, allowMachLookup, allowPty, allowGitConfig = false, disableMandatoryWriteProtection = false, enableWeakerNetworkIsolation = false, allowAppleEvents = false, logTag, }) {
-     const profile = [
+-    const profile = [
++function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksProxyPort, needsNetworkRestriction, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowedLocalPorts, allowedBindPorts, deniedLocalPorts, allowMachLookup, allowPty, allowGitConfig = false, disableMandatoryWriteProtection = false, enableWeakerNetworkIsolation = false, allowAppleEvents = false, hostParity = false, logTag, }) {
++    const profile = hostParity ? [
++        '(version 1)',
++        '(allow default)',
++        '',
++        `; LogTag: ${logTag}`,
++        '',
++    ] : [
          '(version 1)',
          `(deny default (with message "${logTag}"))`,
-@@ -478,7 +504,9 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
+         '',
+@@ -478,7 +517,9 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
          '  (global-name "com.apple.system.opendirectoryd.libinfo")',
          '  (global-name "com.apple.system.opendirectoryd.membership")',
          '  (global-name "com.apple.bsd.dirhelper")',
@@ -1056,7 +1332,7 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..5259afe31bc2431256a0cb27cc22d4a3
          '  (global-name "com.apple.coreservices.launchservicesd")',
          ')',
          '',
-@@ -599,8 +627,12 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
+@@ -599,8 +640,12 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
          '; Distributed notifications',
          '(allow distributed-notification-post)',
          '',
@@ -1071,7 +1347,7 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..5259afe31bc2431256a0cb27cc22d4a3
          '',
          '; File I/O on device files',
          '(allow file-ioctl (literal "/dev/null"))',
-@@ -647,7 +679,18 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
+@@ -647,7 +692,18 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
          if (allowLocalBinding) {
              profile.push('(allow network-bind (local ip "*:*"))');
              profile.push('(allow network-inbound (local ip "*:*"))');
@@ -1091,7 +1367,7 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..5259afe31bc2431256a0cb27cc22d4a3
          }
          // Unix domain sockets for local IPC (SSH agent, Docker, Gradle, etc.)
          // Three separate operations must be allowed:
-@@ -687,6 +730,13 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
+@@ -687,6 +743,13 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
              profile.push(`(allow network-inbound (local ip "localhost:${socksProxyPort}"))`);
              profile.push(`(allow network-outbound (remote ip "localhost:${socksProxyPort}"))`);
          }
@@ -1105,7 +1381,7 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..5259afe31bc2431256a0cb27cc22d4a3
      }
      profile.push('');
      // Read rules
-@@ -700,7 +750,7 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
+@@ -700,7 +763,7 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
      profile.push('');
      // Write rules
      profile.push('; File write');
@@ -1114,16 +1390,16 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..5259afe31bc2431256a0cb27cc22d4a3
      // Read-denied paths inside write roots: the read section's unlink/create
      // re-allow for write roots (and the write section's file-write* allows)
      // must not leave them renameable. Last in the profile so nothing above
-@@ -739,7 +789,7 @@ function escapePath(pathStr) {
+@@ -739,7 +802,7 @@ function escapePath(pathStr) {
   * Wrap command with macOS sandbox
   */
  export function wrapCommandWithSandboxMacOS(params) {
 -    const { command, commandId, needsNetworkRestriction, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowMachLookup, readConfig: readConfigIn, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, allowPty, allowGitConfig = false, gitSafeDirectories, enableWeakerNetworkIsolation = false, allowAppleEvents = false, binShell, } = params;
-+    const { command, commandId, needsNetworkRestriction, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowedLocalPorts, allowedBindPorts, deniedLocalPorts, allowMachLookup, readConfig: readConfigIn, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, allowPty, allowGitConfig = false, disableMandatoryWriteProtection = false, gitSafeDirectories, enableWeakerNetworkIsolation = false, allowAppleEvents = false, binShell, } = params;
++    const { command, commandId, needsNetworkRestriction, httpProxyPort, socksProxyPort, proxyAuthToken, caCertPath, allowUnixSockets, allowAllUnixSockets, allowLocalBinding, allowedLocalPorts, allowedBindPorts, deniedLocalPorts, allowMachLookup, readConfig: readConfigIn, writeConfig, unsetEnvVars, setEnvVars, maskedFileBinds, allowPty, allowGitConfig = false, disableMandatoryWriteProtection = false, gitSafeDirectories, enableWeakerNetworkIsolation = false, allowAppleEvents = false, hostParity = false, binShell, } = params;
      // SBPL cannot redirect a read to different bytes, so whole-file masking
      // degrades to read-deny on macOS: the sandboxed process gets EPERM
      // instead of the sentinel. The DYLD interposer (a later step) lifts
-@@ -787,9 +837,13 @@ export function wrapCommandWithSandboxMacOS(params) {
+@@ -787,11 +850,16 @@ export function wrapCommandWithSandboxMacOS(params) {
          allowUnixSockets,
          allowAllUnixSockets,
          allowLocalBinding,
@@ -1136,8 +1412,11 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..5259afe31bc2431256a0cb27cc22d4a3
 +        disableMandatoryWriteProtection,
          enableWeakerNetworkIsolation,
          allowAppleEvents,
++        hostParity,
          logTag,
-@@ -805,7 +859,8 @@ export function wrapCommandWithSandboxMacOS(params) {
+     });
+     // Generate proxy environment variables using shared utility
+@@ -805,7 +873,8 @@ export function wrapCommandWithSandboxMacOS(params) {
      // Seatbelt filter. The flag is appended after any inherited
      // JAVA_TOOL_OPTIONS unless that var is on the credential-deny list, in
      // which case the inherited value is dropped so the deny holds.
@@ -1417,7 +1696,7 @@ index bd397f0ed189add83847d1ecd5e769833a1f3e4a..332bd563a9375abd746bef05b25bf0f7
          if (Array.isArray(v)) {
              for (const vv of v)
 diff --git a/dist/sandbox/sandbox-config.d.ts b/dist/sandbox/sandbox-config.d.ts
-index a5d9fe988f1f5c1cc1e48aef859c7276be37bb12..b8cb1de08ab3ce9d12756b464727b776c847fc32 100644
+index a5d9fe988f1f5c1cc1e48aef859c7276be37bb12..68430a4fb14166784946f0312452a8d2652b4d44 100644
 --- a/dist/sandbox/sandbox-config.d.ts
 +++ b/dist/sandbox/sandbox-config.d.ts
 @@ -160,6 +160,7 @@ export declare const CredentialFileConfigSchema: z.ZodObject<{
@@ -2228,7 +2507,7 @@ index a5d9fe988f1f5c1cc1e48aef859c7276be37bb12..b8cb1de08ab3ce9d12756b464727b776
      allowAppleEvents?: boolean | undefined;
      ripgrep?: {
 diff --git a/dist/sandbox/sandbox-config.js b/dist/sandbox/sandbox-config.js
-index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..7f4e47b9bfdec0183236cf1d863f3a83e49e5115 100644
+index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..9a0843436aefdeb65a499c6e72e2f7e12be063c1 100644
 --- a/dist/sandbox/sandbox-config.js
 +++ b/dist/sandbox/sandbox-config.js
 @@ -5,7 +5,7 @@
@@ -2259,7 +2538,15 @@ index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..7f4e47b9bfdec0183236cf1d863f3a83
      message: DOMAIN_PATTERN_MESSAGE +
          ' An optional ":port" suffix (1-65535) restricts the entry to that port.',
  });
-@@ -358,6 +359,11 @@ export const CredentialFileConfigSchema = z.object({
+@@ -352,12 +353,17 @@ export const CredentialFileConfigSchema = z.object({
+         'Defaults to false. Only meaningful with mode "mask" and extract ' +
+         'or decode set; accepted but ignored otherwise.'),
+     injectHosts: z
+-        .array(domainPatternSchema)
++        .array(domainPortPatternSchema)
+         .optional()
+-        .describe('Optional narrowing of where the proxy substitutes this credential. ' +
++        .describe('Optional host or host:port narrowing of where the proxy substitutes this credential. ' +
          'If unset, defaults to network.allowedDomains — the credential is ' +
          'injected at every reachable host. Only meaningful when mode is ' +
          '"mask"; accepted but ignored for "deny".'),
@@ -2271,7 +2558,15 @@ index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..7f4e47b9bfdec0183236cf1d863f3a83
  });
  /**
   * Schema for a single credential environment variable entry.
-@@ -487,6 +493,11 @@ export const CredentialEnvVarConfigSchema = z.object({
+@@ -481,12 +487,17 @@ export const CredentialEnvVarConfigSchema = z.object({
+         'unmasked with a stderr warning (fail-open). Only meaningful when ' +
+         'mode is "mask"; accepted but ignored for "deny".'),
+     injectHosts: z
+-        .array(domainPatternSchema)
++        .array(domainPortPatternSchema)
+         .optional()
+-        .describe('Optional narrowing of where the proxy substitutes this credential. ' +
++        .describe('Optional host or host:port narrowing of where the proxy substitutes this credential. ' +
          'If unset, defaults to network.allowedDomains — the credential is ' +
          'injected at every reachable host. Only meaningful when mode is ' +
          '"mask"; accepted but ignored for "deny".'),
@@ -2374,7 +2669,18 @@ index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..7f4e47b9bfdec0183236cf1d863f3a83
  /**
   * Main configuration schema for Sandbox Runtime validation
   */
-@@ -901,6 +964,10 @@ export const SandboxRuntimeConfigSchema = z
+@@ -894,6 +957,10 @@ export const SandboxRuntimeConfigSchema = z
+     .object({
+     network: NetworkConfigSchema.describe('Network restrictions configuration'),
+     filesystem: FilesystemConfigSchema.describe('Filesystem restrictions configuration'),
++    hostParity: z
++        .boolean()
++        .optional()
++        .describe('Preserve ordinary local host process, IPC, device, and network access while enforcing only explicit filesystem policy.'),
+     credentials: CredentialsConfigSchema.optional().describe('Credential handling configuration. Only the explicitly declared files ' +
+         'and environment variables are restricted.'),
+     ignoreViolations: IgnoreViolationsConfigSchema.optional().describe('Optional configuration for ignoring specific violations'),
+@@ -901,6 +968,10 @@ export const SandboxRuntimeConfigSchema = z
          .boolean()
          .optional()
          .describe('Enable weaker nested sandbox mode (for Docker environments)'),
@@ -2385,7 +2691,7 @@ index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..7f4e47b9bfdec0183236cf1d863f3a83
      enableWeakerNetworkIsolation: z
          .boolean()
          .optional()
-@@ -945,6 +1012,13 @@ export const SandboxRuntimeConfigSchema = z
+@@ -945,6 +1016,13 @@ export const SandboxRuntimeConfigSchema = z
          '`safe.directory` without adding them to `filesystem.allowWrite`.'),
  })
      .superRefine((cfg, ctx) => {
@@ -2399,7 +2705,7 @@ index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..7f4e47b9bfdec0183236cf1d863f3a83
      const creds = cfg.credentials;
      if (!creds)
          return;
-@@ -952,12 +1026,10 @@ export const SandboxRuntimeConfigSchema = z
+@@ -952,12 +1030,10 @@ export const SandboxRuntimeConfigSchema = z
      // allowedDomains — semantic (wildcard-aware) coverage, not literal
      // string membership, so `injectHosts: ['api.github.com']` is accepted
      // when `allowedDomains: ['*.github.com']`.
@@ -2413,7 +2719,7 @@ index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..7f4e47b9bfdec0183236cf1d863f3a83
                  ctx.addIssue({
                      code: z.ZodIssueCode.custom,
                      path: [...path, i],
-@@ -981,6 +1053,23 @@ export const SandboxRuntimeConfigSchema = z
+@@ -981,6 +1057,23 @@ export const SandboxRuntimeConfigSchema = z
          if (entry.mode !== 'mask')
              return;
          hasMasked = true;
@@ -2437,7 +2743,7 @@ index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..7f4e47b9bfdec0183236cf1d863f3a83
          // Credential substitution only runs on the TLS-terminated path, so a
          // host covered by tlsTerminate.excludeDomains can never receive the
          // real value — the upstream sees the placeholder. Reject the
-@@ -997,7 +1086,7 @@ export const SandboxRuntimeConfigSchema = z
+@@ -997,7 +1090,7 @@ export const SandboxRuntimeConfigSchema = z
          if (exclude?.length) {
              if (entry.injectHosts) {
                  for (const [i, host] of entry.injectHosts.entries()) {
@@ -2447,7 +2753,7 @@ index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..7f4e47b9bfdec0183236cf1d863f3a83
                              code: z.ZodIssueCode.custom,
                              path: [...path, 'injectHosts', i],
 diff --git a/dist/sandbox/sandbox-manager.js b/dist/sandbox/sandbox-manager.js
-index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d122101967bb94c3bbd3e59bab160046ce9c1f8d 100644
+index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..480b4d4193c00ff00a04476a89745f9add85e31b 100644
 --- a/dist/sandbox/sandbox-manager.js
 +++ b/dist/sandbox/sandbox-manager.js
 @@ -19,8 +19,9 @@ import { checkWindowsDependencies, checkWindowsDependenciesAsync, wrapCommandWit
@@ -2524,6 +2830,15 @@ index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d122101967bb94c3bbd3e59bab160046
  }
  /**
   * Build the per-request SigV4 hook for the TLS-terminating proxy.
+@@ -287,7 +309,7 @@ function buildSigv4Planner() {
+     // Re-read the policies per request (not captured at proxy start) so an
+     // updateConfig() that changes credentials.sigv4 takes effect without a
+     // proxy restart, matching how the injector sees live registry state.
+-    return (method, requestTarget, headers, destHost) => createSigv4Planner(awsPairRegistry, config?.credentials?.sigv4, matchesDomainPattern)(method, requestTarget, headers, destHost);
++    return (method, requestTarget, headers, destHost, destPort) => createSigv4Planner(awsPairRegistry, config?.credentials?.sigv4, matchesDomainPatternWithPort)(method, requestTarget, headers, destHost, destPort);
+ }
+ /**
+  * Get the MITM proxy socket path for a given host, if configured.
 @@ -329,11 +351,16 @@ function getMitmSocketPath(host) {
   * canonicalization (`127.1`, a trailing-dot FQDN) would dodge the exclusion
   * and get terminated anyway.
@@ -2591,13 +2906,19 @@ index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d122101967bb94c3bbd3e59bab160046
          // SigV4 re-signing is TLS-terminated-path only, like credential
          // injection: the real signature must not travel over plaintext.
          planSigv4: buildSigv4Planner(),
-@@ -836,9 +871,7 @@ function getCredentialRestrictions(credentials, allowedDomains) {
-     // Default injectHosts (= allowedDomains) is host-scoped: drop any
-     // `:port` suffixes, otherwise the sentinel would carry an entry no bare
-     // destination host can ever match and the credential would never inject.
+@@ -833,12 +868,10 @@ function getCredentialRestrictions(credentials, allowedDomains) {
+         };
+     }
+     const denyReadPaths = getCredentialDenyReadPaths(credentials);
+-    // Default injectHosts (= allowedDomains) is host-scoped: drop any
+-    // `:port` suffixes, otherwise the sentinel would carry an entry no bare
+-    // destination host can ever match and the credential would never inject.
 -    const defaultInjectHosts = [
 -        ...new Set((allowedDomains ?? []).map(stripDomainPatternPort)),
 -    ];
++    // When an entry omits injectHosts, preserve allowedDomains exactly.
++    // Authority-aware matching supports both host-wide and host:port grants,
++    // so broadening a port-scoped network grant here would leak authority.
 +    const defaultInjectHosts = [...new Set(allowedDomains ?? [])];
      const unsetEnvVars = [];
      for (const v of credentials.envVars ?? []) {
@@ -2653,7 +2974,7 @@ index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d122101967bb94c3bbd3e59bab160046
  function getAllowMachLookup() {
      return config?.network?.allowMachLookup;
  }
-@@ -1091,6 +1143,9 @@ function getIgnoreViolations() {
+@@ -1091,12 +1143,18 @@ function getIgnoreViolations() {
  function getEnableWeakerNestedSandbox() {
      return config?.enableWeakerNestedSandbox;
  }
@@ -2663,7 +2984,16 @@ index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d122101967bb94c3bbd3e59bab160046
  function getEnableWeakerNetworkIsolation() {
      return config?.enableWeakerNetworkIsolation;
  }
-@@ -1106,6 +1161,12 @@ function getMandatoryDenySearchDepth() {
+ function getAllowAppleEvents() {
+     return config?.allowAppleEvents;
+ }
++function getHostParity() {
++    return config?.hostParity ?? false;
++}
+ function getRipgrepConfig() {
+     return config?.ripgrep ?? { command: 'rg' };
+ }
+@@ -1106,6 +1164,12 @@ function getMandatoryDenySearchDepth() {
  function getAllowGitConfig() {
      return config?.filesystem?.allowGitConfig ?? false;
  }
@@ -2676,7 +3006,7 @@ index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d122101967bb94c3bbd3e59bab160046
  /**
   * Union of session-level and per-call `git.safeDirectories`. Marks
   * paths as `safe.directory` (dubious-ownership bypass) WITHOUT
-@@ -1202,6 +1263,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1202,6 +1266,9 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
              denyWithinAllow: stripWriteGlobs(customConfig?.filesystem?.denyWrite ??
                  config?.filesystem.denyWrite ??
                  []),
@@ -2686,7 +3016,7 @@ index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d122101967bb94c3bbd3e59bab160046
          };
          // Credential deny paths are unioned with the caller's denyRead — never
          // replacing it — so explicit filesystem restrictions always survive.
-@@ -1243,8 +1307,12 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1243,8 +1310,12 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
      // 1. customConfig has network.allowedDomains defined (even if empty array = block all)
      // 2. OR config has network.allowedDomains defined (even if empty array = block all)
      // An empty allowedDomains array means "no domains allowed" = block all network access
@@ -2701,7 +3031,7 @@ index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d122101967bb94c3bbd3e59bab160046
      // Network RESTRICTION is needed whenever network config is specified
      // This includes empty allowedDomains which means "block all network"
      const needsNetworkRestriction = hasNetworkConfig;
-@@ -1280,10 +1348,14 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1280,13 +1351,18 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
                  allowUnixSockets: getAllowUnixSockets(),
                  allowAllUnixSockets: getAllowAllUnixSockets(),
                  allowLocalBinding: getAllowLocalBinding(),
@@ -2716,12 +3046,17 @@ index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d122101967bb94c3bbd3e59bab160046
                  gitSafeDirectories,
                  enableWeakerNetworkIsolation: getEnableWeakerNetworkIsolation(),
                  allowAppleEvents: getAllowAppleEvents(),
-@@ -1316,11 +1388,14 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
++                hostParity: getHostParity(),
+                 binShell,
+             });
+         case 'linux':
+@@ -1316,11 +1392,15 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
                  maskedFileBinds: credentialRestrictions.maskedFileBinds,
                  maskedFileStoreDir: credentialRestrictions.maskedFileStoreDir,
                  enableWeakerNestedSandbox: getEnableWeakerNestedSandbox(),
 +                linuxPrivilegedWorker: getLinuxPrivilegedWorker(),
                  allowAllUnixSockets: getAllowAllUnixSockets(),
++                hostParity: getHostParity(),
                  binShell,
                  ripgrepConfig: getRipgrepConfig(),
                  mandatoryDenySearchDepth: getMandatoryDenySearchDepth(),
@@ -2731,7 +3066,7 @@ index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d122101967bb94c3bbd3e59bab160046
                  gitSafeDirectories,
                  seccompConfig: getSeccompConfig(),
                  bwrapPath: config?.bwrapPath,
-@@ -1365,8 +1440,12 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
+@@ -1365,8 +1445,12 @@ async function wrapWithSandbox(command, binShell, customConfig, abortSignal, opt
  async function wrapWithSandboxArgv(command, binShell, customConfig, abortSignal, cwd, options) {
      const platform = getPlatform();
      if (platform === 'windows') {
@@ -2747,7 +3082,7 @@ index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d122101967bb94c3bbd3e59bab160046
              await waitForNetworkInitialization();
          }
 diff --git a/dist/sandbox/sandbox-schemas.d.ts b/dist/sandbox/sandbox-schemas.d.ts
-index d753a3a3a500be8c485f511ec5a94d5921094b91..48e851637c5f009bf42bccad2a44e67d19cdec54 100644
+index d753a3a3a500be8c485f511ec5a94d5921094b91..743e2cb71b1ce5d15aa70553abd18ddab23dd01c 100644
 --- a/dist/sandbox/sandbox-schemas.d.ts
 +++ b/dist/sandbox/sandbox-schemas.d.ts
 @@ -34,6 +34,7 @@ export interface FsReadRestrictionConfig {
@@ -2847,7 +3182,7 @@ index 059e9bc560e31d8e7d1c508f94414ab97eac6ffa..d5513cdaf0f9dfab100a4a2bd10c14b6
  //# sourceMappingURL=tls-terminate-proxy.d.ts.map
 \ No newline at end of file
 diff --git a/dist/sandbox/tls-terminate-proxy.js b/dist/sandbox/tls-terminate-proxy.js
-index 648c26617daded9d524d86b7243eccb62e8e8a2e..fe5d6aa5b853437db8869ce91c12432f3fc94591 100644
+index 648c26617daded9d524d86b7243eccb62e8e8a2e..95e6616400a9dd81beed322f29c10e6cca8c5672 100644
 --- a/dist/sandbox/tls-terminate-proxy.js
 +++ b/dist/sandbox/tls-terminate-proxy.js
 @@ -3,19 +3,24 @@
@@ -3603,7 +3938,13 @@ index 648c26617daded9d524d86b7243eccb62e8e8a2e..fe5d6aa5b853437db8869ce91c12432f
      delete fwdHeaders.host;
      // SigV4 planning runs on the PRE-substitution headers (the trigger is
      // the fake access key id in the credential scope, which the header
-@@ -302,11 +806,42 @@ async function forwardUpstream(filterRequest, mutateHeaders, getBodySubstitution
+@@ -297,16 +801,47 @@ async function forwardUpstream(filterRequest, mutateHeaders, getBodySubstitution
+     // signed-header presence check must see exactly the set that will be
+     // signed and forwarded, or a signed hop-by-hop header would pass the
+     // check and then blow up inside the signer.
+-    const sigv4Plan = planSigv4?.(req.method ?? 'GET', path, fwdHeaders, target.hostname);
++    const sigv4Plan = planSigv4?.(req.method ?? 'GET', path, fwdHeaders, target.hostname, target.port);
+     // Header mutation runs after the allow decision and before httpsRequest.
      // The upstream TLS handshake (rejectUnauthorized defaults to true)
      // completes before any HTTP bytes are written, so mutated headers never
      // reach an unverified server.

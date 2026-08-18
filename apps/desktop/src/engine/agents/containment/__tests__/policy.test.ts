@@ -76,6 +76,7 @@ describe("ZSR policy builder", () => {
       workspaceRoot: workspace,
       designDirectory: design,
       protectedDesignDirectories: [design],
+      designRecognitionPaths: [],
       writeCapabilities: {
         workspace: "write",
         deniedPaths: [design, git],
@@ -141,9 +142,9 @@ describe("ZSR policy builder", () => {
     expect(
       (await stat(prepared.paths.processIdentityMarker)).mode & 0o777,
     ).toBe(0o400);
-    expect(
-      await readFile(prepared.paths.processIdentityMarker, "utf8"),
-    ).toBe(`${prepared.document.generation}\n`);
+    expect(await readFile(prepared.paths.processIdentityMarker, "utf8")).toBe(
+      `${prepared.document.generation}\n`,
+    );
     expect(prepared.document.filesystem.allowRead).toContain(
       prepared.paths.tools,
     );
@@ -152,6 +153,135 @@ describe("ZSR policy builder", () => {
     );
     expect(JSON.parse(await readFile(prepared.paths.policy, "utf8"))).toEqual(
       prepared.document,
+    );
+  });
+
+  it("uses host-parity access for code while subtracting every Design directory", async () => {
+    const workspace = path.join(temporaryRoot, "host-parity-workspace");
+    const primaryDesign = path.join(workspace, "Zeros Design");
+    const nestedDesign = path.join(workspace, "examples", "Product Design");
+    const git = path.join(workspace, ".git");
+    const extra = path.join(temporaryRoot, "host-parity-extra");
+    await Promise.all([
+      mkdir(primaryDesign, { recursive: true }),
+      mkdir(nestedDesign, { recursive: true }),
+      mkdir(git, { recursive: true }),
+      mkdir(extra, { recursive: true }),
+    ]);
+    const territory: AgentFilesystemTerritory = {
+      agentRole: "code",
+      workspaceRoot: workspace,
+      designDirectory: primaryDesign,
+      protectedDesignDirectories: [primaryDesign, nestedDesign],
+      designRecognitionPaths: [],
+      writeCapabilities: {
+        workspace: "write",
+        deniedPaths: [primaryDesign, nestedDesign, git],
+      },
+    };
+
+    const prepared = await prepareZsrPolicy(
+      {
+        executionId: "execution-host-parity-code",
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+        territory,
+        additionalReadWriteRoots: [extra],
+      },
+      newTerritoryGeneration(),
+      { localHostParity: true },
+    );
+
+    expect(prepared.document.runtime.localHostParity).toBe(true);
+    expect(prepared.document.filesystem.allowRead).toContain(
+      path.parse(workspace).root,
+    );
+    expect(prepared.document.filesystem.allowWrite).toContain(
+      path.parse(workspace).root,
+    );
+    expect(prepared.document.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([primaryDesign, nestedDesign]),
+    );
+    expect(prepared.document.filesystem.denyWrite).not.toContain(git);
+    expect(prepared.document.filesystem.denyRead).not.toContain(
+      process.env.ZEROS_DATA_DIR,
+    );
+  });
+
+  it("inverts only repository writes for a host-parity design actor", async () => {
+    const workspace = path.join(temporaryRoot, "workspace");
+    const design = path.join(workspace, "Zeros Design");
+    const git = path.join(workspace, ".git");
+    const extra = path.join(temporaryRoot, "extra");
+    await Promise.all([
+      mkdir(design, { recursive: true }),
+      mkdir(git, { recursive: true }),
+      mkdir(extra, { recursive: true }),
+    ]);
+    const territory: AgentFilesystemTerritory = {
+      agentRole: "code",
+      workspaceRoot: workspace,
+      designDirectory: design,
+      protectedDesignDirectories: [design],
+      designRecognitionPaths: [],
+      writeCapabilities: { workspace: "write", deniedPaths: [design, git] },
+    };
+    const request = {
+      executionId: "execution-design-1",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      territory,
+      // A design actor may still be handed code roots by a generic call site.
+      // They must arrive as read-only rather than failing the admission.
+      additionalReadWriteRoots: [extra],
+      allowedLocalPorts: [5432],
+      trustedLocalPorts: [3000],
+    } as const;
+    const designPolicy = await prepareZsrPolicy(
+      { ...request, actor: "design-agent" },
+      newTerritoryGeneration(),
+      { localHostParity: true, localHostParityWriteIslands: [git] },
+    );
+
+    // Normal host authority remains available outside repository roots. The
+    // workspace and attached code roots are denied, with Design re-opened as
+    // the only writable islands inside them by the runtime compiler.
+    expect(designPolicy.document.filesystem.allowWrite).toEqual(
+      expect.arrayContaining([path.parse(workspace).root, design, git]),
+    );
+    expect(designPolicy.document.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([workspace, extra]),
+    );
+    expect(designPolicy.document.filesystem.denyWrite).not.toContain(design);
+    expect(designPolicy.document.filesystem.denyWrite).not.toContain(git);
+
+    // Reading the whole machine, including code and Design, still works.
+    expect(designPolicy.document.filesystem.allowRead).toContain(
+      path.parse(workspace).root,
+    );
+    expect(designPolicy.document.filesystem.denyRead).not.toContain(
+      process.env.ZEROS_DATA_DIR,
+    );
+
+    // Live data keeps working: ports are untouched by the actor split.
+    expect(designPolicy.document.runtime.allowedLocalPorts).toEqual(
+      expect.arrayContaining([5432, 3000]),
+    );
+    expect(designPolicy.document.actor).toBe("design-agent");
+
+    // The same request as a code actor is the exact inverse on write only.
+    const codePolicy = await prepareZsrPolicy(
+      { ...request, executionId: "execution-design-2", actor: "agent-code" },
+      newTerritoryGeneration(),
+      { localHostParity: true },
+    );
+    expect(codePolicy.document.filesystem.allowWrite).toEqual(
+      expect.arrayContaining([path.parse(workspace).root]),
+    );
+    expect(codePolicy.document.filesystem.denyWrite).not.toContain(workspace);
+    expect(codePolicy.document.filesystem.allowRead).toContain(
+      path.parse(workspace).root,
     );
   });
 
@@ -178,7 +308,8 @@ describe("ZSR policy builder", () => {
       expect(
         prepared.document.filesystem.denyRead.some(
           (root) =>
-            root === operatorState || operatorState.startsWith(`${root}${path.sep}`),
+            root === operatorState ||
+            operatorState.startsWith(`${root}${path.sep}`),
         ),
       ).toBe(true);
     } finally {
@@ -235,9 +366,8 @@ describe("ZSR policy builder", () => {
           actor: "agent-code",
           cwd: workspace,
           workspaceRoot: workspace,
-          additionalReadWriteRoots: Array.from(
-            { length: 33 },
-            (_, index) => path.join(temporaryRoot, `future-${index}`),
+          additionalReadWriteRoots: Array.from({ length: 33 }, (_, index) =>
+            path.join(temporaryRoot, `future-${index}`),
           ),
         },
         newTerritoryGeneration(),
@@ -296,6 +426,7 @@ describe("ZSR policy builder", () => {
       workspaceRoot: other,
       designDirectory: design,
       protectedDesignDirectories: [design],
+      designRecognitionPaths: [],
       writeCapabilities: { workspace: "write", deniedPaths: [design] },
     };
 

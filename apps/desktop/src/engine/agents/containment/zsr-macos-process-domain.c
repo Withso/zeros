@@ -464,10 +464,42 @@ static int command_match(int argc, char **argv) {
   pid_t target;
   if (parse_fingerprint(argc, argv, 2, &fingerprint, &target) != 0) return 2;
   zsr_process candidate;
-  bool match = process_info(target, &candidate) &&
-               matches_fingerprint(&candidate, &fingerprint);
-  printf("{\"version\":%d,\"match\":%s}\n", ZSR_HELPER_VERSION,
-         match ? "true" : "false");
+  bool has_process = process_info(target, &candidate);
+  bool eligible = has_process && candidate.pid > 1 &&
+                  candidate.pid != getpid() &&
+                  candidate.pid != fingerprint.excluded_pid &&
+                  candidate.uid == fingerprint.owner_uid &&
+                  candidate.status != SZOMB;
+  int sandboxed =
+      eligible
+          ? sandbox_check(candidate.pid, NULL, ZSR_SANDBOX_FILTER_NONE)
+          : -2;
+  int allow_read =
+      eligible ? path_decision(candidate.pid, "file-read-data",
+                               fingerprint.allow_path)
+               : -2;
+  int allow_write =
+      eligible ? path_decision(candidate.pid, "file-write-data",
+                               fingerprint.allow_path)
+               : -2;
+  int deny_read = eligible ? path_decision(candidate.pid, "file-read-data",
+                                            fingerprint.deny_path)
+                           : -2;
+  int deny_write =
+      eligible ? path_decision(candidate.pid, "file-write-data",
+                               fingerprint.deny_path)
+               : -2;
+  bool match = eligible && sandboxed == 1 && allow_read == 0 &&
+               allow_write > 0 && deny_read > 0 && deny_write > 0;
+  // The decision tuple contains no paths or process arguments. Keeping it in
+  // the one-pid diagnostic makes a fail-closed admission actionable when a
+  // future Seatbelt/SRT change alters one fingerprint operation.
+  printf("{\"version\":%d,\"match\":%s,\"eligible\":%s,"
+         "\"sandboxed\":%d,\"allowRead\":%d,\"allowWrite\":%d,"
+         "\"denyRead\":%d,\"denyWrite\":%d}\n",
+         ZSR_HELPER_VERSION, match ? "true" : "false",
+         eligible ? "true" : "false", sandboxed, allow_read, allow_write,
+         deny_read, deny_write);
   return match ? 0 : 4;
 }
 

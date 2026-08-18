@@ -21,12 +21,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
-import {
-  createServer,
-  isIP,
-  type Server,
-  type Socket,
-} from "node:net";
+import { createServer, isIP, type Server, type Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
 
@@ -100,6 +95,13 @@ export interface MacosContainerReservationRequest {
   /** Existing engine-private session root selectively mounted into the VM so
    * only the later Git source can be projected into the worker namespace. */
   readonly sessionRoot: string;
+}
+
+export interface MacosContainerReservationOptions {
+  /** Ordinary agent admission reserves only the loopback capability. The
+   * isolated VM remains cold until a contained Docker/Podman client actually
+   * connects, so container parity cannot delay an unrelated first prompt. */
+  readonly activation?: "eager" | "on-first-connection";
 }
 
 export interface MacosContainerStartRequest {
@@ -238,6 +240,17 @@ interface OrbStackMachineInfo {
   readonly ip6?: string;
 }
 
+interface OrbStackProvisionedMachine {
+  readonly runtimeIdentity: OrbStackRuntimeIdentity;
+  readonly recoveryHoldPath: string;
+}
+
+interface NormalizedMacosContainerStartRequest {
+  readonly generation: TerritoryGeneration;
+  readonly protectedRoots: readonly string[];
+  readonly gitProjections: readonly ShadowGitFilesystemProjection[];
+}
+
 interface OrbStackRuntimeIdentity {
   readonly uid: number;
   readonly gid: number;
@@ -305,7 +318,9 @@ export function createOrbStackCommandRunner(
       );
       const code = await new Promise<number>((resolve, reject) => {
         child.once("error", reject);
-        child.once("exit", (exitCode) => resolve(exitCode ?? 125));
+        // "close", not "exit": callers parse this stdout, and exit can fire
+        // before the pipe has been drained.
+        child.once("close", (exitCode) => resolve(exitCode ?? 125));
       }).finally(() => clearTimeout(timeout));
       if (code !== 0 && !options.allowFailure) {
         throw new Error(
@@ -366,6 +381,51 @@ function runCodeSignVerification(
   });
 }
 
+/** Identity of a path as the filesystem sees it, for cache invalidation. Any
+ * write to a file changes its size, mtime or ctime; a replacement changes its
+ * inode. Missing paths get a distinct marker so an absent-then-present file is
+ * never mistaken for an unchanged one. */
+function pathIdentity(candidate: string): string {
+  try {
+    // Nanosecond fields, not the millisecond ones: two writes inside the same
+    // millisecond are ordinary, and a key that cannot tell them apart would
+    // keep serving a sweep for bytes that have already changed.
+    const stat = lstatSync(candidate, { bigint: true });
+    return [
+      candidate,
+      stat.dev,
+      stat.ino,
+      stat.size,
+      stat.mtimeNs,
+      stat.ctimeNs,
+      stat.mode,
+    ]
+      .map(String)
+      .join(":");
+  } catch {
+    return `${candidate}:absent`;
+  }
+}
+
+/** Whole-bundle sweeps already proven for an exact on-disk bundle identity.
+ *
+ * The sweep — `codesign --verify --deep --strict` over OrbStack.app — measured
+ * **570-900 ms** against a 680 MiB bundle on a real Mac, and the worker is
+ * constructed once per admission, so it was the whole of the 704-722 ms
+ * `container-reserve` stage in the 2026-08-17 log. It is also the one part of
+ * the attestation that is a pure function of bytes already on disk.
+ *
+ * What is cached is ONLY that sweep, and only while every file it is keyed on
+ * is byte-identical: the CLI itself, the bundle's `CodeResources` (the signed
+ * manifest of every nested file's hash — so tampering with any bundle content
+ * without updating it leaves a signature that the kernel still refuses at
+ * exec), and the bundle directory. The trust decision — the explicit
+ * `anchor apple generic` requirement match and the identifier/team check — is
+ * NOT cached and still runs on every admission, because it is cheap (50 ms
+ * measured) and it is the check that decides whether these bytes may create a
+ * privileged VM at all. */
+const attestedOrbStackBundles = new Map<string, true>();
+
 export function attestOrbStackCli(
   candidate: string,
   verifier: OrbStackCodeSignVerifier = runCodeSignVerification,
@@ -391,12 +451,17 @@ export function attestOrbStackCli(
     0,
     executable.length - suffix.length + "OrbStack.app".length,
   );
-  const verified = verifier("/usr/bin/codesign", [
-    "--verify",
-    "--deep",
-    "--strict",
-    bundle,
-  ]);
+  const bundleKey = [
+    pathIdentity(executable),
+    pathIdentity(
+      path.join(bundle, "Contents", "_CodeSignature", "CodeResources"),
+    ),
+    pathIdentity(bundle),
+  ].join("|");
+  const sweepAlreadyProven = attestedOrbStackBundles.has(bundleKey);
+  const verified = sweepAlreadyProven
+    ? { status: 0 }
+    : verifier("/usr/bin/codesign", ["--verify", "--deep", "--strict", bundle]);
   // Parsing TeamIdentifier from display output is not a trust decision. Apple
   // documents that certificate trust is not evaluated unless the explicit
   // requirement asks for it; `anchor apple generic` binds this identity to an
@@ -420,9 +485,19 @@ export function attestOrbStackCli(
     !identity.includes(`Identifier=${ORBSTACK_CLI_IDENTIFIER}`) ||
     !identity.includes(`TeamIdentifier=${ORBSTACK_TEAM_ID}`)
   ) {
+    // A failure invalidates the memo as well: the next admission must sweep
+    // again rather than inherit a verdict recorded beside a rejected identity.
+    attestedOrbStackBundles.delete(bundleKey);
     throw new Error("OrbStack CLI code-signing identity is untrusted");
   }
+  attestedOrbStackBundles.set(bundleKey, true);
   return executable;
+}
+
+/** Drop every memoized bundle sweep. Tests only — production invalidation is
+ * the on-disk identity in the key. */
+export function resetAttestedOrbStackBundlesForTesting(): void {
+  attestedOrbStackBundles.clear();
 }
 
 function physicalFile(candidate: string, label: string): string {
@@ -647,10 +722,7 @@ async function listenOnRandomLoopback(server: Server): Promise<number> {
   return address.port;
 }
 
-function orbStackRelayArguments(
-  machineName: string,
-  port: number,
-): string[] {
+function orbStackRelayArguments(machineName: string, port: number): string[] {
   assertOwnedOrbStackMachineName(machineName);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
     throw new Error("invalid private container bridge port");
@@ -767,7 +839,11 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
   private bridgePort: number | null = null;
   private child: ChildProcess | null = null;
   private descriptorPath: string | null = null;
+  private provisionedMachine: OrbStackProvisionedMachine | null;
+  private provisionPromise: Promise<OrbStackProvisionedMachine> | null = null;
+  private startRequest: NormalizedMacosContainerStartRequest | null = null;
   private startPromise: Promise<void> | null = null;
+  private eagerStartPromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
   private readonly peers = new Set<Socket>();
   private readonly relays = new Set<ChildProcess>();
@@ -779,71 +855,74 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
     private readonly request: MacosContainerReservationRequest,
     private readonly mountRoots: readonly string[],
     private readonly sessionKey: string,
-    private readonly runtimeIdentity: OrbStackRuntimeIdentity,
     private readonly runner: OrbStackCommandRunner,
-    private readonly recoveryHoldPath: string,
+    provisionedMachine: OrbStackProvisionedMachine | null,
+    private readonly provisionMachine: () => Promise<OrbStackProvisionedMachine>,
+    private readonly activation: "eager" | "on-first-connection",
     private readonly forwardedBridgeTimeoutMs: number,
     private readonly maxActiveRelays: number,
     private readonly stopTimeoutMs: number,
   ) {
+    this.provisionedMachine = provisionedMachine;
     const endpoint = `tcp://127.0.0.1:${hostPort}`;
     this.environment = Object.freeze({
       DOCKER_HOST: endpoint,
       CONTAINER_HOST: endpoint,
     });
     this.server.on("connection", (peer) => {
+      if (
+        this.stopPromise ||
+        !this.startRequest ||
+        this.peers.size >= this.maxActiveRelays
+      ) {
+        // Raw proxy peers are untrusted. Refuse without attaching an Error,
+        // which would otherwise require every client to have installed an
+        // error listener before the engine can safely reject the socket.
+        peer.destroy();
+        return;
+      }
       this.peers.add(peer);
       peer.once("close", () => this.peers.delete(peer));
-      const bridgePort = this.bridgePort;
-      if (!bridgePort) {
-        // This is an untrusted raw connection, not an engine exception path.
-        // Refuse it without emitting an unhandled server-side socket error.
-        peer.destroy();
-        return;
-      }
-      if (this.relays.size >= this.maxActiveRelays) {
-        // Refuse silently at this raw transport boundary. Passing an Error to
-        // destroy() would emit it on the server-side socket with no consumer
-        // and could crash the engine under deliberate connection pressure.
-        peer.destroy();
-        return;
-      }
-      let relay: ChildProcess;
-      try {
-        relay = spawnOrbStackRelay(this.runner, this.machineName, bridgePort);
-      } catch {
-        peer.destroy();
-        return;
-      }
-      this.relays.add(relay);
-      relay.once("close", (code) => {
-        this.relays.delete(relay);
-        if (peer.destroyed) return;
-        if (code === 0) peer.end();
-        else peer.destroy(new Error("private container relay closed"));
-      });
-      relay.once("error", () => peer.destroy());
-      relay.stdin!.once("error", () => peer.destroy());
-      relay.stdout!.once("error", () => peer.destroy());
-      peer.once("error", () => relay.kill("SIGTERM"));
-      peer.once("close", () => {
-        if (relay.exitCode === null && relay.signalCode === null) {
-          relay.kill("SIGTERM");
-        }
-      });
-      peer.pipe(relay.stdin!);
-      relay.stdout!.pipe(peer);
+      peer.pause();
+      void this.ensureRuntimeStarted()
+        .then(() => this.attachRelay(peer))
+        .catch(() => {
+          peer.destroy();
+          // A failed on-demand start must retire any machine that was created.
+          // Keep the rejected stop promise observable to the owning prepared
+          // boundary while preventing an unhandled background rejection.
+          void this.stopAndProve().catch(() => {
+            console.warn(
+              "[zsr] OrbStack on-demand cleanup could not be proven",
+            );
+          });
+        });
     });
   }
 
   start(request: MacosContainerStartRequest): Promise<void> {
-    if (this.startPromise) return this.startPromise;
-    this.startPromise = this.startOnce(request);
-    return this.startPromise;
+    if (this.stopPromise) {
+      return Promise.reject(new Error("container worker lease is stopping"));
+    }
+    if (!this.startRequest) {
+      try {
+        this.startRequest = this.normalizeStartRequest(request);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+    }
+    if (this.activation === "on-first-connection") {
+      return Promise.resolve();
+    }
+    if (!this.eagerStartPromise) {
+      this.eagerStartPromise = this.startEagerlyAndCleanFailure();
+    }
+    return this.eagerStartPromise;
   }
 
-  private async startOnce(request: MacosContainerStartRequest): Promise<void> {
-    if (this.stopPromise) throw new Error("container worker lease is stopping");
+  private normalizeStartRequest(
+    request: MacosContainerStartRequest,
+  ): NormalizedMacosContainerStartRequest {
     const protectedRoots = [
       ...new Set(
         request.protectedRoots.map((root) =>
@@ -887,6 +966,96 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
     ) {
       throw new Error("private Git projections are outside their exact lease");
     }
+    return {
+      generation: request.generation,
+      protectedRoots,
+      gitProjections,
+    };
+  }
+
+  private ensureProvisionedMachine(): Promise<OrbStackProvisionedMachine> {
+    if (this.provisionedMachine) {
+      return Promise.resolve(this.provisionedMachine);
+    }
+    if (!this.provisionPromise) {
+      this.provisionPromise = this.provisionMachine().then((machine) => {
+        this.provisionedMachine = machine;
+        return machine;
+      });
+    }
+    return this.provisionPromise;
+  }
+
+  private ensureRuntimeStarted(): Promise<void> {
+    if (!this.startRequest) {
+      return Promise.reject(new Error("container worker lease is not armed"));
+    }
+    if (!this.startPromise) {
+      this.startPromise = this.startOnce(this.startRequest);
+    }
+    return this.startPromise;
+  }
+
+  private async startEagerlyAndCleanFailure(): Promise<void> {
+    try {
+      await this.ensureRuntimeStarted();
+    } catch (error) {
+      try {
+        await this.stopAndProve();
+      } catch (cleanupError) {
+        throw new AggregateError(
+          [error, cleanupError],
+          "OrbStack container startup failed and cleanup was not proven",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private attachRelay(peer: Socket): void {
+    const bridgePort = this.bridgePort;
+    if (
+      peer.destroyed ||
+      this.stopPromise ||
+      !bridgePort ||
+      this.relays.size >= this.maxActiveRelays
+    ) {
+      peer.destroy();
+      return;
+    }
+    let relay: ChildProcess;
+    try {
+      relay = spawnOrbStackRelay(this.runner, this.machineName, bridgePort);
+    } catch {
+      peer.destroy();
+      return;
+    }
+    this.relays.add(relay);
+    relay.once("close", (code) => {
+      this.relays.delete(relay);
+      if (peer.destroyed) return;
+      if (code === 0) peer.end();
+      else peer.destroy(new Error("private container relay closed"));
+    });
+    relay.once("error", () => peer.destroy());
+    relay.stdin!.once("error", () => peer.destroy());
+    relay.stdout!.once("error", () => peer.destroy());
+    peer.once("error", () => relay.kill("SIGTERM"));
+    peer.once("close", () => {
+      if (relay.exitCode === null && relay.signalCode === null) {
+        relay.kill("SIGTERM");
+      }
+    });
+    peer.pipe(relay.stdin!);
+    relay.stdout!.pipe(peer);
+    peer.resume();
+  }
+
+  private async startOnce(
+    request: NormalizedMacosContainerStartRequest,
+  ): Promise<void> {
+    const provisionedMachine = await this.ensureProvisionedMachine();
+    if (this.stopPromise) throw new Error("container worker lease is stopping");
     this.descriptorPath = path.join(
       this.request.sessionRoot,
       `orbstack-container-${String(request.generation).slice(0, 20)}-${randomUUID()}.json`,
@@ -898,14 +1067,14 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
         executionId: this.request.executionId,
         generation: request.generation,
         sessionKey: this.sessionKey,
-        uid: this.runtimeIdentity.uid,
-        gid: this.runtimeIdentity.gid,
+        uid: provisionedMachine.runtimeIdentity.uid,
+        gid: provisionedMachine.runtimeIdentity.gid,
         workspaceRoot: this.request.workspaceRoot,
         writeRoots: this.mountRoots.filter(
           (root) => root !== this.request.sessionRoot,
         ),
-        protectedRoots,
-        gitProjections,
+        protectedRoots: request.protectedRoots,
+        gitProjections: request.gitProjections,
       })}\n`,
       { encoding: "utf8", mode: 0o600, flag: "wx" },
     );
@@ -924,6 +1093,7 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
       ],
       { allowFailure: true },
     );
+    if (this.stopPromise) throw new Error("container worker lease is stopping");
     let child: ChildProcess;
     try {
       child = this.runner.spawn([
@@ -937,20 +1107,11 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
         this.descriptorPath,
       ]);
     } catch (error) {
-      const unavailable = new MacosContainerWorkerUnavailableError(
+      throw new MacosContainerWorkerUnavailableError(
         "private-runtime-unavailable",
         "The private OrbStack container worker could not be started",
         { cause: error },
       );
-      try {
-        await this.stopAndProve();
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [unavailable, cleanupError],
-          "OrbStack container startup failed and cleanup was not proven",
-        );
-      }
-      throw unavailable;
     }
     this.child = child;
     let stdout = "";
@@ -1007,63 +1168,51 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
         );
       });
     });
+    let port: number;
     try {
-      let port: number;
-      try {
-        port = await ready;
-      } catch (error) {
+      port = await ready;
+    } catch (error) {
+      throw new MacosContainerWorkerUnavailableError(
+        "private-runtime-unavailable",
+        "The private OrbStack container worker did not become ready",
+        { cause: error },
+      );
+    }
+    const deadline = Date.now() + this.forwardedBridgeTimeoutMs;
+    let observedInvalidAttestation = false;
+    while (true) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        if (observedInvalidAttestation) {
+          throw new Error("OrbStack container bridge attestation failed");
+        }
         throw new MacosContainerWorkerUnavailableError(
           "private-runtime-unavailable",
-          "The private OrbStack container worker did not become ready",
-          { cause: error },
+          "OrbStack container forwarding did not become ready",
         );
       }
-      const deadline = Date.now() + this.forwardedBridgeTimeoutMs;
-      let observedInvalidAttestation = false;
-      while (true) {
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) {
-          if (observedInvalidAttestation) {
-            throw new Error("OrbStack container bridge attestation failed");
-          }
-          throw new MacosContainerWorkerUnavailableError(
-            "private-runtime-unavailable",
-            "OrbStack container forwarding did not become ready",
-          );
+      const probe = await probeRelayedContainerApi(
+        this.runner,
+        this.machineName,
+        port,
+        this.sessionKey,
+        Math.min(2_000, remainingMs),
+        this.relays,
+      );
+      if (probe === "ready") break;
+      observedInvalidAttestation ||= probe === "invalid-attestation";
+      if (Date.now() >= deadline) {
+        if (observedInvalidAttestation) {
+          throw new Error("OrbStack container bridge attestation failed");
         }
-        const probe = await probeRelayedContainerApi(
-          this.runner,
-          this.machineName,
-          port,
-          this.sessionKey,
-          Math.min(2_000, remainingMs),
-          this.relays,
-        );
-        if (probe === "ready") break;
-        observedInvalidAttestation ||= probe === "invalid-attestation";
-        if (Date.now() >= deadline) {
-          if (observedInvalidAttestation) {
-            throw new Error("OrbStack container bridge attestation failed");
-          }
-          throw new MacosContainerWorkerUnavailableError(
-            "private-runtime-unavailable",
-            "OrbStack container forwarding did not become ready",
-          );
-        }
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      this.bridgePort = port;
-    } catch (error) {
-      try {
-        await this.stopAndProve();
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          "OrbStack container startup failed and cleanup was not proven",
+        throw new MacosContainerWorkerUnavailableError(
+          "private-runtime-unavailable",
+          "OrbStack container forwarding did not become ready",
         );
       }
-      throw error;
+      await new Promise((resolve) => setTimeout(resolve, 100));
     }
+    this.bridgePort = port;
   }
 
   stopAndProve(): Promise<void> {
@@ -1087,7 +1236,9 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
         if (!(await waitForExit(relay, this.stopTimeoutMs))) {
           relay.kill("SIGKILL");
           if (!(await waitForExit(relay, this.stopTimeoutMs))) {
-            return new Error("private container relay survived forced teardown");
+            return new Error(
+              "private container relay survived forced teardown",
+            );
           }
         }
         return null;
@@ -1107,8 +1258,15 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
     } catch (error) {
       cleanupFailures.push(error);
     }
-    const child = this.child;
-    if (child && child.exitCode === null && child.signalCode === null) {
+    if (this.provisionPromise) {
+      // Provisioning owns cleanup on failure. Await it so a machine cannot
+      // materialize after this lease has already reported successful teardown.
+      await this.provisionPromise.catch(() => undefined);
+    }
+    const stopChild = async (): Promise<void> => {
+      const child = this.child;
+      if (!child || child.exitCode !== null || child.signalCode !== null)
+        return;
       child.kill("SIGTERM");
       if (!(await waitForExit(child, this.stopTimeoutMs))) {
         child.kill("SIGKILL");
@@ -1118,38 +1276,45 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
           new Error("private container host survived forced teardown"),
         );
       }
+    };
+    await stopChild();
+    if (this.startPromise) {
+      await this.startPromise.catch(() => undefined);
+      await stopChild();
     }
-    // Recovery removes the generation's mounts/firewall state while the guest
-    // is reachable. Deleting and inventory-proving the engine-owned machine is
-    // the authoritative process/resource boundary and also prevents one sparse
-    // VM from leaking for every closed agent session.
-    await this.runner
-      .run(
-        [
-          "-m",
-          this.machineName,
-          "-u",
-          "root",
-          NODE_PATH,
-          HOST_VM_PATH,
-          "--recover",
-          this.sessionKey,
-        ],
-        { allowFailure: true },
-      )
-      .catch(() => undefined);
-    let deletionProven = false;
-    try {
-      await deleteOrbStackMachineAndProve(this.runner, this.machineName);
-      deletionProven = true;
-    } catch (error) {
-      cleanupFailures.push(error);
-    }
-    if (deletionProven) {
+    const provisionedMachine = this.provisionedMachine;
+    if (provisionedMachine) {
+      // Recovery removes the generation's mounts/firewall state while the guest
+      // is reachable. Deleting and inventory-proving the engine-owned machine
+      // is the authoritative process/resource boundary.
+      await this.runner
+        .run(
+          [
+            "-m",
+            this.machineName,
+            "-u",
+            "root",
+            NODE_PATH,
+            HOST_VM_PATH,
+            "--recover",
+            this.sessionKey,
+          ],
+          { allowFailure: true },
+        )
+        .catch(() => undefined);
+      let deletionProven = false;
       try {
-        removeOrbStackRecoveryHold(this.recoveryHoldPath);
+        await deleteOrbStackMachineAndProve(this.runner, this.machineName);
+        deletionProven = true;
       } catch (error) {
         cleanupFailures.push(error);
+      }
+      if (deletionProven) {
+        try {
+          removeOrbStackRecoveryHold(provisionedMachine.recoveryHoldPath);
+        } catch (error) {
+          cleanupFailures.push(error);
+        }
       }
     }
     if (this.descriptorPath) {
@@ -1245,6 +1410,7 @@ export class MacosOrbStackContainerWorker {
 
   async reserve(
     request: MacosContainerReservationRequest,
+    options: MacosContainerReservationOptions = {},
   ): Promise<MacosContainerWorkerLease> {
     if (process.platform !== "darwin" && !process.env.VITEST) {
       throw new Error("OrbStack container workers require macOS");
@@ -1276,13 +1442,19 @@ export class MacosOrbStackContainerWorker {
     }
     const normalizedRequest = { ...request, workspaceRoot, sessionRoot };
     const machineName = orbStackMachineName(request.executionId, mountRoots);
-    const { runtimeIdentity, recoveryHoldPath } =
-      await this.ensureMachine(
+    const activation = options.activation ?? "eager";
+    if (activation !== "eager" && activation !== "on-first-connection") {
+      throw new Error("invalid OrbStack activation policy");
+    }
+    const provisionMachine = () =>
+      this.ensureMachine(
         machineName,
         mountRoots,
         sessionRoot,
         request.executionId,
       );
+    const provisionedMachine =
+      activation === "eager" ? await provisionMachine() : null;
     const server = createServer({ allowHalfOpen: true });
     try {
       const hostPort = await this.reserveHostPort(server);
@@ -1297,9 +1469,10 @@ export class MacosOrbStackContainerWorker {
         normalizedRequest,
         mountRoots,
         sessionKey,
-        runtimeIdentity,
         this.runner,
-        recoveryHoldPath,
+        provisionedMachine,
+        provisionMachine,
+        activation,
         this.forwardedBridgeTimeoutMs,
         this.maxActiveRelays,
         this.stopTimeoutMs,
@@ -1308,14 +1481,16 @@ export class MacosOrbStackContainerWorker {
       if (server.listening) {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
-      try {
-        await deleteOrbStackMachineAndProve(this.runner, machineName);
-        removeOrbStackRecoveryHold(recoveryHoldPath);
-      } catch (cleanupError) {
-        throw new AggregateError(
-          [error, cleanupError],
-          "OrbStack worker proxy admission failed and cleanup was not proven",
-        );
+      if (provisionedMachine) {
+        try {
+          await deleteOrbStackMachineAndProve(this.runner, machineName);
+          removeOrbStackRecoveryHold(provisionedMachine.recoveryHoldPath);
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [error, cleanupError],
+            "OrbStack worker proxy admission failed and cleanup was not proven",
+          );
+        }
       }
       throw new MacosContainerWorkerUnavailableError(
         "private-runtime-unavailable",

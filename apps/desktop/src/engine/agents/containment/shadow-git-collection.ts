@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { chmod, mkdir, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { AgentFilesystemTerritory } from "../types";
@@ -14,6 +14,13 @@ import type { TerritoryGeneration } from "./types";
 
 const MAX_SHADOW_REPOSITORIES = 33;
 
+/** How many repositories' shadow-Git sessions are built at once. Each session is
+ * dozens of short `git` subprocesses, so the useful bound is process-level, not
+ * promise-level: enough concurrency to hide each repository's spawn latency
+ * behind the others, low enough that a 33-repository workspace does not thrash a
+ * laptop's scheduler during an admission the user is waiting on. */
+const SHADOW_GIT_BUILD_CONCURRENCY = 4;
+
 export interface ShadowGitCollectionOptions {
   readonly repositories: readonly CanonicalGitRepository[];
   readonly additionalWriteRoots?: readonly string[];
@@ -27,6 +34,16 @@ export interface ShadowGitCollectionOptions {
   /** Brokers reserved before immutable network policy serialization. Their
    * order must exactly match `repositories`. */
   readonly remoteBrokers?: readonly ShadowGitRemoteBroker[];
+  /** Optional per-phase recorder, summed across every repository built. */
+  readonly onPhase?: (name: string, ms: number) => void;
+  /** The compiled shadow-Git dispatcher. When present it is installed as
+   * `<toolsRoot>/git` in place of a shell script that starts a runtime, which is
+   * what every in-fence Git command used to pay: measured inside a live
+   * boundary, `git --version` is 5-31 ms with the redirect bypassed and
+   * 835-947 ms cold through the runtime chain. The Node dispatcher stays on
+   * disk and stays authoritative — the binary hands it anything it cannot
+   * answer unambiguously. */
+  readonly gitDispatchBinary?: string;
 }
 
 interface CollectionEntry {
@@ -299,6 +316,9 @@ export class ShadowGitCollection {
   private constructor(
     private readonly options: ShadowGitCollectionOptions,
     private readonly entries: readonly CollectionEntry[],
+    /** Null whenever the compiled dispatcher was not installed, which is what
+     * keeps the child from being told to use a fast path that is not there. */
+    private readonly dispatchConfigPath: string | null = null,
   ) {}
 
   static async create(
@@ -347,8 +367,24 @@ export class ShadowGitCollection {
     );
 
     const entries: CollectionEntry[] = [];
+    const builtIndices = new Set<number>();
     try {
-      for (const [index, repository] of options.repositories.entries()) {
+      // Repositories are built CONCURRENTLY, bounded (§5.4). Each session is
+      // ~45 `git` subprocesses under its own private root — disjoint shadow
+      // root, private home, commands root and tools root — so nothing here is
+      // shared but the parent directories created above. Built serially, a
+      // workspace with several repositories paid the sum; a Zeros workspace can
+      // legitimately carry up to 33. The bound exists because these are
+      // subprocesses, not promises: an unbounded fan-out on a 33-repository
+      // workspace would put ~1,500 `git` spawns in flight at once and lose more
+      // to contention than serialization ever cost. Order is preserved, because
+      // `entries[0]` is the dispatcher's fallback identity and the whole
+      // projection list is index-matched to the caller's repositories.
+      const built = new Array<CollectionEntry | undefined>(
+        options.repositories.length,
+      );
+      const buildAt = async (index: number): Promise<void> => {
+        const repository = options.repositories[index]!;
         const id = repositoryId(repository, index);
         const repositoryShadowRoot = path.join(options.shadowRoot, id, "git");
         const repositoryToolsRoot = path.join(
@@ -370,13 +406,42 @@ export class ShadowGitCollection {
           ...(options.remoteBrokers?.[index]
             ? { remoteBroker: options.remoteBrokers[index] }
             : {}),
+          // Phases sum across a workspace's repositories: a 33-repository
+          // workspace's `private-git` is the sum of 33 builds, and the useful
+          // question is which phase dominates, not which repository.
+          ...(options.onPhase ? { onPhase: options.onPhase } : {}),
         });
-        entries.push({
+        built[index] = {
           repository,
           shadowRoot: repositoryShadowRoot,
           toolsRoot: repositoryToolsRoot,
           session,
-        });
+        };
+        builtIndices.add(index);
+      };
+      let nextIndex = 0;
+      const workerCount = Math.min(
+        SHADOW_GIT_BUILD_CONCURRENCY,
+        options.repositories.length,
+      );
+      // Settle every worker before inspecting failures: a rejection must not
+      // leave a sibling session half-built and unreferenced, because the
+      // cleanup below can only stop the sessions it can see.
+      const workers = await Promise.allSettled(
+        Array.from({ length: workerCount }, async () => {
+          for (;;) {
+            const index = nextIndex;
+            nextIndex += 1;
+            if (index >= options.repositories.length) return;
+            await buildAt(index);
+          }
+        }),
+      );
+      for (const entry of built) {
+        if (entry) entries.push(entry);
+      }
+      for (const worker of workers) {
+        if (worker.status === "rejected") throw worker.reason;
       }
       const dispatcherPath = path.join(options.toolsRoot, "git-dispatcher.mjs");
       const config = JSON.stringify({
@@ -399,18 +464,72 @@ export class ShadowGitCollection {
         ),
         { encoding: "utf8", mode: 0o500, flag: "wx" },
       );
-      await writeFile(
-        path.join(options.toolsRoot, "git"),
-        `#!/bin/sh\nexec ${shellQuote(options.toolRuntime)} ${shellQuote(dispatcherPath)} "$@"\n`,
-        { encoding: "utf8", mode: 0o500, flag: "wx" },
-      );
-      return new ShadowGitCollection(options, entries);
+      // One `key value` per line, no escaping, because the C dispatcher must be
+      // able to read it without a parser. Every value is a path this engine
+      // produced or an environment pair it chose, and a newline in any of them
+      // would silently truncate the file, so one is refused outright rather than
+      // quoted: a configuration this engine cannot render exactly is one the
+      // fast path must not run on.
+      // Gated on the binary being supplied rather than on the platform: the
+      // build only produces it where it is compiled, so its absence is already
+      // the signal, and a caller can hand one in to exercise this path.
+      const installedDispatcher = options.gitDispatchBinary ?? null;
+      let dispatchConfigPath: string | null = null;
+      if (installedDispatcher) {
+        const lines = [
+          "v1",
+          `runtime ${options.toolRuntime}`,
+          `dispatcher ${dispatcherPath}`,
+        ];
+        for (const entry of entries) {
+          lines.push(
+            "entry",
+            `workspaceRoot ${entry.repository.workspaceRoot}`,
+            `gitEntry ${entry.repository.gitEntry}`,
+            `shadowRoot ${entry.shadowRoot}`,
+            `toolsRoot ${entry.toolsRoot}`,
+            `client ${path.join(entry.toolsRoot, "git")}`,
+            `git ${entry.repository.gitBinary}`,
+            ...Object.entries(entry.session.env).map(
+              ([name, value]) => `env ${name}=${value}`,
+            ),
+          );
+        }
+        if (lines.some((line) => line.includes("\n"))) {
+          throw new Error("shadow Git dispatch configuration is unrenderable");
+        }
+        dispatchConfigPath = path.join(options.toolsRoot, "git-dispatch.conf");
+        await writeFile(dispatchConfigPath, `${lines.join("\n")}\n`, {
+          encoding: "utf8",
+          mode: 0o400,
+          flag: "wx",
+        });
+      }
+      if (installedDispatcher) {
+        await copyFile(
+          installedDispatcher,
+          path.join(options.toolsRoot, "git"),
+        );
+        await chmod(path.join(options.toolsRoot, "git"), 0o500);
+      } else {
+        await writeFile(
+          path.join(options.toolsRoot, "git"),
+          `#!/bin/sh\nexec ${shellQuote(options.toolRuntime)} ${shellQuote(dispatcherPath)} "$@"\n`,
+          { encoding: "utf8", mode: 0o500, flag: "wx" },
+        );
+      }
+      return new ShadowGitCollection(options, entries, dispatchConfigPath);
     } catch (error) {
       await Promise.allSettled(entries.map((entry) => entry.session.stop()));
+      // Close only the brokers whose session was never built. This is INDEX-
+      // based rather than count-based: sessions are built concurrently, so a
+      // failure can leave holes (index 0 failing while index 1 succeeded), and
+      // `slice(entries.length)` would then close a broker a live session already
+      // owns — a double close on the way out of a failed admission.
       await Promise.allSettled(
-        (options.remoteBrokers ?? [])
-          .slice(entries.length)
-          .map((broker) => broker.close()),
+        (options.remoteBrokers ?? []).flatMap((broker, index) =>
+          builtIndices.has(index) ? [] : [broker.close()],
+        ),
       );
       throw error;
     }
@@ -424,6 +543,9 @@ export class ShadowGitCollection {
             ...this.entries[0]!.session.env,
             ZEROS_ZSR_MACOS_GIT_DISPATCHER: macosInterposition.dispatcher,
             ZEROS_ZSR_MACOS_GIT_BINARY: macosInterposition.gitBinary,
+            ...(this.dispatchConfigPath
+              ? { ZEROS_ZSR_GIT_DISPATCH_CONFIG: this.dispatchConfigPath }
+              : {}),
           }
         : {}),
       PATH: `${this.options.toolsRoot}${path.delimiter}${

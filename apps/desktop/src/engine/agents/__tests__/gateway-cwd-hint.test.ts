@@ -321,6 +321,7 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
           workspaceRoot: string;
           designDirectory: string;
           protectedDesignDirectories: readonly string[];
+          designRecognitionPaths: readonly string[];
           writeCapabilities: {
             workspace: "write";
             deniedPaths: readonly string[];
@@ -332,6 +333,7 @@ describe("AgentGateway.loadSession re-arms the system instruction on a degraded 
       workspaceRoot: os.tmpdir(),
       designDirectory,
       protectedDesignDirectories: [designDirectory],
+      designRecognitionPaths: [path.join(os.tmpdir(), ".zeros")],
       writeCapabilities: {
         workspace: "write",
         deniedPaths: [designDirectory, path.join(os.tmpdir(), ".zeros")],
