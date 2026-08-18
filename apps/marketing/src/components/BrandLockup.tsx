@@ -23,7 +23,7 @@ export function BrandLockup({ size = 'md', className = '' }: BrandLockupProps) {
       <img
         src="/zeros-logo.svg"
         alt=""
-        className={`${mark} shrink-0 object-contain`}
+        className={`${mark} shrink-0 object-contain invert dark:invert-0`}
         draggable={false}
       />
       <span className="font-normal">Zeros</span>

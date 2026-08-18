@@ -23,8 +23,10 @@ import { AgentLogoImg } from './AgentLogos'
  *   Conversation — active thread and stacked ready sessions
  *   Workbench — files/editor above Setup / Run / Terminal
  *
- * Surfaces and chrome match styles/zeros-tokens.css (Zeros Shade) and
- * the real shell classes in apps/desktop/src/renderer/shell/* + apps/desktop/src/renderer/features/agent/*.
+ * Surfaces and chrome match styles/zeros-tokens.css (Neutral Dark + Light)
+ * and the real shell classes in apps/desktop/src/renderer/shell/* +
+ * apps/desktop/src/renderer/features/agent/*. Appearance follows the
+ * marketing site's prefers-color-scheme tokens.
  */
 export function ProductPreview() {
   return (
@@ -34,11 +36,11 @@ export function ProductPreview() {
         className="pointer-events-none absolute -inset-x-10 -inset-y-12 -z-10 rounded-[40px] blur-2xl"
         style={{
           background:
-            'radial-gradient(60% 60% at 50% 30%, rgba(255,255,255,0.05), transparent 70%)',
+            'radial-gradient(60% 60% at 50% 30%, color-mix(in srgb, var(--fg1) 6%, transparent), transparent 70%)',
         }}
       />
 
-      <div className="relative overflow-hidden rounded-lg border border-border2 bg-bg1 shadow-[0_30px_80px_-20px_rgba(0,0,0,0.7)]">
+      <div className="relative overflow-hidden rounded-lg border border-border2 bg-bg1 shadow-[var(--shadow-product)]">
         <TopBar />
 
         <div className="relative overflow-x-auto lg:overflow-x-visible">
@@ -115,7 +117,7 @@ function TopBar() {
             <img
               src="/zeros-logo.svg"
               alt=""
-              className="size-2.5 object-contain opacity-90"
+              className="size-2.5 object-contain opacity-90 invert dark:invert-0"
               draggable={false}
             />
           </span>

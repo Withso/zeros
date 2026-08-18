@@ -60,12 +60,12 @@ function ModeToggle() {
     <div
       role="tablist"
       aria-label="Workspace mode"
-      className="inline-flex items-center gap-1 rounded-full border border-border3 bg-bg2 p-1"
+      className="inline-flex items-center gap-1 rounded-full border border-border3 bg-bg1 p-1"
     >
       <span
         role="tab"
         aria-selected="true"
-        className="rounded-full bg-bg3 px-4 py-1.5 text-[13px] font-medium text-fg1"
+        className="rounded-full bg-bg2 px-4 py-1.5 text-[13px] font-medium text-fg1"
       >
         Dev
       </span>
@@ -127,7 +127,7 @@ function FinalCTA() {
           className="pointer-events-none absolute inset-0 -z-10"
           style={{
             background:
-              'radial-gradient(60% 120% at 50% 0%, rgba(255,255,255,0.06), transparent 70%)',
+              'radial-gradient(60% 120% at 50% 0%, color-mix(in srgb, var(--fg1) 8%, transparent), transparent 70%)',
           }}
         />
         <h2 className="mx-auto max-w-[18ch] text-[32px] leading-[1.1] font-medium tracking-[-0.025em] text-balance text-fg1 sm:text-[44px]">
@@ -156,7 +156,7 @@ function BackgroundGlow() {
         className="pointer-events-none absolute inset-0 -z-10"
         style={{
           background:
-            'radial-gradient(900px 520px at 50% -10%, rgba(255,255,255,0.06), transparent 60%)',
+            'radial-gradient(900px 520px at 50% -10%, color-mix(in srgb, var(--fg1) 8%, transparent), transparent 60%)',
         }}
       />
       <div
@@ -164,7 +164,7 @@ function BackgroundGlow() {
         className="pointer-events-none absolute inset-0 -z-10 opacity-[0.04]"
         style={{
           backgroundImage:
-            'radial-gradient(rgba(255,255,255,0.6) 1px, transparent 1px)',
+            'radial-gradient(color-mix(in srgb, var(--fg1) 60%, transparent) 1px, transparent 1px)',
           backgroundSize: '24px 24px',
           maskImage:
             'radial-gradient(ellipse 80% 50% at 50% 0%, black, transparent 70%)',
