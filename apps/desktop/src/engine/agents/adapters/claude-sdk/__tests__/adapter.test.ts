@@ -546,6 +546,62 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
+  it("rebuilds an idle live query when Claude Browser use changes", async () => {
+    const { queryFn, captured } = makeScriptedQuery(
+      [
+        [initMsg("claude-browser"), resultOk("claude-browser")],
+        [assistantText("continued"), resultOk("claude-browser")],
+      ],
+      { keepAliveAfterResult: true },
+    );
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({
+      cwd: "/tmp",
+      browserUse: { kind: "claude-agent-sdk" },
+    });
+
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("browse")] as never,
+    });
+    expect(captured[0]?.extraArgs).toEqual({ chrome: null });
+
+    await adapter.loadSession({
+      executionId: session.executionId,
+      cwd: "/tmp",
+    });
+    await tick();
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("continue without Chrome")] as never,
+    });
+
+    expect(captured).toHaveLength(2);
+    expect(captured[1]?.extraArgs).toEqual({ "no-chrome": null });
+    expect(captured[1]?.resume).toBe("claude-browser");
+    await adapter.dispose();
+  });
+
+  it("applies the latest Browser switch before a cold session's first query", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("claude-browser-cold"), resultOk("claude-browser-cold")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+
+    await adapter.updateBrowserUse({
+      sessionId: session.sessionId,
+      browserUse: { kind: "claude-agent-sdk" },
+    });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("browse with the latest setting")] as never,
+    });
+
+    expect(captured[0]?.extraArgs).toEqual({ chrome: null });
+    await adapter.dispose();
+  });
+
   it("preserves an old Claude locator without replacing it with the new execution", async () => {
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
       queryFn: makeScriptedQuery([]).queryFn,
@@ -1425,6 +1481,216 @@ describe("ClaudeSdkAdapter", () => {
         sessionId: session.sessionId,
       },
     ]);
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("keeps Claude in Chrome domain approval scoped to the current session", async () => {
+    const perms: PermCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-chrome"), resultOk("sdk-chrome")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], perms), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("browse")] as never,
+    });
+    await tick();
+
+    const canUseTool = captured[0]?.canUseTool as (
+      toolName: string,
+      input: Record<string, unknown>,
+      options: {
+        signal: AbortSignal;
+        toolUseID: string;
+        requestId: string;
+        title?: string;
+        displayName?: string;
+        description?: string;
+        suggestions?: unknown[];
+        matchedAskRule?: { source: string; toolName: string };
+      },
+    ) => Promise<{
+      behavior: string;
+      updatedPermissions?: Array<{
+        type: string;
+        rules?: Array<{ toolName: string; ruleContent?: string }>;
+        destination: string;
+      }>;
+    }>;
+    const domainSuggestion = {
+      type: "addRules",
+      rules: [{ toolName: "ClaudeInChromeDomain", ruleContent: "example.com" }],
+      behavior: "allow",
+      destination: "session",
+    };
+    const decision = canUseTool(
+      "mcp__claude-in-chrome__navigate",
+      { url: "https://example.com/account?token=secret" },
+      {
+        signal: new AbortController().signal,
+        toolUseID: "toolu-chrome",
+        requestId: "permission-chrome",
+        title: "Claude in Chrome wants to navigate on example.com",
+        displayName: "Navigate",
+        description: "https://example.com/account?token=secret",
+        suggestions: [domainSuggestion],
+      },
+    );
+    await tick();
+
+    const request = perms[0]?.request as {
+      useOptionNames?: boolean;
+      allowLocalPolicies?: boolean;
+      options: Array<{ optionId: string; name: string }>;
+      toolCall: { title: string };
+    };
+    expect(request.useOptionNames).toBe(true);
+    expect(request.allowLocalPolicies).toBe(false);
+    expect(request.toolCall.title).toBe("Navigate");
+    expect(request.options.map(({ name }) => name)).toEqual([
+      "Allow",
+      "Allow all actions on example.com for this session",
+      "Deny",
+    ]);
+
+    adapter.respondToPermission({
+      permissionId: perms[0]!.id,
+      response: {
+        outcome: { outcome: "selected", optionId: "allow_chrome_domain" },
+      } as never,
+    });
+    expect((await decision).updatedPermissions).toEqual([domainSuggestion]);
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("does not bypass a user-configured ask rule for Claude in Chrome", async () => {
+    const perms: PermCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-chrome-ask"), resultOk("sdk-chrome-ask")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], perms), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("browse")] as never,
+    });
+    await tick();
+
+    const canUseTool = captured[0]?.canUseTool as (
+      toolName: string,
+      input: Record<string, unknown>,
+      options: Record<string, unknown> & { signal: AbortSignal },
+    ) => Promise<{ behavior: string }>;
+    const decision = canUseTool(
+      "mcp__claude-in-chrome__computer",
+      { action: "click" },
+      {
+        signal: new AbortController().signal,
+        toolUseID: "toolu-chrome-ask",
+        requestId: "permission-chrome-ask",
+        suggestions: [
+          {
+            type: "addRules",
+            rules: [
+              {
+                toolName: "ClaudeInChromeDomain",
+                ruleContent: "example.com",
+              },
+            ],
+            behavior: "allow",
+            destination: "session",
+          },
+        ],
+        matchedAskRule: {
+          source: "userSettings",
+          toolName: "mcp__claude-in-chrome__computer",
+        },
+      },
+    );
+    await tick();
+
+    const options = (
+      perms[0]?.request as { options: Array<{ optionId: string }> }
+    ).options;
+    expect(options.map(({ optionId }) => optionId)).toEqual([
+      "allow_once",
+      "reject_once",
+    ]);
+    adapter.respondToPermission({
+      permissionId: perms[0]!.id,
+      response: {
+        outcome: { outcome: "selected", optionId: "allow_once" },
+      } as never,
+    });
+    expect((await decision).behavior).toBe("allow");
+    await turn;
+    await adapter.dispose();
+  });
+
+  it("fails closed when a Chrome domain suggestion is mixed with another permission amendment", async () => {
+    const perms: PermCapture[] = [];
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-chrome-mixed"), resultOk("sdk-chrome-mixed")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], perms), { queryFn });
+    const { session } = await adapter.newSession({ cwd: "/tmp" });
+    const turn = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("browse")] as never,
+    });
+    await tick();
+
+    const canUseTool = captured[0]?.canUseTool as (
+      toolName: string,
+      input: Record<string, unknown>,
+      options: Record<string, unknown> & { signal: AbortSignal },
+    ) => Promise<{ behavior: string }>;
+    const decision = canUseTool(
+      "mcp__claude-in-chrome__navigate",
+      { url: "https://example.com" },
+      {
+        signal: new AbortController().signal,
+        toolUseID: "toolu-chrome-mixed",
+        requestId: "permission-chrome-mixed",
+        suggestions: [
+          {
+            type: "addRules",
+            rules: [
+              {
+                toolName: "ClaudeInChromeDomain",
+                ruleContent: "example.com",
+              },
+            ],
+            behavior: "allow",
+            destination: "session",
+          },
+          {
+            type: "setMode",
+            mode: "bypassPermissions",
+            destination: "session",
+          },
+        ],
+      },
+    );
+    await tick();
+
+    expect(
+      (
+        perms[0]?.request as {
+          options: Array<{ optionId: string }>;
+        }
+      ).options.map(({ optionId }) => optionId),
+    ).toEqual(["allow_once", "reject_once"]);
+    adapter.respondToPermission({
+      permissionId: perms[0]!.id,
+      response: {
+        outcome: { outcome: "selected", optionId: "allow_once" },
+      } as never,
+    });
+    expect((await decision).behavior).toBe("allow");
     await turn;
     await adapter.dispose();
   });

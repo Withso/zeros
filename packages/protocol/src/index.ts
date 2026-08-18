@@ -12,3 +12,4 @@ export * from "./github-auth";
 export * from "./identities";
 export * from "./containment";
 export * from "./external-url";
+export * from "./browser-tools";

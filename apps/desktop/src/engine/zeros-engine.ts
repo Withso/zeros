@@ -3658,6 +3658,7 @@ export class ZerosEngine {
                   cwd: spawnOpts.cwd,
                   env: spawnOpts.env,
                   workspaceId: spawnOpts.workspaceId,
+                  conversationId: msg.chatId,
                   cliBinary: spawnOpts.cliBinary,
                   admissionSignal: this.conversationAdmissionSignal(
                     msg.chatId,
@@ -5051,6 +5052,7 @@ export class ZerosEngine {
                     cwd: loadOpts.cwd,
                     env: loadOpts.env,
                     workspaceId: loadOpts.workspaceId,
+                    conversationId: msg.chatId,
                     cliBinary: loadOpts.cliBinary,
                     admissionSignal: this.conversationAdmissionSignal(
                       msg.chatId,

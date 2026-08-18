@@ -14,6 +14,7 @@ import React, {
   useState,
 } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { publishNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 import {
   ClipboardPaste,
   GripHorizontal,
@@ -497,7 +498,14 @@ export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   };
 
   return (
-    <DialogPrimitive.Root modal={false} open={open} onOpenChange={onOpenChange}>
+    <DialogPrimitive.Root
+      modal={false}
+      open={open}
+      onOpenChange={(nextOpen) => {
+        publishNativeSurfaceOverlayIntent(nextOpen);
+        onOpenChange(nextOpen);
+      }}
+    >
       <DialogPrimitive.Portal>
         <DialogPrimitive.Content
           ref={panelRef}

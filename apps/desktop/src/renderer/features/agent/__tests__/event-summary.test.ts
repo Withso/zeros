@@ -23,6 +23,22 @@ const agentText = (): AgentMessage =>
   ({ kind: "text", role: "agent" }) as unknown as AgentMessage;
 const errorNotice = (): AgentMessage =>
   ({ kind: "error_notice" }) as unknown as AgentMessage;
+const browserTool = (id: string): AgentMessage =>
+  ({
+    id,
+    kind: "tool",
+    toolCallId: id,
+    toolKind: "mcp",
+    status: "completed",
+    rawInput: {
+      server: "node_repl",
+      tool: "js",
+      arguments: {
+        title: `Browser action ${id}`,
+        code: "await tab.playwright.domSnapshot()",
+      },
+    },
+  }) as unknown as AgentMessage;
 
 describe("countEventSummary", () => {
   it("splits sub-agents out of the tool-call count into their own bucket", () => {
@@ -67,6 +83,17 @@ describe("countEventSummary", () => {
       messages: 0,
       agents: 0,
     });
+  });
+
+  it("counts every nested Browser action in the overall tool total", () => {
+    expect(
+      countEventSummary([
+        browserTool("connect"),
+        browserTool("open"),
+        browserTool("leave"),
+        agentText(),
+      ]),
+    ).toEqual({ toolCalls: 3, messages: 1, agents: 0 });
   });
 });
 

@@ -14,16 +14,26 @@
 // ──────────────────────────────────────────────────────────
 
 import { memo } from "react";
+import { Globe2, SquareMousePointer } from "lucide-react";
 
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { EventRow } from "./event-row";
-import { isImagePath } from "./event-meta";
+import { isImagePath, nativeCodexBrowserPresentation } from "./event-meta";
+import {
+  cachedBrowserFavicon,
+  useConversationBrowserActivity,
+} from "../../browser/browser-session-activity-store";
+import {
+  browserToolActivity,
+  browserActivityUsesWebsiteIcon,
+  type BrowserToolActivity,
+} from "../../browser/browser-tool-activity";
 import { CodeWithGutter, HighlightedCode } from "./highlighted-code";
 import { parseReadBody } from "./read-lines";
 import { asDisplayString } from "./raw-output";
 import { getLang } from "./syntax";
-import type { Renderer } from "./types";
+import type { Renderer, RendererContext } from "./types";
 
 /** Pick a shiki language for a tool's expandable output. We syntax-highlight
  *  ONLY actual code — Read/Edit, by the file's language — because that's where
@@ -56,7 +66,12 @@ function readPathOf(tool: AgentToolMessage): string | null {
   const input = (
     tool.rawInput && typeof tool.rawInput === "object" ? tool.rawInput : {}
   ) as Record<string, unknown>;
-  for (const v of [input.file_path, input.path, input.filePath, input.target_file]) {
+  for (const v of [
+    input.file_path,
+    input.path,
+    input.filePath,
+    input.target_file,
+  ]) {
     if (typeof v === "string" && v) return v;
   }
   return null;
@@ -68,7 +83,11 @@ function readToolText(tool: AgentToolMessage): string | null {
     const parts: string[] = [];
     for (const block of tool.content) {
       const b = block as any;
-      if (b.type === "content" && b.content?.type === "text" && typeof b.content.text === "string") {
+      if (
+        b.type === "content" &&
+        b.content?.type === "text" &&
+        typeof b.content.text === "string"
+      ) {
         parts.push(b.content.text);
       } else if (b.type === "text" && typeof b.text === "string") {
         parts.push(b.text);
@@ -96,19 +115,77 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
     ) {
       return (
         <div
-          className="flex items-center gap-2 py-1 text-sm text-fg1"
+          className="text-fg1 flex items-center gap-2 py-1 text-sm"
           role="status"
           aria-live="polite"
         >
-          <ZerosSpinner size={16} label="Reconnecting agent" className="shrink-0" />
+          <ZerosSpinner
+            size={16}
+            label="Reconnecting agent"
+            className="shrink-0"
+          />
           <span>Reconnecting agent</span>
         </div>
       );
+    }
+    if (message.kind === "tool") {
+      const activity = browserToolActivity(message as AgentToolMessage);
+      if (activity) {
+        return (
+          <NativeBrowserToolRow
+            tool={message as AgentToolMessage}
+            ctx={ctx}
+            browserActivity={activity}
+          />
+        );
+      }
     }
     const detail = renderDetail(message);
     return <EventRow message={message} ctx={ctx} detail={detail} />;
   },
 );
+
+/** Provider-native Browser calls remain ordinary, expandable tool calls, but
+ * their leading glyph and copy describe the page action instead of MCP/REPL
+ * plumbing. Grouped URL-less actions receive the last recorded page URL so a
+ * settled transcript never depends on whichever live tab is active now. */
+export function NativeBrowserToolRow({
+  tool,
+  ctx,
+  inheritedUrl,
+  browserActivity: browserActivityOverride,
+}: {
+  tool: AgentToolMessage;
+  ctx: RendererContext;
+  inheritedUrl?: string;
+  browserActivity?: BrowserToolActivity;
+}) {
+  const session = useConversationBrowserActivity(ctx.chatId ?? undefined);
+  const activity = browserActivityOverride ?? browserToolActivity(tool);
+  const meta = nativeCodexBrowserPresentation(tool, session?.url, activity);
+  const usesWebsiteIcon = Boolean(
+    activity && browserActivityUsesWebsiteIcon(activity),
+  );
+  const faviconDataUrl = usesWebsiteIcon
+    ? ((meta.faviconMatchesLivePage ? session?.faviconDataUrl : undefined) ??
+      cachedBrowserFavicon(activity?.url ?? inheritedUrl))
+    : undefined;
+  const NativeIcon = !usesWebsiteIcon
+    ? SquareMousePointer
+    : faviconDataUrl
+      ? () => (
+          <img src={faviconDataUrl} alt="" className="size-3 rounded-[2px]" />
+        )
+      : Globe2;
+  return (
+    <EventRow
+      message={tool}
+      ctx={ctx}
+      meta={{ ...meta, Icon: NativeIcon }}
+      detail={renderDetail(tool)}
+    />
+  );
+}
 
 /** Max-height for tool detail bodies (~8 lines of mono). Beyond this,
  *  the body becomes its own scroll container so long bash output /
@@ -128,7 +205,11 @@ function renderDetail(message: AgentMessage): React.ReactNode {
       if (text && text.length > 0) {
         const { code, startLine } = parseReadBody(text, tool.rawInput);
         return (
-          <CodeWithGutter code={code} lang={langForTool(tool)} startLine={startLine} />
+          <CodeWithGutter
+            code={code}
+            lang={langForTool(tool)}
+            startLine={startLine}
+          />
         );
       }
     }
@@ -155,9 +236,12 @@ function renderDetail(message: AgentMessage): React.ReactNode {
             texts.push(`@${c.uri.replace(/^file:\/\//, "")}`);
           } else if (c?.type === "resource" && c.resource) {
             // Embedded resource — show its inline text or a path marker.
-            if (typeof c.resource.text === "string") texts.push(c.resource.text);
+            if (typeof c.resource.text === "string")
+              texts.push(c.resource.text);
             else if (typeof c.resource.uri === "string")
-              texts.push(`@${String(c.resource.uri).replace(/^file:\/\//, "")}`);
+              texts.push(
+                `@${String(c.resource.uri).replace(/^file:\/\//, "")}`,
+              );
           }
         } else if (b.type === "text" && typeof b.text === "string") {
           // Defensive: a FLAT (un-wrapped) text block from a non-conformant
@@ -181,7 +265,7 @@ function renderDetail(message: AgentMessage): React.ReactNode {
                 key={i}
                 src={src}
                 alt="tool output"
-                className="mb-2 max-h-[320px] max-w-full rounded-md border border-border1"
+                className="border-border1 mb-2 max-h-[320px] max-w-full rounded-md border"
               />
             ))}
             {texts.length > 0 && (
@@ -216,7 +300,7 @@ function renderDetail(message: AgentMessage): React.ReactNode {
         <HighlightedCode
           code={JSON.stringify(tool.rawInput, null, 2)}
           lang="json"
-          className={`${DETAIL_MAX_H} overflow-y-auto rounded-md bg-bg2/60 p-2 font-mono text-xs leading-relaxed text-fg1 [&_pre]:whitespace-pre-wrap [&_pre]:break-words`}
+          className={`${DETAIL_MAX_H} bg-bg2/60 text-fg1 overflow-y-auto rounded-md p-2 font-mono text-xs leading-relaxed [&_pre]:break-words [&_pre]:whitespace-pre-wrap`}
         />
       );
     }
@@ -224,9 +308,7 @@ function renderDetail(message: AgentMessage): React.ReactNode {
     // returns null for a tool — `expandable` in EventRow then drives
     // the +/- affordance off `detail !== undefined`.
     return (
-      <div className="text-xs italic text-muted-fg">
-        (no captured output)
-      </div>
+      <div className="text-muted-fg text-xs italic">(no captured output)</div>
     );
   }
   if (message.kind === "text" && (message as any).role === "thought") {
@@ -234,7 +316,7 @@ function renderDetail(message: AgentMessage): React.ReactNode {
     if (!text) return null;
     return (
       <div
-        className={`${DETAIL_MAX_H} overflow-y-auto whitespace-pre-wrap text-sm leading-relaxed text-fg2`}
+        className={`${DETAIL_MAX_H} text-fg2 overflow-y-auto text-sm leading-relaxed whitespace-pre-wrap`}
       >
         {text}
       </div>
@@ -246,9 +328,7 @@ function renderDetail(message: AgentMessage): React.ReactNode {
     const m = message as { message?: string };
     if (!m.message) return null;
     return (
-      <div className="whitespace-pre-wrap text-sm text-fg2">
-        {m.message}
-      </div>
+      <div className="text-fg2 text-sm whitespace-pre-wrap">{m.message}</div>
     );
   }
   return null;

@@ -44,6 +44,7 @@ import {
 
 import type {
   AgentAdapter,
+  AgentBrowserUse,
   AgentAdapterContext,
   AgentFilesystemTerritory,
   ContentBlock,
@@ -75,6 +76,19 @@ import {
   type McpElicitationRequestLike,
 } from "../shared/mcp-elicitation";
 import { isDevRuntime } from "../../../runtime";
+import {
+  codexPromptRequestsBrowserSkill,
+  codexBrowserThreadConfig,
+  injectCodexBrowserSkillInput,
+  mergeCodexNativeBrowserMcp,
+  resolveCodexNativeBrowserRuntime,
+  type CodexNativeBrowserSkill,
+} from "./browser-tools";
+import {
+  registerCodexBrowserUseSession,
+  settleCodexBrowserUseTurn,
+} from "../../../browser/browser-tool-client";
+import { resolveCodexBinary } from "./binary-resolver";
 
 import {
   bootCodexAppServerRuntime,
@@ -97,6 +111,7 @@ import {
 } from "../../session-paths";
 import { mergeCommands } from "@zeros/protocol/builtin-commands";
 import { buildQuestionStamp } from "@zeros/protocol/agent-messages";
+import { canonicalBrowserOriginGrantKey } from "@zeros/protocol/browser-tools";
 import type {
   AdvertisedModel,
   AvailableCommand,
@@ -249,6 +264,14 @@ export interface CodexSession {
   /** Codex session-tree identity. Forked threads retain this root id; it is
    * descriptive provider scope and never a Zeros execution route. */
   providerSessionId: string;
+  /** Conversation-owned native IAB host registered to this exact app-server
+   * thread. Null when Browser use is disabled or the official runtime/host
+   * could not be registered; never contains a tool definition or callback. */
+  browserSessionId: string | null;
+  /** Exact skill entry resolved from the same verified OpenAI Browser plugin
+   * that supplied node_repl. Passing this as app-server UserInput avoids
+   * asking the model to reconstruct a versioned plugin-cache path. */
+  browserSkill: CodexNativeBrowserSkill | null;
   /** The thread's resolved model (thread/start `model`; best-effort on
    *  resume). Fallback for turn/start's collaborationMode.settings.model when
    *  the composer supplies no per-turn model — Settings.model is REQUIRED and
@@ -296,6 +319,9 @@ export interface CodexSession {
       native: CodexUserInputRequest;
     }
   >;
+  /** Official Browser origin grants scoped to their native turn. The only
+   * normalized pair is apex/www, so arbitrary subdomains remain gated. */
+  browserOriginGrantsByTurn: Map<string, Map<string, string>>;
   /** itemId → the file paths of a fileChange item, captured as items stream.
    *  A fileChange APPROVAL request carries only the itemId (its params have
    *  no changes[]), so to show WHICH / HOW MANY files a patch touches we
@@ -484,6 +510,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    browserUse?: AgentBrowserUse;
     systemInstruction?: string;
     territory?: AgentFilesystemTerritory;
     executionBoundary?: PreparedBoundary;
@@ -493,6 +520,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       env: opts.env,
       cliBinary: opts.cliBinary,
       mcpServers: opts.mcpServers,
+      browserUse: opts.browserUse,
       systemInstruction: opts.systemInstruction,
       territory: opts.territory,
       executionBoundary: opts.executionBoundary,
@@ -532,6 +560,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    browserUse?: AgentBrowserUse;
     systemInstruction?: string;
     territory?: AgentFilesystemTerritory;
     executionBoundary?: PreparedBoundary;
@@ -555,6 +584,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       env: opts.env,
       cliBinary: opts.cliBinary,
       mcpServers: opts.mcpServers,
+      browserUse: opts.browserUse,
       systemInstruction: opts.systemInstruction,
       territory: opts.territory,
       executionBoundary: opts.executionBoundary,
@@ -733,7 +763,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // this prompt settles.
     session.postCancelInterruptUntil = 0;
 
-    const input = await this.buildUserInput(session, opts.prompt);
+    let input = await this.buildUserInput(session, opts.prompt);
+    if (
+      session.browserSessionId &&
+      session.browserSkill &&
+      codexPromptRequestsBrowserSkill(input)
+    ) {
+      input = injectCodexBrowserSkillInput(input, session.browserSkill);
+    }
     const { approvalPolicy, sandboxPolicy } = modePolicyFor(session.modeId);
 
     // 2026-05-28: per-turn model + reasoning effort. The composer's
@@ -944,6 +981,28 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // a later turn can enqueue behind a dead renderer card.
       this.drainPendingApprovals(session, session.runtimeAlive);
       this.drainPendingQuestions(session, session.runtimeAlive);
+      // IAB intentionally does not send the optional browser-client
+      // `turnEnded` event. A timed-out/reset node_repl batch can also skip
+      // tabs.finalize(), so app-server turn settlement is the authoritative
+      // fallback that restores the exact retained page to normal user control.
+      await this.settleNativeBrowserTurn(session);
+    }
+  }
+
+  private async settleNativeBrowserTurn(session: CodexSession): Promise<void> {
+    if (!session.browserSessionId) return;
+    try {
+      await settleCodexBrowserUseTurn({
+        browserSessionId: session.browserSessionId,
+        nativeSessionId: session.threadId,
+      });
+    } catch (error) {
+      this.ctx.emit.onAgentStderr(
+        this.agentId,
+        `[codex-app-server] Native Browser handoff failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
@@ -970,7 +1029,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
         agentId: AGENT_ID,
       });
     }
-    const input = await this.buildUserInput(session, opts.prompt);
+    let input = await this.buildUserInput(session, opts.prompt);
+    if (
+      session.browserSessionId &&
+      session.browserSkill &&
+      codexPromptRequestsBrowserSkill(input)
+    ) {
+      input = injectCodexBrowserSkillInput(input, session.browserSkill);
+    }
     await session.runtime.requestTyped("turn/steer", {
       threadId: session.threadId,
       input,
@@ -1225,6 +1291,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
           if (delivered !== outcome && mapped.response.action === "cancel") {
             this.warnAnswerRejected(pending.request);
           }
+          if (mapped.response.action === "accept") {
+            this.rememberBrowserOriginGrant(session, pending.native);
+          }
         }
         pending.runtime.respondToUserInput(questionId, mapped.response);
       }
@@ -1437,6 +1506,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         disposeFailed = true;
         disposeError = err;
       }
+      await this.settleNativeBrowserTurn(s);
       await removeSessionDir(s.zerosSessionId).catch(() => {});
       if (disposeFailed) throw disposeError;
     } finally {
@@ -1459,9 +1529,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
         // is belt-and-braces — but it keeps the adapter map clean.
         this.drainPendingApprovals(s, s.runtimeAlive);
         this.drainPendingQuestions(s, s.runtimeAlive);
-        await s.runtime.dispose();
-        // Best-effort session dir removal.
-        await removeSessionDir(s.zerosSessionId).catch(() => {});
+        try {
+          await s.runtime.dispose();
+        } finally {
+          await this.settleNativeBrowserTurn(s);
+          // Best-effort session dir removal.
+          await removeSessionDir(s.zerosSessionId).catch(() => {});
+        }
       }),
     );
   }
@@ -1482,6 +1556,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     /** Per-session MCP registry (gateway-resolved for this cwd); undefined →
      *  the global ctx.mcpServers. */
     mcpServers?: McpServerRegistration[];
+    /** Official app-server Browser plugin bound to Zeros' native IAB host. */
+    browserUse?: AgentBrowserUse;
     /** Zeros' first-turn instruction body → `developerInstructions` on
      *  thread/start AND thread/resume (see `nativeSystemInstruction`). */
     systemInstruction?: string;
@@ -1528,6 +1604,28 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // eslint-disable-next-line prefer-const -- assigned after runtime boot; closures above capture the live ref.
     let session!: CodexSession;
     let runtime: CodexAppServerHandle;
+    let effectiveBrowserUse = opts.browserUse;
+    let nativeBrowserSkill: CodexNativeBrowserSkill | null = null;
+    let mcpServers = opts.mcpServers ?? this.ctx.mcpServers;
+    if (opts.browserUse?.kind === "codex-app-server") {
+      const codexBinary = await resolveCodexBinary({
+        override: opts.cliBinary,
+      });
+      const nativeBrowser = await resolveCodexNativeBrowserRuntime({
+        codexCliPath: codexBinary.path,
+        codexHome: opts.env?.CODEX_HOME,
+      });
+      if (nativeBrowser) {
+        mcpServers = mergeCodexNativeBrowserMcp(mcpServers, nativeBrowser);
+        nativeBrowserSkill = nativeBrowser.browserSkill;
+      } else {
+        effectiveBrowserUse = undefined;
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          "[codex-app-server] Official Browser runtime unavailable: install or update ChatGPT/Codex Desktop so browser@openai-bundled and its node_repl runtime are present. Zeros browser tools will not be substituted.",
+        );
+      }
+    }
     try {
       runtime = await bootCodexAppServerRuntime({
         cwd: opts.cwd,
@@ -1538,9 +1636,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         // Provider MCP tools execute with authority separate from the command
         // sandbox. Never inject them into a code-territory runtime.
         mcpServers:
-          opts.territory && !opts.executionBoundary
-            ? []
-            : (opts.mcpServers ?? this.ctx.mcpServers),
+          opts.territory && !opts.executionBoundary ? [] : mcpServers,
         logTag: `codex-app-server:${zerosSessionId.slice(0, 8)}`,
         onApprovalRequest: (request) =>
           this.handleApprovalRequest(session, request),
@@ -1621,7 +1717,16 @@ export class CodexAppServerAdapter implements AgentAdapter {
                     providerNativeTerritory.workspaceRoot,
                   ],
                 }
-              : {}),
+              : {
+                  // Enable the official bundled Browser plugin only when this
+                  // thread has a conversation-owned native IAB host. No Zeros
+                  // MCP or dynamic-tool namespace is registered. The
+                  // code-territory profile above instead disables every
+                  // plugin/browser surface as part of its carveout config.
+                  config: codexBrowserThreadConfig(
+                    effectiveBrowserUse?.kind === "codex-app-server",
+                  ),
+                }),
             ...(opts.systemInstruction
               ? { developerInstructions: opts.systemInstruction }
               : {}),
@@ -1655,6 +1760,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
               opts.systemInstruction,
               providerNativeTerritory,
               territoryConfig,
+              effectiveBrowserUse,
             ),
           );
           threadId = fresh.threadId;
@@ -1671,6 +1777,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
             opts.systemInstruction,
             providerNativeTerritory,
             territoryConfig,
+            effectiveBrowserUse,
           ),
         );
         threadId = result.threadId;
@@ -1689,6 +1796,31 @@ export class CodexAppServerAdapter implements AgentAdapter {
         err,
         opts.kind === "resume" ? "loadSession" : "newSession",
       );
+    }
+
+    let registeredBrowserSessionId: string | null = null;
+    if (effectiveBrowserUse?.kind === "codex-app-server") {
+      try {
+        const registered = await registerCodexBrowserUseSession({
+          browserSessionId: effectiveBrowserUse.browserSessionId,
+          nativeSessionId: threadId,
+        });
+        if (!registered) {
+          this.ctx.emit.onAgentStderr(
+            this.agentId,
+            "[codex-app-server] Native Browser Use host registration was rejected; Browser will be unavailable for this thread.",
+          );
+        } else {
+          registeredBrowserSessionId = effectiveBrowserUse.browserSessionId;
+        }
+      } catch (error) {
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[codex-app-server] Native Browser Use host registration failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
     }
 
     const translator = new CodexAppServerTranslator({
@@ -1716,6 +1848,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       translator,
       threadId,
       providerSessionId,
+      browserSessionId: registeredBrowserSessionId,
+      browserSkill: registeredBrowserSessionId ? nativeBrowserSkill : null,
       threadModel,
       modeId: initialMode,
       activeTurnId: null,
@@ -1725,6 +1859,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       postCancelInterruptUntil: 0,
       pendingApprovals: new Map(),
       pendingQuestions: new Map(),
+      browserOriginGrantsByTurn: new Map(),
       fileEditPathsByItemId: new Map(),
       authMode: null,
       planType: null,
@@ -2243,6 +2378,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session: CodexSession,
     request: CodexUserInputRequest,
   ): void {
+    if (this.autoAcceptRedirectBrowserOrigin(session, request)) return;
     const canonical = mapCodexQuestionToCanonical(
       session.zerosSessionId,
       request,
@@ -2266,6 +2402,60 @@ export class CodexAppServerAdapter implements AgentAdapter {
       request.questionId,
       canonical,
     );
+  }
+
+  private autoAcceptRedirectBrowserOrigin(
+    session: CodexSession,
+    request: CodexUserInputRequest,
+  ): boolean {
+    const identity = browserOriginRequestIdentity(request);
+    if (!identity) return false;
+    const grants = session.browserOriginGrantsByTurn.get(identity.turnId);
+    // "Allow" is provider-native Allow once. Reuse it only for the one common
+    // canonical redirect where the destination differs solely by a leading
+    // `www.`. An exact repeat must remain gated, and arbitrary subdomains have
+    // distinct keys.
+    const explicitlyGrantedOrigin = grants?.get(identity.key);
+    const explicitlyGrantedExactOrigin = normalizedBrowserApprovalOrigin(
+      explicitlyGrantedOrigin,
+    );
+    const requestedExactOrigin = normalizedBrowserApprovalOrigin(
+      identity.origin,
+    );
+    if (
+      !explicitlyGrantedOrigin ||
+      !explicitlyGrantedExactOrigin ||
+      explicitlyGrantedExactOrigin === requestedExactOrigin
+    ) {
+      return false;
+    }
+    session.runtime.respondToUserInput(request.questionId, {
+      action: "accept",
+      content: null,
+      _meta: null,
+    });
+    return true;
+  }
+
+  private rememberBrowserOriginGrant(
+    session: CodexSession,
+    request: CodexUserInputRequest,
+  ): void {
+    const identity = browserOriginRequestIdentity(request);
+    if (!identity) return;
+    let grants = session.browserOriginGrantsByTurn.get(identity.turnId);
+    if (!grants) {
+      grants = new Map();
+      session.browserOriginGrantsByTurn.set(identity.turnId, grants);
+    }
+    grants.set(identity.key, identity.origin);
+    while (session.browserOriginGrantsByTurn.size > 2) {
+      const oldest = session.browserOriginGrantsByTurn.keys().next().value as
+        | string
+        | undefined;
+      if (!oldest) break;
+      session.browserOriginGrantsByTurn.delete(oldest);
+    }
   }
 
   /** A user-input question settled inside the runtime WITHOUT a
@@ -2569,6 +2759,7 @@ export function buildThreadStartParams(
     string,
     import("./generated/serde_json/JsonValue").JsonValue
   >,
+  browserUse?: AgentBrowserUse,
 ): CodexThreadStartParams {
   const model = env?.OPENAI_MODEL;
   const { approvalPolicy, sandboxMode } = modePolicyFor(modeId);
@@ -2578,9 +2769,20 @@ export function buildThreadStartParams(
       ? {
           runtimeWorkspaceRoots: [territory.workspaceRoot],
           permissions: CODEX_CODE_TERRITORY_PROFILE,
+          // The code-territory carveout config already disables every
+          // plugin/browser surface, so `browserUse` never applies here.
           config: territoryConfig ?? codexTerritoryConfig(territory),
         }
-      : { sandbox: sandboxMode }),
+      : {
+          sandbox: sandboxMode,
+          // App-server applies this only to the Zeros-owned thread. When
+          // enabled, Codex loads its official bundled Browser plugin and talks
+          // to the native IAB pipe hosted by Electron. There is deliberately
+          // no `zeros_browser` dynamic namespace or MCP fallback.
+          config: codexBrowserThreadConfig(
+            browserUse?.kind === "codex-app-server",
+          ),
+        }),
     ...(model ? { model } : {}),
     ...(systemInstruction ? { developerInstructions: systemInstruction } : {}),
     approvalPolicy,
@@ -2800,6 +3002,53 @@ function mimeToExt(mime: string | undefined): string {
       return "gif";
     default:
       return "bin";
+  }
+}
+
+function browserOriginRequestIdentity(
+  request: CodexUserInputRequest,
+): { turnId: string; key: string; origin: string } | null {
+  if (request.method !== "mcpServer/elicitation/request") return null;
+  const params = request.params as McpElicitationRequestLike;
+  const meta =
+    params._meta &&
+    typeof params._meta === "object" &&
+    !Array.isArray(params._meta)
+      ? (params._meta as Record<string, unknown>)
+      : null;
+  if (
+    meta?.codex_approval_kind !== "mcp_tool_call" ||
+    meta.tool_title !== "Access browser origin"
+  ) {
+    return null;
+  }
+  const turnId = typeof params.turnId === "string" ? params.turnId : "";
+  const display = Array.isArray(meta.tool_params_display)
+    ? meta.tool_params_display
+    : [];
+  const originRow = display.find(
+    (value) =>
+      value &&
+      typeof value === "object" &&
+      !Array.isArray(value) &&
+      (value as Record<string, unknown>).name === "origin",
+  ) as Record<string, unknown> | undefined;
+  const origin = typeof originRow?.value === "string" ? originRow.value : "";
+  const key = canonicalBrowserOriginGrantKey(origin);
+  return turnId && key ? { turnId, key, origin } : null;
+}
+
+function normalizedBrowserApprovalOrigin(value: string | undefined):
+  | string
+  | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.origin
+      : null;
+  } catch {
+    return null;
   }
 }
 

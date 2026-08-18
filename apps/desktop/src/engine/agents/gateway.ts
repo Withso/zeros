@@ -62,6 +62,11 @@ import {
 import { repoSettingsPath, repoLocalSettingsPath } from "../settings/files";
 import { runGit } from "../git/git-exec";
 import {
+  acquireZerosBrowserHost,
+  browserUseEnabledForWorkspace,
+  stripBrowserServiceCredentials,
+} from "../browser/browser-tool-client";
+import {
   AGENT_MANIFEST,
   bundledRuntimeVersion,
   findAgent,
@@ -87,6 +92,7 @@ import {
 } from "./probes";
 import type {
   AgentAdapter,
+  AgentBrowserUse,
   AgentAdapterContext,
   AgentGatewayEvents,
   AgentGatewayOptions,
@@ -1476,6 +1482,9 @@ export class AgentGateway {
     string,
     Map<string, Promise<BoundaryPreviewGateway>>
   >();
+  /** Main-checkout root used by layered settings for each live execution.
+   * Plain-folder chats have no entry. */
+  private readonly executionToMainRepoRoot = new Map<string, string>();
   /** Sessions already given the one-shot cwd hint (see CWD_SELF_AWARE_AGENTS).
    *  First prompt per session only — the agent's server keeps it in history. */
   private readonly sessionsCwdHinted = new Set<string>();
@@ -2814,6 +2823,68 @@ export class AgentGateway {
     }
   }
 
+  /** Resolve only browser capabilities the selected provider exposes natively.
+   * Codex receives an opaque IAB host id for its official Browser plugin;
+   * Claude receives its official Agent SDK/Chrome flag; Cursor receives none.
+   * Browser startup failures degrade only this capability. */
+  private async resolveBrowserUse(
+    agentId: string,
+    cwd: string,
+    workspaceId: string | undefined,
+    conversationId: string | undefined,
+    mainRepoRoot?: string,
+  ): Promise<AgentBrowserUse | undefined> {
+    if (agentId !== "claude" && agentId !== "codex") return undefined;
+    // Claude's Chrome integration is provider-owned and needs no Zeros browser
+    // lease, so it also works for chats bound directly to a folder. Codex's
+    // in-app host still needs durable workspace/conversation ownership.
+    if (agentId === "codex" && (!workspaceId || !conversationId)) {
+      return undefined;
+    }
+    try {
+      const workspaceRoot =
+        agentId === "claude"
+          ? cwd
+          : workspaceId
+            ? getWorkspaceById(workspaceId)?.path
+            : undefined;
+      if (!workspaceRoot) {
+        throw new Error("The owning Zeros workspace path is unavailable.");
+      }
+      const browserProvider = agentId === "claude" ? "claude" : "codex";
+      if (
+        !browserUseEnabledForWorkspace(
+          workspaceRoot,
+          mainRepoRoot,
+          browserProvider,
+        )
+      ) {
+        return undefined;
+      }
+      if (agentId === "claude") return { kind: "claude-agent-sdk" };
+      const browser = await acquireZerosBrowserHost({
+        workspaceId: workspaceId!,
+        conversationId: conversationId!,
+        workspaceRoot,
+        mainRepoRoot,
+      });
+      return browser
+        ? {
+            kind: "codex-app-server",
+            browserSessionId: browser.browserSessionId,
+          }
+        : undefined;
+    } catch (error) {
+      this.events.onAgentStderr(
+        agentId,
+        `[zeros-browser] capability unavailable: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      return undefined;
+    }
+  }
+
   // ── Engine-facing gateway API ───────────────────────────
 
   async listAgents(): Promise<EnrichedRegistryAgent[]> {
@@ -3448,6 +3519,8 @@ export class AgentGateway {
        *  renderer is the source of truth). If cwd is missing, the
        *  workspace's path is used. */
       workspaceId?: string;
+      /** Durable Zeros conversation identity owning optional product tools. */
+      conversationId?: string;
       /** Optional CLI binary override from Settings → Providers →
        *  Advanced. Threaded down to the adapter so the per-turn spawn
        *  uses this in place of the registry's `cliBinary`. */
@@ -3509,6 +3582,7 @@ export class AgentGateway {
         mainRepoRoot,
       ),
     );
+    spawn.env = stripBrowserServiceCredentials(spawn.env);
     const primaryTerritory = await this.prepareCodeAgentTerritory(
       adapter,
       cwd,
@@ -3581,6 +3655,13 @@ export class AgentGateway {
       territorySet.contributions,
     );
     const boundary = preparedBoundary.status;
+    const browserUse = await this.resolveBrowserUse(
+      agentId,
+      cwd,
+      opts.workspaceId,
+      opts.conversationId,
+      mainRepoRoot,
+    );
     // Local MCP, hooks, plugins and subagents are now descendants of the same
     // ZSR process root, so Design-bearing sessions retain the normal registry.
     try {
@@ -3597,6 +3678,7 @@ export class AgentGateway {
         env: sessionEnv,
         cliBinary: spawn.cliBinary,
         mcpServers,
+        ...(browserUse ? { browserUse } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
         ...(territory ? { territory } : {}),
         executionBoundary: preparedBoundary,
@@ -3643,6 +3725,9 @@ export class AgentGateway {
     this.executionToAgent.set(session.executionId, agentId);
     this.settleAdapterStartup(session.executionId);
     this.executionToCwd.set(session.executionId, cwd);
+    if (mainRepoRoot) {
+      this.executionToMainRepoRoot.set(session.executionId, mainRepoRoot);
+    }
     this.executionToInstructionCtx.set(session.executionId, instructionCtx);
     this.executionToDesignDirectory.set(
       session.executionId,
@@ -3678,6 +3763,7 @@ export class AgentGateway {
       cwd?: string;
       env?: Record<string, string>;
       workspaceId?: string;
+      conversationId?: string;
       cliBinary?: string;
       /** Publish the engine-owned route before adapter.loadSession can emit
        * updates. The caller must remove provisional routing if load rejects. */
@@ -3730,6 +3816,7 @@ export class AgentGateway {
         mainRepoRoot,
       ),
     );
+    spawn.env = stripBrowserServiceCredentials(spawn.env);
     const primaryTerritory = await this.prepareCodeAgentTerritory(
       adapter,
       cwd,
@@ -3799,6 +3886,13 @@ export class AgentGateway {
       territorySet.contributions,
     );
     const boundary = preparedBoundary.status;
+    const browserUse = await this.resolveBrowserUse(
+      agentId,
+      cwd,
+      opts.workspaceId,
+      opts.conversationId,
+      mainRepoRoot,
+    );
     try {
       opts.onExecutionCreated?.(executionId);
     } catch (error) {
@@ -3816,6 +3910,7 @@ export class AgentGateway {
         env: sessionEnv,
         cliBinary: spawn.cliBinary,
         mcpServers,
+        ...(browserUse ? { browserUse } : {}),
         ...(systemInstruction ? { systemInstruction } : {}),
         ...(territory ? { territory } : {}),
         executionBoundary: preparedBoundary,
@@ -3862,6 +3957,9 @@ export class AgentGateway {
     this.executionToAgent.set(executionId, agentId);
     this.settleAdapterStartup(executionId);
     this.executionToCwd.set(executionId, cwd);
+    if (mainRepoRoot) {
+      this.executionToMainRepoRoot.set(executionId, mainRepoRoot);
+    }
     this.executionToInstructionCtx.set(executionId, instructionCtx);
     this.executionToDesignDirectory.set(
       executionId,
@@ -3964,6 +4062,7 @@ export class AgentGateway {
         mainRepoRoot,
       ),
     );
+    spawn.env = stripBrowserServiceCredentials(spawn.env);
     const primaryTerritory = await this.prepareCodeAgentTerritory(
       adapter,
       cwd,
@@ -4158,6 +4257,7 @@ export class AgentGateway {
     this.executionToAgent.delete(sessionId);
     this.executionToWorkspace.delete(sessionId);
     this.executionToCwd.delete(sessionId);
+    this.executionToMainRepoRoot.delete(sessionId);
     this.sessionsCwdHinted.delete(sessionId);
     this.sessionsInstructed.delete(sessionId);
     this.sessionsTerritoryNoticePending.delete(sessionId);
@@ -4406,6 +4506,35 @@ export class AgentGateway {
     const adapter = this.adapterForSession(sessionId, agentId, {
       requireLiveRoute: true,
     });
+    if (adapter.updateBrowserUse) {
+      const cwd = this.executionToCwd.get(sessionId);
+      if (cwd) {
+        let enabled = false;
+        try {
+          enabled = browserUseEnabledForWorkspace(
+            cwd,
+            this.executionToMainRepoRoot.get(sessionId),
+            "claude",
+          );
+        } catch (error) {
+          // Browser is optional. A malformed/transient settings read must not
+          // block an ordinary Claude turn, but it must fail the external,
+          // signed-in browser capability closed for this query generation.
+          this.events.onAgentStderr(
+            adapter.agentId,
+            `[zeros-browser] capability unavailable: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+        await adapter.updateBrowserUse({
+          sessionId,
+          ...(enabled
+            ? { browserUse: { kind: "claude-agent-sdk" as const } }
+            : {}),
+        });
+      }
+    }
     // First-turn orientation for EVERY agent (workspace preamble + /add-dir +
     // repo prompts.general), then the cwd hint for agents that don't self-report
     // their cwd. Both one-shot per session; system instruction goes outermost so
@@ -4700,6 +4829,7 @@ export class AgentGateway {
     this.executionToAgent.clear();
     this.executionToWorkspace.clear();
     this.executionToCwd.clear();
+    this.executionToMainRepoRoot.clear();
     this.executionToInstructionCtx.clear();
     this.executionToDesignDirectory.clear();
     this.executionToTerritoryIdentity.clear();

@@ -987,7 +987,7 @@ function describeItem(item: ThreadItemUnion): string {
       return first ? `Editing ${first.path}` : "Editing files";
     }
     case "mcpToolCall":
-      return `${item.server}:${item.tool}`;
+      return nativeNodeReplTitle(item) ?? `${item.server}:${item.tool}`;
     case "dynamicToolCall":
       return item.namespace
         ? `${item.namespace}/${item.tool || "tool"}`
@@ -1005,6 +1005,20 @@ function describeItem(item: ThreadItemUnion): string {
     default:
       return (item as { type: string }).type || "tool";
   }
+}
+
+function nativeNodeReplTitle(
+  item: Extract<ThreadItemUnion, { type: "mcpToolCall" }>,
+): string | null {
+  if (item.server !== "node_repl" || item.tool !== "js") return null;
+  const args =
+    item.arguments &&
+    typeof item.arguments === "object" &&
+    !Array.isArray(item.arguments)
+      ? (item.arguments as Record<string, unknown>)
+      : {};
+  const title = typeof args.title === "string" ? args.title.trim() : "";
+  return title ? truncate(title.replace(/\s+/g, " "), 160) : null;
 }
 
 /** Map codex's `commandActions` parse onto a friendlier tool kind + display
@@ -1117,7 +1131,9 @@ function computeStatus(item: ThreadItemUnion): "completed" | "failed" {
     return item.status === "failed" ? "failed" : "completed";
   }
   if (item.type === "mcpToolCall") {
-    return item.error ? "failed" : "completed";
+    return item.error || item.status === "failed" || nodeReplTimedOut(item)
+      ? "failed"
+      : "completed";
   }
   if (item.type === "dynamicToolCall") {
     return item.success === false ? "failed" : "completed";
@@ -1126,6 +1142,40 @@ function computeStatus(item: ThreadItemUnion): "completed" | "failed" {
     return item.status === "failed" ? "failed" : "completed";
   }
   return "completed";
+}
+
+/** OpenAI's node_repl reports a kernel-reset timeout as a successful MCP
+ * transport response containing this canonical text. Treat the native
+ * execution failure as failed for the chat row so it receives the red Browser
+ * glyph instead of a misleading completed state. Other successful text remains
+ * provider-owned and is never guessed from arbitrary prose. */
+function nodeReplTimedOut(
+  item: Extract<ThreadItemUnion, { type: "mcpToolCall" }>,
+): boolean {
+  if (item.server !== "node_repl" || item.tool !== "js") return false;
+  const result = recordValue(item.result);
+  const raw = recordValue(result.raw);
+  for (const envelope of [result, raw]) {
+    if (!Array.isArray(envelope.content)) continue;
+    for (const candidate of envelope.content) {
+      const value = recordValue(candidate);
+      if (
+        typeof value.text === "string" &&
+        /^js execution timed out; kernel reset(?:[,;.]|$)/i.test(
+          value.text.trim(),
+        )
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function recordValue(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function toolInput(item: ThreadItemUnion): unknown {

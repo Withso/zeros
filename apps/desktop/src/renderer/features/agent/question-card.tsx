@@ -31,6 +31,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock,
+  Globe2,
   X,
 } from "lucide-react";
 
@@ -39,6 +40,7 @@ import { Button } from "@/renderer/shared/ui/primitives/button";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
 import { hasShortcutPriorityClaim } from "./shortcut-priority";
 import { isInFocusedPane } from "./pane-focus";
+import { cachedBrowserFavicon } from "../browser/browser-session-activity-store";
 import type {
   QuestionRequest,
   QuestionResponse,
@@ -159,6 +161,19 @@ function isAnswered(q: QuestionSpec, s: QState): boolean {
 }
 
 export function QuestionCard({ request, onRespond }: QuestionCardProps) {
+  const approval = oneClickApproval(request);
+  return approval ? (
+    <OneClickApprovalCard
+      request={request}
+      question={approval}
+      onRespond={onRespond}
+    />
+  ) : (
+    <StructuredQuestionCard request={request} onRespond={onRespond} />
+  );
+}
+
+function StructuredQuestionCard({ request, onRespond }: QuestionCardProps) {
   const questions = request.questions;
   const [index, setIndex] = useState(0);
   const [answers, setAnswers] = useState<Record<string, QState>>(() => {
@@ -587,6 +602,185 @@ export function QuestionCard({ request, onRespond }: QuestionCardProps) {
               </Button>
             </Tooltip>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function oneClickApproval(request: QuestionRequest): QuestionSpec | null {
+  if (request.questions.length !== 1) return null;
+  const question = request.questions[0];
+  return question?.presentation === "one_click_approval" ? question : null;
+}
+
+function OneClickApprovalCard({
+  request,
+  question,
+  onRespond,
+}: QuestionCardProps & { question: QuestionSpec }) {
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const respondedRef = useRef(false);
+  const armedAtRef = useRef(0);
+  const [responded, setResponded] = useState(false);
+  const skipRemainingMs = useSkipCountdown(request.expiresAt);
+  const showCountdown = skipRemainingMs !== null && skipRemainingMs > 0;
+  const byId = new Map(question.options.map((option) => [option.id, option]));
+  const allowOnce = byId.get("accept");
+  const allowSession = byId.get("accept_session");
+  const allowAlways = byId.get("accept_always");
+  const favicon = cachedBrowserFavicon(question.approvalTarget);
+
+  const settle = useCallback(
+    (response: QuestionResponse) => {
+      if (respondedRef.current) return;
+      respondedRef.current = true;
+      setResponded(true);
+      onRespond(response);
+    },
+    [onRespond],
+  );
+  const answer = useCallback(
+    (optionId: string) => {
+      settle({
+        outcome: {
+          outcome: "answered",
+          answers: [
+            {
+              questionId: question.id,
+              selectedOptionIds: [optionId],
+            },
+          ],
+        },
+      });
+    },
+    [question.id, settle],
+  );
+  const deny = useCallback(
+    () => settle({ outcome: { outcome: "declined" } }),
+    [settle],
+  );
+  const dismiss = useCallback(
+    () => settle({ outcome: { outcome: "dismissed" } }),
+    [settle],
+  );
+
+  useEffect(() => {
+    armedAtRef.current = performance.now() + KEYBOARD_ARM_MS;
+  }, []);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (
+        event.repeat ||
+        performance.now() < armedAtRef.current ||
+        respondedRef.current ||
+        hasShortcutPriorityClaim() ||
+        !isInFocusedPane(rootRef.current)
+      ) {
+        return;
+      }
+      const active = document.activeElement;
+      if (
+        active instanceof HTMLElement &&
+        active !== document.body &&
+        active !== document.documentElement &&
+        !rootRef.current?.contains(active)
+      ) {
+        return;
+      }
+      if (event.key === "Escape") {
+        event.preventDefault();
+        dismiss();
+        return;
+      }
+      if (event.key !== "Enter") return;
+      const persistent = allowAlways ?? allowSession;
+      const choice = event.metaKey || event.ctrlKey ? persistent : allowOnce;
+      if (!choice) return;
+      event.preventDefault();
+      answer(choice.id);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [allowAlways, allowOnce, allowSession, answer, dismiss]);
+
+  const persistentButtons = [allowSession, allowAlways].filter(
+    (option): option is NonNullable<typeof option> => Boolean(option),
+  );
+  return (
+    <div ref={rootRef} className="flex w-full min-w-0 flex-col gap-1.5">
+      <div className="border-border1 bg-bg1 flex w-full min-w-0 flex-col gap-3 rounded-lg border px-3.5 py-3">
+        <div className="flex min-w-0 items-start gap-2.5">
+          <span className="border-border1 bg-bg2 text-fg2 mt-0.5 inline-flex size-6 shrink-0 items-center justify-center rounded-full border">
+            {favicon ? (
+              <img src={favicon} alt="" className="size-4 rounded-[3px]" />
+            ) : (
+              <Globe2 className="size-3.5" aria-hidden="true" />
+            )}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="text-fg1 text-sm font-medium">
+              {question.approvalPrompt ?? question.prompt}
+            </div>
+            {question.header ? (
+              <div className="text-fg2 mt-0.5 text-xs">
+                Requested by {question.header}
+              </div>
+            ) : null}
+          </div>
+          {showCountdown ? (
+            <span
+              className={cn(
+                "text-xxs shrink-0 pt-0.5 font-mono tracking-wide uppercase tabular-nums",
+                skipRemainingMs <= 60_000 ? "text-yellow-primary" : "text-fg2",
+              )}
+              role="timer"
+            >
+              Skips in {formatCountdown(skipRemainingMs)}
+            </span>
+          ) : null}
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          {persistentButtons.map((option) => (
+            <Button
+              key={option.id}
+              type="button"
+              size="sm"
+              variant="secondary"
+              disabled={responded}
+              onMouseDown={suppressFocusOnClick}
+              onClick={() => answer(option.id)}
+            >
+              {option.id === "accept_always" &&
+              question.approvalKind === "browser_origin"
+                ? "Allow for all sites"
+                : option.id === "accept_always"
+                  ? "Always allow"
+                  : "Allow for this session"}
+            </Button>
+          ))}
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={responded}
+            onMouseDown={suppressFocusOnClick}
+            onClick={deny}
+          >
+            Deny
+          </Button>
+          {allowOnce ? (
+            <Button
+              type="button"
+              size="sm"
+              variant="default"
+              disabled={responded}
+              onMouseDown={suppressFocusOnClick}
+              onClick={() => answer(allowOnce.id)}
+            >
+              Allow once
+            </Button>
+          ) : null}
         </div>
       </div>
     </div>

@@ -4,8 +4,23 @@ import { Check, ChevronRight, Circle } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import { suppressPointerRefocus } from "@/renderer/shared/ui/overlay-focus";
+import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay";
 
-const DropdownMenu = DropdownMenuPrimitive.Root;
+function DropdownMenu({
+  onOpenChange,
+  ...props
+}: React.ComponentProps<typeof DropdownMenuPrimitive.Root>) {
+  const publishOverlay = useNativeSurfaceOverlayIntent();
+  return (
+    <DropdownMenuPrimitive.Root
+      {...props}
+      onOpenChange={(open) => {
+        publishOverlay(open);
+        onOpenChange?.(open);
+      }}
+    />
+  );
+}
 
 const DropdownMenuTrigger = DropdownMenuPrimitive.Trigger;
 

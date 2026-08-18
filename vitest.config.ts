@@ -25,6 +25,7 @@ export default defineConfig({
       "apps/desktop/src/renderer/platform/__tests__/**/*.test.ts",
       // Pure-function @-mention helpers (fuzzy file/folder ranking).
       "apps/desktop/src/renderer/features/agent/__tests__/**/*.test.ts",
+      "apps/desktop/src/renderer/features/browser/__tests__/**/*.test.ts",
       // Feature-owned renderer helpers and interaction contracts.
       "apps/desktop/src/renderer/features/agent-extensions/__tests__/**/*.test.ts",
       "apps/desktop/src/renderer/features/design-workspace/__tests__/**/*.test.ts",

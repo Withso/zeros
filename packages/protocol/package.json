@@ -20,6 +20,7 @@
     "./identities": "./src/identities.ts",
     "./containment": "./src/containment.ts",
     "./external-url": "./src/external-url.ts",
+    "./browser-tools": "./src/browser-tools.ts",
     "./native-error": "./src/native-error.ts",
     "./run-actions": "./src/run-actions.ts",
     "./scrub": "./src/scrub.ts",

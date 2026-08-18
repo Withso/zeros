@@ -28,13 +28,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { memo, useMemo } from "react";
-import {
-  CircleCheck,
-  CircleX,
-  Clock,
-  MessageSquare,
-  SkipForward,
-} from "lucide-react";
+import { CircleX, Clock, MessageSquare, SkipForward } from "lucide-react";
 
 import type { AgentToolMessage } from "../use-agent-session";
 import type { Renderer } from "./types";
@@ -57,7 +51,7 @@ function StatusChip({
   icon,
   children,
 }: {
-  icon: React.ReactNode;
+  icon?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -102,11 +96,7 @@ export const QuestionRecordCard: Renderer<AgentToolMessage> = memo(
         Awaiting response
       </StatusChip>
     ) : stamp?.outcome === "answered" ? (
-      <StatusChip
-        icon={<CircleCheck className="size-2.5" aria-hidden="true" />}
-      >
-        Answered
-      </StatusChip>
+      <StatusChip>Answered</StatusChip>
     ) : stamp?.outcome === "declined" ? (
       <StatusChip icon={<CircleX className="size-2.5" aria-hidden="true" />}>
         Declined

@@ -63,8 +63,38 @@
  * back in mid-loop. Per-dot animation-delays (set inline, ∝ x+y) make
  * the sweep travel TL → BR; the period is synced to the orbit lap. */
 @keyframes zeros-grid-fade {
-  0%        { opacity: var(--zeros-grid-fade-peak); }
-  50%, 100% { opacity: var(--zeros-grid-fade-trough); }
+  0% {
+    opacity: var(--zeros-grid-fade-peak);
+  }
+  50%,
+  100% {
+    opacity: var(--zeros-grid-fade-trough);
+  }
+}
+
+@keyframes zeros-browser-tab-shimmer {
+  0% {
+    background-position: 120% 0;
+  }
+  100% {
+    background-position: -120% 0;
+  }
+}
+
+.zeros-browser-tab-working {
+  color: transparent;
+  background-image: linear-gradient(
+    90deg,
+    var(--fg3) 0%,
+    var(--fg3) 38%,
+    var(--blue-fg) 50%,
+    var(--fg3) 62%,
+    var(--fg3) 100%
+  );
+  background-size: 250% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  animation: zeros-browser-tab-shimmer 1.45s linear infinite;
 }
 
 /* Reduced motion: freeze the fade — the resting dots hold at their
@@ -73,5 +103,10 @@
 @media (prefers-reduced-motion: reduce) {
   .zeros-spinner span {
     animation: none !important;
+  }
+  .zeros-browser-tab-working {
+    animation: none !important;
+    color: var(--fg2);
+    background: none;
   }
 }

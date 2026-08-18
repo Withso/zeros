@@ -715,6 +715,18 @@ export interface QuestionSpec {
   preserveFreeText?: boolean;
   /** Codex isSecret → masked input; value never logged. */
   secret?: boolean;
+  /** Direct, provider-native approval affordance. Each option submits in one
+   * click; the ordinary selectable rows and separate Submit button are not
+   * rendered. */
+  presentation?: "one_click_approval";
+  /** Concise approval copy shown above the direct buttons. The full prompt is
+   * retained for durable transcript/audit context. */
+  approvalPrompt?: string;
+  /** Lets the renderer name persistence scope accurately without inferring it
+   * from provider-private option ids. */
+  approvalKind?: "browser_origin" | "tool";
+  /** Sanitized HTTP(S) origin for browser-origin approval favicon/copy. */
+  approvalTarget?: string;
 }
 
 export interface QuestionRequest {

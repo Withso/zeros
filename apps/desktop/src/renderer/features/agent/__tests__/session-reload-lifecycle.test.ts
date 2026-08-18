@@ -12,6 +12,10 @@ import {
   cancelledSince,
   loadedSessionStatus,
   markPrebindDirty,
+  providerCapabilityRefreshCanRun,
+  providerCapabilityRefreshNeeded,
+  providerCapabilityRefreshExecution,
+  providerCapabilityRefreshStillTargetsFamily,
   queuedSendNowAction,
   queueReleaseAction,
   recoveredSessionIdentity,
@@ -51,6 +55,147 @@ describe("session reload lifecycle", () => {
   it("restores an engine-active prompt as streaming instead of ready", () => {
     expect(loadedSessionStatus(true)).toBe("streaming");
     expect(loadedSessionStatus(false)).toBe("ready");
+  });
+
+  it("reloads only an idle native Codex or Claude execution for a boot-scoped capability", () => {
+    const nativeBinding = {
+      version: 1 as const,
+      providerId: "codex-app-server",
+      kind: "native" as const,
+      resumeId: "thread-durable",
+    };
+    const candidate = {
+      providerFamily: "codex",
+      agentId: "codex-app-server",
+      executionId: "execution-current",
+      sessionId: "execution-current",
+      providerBinding: nativeBinding,
+    };
+
+    expect(providerCapabilityRefreshExecution(candidate)).toBe(
+      "execution-current",
+    );
+    expect(
+      providerCapabilityRefreshExecution({
+        providerFamily: "claude",
+        agentId: "claude-agent-sdk",
+        executionId: "execution-claude",
+        sessionId: "execution-claude",
+        providerBinding: {
+          ...nativeBinding,
+          providerId: "claude-agent-sdk",
+        },
+      }),
+    ).toBe("execution-claude");
+    expect(
+      providerCapabilityRefreshExecution({
+        ...candidate,
+        providerFamily: "cursor",
+      }),
+    ).toBeNull();
+    expect(
+      providerCapabilityRefreshExecution({
+        ...candidate,
+        providerBinding: { ...nativeBinding, kind: "legacy" },
+      }),
+    ).toBeNull();
+    expect(
+      providerCapabilityRefreshExecution({
+        ...candidate,
+        providerBinding: {
+          ...nativeBinding,
+          providerId: "different-codex-adapter",
+        },
+      }),
+    ).toBeNull();
+
+    expect(
+      providerCapabilityRefreshCanRun({
+        status: "ready",
+        running: false,
+        queuedCount: 0,
+      }),
+    ).toBe(true);
+    expect(
+      providerCapabilityRefreshCanRun({
+        status: "streaming",
+        running: true,
+        queuedCount: 0,
+      }),
+    ).toBe(false);
+    expect(
+      providerCapabilityRefreshCanRun({
+        status: "ready",
+        running: false,
+        queuedCount: 1,
+      }),
+    ).toBe(false);
+  });
+
+  it("refreshes Claude for either Browser toggle edge and Codex only when enabling", () => {
+    expect(
+      providerCapabilityRefreshNeeded({
+        providerFamily: "claude",
+        previousEnabled: false,
+        enabled: true,
+      }),
+    ).toBe(true);
+    expect(
+      providerCapabilityRefreshNeeded({
+        providerFamily: "claude",
+        previousEnabled: true,
+        enabled: false,
+      }),
+    ).toBe(true);
+    expect(
+      providerCapabilityRefreshNeeded({
+        providerFamily: "codex",
+        previousEnabled: false,
+        enabled: true,
+      }),
+    ).toBe(true);
+    expect(
+      providerCapabilityRefreshNeeded({
+        providerFamily: "codex",
+        previousEnabled: true,
+        enabled: false,
+      }),
+    ).toBe(false);
+    expect(
+      providerCapabilityRefreshNeeded({
+        providerFamily: "cursor",
+        previousEnabled: false,
+        enabled: true,
+      }),
+    ).toBe(false);
+    expect(
+      providerCapabilityRefreshNeeded({
+        providerFamily: "claude",
+        previousEnabled: null,
+        enabled: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("drops a queued browser refresh after the chat switches provider families", () => {
+    expect(
+      providerCapabilityRefreshStillTargetsFamily({
+        requestedFamily: "claude",
+        currentFamily: "claude",
+      }),
+    ).toBe(true);
+    expect(
+      providerCapabilityRefreshStillTargetsFamily({
+        requestedFamily: "claude",
+        currentFamily: "codex",
+      }),
+    ).toBe(false);
+    expect(
+      providerCapabilityRefreshStillTargetsFamily({
+        requestedFamily: "codex",
+        currentFamily: "cursor",
+      }),
+    ).toBe(false);
   });
 
   it("queues behind an adopted prompt even though the renderer send lock was reset", () => {

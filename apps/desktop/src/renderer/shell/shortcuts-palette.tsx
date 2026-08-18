@@ -32,6 +32,7 @@
 
 import * as React from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
+import { publishNativeSurfaceOverlayIntent } from "../shared/ui/native-surface-overlay";
 
 import {
   Command,
@@ -50,7 +51,10 @@ export interface ShortcutsPaletteProps {
   onOpenChange: (open: boolean) => void;
 }
 
-export function ShortcutsPalette({ open, onOpenChange }: ShortcutsPaletteProps) {
+export function ShortcutsPalette({
+  open,
+  onOpenChange,
+}: ShortcutsPaletteProps) {
   const [query, setQuery] = React.useState("");
   const [activeCategoryId, setActiveCategoryId] = React.useState(
     SHORTCUT_CATEGORIES[0].id,
@@ -81,13 +85,19 @@ export function ShortcutsPalette({ open, onOpenChange }: ShortcutsPaletteProps) 
       }));
 
   return (
-    <DialogPrimitive.Root open={open} onOpenChange={onOpenChange}>
+    <DialogPrimitive.Root
+      open={open}
+      onOpenChange={(nextOpen) => {
+        publishNativeSurfaceOverlayIntent(nextOpen);
+        onOpenChange(nextOpen);
+      }}
+    >
       <DialogPrimitive.Portal>
         {/* Light scrim only — dims the app a touch so the glass reads, but
             keeps it visible through the panel (no full-screen blur). */}
         <DialogPrimitive.Overlay
           className={cn(
-            "fixed inset-0 z-50 bg-scrim/30",
+            "bg-scrim/30 fixed inset-0 z-50",
             "data-[state=open]:animate-in data-[state=closed]:animate-out",
             "data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0",
           )}
@@ -102,9 +112,9 @@ export function ShortcutsPalette({ open, onOpenChange }: ShortcutsPaletteProps) 
             // (py-2 + h-7) + list padding 8 + 8 × 32px rows; 660px wide keeps
             // the previous 600×312 proportion. Overflowing content scrolls
             // in the list (flex-col + min-h-0).
-            "fixed left-1/2 top-1/2 z-50 flex w-[92vw] max-w-[660px] -translate-x-1/2 -translate-y-1/2 flex-col",
+            "fixed top-1/2 left-1/2 z-50 flex w-[92vw] max-w-[660px] -translate-x-1/2 -translate-y-1/2 flex-col",
             "h-[min(72vh,344px)]",
-            "overflow-hidden rounded-lg border border-border2/60 shadow-[var(--shadow-dropdown)]",
+            "border-border2/60 overflow-hidden rounded-lg border shadow-[var(--shadow-dropdown)]",
             // Thick glass (tuned to the user's reference): a --bg2 wash for
             // warmth + a STRONG smooth blur that melts the app behind into clean
             // colour — not a thin see-through film, not a milky frost (milk = too
@@ -164,10 +174,10 @@ export function ShortcutsPalette({ open, onOpenChange }: ShortcutsPaletteProps) 
                       // --selected-glass semantic token (semantic-tokens.css)
                       // so the pill stays glassy on the frosted panel.
                       className={cn(
-                        "flex h-7 shrink-0 cursor-pointer select-none items-center rounded-md px-2.5 text-xs font-medium transition-colors",
+                        "flex h-7 shrink-0 cursor-pointer items-center rounded-md px-2.5 text-xs font-medium transition-colors select-none",
                         active
-                          ? "bg-[var(--selected-glass)] text-fg1"
-                          : "text-fg2 hover:bg-[var(--selected-glass)] hover:text-fg1",
+                          ? "text-fg1 bg-[var(--selected-glass)]"
+                          : "text-fg2 hover:text-fg1 hover:bg-[var(--selected-glass)]",
                       )}
                     >
                       {category.label}
@@ -189,7 +199,7 @@ export function ShortcutsPalette({ open, onOpenChange }: ShortcutsPaletteProps) 
                   // reference list never looks actionable.
                   className="data-[selected=true]:bg-transparent"
                 >
-                  <span className="min-w-0 flex-1 truncate text-sm text-fg1">
+                  <span className="text-fg1 min-w-0 flex-1 truncate text-sm">
                     {shortcut.label}
                   </span>
                   {/* Chips share the tabs' translucent --selected-glass wash
@@ -197,7 +207,7 @@ export function ShortcutsPalette({ open, onOpenChange }: ShortcutsPaletteProps) 
                       also drops its border (this palette only — everywhere
                       else Kbd keeps border1): the wash alone is the chip. */}
                   {searching && (
-                    <span className="shrink-0 rounded-sm bg-[var(--selected-glass)] px-1.5 py-px text-3xxs font-medium text-fg2">
+                    <span className="text-3xxs text-fg2 shrink-0 rounded-sm bg-[var(--selected-glass)] px-1.5 py-px font-medium">
                       {category.label}
                     </span>
                   )}

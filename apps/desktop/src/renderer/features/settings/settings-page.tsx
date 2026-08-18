@@ -63,6 +63,8 @@ import {
   CircleCheck,
   LogOut,
   Lock,
+  Globe2,
+  ChevronRight,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -89,6 +91,7 @@ import { useThemeVariant } from "../../shared/theme/use-theme-variant";
 import { CodeThemePreview } from "./code-theme-preview";
 import { useProjects } from "../../state/use-projects";
 import { ProvidersPanel } from "./providers-panel";
+import { BrowserUsePanel } from "./browser-use-panel";
 import { TerminalAgentsSection } from "./terminal-agents-section";
 import { GitDefaultsSection } from "./git-defaults-section";
 import { useExperimentalFeature } from "./experimental-features";
@@ -155,6 +158,7 @@ type SectionId =
   | "appearance"
   | "models"
   | "providers"
+  | "browser-use"
   | "terminal-agents"
   | "environment"
   | "git"
@@ -209,6 +213,12 @@ const SECTIONS: SectionDef[] = [
     label: "Agents",
     icon: Astroid,
     Panel: ProvidersPanel,
+  },
+  {
+    id: "browser-use",
+    label: "Browser",
+    icon: Globe2,
+    Panel: BrowserUsePanel,
   },
   // Gated by the `terminalAgents` experimental flag — hidden from the
   // sidebar (and not resolvable as an active section) until the user
@@ -286,7 +296,10 @@ const SECTION_GROUPS: Array<{ label: string; ids: SectionId[] }> = [
       "internal",
     ],
   },
-  { label: "Agents", ids: ["models", "providers", "terminal-agents"] },
+  {
+    label: "Agents",
+    ids: ["models", "providers", "browser-use", "terminal-agents"],
+  },
   { label: "Workspace", ids: ["environment", "git"] },
 ];
 
@@ -728,7 +741,21 @@ export function SettingsPage() {
                     className={isActive ? "flex flex-col gap-6" : "hidden"}
                     aria-hidden={!isActive}
                   >
-                    <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
+                    {section.id === "browser-use" ? (
+                      <div className="flex flex-col gap-2">
+                        <nav
+                          aria-label="Breadcrumb"
+                          className="text-fg3 flex items-center gap-1 text-xs"
+                        >
+                          <span>Agents</span>
+                          <ChevronRight className="size-3" aria-hidden="true" />
+                          <span className="text-fg2">Browser</span>
+                        </nav>
+                        <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
+                      </div>
+                    ) : (
+                      <h1 className={PAGE_HEADING_CLS}>{section.label}</h1>
+                    )}
                     <Panel surfaceActive={pageActive && isActive} />
                   </div>
                 );

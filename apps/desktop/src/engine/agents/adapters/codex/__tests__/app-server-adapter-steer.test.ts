@@ -12,6 +12,11 @@ const rt = vi.hoisted(() => ({
   resolveTurn: null as null | ((value: unknown) => void),
 }));
 
+const browserHost = vi.hoisted(() => ({
+  register: vi.fn(async () => true),
+  settle: vi.fn(async () => true),
+}));
+
 vi.mock("../app-server", () => ({
   bootCodexAppServerRuntime: vi.fn(async () => {
     const request = vi.fn(
@@ -84,6 +89,37 @@ vi.mock("../../session-paths", () => ({
   removeSessionDir: vi.fn(async () => {}),
 }));
 
+vi.mock("../../../../browser/browser-tool-client", () => ({
+  registerCodexBrowserUseSession: browserHost.register,
+  settleCodexBrowserUseTurn: browserHost.settle,
+}));
+
+vi.mock("../binary-resolver", () => ({
+  resolveCodexBinary: vi.fn(async () => ({ path: "/tmp/codex" })),
+}));
+
+vi.mock("../browser-tools", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../browser-tools")>();
+  return {
+    ...actual,
+    resolveCodexNativeBrowserRuntime: vi.fn(async () => ({
+      pluginId: "browser@openai-bundled",
+      pluginRoot:
+        "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601",
+      browserSkill: {
+        name: "control-in-app-browser",
+        path: "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601/skills/control-in-app-browser/SKILL.md",
+      },
+      mcpServer: {
+        name: "node_repl",
+        transport: "stdio",
+        command: "/tmp/node_repl",
+      },
+    })),
+    mergeCodexNativeBrowserMcp: vi.fn((servers) => servers),
+  };
+});
+
 import { CodexAppServerAdapter } from "../app-server-adapter";
 
 const text = (value: string): ContentBlock[] => [
@@ -117,6 +153,8 @@ describe("CodexAppServerAdapter.steer", () => {
     rt.requests = [];
     rt.interruptCalls = [];
     rt.resolveTurn = null;
+    browserHost.register.mockClear();
+    browserHost.settle.mockClear();
   });
 
   afterEach(() => {
@@ -148,6 +186,55 @@ describe("CodexAppServerAdapter.steer", () => {
       },
     });
     expect(rt.interruptCalls).toEqual([]);
+
+    rt.resolveTurn?.({
+      turnId: "turn-active",
+      status: "completed",
+      raw: {},
+    });
+    await prompt;
+    await adapter.dispose();
+  });
+
+  it("steers explicit browser work with the verified native Browser skill", async () => {
+    const adapter = makeAdapter();
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      browserUse: {
+        kind: "codex-app-server",
+        browserSessionId: "browser_steer",
+      },
+    });
+    const prompt = adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: text("initial"),
+    });
+    await tick();
+
+    await adapter.steer({
+      sessionId: session.sessionId,
+      prompt: text("Open https://example.com in the browser."),
+    });
+
+    expect(rt.requests).toContainEqual({
+      method: "turn/steer",
+      params: {
+        threadId: "thread-steer",
+        input: [
+          {
+            type: "text",
+            text: "$control-in-app-browser Open https://example.com in the browser.",
+            text_elements: [],
+          },
+          {
+            type: "skill",
+            name: "control-in-app-browser",
+            path: "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601/skills/control-in-app-browser/SKILL.md",
+          },
+        ],
+        expectedTurnId: "turn-active",
+      },
+    });
 
     rt.resolveTurn?.({
       turnId: "turn-active",

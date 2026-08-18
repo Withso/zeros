@@ -9,7 +9,14 @@ const rt = vi.hoisted(() => ({
   bootCount: 0,
   handlers: [] as Array<Map<string, Set<Handler>>>,
   requests: [] as Array<{ runtime: number; method: string; params: unknown }>,
+  resumeParams: [] as Array<Record<string, unknown>>,
+  turnParams: [] as Array<Record<string, unknown>>,
   disposeCalls: [] as number[],
+}));
+
+const browserHost = vi.hoisted(() => ({
+  register: vi.fn(async () => true),
+  settle: vi.fn(async () => true),
 }));
 
 function forkThread() {
@@ -70,14 +77,20 @@ vi.mock("../app-server", () => ({
         sandbox: { type: "workspaceWrite" },
         raw: {},
       }),
-      resumeThread: async (params: { threadId: string }) => ({
-        threadId: params.threadId,
-        providerSessionId: "session-source",
-        gitInfo: { sha: "provider-sha", branch: "provider", originUrl: null },
-        model: "gpt-5",
-        raw: {},
-      }),
-      runTurn: async () => ({ turnId: "turn-1", status: "completed", raw: {} }),
+      resumeThread: async (params: Record<string, unknown>) => {
+        rt.resumeParams.push(params);
+        return {
+          threadId: String(params.threadId),
+          providerSessionId: "session-source",
+          gitInfo: { sha: "provider-sha", branch: "provider", originUrl: null },
+          model: "gpt-5",
+          raw: {},
+        };
+      },
+      runTurn: async (params: Record<string, unknown>) => {
+        rt.turnParams.push(params);
+        return { turnId: "turn-1", status: "completed", raw: {} };
+      },
       interruptTurn: async () => {},
       respondToPermission: vi.fn(),
       respondToUserInput: vi.fn(),
@@ -102,6 +115,37 @@ vi.mock("../../../session-paths", () => ({
   writeSessionMeta: vi.fn(async () => {}),
   removeSessionDir: vi.fn(async () => {}),
 }));
+
+vi.mock("../../../../browser/browser-tool-client", () => ({
+  registerCodexBrowserUseSession: browserHost.register,
+  settleCodexBrowserUseTurn: browserHost.settle,
+}));
+
+vi.mock("../binary-resolver", () => ({
+  resolveCodexBinary: vi.fn(async () => ({ path: "/tmp/codex" })),
+}));
+
+vi.mock("../browser-tools", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../browser-tools")>();
+  return {
+    ...actual,
+    resolveCodexNativeBrowserRuntime: vi.fn(async () => ({
+      pluginId: "browser@openai-bundled",
+      pluginRoot:
+        "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601",
+      browserSkill: {
+        name: "control-in-app-browser",
+        path: "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601/skills/control-in-app-browser/SKILL.md",
+      },
+      mcpServer: {
+        name: "node_repl",
+        transport: "stdio",
+        command: "/tmp/node_repl",
+      },
+    })),
+    mergeCodexNativeBrowserMcp: vi.fn((servers) => servers),
+  };
+});
 
 import { CodexAppServerAdapter } from "../app-server-adapter";
 
@@ -135,7 +179,93 @@ describe("Codex opaque provider bindings", () => {
     rt.bootCount = 0;
     rt.handlers = [];
     rt.requests = [];
+    rt.resumeParams = [];
+    rt.turnParams = [];
     rt.disposeCalls = [];
+    browserHost.register.mockClear();
+    browserHost.settle.mockClear();
+  });
+
+  it("keeps the ChatGPT Browser plugin out of resumed Zeros threads", async () => {
+    const { adapter } = makeAdapter();
+
+    await adapter.loadSession({
+      executionId: "execution-resume",
+      providerBinding: sourceBinding,
+      cwd: "/tmp/proj",
+    });
+
+    expect(rt.resumeParams).toContainEqual(
+      expect.objectContaining({
+        threadId: "thread-source",
+        config: { "plugins.browser@openai-bundled.enabled": false },
+      }),
+    );
+    await adapter.dispose();
+  });
+
+  it("hands native IAB control back when the owning app-server turn settles", async () => {
+    const { adapter } = makeAdapter();
+    const started = await adapter.newSession({
+      executionId: "execution-browser",
+      cwd: "/tmp/proj",
+      browserUse: {
+        kind: "codex-app-server",
+        browserSessionId: "browser_opaque",
+      },
+    });
+
+    await adapter.prompt({
+      sessionId: started.session.sessionId,
+      prompt: [{ type: "text", text: "browse" } as never],
+    });
+
+    expect(browserHost.register).toHaveBeenCalledWith({
+      browserSessionId: "browser_opaque",
+      nativeSessionId: "thread-source",
+    });
+    expect(browserHost.settle).toHaveBeenCalledWith({
+      browserSessionId: "browser_opaque",
+      nativeSessionId: "thread-source",
+    });
+    await adapter.dispose();
+  });
+
+  it("invokes the verified Browser skill directly for an interactive website prompt", async () => {
+    const { adapter } = makeAdapter();
+    const started = await adapter.newSession({
+      executionId: "execution-browser-skill",
+      cwd: "/tmp/proj",
+      browserUse: {
+        kind: "codex-app-server",
+        browserSessionId: "browser_skill",
+      },
+    });
+
+    await adapter.prompt({
+      sessionId: started.session.sessionId,
+      prompt: [
+        {
+          type: "text",
+          text: "Open https://example.com and explore the public pages.",
+        } as never,
+      ],
+    });
+
+    expect(rt.turnParams.at(-1)).toMatchObject({
+      input: [
+        {
+          type: "text",
+          text: "$control-in-app-browser Open https://example.com and explore the public pages.",
+        },
+        {
+          type: "skill",
+          name: "control-in-app-browser",
+          path: "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601/skills/control-in-app-browser/SKILL.md",
+        },
+      ],
+    });
+    await adapter.dispose();
   });
 
   it("forks through typed app-server dispatch and reads the returned scope", async () => {

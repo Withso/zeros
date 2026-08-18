@@ -1,0 +1,2752 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Interactive product prototype for the shipped Zeros Browser use settings, inline chat permissions, and live agent browser tab."
+    />
+    <title>Zeros Browser Service — UI Prototype</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg0: #0b0c0d;
+        --bg1: #101112;
+        --bg2: #161819;
+        --bg2-hover: #1c1e20;
+        --bg3: #202225;
+        --bg4: #282b2e;
+        --sidebar: #121314;
+        --sidebar-active: #242628;
+        --border: #2a2d30;
+        --border-strong: #393d41;
+        --fg1: #f1f2f3;
+        --fg2: #a3a7ac;
+        --fg3: #70757b;
+        --green: #36d37e;
+        --green-soft: rgba(54, 211, 126, 0.12);
+        --green-border: rgba(54, 211, 126, 0.28);
+        --purple: #8e91ff;
+        --purple-soft: rgba(142, 145, 255, 0.13);
+        --amber: #f3b45b;
+        --amber-soft: rgba(243, 180, 91, 0.12);
+        --amber-border: rgba(243, 180, 91, 0.3);
+        --red: #ff6c75;
+        --red-soft: rgba(255, 108, 117, 0.12);
+        --blue: #72a7ff;
+        --shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+        --radius-sm: 7px;
+        --radius: 10px;
+        --radius-lg: 14px;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      [hidden] {
+        display: none !important;
+      }
+
+      html,
+      body {
+        min-height: 100%;
+        margin: 0;
+        background: var(--bg0);
+        color: var(--fg1);
+        font-family:
+          Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI",
+          sans-serif;
+        font-size: 14px;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      button,
+      select {
+        font: inherit;
+      }
+
+      button {
+        color: inherit;
+      }
+
+      button:focus-visible,
+      select:focus-visible,
+      [tabindex]:focus-visible {
+        outline: 2px solid var(--purple);
+        outline-offset: 2px;
+      }
+
+      .app {
+        min-height: 100vh;
+        display: grid;
+        grid-template-rows: 52px minmax(0, 1fr);
+        background:
+          radial-gradient(circle at 78% -20%, rgba(54, 211, 126, 0.045), transparent 36%),
+          var(--bg1);
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 30;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        height: 52px;
+        padding: 0 18px;
+        border-bottom: 1px solid var(--border);
+        background: rgba(16, 17, 18, 0.94);
+        backdrop-filter: blur(18px);
+      }
+
+      .back-button,
+      .icon-button {
+        width: 30px;
+        height: 30px;
+        display: inline-grid;
+        place-items: center;
+        border: 0;
+        border-radius: var(--radius-sm);
+        background: transparent;
+        color: var(--fg2);
+        cursor: pointer;
+      }
+
+      .back-button:hover,
+      .icon-button:hover {
+        background: var(--bg2-hover);
+        color: var(--fg1);
+      }
+
+      .brand-mark {
+        width: 16px;
+        height: 16px;
+        border-radius: 3px;
+        background: linear-gradient(145deg, #55e996, #11ae58);
+        transform: rotate(45deg);
+        box-shadow: 0 0 20px rgba(54, 211, 126, 0.28);
+      }
+
+      .brand-name {
+        font-size: 15px;
+        font-weight: 620;
+        letter-spacing: -0.01em;
+      }
+
+      .top-divider {
+        width: 1px;
+        height: 18px;
+        background: var(--border);
+        margin: 0 2px;
+      }
+
+      .top-title {
+        color: var(--fg2);
+        white-space: nowrap;
+      }
+
+      .top-status {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .window-dots {
+        display: flex;
+        gap: 7px;
+        margin-left: 10px;
+      }
+
+      .window-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #34373a;
+      }
+
+      .shell {
+        min-height: 0;
+        display: grid;
+        grid-template-columns: 246px minmax(0, 1fr);
+      }
+
+      .sidebar {
+        position: sticky;
+        top: 52px;
+        height: calc(100vh - 52px);
+        overflow: auto;
+        padding: 18px 14px 24px;
+        border-right: 1px solid var(--border);
+        background: var(--sidebar);
+      }
+
+      .sidebar-heading {
+        padding: 4px 10px 13px;
+        font-size: 17px;
+        font-weight: 590;
+        letter-spacing: -0.015em;
+      }
+
+      .nav-group {
+        margin-top: 16px;
+      }
+
+      .nav-group:first-of-type {
+        margin-top: 0;
+      }
+
+      .nav-label {
+        padding: 0 10px 6px;
+        color: var(--fg3);
+        font-size: 11px;
+        letter-spacing: 0.015em;
+      }
+
+      .nav-item {
+        width: 100%;
+        min-height: 34px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        border: 0;
+        border-radius: 8px;
+        padding: 7px 10px;
+        background: transparent;
+        color: var(--fg2);
+        text-align: left;
+        cursor: pointer;
+        transition: 120ms ease;
+      }
+
+      .nav-item:hover {
+        background: rgba(255, 255, 255, 0.035);
+        color: var(--fg1);
+      }
+
+      .nav-item.active {
+        background: var(--sidebar-active);
+        color: var(--fg1);
+      }
+
+      .nav-item svg {
+        width: 15px;
+        height: 15px;
+        flex: none;
+        stroke: currentColor;
+      }
+
+      .nav-item .end {
+        margin-left: auto;
+      }
+
+      .nested-nav {
+        position: relative;
+        margin: 3px 0 3px 25px;
+        padding-left: 12px;
+      }
+
+      .nested-nav::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 2px;
+        bottom: 2px;
+        width: 1px;
+        background: var(--border);
+      }
+
+      .nested-nav .nav-item {
+        min-height: 30px;
+        padding: 5px 8px;
+        font-size: 13px;
+      }
+
+      .mini-badge {
+        display: inline-flex;
+        align-items: center;
+        min-height: 18px;
+        border-radius: 999px;
+        padding: 2px 7px;
+        border: 1px solid var(--border);
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 10px;
+        font-weight: 620;
+        letter-spacing: 0.015em;
+        white-space: nowrap;
+      }
+
+      .mini-badge.implemented {
+        border-color: var(--green-border);
+        background: var(--green-soft);
+        color: #83eeb2;
+      }
+
+      .mini-badge.proposed {
+        border-color: var(--amber-border);
+        background: var(--amber-soft);
+        color: #f5c77f;
+      }
+
+      .mini-badge.native {
+        border-color: rgba(142, 145, 255, 0.28);
+        background: var(--purple-soft);
+        color: #b4b6ff;
+      }
+
+      .sidebar-note {
+        margin-top: 22px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 11px;
+        background: rgba(255, 255, 255, 0.018);
+        color: var(--fg3);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+
+      .sidebar-note strong {
+        display: block;
+        margin-bottom: 3px;
+        color: var(--fg2);
+        font-size: 12px;
+      }
+
+      .main {
+        min-width: 0;
+        min-height: 0;
+        overflow: auto;
+      }
+
+      .page {
+        display: none;
+        width: min(1120px, calc(100% - 64px));
+        margin: 0 auto;
+        padding: 30px 0 80px;
+        animation: page-in 150ms ease both;
+      }
+
+      .page.active {
+        display: block;
+      }
+
+      @keyframes page-in {
+        from {
+          opacity: 0;
+          transform: translateY(3px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .breadcrumbs {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 7px;
+        min-height: 24px;
+        margin-bottom: 18px;
+        color: var(--fg3);
+        font-size: 12px;
+      }
+
+      .breadcrumb-button {
+        border: 0;
+        padding: 0;
+        background: transparent;
+        color: var(--fg2);
+        cursor: pointer;
+      }
+
+      .breadcrumb-button:hover {
+        color: var(--fg1);
+      }
+
+      .breadcrumb-current {
+        color: var(--fg1);
+      }
+
+      .page-header {
+        display: flex;
+        align-items: flex-start;
+        justify-content: space-between;
+        gap: 24px;
+        margin-bottom: 30px;
+      }
+
+      .page-title {
+        margin: 0;
+        font-size: 27px;
+        line-height: 1.18;
+        font-weight: 590;
+        letter-spacing: -0.025em;
+      }
+
+      .page-subtitle {
+        max-width: 730px;
+        margin: 8px 0 0;
+        color: var(--fg2);
+        font-size: 14px;
+        line-height: 1.58;
+      }
+
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: none;
+      }
+
+      .button {
+        min-height: 32px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 6px 11px;
+        background: var(--bg2);
+        color: var(--fg1);
+        font-weight: 540;
+        cursor: pointer;
+        transition: 120ms ease;
+      }
+
+      .button:hover:not(:disabled) {
+        border-color: var(--border-strong);
+        background: var(--bg2-hover);
+      }
+
+      .button.primary {
+        border-color: rgba(76, 225, 141, 0.5);
+        background: #2fc575;
+        color: #07120b;
+      }
+
+      .button.primary:hover:not(:disabled) {
+        background: #42d986;
+      }
+
+      .button.danger {
+        border-color: rgba(255, 108, 117, 0.3);
+        background: var(--red-soft);
+        color: #ff9aa1;
+      }
+
+      .button.ghost {
+        border-color: transparent;
+        background: transparent;
+        color: var(--fg2);
+      }
+
+      .button:disabled {
+        cursor: not-allowed;
+        opacity: 0.45;
+      }
+
+      .button svg {
+        width: 14px;
+        height: 14px;
+        stroke: currentColor;
+      }
+
+      .status-strip {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 14px;
+      }
+
+      .callout {
+        display: flex;
+        gap: 11px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 13px 14px;
+        background: rgba(255, 255, 255, 0.018);
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .callout + .callout {
+        margin-top: 10px;
+      }
+
+      .callout.proposed {
+        border-color: var(--amber-border);
+        background: var(--amber-soft);
+      }
+
+      .callout.implemented {
+        border-color: var(--green-border);
+        background: var(--green-soft);
+      }
+
+      .callout-icon {
+        flex: none;
+        width: 18px;
+        height: 18px;
+        display: grid;
+        place-items: center;
+        margin-top: 1px;
+        border: 1px solid currentColor;
+        border-radius: 50%;
+        color: var(--amber);
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .callout.implemented .callout-icon {
+        color: var(--green);
+      }
+
+      .callout strong {
+        display: block;
+        margin-bottom: 2px;
+        color: var(--fg1);
+        font-weight: 590;
+      }
+
+      .settings-hero {
+        display: flex;
+        align-items: center;
+        gap: 15px;
+        margin: 24px 0 34px;
+        border: 1px solid var(--border-strong);
+        border-radius: var(--radius-lg);
+        padding: 18px;
+        background:
+          linear-gradient(100deg, rgba(54, 211, 126, 0.05), transparent 36%),
+          var(--bg2);
+      }
+
+      .browser-icon {
+        width: 42px;
+        height: 42px;
+        display: grid;
+        place-items: center;
+        flex: none;
+        border: 1px solid var(--green-border);
+        border-radius: 11px;
+        background: var(--green-soft);
+        color: #85efb4;
+      }
+
+      .browser-icon svg {
+        width: 24px;
+        height: 24px;
+        stroke: currentColor;
+      }
+
+      .hero-copy {
+        min-width: 0;
+      }
+
+      .hero-copy h2 {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 0 0 4px;
+        font-size: 15px;
+        font-weight: 620;
+      }
+
+      .hero-copy p {
+        margin: 0;
+        color: var(--fg2);
+        line-height: 1.48;
+      }
+
+      .master-state {
+        margin-left: auto;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        flex: none;
+      }
+
+      .state-label {
+        min-width: 49px;
+        color: var(--fg2);
+        font-size: 12px;
+        text-align: right;
+      }
+
+      .switch {
+        position: relative;
+        width: 42px;
+        height: 24px;
+        flex: none;
+        border: 0;
+        border-radius: 999px;
+        padding: 0;
+        background: #36393d;
+        cursor: pointer;
+        transition: 140ms ease;
+      }
+
+      .switch::after {
+        content: "";
+        position: absolute;
+        top: 3px;
+        left: 3px;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #f5f6f6;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35);
+        transition: 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
+      }
+
+      .switch[aria-checked="true"] {
+        background: var(--green);
+      }
+
+      .switch[aria-checked="true"]::after {
+        transform: translateX(18px);
+      }
+
+      .switch:disabled {
+        cursor: not-allowed;
+        opacity: 0.45;
+      }
+
+      .settings-section {
+        margin-top: 30px;
+      }
+
+      .section-heading-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        margin-bottom: 10px;
+      }
+
+      .section-title {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 13px;
+        font-weight: 590;
+      }
+
+      .section-description {
+        margin: 2px 0 0;
+        color: var(--fg3);
+        font-size: 11px;
+      }
+
+      .settings-card {
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        background: var(--bg2);
+      }
+
+      .settings-row {
+        min-height: 66px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 24px;
+        padding: 13px 16px;
+      }
+
+      .settings-row + .settings-row {
+        border-top: 1px solid var(--border);
+      }
+
+      .row-copy {
+        min-width: 0;
+      }
+
+      .row-title {
+        display: flex;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 7px;
+        color: var(--fg1);
+        font-weight: 560;
+      }
+
+      .row-description {
+        margin-top: 4px;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.45;
+      }
+
+      .row-control {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: none;
+      }
+
+      select.control {
+        min-width: 160px;
+        min-height: 32px;
+        border: 1px solid var(--border-strong);
+        border-radius: 8px;
+        padding: 5px 30px 5px 10px;
+        background: var(--bg3);
+        color: var(--fg1);
+        cursor: pointer;
+      }
+
+      .control-value {
+        min-width: 115px;
+        color: var(--fg2);
+        text-align: right;
+        font-size: 12px;
+      }
+
+      .dependent {
+        transition: 150ms ease;
+      }
+
+      body.browser-disabled .dependent,
+      body.browser-unavailable .dependent {
+        opacity: 0.42;
+        filter: saturate(0.55);
+      }
+
+      body.browser-disabled .dependent button,
+      body.browser-disabled .dependent select,
+      body.browser-unavailable .dependent button,
+      body.browser-unavailable .dependent select {
+        pointer-events: none;
+      }
+
+      .disabled-banner,
+      .unavailable-banner {
+        display: none;
+        align-items: center;
+        gap: 8px;
+        margin: -18px 0 26px;
+        border: 1px solid rgba(255, 108, 117, 0.26);
+        border-radius: 8px;
+        padding: 10px 12px;
+        background: var(--red-soft);
+        color: #ffabb0;
+        font-size: 12px;
+      }
+
+      body.browser-disabled .disabled-banner {
+        display: flex;
+      }
+
+      body.browser-unavailable .unavailable-banner {
+        display: flex;
+      }
+
+      .provider-tabs {
+        display: inline-flex;
+        align-items: center;
+        gap: 3px;
+        margin-bottom: 28px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 4px;
+        background: var(--bg3);
+        overflow-x: auto;
+      }
+
+      .provider-tab {
+        min-height: 32px;
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        border: 0;
+        border-radius: 7px;
+        padding: 0 14px;
+        background: transparent;
+        color: var(--fg2);
+        cursor: pointer;
+        white-space: nowrap;
+      }
+
+      .provider-tab.active {
+        background: var(--bg1);
+        color: var(--fg1);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+      }
+
+      .provider-tab[aria-disabled="true"] {
+        color: var(--fg3);
+        cursor: default;
+      }
+
+      .risk-card {
+        border-color: rgba(243, 180, 91, 0.24);
+      }
+
+      .risk-heading {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        margin-bottom: 6px;
+        color: var(--amber);
+        font-size: 12px;
+        font-weight: 600;
+      }
+
+      .risk-heading svg {
+        width: 15px;
+        height: 15px;
+        stroke: currentColor;
+      }
+
+      .overview-hero {
+        position: relative;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 30px;
+        background:
+          linear-gradient(120deg, rgba(54, 211, 126, 0.09), transparent 38%),
+          linear-gradient(300deg, rgba(142, 145, 255, 0.07), transparent 42%),
+          var(--bg2);
+      }
+
+      .overview-hero::after {
+        content: "";
+        position: absolute;
+        right: -80px;
+        top: -110px;
+        width: 280px;
+        height: 280px;
+        border: 1px solid rgba(255, 255, 255, 0.035);
+        border-radius: 50%;
+        box-shadow:
+          0 0 0 36px rgba(255, 255, 255, 0.012),
+          0 0 0 74px rgba(255, 255, 255, 0.009);
+      }
+
+      .eyebrow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 13px;
+        color: #8cefb8;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+      }
+
+      .eyebrow-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 12px var(--green);
+      }
+
+      .overview-title {
+        position: relative;
+        z-index: 1;
+        max-width: 720px;
+        margin: 0;
+        font-size: clamp(28px, 4vw, 42px);
+        line-height: 1.08;
+        font-weight: 580;
+        letter-spacing: -0.04em;
+      }
+
+      .overview-copy {
+        position: relative;
+        z-index: 1;
+        max-width: 700px;
+        margin: 15px 0 22px;
+        color: var(--fg2);
+        font-size: 15px;
+        line-height: 1.65;
+      }
+
+      .hero-actions {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 9px;
+      }
+
+      .metrics {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin: 22px 0 36px;
+      }
+
+      .metric {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 15px;
+        background: rgba(255, 255, 255, 0.015);
+      }
+
+      .metric-value {
+        font-size: 23px;
+        font-weight: 600;
+        letter-spacing: -0.025em;
+      }
+
+      .metric-label {
+        margin-top: 5px;
+        color: var(--fg2);
+        font-size: 11px;
+        line-height: 1.4;
+      }
+
+      .content-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      .content-card {
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        padding: 18px;
+        background: var(--bg2);
+      }
+
+      .content-card h3 {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 0 0 12px;
+        font-size: 14px;
+        font-weight: 610;
+      }
+
+      .content-card h3 svg {
+        width: 16px;
+        height: 16px;
+        stroke: currentColor;
+      }
+
+      .check-list,
+      .plain-list {
+        display: grid;
+        gap: 9px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .check-list li,
+      .plain-list li {
+        display: flex;
+        align-items: flex-start;
+        gap: 9px;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .check {
+        width: 16px;
+        height: 16px;
+        display: grid;
+        place-items: center;
+        flex: none;
+        margin-top: 1px;
+        border-radius: 50%;
+        background: var(--green-soft);
+        color: #7aebaa;
+        font-size: 10px;
+        font-weight: 800;
+      }
+
+      .dash {
+        width: 16px;
+        flex: none;
+        color: var(--fg3);
+        text-align: center;
+      }
+
+      .architecture {
+        margin-top: 36px;
+      }
+
+      .architecture h2,
+      .subheading {
+        margin: 0 0 6px;
+        font-size: 17px;
+        font-weight: 590;
+        letter-spacing: -0.015em;
+      }
+
+      .architecture > p,
+      .subheading-copy {
+        margin: 0 0 16px;
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.5;
+      }
+
+      .flow {
+        display: grid;
+        grid-template-columns: minmax(0, 1.1fr) 25px minmax(0, 1fr) 25px minmax(0, 1.2fr) 25px minmax(0, 1fr);
+        align-items: stretch;
+        gap: 7px;
+      }
+
+      .flow-node {
+        min-height: 112px;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 13px;
+        background: var(--bg2);
+      }
+
+      .flow-node.accent {
+        border-color: var(--green-border);
+        background: var(--green-soft);
+      }
+
+      .flow-node strong {
+        display: block;
+        margin-bottom: 5px;
+        font-size: 12px;
+      }
+
+      .flow-node span {
+        color: var(--fg2);
+        font-size: 10px;
+        line-height: 1.45;
+      }
+
+      .flow-arrow {
+        display: grid;
+        place-items: center;
+        color: var(--fg3);
+        font-size: 18px;
+      }
+
+      .comparison-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      .comparison-panel {
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: var(--radius-lg);
+        background: var(--bg2);
+      }
+
+      .comparison-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 13px 15px;
+        border-bottom: 1px solid var(--border);
+        background: rgba(255, 255, 255, 0.016);
+      }
+
+      .comparison-header strong {
+        font-size: 13px;
+      }
+
+      .chat-mock {
+        min-height: 385px;
+        padding: 18px;
+        background:
+          linear-gradient(rgba(255, 255, 255, 0.012), rgba(255, 255, 255, 0.012)),
+          var(--bg1);
+      }
+
+      .chat-message {
+        width: fit-content;
+        max-width: 83%;
+        margin-bottom: 13px;
+        border: 1px solid var(--border);
+        border-radius: 11px;
+        padding: 10px 12px;
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .chat-message.user {
+        margin-left: auto;
+        border-color: rgba(142, 145, 255, 0.2);
+        background: var(--purple-soft);
+        color: #d7d8ff;
+      }
+
+      .tool-row {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        margin-bottom: 8px;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 9px 10px;
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 11px;
+      }
+
+      .tool-row .tool-icon {
+        width: 22px;
+        height: 22px;
+        display: grid;
+        place-items: center;
+        border-radius: 6px;
+        background: var(--green-soft);
+        color: #7bebaa;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 10px;
+      }
+
+      .tool-status {
+        margin-left: auto;
+        color: var(--green);
+      }
+
+      .tool-status.paused {
+        color: var(--amber);
+      }
+
+      .mini-dialog {
+        width: min(92%, 360px);
+        margin: 18px auto 0;
+        border: 1px solid var(--border-strong);
+        border-radius: 12px;
+        padding: 15px;
+        background: var(--bg3);
+        box-shadow: 0 18px 50px rgba(0, 0, 0, 0.42);
+      }
+
+      .mini-dialog strong {
+        display: block;
+        margin-bottom: 5px;
+        font-size: 13px;
+      }
+
+      .mini-dialog p {
+        margin: 0 0 11px;
+        color: var(--fg2);
+        font-size: 10px;
+        line-height: 1.5;
+      }
+
+      .mini-actions {
+        display: flex;
+        justify-content: flex-end;
+        gap: 6px;
+      }
+
+      .mini-actions span {
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 5px 7px;
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 9px;
+      }
+
+      .comparison-notes {
+        padding: 15px;
+      }
+
+      .tool-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .tool-card {
+        min-height: 112px;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 14px;
+        background: var(--bg2);
+      }
+
+      .tool-name {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 8px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        font-weight: 700;
+        color: #8cefb8;
+      }
+
+      .tool-card p {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 11px;
+        line-height: 1.48;
+      }
+
+      .adapter-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 10px;
+        margin: 16px 0 34px;
+      }
+
+      .adapter-card {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 15px;
+        background: var(--bg2);
+      }
+
+      .adapter-card.future {
+        border-style: dashed;
+      }
+
+      .adapter-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        margin-bottom: 9px;
+      }
+
+      .adapter-top strong {
+        font-size: 12px;
+      }
+
+      .adapter-card p {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 10px;
+        line-height: 1.5;
+      }
+
+      .definition-box {
+        margin-top: 24px;
+        border: 1px solid var(--purple);
+        border-color: rgba(142, 145, 255, 0.27);
+        border-radius: var(--radius-lg);
+        padding: 18px;
+        background: var(--purple-soft);
+      }
+
+      .definition-box h2 {
+        margin: 0 0 8px;
+        font-size: 16px;
+      }
+
+      .definition-box p {
+        margin: 0;
+        color: #c7c8ff;
+        font-size: 12px;
+        line-height: 1.65;
+      }
+
+      .code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: #a8f3c7;
+      }
+
+      .identity-table {
+        width: 100%;
+        margin-top: 15px;
+        border-collapse: separate;
+        border-spacing: 0;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        background: var(--bg2);
+        font-size: 11px;
+      }
+
+      .identity-table th,
+      .identity-table td {
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+        text-align: left;
+        vertical-align: top;
+      }
+
+      .identity-table tr:last-child td {
+        border-bottom: 0;
+      }
+
+      .identity-table th {
+        color: var(--fg3);
+        font-weight: 560;
+      }
+
+      .identity-table td {
+        color: var(--fg2);
+      }
+
+      .identity-table td:first-child {
+        color: var(--fg1);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+
+      .live-demo {
+        overflow: hidden;
+        margin-top: 18px;
+        border: 1px solid var(--border-strong);
+        border-radius: 14px;
+        background: #101112;
+        box-shadow: var(--shadow);
+      }
+
+      .live-appbar,
+      .live-tabbar,
+      .live-browser-chrome {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border-bottom: 1px solid var(--border);
+        background: #181a1b;
+      }
+
+      .live-appbar {
+        min-height: 40px;
+        padding: 0 12px;
+        color: var(--fg2);
+        font-size: 11px;
+      }
+
+      .live-appbar strong {
+        color: var(--fg1);
+      }
+
+      .live-appbar .live-state {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        margin-left: auto;
+        color: #8cefb8;
+      }
+
+      .activity-dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--green);
+        box-shadow: 0 0 0 4px rgba(54, 211, 126, 0.1);
+      }
+
+      .live-demo.running .activity-dot {
+        animation: activity-pulse 900ms ease-in-out infinite alternate;
+      }
+
+      @keyframes activity-pulse {
+        to { opacity: 0.45; transform: scale(0.78); }
+      }
+
+      .live-layout {
+        display: grid;
+        grid-template-columns: minmax(300px, 0.82fr) minmax(420px, 1.35fr);
+        min-height: 590px;
+      }
+
+      .live-chat-pane {
+        min-width: 0;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr) auto;
+        border-right: 1px solid var(--border);
+        background: var(--bg1);
+      }
+
+      .live-tabbar {
+        min-height: 42px;
+        padding: 0 12px;
+      }
+
+      .live-tab {
+        display: inline-flex;
+        align-items: center;
+        gap: 7px;
+        min-height: 30px;
+        border-radius: 7px;
+        padding: 0 10px;
+        background: var(--bg3);
+        color: var(--fg1);
+        font-size: 11px;
+      }
+
+      .live-chat-scroll {
+        min-height: 0;
+        padding: 16px;
+      }
+
+      .live-chat-scroll .tool-row {
+        transition: 160ms ease;
+      }
+
+      .live-composer-slot {
+        padding: 12px;
+        border-top: 1px solid var(--border);
+        background: #151617;
+      }
+
+      .composer-placeholder {
+        min-height: 74px;
+        display: flex;
+        align-items: center;
+        padding: 12px;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--bg2);
+        color: var(--fg3);
+        font-size: 12px;
+      }
+
+      .permission-card {
+        display: flex;
+        flex-direction: column;
+        gap: 11px;
+        width: 100%;
+        border: 1px solid var(--border-strong);
+        border-radius: 10px;
+        padding: 13px 14px;
+        background: var(--bg2);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+      }
+
+      .permission-card[hidden] {
+        display: none;
+      }
+
+      .permission-title {
+        color: var(--fg1);
+        font-size: 13px;
+        font-weight: 610;
+      }
+
+      .permission-context {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+
+      .permission-context span {
+        max-width: 100%;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 4px 7px;
+        background: var(--bg1);
+        color: var(--fg2);
+        font-size: 9px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .permission-subject {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        color: var(--fg1);
+        font-size: 11px;
+      }
+
+      .permission-subject-icon {
+        width: 22px;
+        height: 22px;
+        display: grid;
+        place-items: center;
+        flex: none;
+        border-radius: 6px;
+        background: var(--green-soft);
+        color: #82ecb1;
+        font-weight: 700;
+      }
+
+      .permission-subject small {
+        display: block;
+        margin-top: 2px;
+        color: var(--fg3);
+        font-size: 9px;
+      }
+
+      .permission-options {
+        display: grid;
+        gap: 6px;
+      }
+
+      .permission-option {
+        min-height: 34px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 7px 10px;
+        background: var(--bg1);
+        color: var(--fg1);
+        text-align: left;
+        cursor: pointer;
+      }
+
+      .permission-option:hover,
+      .permission-option:focus-visible {
+        border-color: var(--border-strong);
+        background: var(--bg3);
+        outline: none;
+      }
+
+      .permission-option.deny {
+        color: #ff9aa1;
+      }
+
+      .permission-shortcut {
+        color: var(--fg3);
+        font-size: 9px;
+      }
+
+      .live-browser-pane {
+        min-width: 0;
+        display: grid;
+        grid-template-rows: auto auto minmax(0, 1fr) auto;
+        background: #0d0e0f;
+      }
+
+      .live-browser-chrome {
+        min-height: 42px;
+        padding: 0 8px;
+      }
+
+      .browser-chrome-button {
+        width: 26px;
+        height: 26px;
+        display: grid;
+        place-items: center;
+        border: 0;
+        border-radius: 6px;
+        background: transparent;
+        color: var(--fg2);
+      }
+
+      .browser-address {
+        min-width: 0;
+        flex: 1;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        border-radius: 7px;
+        padding: 6px 9px;
+        background: var(--bg2);
+        color: var(--fg2);
+        font-size: 10px;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+
+      .site-favicon {
+        width: 16px;
+        height: 16px;
+        display: inline-grid;
+        place-items: center;
+        flex: none;
+        border-radius: 4px;
+        background: linear-gradient(145deg, #266ee8, #20b9dc);
+        color: white;
+        font-size: 9px;
+        font-weight: 800;
+      }
+
+      .agent-status {
+        min-width: 132px;
+        color: #8cefb8;
+        font-size: 10px;
+        text-align: right;
+      }
+
+      .live-viewport {
+        position: relative;
+        min-height: 0;
+        overflow: hidden;
+        background: #f4f5f7;
+        color: #16191d;
+      }
+
+      .live-viewport::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        z-index: 1;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 180ms ease;
+        background:
+          radial-gradient(ellipse at 50% 112%, rgba(21, 174, 229, 0.3), transparent 48%),
+          linear-gradient(180deg, rgba(24, 181, 229, 0.1), rgba(19, 127, 210, 0.2));
+        box-shadow:
+          inset 0 0 72px rgba(28, 192, 236, 0.46),
+          inset 0 -34px 70px rgba(28, 110, 235, 0.34);
+      }
+
+      .live-demo.running .live-viewport {
+        pointer-events: none;
+      }
+
+      .live-demo.running .live-viewport::after {
+        opacity: 1;
+      }
+
+      .browser-work-strip {
+        min-height: 44px;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        border-top: 1px solid var(--border);
+        background: #141617;
+        color: var(--fg1);
+        font-size: 10px;
+      }
+
+      .live-demo.running .browser-work-strip {
+        display: flex;
+      }
+
+      .browser-work-strip button {
+        width: 25px;
+        height: 25px;
+        border: 0;
+        border-radius: 999px;
+        background: var(--bg3);
+        color: var(--fg2);
+        cursor: pointer;
+      }
+
+      .mock-site-header {
+        height: 58px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0 24px;
+        border-bottom: 1px solid #dfe2e6;
+        background: #fff;
+      }
+
+      .mock-logo {
+        font-weight: 750;
+        letter-spacing: -0.03em;
+      }
+
+      .mock-nav {
+        display: flex;
+        gap: 17px;
+        color: #6d737c;
+        font-size: 10px;
+      }
+
+      .mock-site-body {
+        padding: 30px 32px;
+      }
+
+      .mock-site-body h3 {
+        max-width: 420px;
+        margin: 0 0 10px;
+        font-size: clamp(22px, 3vw, 38px);
+        line-height: 1.05;
+        letter-spacing: -0.04em;
+      }
+
+      .mock-site-body p {
+        max-width: 420px;
+        margin: 0;
+        color: #69717b;
+        font-size: 11px;
+        line-height: 1.55;
+      }
+
+      .mock-site-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 27px;
+      }
+
+      .mock-site-card {
+        min-height: 115px;
+        border: 1px solid #dde1e6;
+        border-radius: 10px;
+        padding: 14px;
+        background: #fff;
+      }
+
+      .mock-site-card strong {
+        display: block;
+        margin-bottom: 8px;
+        font-size: 11px;
+      }
+
+      .mock-site-line {
+        height: 6px;
+        margin-top: 6px;
+        border-radius: 999px;
+        background: #edf0f3;
+      }
+
+      .mock-primary {
+        display: inline-flex;
+        margin-top: 22px;
+        border-radius: 7px;
+        padding: 8px 13px;
+        background: #171a1e;
+        color: #fff;
+        font-size: 10px;
+      }
+
+      .agent-pointer {
+        position: absolute;
+        left: 68%;
+        top: 68%;
+        z-index: 2;
+        display: flex;
+        align-items: flex-start;
+        gap: 5px;
+        color: #1f7b4b;
+        filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.24));
+        opacity: 0;
+        transition: left 360ms ease, top 360ms ease, opacity 160ms ease;
+        pointer-events: none;
+      }
+
+      .agent-pointer::before {
+        content: "";
+        width: 0;
+        height: 0;
+        border-top: 13px solid #2bc875;
+        border-right: 8px solid transparent;
+        transform: rotate(-22deg);
+      }
+
+      .live-demo.running .agent-pointer { opacity: 1; }
+
+      .live-demo.stage-open .agent-pointer { left: 18%; top: 24%; }
+      .live-demo.stage-snapshot .agent-pointer { left: 54%; top: 46%; }
+      .live-demo.stage-confirm .agent-pointer { left: 70%; top: 76%; }
+
+      .plan-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 18px;
+      }
+
+      .plan-card {
+        border: 1px solid var(--border);
+        border-radius: var(--radius);
+        padding: 14px;
+        background: var(--bg2);
+      }
+
+      .plan-card strong {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 7px;
+        font-size: 12px;
+      }
+
+      .plan-number {
+        width: 20px;
+        height: 20px;
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--amber-border);
+        border-radius: 50%;
+        background: var(--amber-soft);
+        color: var(--amber);
+        font-size: 9px;
+      }
+
+      .plan-card p {
+        margin: 0;
+        color: var(--fg2);
+        font-size: 10px;
+        line-height: 1.5;
+      }
+
+      .toast-region {
+        position: fixed;
+        right: 18px;
+        bottom: 18px;
+        z-index: 150;
+        display: grid;
+        gap: 8px;
+        pointer-events: none;
+      }
+
+      .toast {
+        min-width: 260px;
+        max-width: 390px;
+        border: 1px solid var(--border-strong);
+        border-radius: 9px;
+        padding: 11px 13px;
+        background: var(--bg3);
+        color: var(--fg1);
+        box-shadow: 0 16px 45px rgba(0, 0, 0, 0.4);
+        font-size: 12px;
+        animation: toast-in 170ms ease both;
+      }
+
+      @keyframes toast-in {
+        from {
+          opacity: 0;
+          transform: translateY(8px);
+        }
+      }
+
+      .mobile-menu {
+        display: none;
+      }
+
+      @media (max-width: 960px) {
+        .shell {
+          grid-template-columns: 210px minmax(0, 1fr);
+        }
+
+        .page {
+          width: min(100% - 38px, 1120px);
+        }
+
+        .metrics {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .flow {
+          grid-template-columns: 1fr;
+        }
+
+        .flow-arrow {
+          height: 20px;
+          transform: rotate(90deg);
+        }
+
+        .adapter-grid,
+        .tool-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .live-layout {
+          grid-template-columns: 1fr;
+        }
+
+        .live-chat-pane {
+          min-height: 520px;
+          border-right: 0;
+          border-bottom: 1px solid var(--border);
+        }
+
+        .live-viewport {
+          min-height: 430px;
+        }
+      }
+
+      @media (max-width: 720px) {
+        .app {
+          grid-template-rows: 48px minmax(0, 1fr);
+        }
+
+        .topbar {
+          height: 48px;
+          padding: 0 10px;
+        }
+
+        .top-title,
+        .top-status .mini-badge,
+        .window-dots {
+          display: none;
+        }
+
+        .mobile-menu {
+          display: inline-grid;
+          margin-left: auto;
+        }
+
+        .shell {
+          display: block;
+        }
+
+        .sidebar {
+          position: fixed;
+          left: 0;
+          top: 48px;
+          z-index: 50;
+          width: min(290px, 86vw);
+          height: calc(100vh - 48px);
+          transform: translateX(-102%);
+          transition: 180ms ease;
+          box-shadow: var(--shadow);
+        }
+
+        body.mobile-nav-open .sidebar {
+          transform: translateX(0);
+        }
+
+        .page {
+          width: min(100% - 28px, 1120px);
+          padding-top: 22px;
+        }
+
+        .page-header,
+        .settings-row,
+        .settings-hero {
+          align-items: flex-start;
+        }
+
+        .page-header {
+          flex-direction: column;
+        }
+
+        .settings-row {
+          flex-direction: column;
+          gap: 12px;
+        }
+
+        .row-control,
+        select.control,
+        .control-value {
+          width: 100%;
+          text-align: left;
+        }
+
+        .settings-hero {
+          flex-wrap: wrap;
+        }
+
+        .master-state {
+          width: 100%;
+          margin-left: 57px;
+          justify-content: flex-start;
+        }
+
+        .content-grid,
+        .comparison-grid,
+        .adapter-grid,
+        .tool-grid,
+        .plan-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .provider-tabs {
+          display: flex;
+        }
+
+        .provider-tab {
+          flex: 1;
+          justify-content: center;
+        }
+
+        .agent-status {
+          display: none;
+        }
+
+        .mock-site-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .overview-hero {
+          padding: 23px;
+        }
+
+        .metrics {
+          grid-template-columns: 1fr 1fr;
+        }
+
+        .identity-table {
+          display: block;
+          overflow-x: auto;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::before,
+        *::after {
+          scroll-behavior: auto !important;
+          animation-duration: 0.01ms !important;
+          transition-duration: 0.01ms !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header class="topbar">
+        <button class="back-button" type="button" aria-label="Back" data-page-link="overview">
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="m15 18-6-6 6-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </button>
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span class="brand-name">Zeros</span>
+        <span class="top-divider" aria-hidden="true"></span>
+        <span class="top-title">Browser use implementation preview</span>
+        <div class="top-status">
+          <span class="mini-badge implemented">This PR</span>
+          <span class="mini-badge implemented">Runtime + UI</span>
+          <button class="icon-button mobile-menu" id="mobile-menu" type="button" aria-label="Open navigation" aria-expanded="false">
+            <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+              <path d="M4 7h16M4 12h16M4 17h16" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" />
+            </svg>
+          </button>
+          <div class="window-dots" aria-hidden="true"><span class="window-dot"></span><span class="window-dot"></span><span class="window-dot"></span></div>
+        </div>
+      </header>
+
+      <div class="shell">
+        <aside class="sidebar" aria-label="Settings navigation">
+          <div class="sidebar-heading">Settings</div>
+
+          <nav>
+            <div class="nav-group">
+              <div class="nav-label">Prototype guide</div>
+              <button class="nav-item active" type="button" data-page-link="overview">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h5A1.5 1.5 0 0 1 12 5.5v5a1.5 1.5 0 0 1-1.5 1.5h-5A1.5 1.5 0 0 1 4 10.5v-5ZM12 13.5a1.5 1.5 0 0 1 1.5-1.5h5a1.5 1.5 0 0 1 1.5 1.5v5a1.5 1.5 0 0 1-1.5 1.5h-5a1.5 1.5 0 0 1-1.5-1.5v-5ZM14 4h4.5A1.5 1.5 0 0 1 20 5.5V9M4 15v3.5A1.5 1.5 0 0 0 5.5 20H9" stroke-width="1.6" stroke-linecap="round" /></svg>
+                What shipped
+                <span class="end mini-badge implemented">Now</span>
+              </button>
+              <button class="nav-item" type="button" data-page-link="live">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3.5" y="5" width="17" height="13" rx="2.5" stroke-width="1.5"/><path d="M3.5 8.5h17M8 15l2-2-2-2M12.5 15h3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                Live browser
+                <span class="end mini-badge implemented">Now</span>
+              </button>
+              <button class="nav-item" type="button" data-page-link="comparison">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M4 7h11M4 12h16M4 17h8M17 4l3 3-3 3" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                Before &amp; after
+              </button>
+              <button class="nav-item" type="button" data-page-link="contract">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3 4.5 7.2 12 11.5l7.5-4.3L12 3ZM4.5 12 12 16.3l7.5-4.3M4.5 16.8 12 21l7.5-4.2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                Canonical contract
+              </button>
+            </div>
+
+            <div class="nav-group">
+              <div class="nav-label">Personal</div>
+              <button class="nav-item muted-product-nav" type="button" data-demo-message="General settings are outside this prototype.">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z" stroke-width="1.6"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06-2.83 2.83-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1.04 1.56V21h-4v-.08A1.7 1.7 0 0 0 8.96 19.4a1.7 1.7 0 0 0-1.87.34l-.06.06-2.83-2.83.06-.06A1.7 1.7 0 0 0 4.6 15 1.7 1.7 0 0 0 3.08 14H3v-4h.08A1.7 1.7 0 0 0 4.6 9a1.7 1.7 0 0 0-.34-1.87L4.2 7.07l2.83-2.83.06.06A1.7 1.7 0 0 0 8.96 4.6 1.7 1.7 0 0 0 10 3.08V3h4v.08A1.7 1.7 0 0 0 15.04 4.6a1.7 1.7 0 0 0 1.87-.34l.06-.06 2.83 2.83-.06.06A1.7 1.7 0 0 0 19.4 9 1.7 1.7 0 0 0 20.92 10H21v4h-.08A1.7 1.7 0 0 0 19.4 15Z" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                General
+              </button>
+              <button class="nav-item muted-product-nav" type="button" data-demo-message="Appearance settings are outside this prototype.">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18h1.2a1.8 1.8 0 0 0 0-3.6h-.7a1.4 1.4 0 0 1 0-2.8H14a7 7 0 0 0-2-13.6Z" stroke-width="1.6"/><circle cx="7.5" cy="10" r="1" fill="currentColor" stroke="none"/><circle cx="10" cy="6.8" r="1" fill="currentColor" stroke="none"/><circle cx="15" cy="7.5" r="1" fill="currentColor" stroke="none"/></svg>
+                Appearance
+              </button>
+            </div>
+
+            <div class="nav-group">
+              <div class="nav-label">Agents</div>
+              <button class="nav-item muted-product-nav" type="button" data-demo-message="Models remains an existing Zeros settings page.">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z" stroke-width="1.6"/><path d="m4.4 7.7 7.6 4.4 7.6-4.4M12 12v8.6" stroke-width="1.4" /></svg>
+                Models
+              </button>
+              <button class="nav-item muted-product-nav" type="button" data-demo-message="Agents remains the existing Zeros agent-management page.">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m12 3 1.5 4.2L18 9l-4.5 1.8L12 15l-1.5-4.2L6 9l4.5-1.8L12 3Z" stroke-width="1.5" stroke-linejoin="round"/><path d="m18.5 14 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2Z" stroke-width="1.4" stroke-linejoin="round" /></svg>
+                Agents
+              </button>
+              <button class="nav-item" type="button" data-page-link="settings">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="12" cy="12" r="8.5" stroke-width="1.5"/><path d="M3.8 9h16.4M3.8 15h16.4M12 3.5c2.1 2.3 3.2 5.1 3.2 8.5S14.1 18.2 12 20.5C9.9 18.2 8.8 15.4 8.8 12S9.9 5.8 12 3.5Z" stroke-width="1.35"/></svg>
+                Browser use
+                <span class="end mini-badge implemented">Added</span>
+              </button>
+            </div>
+
+            <div class="nav-group">
+              <div class="nav-label">Workspace</div>
+              <button class="nav-item muted-product-nav" type="button" data-demo-message="Environment settings are outside this prototype.">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M15 7a4 4 0 1 0-7.8 1.3L3 12.5V16h3v3h3v2h3.5l4.2-4.2A4 4 0 0 0 15 7Z" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                Environment
+              </button>
+              <button class="nav-item muted-product-nav" type="button" data-demo-message="Git &amp; PR settings are outside this prototype.">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><circle cx="7" cy="5" r="2" stroke-width="1.5"/><circle cx="17" cy="19" r="2" stroke-width="1.5"/><circle cx="7" cy="19" r="2" stroke-width="1.5"/><path d="M7 7v10M9 7.5c4 0 6 2 6 6V17" stroke-width="1.5" stroke-linecap="round" /></svg>
+                Git &amp; PR
+              </button>
+            </div>
+          </nav>
+
+          <div class="sidebar-note">
+            <strong>Shipping together</strong>
+            This PR includes the canonical runtime, inline permission card, direct settings, and the live auto-opening Browser tab.
+          </div>
+        </aside>
+
+        <main class="main" id="main-content">
+          <section class="page active" id="page-overview" data-page="overview" aria-labelledby="overview-title">
+            <div class="breadcrumbs"><span>Settings</span><span>/</span><span>Agents</span><span>/</span><span class="breadcrumb-current">Browser service</span></div>
+            <div class="overview-hero">
+              <div class="eyebrow"><span class="eyebrow-dot"></span>Implemented runtime + product UI</div>
+              <h1 class="overview-title" id="overview-title">Provider-native browser use, made visible inside Zeros.</h1>
+              <p class="overview-copy">This PR connects Codex to OpenAI’s official bundled Browser plugin and native app-server IAB protocol, enables Claude’s official Agent SDK Chrome integration, and leaves Cursor unavailable because its SDK has no native browser contract. Zeros adds the conversation-owned live tab, inline PermissionCard, settings, cursor, Stop control, and exact-page handoff—without exposing a Zeros browser MCP to any agent.</p>
+              <div class="hero-actions">
+                <button class="button primary" type="button" data-page-link="live">Try the live browser flow</button>
+                <button class="button" type="button" data-page-link="settings">Open Browser use settings</button>
+                <button class="button ghost" type="button" data-page-link="contract">Understand the contract →</button>
+              </div>
+            </div>
+
+            <div class="metrics" aria-label="Implementation summary">
+              <div class="metric"><div class="metric-value">1</div><div class="metric-label">Official Codex tool surface: node_repl.js</div></div>
+              <div class="metric"><div class="metric-value">2</div><div class="metric-label">Native integrations: Codex and Claude; Cursor unavailable</div></div>
+              <div class="metric"><div class="metric-value">1</div><div class="metric-label">Shared live page for agent control and user takeover</div></div>
+              <div class="metric"><div class="metric-value">8</div><div class="metric-label">Bounded concurrent conversation browser records</div></div>
+            </div>
+
+            <div class="content-grid">
+              <article class="content-card">
+                <h3><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12 4 4L19 6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>Implemented in this PR</h3>
+                <ul class="check-list">
+                  <li><span class="check">✓</span><span>Hidden, isolated Electron Chromium session owned by Zeros.</span></li>
+                  <li><span class="check">✓</span><span>OpenAI’s bundled Browser plugin and official <span class="code">node_repl.js</span> MCP surface for Codex app-server threads.</span></li>
+                  <li><span class="check">✓</span><span>Claude Agent SDK’s official Chrome integration; no custom browser tools for Cursor.</span></li>
+                  <li><span class="check">✓</span><span>Provider-native approvals plus host navigation, download, and device-permission gates routed into the exact chat’s existing PermissionCard.</span></li>
+                  <li><span class="check">✓</span><span>Private bounded screenshots, traces, uploads, and downloads.</span></li>
+                  <li><span class="check">✓</span><span>User/managed setting with isolated browser enabled by default.</span></li>
+                </ul>
+              </article>
+
+              <article class="content-card">
+                <h3><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m5 12 4 4L19 6" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" /></svg>New product UI in this PR</h3>
+                <ul class="check-list">
+                  <li><span class="check">✓</span><span>Settings → Agents → Browser use as a direct navigation item.</span></li>
+                  <li><span class="check">✓</span><span>Codex / Claude / Cursor integration tabs over one global browser policy.</span></li>
+                  <li><span class="check">✓</span><span>Enable, auto-open, and agent-cursor controls with dependent disabled states.</span></li>
+                  <li><span class="check">✓</span><span>Reuse of the existing chat PermissionCard instead of a popup.</span></li>
+                  <li><span class="check">✓</span><span>Auto-opening live Browser tab with activity status, agent cursor, and direct takeover.</span></li>
+                  <li><span class="check">✓</span><span>Favicons, visible scroll/click motion, working gradient, interaction lock, and trusted Stop control.</span></li>
+                  <li><span class="check">✓</span><span>One compact expandable Browser activity row instead of primitive tool-call spam.</span></li>
+                  <li><span class="check">✓</span><span>Background conversations update their own tab without stealing focus.</span></li>
+                </ul>
+              </article>
+            </div>
+
+            <section class="architecture">
+              <h2>Runtime path</h2>
+              <p>The provider owns its skill and tool calls. Zeros owns only the browser host, durable conversation routing, safety controls, and visible lifecycle.</p>
+              <div class="flow" role="img" aria-label="Official Codex Browser plugin to Zeros browser host flow">
+                <div class="flow-node"><strong>Codex app server</strong><span>Loads OpenAI’s official <span class="code">browser@openai-bundled</span> plugin and batches work into <span class="code">node_repl.js</span>.</span></div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-node"><strong>Official Browser client</strong><span>Uses Playwright / DOM CUA over Codex’s private IAB pipe and preserves native result metadata.</span></div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-node accent"><strong>Zeros IAB host</strong><span>Maps the native Codex thread to one opaque, conversation-owned Chromium lease. It is not an MCP tool server.</span></div>
+                <div class="flow-arrow">→</div>
+                <div class="flow-node"><strong>Isolated Chromium</strong><span>Electron main executes tools and moves the same native view between its hidden parking host and the active Browser tab.</span></div>
+              </div>
+            </section>
+          </section>
+
+          <section class="page" id="page-settings" data-page="settings" aria-labelledby="settings-title">
+            <div class="breadcrumbs">
+              <button class="breadcrumb-button" type="button" data-page-link="overview">Settings</button><span>/</span>
+              <span>Agents</span><span>/</span><span class="breadcrumb-current">Browser use</span>
+            </div>
+
+            <div class="page-header">
+              <div>
+                <h1 class="page-title" id="settings-title">Browser use</h1>
+                <p class="page-subtitle">Configure provider-native browser integrations and the Zeros-owned live browser experience.</p>
+                <div class="status-strip"><span class="mini-badge implemented">UI implemented</span><span class="mini-badge implemented">Runtime implemented</span><span class="mini-badge native">Codex app-server native</span></div>
+              </div>
+              <div class="header-actions"><button class="button" type="button" data-open-permission>Preview inline permission</button></div>
+            </div>
+
+            <div class="provider-tabs" role="tablist" aria-label="Agent platforms">
+              <button class="provider-tab active" type="button" role="tab" aria-selected="true" data-agent-tab="codex">Codex <span class="mini-badge native">Integrated</span></button>
+              <button class="provider-tab" type="button" role="tab" aria-selected="false" data-agent-tab="claude">Claude <span class="mini-badge implemented">Integrated</span></button>
+              <button class="provider-tab" type="button" role="tab" aria-selected="false" data-agent-tab="cursor">Cursor <span class="mini-badge proposed">Unavailable</span></button>
+            </div>
+
+            <div class="callout">
+              <span class="callout-icon">✓</span>
+              <div id="agent-integration-copy"><strong>Official Codex Browser plugin</strong>Zeros enables OpenAI’s bundled <span class="code">browser@openai-bundled</span> plugin and registers its verified official <span class="code">node_repl</span> MCP dependency. The visible tool remains <span class="code">node_repl.js</span>, with the agent-supplied title and native Browser metadata. No <span class="code">zeros_browser</span> MCP or dynamic-tool fallback is installed.</div>
+            </div>
+
+            <div class="settings-hero">
+              <div class="browser-icon" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="15" rx="3" stroke-width="1.6"/><path d="M3 8h18M8 14l3.5-2-1.2 4 3.2 2" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/><circle cx="6.3" cy="6.2" r=".7" fill="currentColor" stroke="none"/></svg>
+              </div>
+              <div class="hero-copy">
+                <h2>Browser use <span class="mini-badge implemented">Implemented</span></h2>
+                <p id="browser-description">Enable provider-native browser integrations: OpenAI’s official Codex Browser plugin uses the in-app IAB host, Claude uses official Claude in Chrome, and Cursor remains unavailable until its SDK exposes a native contract. No shared Zeros browser MCP is injected.</p>
+              </div>
+              <div class="master-state">
+                <span class="state-label" id="browser-state-label">Enabled</span>
+                <button class="switch" id="browser-toggle" type="button" role="switch" aria-checked="true" aria-label="Enable browser use"></button>
+              </div>
+            </div>
+
+            <div class="disabled-banner" role="status"><span>●</span><span>Browser use is disabled. New and already-bound agent tool calls are blocked, and live native pages are closed.</span></div>
+            <div class="unavailable-banner" role="status"><span>●</span><span>Browser use is not supported for Cursor because its SDK has no native browser contract. Zeros does not install a custom-tool or MCP fallback.</span></div>
+
+            <div class="dependent" id="browser-dependent-settings">
+              <section class="settings-section">
+                <div class="section-heading-row"><div><h2 class="section-title">General</h2><p class="section-description">Core browser backend and adapter behavior</p></div></div>
+                <div class="settings-card">
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Browser provider <span class="mini-badge implemented">Implemented</span></div><div class="row-description">Zeros-owned execution backend. Only the isolated provider is accepted in this phase.</div></div>
+                    <div class="row-control"><select class="control" aria-label="Browser provider"><option>Isolated Chromium</option></select></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Codex tool surface <span class="mini-badge implemented">Implemented</span></div><div class="row-description">Owned by OpenAI’s bundled Browser plugin and batched through its official Node REPL server.</div></div>
+                    <div class="row-control"><span class="control-value code">node_repl.js</span></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Codex browser routing <span class="mini-badge implemented">Implemented</span></div><div class="row-description">The official Browser client discovers Zeros as its IAB backend. Zeros supplies the tab host and native wire protocol, not the Browser skill or agent tools.</div></div>
+                    <div class="row-control"><span class="control-value">Official plugin → Zeros IAB</span></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Official runtime requirement</div><div class="row-description">Requires OpenAI’s signed desktop <span class="code">cua_node</span> helper and cached bundled Browser plugin. Missing or malformed components fail closed; Zeros never substitutes its own tools.</div></div>
+                    <div class="row-control"><span class="mini-badge native">Verified at thread start</span></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Browser profile</div><div class="row-description">Fresh, unauthenticated, in-memory profile; never attaches to the user's shared Chrome profile.</div></div>
+                    <div class="row-control"><span class="control-value">Ephemeral &amp; isolated</span></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="settings-section">
+                <div class="section-heading-row"><div><h2 class="section-title">Live Browser tab</h2><p class="section-description">How agent activity appears in the workspace</p></div><span class="mini-badge implemented">Implemented</span></div>
+                <div class="settings-card">
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Open automatically</div><div class="row-description">On the first valid native Codex navigation for the active conversation, create and activate its Browser tab immediately.</div></div>
+                    <div class="row-control"><button class="switch" type="button" role="switch" aria-checked="true" aria-label="Open live Browser tab automatically"></button></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Show agent activity and cursor</div><div class="row-description">Display Navigating, Reading, Interacting, or Approval required and show the agent's latest page target.</div></div>
+                    <div class="row-control"><button class="switch" type="button" role="switch" aria-checked="true" aria-label="Show agent cursor"></button></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Focus behavior</div><div class="row-description">Reveal once for the active conversation. Later redirects and background conversations update their own tabs without stealing focus.</div></div>
+                    <div class="row-control"><span class="control-value">Reveal once</span></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Permission presentation</div><div class="row-description">Pause the browser and replace that conversation's composer with the existing Zeros PermissionCard.</div></div>
+                    <div class="row-control"><span class="control-value">Inline in chat</span></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Working state</div><div class="row-description">Lock page input, show a cyan live-page gradient and agent cursor, and expose a trusted bottom Stop control until the agent hands the page back.</div></div>
+                    <div class="row-control"><span class="mini-badge implemented">Implemented</span></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="settings-section">
+                <div class="section-heading-row"><div><h2 class="section-title">Safety &amp; permissions</h2><p class="section-description">Provider-native policy plus authoritative Zeros host boundaries</p></div><button class="button" type="button" data-open-permission>Preview card</button></div>
+                <div class="settings-card">
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Approval for opening websites</div><div class="row-description">Codex owns explicit destination approval. Zeros asks only for an unexpected cross-site redirect, form, or click; native-approved Page.navigate calls never ask twice.</div></div>
+                    <div class="row-control"><select class="control" aria-label="Approval for opening websites"><option>Always ask</option><option>Always allow</option></select></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Sensitive browser actions <span class="mini-badge native">Codex-owned</span></div><div class="row-description">OpenAI’s Browser skill owns semantic policy. Its app-server elicitations render through the same inline Zeros PermissionCard; Zeros does not reinterpret raw CDP as a custom tool.</div></div>
+                    <div class="row-control"><span class="control-value">Provider native</span></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Site settings</div><div class="row-description">Website and device-permission grants apply only to an exact active browser session, origin, category, and scope.</div></div>
+                    <div class="row-control"><button class="button" type="button" data-demo-message="Active in-memory site grants cleared.">Clear active grants</button></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Approval history</div><div class="row-description">This release keeps no durable cross-session browsing approval history.</div></div>
+                    <div class="row-control"><span class="control-value">Session only</span></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Decision ownership</div><div class="row-description">Codex persists native choices according to its card. Zeros host grants remain limited to the active isolated session, origin, category, and scope.</div></div>
+                    <div class="row-control"><span class="control-value">Always enforced</span></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Trusted-window protection</div><div class="row-description">Closing or reloading Zeros denies pending work, revokes grants, and destroys live pages.</div></div>
+                    <div class="row-control"><span class="mini-badge implemented">Fail closed</span></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="settings-section">
+                <div class="section-heading-row"><div><h2 class="section-title">Downloads, uploads &amp; artifacts</h2><p class="section-description">Private bounded storage rather than system browser history</p></div></div>
+                <div class="settings-card">
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Workspace uploads</div><div class="row-description">Only non-empty regular files inside the owning workspace may be privately staged and uploaded.</div></div>
+                    <div class="row-control"><span class="control-value">Workspace only · 100 MB</span></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Browser downloads</div><div class="row-description">Downloads pause for confirmation and remain in a private session bucket.</div></div>
+                    <div class="row-control"><span class="control-value">Ask · 100 MB max</span></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Screenshots and traces</div><div class="row-description">Requested JPEG evidence excludes the live agent tint and cursor; bounded evidence and JSON traces are stored below the Zeros data directory.</div></div>
+                    <div class="row-control"><button class="button" type="button" data-demo-message="A full artifact manager is outside this PR; requested artifacts are still available through tool results.">Manage</button></div>
+                  </div>
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="row-title">Browsing data <span class="mini-badge implemented">Implemented</span></div><div class="row-description">Close active isolated pages and clear cookies, cache, in-memory history, pending approvals, and temporary uploads. Explicit screenshots, downloads, and traces remain in Zeros artifacts.</div></div>
+                    <div class="row-control"><button class="button danger" type="button" data-clear-data>Clear active browser data</button></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="settings-section">
+                <div class="section-heading-row"><div><h2 class="section-title">Session lifecycle</h2><p class="section-description">Current bounded runtime values, surfaced here for clarity</p></div></div>
+                <div class="settings-card">
+                  <div class="settings-row"><div class="row-copy"><div class="row-title">Resource owner</div><div class="row-description">Provider thread and execution IDs never own or key the browser.</div></div><div class="row-control"><span class="control-value">Workspace + conversation</span></div></div>
+                  <div class="settings-row"><div class="row-copy"><div class="row-title">Idle browser timeout</div><div class="row-description">A visible Browser tab remains open for handoff. An unattached inactive browser record is evicted to keep the runtime bounded.</div></div><div class="row-control"><span class="control-value">20 minutes hidden</span></div></div>
+                  <div class="settings-row"><div class="row-copy"><div class="row-title">Maximum retained sessions</div><div class="row-description">Different conversations may work independently; actions within one conversation serialize.</div></div><div class="row-control"><span class="control-value">8 sessions</span></div></div>
+                  <div class="settings-row"><div class="row-copy"><div class="row-title">Delete conversation</div><div class="row-description">Detaches and destroys the conversation-owned browser record and its live page.</div></div><div class="row-control"><span class="control-value">Release automatically</span></div></div>
+                </div>
+              </section>
+
+              <section class="settings-section">
+                <div class="section-heading-row"><div><h2 class="section-title">Developer mode</h2><p class="section-description">Deliberate boundary of the public browser contract</p></div></div>
+                <div class="settings-card risk-card">
+                  <div class="settings-row">
+                    <div class="row-copy"><div class="risk-heading"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 8v5m0 3h.01M10.3 4.9 3.4 17a2 2 0 0 0 1.74 3h13.72a2 2 0 0 0 1.74-3L13.7 4.9a2 2 0 0 0-3.4 0Z" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" /></svg>Elevated risk — deliberately unavailable</div><div class="row-title">Full Chrome DevTools Protocol access</div><div class="row-description">Raw CDP would expose sensitive browser internals and bypass the semantic policy boundary. It is not part of this PR or the canonical agent contract.</div></div>
+                    <div class="row-control"><button class="switch" type="button" role="switch" aria-checked="false" aria-label="Full CDP access unavailable" disabled></button></div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          </section>
+
+          <section class="page" id="page-live" data-page="live" aria-labelledby="live-title">
+            <div class="breadcrumbs"><button class="breadcrumb-button" type="button" data-page-link="overview">Browser service</button><span>/</span><span class="breadcrumb-current">Live browser</span></div>
+            <div class="page-header">
+              <div>
+                <h1 class="page-title" id="live-title">Watch Codex work in the Browser tab</h1>
+                <p class="page-subtitle">The first browser navigation for the active conversation opens one Browser tab, attaches the same isolated Chromium view, and keeps chat authorization inline.</p>
+                <div class="status-strip"><span class="mini-badge implemented">Implemented</span><span class="mini-badge implemented">Exact-chat state events</span><span class="mini-badge">No duplicate browser</span></div>
+              </div>
+              <div class="header-actions">
+                <button class="button primary" type="button" data-run-live-demo>Run auto-open demo</button>
+                <button class="button" type="button" data-open-permission>Show permission card</button>
+              </div>
+            </div>
+
+            <div class="callout implemented">
+              <span class="callout-icon">i</span>
+              <div><strong>Why the Browser tab now shows live work</strong>The renderer consumes exact conversation-keyed <span class="code">browser-session-state</span> events and attaches the existing <span class="code">WebContentsView</span> through narrow, sender-validated IPC. It never creates a second iframe, and a native approval hides the guest until the inline chat decision resolves.</div>
+            </div>
+
+            <div class="live-demo stage-confirm" id="live-demo" aria-label="Zeros chat and live browser interaction">
+              <div class="live-appbar">
+                <strong>Zeros</strong><span>/</span><span>Checkout investigation</span>
+                <span class="mini-badge implemented">Shipped flow</span>
+                <span class="live-state"><span class="activity-dot"></span><span id="live-global-status">Approval required</span></span>
+              </div>
+              <div class="live-layout">
+                <section class="live-chat-pane" aria-label="Chat tab">
+                  <div class="live-tabbar"><span class="live-tab">✦ Codex · Checkout investigation</span></div>
+                  <div class="live-chat-scroll">
+                    <div class="chat-message user">Open the staging checkout, inspect the flow, and test the Pay now action.</div>
+                    <div class="tool-row" id="live-tool-group"><span class="site-favicon">A</span><span><strong>Browsing staging.example</strong> · Opened · Read 23 elements · Clicked “Pay now”</span><span class="tool-status paused">paused</span></div>
+                    <div class="chat-message">I found the checkout control. Codex requested approval before performing the consequential action, and Zeros placed that native request in this chat.</div>
+                  </div>
+                  <div class="live-composer-slot">
+                    <div class="composer-placeholder" id="composer-placeholder" hidden>Send follow up</div>
+                    <div class="permission-card" id="inline-permission-card" role="group" aria-labelledby="inline-permission-title">
+                      <div class="permission-title" id="inline-permission-title">Do you want to allow this browser action?</div>
+                      <div class="permission-context"><span>Payment</span><span>https://staging.example</span><span>Codex</span></div>
+                      <div class="permission-subject">
+                        <span class="permission-subject-icon" aria-hidden="true">B</span>
+                        <span><strong>Click “Pay now”</strong><small>Purchase, payment, or transfer</small></span>
+                      </div>
+                      <div class="permission-options">
+                        <button class="permission-option" type="button" data-permission-decision="Allow once"><span>Allow once</span><span class="permission-shortcut">↵</span></button>
+                        <button class="permission-option deny" type="button" data-permission-decision="Deny"><span>Deny</span><span class="permission-shortcut">⌫</span></button>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+
+                <section class="live-browser-pane" aria-label="Live Browser tab">
+                  <div class="live-tabbar"><span class="live-tab"><span class="site-favicon">A</span> Browser · staging.example</span><span class="mini-badge implemented">Auto-opened</span></div>
+                  <div class="live-browser-chrome">
+                    <button class="browser-chrome-button" type="button" aria-label="Back">‹</button>
+                    <button class="browser-chrome-button" type="button" aria-label="Forward">›</button>
+                    <button class="browser-chrome-button" type="button" aria-label="Reload">↻</button>
+                    <div class="browser-address"><span class="site-favicon">A</span> https://staging.example/checkout</div>
+                    <div class="agent-status" id="agent-status">⌁ Approval required</div>
+                  </div>
+                  <div class="live-viewport">
+                    <div class="mock-site-header"><span class="mock-logo">Acme checkout</span><span class="mock-nav"><span>Cart</span><span>Account</span><span>Help</span></span></div>
+                    <div class="mock-site-body">
+                      <h3>Finish your order.</h3>
+                      <p>Review the delivery and payment details before placing the order.</p>
+                      <div class="mock-site-grid">
+                        <div class="mock-site-card"><strong>Delivery</strong><div class="mock-site-line"></div><div class="mock-site-line" style="width:72%"></div></div>
+                        <div class="mock-site-card"><strong>Payment</strong><div class="mock-site-line"></div><div class="mock-site-line" style="width:58%"></div></div>
+                        <div class="mock-site-card"><strong>Total · $128.00</strong><div class="mock-site-line"></div><span class="mock-primary">Pay now</span></div>
+                      </div>
+                    </div>
+                    <div class="agent-pointer"></div>
+                  </div>
+                  <div class="browser-work-strip"><span>⌁</span><span id="browser-work-label">Reading page…</span><button type="button" data-stop-live aria-label="Stop agent browser work">■</button></div>
+                </section>
+              </div>
+            </div>
+
+            <section class="architecture">
+              <h2>Shipped implementation map</h2>
+              <p>The live interaction is bound to Zeros-owned identities and the canonical security boundary.</p>
+              <div class="plan-grid">
+                <article class="plan-card"><strong><span class="plan-number">1</span>Permission routed to chat</strong><p>The existing <span class="code">PermissionCard</span> replaced the global browser dialog. Trusted workspace/conversation attribution, exact-chat queues, and fail-closed teardown are included.</p></article>
+                <article class="plan-card"><strong><span class="plan-number">2</span>Same live view attached</strong><p>Narrow attach, bounds-update, and detach/repark IPC moves the Zeros <span class="code">WebContentsView</span>. It never exposes a generic WebContents handle.</p></article>
+                <article class="plan-card"><strong><span class="plan-number">3</span>Auto-open is conversation-safe</strong><p>Exact conversation-keyed state adds and activates the Browser tab on first open. Redirects and background chats update without stealing focus.</p></article>
+                <article class="plan-card"><strong><span class="plan-number">4</span>Live work is visible and stoppable</strong><p>Favicons, cursor motion, scroll, the cyan working tint, trusted action capsule, input lock, and Stop all follow host-owned state.</p></article>
+                <article class="plan-card"><strong><span class="plan-number">5</span>Browser use settings shipped</strong><p>Browser use sits directly under Agents, opens with Codex first, and keeps one global product policy across Codex, Claude, Cursor, and later adapters.</p></article>
+                <article class="plan-card"><strong><span class="plan-number">6</span>Lifecycle and transcript hardened</strong><p>Codex keeps its native titled <span class="code">node_repl.js</span> calls instead of emitting click/snapshot spam, Stop invalidates current work, and a kept or interrupted page is handed back without reloading it.</p></article>
+              </div>
+            </section>
+
+            <div class="definition-box">
+              <h2>What was retained from the earlier prototype?</h2>
+              <p>Auto-open planning, Browser-tab attachment, activity labels, and an injected agent pointer were retained. Task/Codex-owned identity assumptions, provider switching, raw CDP, and popup confirmation were deliberately excluded.</p>
+            </div>
+          </section>
+
+          <section class="page" id="page-comparison" data-page="comparison" aria-labelledby="comparison-title">
+            <div class="breadcrumbs"><button class="breadcrumb-button" type="button" data-page-link="overview">Browser service</button><span>/</span><span class="breadcrumb-current">Before &amp; after</span></div>
+            <div class="page-header">
+              <div><h1 class="page-title" id="comparison-title">Before vs. after this PR</h1><p class="page-subtitle">The old implementation ran correctly but stayed hidden behind an unrelated iframe and popup. The shipped UI reuses chat permission chrome and exposes the same live page.</p></div>
+              <div class="header-actions"><button class="button" type="button" data-page-link="live">Open live flow</button></div>
+            </div>
+
+            <div class="comparison-grid">
+              <article class="comparison-panel">
+                <div class="comparison-header"><strong>Before</strong><span class="mini-badge">Hidden runtime only</span></div>
+                <div class="chat-mock">
+                  <div class="chat-message user">Open the staging site, inspect the checkout page, and tell me what is broken.</div>
+                  <div class="tool-row"><span class="tool-icon">B</span><span><span class="code">zeros_browser.open</span> · staging.example</span><span class="tool-status">done</span></div>
+                  <div class="tool-row"><span class="tool-icon">B</span><span><span class="code">zeros_browser.snapshot</span> · hidden page</span><span class="tool-status">done</span></div>
+                  <div class="tool-row"><span class="tool-icon">B</span><span><span class="code">zeros_browser.click</span> · “Pay now”</span><span class="tool-status paused">paused</span></div>
+                  <div class="mini-dialog"><strong>Separate global popup</strong><p>It covers the app and is not the existing composer-slot PermissionCard.</p><div class="mini-actions"><span>Replace</span></div></div>
+                </div>
+                <div class="comparison-notes"><ul class="plain-list"><li><span class="dash">—</span><span>Agent executes against a hidden parking-window view.</span></li><li><span class="dash">—</span><span>Existing workbench Browser tab is an unrelated iframe.</span></li><li><span class="dash">—</span><span><span class="code">browser-session-state</span> is emitted but has no renderer consumer.</span></li></ul></div>
+              </article>
+
+              <article class="comparison-panel">
+                <div class="comparison-header"><strong>After</strong><span class="mini-badge implemented">Implemented here</span></div>
+                <div class="chat-mock">
+                  <div class="chat-message user">Open the staging site, inspect the checkout page, and tell me what is broken.</div>
+                  <div class="tool-row"><span class="site-favicon">A</span><span><strong>Open and inspect staging</strong> · <span class="code">MCP node_repl.js</span></span><span class="tool-status paused">running</span></div>
+                  <div class="permission-card">
+                    <div class="permission-title">Do you want to allow this browser action?</div>
+                    <div class="permission-context"><span>Payment</span><span>staging.example</span></div>
+                    <div class="permission-subject"><span class="permission-subject-icon">B</span><span><strong>Click “Pay now”</strong><small>Purchase, payment, or transfer</small></span></div>
+                    <div class="permission-options"><button class="permission-option" type="button" data-open-permission><span>Allow once</span><span class="permission-shortcut">↵</span></button><button class="permission-option deny" type="button" data-open-permission><span>Deny</span><span class="permission-shortcut">⌫</span></button></div>
+                  </div>
+                </div>
+                <div class="comparison-notes"><ul class="check-list"><li><span class="check">✓</span><span>Reuse the one existing PermissionCard in the chat composer slot.</span></li><li><span class="check">✓</span><span>Attach the same isolated view to an auto-opened Browser tab.</span></li><li><span class="check">✓</span><span>Show agent status and cursor without changing browser ownership.</span></li></ul></div>
+              </article>
+            </div>
+
+            <div class="definition-box">
+              <h2>Are these the only UIs?</h2>
+              <p>No. The browser feature has four coordinated touchpoints: Browser use settings, the reused inline PermissionCard, native titled Browser tool rows in chat, and the live Browser workbench surface with favicon, cursor, gradient, action capsule, interaction lock, Stop, and retained user handoff.</p>
+            </div>
+          </section>
+
+          <section class="page" id="page-contract" data-page="contract" aria-labelledby="contract-title">
+            <div class="breadcrumbs"><button class="breadcrumb-button" type="button" data-page-link="overview">Browser service</button><span>/</span><span class="breadcrumb-current">Native contracts</span></div>
+            <div class="page-header"><div><h1 class="page-title" id="contract-title">Provider tools stay provider-native</h1><p class="page-subtitle">Zeros standardizes ownership, policy, UI, and handoff—not the tool vocabulary presented to every model.</p></div><div class="header-actions"><span class="mini-badge implemented">No fallback MCP</span></div></div>
+
+            <div class="definition-box">
+              <h2>“Canonical contract” in plain language</h2>
+              <p>The canonical Zeros seam is now host-side: acquire one browser lease for a workspace conversation, register the native provider session, route visible state and approvals to that conversation, and release it on deletion. Codex still speaks OpenAI’s IAB protocol and shows <span class="code">node_repl.js</span>; Claude still speaks Anthropic’s Chrome protocol. There is deliberately no common agent-facing <span class="code">zeros_browser</span> tool set.</p>
+            </div>
+
+            <section class="architecture">
+              <h2>Current and future adapters</h2><p>Each adapter opts in only through an official provider contract.</p>
+              <div class="adapter-grid">
+                <article class="adapter-card"><div class="adapter-top"><strong>Codex</strong><span class="mini-badge native">Native</span></div><p>OpenAI’s <span class="code">browser@openai-bundled</span> plugin, official <span class="code">node_repl</span> MCP dependency, and app-server IAB session metadata.</p></article>
+                <article class="adapter-card"><div class="adapter-top"><strong>Claude</strong><span class="mini-badge implemented">Native</span></div><p>Official Claude Agent SDK <span class="code">--chrome</span> integration. Chrome / Edge and the Claude extension own its tabs and approvals.</p></article>
+                <article class="adapter-card"><div class="adapter-top"><strong>Cursor</strong><span class="mini-badge proposed">Unavailable</span></div><p>No browser tools are injected because the current Cursor SDK has no official browser-use contract.</p></article>
+                <article class="adapter-card future"><div class="adapter-top"><strong>Future agent</strong><span class="mini-badge">Official API required</span></div><p>May opt into Zeros hosting only after its own SDK or app server exposes a native browser contract.</p></article>
+              </div>
+            </section>
+
+            <h2 class="subheading">Host-side lifecycle contract</h2><p class="subheading-copy">These are product operations, never model-visible MCP tools.</p>
+            <div class="tool-grid">
+              <article class="tool-card"><div class="tool-name">acquire <span class="mini-badge">Zeros internal</span></div><p>Create or reuse one opaque, memory-only browser lease for a durable workspace and conversation owner.</p></article>
+              <article class="tool-card"><div class="tool-name">register <span class="mini-badge">Codex internal</span></div><p>Bind the exact app-server thread id to that lease so authenticated IAB requests cannot cross conversations.</p></article>
+              <article class="tool-card"><div class="tool-name">attach / detach <span class="mini-badge">UI internal</span></div><p>Move the same Electron <span class="code">WebContentsView</span> between its parking host and the visible workbench rectangle.</p></article>
+              <article class="tool-card"><div class="tool-name">handoff <span class="mini-badge">lifecycle</span></div><p>Remove agent control, cursor, debugger, and interaction lock while preserving the exact live page for the user.</p></article>
+              <article class="tool-card"><div class="tool-name">release <span class="mini-badge">Zeros internal</span></div><p>Destroy ephemeral page data when the conversation is deleted, Browser use is disabled, or the trusted app surface closes.</p></article>
+            </div>
+
+            <section class="architecture">
+              <h2>Ownership and lifecycle</h2><p>The stable Zeros identity prevents provider resumes or switches from accidentally creating a second browser owner.</p>
+              <table class="identity-table">
+                <thead><tr><th>Identity</th><th>Role</th><th>Browser ownership</th></tr></thead>
+                <tbody>
+                  <tr><td>workspaceId</td><td>Scopes the workspace and upload boundary.</td><td>Part of the durable owner key.</td></tr>
+                  <tr><td>conversationId</td><td>Represents the Zeros chat across agent restarts and provider changes.</td><td>Owns one browser resource with the workspace.</td></tr>
+                  <tr><td>browserSessionId</td><td>Opaque main-process lease handle for this app-service lifetime.</td><td>Execution handle, never provider-derived.</td></tr>
+                  <tr><td>executionId</td><td>One live agent run.</td><td>Never a browser key.</td></tr>
+                  <tr><td>provider resume ID</td><td>Codex/Claude/Cursor native thread or session binding.</td><td>Never sent to the browser service.</td></tr>
+                </tbody>
+              </table>
+            </section>
+
+            <section class="settings-section">
+              <div class="section-heading-row"><div><h2 class="section-title">This PR’s boundaries</h2><p class="section-description">Separate product and trust-model decisions</p></div></div>
+              <div class="content-grid">
+                <article class="content-card"><ul class="plain-list"><li><span class="check">✓</span><span>Live Browser-tab attachment is included in this PR.</span></li><li><span class="dash">×</span><span>Shared authenticated Chrome, cloud browsers, and system-computer control</span></li><li><span class="dash">×</span><span>Raw developer CDP or arbitrary JavaScript tool surfaces</span></li></ul></article>
+                <article class="content-card"><ul class="plain-list"><li><span class="dash">×</span><span>Provider-specific session ownership or browser policy</span></li><li><span class="dash">×</span><span>Product MCP registration or fallback</span></li><li><span class="dash">×</span><span>Marketplace apps, plugins, or skills distribution</span></li></ul></article>
+              </div>
+            </section>
+          </section>
+        </main>
+      </div>
+    </div>
+
+    <div class="toast-region" id="toast-region" role="status" aria-live="polite"></div>
+
+    <script>
+      (() => {
+        const pages = [...document.querySelectorAll(".page")];
+        const pageLinks = [...document.querySelectorAll("[data-page-link]")];
+        const navItems = [...document.querySelectorAll(".nav-item[data-page-link]")];
+        const main = document.querySelector(".main");
+        const mobileMenu = document.getElementById("mobile-menu");
+        const browserToggle = document.getElementById("browser-toggle");
+        const browserStateLabel = document.getElementById("browser-state-label");
+        const agentTabs = [...document.querySelectorAll("[data-agent-tab]")];
+        const agentIntegrationCopy = document.getElementById("agent-integration-copy");
+        const toastRegion = document.getElementById("toast-region");
+        const liveDemo = document.getElementById("live-demo");
+        const inlinePermission = document.getElementById("inline-permission-card");
+        const composerPlaceholder = document.getElementById("composer-placeholder");
+        const liveGlobalStatus = document.getElementById("live-global-status");
+        const agentStatus = document.getElementById("agent-status");
+        const browserWorkLabel = document.getElementById("browser-work-label");
+        let browserEnabled = browserToggle.getAttribute("aria-checked") === "true";
+        let demoTimers = [];
+
+        const pageTitles = {
+          overview: "What shipped",
+          settings: "Browser use settings",
+          live: "Live browser",
+          comparison: "Before & after",
+          contract: "Canonical contract",
+        };
+
+        function showPage(name, updateHash = true) {
+          const next = pages.find((page) => page.dataset.page === name) || pages[0];
+          pages.forEach((page) => page.classList.toggle("active", page === next));
+          navItems.forEach((item) => item.classList.toggle("active", item.dataset.pageLink === name));
+          document.title = `Zeros Browser — ${pageTitles[name] || "Prototype"}`;
+          if (updateHash) history.replaceState(null, "", `#${name}`);
+          main.scrollTo({ top: 0, behavior: "auto" });
+          document.body.classList.remove("mobile-nav-open");
+          mobileMenu?.setAttribute("aria-expanded", "false");
+        }
+
+        pageLinks.forEach((link) => link.addEventListener("click", () => showPage(link.dataset.pageLink)));
+
+        mobileMenu?.addEventListener("click", () => {
+          const open = document.body.classList.toggle("mobile-nav-open");
+          mobileMenu.setAttribute("aria-expanded", String(open));
+        });
+
+        function toast(message) {
+          const item = document.createElement("div");
+          item.className = "toast";
+          item.textContent = message;
+          toastRegion.appendChild(item);
+          window.setTimeout(() => {
+            item.style.opacity = "0";
+            item.style.transform = "translateY(5px)";
+            item.style.transition = "140ms ease";
+            window.setTimeout(() => item.remove(), 160);
+          }, 3300);
+        }
+
+        document.querySelectorAll("[data-demo-message]").forEach((control) => {
+          control.addEventListener("click", () => toast(control.dataset.demoMessage));
+        });
+
+        const agentIntegrations = {
+          codex: [
+            "Official Codex Browser · app-server native",
+            'Zeros enables OpenAI’s bundled Browser plugin and its verified official <span class="code">node_repl</span> MCP dependency. The chat shows titled <span class="code">node_repl.js</span> calls, while the plugin controls this conversation’s visible in-app tab through Codex IAB. There is no Zeros browser MCP fallback.',
+          ],
+          claude: [
+            "Official Claude in Chrome · Agent SDK",
+            'Claude receives the SDK’s official Chrome flag and uses Anthropic’s extension, browser tools, approvals, and visible external Chrome / Edge tab. It does not receive Zeros browser MCP tools.',
+          ],
+          cursor: [
+            "Unavailable · no native SDK contract",
+            'The current Cursor SDK has no official browser-use API, so Zeros injects no browser tools and does not fall back to a custom or MCP implementation.',
+          ],
+        };
+        function syncBrowserAvailability(agentId) {
+          const unavailable = agentId === "cursor";
+          document.body.classList.toggle("browser-unavailable", unavailable);
+          document.body.classList.toggle(
+            "browser-disabled",
+            !unavailable && !browserEnabled,
+          );
+          browserToggle.disabled = unavailable;
+          browserToggle.setAttribute(
+            "aria-checked",
+            String(unavailable ? false : browserEnabled),
+          );
+          browserToggle.setAttribute(
+            "aria-label",
+            unavailable
+              ? "Browser use is not supported for Cursor"
+              : "Enable browser use",
+          );
+          browserStateLabel.textContent = unavailable
+            ? "Not supported"
+            : browserEnabled
+              ? "Enabled"
+              : "Disabled";
+        }
+        agentTabs.forEach((tab) => {
+          tab.addEventListener("click", () => {
+            const id = tab.dataset.agentTab;
+            const copy = agentIntegrations[id];
+            if (!copy) return;
+            agentTabs.forEach((candidate) => {
+              const selected = candidate === tab;
+              candidate.classList.toggle("active", selected);
+              candidate.setAttribute("aria-selected", String(selected));
+            });
+            agentIntegrationCopy.innerHTML = `<strong>${copy[0]}</strong>${copy[1]} The master policy is shared by Codex and Claude; Cursor remains unavailable.`;
+            syncBrowserAvailability(id);
+          });
+        });
+
+        browserToggle.addEventListener("click", () => {
+          if (browserToggle.disabled) return;
+          browserEnabled = !browserEnabled;
+          syncBrowserAvailability("codex");
+          toast(browserEnabled ? "Browser use enabled" : "Browser use disabled — dependent controls are now inactive");
+        });
+
+        document.querySelectorAll("[data-clear-data]").forEach((control) => {
+          control.addEventListener("click", () => toast("Active browsing data cleared · explicit artifacts retained."));
+        });
+
+        document.querySelectorAll('.switch:not(#browser-toggle):not(:disabled)').forEach((control) => {
+          control.addEventListener("click", () => {
+            const next = control.getAttribute("aria-checked") !== "true";
+            control.setAttribute("aria-checked", String(next));
+            toast(`Browser setting ${next ? "enabled" : "disabled"}`);
+          });
+        });
+
+        function clearDemoTimers() {
+          demoTimers.forEach((timer) => window.clearTimeout(timer));
+          demoTimers = [];
+        }
+
+        function setToolStatus(id, label, paused = false) {
+          const status = document.querySelector(`#${id} .tool-status`);
+          if (!status) return;
+          status.textContent = label;
+          status.classList.toggle("paused", paused);
+        }
+
+        function setLiveStage(stage, globalLabel, agentLabel) {
+          liveDemo.classList.remove("stage-open", "stage-snapshot", "stage-confirm");
+          liveDemo.classList.add(stage);
+          liveGlobalStatus.textContent = globalLabel;
+          agentStatus.textContent = agentLabel === "Agent working" ? "⌁ Agent working" : `⌁ ${agentLabel}`;
+          if (browserWorkLabel) browserWorkLabel.textContent = globalLabel.endsWith("…") ? globalLabel : `${globalLabel}…`;
+        }
+
+        function showInlinePermission() {
+          clearDemoTimers();
+          showPage("live");
+          liveDemo.classList.remove("running");
+          setLiveStage("stage-confirm", "Approval required", "Approval required");
+          setToolStatus("live-tool-group", "paused", true);
+          inlinePermission.hidden = false;
+          composerPlaceholder.hidden = true;
+          window.setTimeout(() => inlinePermission.querySelector("button")?.focus(), 0);
+        }
+
+        function runLiveDemo() {
+          clearDemoTimers();
+          showPage("live");
+          liveDemo.classList.add("running");
+          inlinePermission.hidden = true;
+          composerPlaceholder.hidden = false;
+          composerPlaceholder.textContent = "Browser tab opened automatically for this conversation…";
+          setToolStatus("live-tool-group", "working");
+          setLiveStage("stage-open", "Opening staging.example", "Agent working");
+
+          demoTimers.push(window.setTimeout(() => {
+            composerPlaceholder.textContent = "Codex is inspecting the live page…";
+            setLiveStage("stage-snapshot", "Reading page", "Agent working");
+          }, 900));
+
+          demoTimers.push(window.setTimeout(() => {
+            setToolStatus("live-tool-group", "paused", true);
+            setLiveStage("stage-confirm", "Approval required", "Approval required");
+            inlinePermission.hidden = false;
+            composerPlaceholder.hidden = true;
+            liveDemo.classList.remove("running");
+          }, 1_800));
+        }
+
+        document.querySelectorAll("[data-open-permission]").forEach((button) => button.addEventListener("click", showInlinePermission));
+        document.querySelectorAll("[data-run-live-demo]").forEach((button) => button.addEventListener("click", runLiveDemo));
+        document.querySelectorAll("[data-permission-decision]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const decision = button.dataset.permissionDecision;
+            inlinePermission.hidden = true;
+            composerPlaceholder.hidden = false;
+            composerPlaceholder.textContent = decision === "Allow once"
+              ? "Allowed once · Codex resumed the browser action."
+              : "Denied · Codex did not perform the browser action.";
+            setToolStatus("live-tool-group", decision === "Allow once" ? "done" : "denied");
+            liveGlobalStatus.textContent = decision === "Allow once" ? "Browser ready" : "Action denied";
+            agentStatus.textContent = decision === "Allow once" ? "Shared browser" : "Action denied";
+            toast(`Browser permission: ${decision}`);
+          });
+        });
+
+        document.querySelectorAll("[data-stop-live]").forEach((button) => {
+          button.addEventListener("click", () => {
+            clearDemoTimers();
+            liveDemo.classList.remove("running");
+            setToolStatus("live-tool-group", "stopped", true);
+            liveGlobalStatus.textContent = "Stopped · page handed back";
+            agentStatus.textContent = "Shared browser";
+            composerPlaceholder.textContent = "Stopped. The same browser page is ready for you.";
+            toast("Agent stopped — browser state retained");
+          });
+        });
+
+        const previewParams = new URLSearchParams(location.search);
+        const initial = location.hash.slice(1);
+        showPage(pageTitles[initial] ? initial : "overview", false);
+        if (previewParams.has("disabled")) browserToggle.click();
+        if (previewParams.has("permission") || previewParams.has("confirm")) window.setTimeout(showInlinePermission, 0);
+        if (previewParams.has("run")) window.setTimeout(runLiveDemo, 0);
+      })();
+    </script>
+  </body>
+</html>

@@ -46,7 +46,8 @@ const TONE_ICON_COLOR = {
 export const CursorTaskCard: Renderer<AgentToolMessage> = memo(
   function CursorTaskCard({ message, ctx }) {
     const tool = message;
-    const isRunning = tool.status === "in_progress" || tool.status === "pending";
+    const isRunning =
+      tool.status === "in_progress" || tool.status === "pending";
     const sTone = statusTone(tool.status);
 
     // One-line summary for the header (the description handed to the subagent).
@@ -62,7 +63,10 @@ export const CursorTaskCard: Renderer<AgentToolMessage> = memo(
       () => (outputText ? renderMarkdown(outputText) : ""),
       [outputText],
     );
-    const outputJson = useMemo(() => safeJson(tool.rawOutput), [tool.rawOutput]);
+    const outputJson = useMemo(
+      () => safeJson(tool.rawOutput),
+      [tool.rawOutput],
+    );
 
     // The subagent's tool calls (+ narration) stream in as parentToolId-tagged
     // children — rendered live in the body below.
@@ -83,11 +87,11 @@ export const CursorTaskCard: Renderer<AgentToolMessage> = memo(
       <div className="flex flex-col">
         <button
           type="button"
-          className="group/task-row -ml-2 flex w-fit min-w-0 max-w-full items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-bg2-hover/40"
+          className="group/task-row hover:bg-bg2-hover/40 -ml-2 flex w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1 text-left transition-colors"
           onClick={() => setUserToggled(!open)}
           aria-expanded={open}
         >
-          <Chev className="size-3 shrink-0 text-fg2" />
+          <Chev className="text-fg2 size-3 shrink-0" />
           {/* While the task works, the leading icon IS the spinner, so the row
               itself says "working". The tail shimmer + timer stays as
               the turn-level indicator; only it carries the elapsed time. */}
@@ -103,9 +107,9 @@ export const CursorTaskCard: Renderer<AgentToolMessage> = memo(
             // across adapters.
             <Bot className={cn("size-3 shrink-0", TONE_ICON_COLOR[sTone])} />
           )}
-          <span className="shrink-0 text-sm text-fg1">Task</span>
+          <span className="text-fg1 shrink-0 text-sm">Task</span>
           {description && (
-            <span className="min-w-0 truncate text-xs text-fg2">
+            <span className="text-fg2 min-w-0 truncate text-xs">
               {truncate(description, 80)}
             </span>
           )}
@@ -114,7 +118,7 @@ export const CursorTaskCard: Renderer<AgentToolMessage> = memo(
           // Threaded body uses the shared rail and rhythm (ml-3.5 rail, no
           // inter-item gap; every sub-row shares the 20px +
           // `py-1` row shape).
-          <div className="ml-3.5 mt-1 mb-2 flex flex-col border-l border-border1 pl-3.5">
+          <div className="border-border1 mt-1 mb-2 ml-3.5 flex flex-col border-l pl-3.5">
             {/* Input row — the FIRST thing in every task group: the payload the
                 parent handed to this task. Collapsed by default; the leading
                 icon swaps to +/- on hover. Click to
@@ -123,12 +127,12 @@ export const CursorTaskCard: Renderer<AgentToolMessage> = memo(
               <div className="flex flex-col">
                 <button
                   type="button"
-                  className="group/input-row -ml-2 flex w-fit max-w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-left transition-colors hover:bg-bg2-hover/40"
+                  className="group/input-row hover:bg-bg2-hover/40 -ml-2 flex w-fit max-w-full cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-left transition-colors"
                   onClick={() => setInputOpen((v) => !v)}
                   aria-expanded={inputOpen}
                 >
                   <span
-                    className="relative inline-flex size-3 shrink-0 items-center justify-center text-fg2 [&_svg]:size-3"
+                    className="text-fg2 relative inline-flex size-3 shrink-0 items-center justify-center [&_svg]:size-3"
                     aria-hidden="true"
                   >
                     <span className="inline-flex group-hover/input-row:hidden">
@@ -148,14 +152,14 @@ export const CursorTaskCard: Renderer<AgentToolMessage> = memo(
                     />
                   </span>
                   {/* Name tier (text-sm / 14px), matching the tool rows. */}
-                  <span className="text-sm text-fg1">Input</span>
+                  <span className="text-fg1 text-sm">Input</span>
                 </button>
                 {inputOpen && (
                   // Left-aligned with the row (px-2), matching the tool-row
                   // detail — no pl-7 indent, no right inset.
                   <div className="px-2 pt-1.5 pb-2">
-                    <div className="rounded-lg border border-border1 bg-bg2 px-3.5 py-2.5">
-                      <pre className="m-0 max-h-[280px] overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-fg1">
+                    <div className="border-border1 bg-bg2 rounded-lg border px-3.5 py-2.5">
+                      <pre className="text-fg1 m-0 max-h-[280px] overflow-auto font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">
                         {inputJson}
                       </pre>
                     </div>
@@ -169,6 +173,7 @@ export const CursorTaskCard: Renderer<AgentToolMessage> = memo(
                 ctx={ctx}
                 live={isRunning}
                 alwaysExpanded
+                browserTailClosed={Boolean(outputHtml || outputJson)}
               />
             )}
             {/* Output — the task's final report, rendered as markdown with the
@@ -182,8 +187,8 @@ export const CursorTaskCard: Renderer<AgentToolMessage> = memo(
               />
             ) : (
               outputJson && (
-                <div className="mt-2 rounded-lg border border-border1 bg-bg2 px-3.5 py-2.5">
-                  <pre className="m-0 max-h-[280px] overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-fg1">
+                <div className="border-border1 bg-bg2 mt-2 rounded-lg border px-3.5 py-2.5">
+                  <pre className="text-fg1 m-0 max-h-[280px] overflow-auto font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">
                     {outputJson}
                   </pre>
                 </div>

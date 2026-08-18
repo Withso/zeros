@@ -58,6 +58,7 @@ import { restoreScrollWithin } from "../scroll-memory";
 import {
   useRetainedViewKeys,
   useRetainedViewKeySet,
+  useStableRetainedViewOrder,
 } from "../use-retained-view-keys";
 import { PrStatusRow } from "../pr/pr-status-row";
 
@@ -130,8 +131,13 @@ function RetainedBrowserDeck({
     MAX_RETAINED_BROWSER_VIEWS,
     availableKeys,
   );
+  // MRU order controls eviction only. Rendering that order directly would
+  // physically move a keyed iframe whenever the active tab changes; Chromium
+  // reloads a browsing context when its DOM node moves. Keep already-mounted
+  // siblings fixed so A → B → A preserves JS, forms, media, and scroll.
+  const renderedKeys = useStableRetainedViewOrder(retainedKeys);
 
-  return retainedKeys.map((key) => {
+  return renderedKeys.map((key) => {
     const target = targets.get(key);
     if (!target) return null;
     const isActive =

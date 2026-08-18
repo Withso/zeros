@@ -22,6 +22,7 @@ import {
   RefreshCw,
   Search as SearchIcon,
   Shield,
+  SquareMousePointer,
   Sparkles,
   Terminal,
   TriangleAlert,
@@ -30,10 +31,11 @@ import {
 
 import type { ComponentType } from "react";
 
-import type {
-  AgentMessage,
-  AgentToolMessage,
-} from "../use-agent-session";
+import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
+import {
+  browserToolActivity,
+  type BrowserToolActivity,
+} from "../../browser/browser-tool-activity";
 
 export interface EventMeta {
   /** Leading icon for the row — a Lucide glyph, or any component taking a
@@ -63,7 +65,17 @@ export interface EventMeta {
 // Image extensions a Read can return — drives the "Read image" label (no line
 // count) and the image glyph on the tag. Cross-adapter: detected from the path.
 const IMAGE_EXT = new Set([
-  "png", "jpg", "jpeg", "gif", "webp", "svg", "bmp", "ico", "avif", "heic", "heif",
+  "png",
+  "jpg",
+  "jpeg",
+  "gif",
+  "webp",
+  "svg",
+  "bmp",
+  "ico",
+  "avif",
+  "heic",
+  "heif",
 ]);
 
 export function isImagePath(p: string | null | undefined): boolean {
@@ -94,7 +106,9 @@ export function metaForEvent(message: AgentMessage): EventMeta {
       // row reads like any other tool row (icon · label · preview) instead of
       // a bare "Thinking". The full thought stays inspectable via expand; the
       // preview pill (event-row.tsx) caps the width so long thoughts ellipsize.
-      target: text ? truncate(text.replace(/\s+/g, " ").trim(), 200) : undefined,
+      target: text
+        ? truncate(text.replace(/\s+/g, " ").trim(), 200)
+        : undefined,
       // Char count intentionally omitted from the right edge. The thought text
       // is still inspectable via expand.
       trailing: undefined,
@@ -124,7 +138,9 @@ export function metaForEvent(message: AgentMessage): EventMeta {
     return {
       Icon: TriangleAlert,
       label: m.severity === "error" ? "Error" : "Warning",
-      target: text ? truncate(text.replace(/\s+/g, " ").trim(), 200) : undefined,
+      target: text
+        ? truncate(text.replace(/\s+/g, " ").trim(), 200)
+        : undefined,
       trailing: undefined,
       expandable: text.length > 0,
     };
@@ -144,12 +160,19 @@ export function metaForEvent(message: AgentMessage): EventMeta {
 
 function metaForTool(tool: AgentToolMessage): EventMeta {
   const kind = tool.toolKind;
-  const input = (tool.rawInput && typeof tool.rawInput === "object"
-    ? (tool.rawInput as Record<string, unknown>)
-    : {}) as Record<string, unknown>;
+  const input = (
+    tool.rawInput && typeof tool.rawInput === "object"
+      ? (tool.rawInput as Record<string, unknown>)
+      : {}
+  ) as Record<string, unknown>;
 
   if (kind === "read") {
-    const path = pickString(input.file_path, input.path, input.filePath, input.target_file);
+    const path = pickString(
+      input.file_path,
+      input.path,
+      input.filePath,
+      input.target_file,
+    );
     const image = isImagePath(path);
     const lineCount = image ? null : readLineCount(tool);
     // Count in the LABEL ("Read 403 lines" / "Read image"), filename as the
@@ -174,7 +197,12 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   if (kind === "edit") {
     // NOTE: edits route to EditCard (registry), which builds its own row via
     // EventRow. This branch is the defensive EventRow fallback.
-    const path = pickString(input.file_path, input.path, input.filePath, input.target_file);
+    const path = pickString(
+      input.file_path,
+      input.path,
+      input.filePath,
+      input.target_file,
+    );
     const diff = editDiffNumbers(tool);
     return {
       Icon: FileEdit,
@@ -188,7 +216,8 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   }
 
   if (kind === "execute") {
-    const cmd = pickString(input.command, input.cmd, input.script) ?? tool.title;
+    const cmd =
+      pickString(input.command, input.cmd, input.script) ?? tool.title;
     // When the agent provides a human description (Claude's
     // Bash tool does), THAT is the bright primary label; the raw command is the
     // muted secondary text. Without one, fall back to "Bash". Both truncate in
@@ -218,7 +247,12 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   if (kind === "list") {
     // Directory listing (Codex `ls`/`listFiles`, Claude `LS`). The path is the
     // listed directory; the listing itself is the expandable detail body.
-    const path = pickString(input.path, input.dir, input.directory, input.file_path);
+    const path = pickString(
+      input.path,
+      input.dir,
+      input.directory,
+      input.file_path,
+    );
     return {
       Icon: FolderTree,
       label: "List",
@@ -253,7 +287,12 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   }
 
   if (kind === "subagent") {
-    const desc = pickString(input.description, input.prompt, input.task, input.subagent_type);
+    const desc = pickString(
+      input.description,
+      input.prompt,
+      input.task,
+      input.subagent_type,
+    );
     return {
       Icon: Bot,
       label: "Agent",
@@ -266,7 +305,12 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   // Cursor's raw task card normally renders via CursorTaskCard; this is the
   // defensive fall-through (e.g. a persisted task surfaced through EventRow).
   if (kind === "task") {
-    const desc = pickString(input.description, input.prompt, input.task, input.subagent_type);
+    const desc = pickString(
+      input.description,
+      input.prompt,
+      input.task,
+      input.subagent_type,
+    );
     return {
       Icon: Bot,
       label: "Task",
@@ -277,6 +321,22 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   }
 
   if (kind === "mcp") {
+    if (isNativeCodexBrowserToolCall(tool)) {
+      const args = objectRecord(input.arguments);
+      const title = pickString(args.title);
+      return {
+        Icon: SquareMousePointer,
+        label: title
+          ? truncate(title.replace(/\s+/g, " ").trim(), 160)
+          : tool.title || "Using browser",
+        target: undefined,
+        trailing: undefined,
+        // The semantic BrowserActivityCard owns expansion. Never expose the
+        // official node_repl implementation payload as a second raw JSON/code
+        // disclosure when this defensive single-row renderer is reached.
+        expandable: false,
+      };
+    }
     return {
       Icon: Plug,
       label: "MCP",
@@ -354,6 +414,109 @@ function metaForTool(tool: AgentToolMessage): EventMeta {
   };
 }
 
+/** Detect the official Codex Browser plugin's batched Node REPL calls without
+ * treating unrelated Node REPL work as browser activity. Pending calls are
+ * identified from their code; completed calls can additionally carry Codex's
+ * native `codex/browserUse` result metadata. */
+export function isNativeCodexBrowserToolCall(tool: AgentToolMessage): boolean {
+  const activity = browserToolActivity(tool);
+  const input = objectRecord(tool.rawInput);
+  return Boolean(
+    activity && input.server === "node_repl" && input.tool === "js",
+  );
+}
+
+export interface NativeCodexBrowserPresentation extends EventMeta {
+  host: string | null;
+  faviconMatchesLivePage: boolean;
+}
+
+/** Present one official batched node_repl Browser action. The
+ * provider-authored title is the row label; implementation vocabulary stays
+ * hidden. Persisted rows prefer their recorded URL over a newer live tab. */
+export function nativeCodexBrowserPresentation(
+  tool: AgentToolMessage,
+  liveUrl?: string,
+  browserActivityOverride?: BrowserToolActivity | null,
+): NativeCodexBrowserPresentation {
+  const base = metaForEvent(tool);
+  const input = objectRecord(tool.rawInput);
+  const args = objectRecord(input.arguments);
+  const operationTitle =
+    browserActivityOverride?.label ?? pickString(args.title);
+  const liveHost = browserHostname(liveUrl);
+  const recordedHost =
+    browserHostname(browserActivityOverride?.url) ??
+    browserHostname(nativeBrowserResultUrl(tool)) ??
+    browserHostname(firstBrowserUrlInCode(args.code));
+  const running =
+    tool.status === "pending" || tool.status === "in_progress";
+  const host = running ? (liveHost ?? recordedHost) : (recordedHost ?? liveHost);
+  const label = operationTitle
+    ? truncate(operationTitle.replace(/\s+/g, " ").trim(), 160)
+    : tool.status === "failed"
+      ? "Browser action failed"
+      : running
+        ? "Browsing"
+        : "Used the browser";
+  return {
+    ...base,
+    label,
+    target: undefined,
+    trailing: undefined,
+    host,
+    faviconMatchesLivePage: Boolean(host && liveHost === host),
+  };
+}
+
+function nativeBrowserResultUrl(tool: AgentToolMessage): string | undefined {
+  for (const candidate of nativeBrowserOutputCandidates(tool)) {
+    const meta = objectRecord(candidate._meta);
+    const browserUse = objectRecord(meta.browser_use ?? meta.browserUse);
+    if (typeof browserUse.url === "string") return browserUse.url;
+  }
+  return undefined;
+}
+
+/** App-server protocol generations have exposed MCP results as either the
+ * result itself, `{ result }`, or a provider-raw payload nested under either
+ * envelope. Keep the candidates bounded and explicit; this is metadata only,
+ * never an unbounded recursive walk through arbitrary tool output. */
+function nativeBrowserOutputCandidates(
+  tool: AgentToolMessage,
+): Record<string, unknown>[] {
+  const output = objectRecord(tool.rawOutput);
+  const result = objectRecord(output.result);
+  return [output, result, objectRecord(output.raw), objectRecord(result.raw)];
+}
+
+function firstBrowserUrlInCode(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  for (const candidate of value.match(/https?:\/\/[^\s"'`<>\\)]+/giu) ?? []) {
+    try {
+      const url = new URL(candidate);
+      if (url.protocol === "http:" || url.protocol === "https:") {
+        return url.href;
+      }
+    } catch {
+      // Keep looking for another complete literal in the native code batch.
+    }
+  }
+  return undefined;
+}
+
+function browserHostname(value: string | undefined): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:"
+      ? url.hostname
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 export function statusTone(
   status: AgentToolMessage["status"],
 ): "ok" | "fail" | "run" | "pending" {
@@ -370,6 +533,12 @@ function pickString(...values: unknown[]): string | null {
     if (typeof v === "string" && v.length > 0) return v;
   }
   return null;
+}
+
+function objectRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
 }
 
 function truncate(s: string, n: number): string {

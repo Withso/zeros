@@ -5,9 +5,23 @@ import { XIcon } from "lucide-react"
 import { Dialog as SheetPrimitive } from "radix-ui"
 
 import { cn } from "@/renderer/shared/ui/cn"
+import { useNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native-surface-overlay"
 
-function Sheet({ ...props }: React.ComponentProps<typeof SheetPrimitive.Root>) {
-  return <SheetPrimitive.Root data-slot="sheet" {...props} />
+function Sheet({
+  onOpenChange,
+  ...props
+}: React.ComponentProps<typeof SheetPrimitive.Root>) {
+  const publishOverlay = useNativeSurfaceOverlayIntent()
+  return (
+    <SheetPrimitive.Root
+      data-slot="sheet"
+      {...props}
+      onOpenChange={(open) => {
+        publishOverlay(open)
+        onOpenChange?.(open)
+      }}
+    />
+  )
 }
 
 function SheetTrigger({

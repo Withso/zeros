@@ -76,6 +76,7 @@ import { buildCodeAgentDesignTerritoryNotice } from "@zeros/protocol/system-inst
 import {
   AgentFailureError,
   type AgentAdapter,
+  type AgentBrowserUse,
   type AgentAdapterContext,
   type AgentFilesystemTerritory,
   type ContentBlock,
@@ -926,6 +927,71 @@ function readAgentCountFromDetail(detail: string | null): number | null {
   return match ? Number(match[1]) : null;
 }
 
+/** Claude's official browser integration is the Claude Code `--chrome` flag.
+ * The Agent SDK exposes CLI flags through `extraArgs`; no Zeros MCP server or
+ * callback tools are injected. */
+export function claudeNativeBrowserExtraArgs(
+  enabled: boolean,
+): Record<string, string | null> {
+  // `--no-chrome` is deliberately explicit. Omitting both flags would allow a
+  // user-level `/chrome` → "Enabled by default" preference to defeat Zeros'
+  // provider switch, so Browser use could remain active after being turned off.
+  return enabled ? { chrome: null } : { "no-chrome": null };
+}
+
+const CLAUDE_CHROME_TOOL_PREFIX = "mcp__claude-in-chrome__";
+
+function isClaudeChromeTool(toolName: string): boolean {
+  return toolName.startsWith(CLAUDE_CHROME_TOOL_PREFIX);
+}
+
+function claudeChromeSessionPermission(input: {
+  suggestions?: PermissionUpdate[];
+  matchedAskRule?: unknown;
+}): { host: string; updates: PermissionUpdate[] } | null {
+  // A permissions.ask rule is an explicit request for a human decision on
+  // every matching action. Never let a provider suggestion weaken that rule.
+  if (input.matchedAskRule) return null;
+  const suggestions = input.suggestions ?? [];
+  const candidates = suggestions.filter(
+    (
+      suggestion,
+    ): suggestion is Extract<PermissionUpdate, { type: "addRules" }> =>
+      suggestion.type === "addRules" &&
+      suggestion.behavior === "allow" &&
+      suggestion.destination === "session" &&
+      suggestion.rules.length > 0 &&
+      suggestion.rules.every(
+        (rule) =>
+          rule.toolName === "ClaudeInChromeDomain" &&
+          typeof rule.ruleContent === "string" &&
+          safeChromePermissionHost(rule.ruleContent) !== null,
+      ),
+  );
+  // The provider's native domain decision is one exact amendment. A mixed
+  // batch could silently apply a broader mode/directory/rule change beside the
+  // host grant, so do not offer it unless every suggestion is that candidate.
+  if (candidates.length !== 1 || suggestions.length !== 1) return null;
+  const hosts = new Set(
+    candidates[0].rules.map((rule) =>
+      safeChromePermissionHost(rule.ruleContent!),
+    ),
+  );
+  if (hosts.size !== 1) return null;
+  return { host: [...hosts][0]!, updates: candidates };
+}
+
+function safeChromePermissionHost(value: string): string | null {
+  const host = value.trim().toLowerCase();
+  if (!host || host.length > 253 || /[\s/@?#]/.test(host)) return null;
+  try {
+    const parsed = new URL(`https://${host}`);
+    return parsed.host.toLowerCase() === host ? host : null;
+  } catch {
+    return null;
+  }
+}
+
 interface SdkSession {
   /** Zeros-side ephemeral routing id (returned to the renderer; never durable). */
   readonly zerosSessionId: string;
@@ -948,6 +1014,7 @@ interface SdkSession {
    * channel. Kept with session state so every lazy query recreation and resume
    * receives the same non-user instruction. */
   systemInstruction?: string;
+  browserUse: boolean;
   permissionMode: ClaudeMode;
   /** Live model override set via setModel(). Wins over env.ANTHROPIC_MODEL
    *  (the creation-time choice) in buildOptions, and is applied to an alive
@@ -1021,8 +1088,8 @@ interface SdkSession {
    *  the new turn streamed to completion. */
   cancelSeq: number;
   disposed: boolean;
-  /** Set by updateConfig when a restart-only knob (CLAUDE_MAX_TURNS / the "max"
-   *  effort tier) changes — the live flag-settings layer can't express those,
+  /** Set when a creation-only option (browser flag, CLAUDE_MAX_TURNS, or the
+   *  "max" effort tier) changes — the live SDK query can't express those,
    *  so the NEXT prompt() recreates the query (with resume) to pick up the
    *  staged env. Deferred to prompt() rather than torn down eagerly so it never
    *  races a concurrent prompt() nor interrupts an in-flight turn. */
@@ -1402,6 +1469,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     systemInstruction?: string;
     territory?: AgentFilesystemTerritory;
     executionBoundary?: PreparedBoundary;
+    browserUse?: AgentBrowserUse;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
     const initialize = await this.initialize();
     const zerosSessionId = opts.executionId ?? randomUUID();
@@ -1440,6 +1508,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     systemInstruction?: string;
     territory?: AgentFilesystemTerritory;
     executionBoundary?: PreparedBoundary;
+    browserUse?: AgentBrowserUse;
   }): Promise<LoadSessionResponse> {
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
     const existing = this.sessions.get(executionId);
@@ -1470,6 +1539,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         existing.territory = opts.territory;
         existing.executionBoundary = opts.executionBoundary;
         existing.systemInstruction = opts.systemInstruction;
+        const browserUse = opts.browserUse?.kind === "claude-agent-sdk";
+        if (existing.browserUse !== browserUse && existing.query) {
+          // Chrome/no-Chrome are subprocess flags, not live SDK settings. Keep an
+          // in-flight turn intact and resume-rebuild at the next prompt boundary.
+          existing.pendingRestart = true;
+        }
+        existing.browserUse = browserUse;
         this.refreshIdleTeardown(existing);
         return loadResponseWithModes(
           existing.permissionMode,
@@ -1541,6 +1617,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       systemInstruction?: string;
       territory?: AgentFilesystemTerritory;
       executionBoundary?: PreparedBoundary;
+      browserUse?: AgentBrowserUse;
     },
   ): SdkSession {
     return {
@@ -1552,6 +1629,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       territory: opts.territory,
       executionBoundary: opts.executionBoundary,
       systemInstruction: opts.systemInstruction,
+      browserUse: opts.browserUse?.kind === "claude-agent-sdk",
       // Fresh chat → honour the user's configured default mode (settings.json
       // hierarchy); a persisted per-chat mode overrides via reconcile.
       permissionMode: containedClaudeMode(
@@ -1853,6 +1931,23 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       );
       this.refreshIdleTeardown(reservedState);
     }
+  }
+
+  /** Chrome enablement is a query-generation flag. Reconcile it immediately
+   * before dispatch so a session created before the Settings broadcast but not
+   * yet bound to a durable Claude conversation cannot launch its first query
+   * with the stale inverse flag. Live queries restart only at the next safe
+   * prompt boundary; the renderer separately close/resumes already-bound idle
+   * conversations when the setting changes. */
+  updateBrowserUse(opts: {
+    sessionId: string;
+    browserUse?: AgentBrowserUse;
+  }): void {
+    const state = this.mustState(opts.sessionId);
+    const browserUse = opts.browserUse?.kind === "claude-agent-sdk";
+    if (state.browserUse === browserUse) return;
+    state.browserUse = browserUse;
+    if (state.query) state.pendingRestart = true;
   }
 
   /** Lazily (re)create the persistent query. resume is set ONLY when we
@@ -2808,8 +2903,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
          * They enrich the canonical PermissionCard only; helper identity never
          * selects a separate renderer. */
         title?: string;
+        displayName?: string;
+        description?: string;
         requestId?: string;
         agentID?: string;
+        matchedAskRule?: {
+          source: string;
+          toolName: string;
+          ruleContent?: string;
+        };
         /** SDK-proposed permission rules for "always allow". We persist the
          *  scoped `addRules` ones (re-destined to localSettings) as the project
          *  rule; edit tools with no such rule fall back to a family allow (see
@@ -2824,6 +2926,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // there instead. Deduped by toolUseID so at most one card appears.
       if (/^AskUserQuestion$/i.test(toolName)) {
         return this.handleAskUserQuestionTool(state, input, options);
+      }
+      if (isClaudeChromeTool(toolName)) {
+        return this.requestClaudeChromePermission(
+          state,
+          toolName,
+          input,
+          options,
+        );
       }
       const permissionId = randomUUID();
       const toolCallId = options.toolUseID ?? `${Date.now()}`;
@@ -2974,6 +3084,123 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         this.ctx.emit.onPermissionRequest(this.agentId, permissionId, request);
       });
     };
+  }
+
+  /** Preserve Claude in Chrome's own approval semantics. The bundled CLI
+   * offers one action or one domain for THIS session. Its domain suggestion
+   * must never be rewritten into `.claude/settings.local.json`, and Zeros-side
+   * title policies must never replay it across a later native request. */
+  private requestClaudeChromePermission(
+    state: SdkSession,
+    toolName: string,
+    input: Record<string, unknown>,
+    options: {
+      signal: AbortSignal;
+      toolUseID?: string;
+      title?: string;
+      displayName?: string;
+      description?: string;
+      requestId?: string;
+      suggestions?: PermissionUpdate[];
+      matchedAskRule?: {
+        source: string;
+        toolName: string;
+        ruleContent?: string;
+      };
+    },
+  ): Promise<PermissionResult> {
+    const permissionId = randomUUID();
+    const domain = claudeChromeSessionPermission(options);
+    const request: RequestPermissionRequest = {
+      sessionId: state.zerosSessionId,
+      title:
+        typeof options.title === "string" && options.title.trim()
+          ? options.title.trim()
+          : "Claude in Chrome wants to use your browser",
+      nativeRequestId:
+        typeof options.requestId === "string" && options.requestId
+          ? options.requestId
+          : (options.toolUseID ?? permissionId),
+      useOptionNames: true,
+      allowLocalPolicies: false,
+      toolCall: {
+        toolCallId: options.toolUseID ?? `${Date.now()}`,
+        title:
+          typeof options.displayName === "string" && options.displayName.trim()
+            ? options.displayName.trim()
+            : "Claude in Chrome",
+        kind: "mcp",
+        rawInput: input,
+        status: "pending",
+      },
+      options: [
+        { optionId: "allow_once", name: "Allow", kind: "allow_once" },
+        ...(domain
+          ? [
+              {
+                optionId: "allow_chrome_domain",
+                name: `Allow all actions on ${domain.host} for this session`,
+                kind: "allow_always" as const,
+              },
+            ]
+          : []),
+        { optionId: "reject_once", name: "Deny", kind: "reject_once" },
+      ],
+    };
+
+    return new Promise<PermissionResult>((resolve) => {
+      let settled = false;
+      const finish = (result: PermissionResult) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        options.signal.removeEventListener("abort", onAbort);
+        this.ctx.emit.onPermissionSettled?.(
+          this.agentId,
+          permissionId,
+          state.zerosSessionId,
+        );
+        resolve(result);
+      };
+      const deny = () =>
+        finish({
+          behavior: "deny",
+          message: "User denied this browser action.",
+        });
+      const settle = (response: RequestPermissionResponse) => {
+        const outcome = response.outcome;
+        if (outcome.outcome !== "selected") return deny();
+        if (outcome.optionId === "allow_once") {
+          return finish({ behavior: "allow", updatedInput: input });
+        }
+        if (outcome.optionId === "allow_chrome_domain" && domain) {
+          return finish({
+            behavior: "allow",
+            updatedInput: input,
+            updatedPermissions: domain.updates,
+          });
+        }
+        deny();
+      };
+      const timer = setTimeout(() => {
+        if (!state.pendingPermissions.has(permissionId)) return;
+        state.pendingPermissions.delete(permissionId);
+        deny();
+      }, PERMISSION_RESPONSE_TIMEOUT_MS);
+      timer.unref?.();
+      const onAbort = () => {
+        if (!state.pendingPermissions.has(permissionId)) return;
+        state.pendingPermissions.delete(permissionId);
+        deny();
+      };
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      state.pendingPermissions.set(permissionId, settle);
+      if (options.signal.aborted) {
+        onAbort();
+        return;
+      }
+      this.ctx.emit.onPermissionRequest(this.agentId, permissionId, request);
+    });
   }
 
   // ── AskUserQuestion (blocking questions) ──────────────────
@@ -3968,11 +4195,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         : { canUseTool: this.canUseTool(state) }),
       // (A) Blocking-dialog channel. Wired defensively: if this CLI routes
       // AskUserQuestion through onUserDialog we handle it here; otherwise the
-      // canUseTool special-case (B) covers it. `supportedDialogKinds` is a
-      // best-effort candidate list (the real kind is opaque in the bundled
-      // binary — the onUserDialog diagnostic log reveals it at runtime).
-      // Deliberately excludes 'refusal_fallback_prompt' so refusal behavior is
-      // unchanged.
+      // canUseTool special-case (B) covers it. Deliberately exclude Claude in
+      // Chrome's `chrome_install_upsell` and `chrome_install_setup`: the native
+      // CLI streams changing setup phases to its UI, whereas the public SDK
+      // callback exposes one request payload. Settings provides the stable
+      // extension/docs entry points instead. Also exclude
+      // `refusal_fallback_prompt` so refusal behavior is unchanged.
       onUserDialog: this.onUserDialog(state),
       // MCP elicitation is a separate SDK callback (it does not flow through
       // canUseTool/onUserDialog). Without it the SDK declines every form/link
@@ -4038,6 +4266,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         state.territory && !state.executionBoundary
           ? []
           : ["user", "project", "local"],
+      // Claude's Chrome integration is another independent host-authority
+      // path, so the same territory clamp force-disables it (--no-chrome).
+      extraArgs: claudeNativeBrowserExtraArgs(
+        state.browserUse && !(state.territory && !state.executionBoundary),
+      ),
       // MCP servers execute outside the local command sandbox. A code actor
       // with a protected Design territory therefore gets no MCP mutation path
       // until Zeros can broker and authorize each tool independently.

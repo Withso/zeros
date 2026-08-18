@@ -204,6 +204,7 @@ export const SubagentCard: Renderer<AgentToolMessage> = memo(
                 ctx={ctx}
                 live={isRunning}
                 alwaysExpanded
+                browserTailClosed={Boolean(resultHtml)}
               />
             )}
             {/* Result — the sub-agent's final answer, rendered as markdown with

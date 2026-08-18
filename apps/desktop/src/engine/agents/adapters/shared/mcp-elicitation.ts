@@ -67,16 +67,10 @@ export function mcpElicitationAuditInput(
   request: McpElicitationRequestLike,
 ): Record<string, unknown> {
   const serverName = boundedNonEmpty(request.serverName, MAX_MCP_LABEL_CHARS);
-  const displayName = boundedNonEmpty(
-    request.displayName,
-    MAX_MCP_LABEL_CHARS,
-  );
+  const displayName = boundedNonEmpty(request.displayName, MAX_MCP_LABEL_CHARS);
   const message = boundedNonEmpty(request.message, MAX_MCP_COPY_CHARS);
   const title = boundedNonEmpty(request.title, MAX_MCP_COPY_CHARS);
-  const description = boundedNonEmpty(
-    request.description,
-    MAX_MCP_COPY_CHARS,
-  );
+  const description = boundedNonEmpty(request.description, MAX_MCP_COPY_CHARS);
   const common = {
     ...(serverName ? { serverName } : {}),
     ...(displayName ? { displayName } : {}),
@@ -424,6 +418,11 @@ function buildFormQuestions(
       const approvalRequester =
         nonEmpty(approvalMeta.connector_name) ?? requester;
       const details = codexMcpToolApprovalDetails(approvalMeta);
+      const browserOriginApproval =
+        nonEmpty(approvalMeta.tool_title) === "Access browser origin";
+      const browserOrigin = browserOriginApproval
+        ? codexMcpBrowserOrigin(approvalMeta)
+        : null;
       return [
         {
           id: MCP_CONFIRM_ID,
@@ -437,6 +436,10 @@ function buildFormQuestions(
             .filter((value): value is string => Boolean(value))
             .join("\n\n"),
           header: approvalRequester,
+          presentation: "one_click_approval",
+          approvalPrompt: copy,
+          approvalKind: browserOriginApproval ? "browser_origin" : "tool",
+          ...(browserOrigin ? { approvalTarget: browserOrigin } : {}),
           multiSelect: false,
           options: [
             { id: CODEX_MCP_APPROVAL_ACCEPT_ONCE_ID, label: "Allow" },
@@ -614,6 +617,24 @@ function codexMcpToolApprovalDetails(meta: Record<string, unknown>): string[] {
   return params.length > 0 ? [...details, params.join("\n")] : details;
 }
 
+function codexMcpBrowserOrigin(meta: Record<string, unknown>): string | null {
+  const display = Array.isArray(meta.tool_params_display)
+    ? meta.tool_params_display
+    : [];
+  for (const raw of display) {
+    const param = asRecord(raw);
+    if (!param) continue;
+    const name = (nonEmpty(param.name) ?? nonEmpty(param.display_name))
+      ?.trim()
+      .toLowerCase();
+    if (name !== "origin" || !("value" in param)) continue;
+    const value = safeWebUrlObject(param.value);
+    if (value) return value.origin;
+  }
+  const rawOrigin = asRecord(meta.tool_params)?.origin;
+  return safeWebUrlObject(rawOrigin)?.origin ?? null;
+}
+
 function displayApprovalParam(value: unknown): string | null {
   let rendered: string;
   if (typeof value === "string") rendered = value;
@@ -679,10 +700,7 @@ export function canRenderMcpForm(request: McpElicitationRequestLike): boolean {
   const entries = Object.entries(properties);
   if (
     entries.length > MAX_MCP_FORM_FIELDS ||
-    entries.some(
-      ([key]) =>
-        !key || [...key].length > MAX_MCP_FIELD_KEY_CHARS,
-    )
+    entries.some(([key]) => !key || [...key].length > MAX_MCP_FIELD_KEY_CHARS)
   ) {
     return false;
   }
@@ -706,7 +724,8 @@ export function canRenderMcpForm(request: McpElicitationRequestLike): boolean {
       case "boolean":
         return (
           hasOnlyKeys(property, ["type", "title", "description", "default"]) &&
-          (property.default === undefined || typeof property.default === "boolean")
+          (property.default === undefined ||
+            typeof property.default === "boolean")
         );
       case "number":
       case "integer":
@@ -730,14 +749,7 @@ export function canRenderMcpForm(request: McpElicitationRequestLike): boolean {
           !hasOnlyKeys(
             property,
             usesEnum
-              ? [
-                  "type",
-                  "title",
-                  "description",
-                  "enum",
-                  "enumNames",
-                  "default",
-                ]
+              ? ["type", "title", "description", "enum", "enumNames", "default"]
               : usesTitledEnum
                 ? ["type", "title", "description", "oneOf", "default"]
                 : [
@@ -872,7 +884,9 @@ function validArrayDefault(property: Record<string, unknown>): boolean {
   return (
     selected.length <= MAX_MCP_ENUM_OPTIONS &&
     new Set(selected).size === selected.length &&
-    selected.every((value) => typeof value === "string" && values.includes(value)) &&
+    selected.every(
+      (value) => typeof value === "string" && values.includes(value),
+    ) &&
     (minimum == null || selected.length >= minimum) &&
     (maximum == null || selected.length <= maximum)
   );
@@ -1369,10 +1383,7 @@ function nonEmpty(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
 
-function boundedNonEmpty(
-  value: unknown,
-  maximum: number,
-): string | undefined {
+function boundedNonEmpty(value: unknown, maximum: number): string | undefined {
   const text = nonEmpty(value);
   return text ? truncateText(text, maximum) : undefined;
 }

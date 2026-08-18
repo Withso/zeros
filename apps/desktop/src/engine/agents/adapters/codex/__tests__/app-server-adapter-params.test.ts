@@ -19,7 +19,10 @@ import path from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import type { AgentFilesystemTerritory } from "../../../types";
+import type {
+  AgentBrowserUse,
+  AgentFilesystemTerritory,
+} from "../../../types";
 
 import {
   buildThreadStartParams,
@@ -176,6 +179,36 @@ describe("buildThreadStartParams", () => {
       });
     },
   );
+
+  it("keeps the bundled Browser plugin off without a native host binding", () => {
+    const params = buildThreadStartParams("/tmp", undefined, "ask");
+
+    expect(params.config).toEqual({
+      "plugins.browser@openai-bundled.enabled": false,
+    });
+  });
+
+  it("uses only the official Browser plugin when a native IAB host is bound", () => {
+    const browserUse: AgentBrowserUse = {
+      kind: "codex-app-server",
+      browserSessionId: "browser-session",
+    };
+
+    const params = buildThreadStartParams(
+      "/tmp",
+      undefined,
+      "ask",
+      undefined,
+      undefined,
+      undefined,
+      browserUse,
+    );
+
+    expect(params.config).toEqual({
+      "plugins.browser@openai-bundled.enabled": true,
+    });
+    expect(params).not.toHaveProperty("dynamicTools");
+  });
 });
 
 describe("uniform ZSR turn authority", () => {
