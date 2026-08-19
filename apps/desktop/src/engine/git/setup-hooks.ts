@@ -146,10 +146,6 @@ export async function runContainedInlineScript(
     workspaceRoot: args.worktreePath,
     repoRoot: args.repoRoot,
     env,
-    // A workspace `setup` script is watched in the Setup tab; an `archive` hook
-    // runs during cleanup with nobody waiting on it, so it must never sit in
-    // front of a chat the user just opened.
-    admissionPriority: args.kind === "archive" ? "background" : "interactive",
   });
   let processHandle: Awaited<ReturnType<typeof boundary.spawn>> | null = null;
   let stderr = "";

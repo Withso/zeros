@@ -4,7 +4,7 @@ This directory is an operator-run validation harness for the Zeros engine in a
 remote Daytona sandbox. It proves that a sandbox image can boot the engine,
 serve an account- and capability-gated bridge, run Claude/Codex/Cursor through
 the same full ZSR boundary, complete `file.tree` and PTY round trips, reconnect
-after stop/start, and pass lifecycle, socket, egress, and SSH gates.
+after stop/start, and pass lifecycle, socket, outbound-reachability, and SSH gates.
 
 This is not a deployable application or a product roadmap. Nothing in the
 packaged desktop app imports these scripts, and repository builds exclude them.
@@ -92,7 +92,7 @@ root with `pnpm tsx scripts/cloud-workspace-validation/<name>.ts`.
 | 3     | `pnpm tsx scripts/cloud-workspace-validation/preview-coordinator.ts`         | Keep running separately; rotate authenticated preview ingress |
 | 4     | `pnpm tsx scripts/cloud-workspace-validation/test-client.ts`                 | Handshake, file tree, PTY, and stop/start reconnect           |
 | 5     | `pnpm tsx scripts/cloud-workspace-validation/agent-smoke.ts`                 | Live providers enter the full Design-enforced boundary        |
-| 6     | `pnpm tsx scripts/cloud-workspace-validation/egress.ts`                      | Required outbound provider and package endpoints              |
+| 6     | `pnpm tsx scripts/cloud-workspace-validation/egress.ts`                      | Required outbound provider/package endpoints are reachable    |
 | 7     | `pnpm tsx scripts/cloud-workspace-validation/lifecycle.ts`                   | Stop/start and archive/restore latency                        |
 | 8     | `ZEROS_SOAK_HOURS=4 pnpm tsx scripts/cloud-workspace-validation/soak-wss.ts` | Long-lived socket stability and reconnect behavior            |
 | 9     | `pnpm tsx scripts/cloud-workspace-validation/ssh-forward.ts`                 | SSH local-forward fallback                                    |
@@ -102,7 +102,7 @@ Set `ZEROS_CLOUD_VALIDATION_SKIP_RECONNECT=1` only for a deliberately shortened
 local iteration. The legacy `ZEROS_SPIKE_SKIP_RECONNECT` name remains accepted
 temporarily so existing operator scripts do not break.
 
-All qualification commands fail non-zero: a blocked egress endpoint, missing
+All qualification commands fail non-zero: an unreachable required endpoint, missing
 SSH round trip, premature soak interruption, dead final socket, or a drop count
 above `ZEROS_SOAK_MAX_DROPS` cannot print a warning and still graduate. The
 default drop budget is zero. `agent-smoke.ts` is deliberately opt-in and refuses
@@ -137,8 +137,9 @@ only into the live `RuntimeClient`; exact expiry closes the socket and emits one
 secret-free renewal event. Neither the signed hostname nor the Zeros capability
 is persisted by renderer state.
 
-The harness automates bridge/account binding, PTY, reconnect, credential
-projection/rotation, egress, lifecycle, soak, and SSH checks. Long-term billing
+The harness automates bridge/account binding, PTY, reconnect, live provider
+authentication, GitHub working-credential rotation, outbound reachability,
+lifecycle, soak, and SSH checks. Long-term billing
 behavior, production file mirroring, and vendor redistribution approval remain
 outside this provider qualification.
 

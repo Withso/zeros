@@ -21,8 +21,6 @@ import {
   imageContractSha256,
   NODE_BASE_IMAGE,
   repositoryUrlSha256,
-  ZSR_CGROUP_PARENT,
-  ZSR_CLOUD_AGENT_RESOURCES,
   ZEROS_REPO_REF,
   type CloudSnapshotAttestation,
   type CloudValidationState,
@@ -74,16 +72,6 @@ function report() {
     },
     resources: {
       finite: true,
-      delegated: {
-        parent: ZSR_CGROUP_PARENT,
-        controllers: ["cpu", "memory", "pids"],
-        resources: {
-          memoryMax: String(ZSR_CLOUD_AGENT_RESOURCES.memoryBytes),
-          cpuMax: `${ZSR_CLOUD_AGENT_RESOURCES.cpuQuotaMicros} ${ZSR_CLOUD_AGENT_RESOURCES.cpuPeriodMicros}`,
-          pidsMax: String(ZSR_CLOUD_AGENT_RESOURCES.processes),
-          swapMax: "0",
-        },
-      },
     },
     qualification: { secure: true },
   };
@@ -142,7 +130,7 @@ describe("cloud workspace runtime admission", () => {
     ).toThrow(/snapshot identity/i);
   });
 
-  it("requires the image contract, finite limits, and secure live qualification", () => {
+  it("requires the image contract, tenant limits, and secure live qualification", () => {
     expect(() =>
       verifyCloudRuntimeAttestation(report(), sourceCommit, 0),
     ).not.toThrow();
@@ -156,22 +144,6 @@ describe("cloud workspace runtime admission", () => {
     expect(() =>
       verifyCloudRuntimeAttestation(
         { ...report(), resources: { finite: false } },
-        sourceCommit,
-        0,
-      ),
-    ).toThrow(/qualification/i);
-    expect(() =>
-      verifyCloudRuntimeAttestation(
-        {
-          ...report(),
-          resources: {
-            ...report().resources,
-            delegated: {
-              ...report().resources.delegated,
-              parent: "/sys/fs/cgroup/not-zeros",
-            },
-          },
-        },
         sourceCommit,
         0,
       ),

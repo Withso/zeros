@@ -2,7 +2,6 @@ import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 import type {
-  CloudWorkerResourceLimits,
   CloudWorkerRuntimeConfiguration,
   CloudWorkerToolchain,
 } from "./types";
@@ -22,11 +21,8 @@ function parseToolchain(value: unknown): CloudWorkerToolchain | null {
   const record = value as Record<string, unknown>;
   const expectedKeys = [
     "bwrap",
-    "containerWorker",
-    "networkBridge",
     "node",
     "setpriv",
-    "socat",
     "supervisor",
   ];
   if (Object.keys(record).sort().join("\0") !== expectedKeys.join("\0")) {
@@ -45,43 +41,8 @@ function parseToolchain(value: unknown): CloudWorkerToolchain | null {
   return {
     node: String(record.node),
     supervisor: String(record.supervisor),
-    networkBridge: String(record.networkBridge),
-    containerWorker: String(record.containerWorker),
     bwrap: String(record.bwrap),
-    socat: String(record.socat),
     setpriv: String(record.setpriv),
-  };
-}
-
-function parseResources(value: unknown): CloudWorkerResourceLimits | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  const record = value as Record<string, unknown>;
-  const expectedKeys = [
-    "cpuPeriodMicros",
-    "cpuQuotaMicros",
-    "memoryBytes",
-    "processes",
-  ];
-  if (Object.keys(record).sort().join("\0") !== expectedKeys.join("\0")) {
-    return null;
-  }
-  const integerInRange = (name: string, minimum: number, maximum: number) =>
-    Number.isSafeInteger(record[name]) &&
-    Number(record[name]) >= minimum &&
-    Number(record[name]) <= maximum;
-  if (
-    !integerInRange("memoryBytes", 256 * 1024 * 1024, 1024 ** 4) ||
-    !integerInRange("cpuQuotaMicros", 1_000, 100_000_000) ||
-    !integerInRange("cpuPeriodMicros", 1_000, 1_000_000) ||
-    !integerInRange("processes", 64, 1_000_000)
-  ) {
-    return null;
-  }
-  return {
-    memoryBytes: Number(record.memoryBytes),
-    cpuQuotaMicros: Number(record.cpuQuotaMicros),
-    cpuPeriodMicros: Number(record.cpuPeriodMicros),
-    processes: Number(record.processes),
   };
 }
 
@@ -100,16 +61,13 @@ export function parseCloudWorkerConfiguration(
   const value = parsed as Record<string, unknown>;
   const expectedKeys = [
     "backend",
-    "cgroupParent",
     "gid",
     "profile",
-    "resources",
     "toolchain",
     "uid",
     "version",
   ];
   const toolchain = parseToolchain(value.toolchain);
-  const resources = parseResources(value.resources);
   if (
     Object.keys(value).sort().join("\0") !== expectedKeys.join("\0") ||
     value.version !== 1 ||
@@ -121,10 +79,6 @@ export function parseCloudWorkerConfiguration(
     !Number.isInteger(value.gid) ||
     Number(value.gid) <= 0 ||
     Number(value.gid) > 2_147_483_647 ||
-    typeof value.cgroupParent !== "string" ||
-    !path.isAbsolute(value.cgroupParent) ||
-    value.cgroupParent.includes("\0") ||
-    !resources ||
     !toolchain
   ) {
     throw new Error("cloud-worker configuration has an unsupported contract");
@@ -135,8 +89,6 @@ export function parseCloudWorkerConfiguration(
     profile: "zeros-cloud-worker-v1",
     uid: Number(value.uid),
     gid: Number(value.gid),
-    cgroupParent: path.normalize(value.cgroupParent),
-    resources,
     toolchain,
   };
 }
@@ -193,24 +145,12 @@ export function loadCloudWorkerConfiguration(
   const configuration = parseCloudWorkerConfiguration(
     readFileSync(file, "utf8"),
   );
-  const cgroupRoot = realpathSync("/sys/fs/cgroup");
-  const relativeCgroup = path.relative(cgroupRoot, configuration.cgroupParent);
-  if (
-    relativeCgroup === "" ||
-    relativeCgroup === ".." ||
-    relativeCgroup.startsWith(`..${path.sep}`) ||
-    path.isAbsolute(relativeCgroup)
-  ) {
-    throw new Error("cloud-worker cgroup parent is outside cgroup v2");
-  }
-  assertRootControlledPath(configuration.cgroupParent, "directory");
   for (const candidate of Object.values(configuration.toolchain)) {
     assertRootControlledPath(candidate);
   }
   for (const candidate of [
     configuration.toolchain.node,
     configuration.toolchain.bwrap,
-    configuration.toolchain.socat,
     configuration.toolchain.setpriv,
   ]) {
     if ((lstatSync(candidate).mode & 0o111) === 0) {

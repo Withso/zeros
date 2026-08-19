@@ -45,10 +45,10 @@ overrides:
 
 # Accepted advisories — reviewed 2026-08-15. Every entry below is the same
 # story: the ONLY undici in the production graph is
-#   @cursor/sdk 1.0.26 → @connectrpc/connect-node 1.7.0 → undici 5.29.0
+#   @cursor/sdk 1.0.28 → @connectrpc/connect-node 1.7.0 → undici 5.29.0
 # (`pnpm audit --prod` / `pnpm why undici`). The fixes land in undici >= 6.24
 # and 6.27 — a different major than connect-node 1.x's declared `^5.28.4`, with
-# no patched 5.x release and no newer SDK to move to (1.0.26 is the latest and
+# no patched 5.x release and no newer SDK to move to (1.0.28 is the latest and
 # pins @connectrpc v1). Forcing undici 6 through an override would run a vendor
 # SDK on an untested major on the agent-run path, a worse trade than the
 # exposure — which is nil in practice: connect-node's only undici import is the

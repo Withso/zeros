@@ -130,9 +130,8 @@ export function boundaryStatusRows(
     });
   }
   if (status.git) {
-    // "Private Git" describes a projection that gets promoted. A native session
-    // has none, so the row is just "Git" — the label and the value have to agree
-    // or the row reads as a contradiction.
+    // Non-native states remain in the wire union for compatibility with older
+    // engines. Current host-parity sessions always report native/not-applicable.
     rows.push({
       label: status.git.state === "native" ? "Git" : "Private Git",
       value: boundaryGitCopy(status.git),
@@ -194,7 +193,7 @@ export const BoundaryStatusPill = memo(function BoundaryStatusPill({
             <DropdownMenuSeparator />
             <div className="text-fg2 max-w-72 px-2 py-1.5 text-xs leading-5">
               {status.remediation ??
-                "Code remains isolated in every workspace; Design is additionally protected when a Design directory is active."}
+                "Code keeps normal workspace behavior while recognized Design directories remain OS-protected app-wide."}
             </div>
           </>
         )}

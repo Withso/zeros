@@ -67,6 +67,8 @@ export interface StdioAgentProcess {
   readonly exited: Promise<{
     code: number | null;
     signal: NodeJS.Signals | null;
+    /** Present when the executable could not be spawned at all. */
+    error?: Error;
   }>;
   /** SIGTERM the whole group; on grace-timeout, SIGKILL the whole group and
    * prove the group is empty. A dead leader is not sufficient: a descendant
@@ -131,20 +133,45 @@ export function spawnStdioAgent(
     launch?.args ?? opts.args,
     spawnOpts,
   );
-  const boundaryProcess: BoundaryProcess | undefined =
-    opts.executionBoundary?.trackProcess(child);
 
   // On POSIX, child.pid IS the new process-group id (because the child
   // is the group leader). On Windows there is no group id, just a pid.
   const processGroupId =
     process.platform === "win32" ? null : (child.pid ?? null);
 
+  let spawnFailure: Error | null = null;
   const exited = new Promise<{
     code: number | null;
     signal: NodeJS.Signals | null;
+    error?: Error;
   }>((resolve) => {
-    child.once("exit", (code, signal) => resolve({ code, signal }));
+    let settled = false;
+    const settle = (result: {
+      code: number | null;
+      signal: NodeJS.Signals | null;
+      error?: Error;
+    }) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    child.once("exit", (code, signal) => settle({ code, signal }));
+    // spawn() reports ENOENT/EACCES asynchronously and emits no `exit` event.
+    // Keep an error listener for the entire child lifetime so a late ChildProcess
+    // error is never process-fatal, but only a pid-less error means spawn itself
+    // failed and can safely settle the process-domain proof.
+    child.on("error", (error) => {
+      if (child.pid != null) return;
+      spawnFailure = error;
+      settle({ code: null, signal: null, error });
+    });
   });
+
+  // Registration may reject a pid-less child synchronously. Keep the Node
+  // error event owned before crossing that boundary so the asynchronous
+  // ENOENT/EACCES that explains the missing pid can never become process-fatal.
+  const boundaryProcess: BoundaryProcess | undefined =
+    opts.executionBoundary?.trackProcess(child);
 
   let stopPromise: Promise<void> | null = null;
   const stop = (
@@ -158,6 +185,8 @@ export function spawnStdioAgent(
       }
       const gracefulMs = stopOpts.gracefulMs ?? DEFAULT_GRACEFUL_SHUTDOWN_MS;
       const forceMs = stopOpts.forceMs ?? DEFAULT_FORCE_SHUTDOWN_MS;
+
+      if (spawnFailure) return;
 
       // A wrapper may exit while leaving a command descendant in its process
       // group. Check the group itself before treating an exited leader as done.

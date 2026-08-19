@@ -149,19 +149,6 @@ async function qualifyAgent(
   timeoutMs: number,
 ): Promise<void> {
   const marker = `ZEROS_PING_${randomUUID().replaceAll("-", "").toUpperCase()}`;
-  const preflight = await requestFrame(
-    client,
-    {
-      type: "AGENT_PREFLIGHT",
-      source: "browser",
-      agentId,
-      workspaceId,
-    },
-    "AGENT_PREFLIGHTED",
-    60_000,
-  );
-  assertFullCloudBoundary(agentId, preflight.status);
-
   const created = await requestFrame(
     client,
     {

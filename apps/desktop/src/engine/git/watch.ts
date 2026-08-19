@@ -27,7 +27,9 @@
 // per collected path, up to thousands per second on a big repo's ref tree)
 // stalled ALL HTTP/WS handling on every 1s tick.
 //
-// We watch three per-worktree git-dir files:
+// We watch three per-worktree git-dir files. `index` is also a Design-
+// recognition input: a marker can enter or leave the staged tree without a
+// worktree/ref event, so its change requests an exact semantic re-preview:
 //   • HEAD       — branch switch / checkout / detach
 //   • index      — stage / unstage / reset (the staging area)
 //   • logs/HEAD  — commit / merge / pull / reset (the HEAD reflog; appended on
@@ -42,8 +44,10 @@
 
 import { lstatSync, type Dirent } from "node:fs";
 import { readFile, readdir, stat } from "node:fs/promises";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import chokidar, { type ChokidarOptions, type FSWatcher } from "chokidar";
+
+import { DESIGN_CANVAS_FILE } from "../design/directory-registry";
 
 const POLL_INTERVAL_MS = 1_000;
 const WORKTREE_DEBOUNCE_MS = 75;
@@ -178,6 +182,9 @@ export interface GitWatchChange {
    * Git metadata. Consumers with source-derived caches use this narrower bit
    * so stage/fetch/ref activity does not discard still-valid data. */
   worktreeChanged?: true;
+  /** A Design canvas marker was created, changed, moved, or removed. This is
+   * rare semantic territory input, unlike ordinary source-file churn. */
+  designRecognitionChanged?: true;
   /** A shared/common Git ref changed (fetch, branch create/delete/advance).
    * Consumers use this to invalidate branch catalogs without doing that work
    * for ordinary source-file saves. */
@@ -312,6 +319,7 @@ function makeChange(
   targets: Iterable<GitWatchTarget | null>,
   gitRefsChanged = false,
   worktreeChanged = false,
+  designRecognitionChanged = false,
 ): GitWatchChange {
   const workspaceIds = new Set<string>();
   let coarse = false;
@@ -323,6 +331,9 @@ function makeChange(
     workspaceIds: Array.from(workspaceIds),
     coarse,
     ...(worktreeChanged ? { worktreeChanged: true as const } : {}),
+    ...(designRecognitionChanged
+      ? { designRecognitionChanged: true as const }
+      : {}),
     ...(gitRefsChanged ? { gitRefsChanged: true as const } : {}),
   };
 }
@@ -353,6 +364,8 @@ export function startGitWatcher(
   const retiredWatchers = new Set<Promise<void>>();
   const pendingWorktreeTargets = new Map<string, GitWatchTarget>();
   let pendingWorktreeCoarse = false;
+  const pendingRecognitionTargets = new Set<string>();
+  let pendingRecognitionCoarse = false;
 
   const watcherOptions = (
     watchedRoot: string,
@@ -391,10 +404,17 @@ export function startGitWatcher(
       resolveReadyPromise();
     };
   });
-  const scheduleWorktreeChange = (target: GitWatchTarget | null) => {
+  const scheduleWorktreeChange = (
+    target: GitWatchTarget | null,
+    designRecognitionChanged = false,
+  ) => {
     if (stopped) return;
     if (target) pendingWorktreeTargets.set(target.root, target);
     else pendingWorktreeCoarse = true;
+    if (designRecognitionChanged) {
+      if (target) pendingRecognitionTargets.add(target.root);
+      else pendingRecognitionCoarse = true;
+    }
     if (worktreeTimer) clearTimeout(worktreeTimer);
     worktreeTimer = setTimeout(() => {
       worktreeTimer = null;
@@ -406,9 +426,12 @@ export function startGitWatcher(
         ],
         false,
         true,
+        pendingRecognitionTargets.size > 0 || pendingRecognitionCoarse,
       );
       pendingWorktreeTargets.clear();
       pendingWorktreeCoarse = false;
+      pendingRecognitionTargets.clear();
+      pendingRecognitionCoarse = false;
       onChange(change);
     }, options.worktreeDebounceMs ?? WORKTREE_DEBOUNCE_MS);
   };
@@ -477,7 +500,10 @@ export function startGitWatcher(
       // An active root always has an owner. Falling back to its bound target
       // covers an OS path spelling that differs from path.resolve while still
       // retaining the exact workspace/coarse identity.
-      scheduleWorktreeChange(changed ?? entry.target);
+      scheduleWorktreeChange(
+        changed ?? entry.target,
+        basename(filePath) === DESIGN_CANVAS_FILE,
+      );
     });
     native.on("error", (error) => {
       if (rootWatchers.get(key) !== entry) return;
@@ -543,6 +569,7 @@ export function startGitWatcher(
       }
       rootWatchers.delete(key);
       pendingWorktreeTargets.delete(entry.target.root);
+      pendingRecognitionTargets.delete(entry.target.root);
       trackRetiredWatcher(entry.watcher.close().catch(() => {}));
     }
     for (const [key, target] of nextByKey) {
@@ -568,20 +595,27 @@ export function startGitWatcher(
       {
         owners: Map<string, GitWatchTarget>;
         gitRefsChanged: boolean;
+        designRecognitionChanged: boolean;
       }
     >();
     const addPath = (
       filePath: string,
       target: GitWatchTarget,
       gitRefsChanged = false,
+      designRecognitionChanged = false,
     ) => {
       let watched = paths.get(filePath);
       if (!watched) {
-        watched = { owners: new Map(), gitRefsChanged };
+        watched = {
+          owners: new Map(),
+          gitRefsChanged,
+          designRecognitionChanged,
+        };
         paths.set(filePath, watched);
       } else if (gitRefsChanged) {
         watched.gitRefsChanged = true;
       }
+      if (designRecognitionChanged) watched.designRecognitionChanged = true;
       watched.owners.set(target.root, target);
     };
     const targetsByCommonDir = new Map<string, Map<string, GitWatchTarget>>();
@@ -590,7 +624,12 @@ export function startGitWatcher(
       if (stopped) return;
       if (!gitDir) continue;
       for (const f of GIT_STATE_FILES) {
-        addPath(join(gitDir, f), target);
+        // Index-only add/reset/unstage can establish or remove a committed
+        // `.zeros-canvas.json` marker without touching either the worktree or
+        // a ref. Re-preview the exact owner's Design roots after every index
+        // change; the engine compares authority identities and drains only if
+        // recognition actually changed.
+        addPath(join(gitDir, f), target, false, f === "index");
       }
       const commonDir = await resolveCommonGitDir(gitDir);
       let owners = targetsByCommonDir.get(commonDir);
@@ -619,6 +658,7 @@ export function startGitWatcher(
     if (stopped) return;
     const changedTargets = new Map<string, GitWatchTarget>();
     let gitRefsChanged = false;
+    let designRecognitionChanged = false;
     const seen = new Set<string>();
     for (const [p, sig] of sigs) {
       const watched = paths.get(p);
@@ -626,6 +666,9 @@ export function startGitWatcher(
       seen.add(p);
       if (primed && known.has(p) && !sigEqual(known.get(p) ?? null, sig)) {
         if (watched.gitRefsChanged) gitRefsChanged = true;
+        if (watched.designRecognitionChanged) {
+          designRecognitionChanged = true;
+        }
         for (const target of watched.owners.values()) {
           changedTargets.set(target.root, target);
         }
@@ -639,7 +682,14 @@ export function startGitWatcher(
     }
     primed = true;
     if (changedTargets.size > 0) {
-      onChange(makeChange(changedTargets.values(), gitRefsChanged));
+      onChange(
+        makeChange(
+          changedTargets.values(),
+          gitRefsChanged,
+          false,
+          designRecognitionChanged,
+        ),
+      );
     }
   };
 
@@ -694,6 +744,7 @@ export function startGitWatcher(
       for (const [candidate, entry] of matches) {
         rootWatchers.delete(candidate);
         pendingWorktreeTargets.delete(entry.target.root);
+        pendingRecognitionTargets.delete(entry.target.root);
       }
       try {
         await Promise.all(matches.map(([, entry]) => entry.watcher.close()));
@@ -706,6 +757,7 @@ export function startGitWatcher(
       // Clear callbacks queued while the exact root watcher was closing.
       for (const [, entry] of matches) {
         pendingWorktreeTargets.delete(entry.target.root);
+        pendingRecognitionTargets.delete(entry.target.root);
       }
 
       let settled = false;
@@ -749,6 +801,8 @@ export function startGitWatcher(
       worktreeTimer = null;
       pendingWorktreeTargets.clear();
       pendingWorktreeCoarse = false;
+      pendingRecognitionTargets.clear();
+      pendingRecognitionCoarse = false;
       for (const suspension of suspendedRoots.values()) {
         if (suspension.expiry) clearTimeout(suspension.expiry);
       }

@@ -655,6 +655,175 @@ printf ran > '${sentinel}'
     expect(dirty.stdout).toBe("");
   });
 
+  it("renames a Design folder whose literal name contains Git pathspec bytes", async () => {
+    const literalName = "Design[1]";
+    const literalDir = path.join(repoRoot, literalName);
+    const pathspecDecoy = path.join(repoRoot, "Design1");
+    await Promise.all([
+      mkdir(literalDir, { recursive: true }),
+      mkdir(pathspecDecoy, { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        path.join(literalDir, ".zeros-canvas.json"),
+        '{"version":2,"frames":{}}\n',
+      ),
+      writeFile(path.join(literalDir, "tokens.css"), "/* literal */\n"),
+      writeFile(path.join(pathspecDecoy, "decoy.txt"), "decoy\n"),
+    ]);
+    await execFileAsync(
+      "git",
+      [
+        "add",
+        "--",
+        `:(literal)${literalName}`,
+        ":(literal)Design1",
+      ],
+      { cwd: repoRoot },
+    );
+    await execFileAsync("git", ["commit", "-q", "-m", "design fixtures"], {
+      cwd: repoRoot,
+    });
+
+    await renameDesignDirectory({
+      repoRoot,
+      from: literalName,
+      to: "Brand",
+    });
+
+    const tracked = (
+      await execFileAsync("git", ["ls-tree", "-r", "--name-only", "HEAD"], {
+        cwd: repoRoot,
+      })
+    ).stdout;
+    expect(tracked).toContain("Brand/tokens.css");
+    expect(tracked).toContain("Design1/decoy.txt");
+    expect(tracked).not.toContain(`${literalName}/tokens.css`);
+    expect(
+      (
+        await execFileAsync("git", ["status", "--porcelain"], {
+          cwd: repoRoot,
+        })
+      ).stdout,
+    ).toBe("");
+  });
+
+  it("checks a literal Design folder for edits instead of a pathspec decoy", async () => {
+    const literalName = ":(literal)Design1";
+    const literalDir = path.join(repoRoot, literalName);
+    const pathspecDecoy = path.join(repoRoot, "Design1");
+    await Promise.all([
+      mkdir(literalDir, { recursive: true }),
+      mkdir(pathspecDecoy, { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(
+        path.join(literalDir, ".zeros-canvas.json"),
+        '{"version":2,"frames":{}}\n',
+      ),
+      writeFile(path.join(literalDir, "tokens.css"), "/* committed */\n"),
+      writeFile(path.join(pathspecDecoy, "decoy.txt"), "decoy\n"),
+    ]);
+    await execFileAsync(
+      "git",
+      [
+        "add",
+        "--",
+        `:(literal)${literalName}`,
+        ":(literal)Design1",
+      ],
+      { cwd: repoRoot },
+    );
+    await execFileAsync("git", ["commit", "-q", "-m", "literal design"], {
+      cwd: repoRoot,
+    });
+    await writeFile(path.join(literalDir, "tokens.css"), "/* pending */\n");
+
+    await expect(
+      renameDesignDirectory({
+        repoRoot,
+        from: literalName,
+        to: "Brand",
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      message: expect.stringContaining("uncommitted changes"),
+    });
+    expect(await readFile(path.join(literalDir, "tokens.css"), "utf8")).toBe(
+      "/* pending */\n",
+    );
+    expect(existsSync(path.join(repoRoot, "Brand"))).toBe(false);
+  });
+
+  it.each(["staged", "unstaged"] as const)(
+    "refuses a rename when the committed settings file has %s user edits",
+    async (settingsState) => {
+      const designDir = path.join(repoRoot, "Zeros Design");
+      const settingsDir = path.join(repoRoot, ".zeros");
+      const settingsFile = path.join(settingsDir, "settings.toml");
+      await Promise.all([
+        mkdir(designDir, { recursive: true }),
+        mkdir(settingsDir, { recursive: true }),
+      ]);
+      await Promise.all([
+        writeFile(
+          path.join(designDir, ".zeros-canvas.json"),
+          '{"version":2,"frames":{}}\n',
+        ),
+        writeFile(path.join(designDir, "tokens.css"), "/* t */\n"),
+        writeFile(
+          settingsFile,
+          '[design]\ndirectory = "Zeros Design"\n\n[env]\nBASE = "one"\n',
+        ),
+      ]);
+      await execFileAsync(
+        "git",
+        [
+          "add",
+          "--",
+          ":(literal)Zeros Design",
+          ":(literal).zeros/settings.toml",
+        ],
+        { cwd: repoRoot },
+      );
+      await execFileAsync("git", ["commit", "-q", "-m", "design settings"], {
+        cwd: repoRoot,
+      });
+      const pendingSettings =
+        '[design]\ndirectory = "Zeros Design"\n\n[env]\nBASE = "one"\nPENDING = "two"\n';
+      await writeFile(settingsFile, pendingSettings);
+      if (settingsState === "staged") {
+        await execFileAsync(
+          "git",
+          ["add", "--", ":(literal).zeros/settings.toml"],
+          { cwd: repoRoot },
+        );
+      }
+      const headBefore = (
+        await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repoRoot })
+      ).stdout.trim();
+
+      await expect(
+        renameDesignDirectory({
+          repoRoot,
+          from: "Zeros Design",
+          to: "Brand",
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        message: expect.stringContaining(".zeros/settings.toml"),
+      });
+      expect(await readFile(settingsFile, "utf8")).toBe(pendingSettings);
+      expect(existsSync(designDir)).toBe(true);
+      expect(existsSync(path.join(repoRoot, "Brand"))).toBe(false);
+      expect(
+        (
+          await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repoRoot })
+        ).stdout.trim(),
+      ).toBe(headBefore);
+    },
+  );
+
   it("reconcileDesignModeTransition completes a crash-interrupted exit at boot", async () => {
     const created = await createWorkspace({ repoRoot, kind: "design" });
     // Simulate the crash window: the row already flipped to code, the durable

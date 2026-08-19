@@ -67,6 +67,7 @@ import {
   setWorkingDirectories,
   setWorkspaceRemoteRestricted,
   setWorkspaceStatus,
+  setSyntheticGitWorkspaceResolver,
   log,
   pull,
   discardFiles,
@@ -127,6 +128,7 @@ import {
   stageHunk,
   unstageHunk,
   discardHunk,
+  inspectApplyPatchPaths,
   createTag,
   listTags,
   deleteTag,
@@ -216,12 +218,9 @@ import {
   primeDesignDirectoryName,
   sanitizeDesignDirectoryName,
 } from "../design/directory-registry";
+import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
 import { withDesignWorkspaceMutation } from "../design/document-write-lock";
-import { designFenceStartBlock } from "../design/fence-health";
-import {
-  fenceDesignDirectory,
-  unfenceDesignDirectory,
-} from "../design/workspace-lock";
+import { unfenceDesignDirectory } from "../design/workspace-lock";
 import { setDesignRuntimeAudit } from "../design/runtime-audits";
 import {
   forgetDesignScreenshots,
@@ -612,6 +611,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
 const DESIGN_WORKSPACE_BLOCKED_MUTATIONS = new Set<string>([
   "workspace.setWorkingDirectories",
 ]);
+const MAX_DESIGN_DESCENDANT_SCAN_ENTRIES = 65_536;
 
 /** Recognizes design territory the way the agent boundary does: by MARKER, not
  *  by name.
@@ -655,12 +655,62 @@ function makeDesignPathRecognizer(
     probed.set(relativeDir, found);
     return found;
   };
+  const descendantProbes = new Map<string, boolean>();
+  const containsMarker = (relativeDir: string): boolean => {
+    const cached = descendantProbes.get(relativeDir);
+    if (cached !== undefined) return cached;
+    const pending = [
+      nodePath.join(workspacePath, ...relativeDir.split("/")),
+    ];
+    let visited = 0;
+    while (pending.length > 0) {
+      const directory = pending.pop()!;
+      let metadata: fs.Stats;
+      let entries: fs.Dirent[];
+      try {
+        metadata = fs.lstatSync(directory);
+        if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+          descendantProbes.set(relativeDir, false);
+          return false;
+        }
+        entries = fs.readdirSync(directory, { withFileTypes: true });
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "ENOTDIR") {
+          descendantProbes.set(relativeDir, false);
+          return false;
+        }
+        // If Git was handed this directory but the trusted bridge cannot
+        // inspect it, refusing is safer than allowing a subtree sweep whose
+        // Design overlap is unknown.
+        descendantProbes.set(relativeDir, true);
+        return true;
+      }
+      // A nested repository is an opaque gitlink/embedded-repo path to the
+      // current owner. Git does not recurse into it, so neither should this
+      // repository's Design guard.
+      if (entries.some((entry) => entry.name === ".git")) continue;
+      for (const entry of entries) {
+        visited += 1;
+        if (visited > MAX_DESIGN_DESCENDANT_SCAN_ENTRIES) {
+          descendantProbes.set(relativeDir, true);
+          return true;
+        }
+        if (entry.name === DESIGN_CANVAS_FILE) {
+          descendantProbes.set(relativeDir, true);
+          return true;
+        }
+        if (entry.isDirectory() && !entry.isSymbolicLink()) {
+          pending.push(nodePath.join(directory, entry.name));
+        }
+      }
+    }
+    descendantProbes.set(relativeDir, false);
+    return false;
+  };
   return (candidate: string): boolean => {
-    const normalized = candidate
-      .replace(/\\/g, "/")
-      .replace(/^\.\//, "")
-      .replace(/\/+$/, "");
-    if (!normalized || normalized.startsWith("../")) return false;
+    const normalized = normalizeRepoMutationPath(candidate);
+    if (!normalized) return false;
     if (
       pointerName &&
       (normalized === pointerName || normalized.startsWith(`${pointerName}/`))
@@ -668,12 +718,64 @@ function makeDesignPathRecognizer(
       return true;
     }
     const segments = normalized.split("/").filter((segment) => segment.length > 0);
+    // A marker at depth >= 1 establishes the folder containing it as Design
+    // territory. Treat the marker itself as protected before it exists, too,
+    // so the generic code editor cannot manufacture a new Design document and
+    // continue writing it through code authority. A root-level marker remains
+    // invalid recognition and is deliberately not special-cased.
+    if (
+      segments.length > 1 &&
+      segments[segments.length - 1] === DESIGN_CANVAS_FILE
+    ) {
+      return true;
+    }
     // Depth 0 is the workspace root and is deliberately skipped.
     for (let depth = segments.length; depth >= 1; depth -= 1) {
       if (hasMarker(segments.slice(0, depth).join("/"))) return true;
     }
-    return false;
+    return containsMarker(normalized);
   };
+}
+
+function normalizeRepoMutationPath(candidate: string): string | null {
+  const slash = candidate.replace(/\\/g, "/");
+  if (!slash || slash.startsWith("/") || /^[A-Za-z]:\//.test(slash)) {
+    return null;
+  }
+  const normalized = nodePath.posix.normalize(slash).replace(/\/+$/, "");
+  if (
+    !normalized ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../")
+  ) {
+    return null;
+  }
+  return normalized.replace(/^\.\//, "");
+}
+
+/** The bridge's path arrays are exact repository paths, never Git pathspec
+ * programs. `--` ends option parsing but does not disable `:(top)`, glob, or
+ * exclude expansion, so lower Git helpers wrap every validated path in
+ * `:(literal)`. This gate rejects only values that cannot name a
+ * repository-relative path; metacharacters remain valid filename bytes. */
+function assertLiteralGitMutationPaths(
+  paths: readonly string[],
+  action: string,
+): void {
+  for (const candidate of paths) {
+    const normalized = normalizeRepoMutationPath(candidate);
+    if (
+      !normalized ||
+      candidate.includes("\0")
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: `${action} requires exact repository-relative paths.`,
+        remediation: "Select the exact files in the Changes view and retry.",
+      });
+    }
+  }
 }
 
 /** Every Design folder the Working Folders picker must lock.
@@ -704,24 +806,86 @@ async function designRootsForWorkingDirectories(
   return [...roots];
 }
 
+function repoMutationPathOverlapsDesignRoot(
+  candidate: string,
+  designRoot: string,
+): boolean {
+  const normalized = normalizeRepoMutationPath(candidate);
+  const normalizedRoot = normalizeRepoMutationPath(designRoot);
+  if (!normalized || !normalizedRoot) return false;
+  return (
+    normalized === normalizedRoot ||
+    normalized.startsWith(`${normalizedRoot}/`) ||
+    normalizedRoot.startsWith(`${normalized}/`)
+  );
+}
+
+/** Return code-side paths inside or containing any Design directory. Git
+ *  treats a directory path as its complete subtree, so an ancestor is just as
+ *  authority-sensitive as a file below the root. The fast path uses current
+ *  on-disk markers and the active/prospective pointer. If that finds nothing,
+ *  consult Git HEAD/index plus sticky engine recognition so an externally
+ *  deleted marker cannot reopen an inactive Design root to the trusted
+ *  Files/Git bridge while ZSR still protects it. */
+async function designPathsInCodeMutation(
+  workspaceId: string,
+  paths: readonly string[],
+  resolvedWorkspacePath?: string,
+): Promise<string[]> {
+  const workspace = getWorkspaceById(workspaceId);
+  const workspacePath = workspace?.path ?? resolvedWorkspacePath;
+  if (!workspacePath) return [];
+  const activeDesignRoot = designDirectoryNameFor(workspacePath);
+  const isDesignPath = makeDesignPathRecognizer(workspacePath, activeDesignRoot);
+  const immediate = paths.filter(
+    (candidate) =>
+      isDesignPath(candidate) ||
+      repoMutationPathOverlapsDesignRoot(candidate, activeDesignRoot),
+  );
+  if (immediate.length > 0) return immediate;
+
+  let recognized: string[];
+  try {
+    const [gitRecognized, stickyRecognized] = await Promise.all([
+      discoverDesignDirectories(workspacePath),
+      stickyRecognizedDesignDirectories(workspacePath),
+    ]);
+    recognized = [...new Set([...gitRecognized, ...stickyRecognized])];
+  } catch (cause) {
+    throw new GitError({
+      code: "GIT_COMMAND_FAILED",
+      message: "Could not verify the repository's Design territory.",
+      cause,
+      remediation:
+        "Retry after Git is available; code-side writes remain refused until Design territory can be verified.",
+      context: { workspaceId },
+    });
+  }
+  if (recognized.length === 0) return [];
+  return paths.filter((candidate) =>
+    recognized.some((root) =>
+      repoMutationPathOverlapsDesignRoot(candidate, root),
+    ),
+  );
+}
+
 /** Hard-refuse code-side writes aimed at the design directory. Design files
  *  are edited through the design surface and committed with "Save designs" —
  *  the ONE write path — so generic staging/discard/commit/editor writes into
  *  that territory are refused with a pointer instead of competing with the
- *  Design mutation sequencer. Unmanaged targets (the local-main trunk) have no
- *  Design territory and pass through. */
-function assertNoDesignPathWrites(
+ *  Design mutation sequencer. Managed worktrees, local-main, and registered
+ *  rowless project roots all use the same recognizer. */
+async function assertNoDesignPathWrites(
   workspaceId: string,
   paths: readonly string[],
   action: string,
-): void {
-  const workspace = getWorkspaceById(workspaceId);
-  if (!workspace) return;
-  const isDesignPath = makeDesignPathRecognizer(
-    workspace.path,
-    designDirectoryNameFor(workspace.path),
+  resolvedWorkspacePath?: string,
+): Promise<void> {
+  const offending = await designPathsInCodeMutation(
+    workspaceId,
+    paths,
+    resolvedWorkspacePath,
   );
-  const offending = paths.filter(isDesignPath);
   if (offending.length === 0) return;
   throw new GitError({
     code: "VALIDATION_FAILED",
@@ -733,19 +897,6 @@ function assertNoDesignPathWrites(
       'Design files are edited in Design Mode and committed with "Save designs".',
     context: { workspaceId },
   });
-}
-
-/** Paths named by a unified-diff patch (`diff --git a/<old> b/<new>` headers) —
- *  the fence input for hunk-level staging/discard, which carry a patch rather
- *  than a path list. */
-function pathsFromPatch(patch: string): string[] {
-  const out = new Set<string>();
-  const header = /^diff --git a\/(.+?) b\/(.+)$/gm;
-  for (const match of patch.matchAll(header)) {
-    if (match[1]) out.add(match[1]);
-    if (match[2]) out.add(match[2]);
-  }
-  return [...out];
 }
 
 /** Read (non-mutating) ops a RELAY client is permitted to invoke — the
@@ -1278,6 +1429,9 @@ export class WorkspaceService {
     // registry; safe to wire in the constructor since it's only invoked later, at
     // upsert/backfill time — never before the DB is migrated.
     setChatWorkspaceResolver((folder) => this.workspaceIdForCwd(folder));
+    setSyntheticGitWorkspaceResolver((workspaceId) =>
+      workspaceId === LOCAL_MAIN_WORKSPACE_ID ? this.localMainEntry() : null,
+    );
   }
 
   /** Live accessor for the engine's MCP gateway (created lazily after this
@@ -1461,20 +1615,16 @@ export class WorkspaceService {
       lifecycle.active ||
       lifecycle.operation != null ||
       !fs.existsSync(ws.path);
-    const fenceBlock = !unavailable ? designFenceStartBlock(ws.id) : null;
-    if (!unavailable && !fenceBlock) return;
+    if (!unavailable) return;
     throw new GitError({
       code: "VALIDATION_FAILED",
       message:
-        fenceBlock?.message ??
-        (ws.archivedAt != null
+        ws.archivedAt != null
           ? "This workspace is archived."
           : lifecycle.operation != null
             ? `This workspace is currently in a ${lifecycle.operation} operation.`
-            : "This workspace's checkout is not available."),
-      remediation:
-        fenceBlock?.remediation ??
-        "Wait for the workspace operation to finish, then try again.",
+            : "This workspace's checkout is not available.",
+      remediation: "Wait for the workspace operation to finish, then try again.",
       context: { workspaceId: ws.id },
     });
   }
@@ -1667,13 +1817,23 @@ export class WorkspaceService {
    *  read-only git-op trunk resolution). A REMOTE client gets the strict
    *  resolveCwd (it addresses workspaces by opaque id, never a raw host path), so
    *  this widens local Files parity without granting a remote client any new path. */
-  private resolveReadCwd(workspaceId: string, remote: boolean): string {
+  resolveReadCwd(workspaceId: string, remote: boolean): string {
     try {
       return this.resolveCwd(workspaceId);
     } catch (err) {
       if (!remote && isKnownRepoRoot(workspaceId)) return workspaceId;
       throw err;
     }
+  }
+
+  /** Engine lifecycle classification shares Git's exact patch parser with the
+   * eventual hunk mutation. Keeping this on the service avoids a second,
+   * weaker header parser at the admission boundary. */
+  inspectGitApplyPatchPaths(
+    workspaceId: string,
+    patch: string,
+  ): Promise<string[]> {
+    return inspectApplyPatchPaths({ workspaceId, patch });
   }
 
   /** Resolve a design-capable semantic workspace from its opaque id. View mode
@@ -2958,9 +3118,6 @@ export class WorkspaceService {
           files: [designDir],
           authority: "design-save",
         });
-        // Retained compatibility seam: current containment is actor-scoped and
-        // does not write persistent metadata into the shared checkout.
-        await fenceDesignDirectory(workspace.path);
         return saved;
       }
       // ── Design directory discovery (settings picker + adoption) ──
@@ -3770,35 +3927,13 @@ export class WorkspaceService {
                   repoRoot,
                 ),
               );
-              const moved: typeof ordered = [];
-              try {
-                for (const transition of ordered) {
-                  // Prime only the validated effective pointer. Re-resolving
-                  // here would reintroduce a TOCTOU gap after validation.
-                  primeDesignDirectoryName(
-                    transition.workspace.path,
-                    transition.next,
-                  );
-                  await fenceDesignDirectory(transition.workspace.path);
-                  moved.push(transition);
-                }
-              } catch (error) {
-                // Publication is intentionally kept as an error boundary even
-                // though the compatibility seam currently performs no I/O.
-                for (const transition of moved) {
-                  primeDesignDirectoryName(
-                    transition.workspace.path,
-                    transition.next,
-                  );
-                }
-                throw new GitError({
-                  code: "GIT_COMMAND_FAILED",
-                  message:
-                    "The Design folder setting was saved, but its authority could not be published completely.",
-                  cause: error,
-                  remediation:
-                    "Restart Zeros to reconcile the Design folder authority before editing designs.",
-                });
+              for (const transition of ordered) {
+                // Prime only the validated effective pointer. Re-resolving
+                // here would reintroduce a TOCTOU gap after validation.
+                primeDesignDirectoryName(
+                  transition.workspace.path,
+                  transition.next,
+                );
               }
               return written;
             },
@@ -4325,7 +4460,12 @@ export class WorkspaceService {
         }
         // The file editor is a code actor — design files have exactly one
         // write path (the design surface's transactional writes).
-        assertNoDesignPathWrites(targetWorkspaceId, [rel], "editing");
+        await assertNoDesignPathWrites(
+          targetWorkspaceId,
+          [rel],
+          "editing",
+          cwd,
+        );
         if (remote && isSensitiveRepoPath(rel)) {
           throw new GitError({
             code: "VALIDATION_FAILED",
@@ -4560,25 +4700,47 @@ export class WorkspaceService {
       case "git.stage": {
         const workspaceId = reqStr(params, "workspaceId");
         const paths = strArr(params, "paths");
-        assertNoDesignPathWrites(workspaceId, paths, "staging");
+        assertLiteralGitMutationPaths(paths, "Staging");
+        await assertNoDesignPathWrites(
+          workspaceId,
+          paths,
+          "staging",
+          this.resolveReadCwd(workspaceId, remote),
+        );
         await stagePaths({ workspaceId, paths });
         return { ok: true };
       }
-      case "git.unstage":
+      case "git.unstage": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const paths = strArr(params, "paths");
+        assertLiteralGitMutationPaths(paths, "Unstaging");
+        await assertNoDesignPathWrites(
+          workspaceId,
+          paths,
+          "unstaging",
+          this.resolveReadCwd(workspaceId, remote),
+        );
         await unstagePaths({
-          workspaceId: reqStr(params, "workspaceId"),
-          paths: strArr(params, "paths"),
+          workspaceId,
+          paths,
         });
         return { ok: true };
+      }
       case "git.discard": {
         // discardFiles resolves the worktree server-side from workspaceId and
         // runs `git restore --worktree -- <paths>` (git's `--` confines paths to
         // the repo). In WRITE_OPS, so a remote client is restriction-gated.
         const workspaceId = reqStr(params, "workspaceId");
         const paths = strArr(params, "paths");
+        assertLiteralGitMutationPaths(paths, "Discarding");
         // Discarding design paths would destroy unsaved canvas work AND
         // half-apply under the fence — refused with the design-mode pointer.
-        assertNoDesignPathWrites(workspaceId, paths, "discarding");
+        await assertNoDesignPathWrites(
+          workspaceId,
+          paths,
+          "discarding",
+          this.resolveReadCwd(workspaceId, remote),
+        );
         await discardFiles({ workspaceId, paths });
         return { ok: true };
       }
@@ -4590,7 +4752,13 @@ export class WorkspaceService {
         // Territory purity is what makes the one-branch/one-PR story clean:
         // code commits carry only code. Design paths commit via design.save.
         if (files) {
-          assertNoDesignPathWrites(workspaceId, files, "committing");
+          assertLiteralGitMutationPaths(files, "Committing");
+          await assertNoDesignPathWrites(
+            workspaceId,
+            files,
+            "committing",
+            this.resolveReadCwd(workspaceId, remote),
+          );
         }
         return commit({
           workspaceId,
@@ -4871,40 +5039,85 @@ export class WorkspaceService {
       //    refused by deny-by-default (the gate runs before dispatch); only the
       //    LOCAL desktop reaches them. ──
       // Write: git — extended
-      case "git.reset":
+      case "git.reset": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const mode = reqStr(params, "mode") as ResetMode;
+        const confirm = optBool(params, "confirm");
+        if (mode === "hard" && confirm === true) {
+          const current = await status(workspaceId);
+          const changedPaths = new Set(current.untracked);
+          for (const change of [
+            ...current.staged,
+            ...current.unstaged,
+            ...current.conflicted,
+          ]) {
+            changedPaths.add(change.path);
+            if (change.oldPath) changedPaths.add(change.oldPath);
+          }
+          const unsavedDesign = await designPathsInCodeMutation(
+            workspaceId,
+            [...changedPaths],
+            this.resolveReadCwd(workspaceId, remote),
+          );
+          if (unsavedDesign.length > 0) {
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message: `Resetting would discard ${unsavedDesign.length} unsaved design ${unsavedDesign.length === 1 ? "path" : "paths"} (e.g. ${unsavedDesign[0]}).`,
+              remediation:
+                'Commit the current Design document with "Save designs" before resetting the checkout.',
+              context: { workspaceId },
+            });
+          }
+        }
         await reset({
-          workspaceId: reqStr(params, "workspaceId"),
-          mode: reqStr(params, "mode") as ResetMode,
+          workspaceId,
+          mode,
           ref: optStr(params, "ref"),
-          confirm: optBool(params, "confirm"),
+          confirm,
         });
         return { ok: true };
-      case "git.restore":
+      }
+      case "git.restore": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const paths = strArr(params, "paths");
+        assertLiteralGitMutationPaths(paths, "Restoring");
+        await assertNoDesignPathWrites(
+          workspaceId,
+          paths,
+          "restoring",
+          this.resolveReadCwd(workspaceId, remote),
+        );
         await restoreFrom({
-          workspaceId: reqStr(params, "workspaceId"),
-          paths: strArr(params, "paths"),
+          workspaceId,
+          paths,
           source: reqStr(params, "source"),
           staged: optBool(params, "staged"),
         });
         return { ok: true };
+      }
       case "git.clean": {
         const workspaceId = reqStr(params, "workspaceId");
         const paths = optStrArr(params, "paths");
         if (paths && paths.length > 0) {
-          assertNoDesignPathWrites(workspaceId, paths, "cleaning");
-        } else if (getWorkspaceById(workspaceId)) {
+          assertLiteralGitMutationPaths(paths, "Cleaning");
+          await assertNoDesignPathWrites(
+            workspaceId,
+            paths,
+            "cleaning",
+            this.resolveReadCwd(workspaceId, remote),
+          );
+        } else {
           // A pathless clean sweeps every untracked file — including
           // not-yet-saved frames (untracked ON PURPOSE, so the engine can
           // write them without an unfence). Refuse while any exist rather
-          // than silently destroying unsaved design work.
-          const target = getWorkspaceById(workspaceId)!;
-          const isDesignPath = makeDesignPathRecognizer(
-            target.path,
-            designDirectoryNameFor(target.path),
+          // than silently destroying unsaved design work. Rowless/local-main
+          // roots use the same semantic check as managed worktrees.
+          const cwd = this.resolveReadCwd(workspaceId, remote);
+          const untrackedDesign = await designPathsInCodeMutation(
+            workspaceId,
+            (await status(workspaceId)).untracked,
+            cwd,
           );
-          const untrackedDesign = (
-            await status(workspaceId)
-          ).untracked.filter(isDesignPath);
           if (untrackedDesign.length > 0) {
             throw new GitError({
               code: "VALIDATION_FAILED",
@@ -4963,23 +5176,50 @@ export class WorkspaceService {
       case "git.stageHunk": {
         const workspaceId = reqStr(params, "workspaceId");
         const patch = reqStr(params, "patch");
-        assertNoDesignPathWrites(workspaceId, pathsFromPatch(patch), "staging");
+        const patchPaths = await this.inspectGitApplyPatchPaths(
+          workspaceId,
+          patch,
+        );
+        await assertNoDesignPathWrites(
+          workspaceId,
+          patchPaths,
+          "staging",
+          this.resolveReadCwd(workspaceId, remote),
+        );
         await stageHunk({ workspaceId, patch });
         return { ok: true };
       }
-      case "git.unstageHunk":
+      case "git.unstageHunk": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const patch = reqStr(params, "patch");
+        const patchPaths = await this.inspectGitApplyPatchPaths(
+          workspaceId,
+          patch,
+        );
+        await assertNoDesignPathWrites(
+          workspaceId,
+          patchPaths,
+          "unstaging",
+          this.resolveReadCwd(workspaceId, remote),
+        );
         await unstageHunk({
-          workspaceId: reqStr(params, "workspaceId"),
-          patch: reqStr(params, "patch"),
+          workspaceId,
+          patch,
         });
         return { ok: true };
+      }
       case "git.discardHunk": {
         const workspaceId = reqStr(params, "workspaceId");
         const patch = reqStr(params, "patch");
-        assertNoDesignPathWrites(
+        const patchPaths = await this.inspectGitApplyPatchPaths(
           workspaceId,
-          pathsFromPatch(patch),
+          patch,
+        );
+        await assertNoDesignPathWrites(
+          workspaceId,
+          patchPaths,
           "discarding",
+          this.resolveReadCwd(workspaceId, remote),
         );
         await discardHunk({ workspaceId, patch });
         return { ok: true };

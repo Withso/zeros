@@ -14,9 +14,10 @@ name: Preflight
 #             scan, settings-schema drift).
 #   build   — the app must actually BUILD: renderer, engine bundle, Electron main,
 #             and the bun-compiled engine sidecar binary that ships in the DMG.
-#   source-sync — workspace create/archive/restore concurrency, the external
-#             file/Git watcher, exact change scopes, selection recovery, bridge
-#             error contracts, and the compiled sidecar runtime on macOS.
+#   source-sync — required aggregate for the macOS source-sync workload plus
+#             ZSR qualification on macOS Intel and Linux arm64. Keeping the
+#             established check name makes the existing ruleset enforce all
+#             three jobs instead of silently overlooking new job names.
 #   secret-scan — gitleaks over every commit the PR adds, not just its net diff,
 #             so a credential added and then removed within the PR is still caught.
 #   control-plane — typecheck + vitest for apps/control-plane (its own pnpm
@@ -369,8 +370,8 @@ jobs:
         # coexist exactly as they do in the unified Pages deployment.
         run: npm --prefix apps/web run build:standalone
 
-  source-sync:
-    name: source-sync (macOS)
+  source-sync-workload:
+    name: source-sync workload (macOS)
     runs-on: macos-latest
     steps:
       - name: Checkout
@@ -566,6 +567,36 @@ jobs:
         # cloud image separately supplies rootless Podman, delegated memory/PID
         # cgroups, and its signed cloud-worker admission artifact.
         run: pnpm check:zsr
+
+  # The repository ruleset already requires `source-sync (macOS)`. GitHub does
+  # not automatically make newly-added sibling jobs required, so retain that
+  # context as an explicit aggregate. `always()` ensures a failed dependency
+  # produces a red required check rather than a skipped one that can be missed.
+  source-sync:
+    name: source-sync (macOS)
+    if: always()
+    needs:
+      - source-sync-workload
+      - zsr-macos-intel
+      - zsr-linux-arm64
+    runs-on: ubuntu-latest
+    steps:
+      - name: Enforce source-sync and ZSR architecture results
+        env:
+          SOURCE_SYNC_RESULT: ${{ needs.source-sync-workload.result }}
+          ZSR_MACOS_INTEL_RESULT: ${{ needs.zsr-macos-intel.result }}
+          ZSR_LINUX_ARM64_RESULT: ${{ needs.zsr-linux-arm64.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+          for result_name in SOURCE_SYNC_RESULT ZSR_MACOS_INTEL_RESULT ZSR_LINUX_ARM64_RESULT; do
+            result="${!result_name}"
+            if [ "$result" != "success" ]; then
+              echo "::error::${result_name} was ${result}"
+              failed=1
+            fi
+          done
+          exit "$failed"
 
   control-plane:
     name: control plane

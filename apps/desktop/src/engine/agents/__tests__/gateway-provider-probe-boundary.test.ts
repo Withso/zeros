@@ -66,7 +66,7 @@ describe("AgentGateway provider command probes", () => {
     await gateway.dispose();
   });
 
-  it("projects a custom provider executable before running its probe", async () => {
+  it("runs a custom provider executable under the host-parity boundary", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-probe-custom-"));
     temporaryDirectories.push(root);
     const binaryRoot = path.join(root, "toolchain", "bin");
@@ -110,7 +110,7 @@ describe("AgentGateway provider command probes", () => {
       }),
     ).resolves.toEqual({ exitCode: 0, stdout: "custom 9.8.7\n" });
     expect(requests).toHaveLength(1);
-    expect(requests[0]?.additionalReadOnlyRoots).toContain(binaryRoot);
+    expect(requests[0]).not.toHaveProperty("additionalReadOnlyRoots");
 
     await gateway.dispose();
   });

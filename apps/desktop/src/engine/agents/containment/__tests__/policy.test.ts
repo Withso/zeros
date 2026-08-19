@@ -1,4 +1,5 @@
 import {
+  link,
   mkdtemp,
   mkdir,
   readFile,
@@ -8,9 +9,9 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { homedir, tmpdir } from "node:os";
-import path from "node:path";
 import { createServer } from "node:net";
+import os from "node:os";
+import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -40,158 +41,99 @@ vi.mock("node:fs/promises", async (importOriginal) => {
 });
 
 import type { AgentFilesystemTerritory } from "../../types";
-import { prepareZsrPolicy, zsrNetworkRoot } from "../policy";
+import {
+  prepareZsrPolicy,
+  type PrepareZsrPolicyOptions,
+  type PreparedZsrPolicy,
+  zsrNetworkRoot,
+} from "../policy";
 import { newTerritoryGeneration } from "../status";
+import type { BoundaryRequest } from "../types";
 
-describe("ZSR policy builder", () => {
+function territory(
+  workspaceRoot: string,
+  protectedDesignDirectories: string[],
+  deniedPaths: string[] = protectedDesignDirectories,
+): AgentFilesystemTerritory {
+  return {
+    agentRole: "code",
+    workspaceRoot,
+    designDirectory: protectedDesignDirectories[0]!,
+    protectedDesignDirectories,
+    designRecognitionPaths: [],
+    writeCapabilities: { workspace: "write", deniedPaths },
+  };
+}
+
+describe("ZSR host-parity policy builder", () => {
   let temporaryRoot: string;
   let previousDataDir: string | undefined;
+  let sequence: number;
+  const cleanupRoots = new Set<string>();
 
   beforeEach(async () => {
     temporaryRoot = await realpath(
-      await mkdtemp(path.join(tmpdir(), "zeros-zsr-policy-")),
+      await mkdtemp(path.join(os.tmpdir(), "zeros-zsr-policy-")),
     );
     previousDataDir = process.env.ZEROS_DATA_DIR;
     process.env.ZEROS_DATA_DIR = path.join(temporaryRoot, "engine");
+    sequence = 0;
   });
 
   afterEach(async () => {
     if (previousDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
     else process.env.ZEROS_DATA_DIR = previousDataDir;
+    await Promise.all(
+      [...cleanupRoots].map((root) =>
+        rm(root, { recursive: true, force: true }),
+      ),
+    );
+    cleanupRoots.clear();
     await rm(temporaryRoot, { recursive: true, force: true });
   });
 
-  it("grants normal code roots while subtracting Design, Git, and policy authority", async () => {
-    const workspace = path.join(temporaryRoot, "workspace");
-    const design = path.join(workspace, "Zeros Design");
-    const git = path.join(workspace, ".git");
-    const extra = path.join(temporaryRoot, "extra");
-    await Promise.all([
-      mkdir(design, { recursive: true }),
-      mkdir(git, { recursive: true }),
-      mkdir(extra, { recursive: true }),
-    ]);
-    const territory: AgentFilesystemTerritory = {
-      agentRole: "code",
-      workspaceRoot: workspace,
-      designDirectory: design,
-      protectedDesignDirectories: [design],
-      designRecognitionPaths: [],
-      writeCapabilities: {
-        workspace: "write",
-        deniedPaths: [design, git],
-      },
-    };
+  async function prepare(
+    request: Omit<BoundaryRequest, "executionId"> & { executionId?: string },
+    options: PrepareZsrPolicyOptions = {},
+  ): Promise<PreparedZsrPolicy> {
+    sequence += 1;
+    const generation = newTerritoryGeneration();
+    cleanupRoots.add(zsrNetworkRoot(generation));
     const prepared = await prepareZsrPolicy(
       {
-        executionId: "execution-1",
-        actor: "agent-code",
-        cwd: workspace,
-        workspaceRoot: workspace,
-        territory,
-        additionalReadWriteRoots: [extra],
+        ...request,
+        executionId: request.executionId ?? `policy-${sequence}`,
       },
-      newTerritoryGeneration(),
+      generation,
+      options,
     );
+    cleanupRoots.add(prepared.paths.root);
+    return prepared;
+  }
 
-    expect(prepared.document.filesystem.allowWrite).toEqual(
-      expect.arrayContaining([workspace, extra, prepared.paths.home]),
-    );
-    expect(prepared.document.filesystem.allowRead).toEqual(
-      expect.arrayContaining([
-        prepared.paths.home,
-        prepared.paths.providerState,
-        prepared.paths.tools,
-      ]),
-    );
-    expect(prepared.document.filesystem.denyRead).toContain(
-      process.env.ZEROS_DATA_DIR,
-    );
-    const cloudValidationState = path.join(
-      homedir(),
-      ".zeros",
-      "cloud-workspace-validation",
-    );
-    expect(
-      prepared.document.filesystem.denyRead.some(
-        (root) =>
-          root === cloudValidationState ||
-          cloudValidationState.startsWith(`${root}${path.sep}`),
-      ),
-    ).toBe(true);
-    expect(prepared.document.filesystem.denyWrite).toEqual(
-      expect.arrayContaining([
-        design,
-        git,
-        prepared.paths.policy,
-        prepared.paths.commands,
-        prepared.paths.tools,
-      ]),
-    );
-    expect(prepared.document.filesystem.allowWrite).not.toContain(
-      prepared.paths.root,
-    );
-    expect(prepared.document.filesystem.allowWrite).not.toContain(
-      prepared.paths.tools,
-    );
-    expect(prepared.paths.providerState.startsWith(prepared.paths.root)).toBe(
-      true,
-    );
-    expect((await stat(prepared.paths.root)).mode & 0o777).toBe(0o700);
-    expect((await stat(prepared.paths.policy)).mode & 0o777).toBe(0o600);
-    expect(
-      (await stat(prepared.paths.processIdentityMarker)).mode & 0o777,
-    ).toBe(0o400);
-    expect(await readFile(prepared.paths.processIdentityMarker, "utf8")).toBe(
-      `${prepared.document.generation}\n`,
-    );
-    expect(prepared.document.filesystem.allowRead).toContain(
-      prepared.paths.tools,
-    );
-    expect(path.dirname(prepared.paths.processIdentityMarker)).toBe(
-      prepared.paths.tools,
-    );
-    expect(JSON.parse(await readFile(prepared.paths.policy, "utf8"))).toEqual(
-      prepared.document,
-    );
-  });
-
-  it("uses host-parity access for code while subtracting every Design directory", async () => {
-    const workspace = path.join(temporaryRoot, "host-parity-workspace");
+  it("subtracts every Design directory while retaining normal host authority", async () => {
+    const workspace = path.join(temporaryRoot, "workspace");
     const primaryDesign = path.join(workspace, "Zeros Design");
     const nestedDesign = path.join(workspace, "examples", "Product Design");
     const git = path.join(workspace, ".git");
-    const extra = path.join(temporaryRoot, "host-parity-extra");
-    await Promise.all([
-      mkdir(primaryDesign, { recursive: true }),
-      mkdir(nestedDesign, { recursive: true }),
-      mkdir(git, { recursive: true }),
-      mkdir(extra, { recursive: true }),
-    ]);
-    const territory: AgentFilesystemTerritory = {
-      agentRole: "code",
-      workspaceRoot: workspace,
-      designDirectory: primaryDesign,
-      protectedDesignDirectories: [primaryDesign, nestedDesign],
-      designRecognitionPaths: [],
-      writeCapabilities: {
-        workspace: "write",
-        deniedPaths: [primaryDesign, nestedDesign, git],
-      },
-    };
-
-    const prepared = await prepareZsrPolicy(
-      {
-        executionId: "execution-host-parity-code",
-        actor: "agent-code",
-        cwd: workspace,
-        workspaceRoot: workspace,
-        territory,
-        additionalReadWriteRoots: [extra],
-      },
-      newTerritoryGeneration(),
-      { localHostParity: true },
+    const extra = path.join(temporaryRoot, "extra");
+    await Promise.all(
+      [primaryDesign, nestedDesign, git, extra].map((directory) =>
+        mkdir(directory, { recursive: true }),
+      ),
     );
+
+    const prepared = await prepare({
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      territory: territory(
+        workspace,
+        [primaryDesign, nestedDesign],
+        [primaryDesign, nestedDesign, git],
+      ),
+      additionalReadWriteRoots: [extra],
+    });
 
     expect(prepared.document.runtime.localHostParity).toBe(true);
     expect(prepared.document.filesystem.allowRead).toContain(
@@ -207,118 +149,169 @@ describe("ZSR policy builder", () => {
     expect(prepared.document.filesystem.denyRead).not.toContain(
       process.env.ZEROS_DATA_DIR,
     );
+    const database = path.join(process.env.ZEROS_DATA_DIR!, "zeros.db");
+    expect(prepared.document.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([
+        database,
+        `${database}-wal`,
+        `${database}-shm`,
+        `${database}-journal`,
+      ]),
+    );
+    expect(prepared.document.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([
+        prepared.paths.policy,
+        prepared.paths.commands,
+        prepared.paths.tools,
+      ]),
+    );
+    expect(Object.keys(prepared.paths)).not.toEqual(
+      expect.arrayContaining(["shadowGit", "networkBridge", "networkClientState"]),
+    );
+    expect((await stat(prepared.paths.root)).mode & 0o777).toBe(0o700);
+    expect((await stat(prepared.paths.policy)).mode & 0o777).toBe(0o600);
+    expect(
+      (await stat(prepared.paths.processIdentityMarker)).mode & 0o777,
+    ).toBe(0o400);
+    expect(await readFile(prepared.paths.processIdentityMarker, "utf8")).toBe(
+      `${prepared.document.generation}\n`,
+    );
+    expect(JSON.parse(await readFile(prepared.paths.policy, "utf8"))).toEqual(
+      prepared.document,
+    );
   });
 
-  it("inverts only repository writes for a host-parity design actor", async () => {
+  it("refuses a pre-existing hard-link alias to database authority", async () => {
+    const workspace = path.join(temporaryRoot, "authority-alias-workspace");
+    const database = path.join(process.env.ZEROS_DATA_DIR!, "zeros.db");
+    await Promise.all([
+      mkdir(workspace, { recursive: true }),
+      mkdir(path.dirname(database), { recursive: true }),
+    ]);
+    await writeFile(database, "authority\n");
+    await link(database, path.join(temporaryRoot, "database-alias"));
+
+    await expect(
+      prepare({ actor: "agent-code", cwd: workspace, workspaceRoot: workspace }),
+    ).rejects.toThrow(/engine authority.*hard-link/i);
+  });
+
+  it("refuses hard-link aliases to recovery seeds but ignores unrelated backups", async () => {
+    const workspace = path.join(temporaryRoot, "seed-alias-workspace");
+    const seedDirectory = path.join(
+      process.env.ZEROS_DATA_DIR!,
+      "worktrees",
+      "seed-key",
+    );
+    const seed = path.join(seedDirectory, "workspace.json");
+    await Promise.all([
+      mkdir(workspace, { recursive: true }),
+      mkdir(seedDirectory, { recursive: true }),
+    ]);
+    await writeFile(seed, '{"id":"ws_seed"}\n');
+    await link(seed, path.join(temporaryRoot, "workspace-seed-alias.json"));
+
+    await expect(
+      prepare({ actor: "agent-code", cwd: workspace, workspaceRoot: workspace }),
+    ).rejects.toThrow(/engine authority.*hard-link/i);
+
+    await rm(path.join(temporaryRoot, "workspace-seed-alias.json"));
+    await rm(seed);
+    const backup = path.join(seedDirectory, "notes.backup");
+    await writeFile(seed, '{"id":"ws_seed"}\n');
+    await writeFile(backup, "backup\n");
+    await link(backup, path.join(temporaryRoot, "notes-alias.backup"));
+    await expect(
+      prepare({ actor: "agent-code", cwd: workspace, workspaceRoot: workspace }),
+    ).resolves.toBeDefined();
+  });
+
+  it("makes Design authority app-wide and exactly inverse to code authority", async () => {
     const workspace = path.join(temporaryRoot, "workspace");
     const design = path.join(workspace, "Zeros Design");
+    const siblingWorkspace = path.join(temporaryRoot, "sibling-workspace");
+    const siblingDesign = path.join(siblingWorkspace, "Zeros Design");
     const git = path.join(workspace, ".git");
     const extra = path.join(temporaryRoot, "extra");
-    await Promise.all([
-      mkdir(design, { recursive: true }),
-      mkdir(git, { recursive: true }),
-      mkdir(extra, { recursive: true }),
-    ]);
-    const territory: AgentFilesystemTerritory = {
-      agentRole: "code",
-      workspaceRoot: workspace,
-      designDirectory: design,
-      protectedDesignDirectories: [design],
-      designRecognitionPaths: [],
-      writeCapabilities: { workspace: "write", deniedPaths: [design, git] },
-    };
-    const request = {
-      executionId: "execution-design-1",
+    await Promise.all(
+      [design, siblingDesign, git, extra].map((directory) =>
+        mkdir(directory, { recursive: true }),
+      ),
+    );
+    const base = {
       cwd: workspace,
       workspaceRoot: workspace,
-      territory,
-      // A design actor may still be handed code roots by a generic call site.
-      // They must arrive as read-only rather than failing the admission.
+      territory: territory(workspace, [design, siblingDesign], [design, git]),
       additionalReadWriteRoots: [extra],
+      protectedCodeDirectories: [siblingWorkspace],
       allowedLocalPorts: [5432],
       trustedLocalPorts: [3000],
     } as const;
-    const designPolicy = await prepareZsrPolicy(
-      { ...request, actor: "design-agent" },
-      newTerritoryGeneration(),
-      { localHostParity: true, localHostParityWriteIslands: [git] },
-    );
 
-    // Normal host authority remains available outside repository roots. The
-    // workspace and attached code roots are denied, with Design re-opened as
-    // the only writable islands inside them by the runtime compiler.
+    const designPolicy = await prepare(
+      { ...base, actor: "design-agent" },
+      { localHostParityWriteIslands: [git] },
+    );
     expect(designPolicy.document.filesystem.allowWrite).toEqual(
-      expect.arrayContaining([path.parse(workspace).root, design, git]),
+      expect.arrayContaining([
+        path.parse(workspace).root,
+        design,
+        siblingDesign,
+        git,
+      ]),
     );
     expect(designPolicy.document.filesystem.denyWrite).toEqual(
-      expect.arrayContaining([workspace, extra]),
+      expect.arrayContaining([workspace, siblingWorkspace, extra]),
     );
     expect(designPolicy.document.filesystem.denyWrite).not.toContain(design);
+    expect(designPolicy.document.filesystem.denyWrite).not.toContain(
+      siblingDesign,
+    );
     expect(designPolicy.document.filesystem.denyWrite).not.toContain(git);
+    expect(designPolicy.document.runtime.allowedLocalPorts).toEqual([3000, 5432]);
 
-    // Reading the whole machine, including code and Design, still works.
-    expect(designPolicy.document.filesystem.allowRead).toContain(
-      path.parse(workspace).root,
-    );
-    expect(designPolicy.document.filesystem.denyRead).not.toContain(
-      process.env.ZEROS_DATA_DIR,
-    );
-
-    // Live data keeps working: ports are untouched by the actor split.
-    expect(designPolicy.document.runtime.allowedLocalPorts).toEqual(
-      expect.arrayContaining([5432, 3000]),
-    );
-    expect(designPolicy.document.actor).toBe("design-agent");
-
-    // The same request as a code actor is the exact inverse on write only.
-    const codePolicy = await prepareZsrPolicy(
-      { ...request, executionId: "execution-design-2", actor: "agent-code" },
-      newTerritoryGeneration(),
-      { localHostParity: true },
-    );
-    expect(codePolicy.document.filesystem.allowWrite).toEqual(
-      expect.arrayContaining([path.parse(workspace).root]),
+    const codePolicy = await prepare({ ...base, actor: "agent-code" });
+    expect(codePolicy.document.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([design, siblingDesign]),
     );
     expect(codePolicy.document.filesystem.denyWrite).not.toContain(workspace);
-    expect(codePolicy.document.filesystem.allowRead).toContain(
-      path.parse(workspace).root,
+    expect(codePolicy.document.filesystem.denyWrite).not.toContain(
+      siblingWorkspace,
     );
   });
 
-  it("hides stable cloud-operator credentials from dev-channel code actors", async () => {
-    const workspace = path.join(temporaryRoot, "dev-workspace");
-    await mkdir(workspace, { recursive: true });
-    const previousDev = process.env.ZEROS_DEV;
-    process.env.ZEROS_DEV = "1";
-    try {
-      const prepared = await prepareZsrPolicy(
-        {
-          executionId: "execution-dev-operator-state",
-          actor: "agent-code",
-          cwd: workspace,
-          workspaceRoot: workspace,
-        },
-        newTerritoryGeneration(),
-      );
-      const operatorState = path.join(
-        homedir(),
-        ".zeros",
-        "cloud-workspace-validation",
-      );
-      expect(
-        prepared.document.filesystem.denyRead.some(
-          (root) =>
-            root === operatorState ||
-            operatorState.startsWith(`${root}${path.sep}`),
-        ),
-      ).toBe(true);
-    } finally {
-      if (previousDev === undefined) delete process.env.ZEROS_DEV;
-      else process.env.ZEROS_DEV = previousDev;
-    }
+  it("uses the same parity policy in cloud while hiding root-owned engine state", async () => {
+    const workspace = path.join(temporaryRoot, "cloud-workspace");
+    const design = path.join(workspace, "Zeros Design");
+    await mkdir(design, { recursive: true });
+
+    const prepared = await prepare(
+      {
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+        territory: territory(workspace, [design]),
+      },
+      { cloudWorker: { uid: 10_001, gid: 10_001 } },
+    );
+
+    expect(prepared.document.runtime).toMatchObject({
+      localHostParity: true,
+      cloudWorker: { version: 1, uid: 10_001, gid: 10_001 },
+    });
+    expect(prepared.document.filesystem.allowWrite).toContain(
+      path.parse(workspace).root,
+    );
+    expect(prepared.document.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([design, process.env.ZEROS_DATA_DIR!]),
+    );
+    expect(prepared.document.filesystem.denyRead).toContain(
+      process.env.ZEROS_DATA_DIR,
+    );
+    expect(prepared.document.runtime.deniedLocalPorts).toEqual([]);
   });
 
-  it("canonicalizes additional-root symlinks before granting them", async () => {
+  it("canonicalizes design-actor additional roots before denying them", async () => {
     const workspace = path.join(temporaryRoot, "workspace");
     const target = path.join(temporaryRoot, "target");
     const alias = path.join(temporaryRoot, "alias");
@@ -327,18 +320,15 @@ describe("ZSR policy builder", () => {
       mkdir(target, { recursive: true }),
     ]);
     await symlink(target, alias, "dir");
-    const prepared = await prepareZsrPolicy(
-      {
-        executionId: "execution-2",
-        actor: "repo-code-task",
-        cwd: workspace,
-        workspaceRoot: workspace,
-        additionalReadWriteRoots: [alias],
-      },
-      newTerritoryGeneration(),
-    );
-    expect(prepared.document.filesystem.allowWrite).toContain(target);
-    expect(prepared.document.filesystem.allowWrite).not.toContain(alias);
+
+    const prepared = await prepare({
+      actor: "design-agent",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      additionalReadWriteRoots: [alias],
+    });
+    expect(prepared.document.filesystem.denyWrite).toContain(target);
+    expect(prepared.document.filesystem.denyWrite).not.toContain(alias);
   });
 
   it("rejects file-shaped and unbounded additional write grants", async () => {
@@ -348,72 +338,40 @@ describe("ZSR policy builder", () => {
     await writeFile(file, "data\n");
 
     await expect(
-      prepareZsrPolicy(
-        {
-          executionId: "execution-file-root",
-          actor: "agent-code",
-          cwd: workspace,
-          workspaceRoot: workspace,
-          additionalReadWriteRoots: [file],
-        },
-        newTerritoryGeneration(),
-      ),
-    ).rejects.toThrow(/must be directories/);
-    await expect(
-      prepareZsrPolicy(
-        {
-          executionId: "execution-too-many-roots",
-          actor: "agent-code",
-          cwd: workspace,
-          workspaceRoot: workspace,
-          additionalReadWriteRoots: Array.from({ length: 33 }, (_, index) =>
-            path.join(temporaryRoot, `future-${index}`),
-          ),
-        },
-        newTerritoryGeneration(),
-      ),
-    ).rejects.toThrow(/at most 32/);
-  });
-
-  it("rejects write roots inside engine-private state", async () => {
-    const engineRoot = process.env.ZEROS_DATA_DIR!;
-    const workspace = path.join(engineRoot, "accidental-workspace");
-    await mkdir(workspace, { recursive: true });
-
-    await expect(
-      prepareZsrPolicy(
-        {
-          executionId: "execution-engine-overlap",
-          actor: "agent-code",
-          cwd: workspace,
-          workspaceRoot: workspace,
-        },
-        newTerritoryGeneration(),
-      ),
-    ).rejects.toThrow(/engine-private state/);
-  });
-
-  it("keeps engine state denied when an authorized root encloses it", async () => {
-    const workspace = path.join(temporaryRoot, "workspace");
-    await mkdir(workspace, { recursive: true });
-    const prepared = await prepareZsrPolicy(
-      {
-        executionId: "execution-broad-root",
+      prepare({
         actor: "agent-code",
         cwd: workspace,
         workspaceRoot: workspace,
-        additionalReadWriteRoots: [temporaryRoot],
-      },
-      newTerritoryGeneration(),
-    );
+        additionalReadWriteRoots: [file],
+      }),
+    ).rejects.toThrow(/must be directories/);
+    await expect(
+      prepare({
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+        additionalReadWriteRoots: Array.from({ length: 33 }, (_, index) =>
+          path.join(temporaryRoot, `future-${index}`),
+        ),
+      }),
+    ).rejects.toThrow(/at most 32/);
+  });
 
-    expect(prepared.document.filesystem.allowWrite).toContain(temporaryRoot);
+  it("keeps engine authority denied even when a requested root encloses it", async () => {
+    const workspace = path.join(temporaryRoot, "workspace");
+    await mkdir(workspace, { recursive: true });
+    const prepared = await prepare({
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      additionalReadWriteRoots: [temporaryRoot],
+    });
     expect(prepared.document.filesystem.denyWrite).toContain(
-      process.env.ZEROS_DATA_DIR,
+      path.join(process.env.ZEROS_DATA_DIR!, "zeros.db"),
     );
   });
 
-  it("rejects a territory resolved for a different workspace", async () => {
+  it("rejects a foreign territory and traversal-shaped execution id", async () => {
     const workspace = path.join(temporaryRoot, "workspace");
     const other = path.join(temporaryRoot, "other");
     const design = path.join(other, "Zeros Design");
@@ -421,86 +379,31 @@ describe("ZSR policy builder", () => {
       mkdir(workspace, { recursive: true }),
       mkdir(design, { recursive: true }),
     ]);
-    const territory: AgentFilesystemTerritory = {
-      agentRole: "code",
-      workspaceRoot: other,
-      designDirectory: design,
-      protectedDesignDirectories: [design],
-      designRecognitionPaths: [],
-      writeCapabilities: { workspace: "write", deniedPaths: [design] },
-    };
-
     await expect(
-      prepareZsrPolicy(
-        {
-          executionId: "execution-territory-mismatch",
-          actor: "agent-code",
-          cwd: workspace,
-          workspaceRoot: workspace,
-          territory,
-        },
-        newTerritoryGeneration(),
-      ),
-    ).rejects.toThrow(/different workspace/);
-  });
-
-  it("rejects execution ids that would alias the session directory", async () => {
-    const workspace = path.join(temporaryRoot, "workspace");
-    await mkdir(workspace, { recursive: true });
-    await expect(
-      prepareZsrPolicy(
-        {
-          executionId: "../execution",
-          actor: "agent-code",
-          cwd: workspace,
-          workspaceRoot: workspace,
-        },
-        newTerritoryGeneration(),
-      ),
-    ).rejects.toThrow(/invalid execution id/);
-  });
-
-  it("couples Linux Unix-socket admission to a root read allowlist", async () => {
-    const workspace = path.join(temporaryRoot, "workspace");
-    const generation = newTerritoryGeneration();
-    const socket = path.join(zsrNetworkRoot(generation), "services", "s0.sock");
-    await mkdir(workspace, { recursive: true });
-    const prepared = await prepareZsrPolicy(
-      {
-        executionId: "execution-unix",
+      prepare({
         actor: "agent-code",
         cwd: workspace,
         workspaceRoot: workspace,
-      },
-      generation,
-      { allowedUnixSockets: [socket] },
-    );
+        territory: territory(other, [design]),
+      }),
+    ).rejects.toThrow(/different workspace/);
 
-    expect(prepared.document.runtime.allowedUnixSockets).toEqual([socket]);
-    expect(prepared.document.filesystem.allowWrite).not.toContain(
-      prepared.paths.networkServices,
-    );
-    expect(prepared.document.filesystem.allowWrite).toContain(
-      prepared.paths.networkBridge,
-    );
-    expect(prepared.document.filesystem.allowWrite).toContain(
-      prepared.paths.networkClientState,
-    );
-    if (process.platform === "linux") {
-      expect(prepared.document.filesystem.denyRead).toContain(
-        path.parse(workspace).root,
-      );
-      expect(prepared.document.filesystem.allowRead).toEqual(
-        expect.arrayContaining([workspace, prepared.paths.home, socket]),
-      );
-    }
+    await expect(
+      prepare({
+        executionId: "../execution",
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+      }),
+    ).rejects.toThrow(/invalid execution id/);
   });
 
-  it("canonicalizes an admitted socket when its runtime cannot realpath the socket vnode", async () => {
+  it("admits only private physical Unix sockets without private-network machinery", async () => {
     const workspace = path.join(temporaryRoot, "workspace");
     const generation = newTerritoryGeneration();
     const networkRoot = zsrNetworkRoot(generation);
     const socket = path.join(networkRoot, "services", "s0.sock");
+    cleanupRoots.add(networkRoot);
     await Promise.all([
       mkdir(workspace, { recursive: true }),
       mkdir(path.dirname(socket), { recursive: true, mode: 0o700 }),
@@ -514,7 +417,7 @@ describe("ZSR policy builder", () => {
     try {
       const prepared = await prepareZsrPolicy(
         {
-          executionId: "execution-unix-runtime",
+          executionId: "unix-socket",
           actor: "agent-code",
           cwd: workspace,
           workspaceRoot: workspace,
@@ -522,11 +425,39 @@ describe("ZSR policy builder", () => {
         generation,
         { allowedUnixSockets: [socket] },
       );
+      cleanupRoots.add(prepared.paths.root);
       expect(prepared.document.runtime.allowedUnixSockets).toEqual([socket]);
+      expect(Object.keys(prepared.paths)).not.toEqual(
+        expect.arrayContaining(["networkBridge", "networkClientState"]),
+      );
     } finally {
       unsupportedSocketRealpaths.delete(socket);
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      await rm(networkRoot, { recursive: true, force: true });
     }
+  });
+
+  it("records exact embedded-container state roots for descriptor validation", async () => {
+    const workspace = path.join(temporaryRoot, "container-workspace");
+    await mkdir(workspace, { recursive: true });
+    const prepared = await prepare({
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      containerWorker: {
+        runtime: "podman",
+        backend: "embedded-linux",
+        executable: process.execPath,
+      },
+    });
+    expect(prepared.paths.containerState).toBeDefined();
+    expect(prepared.document.filesystem.allowRead).toContain(
+      prepared.paths.containerState,
+    );
+    expect(prepared.document.filesystem.allowWrite).toContain(
+      prepared.paths.containerState,
+    );
+    expect(prepared.document.runtime.allowedUnixSockets).toContain(
+      path.join(prepared.paths.containerState!, "podman.sock"),
+    );
   });
 });

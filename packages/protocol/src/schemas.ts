@@ -30,7 +30,6 @@ export const KNOWN_MESSAGE_TYPES = [
   "GITHUB_CREDENTIAL_CHANGED",
   "ENGINE_ERROR",
   "AGENT_LIST_AGENTS",
-  "AGENT_PREFLIGHT",
   "AGENT_NEW_SESSION",
   "AGENT_OPEN_BOUNDARY_PORT",
   "AGENT_INIT_AGENT",
@@ -53,7 +52,6 @@ export const KNOWN_MESSAGE_TYPES = [
   "AGENT_VALIDATE_KEY",
   "AGENT_GENERATE_TITLE",
   "AGENT_AGENTS_LIST",
-  "AGENT_PREFLIGHTED",
   "AGENT_KEY_VALIDATED",
   "AGENT_TITLE_GENERATED",
   "AGENT_SESSION_CREATED",
@@ -162,7 +160,6 @@ const MAX_SELECTED_OPTIONS_PER_ANSWER = 256;
 const MAX_QUESTION_FREE_TEXT_CODE_UNITS = 1024 * 1024;
 const PORTABLE_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const AGENT_ID_REQUIRED_CLIENT_TYPES = new Set([
-  "AGENT_PREFLIGHT",
   "AGENT_NEW_SESSION",
   "AGENT_OPEN_BOUNDARY_PORT",
   "AGENT_INIT_AGENT",
@@ -340,16 +337,6 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       if (env.workspaceId !== undefined && !isNonEmptyStr(env.workspaceId))
         bad("workspaceId");
       if (!isOptionalAgentEnv(env.env)) bad("env");
-      if (env.cliBinary !== undefined && !isNonEmptyStr(env.cliBinary))
-        bad("cliBinary");
-      break;
-    case "AGENT_PREFLIGHT":
-      if (!isNonEmptyStr(env.agentId)) bad("agentId");
-      if (!isNonEmptyStr(env.cwd) && !isNonEmptyStr(env.workspaceId))
-        bad("cwd/workspaceId");
-      if (env.cwd !== undefined && !isNonEmptyStr(env.cwd)) bad("cwd");
-      if (env.workspaceId !== undefined && !isNonEmptyStr(env.workspaceId))
-        bad("workspaceId");
       if (env.cliBinary !== undefined && !isNonEmptyStr(env.cliBinary))
         bad("cliBinary");
       break;

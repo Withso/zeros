@@ -18,8 +18,6 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-import { prepareZsrCgroupHierarchy } from "./prepare-zsr-cgroups.mjs";
-
 const MARKER = "/etc/zeros/cloud-worker.json";
 const BUILD = "/etc/zeros/image-build.json";
 const ENGINE = "/opt/zeros";
@@ -31,13 +29,6 @@ const ADMISSION_PROOF = path.join(
 );
 const ENGINE_LOCK = path.join(ADMISSION_DIRECTORY, "engine.lock");
 const LOCKED_ARGUMENT = "--engine-lock-held";
-const EXPECTED_CGROUP_PARENT = "/sys/fs/cgroup/zeros-agents";
-const EXPECTED_AGENT_RESOURCES = {
-  memoryBytes: 3 * 1024 * 1024 * 1024,
-  cpuQuotaMicros: 200_000,
-  cpuPeriodMicros: 100_000,
-  processes: 2_048,
-};
 
 function sha256File(file) {
   return createHash("sha256").update(readFileSync(file)).digest("hex");
@@ -236,7 +227,7 @@ if (process.argv[2] !== LOCKED_ARGUMENT) {
     {
       encoding: "utf8",
       // The locked child itself permits a 180s live qualification after image
-      // tree/cgroup checks. Keep the outer lock owner bounded but leave enough
+      // tree and tenant-limit checks. Keep the outer lock owner bounded but leave enough
       // headroom that it cannot preempt a valid inner timeout at the boundary.
       timeout: 300_000,
       maxBuffer: MAX_OUTPUT,
@@ -291,7 +282,7 @@ const helperTrust = Object.fromEntries(
     typeof file === "string" &&
       rootControlled(
         file,
-        !["supervisor", "networkBridge", "containerWorker"].includes(name),
+        name !== "supervisor",
       ),
   ]),
 );
@@ -321,23 +312,8 @@ const deploymentTrust = {
     "/usr/local/lib/zeros/attest-cloud-worker.mjs",
     true,
   ),
-  cgroupPreparer: rootControlled(
-    "/usr/local/lib/zeros/prepare-zsr-cgroups.mjs",
-    true,
-  ),
   admissionDirectory: prepareAdmissionDirectory(),
 };
-let cgroupHierarchy = null;
-let cgroupHierarchyError = null;
-try {
-  if (!Object.values(deploymentTrust).every(Boolean)) {
-    throw new Error("deployment trust failed before cgroup preparation");
-  }
-  cgroupHierarchy = prepareZsrCgroupHierarchy(MARKER);
-} catch (error) {
-  cgroupHierarchyError =
-    error instanceof Error ? error.message.slice(0, 1_000) : String(error);
-}
 const cgroupRelative =
   readOptional("/proc/self/cgroup")
     ?.split("\n")
@@ -360,23 +336,15 @@ const finiteResources =
   resources.pidsMax !== null &&
   resources.pidsMax !== "max";
 
-const qualificationResult = cgroupHierarchy
-  ? run(
-      "/usr/local/bin/node",
-      [
-        path.join(ENGINE, "scripts/zsr-qualification/run.mjs"),
-        "--cloud-worker",
-        "--require-secure",
-      ],
-      180_000,
-      { ZEROS_ZSR_CGROUP_PARENT: marker.cgroupParent },
-    )
-  : {
-      status: 1,
-      stdout: "",
-      stderr: cgroupHierarchyError ?? "cgroup hierarchy is unavailable",
-      error: cgroupHierarchyError ?? undefined,
-    };
+const qualificationResult = run(
+  "/usr/local/bin/node",
+  [
+    path.join(ENGINE, "scripts/zsr-qualification/run.mjs"),
+    "--cloud-worker",
+    "--require-secure",
+  ],
+  180_000,
+);
 let qualification = null;
 try {
   qualification = JSON.parse(qualificationResult.stdout);
@@ -395,24 +363,12 @@ const report = {
     marker.backend === "cloud-worker" &&
     marker.uid === 10001 &&
     marker.gid === 10001 &&
-    marker.cgroupParent === EXPECTED_CGROUP_PARENT &&
-    Object.keys(EXPECTED_AGENT_RESOURCES).every(
-      (name) => marker.resources?.[name] === EXPECTED_AGENT_RESOURCES[name],
-    ) &&
-    cgroupHierarchy?.resources?.memoryMax ===
-      String(EXPECTED_AGENT_RESOURCES.memoryBytes) &&
-    cgroupHierarchy?.resources?.cpuMax ===
-      `${EXPECTED_AGENT_RESOURCES.cpuQuotaMicros} ${EXPECTED_AGENT_RESOURCES.cpuPeriodMicros}` &&
-    cgroupHierarchy?.resources?.pidsMax ===
-      String(EXPECTED_AGENT_RESOURCES.processes) &&
-    cgroupHierarchy?.resources?.swapMax === "0" &&
     build.version === 1 &&
     build.profile === marker.profile &&
     ["x64", "arm64"].includes(process.arch) &&
-    Object.values(helperTrust).length === 6 &&
+    Object.values(helperTrust).length === 4 &&
     Object.values(helperTrust).every(Boolean) &&
     Object.values(deploymentTrust).every(Boolean) &&
-    cgroupHierarchy !== null &&
     finiteResources &&
     statusField("Seccomp") === "2" &&
     ["mnt", "pid", "net", "ipc", "uts", "cgroup", "user"].every(
@@ -451,7 +407,6 @@ const report = {
     versions: {
       node: version(marker.toolchain.node),
       bwrap: version(marker.toolchain.bwrap),
-      socat: version(marker.toolchain.socat, ["-V"]),
       setpriv: version(marker.toolchain.setpriv),
       podman: version("/usr/bin/podman"),
       git: version("/usr/bin/git"),
@@ -471,8 +426,6 @@ const report = {
   resources: {
     ...resources,
     finite: finiteResources,
-    delegated: cgroupHierarchy,
-    delegatedError: cgroupHierarchyError,
   },
   qualification,
   qualificationError:

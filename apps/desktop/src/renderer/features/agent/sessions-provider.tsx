@@ -124,6 +124,7 @@ import {
   recoveryLoadLocator,
   resumeFailureInvalidatesBinding,
   sendAdmissionPark,
+  sharedAdmissionFlightAction,
   shouldQueuePrompt,
   statusForFailure,
   takePrebindDirty,
@@ -158,6 +159,7 @@ import {
   closeActivityForSession,
   closeRouteForSession,
 } from "./session-close-lifecycle";
+import { tryRestoreLiveChatDraft } from "./composer-live-drafts";
 
 // 2026-06-09: reconcile now runs on EVERY bind (new session, respawn, resume).
 // It used to run at most once per chat to avoid clobbering a mode the user
@@ -447,6 +449,10 @@ export function AgentSessionsProvider({
   // ("lifecycle-superseded") and started over. Only a DIFFERENT explicit
   // binding may supersede a running load.
   const loadFlightKeysRef = useRef(new Map<string, string>());
+  // Whether the registered load flight is only probing for an already-live
+  // execution. A real focus/send may share the RPC, but must retry admission
+  // if that probe settles without a route.
+  const loadFlightAdoptOnlyRef = useRef(new Map<string, boolean>());
 
   // Chats whose disk hydrate could NOT be trusted: the bridge was absent /
   // mid-reconnect (an engine respawn, a cold boot racing the socket, a dev
@@ -1129,6 +1135,7 @@ export function AgentSessionsProvider({
   const ensureSessionRef = useRef<SessionsActions["ensureSession"] | null>(
     null,
   );
+  const loadIntoChatRef = useRef<SessionsActions["loadIntoChat"] | null>(null);
   /** Self-ref so sendPrompt's turn-completion flush can re-invoke it for the
    *  next queued send (a useCallback can't reference itself in its body). */
   const sendPromptRef = useRef<SessionsActions["sendPrompt"] | null>(null);
@@ -1352,12 +1359,15 @@ export function AgentSessionsProvider({
           (existingDraft.text.trim().length === 0 &&
             existingDraft.attachments.length === 0);
         if (draftIsEmpty) {
-          workspace.dispatch({
-            type: "SET_CHAT_DRAFT",
-            chatId,
-            draft: { text: restorable, attachments: [], json: null },
-          });
-          restored = true;
+          const draft = { text: restorable, attachments: [], json: null };
+          if (tryRestoreLiveChatDraft(chatId, draft)) {
+            workspace.dispatch({
+              type: "SET_CHAT_DRAFT",
+              chatId,
+              draft,
+            });
+            restored = true;
+          }
         }
       }
       const n = queued.length;
@@ -1380,7 +1390,7 @@ export function AgentSessionsProvider({
     async (chatId, agentId, options) => {
       if (!bridge) return;
       const store = getStore();
-      const existing = store.sessions[chatId];
+      let existing = store.sessions[chatId];
 
       // Already wired up and healthy — nothing to do unless the caller
       // forces a rebuild. `reconnecting` and `auth-required` count as
@@ -1401,7 +1411,40 @@ export function AgentSessionsProvider({
       // promise instead. Force still bypasses.
       if (!options?.force) {
         const inflight = ensureInFlightRef.current.get(chatId);
-        if (inflight) return inflight;
+        if (inflight) {
+          const activeAdoptOnly =
+            loadFlightAdoptOnlyRef.current.get(chatId) === true;
+          await inflight;
+          existing = getStore().sessions[chatId];
+          if (
+            sharedAdmissionFlightAction({
+              activeAdoptOnly,
+              requestedAdoptOnly: false,
+              hasLiveSession: Boolean(
+                existing?.executionId ?? existing?.sessionId,
+              ),
+            }) === "reuse"
+          ) {
+            return;
+          }
+          // A send that arrived behind a lazy probe must resume the durable
+          // provider conversation for real before falling back to a fresh
+          // session. The probe's miss intentionally kept that binding intact.
+          if (existing?.providerBinding && loadIntoChatRef.current) {
+            const adopted = await loadIntoChatRef.current(
+              chatId,
+              agentId,
+              existing.providerBinding,
+              {
+                agentName: options?.agentName ?? existing.agentName ?? agentId,
+                cwd: options?.cwd ?? existing.cwd ?? undefined,
+                env: options?.env,
+              },
+            );
+            if (adopted) return;
+            existing = getStore().sessions[chatId];
+          }
+        }
       }
 
       // Resolve cwd ONCE so the slot and the bridge call agree. Earlier
@@ -1456,16 +1499,6 @@ export function AgentSessionsProvider({
             resolvedCwd,
           );
           if (bindCancelled()) return null;
-
-          // No preflight here. AGENT_PREFLIGHT is a real boundary prepare +
-          // proven teardown (gateway.preflightSessionUncached) — the same
-          // discover/policy/private-git/canary work the admission below runs
-          // again, and awaiting it made every cold start pay admission twice
-          // back to back. Its only outputs on this path were the boundary pill
-          // and an early remediation string, and AGENT_NEW_SESSION returns the
-          // real `session.boundary` (patched below) while a refused admission
-          // returns AGENT_ERROR carrying the gateway's own advice. Enforcement
-          // is unchanged: it has always lived in the admission, never here.
 
           // Merge env from Settings → Providers (auth method +
           // gateway URL) with any explicit env the caller supplied.
@@ -3993,6 +4026,8 @@ export function AgentSessionsProvider({
       // only an explicit request for a DIFFERENT binding may replace it.
       const inflightAdmission = ensureInFlightRef.current.get(chatId);
       if (inflightAdmission) {
+        const activeAdoptOnly =
+          loadFlightAdoptOnlyRef.current.get(chatId) === true;
         const activeKey = loadFlightKeysRef.current.get(chatId);
         const requestedKey = providerBinding
           ? `${agentId}\0${
@@ -4003,7 +4038,18 @@ export function AgentSessionsProvider({
           : null;
         if (requestedKey === null || requestedKey === activeKey) {
           await inflightAdmission;
-          return true;
+          const settled = getStore().sessions[chatId];
+          if (
+            sharedAdmissionFlightAction({
+              activeAdoptOnly,
+              requestedAdoptOnly: options?.adoptOnly === true,
+              hasLiveSession: Boolean(
+                settled?.executionId ?? settled?.sessionId,
+              ),
+            }) === "reuse"
+          ) {
+            return true;
+          }
         }
       }
       const bindGeneration = cancelGeneration(
@@ -4054,6 +4100,10 @@ export function AgentSessionsProvider({
           providerBinding?.resumeId ?? providerBinding?.legacySessionId ?? ""
         }`,
       );
+      loadFlightAdoptOnlyRef.current.set(
+        chatId,
+        options?.adoptOnly === true,
+      );
       try {
         const cliBinaryOverride = getProviderBinaryOverride(agentId);
         const resumeWorkspaceId = await resolveSpawnWorkspaceId(
@@ -4061,10 +4111,6 @@ export function AgentSessionsProvider({
           resolvedCwd,
         );
         if (bindCancelled()) return true;
-        // No preflight here either — same reason as ensureSession's create
-        // path. Resume paid the identical duplicate admission, and
-        // AGENT_LOAD_SESSION returns the real `boundary` for the pill.
-
         // Resume must honour the same Provider prefs as new sessions:
         // env injection for API-key mode + binary-path override for the
         // /Settings → Advanced disclosure.
@@ -4322,6 +4368,7 @@ export function AgentSessionsProvider({
         if (ensureInFlightRef.current.get(chatId) === loadFlight) {
           ensureInFlightRef.current.delete(chatId);
           loadFlightKeysRef.current.delete(chatId);
+          loadFlightAdoptOnlyRef.current.delete(chatId);
         }
         evictUnretainedTranscripts();
       }
@@ -4337,6 +4384,15 @@ export function AgentSessionsProvider({
       evictUnretainedTranscripts,
     ],
   );
+
+  useEffect(() => {
+    loadIntoChatRef.current = loadIntoChat;
+    return () => {
+      if (loadIntoChatRef.current === loadIntoChat) {
+        loadIntoChatRef.current = null;
+      }
+    };
+  }, [loadIntoChat]);
 
   const refreshProviderCapabilities = useCallback<
     SessionsActions["refreshProviderCapabilities"]
@@ -4498,6 +4554,7 @@ export function AgentSessionsProvider({
     hydrateInFlightRef.current.clear();
     reconcileInFlightRef.current.clear();
     capabilityRefreshInFlightRef.current.clear();
+    loadFlightAdoptOnlyRef.current.clear();
     persistedMessageRefsRef.current.clear();
     // Note: we deliberately do NOT clear the disk transcript here.
     // disposeAll is called on engine respawn (in-place project swap),
@@ -4521,6 +4578,7 @@ export function AgentSessionsProvider({
       // identity checks, while a fast History reopen may start a fresh bind.
       ensureInFlightRef.current.delete(chatId);
       loadFlightKeysRef.current.delete(chatId);
+      loadFlightAdoptOnlyRef.current.delete(chatId);
       sendQueueRef.current.delete(chatId);
       queueHeldRef.current.delete(chatId);
       flushBubbleRef.current.delete(chatId);

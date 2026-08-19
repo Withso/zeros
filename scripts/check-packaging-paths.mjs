@@ -54,13 +54,11 @@ const CODEX_STAGED = [
 ];
 const ZSR_STAGED = [
   "binaries/zsr-supervisor.mjs",
-  "binaries/zsr-network-bridge.mjs",
   "binaries/zsr-container-worker.mjs",
   "binaries/zsr-orbstack-container-host.mjs",
   "binaries/zsr-orbstack-cloud-init.yaml",
   "binaries/zsr-macos-process-domain",
   "binaries/zsr-git-dispatch",
-  "binaries/zsr-macos-port-bind.dylib",
 ];
 const LEGAL_RESOURCES = [
   "LICENSE",
@@ -252,22 +250,15 @@ for (const staged of ZSR_STAGED) {
 if (
   !/zsr-macos-process-domain\.c/.test(zsrBuildSource) ||
   !/zsr-git-dispatch\.c/.test(zsrBuildSource) ||
-  !/zsr-macos-port-bind\.c/.test(zsrBuildSource) ||
-  !/-dynamiclib/.test(zsrBuildSource) ||
   !/\/usr\/bin\/xcrun/.test(zsrBuildSource)
 ) {
   errs.push(
-    "build-zsr-supervisor must compile the reviewed Darwin process-domain and bind-port C sources with the Apple toolchain",
+    "build-zsr-supervisor must compile the reviewed Darwin process-domain and Git-dispatch C sources with the Apple toolchain",
   );
 }
 if (!/ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER/.test(sidecarSource)) {
   errs.push(
     "the Electron sidecar must pass the packaged macOS process-domain helper to the engine",
-  );
-}
-if (!/ZEROS_ZSR_MACOS_PORT_BIND_LIBRARY/.test(sidecarSource)) {
-  errs.push(
-    "the Electron sidecar must pass the packaged macOS bind-port interposer to the engine",
   );
 }
 if (!/ZEROS_ZSR_GIT_DISPATCH_BINARY/.test(sidecarSource)) {

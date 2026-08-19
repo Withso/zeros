@@ -117,7 +117,7 @@ describe("Create PR direct action", () => {
 
     expect(stage).toHaveBeenCalledWith({
       workspaceId: "ws-1",
-      paths: [".", ":(exclude).zeros"],
+      paths: ["notes.md", "src/a.ts"],
     });
     expect(commit).toHaveBeenCalledOnce();
     expect(commit.mock.calls[0]![0]!.message).toMatch(/^Update notes.md and a.ts/);
@@ -127,6 +127,37 @@ describe("Create PR direct action", () => {
       subject: "Update notes.md and a.ts",
     });
     expect(outcome.result).toEqual({ number: 7 });
+  });
+
+  it("stages the exact visible paths accepted by the native Git bridge", async () => {
+    const stage = vi.fn(
+      async ({ paths }: { workspaceId: string; paths: string[] }) => {
+        if (paths.some((path) => path === "." || path.startsWith(":("))) {
+          throw new Error("pathspec programs are not exact repository paths");
+        }
+      },
+    );
+
+    await expect(
+      createPullRequestForWorkspace(
+        deps({
+          changeCounts: async () => ({ uncommitted: 2 }),
+          status: async () => ({
+            ...CLEAN_STATUS,
+            unstaged: [{ path: "deleted.ts" }],
+            untracked: ["weird[1].txt"],
+          }),
+          stage,
+        }),
+        INPUT,
+      ),
+    ).resolves.toMatchObject({
+      committed: { files: 2 },
+    });
+    expect(stage).toHaveBeenCalledWith({
+      workspaceId: "ws-1",
+      paths: ["deleted.ts", "weird[1].txt"],
+    });
   });
 
   // A branch with NOTHING committed is the case the old refusal made impossible:

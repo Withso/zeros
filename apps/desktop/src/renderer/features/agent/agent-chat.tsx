@@ -102,7 +102,11 @@ import {
   toast,
 } from "@/renderer/shared/ui/primitives/elements";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
-import { getLiveChatDraft, setLiveChatDraft } from "./composer-live-drafts";
+import {
+  getLiveChatDraft,
+  registerLiveChatDraftRestorer,
+  setLiveChatDraft,
+} from "./composer-live-drafts";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
 import {
   composerOwnsFocus,
@@ -2591,6 +2595,29 @@ export function AgentChat({
       draft: { text, attachments: atts, json },
     });
   }, [chatId, dispatch]);
+  useEffect(() => {
+    if (!chatId) return;
+    return registerLiveChatDraftRestorer(chatId, (draft) => {
+      // A queued-message edit or newer typing owns the editor now. The live
+      // draft coordinator also checks its keystroke-fresh mirror, while this
+      // final editor read covers imperative content that deliberately paused
+      // live persistence.
+      if (editingQueuedRef.current) return false;
+      const current = serializeComposerState();
+      if (current && !current.isEmpty) return false;
+      setComposerContent({
+        json:
+          draft.json ?? (draft.text.trim() ? textToDoc(draft.text) : null),
+        attachments: draft.attachments,
+      });
+      composerLiveRef.current = {
+        text: draft.text,
+        attachments: draft.attachments,
+        json: draft.json ?? null,
+      };
+      return true;
+    });
+  }, [chatId, serializeComposerState, setComposerContent]);
   useEffect(() => {
     return () => {
       if (!chatId) return;

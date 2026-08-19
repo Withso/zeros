@@ -128,8 +128,7 @@ describe("spawnSubprocessTransport — host cwd safety", () => {
           HOME: "/user/home",
           // Node fetch/http/https do not consume HTTPS_PROXY unless the
           // runtime's built-in environment proxy support is enabled at boot.
-          // Without this, Cursor opens a direct socket that Seatbelt denies
-          // before SRT can inject its masked credential.
+          // Without this, Cursor ignores the user's configured HTTPS proxy.
           NODE_USE_ENV_PROXY: "1",
           SAFE: "visible",
         },

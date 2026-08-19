@@ -8,10 +8,15 @@ import type {
 } from "@zeros/protocol/containment";
 
 import type { AgentFilesystemTerritory } from "../types";
-import type { AdmissionPriority } from "./admission-gate";
-import type { ShadowGitPromotionResult } from "./shadow-git";
 
-export type { AdmissionPriority };
+/** Cancellation is not a containment failure: it means the owning UI/session
+ * disappeared while preparation was still at a safe checkpoint. */
+export class AdmissionCancelledError extends Error {
+  constructor(message = "execution boundary admission was cancelled") {
+    super(message);
+    this.name = "AdmissionCancelledError";
+  }
+}
 
 /** Opaque generation carried by every broker request. A prepared boundary
  * mints a fresh value even when the path set is unchanged, so credentials
@@ -23,26 +28,13 @@ export type TerritoryGeneration = string & {
 export interface BoundaryRequest {
   executionId: string;
   actor: ExecutionBoundaryActor;
-  /** Scheduling hint only — it never reaches the policy document and cannot
-   * change what this boundary is allowed to do. Engine-initiated admissions
-   * (chat titles, provider probes, session listing, diagnostics) mark
-   * themselves `background` so they queue behind, and never starve, an
-   * admission a person is waiting on. Defaults to `interactive`. */
-  admissionPriority?: AdmissionPriority;
   /** Provider namespace for purpose-specific persistent state. */
   providerId?: string;
   /** Opaque native provider binding for an exact legacy-history import. This
    * is trusted routing metadata, never interpreted as a filesystem path. */
   providerResumeId?: string;
-  /** Stable durable-state scope for provider HOME projections that outlive a
-   * throwaway working root (version/auth probes run in fresh temp dirs). The
-   * default scope is the canonical workspace root; a request whose root is
-   * ephemeral must pin one so each run does not mint — and then orphan — a
-   * full private copy of the provider's host state. Opaque key, never a path. */
-  providerStateScope?: string;
-  /** Trusted provider discovery inputs captured before HOME is virtualized.
-   * Only HOME/XDG/provider config path variables belong here; this object is
-   * never copied wholesale into the child or persisted. */
+  /** Trusted provider path inputs used to report the effective host HOME.
+   * This object is never copied wholesale into the child or persisted. */
   providerStateEnv?: Readonly<Record<string, string>>;
   cwd: string;
   workspaceRoot: string;
@@ -50,10 +42,14 @@ export interface BoundaryRequest {
   /** User-authorized roots from the equivalent normal workspace posture.
    * The policy builder subtracts protected authority after adding these. */
   additionalReadWriteRoots?: readonly string[];
-  /** Read-only toolchain/configuration roots required by the normal workspace
-   * baseline. This becomes material when Linux must hide the ambient root to
-   * admit a private Unix façade. */
-  additionalReadOnlyRoots?: readonly string[];
+  /** App-wide physical repository owners whose code territory a Design actor
+   * must not write. Registered owners are deny-only: this never grants a
+   * sibling checkout to a code actor or makes it an attached directory. */
+  protectedCodeDirectories?: readonly string[];
+  /** Canonical registered repository owners where a code actor may ask the
+   * trusted engine to perform a tree-level Git integration. This never grants
+   * a path-naming checkout/restore; those stay inside the actor fence. */
+  gitIntegrationRoots?: readonly string[];
   /** Trusted loopback services intentionally projected to this execution
    * (for example the scoped Zeros MCP gateway). All other Zeros control ports
    * remain denied even when local binding is enabled for dev servers. */
@@ -61,9 +57,6 @@ export interface BoundaryRequest {
   /** Engine-minted, method-scoped loopback façades such as the dedicated MCP
    * gateway. Only these may carve a port out of Zeros' reserved control range. */
   trustedLocalPorts?: readonly number[];
-  /** Trusted, exact host endpoints that may be leased after admission. Their
-   * random façade ports are the only endpoints exposed to the child. */
-  localServices?: readonly LocalServiceCapability[];
   /** Optional generation-private OCI engine. It runs as an unprivileged
    * sibling inside the same ZSR namespaces, never as a host-daemon tunnel. */
   containerWorker?: ContainerWorkerRequest;
@@ -82,8 +75,8 @@ export interface BoundaryRequest {
    * restriction instead of silently pointing that CLI at a dead socket. */
   containerWorkflowExpected?: boolean;
   /** Canonical Git workspace owners nested in user-authorized writable roots
-   * whose Design territory is part of this generation. Each receives its own
-   * private shadow repository and broker; raw canonical metadata stays absent. */
+   * whose Design territory is part of this generation. Tree-level integrations
+   * may use the trusted engine broker; path-level Git stays native. */
   additionalGitWorkspaceRoots?: readonly string[];
   backendHint?: ExecutionBoundaryBackend;
 }
@@ -123,20 +116,12 @@ export interface RepoTaskBoundaryRequest {
   cwd: string;
   workspaceRoot: string;
   repoRoot: string;
-  /** Complete task environment, used only to discover exact local services and
-   * read-only toolchain roots before HOME/network isolation is compiled. */
+  /** Complete task environment, used to preserve normal task behavior and
+   * discover an optional dedicated container worker. */
   env?: Readonly<Record<string, string>>;
   /** PATH/login-shell discovery uses the normal contained filesystem/network
    * baseline but must not provision local-service or container capabilities. */
   serviceCapabilities?: "full" | "none";
-  /** Scheduling class for the admission gate. Omitting it used to default the
-   * whole repo-task family — including the engine's own boot login-shell PATH
-   * probe and every git hook — to `interactive`, so background work could not
-   * be jumped by a real user session: exactly the head-of-line blocking the
-   * gate's priority classes exist to prevent. Callers now say which they are;
-   * user-clicked Setup/Run stay interactive. Never reaches a policy document
-   * (see BoundaryPrepareRequest.admissionPriority). */
-  admissionPriority?: "interactive" | "background";
 }
 
 export type RepoTaskBoundaryFactory = (
@@ -219,83 +204,6 @@ export interface PortDiscoveryStatus {
   readonly issue?: PortDiscoveryIssue;
 }
 
-export type LocalServiceKind =
-  | "database"
-  | "docker"
-  | "podman"
-  | "nix"
-  | "ssh-agent"
-  | "gpg-agent"
-  | "language-daemon"
-  | "other";
-
-export type LocalTcpServiceAdapter =
-  | "environment-only"
-  | "generic"
-  | "postgres"
-  | "mysql"
-  | "redis"
-  | "docker-tcp"
-  | "podman-tcp";
-
-export type LocalUnixServiceAdapter =
-  | "environment-only"
-  | "generic-unix"
-  | "docker-unix"
-  | "podman-unix"
-  | "ssh-agent"
-  | "gpg-agent"
-  | "nix-daemon";
-
-export interface LocalTcpServiceCapability {
-  serviceId: string;
-  kind: LocalServiceKind;
-  transport: "tcp";
-  /** Exact loopback family; never a wildcard or hostname subject to DNS. */
-  targetHost: "127.0.0.1" | "::1";
-  targetPort: number;
-  adapter: LocalTcpServiceAdapter;
-  /** Trusted environment templates applied only while leased. `{host}` and
-   * `{port}` resolve to the façade, never the raw host endpoint. */
-  environment?: Readonly<Record<string, string>>;
-}
-
-export interface LocalUnixServiceCapability {
-  serviceId: string;
-  kind: LocalServiceKind;
-  transport: "unix";
-  /** Exact physical host socket selected by trusted admission. The broker
-   * snapshots its device/inode and refuses a later pathname replacement. */
-  targetPath: string;
-  adapter: LocalUnixServiceAdapter;
-  /** Canonical host GnuPG home used only by the trusted broker to snapshot
-   * public key/configuration state. Required for `gpg-agent`; forbidden for
-   * other adapters. Private keys, revocation certificates, and host sockets
-   * are never projected. */
-  sourceHome?: string;
-  /** Trusted templates may use `{host}`, `{port}`, and `{socket}`. Docker and
-   * Podman intentionally receive TCP façades; SSH/Nix receive a private Unix
-   * façade because their protocols require a pathname socket. */
-  environment?: Readonly<Record<string, string>>;
-}
-
-export type LocalServiceCapability =
-  | LocalTcpServiceCapability
-  | LocalUnixServiceCapability;
-
-export interface ServiceRequest {
-  kind: LocalServiceKind;
-  serviceId: string;
-}
-
-export interface ServiceLease {
-  readonly leaseId: string;
-  readonly generation: TerritoryGeneration;
-  /** Boundary-private connection metadata, never a raw host control socket. */
-  readonly env: Readonly<Record<string, string>>;
-  revoke(): Promise<void>;
-}
-
 export interface BoundaryProbeResult {
   backend: ExecutionBoundaryBackend;
   available: boolean;
@@ -311,19 +219,7 @@ export interface CloudWorkerIdentity {
   readonly gid: number;
 }
 
-export interface CloudWorkerRuntimeConfiguration extends CloudWorkerIdentity {
-  /** Root-controlled delegated cgroup-v2 parent. Each execution receives a
-   * distinct child scope before any untrusted byte starts. */
-  readonly cgroupParent: string;
-  readonly resources: CloudWorkerResourceLimits;
-}
-
-export interface CloudWorkerResourceLimits {
-  readonly memoryBytes: number;
-  readonly cpuQuotaMicros: number;
-  readonly cpuPeriodMicros: number;
-  readonly processes: number;
-}
+export type CloudWorkerRuntimeConfiguration = CloudWorkerIdentity;
 
 /** Root-controlled executables and scripts baked into a qualified cloud
  * image. These paths are deployment authority and therefore never come from
@@ -331,42 +227,20 @@ export interface CloudWorkerResourceLimits {
 export interface CloudWorkerToolchain {
   readonly node: string;
   readonly supervisor: string;
-  readonly networkBridge: string;
-  readonly containerWorker: string;
   readonly bwrap: string;
-  readonly socat: string;
   readonly setpriv: string;
 }
 
 export interface PreparedBoundary {
   readonly generation: TerritoryGeneration;
   readonly status: ExecutionBoundaryStatus;
-  /** Writable state capability scoped to this provider + canonical workspace.
-   * The returned root persists across execution generations; no sibling
-   * provider or engine control path is exposed. */
-  privateStateDirectory(namespace: string): string;
+  /** Cwd-independent identity of the registered Design write subtraction used
+   * by Setup/Run repository tasks. Ordinary agent boundaries may omit it. */
+  readonly registeredDesignAuthorityIdentity?: string | null;
   /** The effective HOME this session's provider actually runs with — the same
    * path the boundary injects as `HOME` at spawn. Local desktop host-parity
-   * boundaries return the user's canonical HOME; isolated/cloud boundaries
-   * return their generation-private projection.
-   *
-   * Engine-side readers need it because a contained provider writes its state
-   * THERE, not in the user's real home: an adapter that reads
-   * `homedir()/<provider dir>` while its session writes to the projection is
-   * silently looking at the wrong tree (this is what stopped Cursor subagent
-   * transcripts from being found under ZSR). Diagnostic/read capability for the
-   * trusted engine only; nothing an agent can reach is widened by it. */
+   * and cloud host-parity boundaries both return the deployment's real HOME. */
   readonly providerHomePath?: string;
-  /** True when this is the local host-parity profile: the provider runs with the
-   * user's real HOME and there is no per-generation state projection to promote.
-   *
-   * Adapters that maintain their OWN provider-state overlay use this to skip that
-   * machinery. Under parity the durable per-workspace store IS the live store —
-   * the pre-ZSR arrangement, where concurrent sessions in one workspace shared one
-   * on-disk store — so a per-session copy-and-merge hop would be state the "real
-   * HOME" contract says does not exist. The isolated/cloud profile still needs it:
-   * there, HOME is a projection that disappears at teardown. */
-  readonly localHostParity?: boolean;
   wrapSpawn(request: BoundarySpawnRequest): BoundaryLaunchSpec;
   trackProcess(child: ChildProcess): BoundaryProcess;
   /** Adopt a PTY/supervisor process group spawned by the shared Node PTY host.
@@ -381,10 +255,6 @@ export interface PreparedBoundary {
    * renderer/relay callers. */
   portDiscoveryStatus(): PortDiscoveryStatus;
   onPortsChanged(listener: (ports: readonly PortMapping[]) => void): () => void;
-  requestLocalService(request: ServiceRequest): Promise<ServiceLease>;
-  /** Validate and CAS-promote the session's private Git refs/index. This is a
-   * no-op for non-Git folders. */
-  synchronizeGit(): Promise<ShadowGitPromotionResult>;
   revoke(): Promise<void>;
   /** Resolve only after every descendant is dead and every lease is revoked. */
   stopAndProve(): Promise<void>;
@@ -412,10 +282,8 @@ export interface ExecutionBoundary {
  * BoundaryRequest: the request is plain serializable data (the utility pool
  * hashes it for reuse keys), while this carries a live handle. */
 export interface AdmissionControl {
-  /** Cancels the admission only while it still sits in the gate queue —
-   * nothing is built yet, so nothing needs teardown. Once a slot is granted
-   * the admission runs to completion and a superseded result is retired
-   * through the normal proven-teardown path. */
+  /** Checked between acquisitions. A cancellation after preparation starts
+   * unwinds through the same proven cleanup path as an admission error. */
   readonly signal?: AbortSignal;
 }
 

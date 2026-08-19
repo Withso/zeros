@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { PreparedBoundary } from "../../../containment/types";
 import { spawnStdioAgent, type StdioAgentProcess } from "../stdio-process";
 
 const processes: StdioAgentProcess[] = [];
@@ -87,6 +88,56 @@ describe.runIf(process.platform === "darwin" || process.platform === "linux")(
       const second = agent.stop({ gracefulMs: 0 });
       expect(second).toBe(first);
       await expect(first).resolves.toBeUndefined();
+    });
+
+    it("settles supervision when the executable disappears before spawn", async () => {
+      const agent = spawnStdioAgent({
+        command: `/definitely/missing/zeros-stdio-${process.pid}`,
+        args: [],
+        cwd: process.cwd(),
+      });
+      processes.push(agent);
+      const spawnError = new Promise<Error>((resolve) => {
+        agent.child.once("error", resolve);
+      });
+
+      await expect(spawnError).resolves.toMatchObject({ code: "ENOENT" });
+      await expect(
+        Promise.race([
+          agent.exited,
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () => reject(new Error("spawn failure did not settle")),
+              1_000,
+            ),
+          ),
+        ]),
+      ).resolves.toMatchObject({ code: null, signal: null });
+      await expect(
+        agent.stop({ gracefulMs: 0, forceMs: 100 }),
+      ).resolves.toBeUndefined();
+    });
+
+    it("installs the permanent child error listener before boundary registration", async () => {
+      let errorListenersAtRegistration = 0;
+      const boundary = {
+        wrapSpawn: (request: Record<string, unknown>) => request,
+        trackProcess: (child: { listenerCount(name: string): number }) => {
+          errorListenersAtRegistration = child.listenerCount("error");
+          return { stopAndProve: async () => undefined };
+        },
+      } as unknown as PreparedBoundary;
+      const agent = spawnStdioAgent({
+        command: process.execPath,
+        args: ["-e", "process.exit(0)"],
+        cwd: process.cwd(),
+        env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+        executionBoundary: boundary,
+      });
+      processes.push(agent);
+
+      await agent.exited;
+      expect(errorListenersAtRegistration).toBeGreaterThan(0);
     });
   },
 );

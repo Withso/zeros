@@ -151,6 +151,22 @@ export function loadedSessionStatus(promptActive: boolean): SessionStatus {
   return promptActive ? "streaming" : "ready";
 }
 
+/** Decide whether a caller may reuse a matching admission flight. Lazy boot
+ * probes deliberately admit nothing when no live execution exists, so a later
+ * focus/send request that shared such a flight must immediately perform its
+ * real admission after the probe settles. */
+export function sharedAdmissionFlightAction(input: {
+  activeAdoptOnly: boolean;
+  requestedAdoptOnly: boolean;
+  hasLiveSession: boolean;
+}): "reuse" | "retry" {
+  return input.activeAdoptOnly &&
+    !input.requestedAdoptOnly &&
+    !input.hasLiveSession
+    ? "retry"
+    : "reuse";
+}
+
 /** Map a failure classification to the UI session status. The single
  * definition, shared by the RPC paths in <AgentSessionsProvider> and by the
  * store's turn-state settle — those two must not be able to disagree about

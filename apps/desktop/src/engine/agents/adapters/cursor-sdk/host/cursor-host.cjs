@@ -106,16 +106,15 @@ try {
  * Node's built-in environment-proxy support covers fetch/http/https, but not
  * node:http2. Cursor uses both: API-key exchange/model discovery ride fetch,
  * while the local agent protocol rides @connectrpc/connect-node → http2.
- * Under ZSR, direct sockets are kernel-denied, so leaving the second transport
- * untouched produces an ENOTFOUND/timeout without ever reaching SRT's
- * authenticated proxy.
+ * ZSR host parity does not install a proxy. This shim matters only when the
+ * deployment itself sets NODE_USE_ENV_PROXY and HTTP(S)_PROXY; without it the
+ * two Cursor transports would disagree about that ordinary host configuration.
  *
  * Install this before requiring @cursor/sdk, while its bundled connect-node
  * modules still resolve `require("node:http2").connect`. The HTTP/2 connector
  * establishes an authenticated CONNECT tunnel, then returns a real TLSSocket
- * whose `secureConnect` event cannot fire until the tunnel is ready. No
- * provider credential is handled here — SRT keeps the real key and substitutes
- * it only after terminating the exact authority.
+ * whose `secureConnect` event cannot fire until the tunnel is ready. Provider
+ * credentials stay in Cursor's normal request path and are never handled here.
  */
 function installEnvironmentProxyTransports() {
   if (process.env.NODE_USE_ENV_PROXY !== "1") return;

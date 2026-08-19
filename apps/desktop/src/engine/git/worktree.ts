@@ -63,7 +63,6 @@ import {
 } from "./design-mode";
 import { resolveDesignDirectoryForEnter } from "../design/directory";
 import {
-  fenceDesignDirectory,
   unfenceDesignDirectory,
   unlockLegacyDesignWorkspaceLock,
 } from "../design/workspace-lock";
@@ -1651,7 +1650,6 @@ async function createWorkspaceInner(
         { strict: false },
       );
       await ensureDesignDocumentCommitted(workspacePath, designDir);
-      await fenceDesignDirectory(workspacePath);
     } else {
       // Code-mode creates resolve the same identity when the base branch
       // already carries a design folder. Provider admission—not a shared ACL—
@@ -2054,10 +2052,7 @@ async function safeRollback(
       // A checkout folder can disappear after Git registered it. Verify only
       // this operation's exact registration below; never repository-wide prune
       // entries owned by another Zeros/dev/tool instance.
-      if (existsSync(worktreePath)) {
-        await fenceDesignDirectory(worktreePath).catch(() => {});
-        return false;
-      }
+      if (existsSync(worktreePath)) return false;
     }
   }
   // Retain the hidden row + journal unless Git proved ownership and the owned
@@ -2191,6 +2186,21 @@ export function setWorkspaceStatus(
   updateWorkspace(workspaceId, { status });
 }
 
+/** Resolve an engine-owned synthetic Git target (currently `local-main`).
+ * Synthetic rows deliberately do not live in the projects/workspaces tables,
+ * so the workspace service supplies the one target it owns instead of seeding
+ * a phantom project merely to make Git accept its id. Client-provided ids still
+ * reach the normal workspace/known-repository clamps below. */
+let syntheticGitWorkspaceResolver:
+  | ((workspaceId: string) => Workspace | null)
+  | null = null;
+
+export function setSyntheticGitWorkspaceResolver(
+  resolver: ((workspaceId: string) => Workspace | null) | null,
+): void {
+  syntheticGitWorkspaceResolver = resolver;
+}
+
 /** Synthesize a Workspace for a repo's primary checkout ("Local main" trunk) —
  *  no DB row exists for it. Used by `resolveRepoForGitOp` so git ops
  *  (status/diff/log + commit/push/stage/discard) can address the trunk by its
@@ -2243,6 +2253,8 @@ export async function resolveRepoForGitOp(
   try {
     return getWorkspace(idOrRoot);
   } catch (err) {
+    const synthetic = syntheticGitWorkspaceResolver?.(idOrRoot) ?? null;
+    if (synthetic?.id === idOrRoot) return stampPresence(synthetic);
     if (isKnownRepoRoot(idOrRoot)) {
       return trunkWorkspace(idOrRoot);
     }
@@ -2476,9 +2488,6 @@ async function removeManagedWorktreeForLifecycle(
     staged = await prepareWorktreeDirectoryEviction(ws.path);
   } catch (cause) {
     observation?.resume();
-    if (existsSync(ws.path)) {
-      await fenceDesignDirectory(ws.path).catch(() => {});
-    }
     throw new GitError({
       code: "GIT_COMMAND_FAILED",
       message: `Workspace directory could not be staged for removal: ${ws.path}`,

@@ -93,8 +93,6 @@ extraResources:
   # app.asar/node_modules lookup at the security boundary.
   - from: binaries/zsr-supervisor.mjs
     to: zsr-supervisor.mjs
-  - from: binaries/zsr-network-bridge.mjs
-    to: zsr-network-bridge.mjs
   - from: binaries/zsr-container-worker.mjs
     to: zsr-container-worker.mjs
   - from: binaries/zsr-orbstack-container-host.mjs
@@ -106,14 +104,10 @@ extraResources:
   # reviewed C source by the same beforePack hook; signed with the app bundle.
   - from: binaries/zsr-macos-process-domain
     to: zsr-macos-process-domain
-  # The shadow-Git dispatcher, compiled. It is installed as `<toolsRoot>/git`
-  # inside a boundary so a Git command costs an exec instead of a runtime start.
+  # The compiled narrow Git integration dispatcher installed as
+  # `<toolsRoot>/git` inside a boundary.
   - from: binaries/zsr-git-dispatch
     to: zsr-git-dispatch
-  # Post-Seatbelt bind/connect virtualization for exact, immutable per-session
-  # development-port pools. The dylib is signed with the application bundle.
-  - from: binaries/zsr-macos-port-bind.dylib
-    to: zsr-macos-port-bind.dylib
   # The Claude Code CLI — the runtime `query()` actually spawns.
   #
   # @anthropic-ai/claude-agent-sdk ships NO cli.js: the executable lives in a

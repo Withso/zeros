@@ -1,6 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { AgentAdapterContext } from "../../../types";
+import type {
+  AgentAdapterContext,
+  McpServerRegistration,
+} from "../../../types";
+import type { CodexNativeBrowserRuntime } from "../browser-tools";
 import type { ProviderBinding } from "@zeros/protocol/identities";
 
 type Handler = (params: unknown) => void;
@@ -10,13 +14,29 @@ const rt = vi.hoisted(() => ({
   handlers: [] as Array<Map<string, Set<Handler>>>,
   requests: [] as Array<{ runtime: number; method: string; params: unknown }>,
   resumeParams: [] as Array<Record<string, unknown>>,
+  startParams: [] as Array<Record<string, unknown>>,
   turnParams: [] as Array<Record<string, unknown>>,
   disposeCalls: [] as number[],
+  bootOptions: [] as Array<Record<string, unknown>>,
+  bootError: null as Error | null,
+  startError: null as Error | null,
 }));
 
 const browserHost = vi.hoisted(() => ({
   register: vi.fn(async () => true),
   settle: vi.fn(async () => true),
+}));
+
+const browserRuntime = vi.hoisted(() => ({
+  resolve: vi.fn(),
+}));
+
+const browserCapability = vi.hoisted(() => ({
+  reason: null as string | null,
+}));
+
+const sessionPaths = vi.hoisted(() => ({
+  remove: vi.fn(async () => {}),
 }));
 
 function forkThread() {
@@ -30,7 +50,9 @@ function forkThread() {
 }
 
 vi.mock("../app-server", () => ({
-  bootCodexAppServerRuntime: vi.fn(async () => {
+  bootCodexAppServerRuntime: vi.fn(async (options: Record<string, unknown>) => {
+    rt.bootOptions.push(options);
+    if (rt.bootError) throw rt.bootError;
     const runtime = rt.bootCount++;
     const handlers = new Map<string, Set<Handler>>();
     rt.handlers[runtime] = handlers;
@@ -68,15 +90,23 @@ vi.mock("../app-server", () => ({
       cliVersion: "0.146.0",
       binarySource: { source: "path", path: "codex" },
       child: { pid: 4000 + runtime, killed: false },
-      startThread: async () => ({
-        threadId: "thread-source",
-        providerSessionId: "session-source",
-        gitInfo: { sha: "provider-sha", branch: "provider", originUrl: null },
-        model: "gpt-5",
-        approvalPolicy: "on-request",
-        sandbox: { type: "workspaceWrite" },
-        raw: {},
-      }),
+      startThread: async (params: Record<string, unknown>) => {
+        rt.startParams.push(params);
+        if (rt.startError) throw rt.startError;
+        return {
+          threadId: "thread-source",
+          providerSessionId: "session-source",
+          gitInfo: {
+            sha: "provider-sha",
+            branch: "provider",
+            originUrl: null,
+          },
+          model: "gpt-5",
+          approvalPolicy: "on-request",
+          sandbox: { type: "workspaceWrite" },
+          raw: {},
+        };
+      },
       resumeThread: async (params: Record<string, unknown>) => {
         rt.resumeParams.push(params);
         return {
@@ -113,7 +143,7 @@ vi.mock("../../../session-paths", () => ({
     telemetry: "/tmp/s/tel",
   })),
   writeSessionMeta: vi.fn(async () => {}),
-  removeSessionDir: vi.fn(async () => {}),
+  removeSessionDir: sessionPaths.remove,
 }));
 
 vi.mock("../../../../browser/browser-tool-client", () => ({
@@ -129,21 +159,19 @@ vi.mock("../browser-tools", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../browser-tools")>();
   return {
     ...actual,
-    resolveCodexNativeBrowserRuntime: vi.fn(async () => ({
-      pluginId: "browser@openai-bundled",
-      pluginRoot:
-        "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601",
-      browserSkill: {
-        name: "control-in-app-browser",
-        path: "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601/skills/control-in-app-browser/SKILL.md",
-      },
-      mcpServer: {
-        name: "node_repl",
-        transport: "stdio",
-        command: "/tmp/node_repl",
-      },
-    })),
-    mergeCodexNativeBrowserMcp: vi.fn((servers) => servers),
+    codexNativeBrowserUnavailableReason: vi.fn(
+      () => browserCapability.reason,
+    ),
+    resolveCodexNativeBrowserRuntime: browserRuntime.resolve,
+    mergeCodexNativeBrowserMcp: vi.fn(
+      (
+        servers: readonly McpServerRegistration[],
+        runtime: CodexNativeBrowserRuntime,
+      ) => [
+        runtime.mcpServer,
+        ...servers.filter((server) => server.name !== runtime.mcpServer.name),
+      ],
+    ),
   };
 });
 
@@ -151,6 +179,7 @@ import { CodexAppServerAdapter } from "../app-server-adapter";
 
 function makeAdapter() {
   const onSessionUpdate = vi.fn();
+  const onAgentStderr = vi.fn();
   const ctx = {
     projectRoot: "/tmp/proj",
     mcpServers: [],
@@ -159,11 +188,15 @@ function makeAdapter() {
       onSessionUpdate,
       onPermissionRequest: vi.fn(),
       onQuestionRequest: vi.fn(),
-      onAgentStderr: vi.fn(),
+      onAgentStderr,
       onAgentExit: vi.fn(),
     },
   } as unknown as AgentAdapterContext;
-  return { adapter: new CodexAppServerAdapter(ctx), onSessionUpdate };
+  return {
+    adapter: new CodexAppServerAdapter(ctx),
+    onSessionUpdate,
+    onAgentStderr,
+  };
 }
 
 const sourceBinding: ProviderBinding = {
@@ -180,10 +213,32 @@ describe("Codex opaque provider bindings", () => {
     rt.handlers = [];
     rt.requests = [];
     rt.resumeParams = [];
+    rt.startParams = [];
     rt.turnParams = [];
     rt.disposeCalls = [];
+    rt.bootOptions = [];
+    rt.bootError = null;
+    rt.startError = null;
     browserHost.register.mockClear();
     browserHost.settle.mockClear();
+    browserRuntime.resolve.mockReset();
+    browserCapability.reason = null;
+    sessionPaths.remove.mockClear();
+    const runtime = {
+      pluginId: "browser@openai-bundled",
+      pluginRoot:
+        "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601",
+      browserSkill: {
+        name: "control-in-app-browser",
+        path: "/tmp/.codex/plugins/cache/openai-bundled/browser/26.803.61601/skills/control-in-app-browser/SKILL.md",
+      },
+      mcpServer: {
+        name: "node_repl",
+        transport: "stdio",
+        command: "/tmp/node_repl",
+      },
+    } satisfies CodexNativeBrowserRuntime;
+    browserRuntime.resolve.mockResolvedValue(runtime);
   });
 
   it("keeps the ChatGPT Browser plugin out of resumed Zeros threads", async () => {
@@ -228,6 +283,81 @@ describe("Codex opaque provider bindings", () => {
       browserSessionId: "browser_opaque",
       nativeSessionId: "thread-source",
     });
+    await adapter.dispose();
+  });
+
+  it("keeps contained macOS Codex usable while Browser fails closed", async () => {
+    browserCapability.reason =
+      "Official Browser cannot safely run inside the macOS containment boundary";
+    const { adapter, onAgentStderr } = makeAdapter();
+    const started = await adapter.newSession({
+      executionId: "execution-browser-contained",
+      cwd: "/tmp/proj",
+      executionBoundary: {} as never,
+      browserUse: {
+        kind: "codex-app-server",
+        browserSessionId: "browser_contained",
+      },
+    });
+
+    expect(browserRuntime.resolve).not.toHaveBeenCalled();
+    expect(rt.startParams.at(-1)).toMatchObject({
+      config: { "plugins.browser@openai-bundled.enabled": false },
+    });
+    expect(browserHost.register).not.toHaveBeenCalled();
+    expect(onAgentStderr).toHaveBeenCalledWith(
+      "codex",
+      expect.stringMatching(/cannot safely run inside the macOS containment/i),
+    );
+
+    await adapter.disposeSession(started.session.sessionId);
+  });
+
+  it("keeps Codex usable when official Browser runtime discovery fails", async () => {
+    browserRuntime.resolve.mockRejectedValueOnce(
+      new Error("browser plugin cache is unreadable"),
+    );
+    const { adapter, onAgentStderr } = makeAdapter();
+
+    const started = await adapter.newSession({
+      executionId: "execution-browser-discovery-failure",
+      cwd: "/tmp/proj",
+      browserUse: {
+        kind: "codex-app-server",
+        browserSessionId: "browser_discovery_failure",
+      },
+    });
+
+    expect(started.session.sessionId).toBe(
+      "execution-browser-discovery-failure",
+    );
+    expect(rt.bootOptions).toHaveLength(1);
+    expect(onAgentStderr).toHaveBeenCalledWith(
+      "codex",
+      expect.stringMatching(/Official Browser runtime discovery failed/i),
+    );
+    await adapter.dispose();
+  });
+
+  it("retires the runtime and session directory when thread startup fails", async () => {
+    rt.startError = new Error("thread start failed");
+    const { adapter } = makeAdapter();
+
+    await expect(
+      adapter.newSession({
+        executionId: "execution-browser-thread-failure",
+        cwd: "/tmp/proj",
+        browserUse: {
+          kind: "codex-app-server",
+          browserSessionId: "browser_thread_failure",
+        },
+      }),
+    ).rejects.toThrow(/thread start failed/i);
+
+    expect(rt.disposeCalls).toEqual([0]);
+    expect(sessionPaths.remove).toHaveBeenCalledWith(
+      "execution-browser-thread-failure",
+    );
     await adapter.dispose();
   });
 

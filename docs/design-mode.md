@@ -42,22 +42,39 @@ agent only when all of these conditions hold:
 3. The local immutable profile preserves host write authority, then carves
    every recognized Design root and generation-private ZSR descriptor back to
    read-only. Canonical Git metadata stays ordinary and writable.
-4. Every admitted additional repository root is resolved with its own Design
-   territory. Multiple Design roots are first-class; none is selected merely
-   by the current canvas or cwd.
+4. The deny set is the canonical union of every registered local owner: each
+   managed worktree, its physical main checkout, every open project root, and
+   every explicitly admitted additional repository. Registering a root never
+   grants write access to that root; it only contributes its recognized Design
+   territory. Cloud-only and stale missing paths contribute no local authority.
+   Multiple Design roots are first-class; none is selected merely by the
+   current canvas or cwd. Thus an agent running in workspace A cannot write a
+   Design document registered through workspace B or its main checkout.
 5. The engine installs the exact profile with Seatbelt on macOS or a
    mount-only bubblewrap profile on Linux before any provider byte starts.
    There is no instruction-only fallback.
 6. The process tree is observable and must be terminated completely before a
    changed territory can be published.
 
-Claude, Codex, Cursor, custom/PATH tools, MCP children, shells, hooks, and
-subprocesses all inherit this one external OS boundary. Provider-native
+Claude, Codex, Cursor, custom/PATH tools, ordinary MCP children, shells, hooks,
+and subprocesses inherit this one external OS boundary. Provider-native
 permission modes still control approval UX, but they neither establish nor
-weaken the Design filesystem fence. ZSR does not replace HOME, XDG roots,
-Keychain, GH/GitHub tokens, SSH agent, Git configuration, network, ports, logs,
-or ordinary tool paths in the local profile. Only engine bearer/control
-variables are stripped.
+weaken the Design filesystem fence. Codex Browser fails closed on contained
+macOS threads because its helper requires a conflicting nested Seatbelt profile;
+Zeros does not move user-writable plugin code outside the boundary. ZSR does not
+otherwise replace HOME, XDG roots, Keychain, GH/GitHub tokens, SSH agent, Git
+configuration, network, ports, logs, or ordinary tool paths in the local
+profile. Engine bearer/control variables and ambient Docker/Podman selectors are
+stripped; only a private container worker may add the latter back. Known and
+advertised ambient container Unix sockets are subtracted as well. On macOS,
+Apple Events and Launch Services app opening are denied so `open`/`osascript`
+cannot launch an unrestricted process outside the inherited fence. Reads of
+Zeros app data otherwise retain host parity, while writes to the small authority
+set that defines the fence are denied: the workspace/project database and
+SQLite sidecars, worktree recovery seeds, sticky Design recognition, and the
+current generation's private control descriptors. Without that carve-out an
+agent could change the next admission's Design-root union without touching a
+Design file.
 
 The code-agent runtime receives no Design API or Design MCP tool. Engine bearer
 credentials are not written into its workspace or environment. The territory
@@ -119,30 +136,77 @@ therefore does not change what a separate application can do.
 
 ## Git and lifecycle coordination
 
-Local code agents use the canonical repository and ordinary Git executable
-directly. `git -c`, checkout, reset, clean, stash, rm, commits, hooks, signing,
-fetch, pull, and push retain native behavior; there is no shadow repository,
-checkpoint dispatcher, remote broker, hook suppression, or stderr rewriting on
-the local path. The Design directory's OS write denial remains effective when a
-Git subcommand tries to modify its worktree files.
+Local code agents use the canonical repository. Read-only commands, commits,
+hooks, signing, fetch, push, clean, rm, mv, restore, stash, and every operation
+that can name a path run as ordinary Git inside the actor's OS fence. There is
+no shadow repository, private index, remote broker, hook suppression, or stderr
+rewriting. Consequently `git checkout <commit> -- <designfile>` and equivalent
+pathspec forms cannot write Design content.
 
-The design-agent substrate inverts the worktree policy. Repository roots are
-read-only, all recognized Design roots are writable, and the smallest canonical
-Git metadata directories are reopened writable. Directory islands are required:
+Whole-tree checkout/switch/pull/merge/rebase/cherry-pick/revert and hard reset
+are different: a compiled dispatcher forwards them to a generation-scoped
+engine broker, which re-parses the complete argv, bounds the canonical cwd to a
+registered owner, and runs hardened engine Git outside the code fence. This
+preserves the pre-ZSR expectation that changing branches or integrating a
+branch can materialize tracked Design changes. Checkout/reset path forms are
+returned to native Git and remain fenced. Stash stays native because it is
+agent-authored state, not a trusted repository integration. Because Git accepts
+a one-argument checkout as either a ref or a path, the broker grants it only
+after that argument resolves to a commit in the exact registered worktree and
+metadata identity. The authorized invocation is then pinned to a full local
+branch ref or immutable detached commit, preventing a disappearing ref from
+being reinterpreted as a path; otherwise it falls back to native fenced Git. A
+naked `checkout HEAD` or `checkout @` also stays native because pinning that
+no-op to its commit would incorrectly detach a symbolic branch. A
+nested unregistered repository cannot borrow its parent's integration
+authority.
+
+This split consciously accepts one residual: an agent that can construct and
+commit a Design-changing tree without directly writing the Design worktree can
+then ask a tree-level merge to materialize it. Closing that commit-then-merge
+route would require content-aware authorization or a different Design/Git
+product contract; it is not represented as stronger isolation here.
+
+The design-agent substrate is the app-wide inverse. Every registered repository
+owner is read-only, all recognized Design roots are writable, and the smallest
+canonical Git metadata directories for the current owner are reopened writable.
+Directory islands are required:
 binding an existing index file individually prevents Git's atomic replacement.
 This lets native Git stage Design changes without reopening code files.
+Read-only Git succeeds. Staging, committing, fetching, and pushing can succeed
+through the metadata islands when their hooks and worktree effects do not write
+code. Checkout, pull, reset, merge, or a hook that needs to update a forbidden
+code path fails at that write boundary. Trusted Zeros Git routes may perform a
+broader operation only inside the serialized Design mutation lane below; they
+do not lend that authority to the agent process.
 
 Zeros-run checkout, pull, rebase, merge, reset, stash, and turn-restore paths
 share the Design mutation lane. They retire an obsolete authority map when
 needed, perform the Git operation, and resolve the resulting real tree before
-process admission reopens. The filesystem/Git
-watcher reconciles external HEAD or settings movement and retires sessions whose
-captured semantic territory no longer matches.
+process admission reopens. The filesystem/Git watchers reconcile external
+HEAD/ref/index, exact canvas-marker, and settings movement and retire sessions
+whose captured semantic territory no longer matches.
 
 Mode changes themselves do not restart an agent when the territory is
 unchanged. Archive, restore, delete, first Design creation, Design-directory
 settings changes, and territory-changing Git rewrites use fail-closed process
-drain and lifecycle sequencing.
+drain and lifecycle sequencing. Because every code boundary contains the
+app-wide registered-owner union, adding, removing, archiving, restoring, or
+unhiding a project/workspace blocks all new repository-code admissions, cancels
+pending starts, proves every Setup/Run boundary stopped, and retires every
+code-agent and pooled utility boundary before publishing the new owner set.
+Overlapping changes remain queued behind one continuously closed admission
+gate. Chats resume under a newly admitted profile on their next use; stale
+immutable profiles are never patched in place.
+
+External Git-ref/index changes, metadata-signature changes to settings files,
+and exact `.zeros-canvas.json` create/change/remove events enter the same
+reconciliation path. The watcher previews the semantic territory first, so
+ordinary source saves and ref updates that do not change Design ownership do
+not restart agents. A changed or invalid owner drains the old app-wide
+authority before the new territory is recorded and fenced. External tools still
+run outside Zeros' actor boundary, so their multi-file rewrites and the watcher
+transition are not one atomic operation.
 
 ## Design API terminology
 

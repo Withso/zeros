@@ -94,6 +94,25 @@ describe("write ops", () => {
     expect(refreshed.lastActiveAt).not.toBeNull();
   });
 
+  it("keeps exact filenames containing Git pathspec metacharacters usable", async () => {
+    const ws = getWorkspace(workspaceId);
+    const filename = "notes[1].txt";
+    await writeFile(path.join(ws.path, filename), "literal path\n");
+    await stagePaths({ workspaceId, paths: [filename] });
+
+    await expect(
+      commit({
+        workspaceId,
+        message: "literal metacharacter path",
+        files: [filename],
+        authority: "code",
+      }),
+    ).resolves.toMatchObject({ sha: expect.any(String) });
+    await expect(readFile(path.join(ws.path, filename), "utf8")).resolves.toBe(
+      "literal path\n",
+    );
+  });
+
   it("commit fails when nothing staged", async () => {
     await expect(commit({ workspaceId, message: "empty" })).rejects.toThrow(
       /Nothing to commit|VALIDATION_FAILED/,
@@ -148,6 +167,58 @@ describe("write ops", () => {
     });
   });
 
+  it("does not expand a Git-magic-looking direct commit filename", async () => {
+    const ws = getWorkspace(workspaceId);
+    const designDir = path.join(ws.path, "Zeros Design");
+    await mkdir(designDir, { recursive: true });
+    await writeFile(path.join(designDir, "rogue.html"), "<main>rogue</main>\n");
+    await execFileAsync("git", ["-C", ws.path, "add", "--", "Zeros Design"]);
+    const before = (
+      await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
+    ).stdout.trim();
+
+    await expect(
+      commit({
+        workspaceId,
+        message: "magic pathspec bypass",
+        files: [":(top)Zeros Design/rogue.html"],
+        authority: "code",
+      }),
+    ).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED" });
+    const after = (
+      await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
+    ).stdout.trim();
+    expect(after).toBe(before);
+  });
+
+  it("blocks a direct code commit scoped to an ancestor of nested Design", async () => {
+    const ws = getWorkspace(workspaceId);
+    const nestedDesign = path.join(ws.path, "apps", "web", "canvas");
+    await mkdir(nestedDesign, { recursive: true });
+    await writeFile(path.join(nestedDesign, ".zeros-canvas.json"), "{}\n");
+    await writeFile(path.join(nestedDesign, "frame.html"), "<main>frame</main>\n");
+    await execFileAsync("git", ["-C", ws.path, "add", "--", "apps"]);
+    const before = (
+      await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
+    ).stdout.trim();
+
+    await expect(
+      commit({
+        workspaceId,
+        message: "ancestor path bypass",
+        files: ["apps"],
+        authority: "code",
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      remediation: expect.stringMatching(/Save designs/),
+    });
+    const after = (
+      await execFileAsync("git", ["-C", ws.path, "rev-parse", "HEAD"])
+    ).stdout.trim();
+    expect(after).toBe(before);
+  });
+
   it("blocks the Design source of a staged rename out of the active directory", async () => {
     const ws = getWorkspace(workspaceId);
     const designDir = path.join(ws.path, "Zeros Design");
@@ -174,6 +245,35 @@ describe("write ops", () => {
       commit({
         workspaceId,
         message: "rename out of design",
+        authority: "code",
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      remediation: expect.stringMatching(/Save designs/),
+    });
+  });
+
+  it("blocks staged content from every recognized Design directory, not only the active one", async () => {
+    const ws = getWorkspace(workspaceId);
+    const secondary = path.join(ws.path, "Secondary Design");
+    await mkdir(secondary, { recursive: true });
+    await writeFile(path.join(secondary, ".zeros-canvas.json"), "{}\n");
+    await writeFile(
+      path.join(secondary, "frame.html"),
+      "<main>secondary</main>\n",
+    );
+    await execFileAsync("git", [
+      "-C",
+      ws.path,
+      "add",
+      "--",
+      "Secondary Design",
+    ]);
+
+    await expect(
+      commit({
+        workspaceId,
+        message: "bypass inactive design guard",
         authority: "code",
       }),
     ).rejects.toMatchObject({

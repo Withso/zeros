@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, realpath, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  lstat,
+  mkdir,
+  readdir,
+  realpath,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -8,7 +15,9 @@ import type { ExecutionBoundaryActor } from "@zeros/protocol/containment";
 import {
   zerosChannelDataDir,
   zerosDataDir,
+  zerosDbPath,
   zerosStateRoot,
+  worktreeSeedsRoot,
 } from "../../db/paths";
 import { designRecognitionStorePath } from "../../design/recognition-store";
 import { sessionDir } from "../session-paths";
@@ -27,6 +36,72 @@ import type {
 } from "./types";
 
 export const ZSR_POLICY_VERSION = 1 as const;
+const MAX_WORKTREE_SEED_DIRECTORIES = 16_384;
+
+/** Path-scoped denial cannot protect an inode through an already-existing
+ * writable hard-link alias. Audit the exact files that carry engine authority;
+ * recursively walking arbitrary backup material under the seed root adds hot
+ * admission latency and rejects files that seed recovery never reads. */
+async function assertEngineAuthorityFileHasNoAlias(
+  authorityPath: string,
+): Promise<void> {
+  let metadata;
+  try {
+    metadata = await lstat(authorityPath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (metadata.isSymbolicLink()) {
+    throw new Error(
+      `engine authority contains a symbolic-link alias: ${authorityPath}`,
+    );
+  }
+  if (!metadata.isFile()) {
+    throw new Error(`engine authority is not a regular file: ${authorityPath}`);
+  }
+  if (metadata.nlink !== 1) {
+    throw new Error(
+      `engine authority has a pre-existing hard-link alias: ${authorityPath}`,
+    );
+  }
+}
+
+async function assertWorktreeSeedsHaveNoAliases(seedRoot: string): Promise<void> {
+  let rootMetadata;
+  try {
+    rootMetadata = await lstat(seedRoot);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
+    throw new Error("engine worktree-seed authority is not a physical directory");
+  }
+  const entries = await readdir(seedRoot, { withFileTypes: true });
+  if (entries.length > MAX_WORKTREE_SEED_DIRECTORIES) {
+    throw new Error("engine authority tree exceeds the bounded alias audit");
+  }
+  // Bound concurrency so an unusually large but valid workspace registry does
+  // not turn one admission into an unbounded filesystem request burst.
+  for (let offset = 0; offset < entries.length; offset += 256) {
+    await Promise.all(
+      entries.slice(offset, offset + 256).map(async (entry) => {
+        const directory = path.join(seedRoot, entry.name);
+        const metadata = await lstat(directory);
+        if (metadata.isSymbolicLink()) {
+          throw new Error(
+            `engine authority contains a symbolic-link alias: ${directory}`,
+          );
+        }
+        if (!metadata.isDirectory()) return;
+        await assertEngineAuthorityFileHasNoAlias(
+          path.join(directory, "workspace.json"),
+        );
+      }),
+    );
+  }
+}
 
 export interface ZsrPolicyDocument {
   readonly version: typeof ZSR_POLICY_VERSION;
@@ -44,10 +119,10 @@ export interface ZsrPolicyDocument {
   readonly runtime: {
     readonly normalNetwork: true;
     readonly allowPty: true;
-    /** Local desktop sessions retain the user's ordinary host authority. ZSR
-     * compiles only the actor-specific filesystem write subtraction for this
-     * profile; cloud workers deliberately never set it. */
-    readonly localHostParity?: true;
+    /** Every session retains its deployment's ordinary filesystem authority,
+     * with actor territory subtracted. Cloud additionally denies engine roots
+     * before dropping to the worker uid. */
+    readonly localHostParity: true;
     readonly allowedUnixSockets: readonly string[];
     readonly allowedLocalPorts: readonly number[];
     readonly deniedLocalPorts: readonly number[];
@@ -56,8 +131,6 @@ export interface ZsrPolicyDocument {
       readonly version: 1;
       readonly uid: number;
       readonly gid: number;
-      readonly cgroupParent: string;
-      readonly resources: CloudWorkerRuntimeConfiguration["resources"];
     };
   };
 }
@@ -67,7 +140,6 @@ export interface ZsrPrivatePaths {
   readonly home: string;
   readonly scratch: string;
   readonly providerState: string;
-  readonly shadowGit: string;
   readonly policy: string;
   readonly commands: string;
   readonly tools: string;
@@ -84,14 +156,9 @@ export interface ZsrPrivatePaths {
   /** Short trusted-only scratch used by SRT's internal Unix sockets. Kept out
    * of the child view so an agent cannot replace or interfere with its mux. */
   readonly networkRuntime: string;
-  /** Writable only for the trusted pre-seccomp reverse bridge. */
-  readonly networkBridge: string;
   /** Host-created service façades; readable/connectable but never writable by
    * the untrusted process. */
   readonly networkServices: string;
-  /** Generation-private writable client state for socket protocols such as
-   * GnuPG. It contains only broker-sanitized public/configuration data. */
-  readonly networkClientState: string;
   /** Durable per-session OCI image/container store. It is the sole
    * engine-state subtree intentionally projected to an embedded worker. */
   readonly containerState?: string;
@@ -103,25 +170,14 @@ export interface PreparedZsrPolicy {
 }
 
 export interface PrepareZsrPolicyOptions {
-  /** Preserve the pre-ZSR local workspace environment and subtract only the
-   * resolved actor write territory. Mutually exclusive with cloudWorker. */
-  readonly localHostParity?: boolean;
   /** Canonical control metadata that must remain writable inside a broader
    * design-actor worktree deny (for example .git and linked-worktree state). */
   readonly localHostParityWriteIslands?: readonly string[];
-  /** Canonical control metadata discovered by a trusted backend before policy
-   * construction (for example a linked worktree's gitdir/common dir). */
-  readonly additionalDenyWrite?: readonly string[];
-  /** Canonical control state that must be absent from the child view. */
-  readonly additionalDenyRead?: readonly string[];
-  /** Narrow immutable pools projected back inside an absent control root. */
-  readonly additionalAllowRead?: readonly string[];
   /** Generation-private Unix façades. Raw host service sockets are never
-   * admitted here. Linux couples any entry to a root read allowlist because
-   * seccomp can allow AF_UNIX only globally, not by pathname. */
+   * admitted here. */
   readonly allowedUnixSockets?: readonly string[];
-  /** Force a root-absent filesystem view and record the dedicated identity
-   * used by the trusted cloud-worker supervisor. */
+  /** Record the dedicated identity used by the trusted cloud-worker
+   * supervisor. The VM remains the tenant boundary. */
   readonly cloudWorker?: CloudWorkerRuntimeConfiguration;
 }
 
@@ -270,19 +326,10 @@ export function isDeniedZerosControlPort(port: number): boolean {
   return deniedZerosControlPorts([]).includes(port);
 }
 
-/** Build the backend-neutral normal-authority-minus-territory policy for either
- * profile. The engine-private policy/command descriptors are never placed in
- * allowWrite in either one.
- *
- * ISOLATED (cloud, and any caller that omits `localHostParity`): the only mutable
- * roots are the purpose-specific provider state, scratch, HOME, and shadow Git
- * roots, plus the workspace for a code actor.
- *
- * LOCAL HOST PARITY: the host filesystem root is writable and the subtraction is
- * the point — recognized Design directories, the engine's sticky recognition
- * store, and this generation's control descriptors. A design actor inverts the
- * first of those. Nothing else is withheld, so the child keeps the ordinary host
- * HOME, credentials, Git (including `.zeros` and `.git`), network and ports. */
+/** Build the single normal-authority-minus-territory policy. The filesystem
+ * root is readable and writable; recognized Design/code territory, the small
+ * engine-authority set, and generation control descriptors are subtracted.
+ * HOME, credentials, Git, network, and ports otherwise keep deployment parity. */
 export async function prepareZsrPolicy(
   request: BoundaryRequest,
   generation: TerritoryGeneration,
@@ -308,12 +355,6 @@ export async function prepareZsrPolicy(
       options.cloudWorker.gid > 2_147_483_647)
   ) {
     throw new Error("cloud worker requires a valid non-root Linux uid/gid");
-  }
-  if (options.cloudWorker && options.localHostParity) {
-    throw new Error("cloud workers cannot use local host parity");
-  }
-  if (options.localHostParityWriteIslands?.length && !options.localHostParity) {
-    throw new Error("host-parity write islands require local host parity");
   }
   if (
     (options.localHostParityWriteIslands?.length ?? 0) > 256 ||
@@ -345,7 +386,6 @@ export async function prepareZsrPolicy(
     home: path.join(root, "home"),
     scratch: path.join(root, "scratch"),
     providerState: path.join(root, "provider"),
-    shadowGit: path.join(root, "git"),
     policy: path.join(root, "policy.json"),
     commands: path.join(root, "commands"),
     tools: path.join(root, "tools"),
@@ -353,9 +393,7 @@ export async function prepareZsrPolicy(
     processDomainMetadata: path.join(root, "commands", "process-domain.json"),
     network,
     networkRuntime: path.join(network, "runtime"),
-    networkBridge: path.join(network, "bridge"),
     networkServices: path.join(network, "services"),
-    networkClientState: path.join(network, "clients"),
     ...(request.containerWorker?.backend === "embedded-linux"
       ? {
           containerState: path.join(
@@ -370,14 +408,11 @@ export async function prepareZsrPolicy(
       paths.home,
       paths.scratch,
       paths.providerState,
-      paths.shadowGit,
       paths.commands,
       paths.tools,
       paths.network,
       paths.networkRuntime,
-      paths.networkBridge,
       paths.networkServices,
-      paths.networkClientState,
     ].map(async (directory) => {
       await mkdir(directory, { recursive: true, mode: 0o700 });
       await chmod(directory, 0o700);
@@ -434,15 +469,19 @@ export async function prepareZsrPolicy(
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
-  const readOnlyInputs = request.additionalReadOnlyRoots ?? [];
-  if (readOnlyInputs.length > 128) {
-    throw new Error("at most 128 additional read-only roots are allowed");
+  const protectedCodeInputs = request.protectedCodeDirectories ?? [];
+  if (protectedCodeInputs.length > 256) {
+    throw new Error("at most 256 protected code directories are allowed");
   }
-  if (readOnlyInputs.some((entry) => !path.isAbsolute(entry))) {
-    throw new Error("additional read-only roots must be absolute");
+  if (
+    protectedCodeInputs.some(
+      (entry) => !path.isAbsolute(entry) || entry.includes("\0"),
+    )
+  ) {
+    throw new Error("protected code directories must be absolute paths");
   }
-  const additionalReadOnly = await Promise.all(
-    readOnlyInputs.map(canonicalExistingOrLexical),
+  const protectedCodeDirectories = await Promise.all(
+    protectedCodeInputs.map(canonicalExistingOrLexical),
   );
   const engineRoots = await Promise.all(
     [
@@ -456,27 +495,32 @@ export async function prepareZsrPolicy(
       path.join(os.homedir(), ".zeros", "cloud-workspace-validation"),
     ].map(canonicalExistingOrLexical),
   );
-  for (const rootCandidate of [workspaceRoot, ...additional]) {
-    const enclosingEngineRoot = engineRoots.find((engineRoot) =>
-      pathIsInsideOrEqual(rootCandidate, engineRoot),
-    );
-    if (enclosingEngineRoot && !options.localHostParity) {
-      throw new Error(
-        "a code write root cannot be inside Zeros engine-private state",
-      );
-    }
-  }
-
-  // A design actor is the inverse of a code actor: it reads the whole
-  // workspace but owns no code write authority. In local host-parity mode the
-  // Design roots and the explicitly discovered Git-metadata islands are then
-  // reopened below that repository deny. The retained isolated/cloud profile
-  // has no raw-filesystem Design-agent consumer, so it keeps its historical
-  // private-state-only posture. Requested read/write roots are honoured as
-  // read-only rather than rejected: the downgrade can only remove authority.
+  const database = zerosDbPath();
+  const engineAuthorityWriteDenies = await Promise.all(
+    [
+      designRecognitionStorePath(),
+      database,
+      `${database}-wal`,
+      `${database}-shm`,
+      `${database}-journal`,
+      worktreeSeedsRoot(),
+    ].map(canonicalExistingOrLexical),
+  );
+  await Promise.all([
+    ...engineAuthorityWriteDenies
+      .slice(0, -1)
+      .map(assertEngineAuthorityFileHasNoAlias),
+    assertWorktreeSeedsHaveNoAliases(
+      engineAuthorityWriteDenies[engineAuthorityWriteDenies.length - 1]!,
+    ),
+  ]);
+  // A design actor is the inverse of a code actor: it reads the whole machine
+  // but owns no code-tree write authority. Design roots and the explicitly
+  // discovered Git-metadata islands are reopened below that repository deny.
+  // Requested read/write roots are honoured as read-only rather than rejected:
+  // the downgrade can only remove authority.
   const codeWriteAuthority = request.actor !== "design-agent";
 
-  let territoryDenies: string[] = [];
   let protectedDesignDirectories: string[] = [];
   if (request.territory) {
     const territoryWorkspace = await canonicalExistingOrLexical(
@@ -490,33 +534,18 @@ export async function prepareZsrPolicy(
         canonicalExistingOrLexical,
       ),
     );
-    territoryDenies = await Promise.all(
-      request.territory.writeCapabilities.deniedPaths.map(
-        canonicalExistingOrLexical,
-      ),
-    );
   }
   const hostFilesystemRoot = path.parse(workspaceRoot).root;
   const localHostParityWriteIslands = await Promise.all(
     (options.localHostParityWriteIslands ?? []).map(canonicalExistingOrLexical),
   );
-  const allowWrite = options.localHostParity
-    ? uniqueSorted([
-        hostFilesystemRoot,
-        ...(codeWriteAuthority
-          ? []
-          : [...protectedDesignDirectories, ...localHostParityWriteIslands]),
-      ])
-    : uniqueSorted([
-        ...(codeWriteAuthority ? [workspaceRoot, ...additional] : []),
-        paths.home,
-        paths.scratch,
-        paths.providerState,
-        paths.shadowGit,
-        paths.networkBridge,
-        paths.networkClientState,
-        ...(paths.containerState ? [paths.containerState] : []),
-      ]);
+  const allowWrite = uniqueSorted([
+    hostFilesystemRoot,
+    ...(codeWriteAuthority
+      ? []
+      : [...protectedDesignDirectories, ...localHostParityWriteIslands]),
+    ...(paths.containerState ? [paths.containerState] : []),
+  ]);
   const containerSocket = paths.containerState
     ? path.join(paths.containerState, "podman.sock")
     : null;
@@ -536,139 +565,42 @@ export async function prepareZsrPolicy(
       );
     }
   }
-  const linuxUnixIsolation =
-    !options.localHostParity &&
-    process.platform === "linux" &&
-    (allowedUnixSockets.length > 0 || Boolean(options.cloudWorker));
-  const executableTopLevel = path.join(
-    path.parse(process.execPath).root,
-    path
-      .relative(path.parse(process.execPath).root, process.execPath)
-      .split(path.sep)[0] ?? "",
-  );
-  const additionalExecutableRoot = ["/home", "/root", "/tmp", "/var"].includes(
-    executableTopLevel,
-  )
-    ? []
-    : [executableTopLevel];
-  const platformReadRoots = linuxUnixIsolation
-    ? [
-        "/usr",
-        "/bin",
-        "/sbin",
-        "/lib",
-        "/lib64",
-        "/etc",
-        "/opt",
-        "/nix",
-        "/sys",
-        "/var/cache",
-        "/var/lib/dpkg",
-        process.execPath,
-        path.dirname(process.execPath),
-        ...additionalExecutableRoot,
-      ]
-    : [];
-  const allowRead = options.localHostParity
-    ? [hostFilesystemRoot]
-    : uniqueSorted([
-        workspaceRoot,
-        ...additional,
-        ...additionalReadOnly,
-        ...platformReadRoots,
-        paths.home,
-        paths.scratch,
-        paths.providerState,
-        paths.shadowGit,
-        paths.tools,
-        paths.network,
-        paths.networkBridge,
-        paths.networkServices,
-        paths.networkClientState,
-        ...(paths.containerState ? [paths.containerState] : []),
-        ...allowedUnixSockets,
-        ...(await Promise.all(
-          (options.additionalAllowRead ?? []).map(canonicalExistingOrLexical),
-        )),
-      ]);
-  const isolatedDenyWrite = [
-    // Absence from allowWrite already withholds code authority; naming the
-    // roots here as well makes a design actor's read-only posture explicit in
-    // the emitted document, so an audit reads the guarantee rather than
-    // inferring it from an omission. Private boundary state lives under the
-    // engine data dir, not the workspace, so nothing writable is shadowed.
-    ...(codeWriteAuthority ? [] : [workspaceRoot, ...additional]),
-    ...territoryDenies,
-    ...(await Promise.all(
-      (options.additionalDenyWrite ?? []).map(canonicalExistingOrLexical),
-    )),
-    ...engineRoots,
+  // The additional roots were validated above even though the host root makes
+  // their read grant implicit. Keep exact container state entries because the
+  // supervisor validates that embedded-worker descriptors name an admitted
+  // root rather than merely an arbitrary descendant of `/`.
+  const allowRead = uniqueSorted([
+    hostFilesystemRoot,
+    ...(paths.containerState ? [paths.containerState] : []),
+  ]);
+  const denyWrite = uniqueSorted([
+    ...(codeWriteAuthority
+      ? [
+          ...protectedDesignDirectories,
+          // Design CONTENT is subtracted. Design RECOGNITION — committed
+          // `.zeros` settings and canvas markers — stays native so ordinary
+          // tree-level Git can update it. Sticky engine recognition prevents a
+          // later repository edit from de-registering an admitted Design root.
+        ]
+      : [workspaceRoot, ...additional, ...protectedCodeDirectories]),
+    // Both actors are denied the small authority set that defines the next
+    // admission: the database and sidecars, recovery seeds, and sticky Design
+    // recognition. Otherwise either actor could weaken future territory.
+    ...engineAuthorityWriteDenies,
+    // The desktop shares the user's uid and keeps ordinary reads. The cloud
+    // worker is a separate uid within its tenant VM, so root-owned engine state
+    // is absent from both its read and write views.
+    ...(options.cloudWorker ? engineRoots : []),
     paths.policy,
     paths.commands,
     paths.tools,
     paths.networkRuntime,
-  ];
-  const denyWrite = options.localHostParity
-    ? uniqueSorted([
-        ...(codeWriteAuthority
-          ? [
-              ...protectedDesignDirectories,
-              // Design CONTENT is subtracted above. Design RECOGNITION — the
-              // `.zeros` settings directories and the canvas markers named by
-              // `request.territory.designRecognitionPaths` — is DELIBERATELY NOT
-              // denied here, and the choice is measured rather than assumed.
-              //
-              // Repositories commit `.zeros/settings.toml`, so denying it made a
-              // fenced `git pull`/`checkout`/`reset --hard` that has to rewrite
-              // that file fail with `unable to unlink old
-              // '.zeros/settings.toml': Read-only file system` while the code
-              // paths in the same command still applied. That friction is real
-              // and recurring; what it bought was narrow.
-              //
-              // Engine-side sticky recognition (design/recognition-store.ts,
-              // unioned into every territory build) already defeats
-              // de-registration on its own: a folder Zeros has admitted stays
-              // protected no matter what the pointer or the marker say later. The
-              // only case the filesystem deny added was a Design folder that
-              // arrives mid-session — an agent runs `git pull` — and is
-              // de-registered before any admission has recorded it. The canvas
-              // marker also stays unwritable regardless, because it lives inside
-              // the protected directory.
-              //
-              // To re-enable, canonicalize
-              // `request.territory.designRecognitionPaths` alongside
-              // `territoryDenies` above and spread the result here. The
-              // isolated/cloud profile keeps denying them through
-              // `territoryDenies` (which already contains them), so that profile
-              // is unaffected either way.
-              //
-              // The sticky memory ITSELF is still denied. It is engine data, not
-              // repository content, so nothing pulls or checks it out — and local
-              // agents can otherwise write Zeros' data dir (they are the user),
-              // which would leave the backstop as editable as the evidence it
-              // backs up.
-              designRecognitionStorePath(),
-            ]
-          : [workspaceRoot, ...additional]),
-        paths.policy,
-        paths.commands,
-        paths.tools,
-        paths.networkRuntime,
-      ])
-    : uniqueSorted(isolatedDenyWrite);
-  const isolatedDenyRead = [
-    ...(linuxUnixIsolation ? [path.parse(workspaceRoot).root] : []),
-    ...engineRoots,
-    ...(await Promise.all(
-      (options.additionalDenyRead ?? []).map(canonicalExistingOrLexical),
-    )),
-    paths.policy,
+  ]);
+  const denyRead = uniqueSorted([
+    ...(options.cloudWorker ? engineRoots : []),
     paths.commands,
     paths.networkRuntime,
-  ];
-  const denyRead = options.localHostParity
-    ? uniqueSorted([paths.commands, paths.networkRuntime])
-    : uniqueSorted(isolatedDenyRead);
+  ]);
   const localPorts = [
     ...new Set([
       ...(request.allowedLocalPorts ?? []),
@@ -689,20 +621,16 @@ export async function prepareZsrPolicy(
     runtime: {
       normalNetwork: true,
       allowPty: true,
-      ...(options.localHostParity ? { localHostParity: true as const } : {}),
+      localHostParity: true,
       allowedUnixSockets: uniqueSorted(allowedUnixSockets),
       allowedLocalPorts: localPorts.sort((a, b) => a - b),
-      deniedLocalPorts: options.localHostParity
-        ? []
-        : deniedZerosControlPorts(request.trustedLocalPorts ?? []),
+      deniedLocalPorts: [],
       ...(options.cloudWorker
         ? {
             cloudWorker: {
               version: 1,
               uid: options.cloudWorker.uid,
               gid: options.cloudWorker.gid,
-              cgroupParent: options.cloudWorker.cgroupParent,
-              resources: options.cloudWorker.resources,
             } as const,
           }
         : {}),

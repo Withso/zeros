@@ -37,8 +37,6 @@ import {
   SANDBOX_DATA_DIR,
   SANDBOX_ENGINE_DIR,
   SANDBOX_REPO_DIR,
-  ZSR_CGROUP_PARENT,
-  ZSR_CLOUD_AGENT_RESOURCES,
   saveState,
   saveSnapshotAttestation,
   withCloudValidationMutationLock,
@@ -222,18 +220,11 @@ describe("cloud worker image contract", () => {
       profile: "zeros-cloud-worker-v1",
       uid: SANDBOX_AGENT_UID,
       gid: SANDBOX_AGENT_GID,
-      cgroupParent: ZSR_CGROUP_PARENT,
-      resources: ZSR_CLOUD_AGENT_RESOURCES,
       toolchain: {
         node: "/usr/local/bin/node",
         supervisor:
           "/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs",
-        networkBridge:
-          "/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-network-bridge.mjs",
-        containerWorker:
-          "/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-container-worker.mjs",
         bwrap: "/usr/bin/bwrap",
-        socat: "/usr/bin/socat",
         setpriv: "/usr/bin/setpriv",
       },
     });

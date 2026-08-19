@@ -175,6 +175,10 @@ export class RunManager {
     string,
     Set<BoundaryTeardownRecord>
   >();
+  /** Process-wide proof ledger, including rowless tasks and superseded entries.
+   * Failed records intentionally survive until restart recovery; neither a
+   * replacement run nor a missing workspace row may erase old authority. */
+  private readonly allBoundaryTeardowns = new Set<BoundaryTeardownRecord>();
 
   constructor(
     private readonly pty: PtyService,
@@ -206,12 +210,30 @@ export class RunManager {
     if (!entry.boundary) return Promise.resolve();
     if (entry.boundaryTeardown) return entry.boundaryTeardown;
     entry.boundaryFinalized = true;
-    const promise = Promise.resolve().then(() =>
-      entry.boundary!.stopAndProve(),
+    const promise = this.trackBoundaryTeardown(
+      entry.boundary,
+      entry.workspaceId,
     );
     entry.boundaryTeardown = promise;
-    const workspaceId = entry.workspaceId;
+    return promise;
+  }
+
+  /** Track teardown even when cancellation lands after boundary admission but
+   * before a RunEntry exists. Losing that rejected promise would let a later
+   * app-wide Design-owner change proceed under an unproven process domain. */
+  private trackBoundaryTeardown(
+    boundary: PreparedBoundary,
+    workspaceId: string | null,
+  ): Promise<void> {
+    const promise = Promise.resolve().then(() => boundary.stopAndProve());
     const record = { promise } satisfies BoundaryTeardownRecord;
+    this.allBoundaryTeardowns.add(record);
+    void promise.then(
+      () => this.allBoundaryTeardowns.delete(record),
+      () => {
+        // Keep failed proof in the process-wide set until restart recovery.
+      },
+    );
     if (workspaceId) {
       const records = this.boundaryTeardowns.get(workspaceId) ?? new Set();
       records.add(record);
@@ -251,9 +273,69 @@ export class RunManager {
     if (failures.length > 0) {
       throw new AggregateError(
         failures,
-        "repository run containment teardown was not proven",
+        "repository run containment teardown was not proven. Restart Zeros before removing the workspace or changing Design territory.",
       );
     }
+  }
+
+  /** Revoke every repository-controlled run boundary before the app-wide
+   * Design-owner deny union changes. This includes rowless main-checkout runs,
+   * whose null workspace id intentionally has no lifecycle reaper bucket. */
+  async stopAllAndProve(): Promise<void> {
+    for (const sessionId of [...this.starting.keys()]) this.stop(sessionId);
+    const entries = [...this.entries.values()];
+    for (const entry of entries) {
+      if (entry.state === "running") {
+        // stop() publishes the terminal state and begins revocation itself.
+        // Calling revoke again is not part of the boundary contract and can
+        // race two destructive teardown requests against the same domain.
+        this.stop(entry.sessionId);
+      } else {
+        this.beginBoundaryRevocation(entry);
+      }
+    }
+    for (const entry of entries) void this.finalizeBoundary(entry);
+    const results = await Promise.allSettled(
+      [...this.allBoundaryTeardowns].map((record) => record.promise),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "repository run boundaries were not globally retired. Restart Zeros before changing registered Design territory.",
+      );
+    }
+  }
+
+  /** Compare active repository tasks with the current app-wide Design
+   * subtraction. Rowless tasks participate exactly like managed workspaces;
+   * an in-flight start is conservatively changed until its identity publishes. */
+  registeredDesignAuthorityChanged(identity: string | null): boolean {
+    if (this.starting.size > 0 || this.allBoundaryTeardowns.size > 0) {
+      return true;
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.state !== "running" || entry.boundaryFinalized) continue;
+      if (
+        !entry.boundary ||
+        entry.boundary.registeredDesignAuthorityIdentity !== identity
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  hasRepositoryCodeAuthority(): boolean {
+    return (
+      this.starting.size > 0 ||
+      this.allBoundaryTeardowns.size > 0 ||
+      [...this.entries.values()].some(
+        (entry) => entry.state === "running" && !entry.boundaryFinalized,
+      )
+    );
   }
 
   /** The run's child env, never fatal: an env-builder failure must not block
@@ -284,14 +366,22 @@ export class RunManager {
     }
     const prev = this.entries.get(args.sessionId);
     if (this.pty.has(args.sessionId)) {
-      if (!prev) {
-        // An untracked live PTY under this run id — a pre-migration run
-        // terminal (spawned by the old renderer path) still alive. ADOPT it
-        // so it wears the running star and Stop works; its exit settles
-        // through the normal state machine.
-        this.adopt(args);
+      if (prev) return { alreadyRunning: true };
+
+      // A pre-migration renderer could leave a live run PTY that has no
+      // repository boundary. Never adopt that process as current authority:
+      // doing so makes it impossible to prove the app-wide Design subtraction
+      // and causes the next territory refresh to retire every contained
+      // session. Register the exit waiter before kill (kill drops PtyService's
+      // visible row synchronously), prove the old host process exited, then
+      // replace it with an ordinary contained run below.
+      const exited = this.pty.waitForExit(args.sessionId);
+      this.pty.kill(args.sessionId);
+      if (!(await exited)) {
+        throw new Error(
+          "the legacy run process could not be retired before containment",
+        );
       }
-      return { alreadyRunning: true };
     }
     // In-flight guard. There are awaits (the exit-settle wait, the env build)
     // between "no live PTY" and the spawn, so a second Rerun click can arrive
@@ -352,11 +442,9 @@ export class RunManager {
       workspaceRoot: args.cwd,
       repoRoot: args.repoRoot ?? args.cwd,
       ...(env ? { env } : {}),
-      // Stated, not inherited: a Run action is a click the user is watching.
-      admissionPriority: "interactive",
     });
     if (flight.cancelled) {
-      await boundary.stopAndProve();
+      await this.trackBoundaryTeardown(boundary, args.workspaceId);
       return { alreadyRunning: false, cancelled: true };
     }
     let resolveExit = () => {};
@@ -436,40 +524,6 @@ export class RunManager {
     }
     this.registerTerminal?.(args.sessionId, args.cwd);
     return { alreadyRunning: false };
-  }
-
-  /** Track (without spawning) a live PTY this manager didn't create — a
-   *  pre-migration run terminal. Long-lived semantics regardless of the
-   *  action's flag: its command was typed into an interactive shell, so the
-   *  eventual PTY exit is a shell exit, never a verdict. */
-  private adopt(args: RunStartArgs): void {
-    let resolveExit = () => {};
-    const exitSettled = new Promise<void>((resolve) => {
-      resolveExit = resolve;
-    });
-    const entry: RunEntry = {
-      sessionId: args.sessionId,
-      workspaceId: args.workspaceId,
-      actionId: args.actionId,
-      oneShot: false,
-      state: "running",
-      stopRequested: false,
-      startedAt: Date.now(),
-      endedAt: null,
-      exitSettled,
-      settleExit: () => {},
-      settled: false,
-      log: "",
-      truncated: false,
-      boundaryFinalized: false,
-    };
-    entry.settleExit = () => {
-      entry.settled = true;
-      resolveExit();
-    };
-    this.entries.set(args.sessionId, entry);
-    this.persist(entry);
-    this.onChange(entry.workspaceId);
   }
 
   /** Stop a live run without treating it as a failure. With no live PTY it

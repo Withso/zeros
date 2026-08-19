@@ -25,7 +25,6 @@ import { createServer, isIP, type Server, type Socket } from "node:net";
 import os from "node:os";
 import path from "node:path";
 
-import type { ShadowGitFilesystemProjection } from "./shadow-git";
 import type { TerritoryGeneration } from "./types";
 import { ORBSTACK_MACHINE_RECOVERY_HOLD_FILE } from "../session-paths";
 
@@ -107,7 +106,6 @@ export interface MacosContainerReservationOptions {
 export interface MacosContainerStartRequest {
   readonly generation: TerritoryGeneration;
   readonly protectedRoots: readonly string[];
-  readonly gitProjections: readonly ShadowGitFilesystemProjection[];
 }
 
 export interface MacosContainerWorkerLease {
@@ -248,7 +246,6 @@ interface OrbStackProvisionedMachine {
 interface NormalizedMacosContainerStartRequest {
   readonly generation: TerritoryGeneration;
   readonly protectedRoots: readonly string[];
-  readonly gitProjections: readonly ShadowGitFilesystemProjection[];
 }
 
 interface OrbStackRuntimeIdentity {
@@ -925,51 +922,22 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
   ): NormalizedMacosContainerStartRequest {
     const protectedRoots = [
       ...new Set(
-        request.protectedRoots.map((root) =>
-          physicalDirectory(root, "protected Design root"),
-        ),
+        request.protectedRoots
+          .map((root) => physicalDirectory(root, "protected Design root"))
+          // The host code fence is app-wide, while an isolated worker receives
+          // only this lease's exact workspace/add-dir projection. A sibling
+          // Design root outside those mounts has no vnode inside the VM to
+          // protect. Omitting it preserves the same authority intersection;
+          // rejecting it instead made every container-capable local session
+          // fail as soon as a second registered workspace owned Design.
+          .filter((root) =>
+            this.mountRoots.some((parent) => pathInsideOrEqual(root, parent)),
+          ),
       ),
     ].sort();
-    if (
-      protectedRoots.some(
-        (root) =>
-          !this.mountRoots.some((parent) => pathInsideOrEqual(root, parent)),
-      )
-    ) {
-      throw new Error("protected Design root is outside the VM projection");
-    }
-    if (request.gitProjections.length > 33) {
-      throw new Error("private Git projection set is too large");
-    }
-    const gitProjections = request.gitProjections.map((projection) => ({
-      source: projection.readOnly
-        ? physicalFile(projection.source, "private Git source")
-        : physicalDirectory(projection.source, "private Git source"),
-      destination: projection.readOnly
-        ? physicalFile(projection.destination, "Git destination")
-        : physicalDirectory(projection.destination, "Git destination"),
-      readOnly: projection.readOnly,
-    }));
-    if (
-      new Set(gitProjections.map((projection) => projection.source)).size !==
-        gitProjections.length ||
-      new Set(gitProjections.map((projection) => projection.destination))
-        .size !== gitProjections.length ||
-      gitProjections.some(
-        (projection) =>
-          path.basename(projection.destination) !== ".git" ||
-          !this.mountRoots.some((root) =>
-            pathInsideOrEqual(projection.destination, root),
-          ) ||
-          !pathInsideOrEqual(projection.source, this.request.sessionRoot),
-      )
-    ) {
-      throw new Error("private Git projections are outside their exact lease");
-    }
     return {
       generation: request.generation,
       protectedRoots,
-      gitProjections,
     };
   }
 
@@ -1074,7 +1042,6 @@ class OrbStackContainerLease implements MacosContainerWorkerLease {
           (root) => root !== this.request.sessionRoot,
         ),
         protectedRoots: request.protectedRoots,
-        gitProjections: request.gitProjections,
       })}\n`,
       { encoding: "utf8", mode: 0o600, flag: "wx" },
     );

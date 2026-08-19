@@ -1,11 +1,16 @@
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
 import tls from "node:tls";
 import {
   chmod,
+  chown,
+  lchown,
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
+  readdir,
   rm,
   symlink,
   writeFile,
@@ -18,6 +23,7 @@ import {
   CA_TRUST_ENV_NAMES,
   ZsrExecutionBoundary,
 } from "../../apps/desktop/src/engine/agents/containment/zsr-boundary";
+import { loadCloudWorkerConfiguration } from "../../apps/desktop/src/engine/agents/containment/cloud-worker-config";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -108,6 +114,33 @@ async function reserveService(): Promise<{
   };
 }
 
+async function reserveAmbientContainerSocket(): Promise<{
+  path: string;
+  close(): Promise<void>;
+}> {
+  const socketPath = path.join(
+    process.platform === "darwin" ? "/private/tmp" : os.tmpdir(),
+    `zeros-zq-container-${process.pid}-${randomUUID().slice(0, 8)}.sock`,
+  );
+  const server = createServer((socket) => socket.end("ambient-container\n"));
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  // The cloud worker uses a distinct uid. Make a failed subtraction observable
+  // there too instead of letting socket ownership create a false pass.
+  await chmod(socketPath, 0o777);
+  return {
+    path: socketPath,
+    close: async () => {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+      await rm(socketPath, { force: true });
+    },
+  };
+}
+
 function territory(
   workspace: string,
   designs: readonly string[],
@@ -122,11 +155,10 @@ function territory(
     deniedPaths: string[];
   };
 } {
-  // The isolated/cloud profile denies all of these; host parity applies a strict
-  // subset (Design content only). Declaring the full set here is what makes the
-  // qualification meaningful: it proves the parity policy SUBTRACTS the
-  // recognition inputs from the deny it was handed, rather than never being told
-  // about them.
+  // Territory discovery records the full semantic set, while the host-parity
+  // policy subtracts Design content and engine-owned authority only. Declaring
+  // the recognition inputs here proves committed settings remain native rather
+  // than disappearing from the fixture before policy construction.
   const recognition = [
     path.join(workspace, ".zeros"),
     ...designs.map((design) => path.join(design, ".zeros-canvas.json")),
@@ -144,11 +176,39 @@ function territory(
   };
 }
 
+async function grantWorkerTree(
+  root: string,
+  identity: { uid: number; gid: number },
+): Promise<void> {
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    const candidate = path.join(root, entry.name);
+    if (entry.isSymbolicLink()) {
+      await lchown(candidate, identity.uid, identity.gid);
+      continue;
+    }
+    if (entry.isDirectory()) await grantWorkerTree(candidate, identity);
+    await chown(candidate, identity.uid, identity.gid);
+  }
+  const metadata = await lstat(root);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error("cloud qualification worker root is not physical");
+  }
+  await chown(root, identity.uid, identity.gid);
+}
+
 async function run(): Promise<void> {
   if (!new Set(["darwin", "linux"]).has(process.platform)) {
     throw new Error("local host-parity qualification requires macOS or Linux");
   }
 
+  const cloudConfigurationPath =
+    process.env.ZEROS_ZSR_CLOUD_WORKER_CONFIG?.trim();
+  const cloudConfiguration = cloudConfigurationPath
+    ? loadCloudWorkerConfiguration(cloudConfigurationPath)
+    : null;
+  if (cloudConfigurationPath && !cloudConfiguration) {
+    throw new Error("cloud host-parity qualification marker is unavailable");
+  }
   const root = await mkdtemp(path.join(os.tmpdir(), "zeros-zsr-local-parity-"));
   const workspace = path.join(root, "workspace");
   const primaryDesign = path.join(workspace, "Zeros Design");
@@ -157,7 +217,8 @@ async function run(): Promise<void> {
   const hostHome = process.env.HOME || os.homedir();
   const hostLog = path.join(root, "host-app.log");
   const hostCaBundle = path.join(root, "host-ca-bundle.pem");
-  const outsideCache = path.join(root, "outside-cache.txt");
+  const workerScratch = path.join(root, "worker-scratch");
+  const outsideCache = path.join(workerScratch, "outside-cache.txt");
   const remote = path.join(root, "remote.git");
   const hookMarker = path.join(root, "pre-push-ran.txt");
   const codeFile = path.join(workspace, "code.txt");
@@ -168,7 +229,23 @@ async function run(): Promise<void> {
   const designAlias = path.join(workspace, "design-alias");
   const previousDataDir = process.env.ZEROS_DATA_DIR;
   process.env.ZEROS_DATA_DIR = path.join(root, "engine");
+  const engineDatabase = path.join(process.env.ZEROS_DATA_DIR, "zeros.db");
+  const engineAuthorityFiles = [
+    engineDatabase,
+    `${engineDatabase}-wal`,
+    `${engineDatabase}-shm`,
+    `${engineDatabase}-journal`,
+    path.join(process.env.ZEROS_DATA_DIR, "design-recognition.json"),
+    path.join(
+      process.env.ZEROS_DATA_DIR,
+      "worktrees",
+      "fixture",
+      "workspace.json",
+    ),
+  ];
+  const engineAuthorityAliasRoot = path.join(root, "engine-authority-aliases");
   const service = await reserveService();
+  const ambientContainer = await reserveAmbientContainerSocket();
   let codeBoundary: Awaited<
     ReturnType<ZsrExecutionBoundary["prepare"]>
   > | null = null;
@@ -180,8 +257,13 @@ async function run(): Promise<void> {
     await Promise.all([
       mkdir(primaryDesign, { recursive: true }),
       mkdir(secondaryDesign, { recursive: true }),
+      mkdir(engineAuthorityAliasRoot, { recursive: true }),
+      mkdir(workerScratch, { recursive: true }),
     ]);
     await mkdir(path.dirname(repoSettingsFile), { recursive: true });
+    await mkdir(path.dirname(engineAuthorityFiles.at(-1)!), {
+      recursive: true,
+    });
     await Promise.all([
       writeFile(hostLog, "host-log-visible\n"),
       writeFile(codeFile, "initial-code\n"),
@@ -189,6 +271,7 @@ async function run(): Promise<void> {
       writeFile(secondaryFile, '{"mode":"code-protected"}\n'),
       writeFile(primaryMarker, "{}\n"),
       writeFile(repoSettingsFile, '[design]\ndirectory = "Zeros Design"\n'),
+      ...engineAuthorityFiles.map((file) => writeFile(file, "engine-owned\n")),
       symlink(primaryDesign, designAlias, "dir"),
     ]);
     git(["init", "-b", "main"], workspace);
@@ -221,26 +304,35 @@ async function run(): Promise<void> {
       `#!/bin/sh\nprintf 'ran\\n' > ${JSON.stringify(hookMarker)}\n`,
     );
     await chmod(path.join(workspace, ".git", "hooks", "pre-push"), 0o700);
+    if (cloudConfiguration) {
+      await chmod(root, 0o711);
+      await Promise.all([
+        grantWorkerTree(workspace, cloudConfiguration),
+        grantWorkerTree(remote, cloudConfiguration),
+        grantWorkerTree(workerScratch, cloudConfiguration),
+        grantWorkerTree(engineAuthorityAliasRoot, cloudConfiguration),
+      ]);
+    }
 
     const boundary = new ZsrExecutionBoundary({
       projectRoot,
-      localHostParity: true,
       supervisorScript: path.join(projectRoot, "binaries/zsr-supervisor.mjs"),
-      networkBridgeScript: path.join(
-        projectRoot,
-        "binaries/zsr-network-bridge.mjs",
-      ),
       macosProcessDomainHelper: path.join(
         projectRoot,
         "binaries/zsr-macos-process-domain",
       ),
+      ...(cloudConfiguration
+        ? {
+            cloudWorker: cloudConfiguration,
+            cloudWorkerToolchain: cloudConfiguration.toolchain,
+          }
+        : {}),
     });
     // A real, readable PEM so the child's Node runtime accepts the sentinel
     // silently. The point of the variable is not the trust it adds: it is that a
     // configured host trust path must arrive in the session BYTE-IDENTICAL, and
     // that the names the host left unset must stay unset. The supervisor sits in
-    // between and rewrites exactly these names for the isolated profile; under
-    // parity it must rewrite none of them.
+    // between; under host parity it must rewrite none of them.
     await writeFile(hostCaBundle, `${tls.rootCertificates[0] ?? ""}\n`);
     const sentinelEnv = {
       HOME: hostHome,
@@ -290,7 +382,7 @@ async function run(): Promise<void> {
 const fs = require("node:fs");
 const net = require("node:net");
 const { spawnSync } = require("node:child_process");
-const [hostLog, codeFile, primary, secondary, aliasFile, servicePort, expectedCa, settingsFile, markerFile, divergedDesignFile, restoreFromCommit] = process.argv.slice(1);
+const [hostLog, codeFile, primary, secondary, aliasFile, servicePort, expectedCa, settingsFile, markerFile, divergedDesignFile, restoreFromCommit, authorityFilesJson, authorityAliasRoot, ambientContainerSocket, macosAuthorityHelper] = process.argv.slice(1);
 function denied(write) { try { write(); return false; } catch { return true; } }
 const caExpected = JSON.parse(expectedCa);
 const caDrift = Object.entries(caExpected).flatMap(([name, value]) => {
@@ -309,6 +401,17 @@ const designDenied = [primary, secondary, aliasFile].map((file) =>
 const markerDenied = denied(() => fs.writeFileSync(markerFile, "de-registered\n"));
 const repoSettingsWritable = !denied(() =>
   fs.appendFileSync(settingsFile, "\n# host-parity settings write\n"),
+);
+const authorityFiles = JSON.parse(authorityFilesJson);
+const engineAuthorityRead = authorityFiles.every((file) => {
+  try { return fs.readFileSync(file, "utf8") === "engine-owned\n"; }
+  catch { return false; }
+});
+const engineAuthorityWriteDenied = authorityFiles.map((file) =>
+  denied(() => fs.writeFileSync(file, "forbidden\n")),
+);
+const engineAuthorityHardlinkDenied = authorityFiles.map((file, index) =>
+  denied(() => fs.linkSync(file, require("node:path").join(authorityAliasRoot, String(index)))),
 );
 fs.writeFileSync(codeFile, "host-parity-code\n");
 const commands = [
@@ -333,6 +436,36 @@ const gh = spawnSync("gh", ["--version"], { encoding: "utf8" });
 const keychain = process.platform === "darwin"
   ? spawnSync("security", ["list-keychains"], { encoding: "utf8" })
   : { status: 0 };
+let appleEventsDenied = true;
+if (process.platform === "darwin") {
+  const authority = spawnSync(macosAuthorityHelper, ["authority"], {
+    encoding: "utf8",
+  });
+  try {
+    const report = JSON.parse(authority.stdout);
+    appleEventsDenied =
+      authority.status === 0 && report.appleEventsDenied === true;
+  } catch {
+    appleEventsDenied = false;
+  }
+}
+const ambientContainerProbe = spawnSync(
+  process.execPath,
+  [
+    "-e",
+    'const net=require("node:net");const socket=net.connect(process.argv[1]);socket.once("connect",()=>process.exit(91));socket.once("error",()=>process.exit(0));setTimeout(()=>process.exit(92),1500).unref();',
+    ambientContainerSocket,
+  ],
+  { encoding: "utf8", timeout: 3_000 },
+);
+const ambientContainerSocketDenied = ambientContainerProbe.status === 0;
+const ambientContainerSelectorsScrubbed = [
+  "DOCKER_HOST",
+  "DOCKER_CONTEXT",
+  "CONTAINER_HOST",
+  "CONTAINER_CONNECTION",
+  "PODMAN_HOST",
+].every((name) => process.env[name] === undefined);
 const connection = net.connect({ host: "127.0.0.1", port: Number(servicePort) });
 let service = "";
 connection.setEncoding("utf8");
@@ -353,6 +486,9 @@ connection.once("end", () => {
           designDenied,
           markerDenied,
           repoSettingsWritable,
+          engineAuthorityRead,
+          engineAuthorityWriteDenied,
+          engineAuthorityHardlinkDenied,
           designRestoreRefused: designRestore.status !== 0,
           designRestoreBytes: fs.readFileSync(divergedDesignFile, "utf8"),
           gitStatuses: git.map((entry) => entry.status),
@@ -364,12 +500,16 @@ connection.once("end", () => {
           sshSocket: process.env.SSH_AUTH_SOCK,
           ghAvailable: gh.status === 0,
           keychainAvailable: keychain.status === 0,
+          appleEventsDenied,
+          ambientContainerSocketDenied,
+          ambientContainerSelectorsScrubbed,
           directService: service === "host-service\n",
           directPort: selfReply === "agent-port\n",
           proxyUnchanged: process.env.HTTP_PROXY === ${JSON.stringify(process.env.HTTP_PROXY)},
           noNetworkBridge: !process.env.ZEROS_ZSR_NETWORK_BRIDGE,
           caTrustExact: caDrift.length === 0,
           caTrustDrift: caDrift,
+          workerIdentity: process.getuid?.() ?? null,
         }) + "\n");
       });
     });
@@ -388,12 +528,21 @@ connection.once("error", (error) => { throw error; });
         primaryMarker,
         primaryFile,
         initialCommit,
+        JSON.stringify(engineAuthorityFiles),
+        engineAuthorityAliasRoot,
+        ambientContainer.path,
+        path.join(projectRoot, "binaries", "zsr-macos-process-domain"),
       ],
       cwd: workspace,
       env: {
         ...hostEnvironment(),
         ...sentinelEnv,
         PATH: process.env.PATH ?? "/usr/bin:/bin",
+        DOCKER_HOST: `unix://${ambientContainer.path}`,
+        DOCKER_CONTEXT: "ambient-qualification",
+        CONTAINER_HOST: `unix://${ambientContainer.path}`,
+        CONTAINER_CONNECTION: "ambient-qualification",
+        PODMAN_HOST: `unix://${ambientContainer.path}`,
       },
       stdio: "pipe",
     });
@@ -428,7 +577,18 @@ connection.once("error", (error) => { throw error; });
         String.raw`
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
-const [codeFile, primary, secondary, outside] = process.argv.slice(1);
+const [codeFile, primary, secondary, outside, authorityFilesJson, authorityAliasRoot] = process.argv.slice(1);
+const authorityFiles = JSON.parse(authorityFilesJson);
+const engineAuthorityRead = authorityFiles.every((file) => {
+  try { return fs.readFileSync(file, "utf8") === "engine-owned\n"; }
+  catch { return false; }
+});
+const engineAuthorityWriteDenied = authorityFiles.map((file) => {
+  try { fs.writeFileSync(file, "forbidden\n"); return false; } catch { return true; }
+});
+const engineAuthorityHardlinkDenied = authorityFiles.map((file, index) => {
+  try { fs.linkSync(file, require("node:path").join(authorityAliasRoot, "design-" + index)); return false; } catch { return true; }
+});
 let codeDenied = false;
 try { fs.writeFileSync(codeFile, "forbidden-design-code\n"); } catch { codeDenied = true; }
 fs.writeFileSync(primary, '{"mode":"design-writable"}\n');
@@ -448,15 +608,21 @@ process.stdout.write(JSON.stringify({
   outsideWrite: fs.readFileSync(outside, "utf8") === "outside-write\n",
   gitDirectoryWrite,
   canonicalGitWrite: git.status === 0,
+  engineAuthorityRead,
+  engineAuthorityWriteDenied,
+  engineAuthorityHardlinkDenied,
   gitError: git.stderr,
   home: process.env.HOME,
   ghToken: process.env.GH_TOKEN,
+  workerIdentity: process.getuid?.() ?? null,
 }));
 `,
         codeFile,
         primaryFile,
         secondaryFile,
         outsideCache,
+        JSON.stringify(engineAuthorityFiles),
+        engineAuthorityAliasRoot,
       ],
       cwd: workspace,
       env: {
@@ -496,6 +662,7 @@ process.stdout.write(JSON.stringify({
           (await readFile(codeFile, "utf8")) === "host-parity-code\n",
         codeAdmissionMs,
         designAdmissionMs,
+        cloudWorkerUid: cloudConfiguration?.uid ?? null,
       })}\n`,
     );
   } finally {
@@ -504,6 +671,7 @@ process.stdout.write(JSON.stringify({
       designBoundary?.stopAndProve(),
     ]);
     await service.close().catch(() => undefined);
+    await ambientContainer.close().catch(() => undefined);
     if (previousDataDir === undefined) delete process.env.ZEROS_DATA_DIR;
     else process.env.ZEROS_DATA_DIR = previousDataDir;
     await rm(root, { recursive: true, force: true });

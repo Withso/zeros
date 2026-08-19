@@ -7,9 +7,7 @@
 // same-user ACL is the wrong scope: it also blocks the user's other editors,
 // Git clients, and coding platforms. New builds therefore never install one.
 //
-// Historical names are retained at existing call sites to avoid a broad
-// lifecycle rewrite. `fenceDesignDirectory` is now a no-op compatibility seam;
-// boot owns the cold, durable ACL migration so admission and canvas writes do
+// Boot owns the cold, durable ACL migration so admission and canvas writes do
 // not walk the tree.
 // ──────────────────────────────────────────────────────────
 
@@ -28,10 +26,6 @@ import {
 } from "../git/state";
 import { discoverDesignDirectories } from "./directory";
 import { designDirectoryNameFor } from "./directory-registry";
-import {
-  clearDesignFenceFailure,
-  recordDesignFenceFailure,
-} from "./fence-health";
 
 export const LEGACY_DESIGN_ACL_CLEANUP_META_KEY =
   "design.legacy-acl-cleanup.v1";
@@ -41,15 +35,6 @@ function failedPathsMessage(action: string, failed: readonly string[]): string {
   return `Design directory ${action} failed for ${failed.length} ${
     failed.length === 1 ? "path" : "paths"
   }${sample ? ` (${sample})` : ""}.`;
-}
-
-/** Reconcile an old Design ACL to today's Zeros-scoped isolation policy.
- * Historical name retained for internal call-site compatibility. */
-export async function fenceDesignDirectory(
-  _workspacePath: string,
-): Promise<void> {
-  // Do not touch the shared filesystem. Provider sandboxes and engine path
-  // authorization are scoped to Zeros; a chmod ACL is not.
 }
 
 function legacyAclCleanupComplete(workspacePath: string): boolean {
@@ -71,15 +56,9 @@ export async function unfenceDesignDirectory(
   const designName = designDirectoryNameFor(workspacePath);
   const designPath = path.join(workspacePath, ...designName.split("/"));
   if (!existsSync(designPath)) return;
-  try {
-    const result = await unfenceDesignDirFiles(workspacePath, designName);
-    if (result.failed.length > 0) {
-      throw new Error(failedPathsMessage("unfence", result.failed));
-    }
-    clearDesignFenceFailure(workspacePath);
-  } catch (error) {
-    recordDesignFenceFailure(workspacePath, error);
-    throw error;
+  const result = await unfenceDesignDirFiles(workspacePath, designName);
+  if (result.failed.length > 0) {
+    throw new Error(failedPathsMessage("unfence", result.failed));
   }
 }
 
@@ -121,26 +100,20 @@ export async function cleanupLegacyDesignFilesystemGuards(
   if (!designLockSupported()) return;
   const workspace = getWorkspaceByPath(path.resolve(workspacePath));
   if (legacyAclCleanupComplete(workspacePath)) return;
-  try {
-    const wholeTree = await unlockCodebase(workspacePath);
-    const failed = [
-      ...wholeTree.failed,
-      ...(await releaseKnownDesignDirectoryAcls(workspacePath)),
-    ];
-    if (failed.length > 0) {
-      throw new Error(failedPathsMessage("cleanup", failed));
-    }
-    if (workspace) {
-      setWorkspaceMeta(
-        workspace.id,
-        LEGACY_DESIGN_ACL_CLEANUP_META_KEY,
-        "complete",
-      );
-    }
-    clearDesignFenceFailure(workspacePath);
-  } catch (error) {
-    recordDesignFenceFailure(workspacePath, error);
-    throw error;
+  const wholeTree = await unlockCodebase(workspacePath);
+  const failed = [
+    ...wholeTree.failed,
+    ...(await releaseKnownDesignDirectoryAcls(workspacePath)),
+  ];
+  if (failed.length > 0) {
+    throw new Error(failedPathsMessage("cleanup", failed));
+  }
+  if (workspace) {
+    setWorkspaceMeta(
+      workspace.id,
+      LEGACY_DESIGN_ACL_CLEANUP_META_KEY,
+      "complete",
+    );
   }
 }
 

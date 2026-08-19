@@ -1,29 +1,27 @@
 # ZSR Instant Sessions — diagnosis, research, and target architecture
 
-**Status:** R0, R1 and part of R2 are now IMPLEMENTED in this working tree
-(2026-08-17). See [§12 Implementation status](#12-implementation-status-2026-08-17)
-for exactly what landed, what it changed, and what is still only specified. The
-diagnosis and architecture below are unchanged and remain the plan of record for
-the rest.
-
-It builds on the landed-but-uncommitted latency work already in this working tree
-(preflight removal, keystroke-armed spawn, admission gate, 32-wide overlay copy,
-overlay⇄shadow-git overlap) and on the recorded evidence in
+**Status:** superseded historical research, retained for its measurements and
+decision record. The private-world architecture described below is no longer a
+plan of record and its file/line references intentionally name removed code.
+The current contracts are
+[zeros-sandbox-runtime-plan.md](zeros-sandbox-runtime-plan.md) and
 [zeros-sandbox-runtime-qualification.md](zeros-sandbox-runtime-qualification.md).
-Companion to the roadmap of record,
-[zeros-sandbox-runtime-plan.md](zeros-sandbox-runtime-plan.md). All code references
-are working-tree `file:line`. External claims carry source URLs. Numbers are marked
-**measured** (from logs/benches/papers) or **estimated** (arithmetic from measured
-parts; needs a confirming run on the Mac).
 
-## 2026-08-18 resolution: local sessions no longer build a private world
+This report analyzed the 2026-08-17 implementation: preflight admission,
+provider-HOME copies, shadow Git, credential projection, network/port brokers,
+and per-agent resource controls. It uses working-tree references from that
+snapshot. External claims carry source URLs. Numbers are marked **measured**
+(from logs/benches/papers) or **estimated** (arithmetic from measured parts).
 
-The product contract changed after the measurements in this report. Local ZSR
-now owns one restriction only: actor-scoped Design write authority. It no longer
-creates a private HOME, shadow Git, Git dispatcher, credential projection,
-network bridge, port map, or per-chat container machine. Those mechanisms remain
-for root-controlled cloud isolation and are why the historical diagnosis below
-is retained.
+## 2026-08-19 resolution: sessions no longer build a private world
+
+The product contract changed after the measurements in this report. ZSR now
+owns actor-scoped Design/code write authority, immutable engine-control state,
+process-domain teardown, a narrow trusted whole-tree Git integration broker,
+and dedicated container capability. Local and cloud sessions no longer create
+a private HOME, shadow Git, credential projection, network/port/service broker,
+or per-agent cgroup. Cloud uses the tenant VM as its network, credential, and
+resource boundary.
 
 For local code sessions, native Git and the original HOME/GH/SSH/Keychain and
 network environment pass through unchanged while every recognized Design root
@@ -34,7 +32,7 @@ measured complete admissions at roughly 0.4 seconds. The synchronized
 Apple-silicon Mac measured 756 ms for code and 202 ms for design. Both passed
 with `secure: true`.
 
-This makes the earlier remaining performance tasks local no-ops:
+This makes the earlier remaining private-world performance tasks no-ops:
 
 - Task #13's dispatcher is bypassed entirely rather than optimized further.
 - Boot refill depth does not affect local admission because local sessions do
@@ -45,7 +43,7 @@ This makes the earlier remaining performance tasks local no-ops:
   chat, with a credential-free stable control root.
 
 The queue/private-world numbers below remain valid historical evidence for the
-isolated profile; they are not the cost model of the current local desktop path.
+removed profile; they are not the cost model of any current runtime path.
 
 ---
 

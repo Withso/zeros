@@ -232,7 +232,7 @@ describe("sweepDeadSessions", () => {
     expect(await readdir(sessionsRoot())).toEqual(["closing"]);
   });
 
-  it("preserves explicit and swept sessions while shadow Git recovery is pending", async () => {
+  it("preserves explicit and swept sessions carrying a legacy Git recovery hold", async () => {
     await seedSession("git-recovery", DEAD_PID);
     await writeFile(
       path.join(sessionsRoot(), "git-recovery", SHADOW_GIT_RECOVERY_HOLD_FILE),

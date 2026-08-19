@@ -48,13 +48,7 @@ import {
 } from "./host/host-client";
 import { wrapSdkWithLocalStore, type RawCursorSdk } from "./local-store";
 import type { PreparedBoundary } from "../../containment/types";
-import {
-  armCursorStateRecovery,
-  durableCursorStateRoot,
-  prepareCursorStateOverlay,
-  promoteCursorStateOverlay,
-  type CursorStateOverlay,
-} from "./state-overlay";
+import { durableCursorStateRoot } from "./state-overlay";
 
 const AGENT_ID = "cursor";
 /** Cursor LOCAL SDK agents (we always run `local: { cwd }`) require an
@@ -537,16 +531,10 @@ interface Session {
    * Cursor host below this session's prepared ZSR boundary. */
   sdk: CursorSdkModule;
   disposeRuntime?: () => Promise<void>;
-  /** Present only for the isolated/cloud profile, whose HOME is a projection that
-   * disappears at teardown and therefore needs copy-in/merge-out. Absent under
-   * local host parity, where the host writes the durable per-workspace store
-   * directly (the pre-ZSR arrangement). */
-  stateOverlay?: CursorStateOverlay;
   /** The HOME this session's Cursor host actually runs with, and where the SDK
    * writes `.cursor/projects/<slug>/agent-transcripts` — so every engine-side read
-   * of that tree must be rooted here, not at the engine's own home. Under local
-   * host parity it IS the user's real HOME; under the isolated/cloud profile it is
-   * the boundary's projection. */
+   * of that tree must be rooted here, not at the engine's own home. Host-parity
+   * boundaries expose the deployment's real HOME. */
   providerHome?: string;
   store?: Promise<CursorLocalStore | null>;
   activeRun: SdkRun | null;
@@ -569,7 +557,6 @@ interface Session {
 interface CursorSessionRuntime {
   sdk: CursorSdkModule;
   dispose?: () => Promise<void>;
-  stateOverlay?: CursorStateOverlay;
   /** See Session.providerHome. */
   providerHome?: string;
 }
@@ -736,45 +723,23 @@ export class CursorSdkAdapter implements AgentAdapter {
     if (process.env.CURSOR_RIPGREP_PATH && !env.CURSOR_RIPGREP_PATH) {
       env.CURSOR_RIPGREP_PATH = process.env.CURSOR_RIPGREP_PATH;
     }
-    // Under local host parity the host runs with the user's real HOME and can
-    // reach the durable store directly, so it writes there — one store per
-    // workspace, shared by concurrent sessions, exactly as before ZSR. Routing it
-    // through a generation-private boundary directory and merging back out would
-    // be per-session containment state in a session that has none. The overlay
-    // (with its merge baseline and crash-recovery hold) remains for the
-    // isolated/cloud profile, whose HOME is a projection that does not survive
-    // teardown.
-    const parity = opts.executionBoundary.localHostParity === true;
-    const localState = parity
-      ? await durableCursorStateRoot(opts.cwd)
-      : opts.executionBoundary.privateStateDirectory("cursor");
-    const stateOverlay = parity
-      ? undefined
-      : await armCursorStateRecovery(
-          await prepareCursorStateOverlay(localState, opts.cwd),
-        );
+    // Every shipped local and cloud boundary is host parity. Cursor therefore
+    // writes the durable per-workspace store directly; generation-private
+    // overlays are retained only as a boot-recovery format for older builds.
+    const localState = await durableCursorStateRoot(opts.cwd);
     env.ZEROS_CURSOR_STATE_ROOT = localState;
-    try {
-      const runtime = createCursorHostRuntime({
-        executionBoundary: opts.executionBoundary,
-        cwd: opts.cwd,
-        env,
-      });
-      return {
-        sdk: runtime.module,
-        dispose: runtime.dispose,
-        ...(stateOverlay ? { stateOverlay } : {}),
-        ...(opts.executionBoundary.providerHomePath
-          ? { providerHome: opts.executionBoundary.providerHomePath }
-          : {}),
-      };
-    } catch (error) {
-      // Host construction can fail synchronously after the recovery hold is
-      // armed but before a runtime object exists. No provider can still be
-      // writing, so finalize the empty/provisional overlay immediately.
-      if (stateOverlay) await this.finalizeRejectedSessionRuntime({ stateOverlay });
-      throw error;
-    }
+    const runtime = createCursorHostRuntime({
+      executionBoundary: opts.executionBoundary,
+      cwd: opts.cwd,
+      env,
+    });
+    return {
+      sdk: runtime.module,
+      dispose: runtime.dispose,
+      ...(opts.executionBoundary.providerHomePath
+        ? { providerHome: opts.executionBoundary.providerHomePath }
+        : {}),
+    };
   }
 
   /** Start building this session's workspace executor the moment its host
@@ -830,40 +795,21 @@ export class CursorSdkAdapter implements AgentAdapter {
       });
   }
 
-  /** Stop a dedicated Cursor host before merging its generation-private JSONL
-   * state and clearing the crash-recovery hold. Failed admission never reaches
-   * `this.sessions`, so `disposeSession()` cannot perform this step for it.
-   * Ordering is security-sensitive: never promote while a provider process may
-   * still be writing. A stop or promotion failure deliberately leaves the hold
-   * armed for boot recovery and the boundary's fail-closed GC check.
-   *
-   * With no overlay (local host parity) this is just the host stop: the state the
-   * host wrote is already the durable state, so there is nothing to promote and
-   * nothing that a crash could leave unmerged. */
+  /** Stop a dedicated Cursor host. State is already durable under host parity;
+   * older generation-overlay holds are handled only by boot recovery. */
   private async finalizeSessionRuntime(
-    runtime: Pick<CursorSessionRuntime, "dispose" | "stateOverlay">,
+    runtime: Pick<CursorSessionRuntime, "dispose">,
   ): Promise<void> {
     await runtime.dispose?.();
-    if (!runtime.stateOverlay) return;
-    const promotion = await promoteCursorStateOverlay(runtime.stateOverlay);
-    if (promotion.conflicts.length > 0) {
-      this.ctx.emit.onAgentStderr(
-        AGENT_ID,
-        `[cursor-sdk] preserved ${promotion.conflicts.length} concurrent ` +
-          `state conflict(s) in the provider-state recovery directory`,
-      );
-    }
   }
 
   private async finalizeRejectedSessionRuntime(
-    runtime: Pick<CursorSessionRuntime, "dispose" | "stateOverlay">,
+    runtime: Pick<CursorSessionRuntime, "dispose">,
   ): Promise<void> {
     try {
       await this.finalizeSessionRuntime(runtime);
     } catch (error) {
       // Keep the provider's actionable startup failure as the thrown result.
-      // The armed marker remains authoritative, so gateway teardown will also
-      // retain the boundary and boot recovery can finish the promotion.
       this.ctx.emit.onAgentStderr(
         AGENT_ID,
         `[cursor-sdk] failed to finalize rejected runtime: ${
@@ -1037,7 +983,6 @@ export class CursorSdkAdapter implements AgentAdapter {
       agent,
       sdk,
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
-      ...(runtime.stateOverlay ? { stateOverlay: runtime.stateOverlay } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
       cancelRequested: false,
@@ -1185,7 +1130,6 @@ export class CursorSdkAdapter implements AgentAdapter {
       agent,
       sdk,
       ...(runtime.dispose ? { disposeRuntime: runtime.dispose } : {}),
-      ...(runtime.stateOverlay ? { stateOverlay: runtime.stateOverlay } : {}),
       ...(runtime.providerHome ? { providerHome: runtime.providerHome } : {}),
       activeRun: null,
       cancelRequested: false,
@@ -1244,7 +1188,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     } catch {
       return { sessions: [] } as never;
     } finally {
-      if (runtime?.dispose || runtime?.stateOverlay) {
+      if (runtime?.dispose) {
         await this.finalizeSessionRuntime(runtime);
       }
     }
@@ -1703,13 +1647,9 @@ export class CursorSdkAdapter implements AgentAdapter {
     } catch {
       /* best-effort store flush; boundary teardown remains authoritative */
     }
-    await this.finalizeSessionRuntime({
-      dispose: session.disposeRuntime,
-      stateOverlay: session.stateOverlay,
-    });
-    // Retain the cleanup handle until host stop + state promotion both
-    // succeed. A fail-closed caller can then retry in this same engine process
-    // instead of being permanently wedged behind an armed recovery marker.
+    await this.finalizeSessionRuntime({ dispose: session.disposeRuntime });
+    // Retain the cleanup handle until host stop succeeds. A fail-closed caller
+    // can then retry in this same engine process.
     this.sessions.delete(sessionId);
   }
 
@@ -1762,7 +1702,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         ? { ok: false, error: "Cursor rejected this API key." }
         : { ok: null };
     } finally {
-      if (runtime?.dispose || runtime?.stateOverlay) {
+      if (runtime?.dispose) {
         await this.finalizeSessionRuntime(runtime);
       }
     }

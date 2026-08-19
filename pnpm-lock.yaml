@@ -17,7 +17,7 @@ overrides:
 
 patchedDependencies:
   '@anthropic-ai/sandbox-runtime@0.0.73':
-    hash: db98cee40aab2e2da7bf5a38216367c38d84b6d740115a1ffe6812a7e03fe89a
+    hash: 00f28f052797545a83bc793fc6029f37c16828cb1033fcbf2ab1b0fb35db889f
     path: patches/@anthropic-ai__sandbox-runtime@0.0.73.patch
 
 importers:
@@ -29,7 +29,7 @@ importers:
         version: 0.3.231(@anthropic-ai/sdk@0.100.1(zod@4.3.6))(@modelcontextprotocol/sdk@1.30.0(zod@4.3.6))(zod@4.3.6)
       '@anthropic-ai/sandbox-runtime':
         specifier: 0.0.73
-        version: 0.0.73(patch_hash=db98cee40aab2e2da7bf5a38216367c38d84b6d740115a1ffe6812a7e03fe89a)
+        version: 0.0.73(patch_hash=00f28f052797545a83bc793fc6029f37c16828cb1033fcbf2ab1b0fb35db889f)
       '@codemirror/autocomplete':
         specifier: ^6.20.3
         version: 6.20.3
@@ -6998,7 +6998,7 @@ snapshots:
       '@anthropic-ai/claude-agent-sdk-win32-arm64': 0.3.231
       '@anthropic-ai/claude-agent-sdk-win32-x64': 0.3.231
 
-  '@anthropic-ai/sandbox-runtime@0.0.73(patch_hash=db98cee40aab2e2da7bf5a38216367c38d84b6d740115a1ffe6812a7e03fe89a)':
+  '@anthropic-ai/sandbox-runtime@0.0.73(patch_hash=00f28f052797545a83bc793fc6029f37c16828cb1033fcbf2ab1b0fb35db889f)':
     dependencies:
       '@pondwader/socks5-server': 1.0.10
       commander: 12.1.0

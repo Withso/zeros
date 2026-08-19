@@ -79,6 +79,7 @@ import { isDevRuntime } from "../../../runtime";
 import {
   codexPromptRequestsBrowserSkill,
   codexBrowserThreadConfig,
+  codexNativeBrowserUnavailableReason,
   injectCodexBrowserSkillInput,
   mergeCodexNativeBrowserMcp,
   resolveCodexNativeBrowserRuntime,
@@ -1608,22 +1609,49 @@ export class CodexAppServerAdapter implements AgentAdapter {
     let nativeBrowserSkill: CodexNativeBrowserSkill | null = null;
     let mcpServers = opts.mcpServers ?? this.ctx.mcpServers;
     if (opts.browserUse?.kind === "codex-app-server") {
-      const codexBinary = await resolveCodexBinary({
-        override: opts.cliBinary,
+      const containmentReason = codexNativeBrowserUnavailableReason({
+        contained: Boolean(opts.executionBoundary),
       });
-      const nativeBrowser = await resolveCodexNativeBrowserRuntime({
-        codexCliPath: codexBinary.path,
-        codexHome: opts.env?.CODEX_HOME,
-      });
-      if (nativeBrowser) {
-        mcpServers = mergeCodexNativeBrowserMcp(mcpServers, nativeBrowser);
-        nativeBrowserSkill = nativeBrowser.browserSkill;
-      } else {
+      if (containmentReason) {
         effectiveBrowserUse = undefined;
         this.ctx.emit.onAgentStderr(
           this.agentId,
-          "[codex-app-server] Official Browser runtime unavailable: install or update ChatGPT/Codex Desktop so browser@openai-bundled and its node_repl runtime are present. Zeros browser tools will not be substituted.",
+          `[codex-app-server] ${containmentReason}. Codex will continue without Browser for this thread.`,
         );
+      } else {
+        let nativeBrowser: Awaited<
+          ReturnType<typeof resolveCodexNativeBrowserRuntime>
+        > = null;
+        try {
+          const codexBinary = await resolveCodexBinary({
+            override: opts.cliBinary,
+          });
+          nativeBrowser = await resolveCodexNativeBrowserRuntime({
+            codexCliPath: codexBinary.path,
+            codexHome: opts.env?.CODEX_HOME,
+          });
+        } catch (error) {
+          // Browser is an optional per-thread capability. A stale plugin cache
+          // must not strand the whole Codex conversation after its session
+          // directory has already been created.
+          effectiveBrowserUse = undefined;
+          this.ctx.emit.onAgentStderr(
+            this.agentId,
+            `[codex-app-server] Official Browser runtime discovery failed: ${
+              error instanceof Error ? error.message : String(error)
+            }. Codex will continue without Browser for this thread.`,
+          );
+        }
+        if (nativeBrowser) {
+          mcpServers = mergeCodexNativeBrowserMcp(mcpServers, nativeBrowser);
+          nativeBrowserSkill = nativeBrowser.browserSkill;
+        } else if (effectiveBrowserUse) {
+          effectiveBrowserUse = undefined;
+          this.ctx.emit.onAgentStderr(
+            this.agentId,
+            "[codex-app-server] Official Browser runtime unavailable: install or update ChatGPT/Codex Desktop so browser@openai-bundled and its node_repl runtime are present. Zeros browser tools will not be substituted.",
+          );
+        }
       }
     }
     try {
@@ -1635,8 +1663,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         executionBoundary: opts.executionBoundary,
         // Provider MCP tools execute with authority separate from the command
         // sandbox. Never inject them into a code-territory runtime.
-        mcpServers:
-          opts.territory && !opts.executionBoundary ? [] : mcpServers,
+        mcpServers: opts.territory && !opts.executionBoundary ? [] : mcpServers,
         logTag: `codex-app-server:${zerosSessionId.slice(0, 8)}`,
         onApprovalRequest: (request) =>
           this.handleApprovalRequest(session, request),
@@ -1688,8 +1715,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
         );
       }
     } catch (error) {
-      await runtime.dispose();
-      throw error;
+      const runtimeFailure = await withRuntimeDisposeFailure(runtime, error);
+      await removeSessionDir(zerosSessionId).catch(() => {});
+      throw runtimeFailure;
     }
     // True when a `kind:"resume"` could not load the rollout and fell through to
     // a fresh thread below — the gateway re-injects the first-turn
@@ -1785,7 +1813,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         threadModel = result.model ?? null;
       }
     } catch (err) {
-      await runtime.dispose().catch(() => {});
+      const runtimeFailure = await withRuntimeDisposeFailure(runtime, err);
       await removeSessionDir(zerosSessionId).catch(() => {});
       // thread/resume against a rollout codex has cleaned up surfaces
       // as a "no rollout found"-shaped error. Classify so the UI's
@@ -1793,7 +1821,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // resume → start fallback above absorbs the common case, so by
       // the time we reach here the error is non-recoverable.
       throw classifyThreadFailure(
-        err,
+        runtimeFailure,
         opts.kind === "resume" ? "loadSession" : "newSession",
       );
     }
@@ -3038,9 +3066,9 @@ function browserOriginRequestIdentity(
   return turnId && key ? { turnId, key, origin } : null;
 }
 
-function normalizedBrowserApprovalOrigin(value: string | undefined):
-  | string
-  | null {
+function normalizedBrowserApprovalOrigin(
+  value: string | undefined,
+): string | null {
   if (!value) return null;
   try {
     const url = new URL(value);
@@ -3686,6 +3714,21 @@ export function codexDisconnectedFailure(): AgentFailureError {
     stage: "prompt",
     agentId: AGENT_ID,
   });
+}
+
+async function withRuntimeDisposeFailure(
+  runtime: CodexAppServerHandle,
+  original: unknown,
+): Promise<unknown> {
+  try {
+    await runtime.dispose();
+    return original;
+  } catch (disposeError) {
+    return new AggregateError(
+      [original, disposeError],
+      "Codex startup failed and its process group did not stop cleanly",
+    );
+  }
 }
 
 function classifyBootFailure(

@@ -393,6 +393,23 @@ static int command_self_test(void) {
   return 0;
 }
 
+// Run inside the admitted child. sandbox_check inspects the inherited kernel
+// policy without sending an Apple Event or asking Launch Services to open an
+// application, so qualification cannot create the escape it is testing.
+static int command_authority(void) {
+  int sandboxed = sandbox_check(getpid(), NULL, ZSR_SANDBOX_FILTER_NONE);
+  int apple_events =
+      sandbox_check(getpid(), "appleevent-send", ZSR_SANDBOX_FILTER_NONE);
+  int launch_services =
+      sandbox_check(getpid(), "lsopen", ZSR_SANDBOX_FILTER_NONE);
+  bool denied = sandboxed == 1 && apple_events > 0 && launch_services > 0;
+  printf("{\"version\":%d,\"sandboxed\":%s,\"appleEvents\":%d,"
+         "\"launchServices\":%d,\"appleEventsDenied\":%s}\n",
+         ZSR_HELPER_VERSION, sandboxed == 1 ? "true" : "false", apple_events,
+         launch_services, denied ? "true" : "false");
+  return denied ? 0 : 4;
+}
+
 static int command_identity(int argc, char **argv) {
   if (argc != 3) return 2;
   uint64_t raw_pid;
@@ -651,7 +668,7 @@ static int command_reap(int argc, char **argv) {
 
 static void usage(void) {
   fprintf(stderr,
-          "usage: zsr-macos-process-domain self-test | identity PID | "
+          "usage: zsr-macos-process-domain self-test | authority | identity PID | "
           "match/listeners/reap --allow PATH --deny PATH --uid UID "
           "[--exclude PID] [--pid PID]\n");
 }
@@ -663,6 +680,9 @@ int main(int argc, char **argv) {
   }
   if (strcmp(argv[1], "self-test") == 0 && argc == 2) {
     return command_self_test();
+  }
+  if (strcmp(argv[1], "authority") == 0 && argc == 2) {
+    return command_authority();
   }
   if (strcmp(argv[1], "identity") == 0) return command_identity(argc, argv);
   if (strcmp(argv[1], "match") == 0) return command_match(argc, argv);

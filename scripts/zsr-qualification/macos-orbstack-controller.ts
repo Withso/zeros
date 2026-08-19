@@ -200,22 +200,18 @@ async function main() {
   const session = path.join(fixtureRoot, executionId);
   const design = path.join(workspace, "Zeros Design");
   const canonicalGit = path.join(workspace, ".git");
-  const shadowGit = path.join(session, "git");
   const code = path.join(workspace, "code");
   await Promise.all([
     mkdir(design, { recursive: true }),
     mkdir(canonicalGit, { recursive: true }),
-    mkdir(shadowGit, { recursive: true }),
     mkdir(code, { recursive: true }),
   ]);
   await Promise.all([
     writeFile(path.join(design, "protected.txt"), "design\n"),
     writeFile(path.join(canonicalGit, "identity"), "canonical\n"),
-    writeFile(path.join(shadowGit, "identity"), "private\n"),
     writeFile(path.join(code, "input.txt"), "code\n"),
   ]);
   await chmod(session, 0o700);
-  await chmod(shadowGit, 0o700);
 
   const controller = new MacosOrbStackContainerWorker({
     orbPath: orb,
@@ -298,13 +294,6 @@ async function main() {
       generation:
         `orb_${randomUUID().replaceAll("-", "")}` as TerritoryGeneration,
       protectedRoots: [design],
-      gitProjections: [
-        {
-          source: shadowGit,
-          destination: canonicalGit,
-          readOnly: false,
-        },
-      ],
     });
     reportStage("worker-ready");
     if ((await ping(lease.hostPort)).trim() !== "OK") {
@@ -347,7 +336,7 @@ async function main() {
         "localhost/zeros-busybox:qualification",
         "/bin/sh",
         "-c",
-        'set -eu; echo container-code > /work/code/container.txt; grep -qx private /work/.git/identity; echo private-write > /work/.git/container-marker; if echo mutation > "/work/Zeros Design/protected.txt" 2>/dev/null; then exit 77; fi',
+        'set -eu; echo container-code > /work/code/container.txt; grep -qx canonical /work/.git/identity; echo canonical-write > /work/.git/container-marker; if echo mutation > "/work/Zeros Design/protected.txt" 2>/dev/null; then exit 77; fi',
       ],
       { env },
     );
@@ -378,8 +367,8 @@ async function main() {
         "design\n" ||
       (await readFile(path.join(canonicalGit, "identity"), "utf8")) !==
         "canonical\n" ||
-      (await readFile(path.join(shadowGit, "container-marker"), "utf8")) !==
-        "private-write\n"
+      (await readFile(path.join(canonicalGit, "container-marker"), "utf8")) !==
+        "canonical-write\n"
     ) {
       throw new Error("container filesystem projection diverged");
     }

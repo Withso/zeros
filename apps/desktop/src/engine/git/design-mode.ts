@@ -47,10 +47,7 @@ import {
   sanitizeDesignDirectoryName,
 } from "../design/directory-registry";
 import { initializeDesignDocument } from "../design/document";
-import {
-  fenceDesignDirectory,
-  unlockLegacyDesignWorkspaceLock,
-} from "../design/workspace-lock";
+import { unlockLegacyDesignWorkspaceLock } from "../design/workspace-lock";
 import { opSettingsWrite } from "../settings/ops";
 import { GitError } from "./errors";
 import { runGit } from "./git-exec";
@@ -73,6 +70,13 @@ import type { Workspace, WorkspaceMode } from "./types";
 export const DESIGN_MODE_TRANSITION_META_KEY = "design.mode.transition.v1";
 
 type TransitionMarker = "enter" | "exit";
+
+/** `--` ends option parsing, not Git pathspec parsing. Design directory names
+ * are valid filesystem names and may contain glob or pathspec-magic bytes, so
+ * every exact path handed to a pathspec-taking Git command is literalized. */
+function literalGitPathspec(candidate: string): string {
+  return `:(literal)${candidate}`;
+}
 
 function readMarker(workspaceId: string): TransitionMarker | null {
   const raw = getWorkspaceMeta(workspaceId, DESIGN_MODE_TRANSITION_META_KEY);
@@ -115,14 +119,25 @@ export async function ensureDesignDocumentCommitted(
     "ls-files",
     "-z",
     "--",
-    designDir,
+    literalGitPathspec(designDir),
   ]);
   const commitPaths: string[] = [];
   if (!tracked.stdout.split("\0").some(Boolean)) {
-    await runGit(workspacePath, ["add", "-f", "-A", "--", designDir]);
+    await runGit(workspacePath, [
+      "add",
+      "-f",
+      "-A",
+      "--",
+      literalGitPathspec(designDir),
+    ]);
     commitPaths.push(designDir);
   } else if (created.length > 0) {
-    await runGit(workspacePath, ["add", "-f", "--", ...created]);
+    await runGit(workspacePath, [
+      "add",
+      "-f",
+      "--",
+      ...created.map(literalGitPathspec),
+    ]);
     commitPaths.push(...created);
   } else {
     return { committed: false };
@@ -135,7 +150,7 @@ export async function ensureDesignDocumentCommitted(
     "--cached",
     "--name-only",
     "--",
-    ...commitPaths,
+    ...commitPaths.map(literalGitPathspec),
   ]);
   if (!staged.stdout.trim()) return { committed: false };
   await runGit(workspacePath, [
@@ -148,7 +163,7 @@ export async function ensureDesignDocumentCommitted(
     "-m",
     "Initialize Zeros Design",
     "--",
-    ...commitPaths,
+    ...commitPaths.map(literalGitPathspec),
   ]);
   return { committed: true };
 }
@@ -218,7 +233,6 @@ export async function enterDesignMode(
     try {
       await ensureDesignDocumentCommitted(workspace.path, designDir);
       updateWorkspace(workspace.id, { viewMode: "design" });
-      await fenceDesignDirectory(workspace.path);
     } catch (error) {
       updateWorkspace(workspace.id, { viewMode: "code" });
       clearMarker(workspace.id);
@@ -261,7 +275,6 @@ export async function exitDesignMode(workspace: Workspace): Promise<void> {
       context: { workspaceId: workspace.id },
     });
   }
-  await fenceDesignDirectory(workspace.path);
   clearMarker(workspace.id);
 }
 
@@ -272,12 +285,9 @@ export async function fenceWorkspaceDesignDirectoryIfPresent(workspace: {
   path: string;
   repoRoot: string;
 }): Promise<void> {
-  const name = await resolveDesignDirectoryForEnter(workspace, {
+  await resolveDesignDirectoryForEnter(workspace, {
     strict: false,
   });
-  if (existsSync(path.join(workspace.path, ...name.split("/")))) {
-    await fenceDesignDirectory(workspace.path);
-  }
 }
 
 /** Re-prime semantic identity after external Git moves HEAD. Older builds also
@@ -305,8 +315,9 @@ export async function reconcileDesignDirAfterExternalGit(workspace: {
  *  open documents and zeros-design:// resources are all
  *  rooted at the old name, and rewriting them mid-session is not worth the
  *  complexity while the rename is one Archive/Exit away from being safe.
- *  Refused when the folder has uncommitted changes in the main checkout — a
- *  pathspec commit would sweep them silently into the rename. */
+ *  Refused when the folder or committed settings file has uncommitted changes
+ *  in the main checkout — an automatic commit would sweep them silently into
+ *  the rename. */
 export async function renameDesignDirectory(opts: {
   repoRoot: string;
   from: string;
@@ -334,7 +345,13 @@ export async function renameDesignDirectory(opts: {
         "Archive them (or switch them to code mode), rename the folder, then restore.",
     });
   }
-  const tracked = await runGit(opts.repoRoot, ["ls-files", "-z", "--", from]);
+  const settingsPath = ".zeros/settings.toml";
+  const tracked = await runGit(opts.repoRoot, [
+    "ls-files",
+    "-z",
+    "--",
+    literalGitPathspec(from),
+  ]);
   if (!tracked.stdout.split("\0").some(Boolean)) {
     throw new GitError({
       code: "VALIDATION_FAILED",
@@ -351,13 +368,17 @@ export async function renameDesignDirectory(opts: {
     "status",
     "--porcelain",
     "--",
-    from,
+    literalGitPathspec(from),
+    literalGitPathspec(settingsPath),
   ]);
   if (dirty.stdout.trim()) {
     throw new GitError({
       code: "VALIDATION_FAILED",
-      message: `"${from}" has uncommitted changes in the main checkout.`,
-      remediation: "Commit or stash them, then rename the design folder.",
+      message:
+        `"${from}" or ${settingsPath} has uncommitted changes in the ` +
+        "main checkout.",
+      remediation:
+        "Commit or stash those changes, then rename the design folder.",
     });
   }
   // A nested target ("apps/web/designs") needs its parent to exist before
@@ -372,7 +393,11 @@ export async function renameDesignDirectory(opts: {
   opSettingsWrite("repo", { design: { directory: to } }, opts.repoRoot);
   let committedPointer = true;
   try {
-    await runGit(opts.repoRoot, ["add", "--", ".zeros/settings.toml"]);
+    await runGit(opts.repoRoot, [
+      "add",
+      "--",
+      literalGitPathspec(settingsPath),
+    ]);
   } catch {
     committedPointer = false;
   }
@@ -386,9 +411,9 @@ export async function renameDesignDirectory(opts: {
     "-m",
     `Rename design directory to ${to}`,
     "--",
-    from,
-    to,
-    ...(committedPointer ? [".zeros/settings.toml"] : []),
+    literalGitPathspec(from),
+    literalGitPathspec(to),
+    ...(committedPointer ? [literalGitPathspec(settingsPath)] : []),
   ]);
   return { committedPointer };
 }
@@ -414,12 +439,9 @@ export async function reconcileDesignModeTransition(
     return;
   }
   const mode: WorkspaceMode = workspace.kind === "design" ? "design" : "code";
-  if (marker === "enter" && mode === "design") {
-    await fenceDesignDirectory(workspace.path);
-  } else if (marker === "exit" && mode === "code") {
+  if (marker === "exit" && mode === "code") {
     await normalizeLegacyCone(workspace.path);
     await unlockLegacyDesignWorkspaceLock(workspace.path);
-    await fenceDesignDirectory(workspace.path);
   }
   clearMarker(workspaceId);
 }

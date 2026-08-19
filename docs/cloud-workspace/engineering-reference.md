@@ -85,7 +85,7 @@ The provider-account sequence is documented beside the harness. It is never a
 fork/PR-CI claim. The protected manual workflow uses exact-commit image builds,
 an ephemeral asymmetric validation identity, required live
 Claude/Codex/Cursor turns with a per-turn challenge, the same browser-safe WSS
-credential carrier as the renderer, fail-closed egress/soak/SSH verdicts, and
+credential carrier as the renderer, outbound-reachability/soak/SSH verdicts, and
 fresh-inventory-verified resource cleanup. A workflow existing in source is not
 evidence that it ran: record platform, region, image ID, runtime versions,
 measured latencies, soak duration, cleanup result, and sanitized failures in

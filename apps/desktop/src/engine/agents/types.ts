@@ -243,29 +243,17 @@ export interface AgentFilesystemTerritory {
    * workspace. Kept explicit so lifecycle reconciliation can compare semantic
    * authority without guessing which denied path is Design, Git, or policy. */
   protectedDesignDirectories: readonly string[];
-  /** The files that decide whether those folders are recognized as Design at
-   * all — the repo `.zeros` settings directories holding the `[design] directory`
-   * pointer, plus each folder's `.zeros-canvas.json` marker. An agent that edits
-   * these cannot touch Design content, but can de-register a Design folder so the
-   * NEXT admission protects nothing.
-   *
-   * Named separately because the two profiles protect this differently. The
-   * isolated/cloud profile denies them along with the rest of the policy
-   * carveouts. Host parity does NOT: `.zeros/settings.toml` is committed
-   * repository content, and denying it made every `git pull` that had to rewrite
-   * it fail. There, de-registration is closed in engine state instead
-   * (design/recognition-store.ts), and the marker stays unwritable anyway because
-   * it lives inside a protected directory. */
+  /** Files that decide whether those folders are recognized as Design: repo
+   * `.zeros` settings plus each folder's canvas marker. Host parity leaves the
+   * committed settings native so tree-level Git can update them; sticky engine
+   * recognition prevents an edit from de-registering an existing Design root,
+   * while the marker remains unwritable inside that root. Kept explicit for
+   * lifecycle comparison and provider-native fallback policy. */
   designRecognitionPaths: readonly string[];
-  /** The complete carveout set the ISOLATED/cloud profile withholds: every
-   * recognized Design document, the workspace policy directories, and raw Git
-   * metadata — the last because one index file cannot enforce a path-scoped
-   * "code only" staging policy.
-   *
-   * Local host parity applies a strict SUBSET of this: Design content and
-   * `designRecognitionPaths` only, leaving Git metadata writable so the agent uses
-   * the workspace's own repository. Read this field as the maximum authority a
-   * profile may withhold, not as what every profile does withhold. */
+  /** Complete semantic carveout discovered for this territory. The current ZSR
+   * host-parity policy derives its exact subtraction from the recognized Design
+   * roots and engine-owned state rather than blindly applying every entry; in
+   * particular, canonical Git metadata remains writable to a code actor. */
   writeCapabilities: AgentWriteCapabilities;
 }
 

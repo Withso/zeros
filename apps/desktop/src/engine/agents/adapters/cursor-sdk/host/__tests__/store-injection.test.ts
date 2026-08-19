@@ -274,9 +274,8 @@ describe("cursor host — local agent store injection", () => {
       expect(connectLines).toEqual([
         "CONNECT api2.cursor.invalid:443 HTTP/1.1",
       ]);
-      // SRT must see a TLS ClientHello so it can terminate the exact authority
-      // and substitute the masked credential. A raw HTTP/2 preface ("PRI")
-      // would be opaque-tunnelled and can never receive credential injection.
+      // HTTP/2 through an HTTPS proxy must begin with TLS, not send the raw
+      // cleartext HTTP/2 preface ("PRI") into the CONNECT tunnel.
       expect(tunnelPrefixes[0]?.[0]).toBe(0x16);
       expect(tunnelPrefixes[0]?.[1]).toBe(0x03);
     } finally {

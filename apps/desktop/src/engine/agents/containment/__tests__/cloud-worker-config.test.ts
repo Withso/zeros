@@ -13,18 +13,8 @@ const roots: string[] = [];
 const toolchain = {
   node: "/usr/local/bin/node",
   supervisor: "/opt/zeros/zsr-supervisor.mjs",
-  networkBridge: "/opt/zeros/zsr-network-bridge.mjs",
-  containerWorker: "/opt/zeros/zsr-container-worker.mjs",
   bwrap: "/usr/bin/bwrap",
-  socat: "/usr/bin/socat",
   setpriv: "/usr/bin/setpriv",
-};
-const cgroupParent = "/sys/fs/cgroup/zeros-agents";
-const resources = {
-  memoryBytes: 3 * 1024 * 1024 * 1024,
-  cpuQuotaMicros: 200_000,
-  cpuPeriodMicros: 100_000,
-  processes: 2_048,
 };
 
 describe("cloud worker deployment configuration", () => {
@@ -44,8 +34,6 @@ describe("cloud worker deployment configuration", () => {
           profile: "zeros-cloud-worker-v1",
           uid: 10_001,
           gid: 10_001,
-          cgroupParent,
-          resources,
           toolchain,
         }),
       ),
@@ -55,8 +43,6 @@ describe("cloud worker deployment configuration", () => {
       profile: "zeros-cloud-worker-v1",
       uid: 10_001,
       gid: 10_001,
-      cgroupParent,
-      resources,
       toolchain,
     });
 
@@ -67,8 +53,6 @@ describe("cloud worker deployment configuration", () => {
         profile: "zeros-cloud-worker-v1",
         uid: 10_001,
         gid: 10_001,
-        cgroupParent,
-        resources,
         toolchain,
         permissive: true,
       },
@@ -78,8 +62,6 @@ describe("cloud worker deployment configuration", () => {
         profile: "zeros-cloud-worker-v1",
         uid: 0,
         gid: 10_001,
-        cgroupParent,
-        resources,
         toolchain,
       },
       {
@@ -88,8 +70,6 @@ describe("cloud worker deployment configuration", () => {
         profile: "zeros-cloud-worker-v1",
         uid: 10_001,
         gid: 10_001,
-        cgroupParent,
-        resources,
         toolchain,
       },
     ]) {
@@ -122,8 +102,6 @@ describe("cloud worker deployment configuration", () => {
         profile: "zeros-cloud-worker-v1",
         uid: 10_001,
         gid: 10_001,
-        cgroupParent,
-        resources,
         toolchain,
       })}\n`,
       { mode: 0o600 },

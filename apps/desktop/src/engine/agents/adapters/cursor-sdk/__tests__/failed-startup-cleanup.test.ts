@@ -1,4 +1,4 @@
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -53,7 +53,6 @@ vi.mock("../host/host-client", () => {
 
 let root: string;
 let generationRoot: string;
-let localStateRoot: string;
 let previousDataDir: string | undefined;
 
 const fakeAgent = {
@@ -79,11 +78,10 @@ function makeCtx(): AgentAdapterContext {
 
 function boundary(): PreparedBoundary {
   return {
-    privateStateDirectory: (namespace: string) => {
-      expect(namespace).toBe("cursor");
-      return localStateRoot;
+    privateStateDirectory: () => {
+      throw new Error("host-parity Cursor must not request private state");
     },
-  } as PreparedBoundary;
+  } as unknown as PreparedBoundary;
 }
 
 async function recoveryMarkerExists(): Promise<boolean> {
@@ -108,8 +106,6 @@ beforeEach(async () => {
     "boundary",
     "gen-1",
   );
-  localStateRoot = path.join(generationRoot, "provider", "cursor");
-  await mkdir(localStateRoot, { recursive: true, mode: 0o700 });
   previousDataDir = process.env.ZEROS_DATA_DIR;
   process.env.ZEROS_DATA_DIR = path.join(root, "engine");
   delete process.env.CURSOR_API_KEY;
@@ -163,7 +159,7 @@ describe("CursorSdkAdapter — failed contained startup cleanup", () => {
     expect(await recoveryMarkerExists()).toBe(false);
   });
 
-  it("does not hide a one-shot host teardown proof failure", async () => {
+  it("does not hide a one-shot host teardown proof failure or arm legacy recovery", async () => {
     disposeSpy.mockRejectedValueOnce(
       new Error("Cursor one-shot host stop was not proven"),
     );
@@ -176,7 +172,7 @@ describe("CursorSdkAdapter — failed contained startup cleanup", () => {
         executionBoundary: boundary(),
       }),
     ).rejects.toThrow("Cursor one-shot host stop was not proven");
-    expect(await recoveryMarkerExists()).toBe(true);
+    expect(await recoveryMarkerExists()).toBe(false);
   });
 
   it("retains a live cleanup handle so failed teardown can be retried", async () => {
@@ -193,7 +189,7 @@ describe("CursorSdkAdapter — failed contained startup cleanup", () => {
     await expect(adapter.disposeSession(session.sessionId)).rejects.toThrow(
       "Cursor host stop was not proven",
     );
-    expect(await recoveryMarkerExists()).toBe(true);
+    expect(await recoveryMarkerExists()).toBe(false);
 
     await expect(
       adapter.disposeSession(session.sessionId),
@@ -202,7 +198,7 @@ describe("CursorSdkAdapter — failed contained startup cleanup", () => {
     expect(await recoveryMarkerExists()).toBe(false);
   });
 
-  it("disarms provider state when the dedicated host cannot be constructed", async () => {
+  it("does not arm legacy recovery when the dedicated host cannot be constructed", async () => {
     createRuntimeSpy.mockImplementationOnce(() => {
       throw new Error("Cursor host construction failed");
     });
@@ -220,7 +216,7 @@ describe("CursorSdkAdapter — failed contained startup cleanup", () => {
     expect(await recoveryMarkerExists()).toBe(false);
   });
 
-  it("promotes and disarms provider state when new-session admission fails", async () => {
+  it("stops the dedicated host when new-session admission fails", async () => {
     createSpy.mockRejectedValueOnce(new Error("Invalid User API Key"));
     const adapter = new CursorSdkAdapter(makeCtx());
 
@@ -236,7 +232,7 @@ describe("CursorSdkAdapter — failed contained startup cleanup", () => {
     expect(await recoveryMarkerExists()).toBe(false);
   });
 
-  it("promotes and disarms provider state when resume admission fails", async () => {
+  it("stops the dedicated host when resume admission fails", async () => {
     resumeSpy.mockRejectedValueOnce(new Error("Invalid User API Key"));
     const adapter = new CursorSdkAdapter(makeCtx());
 
@@ -253,7 +249,7 @@ describe("CursorSdkAdapter — failed contained startup cleanup", () => {
     expect(await recoveryMarkerExists()).toBe(false);
   });
 
-  it("promotes and disarms provider state when a fresh resume fallback fails", async () => {
+  it("stops the dedicated host when a fresh resume fallback fails", async () => {
     resumeSpy.mockRejectedValueOnce(
       new Error("Agent prior-agent-id not found"),
     );

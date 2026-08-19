@@ -36,6 +36,7 @@ import { tmpdir } from "node:os";
 // barrel) to avoid pulling GitHub auth/Octokit wiring into the engine
 // bundle.
 import { getWorkspaceById, listWorkspaces } from "../git/state";
+import { listKnownRepoRoots } from "../db/projects";
 import { resolveWorkspaceTargetRef } from "../git/target-branch";
 import { mergeSpawnEnv } from "../settings/spawn-env";
 import { applyUserProviderConfig } from "../settings/provider-env";
@@ -54,7 +55,6 @@ import {
   rememberRecognizedDesignDirectories,
   stickyRecognizedDesignDirectories,
 } from "../design/recognition-store";
-import { fenceDesignDirectory } from "../design/workspace-lock";
 import {
   assertDesignDirHasNoHardlinkAliases,
   resolveDesignDirForLock,
@@ -122,18 +122,14 @@ import {
   type ExecutionBoundaryStatus,
 } from "@zeros/protocol/containment";
 import { redactSensitive } from "@zeros/protocol/scrub";
-import { unavailableBoundaryStatus } from "./containment/status";
-import type {
-  AdmissionPriority,
-  BoundaryRequest,
-  ContainerWorkerRequest,
-  ExecutionBoundary,
-  LocalServiceCapability,
-  LocalTcpServiceCapability,
-  PreparedBoundary,
+import {
+  AdmissionCancelledError,
+  type BoundaryRequest,
+  type ContainerWorkerRequest,
+  type ExecutionBoundary,
+  type PreparedBoundary,
 } from "./containment/types";
 import { ZsrExecutionBoundary } from "./containment/zsr-boundary";
-import { AdmissionCancelledError } from "./containment/admission-gate";
 import { UtilityBoundaryPool } from "./containment/utility-boundary-pool";
 import { completeAgentSpawnEnv } from "./adapters/shared/config-isolation";
 import { findOrbStackCli } from "./containment/macos-orbstack-container-worker";
@@ -220,69 +216,6 @@ async function awaitAdapterStartup<T>(options: {
   }
 }
 
-const LOOPBACK_URL_ENV: Readonly<
-  Record<
-    string,
-    { kind: LocalTcpServiceCapability["kind"]; defaultPort: number }
-  >
-> = {
-  DATABASE_URL: { kind: "database", defaultPort: 5432 },
-  REDIS_URL: { kind: "database", defaultPort: 6379 },
-  MONGODB_URI: { kind: "database", defaultPort: 27017 },
-  MONGO_URL: { kind: "database", defaultPort: 27017 },
-  ELASTICSEARCH_URL: { kind: "other", defaultPort: 9200 },
-};
-
-function exactLoopbackHost(hostname: string): "127.0.0.1" | "::1" | null {
-  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
-  if (normalized === "127.0.0.1" || normalized === "localhost") {
-    return "127.0.0.1";
-  }
-  return normalized === "::1" ? "::1" : null;
-}
-
-function urlFacadeTemplate(raw: string): string | null {
-  const scheme = raw.indexOf("://");
-  if (scheme < 1) return null;
-  const authorityStart = scheme + 3;
-  const suffixOffset = raw.slice(authorityStart).search(/[/?#]/);
-  const authorityEnd =
-    suffixOffset < 0 ? raw.length : authorityStart + suffixOffset;
-  const authority = raw.slice(authorityStart, authorityEnd);
-  if (!authority || authority.includes(",")) return null;
-  const at = authority.lastIndexOf("@");
-  const credentials = at >= 0 ? authority.slice(0, at + 1) : "";
-  return (
-    raw.slice(0, authorityStart) +
-    credentials +
-    "{host}:{port}" +
-    raw.slice(authorityEnd)
-  );
-}
-
-function preflightBoundaryRemediation(error: unknown): string {
-  if (error instanceof AgentFailureError && error.failure.advice) {
-    return error.failure.advice;
-  }
-  const message = error instanceof Error ? error.message.toLowerCase() : "";
-  if (
-    message.includes("provider overlay") ||
-    message.includes("provider home") ||
-    message.includes("provider state") ||
-    message.includes("provider keychain")
-  ) {
-    return "Zeros could not prepare the private provider state. Restart Zeros and retry; the session will remain blocked rather than run uncontained.";
-  }
-  if (
-    message.includes("design") ||
-    message.includes("territory") ||
-    message.includes("workspace root")
-  ) {
-    return "Fix the Design directory setting or its filesystem permissions, then retry.";
-  }
-  return "Repair or enable the qualified Zeros sandbox backend for this workspace, then retry. Zeros will not run this session uncontained.";
-}
-
 function boundaryRequiresProviderAuthentication(
   agentId: string,
   error: unknown,
@@ -293,131 +226,6 @@ function boundaryRequiresProviderAuthentication(
     "Claude OAuth refresh token is unavailable",
     "Claude OAuth credential was invalid",
   ].some((message) => error.message.includes(message));
-}
-
-/** Discover only standard client variables that already name an exact local
- * TCP dependency. Raw URLs/credentials remain trusted engine input; the
- * returned template changes only host/port to a generation-scoped façade. */
-export function deriveLoopbackServiceCapabilities(
-  env: Readonly<Record<string, string>> | undefined,
-): LocalServiceCapability[] {
-  if (!env) return [];
-  const capabilities: LocalServiceCapability[] = [];
-  for (const [name, definition] of Object.entries(LOOPBACK_URL_ENV)) {
-    const raw = env[name]?.trim();
-    if (!raw) continue;
-    let url: URL;
-    try {
-      url = new URL(raw);
-    } catch {
-      continue;
-    }
-    const targetHost = exactLoopbackHost(url.hostname);
-    const template = urlFacadeTemplate(raw);
-    const targetPort = Number(url.port || definition.defaultPort);
-    if (
-      !targetHost ||
-      !template ||
-      !Number.isInteger(targetPort) ||
-      targetPort < 1 ||
-      targetPort > 65_535
-    ) {
-      continue;
-    }
-    capabilities.push({
-      serviceId: `env-${name.toLowerCase().replaceAll("_", "-")}`,
-      kind: definition.kind,
-      transport: "tcp",
-      targetHost,
-      targetPort,
-      adapter: "environment-only",
-      environment: { [name]: template },
-    });
-  }
-
-  const hostPortPairs = [
-    {
-      hostName: "PGHOST",
-      portName: "PGPORT",
-      defaultPort: 5432,
-      kind: "database" as const,
-    },
-    {
-      hostName: "MYSQL_HOST",
-      portName: "MYSQL_TCP_PORT",
-      defaultPort: 3306,
-      kind: "database" as const,
-    },
-  ];
-  for (const pair of hostPortPairs) {
-    const rawHost = env[pair.hostName]?.trim();
-    if (!rawHost) continue;
-    const targetHost = exactLoopbackHost(rawHost);
-    const targetPort = Number(env[pair.portName] || pair.defaultPort);
-    if (
-      !targetHost ||
-      !Number.isInteger(targetPort) ||
-      targetPort < 1 ||
-      targetPort > 65_535
-    ) {
-      continue;
-    }
-    capabilities.push({
-      serviceId: `env-${pair.hostName.toLowerCase()}`,
-      kind: pair.kind,
-      transport: "tcp",
-      targetHost,
-      targetPort,
-      adapter: "environment-only",
-      environment: {
-        [pair.hostName]: "{host}",
-        [pair.portName]: "{port}",
-      },
-    });
-  }
-
-  const sshAgent = exactAbsoluteSocketPath(env.SSH_AUTH_SOCK);
-  if (sshAgent) {
-    capabilities.push({
-      serviceId: "env-ssh-auth-sock",
-      kind: "ssh-agent",
-      transport: "unix",
-      targetPath: sshAgent,
-      adapter: "ssh-agent",
-    });
-  }
-  const nixDaemon = exactUnixUrlPath(env.NIX_REMOTE);
-  if (nixDaemon) {
-    capabilities.push({
-      serviceId: "env-nix-remote",
-      kind: "nix",
-      transport: "unix",
-      targetPath: nixDaemon,
-      adapter: "nix-daemon",
-    });
-  }
-  const gpgHome = exactGpgHome(env);
-  if (gpgHome) {
-    const candidates = [
-      legacyGpgAgentSocket(env.GPG_AGENT_INFO),
-      path.join(gpgHome, "S.gpg-agent"),
-    ];
-    const gpgAgent = candidates.find(
-      (candidate): candidate is string =>
-        candidate !== null && isPhysicalUnixSocket(candidate),
-    );
-    if (gpgAgent) {
-      capabilities.push({
-        serviceId: "env-gpg-agent",
-        kind: "gpg-agent",
-        transport: "unix",
-        targetPath: gpgAgent,
-        adapter: "gpg-agent",
-        sourceHome: gpgHome,
-      });
-    }
-  }
-  return capabilities;
 }
 
 /** Select a local OCI implementation, never an ambient daemon endpoint. On
@@ -469,9 +277,13 @@ export function expectsContainerWorkflow(
 ): boolean {
   if (!env) return false;
   if (
-    ["DOCKER_HOST", "CONTAINER_HOST", "DOCKER_CONTEXT"].some((name) =>
-      Boolean(env[name]?.trim()),
-    )
+    [
+      "DOCKER_HOST",
+      "CONTAINER_HOST",
+      "DOCKER_CONTEXT",
+      "PODMAN_HOST",
+      "CONTAINER_CONNECTION",
+    ].some((name) => Boolean(env[name]?.trim()))
   ) {
     return true;
   }
@@ -500,161 +312,6 @@ export function expectsContainerWorkflow(
     }
   }
   return false;
-}
-
-function exactAbsoluteSocketPath(raw: string | undefined): string | null {
-  const value = raw?.trim();
-  if (
-    !value ||
-    !path.isAbsolute(value) ||
-    value.includes("\0") ||
-    value.includes("?") ||
-    value.includes("#")
-  ) {
-    return null;
-  }
-  return path.normalize(value);
-}
-
-function exactUnixUrlPath(raw: string | undefined): string | null {
-  const value = raw?.trim();
-  if (!value?.startsWith("unix://")) return null;
-  return exactAbsoluteSocketPath(value.slice("unix://".length));
-}
-
-function exactGpgHome(env: Readonly<Record<string, string>>): string | null {
-  const explicit = exactAbsoluteSocketPath(env.GNUPGHOME);
-  if (explicit) return explicit;
-  const home = exactAbsoluteSocketPath(env.HOME);
-  return home ? path.join(home, ".gnupg") : null;
-}
-
-function legacyGpgAgentSocket(raw: string | undefined): string | null {
-  const value = raw?.trim();
-  if (!value) return null;
-  const fields = value.split(":");
-  if (fields.length < 3) return null;
-  return exactAbsoluteSocketPath(fields.slice(0, -2).join(":"));
-}
-
-function isPhysicalUnixSocket(candidate: string): boolean {
-  try {
-    const stat = lstatSync(candidate);
-    return stat.isSocket() && !stat.isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
-/** Linux must hide the ambient filesystem root before it can safely enable
- * AF_UNIX (seccomp cannot filter socket paths). Preserve the exact PATH plus
- * well-known user toolchain stores that PATH shims need, without reopening the
- * whole host HOME and its control sockets. The policy builder canonicalizes
- * every returned path before admission. */
-export function deriveToolchainReadRoots(
-  env: Readonly<Record<string, string>> | undefined,
-): string[] {
-  if (!env) return [];
-  const roots = new Set<string>();
-  const add = (candidate: string | undefined) => {
-    const value = candidate?.trim();
-    if (!value || !path.isAbsolute(value) || value.includes("\0")) return;
-    const normalized = path.normalize(value);
-    if (path.dirname(normalized) !== normalized) roots.add(normalized);
-  };
-  for (const entry of (env.PATH ?? "").split(path.delimiter)) add(entry);
-  for (const name of [
-    "NVM_DIR",
-    "VOLTA_HOME",
-    "ASDF_DATA_DIR",
-    "MISE_DATA_DIR",
-    "BUN_INSTALL",
-    "CARGO_HOME",
-    "RUSTUP_HOME",
-    "PYENV_ROOT",
-    "RBENV_ROOT",
-    "PNPM_HOME",
-    "GOPATH",
-  ]) {
-    add(env[name]);
-  }
-  const home = env.HOME?.trim();
-  if (home && path.isAbsolute(home)) {
-    const normalizedHome = path.normalize(home);
-    const managerRoots = new Set([
-      ".nvm",
-      ".asdf",
-      ".volta",
-      ".fnm",
-      ".pyenv",
-      ".rbenv",
-      ".bun",
-      ".deno",
-      ".rustup",
-      ".cargo",
-    ]);
-    for (const root of [...roots]) {
-      const relative = path.relative(normalizedHome, root);
-      if (
-        !relative ||
-        relative === ".." ||
-        relative.startsWith(`..${path.sep}`) ||
-        path.isAbsolute(relative)
-      ) {
-        continue;
-      }
-      const first = relative.split(path.sep)[0];
-      if (first && managerRoots.has(first)) {
-        roots.add(path.join(normalizedHome, first));
-      }
-      for (const managed of [
-        path.join(".local", "share", "mise"),
-        path.join(".local", "share", "pnpm"),
-      ]) {
-        if (
-          relative === managed ||
-          relative.startsWith(`${managed}${path.sep}`)
-        ) {
-          roots.add(path.join(normalizedHome, managed));
-        }
-      }
-    }
-    for (const relative of [
-      ".oh-my-zsh",
-      ".zprezto",
-      ".bash_it",
-      ".zsh",
-      ".nvm",
-      ".asdf",
-      ".volta",
-      ".fnm",
-      ".pyenv",
-      ".rbenv",
-      ".bun",
-      ".deno",
-      ".rustup",
-      path.join(".cargo", "bin"),
-      path.join(".cargo", "registry"),
-      path.join(".cargo", "git"),
-      // Keep in step with readOnlyCompatibilityLinks in
-      // containment/provider-home-overlay.ts: that list decides what a session's
-      // projected HOME can SEE, this one decides what the policy admits it to
-      // READ, and a path present in only one of them is either an unreadable
-      // symlink or an unreachable grant. See that file for why npm's caches are
-      // the difference between an `npx`-declared MCP server starting in ~3s and
-      // timing out after 60s on every session.
-      path.join(".npm", "_npx"),
-      path.join(".npm", "_cacache"),
-      path.join(".local", "bin"),
-      path.join(".local", "share", "mise"),
-      path.join(".local", "share", "pnpm"),
-      path.join(".local", "share", "zinit"),
-    ]) {
-      const candidate = path.join(normalizedHome, relative);
-      if (existsSync(candidate)) add(candidate);
-    }
-  }
-  return [...roots].sort((left, right) => left.localeCompare(right));
 }
 
 function canonicalExecutable(candidate: string): string | null {
@@ -703,27 +360,6 @@ function resolveProviderExecutable(
     }
   }
   return null;
-}
-
-/** Read roots needed by an explicitly selected provider executable. PATH-based
- * toolchain roots are already projected by deriveToolchainReadRoots; this
- * closes the Advanced → Executable path case where the binary is intentionally
- * outside PATH. A containing node_modules store is included for npm/pnpm shims
- * whose package-relative imports otherwise resolve outside the bin directory. */
-export function deriveProviderExecutableReadRoots(
-  binary: string | undefined,
-  env?: Readonly<Record<string, string>>,
-): string[] {
-  if (!binary) return [];
-  const executable = resolveProviderExecutable(binary, env);
-  if (!executable) return [];
-  const roots = new Set<string>([path.dirname(executable)]);
-  const segments = executable.split(path.sep);
-  const nodeModules = segments.indexOf("node_modules");
-  if (nodeModules > 0) {
-    roots.add(segments.slice(0, nodeModules + 1).join(path.sep) || path.sep);
-  }
-  return [...roots].sort((left, right) => left.localeCompare(right));
 }
 
 function normalizeProviderBinary(
@@ -781,9 +417,84 @@ interface TerritoryContributionSnapshot {
 
 interface ResolvedTerritorySet {
   territory: AgentFilesystemTerritory | undefined;
+  registeredDesignAuthorityIdentity: string | null;
   contributions: readonly TerritoryContributionSnapshot[];
   additionalRoots: readonly string[];
   additionalGitWorkspaceRoots: readonly string[];
+}
+
+export interface RegisteredCodeTerritoryOwner {
+  path: string;
+  repoRoot: string;
+}
+
+function registeredOwnerRealpath(candidate: string): string | null {
+  try {
+    return realpathSync(candidate);
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT" || code === "ENOTDIR") return null;
+    // Permission, malformed-path, I/O, and descriptor-exhaustion failures do
+    // not prove absence. Dropping that owner would make its Design tree
+    // writable for this admission, so authority discovery fails closed.
+    throw error;
+  }
+}
+
+/** Physical local owners reachable by a host-parity code process. Worktree
+ * rows and opened project roots are separate concepts in the DB; both must
+ * feed the same deny union, while cloud rows name another filesystem namespace
+ * and are intentionally absent. */
+export function registeredCodeTerritorySnapshot(): {
+  owners: RegisteredCodeTerritoryOwner[];
+  workspaces: RegisteredCodeTerritoryOwner[];
+} {
+  const owners = new Map<string, RegisteredCodeTerritoryOwner>();
+  const workspaces: RegisteredCodeTerritoryOwner[] = [];
+  // Registry reads are authority discovery, not optional enrichment. Returning
+  // a partial union after either query fails would silently make every omitted
+  // Design root writable to a newly admitted code process.
+  for (const workspace of listWorkspaces({ archived: false })) {
+    if (workspace.placement === "cloud") continue;
+    let repoRoot = path.resolve(workspace.repoRoot);
+    const physicalRepoRoot = registeredOwnerRealpath(repoRoot);
+    if (physicalRepoRoot) {
+      repoRoot = physicalRepoRoot;
+      owners.set(repoRoot, { path: repoRoot, repoRoot });
+    } else {
+      // A missing main checkout has no currently writable vnode. Resolve the
+      // worktree independently below: one stale half of a workspace row must
+      // not suppress the other live owner.
+    }
+    const workspacePath = registeredOwnerRealpath(workspace.path);
+    if (workspacePath) {
+      const worktree = { path: workspacePath, repoRoot };
+      workspaces.push(worktree);
+      owners.set(workspacePath, worktree);
+    } else {
+      // Stale worktree rows with no path contribute no currently reachable
+      // vnode. The registry row itself was read successfully.
+    }
+  }
+  for (const repoRoot of listKnownRepoRoots()) {
+    const physicalRepoRoot = registeredOwnerRealpath(repoRoot);
+    if (physicalRepoRoot) {
+      owners.set(physicalRepoRoot, {
+        path: physicalRepoRoot,
+        repoRoot: physicalRepoRoot,
+      });
+    } else {
+      // Stale project rows do not name a currently reachable vnode.
+    }
+  }
+  return {
+    owners: [...owners.values()].sort((left, right) =>
+      left.path.localeCompare(right.path),
+    ),
+    workspaces: workspaces.sort((left, right) =>
+      left.path.localeCompare(right.path),
+    ),
+  };
 }
 
 function pathInsideOrEqual(candidate: string, root: string): boolean {
@@ -842,7 +553,7 @@ function territoryForGrants(
   };
 }
 
-function mergeTerritories(
+export function mergeCodeAgentTerritories(
   workspaceRoot: string,
   primary: AgentFilesystemTerritory | undefined,
   additions: readonly AgentFilesystemTerritory[],
@@ -887,6 +598,51 @@ function mergeTerritories(
       ].sort(),
     },
   };
+}
+
+/** Identity of the filesystem subtraction itself, independent of which
+ * workspace is the current process cwd. Repository tasks use this app-wide
+ * value so an external owner change can retire them even when no chat session
+ * exists to compare against. */
+export function codeAgentWriteAuthorityIdentity(
+  territory: AgentFilesystemTerritory | undefined,
+): string | null {
+  if (!territory) return null;
+  return JSON.stringify({
+    protectedDesignDirectories: [...territory.protectedDesignDirectories]
+      .map((candidate) => path.resolve(candidate))
+      .sort(),
+    designRecognitionPaths: [...territory.designRecognitionPaths]
+      .map((candidate) => path.resolve(candidate))
+      .sort(),
+    deniedPaths: [...territory.writeCapabilities.deniedPaths]
+      .map((candidate) => path.resolve(candidate))
+      .sort(),
+  });
+}
+
+/** Pure snapshot of the Design subtraction shared by every local repository
+ * task. Registry failures and invalid owners propagate: a partial identity
+ * would make an old boundary look current and reopen writes. */
+export async function previewRegisteredCodeWriteAuthorityIdentity(): Promise<
+  string | null
+> {
+  const owners = registeredCodeTerritorySnapshot().owners;
+  const territories: AgentFilesystemTerritory[] = [];
+  for (const owner of owners) {
+    const territory = await previewCodeAgentTerritory({
+      cwd: owner.path,
+      workspaceRoot: owner.path,
+      repoRoot: owner.repoRoot,
+    });
+    if (territory) territories.push(territory);
+  }
+  const merged = mergeCodeAgentTerritories(
+    owners[0]?.path ?? path.parse(process.cwd()).root,
+    undefined,
+    territories,
+  );
+  return codeAgentWriteAuthorityIdentity(merged);
 }
 
 async function canonicalAdditionalTerritoryRoots(
@@ -1214,16 +970,11 @@ async function buildCodeAgentTerritory(opts: {
   // A Git index is one monolithic file: no OS sandbox can permit "stage code"
   // while forbidding "stage Design" inside that same index.
   //
-  // The ISOLATED/cloud profile resolves that by denying the worktree/common
-  // metadata outright — inspection still works, and durable agent commits go
-  // through private overlays plus validated ChangeSet integration rather than
-  // weakening the canonical boundary. Local host parity deliberately applies NONE
-  // of the carveouts below (policy.ts keeps only Design content and its own
-  // sticky-recognition store): the agent commits, pulls and pushes with the
-  // workspace's own Git, which is the whole point of the profile. The consequences
-  // are recorded rather than hidden — a commit can carry Design-path CONTENT into
-  // history, and a mixed `reset --hard`/`clean` half-completes instead of being
-  // refused whole. Design bytes in the worktree stay unwritable in both profiles.
+  // Host parity keeps canonical Git metadata writable so normal staging,
+  // commits, fetches, and pushes work. The consequences are explicit: a commit
+  // can carry synthetic Design content into history, and mixed native path
+  // operations may update code before the Design write is refused. Design bytes
+  // in the worktree remain protected by the actor fence.
   const gitMetadata = new Set<string>();
   const dotGit = path.join(workspaceRoot, ".git");
   if (existsSync(dotGit)) gitMetadata.add(dotGit);
@@ -1248,10 +999,8 @@ async function buildCodeAgentTerritory(opts: {
   }
   // What decides, for the NEXT session, whether these folders are Design at all:
   // the `.zeros` settings directories that hold the `[design] directory` pointer,
-  // and the `.zeros-canvas.json` markers Git recognition reads. Named separately
-  // from `deniedPaths` because the two profiles protect them differently — the
-  // isolated profile denies them along with the rest of Git and policy, while host
-  // parity leaves them writable (they are committed repository content; denying
+  // and the `.zeros-canvas.json` markers Git recognition reads. Host parity
+  // leaves them writable because they are committed repository content; denying
   // `.zeros/settings.toml` broke any `git pull` that had to rewrite it) and closes
   // de-registration in engine state instead, via design/recognition-store.ts.
   const designRecognitionPaths = [
@@ -1330,7 +1079,6 @@ export async function resolveCodeAgentTerritory(opts: {
     .split(path.sep)
     .join("/");
   primeDesignDirectoryName(territory.workspaceRoot, activeName);
-  await fenceDesignDirectory(territory.workspaceRoot);
   // Remember what this admission actually protected, so a later session still
   // protects it after the repository evidence is edited away. Only the resolve
   // path records — a preview must leave engine state alone — and the store drops
@@ -1353,14 +1101,6 @@ export async function resolveCodeAgentTerritory(opts: {
  *  absorb the typical 5-10 renderer-churn calls/second that hit
  *  this code path. force-refresh (via refreshRegistry) bypasses. */
 const LIST_AGENTS_FRESHNESS_MS = 5_000;
-
-/** TTLs on preflight boundary results. Preflight is diagnostic — admission
- *  re-runs the request-specific canary before any provider byte — but each
- *  live preflight costs a boundary prepare + proven teardown, so mounted-view
- *  storms must coalesce. Failures stay short so "repair backend, retry" is
- *  seen quickly; refreshRegistry drops both unconditionally. */
-const PREFLIGHT_SUCCESS_FRESHNESS_MS = 15_000;
-const PREFLIGHT_FAILURE_FRESHNESS_MS = 5_000;
 
 // Account details (provider / plan / org / email) are far more expensive to
 // fetch than the install/auth/version probes — each can spawn a short-lived
@@ -1535,21 +1275,6 @@ export class AgentGateway {
     { readonly promise: Promise<void>; readonly settle: () => void }
   >();
 
-  /** Preflight results are diagnostic (they paint the pre-send UI) while a
-   *  full preflight costs a real boundary prepare + teardown, three per-repo
-   *  promotion-lock sections included. A cold boot mounts many chat views at
-   *  once and each fires preflights, so identical requests share one in-flight
-   *  run and a short-lived result. Real admission re-proves everything, so a
-   *  briefly stale card never weakens enforcement. */
-  private readonly preflightResults = new Map<
-    string,
-    { at: number; status: ExecutionBoundaryStatus }
-  >();
-  private readonly preflightFlights = new Map<
-    string,
-    Promise<ExecutionBoundaryStatus>
-  >();
-
   /** Per-agent account-details cache (provider / plan / org / email), keyed
    *  by agent id. Long TTL (ACCOUNT_INFO_TTL_MS) because each miss can spawn
    *  a child; null is cached too (so a logged-out / unsupported agent doesn't
@@ -1690,11 +1415,15 @@ export class AgentGateway {
     workspaceRoot: string | undefined,
     mainRepoRoot: string | undefined,
     stage: "newSession" | "loadSession" | "forkSession",
-    _opts?: { cliBinary?: string },
+    opts?: { cliBinary?: string; persistRecognition?: boolean },
   ): Promise<AgentFilesystemTerritory | undefined> {
     let territory: AgentFilesystemTerritory | undefined;
     try {
-      territory = await resolveCodeAgentTerritory({
+      const resolveTerritory =
+        opts?.persistRecognition === false
+          ? previewCodeAgentTerritory
+          : resolveCodeAgentTerritory;
+      territory = await resolveTerritory({
         cwd,
         workspaceRoot,
         repoRoot: mainRepoRoot,
@@ -1716,11 +1445,14 @@ export class AgentGateway {
     return territory;
   }
 
-  /** Extend the primary immutable territory across every user-authorized
-   * `/add-dir` owner before a provider process exists. A second Zeros/Git
-   * workspace is not a generic writable folder: its Design roots, policy and
-   * canonical Git metadata must be subtracted too. Resolving by the physical
-   * Git owner also covers a selected subdirectory of that workspace.
+  /** Extend the primary immutable territory across every registered local
+   * checkout and every user-authorized `/add-dir` owner before a provider
+   * process exists. Host parity means an agent can otherwise walk to any of
+   * those paths, so Design protection must be app-wide even though ordinary
+   * write grants remain unchanged. A second Zeros/Git workspace is not an
+   * implicit additional directory: only its Design roots are subtracted unless
+   * the user explicitly attached it. Resolving by the physical Git owner also
+   * covers a selected subdirectory of that workspace.
    *
    * Contributions remain separate for lifecycle comparison. This lets a
    * Design transition in an attached workspace retire the primary session
@@ -1731,6 +1463,7 @@ export class AgentGateway {
     workspaceRoot: string | undefined,
     env: Record<string, string> | undefined,
     stage: "newSession" | "loadSession" | "forkSession",
+    options: { persistRecognition?: boolean } = {},
   ): Promise<ResolvedTerritorySet> {
     const canonicalWorkspace = path.resolve(
       primary?.workspaceRoot ??
@@ -1766,37 +1499,48 @@ export class AgentGateway {
       ...(primary ? { territory: primary } : {}),
     });
 
-    let registeredWorkspaces: Array<{ path: string; repoRoot: string }> = [];
-    try {
-      registeredWorkspaces = listWorkspaces().flatMap((workspace) => {
-        try {
-          return [
-            {
-              path: realpathSync(workspace.path),
-              repoRoot: path.resolve(workspace.repoRoot),
-            },
-          ];
-        } catch {
-          return [];
-        }
-      });
-    } catch {
-      // Plain-folder/unit-test gateways may not have an initialized workspace
-      // registry. Exact Git-owner discovery below remains authoritative.
+    const registered = registeredCodeTerritorySnapshot();
+    const registeredWorkspaces = registered.workspaces;
+    const registeredOwnerPaths = new Set(
+      registered.owners.map((owner) => owner.path),
+    );
+    const registeredTerritories: AgentFilesystemTerritory[] = [];
+    if (primary && registeredOwnerPaths.has(canonicalWorkspace)) {
+      registeredTerritories.push(primary);
     }
     const ownerGrants = new Map<
       string,
-      { grants: Set<string>; repoRoot: string }
+      {
+        grants: Set<string>;
+        repoRoot: string;
+        full: boolean;
+        attached: boolean;
+      }
     >();
-    const addOwnerGrant = (owner: string, repoRoot: string, grant: string) => {
+    const addOwnerGrant = (
+      owner: string,
+      repoRoot: string,
+      grant: string,
+      opts: { full?: boolean; attached?: boolean } = {},
+    ) => {
       if (owner === canonicalWorkspace) return;
       const current = ownerGrants.get(owner) ?? {
         grants: new Set<string>(),
         repoRoot,
+        full: false,
+        attached: false,
       };
       current.grants.add(grant);
+      current.full ||= opts.full === true;
+      current.attached ||= opts.attached === true;
       ownerGrants.set(owner, current);
     };
+    // These are deny-only contributions. Do not add them to `additionalRoots`
+    // or `additionalGitWorkspaceRoots`: registration in Zeros is not a write
+    // grant from one workspace to another.
+    for (const owner of registered.owners) {
+      addOwnerGrant(owner.path, owner.repoRoot, owner.path, { full: true });
+    }
     for (const root of additionalRoots) {
       let owner = root;
       try {
@@ -1811,19 +1555,27 @@ export class AgentGateway {
       const registeredOwner = registeredWorkspaces.find(
         (workspace) => workspace.path === owner,
       );
-      addOwnerGrant(owner, registeredOwner?.repoRoot ?? owner, root);
+      addOwnerGrant(owner, registeredOwner?.repoRoot ?? owner, root, {
+        attached: true,
+      });
       // A browsed parent can contain multiple managed workspaces. Every one is
       // a separate Design authority even though `git rev-parse` at the parent
       // cannot discover its nested repositories.
       for (const workspace of registeredWorkspaces) {
         if (pathInsideOrEqual(workspace.path, root)) {
-          addOwnerGrant(workspace.path, workspace.repoRoot, root);
+          addOwnerGrant(workspace.path, workspace.repoRoot, root, {
+            attached: true,
+          });
         }
       }
     }
 
     const additions: AgentFilesystemTerritory[] = [];
     const additionalGitWorkspaceRoots: string[] = [];
+    const resolveTerritory =
+      options.persistRecognition === false
+        ? previewCodeAgentTerritory
+        : resolveCodeAgentTerritory;
     try {
       for (const [owner, ownerGrant] of [...ownerGrants].sort(
         ([left], [right]) => left.localeCompare(right),
@@ -1831,21 +1583,26 @@ export class AgentGateway {
         const grants = [...ownerGrant.grants].sort((left, right) =>
           left.localeCompare(right),
         );
-        const ownerTerritory = await resolveCodeAgentTerritory({
+        const ownerTerritory = await resolveTerritory({
           cwd: owner,
           workspaceRoot: owner,
           repoRoot: ownerGrant.repoRoot,
         });
-        const contribution = territoryForGrants(ownerTerritory, grants);
+        const contribution = ownerGrant.full
+          ? ownerTerritory
+          : territoryForGrants(ownerTerritory, grants);
         if (contribution) {
           additions.push(contribution);
-          if (existsSync(path.join(owner, ".git"))) {
+          if (registeredOwnerPaths.has(owner)) {
+            registeredTerritories.push(contribution);
+          }
+          if (ownerGrant.attached && existsSync(path.join(owner, ".git"))) {
             additionalGitWorkspaceRoots.push(owner);
           }
         }
         contributions.set(owner, {
           grants: new Set(grants),
-          full: false,
+          full: ownerGrant.full,
           ...(contribution ? { territory: contribution } : {}),
         });
       }
@@ -1854,17 +1611,28 @@ export class AgentGateway {
         kind: "protocol-error",
         stage,
         message:
-          `Code agent cannot start because an attached directory's Design ` +
+          `Code agent cannot start because a registered or attached directory's Design ` +
           `territory could not be resolved and protected: ${
             error instanceof Error ? error.message : String(error)
           }`,
         advice:
-          "Fix the attached workspace's Design directory or remove that linked directory, then retry.",
+          "Fix the registered workspace's Design directory or remove the invalid linked directory, then retry.",
       });
     }
 
     return {
-      territory: mergeTerritories(canonicalWorkspace, primary, additions),
+      territory: mergeCodeAgentTerritories(
+        canonicalWorkspace,
+        primary,
+        additions,
+      ),
+      registeredDesignAuthorityIdentity: codeAgentWriteAuthorityIdentity(
+        mergeCodeAgentTerritories(
+          canonicalWorkspace,
+          undefined,
+          registeredTerritories,
+        ),
+      ),
       additionalRoots,
       additionalGitWorkspaceRoots: additionalGitWorkspaceRoots.sort(
         (left, right) => left.localeCompare(right),
@@ -1886,27 +1654,52 @@ export class AgentGateway {
 
   private async assertAdditionalTerritorySetStillCurrent(
     expected: ResolvedTerritorySet,
-    primary: AgentFilesystemTerritory | undefined,
+    adapter: AgentAdapter,
     cwd: string,
     workspaceRoot: string | undefined,
+    mainRepoRoot: string | undefined,
     env: Record<string, string> | undefined,
     stage: "newSession" | "loadSession" | "forkSession",
   ): Promise<void> {
+    // Re-read the primary owner too. Reusing the pre-admission object here
+    // checked only secondary registered owners and missed a pointer/marker
+    // change in the workspace whose process was about to start.
+    const primary = await this.prepareCodeAgentTerritory(
+      adapter,
+      cwd,
+      workspaceRoot,
+      mainRepoRoot,
+      stage,
+      { persistRecognition: false },
+    );
     const current = await this.resolveTerritorySet(
       primary,
       cwd,
       workspaceRoot,
       env,
       stage,
+      { persistRecognition: false },
     );
+    this.assertTerritorySetsEqual(expected, current, stage);
+  }
+
+  private assertTerritorySetsEqual(
+    expected: ResolvedTerritorySet,
+    current: ResolvedTerritorySet,
+    stage: "newSession" | "loadSession" | "forkSession",
+  ): void {
     const expectedIdentity = JSON.stringify({
       territory: agentTerritoryIdentity(expected.territory),
+      registeredDesignAuthorityIdentity:
+        expected.registeredDesignAuthorityIdentity,
       contributions: expected.contributions,
       additionalRoots: expected.additionalRoots,
       additionalGitWorkspaceRoots: expected.additionalGitWorkspaceRoots,
     });
     const currentIdentity = JSON.stringify({
       territory: agentTerritoryIdentity(current.territory),
+      registeredDesignAuthorityIdentity:
+        current.registeredDesignAuthorityIdentity,
       contributions: current.contributions,
       additionalRoots: current.additionalRoots,
       additionalGitWorkspaceRoots: current.additionalGitWorkspaceRoots,
@@ -1916,8 +1709,8 @@ export class AgentGateway {
         kind: "protocol-error",
         stage,
         message:
-          "An attached workspace's Design territory changed while the code boundary was being prepared.",
-        advice: "Retry once the attached workspace transition finishes.",
+          "A registered workspace's Design territory changed while the code boundary was being prepared.",
+        advice: "Retry once the Design territory transition finishes.",
       });
     }
   }
@@ -1930,20 +1723,15 @@ export class AgentGateway {
     env: Record<string, string> | undefined,
     providerId: string | undefined,
     mcpServers: readonly McpServerRegistration[],
-    providerExecutable?: string,
     resolvedAdditionalRoots?: readonly string[],
     additionalGitWorkspaceRoots: readonly string[] = [],
     includeSessionCapabilities = true,
     providerResumeId?: string,
-    providerStateScope?: string,
     // Everything the gateway admits today is a code actor. A design actor
     // reaches the same boundary with code authority subtracted instead of
     // Design authority; the policy builder owns that difference, so the only
     // thing the caller chooses is which side of the contract it is on.
     actor: ExecutionBoundaryActor = "agent-code",
-    // Engine-initiated admissions pass "background" so a chat the user is
-    // starting is never queued behind a chat title or a provider probe.
-    admissionPriority: AdmissionPriority = "interactive",
   ): Promise<BoundaryRequest> {
     const canonicalWorkspace =
       territory?.workspaceRoot ??
@@ -1953,6 +1741,63 @@ export class AgentGateway {
       : await canonicalAdditionalTerritoryRoots(
           this.parseInstructionCtx(env).additionalDirectories,
         );
+    const registeredSnapshot = registeredCodeTerritorySnapshot();
+    const registeredCodeOwners = registeredSnapshot.owners.map(
+      (owner) => owner.path,
+    );
+    let effectiveTerritory = territory;
+    if (actor === "design-agent") {
+      const registeredTerritories: AgentFilesystemTerritory[] = [];
+      for (const owner of registeredSnapshot.owners) {
+        if (
+          effectiveTerritory &&
+          path.resolve(effectiveTerritory.workspaceRoot) === owner.path
+        ) {
+          continue;
+        }
+        try {
+          const ownerTerritory = await previewCodeAgentTerritory({
+            cwd: owner.path,
+            workspaceRoot: owner.path,
+            repoRoot: owner.repoRoot,
+          });
+          if (ownerTerritory) registeredTerritories.push(ownerTerritory);
+        } catch (error) {
+          throw new Error(
+            `Design actor cannot resolve registered owner ${owner.path}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+      effectiveTerritory = mergeCodeAgentTerritories(
+        canonicalWorkspace,
+        effectiveTerritory,
+        registeredTerritories,
+      );
+    }
+    const protectedCodeDirectories =
+      actor === "design-agent"
+        ? [
+            ...new Set([
+              path.resolve(canonicalWorkspace),
+              ...additionalReadWriteRoots.map((root) => path.resolve(root)),
+              ...registeredCodeOwners,
+            ]),
+          ].sort((left, right) => left.localeCompare(right))
+        : [];
+    const gitIntegrationRoots =
+      actor !== "design-agent"
+        ? [
+            ...new Set([
+              path.resolve(canonicalWorkspace),
+              ...additionalGitWorkspaceRoots.map((root) =>
+                path.resolve(root),
+              ),
+              ...registeredCodeOwners,
+            ]),
+          ].sort((left, right) => left.localeCompare(right))
+        : [];
     const providerStateEnv = Object.fromEntries(
       [
         "HOME",
@@ -1967,45 +1812,34 @@ export class AgentGateway {
         return value ? [[name, value] as const] : [];
       }),
     );
-    const localServices = includeSessionCapabilities
-      ? deriveLoopbackServiceCapabilities(env)
-      : [];
     const containerWorker = includeSessionCapabilities
       ? deriveContainerWorker(env)
       : undefined;
     const containerWorkflowExpected = includeSessionCapabilities
       ? expectsContainerWorkflow(env)
       : false;
-    const additionalReadOnlyRoots = [
-      ...new Set([
-        ...deriveToolchainReadRoots(env),
-        ...deriveProviderExecutableReadRoots(providerExecutable, env),
-      ]),
-    ].sort((left, right) => left.localeCompare(right));
     return {
       executionId,
       actor,
-      ...(admissionPriority !== "interactive" ? { admissionPriority } : {}),
       ...(providerId ? { providerId } : {}),
       ...(providerResumeId ? { providerResumeId } : {}),
-      ...(providerStateScope ? { providerStateScope } : {}),
       ...(Object.keys(providerStateEnv).length > 0 ? { providerStateEnv } : {}),
       cwd: path.resolve(cwd),
       workspaceRoot: path.resolve(canonicalWorkspace),
-      ...(territory ? { territory } : {}),
+      ...(effectiveTerritory ? { territory: effectiveTerritory } : {}),
       ...(additionalReadWriteRoots.length > 0
         ? { additionalReadWriteRoots }
         : {}),
-      ...(additionalReadOnlyRoots.length > 0
-        ? { additionalReadOnlyRoots }
+      ...(protectedCodeDirectories.length > 0
+        ? { protectedCodeDirectories }
         : {}),
+      ...(gitIntegrationRoots.length > 0 ? { gitIntegrationRoots } : {}),
       allowedLocalPorts: includeSessionCapabilities
         ? this.scopedLocalServicePorts(mcpServers)
         : [],
       trustedLocalPorts: includeSessionCapabilities
         ? this.trustedLocalServicePorts()
         : [],
-      ...(localServices.length > 0 ? { localServices } : {}),
       ...(containerWorker ? { containerWorker } : {}),
       ...(containerWorkflowExpected ? { containerWorkflowExpected: true } : {}),
       ...(additionalGitWorkspaceRoots.length > 0
@@ -2024,17 +1858,13 @@ export class AgentGateway {
     env: Record<string, string> | undefined,
     mcpServers: readonly McpServerRegistration[],
     stage: "newSession" | "loadSession" | "forkSession",
-    providerExecutable?: string,
     resolvedAdditionalRoots?: readonly string[],
     additionalGitWorkspaceRoots: readonly string[] = [],
     options: {
       includeSessionCapabilities?: boolean;
       providerResumeId?: string;
       actor?: ExecutionBoundaryActor;
-      admissionPriority?: AdmissionPriority;
-      /** Cancels the admission while it is still queued in the gate (the chat
-       * was closed before any world was built). Never interrupts a granted
-       * slot — see AdmissionControl in containment/types.ts. */
+      /** Cancels at the next safe preparation checkpoint. */
       admissionSignal?: AbortSignal;
     } = {},
   ): Promise<PreparedBoundary> {
@@ -2048,14 +1878,11 @@ export class AgentGateway {
         env,
         adapter.agentId,
         mcpServers,
-        providerExecutable,
         resolvedAdditionalRoots,
         additionalGitWorkspaceRoots,
         options.includeSessionCapabilities !== false,
         options.providerResumeId,
-        undefined,
         options.actor,
-        options.admissionPriority,
       );
       const prepared = options.admissionSignal
         ? await this.executionBoundary.prepare(request, {
@@ -2063,12 +1890,6 @@ export class AgentGateway {
           })
         : await this.executionBoundary.prepare(request);
       try {
-        for (const service of request.localServices ?? []) {
-          await prepared.requestLocalService({
-            kind: service.kind,
-            serviceId: service.serviceId,
-          });
-        }
         if (stage !== "forkSession") {
           this.observeBoundaryPorts(executionId, adapter.agentId, prepared);
         }
@@ -2098,16 +1919,15 @@ export class AgentGateway {
     error: unknown,
   ): AgentFailureError {
     if (error instanceof AdmissionCancelledError) {
-      // The chat was closed while its admission was still queued. Nothing was
-      // built, nothing failed, and the provider's durable thread is untouched
-      // — this must route exactly like losing the conversation-bind race, not
-      // like a boundary defect.
+      // The chat was closed during admission. Proven cleanup already ran, and
+      // the provider's durable thread is untouched, so route this like losing
+      // the conversation-bind race rather than a boundary defect.
       return new AgentFailureError({
         kind: "lifecycle-superseded",
         stage,
         agentId: providerId,
         message:
-          "The conversation was closed before its execution boundary left the admission queue.",
+          "The conversation was closed before its execution boundary was ready.",
       });
     }
     const authenticationRequired = boundaryRequiresProviderAuthentication(
@@ -2165,6 +1985,7 @@ export class AgentGateway {
     providerId: string,
     stage: "newSession" | "loadSession" | "forkSession",
     request: BoundaryRequest,
+    registeredDesignAuthorityIdentity: string | null,
     operation: (context: {
       boundary: PreparedBoundary;
       executionId: string;
@@ -2179,17 +2000,22 @@ export class AgentGateway {
     }
     let releaseStarted = false;
     try {
-      if (!lease.reused) {
-        try {
-          for (const service of request.localServices ?? []) {
-            await lease.boundary.requestLocalService({
-              kind: service.kind,
-              serviceId: service.serviceId,
-            });
-          }
-        } catch (error) {
-          throw this.boundaryAdmissionFailure(providerId, stage, error);
-        }
+      const admittedIdentity = lease.boundary.registeredDesignAuthorityIdentity;
+      if (admittedIdentity === undefined) {
+        Object.defineProperty(
+          lease.boundary,
+          "registeredDesignAuthorityIdentity",
+          {
+            configurable: false,
+            enumerable: false,
+            writable: false,
+            value: registeredDesignAuthorityIdentity,
+          },
+        );
+      } else if (admittedIdentity !== registeredDesignAuthorityIdentity) {
+        throw new Error(
+          "pooled utility boundary has stale registered Design authority",
+        );
       }
       const result = await operation({
         boundary: lease.boundary,
@@ -2219,16 +2045,43 @@ export class AgentGateway {
     }
   }
 
-  /** Prove every idle pooled utility boundary stopped. Called on a Design
-   * territory transition (the pooled policy was compiled under the OLD
-   * generation) and on gateway dispose. */
-  async retirePooledUtilityBoundaries(): Promise<void> {
+  /** Prove every pooled utility boundary stopped. A global Design-owner
+   * transaction passes `reopen:false` and owns the later reopen, keeping title,
+   * probe, validation, and listing admissions closed through the mutation. */
+  async retirePooledUtilityBoundaries(
+    options: { reopen?: boolean } = {},
+  ): Promise<void> {
     if (!this.utilityBoundariesInstance) return;
     try {
       await this.utilityBoundariesInstance.disposeAll();
     } finally {
-      this.utilityBoundariesInstance.reopen();
+      if (options.reopen !== false) this.utilityBoundariesInstance.reopen();
     }
+  }
+
+  /** Reopen utility admission after the outer engine transaction has
+   * published the new registered-owner map. No-op when the pool was never
+   * instantiated. */
+  reopenPooledUtilityBoundaries(): void {
+    this.utilityBoundariesInstance?.reopen();
+  }
+
+  /** Whether a prepared title/probe/validation/listing boundary still carries
+   * code authority. Admissions still inside prepare() are absent here, but
+   * their post-prepare territory recheck prevents provider bytes from crossing
+   * an external owner change. */
+  hasPooledUtilityCodeAuthority(): boolean {
+    return (this.utilityBoundariesInstance?.size() ?? 0) > 0;
+  }
+
+  pooledUtilityRegisteredDesignAuthorityChanged(
+    identity: string | null,
+  ): boolean {
+    return (
+      this.utilityBoundariesInstance?.registeredDesignAuthorityChanged(
+        identity,
+      ) ?? false
+    );
   }
 
   /** A rejected stop proof is process-wide, not session-local. Preserve the
@@ -2481,155 +2334,6 @@ export class AgentGateway {
     });
   }
 
-  /** Read-only boundary preflight. It resolves and probes the same immutable
-   * territory as admission but does not publish a registry pointer, fence the
-   * checkout, create a provider execution, or expose host paths in its result. */
-  async preflightSession(
-    agentId: string,
-    opts: {
-      cwd?: string;
-      workspaceId?: string;
-      cliBinary?: string;
-    },
-  ): Promise<ExecutionBoundaryStatus> {
-    const key = [
-      agentId,
-      opts.cwd ?? "",
-      opts.workspaceId ?? "",
-      opts.cliBinary ?? "",
-    ].join("\0");
-    const cached = this.preflightResults.get(key);
-    if (cached) {
-      const freshFor =
-        cached.status.state === "unavailable"
-          ? PREFLIGHT_FAILURE_FRESHNESS_MS
-          : PREFLIGHT_SUCCESS_FRESHNESS_MS;
-      if (Date.now() - cached.at <= freshFor) return cached.status;
-      this.preflightResults.delete(key);
-    }
-    const inFlight = this.preflightFlights.get(key);
-    if (inFlight) return inFlight;
-    const flight = this.preflightSessionUncached(agentId, opts)
-      .then((status) => {
-        this.preflightResults.set(key, { at: Date.now(), status });
-        return status;
-      })
-      .finally(() => {
-        this.preflightFlights.delete(key);
-      });
-    this.preflightFlights.set(key, flight);
-    return flight;
-  }
-
-  private async preflightSessionUncached(
-    agentId: string,
-    opts: {
-      cwd?: string;
-      workspaceId?: string;
-      cliBinary?: string;
-    },
-  ): Promise<ExecutionBoundaryStatus> {
-    const checkedAt = Date.now();
-    try {
-      await this.adapterFor(agentId);
-    } catch {
-      return unavailableBoundaryStatus({
-        checkedAt,
-        remediation:
-          "Install or enable this provider runtime, then run the preflight again.",
-      });
-    }
-    let cwd: string;
-    try {
-      cwd = resolveAgentCwd(opts.cwd, "newSession", opts.workspaceId);
-    } catch (error) {
-      return unavailableBoundaryStatus({
-        checkedAt,
-        remediation:
-          error instanceof AgentFailureError
-            ? (error.failure.advice ?? error.failure.message)
-            : "Bind this chat to an existing project folder, then retry.",
-      });
-    }
-    const workspace = opts.workspaceId
-      ? getWorkspaceById(opts.workspaceId)
-      : undefined;
-    const canonicalWorkspaceRoot = workspace?.path;
-    const mainRepoRoot = workspace?.repoRoot;
-    const providerSpawn = normalizeProviderSpawn(
-      applyUserProviderConfig(
-        cwd,
-        agentId,
-        { cliBinary: opts.cliBinary },
-        mainRepoRoot,
-      ),
-    );
-    let territory: AgentFilesystemTerritory | undefined;
-    try {
-      territory = await previewCodeAgentTerritory({
-        cwd,
-        workspaceRoot: canonicalWorkspaceRoot,
-        repoRoot: mainRepoRoot,
-      });
-      this.assertBoundaryRetirementHealthy();
-      const preflightExecutionId = `preflight-${randomUUID()}`;
-      const request = await this.boundaryRequest(
-        preflightExecutionId,
-        cwd,
-        canonicalWorkspaceRoot,
-        territory,
-        undefined,
-        // Preflight proves the request-specific filesystem/process profile but
-        // starts no provider byte. Do not clone/reconcile provider HOME (which
-        // may include credential material), reserve MCP/local-service leases,
-        // or start a private container worker merely to paint the pre-send UI.
-        // The real admission repeats the same territory canary with those
-        // capabilities after the renderer has explicitly couriered secrets.
-        undefined,
-        [],
-        providerSpawn.cliBinary,
-        undefined,
-        [],
-        false,
-        undefined,
-        undefined,
-        undefined,
-        // Diagnostic only; no session path awaits it any more.
-        "background",
-      );
-      // A capability-only probe cannot prove that the generated profile for
-      // this workspace actually protects its exact Design aliases and engine
-      // roots. Prepare runs that request-specific live canary; tear it down
-      // before returning so preflight never publishes a session authority.
-      const prepared = await this.executionBoundary.prepare(request);
-      try {
-        for (const service of request.localServices ?? []) {
-          await prepared.requestLocalService({
-            kind: service.kind,
-            serviceId: service.serviceId,
-          });
-        }
-        return {
-          ...prepared.status,
-          designProtection: {
-            required: Boolean(territory),
-            enforced: Boolean(territory),
-            protectedDirectoryCount:
-              territory?.protectedDesignDirectories.length ?? 0,
-          },
-          checkedAt,
-        };
-      } finally {
-        await this.retirePreparedBoundary(preflightExecutionId, prepared);
-      }
-    } catch (error) {
-      return unavailableBoundaryStatus({
-        checkedAt,
-        remediation: preflightBoundaryRemediation(error),
-      });
-    }
-  }
-
   /** Called when a prompt succeeds — clears any prior auth-failed
    *  marker so the dot turns green again as soon as the user re-logs. */
   markAuthOk(agentId: string): void {
@@ -2685,11 +2389,6 @@ export class AgentGateway {
       opts.executionBoundary ??
       new ZsrExecutionBoundary({
         projectRoot: opts.projectRoot,
-        // The gateway's production owner (ZerosEngine) always injects its
-        // already-qualified boundary. This fallback is for a directly hosted
-        // desktop gateway and must select the local filesystem-only profile
-        // explicitly.
-        localHostParity: true,
       });
     this.previewGatewayFactory =
       opts.previewGatewayFactory ?? localPreviewGatewayFactory;
@@ -3058,8 +2757,8 @@ export class AgentGateway {
   }
 
   /** A provider's auth/version command is still provider code even though it
-   * is short-lived. Give it a neutral writable root and the provider's normal
-   * private state projection, never the active checkout or engine authority. */
+   * is short-lived. Give it a neutral writable root and normal host state,
+   * never the active checkout or engine authority. */
   private async runProviderProbeCommand(
     providerId: string,
     binary: string,
@@ -3098,32 +2797,56 @@ export class AgentGateway {
       if (!executable) {
         throw new Error("provider command probe executable is unavailable");
       }
-      // Probes run in throwaway temp roots; pin their durable provider-state
-      // scope so every probe reuses one warm projection per provider instead
-      // of minting and orphaning a fresh full copy of host provider state.
+      const primaryTerritory = await resolveCodeAgentTerritory({
+        cwd: probeRoot,
+        workspaceRoot: probeRoot,
+        repoRoot: probeRoot,
+      });
+      const territorySet = await this.resolveTerritorySet(
+        primaryTerritory,
+        probeRoot,
+        probeRoot,
+        env,
+        "newSession",
+      );
+      // Probes run in one remembered neutral root per provider, so their exact
+      // boundary request remains poolable without any private-HOME projection.
       const request = await this.boundaryRequest(
         `probe-${safeProvider}-${randomUUID()}`,
         probeRoot,
         probeRoot,
-        undefined,
+        territorySet.territory,
         env,
         providerId,
         [],
-        executable,
-        undefined,
-        [],
+        territorySet.additionalRoots,
+        territorySet.additionalGitWorkspaceRoots,
         false,
-        undefined,
-        `zeros-provider-probe\0${providerId}`,
-        undefined,
-        // A registry refresh paints dots in the UI; it must not delay a chat.
-        "background",
       );
       return await this.withUtilityBoundary(
         providerId,
         "newSession",
         request,
+        territorySet.registeredDesignAuthorityIdentity,
         async ({ boundary }) => {
+          const currentPrimary = await previewCodeAgentTerritory({
+            cwd: probeRoot,
+            workspaceRoot: probeRoot,
+            repoRoot: probeRoot,
+          });
+          const currentTerritorySet = await this.resolveTerritorySet(
+            currentPrimary,
+            probeRoot,
+            probeRoot,
+            env,
+            "newSession",
+            { persistRecognition: false },
+          );
+          this.assertTerritorySetsEqual(
+            territorySet,
+            currentTerritorySet,
+            "newSession",
+          );
           const child = await boundary.spawn({
             command: executable,
             args,
@@ -3283,9 +3006,6 @@ export class AgentGateway {
     // Drop cached account details so a user-triggered Refresh can reuse a
     // currently live runtime. Refresh never creates provider work by itself.
     this.accountInfoCache.clear();
-    // A user-triggered Refresh is also the retry path after repairing the
-    // sandbox backend — never serve it a remembered preflight verdict.
-    this.preflightResults.clear();
     return this.listAgents();
   }
 
@@ -3350,37 +3070,54 @@ export class AgentGateway {
       "newSession",
       { cliBinary: spawn.cliBinary },
     );
+    const territorySet = await this.resolveTerritorySet(
+      territory,
+      cwd,
+      cwd,
+      env,
+      "newSession",
+    );
     // Pooled, not per-call (§5.1 "reusable utility boundary"): key validation
     // and session listing are engine-owned, background, and identical from one
-    // call to the next, so they share one warm boundary instead of each paying a
-    // provider-HOME projection + shadow Git + canary + proven teardown. The pool
-    // keys on this exact request, serializes leases, and retires on failure.
+    // call to the next, so they share one warm boundary instead of each paying
+    // another canary and proven teardown. The pool keys on this exact request,
+    // serializes leases, and retires on failure.
     const request = await this.boundaryRequest(
       // Replaced by the pool with the pooled boundary's own id; only the shape
       // of the rest of this request decides whether a warm one may be reused.
       `${opts.executionPrefix}-${opts.agentId}-${randomUUID()}`,
       cwd,
       cwd,
-      territory,
+      territorySet.territory,
       env,
       adapter.agentId,
       [],
-      spawn.cliBinary,
-      [],
-      [],
+      territorySet.additionalRoots,
+      territorySet.additionalGitWorkspaceRoots,
       false,
-      undefined,
-      undefined,
-      undefined,
-      // No person is blocked on these, so they yield to real session admissions.
-      "background",
     );
     return this.withUtilityBoundary(
       adapter.agentId,
       "newSession",
       request,
-      ({ boundary }) =>
-        opts.operation({ adapter, cwd, env, executionBoundary: boundary }),
+      territorySet.registeredDesignAuthorityIdentity,
+      async ({ boundary }) => {
+        await this.assertAdditionalTerritorySetStillCurrent(
+          territorySet,
+          adapter,
+          cwd,
+          cwd,
+          undefined,
+          env,
+          "newSession",
+        );
+        return opts.operation({
+          adapter,
+          cwd,
+          env,
+          executionBoundary: boundary,
+        });
+      },
     );
   }
 
@@ -3456,41 +3193,51 @@ export class AgentGateway {
         cwd,
         "newSession",
       );
+      const territorySet = await this.resolveTerritorySet(
+        territory,
+        cwd,
+        cwd,
+        env,
+        "newSession",
+      );
       // Pooled (§5.1). Every title for a given provider builds the identical
       // request, so the second and later titles in a session reuse one warm
       // boundary. This is where the old per-title prepare+prove-teardown showed
-      // up as five background admissions racing the user's own sends, and as the
-      // recurring concurrent provider-HOME promotion conflicts.
+      // up as five background admissions racing the user's own sends.
       const request = await this.boundaryRequest(
         `title-${randomUUID()}`,
         cwd,
         cwd,
-        territory,
-        env,
-        adapter.agentId,
-        [],
-        undefined,
-        undefined,
-        [],
-        false,
-        undefined,
-        undefined,
-        undefined,
-        // Nobody watches a tab rename. In a real 4-minute engine log five of
-        // these queued in front of the sessions the user was starting.
-        "background",
-      );
+        territorySet.territory,
+      env,
+      adapter.agentId,
+      [],
+      territorySet.additionalRoots,
+      territorySet.additionalGitWorkspaceRoots,
+      false,
+    );
       const text = await this.withUtilityBoundary(
         adapter.agentId,
         "newSession",
         request,
-        ({ boundary }) =>
-          adapter.generateText!({
+        territorySet.registeredDesignAuthorityIdentity,
+        async ({ boundary }) => {
+          await this.assertAdditionalTerritorySetStillCurrent(
+            territorySet,
+            adapter,
+            cwd,
+            cwd,
+            cwd,
+            env,
+            "newSession",
+          );
+          return adapter.generateText!({
             ...opts,
             env,
             timeoutMs: 30_000,
             executionBoundary: boundary,
-          }),
+          });
+        },
       );
       const title = text.trim();
       return { title: title.length > 0 ? title : null };
@@ -3627,7 +3374,6 @@ export class AgentGateway {
       sessionEnv,
       mcpServers,
       "newSession",
-      spawn.cliBinary,
       territorySet.additionalRoots,
       territorySet.additionalGitWorkspaceRoots,
       opts.admissionSignal ? { admissionSignal: opts.admissionSignal } : {},
@@ -3635,9 +3381,10 @@ export class AgentGateway {
     try {
       await this.assertAdditionalTerritorySetStillCurrent(
         territorySet,
-        primaryTerritory,
+        adapter,
         cwd,
         canonicalWorkspaceRoot,
+        mainRepoRoot,
         sessionEnv,
         "newSession",
       );
@@ -3853,7 +3600,6 @@ export class AgentGateway {
       sessionEnv,
       mcpServers,
       "loadSession",
-      spawn.cliBinary,
       territorySet.additionalRoots,
       territorySet.additionalGitWorkspaceRoots,
       {
@@ -3866,9 +3612,10 @@ export class AgentGateway {
     try {
       await this.assertAdditionalTerritorySetStillCurrent(
         territorySet,
-        primaryTerritory,
+        adapter,
         cwd,
         canonicalWorkspaceRoot,
+        mainRepoRoot,
         sessionEnv,
         "loadSession",
       );
@@ -4100,7 +3847,6 @@ export class AgentGateway {
       sessionEnv,
       mcpServers,
       "forkSession",
-      spawn.cliBinary,
       territorySet.additionalRoots,
       territorySet.additionalGitWorkspaceRoots,
       {
@@ -4113,9 +3859,10 @@ export class AgentGateway {
     try {
       await this.assertAdditionalTerritorySetStillCurrent(
         territorySet,
-        primaryTerritory,
+        adapter,
         cwd,
         canonicalWorkspaceRoot,
+        mainRepoRoot,
         sessionEnv,
         "forkSession",
       );
@@ -4269,7 +4016,8 @@ export class AgentGateway {
     const adapter = this.adapters.get(resolvedAgentId);
     let failure: unknown;
     try {
-      // Revoke broker/port credentials before asking provider code to unwind.
+      // Revoke boundary-owned integration and port capabilities before asking
+      // provider code to unwind.
       await this.closeBoundaryPreviews(sessionId);
     } catch (err) {
       failure = err;
@@ -4548,61 +4296,6 @@ export class AgentGateway {
         sessionId,
         prompt: outgoing,
       });
-      const currentGit =
-        this.executionToBoundaryStatus.get(sessionId)?.git?.state;
-      // `native` sessions commit straight into the workspace's own repository,
-      // so there is no promotion to narrate and nothing a "Promoting changes…"
-      // row could describe. Reporting the boundary's own promotion result over it
-      // would also demote the row back to "not a Git workspace" after the first
-      // turn, since a boundary with no private projection has nothing to report.
-      const promotes =
-        currentGit !== "not-applicable" && currentGit !== "native";
-      if (promotes) {
-        this.updateBoundaryStatus(sessionId, (current) => ({
-          ...current,
-          git: { state: "synchronizing", changedAt: Date.now() },
-          checkedAt: Date.now(),
-        }));
-      }
-      try {
-        const result = await this.executionBoundaries
-          .get(sessionId)
-          ?.synchronizeGit();
-        if (result && promotes) {
-          const changedAt = Date.now();
-          this.updateBoundaryStatus(sessionId, (current) => ({
-            ...current,
-            git: {
-              state: result.state,
-              updatedRefs: result.updatedRefs,
-              indexUpdated: result.indexUpdated,
-              changedAt,
-            },
-            checkedAt: changedAt,
-          }));
-        }
-      } catch (error) {
-        const changedAt = Date.now();
-        this.updateBoundaryStatus(sessionId, (current) => ({
-          ...current,
-          git: {
-            state: "blocked",
-            issue: "promotion-conflict",
-            changedAt,
-          },
-          checkedAt: changedAt,
-        }));
-        throw new AgentFailureError({
-          kind: "protocol-error",
-          message: `Zeros could not safely promote the agent's private Git ChangeSet: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-          stage: "prompt",
-          agentId: adapter.agentId,
-          advice:
-            "Review the concurrent Git or Design-impact conflict, then retry. The private Git state was preserved for recovery.",
-        });
-      }
       // A clean prompt is the strongest possible signal that auth is
       // good — clear any prior failed-auth marker so the green dot
       // re-illuminates the moment the user resolves their login.

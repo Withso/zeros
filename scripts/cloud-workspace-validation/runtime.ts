@@ -19,8 +19,6 @@ import {
   saveRuntimeAttestation,
   saveState,
   ZEROS_REPO_REF,
-  ZSR_CGROUP_PARENT,
-  ZSR_CLOUD_AGENT_RESOURCES,
   type CloudSnapshotAttestation,
   type CloudEngineIngressGeneration,
   type CloudEngineIngressState,
@@ -948,16 +946,6 @@ export interface RuntimeAttestation {
   };
   readonly resources?: {
     readonly finite?: boolean;
-    readonly delegated?: {
-      readonly parent?: string;
-      readonly controllers?: readonly string[];
-      readonly resources?: {
-        readonly memoryMax?: string;
-        readonly cpuMax?: string;
-        readonly pidsMax?: string;
-        readonly swapMax?: string | null;
-      };
-    } | null;
   };
   readonly qualification?: { readonly secure?: boolean };
 }
@@ -994,16 +982,6 @@ export function verifyCloudRuntimeAttestation(
     report.metadata.build.source.ref !== ZEROS_REPO_REF ||
     report.metadata.build.source.commit !== expectedSourceCommit ||
     report.resources?.finite !== true ||
-    report.resources.delegated?.parent !== ZSR_CGROUP_PARENT ||
-    [...(report.resources.delegated.controllers ?? [])].sort().join(",") !==
-      "cpu,memory,pids" ||
-    report.resources.delegated.resources?.memoryMax !==
-      String(ZSR_CLOUD_AGENT_RESOURCES.memoryBytes) ||
-    report.resources.delegated.resources?.cpuMax !==
-      `${ZSR_CLOUD_AGENT_RESOURCES.cpuQuotaMicros} ${ZSR_CLOUD_AGENT_RESOURCES.cpuPeriodMicros}` ||
-    report.resources.delegated.resources?.pidsMax !==
-      String(ZSR_CLOUD_AGENT_RESOURCES.processes) ||
-    report.resources.delegated.resources?.swapMax !== "0" ||
     report.qualification?.secure !== true
   ) {
     throw new Error("cloud worker failed image/runtime qualification");
@@ -1022,7 +1000,7 @@ export async function attestCloudWorker(
     undefined,
     undefined,
     // The in-image harness has its own 180s qualification timeout plus image
-    // trust and cgroup setup. The provider RPC must not race that inner bound.
+    // trust checks. The provider RPC must not race that inner bound.
     360,
   );
   const output = response.result || response.artifacts?.stdout || "";

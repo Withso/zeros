@@ -90,7 +90,7 @@ export function buildEngineImage(): Image {
         //    admission canary. The baked attestation records resolved package
         //    versions; the snapshot digest is the deployment identity.
         "apt-get update",
-        "apt-get install -y --no-install-recommends acl bubblewrap busybox-static ca-certificates curl file g++ git git-lfs gnupg inotify-tools make openssh-client podman procps python3 ripgrep slirp4netns socat uidmap unzip util-linux xz-utils",
+        "apt-get install -y --no-install-recommends acl bubblewrap busybox-static ca-certificates curl file g++ git git-lfs gnupg inotify-tools make openssh-client podman procps python3 ripgrep slirp4netns uidmap unzip util-linux xz-utils",
         "rm -rf /var/lib/apt/lists/*",
         `groupadd --gid ${SANDBOX_AGENT_GID} zeros-agent`,
         `useradd --uid ${SANDBOX_AGENT_UID} --gid ${SANDBOX_AGENT_GID} --create-home --home-dir /home/zeros-agent --shell /bin/bash zeros-agent`,
@@ -150,10 +150,6 @@ export function buildEngineImage(): Image {
         "/usr/local/lib/zeros/attest-cloud-worker.mjs",
       )
       .addLocalFile(
-        path.join(here, "sandbox", "prepare-zsr-cgroups.mjs"),
-        "/usr/local/lib/zeros/prepare-zsr-cgroups.mjs",
-      )
-      .addLocalFile(
         path.join(here, "sandbox", "consume-cloud-admission.mjs"),
         "/usr/local/lib/zeros/consume-cloud-admission.mjs",
       )
@@ -170,9 +166,9 @@ export function buildEngineImage(): Image {
         "/usr/local/lib/zeros/cloud-github-refresh-request.mjs",
       )
       .runCommands(
-        "chown root:root /usr/local/bin/start-engine.sh /usr/local/bin/egress-probe.sh /usr/local/lib/zeros/write-image-build-metadata.mjs /usr/local/lib/zeros/attest-cloud-worker.mjs /usr/local/lib/zeros/prepare-zsr-cgroups.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs /usr/local/lib/zeros/install-cloud-preview-links.mjs /usr/local/lib/zeros/install-cloud-github-credential.mjs /usr/local/lib/zeros/cloud-github-refresh-request.mjs /etc/zeros/cloud-worker.json",
+        "chown root:root /usr/local/bin/start-engine.sh /usr/local/bin/egress-probe.sh /usr/local/lib/zeros/write-image-build-metadata.mjs /usr/local/lib/zeros/attest-cloud-worker.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs /usr/local/lib/zeros/install-cloud-preview-links.mjs /usr/local/lib/zeros/install-cloud-github-credential.mjs /usr/local/lib/zeros/cloud-github-refresh-request.mjs /etc/zeros/cloud-worker.json",
         "chmod 0755 /usr/local/bin/start-engine.sh /usr/local/bin/egress-probe.sh",
-        "chmod 0555 /usr/local/lib/zeros/write-image-build-metadata.mjs /usr/local/lib/zeros/attest-cloud-worker.mjs /usr/local/lib/zeros/prepare-zsr-cgroups.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs /usr/local/lib/zeros/install-cloud-preview-links.mjs /usr/local/lib/zeros/install-cloud-github-credential.mjs /usr/local/lib/zeros/cloud-github-refresh-request.mjs",
+        "chmod 0555 /usr/local/lib/zeros/write-image-build-metadata.mjs /usr/local/lib/zeros/attest-cloud-worker.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs /usr/local/lib/zeros/install-cloud-preview-links.mjs /usr/local/lib/zeros/install-cloud-github-credential.mjs /usr/local/lib/zeros/cloud-github-refresh-request.mjs",
         "chmod 0644 /etc/zeros/cloud-worker.json",
         `/usr/local/bin/node /usr/local/lib/zeros/write-image-build-metadata.mjs /etc/zeros/image-build.json ${baseImage} ${repositoryUrl} ${repositoryRef} ${engineDirectory} ${imageContract}`,
       )

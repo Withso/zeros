@@ -4,20 +4,10 @@
   "profile": "zeros-cloud-worker-v1",
   "uid": 10001,
   "gid": 10001,
-  "cgroupParent": "/sys/fs/cgroup/zeros-agents",
-  "resources": {
-    "memoryBytes": 3221225472,
-    "cpuQuotaMicros": 200000,
-    "cpuPeriodMicros": 100000,
-    "processes": 2048
-  },
   "toolchain": {
     "node": "/usr/local/bin/node",
     "supervisor": "/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs",
-    "networkBridge": "/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-network-bridge.mjs",
-    "containerWorker": "/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-container-worker.mjs",
     "bwrap": "/usr/bin/bwrap",
-    "socat": "/usr/bin/socat",
     "setpriv": "/usr/bin/setpriv"
   }
 }

@@ -40,8 +40,9 @@ reported as ready.
 - Isolate tenants at the provider's strongest supported compute boundary.
 - Run as a non-root user with the minimum filesystem and process privileges.
 - Deny inbound traffic except the intended bridge/health boundary.
-- Restrict outbound destinations where the supported agent and package-manager
-  workflows permit it; log policy decisions without logging credentials.
+- Treat outbound traffic as direct tenant-VM traffic for the initial release.
+  Per-agent egress policy is not a ZSR claim and may be added later at the
+  provider/VM boundary.
 - Do not mount control-plane credentials, signing keys, production database
   credentials, or broad Git tokens in the environment.
 - Destroy ephemeral credentials on stop/delete and verify resource deletion
@@ -59,6 +60,12 @@ already has it.
 Agent authentication and redistribution terms are independent release gates.
 A technically functioning runtime must not ship until its supported
 authentication flow, license, and redistribution rights are approved.
+
+For the initial cloud release, provider model keys use their normal raw
+environment/file representation inside the tenant VM. There is no sentinel
+masking or credential-injection proxy. This does not permit provisioning,
+control-plane, signing, production database, or broad repository credentials in
+the worker; those remain external or narrowly scoped as described above.
 
 ## Bridge and protocol
 

@@ -4,18 +4,15 @@ import path from "node:path";
 
 const ZSR_ASSETS = {
   ZEROS_ZSR_SUPERVISOR_SCRIPT: "zsr-supervisor.mjs",
-  ZEROS_ZSR_NETWORK_BRIDGE_SCRIPT: "zsr-network-bridge.mjs",
   ZEROS_ZSR_CONTAINER_WORKER_SCRIPT: "zsr-container-worker.mjs",
   ZEROS_ZSR_ORBSTACK_CONTAINER_HOST_SCRIPT:
     "zsr-orbstack-container-host.mjs",
   ZEROS_ZSR_ORBSTACK_CLOUD_INIT: "zsr-orbstack-cloud-init.yaml",
   ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER: "zsr-macos-process-domain",
-  ZEROS_ZSR_MACOS_PORT_BIND_LIBRARY: "zsr-macos-port-bind.dylib",
 };
 
 const DARWIN_ONLY_ASSETS = new Set([
   "ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER",
-  "ZEROS_ZSR_MACOS_PORT_BIND_LIBRARY",
 ]);
 
 const moduleRequire = createRequire(import.meta.url);

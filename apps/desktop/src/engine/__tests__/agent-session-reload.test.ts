@@ -895,20 +895,10 @@ describe("agent session continuity across a local renderer reload", () => {
       profile: "zeros-cloud-worker-v1",
       uid: process.getuid?.() || 10_001,
       gid: process.getgid?.() || 10_001,
-      cgroupParent: "/sys/fs/cgroup/zeros-agents",
-      resources: {
-        memoryBytes: 4 * 1024 ** 3,
-        cpuQuotaMicros: 200_000,
-        cpuPeriodMicros: 100_000,
-        processes: 1_024,
-      },
       toolchain: {
         node: "/usr/bin/node",
         supervisor: "/opt/zeros/zsr-supervisor.mjs",
-        networkBridge: "/opt/zeros/zsr-network-bridge.mjs",
-        containerWorker: "/opt/zeros/zsr-container-worker.mjs",
         bwrap: "/usr/bin/bwrap",
-        socat: "/usr/bin/socat",
         setpriv: "/usr/bin/setpriv",
       },
     };

@@ -5,13 +5,9 @@
 // Engine-owned one-shots — chat-title generation, provider auth/version probes,
 // save-time key validation, `listSessions` — are real provider code and so must
 // run inside a real ZSR boundary. Each one used to prepare its OWN boundary and
-// then prove it torn down: a fresh provider HOME projection (four tree
-// traversals plus a per-file copy), a fresh private shadow Git (~45 `git`
-// spawns), a fresh live canary (two cold Node starts), and a proven teardown —
-// ~2.5 s of engine work, per call, for work nobody is watching. In the
-// 2026-08-17 boot log roughly a third of all admissions were exactly this, and
-// their concurrent promotions were the source of the recurring
-// "preserved N concurrent provider HOME conflict(s)" churn.
+// then prove it torn down: a fresh policy, live canary, and proven teardown for
+// work nobody is watching. In the 2026-08-17 boot log roughly a third of all
+// admissions were exactly this.
 //
 // This pool keeps ONE such boundary alive per identical request and hands it to
 // each one-shot in turn.
@@ -29,8 +25,8 @@
 //     the same generation, the same canary-proved fence, and the same proven
 //     teardown at the end.
 //  3. ONE OPERATION AT A TIME. Leases are strictly serialized per key. Nothing
-//     in here has to reason about two provider one-shots sharing a private HOME
-//     or a private state directory concurrently, because that never happens.
+//     in here has to reason about concurrent one-shots in the same process
+//     domain, because that never happens.
 //  4. IT NEVER SERVES A SESSION. Only background, engine-initiated one-shots
 //     take leases; user session admissions keep their own dedicated boundaries.
 //  5. TEARDOWN IS STILL PROVEN. Idle expiry, `disposeAll`, and an unhealthy
@@ -120,8 +116,16 @@ function stableStringify(value: unknown): string {
 
 export class UtilityBoundaryPool {
   private readonly entries = new Map<string, PoolEntry>();
+  /** Per-key admission reservation. Lease serialization used to begin only
+   * after prepare() published an entry, so two cold callers could prepare two
+   * identical boundaries and the later map write orphaned the first. */
+  private readonly pendingAdmissions = new Map<string, Promise<void>>();
   private readonly idleMs: number;
   private disposed = false;
+  /** Monotonic transition generation. `reopen()` deliberately does not roll it
+   * back: an admission that began before disposeAll must never publish into the
+   * reopened pool after the old territory was retired. */
+  private lifecycleEpoch = 0;
 
   constructor(private readonly options: UtilityBoundaryPoolOptions) {
     this.idleMs = options.idleMs ?? UTILITY_BOUNDARY_IDLE_MS;
@@ -136,6 +140,11 @@ export class UtilityBoundaryPool {
     // these are background operations, and serializing them also stops them
     // from starving the machine the way the old per-call herd did.
     for (;;) {
+      const pendingAdmission = this.pendingAdmissions.get(key);
+      if (pendingAdmission) {
+        await pendingAdmission.catch(() => undefined);
+        continue;
+      }
       const waiting = this.entries.get(key);
       if (!waiting) break;
       if (waiting.retiring) {
@@ -154,23 +163,59 @@ export class UtilityBoundaryPool {
       return this.lease(entry, true);
     }
     this.options.assertHealthy?.();
+    let resolveAdmission!: () => void;
+    let rejectAdmission!: (error: unknown) => void;
+    const pendingAdmission = new Promise<void>((resolve, reject) => {
+      resolveAdmission = resolve;
+      rejectAdmission = reject;
+    });
+    // The owning acquire rethrows the same failure. Attach a sink as well so a
+    // cold admission with no concurrent waiter never creates an unhandled
+    // rejection solely through this coordination promise.
+    void pendingAdmission.catch(() => undefined);
+    this.pendingAdmissions.set(key, pendingAdmission);
+    const admissionEpoch = this.lifecycleEpoch;
     // The FIRST caller's executionId becomes the pooled boundary's id. It only
     // forms paths and log labels (the security identity is `generation`), so
     // reusing it is safe — and it keeps `[zsr] admitted …` lines and session
     // directories named after the work that actually created the boundary
     // (`probe-codex-…`, `title-…`) instead of an opaque pool handle.
     const executionId = request.executionId;
-    const boundary = await this.options.prepare(request);
-    entry = {
-      key,
-      executionId,
-      boundary,
-      generation: String(boundary.generation),
-      tail: Promise.resolve(),
-      busy: false,
-    };
-    this.entries.set(key, entry);
-    return this.lease(entry, false);
+    let admissionFailed = false;
+    try {
+      const boundary = await this.options.prepare(request);
+      if (this.disposed || admissionEpoch !== this.lifecycleEpoch) {
+        // disposeAll may have completed and reopen() may already have cleared the
+        // boolean while prepare() was still building this boundary. The epoch is
+        // the durable proof that it crossed a territory transition. Retire it
+        // before any provider operation can receive the capability.
+        await this.options.retire(executionId, boundary);
+        throw new Error(
+          "utility boundary admission was invalidated by a territory transition",
+        );
+      }
+      entry = {
+        key,
+        executionId,
+        boundary,
+        generation: String(boundary.generation),
+        tail: Promise.resolve(),
+        busy: false,
+      };
+      this.entries.set(key, entry);
+      // lease() marks the entry busy before the admission reservation wakes a
+      // waiter in finally, so the waiter queues behind this exact first lease.
+      return this.lease(entry, false);
+    } catch (error) {
+      admissionFailed = true;
+      rejectAdmission(error);
+      throw error;
+    } finally {
+      if (!admissionFailed) resolveAdmission();
+      if (this.pendingAdmissions.get(key) === pendingAdmission) {
+        this.pendingAdmissions.delete(key);
+      }
+    }
   }
 
   private lease(entry: PoolEntry, reused: boolean): UtilityBoundaryLease {
@@ -244,15 +289,17 @@ export class UtilityBoundaryPool {
     return flight;
   }
 
-  /** Retire every idle pooled boundary now (territory transition, engine stop).
-   * Busy entries are retired by their holder's release. Rejects if any teardown
-   * could not be proven. */
+  /** Retire every pooled boundary now (territory transition, engine stop).
+   * Busy entries are revoked/stopped too: returning while provider bytes still
+   * run under the old immutable map would let a registry mutation outrun its
+   * own authority drain. The holder's later release shares the same retirement
+   * promise. Rejects if any teardown could not be proven. */
   async disposeAll(): Promise<void> {
     this.disposed = true;
+    this.lifecycleEpoch += 1;
     const errors: unknown[] = [];
     await Promise.all(
       [...this.entries.values()].map(async (entry) => {
-        if (entry.busy) return;
         try {
           await this.retire(entry);
         } catch (error) {
@@ -279,5 +326,17 @@ export class UtilityBoundaryPool {
   /** Live entry count — diagnostics and tests only. */
   size(): number {
     return this.entries.size;
+  }
+
+  /** Whether any prepared utility boundary was admitted under a different
+   * app-wide registered Design subtraction. `undefined` is conservative: an
+   * unlabelled/legacy boundary cannot prove that it is current. */
+  registeredDesignAuthorityChanged(identity: string | null): boolean {
+    for (const entry of this.entries.values()) {
+      if (entry.boundary.registeredDesignAuthorityIdentity !== identity) {
+        return true;
+      }
+    }
+    return false;
   }
 }

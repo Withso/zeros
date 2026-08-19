@@ -705,6 +705,60 @@ describe("runGit — transient lock retry", () => {
     }
   });
 
+  it("authenticates a pull through the current branch's configured upstream", async () => {
+    const remoteRoot = path.join(dir, "http-pull-root");
+    const bareRemote = path.join(remoteRoot, "remote.git");
+    await mkdir(remoteRoot, { recursive: true });
+    await execFileAsync("git", ["init", "-q", "--bare", bareRemote]);
+    await execFileAsync("git", [
+      "--git-dir",
+      bareRemote,
+      "config",
+      "http.receivepack",
+      "true",
+    ]);
+    const server = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "pull-secret",
+    });
+    await execFileAsync("git", ["remote", "add", "origin", server.url], {
+      cwd: repo,
+    });
+
+    let credentialReads = 0;
+    setGitCredentialSourceForTesting({
+      supports({ protocol, host }) {
+        return protocol === "http" && host === "127.0.0.1";
+      },
+      async getCredential() {
+        credentialReads += 1;
+        return {
+          username: "x-access-token",
+          password: "pull-secret",
+        };
+      },
+    });
+
+    try {
+      await runGit(repo, ["push", "-u", "origin", "main"], {
+        timeoutMs: 10_000,
+      });
+      credentialReads = 0;
+      server.observed.length = 0;
+
+      await expect(
+        runGit(repo, ["pull", "--ff-only"], { timeoutMs: 10_000 }),
+      ).resolves.toMatchObject({ stdout: expect.any(String) });
+      expect(credentialReads).toBeGreaterThan(0);
+      expect(server.observed).toContainEqual({
+        username: "x-access-token",
+        password: "pull-secret",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
   it("brokers an admitted non-GitHub credential through the user's global helper", async () => {
     const remoteRoot = path.join(dir, "ambient-http-root");
     const bareRemote = path.join(remoteRoot, "remote.git");

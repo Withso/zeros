@@ -79,7 +79,6 @@ const selectedPackages = [
   "podman",
   "ripgrep",
   "slirp4netns",
-  "socat",
   "uidmap",
   "util-linux",
 ];

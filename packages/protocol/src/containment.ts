@@ -38,8 +38,8 @@ export type ExecutionBoundaryRestriction =
   | "shadow-git-unavailable"
   | "local-services-unavailable"
   | "container-workflows-unavailable"
-  /** Retained for v1 wire compatibility with pre-dispatcher engines. Current
-   * ZSR sessions provision one shadow repository per attached Git owner. */
+  /** Retained for v1 wire compatibility. Current ZSR sessions use native Git
+   * plus a narrow trusted broker for whole-tree integrations. */
   | "additional-repository-git-read-only";
 
 export interface ExecutionBoundaryStatus {

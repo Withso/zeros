@@ -186,7 +186,10 @@ async function ensureBroker(): Promise<GitCredentialBroker> {
  *  this host/method; unsupported hosts retain the user's normal helper chain. */
 export async function prepareGitCredentialInvocation(
   request: GitCredentialRequest,
-  options: { ambient?: AmbientGitCredentialOptions } = {},
+  options: {
+    ambient?: AmbientGitCredentialOptions;
+    consumerIdentity?: GitCredentialShellConsumerIdentity;
+  } = {},
 ): Promise<GitCredentialInvocation | null> {
   const source = credentialSource;
   const sourceOwns =
@@ -194,6 +197,9 @@ export async function prepareGitCredentialInvocation(
     (!source.shouldHandle || (await source.shouldHandle(request)));
   if (!sourceOwns && !options.ambient) return null;
   const activeBroker = await ensureBroker();
+  if (options.consumerIdentity) {
+    await activeBroker.grantConsumer(options.consumerIdentity);
+  }
   if (sourceOwns && source) {
     const credentialFingerprint = source.credentialFingerprint
       ? await source.credentialFingerprint(request)

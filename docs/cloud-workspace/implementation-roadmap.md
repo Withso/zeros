@@ -19,7 +19,7 @@ an item complete.
       release blockers for the remote image.
 
 Exit: representative provider runs prove image, ABI, bridge, PTY, reconnect,
-egress, lifecycle, soak, and cleanup behavior without credentials in logs or
+outbound reachability, lifecycle, soak, and cleanup behavior without credentials in logs or
 tracked files.
 
 ## Phase 1 — Control-plane contracts
@@ -50,12 +50,15 @@ provider drift.
 ## Phase 2 — Production execution environment
 
 - [ ] Produce a pinned, licensed, reproducible engine image.
-- [ ] Run the engine and setup steps as a non-root user with bounded resources.
+- [ ] Run the engine and setup steps as a non-root user with VM/provider-level
+      resource bounds; per-agent cgroups are not an initial-release requirement.
 - [ ] Issue short-lived repository and engine grants; keep provisioning
       credentials outside the sandbox.
 - [ ] Implement readiness, sanitized setup logs, stop/wake/delete, and image
       generation upgrades.
-- [ ] Enforce inbound and outbound network policy and verify snapshot deletion.
+- [ ] Enforce inbound network policy, document direct tenant-VM egress, and
+      verify snapshot deletion. Revisit provider-level egress restrictions after
+      the first cloud release.
 
 Exit: a fresh authorized repository reaches readiness, survives stop/wake, and
 is completely revoked/deleted through repeatable end-to-end tests.

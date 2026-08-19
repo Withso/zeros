@@ -100,7 +100,6 @@ function readDescriptor(descriptorPath) {
     [
       "executionId",
       "generation",
-      "gitProjections",
       "sessionKey",
       "uid",
       "gid",
@@ -166,52 +165,6 @@ function readDescriptor(descriptorPath) {
   if (protectedRoots.some((root) => root === workspace)) {
     fail("workspace root cannot be the protected subtree");
   }
-  if (
-    !Array.isArray(value.gitProjections) ||
-    value.gitProjections.length > 33
-  ) {
-    fail("Git projection set is invalid");
-  }
-  const gitProjections = value.gitProjections.map((projection, index) => {
-    exactKeys(
-      projection,
-      ["destination", "readOnly", "source"],
-      `Git projection ${index}`,
-    );
-    if (typeof projection.readOnly !== "boolean") {
-      fail("Git projection mode is invalid");
-    }
-    const gitSource = physical(
-      projection.source,
-      projection.readOnly ? "file" : "directory",
-      `Git projection ${index} source`,
-    ).path;
-    const gitDestination = physical(
-      projection.destination,
-      projection.readOnly ? "file" : "directory",
-      `Git projection ${index} destination`,
-    ).path;
-    if (
-      path.basename(gitDestination) !== ".git" ||
-      !writeRoots.some((root) => inside(gitDestination, root)) ||
-      writeRoots.some((root) => inside(gitSource, root))
-    ) {
-      fail("Git projection is outside its exact authority");
-    }
-    return {
-      source: gitSource,
-      destination: gitDestination,
-      readOnly: projection.readOnly,
-    };
-  });
-  if (
-    new Set(gitProjections.map((projection) => projection.source)).size !==
-      gitProjections.length ||
-    new Set(gitProjections.map((projection) => projection.destination)).size !==
-      gitProjections.length
-  ) {
-    fail("Git projections must be unique");
-  }
   return {
     executionId: value.executionId,
     generation: value.generation,
@@ -221,7 +174,6 @@ function readDescriptor(descriptorPath) {
     workspace,
     writeRoots,
     protectedRoots,
-    gitProjections,
   };
 }
 
@@ -454,7 +406,6 @@ function workerArguments(descriptor, workerState, usernsState, usernsRuntime) {
   const mountDestinations = [
     ...descriptor.writeRoots,
     ...descriptor.protectedRoots,
-    ...descriptor.gitProjections.map((projection) => projection.destination),
   ];
   const bwrap = [
     BWRAP,
@@ -521,11 +472,6 @@ function workerArguments(descriptor, workerState, usernsState, usernsRuntime) {
     ...directoryArguments(mountDestinations),
     ...descriptor.writeRoots.flatMap((root) => ["--bind", root, root]),
     ...descriptor.protectedRoots.flatMap((root) => ["--ro-bind", root, root]),
-    ...descriptor.gitProjections.flatMap((projection) => [
-      projection.readOnly ? "--ro-bind" : "--bind",
-      projection.source,
-      projection.destination,
-    ]),
     "--chdir",
     descriptor.workspace,
     NODE,

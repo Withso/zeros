@@ -24,6 +24,7 @@ import {
   sendAdmissionPark,
   sendNeedsSessionRecovery,
   sendSessionRecoveryMode,
+  sharedAdmissionFlightAction,
   shouldQueuePrompt,
   takePrebindDirty,
 } from "../session-reload-lifecycle";
@@ -208,6 +209,30 @@ describe("session reload lifecycle", () => {
         flushing: false,
       }),
     ).toBe(true);
+  });
+
+  it("upgrades a real admission that shared an adopt-only probe which missed", () => {
+    expect(
+      sharedAdmissionFlightAction({
+        activeAdoptOnly: true,
+        requestedAdoptOnly: false,
+        hasLiveSession: false,
+      }),
+    ).toBe("retry");
+    expect(
+      sharedAdmissionFlightAction({
+        activeAdoptOnly: true,
+        requestedAdoptOnly: false,
+        hasLiveSession: true,
+      }),
+    ).toBe("reuse");
+    expect(
+      sharedAdmissionFlightAction({
+        activeAdoptOnly: true,
+        requestedAdoptOnly: true,
+        hasLiveSession: false,
+      }),
+    ).toBe("reuse");
   });
 
   it("rejects stale bind callbacks after close or a replacement execution", () => {

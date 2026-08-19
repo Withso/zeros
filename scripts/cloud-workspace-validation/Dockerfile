@@ -39,7 +39,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends \
       acl bubblewrap busybox-static ca-certificates curl file g++ git git-lfs gnupg \
       inotify-tools make openssh-client podman procps python3 ripgrep \
-      slirp4netns socat uidmap unzip util-linux xz-utils \
+      slirp4netns uidmap unzip util-linux xz-utils \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --gid 10001 zeros-agent \
  && useradd --uid 10001 --gid 10001 --create-home \
@@ -85,7 +85,6 @@ COPY sandbox/egress-probe.sh /usr/local/bin/egress-probe.sh
 COPY sandbox/cloud-worker.json /etc/zeros/cloud-worker.json
 COPY sandbox/write-image-build-metadata.mjs /usr/local/lib/zeros/write-image-build-metadata.mjs
 COPY sandbox/attest-cloud-worker.mjs /usr/local/lib/zeros/attest-cloud-worker.mjs
-COPY sandbox/prepare-zsr-cgroups.mjs /usr/local/lib/zeros/prepare-zsr-cgroups.mjs
 COPY sandbox/consume-cloud-admission.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs
 COPY sandbox/install-cloud-preview-links.mjs /usr/local/lib/zeros/install-cloud-preview-links.mjs
 COPY sandbox/install-cloud-github-credential.mjs /usr/local/lib/zeros/install-cloud-github-credential.mjs
@@ -94,7 +93,6 @@ RUN chown root:root /usr/local/bin/start-engine.sh \
       /usr/local/bin/egress-probe.sh \
       /usr/local/lib/zeros/write-image-build-metadata.mjs \
       /usr/local/lib/zeros/attest-cloud-worker.mjs \
-      /usr/local/lib/zeros/prepare-zsr-cgroups.mjs \
       /usr/local/lib/zeros/consume-cloud-admission.mjs \
       /usr/local/lib/zeros/install-cloud-preview-links.mjs \
       /usr/local/lib/zeros/install-cloud-github-credential.mjs \
@@ -103,7 +101,6 @@ RUN chown root:root /usr/local/bin/start-engine.sh \
  && chmod 0755 /usr/local/bin/start-engine.sh /usr/local/bin/egress-probe.sh \
  && chmod 0555 /usr/local/lib/zeros/write-image-build-metadata.mjs \
       /usr/local/lib/zeros/attest-cloud-worker.mjs \
-      /usr/local/lib/zeros/prepare-zsr-cgroups.mjs \
       /usr/local/lib/zeros/consume-cloud-admission.mjs \
       /usr/local/lib/zeros/install-cloud-preview-links.mjs \
       /usr/local/lib/zeros/install-cloud-github-credential.mjs \

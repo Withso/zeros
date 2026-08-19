@@ -96,7 +96,6 @@ const PER_TYPE_QUEUE_CAP: Record<string, number> = {
   // doesn't flood the registry probe.
   AGENT_NEW_SESSION: 12,
   AGENT_LIST_AGENTS: 24,
-  AGENT_PREFLIGHT: 24,
 };
 
 /**

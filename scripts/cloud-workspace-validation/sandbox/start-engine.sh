@@ -40,10 +40,7 @@ export ZEROS_PTY_HOST_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/pty/pty-host.c
 export ZEROS_CURSOR_HOST_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs"
 export ZEROS_ZSR_SUPERVISOR_RUNTIME="/usr/local/bin/node"
 export ZEROS_ZSR_SUPERVISOR_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs"
-export ZEROS_ZSR_NETWORK_BRIDGE_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/agents/containment/zsr-network-bridge.mjs"
-export ZEROS_ZSR_CONTAINER_WORKER_SCRIPT="$ENGINE_DIR/apps/desktop/src/engine/agents/containment/zsr-container-worker.mjs"
 export ZEROS_ZSR_BWRAP_PATH="/usr/bin/bwrap"
-export ZEROS_ZSR_SOCAT_PATH="/usr/bin/socat"
 export ZEROS_ZSR_SETPRIV_PATH="/usr/bin/setpriv"
 
 if [[ -z "${ZEROS_CLOUD_PORT:-}" ]]; then
@@ -106,8 +103,8 @@ if [[ ! -f /run/zeros/github-credential.json || -L /run/zeros/github-credential.
 fi
 
 # The attester and engine share this lock. This prevents a new qualification
-# pass from killing/recovering cgroups while an admitted coordinator is live,
-# and prevents two coordinators from consuming adjacent proofs concurrently.
+# pass from replacing an admission proof while a coordinator is live, and
+# prevents two coordinators from consuming adjacent proofs concurrently.
 exec 9>>/run/zeros/engine.lock
 if ! /usr/bin/flock --nonblock 9; then
   echo "[start-engine] FATAL: another attester or engine owns this worker" >&2

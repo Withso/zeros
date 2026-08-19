@@ -54,8 +54,6 @@ describe("live agent smoke ZSR assets", () => {
         "/repo/apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs",
       ZEROS_ZSR_SUPERVISOR_RUNTIME: "/runtime/node",
       ZEROS_ZSR_SUPERVISOR_SCRIPT: "/repo/binaries/zsr-supervisor.mjs",
-      ZEROS_ZSR_NETWORK_BRIDGE_SCRIPT:
-        "/repo/binaries/zsr-network-bridge.mjs",
       ZEROS_ZSR_CONTAINER_WORKER_SCRIPT:
         "/repo/binaries/zsr-container-worker.mjs",
       ZEROS_ZSR_ORBSTACK_CONTAINER_HOST_SCRIPT:
@@ -64,8 +62,6 @@ describe("live agent smoke ZSR assets", () => {
         "/repo/binaries/zsr-orbstack-cloud-init.yaml",
       ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER:
         "/repo/binaries/zsr-macos-process-domain",
-      ZEROS_ZSR_MACOS_PORT_BIND_LIBRARY:
-        "/repo/binaries/zsr-macos-port-bind.dylib",
     });
   });
 
@@ -105,7 +101,6 @@ describe("live agent smoke ZSR assets", () => {
     );
     const commonAssets = [
       "zsr-supervisor.mjs",
-      "zsr-network-bridge.mjs",
       "zsr-container-worker.mjs",
       "zsr-orbstack-container-host.mjs",
       "zsr-orbstack-cloud-init.yaml",

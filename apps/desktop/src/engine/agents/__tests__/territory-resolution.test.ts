@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import {
   link,
   mkdir,
@@ -29,11 +29,13 @@ import {
   AgentGateway,
   agentTerritoryIdentity,
   previewCodeAgentTerritory,
+  registeredCodeTerritorySnapshot,
   resolveCodeAgentTerritory,
 } from "../gateway";
 import type { AgentAdapter, AgentFilesystemTerritory } from "../types";
-import type { ExecutionBoundary } from "../containment/types";
-import { designDirectoryNameFor } from "../../design/directory-registry";
+import type { BoundaryRequest, ExecutionBoundary } from "../containment/types";
+import * as projectState from "../../db/projects";
+import * as gitState from "../../git/state";
 import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
 const execFileAsync = promisify(execFile);
@@ -216,11 +218,9 @@ describe("code-agent territory resolution", () => {
     });
 
     // The pointer's settings directory and the folder's own marker — what decides
-    // whether this folder is still Design on the NEXT admission. Named explicitly
-    // because the two profiles treat them differently: the isolated profile denies
-    // them with the rest of the policy carveouts, while host parity subtracts them
-    // (denying `.zeros` broke `git pull`, and sticky recognition covers
-    // de-registration instead — see containment/policy.ts).
+    // whether this folder is still Design on the NEXT admission. They remain
+    // explicit semantic inputs even though host parity leaves committed settings
+    // writable; sticky recognition covers de-registration (see policy.ts).
     expect(territory!.designRecognitionPaths).toEqual([
       path.join(root, ".zeros"),
       path.join(design, ".zeros-canvas.json"),
@@ -256,7 +256,9 @@ describe("code-agent territory resolution", () => {
       ),
     ]);
     await execFileAsync("git", ["add", "-A"], { cwd: root });
-    await execFileAsync("git", ["commit", "-q", "-m", "fixture"], { cwd: root });
+    await execFileAsync("git", ["commit", "-q", "-m", "fixture"], {
+      cwd: root,
+    });
 
     // One real admission: this is what teaches the engine that "Product Design"
     // is a Design document here.
@@ -293,7 +295,9 @@ describe("code-agent territory resolution", () => {
     });
     expect(afterDeregistration?.protectedDesignDirectories).toEqual([design]);
     expect(afterDeregistration?.designDirectory).toBe(design);
-    expect(afterDeregistration!.writeCapabilities.deniedPaths).toContain(design);
+    expect(afterDeregistration!.writeCapabilities.deniedPaths).toContain(
+      design,
+    );
   });
 
   it("forgets a remembered Design folder the user actually deleted", async () => {
@@ -708,7 +712,13 @@ describe("code-agent territory resolution", () => {
     );
     const adapter = {
       agentId: "contained",
-      newSession: vi.fn(),
+      newSession: vi.fn(async (opts: { executionId?: string }) => ({
+        session: {
+          executionId: opts.executionId!,
+          sessionId: opts.executionId!,
+        },
+        initialize: {},
+      })),
     } as unknown as AgentAdapter;
     (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
       "contained",
@@ -740,6 +750,46 @@ describe("code-agent territory resolution", () => {
       }),
     );
     expect(adapter.newSession).not.toHaveBeenCalled();
+  });
+
+  it("retires a prepared boundary when the primary Design pointer changes during admission", async () => {
+    const root = await fixture();
+    const onStop = vi.fn();
+    let changed = false;
+    const gw = gateway(
+      testExecutionBoundary({
+        onPrepare: () => {
+          if (changed) return;
+          changed = true;
+          writeFileSync(
+            path.join(root, ".zeros", "settings.toml"),
+            '[design]\ndirectory = "Zeros Design"\n',
+          );
+        },
+        onStop,
+      }),
+    );
+    const adapter = {
+      agentId: "contained",
+      newSession: vi.fn(async (opts: { executionId?: string }) => ({
+        session: {
+          executionId: opts.executionId!,
+          sessionId: opts.executionId!,
+        },
+        initialize: {},
+      })),
+      disposeSession: vi.fn(async () => {}),
+    } as unknown as AgentAdapter;
+    (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
+      "contained",
+      adapter,
+    );
+
+    await expect(
+      gw.newSession("contained", { cwd: path.join(root, "src") }),
+    ).rejects.toThrow(/Design territory changed while.*prepared/i);
+    expect(adapter.newSession).not.toHaveBeenCalled();
+    expect(onStop).toHaveBeenCalledOnce();
   });
 
   it("subtracts Design authority from an attached workspace and tracks its lifecycle owner", async () => {
@@ -816,110 +866,344 @@ describe("code-agent territory resolution", () => {
     expect(gw.workspaceSessionIds("attached-workspace", attached)).toEqual([]);
   });
 
-  it("preflights the exact territory without publishing it or creating a session", async () => {
-    const root = await fixture();
-    const onProbe = vi.fn();
-    const gw = gateway(testExecutionBoundary({ onProbe }));
-    (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
-      "contained",
+  it("subtracts every registered local Design root without granting its checkout", async () => {
+    const primary = await prospectiveDesignFixture();
+    await writeFile(path.join(primary, ".zeros", "settings.toml"), "");
+    const registeredWorktree = await singleDesignFixture();
+    const registeredMain = await singleDesignFixture();
+    const registeredProject = await singleDesignFixture();
+    const cloudCheckout = await singleDesignFixture();
+    const archivedCheckout = await singleDesignFixture();
+    const activeRows = [
       {
-        agentId: "contained",
-      } as unknown as AgentAdapter,
-    );
-
-    const status = await gw.preflightSession("contained", {
-      cwd: path.join(root, "src"),
-    });
-
-    expect(status).toMatchObject({
-      state: "ready",
-      backend: "zeros-srt",
-      designProtection: {
-        required: true,
-        enforced: true,
-        protectedDirectoryCount: 2,
+        id: "ws_registered",
+        path: registeredWorktree,
+        repoRoot: registeredMain,
+        placement: "local",
       },
-      parity: {
-        level: "full",
-        restrictions: [],
+      {
+        id: "ws_cloud",
+        path: cloudCheckout,
+        repoRoot: cloudCheckout,
+        placement: "cloud",
       },
-    });
-    expect(status.designProtection.territoryGeneration).toBeUndefined();
-    expect(onProbe).toHaveBeenCalledOnce();
-    expect(onProbe).toHaveBeenCalledWith(
-      expect.objectContaining({
-        actor: "agent-code",
-        workspaceRoot: root,
-        territory: expect.objectContaining({
-          protectedDesignDirectories: [
-            path.join(root, "Product Design"),
-            path.join(root, "Zeros Design"),
-          ],
+    ] as ReturnType<typeof gitState.listWorkspaces>;
+    const archivedRows = [
+      ...activeRows,
+      {
+        id: "ws_archived",
+        path: archivedCheckout,
+        repoRoot: archivedCheckout,
+        placement: "local",
+        archivedAt: Date.now(),
+      },
+    ] as ReturnType<typeof gitState.listWorkspaces>;
+    const listSpy = vi
+      .spyOn(gitState, "listWorkspaces")
+      .mockImplementation((filter) =>
+        filter?.archived === false ? activeRows : archivedRows,
+      );
+    const projectSpy = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue([registeredProject]);
+    const onPrepare = vi.fn();
+    const gw = gateway(testExecutionBoundary({ onPrepare }));
+    const adapter = {
+      agentId: "contained",
+      newSession: vi.fn(
+        async (opts: {
+          executionId?: string;
+          territory?: AgentFilesystemTerritory;
+        }) => ({
+          session: {
+            executionId: opts.executionId!,
+            sessionId: opts.executionId!,
+          },
+          initialize: {},
         }),
-      }),
-    );
-    const request = onProbe.mock.calls[0]?.[0] as
-      | Record<string, unknown>
-      | undefined;
-    expect(request).toBeDefined();
-    expect(request).not.toHaveProperty("providerId");
-    expect(request).not.toHaveProperty("providerStateEnv");
-    expect(request).not.toHaveProperty("containerWorker");
-    expect(request?.localServices ?? []).toEqual([]);
-    expect(request?.allowedLocalPorts ?? []).toEqual([]);
-    expect(designDirectoryNameFor(root)).toBe("Zeros Design");
-  });
-
-  it("returns actionable unavailable preflight state instead of downgrading", async () => {
-    const root = await fixture();
-    const gw = gateway(
-      testExecutionBoundary({
-        probeResult: {
-          backend: "zeros-srt",
-          available: false,
-          secureNestedIsolation: false,
-          reasons: ["qualified backend is unavailable"],
-        },
-      }),
-    );
-    (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
-      "unsupported",
-      {
-        agentId: "unsupported",
-      } as AgentAdapter,
-    );
-
-    const status = await gw.preflightSession("unsupported", {
-      cwd: path.join(root, "src"),
-    });
-
-    expect(status).toMatchObject({
-      state: "unavailable",
-      designProtection: { required: true, enforced: false },
-    });
-    expect(status.remediation).toMatch(/qualified Zeros sandbox backend/i);
-  });
-
-  it("does not blame Design settings when private provider state admission fails", async () => {
-    const root = await fixture();
-    const gw = gateway(
-      testExecutionBoundary({
-        prepareError: new Error(
-          "provider overlay exceeds its bounded snapshot quota",
-        ),
-      }),
-    );
+      ),
+      disposeSession: vi.fn(async () => {}),
+    } as unknown as AgentAdapter;
     (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
       "contained",
-      { agentId: "contained" } as AgentAdapter,
+      adapter,
     );
 
-    const status = await gw.preflightSession("contained", {
-      cwd: path.join(root, "src"),
-    });
+    try {
+      const session = await gw.newSession("contained", { cwd: primary });
+      const registeredDesignRoots = [
+        registeredMain,
+        registeredProject,
+        registeredWorktree,
+      ]
+        .map((root) => path.join(root, "Zeros Design"))
+        .sort((left, right) => left.localeCompare(right));
 
-    expect(status.state).toBe("unavailable");
-    expect(status.remediation).toMatch(/private provider state/i);
-    expect(status.remediation).not.toMatch(/Design directory/i);
+      expect(onPrepare).toHaveBeenCalledWith(
+        expect.objectContaining({
+          workspaceRoot: primary,
+          territory: expect.objectContaining({
+            protectedDesignDirectories: expect.arrayContaining(
+              registeredDesignRoots,
+            ),
+          }),
+        }),
+      );
+      expect(
+        (
+          onPrepare.mock.calls[0]?.[0] as {
+            territory?: AgentFilesystemTerritory;
+            additionalReadWriteRoots?: string[];
+            additionalGitWorkspaceRoots?: string[];
+          }
+        ).territory?.protectedDesignDirectories,
+      ).not.toContain(path.join(cloudCheckout, "Zeros Design"));
+      expect(
+        (
+          onPrepare.mock.calls[0]?.[0] as {
+            territory?: AgentFilesystemTerritory;
+          }
+        ).territory?.protectedDesignDirectories,
+      ).not.toContain(path.join(archivedCheckout, "Zeros Design"));
+      expect(
+        (
+          onPrepare.mock.calls[0]?.[0] as {
+            territory?: AgentFilesystemTerritory;
+          }
+        ).territory?.protectedDesignDirectories,
+      ).toHaveLength(3);
+      const request = onPrepare.mock.calls[0]?.[0] as {
+        additionalReadWriteRoots?: string[];
+        additionalGitWorkspaceRoots?: string[];
+      };
+      expect(request.additionalReadWriteRoots ?? []).toEqual([]);
+      expect(request.additionalGitWorkspaceRoots ?? []).toEqual([]);
+      expect(
+        gw.workspaceSessionIds("ws_registered", registeredWorktree),
+      ).toEqual([session.executionId]);
+      expect(gw.workspaceSessionIds("local-main", registeredMain)).toEqual([
+        session.executionId,
+      ]);
+
+      await gw.endSession("contained", session.executionId, {
+        failClosed: true,
+      });
+    } finally {
+      projectSpy.mockRestore();
+      listSpy.mockRestore();
+    }
+  });
+
+  it("subtracts every registered Design root from all provider one-shot boundaries", async () => {
+    const primary = await prospectiveDesignFixture();
+    await writeFile(path.join(primary, ".zeros", "settings.toml"), "");
+    const registered = await singleDesignFixture();
+    const workspaceSpy = vi
+      .spyOn(gitState, "listWorkspaces")
+      .mockReturnValue([]);
+    const projectSpy = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue([registered]);
+    const requests: BoundaryRequest[] = [];
+    const gw = new AgentGateway({
+      projectRoot: primary,
+      executionBoundary: testExecutionBoundary({
+        onPrepare: (request) => requests.push(request),
+      }),
+      events: {
+        onSessionUpdate: () => {},
+        onPermissionRequest: () => {},
+        onQuestionRequest: () => {},
+        onAgentStderr: () => {},
+        onAgentExit: () => {},
+      },
+    });
+    const adapter = {
+      agentId: "contained",
+      listSessions: vi.fn(async () => ({ sessions: [] })),
+      generateText: vi.fn(async () => "A title"),
+      dispose: vi.fn(async () => {}),
+    } as unknown as AgentAdapter;
+    (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
+      "contained",
+      adapter,
+    );
+
+    try {
+      await gw.listSessions("contained", { cwd: primary });
+      await gw.generateTitle("contained", {
+        model: "test",
+        systemPrompt: "title",
+        prompt: "conversation",
+      });
+      await (
+        gw as unknown as {
+          runProviderProbeCommand(
+            providerId: string,
+            binary: string,
+            args: string[],
+            options: { timeoutMs: number },
+          ): Promise<{ exitCode: number | null; stdout: string }>;
+        }
+      ).runProviderProbeCommand(
+        "contained",
+        process.execPath,
+        ["-e", "process.stdout.write('ok\\n')"],
+        { timeoutMs: 5_000 },
+      );
+
+      // Session discovery and title generation intentionally reuse one
+      // policy-identical utility boundary; the CLI probe has its own root.
+      expect(requests).toHaveLength(2);
+      const registeredDesign = path.join(registered, "Zeros Design");
+      for (const request of requests) {
+        expect(request.actor).toBe("agent-code");
+        expect(request.territory?.protectedDesignDirectories).toContain(
+          registeredDesign,
+        );
+        expect(request.territory?.writeCapabilities.deniedPaths).toContain(
+          registeredDesign,
+        );
+        expect(request.additionalReadWriteRoots ?? []).not.toContain(
+          registered,
+        );
+      }
+    } finally {
+      await gw.dispose();
+      projectSpy.mockRestore();
+      workspaceSpy.mockRestore();
+    }
+  });
+
+  it("subtracts every registered code owner from a design-actor boundary", async () => {
+    const primary = await singleDesignFixture();
+    const siblingWorktree = await singleDesignFixture();
+    const siblingMain = await singleDesignFixture();
+    const siblingProject = await singleDesignFixture();
+    const workspaceSpy = vi.spyOn(gitState, "listWorkspaces").mockReturnValue([
+      {
+        id: "ws_design_sibling",
+        path: siblingWorktree,
+        repoRoot: siblingMain,
+        placement: "local",
+      },
+    ] as ReturnType<typeof gitState.listWorkspaces>);
+    const projectSpy = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue([siblingProject]);
+    const gw = gateway();
+    const internal = gw as unknown as {
+      boundaryRequest(
+        executionId: string,
+        cwd: string,
+        workspaceRoot: string,
+        territory: AgentFilesystemTerritory | undefined,
+        env: undefined,
+        providerId: undefined,
+        mcpServers: readonly never[],
+        resolvedAdditionalRoots: readonly string[],
+        additionalGitWorkspaceRoots: readonly string[],
+        includeSessionCapabilities: boolean,
+        providerResumeId: undefined,
+        actor: "design-agent",
+      ): Promise<BoundaryRequest>;
+    };
+
+    try {
+      const territory = await previewCodeAgentTerritory({
+        cwd: primary,
+        workspaceRoot: primary,
+        repoRoot: primary,
+      });
+      const request = await internal.boundaryRequest(
+        "design-global-code",
+        primary,
+        primary,
+        territory,
+        undefined,
+        undefined,
+        [],
+        [],
+        [],
+        false,
+        undefined,
+        "design-agent",
+      );
+
+      expect(request.protectedCodeDirectories).toEqual(
+        expect.arrayContaining([
+          primary,
+          siblingWorktree,
+          siblingMain,
+          siblingProject,
+        ]),
+      );
+      expect(request.territory?.protectedDesignDirectories).toEqual(
+        expect.arrayContaining([
+          path.join(primary, "Zeros Design"),
+          path.join(siblingWorktree, "Zeros Design"),
+          path.join(siblingMain, "Zeros Design"),
+          path.join(siblingProject, "Zeros Design"),
+        ]),
+      );
+      expect(request.additionalReadWriteRoots ?? []).toEqual([]);
+    } finally {
+      await gw.dispose();
+      projectSpy.mockRestore();
+      workspaceSpy.mockRestore();
+    }
+  });
+
+  it("fails closed when either registered-owner source cannot be read", () => {
+    const workspaceSpy = vi.spyOn(gitState, "listWorkspaces");
+    const projectSpy = vi.spyOn(projectState, "listKnownRepoRoots");
+    try {
+      workspaceSpy.mockImplementation(() => {
+        throw new Error("workspace registry unavailable");
+      });
+      projectSpy.mockReturnValue([]);
+      expect(() => registeredCodeTerritorySnapshot()).toThrow(
+        /workspace registry unavailable/,
+      );
+
+      workspaceSpy.mockReturnValue([]);
+      projectSpy.mockImplementation(() => {
+        throw new Error("project registry unavailable");
+      });
+      expect(() => registeredCodeTerritorySnapshot()).toThrow(
+        /project registry unavailable/,
+      );
+
+      projectSpy.mockReturnValue(["invalid\0project-root"]);
+      expect(() => registeredCodeTerritorySnapshot()).toThrow();
+    } finally {
+      projectSpy.mockRestore();
+      workspaceSpy.mockRestore();
+    }
+  });
+
+  it("retains a live main checkout when its registered worktree path is stale", async () => {
+    const registeredMain = await singleDesignFixture();
+    const workspaceSpy = vi.spyOn(gitState, "listWorkspaces").mockReturnValue([
+      {
+        id: "ws_missing_worktree",
+        path: path.join(registeredMain, "missing-worktree"),
+        repoRoot: registeredMain,
+        placement: "local",
+      },
+    ] as ReturnType<typeof gitState.listWorkspaces>);
+    const projectSpy = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue([]);
+
+    try {
+      expect(registeredCodeTerritorySnapshot().owners).toContainEqual({
+        path: registeredMain,
+        repoRoot: registeredMain,
+      });
+    } finally {
+      projectSpy.mockRestore();
+      workspaceSpy.mockRestore();
+    }
   });
 });

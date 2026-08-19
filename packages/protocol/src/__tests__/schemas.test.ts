@@ -330,38 +330,13 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
     ).toThrow(/env/);
   });
 
-  it("validates the read-only agent boundary preflight request", () => {
-    const b = { ...base, source: "browser" as const };
-    expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_PREFLIGHT");
-    expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_PREFLIGHTED");
+  it("lists the live boundary status and port message types", () => {
     expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_BOUNDARY_STATUS_CHANGED");
     expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_BOUNDARY_PORTS_CHANGED");
     expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_OPEN_BOUNDARY_PORT");
     expect(KNOWN_MESSAGE_TYPES).toContain("AGENT_BOUNDARY_PORT_OPENED");
-    expect(
-      parseBridgeMessage({
-        ...b,
-        type: "AGENT_PREFLIGHT",
-        agentId: "codex",
-        workspaceId: "workspace-1",
-      }).type,
-    ).toBe("AGENT_PREFLIGHT");
-    expect(() =>
-      parseBridgeMessage({
-        ...b,
-        type: "AGENT_PREFLIGHT",
-        agentId: "codex",
-      }),
-    ).toThrow(/cwd\/workspaceId/);
-    expect(() =>
-      parseBridgeMessage({
-        ...b,
-        type: "AGENT_PREFLIGHT",
-        agentId: "codex",
-        cwd: "/repo",
-        cliBinary: {},
-      }),
-    ).toThrow(/cliBinary/);
+    expect(KNOWN_MESSAGE_TYPES).not.toContain("AGENT_PREFLIGHT");
+    expect(KNOWN_MESSAGE_TYPES).not.toContain("AGENT_PREFLIGHTED");
   });
 
   it("accepts only exact opaque live-port open requests", () => {

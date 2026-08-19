@@ -103,6 +103,7 @@ export {
   pruneOrphanWorkspaceBranchOwnershipRefs,
   reconcileInterruptedWorkspaceLifecycles,
   restoreWorkspace,
+  setSyntheticGitWorkspaceResolver,
   setWorkspaceStatus,
   migrateWorktreesToNewRoot,
   whenSeedingSettled,
@@ -222,6 +223,7 @@ export type {
 
 export {
   discardHunk,
+  inspectApplyPatchPaths,
   stageHunk,
   stagePaths,
   unstageHunk,

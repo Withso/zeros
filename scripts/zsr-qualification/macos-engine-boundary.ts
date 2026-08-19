@@ -12,10 +12,6 @@ const projectRoot = path.resolve(
   "../..",
 );
 const supervisorScript = path.join(projectRoot, "binaries/zsr-supervisor.mjs");
-const networkBridgeScript = path.join(
-  projectRoot,
-  "binaries/zsr-network-bridge.mjs",
-);
 const processDomainHelper = path.join(
   projectRoot,
   "binaries/zsr-macos-process-domain",
@@ -25,9 +21,7 @@ const fixturePath = fileURLToPath(import.meta.url);
 function boundary() {
   return new ZsrExecutionBoundary({
     projectRoot,
-    localHostParity: true,
     supervisorScript,
-    networkBridgeScript,
     macosProcessDomainHelper: processDomainHelper,
   });
 }
@@ -126,7 +120,6 @@ async function run(): Promise<void> {
   }
   for (const required of [
     supervisorScript,
-    networkBridgeScript,
     processDomainHelper,
   ]) {
     if (!existsSync(required))

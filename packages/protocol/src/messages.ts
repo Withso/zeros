@@ -370,33 +370,6 @@ export interface AgentListAgentsMessage extends BaseMessage {
   force?: boolean;
 }
 
-/** Read-only admission probe. It starts no provider session and carries no
- * secrets.
- *
- * DIAGNOSTIC-ONLY, and deliberately so. It is a real boundary prepare plus a
- * proven teardown — the same policy / private-Git / live-canary work an
- * admission does — so awaiting it before AGENT_NEW_SESSION / AGENT_LOAD_SESSION
- * made every cold start admit twice back to back while proving nothing the
- * admission does not re-prove. No session path may call it: both session
- * responses already carry the real `boundary` status, and a refused admission
- * returns AGENT_ERROR with the gateway's own advice. Remaining callers are the
- * cloud-workspace validation smoke and hand-run diagnostics; the engine admits
- * it at BACKGROUND priority so it can never sit in front of a real send. */
-export interface AgentPreflightMessage extends BaseMessage {
-  type: "AGENT_PREFLIGHT";
-  agentId: string;
-  cwd?: string;
-  workspaceId?: WorkspaceId;
-  cliBinary?: string;
-}
-
-export interface AgentPreflightedMessage extends BaseMessage {
-  type: "AGENT_PREFLIGHTED";
-  requestId: string;
-  agentId: string;
-  status: ExecutionBoundaryStatus;
-}
-
 export interface AgentNewSessionMessage extends BaseMessage {
   type: "AGENT_NEW_SESSION";
   agentId: string;
@@ -1197,7 +1170,6 @@ export type BridgeMessage =
   | EngineErrorMessage
   // Agent (browser → engine)
   | AgentListAgentsMessage
-  | AgentPreflightMessage
   | AgentNewSessionMessage
   | AgentOpenBoundaryPortMessage
   | AgentInitAgentMessage
@@ -1220,7 +1192,6 @@ export type BridgeMessage =
   | AgentGenerateTitleMessage
   // Agent (engine → browser)
   | AgentAgentsListMessage
-  | AgentPreflightedMessage
   | AgentKeyValidatedMessage
   | AgentTitleGeneratedMessage
   | AgentSessionCreatedMessage

@@ -130,46 +130,4 @@ describe("gateway session readiness", () => {
     ).rejects.toMatchObject({ failure: { kind: "session-expired" } });
     expect(prompt).not.toHaveBeenCalled();
   });
-
-  it("coalesces identical preflights and serves a short-lived cached verdict", async () => {
-    const root = await fixture();
-    const onPrepare = vi.fn();
-    const gw = gateway(testExecutionBoundary({ onPrepare }));
-    installAdapter(gw, { agentId: "contained" } as AgentAdapter);
-    const cwd = path.join(root, "src");
-
-    const [first, second] = await Promise.all([
-      gw.preflightSession("contained", { cwd }),
-      gw.preflightSession("contained", { cwd }),
-    ]);
-    const third = await gw.preflightSession("contained", { cwd });
-
-    expect(onPrepare).toHaveBeenCalledTimes(1);
-    expect(second).toEqual(first);
-    expect(third).toEqual(first);
-    expect(first.state).toBe("ready");
-
-    // A different request shape is a different verdict — never share it.
-    await gw.preflightSession("contained", { cwd: root });
-    expect(onPrepare).toHaveBeenCalledTimes(2);
-  });
-
-  it("caches a failed preflight only briefly", async () => {
-    const root = await fixture();
-    const onPrepare = vi.fn();
-    const gw = gateway(
-      testExecutionBoundary({
-        onPrepare,
-        prepareError: new Error("provider overlay is unavailable"),
-      }),
-    );
-    installAdapter(gw, { agentId: "contained" } as AgentAdapter);
-    const cwd = path.join(root, "src");
-
-    const first = await gw.preflightSession("contained", { cwd });
-    const second = await gw.preflightSession("contained", { cwd });
-    expect(first.state).toBe("unavailable");
-    expect(second).toEqual(first);
-    expect(onPrepare).toHaveBeenCalledTimes(1);
-  });
 });

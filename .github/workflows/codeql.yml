@@ -8,13 +8,16 @@ name: CodeQL
 # multi-user: the engine spawns child processes, reads/writes by path, runs Git,
 # bridges renderer ↔ main IPC, and the control plane terminates network input.
 #
-# ADVISORY by nature: findings surface as Code Scanning alerts, NOT job failures,
-# so this never blocks a PR (don't make it a required check — a per-PR CodeQL gate
-# adds minutes + alert-triage churn). Code scanning is free on public repositories,
-# so results are UPLOADED and triaged on the Security tab. JS/TS needs no build step.
+# Findings remain advisory Code Scanning alerts rather than job failures, but the
+# live main ruleset requires the `codeql` context so a missing or broken analysis
+# cannot merge silently. Run the same check for merge-queue commits; otherwise a
+# required queue context can never report. Code scanning is free on this public
+# repository, so results are uploaded and triaged on the Security tab. JS/TS
+# needs no build step.
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
   schedule:

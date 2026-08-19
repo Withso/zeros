@@ -21,7 +21,6 @@ function request(overrides: Partial<BoundaryRequest> = {}): BoundaryRequest {
 function boundary(id: string): PreparedBoundary {
   return {
     generation: `gen-${id}`,
-    requestLocalService: vi.fn(async () => undefined),
   } as unknown as PreparedBoundary;
 }
 
@@ -73,15 +72,12 @@ describe("utilityBoundaryKey", () => {
 
     expect(utilityBoundaryKey(request({ providerId: "codex" }))).not.toBe(left);
     expect(utilityBoundaryKey(request({ cwd: "/tmp/other" }))).not.toBe(left);
-    expect(
-      utilityBoundaryKey(request({ admissionPriority: "interactive" })),
-    ).not.toBe(left);
   });
 
   it("treats an absent field and an explicitly-undefined field as the same", () => {
-    expect(
-      utilityBoundaryKey(request({ providerResumeId: undefined })),
-    ).toBe(utilityBoundaryKey(request()));
+    expect(utilityBoundaryKey(request({ providerResumeId: undefined }))).toBe(
+      utilityBoundaryKey(request()),
+    );
   });
 });
 
@@ -153,6 +149,42 @@ describe("UtilityBoundaryPool", () => {
     await instance.disposeAll();
   });
 
+  it("coalesces identical admissions that begin before the first prepare finishes", async () => {
+    let finishPrepare!: (value: PreparedBoundary) => void;
+    const prepare = vi.fn(
+      () =>
+        new Promise<PreparedBoundary>((resolve) => {
+          finishPrepare = resolve;
+        }),
+    );
+    const { instance } = pool({ prepare });
+
+    const firstFlight = instance.acquire(
+      request({ executionId: "concurrent-first" }),
+    );
+    const secondFlight = instance.acquire(
+      request({ executionId: "concurrent-second" }),
+    );
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+    finishPrepare(boundary("coalesced"));
+
+    const first = await firstFlight;
+    let secondSettled = false;
+    void secondFlight.then(() => {
+      secondSettled = true;
+    });
+    await Promise.resolve();
+    expect(secondSettled).toBe(false);
+
+    await first.release("ok");
+    const second = await secondFlight;
+    expect(second.reused).toBe(true);
+    expect(second.executionId).toBe("concurrent-first");
+    expect(prepare).toHaveBeenCalledOnce();
+    await second.release("ok");
+    await instance.disposeAll();
+  });
+
   it("retires an idle boundary once its idle window elapses", async () => {
     vi.useFakeTimers();
     try {
@@ -168,10 +200,50 @@ describe("UtilityBoundaryPool", () => {
     }
   });
 
+  it("stops a busy boundary before disposeAll returns", async () => {
+    const { instance, retired } = pool({});
+    const lease = await instance.acquire(
+      request({ executionId: "busy-territory" }),
+    );
+
+    await instance.disposeAll();
+
+    expect(retired).toEqual(["busy-territory"]);
+    await lease.release("ok");
+    expect(instance.size()).toBe(0);
+  });
+
+  it("invalidates an admission that finishes after disposeAll and reopen", async () => {
+    let finishPrepare!: (value: PreparedBoundary) => void;
+    const prepare = vi.fn(
+      () =>
+        new Promise<PreparedBoundary>((resolve) => {
+          finishPrepare = resolve;
+        }),
+    );
+    const retire = vi.fn(async () => undefined);
+    const { instance } = pool({ prepare, retire });
+    const acquiring = instance.acquire(
+      request({ executionId: "crossed-transition" }),
+    );
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+
+    await instance.disposeAll();
+    instance.reopen();
+    const prepared = boundary("crossed-transition");
+    finishPrepare(prepared);
+
+    await expect(acquiring).rejects.toThrow(/invalidated.*transition/i);
+    expect(retire).toHaveBeenCalledWith("crossed-transition", prepared);
+    expect(instance.size()).toBe(0);
+  });
+
   it("refuses to admit while boundary retirement is unhealthy", async () => {
     const { instance } = pool({
       assertHealthy: () => {
-        throw new Error("a prior execution boundary could not be proven stopped");
+        throw new Error(
+          "a prior execution boundary could not be proven stopped",
+        );
       },
     });
     await expect(instance.acquire(request())).rejects.toThrow(

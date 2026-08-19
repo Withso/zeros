@@ -1045,6 +1045,31 @@ describe("WorkspaceService", () => {
     try {
       const designFile = "Zeros Design/tokens.css";
       const saveDesigns = expect.stringContaining("Save designs");
+      const trackedDesignFile = path.join(
+        created.path,
+        "Zeros Design",
+        "tracked.txt",
+      );
+      fs.writeFileSync(trackedDesignFile, "original\n");
+      execFileSync("git", ["add", "--", "Zeros Design/tracked.txt"], {
+        cwd: created.path,
+      });
+      execFileSync("git", ["commit", "-q", "-m", "track design fixture"], {
+        cwd: created.path,
+      });
+      fs.writeFileSync(trackedDesignFile, "edited\n");
+      await expect(
+        svc.handle("git.reset", {
+          workspaceId: created.workspaceId,
+          mode: "hard",
+          confirm: true,
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        message: expect.stringContaining("unsaved design"),
+        remediation: saveDesigns,
+      });
+      expect(fs.readFileSync(trackedDesignFile, "utf8")).toBe("edited\n");
       // Staging, hunk-staging, discard, commit-with-files, and the file
       // editor all refuse design paths — design files have ONE write path.
       await expect(
@@ -1066,10 +1091,48 @@ describe("WorkspaceService", () => {
         remediation: saveDesigns,
       });
       await expect(
+        svc.handle("git.restore", {
+          workspaceId: created.workspaceId,
+          paths: ["Zeros Design/tracked.txt"],
+          source: "HEAD",
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+      await expect(
+        svc.handle("git.unstage", {
+          workspaceId: created.workspaceId,
+          paths: [designFile],
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+      // `--` stops option parsing, not Git pathspec expansion. A magic-looking
+      // exact filename must be literalized rather than expanding back onto
+      // protected content inside the trusted Git bridge.
+      await expect(
+        svc.handle("git.discard", {
+          workspaceId: created.workspaceId,
+          paths: [":(top)Zeros Design/tracked.txt"],
+        }),
+      ).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED" });
+      expect(fs.readFileSync(trackedDesignFile, "utf8")).toBe("edited\n");
+      await expect(
         svc.handle("git.commit", {
           workspaceId: created.workspaceId,
           message: "mixed",
           files: ["hello.txt", designFile],
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+      await expect(
+        svc.handle("git.unstageHunk", {
+          workspaceId: created.workspaceId,
+          patch: `diff --git a/${designFile} b/${designFile}\n--- a/${designFile}\n+++ b/${designFile}\n@@ -1 +1 @@\n-a\n+b\n`,
         }),
       ).rejects.toMatchObject({
         code: "VALIDATION_FAILED",
@@ -1084,6 +1147,21 @@ describe("WorkspaceService", () => {
         code: "VALIDATION_FAILED",
         remediation: saveDesigns,
       });
+      // `git apply` also accepts traditional patches without a `diff --git`
+      // header. An empty best-effort path parse must fail closed instead of
+      // handing such a patch to the trusted worktree writer.
+      await expect(
+        svc.handle("git.discardHunk", {
+          workspaceId: created.workspaceId,
+          patch:
+            "--- a/Zeros Design/tracked.txt\n" +
+            "+++ b/Zeros Design/tracked.txt\n" +
+            "@@ -1 +1 @@\n" +
+            "-original\n" +
+            "+edited\n",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      expect(fs.readFileSync(trackedDesignFile, "utf8")).toBe("edited\n");
       await expect(
         svc.handle("file.write", {
           workspaceId: created.workspaceId,
@@ -1143,6 +1221,23 @@ describe("WorkspaceService", () => {
       // write below. Recognition is by marker, so no priming is required.
       const renamed = "designs";
       const nested = "apps/web/canvas";
+
+      // Creating the marker is itself a Design-authority mutation. A generic
+      // code editor must not manufacture a new Design document and then keep
+      // writing it through the code path.
+      await expect(
+        svc.handle("file.write", {
+          workspaceId: created.workspaceId,
+          path: "brand-new-design/.zeros-canvas.json",
+          content: "{}\n",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      expect(
+        fs.existsSync(
+          path.join(created.path, "brand-new-design", ".zeros-canvas.json"),
+        ),
+      ).toBe(false);
+
       for (const relative of [renamed, nested]) {
         fs.mkdirSync(path.join(created.path, ...relative.split("/")), {
           recursive: true,
@@ -1177,6 +1272,19 @@ describe("WorkspaceService", () => {
         ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
       }
 
+      // Git treats an exact directory path as its complete subtree. A code
+      // actor must not stage a writable ancestor and sweep a nested Design
+      // document into the index indirectly.
+      await expect(
+        svc.handle("git.stage", {
+          workspaceId: created.workspaceId,
+          paths: ["apps"],
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+
       // A sibling under the same parent as a nested design folder stays
       // writable — recognition is per-folder, never per-ancestor, and the
       // workspace root is deliberately never probed.
@@ -1209,6 +1317,22 @@ describe("WorkspaceService", () => {
         svc.handle("file.write", {
           workspaceId: created.workspaceId,
           path: "reserved-designs/document.json",
+          content: "nope\n",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+
+      // HEAD/index recognition remains authoritative while a marker is
+      // missing from the worktree (for example an unstaged deletion). The
+      // service guard must agree with the ZSR territory resolver here.
+      execFileSync("git", ["add", renamed, nested], { cwd: created.path });
+      execFileSync("git", ["commit", "-q", "-m", "recognize designs"], {
+        cwd: created.path,
+      });
+      fs.rmSync(path.join(created.path, renamed, ".zeros-canvas.json"));
+      await expect(
+        svc.handle("file.write", {
+          workspaceId: created.workspaceId,
+          path: `${renamed}/after-marker-delete.txt`,
           content: "nope\n",
         }),
       ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
@@ -1835,6 +1959,94 @@ describe("WorkspaceService", () => {
     })) as { kind: string; content?: string };
     expect(r.kind).toBe("text");
     expect(r.content).toBe("hi there");
+  });
+
+  it("treats local-main file and Git writes as code authority around Design markers", async () => {
+    const design = path.join(dir, "Product Design");
+    fs.mkdirSync(design, { recursive: true });
+    fs.writeFileSync(path.join(design, ".zeros-canvas.json"), "{}\n");
+    fs.writeFileSync(path.join(design, "tokens.css"), "a{}\n");
+
+    await expect(
+      svc.handle("file.write", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        path: "Product Design/tokens.css",
+        content: "nope\n",
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(
+      svc.handle("git.stage", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        paths: ["Product Design/tokens.css"],
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(
+      svc.handle("git.clean", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        confirm: true,
+        directories: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      message: expect.stringContaining("unsaved design"),
+    });
+  });
+
+  it("keeps ordinary local-main Git path mutations available", async () => {
+    execFileSync("git", ["config", "user.email", "test@zeros.local"], {
+      cwd: dir,
+    });
+    execFileSync("git", ["config", "user.name", "Zeros Test"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "initial"], { cwd: dir });
+
+    fs.writeFileSync(path.join(dir, "hello.txt"), "changed\n");
+    await expect(
+      svc.handle("git.stage", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        paths: ["hello.txt"],
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(
+      execFileSync("git", ["diff", "--cached", "--name-only"], {
+        cwd: dir,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("hello.txt");
+
+    await expect(
+      svc.handle("git.unstage", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        paths: ["hello.txt"],
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(
+      execFileSync("git", ["diff", "--cached", "--name-only"], {
+        cwd: dir,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("");
+
+    await expect(
+      svc.handle("git.restore", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        paths: ["hello.txt"],
+        source: "HEAD",
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(fs.readFileSync(path.join(dir, "hello.txt"), "utf8")).toBe(
+      "hi there",
+    );
+
+    fs.writeFileSync(path.join(dir, "ordinary-untracked.txt"), "remove me\n");
+    await expect(
+      svc.handle("git.clean", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        paths: ["ordinary-untracked.txt"],
+        confirm: true,
+      }),
+    ).resolves.toEqual({ removed: ["ordinary-untracked.txt"] });
+    expect(fs.existsSync(path.join(dir, "ordinary-untracked.txt"))).toBe(false);
   });
 
   it("refuses to read outside the workspace (no client path escape)", async () => {

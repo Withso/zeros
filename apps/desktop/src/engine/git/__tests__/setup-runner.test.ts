@@ -3,7 +3,7 @@
 // the data/exit callbacks by hand to verify the rerun-race guard + the stale-run
 // reconciliation, without launching a real shell.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -337,6 +337,73 @@ describe("SetupManager", () => {
     );
   });
 
+  it("globally revokes and proves every setup boundary before an owner-map change", async () => {
+    const wsId = "ws_global1-cypress";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc, killed } = fakePty();
+    const revoke = vi.fn(async () => {});
+    const stopAndProve = vi.fn(async () => {});
+    const boundary = {
+      ...preparedTestBoundary(),
+      revoke,
+      stopAndProve,
+    } as PreparedBoundary;
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      undefined,
+      async () => boundary,
+    );
+    await mgr.start({ workspaceId: wsId, command: "pnpm install" });
+
+    await mgr.stopAllAndProve();
+
+    expect(killed).toEqual([setupSessionId(wsId, 1)]);
+    expect(revoke).toHaveBeenCalledOnce();
+    expect(stopAndProve).toHaveBeenCalledOnce();
+    expect(getWorkspaceById(wsId)?.setupState).toBe("stopped");
+  });
+
+  it("retains a superseded setup teardown failure after the replacement start aborts", async () => {
+    const wsId = "ws_global2-juniper";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc } = fakePty();
+    let envBuild = 0;
+    const envBuilder = vi.fn(async () => {
+      envBuild += 1;
+      if (envBuild === 2) throw new Error("replacement env failed");
+      return { PATH: "/usr/bin:/bin" };
+    });
+    const failedBoundary = {
+      ...preparedTestBoundary(),
+      stopAndProve: async () => {
+        throw new Error("superseded setup domain is still populated");
+      },
+    } as PreparedBoundary;
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      envBuilder,
+      async () => failedBoundary,
+    );
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await mgr.start({ workspaceId: wsId, command: "pnpm install" });
+      await expect(
+        mgr.start({ workspaceId: wsId, command: "pnpm install" }),
+      ).rejects.toThrow(/replacement env failed/i);
+      await vi.waitFor(() => expect(diagnostic).toHaveBeenCalled());
+
+      expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
+      expect(mgr.registeredDesignAuthorityChanged(null)).toBe(true);
+      await expect(mgr.stopAllAndProve()).rejects.toThrow(
+        /setup boundaries were not globally retired/i,
+      );
+    } finally {
+      diagnostic.mockRestore();
+    }
+  });
+
   it("reports an unproven boundary teardown when PTY creation fails", async () => {
     const wsId = "ws_spawn1-willow";
     insertWorkspace(sampleWorkspace(wsId));
@@ -396,6 +463,44 @@ describe("SetupManager", () => {
     expect(created).toEqual([]);
     expect(getWorkspaceById(wsId)?.setupState).toBe("stopped");
     expect(mgr.info(wsId).state).toBe("stopped");
+  });
+
+  it("retains failed teardown proof when Stop lands after boundary admission", async () => {
+    const wsId = "ws_stop02-pine";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc } = fakePty();
+    let releaseBoundary = () => {};
+    const boundaryGate = new Promise<void>((resolve) => {
+      releaseBoundary = resolve;
+    });
+    const stopAndProve = vi.fn(async () => {
+      throw new Error("cancelled setup domain is still populated");
+    });
+    const boundaryFactory = vi.fn(async () => {
+      await boundaryGate;
+      return {
+        ...preparedTestBoundary(),
+        stopAndProve,
+      } as PreparedBoundary;
+    });
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      async () => ({ PATH: "/bin" }),
+      boundaryFactory,
+    );
+
+    const starting = mgr.start({
+      workspaceId: wsId,
+      command: "pnpm install",
+    });
+    await vi.waitFor(() => expect(boundaryFactory).toHaveBeenCalledOnce());
+    mgr.stop(wsId);
+    releaseBoundary();
+
+    await expect(starting).rejects.toThrow(/cancelled setup domain/i);
+    await expect(mgr.stopAllAndProve()).rejects.toThrow(/restart Zeros/i);
+    expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
   });
 
   it("stop() after the run finished is a no-op (doesn't clobber the result)", async () => {

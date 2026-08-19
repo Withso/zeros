@@ -1,33 +1,29 @@
-// Zeros Sandbox Runtime shadow-Git dispatcher, compiled.
+// Zeros Sandbox Runtime Git integration dispatcher, compiled.
 //
 // Every Git invocation inside the fence is redirected here — by PATH, because
 // this binary is installed as `<toolsRoot>/git`, and by the macOS interposer,
 // which rewrites absolute invocations of the admitted Git binary to this path.
-// The dispatcher picks the private repository that owns the caller's working
-// directory and hands the command to that repository's client.
+// The dispatcher sends only tree-integration candidates to the trusted engine
+// broker. Everything else executes as ordinary Git under the caller's kernel
+// filesystem fence.
 //
 // It exists because the same decision used to be made by a Node program. That
 // cost a full runtime start per Git command: measured inside a live boundary,
 // an in-fence `git --version` with the redirect bypassed is 5-31 ms, and the
-// identical command through the redirect chain is 835-947 ms cold and 107-152 ms
-// warm — two runtime starts, one for that dispatch and one for the private
-// client. This binary removes the first of them, and the `/bin/sh` exec that
-// used to precede it, without changing what is dispatched or what enforces it.
+// identical command through the old redirect chain was 835-947 ms cold and
+// 107-152 ms warm. This binary removes the Node startup from ordinary native
+// Git commands without changing what enforces the Design write fence.
 //
 // Deliberately narrow. It answers only the unambiguous case: one repository,
 // no argument that redirects Git at a repository other than the one the working
 // directory implies, and nothing nearer to the caller that looks like a
 // repository of its own. Anything else — anything at all — is handed to the
-// original Node dispatcher, unchanged, which remains the reference
-// implementation. A dispatcher that guessed would be worse than a slow one:
-// selecting the wrong private repository would hand a session another session's
-// Git view, so every uncertain case is spent rather than resolved.
+// Node client unchanged, which remains the reference implementation. Every
+// uncertain case is delegated rather than guessed.
 //
-// Nothing here is a security boundary. Seatbelt still denies canonical Git paths
-// whatever this chooses, the client this execs is still the only route to a
-// remote, and the admission canary independently proves that Git inside the
-// fence resolves to the expected private directory — so a mis-selection fails an
-// admission rather than escaping one.
+// Nothing here is a security boundary. Seatbelt/bwrap still enforces path-level
+// Design denies, and the broker independently re-parses and authorizes every
+// candidate before running engine Git.
 
 #define _DARWIN_C_SOURCE 1
 
@@ -62,36 +58,9 @@ struct zsr_config {
   struct zsr_pair env[ZSR_MAX_ENTRY_ENV];
   size_t env_count;
   size_t entry_count;
+  bool host_parity;
   bool overflowed;
   bool valid;
-};
-
-/** Every name the Node dispatcher removes before applying the entry's own
- *  environment. Kept in the same order as `mappedEnvironment` so the two can be
- *  read side by side. */
-static const char *const ZSR_DROP_EXACT[] = {
-    "GIT_DIR",
-    "GIT_COMMON_DIR",
-    "GIT_WORK_TREE",
-    "GIT_INDEX_FILE",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
-    "GIT_NAMESPACE",
-    "GIT_CEILING_DIRECTORIES",
-    "GIT_ASKPASS",
-    "GIT_SSH",
-    "GIT_SSH_COMMAND",
-    "GIT_EXEC_PATH",
-    "GIT_PROXY_COMMAND",
-    "SSH_ASKPASS",
-    "ZEROS_ZSR_MACOS_GIT_INTERPOSE_BYPASS",
-};
-
-static const char *const ZSR_DROP_PREFIX[] = {
-    "GIT_CONFIG",
-    "ZEROS_GIT_AUTH_",
-    "ZEROS_REAL_GIT",
-    "ZEROS_REAL_GH",
 };
 
 static bool zsr_absolute(const char *value) {
@@ -192,6 +161,8 @@ static void zsr_parse_config(char *text, struct zsr_config *config) {
     }
     if (strcmp(line, "v1") == 0) {
       version_seen = true;
+    } else if (strcmp(line, "hostParity") == 0) {
+      config->host_parity = true;
     } else if (strcmp(line, "runtime") == 0) {
       config->runtime = value;
     } else if (strcmp(line, "dispatcher") == 0) {
@@ -220,7 +191,7 @@ static void zsr_parse_config(char *text, struct zsr_config *config) {
       config->env_count++;
     }
   }
-  config->valid = version_seen && !config->overflowed &&
+  config->valid = version_seen && config->host_parity && !config->overflowed &&
                   config->entry_count == 1 &&
                   zsr_absolute(config->runtime) &&
                   zsr_absolute(config->dispatcher) &&
@@ -285,30 +256,8 @@ static bool zsr_simple_arguments(char *const argv[], char *cwd, size_t cwd_size,
   return true;
 }
 
-static bool zsr_dropped(const char *entry) {
-  size_t name_length = (size_t)(strchr(entry, '=') - entry);
-  for (size_t index = 0;
-       index < sizeof(ZSR_DROP_EXACT) / sizeof(ZSR_DROP_EXACT[0]); index++) {
-    const char *name = ZSR_DROP_EXACT[index];
-    if (strlen(name) == name_length && strncmp(entry, name, name_length) == 0) {
-      return true;
-    }
-  }
-  for (size_t index = 0;
-       index < sizeof(ZSR_DROP_PREFIX) / sizeof(ZSR_DROP_PREFIX[0]); index++) {
-    const char *prefix = ZSR_DROP_PREFIX[index];
-    size_t prefix_length = strlen(prefix);
-    if (name_length >= prefix_length &&
-        strncmp(entry, prefix, prefix_length) == 0) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/** The caller's environment with the repository-selecting names removed, the
- *  entry's own environment applied, and `PATH` prefixed with the entry's tools
- *  directory — the three steps `mappedEnvironment` performs, in that order. */
+/** Preserve the host-parity environment, apply explicit entry overrides, and
+ *  prefix PATH with the trusted tools directory. */
 static char **zsr_mapped_environment(const struct zsr_config *config) {
   size_t inherited = 0;
   while (environ[inherited] != NULL) inherited++;
@@ -319,7 +268,7 @@ static char **zsr_mapped_environment(const struct zsr_config *config) {
   const char *inherited_path = NULL;
   for (size_t index = 0; index < inherited; index++) {
     char *entry = environ[index];
-    if (strchr(entry, '=') == NULL || zsr_dropped(entry)) continue;
+    if (strchr(entry, '=') == NULL) continue;
     if (strncmp(entry, "PATH=", 5) == 0) {
       inherited_path = entry + 5;
       continue;
@@ -356,16 +305,13 @@ static char **zsr_mapped_environment(const struct zsr_config *config) {
   return result;
 }
 
-/** The operations `git-client.mjs` sends to the broker rather than running
- *  natively. Only `push`, `fetch` and `pull` are network operations — the other
- *  twelve are here because they can destroy or rewrite protected Design
- *  directories, so this list is the Design fence's enforcement path and not a
- *  credential one. It is copied from the client verbatim and must stay that way:
- *  a shorter list here would run one of those unbrokered. */
+/** Operations that may perform a whole-tree integration. Checkout and reset
+ *  remain candidates here because their path-level forms require full argv
+ *  parsing; the broker returns those forms to native Git, where the kernel
+ *  Design deny remains authoritative. */
 static const char *const ZSR_BROKERED[] = {
-    "push",   "fetch",  "pull",       "checkout", "switch",
-    "reset",  "restore", "clean",     "merge",    "rebase",
-    "cherry-pick", "revert", "stash", "rm",       "mv",
+    "pull", "checkout", "switch", "reset", "merge", "rebase",
+    "cherry-pick", "revert",
 };
 
 /** `git-client.mjs`'s `subcommand()`, argument for argument. Returns NULL where
@@ -431,28 +377,6 @@ static bool zsr_help_requested(char *const argv[]) {
   return false;
 }
 
-/** Whether `<cwd>/.git` is a regular file.
- *
- *  The client treats a regular `.git` whose target lies inside the private root
- *  as a linked worktree and drops the process-wide `GIT_DIR`/`GIT_INDEX_FILE`
- *  overrides for it. This does not reproduce that — it refuses to answer at all
- *  when the question could arise, and lets the client decide.
- *
- *  Measured, so the refusal is nearly free: a shadow projection leaves the
- *  primary workspace's `.git` a DIRECTORY on both platforms and redirects Git
- *  through `GIT_DIR` in the child environment instead, and a worktree the
- *  session creates lands outside the workspace root — so the fast path's own
- *  preconditions already exclude every linked worktree. This makes that an
- *  enforced condition rather than an argued one. */
-static bool zsr_possible_linked_worktree(const char *cwd) {
-  char candidate[PATH_MAX];
-  if (strlen(cwd) + 6 >= sizeof(candidate)) return true;
-  snprintf(candidate, sizeof(candidate), "%s/.git", cwd);
-  struct stat metadata;
-  if (lstat(candidate, &metadata) != 0) return false;
-  return S_ISREG(metadata.st_mode);
-}
-
 /** Hand the command to the Node dispatcher exactly as it would have arrived
  *  there before this binary existed. Every path that is not provably simple ends
  *  here, so this is the common case's fallback and the whole correctness story
@@ -467,7 +391,7 @@ static int zsr_delegate(const struct zsr_config *config, char *const argv[]) {
   for (size_t index = 1; index < count; index++) forwarded[index + 1] = argv[index];
   forwarded[count + 1] = NULL;
   execv(config->runtime, (char *const *)forwarded);
-  fprintf(stderr, "git: shadow dispatcher is unavailable: %s\n",
+  fprintf(stderr, "git: integration dispatcher is unavailable: %s\n",
           strerror(errno));
   return 127;
 }
@@ -491,32 +415,6 @@ static bool zsr_environment_set(char ***environment, const char *entry) {
   list[count] = (char *)entry;
   list[count + 1] = NULL;
   return true;
-}
-
-static void zsr_environment_unset(char **environment, const char *name) {
-  size_t name_length = strlen(name);
-  size_t write = 0;
-  for (size_t read = 0; environment[read] != NULL; read++) {
-    if (strncmp(environment[read], name, name_length) == 0 &&
-        environment[read][name_length] == '=') {
-      continue;
-    }
-    environment[write++] = environment[read];
-  }
-  environment[write] = NULL;
-}
-
-/** Run the private client, which is what happens whenever this refuses to
- *  answer but the entry itself was unambiguous. */
-static int zsr_exec_client(const struct zsr_config *config,
-                           const char **forwarded, const char *cwd,
-                           char *const argv[]) {
-  char **mapped = zsr_mapped_environment(config);
-  if (mapped == NULL || chdir(cwd) != 0) return zsr_delegate(config, argv);
-  forwarded[0] = config->client;
-  execve(config->client, (char *const *)forwarded, mapped);
-  fprintf(stderr, "git: shadow client is unavailable: %s\n", strerror(errno));
-  return 127;
 }
 
 /** Nothing between the caller and the workspace root may look like a repository
@@ -550,12 +448,12 @@ int main(int argc, char *argv[]) {
   char *text = zsr_absolute(config_path) ? zsr_read_file(config_path, &length)
                                          : NULL;
   if (text == NULL) {
-    fprintf(stderr, "git: shadow dispatcher configuration is unavailable\n");
+    fprintf(stderr, "git: integration dispatcher configuration is unavailable\n");
     return 127;
   }
   zsr_parse_config(text, &config);
   if (!zsr_absolute(config.runtime) || !zsr_absolute(config.dispatcher)) {
-    fprintf(stderr, "git: shadow dispatcher configuration is unusable\n");
+    fprintf(stderr, "git: integration dispatcher configuration is unusable\n");
     return 127;
   }
   if (!config.valid) return zsr_delegate(&config, argv);
@@ -591,37 +489,23 @@ int main(int argc, char *argv[]) {
       !zsr_no_nearer_repository(cwd, config.workspace_root)) {
     return zsr_delegate(&config, argv);
   }
-  // `git-client.mjs`'s own decision, reproduced rather than reinvented: it runs
-  // the real Git natively for everything outside the brokered set, and the only
-  // thing its runtime start buys for those is the decision itself. Deriving this
-  // from whether an operation touches the network would be a different — and
-  // wrong — split, because twelve of the fifteen brokered operations are there
-  // to protect Design directories, not credentials.
+  // Ordinary Git is native. Only possible whole-tree integrations pay for the
+  // Node client and the broker's authoritative argv classification.
   const char *operation = zsr_subcommand(argv);
   const bool native = !zsr_brokered(operation) || zsr_help_requested(argv);
-  if (native && zsr_possible_linked_worktree(cwd)) {
-    // The client would have to decide whether to drop the private overrides.
-    return zsr_exec_client(&config, forwarded, cwd, argv);
-  }
   char **mapped = zsr_mapped_environment(&config);
   if (mapped == NULL) return zsr_delegate(&config, argv);
   if (chdir(cwd) != 0) return zsr_delegate(&config, argv);
   if (!native) {
     forwarded[0] = config.client;
     execve(config.client, (char *const *)forwarded, mapped);
-    fprintf(stderr, "git: shadow client is unavailable: %s\n", strerror(errno));
+    fprintf(stderr, "git: integration client is unavailable: %s\n", strerror(errno));
     return 127;
   }
   // What `runNative()` does: the admitted Git, the entry's environment, and the
   // one-hop bypass that stops the interposer sending this straight back here.
   if (!zsr_environment_set(&mapped, "ZEROS_ZSR_MACOS_GIT_INTERPOSE_BYPASS=1")) {
     return zsr_delegate(&config, argv);
-  }
-  if (operation != NULL && strcmp(operation, "worktree") == 0) {
-    // `git worktree add` must build the new worktree's own index; leaving the
-    // primary override in place produces a branch whose first commit can
-    // silently omit paths that were never materialized in that index.
-    zsr_environment_unset(mapped, "GIT_INDEX_FILE");
   }
   forwarded[0] = config.git;
   execve(config.git, (char *const *)forwarded, mapped);

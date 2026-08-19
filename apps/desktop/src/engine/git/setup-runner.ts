@@ -141,19 +141,32 @@ export class SetupManager {
   private finalizeBoundary(entry: SetupEntry): Promise<void> {
     if (entry.boundaryTeardown) return entry.boundaryTeardown;
     entry.boundaryFinalized = true;
-    const promise = Promise.resolve().then(() => entry.boundary.stopAndProve());
+    const promise = this.trackBoundaryTeardown(
+      entry.boundary,
+      entry.workspaceId,
+    );
     entry.boundaryTeardown = promise;
+    return promise;
+  }
+
+  /** Track teardown even when cancellation lands after boundary admission but
+   * before a SetupEntry exists. The durable process-domain proof must remain a
+   * lifecycle barrier if that detached teardown fails. */
+  private trackBoundaryTeardown(
+    boundary: PreparedBoundary,
+    workspaceId: string,
+  ): Promise<void> {
+    const promise = Promise.resolve().then(() => boundary.stopAndProve());
     const records =
-      this.boundaryTeardowns.get(entry.workspaceId) ??
-      new Set<BoundaryTeardownRecord>();
+      this.boundaryTeardowns.get(workspaceId) ?? new Set<BoundaryTeardownRecord>();
     const record = { promise } satisfies BoundaryTeardownRecord;
     records.add(record);
-    this.boundaryTeardowns.set(entry.workspaceId, records);
+    this.boundaryTeardowns.set(workspaceId, records);
     void promise.then(
       () => {
         records.delete(record);
         if (records.size === 0) {
-          this.boundaryTeardowns.delete(entry.workspaceId);
+          this.boundaryTeardowns.delete(workspaceId);
         }
       },
       () => {
@@ -180,9 +193,66 @@ export class SetupManager {
     if (failures.length > 0) {
       throw new AggregateError(
         failures,
-        "repository setup containment teardown was not proven",
+        "repository setup containment teardown was not proven. Restart Zeros before removing the workspace or changing Design territory.",
       );
     }
+  }
+
+  /** Revoke every repository-controlled setup boundary before the app-wide
+   * Design-owner map changes. Human terminals are deliberately unrelated; a
+   * setup script is code authority and must not retain an older deny union. */
+  async stopAllAndProve(): Promise<void> {
+    const workspaceIds = new Set([
+      ...this.starting.keys(),
+      ...this.entries.keys(),
+      // A superseded entry is removed before its replacement builds the env.
+      // If that replacement aborts, this ledger is the only remaining handle
+      // to an older teardown whose process-domain proof may have failed.
+      ...this.boundaryTeardowns.keys(),
+    ]);
+    for (const workspaceId of workspaceIds) this.stop(workspaceId);
+    const results = await Promise.allSettled(
+      [...workspaceIds].map((workspaceId) =>
+        this.proveWorkspaceBoundaryStopped(workspaceId),
+      ),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "repository setup boundaries were not globally retired. Restart Zeros before changing registered Design territory.",
+      );
+    }
+  }
+
+  /** Whether a live or admitting setup task was compiled from a different
+   * app-wide Design subtraction. An in-flight admission has not published its
+   * identity yet, so a concurrent external territory event is conservatively
+   * treated as changed and the global start drain resolves the race. */
+  registeredDesignAuthorityChanged(identity: string | null): boolean {
+    if (this.starting.size > 0 || this.boundaryTeardowns.size > 0) return true;
+    for (const entry of this.entries.values()) {
+      if (entry.state !== "running" || entry.boundaryFinalized) continue;
+      if (
+        !entry.boundary ||
+        entry.boundary.registeredDesignAuthorityIdentity !== identity
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  hasRepositoryCodeAuthority(): boolean {
+    return (
+      this.starting.size > 0 ||
+      this.boundaryTeardowns.size > 0 ||
+      [...this.entries.values()].some(
+        (entry) => entry.state === "running" && !entry.boundaryFinalized,
+      )
+    );
   }
 
   /** On engine start the in-memory buffers are empty, so any workspace row still
@@ -279,12 +349,9 @@ export class SetupManager {
         workspaceRoot: cwd,
         repoRoot,
         env,
-        // Stated, not inherited: the user is watching the Setup tab, so this
-        // stays in the interactive class even if the factory's default changes.
-        admissionPriority: "interactive",
       });
       if (flight.cancelled) {
-        await boundary.stopAndProve();
+        await this.trackBoundaryTeardown(boundary, args.workspaceId);
         return;
       }
       const sessionId = setupSessionId(args.workspaceId, ++this.gen);

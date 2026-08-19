@@ -15,6 +15,9 @@ import path from "node:path";
 import { zerosDataDir } from "../../../db/paths";
 import { CURSOR_STATE_RECOVERY_HOLD_FILE } from "../../session-paths";
 
+// New sessions write the durable store directly. The overlay structures and
+// merge implementation remain solely to recover generation state produced by
+// older builds; removing them would strand serialized crash-recovery holds.
 const MAX_STORE_FILE_BYTES = 128 * 1024 * 1024;
 const MAX_STORE_RECORD_BYTES = 2 * 1024 * 1024;
 const MAX_STORE_RECORDS = 250_000;
@@ -251,16 +254,14 @@ async function withPromotionLock<T>(
 
 /** The durable per-workspace store itself, ready to be written directly.
  *
- * This is the LOCAL HOST-PARITY path: no per-execution overlay, no merge
+ * This is the host-parity path for local and cloud: no per-execution overlay, no merge
  * baseline, no crash-recovery hold — because there is nothing transient to
  * reconcile. It restores the pre-ZSR arrangement, where every session in a
  * workspace shared one on-disk agent store, and it keeps the location Zeros has
  * been using so existing chats resume against their own history instead of
  * starting from an empty store.
- *
- * The overlay path below stays for the isolated/cloud profile, where the
- * provider's HOME is a projection that disappears at teardown and per-session
- * state genuinely has to be copied in and merged back out. */
+ * The overlay code below is legacy crash-recovery compatibility and is not
+ * used to create new session state. */
 export async function durableCursorStateRoot(cwd: string): Promise<string> {
   if (!path.isAbsolute(cwd)) {
     throw new Error("Cursor state root requires an absolute workspace path");
@@ -271,9 +272,8 @@ export async function durableCursorStateRoot(cwd: string): Promise<string> {
   return durable;
 }
 
-/** Seed a per-execution writable overlay from Zeros' durable Cursor state.
- * Cursor's host may additionally seed an empty overlay from the pre-ZSR native
- * store, which is then promoted through the same merge path. */
+/** Reconstruct the legacy overlay format for recovery tests and tooling. New
+ * sessions must use {@link durableCursorStateRoot}. */
 export async function prepareCursorStateOverlay(
   localRoot: string,
   cwd: string,
@@ -471,15 +471,8 @@ export async function promoteCursorStateOverlay(
     return { conflicts };
   });
   if (overlay.recovery) await clearCursorStateRecovery(overlay.recovery);
-  // Return the generation-private state root to the empty state
-  // prepareCursorStateOverlay requires. Two things need this. A pooled utility
-  // boundary (containment/utility-boundary-pool.ts) serves several one-shots in
-  // turn from one boundary, so the SECOND `listSessions`/key validation on it
-  // would otherwise fail its "must start empty" assertion. And a live session
-  // whose Cursor host is replaced mid-life re-prepares against the same root.
-  // Deleting is safe precisely here and nowhere earlier: the merge above is
-  // durable and the crash-recovery hold is already cleared, so these bytes are
-  // no longer authoritative for anything.
+  // Empty the retired generation root only after the merge is durable and the
+  // crash-recovery hold is cleared. The bytes are no longer authoritative.
   await clearCursorStateRoot(overlay.localRoot);
   return result;
 }

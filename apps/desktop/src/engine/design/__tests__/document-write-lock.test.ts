@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const fenceHarness = vi.hoisted(() => ({
   supported: true,
-  fence: vi.fn<() => Promise<void>>(),
   unfence: vi.fn<() => Promise<void>>(),
 }));
 
@@ -11,7 +10,6 @@ vi.mock("../../files/design-lock", () => ({
 }));
 
 vi.mock("../workspace-lock", () => ({
-  fenceDesignDirectory: fenceHarness.fence,
   unfenceDesignDirectory: fenceHarness.unfence,
 }));
 
@@ -23,7 +21,6 @@ import {
 describe("withDesignDocumentWrite", () => {
   beforeEach(() => {
     fenceHarness.supported = true;
-    fenceHarness.fence.mockReset().mockResolvedValue(undefined);
     fenceHarness.unfence.mockReset().mockResolvedValue(undefined);
   });
 
@@ -35,7 +32,6 @@ describe("withDesignDocumentWrite", () => {
     );
     expect(write).toHaveBeenCalledTimes(1);
     expect(fenceHarness.unfence).not.toHaveBeenCalled();
-    expect(fenceHarness.fence).not.toHaveBeenCalled();
   });
 
   it("preserves the Design write error without replacing it with ACL state", async () => {
@@ -47,7 +43,6 @@ describe("withDesignDocumentWrite", () => {
 
     expect(failure).toBe(writeError);
     expect(fenceHarness.unfence).not.toHaveBeenCalled();
-    expect(fenceHarness.fence).not.toHaveBeenCalled();
   });
 
   it("serializes pointer metadata changes with document mutations", async () => {

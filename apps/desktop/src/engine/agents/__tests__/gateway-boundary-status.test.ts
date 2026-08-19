@@ -31,7 +31,7 @@ function initialStatus(): ExecutionBoundaryStatus {
 }
 
 describe("AgentGateway boundary status publication", () => {
-  it("publishes redacted private-Git transitions and retains mapped services", async () => {
+  it("does not execute legacy private-Git promotion after a prompt", async () => {
     const events: ExecutionBoundaryStatus[] = [];
     const gateway = new AgentGateway({
       projectRoot: "/tmp/zeros-boundary-status",
@@ -86,19 +86,11 @@ describe("AgentGateway boundary status publication", () => {
 
     await gateway.prompt("fake", "execution-1", []);
 
-    expect(synchronizeGit).toHaveBeenCalledTimes(1);
-    expect(events.map((status) => status.git?.state)).toEqual([
-      "synchronizing",
-      "promoted",
-    ]);
-    expect(events.at(-1)).toMatchObject({
-      state: "ready",
-      services: { activeCount: 1, kinds: ["database"] },
-      git: { state: "promoted", updatedRefs: 1, indexUpdated: true },
-    });
-    expect(JSON.stringify(events)).not.toMatch(
-      /\/tmp|refs\/heads|socket|token/i,
-    );
+    expect(synchronizeGit).not.toHaveBeenCalled();
+    expect(events).toEqual([]);
+    expect(
+      internal.executionToBoundaryStatus.get("execution-1"),
+    ).toEqual(boundary.status);
 
     await gateway.dispose();
   });
@@ -126,7 +118,7 @@ describe("AgentGateway boundary status publication", () => {
       workspaceRoot: "/tmp/zeros-boundary-native",
       backendHint: "zeros-srt",
     });
-    // A local host-parity boundary has no private projection, so its
+    // A host-parity boundary has no Git promotion phase, so its
     // synchronizeGit() reports "not-applicable" every turn. Publishing that would
     // relabel a real Git repository as "Not a Git workspace" after the first
     // message — the bug this pins.

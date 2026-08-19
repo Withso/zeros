@@ -92,6 +92,7 @@ describe("design workspace agent isolation", () => {
     expect(engine).not.toContain(
       "change.gitRefsChanged || change.worktreeChanged",
     );
+    expect(engine).toContain("change.designRecognitionChanged");
     const service = read("apps/desktop/src/engine/workspace/service.ts");
     expect(service).toContain("assertNoDesignPathWrites");
   });

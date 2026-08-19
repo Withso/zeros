@@ -3,7 +3,7 @@
 // clean) require an explicit `confirm: true` so a mis-wired UI button
 // can't wipe work silently — the IPC layer surfaces the confirmation.
 
-import { getWorkspace, resolveRepoForGitOp } from "./worktree";
+import { resolveRepoForGitOp } from "./worktree";
 import { assertSafeGitRef, runGit } from "./git-exec";
 import { GitError } from "./errors";
 
@@ -47,7 +47,7 @@ export interface ResetOptions {
 }
 
 export async function reset(opts: ResetOptions): Promise<void> {
-  const ws = getWorkspace(opts.workspaceId);
+  const ws = await resolveRepoForGitOp(opts.workspaceId);
   // Validate the mode against the union before building the git flag. A caller
   // can pass an arbitrary string past the TS type (the IPC handler casts a raw
   // `requireString`), and an unguarded value would be interpolated as
@@ -86,7 +86,13 @@ export interface DiscardOptions {
 export async function discardFiles(opts: DiscardOptions): Promise<void> {
   const ws = await resolveRepoForGitOp(opts.workspaceId);
   const paths = requirePaths(opts.paths, "discard");
-  await runGit(ws.path, ["restore", "--staged", "--worktree", "--", ...paths]);
+  await runGit(ws.path, [
+    "restore",
+    "--staged",
+    "--worktree",
+    "--",
+    ...paths.map((candidate) => `:(literal)${candidate}`),
+  ]);
 }
 
 // ── restore from a source ref ────────────────────────────
@@ -101,12 +107,12 @@ export interface RestoreFromOptions {
 }
 
 export async function restoreFrom(opts: RestoreFromOptions): Promise<void> {
-  const ws = getWorkspace(opts.workspaceId);
+  const ws = await resolveRepoForGitOp(opts.workspaceId);
   const paths = requirePaths(opts.paths, "restoreFrom");
   assertSafeGitRef(opts.source, "restoreFrom.source");
   const args = ["restore", "--source", opts.source, "--worktree"];
   if (opts.staged !== false) args.push("--staged");
-  args.push("--", ...paths);
+  args.push("--", ...paths.map((candidate) => `:(literal)${candidate}`));
   await runGit(ws.path, args);
 }
 
@@ -127,7 +133,7 @@ export interface CleanResult {
 }
 
 export async function clean(opts: CleanOptions): Promise<CleanResult> {
-  const ws = getWorkspace(opts.workspaceId);
+  const ws = await resolveRepoForGitOp(opts.workspaceId);
   if (opts.confirm !== true) {
     throw new GitError({
       code: "VALIDATION_FAILED",
@@ -137,7 +143,12 @@ export async function clean(opts: CleanOptions): Promise<CleanResult> {
   const args = ["clean", "-f"];
   if (opts.directories !== false) args.push("-d");
   if (opts.paths && opts.paths.length > 0) {
-    args.push("--", ...requirePaths(opts.paths, "clean"));
+    args.push(
+      "--",
+      ...requirePaths(opts.paths, "clean").map(
+        (candidate) => `:(literal)${candidate}`,
+      ),
+    );
   }
   const { stdout } = await runGit(ws.path, args);
   // `git clean -f` prints "Removing <path>" per entry.

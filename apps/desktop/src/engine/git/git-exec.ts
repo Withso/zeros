@@ -7,6 +7,7 @@ import { execFile, type ExecFileException } from "node:child_process";
 import {
   accessSync,
   chmodSync,
+  chownSync,
   constants as fsConstants,
   lstatSync,
   mkdtempSync,
@@ -37,6 +38,10 @@ export interface RunFileOptions {
   env?: Record<string, string | undefined>;
   /** Abort the process and its request when the owning capability is revoked. */
   signal?: AbortSignal;
+  /** Run the final child as the qualified cloud worker. The engine remains
+   * root, but filesystem mutations produced on the worker's behalf must keep
+   * the tenant checkout worker-owned. */
+  identity?: { uid: number; gid: number };
 }
 
 export interface RunFileResult {
@@ -65,6 +70,8 @@ interface BunSubprocessRuntime {
       maxBuffer: number;
       timeout?: number;
       killSignal: "SIGKILL";
+      uid?: number;
+      gid?: number;
     },
   ): BunSubprocess;
 }
@@ -146,6 +153,9 @@ export async function runFile(
         ...(opts.timeoutMs && opts.timeoutMs > 0
           ? { timeout: opts.timeoutMs }
           : {}),
+        ...(opts.identity
+          ? { uid: opts.identity.uid, gid: opts.identity.gid }
+          : {}),
         // A timeout is a hard request-path boundary. Git and cleanup hooks do
         // not get to ignore SIGTERM and strand the single engine process.
         killSignal: "SIGKILL",
@@ -199,6 +209,9 @@ export async function runFile(
       : {}),
     ...(opts.env ? { env: opts.env } : {}),
     ...(opts.signal ? { signal: opts.signal } : {}),
+    ...(opts.identity
+      ? { uid: opts.identity.uid, gid: opts.identity.gid }
+      : {}),
   });
   if (opts.input !== undefined && child.child.stdin) {
     child.child.stdin.write(opts.input);
@@ -232,6 +245,11 @@ export interface RunGitOptions {
    *  scratch index (so a whole-tree snapshot never disturbs the user's real
    *  staging area) and to stamp a fixed author/committer for commit-tree. */
   env?: Record<string, string | undefined>;
+  /** Qualified uid/gid for a trusted engine operation performed on behalf of
+   * a cloud agent. Local desktop callers omit it and retain same-user parity. */
+  identity?: { uid: number; gid: number };
+  /** Revoke an in-flight integration operation with its boundary. */
+  signal?: AbortSignal;
 }
 
 const SAFE_CALLER_GIT_ENV = new Set([
@@ -591,6 +609,7 @@ const ENGINE_GIT_BUILTINS = new Set([
   "sparse-checkout",
   "stash",
   "status",
+  "switch",
   "symbolic-ref",
   "tag",
   "update-index",
@@ -606,7 +625,7 @@ const SAFE_CALLER_CONFIG_KEYS = new Set([
   "user.name",
 ]);
 
-interface ParsedEngineGitCommand {
+export interface ParsedEngineGitCommand {
   globalArgs: string[];
   command: string;
   commandArgs: string[];
@@ -640,7 +659,9 @@ function assertSafeCallerConfig(value: string): void {
   );
 }
 
-function parseEngineGitCommand(args: string[]): ParsedEngineGitCommand {
+export function parseEngineGitCommand(
+  args: string[],
+): ParsedEngineGitCommand {
   const commandIndex = subcommandIndex(args);
   if (commandIndex < 0) {
     throw unsafeGitInvocation(
@@ -785,13 +806,40 @@ function assertNoExecutableCommandOptions(
 }
 
 let emptyEngineGitDirectory: string | null = null;
+let emptyEngineGitConsumerGid: number | null = null;
 
-function engineGitEmptyDirectory(): string {
+function engineGitEmptyDirectory(identity?: {
+  uid: number;
+  gid: number;
+}): string {
   if (!emptyEngineGitDirectory) {
     emptyEngineGitDirectory = mkdtempSync(
       path.join(tmpdir(), "zeros-engine-git-empty-"),
     );
     chmodSync(emptyEngineGitDirectory, 0o700);
+  }
+  if (identity && emptyEngineGitConsumerGid !== identity.gid) {
+    if (emptyEngineGitConsumerGid !== null) {
+      throw unsafeGitInvocation(
+        "Engine Git already serves a different cloud worker group.",
+      );
+    }
+    const ownerUid = process.geteuid?.();
+    if (ownerUid !== 0) {
+      if (
+        ownerUid !== identity.uid ||
+        (process.getegid?.() !== identity.gid &&
+          !(process.getgroups?.() ?? []).includes(identity.gid))
+      ) {
+        throw unsafeGitInvocation(
+          "Engine Git cannot grant its policy directory to this worker.",
+        );
+      }
+    } else {
+      chownSync(emptyEngineGitDirectory, 0, identity.gid);
+    }
+    chmodSync(emptyEngineGitDirectory, 0o750);
+    emptyEngineGitConsumerGid = identity.gid;
   }
   return emptyEngineGitDirectory;
 }
@@ -1000,7 +1048,7 @@ function engineExecutable(name: string): string {
   throw unsafeGitInvocation(`Engine ${name} executable is unavailable.`);
 }
 
-function engineGitBinary(): string {
+export function engineGitBinary(): string {
   return engineExecutable("git");
 }
 
@@ -1201,9 +1249,10 @@ async function engineGitPolicyArgs(
   env: Record<string, string | undefined>,
   command: string,
   allowSsh: boolean,
+  identity?: { uid: number; gid: number },
 ): Promise<string[]> {
   const dynamic = await dynamicEngineGitPolicy(cwd, callerGlobalArgs, env);
-  const empty = engineGitEmptyDirectory();
+  const empty = engineGitEmptyDirectory(identity);
   return configArgs([
     ...dynamic,
     ["commit.gpgSign", "false"],
@@ -1286,6 +1335,30 @@ function firstNetworkRemote(
     return value;
   }
   return null;
+}
+
+/** Resolve the remote Git itself will use for a no-argument pull. Pull's
+ * positional repository is optional when the current branch has an upstream;
+ * transport hardening still needs that remote before the child starts so SSH
+ * and credential capabilities are scoped correctly. */
+async function configuredPullRemote(cwd: string): Promise<string | null> {
+  try {
+    const branch = await runFile(
+      "git",
+      ["-C", cwd, "symbolic-ref", "--quiet", "--short", "HEAD"],
+      { timeoutMs: 5_000, env: gitChildEnv() },
+    );
+    const branchName = branch.stdout.trim();
+    if (!branchName) return null;
+    const configured = await runFile(
+      "git",
+      ["-C", cwd, "config", "--get", `branch.${branchName}.remote`],
+      { timeoutMs: 5_000, env: gitChildEnv() },
+    );
+    return configured.stdout.trim() || null;
+  } catch {
+    return null;
+  }
 }
 
 function parseHttpRemote(value: string): URL | null {
@@ -1371,6 +1444,9 @@ async function networkCredentialRequest(
   }
   const command = args[commandIndex];
   let target = firstNetworkRemote(args, commandIndex, command);
+  if (!target && command === "pull") {
+    target = await configuredPullRemote(cwd);
+  }
   if (!target) {
     return {
       network: true,
@@ -1515,6 +1591,7 @@ export async function runGit(
               },
             }
           : {}),
+        ...(opts.identity ? { consumerIdentity: opts.identity } : {}),
       })
     : null;
   const baseChildEnv = gitChildEnv(opts.env);
@@ -1524,6 +1601,7 @@ export async function runGit(
     baseChildEnv,
     parsedCommand.command,
     networkTarget.transport === "ssh",
+    opts.identity,
   );
   const childArgs = [
     ...parsedCommand.globalArgs,
@@ -1557,6 +1635,8 @@ export async function runGit(
           // the credential socket.
           env: { ...baseChildEnv, ...controlledEnv },
           input: opts.input,
+          signal: opts.signal,
+          identity: opts.identity,
         });
         // Some remote helpers have returned exit 0 after their child transport
         // printed a fatal authentication error. Never turn that into a successful

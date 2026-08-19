@@ -418,7 +418,7 @@ async function checkSandboxRuntime(installedVersion) {
   }
 
   try {
-    const { FilesystemConfigSchema, NetworkConfigSchema } =
+    const { FilesystemConfigSchema, SandboxRuntimeConfigSchema } =
       await import("@anthropic-ai/sandbox-runtime");
     const fsBase = {
       denyRead: [],
@@ -426,45 +426,33 @@ async function checkSandboxRuntime(installedVersion) {
       allowWrite: [],
       denyWrite: [],
     };
-    const netBase = { allowedDomains: ["example.com"], deniedDomains: [] };
     const fsDefault = FilesystemConfigSchema.parse(fsBase);
-    const netDefault = NetworkConfigSchema.parse(netBase);
     const fsOptIn = FilesystemConfigSchema.parse({
       ...fsBase,
       disableMandatoryWriteProtection: true,
       allowWriteWithinDeny: ["/private/session"],
     });
-    const fsProjection = FilesystemConfigSchema.parse({
-      ...fsBase,
-      bindMounts: [
-        {
-          source: "/private/git",
-          destination: "/workspace/.git",
-          readOnly: false,
-        },
-      ],
-    });
-    const netOptIn = NetworkConfigSchema.parse({
-      ...netBase,
-      disabled: true,
-      allowedBindPorts: [43123],
+    const hostParity = SandboxRuntimeConfigSchema.parse({
+      hostParity: true,
+      linuxPrivilegedWorker: {
+        uid: 1000,
+        gid: 1000,
+        setprivPath: "/usr/bin/setpriv",
+      },
+      filesystem: fsBase,
+      network: { allowedDomains: [], deniedDomains: [] },
     });
     if (
       fsDefault.disableMandatoryWriteProtection !== undefined ||
       fsDefault.allowWriteWithinDeny !== undefined ||
-      netDefault.disabled !== undefined ||
-      netDefault.allowedBindPorts !== undefined ||
       fsOptIn.disableMandatoryWriteProtection !== true ||
       fsOptIn.allowWriteWithinDeny?.[0] !== "/private/session" ||
-      fsProjection.bindMounts?.[0]?.source !== "/private/git" ||
-      fsProjection.bindMounts?.[0]?.destination !== "/workspace/.git" ||
-      fsProjection.bindMounts?.[0]?.readOnly !== false ||
-      netOptIn.disabled !== true ||
-      netOptIn.allowedBindPorts?.[0] !== 43123
+      hostParity.hostParity !== true ||
+      hostParity.linuxPrivilegedWorker?.uid !== 1000
     ) {
       fail(
-        "ZSR patch contract drifted: compatibility switches must be explicit " +
-          "opt-ins and upstream defaults must remain unchanged.",
+        "ZSR patch contract drifted: host-parity filesystem and worker " +
+          "switches must remain explicit opt-ins.",
       );
     }
   } catch (error) {

@@ -23,6 +23,40 @@ describe("repository layout contracts", () => {
     expect(workflowLint).not.toMatch(/\n  pull_request:\s*\n\s+paths:/);
   });
 
+  it("runs the required CodeQL check for pull requests and merge queues", () => {
+    const codeql = read(".github/workflows/codeql.yml");
+
+    expect(codeql).toContain("  pull_request:");
+    expect(codeql).toContain("  merge_group:");
+    expect(codeql).toContain("    name: codeql");
+  });
+
+  it("keeps required source-sync red until every ZSR architecture qualifies", () => {
+    const preflight = read(".github/workflows/preflight.yml");
+
+    expect(preflight).toContain("  source-sync-workload:");
+    expect(preflight).toMatch(
+      /  source-sync:\n(?:.|\n)*?    name: source-sync \(macOS\)\n(?:.|\n)*?    needs:\n(?:.|\n)*?      - source-sync-workload\n(?:.|\n)*?      - zsr-macos-intel\n(?:.|\n)*?      - zsr-linux-arm64/,
+    );
+    expect(preflight).toContain("SOURCE_SYNC_RESULT:");
+    expect(preflight).toContain("ZSR_MACOS_INTEL_RESULT:");
+    expect(preflight).toContain("ZSR_LINUX_ARM64_RESULT:");
+  });
+
+  it("fails closed when an explicit containment test path disappears", () => {
+    const rootPackage = JSON.parse(read("package.json")) as {
+      scripts: Record<string, string>;
+    };
+    const command = rootPackage.scripts["check:design-containment"] ?? "";
+    expect(command).toMatch(/^node scripts\/run-explicit-vitest\.mjs /);
+
+    const files = command
+      .split(/\s+/)
+      .filter((token) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(token));
+    expect(files.length).toBeGreaterThan(0);
+    expect(files.filter((file) => !existsSync(file))).toEqual([]);
+  });
+
   it("keeps active automation off retired repository roots", () => {
     expect(existsSync("backend")).toBe(false);
     expect(existsSync("website")).toBe(false);
@@ -455,9 +489,8 @@ describe("repository layout contracts", () => {
     expect(dockerfile).toContain(
       "COPY sandbox/consume-cloud-admission.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs",
     );
-    expect(dockerfile).toContain(
-      "COPY sandbox/prepare-zsr-cgroups.mjs /usr/local/lib/zeros/prepare-zsr-cgroups.mjs",
-    );
+    expect(dockerfile).not.toContain("prepare-zsr-cgroups");
+    expect(image).not.toContain("prepare-zsr-cgroups");
     expect(dockerfile).not.toMatch(/curl[^\n|]*\|\s*(?:ba)?sh/);
     expect(image).not.toMatch(/curl[^\n|]*\|\s*(?:ba)?sh/);
     expect(dockerfile).not.toMatch(/mutagen/i);

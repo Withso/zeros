@@ -21,12 +21,11 @@ const dispatcher = path.resolve(
   "binaries/zsr-git-dispatch",
 );
 
-/** The compiled dispatcher is built by `xcrun clang`, so it only exists where it
- * can be built. Everything it decides is otherwise unobserved by the suite: the
- * collection tests cover the engine's half (what is installed and what the
- * configuration says) on every platform, and this covers the binary's half. */
+/** The packaged dispatcher is built by `xcrun clang`, so its executable exists
+ * only in a macOS build tree. The broker tests cover the authoritative argv
+ * classification on every platform; these tests pin the native fast path. */
 describe.skipIf(process.platform !== "darwin" || !existsSync(dispatcher))(
-  "compiled shadow-Git dispatcher",
+  "compiled Git integration dispatcher",
   () => {
     let root: string;
     let workspace: string;
@@ -46,9 +45,6 @@ describe.skipIf(process.platform !== "darwin" || !existsSync(dispatcher))(
       await mkdir(path.join(workspace, "sub"), { recursive: true });
       await mkdir(path.join(workspace, "nested", ".git"), { recursive: true });
       await mkdir(tools, { recursive: true });
-      // A real shadow projection leaves the primary workspace's `.git` a
-      // DIRECTORY and redirects Git through GIT_DIR in the child environment;
-      // the regular-file shape belongs to a linked worktree.
       await mkdir(path.join(workspace, ".git"), { recursive: true });
       // Stand-ins that report which route was taken and what they were handed.
       await writeFile(
@@ -77,6 +73,7 @@ describe.skipIf(process.platform !== "darwin" || !existsSync(dispatcher))(
     async function writeConfig(entries: number) {
       const lines = [
         "v1",
+        "hostParity",
         `runtime ${process.execPath}`,
         `dispatcher ${path.join(tools, "dispatcher.mjs")}`,
       ];
@@ -84,13 +81,9 @@ describe.skipIf(process.platform !== "darwin" || !existsSync(dispatcher))(
         lines.push(
           "entry",
           `workspaceRoot ${workspace}`,
-          `gitEntry ${path.join(workspace, ".git")}`,
-          `shadowRoot ${path.join(root, "shadow")}`,
           `toolsRoot ${tools}`,
           `client ${path.join(tools, "client")}`,
           `git ${path.join(tools, "git")}`,
-          `env GIT_DIR=${path.join(root, "shadow")}`,
-          `env GIT_INDEX_FILE=${path.join(root, "shadow", "index")}`,
         );
       }
       await rm(config, { force: true });
@@ -107,8 +100,6 @@ describe.skipIf(process.platform !== "darwin" || !existsSync(dispatcher))(
         env: {
           PATH: process.env.PATH ?? "/usr/bin:/bin",
           ZEROS_ZSR_GIT_DISPATCH_CONFIG: config,
-          // What a contained child actually carries: the entry's own GIT_DIR.
-          GIT_DIR: path.join(root, "shadow"),
           ...env,
         },
       });
@@ -125,47 +116,53 @@ describe.skipIf(process.platform !== "darwin" || !existsSync(dispatcher))(
       expect(route).toBe("NATIVE");
       expect(cwd).toBe(path.join(workspace, "sub"));
       expect(args).toBe("status");
-      expect(gitDir).toBe(path.join(root, "shadow"));
-      expect(indexFile).toBe(path.join(root, "shadow", "index"));
+      expect(gitDir).toBe("unset");
+      expect(indexFile).toBe("unset");
       // Without the one-hop bypass the interposer would send this straight back.
       expect(bypass).toBe("1");
     });
 
     it.each([
-      ["push"],
-      ["fetch"],
       ["pull"],
       ["checkout"],
       ["reset"],
-      ["clean"],
-      ["rm"],
-      ["mv"],
-      ["stash"],
       ["merge"],
       ["rebase"],
       ["cherry-pick"],
       ["revert"],
       ["switch"],
-      ["restore"],
     ])(
-      "sends %s to the client, because the broker owns it",
+      "sends tree-integration candidate %s to the client",
       async (operation) => {
-        // Twelve of these fifteen are Design protection rather than network
-        // operations, so this list is a fence and not an optimisation boundary.
         const result = await dispatch(workspace, [operation]);
         expect(result.split("|")[0]).toBe("CLIENT");
       },
     );
 
-    it("lets the client decide a brokered operation carrying --help", async () => {
-      // The client forces native for --help; letting it make that call keeps one
-      // decision in one place.
+    it.each([
+      ["push"],
+      ["fetch"],
+      ["restore"],
+      ["clean"],
+      ["rm"],
+      ["mv"],
+      ["stash"],
+    ])(
+      "runs non-integration operation %s natively",
+      async (operation) => {
+        expect((await dispatch(workspace, [operation])).split("|")[0]).toBe(
+          "NATIVE",
+        );
+      },
+    );
+
+    it("runs help natively without contacting the broker", async () => {
       expect(
         (await dispatch(workspace, ["push", "--help"])).split("|")[0],
       ).toBe("NATIVE");
     });
 
-    it("drops the primary index override for git worktree", async () => {
+    it("runs git worktree with the ordinary host environment", async () => {
       const result = await dispatch(path.join(workspace, "sub"), [
         "worktree",
         "add",
@@ -173,18 +170,14 @@ describe.skipIf(process.platform !== "darwin" || !existsSync(dispatcher))(
       ]);
       const [route, , , gitDir, indexFile] = result.split("|");
       expect(route).toBe("NATIVE");
-      expect(gitDir).toBe(path.join(root, "shadow"));
-      // A worktree must build its own index; keeping the primary override can
-      // produce a first commit that silently omits unmaterialized paths.
+      expect(gitDir).toBe("unset");
       expect(indexFile).toBe("unset");
     });
 
-    it("refuses to answer when the caller could be in a linked worktree", async () => {
-      // A regular `.git` is the shape the client inspects to decide whether to
-      // drop the private overrides. This does not reproduce that decision.
+    it("delegates when a nested worktree owns the cwd", async () => {
       await writeFile(
         path.join(workspace, "sub", ".git"),
-        `gitdir: ${path.join(root, "shadow", "worktrees", "x")}\n`,
+        `gitdir: ${path.join(workspace, ".git", "worktrees", "x")}\n`,
       );
       const result = await dispatch(path.join(workspace, "sub"), ["status"]);
       expect(result.split("|")[0]).toBe("DELEGATED");

@@ -31,14 +31,8 @@ vi.mock("../../git/state", () => ({
   setWorkspaceMeta: vi.fn(),
 }));
 
-vi.mock("../fence-health", () => ({
-  clearDesignFenceFailure: vi.fn(),
-  recordDesignFenceFailure: vi.fn(),
-}));
-
 import {
   cleanupLegacyDesignFilesystemGuards,
-  fenceDesignDirectory,
   unfenceDesignDirectory,
   unlockLegacyDesignWorkspaceLock,
 } from "../workspace-lock";
@@ -58,15 +52,6 @@ describe("Design filesystem compatibility cleanup", () => {
 
   afterEach(async () => {
     await rm(root, { recursive: true, force: true });
-  });
-
-  it("never installs a process-independent Design ACL", async () => {
-    await mkdir(path.join(root, "Zeros Design"));
-
-    await fenceDesignDirectory(root);
-
-    expect(aclHarness.unlock).not.toHaveBeenCalled();
-    expect(aclHarness.unfence).not.toHaveBeenCalled();
   });
 
   it("treats an absent first-use Design directory as already released", async () => {

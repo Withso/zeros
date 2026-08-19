@@ -1,8 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 
 import type {
   AdmissionControl,
@@ -15,7 +12,6 @@ import type {
   PortLease,
   PortMapping,
   PreparedBoundary,
-  ServiceLease,
   TerritoryGeneration,
 } from "../../containment/types";
 import { boundaryParityRestrictions } from "../../containment/status";
@@ -23,7 +19,6 @@ import { boundaryParityRestrictions } from "../../containment/status";
 export interface TestExecutionBoundaryOptions {
   probeResult?: BoundaryProbeResult;
   prepareError?: Error;
-  localServiceError?: Error;
   stopError?: Error;
   onProbe?: (request: BoundaryRequest) => void;
   onPrepare?: (request: BoundaryRequest, control?: AdmissionControl) => void;
@@ -203,30 +198,17 @@ export function testExecutionBoundary(
             level: restrictions.length === 0 ? "full" : "restricted",
             restrictions,
           },
-          services: {
-            state: "ready",
-            activeCount: request.localServices?.length ?? 0,
-            kinds: [
-              ...new Set(
-                (request.localServices ?? []).map((service) => service.kind),
-              ),
-            ].sort(),
-          },
+          ...(request.containerWorker
+            ? {
+                services: {
+                  state: "ready" as const,
+                  activeCount: 1,
+                  kinds: ["podman" as const],
+                },
+              }
+            : {}),
           git: { state: "not-applicable" },
           checkedAt: Date.now(),
-        },
-        privateStateDirectory: (namespace) => {
-          if (!/^[a-z0-9][a-z0-9._-]{0,63}$/i.test(namespace)) {
-            throw new Error("invalid test private-state namespace");
-          }
-          const directory = path.join(
-            os.tmpdir(),
-            "zeros-test-boundary-state",
-            generation,
-            namespace,
-          );
-          mkdirSync(directory, { recursive: true, mode: 0o700 });
-          return directory;
         },
         wrapSpawn: (spawnRequest: BoundarySpawnRequest) => {
           if (revoked) throw new Error("test boundary is revoked");
@@ -287,25 +269,6 @@ export function testExecutionBoundary(
           listener([...ports.values()]);
           return () => portObservers.delete(listener);
         },
-        requestLocalService: async () => {
-          if (revoked) throw new Error("test boundary is revoked");
-          if (options.localServiceError) throw options.localServiceError;
-          const lease: ServiceLease = {
-            leaseId: `test-service-${randomUUID()}`,
-            generation,
-            env: {},
-            revoke: async () => {
-              leases.delete(lease);
-            },
-          };
-          leases.add(lease);
-          return lease;
-        },
-        synchronizeGit: async () => ({
-          state: "not-applicable",
-          updatedRefs: 0,
-          indexUpdated: false,
-        }),
         revoke: async () => {
           if (revoked) return;
           revoked = true;

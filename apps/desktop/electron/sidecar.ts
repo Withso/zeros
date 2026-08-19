@@ -339,25 +339,6 @@ function resolveZsrSupervisorPath(): string | null {
   return existsSync(dev) ? dev : null;
 }
 
-function resolveZsrNetworkBridgePath(): string | null {
-  if (IS_PACKAGED) {
-    const packaged = path.join(process.resourcesPath, "zsr-network-bridge.mjs");
-    return existsSync(packaged) ? packaged : null;
-  }
-  const dev = path.resolve(
-    __dirname,
-    "..",
-    "apps",
-    "desktop",
-    "src",
-    "engine",
-    "agents",
-    "containment",
-    "zsr-network-bridge.mjs",
-  );
-  return existsSync(dev) ? dev : null;
-}
-
 function resolveZsrContainerWorkerPath(): string | null {
   if (IS_PACKAGED) {
     const packaged = path.join(
@@ -427,14 +408,6 @@ function resolveZsrGitDispatchBinaryPath(): string | null {
   const candidate = IS_PACKAGED
     ? path.join(process.resourcesPath, "zsr-git-dispatch")
     : path.resolve(__dirname, "..", "binaries", "zsr-git-dispatch");
-  return existsSync(candidate) ? candidate : null;
-}
-
-function resolveZsrMacosPortBindLibraryPath(): string | null {
-  if (process.platform !== "darwin") return null;
-  const candidate = IS_PACKAGED
-    ? path.join(process.resourcesPath, "zsr-macos-port-bind.dylib")
-    : path.resolve(__dirname, "..", "binaries", "zsr-macos-port-bind.dylib");
   return existsSync(candidate) ? candidate : null;
 }
 
@@ -1420,10 +1393,6 @@ async function doSpawnEngine(
   extraEnv.ZEROS_ZSR_SUPERVISOR_RUNTIME = process.execPath;
   const zsrSupervisor = resolveZsrSupervisorPath();
   if (zsrSupervisor) extraEnv.ZEROS_ZSR_SUPERVISOR_SCRIPT = zsrSupervisor;
-  const zsrNetworkBridge = resolveZsrNetworkBridgePath();
-  if (zsrNetworkBridge) {
-    extraEnv.ZEROS_ZSR_NETWORK_BRIDGE_SCRIPT = zsrNetworkBridge;
-  }
   const zsrContainerWorker = resolveZsrContainerWorkerPath();
   if (zsrContainerWorker) {
     extraEnv.ZEROS_ZSR_CONTAINER_WORKER_SCRIPT = zsrContainerWorker;
@@ -1440,10 +1409,6 @@ async function doSpawnEngine(
   const zsrMacosProcessDomain = resolveZsrMacosProcessDomainHelperPath();
   if (zsrMacosProcessDomain) {
     extraEnv.ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER = zsrMacosProcessDomain;
-  }
-  const zsrMacosPortBind = resolveZsrMacosPortBindLibraryPath();
-  if (zsrMacosPortBind) {
-    extraEnv.ZEROS_ZSR_MACOS_PORT_BIND_LIBRARY = zsrMacosPortBind;
   }
   const zsrGitDispatch = resolveZsrGitDispatchBinaryPath();
   if (zsrGitDispatch) {

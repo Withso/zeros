@@ -120,8 +120,8 @@ export const ENGINE_CLOUD_PORT = parseCloudValidationPort(
 );
 
 /** Dedicated provider-preview origins used by the authenticated ZSR browser
- * façades. The agent listeners stay inside their private network namespaces;
- * these host ports are bound only by the trusted engine after admission. */
+ * façades. Agent listeners remain tenant-VM-local; only the trusted engine
+ * publishes these browser-facing ports after admission. */
 export const CLOUD_PREVIEW_PORTS = Object.freeze(
   Array.from({ length: 64 }, (_value, index) => 41_000 + index),
 );
@@ -151,13 +151,6 @@ export const SANDBOX_DATA_DIR = "/var/lib/zeros";
 export const SANDBOX_ENGINE_LOG = "/var/log/zeros/engine.log";
 export const SANDBOX_AGENT_UID = 10_001;
 export const SANDBOX_AGENT_GID = 10_001;
-export const ZSR_CGROUP_PARENT = "/sys/fs/cgroup/zeros-agents";
-export const ZSR_CLOUD_AGENT_RESOURCES = Object.freeze({
-  memoryBytes: 3 * 1024 * 1024 * 1024,
-  cpuQuotaMicros: 200_000,
-  cpuPeriodMicros: 100_000,
-  processes: 2_048,
-});
 
 // ── Agent credentials (create()-time only) ────────────────
 
@@ -922,7 +915,6 @@ export function imageContractSha256(): string {
     "sandbox/cloud-worker.json",
     "sandbox/write-image-build-metadata.mjs",
     "sandbox/attest-cloud-worker.mjs",
-    "sandbox/prepare-zsr-cgroups.mjs",
     "sandbox/consume-cloud-admission.mjs",
     "sandbox/install-cloud-preview-links.mjs",
     "sandbox/install-cloud-github-credential.mjs",

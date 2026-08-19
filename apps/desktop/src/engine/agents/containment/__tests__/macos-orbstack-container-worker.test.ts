@@ -63,7 +63,7 @@ describe("macOS OrbStack container worker", () => {
     await Promise.all([
       mkdir(path.join(workspace, ".git"), { recursive: true }),
       mkdir(path.join(workspace, "Zeros Design"), { recursive: true }),
-      mkdir(path.join(session, "git"), { recursive: true }),
+      mkdir(session, { recursive: true }),
       writeFile(orb, "#!/bin/sh\nexit 0\n", { mode: 0o700 }),
       writeFile(cloudInit, "#cloud-config\n", { mode: 0o600 }),
       writeFile(host, "// host\n", { mode: 0o600 }),
@@ -438,6 +438,15 @@ peer.once("error",()=>process.exit(125));`,
   }
 
   it("attests an exact isolated machine and proxies only its private API", async () => {
+    // The host fence is app-wide, but this lease mounts only `workspace` and
+    // its private session root. A Design owner in another registered workspace
+    // is unreachable from this VM and must not make the current lease invalid.
+    const unprojectedDesign = path.join(
+      root,
+      "registered-sibling",
+      "Zeros Design",
+    );
+    await mkdir(unprojectedDesign, { recursive: true });
     const sessionKey = "c".repeat(32);
     internal = createServer({ allowHalfOpen: true }, (peer) => {
       internalPeers.add(peer);
@@ -496,13 +505,9 @@ peer.once("error",()=>process.exit(125));`,
     );
     await lease.start({
       generation: generation("abcdefghijklmnopqrstuvwx"),
-      protectedRoots: [path.join(workspace, "Zeros Design")],
-      gitProjections: [
-        {
-          source: path.join(session, "git"),
-          destination: path.join(workspace, ".git"),
-          readOnly: false,
-        },
+      protectedRoots: [
+        path.join(workspace, "Zeros Design"),
+        unprojectedDesign,
       ],
     });
     expect(runner.calls).toEqual([]);
@@ -556,17 +561,14 @@ peer.once("error",()=>process.exit(125));`,
     const descriptor = JSON.parse(await readFile(launch.at(-1)!, "utf8")) as {
       uid?: unknown;
       gid?: unknown;
-      gitProjections?: unknown;
+      protectedRoots?: unknown;
     };
     expect(descriptor.uid).toBe(process.getuid?.() ?? -1);
     expect(descriptor.gid).toBe(501);
-    expect(descriptor.gitProjections).toEqual([
-      {
-        source: path.join(session, "git"),
-        destination: path.join(workspace, ".git"),
-        readOnly: false,
-      },
+    expect(descriptor.protectedRoots).toEqual([
+      path.join(workspace, "Zeros Design"),
     ]);
+    expect(descriptor).not.toHaveProperty("gitProjections");
 
     await lease.stopAndProve();
     expect(runner.calls.some((args) => args.includes("--recover"))).toBe(true);
@@ -617,7 +619,6 @@ peer.once("error",()=>process.exit(125));`,
     await lease.start({
       generation: generation("unusedondemandgeneratio"),
       protectedRoots: [path.join(workspace, "Zeros Design")],
-      gitProjections: [],
     });
     await lease.stopAndProve();
 
@@ -722,7 +723,6 @@ peer.once("error",()=>process.exit(125));`,
         lease.start({
           generation: generation("localhostforwardgeneration"),
           protectedRoots: [path.join(workspace, "Zeros Design")],
-          gitProjections: [],
         }),
       ).resolves.toBeUndefined();
 
@@ -800,7 +800,6 @@ peer.once("error",()=>process.exit(125));`,
       await lease.start({
         generation: generation("relaycapgeneration123456"),
         protectedRoots: [path.join(workspace, "Zeros Design")],
-        gitProjections: [],
       });
       const relayCallsBeforeConnections = runner.calls.filter((args) =>
         args.includes("--relay"),
@@ -866,7 +865,6 @@ peer.once("error",()=>process.exit(125));`,
       lease.start({
         generation: generation("relaydeadlinegeneration12"),
         protectedRoots: [path.join(workspace, "Zeros Design")],
-        gitProjections: [],
       }),
     ).rejects.toMatchObject({
       name: MacosContainerWorkerUnavailableError.name,
@@ -900,7 +898,6 @@ peer.once("error",()=>process.exit(125));`,
       lease.start({
         generation: generation("stubbornprobegeneration12"),
         protectedRoots: [path.join(workspace, "Zeros Design")],
-        gitProjections: [],
       }),
     ).rejects.toMatchObject({
       name: MacosContainerWorkerUnavailableError.name,
@@ -942,7 +939,6 @@ peer.once("error",()=>process.exit(125));`,
         lease.start({
           generation: generation("relayoutputdrain12345678"),
           protectedRoots: [path.join(workspace, "Zeros Design")],
-          gitProjections: [],
         }),
       ).resolves.toBeUndefined();
     } finally {
@@ -1004,7 +1000,6 @@ peer.once("error",()=>process.exit(125));`,
     await lease.start({
       generation: generation("stubbornrelaygeneration12"),
       protectedRoots: [path.join(workspace, "Zeros Design")],
-      gitProjections: [],
     });
     const probeRelays = runner.calls.filter((args) =>
       args.includes("--relay"),
@@ -1086,7 +1081,6 @@ peer.once("error",()=>process.exit(125));`,
         .start({
           generation: generation("forwardcollisiongeneration"),
           protectedRoots: [path.join(workspace, "Zeros Design")],
-          gitProjections: [],
         })
         .catch((error: unknown) => error);
       expect(failure).toBeInstanceOf(Error);
@@ -1127,7 +1121,6 @@ peer.once("error",()=>process.exit(125));`,
         lease.start({
           generation: generation("workerexitgeneration1234"),
           protectedRoots: [path.join(workspace, "Zeros Design")],
-          gitProjections: [],
         }),
       ).rejects.toMatchObject({
         name: MacosContainerWorkerUnavailableError.name,
@@ -1167,7 +1160,6 @@ peer.once("error",()=>process.exit(125));`,
       lease.start({
         generation: generation("workerspawngeneration123"),
         protectedRoots: [path.join(workspace, "Zeros Design")],
-        gitProjections: [],
       }),
     ).rejects.toMatchObject({
       name: MacosContainerWorkerUnavailableError.name,

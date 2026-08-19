@@ -2,44 +2,30 @@ import { spawn } from "node:child_process";
 import {
   access,
   chmod,
-  copyFile,
   mkdtemp,
   mkdir,
   readFile,
-  readdir,
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { connect, createServer } from "node:net";
+import { createServer } from "node:net";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runFile } from "../../../git/git-exec";
-import {
-  armCursorStateRecovery,
-  prepareCursorStateOverlay,
-} from "../../adapters/cursor-sdk/state-overlay";
-import { AdmissionGate } from "../admission-gate";
-import { MacosContainerWorkerUnavailableError } from "../macos-orbstack-container-worker";
 import type { MacosProcessDomainCommandRunner } from "../macos-process-domain";
 import {
-  armProviderHomeRecovery,
-  prepareProviderHomeOverlay,
-} from "../provider-home-overlay";
-import {
+  cleanupZsrPreparationProcessDomain,
   ZsrExecutionBoundary as RuntimeZsrExecutionBoundary,
   type ZsrBoundaryOptions,
 } from "../zsr-boundary";
 import { sessionDir } from "../../session-paths";
 
-const NETWORK_BRIDGE_SCRIPT = path.join(
-  process.cwd(),
-  "apps/desktop/src/engine/agents/containment/zsr-network-bridge.mjs",
-);
 const boundaryTmpdir =
   process.platform === "darwin" ? "/private/tmp" : tmpdir();
 
@@ -91,17 +77,13 @@ class ZsrExecutionBoundary extends RuntimeZsrExecutionBoundary {
   constructor(options: ZsrBoundaryOptions) {
     super({
       ...options,
-      // Most tests below exercise the separately retained cloud/isolated
-      // machinery. Production desktop constructors select host parity
-      // explicitly; tests opt into that contract where it is material.
-      localHostParity: options.localHostParity ?? false,
       ...(process.platform === "darwin" ? { macosProcessDomainRunner } : {}),
     });
   }
 }
 
 const PASSING_SUPERVISOR = String.raw`
-import { readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 const commandPath = process.argv[process.argv.indexOf("--command") + 1];
 const descriptor = JSON.parse(readFileSync(commandPath, "utf8"));
 if (descriptor.env.HOST_PARITY_CANARY) {
@@ -127,37 +109,6 @@ if (descriptor.env.HOST_PARITY_CANARY) {
   process.stdout.write(JSON.stringify(result) + "\n");
   process.exit(0);
 }
-if (descriptor.env.ZEROS_ADMISSION_SENTINEL) {
-  const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));
-  writeFileSync(spec.codeFile, "ok\n", { flag: "wx" });
-  unlinkSync(spec.codeFile);
-  writeFileSync(spec.privateWriteFile, "private\n", { flag: "wx" });
-  for (const projection of spec.gitProjections) {
-    writeFileSync(
-      projection.privateGitDir + "/" + projection.markerName,
-      spec.generation + "\n",
-      { flag: "wx", mode: 0o600 },
-    );
-  }
-  process.stdout.write(JSON.stringify({
-    codeWrite: true,
-    policyReadDenied: true,
-    environmentExact: !descriptor.env.ZEROS_LOCAL_WS_TOKEN &&
-      !descriptor.env.ZEROS_CONTROL_FD &&
-      !descriptor.env.ZEROS_ZSR_AMBIENT_SECRET,
-    designWriteDenied: spec.designProbes.map(() => true),
-    designAliasWriteDenied: true,
-    controlWriteDenied: spec.controlWriteFiles.map(() => true),
-    controlReadDenied: spec.controlReadFiles.map(() => true),
-    gitProjectionPrivate: spec.gitProjections.map(() => true),
-    privateStateWrite: true,
-    engineRootWriteDenied: true,
-    processDomainMarkerReadable: true,
-    sandboxPid: process.pid,
-    dynamicBindMapped: true,
-  }) + "\n");
-  process.exit(0);
-}
 const probe = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));
 writeFileSync(probe.codeFile, "ok\n");
 process.stdout.write(JSON.stringify({
@@ -168,6 +119,7 @@ process.stdout.write(JSON.stringify({
   designUnlinkDenied: true,
   designRenameOutDenied: true,
   designRenameInDenied: true,
+  designAncestorRenameDenied: true,
   designChmodDenied: true,
   designSymlinkWriteDenied: true,
   secretReadDenied: readFileSync(probe.secret, "utf8") === "engine-only\n",
@@ -197,15 +149,11 @@ describe("ZSR execution boundary", () => {
     if (process.platform === "darwin") {
       const binaries = path.join(root, "binaries");
       await mkdir(binaries, { mode: 0o700 });
-      await Promise.all([
-        writeFile(path.join(binaries, "zsr-macos-process-domain"), "test\n", {
-          mode: 0o500,
-        }),
-        copyFile(
-          path.join(process.cwd(), "binaries", "zsr-macos-port-bind.dylib"),
-          path.join(binaries, "zsr-macos-port-bind.dylib"),
-        ),
-      ]);
+      await writeFile(
+        path.join(binaries, "zsr-macos-process-domain"),
+        "test\n",
+        { mode: 0o500 },
+      );
     }
     await writeFile(supervisor, PASSING_SUPERVISOR, { mode: 0o700 });
   });
@@ -218,7 +166,29 @@ describe("ZSR execution boundary", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it("admits only after a behavioral canary and emits one-shot private descriptors", async () => {
+  it("preserves process-domain recovery evidence when preparation reap fails", async () => {
+    const policyRoot = path.join(root, "failed-preparation-policy");
+    await mkdir(policyRoot);
+    await writeFile(path.join(policyRoot, "process-domain.json"), "evidence\n");
+    const retireMetadata = vi.fn(async () => undefined);
+
+    await expect(
+      cleanupZsrPreparationProcessDomain(
+        {
+          reap: async () => {
+            throw new Error("process domain survived");
+          },
+          retireMetadata,
+        },
+        policyRoot,
+      ),
+    ).rejects.toThrow(/process domain survived/i);
+
+    await expect(stat(policyRoot)).resolves.toBeDefined();
+    expect(retireMetadata).not.toHaveBeenCalled();
+  });
+
+  it("preserves host authority while keeping the supervisor bootstrap private", async () => {
     process.env.SRT_DEBUG = "1";
     const hostHome = path.join(root, "host-home");
     await mkdir(hostHome, { recursive: true });
@@ -226,7 +196,6 @@ describe("ZSR execution boundary", () => {
       projectRoot: root,
       supervisorScript: supervisor,
       supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
     });
     const request = {
       executionId: "execution-1",
@@ -236,11 +205,6 @@ describe("ZSR execution boundary", () => {
       cwd: workspace,
       workspaceRoot: workspace,
     };
-    await expect(boundary.probe(request)).resolves.toMatchObject({
-      available: true,
-      secureNestedIsolation: true,
-    });
-
     const prepared = await boundary.prepare(request);
     await expect(
       readFile(path.join(sessionDir(request.executionId), "meta.json"), "utf8"),
@@ -250,11 +214,10 @@ describe("ZSR execution boundary", () => {
         meta.agentId === request.providerId &&
         meta.actor === request.actor &&
         meta.cwd === request.cwd &&
-        meta.pid === process.pid &&
-        typeof meta.createdAt === "number" &&
-        meta.createdAt > 0
+        meta.pid === process.pid
       );
     });
+
     const launch = prepared.wrapSpawn({
       command: process.execPath,
       args: ["-e", "process.exit(0)"],
@@ -266,90 +229,104 @@ describe("ZSR execution boundary", () => {
         NODE_OPTIONS: "--require=/workspace/preload.cjs",
         LD_PRELOAD: "/workspace/preload.so",
         ZEROS_LOCAL_WS_TOKEN: "must-not-cross",
-        OPENAI_API_KEY: "sk-boundary-real-value",
+        OPENAI_API_KEY: "raw-provider-key",
         DOCKER_HOST: "tcp://127.0.0.1:2375",
         DOCKER_CONTEXT: "host-context",
+        CONTAINER_HOST: "unix:///ambient/container.sock",
+        CONTAINER_CONNECTION: "ambient-connection",
+        PODMAN_HOST: "unix:///ambient/podman.sock",
       },
     });
-    expect(launch.command).toBe(process.execPath);
-    expect(launch.args[0]).toBe(supervisor);
-    expect(launch.env.HOME).not.toBe("/user/home");
     expect(launch.env.PATH).not.toBe("/child/bin");
+    expect(launch.env.HOME).not.toBe("/user/home");
     expect(launch.env.SENTINEL).toBeUndefined();
-    expect(launch.env.NODE_OPTIONS).toBeUndefined();
-    expect(launch.env.LD_PRELOAD).toBeUndefined();
-    expect(launch.env.ZEROS_LOCAL_WS_TOKEN).toBeUndefined();
     expect(launch.env.OPENAI_API_KEY).toBeUndefined();
-    // Debugging is a trusted-supervisor concern: operators can turn on SRT's
-    // redacted proxy diagnostics, but the provider child still receives only
-    // its explicit descriptor environment below.
     expect(launch.env.SRT_DEBUG).toBe("1");
+
     const commandPath = launch.args[launch.args.indexOf("--command") + 1];
     expect((await stat(commandPath)).mode & 0o777).toBe(0o600);
     const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
+      deniedContainerSockets: string[];
       env: Record<string, string>;
-      filesystemProjections?: Array<{
-        source: string;
-        destination: string;
-        readOnly: boolean;
-      }>;
-      internalProxyPorts: { http: number; socks: number };
-      credentialCapabilities?: Array<{
-        name: string;
-        injectAuthorities: string[];
-        allowPlaintext: boolean;
-      }>;
+      [key: string]: unknown;
     };
     expect(descriptor).toMatchObject({
-      version: 5,
+      version: 6,
       generation: prepared.generation,
       command: process.execPath,
       cwd: workspace,
       env: {
-        PATH: "/child/bin",
+        HOME: "/user/home",
         SENTINEL: "present",
         NODE_OPTIONS: "--require=/workspace/preload.cjs",
         LD_PRELOAD: "/workspace/preload.so",
+        OPENAI_API_KEY: "raw-provider-key",
       },
     });
-    expect(descriptor.env.HOME).not.toBe("/user/home");
-    expect(descriptor.env.HOME).toMatch(/\/boundary\/[^/]+\/home$/);
-    expect(descriptor.env.XDG_CONFIG_HOME).toBe(
-      path.join(descriptor.env.HOME, ".config"),
+    expect(descriptor.env.PATH.endsWith(`${path.delimiter}/child/bin`)).toBe(
+      true,
     );
-    expect(descriptor.env.DOCKER_HOST).toMatch(
-      /^unix:\/\/.*container-worker-unavailable\.sock$/,
+    expect(descriptor.env.ZEROS_LOCAL_WS_TOKEN).toBeUndefined();
+    for (const ambientContainerSelector of [
+      "DOCKER_HOST",
+      "DOCKER_CONTEXT",
+      "CONTAINER_HOST",
+      "CONTAINER_CONNECTION",
+      "PODMAN_HOST",
+    ]) {
+      expect(descriptor.env[ambientContainerSelector]).toBeUndefined();
+    }
+    expect(descriptor.deniedContainerSockets).toEqual(
+      expect.arrayContaining([
+        "/ambient/container.sock",
+        "/ambient/podman.sock",
+        "/var/run/docker.sock",
+      ]),
     );
-    expect(descriptor.env.CONTAINER_HOST).toBe(descriptor.env.DOCKER_HOST);
-    expect(descriptor.env.DOCKER_CONTEXT).toBeUndefined();
-    expect(descriptor.env.SRT_DEBUG).toBeUndefined();
-    expect(descriptor.internalProxyPorts.http).toBeGreaterThanOrEqual(20_000);
-    expect(descriptor.internalProxyPorts.socks).toBeGreaterThanOrEqual(20_000);
-    expect(descriptor.internalProxyPorts.http).not.toBe(
-      descriptor.internalProxyPorts.socks,
-    );
-    expect(descriptor.credentialCapabilities).toEqual([
-      {
-        name: "OPENAI_API_KEY",
-        injectAuthorities: ["api.openai.com:443"],
-        allowPlaintext: false,
-      },
-    ]);
-    expect([1080, 3000, 3128, 5173, 8000, 8080]).not.toContain(
-      descriptor.internalProxyPorts.http,
-    );
-    expect([1080, 3000, 3128, 5173, 8000, 8080]).not.toContain(
-      descriptor.internalProxyPorts.socks,
-    );
-    expect(
-      JSON.parse(await readFile(commandPath, "utf8")).env.ZEROS_LOCAL_WS_TOKEN,
-    ).toBeUndefined();
+    expect(descriptor).not.toHaveProperty("credentialCapabilities");
+    expect(descriptor).not.toHaveProperty("filesystemProjections");
+    expect(descriptor).not.toHaveProperty("networkBridge");
+    expect(descriptor).not.toHaveProperty("portPolicy");
+    expect(descriptor).not.toHaveProperty("internalProxyPorts");
+
     await prepared.stopAndProve();
-    await expect(access(sessionDir(request.executionId))).rejects.toMatchObject(
-      {
-        code: "ENOENT",
-      },
+    await expect(access(sessionDir(request.executionId))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
+  it("owns an asynchronous direct-spawn ENOENT before process registration", async () => {
+    const runtime = path.join(root, "ephemeral-node");
+    await writeFile(
+      runtime,
+      `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
+      { mode: 0o700 },
     );
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: runtime,
+    });
+    const prepared = await boundary.prepare({
+      executionId: "direct-spawn-enoent",
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+    });
+    try {
+      await rm(runtime);
+      await expect(
+        prepared.spawn({
+          command: process.execPath,
+          args: ["-e", "process.exit(0)"],
+          cwd: workspace,
+          env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+          stdio: "pipe",
+        }),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await prepared.stopAndProve();
+    }
   });
 
   it("keeps the canonical host environment and Git in local host-parity mode", async () => {
@@ -366,8 +343,6 @@ describe("ZSR execution boundary", () => {
       projectRoot: root,
       supervisorScript: supervisor,
       supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      localHostParity: true,
     });
     const prepared = await boundary.prepare({
       executionId: "execution-host-parity",
@@ -426,7 +401,11 @@ describe("ZSR execution boundary", () => {
       runtime: { localHostParity?: boolean };
     };
 
-    expect(descriptor.env).toMatchObject(childEnv);
+    expect({ ...descriptor.env, PATH: childEnv.PATH }).toMatchObject(childEnv);
+    expect(descriptor.env.PATH.endsWith(`:${childEnv.PATH}`)).toBe(true);
+    expect(descriptor.env.ZEROS_ZSR_GIT_DISPATCH_CONFIG).toMatch(
+      /git-dispatch\.conf$/,
+    );
     expect(descriptor.env.GIT_DIR).toBeUndefined();
     expect(descriptor.env.DOCKER_HOST).toBeUndefined();
     expect(descriptor.credentialCapabilities).toBeUndefined();
@@ -457,7 +436,6 @@ describe("ZSR execution boundary", () => {
     expect(policy.filesystem.denyRead).not.toContain(
       process.env.ZEROS_DATA_DIR,
     );
-
     await expect(
       prepared.requestPort({
         protocol: "udp",
@@ -475,8 +453,6 @@ describe("ZSR execution boundary", () => {
       projectRoot: root,
       supervisorScript: supervisor,
       supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      localHostParity: true,
     });
     const prepared = await boundary.prepare({
       executionId: "execution-host-parity-no-git",
@@ -496,8 +472,6 @@ describe("ZSR execution boundary", () => {
       projectRoot: root,
       supervisorScript: supervisor,
       supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      localHostParity: true,
     });
     const controller = new AbortController();
     // Aborted before `prepare` runs, so the very first checkpoint fires. The
@@ -569,7 +543,6 @@ describe("ZSR execution boundary", () => {
       await chmod(prePushHook, 0o700);
       const boundary = new RuntimeZsrExecutionBoundary({
         projectRoot: process.cwd(),
-        localHostParity: true,
       });
       const prepared = await boundary.prepare({
         executionId: "execution-real-host-parity",
@@ -660,13 +633,182 @@ process.stdout.write(JSON.stringify({
     },
   );
 
+  (process.platform === "linux" ? it : it.skip)(
+    "subtracts an advertised ambient container socket from host parity",
+    async () => {
+      const socketPath = path.join(root, "ambient-container.sock");
+      const server = createServer((socket) => socket.end("ambient\n"));
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(socketPath, resolve);
+      });
+      const boundary = new RuntimeZsrExecutionBoundary({
+        projectRoot: process.cwd(),
+      });
+      const prepared = await boundary.prepare({
+        executionId: "execution-container-socket-subtraction",
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+      });
+      try {
+        const child = await prepared.spawn({
+          command: process.execPath,
+          args: [
+            "-e",
+            String.raw`
+const { connect } = require("node:net");
+const socketPath = process.argv[1];
+const connection = connect(socketPath);
+let finished = false;
+const finish = (connected, error) => {
+  if (finished) return;
+  finished = true;
+  connection.destroy();
+  process.stdout.write(JSON.stringify({
+    connected,
+    error,
+    dockerHost: process.env.DOCKER_HOST ?? null,
+  }));
+};
+connection.once("connect", () => finish(true, null));
+connection.once("error", (error) => finish(false, error.code ?? "error"));
+setTimeout(() => finish(false, "timeout"), 1_000).unref();
+`,
+            socketPath,
+          ],
+          cwd: workspace,
+          env: {
+            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            DOCKER_HOST: `unix://${socketPath}`,
+          },
+          stdio: "pipe",
+        });
+        let stdout = "";
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        await expect(child.wait()).resolves.toMatchObject({ code: 0 });
+        expect(JSON.parse(stdout)).toMatchObject({
+          connected: false,
+          dockerHost: null,
+        });
+      } finally {
+        await prepared.stopAndProve();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
   // The two fence tests above run `git reset --hard` with the Design tree already
   // matching HEAD, so git never actually tries to write a Design path and the
   // kernel deny is never exercised THROUGH git. This one diverges the tracked
   // Design file from HEAD first, from outside the fence, so the restore genuinely
   // attempts the write the boundary must refuse.
   (process.platform === "linux" ? it : it.skip)(
-    "preserves Design bytes when git itself tries to restore them",
+    "materializes Design changes for a branch-level Git integration",
+    async () => {
+      const design = path.join(workspace, "Zeros Design");
+      const designFile = path.join(design, "canvas.json");
+      const codeFile = path.join(workspace, "code.txt");
+      const hostHome = path.join(root, "host-home-git-integration");
+      await Promise.all([
+        mkdir(design, { recursive: true }),
+        mkdir(hostHome, { recursive: true }),
+      ]);
+      await runFile("git", ["init", "-b", "main"], { cwd: workspace });
+      await runFile("git", ["config", "user.name", "Host User"], {
+        cwd: workspace,
+      });
+      await runFile("git", ["config", "user.email", "host@example.test"], {
+        cwd: workspace,
+      });
+      await Promise.all([
+        writeFile(codeFile, "main-code\n"),
+        writeFile(designFile, '{"branch":"main"}\n'),
+      ]);
+      await runFile("git", ["add", "-A"], { cwd: workspace });
+      await runFile("git", ["commit", "-m", "main"], { cwd: workspace });
+      await runFile("git", ["checkout", "-b", "incoming"], {
+        cwd: workspace,
+      });
+      await Promise.all([
+        writeFile(codeFile, "incoming-code\n"),
+        writeFile(designFile, '{"branch":"incoming"}\n'),
+      ]);
+      await runFile("git", ["add", "-A"], { cwd: workspace });
+      await runFile("git", ["commit", "-m", "incoming"], { cwd: workspace });
+      await runFile("git", ["checkout", "main"], { cwd: workspace });
+
+      const boundary = new RuntimeZsrExecutionBoundary({
+        projectRoot: process.cwd(),
+      });
+      const prepared = await boundary.prepare({
+        executionId: "execution-parity-git-integration",
+        actor: "agent-code",
+        providerId: "codex",
+        providerStateEnv: { HOME: hostHome },
+        cwd: workspace,
+        workspaceRoot: workspace,
+        territory: {
+          agentRole: "code",
+          workspaceRoot: workspace,
+          designDirectory: design,
+          protectedDesignDirectories: [design],
+          designRecognitionPaths: [],
+          writeCapabilities: {
+            workspace: "write",
+            deniedPaths: [design],
+          },
+        },
+      });
+      try {
+        const child = await prepared.spawn({
+          command: process.execPath,
+          args: [
+            "-e",
+            String.raw`
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const [codeFile, designFile] = process.argv.slice(1);
+const checkout = spawnSync("git", ["checkout", "incoming"], { encoding: "utf8" });
+process.stdout.write(JSON.stringify({
+  status: checkout.status,
+  stdout: checkout.stdout,
+  stderr: checkout.stderr,
+  code: fs.readFileSync(codeFile, "utf8"),
+  design: fs.readFileSync(designFile, "utf8"),
+}));`,
+            codeFile,
+            designFile,
+          ],
+          cwd: workspace,
+          env: {
+            PATH: process.env.PATH ?? "/usr/bin:/bin",
+            HOME: hostHome,
+          },
+          stdio: "pipe",
+        });
+        let stdout = "";
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        await expect(child.wait()).resolves.toMatchObject({ code: 0 });
+        expect(JSON.parse(stdout)).toMatchObject({
+          status: 0,
+          code: "incoming-code\n",
+          design: '{"branch":"incoming"}\n',
+        });
+      } finally {
+        await prepared.stopAndProve();
+      }
+    },
+  );
+
+  (process.platform === "linux" ? it : it.skip)(
+    "keeps commit-plus-path checkout inside the Design write fence",
     async () => {
       const design = path.join(workspace, "Zeros Design");
       const designFile = path.join(design, "canvas.json");
@@ -700,7 +842,6 @@ process.stdout.write(JSON.stringify({
       ]);
       const boundary = new RuntimeZsrExecutionBoundary({
         projectRoot: process.cwd(),
-        localHostParity: true,
       });
       const prepared = await boundary.prepare({
         executionId: "execution-parity-git-restore",
@@ -733,12 +874,15 @@ process.stdout.write(JSON.stringify({
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const [designFile, codeFile] = process.argv.slice(1);
-const reset = spawnSync("git", ["reset", "--hard", "HEAD"], { encoding: "utf8" });
-const checkout = spawnSync("git", ["checkout", "--", "."], { encoding: "utf8" });
+const ambiguous = spawnSync("git", ["checkout", "Zeros Design/canvas.json"], { encoding: "utf8" });
+const designAfterAmbiguous = fs.readFileSync(designFile, "utf8");
+const checkout = spawnSync("git", ["checkout", "HEAD", "--", "Zeros Design/canvas.json", "code.txt"], { encoding: "utf8" });
 process.stdout.write(JSON.stringify({
-  resetStatus: reset.status,
-  resetStderr: reset.stderr,
+  ambiguousStatus: ambiguous.status,
+  ambiguousStderr: ambiguous.stderr,
+  designAfterAmbiguous,
   checkoutStatus: checkout.status,
+  checkoutStderr: checkout.stderr,
   design: fs.readFileSync(designFile, "utf8"),
   code: fs.readFileSync(codeFile, "utf8"),
 }) + "\n");`,
@@ -759,20 +903,23 @@ process.stdout.write(JSON.stringify({
         });
         await expect(child.wait()).resolves.toMatchObject({ code: 0 });
         const result = JSON.parse(stdout.trim()) as {
-          resetStatus: number | null;
-          resetStderr: string;
+          ambiguousStatus: number | null;
+          ambiguousStderr: string;
+          designAfterAmbiguous: string;
           checkoutStatus: number | null;
+          checkoutStderr: string;
           design: string;
           code: string;
         };
-        // The invariant: git ran as the agent's own native git, tried to write a
-        // protected path, and failed on that path alone. Design bytes are
-        // untouched and the failure is git's own — not a Zeros wrapper message.
+        // A named path is authoring, not integration: it stays with native Git
+        // inside the kernel fence even though branch checkout is brokered.
+        expect(result.designAfterAmbiguous).toBe('{"generation":2}\n');
+        expect(result.ambiguousStatus).not.toBe(0);
+        expect(result.ambiguousStderr).not.toContain("integration broker");
         expect(result.design).toBe('{"generation":2}\n');
-        expect(result.resetStatus).not.toBe(0);
         expect(result.checkoutStatus).not.toBe(0);
-        expect(result.resetStderr).not.toContain("[zsr");
-        expect(result.resetStderr).toContain("Zeros Design/canvas.json");
+        expect(result.checkoutStderr).not.toContain("integration broker");
+        expect(result.checkoutStderr).toContain("Zeros Design/canvas.json");
         // And the accepted trade (see the pivot decision): the operation is not
         // atomic any more. The code half of the same command is free to have
         // applied, which is why this asserts the Design guarantee rather than
@@ -835,7 +982,6 @@ process.stdout.write(JSON.stringify({
       await runFile("git", ["commit", "-m", "two"], { cwd: workspace });
       const boundary = new RuntimeZsrExecutionBoundary({
         projectRoot: process.cwd(),
-        localHostParity: true,
       });
       const prepared = await boundary.prepare({
         executionId: "execution-parity-settings-checkout",
@@ -935,7 +1081,6 @@ process.stdout.write(JSON.stringify({
       await runFile("git", ["commit", "-m", "initial"], { cwd: workspace });
       const boundary = new RuntimeZsrExecutionBoundary({
         projectRoot: process.cwd(),
-        localHostParity: true,
       });
       const prepared = await boundary.prepare({
         executionId: "execution-real-design-parity",
@@ -1003,7 +1148,15 @@ process.stdout.write(JSON.stringify({
 
   it("shares one credential-free OrbStack worker per local workspace", async () => {
     const design = path.join(workspace, "Zeros Design");
-    await mkdir(design, { recursive: true });
+    const unprojectedDesign = path.join(
+      root,
+      "registered-sibling",
+      "Zeros Design",
+    );
+    await Promise.all([
+      mkdir(design, { recursive: true }),
+      mkdir(unprojectedDesign, { recursive: true }),
+    ]);
     let reservations = 0;
     let starts = 0;
     let stops = 0;
@@ -1013,8 +1166,6 @@ process.stdout.write(JSON.stringify({
       projectRoot: root,
       supervisorScript: supervisor,
       supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      localHostParity: true,
       macosContainerWorkerFactory: () => ({
         reserve: async (request) => {
           reservations += 1;
@@ -1037,7 +1188,10 @@ process.stdout.write(JSON.stringify({
         },
       }),
     });
-    const request = (executionId: string) => ({
+    const request = (
+      executionId: string,
+      protectedDesignDirectories: readonly string[] = [design],
+    ) => ({
       executionId,
       actor: "agent-code" as const,
       cwd: workspace,
@@ -1046,11 +1200,14 @@ process.stdout.write(JSON.stringify({
         agentRole: "code" as const,
         workspaceRoot: workspace,
         designDirectory: design,
-        protectedDesignDirectories: [design],
+        protectedDesignDirectories,
         designRecognitionPaths: [],
         writeCapabilities: {
           workspace: "write" as const,
-          deniedPaths: [design, path.join(workspace, ".git")],
+          deniedPaths: [
+            ...protectedDesignDirectories,
+            path.join(workspace, ".git"),
+          ],
         },
       },
       containerWorker: {
@@ -1062,7 +1219,9 @@ process.stdout.write(JSON.stringify({
     });
 
     const first = await boundary.prepare(request("workspace-worker-one"));
-    const second = await boundary.prepare(request("workspace-worker-two"));
+    const second = await boundary.prepare(
+      request("workspace-worker-two", [design, unprojectedDesign]),
+    );
     expect(reservations).toBe(1);
     expect(starts).toBe(2);
     expect(reservedExecutionId).toMatch(/^zsrw-[a-f0-9]{20}$/);
@@ -1076,469 +1235,227 @@ process.stdout.write(JSON.stringify({
     expect(stops).toBe(1);
   });
 
-  it("keeps exact-admission support paths out of the Git worktree", async () => {
-    const design = path.join(workspace, "Zeros Design");
-    const witness = path.join(root, "admission-paths.json");
-    await mkdir(design, { recursive: true });
-    await writeFile(
-      supervisor,
-      PASSING_SUPERVISOR.replace(
-        'if (descriptor.env.ZEROS_ADMISSION_SENTINEL) {\n  const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));',
-        `if (descriptor.env.ZEROS_ADMISSION_SENTINEL) {
-  const spec = JSON.parse(Buffer.from(descriptor.args.at(-1), "base64url").toString("utf8"));
-  writeFileSync(${JSON.stringify(witness)}, JSON.stringify({
-    codeFile: spec.codeFile,
-    designAlias: spec.designAlias,
-    releaseFile: spec.processDomain?.releaseFile ?? null,
-  }));`,
-      ),
-      { mode: 0o700 },
-    );
+  it("keys shared OrbStack workers by the physical protected-root projection", async () => {
+    const firstDesign = path.join(workspace, "First Design");
+    const secondDesign = path.join(workspace, "Second Design");
+    const aliasParent = path.join(root, "design-aliases");
+    const firstAlias = path.join(aliasParent, "first");
+    const secondAlias = path.join(aliasParent, "second");
+    await Promise.all([
+      mkdir(firstDesign, { recursive: true }),
+      mkdir(secondDesign, { recursive: true }),
+      mkdir(aliasParent, { recursive: true }),
+    ]);
+    await Promise.all([
+      symlink(firstDesign, firstAlias, "dir"),
+      symlink(secondDesign, secondAlias, "dir"),
+    ]);
+
+    let reservations = 0;
+    let stops = 0;
     const boundary = new ZsrExecutionBoundary({
       projectRoot: root,
       supervisorScript: supervisor,
       supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+      macosContainerWorkerFactory: () => ({
+        reserve: async () => {
+          reservations += 1;
+          return {
+            hostPort: 43_300 + reservations,
+            machineName: `zeros-zsr-physical-${reservations}`,
+            environment: {},
+            start: async () => undefined,
+            stopAndProve: async () => {
+              stops += 1;
+            },
+          };
+        },
+      }),
     });
-
-    const prepared = await boundary.prepare({
-      executionId: "private-admission-support",
-      actor: "agent-code",
+    const request = (executionId: string, designDirectory: string) => ({
+      executionId,
+      actor: "agent-code" as const,
       cwd: workspace,
       workspaceRoot: workspace,
       territory: {
-        agentRole: "code",
+        agentRole: "code" as const,
         workspaceRoot: workspace,
-        designDirectory: design,
-        protectedDesignDirectories: [design],
+        designDirectory,
+        protectedDesignDirectories: [designDirectory],
         designRecognitionPaths: [],
         writeCapabilities: {
-          workspace: "write",
-          deniedPaths: [design, path.join(workspace, ".git")],
+          workspace: "write" as const,
+          deniedPaths: [designDirectory, path.join(workspace, ".git")],
         },
       },
+      containerWorker: {
+        runtime: "podman" as const,
+        backend: "orbstack-machine" as const,
+        executable: process.execPath,
+      },
+      containerWorkflowExpected: true,
     });
-    try {
-      const paths = JSON.parse(await readFile(witness, "utf8")) as {
-        codeFile: string;
-        designAlias: string;
-        releaseFile: string | null;
-      };
-      expect(path.dirname(paths.codeFile)).toBe(workspace);
-      expect(path.relative(workspace, paths.designAlias)).toMatch(/^\.\./);
-      if (paths.releaseFile) {
-        expect(path.relative(workspace, paths.releaseFile)).toMatch(/^\.\./);
-      }
-      expect(await readdir(workspace)).not.toContainEqual(
-        expect.stringMatching(/^\.zeros-zsr-admission-/),
-      );
-      await expect(stat(paths.codeFile)).rejects.toMatchObject({
-        code: "ENOENT",
-      });
-    } finally {
-      await prepared.stopAndProve();
-    }
+
+    const first = await boundary.prepare(request("physical-one", firstAlias));
+    const second = await boundary.prepare(
+      request("physical-two", secondAlias),
+    );
+    expect(reservations).toBe(2);
+
+    await Promise.all([first.stopAndProve(), second.stopAndProve()]);
+    expect(stops).toBe(2);
   });
 
-  it("keeps Electron in Node mode inside the behavioral canary", async () => {
-    const previousElectronRuntime = process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON;
-    process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON = "1";
-    await writeFile(
-      supervisor,
-      PASSING_SUPERVISOR.replace(
-        'const descriptor = JSON.parse(readFileSync(commandPath, "utf8"));',
-        `const descriptor = JSON.parse(readFileSync(commandPath, "utf8"));
-if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
-  process.stderr.write("behavioral canary dropped Electron Node mode\\n");
-  process.exit(70);
-}`,
-      ),
-      { mode: 0o700 },
-    );
-    try {
-      const boundary = new ZsrExecutionBoundary({
+  (process.platform === "darwin" ? it : it.skip)(
+    "reports the original local-parity worker failure after ordered process-domain cleanup",
+    async () => {
+      const startupFailure = new Error("container worker start rejected");
+      const stopAndProve = vi.fn(async () => undefined);
+      const boundary = new RuntimeZsrExecutionBoundary({
         projectRoot: root,
         supervisorScript: supervisor,
         supervisorRuntime: process.execPath,
-        networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+        macosProcessDomainRunner: async (helper, args) => {
+          // Make the dependency visible: the policy root must stay present
+          // until reap has finished and its metadata has been retired.
+          if (args[0] === "reap") {
+            await new Promise<void>((resolve) => setTimeout(resolve, 25));
+          }
+          return macosProcessDomainRunner(helper, args);
+        },
+        macosContainerWorkerFactory: () => ({
+          reserve: async () => ({
+            hostPort: 43_220,
+            machineName: "zeros-zsr-ordered-preparation-cleanup",
+            environment: {},
+            start: async () => {
+              throw startupFailure;
+            },
+            stopAndProve,
+          }),
+        }),
       });
+      const executionId = "local-parity-worker-start-failure";
 
       await expect(
-        boundary.probe({
-          executionId: "electron-canary",
+        boundary.prepare({
+          executionId,
           actor: "agent-code",
           cwd: workspace,
           workspaceRoot: workspace,
+          containerWorker: {
+            runtime: "podman",
+            backend: "orbstack-machine",
+            executable: process.execPath,
+          },
         }),
-      ).resolves.toMatchObject({
-        available: true,
-        secureNestedIsolation: true,
+      ).rejects.toBe(startupFailure);
+      expect(stopAndProve).toHaveBeenCalledOnce();
+      await expect(access(sessionDir(executionId))).rejects.toMatchObject({
+        code: "ENOENT",
       });
-    } finally {
-      if (previousElectronRuntime === undefined) {
-        delete process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON;
-      } else {
-        process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON = previousElectronRuntime;
-      }
-    }
-  });
+    },
+  );
 
-  it("admits only the Electron app contents needed by an engine-private runtime", async () => {
-    const previousElectronRuntime = process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON;
-    process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON = "1";
-    const contents = path.join(
-      process.env.ZEROS_DATA_DIR!,
-      "dev-instances",
-      "Zeros Test.app",
-      "Contents",
-    );
-    const runtime = path.join(contents, "MacOS", "Zeros Test");
-    await mkdir(path.dirname(runtime), { recursive: true });
-    await mkdir(path.join(contents, "Frameworks"), { recursive: true });
-    // The trusted-runtime check rejects group/world-writable ancestors, and a
-    // permissive host umask (0002 on some CI/sandbox images) would leak into
-    // the recursive mkdir above. Pin the bundle chain explicitly.
-    for (const directory of [
-      path.dirname(contents),
-      contents,
-      path.dirname(runtime),
-      path.join(contents, "Frameworks"),
-    ]) {
-      await chmod(directory, 0o755);
-    }
-    await writeFile(
-      runtime,
-      `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} "$@"\n`,
-      { mode: 0o700 },
-    );
-    try {
-      const boundary = new ZsrExecutionBoundary({
-        projectRoot: root,
-        supervisorScript: supervisor,
-        supervisorRuntime: runtime,
-        networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
+
+  (process.platform === "linux" ? it : it.skip)(
+    "documents the accepted commit-then-merge Design materialization trade",
+    async () => {
+      const design = path.join(workspace, "Zeros Design");
+      const designFile = path.join(design, "canvas.json");
+      const codeFile = path.join(workspace, "code.txt");
+      await mkdir(design, { recursive: true });
+      await Promise.all([
+        writeFile(designFile, '{"source":"main"}\n'),
+        writeFile(codeFile, "main\n"),
+      ]);
+      await runFile("git", ["init", "-b", "main"], { cwd: workspace });
+      await runFile("git", ["config", "user.name", "Zeros Test"], {
+        cwd: workspace,
+      });
+      await runFile("git", ["config", "user.email", "zeros@example.invalid"], {
+        cwd: workspace,
+      });
+      await runFile("git", ["add", "-A"], { cwd: workspace });
+      await runFile("git", ["commit", "-m", "initial"], { cwd: workspace });
+
+      const boundary = new RuntimeZsrExecutionBoundary({
+        projectRoot: process.cwd(),
       });
       const prepared = await boundary.prepare({
-        executionId: "electron-runtime-read",
+        executionId: "execution-commit-merge-trade",
         actor: "agent-code",
         cwd: workspace,
         workspaceRoot: workspace,
+        territory: {
+          agentRole: "code",
+          workspaceRoot: workspace,
+          designDirectory: design,
+          protectedDesignDirectories: [design],
+          designRecognitionPaths: [],
+          writeCapabilities: { workspace: "write", deniedPaths: [design] },
+        },
       });
       try {
-        const launch = prepared.wrapSpawn({
+        const child = await prepared.spawn({
           command: process.execPath,
-          args: ["-e", "process.exit(0)"],
+          args: [
+            "-e",
+            String.raw`
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const designFile = process.argv[1];
+const git = (args, input) => spawnSync("git", args, { encoding: "utf8", input });
+const base = git(["rev-parse", "HEAD"]).stdout.trim();
+const codeBlob = git(["rev-parse", "HEAD:code.txt"]).stdout.trim();
+const designBlob = git(["hash-object", "-w", "--stdin"], '{"source":"local-commit"}\n').stdout.trim();
+const designTree = git(["mktree"], "100644 blob " + designBlob + "\tcanvas.json\n").stdout.trim();
+const rootTree = git(["mktree"], "040000 tree " + designTree + "\tZeros Design\n100644 blob " + codeBlob + "\tcode.txt\n").stdout.trim();
+const commit = git(["commit-tree", rootTree, "-p", base], "locally authored Design commit\n").stdout.trim();
+const branch = git(["branch", "locally-authored-design", commit]);
+const merge = git(["merge", "--no-ff", "--no-edit", "locally-authored-design"]);
+process.stdout.write(JSON.stringify({
+  branch: branch.status,
+  merge: merge.status,
+  mergeStderr: merge.stderr,
+  design: fs.readFileSync(designFile, "utf8"),
+}));`,
+            designFile,
+          ],
           cwd: workspace,
           env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+          stdio: "pipe",
         });
-        const policyPath = launch.args[launch.args.indexOf("--policy") + 1];
-        const policy = JSON.parse(await readFile(policyPath, "utf8")) as {
-          filesystem: {
-            allowRead: string[];
-            allowWrite: string[];
-            denyRead: string[];
-            denyWrite: string[];
-          };
+        let stdout = "";
+        child.stdout?.setEncoding("utf8");
+        child.stdout?.on("data", (chunk: string) => {
+          stdout += chunk;
+        });
+        await expect(child.wait()).resolves.toMatchObject({ code: 0 });
+        const result = JSON.parse(stdout) as {
+          branch: number;
+          merge: number;
+          mergeStderr: string;
+          design: string;
         };
-        expect(policy.filesystem.allowRead).toContain(contents);
-        expect(policy.filesystem.allowRead).not.toContain(
-          path.dirname(contents),
-        );
-        expect(policy.filesystem.allowWrite).not.toContain(contents);
-        expect(
-          policy.filesystem.denyRead.some((denied) =>
-            path.relative(denied, contents).startsWith("dev-"),
-          ),
-        ).toBe(true);
-        expect(
-          policy.filesystem.denyWrite.some((denied) =>
-            path.relative(denied, contents).startsWith("dev-"),
-          ),
-        ).toBe(true);
+        expect(result).toMatchObject({
+          branch: 0,
+          merge: 0,
+          design: '{"source":"local-commit"}\n',
+        });
+        expect(result.mergeStderr).not.toContain("integration broker");
       } finally {
         await prepared.stopAndProve();
       }
-    } finally {
-      if (previousElectronRuntime === undefined) {
-        delete process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON;
-      } else {
-        process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON = previousElectronRuntime;
-      }
-    }
-  });
+    },
+  );
 
-  it("keeps code usable and reports restricted parity when OrbStack is safely unavailable", async () => {
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const reserve = vi.fn(async () => {
-      throw new MacosContainerWorkerUnavailableError(
-        "insufficient-disk-space",
-        "OrbStack needs at least 4 GiB free",
-      );
-    });
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      macosContainerWorkerFactory: () => ({
-        reserve,
-      }),
-    });
-
-    const prepared = await boundary.prepare({
-      executionId: "orbstack-unavailable",
-      actor: "agent-code",
-      providerId: "codex",
-      providerStateEnv: { HOME: path.join(root, "provider-home") },
-      cwd: workspace,
-      workspaceRoot: workspace,
-      containerWorkflowExpected: true,
-      containerWorker: {
-        runtime: "podman",
-        backend: "orbstack-machine",
-        executable: process.execPath,
-      },
-    });
-
-    expect(prepared.status.parity).toEqual({
-      level: "restricted",
-      restrictions: ["container-workflows-unavailable"],
-    });
-    expect(prepared.status.services?.kinds ?? []).not.toContain("podman");
-    expect(prepared.status.remediation).toMatch(/Free at least 4 GiB/);
-    expect(warning).toHaveBeenCalledWith(
-      "[zsr] OrbStack needs at least 4 GiB free",
-    );
-    expect(reserve).toHaveBeenCalledWith(
-      expect.objectContaining({ executionId: "orbstack-unavailable" }),
-      { activation: "on-first-connection" },
-    );
-    await prepared.stopAndProve();
-    warning.mockRestore();
-  });
-
-  it("re-admits after a container-worker fallback without re-entering the admission gate", async () => {
-    // The fallback re-runs admission from inside an admission that already
-    // holds a gate slot. Taking the gate again there would deadlock the moment
-    // the slot count is exhausted — which in production is two. A gate of one
-    // makes that failure deterministic instead of load-dependent.
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const stopAndProve = vi.fn(async () => undefined);
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      admissionGate: new AdmissionGate({ limit: 1 }),
-      macosContainerWorkerFactory: () => ({
-        reserve: async () => ({
-          hostPort: 42_321,
-          machineName: "zeros-zsr-abcdef0123456789abce",
-          environment: {},
-          start: async () => {
-            throw new MacosContainerWorkerUnavailableError(
-              "private-runtime-unavailable",
-              "The private OrbStack bridge is temporarily unavailable",
-            );
-          },
-          stopAndProve,
-        }),
-      }),
-    });
-
-    const prepared = await boundary.prepare({
-      executionId: "orbstack-gate-reentry",
-      actor: "agent-code",
-      providerId: "codex",
-      providerStateEnv: { HOME: path.join(root, "provider-home") },
-      cwd: workspace,
-      workspaceRoot: workspace,
-      containerWorkflowExpected: true,
-      containerWorker: {
-        runtime: "podman",
-        backend: "orbstack-machine",
-        executable: process.execPath,
-      },
-    });
-
-    expect(prepared.status.parity.restrictions).toContain(
-      "container-workflows-unavailable",
-    );
-    await prepared.stopAndProve();
-    warning.mockRestore();
-  });
-
-  it("keeps code usable when a reserved OrbStack worker becomes safely unavailable", async () => {
-    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const stopAndProve = vi.fn(async () => undefined);
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      macosContainerWorkerFactory: () => ({
-        reserve: async () => ({
-          hostPort: 42_320,
-          machineName: "zeros-zsr-abcdef0123456789abcd",
-          environment: {},
-          start: async () => {
-            throw new MacosContainerWorkerUnavailableError(
-              "private-runtime-unavailable",
-              "The private OrbStack bridge is temporarily unavailable",
-            );
-          },
-          stopAndProve,
-        }),
-      }),
-    });
-
-    const prepared = await boundary.prepare({
-      executionId: "orbstack-start-unavailable",
-      actor: "agent-code",
-      providerId: "codex",
-      providerStateEnv: { HOME: path.join(root, "provider-home") },
-      cwd: workspace,
-      workspaceRoot: workspace,
-      containerWorkflowExpected: true,
-      containerWorker: {
-        runtime: "podman",
-        backend: "orbstack-machine",
-        executable: process.execPath,
-      },
-    });
-
-    expect(stopAndProve).toHaveBeenCalledOnce();
-    expect(prepared.status.parity).toEqual({
-      level: "restricted",
-      restrictions: ["container-workflows-unavailable"],
-    });
-    expect(prepared.status.services?.kinds ?? []).not.toContain("podman");
-    expect(prepared.status.remediation).toMatch(/OrbStack runtime/i);
-    expect(warning).toHaveBeenCalledWith(
-      "[zsr] The private OrbStack bridge is temporarily unavailable",
-    );
-    await prepared.stopAndProve();
-    warning.mockRestore();
-  });
-
-  it("poisons later admissions when any prepared boundary cannot prove teardown", async () => {
-    const teardownFailure = new Error("container worker teardown proof failed");
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      macosContainerWorkerFactory: () => ({
-        reserve: async () => ({
-          hostPort: 42_321,
-          machineName: "zeros-zsr-0123456789abcdef0123",
-          environment: {},
-          start: async () => {},
-          stopAndProve: async () => {
-            throw teardownFailure;
-          },
-        }),
-      }),
-    });
-    const request = {
-      executionId: "unproven-retirement-1",
-      actor: "agent-code" as const,
-      providerId: "codex",
-      providerStateEnv: { HOME: path.join(root, "provider-home") },
-      cwd: workspace,
-      workspaceRoot: workspace,
-      containerWorker: {
-        runtime: "podman" as const,
-        backend: "orbstack-machine" as const,
-        executable: process.execPath,
-      },
-    };
-
-    const prepared = await boundary.prepare(request);
-    const launch = prepared.wrapSpawn({
-      command: process.execPath,
-      args: ["-e", "process.exit(0)"],
-      cwd: workspace,
-      env: {
-        PATH: process.env.PATH ?? "/usr/bin:/bin",
-        HOME: path.join(root, "provider-home"),
-      },
-    });
-    const commandPath = launch.args[launch.args.indexOf("--command") + 1];
-    const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
-      env: Record<string, string>;
-    };
-    const recoverySentinel = path.join(
-      descriptor.env.HOME,
-      ".codex",
-      "recovery-sentinel",
-    );
-    await mkdir(path.dirname(recoverySentinel), { recursive: true });
-    await writeFile(recoverySentinel, "must remain until proof\n");
-
-    await expect(prepared.stopAndProve()).rejects.toThrow(
-      "failed to revoke boundary capabilities",
-    );
-    await expect(readFile(recoverySentinel, "utf8")).resolves.toBe(
-      "must remain until proof\n",
-    );
-    await expect(
-      boundary.prepare({ ...request, executionId: "unproven-retirement-2" }),
-    ).rejects.toThrow(/prior execution boundary could not be proven stopped/);
-    await expect(boundary.probe(request)).resolves.toMatchObject({
-      available: false,
-      secureNestedIsolation: false,
-      reasons: [expect.stringMatching(/restart Zeros/)],
-    });
-  });
-
-  it("poisons later admissions when preparation cleanup cannot be proven", async () => {
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      macosContainerWorkerFactory: () => ({
-        reserve: async () => ({
-          hostPort: 42_322,
-          machineName: "zeros-zsr-123456789abcdef01234",
-          environment: {},
-          start: async () => {
-            throw new Error("container worker startup failed");
-          },
-          stopAndProve: async () => {
-            throw new Error("preparation cleanup proof failed");
-          },
-        }),
-      }),
-    });
-    const request = {
-      executionId: "failed-preparation-1",
-      actor: "repo-code-task" as const,
-      providerId: "generic",
-      cwd: workspace,
-      workspaceRoot: workspace,
-      containerWorker: {
-        runtime: "podman" as const,
-        backend: "orbstack-machine" as const,
-        executable: process.execPath,
-      },
-    };
-
-    await expect(boundary.prepare(request)).rejects.toThrow(
-      /cleanup could not be proven/,
-    );
-    await expect(
-      boundary.prepare({ ...request, executionId: "failed-preparation-2" }),
-    ).rejects.toThrow(/prior execution boundary could not be proven stopped/);
-  });
-
-  it("fails closed when a live canary reports a protected write", async () => {
+  it("fails admission when the exact host-parity canary reports a write split violation", async () => {
     await writeFile(
       supervisor,
       PASSING_SUPERVISOR.replace(
-        'designWriteDenied: readFileSync(probe.designFile, "utf8") === "original\\n"',
-        "designWriteDenied: false",
+        "codeWrite: !designWritable,",
+        "codeWrite: false,",
       ),
       { mode: 0o700 },
     );
@@ -1546,44 +1463,29 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
       projectRoot: root,
       supervisorScript: supervisor,
       supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
     });
-    const request = {
-      executionId: "execution-2",
-      actor: "agent-code" as const,
-      cwd: workspace,
-      workspaceRoot: workspace,
-    };
-    const probe = await boundary.probe(request);
-    expect(probe.available).toBe(false);
-    expect(probe.reasons.join(" ")).toMatch(/protected Design/);
-    await expect(boundary.prepare(request)).rejects.toThrow(/protected Design/);
+    await expect(
+      boundary.prepare({
+        executionId: "host-parity-canary-failure",
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+      }),
+    ).rejects.toThrow(/code actor cannot write code territory/);
+    await expect(
+      access(sessionDir("host-parity-canary-failure")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("refuses a container engine to a design actor and says why", async () => {
-    // A container engine is a shared namespace, so it must never be a place
-    // where design and code authority can meet. The refusal is by rule: it
-    // happens before any backend/platform validation, and it degrades to the
-    // ordinary parity restriction rather than failing the session.
-    await writeFile(
-      supervisor,
-      // A design actor must prove it CANNOT write code territory.
-      PASSING_SUPERVISOR.replace("codeWrite: true,", "codeWrite: false,"),
-      { mode: 0o700 },
-    );
-    const hostHome = path.join(root, "host-home");
-    await mkdir(hostHome, { recursive: true });
+  it("refuses container authority to a Design actor before backend validation", async () => {
     const boundary = new ZsrExecutionBoundary({
       projectRoot: root,
       supervisorScript: supervisor,
       supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
     });
     const prepared = await boundary.prepare({
       executionId: "design-container-refusal",
       actor: "design-agent",
-      providerId: "codex",
-      providerStateEnv: { HOME: hostHome },
       cwd: workspace,
       workspaceRoot: workspace,
       containerWorkflowExpected: true,
@@ -1600,20 +1502,15 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
       expect(prepared.status.remediation).toMatch(
         /Design sessions never run containers/,
       );
-      expect(prepared.status.services?.kinds ?? []).not.toContain("podman");
-      expect(prepared.status.services?.activeCount).toBe(0);
+      expect(prepared.status.services).toBeUndefined();
     } finally {
       await prepared.stopAndProve();
     }
 
-    // The rule is scoped to design actors: a code actor's invalid worker still
-    // reaches validation instead of being silently dropped.
     await expect(
       boundary.prepare({
-        executionId: "code-container-validated",
+        executionId: "code-container-validation",
         actor: "agent-code",
-        providerId: "codex",
-        providerStateEnv: { HOME: hostHome },
         cwd: workspace,
         workspaceRoot: workspace,
         containerWorker: {
@@ -1625,281 +1522,28 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
     ).rejects.toThrow(/container-worker request is invalid/);
   });
 
-  it("reports the canary's own phase timings and ignores implausible ones", async () => {
-    // canary-attest is ~half of a median admission but spans three process
-    // starts AND every in-sandbox probe. The canary therefore reports its own
-    // split. That report comes from inside the fence, so it is logging-only
-    // input: a hostile or broken value must be dropped or clamped, never
-    // trusted and never able to invent a stage name.
-    process.env.SRT_DEBUG = "1";
-    await writeFile(
-      supervisor,
-      PASSING_SUPERVISOR.replace(
-        "dynamicBindMapped: true,",
-        "dynamicBindMapped: true,\n" +
-          "    timings: { boot: 1234, probes: 5, git: 678, bind: 9," +
-          ' "canary-release": 99999, hostile: 42, negative: -5, nan: "slow" },',
-      ),
-      { mode: 0o700 },
-    );
-    const hostHome = path.join(root, "host-home");
-    await mkdir(hostHome, { recursive: true });
-    const logged = vi.spyOn(console, "log").mockImplementation(() => {});
-    try {
-      const boundary = new ZsrExecutionBoundary({
-        projectRoot: root,
-        supervisorScript: supervisor,
-        supervisorRuntime: process.execPath,
-        networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      });
-      const prepared = await boundary.prepare({
-        executionId: "canary-timings-1",
-        actor: "agent-code",
-        providerId: "codex",
-        providerStateEnv: { HOME: hostHome },
-        cwd: workspace,
-        workspaceRoot: workspace,
-      });
-      const line = logged.mock.calls
-        .map((call) => String(call[0]))
-        .find((text) => text.includes("[zsr] admitted"));
-      expect(line).toBeDefined();
-      expect(line).toContain("canary-boot=1234ms");
-      expect(line).toContain("canary-probes=5ms");
-      expect(line).toContain("canary-git=678ms");
-      expect(line).toContain("canary-bind=9ms");
-      // Only the four known phases are read: no injected stage name, no
-      // negative or non-numeric value, and nothing above the probe timeout.
-      expect(line).not.toContain("hostile=");
-      expect(line).not.toContain("negative=");
-      expect(line).not.toContain("nan=");
-      expect(line).not.toContain("canary-release=99999ms");
-      await prepared.stopAndProve();
-    } finally {
-      logged.mockRestore();
-    }
-  });
-
-  it("cleans up in-flight shadow Git when the overlapped provider overlay fails", async () => {
-    // Shadow Git and the provider HOME overlay are prepared concurrently, so
-    // an overlay failure has to stop a collection that is still being built
-    // rather than leaving it — and the next admission must stay admissible,
-    // which it would not be if teardown had gone unproven.
-    await runFile("git", ["init", "-b", "main"], { cwd: workspace });
-    await runFile("git", ["config", "user.name", "Zeros Test"], {
-      cwd: workspace,
-    });
-    await runFile("git", ["config", "user.email", "zeros@example.invalid"], {
-      cwd: workspace,
-    });
-    await writeFile(path.join(workspace, "code.txt"), "initial\n");
-    await runFile("git", ["add", "--", "code.txt"], { cwd: workspace });
-    await runFile("git", ["commit", "-m", "initial"], { cwd: workspace });
-
+  it("revokes direct leases and proves every tracked process group stopped", async () => {
     const boundary = new ZsrExecutionBoundary({
       projectRoot: root,
       supervisorScript: supervisor,
       supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    await expect(
-      boundary.prepare({
-        executionId: "overlay-failure-1",
-        actor: "agent-code",
-        providerId: "codex",
-        // The filesystem root is a rejected host HOME, so the overlay throws
-        // while the collection is still in flight.
-        providerStateEnv: { HOME: path.parse(workspace).root },
-        cwd: workspace,
-        workspaceRoot: workspace,
-      }),
-    ).rejects.toThrow(/host HOME cannot be the filesystem root/);
-    await expect(access(sessionDir("overlay-failure-1"))).rejects.toMatchObject(
-      { code: "ENOENT" },
-    );
-
-    const hostHome = path.join(root, "host-home");
-    await mkdir(hostHome, { recursive: true });
-    const prepared = await boundary.prepare({
-      executionId: "overlay-failure-2",
-      actor: "agent-code",
-      providerId: "codex",
-      providerStateEnv: { HOME: hostHome },
-      cwd: workspace,
-      workspaceRoot: workspace,
-    });
-    await prepared.stopAndProve();
-  });
-
-  it("admits a design actor only when the live canary proves code writes are denied", async () => {
-    // The design actor's guarantee is the inverse of the code actor's, so the
-    // canary that proves it is the same probe read the other way round.
-    await writeFile(
-      supervisor,
-      PASSING_SUPERVISOR.replace(
-        '  writeFileSync(spec.codeFile, "ok\\n", { flag: "wx" });\n' +
-          "  unlinkSync(spec.codeFile);\n",
-        "",
-      ).replace("    codeWrite: true,", "    codeWrite: false,"),
-      { mode: 0o700 },
-    );
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
     });
     const prepared = await boundary.prepare({
-      executionId: "design-actor-1",
-      actor: "design-agent",
-      cwd: workspace,
-      workspaceRoot: workspace,
-    });
-    const descriptor = JSON.parse(
-      await readFile(
-        path.join(
-          sessionDir("design-actor-1"),
-          "boundary",
-          prepared.generation,
-          "policy.json",
-        ),
-        "utf8",
-      ),
-    ) as {
-      actor: string;
-      filesystem: { allowWrite: string[]; denyWrite: string[] };
-    };
-    expect(descriptor.actor).toBe("design-agent");
-    expect(descriptor.filesystem.allowWrite).not.toContain(workspace);
-    expect(descriptor.filesystem.denyWrite).toContain(workspace);
-    await prepared.stopAndProve();
-  });
-
-  it("fails closed when a design actor can still write code territory", async () => {
-    // PASSING_SUPERVISOR reports the ordinary code-actor result, which is
-    // exactly the failure a design admission must refuse.
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    await expect(
-      boundary.prepare({
-        executionId: "design-actor-2",
-        actor: "design-agent",
-        cwd: workspace,
-        workspaceRoot: workspace,
-      }),
-    ).rejects.toThrow(/design actor write code territory/);
-  });
-
-  it("fails closed when a live canary can create a Design hard-link alias", async () => {
-    await writeFile(
-      supervisor,
-      PASSING_SUPERVISOR.replace(
-        "designHardlinkDenied: true",
-        "designHardlinkDenied: false",
-      ),
-      { mode: 0o700 },
-    );
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const request = {
-      executionId: "execution-hardlink-failure",
-      actor: "agent-code" as const,
-      cwd: workspace,
-      workspaceRoot: workspace,
-    };
-
-    const probe = await boundary.probe(request);
-    expect(probe.available).toBe(false);
-    expect(probe.reasons.join(" ")).toMatch(/hard-link alias/i);
-    await expect(boundary.prepare(request)).rejects.toThrow(/hard-link alias/i);
-  });
-
-  it("fails closed when a live canary can rename a protected Design file", async () => {
-    await writeFile(
-      supervisor,
-      PASSING_SUPERVISOR.replace(
-        "designRenameOutDenied: true",
-        "designRenameOutDenied: false",
-      ),
-      { mode: 0o700 },
-    );
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const request = {
-      executionId: "execution-rename-failure",
-      actor: "agent-code" as const,
-      cwd: workspace,
-      workspaceRoot: workspace,
-    };
-
-    const probe = await boundary.probe(request);
-    expect(probe.available).toBe(false);
-    expect(probe.reasons.join(" ")).toMatch(/rename.*protected Design/i);
-    await expect(boundary.prepare(request)).rejects.toThrow(
-      /rename.*protected Design/i,
-    );
-  });
-
-  it("fails closed when the exact request policy exposes engine state", async () => {
-    await writeFile(
-      supervisor,
-      PASSING_SUPERVISOR.replace(
-        "policyReadDenied: true",
-        "policyReadDenied: false",
-      ),
-      { mode: 0o700 },
-    );
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    await expect(
-      boundary.prepare({
-        executionId: "execution-exact-failure",
-        actor: "agent-code",
-        cwd: workspace,
-        workspaceRoot: workspace,
-      }),
-    ).rejects.toThrow(/engine-private policy state/);
-  });
-
-  it("revokes leases and kills every ordinary process-group descendant", async () => {
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const prepared = await boundary.prepare({
-      executionId: "execution-3",
+      executionId: "host-parity-process-retirement",
       actor: "agent-code",
       cwd: workspace,
       workspaceRoot: workspace,
     });
     const lease = await prepared.requestPort({
       protocol: "tcp",
-      ...(process.platform === "darwin" ? {} : { preferredPort: 43123 }),
+      preferredPort: 43_123,
       purpose: "dev-server",
     });
     expect(lease).toMatchObject({
       host: "127.0.0.1",
-      port: process.platform === "darwin" ? expect.any(Number) : 43123,
+      port: 43_123,
+      targetPort: 43_123,
     });
-
     const child = spawn(
       process.execPath,
       [
@@ -1914,766 +1558,4 @@ if (descriptor.env.ELECTRON_RUN_AS_NODE !== "1") {
     await expect(lease.revoke()).resolves.toBeUndefined();
   });
 
-  it("never turns a reserved engine port into a browser lease", async () => {
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const prepared = await boundary.prepare({
-      executionId: "execution-engine-port",
-      actor: "agent-code",
-      cwd: workspace,
-      workspaceRoot: workspace,
-    });
-    await expect(
-      prepared.requestPort({
-        protocol: "tcp",
-        preferredPort: 24293,
-        targetPort: 24293,
-        purpose: "debug",
-      }),
-    ).rejects.toThrow(/reserved control port/);
-    await prepared.stopAndProve();
-  });
-
-  it("leases only a predeclared exact local service and revokes its façade", async () => {
-    const target = createServer((peer) => {
-      peer.setEncoding("utf8");
-      peer.on("data", (chunk) => peer.end(`postgres:${chunk}`));
-    });
-    await new Promise<void>((resolve, reject) => {
-      target.once("error", reject);
-      target.listen(0, "127.0.0.1", resolve);
-    });
-    const address = target.address();
-    if (!address || typeof address === "string")
-      throw new Error("missing port");
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const prepared = await boundary.prepare({
-      executionId: "execution-service",
-      actor: "agent-code",
-      cwd: workspace,
-      workspaceRoot: workspace,
-      localServices: [
-        {
-          serviceId: "db",
-          kind: "database",
-          transport: "tcp",
-          targetHost: "127.0.0.1",
-          targetPort: address.port,
-          adapter: "postgres",
-        },
-      ],
-    });
-    try {
-      await expect(
-        prepared.requestLocalService({ kind: "docker", serviceId: "db" }),
-      ).rejects.toThrow(/kind/i);
-      const lease = await prepared.requestLocalService({
-        kind: "database",
-        serviceId: "db",
-      });
-      const facadePort = Number(lease.env.PGPORT);
-      const response = await new Promise<string>((resolve, reject) => {
-        const peer = connect({ host: lease.env.PGHOST, port: facadePort });
-        let received = "";
-        peer.setEncoding("utf8");
-        peer.once("connect", () => peer.write("query"));
-        peer.on("data", (chunk) => (received += chunk));
-        peer.once("end", () => resolve(received));
-        peer.once("error", reject);
-      });
-      expect(response).toBe("postgres:query");
-      await lease.revoke();
-    } finally {
-      await prepared.stopAndProve();
-      await new Promise<void>((resolve) => target.close(() => resolve()));
-    }
-  });
-
-  it("uses a sanitized writable GPG home while the exact agent lease is active", async () => {
-    const sourceHome = path.join(root, "host-gnupg");
-    await mkdir(path.join(sourceHome, "private-keys-v1.d"), {
-      recursive: true,
-      mode: 0o700,
-    });
-    await writeFile(path.join(sourceHome, "pubring.kbx"), "public\n", {
-      mode: 0o600,
-    });
-    await writeFile(
-      path.join(sourceHome, "private-keys-v1.d", "private.key"),
-      "secret\n",
-      { mode: 0o600 },
-    );
-    const targetPath = path.join(sourceHome, "S.gpg-agent");
-    const target = createServer((peer) => {
-      peer.setEncoding("utf8");
-      peer.on("data", (chunk) => peer.write(`agent:${chunk}`));
-    });
-    await new Promise<void>((resolve, reject) => {
-      target.once("error", reject);
-      target.listen(targetPath, resolve);
-    });
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const prepared = await boundary.prepare({
-      executionId: "execution-gpg-service",
-      actor: "agent-code",
-      cwd: workspace,
-      workspaceRoot: workspace,
-      localServices: [
-        {
-          serviceId: "gpg",
-          kind: "gpg-agent",
-          transport: "unix",
-          targetPath,
-          adapter: "gpg-agent",
-          sourceHome,
-        },
-      ],
-    });
-    try {
-      const lease = await prepared.requestLocalService({
-        kind: "gpg-agent",
-        serviceId: "gpg",
-      });
-      const launch = prepared.wrapSpawn({
-        command: process.execPath,
-        args: ["-e", "process.exit(0)"],
-        cwd: workspace,
-        env: {
-          PATH: process.env.PATH ?? "/usr/bin:/bin",
-          HOME: root,
-          GNUPGHOME: sourceHome,
-          GPG_AGENT_INFO: `${targetPath}:123:1`,
-        },
-      });
-      const commandPath = launch.args[launch.args.indexOf("--command") + 1];
-      const policyPath = launch.args[launch.args.indexOf("--policy") + 1];
-      const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
-        env: Record<string, string>;
-      };
-      const policy = JSON.parse(await readFile(policyPath, "utf8")) as {
-        filesystem: { allowRead: string[]; allowWrite: string[] };
-      };
-      const projectedHome = descriptor.env.GNUPGHOME;
-      const projectedSocket = path.join(projectedHome, "S.gpg-agent");
-      expect(projectedHome).not.toBe(sourceHome);
-      expect(descriptor.env.GPG_AGENT_INFO).toBe(`${projectedSocket}:0:1`);
-      expect(
-        await readFile(path.join(projectedHome, "pubring.kbx"), "utf8"),
-      ).toBe("public\n");
-      await expect(
-        access(path.join(projectedHome, "private-keys-v1.d", "private.key")),
-      ).rejects.toMatchObject({ code: "ENOENT" });
-      expect(
-        policy.filesystem.allowWrite.some(
-          (allowed) =>
-            path.relative(allowed, projectedHome) === "" ||
-            (!path.relative(allowed, projectedHome).startsWith("..") &&
-              !path.isAbsolute(path.relative(allowed, projectedHome))),
-        ),
-      ).toBe(true);
-      expect(policy.filesystem.allowRead).not.toContain(sourceHome);
-      const response = await new Promise<string>((resolve, reject) => {
-        const peer = connect(projectedSocket);
-        let received = "";
-        peer.setEncoding("utf8");
-        peer.once("connect", () => peer.write("sign"));
-        peer.on("data", (chunk) => {
-          received += chunk;
-          peer.end();
-        });
-        peer.once("end", () => resolve(received));
-        peer.once("error", reject);
-      });
-      expect(response).toBe("agent:sign");
-      await lease.revoke();
-    } finally {
-      await prepared.stopAndProve();
-      await new Promise<void>((resolve) => target.close(() => resolve()));
-    }
-  });
-
-  it("projects and durably promotes provider HOME without exposing host HOME", async () => {
-    const hostHome = path.join(root, "host-home");
-    await mkdir(path.join(hostHome, ".codex"), { recursive: true });
-    await writeFile(
-      path.join(hostHome, ".codex", "config.toml"),
-      "model='host'\n",
-    );
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const request = {
-      executionId: "execution-provider-home-a",
-      actor: "agent-code" as const,
-      providerId: "codex",
-      providerStateEnv: { HOME: hostHome },
-      cwd: workspace,
-      workspaceRoot: workspace,
-    };
-    const first = await boundary.prepare(request);
-    const firstLaunch = first.wrapSpawn({
-      command: process.execPath,
-      args: ["-e", "process.exit(0)"],
-      cwd: workspace,
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: hostHome },
-    });
-    const firstCommand =
-      firstLaunch.args[firstLaunch.args.indexOf("--command") + 1];
-    const firstDescriptor = JSON.parse(
-      await readFile(firstCommand, "utf8"),
-    ) as { env: Record<string, string> };
-    expect(firstDescriptor.env.HOME).not.toBe(hostHome);
-    expect(
-      await readFile(
-        path.join(firstDescriptor.env.HOME, ".codex", "config.toml"),
-        "utf8",
-      ),
-    ).toBe("model='host'\n");
-    expect(
-      (
-        await stat(
-          path.join(
-            path.dirname(firstDescriptor.env.HOME),
-            ".provider-home-recovery.json",
-          ),
-        )
-      ).isFile(),
-    ).toBe(true);
-    await writeFile(
-      path.join(firstDescriptor.env.HOME, ".codex", "config.toml"),
-      "model='private'\n",
-    );
-    await first.stopAndProve();
-
-    const second = await boundary.prepare({
-      ...request,
-      executionId: "execution-provider-home-b",
-    });
-    const secondLaunch = second.wrapSpawn({
-      command: process.execPath,
-      args: ["-e", "process.exit(0)"],
-      cwd: workspace,
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: hostHome },
-    });
-    const secondCommand =
-      secondLaunch.args[secondLaunch.args.indexOf("--command") + 1];
-    const secondDescriptor = JSON.parse(
-      await readFile(secondCommand, "utf8"),
-    ) as { env: Record<string, string> };
-    expect(
-      await readFile(
-        path.join(secondDescriptor.env.HOME, ".codex", "config.toml"),
-        "utf8",
-      ),
-    ).toBe("model='private'\n");
-    expect(
-      await readFile(path.join(hostHome, ".codex", "config.toml"), "utf8"),
-    ).toBe("model='host'\n");
-    await second.stopAndProve();
-  });
-
-  it("defers mutable crash recovery until container retirement is complete", async () => {
-    const hostHome = path.join(root, "crash-host-home");
-    const generationRoot = path.join(
-      process.env.ZEROS_DATA_DIR!,
-      "sessions",
-      "crashed-provider",
-      "boundary",
-      "generation",
-    );
-    const localHome = path.join(generationRoot, "home");
-    await Promise.all([
-      mkdir(path.join(hostHome, ".codex"), { recursive: true }),
-      mkdir(localHome, { recursive: true }),
-    ]);
-    const overlay = await prepareProviderHomeOverlay({
-      providerId: "codex",
-      workspaceRoot: workspace,
-      localHome,
-      ambientEnv: { HOME: hostHome },
-    });
-    await armProviderHomeRecovery(overlay);
-    await writeFile(
-      path.join(localHome, ".codex", "crashed-session.jsonl"),
-      "survived\n",
-    );
-    const cursorGenerationRoot = path.join(
-      process.env.ZEROS_DATA_DIR!,
-      "sessions",
-      "crashed-cursor",
-      "boundary",
-      "generation",
-    );
-    const cursorLocalRoot = path.join(
-      cursorGenerationRoot,
-      "provider",
-      "cursor",
-    );
-    await mkdir(cursorLocalRoot, { recursive: true, mode: 0o700 });
-    const cursorOverlay = await armCursorStateRecovery(
-      await prepareCursorStateOverlay(cursorLocalRoot, workspace),
-    );
-    await writeFile(
-      path.join(cursorOverlay.localRoot, "agents.ndjson"),
-      '{"agentId":"survived","name":"Recovered"}\n',
-    );
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-
-    await boundary.recoverStaleProcesses();
-    await expect(
-      stat(path.join(generationRoot, ".provider-home-recovery.json")),
-    ).resolves.toBeDefined();
-    await expect(boundary.recoverStaleMutableState()).resolves.toMatchObject({
-      discovered: 2,
-      recovered: 2,
-      preserved: 0,
-    });
-    await expect(
-      stat(path.join(generationRoot, ".provider-home-recovery.json")),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      stat(path.join(cursorGenerationRoot, ".cursor-state-recovery.json")),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      readFile(
-        path.join(cursorOverlay.persistentRoot, "agents.ndjson"),
-        "utf8",
-      ),
-    ).resolves.toContain('"agentId":"survived"');
-  });
-
-  it("reclaims pre-parity provider/Git state roots and then stops scanning them", async () => {
-    const dataDir = process.env.ZEROS_DATA_DIR!;
-    const shadowGitRecovery = path.join(dataDir, "recovery", "shadow-git");
-    const providerHome = path.join(dataDir, "provider-home", "codex");
-    const parked = path.join(dataDir, "provider-home-parked", "codex");
-    await Promise.all([
-      mkdir(shadowGitRecovery, { recursive: true }),
-      mkdir(providerHome, { recursive: true }),
-      mkdir(parked, { recursive: true }),
-    ]);
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      localHostParity: true,
-    });
-
-    await boundary.recoverStaleMutableState();
-
-    // A parity session writes none of this, so once the sweeps have nothing left
-    // to recover the roots go away — which is also what makes every later boot
-    // skip the walk instead of re-scanning trees that can no longer grow.
-    for (const directory of [shadowGitRecovery, providerHome, parked]) {
-      await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
-    }
-    await expect(
-      stat(path.join(dataDir, "provider-home")),
-    ).rejects.toMatchObject({ code: "ENOENT" });
-
-    // Idempotent: a second boot with nothing there does no work and does not fail.
-    await expect(
-      boundary.recoverStaleMutableState(),
-    ).resolves.toMatchObject({ discovered: 0, recovered: 0, preserved: 0 });
-  });
-
-  it("keeps sweeping pre-parity roots that still hold unrecovered state", async () => {
-    const dataDir = process.env.ZEROS_DATA_DIR!;
-    const preserved = path.join(
-      dataDir,
-      "recovery",
-      "shadow-git",
-      "unfinished",
-    );
-    await mkdir(preserved, { recursive: true });
-    await writeFile(path.join(preserved, "manifest.json"), "{ truncated");
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-      localHostParity: true,
-    });
-
-    const result = await boundary.recoverStaleMutableState();
-
-    // The sweep could not prove this entry safe to discard, so it retained it —
-    // and the root must survive so the next boot tries again. Reclaiming here
-    // would make the tidy-up the thing that loses a user's unmerged work.
-    expect(result.preserved).toBeGreaterThan(0);
-    await expect(stat(preserved)).resolves.toBeDefined();
-  });
-
-  it("retains the boundary root when provider HOME recovery cannot be proven", async () => {
-    const hostHome = path.join(root, "host-home-recovery-failure");
-    await mkdir(path.join(hostHome, ".codex"), { recursive: true });
-    await writeFile(
-      path.join(hostHome, ".codex", "config.toml"),
-      "model='host'\n",
-    );
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const prepared = await boundary.prepare({
-      executionId: "execution-provider-home-recovery-failure",
-      actor: "agent-code",
-      providerId: "codex",
-      providerStateEnv: { HOME: hostHome },
-      cwd: workspace,
-      workspaceRoot: workspace,
-    });
-    const launch = prepared.wrapSpawn({
-      command: process.execPath,
-      args: ["-e", "process.exit(0)"],
-      cwd: workspace,
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: hostHome },
-    });
-    const commandPath = launch.args[launch.args.indexOf("--command") + 1];
-    const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
-      env: Record<string, string>;
-    };
-    const projectedHome = descriptor.env.HOME;
-    await writeFile(path.join(projectedHome, ".codex", "unsaved.jsonl"), "x\n");
-
-    const providerBase = path.join(
-      process.env.ZEROS_DATA_DIR!,
-      "provider-home",
-      "codex",
-    );
-    const [persistentKey] = await readdir(providerBase);
-    if (!persistentKey) throw new Error("missing provider persistence root");
-    const persistentRoot = path.join(providerBase, persistentKey);
-    await rm(persistentRoot, { recursive: true, force: true });
-    await writeFile(persistentRoot, "blocks promotion and recovery\n");
-
-    await expect(prepared.stopAndProve()).rejects.toBeDefined();
-    await expect(
-      readFile(path.join(projectedHome, ".codex", "unsaved.jsonl"), "utf8"),
-    ).resolves.toBe("x\n");
-  });
-
-  it("retains the boundary root while Cursor state promotion is pending", async () => {
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const prepared = await boundary.prepare({
-      executionId: "execution-cursor-state-recovery",
-      actor: "agent-code",
-      providerId: "cursor",
-      cwd: workspace,
-      workspaceRoot: workspace,
-    });
-    const localState = prepared.privateStateDirectory("cursor");
-    const generationRoot = path.dirname(path.dirname(localState));
-    const sentinel = path.join(localState, "agents.ndjson");
-    await writeFile(sentinel, '{"agentId":"unsaved"}\n');
-    await writeFile(
-      path.join(generationRoot, ".cursor-state-recovery.json"),
-      '{"version":1}\n',
-      { mode: 0o600 },
-    );
-
-    await expect(prepared.stopAndProve()).rejects.toThrow(
-      "Cursor provider-state promotion is pending recovery",
-    );
-    await expect(readFile(sentinel, "utf8")).resolves.toContain("unsaved");
-  });
-
-  it("projects a private Git repository and denies canonical control metadata", async () => {
-    await runFile("git", ["init", "-b", "main"], { cwd: workspace });
-    await runFile("git", ["config", "user.name", "Zeros Test"], {
-      cwd: workspace,
-    });
-    await runFile("git", ["config", "user.email", "zeros@example.invalid"], {
-      cwd: workspace,
-    });
-    await writeFile(path.join(workspace, "code.txt"), "initial\n");
-    await runFile("git", ["add", "code.txt"], { cwd: workspace });
-    await runFile("git", ["commit", "-m", "initial"], { cwd: workspace });
-
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const prepared = await boundary.prepare({
-      executionId: "execution-shadow-git",
-      actor: "agent-code",
-      cwd: workspace,
-      workspaceRoot: workspace,
-    });
-    const launch = prepared.wrapSpawn({
-      command: process.execPath,
-      args: ["-e", "process.exit(0)"],
-      cwd: workspace,
-      env: {
-        PATH: process.env.PATH ?? "/usr/bin:/bin",
-        GH_TOKEN: "must-not-cross",
-        SSH_AUTH_SOCK: "/tmp/host-agent.sock",
-        ZEROS_GIT_AUTH_SOCKET: "/tmp/old-broker.sock",
-      },
-    });
-    const commandPath = launch.args[launch.args.indexOf("--command") + 1];
-    const policyPath = launch.args[launch.args.indexOf("--policy") + 1];
-    const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
-      env: Record<string, string>;
-      filesystemProjections?: Array<{
-        source: string;
-        destination: string;
-        readOnly: boolean;
-      }>;
-    };
-    const policy = JSON.parse(await readFile(policyPath, "utf8")) as {
-      filesystem: {
-        allowRead: string[];
-        denyRead: string[];
-        denyWrite: string[];
-      };
-    };
-    if (process.platform === "darwin") {
-      expect(descriptor.env.GIT_DIR).toMatch(
-        /\/boundary\/[^/]+\/git\/0-[^/]+\/git$/,
-      );
-      expect(descriptor.env.GIT_COMMON_DIR).toBe(descriptor.env.GIT_DIR);
-      expect(descriptor.env.GIT_WORK_TREE).toBe(workspace);
-      expect(descriptor.env.GIT_DIR).not.toBe(path.join(workspace, ".git"));
-    } else {
-      expect(descriptor.env.GIT_DIR).toBeUndefined();
-      expect(descriptor.env.GIT_COMMON_DIR).toBeUndefined();
-      expect(descriptor.env.GIT_WORK_TREE).toBeUndefined();
-    }
-    let repositoryProjection:
-      | { source: string; destination: string; readOnly: boolean }
-      | undefined;
-    if (process.platform === "linux") {
-      expect(descriptor.filesystemProjections).toHaveLength(1);
-      repositoryProjection = descriptor.filesystemProjections![0];
-      expect(repositoryProjection).toMatchObject({
-        destination: path.join(workspace, ".git"),
-        readOnly: false,
-      });
-    } else {
-      expect(descriptor.filesystemProjections).toBeUndefined();
-    }
-    expect(descriptor.env.PATH?.split(path.delimiter)[0]).not.toBe(
-      (process.env.PATH ?? "").split(path.delimiter)[0],
-    );
-    expect(descriptor.env.GH_TOKEN).toBeUndefined();
-    expect(descriptor.env.SSH_AUTH_SOCK).toBeUndefined();
-    expect(descriptor.env.ZEROS_GIT_AUTH_SOCKET).toBeUndefined();
-    expect(policy.filesystem.denyWrite).toContain(path.join(workspace, ".git"));
-    expect(policy.filesystem.denyRead).toContain(path.join(workspace, ".git"));
-    expect(policy.filesystem.allowRead).toContain(
-      path.join(workspace, ".git", "objects"),
-    );
-    const toolsRoot = descriptor.env.PATH!.split(path.delimiter)[0]!;
-    const dispatcher = await readFile(
-      path.join(toolsRoot, "git-dispatcher.mjs"),
-      "utf8",
-    );
-    expect(dispatcher).toContain("discoverEntry");
-    const repositoryId = repositoryProjection
-      ? path.basename(path.dirname(repositoryProjection.source))
-      : /git-repositories\/([^/]+)\/git/.exec(dispatcher)?.[1];
-    expect(repositoryId).toBeTruthy();
-    const gitClient = await readFile(
-      path.join(toolsRoot, "git-repositories", repositoryId!, "git-client.mjs"),
-      "utf8",
-    );
-    expect(gitClient).toContain('"host":"127.0.0.1"');
-    expect(gitClient).toMatch(/"port":\d+/);
-    const networkPolicy = JSON.parse(await readFile(policyPath, "utf8")) as {
-      runtime: { allowedLocalPorts: number[]; deniedLocalPorts: number[] };
-    };
-    expect(networkPolicy.runtime.allowedLocalPorts).toHaveLength(1);
-    expect(networkPolicy.runtime.deniedLocalPorts).not.toContain(
-      networkPolicy.runtime.allowedLocalPorts[0],
-    );
-    await prepared.stopAndProve();
-  });
-
-  it("projects every admitted Design-bearing Git owner and rejects an owner outside its grant", async () => {
-    const secondary = path.join(root, "secondary");
-    const primaryDesign = path.join(workspace, "Zeros Design");
-    const secondaryDesign = path.join(secondary, "Zeros Design");
-    await Promise.all([
-      mkdir(primaryDesign, { recursive: true }),
-      mkdir(secondaryDesign, { recursive: true }),
-    ]);
-    for (const repository of [workspace, secondary]) {
-      await runFile("git", ["init", "-b", "main"], { cwd: repository });
-      await runFile("git", ["config", "user.name", "Zeros Test"], {
-        cwd: repository,
-      });
-      await runFile("git", ["config", "user.email", "zeros@example.invalid"], {
-        cwd: repository,
-      });
-      await Promise.all([
-        writeFile(path.join(repository, "code.txt"), "initial\n"),
-        writeFile(
-          path.join(repository, "Zeros Design", "document.json"),
-          '{"safe":true}\n',
-        ),
-      ]);
-      await runFile("git", ["add", "--", "code.txt", "Zeros Design"], {
-        cwd: repository,
-      });
-      await runFile("git", ["commit", "-m", "initial"], {
-        cwd: repository,
-      });
-    }
-    const territory = {
-      agentRole: "code" as const,
-      workspaceRoot: workspace,
-      designDirectory: primaryDesign,
-      protectedDesignDirectories: [primaryDesign, secondaryDesign],
-      designRecognitionPaths: [],
-      writeCapabilities: {
-        workspace: "write" as const,
-        deniedPaths: [
-          primaryDesign,
-          path.join(workspace, ".git"),
-          secondaryDesign,
-          path.join(secondary, ".git"),
-        ],
-      },
-    };
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const baseRequest = {
-      executionId: "execution-multi-shadow-git",
-      actor: "agent-code" as const,
-      cwd: workspace,
-      workspaceRoot: workspace,
-      territory,
-      additionalGitWorkspaceRoots: [secondary],
-    };
-    await expect(boundary.prepare(baseRequest)).rejects.toThrow(
-      /outside write grants/,
-    );
-
-    const prepared = await boundary.prepare({
-      ...baseRequest,
-      executionId: "execution-multi-shadow-git-admitted",
-      additionalReadWriteRoots: [secondary],
-    });
-    const launch = prepared.wrapSpawn({
-      command: process.execPath,
-      args: ["-e", "process.exit(0)"],
-      cwd: workspace,
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
-    });
-    const commandPath = launch.args[launch.args.indexOf("--command") + 1];
-    const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
-      filesystemProjections?: Array<{
-        source: string;
-        destination: string;
-        readOnly: boolean;
-      }>;
-    };
-    if (process.platform === "linux") {
-      expect(
-        descriptor.filesystemProjections?.map(
-          (projection) => projection.destination,
-        ),
-      ).toEqual([path.join(workspace, ".git"), path.join(secondary, ".git")]);
-    }
-    expect(prepared.status.parity).toEqual({ level: "full", restrictions: [] });
-    await prepared.stopAndProve();
-  });
-
-  it("projects a read-only .git pointer for linked worktrees", async () => {
-    const repository = path.join(root, "repository");
-    await mkdir(repository);
-    await runFile("git", ["init", "-b", "main"], { cwd: repository });
-    await runFile("git", ["config", "user.name", "Zeros Test"], {
-      cwd: repository,
-    });
-    await runFile("git", ["config", "user.email", "zeros@example.invalid"], {
-      cwd: repository,
-    });
-    await writeFile(path.join(repository, "code.txt"), "initial\n");
-    await runFile("git", ["add", "code.txt"], { cwd: repository });
-    await runFile("git", ["commit", "-m", "initial"], { cwd: repository });
-    await rm(workspace, { recursive: true, force: true });
-    await runFile("git", ["worktree", "add", "-b", "feature", workspace], {
-      cwd: repository,
-    });
-
-    const boundary = new ZsrExecutionBoundary({
-      projectRoot: root,
-      supervisorScript: supervisor,
-      supervisorRuntime: process.execPath,
-      networkBridgeScript: NETWORK_BRIDGE_SCRIPT,
-    });
-    const prepared = await boundary.prepare({
-      executionId: "execution-linked-worktree",
-      actor: "agent-code",
-      cwd: workspace,
-      workspaceRoot: workspace,
-    });
-    const launch = prepared.wrapSpawn({
-      command: process.execPath,
-      args: ["-e", "process.exit(0)"],
-      cwd: workspace,
-      env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
-    });
-    const commandPath = launch.args[launch.args.indexOf("--command") + 1];
-    const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
-      env: Record<string, string>;
-      filesystemProjections?: Array<{
-        source: string;
-        destination: string;
-        readOnly: boolean;
-      }>;
-    };
-    if (process.platform === "linux") {
-      expect(descriptor.filesystemProjections).toHaveLength(1);
-      const projection = descriptor.filesystemProjections![0];
-      expect(projection).toMatchObject({
-        destination: path.join(workspace, ".git"),
-        readOnly: true,
-      });
-      const pointer = await readFile(projection.source, "utf8");
-      expect(pointer).toMatch(/^gitdir: \/.*\/git\n$/);
-      expect(pointer).not.toContain(path.join(workspace, ".git"));
-    } else {
-      expect(descriptor.filesystemProjections).toBeUndefined();
-    }
-    await prepared.stopAndProve();
-  });
 });

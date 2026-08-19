@@ -4,7 +4,7 @@
 // respawn guard, and the durable last-run rows (workspace_meta) incl. the
 // lazy orphan reconciliation after an engine restart.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -34,6 +34,7 @@ function fakePty() {
   const killed: string[] = [];
   const svc = {
     has: (id: string) => live.has(id),
+    waitForExit: async () => true,
     kill: (id: string) => {
       live.delete(id);
       killed.push(id);
@@ -230,6 +231,24 @@ describe("RunManager", () => {
     expect(created[0]?.wrapped).toBe(true);
   });
 
+  it("replaces an untracked legacy run with a contained process", async () => {
+    const { svc, live, killed, created } = fakePty();
+    live.add(SID);
+    const boundaryFactory = vi.fn(async () => preparedTestBoundary());
+    const mgr = make(svc, [], undefined, boundaryFactory);
+
+    await expect(mgr.start(startArgs())).resolves.toEqual({
+      alreadyRunning: false,
+    });
+
+    expect(killed).toEqual([SID]);
+    expect(boundaryFactory).toHaveBeenCalledOnce();
+    expect(created).toEqual([
+      expect.objectContaining({ sessionId: SID, wrapped: true }),
+    ]);
+    expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
+  });
+
   it("spawns with the resolved run env (login PATH), not the engine's raw env", async () => {
     const { svc, envs } = fakePty();
     const mgr = make(svc);
@@ -297,6 +316,34 @@ describe("RunManager", () => {
     expect(await started).toEqual({ alreadyRunning: false, cancelled: true });
     expect(created).toHaveLength(0);
     expect(mgr.info([SID], WS).dev).toBeUndefined();
+  });
+
+  it("retains failed teardown proof when Stop lands after boundary admission", async () => {
+    const { svc } = fakePty();
+    let releaseBoundary = () => {};
+    const boundaryGate = new Promise<void>((resolve) => {
+      releaseBoundary = resolve;
+    });
+    const stopAndProve = vi.fn(async () => {
+      throw new Error("cancelled run domain is still populated");
+    });
+    const boundaryFactory = vi.fn(async () => {
+      await boundaryGate;
+      return {
+        ...preparedTestBoundary(),
+        stopAndProve,
+      } as PreparedBoundary;
+    });
+    const mgr = make(svc, [], undefined, boundaryFactory);
+
+    const starting = mgr.start(startArgs());
+    await vi.waitFor(() => expect(boundaryFactory).toHaveBeenCalledOnce());
+    mgr.stop(SID);
+    releaseBoundary();
+
+    await expect(starting).rejects.toThrow(/cancelled run domain/i);
+    await expect(mgr.stopAllAndProve()).rejects.toThrow(/restart Zeros/i);
+    expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
   });
 
   it("Stop then RERUN inside the env window actually runs", async () => {
@@ -436,6 +483,57 @@ describe("RunManager", () => {
     await expect(mgr.proveWorkspaceBoundariesStopped(WS)).rejects.toThrow(
       /repository run containment teardown was not proven/i,
     );
+  });
+
+  it("globally revokes and proves rowless run boundaries before an owner-map change", async () => {
+    const { svc, killed } = fakePty();
+    const revoke = vi.fn(async () => {});
+    const stopAndProve = vi.fn(async () => {});
+    const boundary = {
+      ...preparedTestBoundary(),
+      revoke,
+      stopAndProve,
+    } as PreparedBoundary;
+    const mgr = make(svc, [], undefined, async () => boundary);
+    await mgr.start(startArgs({ workspaceId: null }));
+
+    await mgr.stopAllAndProve();
+
+    expect(killed).toEqual([SID]);
+    expect(revoke).toHaveBeenCalledOnce();
+    expect(stopAndProve).toHaveBeenCalledOnce();
+    expect(mgr.info([SID], null).dev).toMatchObject({ state: "stopped" });
+  });
+
+  it("retains a superseded rowless run teardown failure across replacement", async () => {
+    const { svc, live } = fakePty();
+    let admitted = 0;
+    const failedBoundary = {
+      ...preparedTestBoundary(),
+      stopAndProve: async () => {
+        throw new Error("superseded rowless run domain is still populated");
+      },
+    } as PreparedBoundary;
+    const replacementBoundary = preparedTestBoundary();
+    const mgr = make(svc, [], undefined, async () =>
+      admitted++ === 0 ? failedBoundary : replacementBoundary,
+    );
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await mgr.start(startArgs({ workspaceId: null }));
+      live.delete(SID);
+      mgr.handleExit(SID, 137, 9);
+      await vi.waitFor(() => expect(diagnostic).toHaveBeenCalled());
+
+      await mgr.start(startArgs({ workspaceId: null }));
+      await expect(mgr.stopAllAndProve()).rejects.toThrow(
+        /run boundaries were not globally retired/i,
+      );
+      expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
+      expect(mgr.registeredDesignAuthorityChanged(null)).toBe(true);
+    } finally {
+      diagnostic.mockRestore();
+    }
   });
 
   it("does not stop or disclose a run when the asserted workspace owner differs", async () => {
