@@ -964,16 +964,26 @@ function pathSpellings(candidate: string): string[] {
   return lexical === physical ? [lexical] : [lexical, physical];
 }
 
-function configOriginPaths(origin: string, cwd: string): string[] {
+function configOriginPaths(
+  origin: string,
+  cwd: string,
+  territory: ReturnType<typeof findWorktreeTerritory>,
+): string[] {
   if (!origin.startsWith("file:")) return [];
   const value = origin.slice("file:".length);
-  return value ? pathSpellings(path.resolve(cwd, value)) : [];
+  if (!value) return [];
+  // Git renders repository-local origins as `file:.git/config` even when the
+  // command cwd is a nested directory. Anchor relative origins at the detected
+  // worktree root; resolving them from the nested cwd invents a code-owned
+  // `.git` path and makes every safe engine Git command fail closed.
+  return pathSpellings(path.resolve(territory?.root ?? cwd, value));
 }
 
 function resolveIncludePaths(
   value: string,
   origin: string,
   cwd: string,
+  territory: ReturnType<typeof findWorktreeTerritory>,
 ): string[] {
   let candidates: string[];
   if (value.startsWith("~/")) {
@@ -985,8 +995,8 @@ function resolveIncludePaths(
   } else if (path.isAbsolute(value)) {
     candidates = [value];
   } else {
-    candidates = configOriginPaths(origin, cwd).map((originPath) =>
-      path.resolve(path.dirname(originPath), value),
+    candidates = configOriginPaths(origin, cwd, territory).map(
+      (originPath) => path.resolve(path.dirname(originPath), value),
     );
   }
   return [...new Set(candidates.flatMap(pathSpellings))];
@@ -1001,7 +1011,7 @@ function assertNoCodeWritableConfig(
   const isMetadata = (candidate: string): boolean =>
     territory.metadata.some((metadata) => pathInside(candidate, metadata));
   for (const entry of entries) {
-    const unsafeOrigin = configOriginPaths(entry.origin, cwd).find(
+    const unsafeOrigin = configOriginPaths(entry.origin, cwd, territory).find(
       (origin) => pathInside(origin, territory.root) && !isMetadata(origin),
     );
     if (unsafeOrigin) {
@@ -1018,6 +1028,7 @@ function assertNoCodeWritableConfig(
         entry.value,
         entry.origin,
         cwd,
+        territory,
       ).find(
         (includePath) =>
           pathInside(includePath, territory.root) && !isMetadata(includePath),
@@ -1165,7 +1176,7 @@ function configSourcePaths(
 ): string[] {
   const candidates = new Set<string>();
   for (const entry of entries) {
-    for (const origin of configOriginPaths(entry.origin, cwd)) {
+    for (const origin of configOriginPaths(entry.origin, cwd, territory)) {
       candidates.add(origin);
     }
     const lower = entry.key.toLowerCase();
@@ -1177,6 +1188,7 @@ function configSourcePaths(
         entry.value,
         entry.origin,
         cwd,
+        territory,
       )) {
         candidates.add(includePath);
       }
