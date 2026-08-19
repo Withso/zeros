@@ -1,6 +1,5 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants as fsConstants } from "node:fs";
 import { chmod, lstat, mkdir, open, rm } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
@@ -643,6 +642,73 @@ function isProcessAlive(pid: number): boolean {
   }
 }
 
+async function inspectMacClaudeRefreshLock(
+  lockPath: string,
+): Promise<"absent" | "present" | "retired"> {
+  let staleHandle;
+  try {
+    staleHandle = await open(lockPath, "r");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+    throw new Error("Claude OAuth refresh lock is unavailable");
+  }
+  try {
+    const metadata = await staleHandle.stat();
+    const current = await lstat(lockPath);
+    if (
+      !metadata.isFile() ||
+      metadata.nlink !== 1 ||
+      current.isSymbolicLink() ||
+      current.dev !== metadata.dev ||
+      current.ino !== metadata.ino
+    ) {
+      throw new Error("Claude OAuth refresh lock is unsafe");
+    }
+    if (
+      metadata.size > 256 ||
+      Date.now() - metadata.mtimeMs <= REFRESH_LOCK_STALE_MS
+    ) {
+      return "present";
+    }
+    let retireStaleLock = metadata.size === 0;
+    if (!retireStaleLock) {
+      try {
+        const parsed = JSON.parse(await staleHandle.readFile("utf8")) as {
+          version?: unknown;
+          pid?: unknown;
+        };
+        retireStaleLock =
+          parsed.version === 1 &&
+          Number.isSafeInteger(parsed.pid) &&
+          Number(parsed.pid) > 0 &&
+          !isProcessAlive(Number(parsed.pid));
+      } catch {
+        // A crash between O_EXCL creation and the fsynced owner record can
+        // leave an empty or partial JSON file. Every production task holding
+        // this lock has a deadline well below the stale window, so an old
+        // malformed record cannot represent a valid owner.
+        retireStaleLock = true;
+      }
+    }
+    if (!retireStaleLock) return "present";
+    const beforeRetire = await lstat(lockPath);
+    if (
+      beforeRetire.isSymbolicLink() ||
+      beforeRetire.dev !== metadata.dev ||
+      beforeRetire.ino !== metadata.ino
+    ) {
+      return "present";
+    }
+    await rm(lockPath, { force: true });
+    return "retired";
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return "absent";
+    throw new Error("Claude OAuth refresh lock is unavailable");
+  } finally {
+    await staleHandle.close();
+  }
+}
+
 export async function withMacClaudeRefreshLock<T>(
   task: () => Promise<T>,
   options: { readonly lockRoot?: string } = {},
@@ -654,62 +720,9 @@ export async function withMacClaudeRefreshLock<T>(
   const lockPath = path.join(lockRoot, "claude-oauth-refresh.lock");
   const deadline = Date.now() + REFRESH_LOCK_WAIT_MS;
   while (true) {
-    let handle;
-    try {
-      handle = await open(lockPath, "wx", 0o600);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-      try {
-        const staleHandle = await open(
-          lockPath,
-          fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
-        );
-        try {
-          const metadata = await staleHandle.stat();
-          if (!metadata.isFile() || metadata.nlink !== 1) {
-            throw new Error("Claude OAuth refresh lock is unsafe");
-          }
-          if (
-            metadata.size <= 256 &&
-            Date.now() - metadata.mtimeMs > REFRESH_LOCK_STALE_MS
-          ) {
-            let retireStaleLock = metadata.size === 0;
-            if (!retireStaleLock) {
-              try {
-                const parsed = JSON.parse(
-                  await staleHandle.readFile("utf8"),
-                ) as {
-                  version?: unknown;
-                  pid?: unknown;
-                };
-                retireStaleLock =
-                  parsed.version === 1 &&
-                  Number.isSafeInteger(parsed.pid) &&
-                  Number(parsed.pid) > 0 &&
-                  !isProcessAlive(Number(parsed.pid));
-              } catch {
-                // A crash between O_EXCL creation and the fsynced owner record
-                // can leave an empty or partial JSON file. Every production task
-                // holding this lock has a deadline well below the stale window,
-                // so an old malformed record cannot represent a valid owner.
-                retireStaleLock = true;
-              }
-            }
-            if (retireStaleLock) {
-              const current = await lstat(lockPath);
-              if (current.dev === metadata.dev && current.ino === metadata.ino) {
-                await rm(lockPath, { force: true });
-                continue;
-              }
-            }
-          }
-        } finally {
-          await staleHandle.close();
-        }
-      } catch (lockError) {
-        if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;
-        throw new Error("Claude OAuth refresh lock is unavailable");
-      }
+    const existing = await inspectMacClaudeRefreshLock(lockPath);
+    if (existing === "retired") continue;
+    if (existing === "present") {
       if (Date.now() >= deadline) {
         throw new Error("Claude OAuth refresh lock timed out");
       }
@@ -717,6 +730,14 @@ export async function withMacClaudeRefreshLock<T>(
         setTimeout(resolve, REFRESH_LOCK_RETRY_MS),
       );
       continue;
+    }
+
+    let handle;
+    try {
+      handle = await open(lockPath, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") continue;
+      throw error;
     }
 
     // Keep lock acquisition separate from the protected task. In particular,

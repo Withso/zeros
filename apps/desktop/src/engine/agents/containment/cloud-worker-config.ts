@@ -1,6 +1,5 @@
 import {
   closeSync,
-  constants as fsConstants,
   fstatSync,
   lstatSync,
   openSync,
@@ -139,10 +138,7 @@ export function loadCloudWorkerConfiguration(
 ): CloudWorkerConfiguration | null {
   let descriptor: number;
   try {
-    descriptor = openSync(
-      file,
-      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
-    );
+    descriptor = openSync(file, "r");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;

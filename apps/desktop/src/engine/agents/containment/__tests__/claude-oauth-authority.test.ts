@@ -1,4 +1,12 @@
-import { lstat, mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  rm,
+  symlink,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -43,6 +51,25 @@ describe("Claude OAuth host authority", () => {
         withMacClaudeRefreshLock(async () => "recovered", { lockRoot }),
       ).resolves.toBe("recovered");
       await expect(lstat(lockPath)).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a refresh lock reached through a symbolic link", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-claude-lock-test-"));
+    const lockRoot = path.join(root, "credentials");
+    const lockPath = path.join(lockRoot, "claude-oauth-refresh.lock");
+    const target = path.join(root, "attacker-controlled-lock");
+    try {
+      await mkdir(lockRoot, { recursive: true, mode: 0o700 });
+      await writeFile(target, "", { mode: 0o600, flag: "wx" });
+      await symlink(target, lockPath);
+
+      await expect(
+        withMacClaudeRefreshLock(async () => "unsafe", { lockRoot }),
+      ).rejects.toThrow("Claude OAuth refresh lock is unavailable");
+      await expect(lstat(target)).resolves.toMatchObject({ size: 0 });
     } finally {
       await rm(root, { recursive: true, force: true });
     }

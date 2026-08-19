@@ -907,10 +907,7 @@ function findWorktreeTerritory(cwd: string): {
     try {
       let descriptor: number;
       try {
-        descriptor = openSync(
-          dotGit,
-          fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
-        );
+        descriptor = openSync(dotGit, "r");
       } catch (error) {
         // Windows does not consistently allow opening a directory as a file
         // descriptor. This fallback never reads a checked path; it only
@@ -923,10 +920,20 @@ function findWorktreeTerritory(cwd: string): {
       }
       try {
         const value = fstatSync(descriptor);
+        const currentEntry = lstatSync(dotGit);
+        if (
+          currentEntry.isSymbolicLink() ||
+          currentEntry.dev !== value.dev ||
+          currentEntry.ino !== value.ino
+        ) {
+          throw new Error("unstable .git entry");
+        }
         if (value.isDirectory()) {
           return { root: current, metadata: [realpathSync(dotGit)] };
         }
-        if (!value.isFile()) throw new Error("unsupported .git entry");
+        if (!value.isFile() || value.nlink !== 1) {
+          throw new Error("unsupported .git entry");
+        }
         const source = readFileSync(descriptor, "utf8").slice(0, 16_384);
         const match = /^gitdir:\s*(.+?)\s*$/im.exec(source);
         if (match?.[1]) {
