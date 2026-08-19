@@ -2,9 +2,109 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   RuntimeClient,
+  cloudRuntimeWebSocketProtocols,
   describeConnectionRejection,
   isRejectionRetryableAfterEngineRestart,
+  parseRuntimeConnectionTarget,
 } from "../ws-client";
+
+describe("qualified cloud runtime connection target", () => {
+  it("uses WSS and a subprotocol bearer, never a token query", () => {
+    const now = 1_800_000_000_000;
+    const target = parseRuntimeConnectionTarget(
+      {
+        kind: "cloud",
+        url: "wss://engine.preview.example/ws",
+        cloudToken: "worker-minted-connection-token",
+        expiresAt: now + 60_000,
+      },
+      now,
+    );
+    if (target.kind !== "cloud") throw new Error("expected cloud target");
+    expect(target).toEqual({
+      kind: "cloud",
+      url: "wss://engine.preview.example/ws",
+      cloudToken: "worker-minted-connection-token",
+      expiresAt: now + 60_000,
+    });
+    const protocols = cloudRuntimeWebSocketProtocols(target.cloudToken);
+    expect(protocols[0]).toBe("zeros-v1");
+    expect(protocols.join(",")).not.toContain(target.cloudToken);
+    expect(new URL(target.url).search).toBe("");
+  });
+
+  it.each([
+    {
+      kind: "cloud",
+      url: "ws://engine.example/ws",
+      cloudToken: "x".repeat(20),
+      expiresAt: 1_800_000_060_000,
+    },
+    {
+      kind: "cloud",
+      url: "wss://engine.example/ws?token=leak",
+      cloudToken: "x".repeat(20),
+      expiresAt: 1_800_000_060_000,
+    },
+    {
+      kind: "cloud",
+      url: "wss://engine.example/not-ws",
+      cloudToken: "x".repeat(20),
+      expiresAt: 1_800_000_060_000,
+    },
+    {
+      kind: "cloud",
+      url: "wss://engine.example/ws",
+      cloudToken: "short",
+      expiresAt: 1_800_000_060_000,
+    },
+    {
+      kind: "cloud",
+      url: "wss://engine.example/ws",
+      cloudToken: "x".repeat(20),
+      expiresAt: 1_799_999_999_999,
+    },
+  ])("rejects an unsafe or expired target %#", (target) => {
+    expect(() =>
+      parseRuntimeConnectionTarget(target, 1_800_000_000_000),
+    ).toThrow(/cloud runtime connection/i);
+  });
+
+  it("expires an installed descriptor exactly once instead of reconnecting with stale authority", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_800_000_000_000);
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    try {
+      const client = new RuntimeClient({
+        kind: "cloud",
+        url: "wss://engine.preview.example/ws",
+        cloudToken: "worker-minted-connection-token",
+        expiresAt: 1_800_000_060_000,
+      });
+      const expired: number[] = [];
+      client.onConnectionTargetExpired(() => {
+        throw new Error("broken observer");
+      });
+      client.onConnectionTargetExpired((event) =>
+        expired.push(event.expiresAt),
+      );
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(expired).toEqual([1_800_000_060_000]);
+      expect(client.status).toBe("disconnected");
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(expired).toHaveLength(1);
+      expect(consoleError).toHaveBeenCalledOnce();
+      client.dispose();
+    } finally {
+      consoleError.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
 
 describe("RuntimeClient correlated domain errors", () => {
   it("resolves WORKSPACE_ERROR intact for workspaceOp to classify", async () => {

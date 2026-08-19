@@ -118,6 +118,19 @@ describe("resolveValidModelId (pure)", () => {
   });
 });
 
+describe("CursorSdkAdapter — provider-neutral initialization", () => {
+  it("does not start SDK work merely because the engine inherited a key", async () => {
+    process.env.CURSOR_API_KEY = "key_must_remain_idle";
+    const adapter = new CursorSdkAdapter(makeCtx());
+
+    await adapter.initialize();
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    expect(modelsListSpy).not.toHaveBeenCalled();
+    expect(createSpy).not.toHaveBeenCalled();
+  });
+});
+
 describe("applyCursorReasoning (pure) — Effort/Fast pills swap to a variant id", () => {
   // Cursor bakes reasoning + speed into the MODEL ID (no separate SDK field),
   // so the composer's Effort/Fast pills can only take effect by swapping to a
@@ -382,6 +395,70 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
       model: { id: "composer-2.5" },
     });
     expect(completed.response.effectiveModel).toBe("composer-2.5");
+  });
+
+  it("surfaces wait().result when a successful run streams no assistant event", async () => {
+    sendSpy.mockResolvedValueOnce({
+      id: "run-final-only",
+      stream: async function* () {
+        yield { type: "status", status: "RUNNING" };
+      },
+      wait: async () => ({ status: "finished", result: "PINGOK" }),
+      cancel: async () => {},
+    });
+    const ctx = makeCtx();
+    const updateSpy = vi.fn();
+    ctx.emit.onSessionUpdate = updateSpy;
+    const adapter = new CursorSdkAdapter(ctx);
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    expect(
+      updateSpy.mock.calls.map(([, notification]) =>
+        notification.update.sessionUpdate === "agent_message_chunk"
+          ? notification.update.content.text
+          : null,
+      ),
+    ).toContain("PINGOK");
+  });
+
+  it("does not duplicate wait().result after assistant text was streamed", async () => {
+    sendSpy.mockResolvedValueOnce({
+      id: "run-stream-and-final",
+      stream: async function* () {
+        yield {
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "PINGOK" }],
+          },
+        };
+      },
+      wait: async () => ({ status: "finished", result: "PINGOK" }),
+      cancel: async () => {},
+    });
+    const ctx = makeCtx();
+    const updateSpy = vi.fn();
+    ctx.emit.onSessionUpdate = updateSpy;
+    const adapter = new CursorSdkAdapter(ctx);
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+
+    await adapter.prompt({ sessionId: session.sessionId, prompt: TEXT });
+
+    expect(
+      updateSpy.mock.calls.flatMap(([, notification]) =>
+        notification.update.sessionUpdate === "agent_message_chunk"
+          ? [notification.update.content.text]
+          : [],
+      ),
+    ).toEqual(["PINGOK"]);
   });
 
   it("returns the SDK's per-turn token usage from the stream", async () => {
@@ -713,5 +790,84 @@ describe("CursorSdkAdapter — reject-recovery on a model the account can't run"
     });
     // No wasted retry on a non-model failure.
     expect(sendSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("CursorSdkAdapter — multi-root workspaces (@cursor/sdk 1.0.28 local.dirs)", () => {
+  it("carries /add-dir directories into local.dirs with cwd first", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_test",
+        ZEROS_ADDITIONAL_DIRS: '["/work/api","/work/web","/tmp/proj"]',
+      },
+    });
+
+    const [opts] = createSpy.mock.calls[0];
+    // cwd stays the PRIMARY root (shell cwd + agent-store scoping); the extra
+    // roots widen rule/skill/context loading. The duplicate cwd entry is dropped.
+    expect(opts.local.cwd).toBe("/tmp/proj");
+    expect(opts.local.dirs).toEqual(["/tmp/proj", "/work/api", "/work/web"]);
+  });
+
+  it("omits local.dirs entirely for a single-root chat", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+    expect(createSpy.mock.calls[0][0].local).not.toHaveProperty("dirs");
+  });
+
+  it("ignores a malformed or relative additional-dirs value", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_test",
+        ZEROS_ADDITIONAL_DIRS: '["relative/path", 7, "  "]',
+      },
+    });
+    expect(createSpy.mock.calls[0][0].local).not.toHaveProperty("dirs");
+
+    createSpy.mockClear();
+    const tolerant = new CursorSdkAdapter(makeCtx());
+    await tolerant.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test", ZEROS_ADDITIONAL_DIRS: "not-json" },
+    });
+    expect(createSpy.mock.calls[0][0].local).not.toHaveProperty("dirs");
+  });
+});
+
+describe("CursorSdkAdapter — model discovery is bounded at session start", () => {
+  it("creates the agent without waiting out a hung catalog request", async () => {
+    let releaseCatalog = () => {};
+    modelsListSpy.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseCatalog = () => resolve([{ id: "composer-2.5" }]);
+        }),
+    );
+    vi.useFakeTimers();
+    try {
+      const adapter = new CursorSdkAdapter(makeCtx());
+      const flight = adapter.newSession({
+        cwd: "/tmp/proj",
+        env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "composer-2.5" },
+      });
+      // Nothing created yet: the catalog request is still outstanding.
+      await vi.advanceTimersByTimeAsync(100);
+      expect(createSpy).not.toHaveBeenCalled();
+      // Past the start budget, the session goes ahead without the catalog.
+      await vi.advanceTimersByTimeAsync(2_500);
+      await flight;
+      expect(createSpy).toHaveBeenCalledTimes(1);
+      expect(createSpy.mock.calls[0][0].model).toEqual({ id: "composer-2.5" });
+    } finally {
+      releaseCatalog();
+      vi.useRealTimers();
+    }
   });
 });

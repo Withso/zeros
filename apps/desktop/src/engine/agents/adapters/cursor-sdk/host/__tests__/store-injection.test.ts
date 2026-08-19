@@ -10,7 +10,10 @@
 
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
+import { createServer, type Server } from "node:net";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -28,10 +31,56 @@ class Host {
   >();
   private readyPromise: Promise<void>;
 
-  constructor() {
+  constructor(
+    options: {
+      cwd?: string;
+      stateRoot?: string;
+      defaultStateRoot?: string;
+      httpsProxy?: string;
+      http2Target?: string;
+      ripgrepBoundaryProbe?: boolean;
+      reportScanTtl?: boolean;
+      ripwalkCacheTtlMs?: string;
+    } = {},
+  ) {
     this.child = spawn(process.execPath, [HOST], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ZEROS_CURSOR_SDK_ENTRY: STUB },
+      cwd: options.cwd,
+      env: {
+        ...process.env,
+        ZEROS_CURSOR_SDK_ENTRY: STUB,
+        ...(options.stateRoot
+          ? { ZEROS_CURSOR_STATE_ROOT: options.stateRoot }
+          : {}),
+        ...(options.defaultStateRoot
+          ? {
+              ZEROS_CURSOR_STUB_DEFAULT_STATE_ROOT: options.defaultStateRoot,
+            }
+          : {}),
+        ...(options.httpsProxy
+          ? {
+              HTTP_PROXY: options.httpsProxy,
+              HTTPS_PROXY: options.httpsProxy,
+              NO_PROXY: "",
+              NODE_USE_ENV_PROXY: "1",
+            }
+          : {}),
+        ...(options.http2Target
+          ? { ZEROS_CURSOR_STUB_HTTP2_TARGET: options.http2Target }
+          : {}),
+        ...(options.ripgrepBoundaryProbe
+          ? {
+              CURSOR_RIPGREP_PATH: process.execPath,
+              ZEROS_CURSOR_STUB_RIPGREP_BOUNDARY: "1",
+            }
+          : {}),
+        ...(options.reportScanTtl
+          ? { ZEROS_CURSOR_STUB_REPORT_SCAN_TTL: "1" }
+          : {}),
+        ...(options.ripwalkCacheTtlMs === undefined
+          ? {}
+          : { CURSOR_RIPWALK_CACHE_TTL_MS: options.ripwalkCacheTtlMs }),
+      },
     });
     let signalReady = () => {};
     this.readyPromise = new Promise<void>((r) => (signalReady = () => r()));
@@ -88,8 +137,8 @@ class Host {
 }
 
 let host: Host | null = null;
-function startHost(): Host {
-  host = new Host();
+function startHost(options?: ConstructorParameters<typeof Host>[0]): Host {
+  host = new Host(options);
   return host;
 }
 
@@ -98,7 +147,144 @@ afterEach(() => {
   host = null;
 });
 
+describe("cursor host — workspace scan cache TTL", () => {
+  // The host prewarms the workspace executor during session start so the first
+  // turn doesn't pay for the scan. The SDK's 20s default expires that warm scan
+  // while the user is still reading the chat they just opened, so the turn
+  // re-walks anyway and the prewarm buys nothing.
+  it("widens the scan cache so a prewarmed workspace survives until the user sends", async () => {
+    const h = startHost({ reportScanTtl: true });
+    await h.ready();
+    const res = await h.req<{ agentId: string }>("agent.create", {
+      cwd: "/w/alpha",
+      local: { cwd: "/w/alpha" },
+    });
+    expect(res.agentId).toBe(`scanTtl:${5 * 60_000}`);
+  });
+
+  it("defers to an operator-set CURSOR_RIPWALK_CACHE_TTL_MS", async () => {
+    // The SDK reads a configured value AHEAD of the env var, so honouring the
+    // environment means configuring nothing at all — not configuring a value we
+    // believe matches it.
+    const h = startHost({ reportScanTtl: true, ripwalkCacheTtlMs: "60000" });
+    await h.ready();
+    const res = await h.req<{ agentId: string }>("agent.create", {
+      cwd: "/w/alpha",
+      local: { cwd: "/w/alpha" },
+    });
+    expect(res.agentId).toBe("scanTtl:unset");
+  });
+});
+
 describe("cursor host — local agent store injection", () => {
+  it("keeps Cursor ripgrep scans away from the protected canonical .git entry", async () => {
+    const temporary = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-cursor-ripgrep-boundary-"),
+    );
+    try {
+      const h = startHost({
+        stateRoot: path.join(temporary, "private-state"),
+        ripgrepBoundaryProbe: true,
+      });
+      await h.ready();
+      const res = await h.req<{ agentId: string }>("agent.create", {
+        cwd: "/w/alpha",
+        local: { cwd: "/w/alpha" },
+      });
+      const args = JSON.parse(
+        res.agentId.slice("ripgrep:".length),
+      ) as string[];
+      const searchPathSeparator = args.indexOf("--");
+      expect(searchPathSeparator).toBeGreaterThan(0);
+      expect(args.slice(0, searchPathSeparator)).toEqual(
+        expect.arrayContaining([
+          "--iglob",
+          "!.git",
+          "--iglob",
+          "!**/.git",
+        ]),
+      );
+      expect(args.slice(searchPathSeparator)).toEqual(["--", "src"]);
+    } finally {
+      host?.dispose();
+      host = null;
+      await rm(temporary, { recursive: true, force: true });
+    }
+  });
+
+  it("routes Cursor's node:http2 transport through the contained HTTPS proxy", async () => {
+    const connectLines: string[] = [];
+    const tunnelPrefixes: Buffer[] = [];
+    let resolveTunnelPrefix = () => {};
+    const tunnelPrefixObserved = new Promise<void>((resolve) => {
+      resolveTunnelPrefix = resolve;
+    });
+    const proxy: Server = createServer((socket) => {
+      let request = Buffer.alloc(0);
+      let connected = false;
+      const captureTunnelPrefix = (bytes: Buffer) => {
+        if (tunnelPrefixes.length > 0 || bytes.length < 3) return;
+        tunnelPrefixes.push(bytes.subarray(0, 3));
+        resolveTunnelPrefix();
+        socket.destroy();
+      };
+      socket.on("error", () => {});
+      socket.on("data", (chunk) => {
+        const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        if (connected) {
+          captureTunnelPrefix(bytes);
+          return;
+        }
+        request = Buffer.concat([request, bytes]);
+        const marker = request.indexOf("\r\n\r\n");
+        if (marker === -1) return;
+        const head = request.subarray(0, marker).toString("latin1");
+        connectLines.push(head.split("\r\n", 1)[0] ?? "");
+        connected = true;
+        socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+        captureTunnelPrefix(request.subarray(marker + 4));
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      proxy.once("error", reject);
+      proxy.listen(0, "127.0.0.1", resolve);
+    });
+    try {
+      const address = proxy.address();
+      if (!address || typeof address === "string")
+        throw new Error("test proxy has no TCP port");
+      const h = startHost({
+        httpsProxy: `http://127.0.0.1:${address.port}`,
+        http2Target: "https://api2.cursor.invalid",
+      });
+      await h.ready();
+      await h.req("agent.create", {
+        cwd: "/w/alpha",
+        local: { cwd: "/w/alpha" },
+      });
+      await Promise.race([
+        tunnelPrefixObserved,
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error("test proxy saw no tunnel payload")),
+            2_000,
+          ),
+        ),
+      ]);
+      expect(connectLines).toEqual([
+        "CONNECT api2.cursor.invalid:443 HTTP/1.1",
+      ]);
+      // HTTP/2 through an HTTPS proxy must begin with TLS, not send the raw
+      // cleartext HTTP/2 preface ("PRI") into the CONNECT tunnel.
+      expect(tunnelPrefixes[0]?.[0]).toBe(0x16);
+      expect(tunnelPrefixes[0]?.[1]).toBe(0x03);
+    } finally {
+      host?.dispose();
+      host = null;
+      await new Promise<void>((resolve) => proxy.close(() => resolve()));
+    }
+  });
+
   it("attaches a store at local.store for agent.create, rooted at the SDK's own per-workspace state root", async () => {
     const h = startHost();
     await h.ready();
@@ -109,6 +295,44 @@ describe("cursor host — local agent store injection", () => {
     // Not "none": the SDK must never be left to resolve its own default, which
     // is the node:sqlite default that caused the historical packaged failure.
     expect(res.agentId).toBe("create:store1@/state-root/w/alpha");
+  });
+
+  it("seeds and exclusively uses the ZSR private provider-state root", async () => {
+    const temporary = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-cursor-host-state-"),
+    );
+    try {
+      const workspace = path.join(temporary, "workspace");
+      const source = path.join(temporary, "normal-state");
+      const privateState = path.join(temporary, "private-state");
+      await Promise.all([
+        mkdir(workspace, { recursive: true }),
+        mkdir(source, { recursive: true }),
+        mkdir(privateState, { recursive: true }),
+      ]);
+      await writeFile(
+        path.join(source, "agents.ndjson"),
+        '{"agentId":"existing"}\n',
+      );
+      const h = startHost({
+        cwd: workspace,
+        stateRoot: privateState,
+        defaultStateRoot: source,
+      });
+      await h.ready();
+      expect(
+        await readFile(path.join(privateState, "agents.ndjson"), "utf8"),
+      ).toBe('{"agentId":"existing"}\n');
+      const res = await h.req<{ agentId: string }>("agent.create", {
+        cwd: workspace,
+        local: { cwd: workspace },
+      });
+      expect(res.agentId).toBe(`create:store1@${privateState}`);
+    } finally {
+      host?.dispose();
+      host = null;
+      await rm(temporary, { recursive: true, force: true });
+    }
   });
 
   it("attaches a store for agent.resume too — resume hits the same default-store path as create", async () => {
@@ -207,7 +431,10 @@ describe("cursor host — local agent store injection", () => {
     // overridden, so it is pinned rather than left to chance.
     const res = await h.req<{ agentId: string }>("agent.create", {
       cwd: "/w/alpha",
-      local: { cwd: "/w/alpha", store: { instanceId: "mine", rootDir: "/mine" } },
+      local: {
+        cwd: "/w/alpha",
+        store: { instanceId: "mine", rootDir: "/mine" },
+      },
     });
     expect(res.agentId).toBe("create:mine@/mine");
   });

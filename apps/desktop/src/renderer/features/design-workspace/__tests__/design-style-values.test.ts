@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  designStylePropertyAffectsLayout,
   designStyleFieldValue,
   isDesignRuntimeStylePropertyAuthored,
+  normalizeDesignStyleFieldInput,
   resolveDesignNumericExpression,
   scrubDesignNumericValue,
   parseDesignCssDeclarations,
@@ -134,6 +136,52 @@ describe("design style values", () => {
     expect(resolveDesignNumericExpression("*2", "24px")).toBe("48px");
     expect(resolveDesignNumericExpression("(x / 2) + 6", "24px")).toBe("18px");
     expect(resolveDesignNumericExpression("18px", "24px")).toBe("18px");
+  });
+
+  it("normalizes design-tool numeric input with property-aware CSS units", () => {
+    expect(normalizeDesignStyleFieldInput("width", "320", "240px")).toBe(
+      "320px",
+    );
+    expect(normalizeDesignStyleFieldInput("width", "+16", "240px")).toBe(
+      "256px",
+    );
+    expect(
+      normalizeDesignStyleFieldInput("transition-duration", "180", "0s"),
+    ).toBe("180ms");
+    expect(normalizeDesignStyleFieldInput("opacity", "0.5", "1")).toBe("0.5");
+    expect(normalizeDesignStyleFieldInput("outline-offset", "-2", "0px")).toBe(
+      "-2px",
+    );
+    expect(normalizeDesignStyleFieldInput("text-indent", "+8", "16px")).toBe(
+      "24px",
+    );
+    expect(
+      normalizeDesignStyleFieldInput(
+        "grid-template-columns",
+        "1fr minmax(0, 2fr)",
+        "none",
+      ),
+    ).toBe("1fr minmax(0, 2fr)");
+  });
+
+  it("classifies every geometry-producing property for live canvas readback", () => {
+    for (const property of [
+      "width",
+      "padding-left",
+      "gap",
+      "font-size",
+      "font-style",
+      "word-break",
+      "writing-mode",
+      "grid-template-columns",
+      "grid-column",
+      "float",
+      "transform",
+    ]) {
+      expect(designStylePropertyAffectsLayout(property), property).toBe(true);
+    }
+    expect(designStylePropertyAffectsLayout("background-color")).toBe(false);
+    expect(designStylePropertyAffectsLayout("opacity")).toBe(false);
   });
 
   it("makes authored offsets effective for statically positioned elements", () => {

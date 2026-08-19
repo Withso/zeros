@@ -516,6 +516,37 @@ describe("normalizeWorkbenchTabs", () => {
     });
   });
 
+  it("persists only safe preview routing identity behind a loopback URL", () => {
+    const out = normalizeWorkbenchTabs([
+      {
+        id: "preview-safe",
+        type: "browser",
+        title: "localhost:5173",
+        url: "http://localhost:5173/",
+        previewSource: {
+          chatId: "chat-safe",
+          port: 5173,
+          admissionUrl:
+            "https://41000-provider-secret.preview.example/?__zsr_cap=secret",
+        },
+      } as unknown as WorkbenchTab,
+      {
+        id: "preview-external",
+        type: "browser",
+        title: "External",
+        url: "https://example.com/",
+        previewSource: { chatId: "chat-unsafe", port: 5173 },
+      } as unknown as WorkbenchTab,
+    ]);
+    expect(out.find((tab) => tab.id === "preview-safe")?.previewSource).toEqual(
+      { chatId: "chat-safe", port: 5173 },
+    );
+    expect(JSON.stringify(out)).not.toContain("provider-secret");
+    expect(
+      out.find((tab) => tab.id === "preview-external")?.previewSource,
+    ).toBeUndefined();
+  });
+
   it("promotes one Changes/Review pair, preserves selection, and drops legacy types", () => {
     const input = [
       {

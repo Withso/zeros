@@ -447,6 +447,10 @@ export function toBridgeAgents(
    *  vitest the real Claude runtime always resolves, which is exactly the blind
    *  spot that let the packaged bug ship). */
   manifest: AgentManifestEntry[] = AGENT_MANIFEST,
+  /** Safe, already-redacted reasons an authentication probe could not run.
+   * Absence from the authenticated set means signed out only when this map has
+   * no entry for the provider. */
+  authenticationUnavailableByAgentId?: ReadonlyMap<string, string>,
 ): EnrichedRegistryAgent[] {
   return manifest.map((m) => {
     // Can the runtime we'd actually spawn be found? For bundled-runtime agents
@@ -454,14 +458,19 @@ export function toBridgeAgents(
     // to whether chats work.
     const runtimeUnavailableReason =
       m.runtimeUnavailable?.(runtimeOverrides?.get(m.id)) ?? undefined;
+    const selectedBinary = runtimeOverrides?.get(m.id) ?? m.cliBinary;
     // SDK-backed agents (bundledRuntime) ship with the app, so they're
     // always "installed" — no `cliBinary` on PATH required — UNLESS the shipped
     // runtime is actually missing, which is a packaging defect we must surface
     // rather than paper over.
     const installed = runtimeUnavailableReason
       ? false
-      : m.bundledRuntime === true || installedBinaries.has(m.cliBinary);
+      : m.bundledRuntime === true || installedBinaries.has(selectedBinary);
     const vinfo = versionInfoByAgentId?.get(m.id);
+    const authenticationUnavailableReason =
+      runtimeUnavailableReason || !installed
+        ? undefined
+        : authenticationUnavailableByAgentId?.get(m.id);
     return {
       id: m.id,
       name: m.name,
@@ -494,7 +503,10 @@ export function toBridgeAgents(
       // "will work", and it cannot work without a runtime.
       authenticated: runtimeUnavailableReason
         ? false
-        : authenticatedAgentIds?.has(m.id),
+        : authenticationUnavailableReason
+          ? undefined
+          : authenticatedAgentIds?.has(m.id),
+      authenticationUnavailableReason,
       runtimeUnavailableReason,
       installedVersion: vinfo?.installedVersion,
       versionCompatible: vinfo?.versionCompatible,

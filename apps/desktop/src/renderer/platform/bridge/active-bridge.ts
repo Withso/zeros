@@ -19,7 +19,10 @@
 // onActiveBridgeChange when it only needs the client instance.
 // ──────────────────────────────────────────────────────────
 
-import type { RuntimeClient } from "./ws-client";
+import type {
+  RuntimeClient,
+  RuntimeConnectionTarget,
+} from "./ws-client";
 
 let active: RuntimeClient | null = null;
 type ActiveBridgeListener = (client: RuntimeClient | null) => void;
@@ -38,6 +41,17 @@ export function setActiveBridge(client: RuntimeClient | null): void {
 
 export function getActiveBridge(): RuntimeClient | null {
   return active;
+}
+
+/** Install a coordinator-minted local/cloud descriptor in the one live bridge.
+ * The descriptor is deliberately never cached in localStorage, SQLite, URL
+ * state, or this module; the RuntimeClient owns it only for its process life. */
+export async function installActiveRuntimeConnectionTarget(
+  target: RuntimeConnectionTarget,
+): Promise<void> {
+  const client = active;
+  if (!client) throw new Error("No active runtime bridge is available");
+  await client.setConnectionTarget(target);
 }
 
 /** Translate a bridge connection callback into a keyed-cache freshness policy.

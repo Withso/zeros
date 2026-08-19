@@ -1,4 +1,5 @@
 import React, { useCallback, useLayoutEffect, useRef, useState } from "react";
+import type { Workspace } from "../../platform/git";
 
 import { useResizeHint } from "../../shell/use-resize-hint";
 import { cn } from "../../shared/ui/cn";
@@ -25,13 +26,24 @@ const DRAG_THRESHOLD_PX = 3;
 export function DesignWorkspaceSidebar({
   surfaceActive,
   canvasCollapsed = false,
+  workspace = null,
+  folder = null,
 }: {
   surfaceActive: boolean;
   canvasCollapsed?: boolean;
+  workspace?: Workspace | null;
+  folder?: string | null;
 }) {
   const sectionRef = useRef<HTMLElement | null>(null);
   const [ratio, setRatio] = useState(readPersistedDesignWorkspaceSidebarRatio);
   const { hintHandlers, hint } = useResizeHint("Drag to resize");
+  const ownerSuffix = workspace?.id ?? null;
+  const sidebarId = ownerSuffix
+    ? `design-workspace-sidebar-${ownerSuffix}`
+    : "design-workspace-sidebar";
+  const panelId = ownerSuffix
+    ? `design-layers-panel-${ownerSuffix}`
+    : "design-layers-panel";
 
   useLayoutEffect(() => {
     sectionRef.current?.parentElement?.style.setProperty(
@@ -153,7 +165,7 @@ export function DesignWorkspaceSidebar({
   return (
     <section
       ref={sectionRef}
-      id="design-workspace-sidebar"
+      id={sidebarId}
       data-design-workspace-surface=""
       aria-label="Design workspace sidebar"
       className={cn(
@@ -161,12 +173,17 @@ export function DesignWorkspaceSidebar({
         canvasCollapsed ? SIDEBAR_WIDE_CLS : SIDEBAR_OPEN_CLS,
       )}
     >
-      <DesignWorkspaceSidebarPanels surfaceActive={surfaceActive} />
+      <DesignWorkspaceSidebarPanels
+        surfaceActive={surfaceActive}
+        workspace={workspace}
+        folder={folder}
+        panelId={panelId}
+      />
       <div
         role="separator"
         aria-orientation="vertical"
         aria-label="Resize design sidebar"
-        aria-controls="design-workspace-sidebar"
+        aria-controls={sidebarId}
         aria-valuemin={10}
         aria-valuemax={50}
         aria-valuenow={Math.round(ratio * 100)}

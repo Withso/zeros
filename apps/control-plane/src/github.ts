@@ -10,8 +10,10 @@ import {
   createDecipheriv,
   createHash,
   createHmac,
+  createPrivateKey,
   hkdfSync,
   randomBytes,
+  sign,
   timingSafeEqual,
 } from "node:crypto";
 import { Hono } from "hono";
@@ -62,6 +64,25 @@ const RefreshBindingSchema = z
   .min(32)
   .max(4096)
   .regex(/^zghrb_v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+const CloudInstallationTokenBodySchema = z
+  .object({
+    repositories: z
+      .array(
+        z
+          .string()
+          .trim()
+          .min(1)
+          .max(100)
+          .regex(/^[A-Za-z0-9._-]+$/),
+      )
+      .min(1)
+      .max(500)
+      .refine((items) => new Set(items).size === items.length, {
+        message: "Repository names must be unique",
+      })
+      .optional(),
+  })
+  .strict();
 
 type FetchLike = typeof fetch;
 
@@ -192,6 +213,58 @@ function sha256(value: string): Buffer {
 
 function base64url(value: Buffer): string {
   return value.toString("base64url");
+}
+
+/** GitHub requires RS256, an iat backdated for clock drift, and an exp no more
+ * than ten minutes ahead. The public client id is the recommended issuer. */
+export function createGithubAppJwt(
+  config: GithubBackendConfig,
+  nowMs: number = Date.now(),
+): string {
+  if (
+    !config.privateKey ||
+    !Number.isSafeInteger(nowMs) ||
+    nowMs <= 0
+  ) {
+    throw new HttpError(
+      503,
+      "github_cloud_not_configured",
+      "Cloud GitHub access is not configured on this Zeros control plane.",
+    );
+  }
+  let key;
+  try {
+    key = createPrivateKey(config.privateKey);
+  } catch {
+    throw new HttpError(
+      503,
+      "github_cloud_not_configured",
+      "Cloud GitHub access is not configured on this Zeros control plane.",
+    );
+  }
+  if (key.asymmetricKeyType !== "rsa") {
+    throw new HttpError(
+      503,
+      "github_cloud_not_configured",
+      "Cloud GitHub access is not configured on this Zeros control plane.",
+    );
+  }
+  const header = Buffer.from(
+    JSON.stringify({ alg: "RS256", typ: "JWT" }),
+  ).toString("base64url");
+  const nowSeconds = Math.floor(nowMs / 1_000);
+  const payload = Buffer.from(
+    JSON.stringify({
+      iat: nowSeconds - 60,
+      exp: nowSeconds + 9 * 60,
+      iss: config.clientId,
+    }),
+  ).toString("base64url");
+  const unsigned = `${header}.${payload}`;
+  const signature = sign("RSA-SHA256", Buffer.from(unsigned), key).toString(
+    "base64url",
+  );
+  return `${unsigned}.${signature}`;
 }
 
 function pkceChallenge(verifier: string): string {
@@ -927,6 +1000,120 @@ async function revokeGithubAccessToken(
   return response.ok || response.status === 404;
 }
 
+interface CloudInstallationRow {
+  suspended_at: Date | null;
+}
+
+async function assertCloudInstallationAccess(
+  tx: Tx,
+  input: {
+    ownerUserId: string;
+    appVariant: string;
+    installationId: number;
+  },
+): Promise<void> {
+  // Look up the caller-owned row first. RLS plus the explicit owner predicate
+  // make a foreign id indistinguishable from a nonexistent id (404), even
+  // when the caller has never connected GitHub. Only a known owner should get
+  // authorization-expired or suspension detail.
+  const result = await tx.query<CloudInstallationRow>(
+    `SELECT suspended_at
+     FROM github_installations
+     WHERE owner_user_id = $1
+       AND app_variant = $2
+       AND github_installation_id = $3`,
+    [input.ownerUserId, input.appVariant, input.installationId],
+  );
+  const row = result.rows[0];
+  if (!row) {
+    throw new HttpError(
+      404,
+      "github_installation_not_found",
+      "This GitHub App installation is not connected to your account.",
+    );
+  }
+  await assertLiveAuthorization(tx, {
+    ownerUserId: input.ownerUserId,
+    appVariant: input.appVariant,
+  });
+  if (row.suspended_at) {
+    throw new HttpError(
+      409,
+      "github_installation_suspended",
+      "This GitHub App installation is suspended.",
+    );
+  }
+}
+
+async function revokeGithubInstallationToken(
+  fetchImpl: FetchLike,
+  config: GithubBackendConfig,
+  token: string,
+): Promise<void> {
+  await fetchWithTimeout(
+    fetchImpl,
+    `${config.apiBaseUrl}/installation/token`,
+    {
+      method: "DELETE",
+      headers: githubHeaders(token),
+    },
+  ).catch(() => undefined);
+}
+
+async function mintGithubInstallationToken(
+  fetchImpl: FetchLike,
+  config: GithubBackendConfig,
+  input: {
+    installationId: number;
+    repositories?: readonly string[];
+    nowMs: number;
+  },
+): Promise<{ token: string; expiresAtMs: number }> {
+  const response = await fetchWithTimeout(
+    fetchImpl,
+    `${config.apiBaseUrl}/app/installations/${input.installationId}/access_tokens`,
+    {
+      method: "POST",
+      headers: {
+        accept: "application/vnd.github+json",
+        authorization: `Bearer ${createGithubAppJwt(config, input.nowMs)}`,
+        "content-type": "application/json",
+        "user-agent": "zeros-control-plane",
+        "x-github-api-version": API_VERSION,
+      },
+      body: JSON.stringify(
+        input.repositories ? { repositories: input.repositories } : {},
+      ),
+    },
+  );
+  const raw = await responseJson(response);
+  const body =
+    raw && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)
+      : {};
+  const token = stringField(body.token, 4_096);
+  const expiresAtMs = Date.parse(String(body.expires_at ?? ""));
+  if (
+    !response.ok ||
+    response.status !== 201 ||
+    !token ||
+    !Number.isFinite(expiresAtMs) ||
+    expiresAtMs - input.nowMs < 5 * 60_000 ||
+    expiresAtMs - input.nowMs > 70 * 60_000
+  ) {
+    throw new HttpError(
+      response.status === 404 ? 404 : 503,
+      response.status === 404
+        ? "github_installation_not_found"
+        : "github_unavailable",
+      response.status === 404
+        ? "GitHub no longer recognizes this App installation."
+        : "GitHub could not issue a cloud workspace credential.",
+    );
+  }
+  return { token, expiresAtMs };
+}
+
 /** Send browser-only handoff material in the fragment so the hosted completion
  * page can offer an exact-channel Open Zeros link without exposing the nonce
  * to Cloudflare request logs, referrers, or query-string analytics. */
@@ -1628,19 +1815,92 @@ export function createGithubRoutes(
     });
   });
 
-  // Cloud workspace token minting is intentionally deferred. Keeping the
-  // route explicit prevents a future client from mistaking a 404 for support.
-  app.post("/v1/github/installations/:id/token", (c) =>
-    c.json(
-      {
-        error: {
-          code: "not_implemented",
-          message:
-            "GitHub App installation tokens are not available until cloud workspaces ship.",
-        },
-      },
-      501,
-    ),
+  app.post(
+    "/v1/github/installations/:id/token",
+    rateLimit("github-cloud-installation-token", 10, 60_000),
+    async (c) => {
+      const user = c.get("user");
+      const installationId = Number(c.req.param("id"));
+      if (
+        !Number.isSafeInteger(installationId) ||
+        installationId < 1
+      ) {
+        throw new HttpError(
+          422,
+          "invalid_input",
+          "GitHub installation id is invalid.",
+        );
+      }
+      const body = parse(
+        CloudInstallationTokenBodySchema,
+        await c.req.json().catch(() => ({})),
+      );
+      const access = {
+        ownerUserId: user.id,
+        appVariant: config.variantKey,
+        installationId,
+      };
+      // Authorize before touching GitHub. A caller cannot use this endpoint to
+      // probe whether another user's installation id exists.
+      await withUserTx(pool, user.id, (tx) =>
+        assertCloudInstallationAccess(tx, access),
+      );
+      const nowMs = now();
+      const minted = await mintGithubInstallationToken(fetchImpl, config, {
+        installationId,
+        ...(body.repositories ? { repositories: body.repositories } : {}),
+        nowMs,
+      });
+      // Disconnect/suspension can race the network round trip. Re-check before
+      // releasing the bearer, and revoke the just-created token on a lost race.
+      try {
+        await withUserTx(pool, user.id, (tx) =>
+          assertCloudInstallationAccess(tx, access),
+        );
+      } catch (error) {
+        await revokeGithubInstallationToken(
+          fetchImpl,
+          config,
+          minted.token,
+        );
+        throw error;
+      }
+      try {
+        await withUserTx(pool, user.id, (tx) =>
+          tx.query(
+            `INSERT INTO github_audit_log (
+               owner_user_id, actor_id, action, subject
+             ) VALUES ($1, $1, 'github.cloud_credential.minted', $2::jsonb)`,
+            [
+              user.id,
+              JSON.stringify({
+                appVariant: config.variantKey,
+                installationId,
+                repositoryCount: body.repositories?.length ?? null,
+                expiresAt: new Date(minted.expiresAtMs).toISOString(),
+              }),
+            ],
+          ),
+        );
+      } catch (error) {
+        console.warn(
+          `[github] cloud credential audit failed after mint: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+      return c.json({
+        method: "github-app",
+        accessToken: minted.token,
+        expiresAtMs: minted.expiresAtMs,
+        gitHost: "github.com",
+        gitHttpUsername: "x-access-token",
+        variantKey: config.variantKey,
+        ownerSubjectSha256: createHash("sha256")
+          .update(user.providerSub, "utf8")
+          .digest("hex"),
+      });
+    },
   );
 
   return app;

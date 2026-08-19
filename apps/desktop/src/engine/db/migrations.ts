@@ -857,6 +857,48 @@ CREATE INDEX idx_workspaces_organization
   ON workspaces(organization_id, placement, archived_at);
 `;
 
+/** v32 — split presentation state from actor authority. `view_mode` is the
+ * canonical presentation value; `kind` remains a mirrored DB/wire
+ * compatibility field for older clients. Neither field grants an agent any
+ * filesystem or tool capability. Runtime writes update both fields atomically;
+ * triggers cover older binaries and direct SQLite recovery tools. A legacy
+ * insert/update that supplies only `kind` is projected into `view_mode`; an
+ * explicit standalone `view_mode` repair is projected back into `kind`. */
+const MIGRATION_32_WORKSPACE_VIEW_MODE = `
+ALTER TABLE workspaces ADD COLUMN view_mode TEXT NOT NULL DEFAULT 'code'
+  CHECK (view_mode IN ('code', 'design'));
+UPDATE workspaces SET view_mode = kind;
+
+CREATE TRIGGER workspaces_kind_to_view_mode_insert
+AFTER INSERT ON workspaces
+WHEN NEW.view_mode <> NEW.kind
+BEGIN
+  UPDATE workspaces SET view_mode = NEW.kind WHERE id = NEW.id;
+END;
+CREATE TRIGGER workspaces_kind_to_view_mode_update
+AFTER UPDATE OF kind ON workspaces
+WHEN NEW.view_mode = OLD.view_mode AND NEW.view_mode <> NEW.kind
+BEGIN
+  UPDATE workspaces SET view_mode = NEW.kind WHERE id = NEW.id;
+END;
+CREATE TRIGGER workspaces_view_mode_to_kind_update
+AFTER UPDATE OF view_mode ON workspaces
+WHEN NEW.kind = OLD.kind AND NEW.kind <> NEW.view_mode
+BEGIN
+  UPDATE workspaces SET kind = NEW.view_mode WHERE id = NEW.id;
+END;
+`;
+
+/** v33 — append-only repair for internal foundation checkpoints that recorded
+ * retired workspace-command/artifact drafts as v28-v30 before the provider
+ * identity ladder landed on main. Those databases can already report v32 while
+ * lacking provider_binding/provider_metadata. The conditional JavaScript
+ * repair adds only the two final columns and backfills the existing durable
+ * session locator; a normal released database makes this migration a no-op. */
+const MIGRATION_33_CHAT_IDENTITY_SCHEMA_REPAIR = `
+SELECT 1;
+`;
+
 /** The ordered migration list. Append only — NEVER edit or reorder a shipped
  *  entry; add a new one. */
 export const MIGRATIONS: Migration[] = [
@@ -1010,6 +1052,16 @@ export const MIGRATIONS: Migration[] = [
     version: 31,
     name: "workspaces: organization owner + local/cloud placement",
     up: MIGRATION_31_WORKSPACE_OWNER,
+  },
+  {
+    version: 32,
+    name: "workspace view mode compatibility projection",
+    up: MIGRATION_32_WORKSPACE_VIEW_MODE,
+  },
+  {
+    version: 33,
+    name: "chat identity schema invariant repair",
+    up: MIGRATION_33_CHAT_IDENTITY_SCHEMA_REPAIR,
   },
 ];
 
@@ -1209,6 +1261,20 @@ function shouldRepairDraftChatIdentity(
     : !columns.has("provider_binding") || columns.has("provider_metadata");
 }
 
+/** Internal builds from before this feature was rebased recorded the view-mode
+ * projection as migration 28. The final ladder reserves 28-31 for mainline and
+ * appends view mode at 32. Detect the schema, repair the mainline columns while
+ * their old version markers are already occupied, then record 29-32 normally.
+ * This is development-build compatibility only; released databases take the
+ * ordinary append-only 28→32 path. */
+function hasDraftWorkspaceViewModeV28(db: Database.Database): boolean {
+  if (!tableColumns(db, "workspaces").has("view_mode")) return false;
+  const row = db
+    .prepare("SELECT name FROM schema_migrations WHERE version = 28")
+    .get() as { name: string } | undefined;
+  return row?.name === "workspace view mode compatibility projection";
+}
+
 export function runMigrations(db: Database.Database): void {
   db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -1223,6 +1289,7 @@ export function runMigrations(db: Database.Database): void {
     v: number | null;
   };
   const applied = row.v ?? 0;
+  const draftViewModeV28 = hasDraftWorkspaceViewModeV28(db);
   const pending = MIGRATIONS.filter((m) => m.version > applied).sort(
     (a, b) => a.version - b.version,
   );
@@ -1248,6 +1315,12 @@ export function runMigrations(db: Database.Database): void {
         repairDraftChatIdentityColumns(db);
         skipSql = true;
       }
+      if (m.version === 29 && draftViewModeV28) {
+        // v28 was consumed by the draft view-mode migration, so v29 must create
+        // both final identity columns and perform the ordinary legacy backfill.
+        repairDraftChatIdentityColumns(db);
+        skipSql = true;
+      }
       if (m.version === 30) repairDraftChatIdentityColumns(db);
       if (m.version === 31 && hasFeatureBranchWorkspaceOwnerColumns(db)) {
         db.exec(`
@@ -1256,6 +1329,10 @@ export function runMigrations(db: Database.Database): void {
         `);
         skipSql = true;
       }
+      if (m.version === 32 && tableColumns(db, "workspaces").has("view_mode")) {
+        skipSql = true;
+      }
+      if (m.version === 33) repairDraftChatIdentityColumns(db);
       // Early dev builds applied a draft v21 before payload_json existed.
       // SQLite has no portable ADD COLUMN IF NOT EXISTS, so v22 is an ordinary
       // tracked ALTER for those databases and a recorded no-op for fresh/final

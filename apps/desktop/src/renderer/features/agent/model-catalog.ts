@@ -28,6 +28,7 @@ import type {
   InitializeResponse,
   SessionMode,
 } from "../../platform/bridge/agent-events";
+import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 import type {
   ChatThread,
   ChatEffort,
@@ -738,6 +739,7 @@ export type PermissionMenuItem = { modeId: string; label: string };
 export function permissionMenuItems(
   agentId: string | null,
   model: string | null = null,
+  boundary: ExecutionBoundaryStatus | null = null,
 ): PermissionMenuItem[] {
   const fam = agentFamily(agentId);
   const order = PERMISSION_MODE_ORDER[fam];
@@ -745,9 +747,25 @@ export function permissionMenuItems(
   if (!order || !labels) return [];
   const m = (model ?? "").toLowerCase();
   const dropAuto = fam === "claude" && m.includes("haiku");
+  const designProtected =
+    boundary?.state === "ready" &&
+    boundary.designProtection.required &&
+    boundary.designProtection.enforced;
+  const bypassDisabled =
+    designProtected &&
+    boundary.parity.restrictions.includes("provider-bypass-mode-disabled");
   return order
-    .filter((id) => !(dropAuto && id === "auto"))
-    .map((id) => ({ modeId: id, label: labels[id] ?? id }));
+    .filter(
+      (id) =>
+        !(dropAuto && id === "auto") && !(bypassDisabled && id === "bypass"),
+    )
+    .map((id) => ({
+      modeId: id,
+      label:
+        designProtected && ["bypass", "full-access", "agent"].includes(id)
+          ? "Full Access — Design protected"
+          : (labels[id] ?? id),
+    }));
 }
 
 /** Whether the composer's permission toggle should render for this agent+model
@@ -797,9 +815,10 @@ export function coerceModeIdForModel(
   agentId: string | null,
   model: string | null,
   modeId: string | null,
+  boundary: ExecutionBoundaryStatus | null = null,
 ): string | null {
   if (!modeId) return modeId;
-  const items = permissionMenuItems(agentId, model);
+  const items = permissionMenuItems(agentId, model, boundary);
   if (items.length === 0) return modeId;
   if (items.some((i) => i.modeId === modeId)) return modeId;
   return (items.find((i) => i.modeId === "accept-edits") ?? items[0]).modeId;

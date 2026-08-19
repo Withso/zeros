@@ -10,6 +10,8 @@ import {
   verifyAccountJwtViaJwks,
   resetJwksCache,
   buildAccountAuthFromEnv,
+  assertQualifiedCloudAccountBinding,
+  cloudOwnerSubjectFromEnv,
   remoteMustBindFirst,
   remoteAccountVerdict,
   nextOwnerAccount,
@@ -124,6 +126,19 @@ describe("verifyAccountJwt — HS256", () => {
       ),
     ).toBe("NOT_YET_VALID");
   });
+
+  it.each([-1, 1.5, 301, Number.NaN, Number.POSITIVE_INFINITY])(
+    "rejects unsafe verifier clock skew %s",
+    (clockSkewSec) => {
+      expect(() =>
+        verifyAccountJwt(
+          signHs256(base, secret),
+          { hs256Secret: secret, clockSkewSec },
+          NOW,
+        ),
+      ).toThrowError(expect.objectContaining({ code: "MALFORMED" }));
+    },
+  );
 
   it("rejects a bad audience / issuer / missing subject", () => {
     expect(
@@ -302,11 +317,10 @@ describe("verifyAccountJwtViaJwks (production asymmetric, kid-resolved)", () => 
     resetJwksCache();
     fetchMock = vi.fn(
       async () =>
-        ({
-          ok: true,
+        new Response(JSON.stringify({ keys: [jwk] }), {
           status: 200,
-          json: async () => ({ keys: [jwk] }),
-        }) as unknown as Response,
+          headers: { "content-type": "application/json" },
+        }),
     );
     vi.stubGlobal("fetch", fetchMock);
   });
@@ -338,6 +352,31 @@ describe("verifyAccountJwtViaJwks (production asymmetric, kid-resolved)", () => 
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it("coalesces concurrent JWKS lookups and gives the fetch a deadline", async () => {
+    let releaseFetch!: (response: Response) => void;
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise<Response>((resolve) => {
+          releaseFetch = resolve;
+        }),
+    );
+    const token = signEs256WithKid(base, privateKey, "key-1");
+    const first = verifyAccountJwtViaJwks(token, { jwksUrl: JWKS_URL }, NOW);
+    const second = verifyAccountJwtViaJwks(token, { jwksUrl: JWKS_URL }, NOW);
+
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(fetchMock.mock.calls[0]?.[1]).toMatchObject({
+      signal: expect.any(AbortSignal),
+    });
+    releaseFetch(
+      new Response(JSON.stringify({ keys: [jwk] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+  });
+
   it("rejects a token whose kid is absent from the JWKS (no key)", async () => {
     await expect(
       verifyAccountJwtViaJwks(
@@ -348,11 +387,120 @@ describe("verifyAccountJwtViaJwks (production asymmetric, kid-resolved)", () => 
     ).rejects.toMatchObject({ code: "NO_KEY" });
   });
 
+  it("rejects oversized JWKS responses and unbounded kid values", async () => {
+    const json = vi.fn(async () => ({ keys: [jwk] }));
+    fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: { get: () => String(2 * 1024 * 1024) },
+      json,
+    } as unknown as Response);
+    await expect(
+      verifyAccountJwtViaJwks(
+        signEs256WithKid(base, privateKey, "key-1"),
+        { jwksUrl: JWKS_URL },
+        NOW,
+      ),
+    ).rejects.toMatchObject({ code: "NO_KEY" });
+    expect(json).not.toHaveBeenCalled();
+
+    resetJwksCache();
+    fetchMock.mockClear();
+    await expect(
+      verifyAccountJwtViaJwks(
+        signEs256WithKid(base, privateKey, "x".repeat(257)),
+        { jwksUrl: JWKS_URL },
+        NOW,
+      ),
+    ).rejects.toMatchObject({ code: "NO_KEY" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("cancels a chunked JWKS body as soon as the decompressed byte cap is crossed", async () => {
+    resetJwksCache();
+    let cancelled = false;
+    const encoder = new TextEncoder();
+    const chunks = [
+      encoder.encode(`{"keys":[],"padding":"${"x".repeat(400_000)}`),
+      encoder.encode("x".repeat(400_000)),
+      encoder.encode("x".repeat(400_000)),
+      encoder.encode('"}'),
+    ];
+    let next = 0;
+    const body = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        const chunk = chunks[next++];
+        if (chunk) controller.enqueue(chunk);
+        else controller.close();
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    fetchMock.mockResolvedValueOnce(
+      new Response(body, {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+
+    await expect(
+      verifyAccountJwtViaJwks(
+        signEs256WithKid(base, privateKey, "key-1"),
+        { jwksUrl: JWKS_URL },
+        NOW,
+      ),
+    ).rejects.toMatchObject({ code: "NO_KEY" });
+    expect(cancelled).toBe(true);
+  });
+
   it("rejects a token with no kid header", async () => {
     // signAsym (no kid) → resolution can't pick a key.
     await expect(
       verifyAccountJwtViaJwks(
         signAsym(base, "ES256", privateKey),
+        { jwksUrl: JWKS_URL },
+        NOW,
+      ),
+    ).rejects.toMatchObject({ code: "NO_KEY" });
+  });
+
+  it("never falls back to HS256 when the JWKS verification path is selected", async () => {
+    const secret = "legacy-shared-secret";
+    const header = b64url(
+      JSON.stringify({ alg: "HS256", typ: "JWT", kid: "key-1" }),
+    );
+    const payload = b64url(JSON.stringify(base));
+    const signature = createHmac("sha256", secret)
+      .update(`${header}.${payload}`)
+      .digest("base64url");
+
+    await expect(
+      verifyAccountJwtViaJwks(
+        `${header}.${payload}.${signature}`,
+        { jwksUrl: JWKS_URL, hs256Secret: secret },
+        NOW,
+      ),
+    ).rejects.toMatchObject({ code: "UNSUPPORTED_ALG" });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { field: "alg", value: "RS256" },
+    { field: "use", value: "enc" },
+    { field: "key_ops", value: ["encrypt"] },
+  ])("rejects a JWKS key with incompatible $field metadata", async (change) => {
+    resetJwksCache();
+    fetchMock.mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ keys: [{ ...jwk, [change.field]: change.value }] }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+
+    await expect(
+      verifyAccountJwtViaJwks(
+        signEs256WithKid(base, privateKey, "key-1"),
         { jwksUrl: JWKS_URL },
         NOW,
       ),
@@ -667,5 +815,94 @@ describe("buildAccountAuthFromEnv", () => {
         "https://tenant.example.com/,https://api.zeros.build/",
     });
     expect(a?.config.issuer).toContain("tenant.example.com");
+  });
+
+  it.each(["-1", "1.5", "301", "NaN", "Infinity"])(
+    "rejects unsafe account-token clock skew %s instead of weakening expiry",
+    (clockSkew) => {
+      expect(() =>
+        buildAccountAuthFromEnv({
+          ZEROS_ACCOUNT_JWT_PUBLIC_KEY: "configured",
+          ZEROS_ACCOUNT_JWT_SKEW: clockSkew,
+        }),
+      ).toThrow(/clock skew/i);
+    },
+  );
+});
+
+describe("cloudOwnerSubjectFromEnv", () => {
+  it("returns the immutable cloud owner subject and ignores surrounding whitespace", () => {
+    expect(
+      cloudOwnerSubjectFromEnv({ ZEROS_CLOUD_OWNER_SUB: "  user_123  " }),
+    ).toBe("user_123");
+  });
+
+  it("returns null when an owner was not provisioned", () => {
+    expect(cloudOwnerSubjectFromEnv({})).toBeNull();
+  });
+
+  it.each([" ", "bad\nsubject", "bad\0subject", "x".repeat(513)])(
+    "fails closed for an invalid provisioned subject",
+    (subject) => {
+      expect(() =>
+        cloudOwnerSubjectFromEnv({ ZEROS_CLOUD_OWNER_SUB: subject }),
+      ).toThrow(/cloud owner/i);
+    },
+  );
+});
+
+describe("assertQualifiedCloudAccountBinding", () => {
+  it("requires mandatory asymmetric verification for a privileged cloud worker", () => {
+    const staticPublicKey = generateKeyPairSync("ec", {
+      namedCurve: "P-256",
+    })
+      .publicKey.export({ type: "spki", format: "pem" })
+      .toString();
+    expect(() => assertQualifiedCloudAccountBinding(null)).toThrow(
+      /asymmetric account binding/i,
+    );
+    expect(() =>
+      assertQualifiedCloudAccountBinding({
+        required: false,
+        config: { publicKey: "pem", audience: "cloud" },
+      }),
+    ).toThrow(/asymmetric account binding/i);
+    expect(() =>
+      assertQualifiedCloudAccountBinding({
+        required: true,
+        config: {
+          hs256Secret: "shared-secret",
+          audience: "cloud",
+        },
+      }),
+    ).toThrow(/asymmetric account binding/i);
+    expect(() =>
+      assertQualifiedCloudAccountBinding({
+        required: true,
+        config: { publicKey: "not-a-public-key", audience: "cloud" },
+      }),
+    ).toThrow(/asymmetric account binding/i);
+    expect(() =>
+      assertQualifiedCloudAccountBinding({
+        required: true,
+        config: { publicKey: staticPublicKey, audience: "" },
+      }),
+    ).toThrow(/asymmetric account binding/i);
+
+    expect(
+      assertQualifiedCloudAccountBinding({
+        required: true,
+        config: {
+          jwksUrl: "https://identity.example.com/.well-known/jwks.json",
+          audience: "cloud",
+        },
+      }),
+    ).toMatchObject({ required: true });
+    expect(
+      assertQualifiedCloudAccountBinding({
+        required: true,
+        config: { publicKey: staticPublicKey, audience: "cloud" },
+      }),
+    ).toMatchObject({ required: true });
   });
 });

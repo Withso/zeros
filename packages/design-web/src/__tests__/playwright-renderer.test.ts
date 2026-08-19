@@ -45,7 +45,10 @@ describe("Playwright headless design renderer", () => {
         },
       },
     ]);
-    const api = new DesignApi(repository, { renderer });
+    const api = new DesignApi(repository, {
+      authorization: { kind: "trusted-in-process" },
+      renderer,
+    });
     const opened = await api.open("responsive-document");
     const [desktop, mobile] = await Promise.all([
       api.render({

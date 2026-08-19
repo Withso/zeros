@@ -35,6 +35,9 @@ export const MCP_VAULT_ACCOUNT = "mcp_oauth_vault";
 export const MCP_VAULT_CONTROL_TYPE = "mcp.vault";
 /** Control-message `type` on the host→engine stdin channel (boot restore seed). */
 export const MCP_VAULT_SEED_TYPE = "host.mcpVault";
+/** Engine→host launch authority. The child mints this per process and returns
+ * it over fd 3 so it never appears in `/proc/<pid>/environ` / `ps eww`. */
+export const ENGINE_LOCAL_AUTHORITY_CONTROL_TYPE = "engine.localAuthority";
 
 /** The serializable vault, keyed by canonical resource URI (RFC 8707). */
 export type VaultSnapshot = Record<string, BackendCredentials>;
@@ -79,6 +82,38 @@ export function parseVaultControl(line: string): VaultSnapshot | null {
   const m = msg as { type?: unknown; data?: unknown };
   if (m.type !== MCP_VAULT_CONTROL_TYPE) return null;
   return asSnapshot(m.data);
+}
+
+/** Engine side: frame the per-process loopback bearer on the private control
+ * fd. It is deliberately separate from the runtime manifest, stdout, and env. */
+export function engineLocalAuthorityControlLine(token: string): string {
+  if (!/^[a-f0-9]{64}$/.test(token)) {
+    throw new Error("invalid engine local authority token");
+  }
+  return `${JSON.stringify({
+    type: ENGINE_LOCAL_AUTHORITY_CONTROL_TYPE,
+    token,
+  })}\n`;
+}
+
+/** Host side: return an exact launch bearer, or null for every other/malformed
+ * control message. Never accept loose string values on this authority seam. */
+export function parseEngineLocalAuthorityControl(
+  line: string,
+): string | null {
+  let msg: unknown;
+  try {
+    msg = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (!msg || typeof msg !== "object") return null;
+  const value = msg as { type?: unknown; token?: unknown };
+  return value.type === ENGINE_LOCAL_AUTHORITY_CONTROL_TYPE &&
+    typeof value.token === "string" &&
+    /^[a-f0-9]{64}$/.test(value.token)
+    ? value.token
+    : null;
 }
 
 /** The host→engine stdin line (newline-terminated) seeding the vault at boot. */

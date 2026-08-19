@@ -169,6 +169,442 @@
   background-color: var(--bg2-hover);
 }
 
+/* Canvas selection geometry consumes the synchronously painted inverse-camera
+ * variable so these colors remain crisp even before React settles the view. */
+.zd-design-selection-outline {
+  outline-color: var(--design-selection-stroke);
+}
+
+.zd-design-hover-outline {
+  outline-color: var(--design-hover-stroke);
+}
+
+.zd-design-selection-border {
+  border-color: var(--design-selection-stroke);
+}
+
+.zd-design-selection-fill {
+  background-color: var(--design-selection-soft);
+}
+
+.zd-design-selection-handle {
+  border-color: var(--design-selection-stroke);
+  background-color: var(--design-selection-handle-fill);
+}
+
+/* The rotation pivot: a reticle in the selection color. It sits over authored
+ * content, so it stays quiet until the pointer arms it. */
+.zd-design-origin-marker {
+  color: var(--design-selection-stroke);
+  opacity: 0.75;
+}
+
+/* The pivot covers the point where a drag means "move this element" and a
+ * double-click means "edit this text", so it only accepts the pointer once that
+ * pointer has visited a rotation corner. */
+[data-design-origin-armed] [data-design-origin-handle] {
+  pointer-events: auto;
+}
+
+[data-design-origin-armed] .zd-design-origin-marker {
+  opacity: 0.85;
+}
+
+[data-design-origin-handle]:hover .zd-design-origin-marker,
+[data-design-origin-handle]:focus-visible .zd-design-origin-marker,
+[data-design-origin-dragging] .zd-design-origin-marker {
+  opacity: 1;
+}
+
+/* Snap anchors, revealed only while the pivot is being dragged. */
+.zd-design-origin-anchor {
+  border-style: dashed;
+  border-color: var(--design-selection-stroke);
+}
+
+/* Resting dashed guides from a selected element's top/left centers to its
+ * parent's edges. Softer than the selection stroke so they read as hints. */
+.zd-design-parent-guide {
+  border-color: color-mix(
+    in srgb,
+    var(--design-selection-stroke) 72%,
+    transparent
+  );
+}
+
+.zd-design-selection-label {
+  border-color: var(--design-selection-stroke);
+  background-color: var(--design-selection-label-bg);
+  color: var(--design-selection-label-fg);
+}
+
+.zd-design-inline-text-editor {
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  resize: none;
+  user-select: text;
+  cursor: text;
+}
+
+.zd-design-inline-text-editor:focus {
+  outline-color: var(--design-selection-stroke);
+}
+
+.zd-design-inline-text-editor:empty::before {
+  color: color-mix(in srgb, currentColor 45%, transparent);
+  content: attr(data-placeholder);
+  pointer-events: none;
+}
+
+.zd-design-creation-draft {
+  outline-color: var(--design-selection-stroke);
+  background-color: color-mix(
+    in srgb,
+    var(--design-selection-soft) 42%,
+    transparent
+  );
+}
+
+.zd-design-creation-draft[data-design-creation-draft="text"] {
+  background-color: transparent;
+}
+
+[data-design-active-tool="frame"]
+  :where(
+    [data-design-element-overlay],
+    [data-design-resize-edge],
+    [data-design-resize-handle]
+  ),
+[data-design-active-tool="text"]
+  :where(
+    [data-design-element-overlay],
+    [data-design-resize-edge],
+    [data-design-resize-handle]
+  ) {
+  cursor: crosshair !important;
+}
+
+.zd-design-motion-accent,
+.zd-design-motion-accent-soft {
+  background-color: var(--design-selection-soft);
+  color: var(--design-selection-stroke);
+}
+
+.zd-design-motion-keyframe-icon {
+  color: var(--design-selection-stroke);
+}
+
+.zd-design-motion-keyframe {
+  border-color: var(--design-selection-stroke);
+  background-color: var(--bg1);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--bg1) 72%, transparent);
+}
+
+.zd-design-motion-keyframe:hover,
+.zd-design-motion-keyframe-selected {
+  background-color: var(--design-selection-stroke);
+}
+
+.zd-design-motion-keyframe-selected {
+  box-shadow:
+    0 0 0 2px var(--bg1),
+    0 0 0 3px var(--design-selection-stroke);
+}
+
+.zd-design-motion-playhead {
+  background-color: var(--design-selection-stroke);
+}
+
+.zd-design-motion-playhead > span {
+  background-color: var(--design-selection-stroke);
+}
+
+.zd-design-motion-range {
+  border-color: color-mix(
+    in srgb,
+    var(--design-selection-stroke) 55%,
+    transparent
+  );
+  background-color: var(--design-selection-soft);
+}
+
+.zd-design-motion-range > span {
+  background-color: var(--design-selection-stroke);
+}
+
+.zd-design-motion-track-selected {
+  background-color: var(--design-selection-soft);
+}
+
+.zd-design-inline-spacing-handle,
+.zd-design-inline-gap-handle {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--design-selection-label-fg);
+  outline: 0;
+}
+
+.zd-design-inline-spacing-line {
+  opacity: 0;
+  border-color: var(--design-spacing-line-border);
+  background-color: var(--design-padding-stroke);
+  box-shadow: 0 0 0 1px
+    color-mix(in srgb, var(--design-padding-stroke) 36%, transparent);
+}
+
+.zd-design-inline-spacing-value {
+  visibility: hidden;
+  opacity: 0;
+  background-color: var(--design-padding-stroke);
+  color: var(--design-selection-label-fg);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--bg1) 38%, transparent);
+}
+
+.zd-design-inline-spacing-highlight {
+  opacity: 0;
+  background-color: var(--design-padding-soft);
+  background-image: repeating-linear-gradient(
+    135deg,
+    transparent 0 5px,
+    color-mix(in srgb, var(--design-padding-stroke) 58%, transparent) 5px 7px
+  );
+}
+
+.zd-design-inline-gap-handle > .zd-design-inline-spacing-line {
+  background-color: var(--design-gap-stroke);
+  box-shadow: 0 0 0 1px
+    color-mix(in srgb, var(--design-gap-stroke) 36%, transparent);
+}
+
+.zd-design-inline-gap-handle > .zd-design-inline-spacing-value {
+  background-color: var(--design-gap-stroke);
+}
+
+.zd-design-inline-gap-handle > .zd-design-inline-spacing-highlight {
+  background-color: var(--design-gap-soft);
+  background-image: repeating-linear-gradient(
+    135deg,
+    transparent 0 5px,
+    color-mix(in srgb, var(--design-gap-stroke) 62%, transparent) 5px 7px
+  );
+}
+
+/* Camera movement owns the whole frame budget. Padding, gap, grid, and
+ * distance tooling returns after the coalesced camera commit, with geometry
+ * recomputed for the final zoom instead of flashing stale hit regions. */
+[data-design-camera-gesture] [data-design-inline-spacing-root],
+[data-design-camera-gesture] [data-design-spacing-measurement] {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Spacing ticks reveal while the pointer is inside the selection's own box.
+   The zone is a full-bleed child rather than the overlay itself, because the
+   resize squares, the rotation corners and the size label all sit outside that
+   box — and reading the overlay's rect on every pointer event, which is what
+   this replaces, forced a host layout mid-drag. */
+[data-design-element-overlay]:has([data-design-spacing-hover-zone]:hover)
+  .zd-design-inline-spacing-line,
+[data-design-spacing-hover] .zd-design-inline-spacing-line {
+  opacity: 1;
+}
+
+.zd-design-inline-padding-control:has(
+    .zd-design-inline-spacing-handle:hover,
+    .zd-design-inline-spacing-handle:focus-visible,
+    .zd-design-inline-spacing-handle[data-dragging="true"],
+    .zd-design-inline-spacing-handle[data-mirrored="true"]
+  )
+  > .zd-design-inline-spacing-highlight,
+.zd-design-inline-gap-handle:hover > .zd-design-inline-spacing-highlight,
+.zd-design-inline-gap-handle:focus-visible
+  > .zd-design-inline-spacing-highlight,
+.zd-design-inline-gap-handle[data-dragging="true"]
+  > .zd-design-inline-spacing-highlight {
+  opacity: 1;
+}
+
+.zd-design-inline-spacing-handle:hover > .zd-design-inline-spacing-value,
+.zd-design-inline-gap-handle:hover > .zd-design-inline-spacing-value,
+.zd-design-inline-spacing-handle:focus-visible
+  > .zd-design-inline-spacing-value,
+.zd-design-inline-gap-handle:focus-visible > .zd-design-inline-spacing-value,
+.zd-design-inline-spacing-handle[data-dragging="true"]
+  > .zd-design-inline-spacing-value,
+.zd-design-inline-spacing-handle[data-mirrored="true"]
+  > .zd-design-inline-spacing-value,
+.zd-design-inline-gap-handle[data-dragging="true"]
+  > .zd-design-inline-spacing-value {
+  visibility: visible;
+  opacity: 1;
+}
+
+.zd-design-inline-spacing-handle:hover > .zd-design-inline-spacing-line,
+.zd-design-inline-gap-handle:hover > .zd-design-inline-spacing-line,
+.zd-design-inline-spacing-handle:focus-visible > .zd-design-inline-spacing-line,
+.zd-design-inline-gap-handle:focus-visible > .zd-design-inline-spacing-line,
+.zd-design-inline-spacing-handle[data-dragging="true"]
+  > .zd-design-inline-spacing-line,
+.zd-design-inline-spacing-handle[data-mirrored="true"]
+  > .zd-design-inline-spacing-line,
+.zd-design-inline-gap-handle[data-dragging="true"]
+  > .zd-design-inline-spacing-line {
+  opacity: 1;
+  box-shadow:
+    0 0 0 1px var(--design-spacing-line-border),
+    0 0 0 2px var(--design-padding-stroke);
+}
+
+.zd-design-inline-gap-handle:hover > .zd-design-inline-spacing-line,
+.zd-design-inline-gap-handle:focus-visible > .zd-design-inline-spacing-line,
+.zd-design-inline-gap-handle[data-dragging="true"]
+  > .zd-design-inline-spacing-line {
+  box-shadow:
+    0 0 0 1px var(--design-spacing-line-border),
+    0 0 0 2px var(--design-gap-stroke);
+}
+
+.zd-design-grid-line {
+  border-color: color-mix(
+    in srgb,
+    var(--design-selection-stroke) 72%,
+    transparent
+  );
+}
+
+.zd-design-grid-track-label {
+  border-color: color-mix(
+    in srgb,
+    var(--design-selection-stroke) 55%,
+    transparent
+  );
+  background-color: color-mix(in srgb, var(--bg1) 90%, transparent);
+  color: var(--design-selection-stroke);
+}
+
+/* Layers rows read as one quiet Figma-like tree: fg2 text everywhere, hover
+ * lifts only the background, and focus paints an outline solely for keyboard
+ * travel — a mouse click must never leave a ring behind. */
+.zd-design-layer-row {
+  border-width: 0;
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--fg2);
+  /* Selection is state, not motion. Animating these fills made a frame switch
+   * look broken: the outgoing frame's block kept fading at its old position
+   * while the incoming one faded in above it, so two selections were on screen
+   * at once. Layer rows repaint in the same commit that moves the selection. */
+  transition: none;
+}
+
+.zd-design-layer-row:hover {
+  border-color: transparent;
+  background-color: var(--bg1-hover);
+  color: var(--fg2);
+}
+
+.zd-design-layer-row:focus-visible {
+  border-color: transparent;
+  outline: 1px solid var(--highlighted-bright);
+  outline-offset: -1px;
+}
+
+/* Layer selection stays neutral: the tree reads as chrome, and the canvas keeps
+ * sole ownership of the design accent. One surface token supplies the whole
+ * ramp — owned rows sit below hover, and the selection itself sits above it. */
+.zd-design-layer-selected,
+.zd-design-layer-selected:hover {
+  border-width: 0;
+  background-color: var(--bg2-hover);
+  box-shadow: none;
+  color: var(--fg2);
+}
+
+/* Rows owned by the current selection (a selected container's descendants). */
+.zd-design-layer-in-selection {
+  background-color: color-mix(in srgb, var(--bg2-hover) 55%, transparent);
+}
+
+.zd-design-layer-in-selection:hover {
+  background-color: color-mix(in srgb, var(--bg2-hover) 80%, transparent);
+}
+
+/* Canvas hover mirrors the row's own pointer hover exactly. */
+.zd-design-layer-hovered {
+  background-color: var(--bg1-hover);
+  color: var(--fg2);
+}
+
+/* Hidden layers (and everything they own) fade their own label and icons. The
+ * fill stays untouched: fading it would cut visible gaps through the block a
+ * selection paints across the rows it owns. */
+.zd-design-layer-dimmed {
+  color: color-mix(in srgb, var(--fg2) 45%, transparent);
+}
+
+.zd-design-layer-dimmed:hover {
+  color: color-mix(in srgb, var(--fg2) 45%, transparent);
+}
+
+.zd-design-layer-selection-count {
+  background-color: var(--bg2-hover);
+  color: var(--fg2);
+}
+
+.zd-design-theme-filter {
+  background-color: transparent;
+  color: var(--muted-fg);
+}
+
+.zd-design-theme-filter:hover {
+  background-color: var(--bg1-hover);
+  color: var(--fg1);
+}
+
+.zd-design-theme-mode-active {
+  background-color: var(--design-selection-soft);
+  color: var(--design-selection-stroke);
+}
+
+.zd-design-motion-inline-toolbar {
+  border-color: color-mix(
+    in srgb,
+    var(--design-selection-stroke) 48%,
+    transparent
+  );
+  background-color: color-mix(in srgb, var(--bg1) 92%, transparent);
+  color: var(--design-selection-stroke);
+}
+
+.zd-design-motion-path-line {
+  stroke: var(--design-selection-stroke);
+}
+
+.zd-design-motion-path-point {
+  border-color: var(--design-selection-stroke);
+  background-color: var(--design-selection-handle-fill);
+}
+
+.zd-design-motion-path-point:hover,
+.zd-design-motion-path-point-selected,
+.zd-design-motion-current-point {
+  background-color: var(--design-selection-stroke);
+}
+
+.zd-design-motion-path-point-selected {
+  box-shadow:
+    0 0 0 2px var(--design-selection-handle-fill),
+    0 0 0 3px var(--design-selection-stroke);
+}
+
+.zd-design-motion-property-active {
+  background-color: var(--design-selection-soft);
+  color: var(--design-selection-stroke);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .zd-design-control-quiet,
   .zd-design-control-applied,

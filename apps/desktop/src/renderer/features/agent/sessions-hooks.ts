@@ -101,6 +101,8 @@ export function useChatSession(
       ),
     cancel: () => ctx.cancel(chatId),
     stopBackgroundTask,
+    openBoundaryPort: (portId: string) =>
+      ctx.openBoundaryPort(chatId, portId),
     respondToPermission: (response) =>
       ctx.respondToPermission(chatId, response),
     respondToQuestion: (response) => ctx.respondToQuestion(chatId, response),

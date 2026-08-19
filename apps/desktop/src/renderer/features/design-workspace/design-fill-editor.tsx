@@ -158,6 +158,14 @@ export function DesignFillEditor({
     }
   };
 
+  /** Typed values in this editor are drafts that blur commits, so Enter has to
+   * mean the same thing rather than nothing. */
+  const commitFieldOnEnter = (event: React.KeyboardEvent<HTMLInputElement>) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    event.currentTarget.blur();
+  };
+
   const commitOnBlur = (styles: Record<string, string | null>) => {
     if (skipBlurCommitRef.current) {
       skipBlurCommitRef.current = false;
@@ -298,9 +306,9 @@ export function DesignFillEditor({
                 className="zd-design-control-applied h-7 min-w-0 font-mono text-[11px]"
                 aria-label="Fill color value"
                 onChange={(event) => {
-                  const next = event.currentTarget.value;
-                  setDraftColor(next);
-                  onPreview?.({ "background-color": next });
+                  // A draft until Enter or blur; the swatch beside it is the
+                  // live surface.
+                  setDraftColor(event.currentTarget.value);
                 }}
                 onBlur={() =>
                   commitOnBlur({
@@ -308,6 +316,7 @@ export function DesignFillEditor({
                     "background-image": "none",
                   })
                 }
+                onKeyDown={commitFieldOnEnter}
               />
             </div>
           </TabsContent>
@@ -398,9 +407,11 @@ export function DesignFillEditor({
                 aria-label="Gradient angle value"
                 onChange={(event) => {
                   const angle = event.currentTarget.valueAsNumber;
-                  if (Number.isFinite(angle)) updateGradient({ angle });
+                  if (Number.isFinite(angle))
+                    setGradient({ ...gradient, angle });
                 }}
                 onBlur={() => commitOnBlur({ "background-image": gradientCss })}
+                onKeyDown={commitFieldOnEnter}
               />
             </div>
             {unsupportedGradient ? (
@@ -431,13 +442,11 @@ export function DesignFillEditor({
                 className="zd-design-control-applied h-7 font-mono text-[11px]"
                 placeholder="./assets/image.png"
                 onChange={(event) => {
-                  const next = event.currentTarget.value;
-                  setImageUrl(next);
-                  onPreview?.({
-                    "background-image": formatDesignImageUrl(next),
-                  });
+                  // A URL is only meaningful once it is complete.
+                  setImageUrl(event.currentTarget.value);
                 }}
                 onBlur={() => commitOnBlur({ "background-image": imageCss })}
+                onKeyDown={commitFieldOnEnter}
               />
               <span className="text-muted-fg text-[9px]">
                 You can also drag an asset directly onto the selected frame.
@@ -517,6 +526,7 @@ export function DesignFillEditor({
                   onBlur={() =>
                     commitOnBlur({ "background-position": imagePosition })
                   }
+                  onKeyDown={commitFieldOnEnter}
                 />
                 <Input
                   value={imageRepeat}
@@ -528,6 +538,7 @@ export function DesignFillEditor({
                   onBlur={() =>
                     commitOnBlur({ "background-repeat": imageRepeat })
                   }
+                  onKeyDown={commitFieldOnEnter}
                 />
               </div>
             </div>

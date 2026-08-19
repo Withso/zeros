@@ -94,6 +94,8 @@ const ALLOWED_COMMANDS = new Set<string>([
   // these rejects cache/cookie clear, element screenshots, and picker
   // reinjection at the preload bridge (the bug this guard now prevents).
   "browser:reinject-picker",
+  "browser:authorize-preview-origin",
+  "browser:revoke-preview-origin",
   "browser:control-iframe",
   "browser_confirmation_respond",
   "browser_confirmation_requests",

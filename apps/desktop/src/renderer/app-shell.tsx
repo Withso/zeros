@@ -125,7 +125,14 @@ import {
   useInternalFeatureActive,
   useInternalUserResolutionSettled,
 } from "./features/settings/internal-features";
-import { shouldLeaveBlockedDesignWorkspace } from "./shell/design-workspace-access";
+import { shouldShowBlockedDesignModePlaceholder } from "./shell/design-workspace-access";
+import { DesignModeDisabledPanel } from "./shell/design-mode-disabled-panel";
+import type { Workspace } from "./platform/git";
+
+interface RetainedDesignWorkspace {
+  workspace: Workspace;
+  folder: string;
+}
 
 // Chat localStorage cache keys live in a shared module so the repo-removal
 // path (which bulk-deletes a repo's chats) reconciles the exact same keys this
@@ -1012,29 +1019,20 @@ function MainShellBody({
   useWorkspacePrSync(designWorkspaceRequested ? null : activeWorkspace);
   const dispatch = useWorkspaceDispatch();
   // A persisted design destination can outlive its per-channel Internal flag
-  // (or the staff role can be revoked between launches). Leave the workspace
-  // identity remembered, but move to the user's complete Home destination
-  // before paint. This avoids mounting either design UI or the coding harness,
-  // and avoids auto-spawning a coding chat merely as an access fallback.
-  React.useLayoutEffect(() => {
-    if (
-      !shouldLeaveBlockedDesignWorkspace({
-        workspaceRoute: activePage === "workspace",
-        designRequested: designWorkspaceRequested,
-        designActive: designWorkspaceActive,
-        internalUserResolutionSettled,
-      })
-    ) {
-      return;
-    }
-    dispatch({ type: "OPEN_HOME" });
-  }, [
-    activePage,
-    designWorkspaceActive,
-    designWorkspaceRequested,
-    dispatch,
+  // (or the staff role can be revoked between launches). Under the mode model
+  // the workspace stays reachable: the route mounts a placeholder whose one
+  // action — exit design mode — is never flag-gated, instead of bouncing Home
+  // (which trapped the workspace in an unrenderable mode). Neither the design
+  // UI nor the coding harness mounts while blocked: the engine refuses
+  // agents/terminals for a design-mode row, so the harness would be dead
+  // controls; and fail-closed while staff identity is loading means no
+  // placeholder flash for a user whose flag is about to land.
+  const showDesignModeDisabledPanel = shouldShowBlockedDesignModePlaceholder({
+    workspaceRoute: activePage === "workspace",
+    designRequested: designWorkspaceRequested,
+    designActive: designWorkspaceActive,
     internalUserResolutionSettled,
-  ]);
+  });
   const { projects } = useProjects();
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is
   // enabled. Mounted here so neither shortcut fires from Settings.
@@ -1093,6 +1091,43 @@ function MainShellBody({
   const renderWorkspaceShell =
     !showWelcome &&
     (workspaceShellRetainedRef.current || activePage === "workspace");
+  const activeDesignWorkspace = React.useMemo<RetainedDesignWorkspace | null>(
+    () =>
+      designWorkspaceActive &&
+      activeWorkspace?.kind === "design" &&
+      activeWorkspaceFolder
+        ? { workspace: activeWorkspace, folder: activeWorkspaceFolder }
+        : null,
+    [designWorkspaceActive, activeWorkspace, activeWorkspaceFolder],
+  );
+  const retainedDesignWorkspaceRef = React.useRef(
+    new Map<string, RetainedDesignWorkspace>(),
+  );
+  const designWorkspaceIdsToRender = useRetainedViewKeys(
+    activeDesignWorkspace?.workspace.id ?? null,
+    2,
+    undefined,
+    "design-workspaces",
+  );
+  const designWorkspacesToRender = designWorkspaceIdsToRender.flatMap((id) => {
+    if (activeDesignWorkspace?.workspace.id === id) {
+      return [activeDesignWorkspace];
+    }
+    const retained = retainedDesignWorkspaceRef.current.get(id);
+    return retained ? [retained] : [];
+  });
+  React.useLayoutEffect(() => {
+    if (activeDesignWorkspace) {
+      retainedDesignWorkspaceRef.current.set(
+        activeDesignWorkspace.workspace.id,
+        activeDesignWorkspace,
+      );
+    }
+    const retainedIds = new Set(designWorkspaceIdsToRender);
+    for (const id of retainedDesignWorkspaceRef.current.keys()) {
+      if (!retainedIds.has(id)) retainedDesignWorkspaceRef.current.delete(id);
+    }
+  }, [activeDesignWorkspace, designWorkspaceIdsToRender]);
 
   // Only the workspace view swaps in the missing-worktree panel — the Home
   // sub-pages have no active worktree content to lose, so they render normally
@@ -1167,37 +1202,70 @@ function MainShellBody({
               aria-hidden={isHome}
             >
               {designWorkspaceBlocked ? (
-                <div className="bg-bg1 flex min-h-0 min-w-0 flex-1" />
-              ) : designWorkspaceActive ? (
-                <>
-                  <DesignWorkspaceSidebar
-                    surfaceActive={!isHome}
-                    canvasCollapsed={workbenchCollapsed}
-                  />
-                  <DesignWorkspaceColumn
-                    workspace={
-                      activeWorkspace?.kind === "design"
-                        ? activeWorkspace
-                        : null
-                    }
-                    folder={activeWorkspaceFolder}
-                    surfaceActive={!isHome && !workbenchCollapsed}
-                    collapsed={workbenchCollapsed}
-                    onToggleWorkbench={toggleWorkbench}
-                  />
-                </>
+                showDesignModeDisabledPanel && activeWorkspace ? (
+                  <DesignModeDisabledPanel workspace={activeWorkspace} />
+                ) : (
+                  <div className="bg-bg1 flex min-h-0 min-w-0 flex-1" />
+                )
               ) : (
-                <>
-                  <ConversationPane
-                    workbenchCollapsed={workbenchCollapsed}
-                    onToggleWorkbench={toggleWorkbench}
-                  />
-                  <WorkbenchPane
-                    onToggleWorkbench={toggleWorkbench}
-                    surfaceActive={!isHome && !workbenchCollapsed}
-                    collapsed={workbenchCollapsed}
-                  />
-                </>
+                <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+                  {designWorkspacesActive
+                    ? designWorkspacesToRender.map((entry) => {
+                        const entryActive =
+                          designWorkspaceActive &&
+                          entry.workspace.id ===
+                            activeDesignWorkspace?.workspace.id;
+                        // `visible` re-enables painting under any hidden
+                        // ancestor, so the active deck must drop it while a
+                        // Home page owns the window — otherwise its z-indexed
+                        // layer rows paint straight through the Home sidebar.
+                        const entryVisible = entryActive && !isHome;
+                        return (
+                          <div
+                            key={entry.workspace.id}
+                            data-design-retained-workspace={entry.workspace.id}
+                            {...(!entryVisible ? { inert: "" } : {})}
+                            aria-hidden={!entryVisible}
+                            className={[
+                              "absolute inset-0 flex min-h-0 min-w-0 overflow-hidden",
+                              entryVisible
+                                ? "pointer-events-auto visible"
+                                : "pointer-events-none invisible",
+                            ].join(" ")}
+                          >
+                            <DesignWorkspaceSidebar
+                              workspace={entry.workspace}
+                              folder={entry.folder}
+                              surfaceActive={entryActive && !isHome}
+                              canvasCollapsed={workbenchCollapsed}
+                            />
+                            <DesignWorkspaceColumn
+                              workspace={entry.workspace}
+                              folder={entry.folder}
+                              surfaceActive={
+                                entryActive && !isHome && !workbenchCollapsed
+                              }
+                              collapsed={workbenchCollapsed}
+                              onToggleWorkbench={toggleWorkbench}
+                            />
+                          </div>
+                        );
+                      })
+                    : null}
+                  {!designWorkspaceActive ? (
+                    <div className="absolute inset-0 flex min-h-0 min-w-0 overflow-hidden">
+                      <ConversationPane
+                        workbenchCollapsed={workbenchCollapsed}
+                        onToggleWorkbench={toggleWorkbench}
+                      />
+                      <WorkbenchPane
+                        onToggleWorkbench={toggleWorkbench}
+                        surfaceActive={!isHome && !workbenchCollapsed}
+                        collapsed={workbenchCollapsed}
+                      />
+                    </div>
+                  ) : null}
+                </div>
               )}
             </div>
           )}

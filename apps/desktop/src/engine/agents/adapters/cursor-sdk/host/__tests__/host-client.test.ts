@@ -121,6 +121,77 @@ describe("toHostError", () => {
 });
 
 describe("CursorHostClient proxy", () => {
+  it("registers one exit callback per host generation", () => {
+    const transport = {
+      send: vi.fn(),
+      onLine: vi.fn(),
+      onExit: vi.fn(),
+      dispose: vi.fn(),
+    } satisfies HostTransport;
+    const client = new CursorHostClient(() => transport);
+
+    void client.module().Agent.create({}).catch(() => {});
+
+    expect(transport.onExit).toHaveBeenCalledOnce();
+  });
+
+  it("sends workspace prewarm with no control timeout", async () => {
+    // Building the workspace executor on a cold contained host is exactly the
+    // multi-second work being moved off the first turn, so it must not be
+    // capped by the 30s control budget the way an ordinary op is — nothing is
+    // waiting on the reply.
+    vi.useFakeTimers();
+    try {
+      const { client, fake } = makeClient();
+      const opts = { apiKey: "k", cwd: "/w", local: { cwd: "/w" } };
+      let settled = false;
+      const pending = client
+        .module()
+        .platform!.prewarm(opts)
+        .then(() => {
+          settled = true;
+        });
+
+      const req = fake.reqOf("platform.prewarm");
+      expect(req?.args).toEqual(opts);
+
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(settled).toBe(false);
+
+      fake.emit({
+        k: "res",
+        id: req!.id,
+        ok: true,
+        result: { prewarmed: true, elapsedMs: 1482 },
+      });
+      await pending;
+      expect(settled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("rejects a control request whose host never answers", async () => {
+    vi.useFakeTimers();
+    try {
+      const { client } = makeClient();
+      const pending = client.module().Cursor!.models.list({ apiKey: "k" });
+      let failure: unknown;
+      void pending.catch((error) => {
+        failure = error;
+      });
+
+      await vi.advanceTimersByTimeAsync(30_001);
+
+      expect(failure).toBeInstanceOf(Error);
+      expect(String((failure as Error).message)).toMatch(
+        /models\.list.*timed out/i,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("create → send → stream → wait round-trips over the protocol", async () => {
     const { client, fake } = makeClient();
     const mod = client.module();

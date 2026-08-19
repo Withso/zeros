@@ -46,16 +46,26 @@ import type { ParserError } from "parse5";
 import postcss from "postcss";
 
 import { expandDesignComponents } from "./components";
+import {
+  DEFAULT_DESIGN_DIRECTORY_NAME,
+  DESIGN_CANVAS_FILE as CANVAS_MARKER_FILE,
+  designDirectoryNameFor,
+} from "./directory-registry";
 import { getDesignRuntimeAudit } from "./runtime-audits";
 import { inspectSafeRegularFile, readSafeRegularFile } from "./safe-files";
 
-export const DESIGN_DIRECTORY_NAME = "Zeros Design";
-export const DESIGN_CANVAS_FILE = ".zeros-canvas.json";
+/** The DEFAULT design folder name. Callers that need the folder for a
+ *  SPECIFIC workspace must go through designDirectoryNameFor (the per-repo
+ *  `[design] directory` pointer can rename or nest it); this constant remains
+ *  for defaults, seeds, and pre-pointer compatibility. */
+export const DESIGN_DIRECTORY_NAME = DEFAULT_DESIGN_DIRECTORY_NAME;
+export { designDirectoryNameFor } from "./directory-registry";
+export const DESIGN_CANVAS_FILE = CANVAS_MARKER_FILE;
 export const DESIGN_TOKENS_FILE = "tokens.css";
 export const DESIGN_TRANSACTION_JOURNAL_FILE = ".zeros-transaction.json";
 
-const FRAME_MIN_WIDTH = 120;
-const FRAME_MIN_HEIGHT = 80;
+const FRAME_MIN_WIDTH = 1;
+const FRAME_MIN_HEIGHT = 1;
 const FRAME_MAX_SIZE = 16_384;
 const MAX_FRAME_COUNT = 256;
 const DEFAULT_FRAME_WIDTH = 1_440;
@@ -137,7 +147,9 @@ export interface DesignLintViolation {
     | "render-budget"
     | "contrast"
     | "overflow"
-    | "spacing-scale";
+    | "spacing-scale"
+    | "audit-limit"
+    | "layer-tree-limit";
   severity: DesignLintSeverity;
   message: string;
   file: string;
@@ -165,6 +177,9 @@ export interface DesignFrameGeometry {
 export interface DesignFrameSummary {
   file: string;
   title: string;
+  /** Text-backed frames give loose canvas text durable HTML ownership without
+   * visually pretending that the text is a conventional artboard. */
+  kind: "frame" | "text";
   width: number;
   height: number;
   x: number;
@@ -301,6 +316,7 @@ interface FrameMeta {
   title: string;
   width: number;
   height: number;
+  kind: "frame" | "text";
 }
 
 interface ElementRecord {
@@ -424,12 +440,17 @@ const TOKENS_SEED = `@layer reset {
 }
 `;
 
-const FRAME_SEED = (title: string, oid: string): string => `<!doctype html>
+const FRAME_SEED = (
+  title: string,
+  oid: string,
+  width: number,
+  height: number,
+): string => `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="zeros-frame" content="width=${DEFAULT_FRAME_WIDTH},height=${DEFAULT_FRAME_HEIGHT},title=${escapeAttribute(title)}">
+    <meta name="zeros-frame" content="width=${width},height=${height},kind=frame,title=${escapeAttribute(title)}">
     <link rel="stylesheet" href="./tokens.css">
     <title>${escapeText(title)}</title>
   </head>
@@ -438,6 +459,32 @@ const FRAME_SEED = (title: string, oid: string): string => `<!doctype html>
       <h1 data-oid="${oid}-heading">${escapeText(title)}</h1>
       <p data-oid="${oid}-copy" style="color:var(--fg2);">Shape this frame with the canvas and inspector.</p>
     </main>
+  </body>
+</html>
+`;
+
+const TEXT_FRAME_SEED = (
+  title: string,
+  nodeId: string,
+  text: string,
+  width: number,
+  height: number,
+  fixedSize: boolean,
+): string => `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="zeros-frame" content="width=${width},height=${height},kind=text,title=${escapeAttribute(title)}">
+    <link rel="stylesheet" href="./tokens.css">
+    <title>${escapeText(title)}</title>
+    <style>
+      html, body { width: 100%; height: 100%; min-height: 0; margin: 0; background: transparent !important; overflow: visible; }
+      body > [data-oid] { ${fixedSize ? "width:100%;min-height:100%;" : "width:max-content;max-width:none;"} margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+    </style>
+  </head>
+  <body>
+    <div data-oid="${escapeAttribute(nodeId)}">${escapeText(text)}</div>
   </body>
 </html>
 `;
@@ -454,7 +501,13 @@ function escapeAttribute(value: string): string {
 }
 
 function designDirectory(workspacePath: string): string {
-  return path.join(path.resolve(workspacePath), DESIGN_DIRECTORY_NAME);
+  // The active folder comes from the per-workspace registry (primed from the
+  // `[design] directory` pointer); split on "/" so a nested name like
+  // "apps/web/designs" joins as real path segments on every platform.
+  return path.join(
+    path.resolve(workspacePath),
+    ...designDirectoryNameFor(workspacePath).split("/"),
+  );
 }
 
 async function ensureSafeDesignRoot(workspacePath: string): Promise<string> {
@@ -462,7 +515,14 @@ async function ensureSafeDesignRoot(workspacePath: string): Promise<string> {
   const directory = designDirectory(workspacePath);
   await mkdir(directory, { recursive: true });
   const canonicalDirectory = await realpath(directory);
-  const expectedDirectory = path.join(workspaceRoot, DESIGN_DIRECTORY_NAME);
+  // realpath the WORKSPACE root only; every design-dir segment below it must
+  // be a real directory (no symlink hop), or the canonical spelling differs
+  // from the expected join and the write is refused — same guard as before,
+  // now covering each nested segment too.
+  const expectedDirectory = path.join(
+    workspaceRoot,
+    ...designDirectoryNameFor(workspacePath).split("/"),
+  );
   if (canonicalDirectory !== expectedDirectory) {
     throw new Error("Refusing an unsafe design write directory.");
   }
@@ -727,12 +787,21 @@ function slugFrameTitle(title: string): string {
 
 export async function createDesignFrame(
   workspacePath: string,
-  input: { title?: string } = {},
+  input: {
+    title?: string;
+    geometry?: Partial<DesignFrameGeometry>;
+    seed?: {
+      kind: "text";
+      nodeId: string;
+      text: string;
+      fixedSize: boolean;
+    };
+  } = {},
 ): Promise<DesignFrameSummary> {
   return withDocumentWrite(workspacePath, async () => {
     await initializeDesignDocumentUnlocked(workspacePath);
     const directory = designDirectory(workspacePath);
-    const title = input.title?.trim().slice(0, 120) || "Untitled frame";
+    const title = input.title?.trim().slice(0, 120) || "Frame";
     const base = slugFrameTitle(title);
     let file = `${base}.html`;
     for (let suffix = 2; existsSync(path.join(directory, file)); suffix++) {
@@ -742,14 +811,31 @@ export async function createDesignFrame(
       .update(`${file}:${Date.now()}:${randomUUID()}`)
       .digest("hex")
       .slice(0, 8)}`;
-    await writeFile(path.join(directory, file), FRAME_SEED(title, oid), {
-      encoding: "utf8",
-      flag: "wx",
-    });
     const canvas = await readCanvas(workspacePath);
-    const geometry = nextFrameGeometry(Object.values(canvas.frames), {
+    const automaticGeometry = nextFrameGeometry(Object.values(canvas.frames), {
       width: DEFAULT_FRAME_WIDTH,
       height: DEFAULT_FRAME_HEIGHT,
+    });
+    const geometry = input.geometry
+      ? normalizeGeometry(input.geometry, automaticGeometry)
+      : automaticGeometry;
+    const textSeed = input.seed;
+    if (textSeed && textSeed.text.length > 10_000) {
+      throw new Error("Design text is too long.");
+    }
+    const source = textSeed
+      ? TEXT_FRAME_SEED(
+          title,
+          assertDesignNodeId(textSeed.nodeId),
+          textSeed.text,
+          geometry.w,
+          geometry.h,
+          textSeed.fixedSize,
+        )
+      : FRAME_SEED(title, oid, geometry.w, geometry.h);
+    await writeFile(path.join(directory, file), source, {
+      encoding: "utf8",
+      flag: "wx",
     });
     canvas.frames[file] = geometry;
     await writeCanvas(workspacePath, canvas);
@@ -757,12 +843,13 @@ export async function createDesignFrame(
     return {
       file,
       title,
+      kind: textSeed ? "text" : "frame",
       width: geometry.w,
       height: geometry.h,
       x: geometry.x,
       y: geometry.y,
       z: geometry.z,
-      nodeCount: 3,
+      nodeCount: textSeed ? 1 : 3,
       modifiedAt: info.mtimeMs,
     };
   });
@@ -1038,12 +1125,16 @@ function readFrameMeta(
     );
   };
   const titleMatch = /(?:^|,)\s*title\s*=\s*(.+)$/i.exec(content);
+  const kindMatch = /(?:^|,)\s*kind\s*=\s*(frame|text)(?:\s*,|\s*$)/i.exec(
+    content,
+  );
   return {
     title:
       titleMatch?.[1]?.trim().slice(0, 120) ||
       file.replace(/\.html$/i, "").replace(/[-_]+/g, " "),
     width: numberValue("width", DEFAULT_FRAME_WIDTH),
     height: numberValue("height", DEFAULT_FRAME_HEIGHT),
+    kind: kindMatch?.[1]?.toLowerCase() === "text" ? "text" : "frame",
   };
 }
 
@@ -1141,6 +1232,7 @@ async function listDesignFramesUnlocked(
     summaries.push({
       file,
       title: meta.title,
+      kind: meta.kind,
       width: geometry.w,
       height: geometry.h,
       x: geometry.x,
@@ -2128,6 +2220,7 @@ async function mutationResultUnlocked(
     frame: {
       file,
       title: meta.title,
+      kind: meta.kind,
       width: geometry.w,
       height: geometry.h,
       x: geometry.x,
@@ -2525,6 +2618,7 @@ export async function duplicateDesignFrame(
     return {
       file,
       title,
+      kind: originalMeta.kind,
       width: geometry.w,
       height: geometry.h,
       x: geometry.x,

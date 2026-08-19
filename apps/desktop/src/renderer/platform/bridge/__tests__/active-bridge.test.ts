@@ -2,14 +2,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   bridgeConnectionCacheMaxAge,
+  installActiveRuntimeConnectionTarget,
   onActiveBridgeConnected,
   setActiveBridge,
 } from "../active-bridge";
-import type { ConnectionStatus, RuntimeClient } from "../ws-client";
+import type {
+  ConnectionStatus,
+  RuntimeClient,
+  RuntimeConnectionTarget,
+} from "../ws-client";
 
 class FakeBridge {
   status: ConnectionStatus;
   private listeners = new Set<(status: ConnectionStatus) => void>();
+  readonly targets: RuntimeConnectionTarget[] = [];
 
   constructor(status: ConnectionStatus) {
     this.status = status;
@@ -23,6 +29,10 @@ class FakeBridge {
   setStatus(status: ConnectionStatus): void {
     this.status = status;
     for (const listener of this.listeners) listener(status);
+  }
+
+  async setConnectionTarget(target: RuntimeConnectionTarget): Promise<void> {
+    this.targets.push(target);
   }
 }
 
@@ -105,5 +115,24 @@ describe("active bridge connection subscriptions", () => {
     second.setStatus("disconnected");
     second.setStatus("connected");
     expect(connected).toHaveBeenCalledOnce();
+  });
+
+  it("installs a cloud descriptor only into the live memory-resident client", async () => {
+    const bridge = new FakeBridge("connected");
+    setActiveBridge(runtimeClient(bridge));
+    const target: RuntimeConnectionTarget = {
+      kind: "cloud",
+      url: "wss://engine.preview.example/ws",
+      cloudToken: "worker-minted-connection-token",
+      expiresAt: Date.now() + 60_000,
+    };
+
+    await installActiveRuntimeConnectionTarget(target);
+    expect(bridge.targets).toEqual([target]);
+
+    setActiveBridge(null);
+    await expect(
+      installActiveRuntimeConnectionTarget(target),
+    ).rejects.toThrow(/active runtime bridge/i);
   });
 });

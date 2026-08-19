@@ -6,11 +6,11 @@ an item complete.
 
 ## Phase 0 — Validation foundation
 
-- [x] Add an opt-in, token-gated engine `CloudTransport` without weakening the
+- [ ] Add an opt-in, token-gated engine `CloudTransport` without weakening the
       local loopback/origin boundary.
-- [x] Cover health, token rejection, connection lifecycle, ping/pong, and bridge
+- [ ] Cover health, token rejection, connection lifecycle, ping/pong, and bridge
       round trips with unit tests.
-- [x] Build the operator-only `scripts/cloud-workspace-validation/` harness with
+- [ ] Build the operator-only `scripts/cloud-workspace-validation/` harness with
       private atomic state, fail-closed native dependency rebuilds, lifecycle
       checks, and cleanup.
 - [ ] Run the full provider-account sequence, including soak and delete, and
@@ -19,7 +19,7 @@ an item complete.
       release blockers for the remote image.
 
 Exit: representative provider runs prove image, ABI, bridge, PTY, reconnect,
-egress, lifecycle, soak, and cleanup behavior without credentials in logs or
+outbound reachability, lifecycle, soak, and cleanup behavior without credentials in logs or
 tracked files.
 
 ## Phase 1 — Control-plane contracts
@@ -32,6 +32,17 @@ tracked files.
 - [ ] Add reconciliation workers for timeouts, drift, and orphan cleanup.
 - [ ] Add quotas and per-operation audit records before enabling creation.
 
+Branch-only foundation exists in migration
+`0010_cloud_workspace_control_plane.sql`, the `src/cloud-workspaces/`
+API/provider/reconciler boundary, and PostgreSQL-backed integration tests. The
+boxes remain unchecked until that code is reviewed and merged; neither its
+presence nor a passing unit suite is a shipped or production-qualified cloud
+workspace. Creation remains disabled unless the explicit paid-resource gate,
+complete provider/GitHub-App configuration, Organization eligibility, and a
+system-provisioned quota are all present. Even after review, completing this
+phase would not make a sandbox ready: successful provider creation queues a
+Phase 2 setup run and truthfully leaves the workspace in `setting_up`.
+
 Exit: API and reconciliation integration tests cover duplicate requests,
 timeouts after dispatch, revoked membership, concurrent lifecycle intents, and
 provider drift.
@@ -39,12 +50,15 @@ provider drift.
 ## Phase 2 — Production execution environment
 
 - [ ] Produce a pinned, licensed, reproducible engine image.
-- [ ] Run the engine and setup steps as a non-root user with bounded resources.
+- [ ] Run the engine and setup steps as a non-root user with VM/provider-level
+      resource bounds; per-agent cgroups are not an initial-release requirement.
 - [ ] Issue short-lived repository and engine grants; keep provisioning
       credentials outside the sandbox.
 - [ ] Implement readiness, sanitized setup logs, stop/wake/delete, and image
       generation upgrades.
-- [ ] Enforce inbound and outbound network policy and verify snapshot deletion.
+- [ ] Enforce inbound network policy, document direct tenant-VM egress, and
+      verify snapshot deletion. Revisit provider-level egress restrictions after
+      the first cloud release.
 
 Exit: a fresh authorized repository reaches readiness, survives stop/wake, and
 is completely revoked/deleted through repeatable end-to-end tests.

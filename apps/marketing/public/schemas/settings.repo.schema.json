@@ -153,6 +153,15 @@
           "type": "string"
         }
       }
+    },
+    "design": {
+      "type": "object",
+      "properties": {
+        "directory": {
+          "type": "string",
+          "description": "Repo-relative folder the design surface reads and writes (default \"Zeros Design\"). The folder is committed content; this key just selects which design folder is active."
+        }
+      }
     }
   }
 }

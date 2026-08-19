@@ -118,6 +118,19 @@ interface UseIframeWebviewOptions {
   /** Stable iframe `name`, used to route trusted main-process navigation events
    *  to the correct Browser tab when several iframes are mounted. */
   frameName?: string;
+  /** Volatile engine-authorized cloud preview origin. It is never persisted
+   * and grants picker messaging only to this Browser-tab hook instance. */
+  trustedPreviewOrigin?: string;
+}
+
+function pickerUrlAllowed(value: string, trustedOrigin?: string): boolean {
+  if (isLoopbackUrl(value)) return true;
+  if (!trustedOrigin) return false;
+  try {
+    return new URL(value).origin === trustedOrigin;
+  } catch {
+    return false;
+  }
 }
 
 export interface ForkSnapshotRequestResult {
@@ -138,6 +151,9 @@ export interface UseIframeWebviewResult {
   /** Latest known state. Updated on iframe load events. */
   state: IframeWebviewState;
   navigate: (url: string) => void;
+  /** Replace the current history entry while remounting the iframe. Used for
+   * transparent preview credential/origin renewal. */
+  replace: (url: string) => void;
   back: () => void;
   forward: () => void;
   reload: () => void;
@@ -257,7 +273,7 @@ function sanitizeForkSnapshot(value: unknown): ForkSnapshotPayload | null {
 export function useIframeWebview(
   opts: UseIframeWebviewOptions = {},
 ): UseIframeWebviewResult {
-  const { initialUrl = "", frameName } = opts;
+  const { initialUrl = "", frameName, trustedPreviewOrigin } = opts;
   const nativeReady = useNativeRuntime().ready;
 
   // Typed nullable so the callback ref (setIframeNode) can assign
@@ -574,6 +590,27 @@ export function useIframeWebview(
     ],
   );
 
+  const replace = useCallback(
+    (url: string) => {
+      if (!url) return;
+      const previousHistory = snapshotIframeHistory(
+        historyRef.current,
+        indexRef.current,
+      );
+      if (indexRef.current < 0) {
+        historyRef.current = [url];
+        indexRef.current = 0;
+      } else {
+        historyRef.current[indexRef.current] = url;
+      }
+      documentGenerationRef.current += 1;
+      requestFrameNavigation(url, previousHistory);
+      updateState({ currentUrl: url, isLoading: true, title: "" });
+      recomputeNav();
+    },
+    [requestFrameNavigation, updateState, recomputeNav],
+  );
+
   const back = useCallback(() => {
     if (indexRef.current <= 0) return;
     const previousHistory = snapshotIframeHistory(
@@ -786,7 +823,7 @@ export function useIframeWebview(
   const postToPicker = useCallback(
     (type: string, extra: Record<string, unknown> = {}) => {
       const currentUrl = historyRef.current[indexRef.current] ?? "";
-      if (!isLoopbackUrl(currentUrl)) return;
+      if (!pickerUrlAllowed(currentUrl, trustedPreviewOrigin)) return;
       const iframe = ref.current;
       const cw = iframe?.contentWindow;
       if (!cw) return;
@@ -798,7 +835,7 @@ export function useIframeWebview(
            but reading the proxy can be touchy. Swallow. */
       }
     },
-    [],
+    [trustedPreviewOrigin],
   );
 
   // ── Iframe node listeners (callback ref) ─────────────────
@@ -1047,7 +1084,7 @@ export function useIframeWebview(
       // Picker code is injected only on loopback pages. A public page shares
       // the iframe's contentWindow proxy and could otherwise forge the same
       // protocol to surface selections or append content into a chat.
-      if (!isLoopbackUrl(ev.origin)) return;
+      if (!pickerUrlAllowed(ev.origin, trustedPreviewOrigin)) return;
       if (!isPickerMessage(ev.data)) return;
       const msg = ev.data;
       const op = msg.type.slice(MSG_PREFIX.length);
@@ -1156,6 +1193,7 @@ export function useIframeWebview(
     postToPicker,
     captureElementScreenshot,
     cancelPendingFork,
+    trustedPreviewOrigin,
   ]);
 
   const clearSelectedElements = useCallback(() => {
@@ -1224,6 +1262,7 @@ export function useIframeWebview(
     frameNavigationKey: frameRequest.key,
     state,
     navigate,
+    replace,
     back,
     forward,
     reload,

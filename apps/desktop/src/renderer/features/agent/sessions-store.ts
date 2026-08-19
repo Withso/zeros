@@ -238,6 +238,8 @@ export const BLANK: AgentSessionState = {
   sessionId: null,
   providerBinding: null,
   providerMetadata: null,
+  boundary: null,
+  boundaryPorts: null,
   cwd: null,
   initialize: null,
   session: null,
@@ -1376,6 +1378,13 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           executionId: null,
           sessionId: null,
           session: null,
+          // The boundary belonged to the exact execution that just died, and
+          // with executionId nulled the status-changed guard drops any late
+          // engine publish for it — so a stale snapshot here (e.g. `draining`
+          // from a territory restart) would render, and spin, forever. The
+          // next create/load response repopulates both fields.
+          boundary: null,
+          boundaryPorts: null,
         };
       }
       if (!changed) return state;

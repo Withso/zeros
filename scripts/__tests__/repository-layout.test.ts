@@ -23,6 +23,96 @@ describe("repository layout contracts", () => {
     expect(workflowLint).not.toMatch(/\n  pull_request:\s*\n\s+paths:/);
   });
 
+  it("runs the required CodeQL check for pull requests and merge queues", () => {
+    const codeql = read(".github/workflows/codeql.yml");
+
+    expect(codeql).toContain("  pull_request:");
+    expect(codeql).toContain("  merge_group:");
+    expect(codeql).toContain("    name: codeql");
+  });
+
+  it("keeps required source-sync red until every ZSR architecture qualifies", () => {
+    const preflight = read(".github/workflows/preflight.yml");
+
+    expect(preflight).toContain("  source-sync-workload:");
+    expect(preflight).toMatch(
+      /  source-sync:\n(?:.|\n)*?    name: source-sync \(macOS\)\n(?:.|\n)*?    needs:\n(?:.|\n)*?      - source-sync-workload\n(?:.|\n)*?      - zsr-macos-intel\n(?:.|\n)*?      - zsr-linux-arm64/,
+    );
+    expect(preflight).toContain("SOURCE_SYNC_RESULT:");
+    expect(preflight).toContain("ZSR_MACOS_INTEL_RESULT:");
+    expect(preflight).toContain("ZSR_LINUX_ARM64_RESULT:");
+  });
+
+  it("uses the HTTPS Ubuntu archive before the amd64 containment install", () => {
+    const preflight = read(".github/workflows/preflight.yml");
+    const archive = preflight.indexOf("https://archive.ubuntu.com/ubuntu");
+    const update = preflight.indexOf("sudo apt-get update");
+
+    expect(archive).toBeGreaterThanOrEqual(0);
+    expect(archive).toBeLessThan(update);
+  });
+
+  it("smokes the production bubblewrap and seccomp namespace prerequisites", () => {
+    const preflight = read(".github/workflows/preflight.yml");
+    expect(
+      preflight.match(/kernel\.apparmor_restrict_unprivileged_userns=0/g),
+    ).toHaveLength(5);
+    expect(
+      preflight.match(
+        /kernel\.apparmor_restrict_unprivileged_userns="\$userns_restriction"/g,
+      ),
+    ).toHaveLength(5);
+    const installs = [
+      ...preflight.matchAll(
+        /      - name: Install contained-execution runtime\n([\s\S]*?)(?=\n      - name:|\n  [A-Za-z0-9_-]+:)/g,
+      ),
+    ].map((match) => match[1]!);
+
+    expect(installs).toHaveLength(2);
+    for (const install of installs) {
+      const usernsEnable = install.indexOf(
+        "kernel.apparmor_restrict_unprivileged_userns=0",
+      );
+      const sandboxSmoke = install.indexOf("--ro-bind / /");
+
+      expect(usernsEnable).toBeGreaterThanOrEqual(0);
+      expect(usernsEnable).toBeLessThan(sandboxSmoke);
+      expect(install).not.toContain("bwrap-userns-restrict");
+      expect(install.slice(sandboxSmoke)).toContain("--unshare-user");
+      expect(install.slice(sandboxSmoke)).toContain("--cap-drop ALL");
+      expect(install.slice(sandboxSmoke)).toContain("--unshare-pid");
+      expect(install.slice(sandboxSmoke)).toContain("--proc /proc");
+      expect(install.slice(sandboxSmoke)).toContain(
+        '"$apply_seccomp" /bin/true',
+      );
+    }
+
+    const vitest = preflight.match(
+      /      - name: Run vitest suite\n([\s\S]*?)(?=\n      - name:|\n  [A-Za-z0-9_-]+:)/,
+    )?.[1];
+    expect(vitest).toContain(
+      "trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=\"$userns_restriction\"' EXIT",
+    );
+    expect(vitest).toContain(
+      "sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0",
+    );
+    expect(vitest).toContain("pnpm test:git");
+  });
+
+  it("fails closed when an explicit containment test path disappears", () => {
+    const rootPackage = JSON.parse(read("package.json")) as {
+      scripts: Record<string, string>;
+    };
+    const command = rootPackage.scripts["check:design-containment"] ?? "";
+    expect(command).toMatch(/^node scripts\/run-explicit-vitest\.mjs /);
+
+    const files = command
+      .split(/\s+/)
+      .filter((token) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(token));
+    expect(files.length).toBeGreaterThan(0);
+    expect(files.filter((file) => !existsSync(file))).toEqual([]);
+  });
+
   it("keeps active automation off retired repository roots", () => {
     expect(existsSync("backend")).toBe(false);
     expect(existsSync("website")).toBe(false);
@@ -278,8 +368,8 @@ describe("repository layout contracts", () => {
     const generator = read("scripts/generate-third-party-licenses.mjs");
 
     for (const packageName of [
-      "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.221",
-      "@cursor/sdk-darwin-arm64@1.0.26",
+      "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.231",
+      "@cursor/sdk-darwin-arm64@1.0.28",
       "@vscode/ripgrep-darwin-arm64@1.18.0",
       // The staged Codex runtime is redistributed inside Contents/Resources,
       // so its platform package must carry terms — not just the JS wrapper.
@@ -343,6 +433,8 @@ describe("repository layout contracts", () => {
     const engineSmoke = read("scripts/smoke-engine.mjs");
 
     expect(engineSmoke).toContain('ZEROS_PARENT_PID: ""');
+    expect(engineSmoke).toContain('source: "browser"');
+    expect(engineSmoke).not.toContain('source: "client"');
   });
 
   it("threads the active session's live model capabilities into the unified menu", () => {
@@ -410,19 +502,67 @@ describe("repository layout contracts", () => {
     const image = read("scripts/cloud-workspace-validation/image.ts");
     const lifecycle = read("scripts/cloud-workspace-validation/lifecycle.ts");
     const dockerfile = read("scripts/cloud-workspace-validation/Dockerfile");
+    const launcher = read(
+      "scripts/cloud-workspace-validation/sandbox/start-engine.sh",
+    );
+    const attester = read(
+      "scripts/cloud-workspace-validation/sandbox/attest-cloud-worker.mjs",
+    );
+    const admission = read(
+      "scripts/cloud-workspace-validation/sandbox/consume-cloud-admission.mjs",
+    );
+    const runtime = read("scripts/cloud-workspace-validation/runtime.ts");
 
     expect(config).toContain("mode: 0o700");
     expect(config).toContain("mode: 0o600");
     expect(config).toContain("fs.renameSync(temporary, stateFile)");
     expect(config).toContain('u.searchParams.delete("token")');
-    expect(client).toContain('headers["x-zeros-cloud-token"]');
+    expect(client).toContain('"zeros-v1"');
+    expect(client).toContain("zeros-cloud-token.${Buffer.from");
+    expect(client).toContain('source: "browser" as const');
+    expect(client).not.toContain('source: "client"');
     expect(client).toContain('from "../../../packages/protocol/src/version"');
     expect(client).not.toMatch(/const PROTOCOL_VERSION\s*=\s*\d/);
     expect(lifecycle).toContain("clearState()");
     expect(dockerfile).toContain("&& pnpm rebuild better-sqlite3");
     expect(dockerfile).not.toContain("pnpm rebuild better-sqlite3 || true");
+    expect(dockerfile).toContain(
+      'if [ "${#ZEROS_REPO_COMMIT}" -ne 40 ] && [ "${#ZEROS_REPO_COMMIT}" -ne 64 ]',
+    );
     expect(image).toContain("&& pnpm rebuild better-sqlite3`");
     expect(image).not.toContain("pnpm rebuild better-sqlite3 || true");
+    expect(config).toContain('SANDBOX_ENGINE_DIR = "/opt/zeros"');
+    expect(config).toContain('SANDBOX_REPO_DIR = "/workspace/zeros"');
+    expect(config).toMatch(/node:22[^"\n]+@sha256:[a-f0-9]{64}/);
+    expect(image).toContain("acl bubblewrap busybox-static ca-certificates");
+    expect(image).toContain('"/etc/zeros/cloud-worker.json"');
+    expect(dockerfile).toContain("bubblewrap");
+    expect(dockerfile).toContain("podman");
+    expect(image).toContain("podman");
+    expect(dockerfile).toContain(
+      "COPY sandbox/cloud-worker.json /etc/zeros/cloud-worker.json",
+    );
+    expect(dockerfile).toContain(
+      "COPY sandbox/consume-cloud-admission.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs",
+    );
+    expect(dockerfile).not.toContain("prepare-zsr-cgroups");
+    expect(image).not.toContain("prepare-zsr-cgroups");
+    expect(dockerfile).not.toMatch(/curl[^\n|]*\|\s*(?:ba)?sh/);
+    expect(image).not.toMatch(/curl[^\n|]*\|\s*(?:ba)?sh/);
+    expect(dockerfile).not.toMatch(/mutagen/i);
+    expect(image).not.toMatch(/mutagen/i);
+    expect(attester).toContain("cloud-worker-admission.json");
+    expect(attester).toContain("rootControlledTree(ENGINE)");
+    expect(admission).toContain("renameSync(PROOF, consumed)");
+    expect(admission).toContain("containerInitStartTicks");
+    expect(launcher).toContain("consume-cloud-admission.mjs");
+    expect(runtime).toContain("attestCloudWorker(");
+    expect(runtime).toContain("relaunchQualifiedCloudEngine");
+    expect(lifecycle).toContain("relaunchQualifiedCloudEngine");
+    expect(launcher).toContain(
+      'node "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR"',
+    );
+    expect(launcher).not.toContain('node "$REPO_DIR/dist-engine/cli.js"');
   });
 
   it("keeps private delivery ledgers out of tracked design references", () => {

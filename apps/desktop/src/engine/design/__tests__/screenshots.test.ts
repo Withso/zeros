@@ -6,13 +6,16 @@ import {
   setDesignScreenshot,
 } from "../screenshots";
 
+const PNG_1X1_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+
 function screenshot(workspaceId: string, frame: string, nodeId: string | null) {
   return {
     workspaceId,
     frame,
     nodeId,
     mimeType: "image/png" as const,
-    data: Buffer.from(`${workspaceId}:${frame}:${nodeId}`).toString("base64"),
+    data: PNG_1X1_BASE64,
     width: 100,
     height: 80,
     scale: 1,
@@ -83,6 +86,12 @@ describe("design screenshot registry", () => {
         data: "not base64!",
       }),
     ).toThrow(/base64/);
+    expect(() =>
+      setDesignScreenshot({
+        ...screenshot("workspace-a", "home.html", null),
+        data: Buffer.from("valid-base64-but-not-a-png").toString("base64"),
+      }),
+    ).toThrow(/PNG/);
   });
 
   it("rejects a stale generation without evicting current pixels", () => {

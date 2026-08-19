@@ -47,6 +47,7 @@ function config(github: GithubBackendConfig | null): Config {
     isProduction: true,
     github,
     feedback: null,
+    cloudWorkspaces: null,
   };
 }
 

@@ -3,7 +3,7 @@
 // out automatically honors .gitignore + .gitattributes the same way the
 // rest of the user's git tooling does.
 
-import { getWorkspace, resolveRepoForGitOp } from "./worktree";
+import { resolveRepoForGitOp } from "./worktree";
 import { runGit } from "./git-exec";
 import { GitError } from "./errors";
 
@@ -47,7 +47,12 @@ function validatePaths(paths: unknown): string[] {
 export async function stagePaths(opts: StageOptions): Promise<void> {
   const ws = await resolveRepoForGitOp(opts.workspaceId);
   const paths = validatePaths(opts.paths);
-  await runGit(ws.path, ["add", ...(opts.force ? ["-f"] : []), "--", ...paths]);
+  await runGit(ws.path, [
+    "add",
+    ...(opts.force ? ["-f"] : []),
+    "--",
+    ...paths.map((candidate) => `:(literal)${candidate}`),
+  ]);
 }
 
 /** Unstage one or more paths via `git restore --staged -- <paths...>`.
@@ -55,7 +60,12 @@ export async function stagePaths(opts: StageOptions): Promise<void> {
 export async function unstagePaths(opts: StageOptions): Promise<void> {
   const ws = await resolveRepoForGitOp(opts.workspaceId);
   const paths = validatePaths(opts.paths);
-  await runGit(ws.path, ["restore", "--staged", "--", ...paths]);
+  await runGit(ws.path, [
+    "restore",
+    "--staged",
+    "--",
+    ...paths.map((candidate) => `:(literal)${candidate}`),
+  ]);
 }
 
 // ── hunk-level staging (D.6) ─────────────────────────────
@@ -80,9 +90,70 @@ function validatePatch(patch: unknown): string {
   return patch.endsWith("\n") ? patch : patch + "\n";
 }
 
+/** Ask Git's own patch parser which repository paths an apply operation can
+ * touch. A hand-rolled `diff --git` regex misses traditional patches, quoted
+ * names, binary patches, and rename metadata. Parse both directions because
+ * `--numstat -z` reports a rename's destination; reverse reports its source.
+ * The NUL format keeps tabs/newlines in filenames unambiguous. */
+export async function inspectApplyPatchPaths(
+  opts: ApplyHunkOptions,
+): Promise<string[]> {
+  const ws = await resolveRepoForGitOp(opts.workspaceId);
+  const input = validatePatch(opts.patch);
+  let outputs: string[];
+  try {
+    outputs = await Promise.all(
+      [false, true].map(async (reverse) => {
+        const { stdout } = await runGit(
+          ws.path,
+          ["apply", "--numstat", "-z", ...(reverse ? ["--reverse"] : [])],
+          {
+            input,
+            mapErrorCode: () => "VALIDATION_FAILED",
+          },
+        );
+        return stdout;
+      }),
+    );
+  } catch (cause) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "The selected hunk is not a valid, inspectable Git patch.",
+      cause,
+      remediation: "Refresh the diff and select the hunk again.",
+    });
+  }
+  const paths = new Set<string>();
+  for (const output of outputs) {
+    for (const record of output.split("\0")) {
+      if (!record) continue;
+      const firstTab = record.indexOf("\t");
+      const secondTab =
+        firstTab === -1 ? -1 : record.indexOf("\t", firstTab + 1);
+      const candidate = secondTab === -1 ? "" : record.slice(secondTab + 1);
+      if (!candidate) {
+        throw new GitError({
+          code: "VALIDATION_FAILED",
+          message: "Git returned an invalid path while inspecting the hunk.",
+          remediation: "Refresh the diff and select the hunk again.",
+        });
+      }
+      paths.add(candidate);
+    }
+  }
+  if (paths.size === 0) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "The selected hunk does not identify a repository path.",
+      remediation: "Refresh the diff and select the hunk again.",
+    });
+  }
+  return [...paths];
+}
+
 /** Stage a selected hunk: `git apply --cached` of the patch on stdin. */
 export async function stageHunk(opts: ApplyHunkOptions): Promise<void> {
-  const ws = getWorkspace(opts.workspaceId);
+  const ws = await resolveRepoForGitOp(opts.workspaceId);
   await runGit(ws.path, ["apply", "--cached"], {
     input: validatePatch(opts.patch),
     mapErrorCode: () => "GIT_COMMAND_FAILED",
@@ -91,7 +162,7 @@ export async function stageHunk(opts: ApplyHunkOptions): Promise<void> {
 
 /** Unstage a selected hunk: reverse-apply the patch against the index. */
 export async function unstageHunk(opts: ApplyHunkOptions): Promise<void> {
-  const ws = getWorkspace(opts.workspaceId);
+  const ws = await resolveRepoForGitOp(opts.workspaceId);
   await runGit(ws.path, ["apply", "--cached", "--reverse"], {
     input: validatePatch(opts.patch),
     mapErrorCode: () => "GIT_COMMAND_FAILED",
@@ -101,7 +172,7 @@ export async function unstageHunk(opts: ApplyHunkOptions): Promise<void> {
 /** Discard a selected hunk from the working tree: reverse-apply to the
  *  worktree (no --cached). Destructive — the UI should confirm. */
 export async function discardHunk(opts: ApplyHunkOptions): Promise<void> {
-  const ws = getWorkspace(opts.workspaceId);
+  const ws = await resolveRepoForGitOp(opts.workspaceId);
   await runGit(ws.path, ["apply", "--reverse"], {
     input: validatePatch(opts.patch),
     mapErrorCode: () => "GIT_COMMAND_FAILED",

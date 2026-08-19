@@ -9,6 +9,7 @@ import {
   closeState,
   createWorkspace,
   getWorkspace,
+  inspectApplyPatchPaths,
   setStateRootForTesting,
   stagePaths,
   status,
@@ -85,5 +86,21 @@ describe("stage / unstage", () => {
     await expect(
       stagePaths({ workspaceId, paths: ["--all"] }),
     ).rejects.toThrow();
+  });
+
+  it("inspects both paths in a NUL-delimited rename patch", async () => {
+    const ws = getWorkspace(workspaceId);
+    await execFileAsync("git", ["mv", "a.txt", "renamed.txt"], {
+      cwd: ws.path,
+    });
+    const { stdout: patch } = await execFileAsync(
+      "git",
+      ["diff", "--cached", "--binary", "-M"],
+      { cwd: ws.path },
+    );
+
+    await expect(
+      inspectApplyPatchPaths({ workspaceId, patch }),
+    ).resolves.toEqual(expect.arrayContaining(["a.txt", "renamed.txt"]));
   });
 });

@@ -106,6 +106,7 @@ const PER_TYPE_QUEUE_CAP: Record<string, number> = {
  * and we need to drop the old value before the next connect().
  */
 let cachedPortPromise: Promise<number> | null = null;
+let cachedTokenPromise: Promise<string> | null = null;
 function resolveEnginePort(): Promise<number> {
   if (cachedPortPromise) return cachedPortPromise;
   cachedPortPromise = (async () => {
@@ -158,13 +159,17 @@ export function invalidateEnginePort(): void {
   cachedPortPromise = null;
 }
 
+/** Port and bearer identify one sidecar generation and must rotate together. */
+export function invalidateEngineToken(): void {
+  cachedTokenPromise = null;
+}
+
 /**
  * Resolve the loopback /ws auth token. The engine requires it on the
  * upgrade so a website that opens a cross-origin ws:// to 127.0.0.1 can't pose
- * as the renderer. Cached for the app's lifetime — the token is stable across
- * engine respawns (the Electron host mints it once per launch).
+ * as the renderer. Cached for one engine generation; forceReconnect clears it
+ * because every replacement engine mints a fresh authority token.
  */
-let cachedTokenPromise: Promise<string> | null = null;
 function resolveEngineToken(): Promise<string> {
   if (cachedTokenPromise) return cachedTokenPromise;
   cachedTokenPromise = (async () => {
@@ -189,6 +194,95 @@ function resolveEngineToken(): Promise<string> {
 }
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
+
+export type RuntimeConnectionTarget =
+  | { readonly kind: "local" }
+  | {
+      readonly kind: "cloud";
+      /** Signed/private ingress endpoint. Bearers must never be in query/hash. */
+      readonly url: string;
+      readonly cloudToken: string;
+      readonly expiresAt: number;
+    };
+
+export interface ConnectionTargetExpiredEvent {
+  readonly kind: "cloud";
+  readonly expiresAt: number;
+}
+
+export function parseRuntimeConnectionTarget(
+  raw: unknown,
+  now: number = Date.now(),
+): RuntimeConnectionTarget {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("cloud runtime connection target is invalid");
+  }
+  const value = raw as Record<string, unknown>;
+  if (value.kind === "local" && Object.keys(value).length === 1) {
+    return { kind: "local" };
+  }
+  if (
+    value.kind !== "cloud" ||
+    Object.keys(value).sort().join("\0") !==
+      ["cloudToken", "expiresAt", "kind", "url"].sort().join("\0") ||
+    typeof value.url !== "string" ||
+    typeof value.cloudToken !== "string" ||
+    value.cloudToken.length < 16 ||
+    new TextEncoder().encode(value.cloudToken).length > 4_096 ||
+    /[\0\r\n]/.test(value.cloudToken) ||
+    !Number.isSafeInteger(value.expiresAt) ||
+    Number(value.expiresAt) - now < 5_000 ||
+    Number(value.expiresAt) - now > 24 * 60 * 60_000 + 60_000 ||
+    !Number.isSafeInteger(now)
+  ) {
+    throw new Error("cloud runtime connection target is invalid");
+  }
+  let url: URL;
+  try {
+    url = new URL(value.url);
+  } catch {
+    throw new Error("cloud runtime connection URL is invalid");
+  }
+  if (
+    url.protocol !== "wss:" ||
+    url.username ||
+    url.password ||
+    url.pathname !== "/ws" ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error("cloud runtime connection URL is invalid");
+  }
+  return {
+    kind: "cloud",
+    url: url.toString(),
+    cloudToken: value.cloudToken,
+    expiresAt: Number(value.expiresAt),
+  };
+}
+
+function base64urlUtf8(value: string): string {
+  const bytes = new TextEncoder().encode(value);
+  let binary = "";
+  for (let index = 0; index < bytes.length; index += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(index, index + 0x8000));
+  }
+  return btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/, "");
+}
+
+export function cloudRuntimeWebSocketProtocols(cloudToken: string): string[] {
+  if (
+    cloudToken.length < 16 ||
+    new TextEncoder().encode(cloudToken).length > 4_096 ||
+    /[\0\r\n]/.test(cloudToken)
+  ) {
+    throw new Error("cloud runtime connection token is invalid");
+  }
+  return ["zeros-v1", `zeros-cloud-token.${base64urlUtf8(cloudToken)}`];
+}
 
 // ── Connection-rejection recovery (pure helpers) ──────────
 //
@@ -356,6 +450,19 @@ export class RuntimeClient {
   private _rejected = false;
   lastRejection: ConnectionRejection | null = null;
   private rejectionListeners = new Set<(r: ConnectionRejection) => void>();
+  private connectionTarget: RuntimeConnectionTarget = { kind: "local" };
+  private connectionTargetEpoch = 0;
+  private expiredConnectionTargetEpoch = -1;
+  private connectionTargetExpiryTimer: ReturnType<typeof setTimeout> | null =
+    null;
+  private connectionTargetExpiryListeners = new Set<
+    (event: ConnectionTargetExpiredEvent) => void
+  >();
+
+  constructor(target: RuntimeConnectionTarget = { kind: "local" }) {
+    this.connectionTarget = parseRuntimeConnectionTarget(target);
+    this.armConnectionTargetExpiry();
+  }
 
   get status(): ConnectionStatus {
     return this._status;
@@ -378,17 +485,34 @@ export class RuntimeClient {
     // chunk multiplied by the orphan count.
     if (this.pendingWs) return;
 
-    let port: number;
-    let token: string;
-    try {
-      port = await resolveEnginePort();
-      token = await resolveEngineToken();
-    } catch {
-      if (this._disposed) return;
-      invalidateEnginePort();
-      this.setStatus("disconnected");
-      this.scheduleReconnect();
-      return;
+    let wsUrl: string;
+    let protocols: string[] | undefined;
+    if (this.connectionTarget.kind === "cloud") {
+      const target = this.connectionTarget;
+      if (target.expiresAt <= Date.now()) {
+        this.expireConnectionTarget(this.connectionTargetEpoch);
+        return;
+      }
+      wsUrl = target.url;
+      protocols = cloudRuntimeWebSocketProtocols(target.cloudToken);
+    } else {
+      let port: number;
+      let token: string;
+      try {
+        port = await resolveEnginePort();
+        token = await resolveEngineToken();
+      } catch {
+        if (this._disposed) return;
+        invalidateEnginePort();
+        this.setStatus("disconnected");
+        this.scheduleReconnect();
+        return;
+      }
+      // Present the per-launch token on the local upgrade. Omitted only when
+      // the host couldn't provide one (a tokenless standalone engine).
+      wsUrl = token
+        ? `ws://localhost:${port}/ws?token=${encodeURIComponent(token)}`
+        : `ws://localhost:${port}/ws`;
     }
     if (this._disposed) return;
     // Re-check after the async hop — another connect() could have won
@@ -396,16 +520,11 @@ export class RuntimeClient {
     if (this.ws?.readyState === WebSocket.OPEN) return;
     if (this.pendingWs) return;
 
-    // Present the per-launch token on the upgrade. Omitted only when the
-    // host couldn't provide one (a tokenless standalone engine).
-    const wsUrl = token
-      ? `ws://localhost:${port}/ws?token=${encodeURIComponent(token)}`
-      : `ws://localhost:${port}/ws`;
     this.setStatus("connecting");
 
     let ws: WebSocket;
     try {
-      ws = new WebSocket(wsUrl);
+      ws = protocols ? new WebSocket(wsUrl, protocols) : new WebSocket(wsUrl);
     } catch {
       this.setStatus("disconnected");
       this.scheduleReconnect();
@@ -475,6 +594,29 @@ export class RuntimeClient {
    *  (a dead engine holds no clients, and the next sign-in re-seeds the owner). */
   signalOwnerSignedOut(): void {
     this.send({ type: "OWNER_SIGNED_OUT" });
+  }
+
+  /** Switch this stable bridge client between its local sidecar and a freshly
+   * minted cloud descriptor. The descriptor remains memory-only. */
+  async setConnectionTarget(target: RuntimeConnectionTarget): Promise<void> {
+    this.connectionTarget = parseRuntimeConnectionTarget(target);
+    this.armConnectionTargetExpiry();
+    this._rejected = false;
+    this.lastRejection = null;
+    await this.forceReconnect();
+  }
+
+  /** Subscribe to expiry of the exact cloud descriptor currently installed.
+   * The event is secret-free and fires once per descriptor, allowing the
+   * trusted coordinator to mint and install a replacement without a stale
+   * reconnect loop. */
+  onConnectionTargetExpired(
+    listener: (event: ConnectionTargetExpiredEvent) => void,
+  ): () => void {
+    this.connectionTargetExpiryListeners.add(listener);
+    return () => {
+      this.connectionTargetExpiryListeners.delete(listener);
+    };
   }
 
   /**
@@ -683,6 +825,7 @@ export class RuntimeClient {
     this._engineConnected = false;
     this.setStatus("disconnected");
     invalidateEnginePort();
+    invalidateEngineToken();
     // Kick the reconnect immediately rather than going through the
     // backoff ladder — the user just clicked "Open Workspace" and is
     // actively waiting for the new engine.
@@ -691,6 +834,10 @@ export class RuntimeClient {
 
   dispose(): void {
     this._disposed = true;
+    if (this.connectionTargetExpiryTimer) {
+      clearTimeout(this.connectionTargetExpiryTimer);
+      this.connectionTargetExpiryTimer = null;
+    }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -706,6 +853,7 @@ export class RuntimeClient {
     this.queuedRequests = [];
     this.handlers.clear();
     this.statusListeners.clear();
+    this.connectionTargetExpiryListeners.clear();
     // Close BOTH the active socket and any in-flight pending one — an
     // un-disposed pendingWs would keep its TCP connection to the engine
     // open even though this client is gone, and on next mount the new
@@ -968,6 +1116,13 @@ export class RuntimeClient {
 
   private scheduleReconnect() {
     if (this._disposed) return;
+    if (
+      this.connectionTarget.kind === "cloud" &&
+      this.connectionTarget.expiresAt <= Date.now()
+    ) {
+      this.expireConnectionTarget(this.connectionTargetEpoch);
+      return;
+    }
     // Engine refused us — don't hammer it; wait for clearRejection() to retry.
     if (this._rejected) return;
     if (this.reconnectTimer) return;
@@ -982,5 +1137,73 @@ export class RuntimeClient {
         console.warn("[Zeros] reconnect failed:", err);
       });
     }, delay);
+  }
+
+  private armConnectionTargetExpiry(): void {
+    this.connectionTargetEpoch += 1;
+    this.expiredConnectionTargetEpoch = -1;
+    if (this.connectionTargetExpiryTimer) {
+      clearTimeout(this.connectionTargetExpiryTimer);
+      this.connectionTargetExpiryTimer = null;
+    }
+    if (this.connectionTarget.kind !== "cloud") return;
+    const epoch = this.connectionTargetEpoch;
+    const delay = Math.max(0, this.connectionTarget.expiresAt - Date.now());
+    this.connectionTargetExpiryTimer = setTimeout(
+      () => this.expireConnectionTarget(epoch),
+      delay,
+    );
+  }
+
+  private expireConnectionTarget(epoch: number): void {
+    if (
+      this._disposed ||
+      epoch !== this.connectionTargetEpoch ||
+      this.expiredConnectionTargetEpoch === epoch ||
+      this.connectionTarget.kind !== "cloud" ||
+      this.connectionTarget.expiresAt > Date.now()
+    ) {
+      return;
+    }
+    this.expiredConnectionTargetEpoch = epoch;
+    if (this.connectionTargetExpiryTimer) {
+      clearTimeout(this.connectionTargetExpiryTimer);
+      this.connectionTargetExpiryTimer = null;
+    }
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    const activeSocket = this.ws;
+    const pendingSocket = this.pendingWs;
+    this.ws = null;
+    this.pendingWs = null;
+    try {
+      activeSocket?.close();
+    } catch {
+      /* already dead */
+    }
+    try {
+      pendingSocket?.close();
+    } catch {
+      /* already dead */
+    }
+    this.rejectInFlightSoftFail();
+    this._engineConnected = false;
+    this.setStatus("disconnected");
+    const event: ConnectionTargetExpiredEvent = {
+      kind: "cloud",
+      expiresAt: this.connectionTarget.expiresAt,
+    };
+    for (const listener of this.connectionTargetExpiryListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        console.error(
+          "[Zeros] cloud connection expiry listener failed:",
+          error,
+        );
+      }
+    }
   }
 }

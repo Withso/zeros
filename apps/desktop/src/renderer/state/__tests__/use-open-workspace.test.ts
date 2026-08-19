@@ -50,25 +50,12 @@ beforeEach(() => {
 });
 
 describe("useOpenWorkspace", () => {
-  it("keeps a design destination completely inert while its Internal gate is off", () => {
+  it("opens a design destination even while the Internal gate is off (route renders the placeholder)", () => {
+    // One workspace, two modes: refusing to open trapped the workspace with
+    // no way to reach its un-gated "exit design mode" action. The route
+    // itself decides between canvas and placeholder; opening never spawns or
+    // revives a coding chat for a design destination either way.
     useInternalFeatureActive.mockReturnValue(false);
-
-    useOpenWorkspace()({
-      id: "ws_design",
-      kind: "design",
-      path: "/design workspaces/zeros/landing-page",
-      repoRoot: "/repo",
-    });
-
-    expect(useInternalFeatureActive).toHaveBeenCalledWith("designWorkspaces");
-    expect(prefetchWorkspaceSurface).not.toHaveBeenCalled();
-    expect(dispatch).not.toHaveBeenCalled();
-    expect(selectChatToRestoreForFolder).not.toHaveBeenCalled();
-    expect(hydrateChat).not.toHaveBeenCalled();
-    expect(spawnDefaultChatForWorkspace).not.toHaveBeenCalled();
-  });
-
-  it("rechecks the live gate when a previously-rendered callback runs", () => {
     isInternalFeatureActive.mockReturnValue(false);
 
     useOpenWorkspace()({
@@ -78,9 +65,17 @@ describe("useOpenWorkspace", () => {
       repoRoot: "/repo",
     });
 
-    expect(isInternalFeatureActive).toHaveBeenCalledWith("designWorkspaces");
-    expect(prefetchWorkspaceSurface).not.toHaveBeenCalled();
-    expect(dispatch).not.toHaveBeenCalled();
+    expect(prefetchWorkspaceSurface).toHaveBeenCalledOnce();
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "OPEN_WORKSPACE",
+      folder: "/design workspaces/zeros/landing-page",
+      repoRoot: "/repo",
+      chatId: null,
+      validationPending: undefined,
+    });
+    expect(selectChatToRestoreForFolder).not.toHaveBeenCalled();
+    expect(hydrateChat).not.toHaveBeenCalled();
+    expect(spawnDefaultChatForWorkspace).not.toHaveBeenCalled();
   });
 
   it("never restores, hydrates, or spawns coding chat for a design destination", () => {

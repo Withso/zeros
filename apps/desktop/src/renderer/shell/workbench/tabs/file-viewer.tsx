@@ -504,6 +504,15 @@ export function FileViewer({
 
   const canCopy = result?.kind === "text" && result.content != null;
 
+  // Design territory has exactly one write path — the design surface — so the
+  // engine refuses generic editor writes, staging and discard for these paths
+  // in EVERY mode (modes are concurrent; an agent can be working in code
+  // territory while the canvas is open). Rendering read-only here keeps the UI
+  // from offering an action the engine is going to reject. The engine remains
+  // the authority: if a transport omits the tag we simply behave as before.
+  const designReadOnly = result?.designPath === true;
+  const sourceReadOnly = readOnly || designReadOnly;
+
   // Mode toggle: markdown → Preview/Edit (+ Diff when a diff is available); other
   // text → Edit (+ Diff). "Diff" stays available for notInCommit so the user can
   // see the "not part of this commit" explanation. A lone option renders no toggle.
@@ -557,7 +566,7 @@ export function FileViewer({
           )}
           {/* Discard — ONLY when opened from the All-changes filter on a file
               with uncommitted work (discardable) and a writable target. */}
-          {discardable && !readOnly && (!fileMissing || diffAvailable) && (
+          {discardable && !sourceReadOnly && (!fileMissing || diffAvailable) && (
             <Tooltip label="Discard changes">
               <button
                 type="button"
@@ -702,18 +711,28 @@ export function FileViewer({
             <MarkdownPreview html={previewHtml} />
           </div>
         )}
-        {sourceShown && readOnly && (
-          <CodeView
-            content={result?.content ?? ""}
-            lang={codeLang}
-            scrollKey={JSON.stringify([scrollKeyBase, "source"])}
-          />
+        {sourceShown && sourceReadOnly && (
+          <div className="flex h-full min-h-0 flex-col">
+            {designReadOnly && (
+              <div className="text-fg3 bg-bg2 border-bd1 shrink-0 border-b px-5 py-2 text-xs">
+                Design files are edited in Design Mode and committed with “Save
+                designs”.
+              </div>
+            )}
+            <div className="min-h-0 flex-1">
+              <CodeView
+                content={result?.content ?? ""}
+                lang={codeLang}
+                scrollKey={JSON.stringify([scrollKeyBase, "source"])}
+              />
+            </div>
+          </div>
         )}
         {/* Keep a writable editor mounted while Diff/Preview is selected. Its
             draft + dirty registration then survive every workbench view switch;
             only the owning File tab closing (or a destructive reset revision)
             intentionally unmounts it. */}
-        {isText && !readOnly && (
+        {isText && !sourceReadOnly && (
           <div
             className={cn("h-full", !sourceShown && "hidden")}
             aria-hidden={!sourceShown || undefined}

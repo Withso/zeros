@@ -34,6 +34,14 @@ import type {
 } from "@zeros/protocol/agent-events";
 import type { ExecutionId, ProviderBinding } from "@zeros/protocol/identities";
 import type { AccountDetails } from "@zeros/protocol/messages";
+import type {
+  ExecutionBoundaryBackend,
+  ExecutionBoundaryPortsSnapshot,
+  ExecutionBoundaryRestriction,
+  ExecutionBoundaryStatus,
+} from "@zeros/protocol/containment";
+import type { ExecutionBoundary, PreparedBoundary } from "./containment/types";
+import type { BoundaryPreviewGatewayFactory } from "./containment/zsr-preview-gateway";
 
 // ── Failure taxonomy ─────────────────────────────────────
 //
@@ -106,6 +114,20 @@ export class AgentFailureError extends Error {
 
 export interface AgentGatewayEvents {
   onSessionUpdate: (agentId: string, notification: SessionNotification) => void;
+  /** Engine-authoritative status for the exact live execution. Contains only
+   * stable categories and counts, never paths, endpoints, refs, or errors. */
+  onBoundaryStatusChanged?: (
+    agentId: string,
+    executionId: string,
+    status: ExecutionBoundaryStatus,
+  ) => void;
+  /** Engine-authoritative, owner-routed listener snapshot. It contains no host
+   * endpoint, policy token, generation, or raw discovery error. */
+  onBoundaryPortsChanged?: (
+    agentId: string,
+    executionId: string,
+    snapshot: ExecutionBoundaryPortsSnapshot,
+  ) => void;
   onPermissionRequest: (
     agentId: string,
     permissionId: string,
@@ -175,6 +197,12 @@ export type McpServerRegistration =
 export interface AgentGatewayOptions {
   projectRoot: string;
   events: AgentGatewayEvents;
+  /** Production defaults to ZSR. Tests and platform coordinators may inject a
+   * contract-compatible backend; omission must never mean uncontained. */
+  executionBoundary?: ExecutionBoundary;
+  /** Browser-preview ingress. Local sessions use loopback; a qualified cloud
+   * coordinator injects a root-owned signed-port factory. */
+  previewGatewayFactory?: BoundaryPreviewGatewayFactory;
 }
 
 // ── AgentAdapter — the per-CLI contract ──────────────────
@@ -191,6 +219,42 @@ export interface AgentAdapterContext {
   sessionDirRoot: string;
   /** Emit events up to the gateway. */
   emit: AgentGatewayEvents;
+}
+
+export type AgentRole = "code";
+
+/** Immutable write authority for one provider sandbox. Read access is broader
+ * by design: code actors may inspect the repository and Design documents for
+ * context, but writes are carved out at the provider/OS boundary. */
+export interface AgentWriteCapabilities {
+  workspace: "write";
+  deniedPaths: readonly string[];
+}
+
+/** Immutable filesystem authority attached to one agent session. This is
+ * intentionally independent of workspace `viewMode`: switching UI surfaces
+ * can never change a running process's role or widen its capabilities. */
+export interface AgentFilesystemTerritory {
+  agentRole: AgentRole;
+  workspaceRoot: string;
+  /** Active Design document used for orientation and Design-surface identity. */
+  designDirectory: string;
+  /** Every recognized Design document carved out of this process's writable
+   * workspace. Kept explicit so lifecycle reconciliation can compare semantic
+   * authority without guessing which denied path is Design, Git, or policy. */
+  protectedDesignDirectories: readonly string[];
+  /** Files that decide whether those folders are recognized as Design: repo
+   * `.zeros` settings plus each folder's canvas marker. Host parity leaves the
+   * committed settings native so tree-level Git can update them; sticky engine
+   * recognition prevents an edit from de-registering an existing Design root,
+   * while the marker remains unwritable inside that root. Kept explicit for
+   * lifecycle comparison and provider-native fallback policy. */
+  designRecognitionPaths: readonly string[];
+  /** Complete semantic carveout discovered for this territory. The current ZSR
+   * host-parity policy derives its exact subtraction from the recognized Design
+   * roots and engine-owned state rather than blindly applying every entry; in
+   * particular, canonical Git metadata remains writable to a code actor. */
+  writeCapabilities: AgentWriteCapabilities;
 }
 
 /** Provider-native browser capability for one agent session.
@@ -213,6 +277,28 @@ export type AgentBrowserUse =
 
 export interface AgentAdapter {
   readonly agentId: string;
+
+  /** True only when this adapter turns `territory` into a non-bypassable
+   * runtime filesystem restriction in every permission posture. The gateway
+   * refuses a Design-enabled session when this is absent/false. */
+  readonly enforcesFilesystemTerritory?: boolean;
+
+  /** Diagnostic identity for the implementation enforcing `territory`.
+   * Authority never depends on this label; admission still requires the live
+   * probe below. During migration provider-native is the explicit fallback. */
+  readonly filesystemTerritoryBackend?: ExecutionBoundaryBackend;
+
+  /** Honest normal-vs-contained differences for this temporary backend.
+   * ZSR-qualified adapters expose an empty list. */
+  readonly filesystemTerritoryRestrictions?: readonly ExecutionBoundaryRestriction[];
+
+  /** Resolve runtime dependencies and prove that this exact immutable
+   * territory can be established before the session is admitted. Implementors
+   * must throw instead of degrading to an unsandboxed process. */
+  prepareFilesystemTerritory?(
+    territory: AgentFilesystemTerritory,
+    opts?: { cliBinary?: string },
+  ): Promise<void>;
 
   /** Declares that this adapter delivers Zeros' first-turn system instruction
    *  over the agent's NATIVE instruction channel (e.g. Codex
@@ -244,6 +330,10 @@ export interface AgentAdapter {
     mcpServers?: McpServerRegistration[];
     browserUse?: AgentBrowserUse;
     systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    /** Zeros-owned outer process boundary. Adapters must route every process
+     * root they create for this execution through it. */
+    executionBoundary?: PreparedBoundary;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }>;
 
   /** Resume a prior provider binding into a fresh Zeros execution.
@@ -262,6 +352,8 @@ export interface AgentAdapter {
     mcpServers?: McpServerRegistration[];
     browserUse?: AgentBrowserUse;
     systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
   }): Promise<LoadSessionResponse>;
 
   /** Fork one durable provider conversation reference. This operation creates
@@ -275,12 +367,18 @@ export interface AgentAdapter {
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
   }): Promise<{ providerBinding: ProviderBinding }>;
 
   /** List resumable sessions the CLI knows about. */
   listSessions(opts: {
     cwd?: string;
     cursor?: string | null;
+    /** Provider-backed discovery is a code actor too. The gateway supplies a
+     * fresh one-shot boundary; direct adapter tests may omit it. */
+    env?: Record<string, string>;
+    executionBoundary?: PreparedBoundary;
   }): Promise<ListSessionsResponse>;
 
   /** Send a turn. Streaming events fan out via emit.onSessionUpdate. */
@@ -335,6 +433,12 @@ export interface AgentAdapter {
    *  must never be logged or stored by the implementation. */
   validateApiKey?(
     apiKey: string,
+    opts?: {
+      cwd: string;
+      env?: Record<string, string>;
+      /** Save-time validation must not create a shared/global provider host. */
+      executionBoundary?: PreparedBoundary;
+    },
   ): Promise<{ ok: boolean | null; error?: string }>;
 
   /** Background one-shot text generation (the AI chat-title call): send ONE
@@ -350,6 +454,9 @@ export interface AgentAdapter {
     prompt: string;
     env?: Record<string, string>;
     timeoutMs?: number;
+    /** One-shot provider processes are still code actors. The gateway always
+     * supplies a freshly admitted boundary and retires it after the call. */
+    executionBoundary?: PreparedBoundary;
   }): Promise<string>;
 
   /** Change the model of a LIVE session without rebuilding it. Optional —
@@ -405,10 +512,16 @@ export interface AgentAdapter {
   /** Read the signed-in account's details (provider / plan / org / email)
    *  for the Providers panel's connection block. Optional — only providers
    *  with a queryable account implement it (Claude via the SDK, Codex via
-   *  the app-server); others (Cursor) omit it. May spawn a short-lived
-   *  runtime, so the gateway caches the result behind a long TTL. Returns
-   *  null when unavailable (not signed in, API-key mode, or fetch failed). */
-  getAccountInfo?(): Promise<AccountDetails | null>;
+   *  the app-server); others (Cursor) omit it. Returns null when unavailable
+   *  (not signed in, API-key mode, no live runtime, or fetch failed). */
+  getAccountInfo?(opts?: {
+    /** Never create provider work merely to decorate registry UI. */
+    liveOnly?: boolean;
+    /** Complete provider environment prepared at the trusted gateway edge. */
+    env?: Record<string, string>;
+    /** Fresh boundary for any fallback/throwaway provider runtime. */
+    executionBoundary?: PreparedBoundary;
+  }): Promise<AccountDetails | null>;
 
   /** Release resources: kill subprocesses, close sockets. */
   dispose(): Promise<void>;

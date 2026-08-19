@@ -3,7 +3,7 @@
 // the data/exit callbacks by hand to verify the rerun-race guard + the stale-run
 // reconciliation, without launching a real shell.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -16,6 +16,7 @@ import {
 } from "../state";
 import { SetupManager, setupSessionId } from "../setup-runner";
 import type { PtyService } from "../../pty/service";
+import type { PreparedBoundary } from "../../agents/containment/types";
 import type { Workspace } from "../types";
 
 /** A minimal PtyService stand-in — SetupManager only calls has/kill/create. */
@@ -23,15 +24,21 @@ function fakePty() {
   const live = new Set<string>();
   const created: string[] = [];
   const killed: string[] = [];
+  const wrapped: boolean[] = [];
   const svc = {
     has: (id: string) => live.has(id),
     kill: (id: string) => {
       live.delete(id);
       killed.push(id);
     },
-    create: (opts: { sessionId: string; resolvedCwd?: string }) => {
+    create: (opts: {
+      sessionId: string;
+      resolvedCwd?: string;
+      wrapSpawn?: (request: unknown) => unknown;
+    }) => {
       live.add(opts.sessionId);
       created.push(opts.sessionId);
+      wrapped.push(typeof opts.wrapSpawn === "function");
       return {
         sessionId: opts.sessionId,
         pid: 1,
@@ -41,7 +48,7 @@ function fakePty() {
       };
     },
   };
-  return { svc: svc as unknown as PtyService, created, killed };
+  return { svc: svc as unknown as PtyService, created, killed, wrapped };
 }
 
 function sampleWorkspace(
@@ -70,6 +77,17 @@ function sampleWorkspace(
   };
 }
 
+function preparedTestBoundary(): PreparedBoundary {
+  return {
+    wrapSpawn: (request: unknown) => request,
+    trackProcessGroup: () => ({}) as never,
+    revoke: async () => {},
+    stopAndProve: async () => {},
+  } as unknown as PreparedBoundary;
+}
+
+const testBoundaryFactory = async () => preparedTestBoundary();
+
 describe("SetupManager", () => {
   let stateRoot: string;
 
@@ -92,7 +110,7 @@ describe("SetupManager", () => {
     const wsId = "ws_aaa111-rose";
     insertWorkspace(sampleWorkspace(wsId));
     const { svc, created, killed } = fakePty();
-    const mgr = new SetupManager(svc, () => {});
+    const mgr = new SetupManager(svc, () => {}, undefined, testBoundaryFactory);
 
     // Run 1.
     await mgr.start({ workspaceId: wsId, command: "true" });
@@ -126,10 +144,47 @@ describe("SetupManager", () => {
     const wsId = "ws_bbb222-iris";
     insertWorkspace(sampleWorkspace(wsId));
     const { svc } = fakePty();
-    const mgr = new SetupManager(svc, () => {});
+    const mgr = new SetupManager(svc, () => {}, undefined, testBoundaryFactory);
     await mgr.start({ workspaceId: wsId, command: "false" });
     mgr.handleExit(setupSessionId(wsId, 1), 1);
     expect(getWorkspaceById(wsId)?.setupState).toBe("failed");
+  });
+
+  it("prepares and applies a repo-code-task boundary before spawning setup", async () => {
+    const wsId = "ws_bound1-cedar";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc, wrapped } = fakePty();
+    const requests: Array<{
+      executionId: string;
+      cwd: string;
+      workspaceRoot: string;
+      repoRoot: string;
+    }> = [];
+    const boundary = {
+      wrapSpawn: (request: unknown) => request,
+      revoke: async () => {},
+      stopAndProve: async () => {},
+    } as unknown as PreparedBoundary;
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      async () => ({ PATH: "/bin" }),
+      async (request) => {
+        requests.push(request);
+        return boundary;
+      },
+    );
+
+    await mgr.start({ workspaceId: wsId, command: "pnpm install" });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      cwd: `/tmp/worktrees/test-repo/${wsId}`,
+      workspaceRoot: `/tmp/worktrees/test-repo/${wsId}`,
+      repoRoot: "/tmp/test-repo",
+    });
+    expect(requests[0]!.executionId).toMatch(/^repo-setup-/);
+    expect(wrapped).toEqual([true]);
   });
 
   it("a KILLED run never scores a pass — node-pty reports kill() as exitCode 0", async () => {
@@ -142,7 +197,7 @@ describe("SetupManager", () => {
     insertWorkspace(sampleWorkspace(wsId));
     const { svc } = fakePty();
     let passed = 0;
-    const mgr = new SetupManager(svc, () => {});
+    const mgr = new SetupManager(svc, () => {}, undefined, testBoundaryFactory);
     await mgr.start({
       workspaceId: wsId,
       command: "pnpm install",
@@ -190,9 +245,14 @@ describe("SetupManager", () => {
     // old code recovered on the next line (start() sets "running" again), so the
     // damage was a transient verdict + an onPassed that already fired.
     const states: Array<string | null | undefined> = [];
-    const mgr = new SetupManager(svc, () => {
-      states.push(getWorkspaceById(wsId)?.setupState);
-    });
+    const mgr = new SetupManager(
+      svc,
+      () => {
+        states.push(getWorkspaceById(wsId)?.setupState);
+      },
+      undefined,
+      testBoundaryFactory,
+    );
     ref.mgr = mgr;
 
     await mgr.start({
@@ -220,7 +280,7 @@ describe("SetupManager", () => {
     insertWorkspace(sampleWorkspace(orphan, { setupState: "running" }));
     insertWorkspace(sampleWorkspace(done, { setupState: "passed" }));
     const { svc } = fakePty();
-    const mgr = new SetupManager(svc, () => {});
+    const mgr = new SetupManager(svc, () => {}, undefined, testBoundaryFactory);
 
     mgr.reconcileStaleRuns();
 
@@ -235,7 +295,7 @@ describe("SetupManager", () => {
     const wsId = "ws_eee555-fern";
     insertWorkspace(sampleWorkspace(wsId));
     const { svc, killed } = fakePty();
-    const mgr = new SetupManager(svc, () => {});
+    const mgr = new SetupManager(svc, () => {}, undefined, testBoundaryFactory);
 
     await mgr.start({ workspaceId: wsId, command: "sleep 999" });
     const s1 = setupSessionId(wsId, 1);
@@ -252,6 +312,131 @@ describe("SetupManager", () => {
     expect(mgr.info(wsId).state).toBe("stopped");
   });
 
+  it("makes setup boundary teardown proof part of workspace lifecycle", async () => {
+    const wsId = "ws_proof1-umber";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc } = fakePty();
+    const boundary = {
+      ...preparedTestBoundary(),
+      stopAndProve: async () => {
+        throw new Error("setup process domain is still populated");
+      },
+    } as PreparedBoundary;
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      undefined,
+      async () => boundary,
+    );
+    await mgr.start({ workspaceId: wsId, command: "pnpm install" });
+    svc.kill(setupSessionId(wsId, 1));
+    mgr.handleExit(setupSessionId(wsId, 1), 137, 9);
+
+    await expect(mgr.proveWorkspaceBoundaryStopped(wsId)).rejects.toThrow(
+      /repository setup containment teardown was not proven/i,
+    );
+  });
+
+  it("globally revokes and proves every setup boundary before an owner-map change", async () => {
+    const wsId = "ws_global1-cypress";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc, killed } = fakePty();
+    const revoke = vi.fn(async () => {});
+    const stopAndProve = vi.fn(async () => {});
+    const boundary = {
+      ...preparedTestBoundary(),
+      revoke,
+      stopAndProve,
+    } as PreparedBoundary;
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      undefined,
+      async () => boundary,
+    );
+    await mgr.start({ workspaceId: wsId, command: "pnpm install" });
+
+    await mgr.stopAllAndProve();
+
+    expect(killed).toEqual([setupSessionId(wsId, 1)]);
+    expect(revoke).toHaveBeenCalledOnce();
+    expect(stopAndProve).toHaveBeenCalledOnce();
+    expect(getWorkspaceById(wsId)?.setupState).toBe("stopped");
+  });
+
+  it("retains a superseded setup teardown failure after the replacement start aborts", async () => {
+    const wsId = "ws_global2-juniper";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc } = fakePty();
+    let envBuild = 0;
+    const envBuilder = vi.fn(async () => {
+      envBuild += 1;
+      if (envBuild === 2) throw new Error("replacement env failed");
+      return { PATH: "/usr/bin:/bin" };
+    });
+    const failedBoundary = {
+      ...preparedTestBoundary(),
+      stopAndProve: async () => {
+        throw new Error("superseded setup domain is still populated");
+      },
+    } as PreparedBoundary;
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      envBuilder,
+      async () => failedBoundary,
+    );
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await mgr.start({ workspaceId: wsId, command: "pnpm install" });
+      await expect(
+        mgr.start({ workspaceId: wsId, command: "pnpm install" }),
+      ).rejects.toThrow(/replacement env failed/i);
+      await vi.waitFor(() => expect(diagnostic).toHaveBeenCalled());
+
+      expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
+      expect(mgr.registeredDesignAuthorityChanged(null)).toBe(true);
+      await expect(mgr.stopAllAndProve()).rejects.toThrow(
+        /setup boundaries were not globally retired/i,
+      );
+    } finally {
+      diagnostic.mockRestore();
+    }
+  });
+
+  it("reports an unproven boundary teardown when PTY creation fails", async () => {
+    const wsId = "ws_spawn1-willow";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc } = fakePty();
+    const spawnError = new Error("node-pty create failed");
+    const failingPty = {
+      ...svc,
+      create: () => {
+        throw spawnError;
+      },
+    } as unknown as PtyService;
+    const boundary = {
+      ...preparedTestBoundary(),
+      stopAndProve: async () => {
+        throw new Error("setup process domain is still populated");
+      },
+    } as PreparedBoundary;
+    const mgr = new SetupManager(
+      failingPty,
+      () => {},
+      undefined,
+      async () => boundary,
+    );
+
+    await expect(
+      mgr.start({ workspaceId: wsId, command: "pnpm install" }),
+    ).rejects.toMatchObject({
+      name: "AggregateError",
+      errors: expect.arrayContaining([spawnError]),
+    });
+    expect(getWorkspaceById(wsId)?.setupState).toBe("failed");
+  });
+
   it("stop() during environment resolution cancels the pending setup spawn", async () => {
     const wsId = "ws_stop01-moss";
     insertWorkspace(sampleWorkspace(wsId));
@@ -264,6 +449,7 @@ describe("SetupManager", () => {
       svc,
       () => {},
       async () => envPending,
+      testBoundaryFactory,
     );
 
     const starting = mgr.start({
@@ -279,11 +465,49 @@ describe("SetupManager", () => {
     expect(mgr.info(wsId).state).toBe("stopped");
   });
 
+  it("retains failed teardown proof when Stop lands after boundary admission", async () => {
+    const wsId = "ws_stop02-pine";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc } = fakePty();
+    let releaseBoundary = () => {};
+    const boundaryGate = new Promise<void>((resolve) => {
+      releaseBoundary = resolve;
+    });
+    const stopAndProve = vi.fn(async () => {
+      throw new Error("cancelled setup domain is still populated");
+    });
+    const boundaryFactory = vi.fn(async () => {
+      await boundaryGate;
+      return {
+        ...preparedTestBoundary(),
+        stopAndProve,
+      } as PreparedBoundary;
+    });
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      async () => ({ PATH: "/bin" }),
+      boundaryFactory,
+    );
+
+    const starting = mgr.start({
+      workspaceId: wsId,
+      command: "pnpm install",
+    });
+    await vi.waitFor(() => expect(boundaryFactory).toHaveBeenCalledOnce());
+    mgr.stop(wsId);
+    releaseBoundary();
+
+    await expect(starting).rejects.toThrow(/cancelled setup domain/i);
+    await expect(mgr.stopAllAndProve()).rejects.toThrow(/restart Zeros/i);
+    expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
+  });
+
   it("stop() after the run finished is a no-op (doesn't clobber the result)", async () => {
     const wsId = "ws_fff666-sage";
     insertWorkspace(sampleWorkspace(wsId));
     const { svc } = fakePty();
-    const mgr = new SetupManager(svc, () => {});
+    const mgr = new SetupManager(svc, () => {}, undefined, testBoundaryFactory);
 
     await mgr.start({ workspaceId: wsId, command: "true" });
     const s1 = setupSessionId(wsId, 1);
@@ -299,9 +523,14 @@ describe("SetupManager", () => {
     const localId = "local:test-repo";
     const { svc, created } = fakePty();
     const changedWorkspaceIds: Array<string | null> = [];
-    const mgr = new SetupManager(svc, (workspaceId) => {
-      changedWorkspaceIds.push(workspaceId);
-    });
+    const mgr = new SetupManager(
+      svc,
+      (workspaceId) => {
+        changedWorkspaceIds.push(workspaceId);
+      },
+      undefined,
+      testBoundaryFactory,
+    );
 
     // No workspace row — without a target this is a no-op…
     await mgr.start({ workspaceId: localId, command: "true" });
@@ -348,7 +577,7 @@ describe("SetupManager", () => {
     const wsId = "ws_pass01-rose";
     insertWorkspace(sampleWorkspace(wsId));
     const { svc } = fakePty();
-    const mgr = new SetupManager(svc, () => {});
+    const mgr = new SetupManager(svc, () => {}, undefined, testBoundaryFactory);
     let fired = 0;
     const onPassed = () => {
       fired += 1;

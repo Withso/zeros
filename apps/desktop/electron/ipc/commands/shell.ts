@@ -22,16 +22,14 @@ import os from "node:os";
 import path from "node:path";
 import type { CommandHandler } from "../router";
 import { isKnownInstallCommand } from "../../../src/engine/agents/install-commands";
+import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
 
 /** Open an external http(s) URL in the user's default browser.
  *  Scheme allowlist prevents a rogue caller from
  *  triggering `open -a ...` or `file://` style actions. */
 export const shellOpenUrl: CommandHandler = async (args) => {
-  const url = typeof args.url === "string" ? args.url : "";
-  const lower = url.toLowerCase();
-  if (!(lower.startsWith("http://") || lower.startsWith("https://"))) {
-    throw new Error("only http(s) URLs are allowed");
-  }
+  const url = normalizeExternalHttpUrl(args.url);
+  if (!url) throw new Error("only valid http(s) URLs are allowed");
   await shell.openExternal(url);
 };
 

@@ -18,9 +18,9 @@
 // adapter's logic (model resolution, classify, translator, retry) is unchanged:
 // only the transport for the raw SDK calls moved out of process.
 //
-// One shared host owns every Cursor agent/run/store. If it dies unexpectedly,
-// pending requests reject and live run streams throw (the adapter classifies
-// that as a turn failure); the next call lazily respawns the host.
+// Production sessions use one host per prepared ZSR boundary, so SDK tools,
+// local MCP, plugins and shell descendants are causally contained. A shared
+// host remains only for non-session probes and legacy direct-adapter tests.
 //
 // Runtime resolution reuses the PTY host's (set by apps/desktop/electron/sidecar.ts; both
 // hosts just need a real Node, not bun):
@@ -39,7 +39,14 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { preserveAmbientConfigRoots } from "../../shared/config-isolation";
+import {
+  preserveAmbientConfigRoots,
+  stripEngineAuthorityEnv,
+} from "../../shared/config-isolation";
+import type {
+  BoundaryProcess,
+  PreparedBoundary,
+} from "../../../containment/types";
 import type {
   CursorSdkModule,
   SdkAgent,
@@ -102,6 +109,12 @@ const RESPAWN_BACKOFF_CAP_MS = 30_000;
 const MAX_QUEUED_MSGS = 10_000;
 /** Ceiling for a partial (un-newline-terminated) protocol line — see onLine. */
 const MAX_PARTIAL_LINE_CHARS = 32 * 1024 * 1024;
+/** A control-plane reply (create/resume/list/send/store) should arrive well
+ * before a model turn completes. Bound it independently so a lost NDJSON
+ * response or wedged HTTP/2 CONNECT cannot leave session admission in
+ * `warming` forever. `run.wait` explicitly opts out because it spans the
+ * user-visible model turn and is cancelled by the owning prompt lifecycle. */
+const CONTROL_REQUEST_TIMEOUT_MS = 30_000;
 
 export function toHostError(e: SerializedHostError | undefined): Error {
   const err = new Error(e?.message ?? "cursor host error") as Error & {
@@ -175,12 +188,18 @@ export interface HostTransport {
   send(line: string): void;
   onLine(cb: (line: string) => void): void;
   onExit(cb: () => void): void;
-  dispose(): void;
+  dispose(): void | Promise<void>;
 }
 
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (err: unknown) => void;
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+function clearPendingTimer(pending: Pending): void {
+  if (pending.timer) clearTimeout(pending.timer);
+  pending.timer = undefined;
 }
 
 /** Drives one Cursor host subprocess: correlates request/response, routes run
@@ -280,13 +299,15 @@ export class CursorHostClient {
         return;
       case "fatal":
         this.fatalMessage = typeof m.message === "string" ? m.message : null;
-        if (this.fatalMessage) console.error(`[cursor-host] fatal: ${this.fatalMessage}`);
+        if (this.fatalMessage)
+          console.error(`[cursor-host] fatal: ${this.fatalMessage}`);
         return;
       case "res": {
         const id = typeof m.id === "number" ? m.id : Number(m.id);
         const p = this.pending.get(id);
         if (!p) return;
         this.pending.delete(id);
+        clearPendingTimer(p);
         if (m.ok) p.resolve(m.result);
         else p.reject(toHostError(m.error as SerializedHostError | undefined));
         return;
@@ -345,9 +366,9 @@ export class CursorHostClient {
     const err = new Error(
       crashLooping
         ? `cursor host: ${reason} — and has now crashed ` +
-          `${this.consecutiveEarlyDeaths} times in a row at boot. Respawn is ` +
-          `held off; it will be retried automatically. ` +
-          CURSOR_HOST_CRASH_LOOP_ADVICE
+            `${this.consecutiveEarlyDeaths} times in a row at boot. Respawn is ` +
+            `held off; it will be retried automatically. ` +
+            CURSOR_HOST_CRASH_LOOP_ADVICE
         : `cursor host: ${reason}`,
     ) as Error & { code?: string };
     // Unexpected death (no fatal line) → recoverable: the next call respawns
@@ -359,13 +380,20 @@ export class CursorHostClient {
     // identically) stays untagged.
     if (crashLooping) err.code = CURSOR_HOST_CRASH_LOOP_CODE;
     else if (!fatal) err.code = CURSOR_HOST_EXITED_CODE;
-    for (const p of this.pending.values()) p.reject(err);
+    for (const p of this.pending.values()) {
+      clearPendingTimer(p);
+      p.reject(err);
+    }
     this.pending.clear();
     for (const q of this.queues.values()) q.fail(err);
     this.queues.clear();
   }
 
-  request<T = unknown>(op: string, args: unknown): Promise<T> {
+  request<T = unknown>(
+    op: string,
+    args: unknown,
+    timeoutMs = CONTROL_REQUEST_TIMEOUT_MS,
+  ): Promise<T> {
     if (!this.ensure()) {
       // Respawn hold-off (crash-loop guard): fail fast without spawning.
       // Below the loop threshold the rejection stays RECOVERABLE (a blip the
@@ -377,7 +405,10 @@ export class CursorHostClient {
       // it recoverable would feed the silent-retry loop a known-broken host.
       const now = Date.now();
       if (!this.spawnFailed && now < this.respawnBlockedUntil) {
-        const waitS = Math.max(1, Math.ceil((this.respawnBlockedUntil - now) / 1000));
+        const waitS = Math.max(
+          1,
+          Math.ceil((this.respawnBlockedUntil - now) / 1000),
+        );
         const crashLooping =
           this.consecutiveEarlyDeaths >= MAX_CONSECUTIVE_EARLY_DEATHS;
         const fatal = this.fatalMessage;
@@ -404,40 +435,62 @@ export class CursorHostClient {
     }
     const id = this.nextReqId++;
     return new Promise<T>((resolve, reject) => {
-      this.pending.set(id, {
+      const pending: Pending = {
         resolve: resolve as (v: unknown) => void,
         reject,
-      });
+      };
+      this.pending.set(id, pending);
+      if (Number.isFinite(timeoutMs) && timeoutMs > 0) {
+        pending.timer = setTimeout(() => {
+          if (this.pending.get(id) !== pending) return;
+          this.pending.delete(id);
+          pending.timer = undefined;
+          reject(
+            new Error(
+              `cursor host request ${op} timed out after ${timeoutMs}ms`,
+            ),
+          );
+        }, timeoutMs);
+      }
       try {
         this.transport!.send(JSON.stringify({ k: "req", id, op, args }));
       } catch (err) {
         this.pending.delete(id);
+        clearPendingTimer(pending);
         reject(err);
       }
     });
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
     const t = this.transport;
     this.transport = null;
-    for (const p of this.pending.values())
+    for (const p of this.pending.values()) {
+      clearPendingTimer(p);
       p.reject(new Error("cursor host: disposed"));
+    }
     this.pending.clear();
     for (const q of this.queues.values()) q.end();
     this.queues.clear();
-    if (t) t.dispose();
+    if (t) await t.dispose();
   }
 
   // ── CursorSdkModule proxy ─────────────────────────────────
 
-  private makeRun(runId: string, sdkRunId: string | null, queue: AsyncMsgQueue): SdkRun {
+  private makeRun(
+    runId: string,
+    sdkRunId: string | null,
+    queue: AsyncMsgQueue,
+  ): SdkRun {
     return {
       id: sdkRunId ?? undefined,
       stream: () => queue[Symbol.asyncIterator](),
       wait: () =>
-        this.request<{ status?: string; result?: string } | null>("run.wait", {
-          runId,
-        }).then((r) => r ?? undefined),
+        this.request<{ status?: string; result?: string } | null>(
+          "run.wait",
+          { runId },
+          0,
+        ).then((r) => r ?? undefined),
       cancel: () => this.request<void>("run.cancel", { runId }).then(() => {}),
     };
   }
@@ -529,6 +582,18 @@ export class CursorHostClient {
           return this.makeStore(res?.storeId ?? null);
         },
       },
+      platform: {
+        // Building the workspace executor can outlast the ordinary control
+        // budget on a cold contained host — that IS the cost being moved off
+        // the turn — and nothing waits on the reply, so it opts out of the
+        // 30s timeout the way `run.wait` does.
+        prewarm: (opts) =>
+          this.request<{ prewarmed: boolean; elapsedMs?: number }>(
+            "platform.prewarm",
+            opts,
+            Number.POSITIVE_INFINITY,
+          ),
+      },
     };
   }
 }
@@ -562,6 +627,16 @@ function resolveRuntime(): { cmd: string; electron: boolean } {
   return { cmd: "node", electron: false };
 }
 
+function resolveExecutable(command: string): string | null {
+  if (path.isAbsolute(command)) return existsSync(command) ? command : null;
+  for (const entry of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!entry) continue;
+    const candidate = path.join(entry, command);
+    if (existsSync(candidate)) return candidate;
+  }
+  return null;
+}
+
 /**
  * The cwd to spawn the host subprocess in. **Must NOT be a git repository.**
  *
@@ -591,7 +666,16 @@ export function resolveHostCwd(): string {
   return os.tmpdir();
 }
 
-export function spawnSubprocessTransport(): HostTransport | null {
+export interface CursorHostSpawnOptions {
+  executionBoundary: PreparedBoundary;
+  cwd: string;
+  /** Complete, already-scrubbed provider environment. */
+  env: Record<string, string>;
+}
+
+export function spawnSubprocessTransport(
+  options?: CursorHostSpawnOptions,
+): HostTransport | null {
   const script = resolveHostScript();
   if (!script) {
     console.error(
@@ -599,26 +683,52 @@ export function spawnSubprocessTransport(): HostTransport | null {
     );
     return null;
   }
-  const { cmd, electron } = resolveRuntime();
-  // The shared Cursor host inherits the engine's env (where the @cursor/sdk
-  // reads the user's HOME/config). Route through the guard so the host can
-  // never be pointed at an isolated config dir — uniform with the Claude +
-  // Codex spawn-env builders.
-  const env: Record<string, string> = preserveAmbientConfigRoots({
-    ...(process.env as Record<string, string>),
-  });
-  if (electron) env.ELECTRON_RUN_AS_NODE = "1";
+  const runtime = resolveRuntime();
+  const cmd = options ? resolveExecutable(runtime.cmd) : runtime.cmd;
+  if (!cmd) {
+    console.error(
+      `[cursor-host] cannot resolve host runtime ${runtime.cmd} to an absolute executable`,
+    );
+    return null;
+  }
+  // A session host receives the gateway's complete environment verbatim
+  // (minus engine authority). The legacy shared probe host constructs ambient
+  // compatibility here because it has no session admission edge.
+  const env: Record<string, string> = options
+    ? stripEngineAuthorityEnv({ ...options.env })
+    : preserveAmbientConfigRoots({
+        ...(process.env as Record<string, string>),
+      });
+  if (options) {
+    // Cursor's SDK uses global fetch plus Node's HTTP/1 transport during
+    // Agent.create. Node does not consult HTTP(S)_PROXY by default, so a
+    // contained host otherwise attempts a direct socket that the kernel fence
+    // correctly denies before SRT can authenticate and inspect the request.
+    // Electron 43 embeds Node 24, whose built-in proxy support covers fetch,
+    // http.request and https.request when enabled at process startup.
+    env.NODE_USE_ENV_PROXY = "1";
+  }
+  if (runtime.electron) env.ELECTRON_RUN_AS_NODE = "1";
 
   // cwd is deliberately a non-repo dir — see resolveHostCwd(). NEVER inherit the
   // engine's cwd here, or a missing per-agent cwd corrupts the Zeros repo.
-  const hostCwd = resolveHostCwd();
+  const hostCwd = options?.cwd ?? resolveHostCwd();
+
+  const launch = options?.executionBoundary.wrapSpawn({
+    command: cmd,
+    args: [script],
+    cwd: hostCwd,
+    env,
+    stdio: "pipe",
+  });
 
   let child: ChildProcess;
   try {
-    child = spawn(cmd, [script], {
+    child = spawn(launch?.command ?? cmd, launch?.args ?? [script], {
       stdio: ["pipe", "pipe", "pipe"],
-      env,
-      cwd: hostCwd,
+      env: launch?.env ?? env,
+      cwd: launch?.cwd ?? hostCwd,
+      detached: Boolean(options),
     });
   } catch (err) {
     console.error(
@@ -628,6 +738,8 @@ export function spawnSubprocessTransport(): HostTransport | null {
     );
     return null;
   }
+  const boundaryProcess: BoundaryProcess | undefined =
+    options?.executionBoundary.trackProcess(child);
 
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
@@ -656,21 +768,38 @@ export function spawnSubprocessTransport(): HostTransport | null {
         cb();
       });
     },
-    dispose: () => {
+    dispose: async () => {
       try {
         child.stdin?.end();
       } catch {
         /* already closed */
       }
-      if (!child.killed) {
+      if (!child.killed && !boundaryProcess) {
         try {
           child.kill("SIGTERM");
         } catch {
           /* already dead */
         }
       }
+      if (boundaryProcess) {
+        await boundaryProcess.stopAndProve();
+      }
     },
   };
+}
+
+export interface CursorHostRuntime {
+  module: CursorSdkModule;
+  dispose(): Promise<void>;
+}
+
+/** Create a dedicated Cursor host rooted below one prepared execution
+ * boundary. No singleton or in-process escape hatch is used on this path. */
+export function createCursorHostRuntime(
+  options: CursorHostSpawnOptions,
+): CursorHostRuntime {
+  const client = new CursorHostClient(() => spawnSubprocessTransport(options));
+  return { module: client.module(), dispose: () => client.dispose() };
 }
 
 let singleton: CursorHostClient | null = null;
@@ -683,7 +812,7 @@ export function getCursorHostModule(): CursorSdkModule {
 
 /** Tear down the host subprocess (engine stop + process-exit safety net). */
 export function disposeCursorHost(): void {
-  singleton?.dispose();
+  void singleton?.dispose();
   singleton = null;
 }
 

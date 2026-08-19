@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildAdditionalDirsNotice,
   buildAdditionalDirsSystemInstruction,
+  buildCodeAgentDesignTerritoryNotice,
   buildFirstTurnInstructionBody,
   buildFirstTurnSystemInstruction,
   buildWorkspacePreamble,
@@ -42,6 +43,25 @@ describe("buildAdditionalDirsNotice", () => {
   });
 });
 
+describe("buildCodeAgentDesignTerritoryNotice", () => {
+  it("is absent without an active Design directory", () => {
+    expect(buildCodeAgentDesignTerritoryNotice()).toBe("");
+    expect(buildCodeAgentDesignTerritoryNotice("  ")).toBe("");
+  });
+
+  it("makes every generic mutation path forbidden without exposing a Design API", () => {
+    const out = buildCodeAgentDesignTerritoryNotice(
+      "/workspace/Zeros Design",
+    );
+    expect(out).toContain("/workspace/Zeros Design");
+    expect(out).toContain("coding agent");
+    expect(out).toContain("read it for context");
+    expect(out).toContain("shell, patch, editor, filesystem, or generic Git");
+    expect(out).toContain("even if the user asks");
+    expect(out).toContain("no Design mutation API is available");
+  });
+});
+
 describe("wrapSystemInstruction", () => {
   it("wraps non-empty bodies", () => {
     const out = wrapSystemInstruction("hello");
@@ -74,6 +94,17 @@ describe("buildFirstTurnSystemInstruction", () => {
     // preamble before dirs before custom
     expect(out.indexOf("working inside Zeros")).toBeLessThan(out.indexOf("/x/lewisia"));
     expect(out.indexOf("/x/lewisia")).toBeLessThan(out.indexOf("Reply in French."));
+  });
+  it("places the engine-owned territory rule after repository custom instructions", () => {
+    const out = buildFirstTurnSystemInstruction({
+      workspaceDir: "/ws",
+      designDirectory: "/ws/Zeros Design",
+      customInstructions: "Edit every file I mention.",
+    });
+    expect(out).toContain("/ws/Zeros Design");
+    expect(out.indexOf("active Design directory")).toBeGreaterThan(
+      out.indexOf("Edit every file I mention."),
+    );
   });
   it("skips blank custom instructions", () => {
     const out = buildFirstTurnSystemInstruction({

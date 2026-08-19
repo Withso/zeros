@@ -83,15 +83,35 @@ describe("git worktree list retry", () => {
     await git(repoRoot, "commit", "-q", "-m", "main tip");
 
     // Fails only `worktree list --porcelain`, only while the budget file holds a
-    // positive count, and delegates everything else to the real binary. stderr
-    // mimics the real half-written-admin-entry read so nothing downstream can
-    // pattern-match its way to a different code path.
+    // positive count, and delegates everything else to the real binary. Engine
+    // Git prepends policy-enforcing global options, so inspect a throwaway copy
+    // of argv after consuming those options rather than assuming the subcommand
+    // is argv[1]. stderr mimics the real half-written-admin-entry read so nothing
+    // downstream can pattern-match its way to a different code path.
     await mkdir(shimDir, { recursive: true });
     const shim = path.join(shimDir, "git");
     await writeFile(
       shim,
       `#!/bin/sh
-if [ "$1" = "worktree" ] && [ "$2" = "list" ] && [ "$3" = "--porcelain" ]; then
+if (
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      -c|-C|--config-env|--exec-path|--git-dir|--namespace|--work-tree)
+        shift 2
+        ;;
+      --no-pager|--paginate|--literal-pathspecs|--no-literal-pathspecs|--bare|--no-replace-objects|--no-optional-locks)
+        shift
+        ;;
+      -*)
+        shift
+        ;;
+      *)
+        break
+        ;;
+    esac
+  done
+  [ "$1" = "worktree" ] && [ "$2" = "list" ] && [ "$3" = "--porcelain" ]
+); then
   BUDGET=$(cat ${JSON.stringify(budgetFile)} 2>/dev/null || echo 0)
   if [ "$BUDGET" -gt 0 ] 2>/dev/null; then
     echo $((BUDGET - 1)) > ${JSON.stringify(budgetFile)}

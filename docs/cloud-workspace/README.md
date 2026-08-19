@@ -6,11 +6,15 @@ requirements, and implementation sequence without depending on a particular
 sandbox vendor.
 
 Cloud workspaces are **pre-production** in this repository. The implemented
-foundation is limited to the engine's opt-in remote transport and the
-operator-run provider validation harness. There is no shipping provisioning
-API, durable cloud-workspace record, desktop management UI, or mobile client
-yet. Documents in this folder must distinguish implemented behavior from target
-behavior.
+foundation includes the opt-in remote transport, attested cloud-worker runtime,
+account/capability gates, signed ingress and credential coordinators, the
+operator/protected-CI provider qualification harness, and a disabled-by-default
+production control-plane foundation: durable workspace generations, quotas,
+idempotent lifecycle APIs, a provider adapter, and reconciliation. Provider
+creation currently stops honestly at `setting_up`; there is still no production
+setup worker, workspace-bound engine grant, desktop management UI, durable chat
+record, web management surface, or mobile client. Documents in this folder must
+distinguish implemented behavior from target behavior.
 
 ## Documents
 

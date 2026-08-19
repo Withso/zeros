@@ -4,10 +4,8 @@ import { buildLocalMainWorkspace } from "../state/local-main-workspace";
 import type { Project } from "../state/projects-store";
 import {
   findWorkspaceForFolder,
-  workspaceKindFromManagedPath,
   workspaceIdFromWorktreePath,
 } from "../state/workspace-resolution";
-import { filterWorkspacesForDesignAccess } from "../state/live-workspace-selectors";
 import type { WorkspaceNavigationTarget } from "./prefetch-workspace-surface";
 
 export type WorkspacePinSide = "left" | "right" | null;
@@ -66,19 +64,16 @@ export function resolveRepoWorkspaceDestination(args: {
   rememberedFolder: string | null | undefined;
   cachedWorkspaces: readonly Workspace[] | undefined;
   allowLocalMain?: boolean;
+  /** Inert under the mode model — design-MODE rows are ordinary destinations
+   *  (a blocked route renders the placeholder with its un-gated exit). Kept
+   *  in the signature so the three call sites and their memo inputs stay
+   *  untouched; retired with the flag. */
   allowDesignWorkspaces?: boolean;
 }): WorkspaceNavigationTarget {
   const { project, cachedWorkspaces } = args;
   const allowLocalMain = args.allowLocalMain !== false;
-  const allowDesignWorkspaces = args.allowDesignWorkspaces !== false;
-  const accessibleCachedWorkspaces = cachedWorkspaces
-    ? filterWorkspacesForDesignAccess(cachedWorkspaces, allowDesignWorkspaces)
-    : undefined;
-  const rememberedFolder =
-    !allowDesignWorkspaces &&
-    workspaceKindFromManagedPath(args.rememberedFolder) === "design"
-      ? project.repoRoot
-      : args.rememberedFolder || project.repoRoot;
+  const accessibleCachedWorkspaces = cachedWorkspaces;
+  const rememberedFolder = args.rememberedFolder || project.repoRoot;
   const main = buildLocalMainWorkspace(project);
   const matched = accessibleCachedWorkspaces
     ? findWorkspaceForFolder(rememberedFolder, accessibleCachedWorkspaces)

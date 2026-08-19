@@ -36,13 +36,16 @@
 
 import { randomUUID } from "node:crypto";
 import { providerBindingForResume } from "@zeros/protocol/identities";
+import { execFile } from "node:child_process";
 import * as fsp from "node:fs/promises";
 import { readFileSync } from "node:fs";
 import * as path from "node:path";
 import { homedir } from "node:os";
+import { promisify } from "node:util";
 
 import {
   query,
+  resolveSettings,
   type AccountInfo,
   type ElicitationRequest,
   type ElicitationResult,
@@ -52,6 +55,8 @@ import {
   type PermissionResult,
   type PermissionUpdate,
   type Query,
+  type ResolvedSettings,
+  type ResolveSettingsOptions,
   type SDKMessage,
   type SDKUserMessage,
   type Settings,
@@ -66,12 +71,14 @@ import type {
 } from "@zeros/protocol/agent-events";
 import type { AccountDetails } from "@zeros/protocol/messages";
 import { buildQuestionStamp } from "@zeros/protocol/agent-messages";
+import { buildCodeAgentDesignTerritoryNotice } from "@zeros/protocol/system-instructions";
 
 import {
   AgentFailureError,
   type AgentAdapter,
   type AgentBrowserUse,
   type AgentAdapterContext,
+  type AgentFilesystemTerritory,
   type ContentBlock,
   type InitializeResponse,
   type LoadSessionResponse,
@@ -90,7 +97,10 @@ import {
 } from "../../types";
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
-import { preserveAmbientConfigRoots } from "../shared/config-isolation";
+import {
+  preserveAmbientConfigRoots,
+  stripEngineAuthorityEnv,
+} from "../shared/config-isolation";
 import {
   answerMcpElicitation,
   buildMcpElicitationQuestion,
@@ -99,7 +109,7 @@ import {
   mcpElicitationAuditInput,
 } from "../shared/mcp-elicitation";
 import { isDevRuntime } from "../../../runtime";
-import { openExternalUrl } from "../../gateway/open-url";
+import { isRuntimeInjectionEnvName } from "../../../settings/env-names";
 import {
   ensureSessionDir,
   removeSessionDir,
@@ -116,7 +126,15 @@ import {
   resolveClaudeCli,
   type ClaudeCliSourceKind,
 } from "./binary-resolver";
+import { compareVersions } from "../../probes";
 import { InputQueue, createDeferred, type Deferred } from "./input-queue";
+import {
+  spawnContainedClaudeProcess,
+  terminateContainedClaudeProcess,
+  type ContainedClaudeProcess,
+} from "./contained-process";
+import type { PreparedBoundary } from "../../containment/types";
+import { defaultMacClaudeOAuthAuthority } from "../../containment/claude-oauth-authority";
 
 /** Which CLI tier we last logged, so the breadcrumb lands once per engine boot
  *  (and again if the tier ever changes mid-run) instead of once per turn. */
@@ -125,6 +143,350 @@ let loggedCliSource: ClaudeCliSourceKind | null = null;
 const CLAUDE_IDLE_TIMEOUT_ENV_VAR = "ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES";
 const DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES = 30;
 const ALLOWED_CLAUDE_IDLE_TIMEOUT_MINUTES = new Set([30, 60, 120, 300]);
+/** Claude Code first applies `Edit(path)` rules to its built-in Write tool at
+ * this version. Older runtimes leave a path that is protected for Bash but
+ * writable through the in-process Write tool, so they cannot carry Zeros'
+ * all-tool Design promise. */
+const CLAUDE_DESIGN_CONTAINMENT_MIN_VERSION = "2.1.228";
+const claudeRuntimeVersionByPath = new Map<string, Promise<string>>();
+
+type ClaudeSettingsResolver = (
+  opts?: ResolveSettingsOptions,
+) => Promise<ResolvedSettings>;
+
+type ClaudeOAuthTokenProvider = (options: {
+  readonly forceRefresh: true;
+  readonly signal: AbortSignal;
+}) => Promise<string | null>;
+
+/** Runtime 0.3.231 supports this host-auth control channel but its generated
+ * declaration currently omits the property. Keep the augmentation exact and
+ * local so a future SDK declaration can replace it without an ambient patch. */
+type ClaudeOptionsWithOAuthRefresh = Options & {
+  getOAuthToken?: (options: {
+    readonly signal: AbortSignal;
+  }) => Promise<string | null>;
+};
+
+function hasExplicitClaudeCredential(env: Record<string, string> | undefined) {
+  return [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ].some((name) => Boolean(env?.[name]?.trim()));
+}
+
+function hasEntries(value: readonly unknown[] | undefined): boolean {
+  return Boolean(value?.length);
+}
+
+function hasViolationExceptions(
+  value: Record<string, string[]> | undefined,
+): boolean {
+  return Boolean(
+    value && Object.values(value).some((patterns) => patterns.length > 0),
+  );
+}
+
+function hasActivePlugins(value: Settings["enabledPlugins"]): boolean {
+  return Boolean(
+    value &&
+    Object.values(value).some(
+      (entry) =>
+        entry === true ||
+        (Array.isArray(entry) && entry.length > 0) ||
+        (typeof entry === "object" &&
+          entry !== null &&
+          Object.keys(entry).length > 0),
+    ),
+  );
+}
+
+/** Remove ambient Claude launch controls that execute before the command
+ * sandbox exists. The settings env pipeline already blocks repo/user values
+ * with code-injection names, but a containing desktop process can legitimately
+ * inherit a corporate wrapper. That is compatible with ordinary chats; it is
+ * not part of the runtime Zeros qualified for a Design-bearing session. */
+export function claudeContainedProcessEnv(
+  ambientEnv: Record<string, string>,
+  overrides: Record<string, string> = {},
+): Record<string, string> {
+  const sanitizedOverrides = { ...overrides };
+  for (const name of Object.keys(sanitizedOverrides)) {
+    if (isRuntimeInjectionEnvName(name)) delete sanitizedOverrides[name];
+  }
+  const contained = preserveAmbientConfigRoots({
+    ...ambientEnv,
+    ...sanitizedOverrides,
+  });
+  for (const name of Object.keys(contained)) {
+    // The app's inherited PATH is the trusted baseline that keeps ordinary
+    // Git/package/shell tools available. A caller-provided PATH was removed
+    // above; all other inherited startup-injection controls are unnecessary
+    // for a contained provider and remain fail-closed.
+    if (name !== "PATH" && isRuntimeInjectionEnvName(name)) {
+      delete contained[name];
+    }
+  }
+  for (const name of [
+    "CLAUDE_CODE_PROCESS_WRAPPER",
+    "CLAUDE_CODE_MANAGED_SETTINGS_PATH",
+    "CLAUDE_CODE_REMOTE_SETTINGS_PATH",
+    "CLAUDE_CODE_PLUGIN_CACHE_DIR",
+    "CLAUDE_CODE_PLUGIN_SEED_DIR",
+    "CLAUDE_CODE_SHELL",
+    "CLAUDE_CODE_SHELL_PREFIX",
+    "CLAUDE_CODE_SANDBOXED",
+    "CLAUDE_CODE_SAFE_MODE",
+    "CLAUDE_CODE_BUBBLEWRAP",
+    "CLAUDE_CODE_ADDITIONAL_PROTECTION",
+    "CLAUDE_CODE_WORKSPACE_HOST_PATHS",
+    "CLAUDE_CODE_TMPDIR",
+    "CLAUDE_TMPDIR",
+    "CLAUDE_ENV_FILE",
+    "CLAUDE_PTY_HOST_EXEC",
+    "CLAUDE_REMOTE_WORKFLOW_SCRIPT",
+    "CLAUDE_STAGE_FILE_ROOT",
+    "CLAUDE_JOB_DIR",
+    "CLAUDE_MEMORY_STORES",
+    "CLAUDE_CODE_ARTIFACT_DB",
+  ]) {
+    delete contained[name];
+  }
+  return contained;
+}
+
+/** Refuse administrator policy that can expand or bypass the exact command
+ * sandbox Zeros qualified. `settingSources: []` suppresses user/project/local
+ * configuration, but Claude intentionally still reads its managed policy
+ * tier. Restrictive managed policy is compatible; any escape hatch makes this
+ * provider/host combination unqualified instead of silently weakening the
+ * product promise.
+ *
+ * An administrator remains outside the same-user agent threat model. This
+ * check protects against an ordinary, non-malicious enterprise policy that is
+ * incompatible with the scoped guarantee; it is not an attempt to contain a
+ * hostile root/MDM administrator. */
+export function assertClaudeManagedPolicyCompatible(
+  resolved: ResolvedSettings,
+): void {
+  const incompatible = new Set<string>();
+  for (const source of resolved.sources) {
+    if (source.source !== "managed") continue;
+    const settings = source.settings;
+    const sandbox = settings.sandbox;
+    const network = sandbox?.network;
+    const filesystem = sandbox?.filesystem;
+
+    if (settings.policyHelper || settings.policyHelpers) {
+      incompatible.add("dynamic policy helpers");
+    }
+    if (
+      settings.processWrapper ||
+      settings.apiKeyHelper ||
+      settings.proxyAuthHelper ||
+      settings.awsCredentialExport ||
+      settings.awsAuthRefresh ||
+      settings.gcpAuthRefresh ||
+      settings.otelHeadersHelper ||
+      settings.fileSuggestion ||
+      settings.statusLine ||
+      settings.subagentStatusLine
+    ) {
+      incompatible.add("host executable helpers");
+    }
+    if (
+      (settings.hooks && Object.keys(settings.hooks).length > 0) ||
+      hasActivePlugins(settings.enabledPlugins)
+    ) {
+      incompatible.add("managed hooks or plugins");
+    }
+    if (
+      settings.disableAllHooks === false ||
+      settings.disableSkillShellExecution === false ||
+      settings.disableRemoteControl === false ||
+      settings.disableAgentView === false ||
+      settings.disableWorkflows === false ||
+      settings.disableArtifact === false ||
+      settings.enableWorkflows === true ||
+      settings.enableArtifact === true
+    ) {
+      incompatible.add("disabled Zeros authority-surface guards");
+    }
+    if (settings.plansDirectory) {
+      incompatible.add("a custom plan-write directory");
+    }
+    if (settings.env && Object.keys(settings.env).length > 0) {
+      incompatible.add("managed process environment variables");
+    }
+    if (hasEntries(settings.permissions?.additionalDirectories)) {
+      incompatible.add("additional working directories");
+    }
+    if (settings.permissions?.defaultMode === "bypassPermissions") {
+      incompatible.add("permission bypass");
+    }
+    if (settings.allowManagedPermissionRulesOnly === true) {
+      incompatible.add("managed-only permission rules");
+    }
+    if (sandbox?.enabled === false) incompatible.add("a disabled sandbox");
+    if (sandbox?.failIfUnavailable === false) {
+      incompatible.add("fail-open sandbox startup");
+    }
+    if (sandbox?.allowUnsandboxedCommands === true) {
+      incompatible.add("unsandboxed commands");
+    }
+    if (filesystem?.disabled === true) {
+      incompatible.add("disabled filesystem isolation");
+    }
+    if (hasEntries(filesystem?.allowWrite)) {
+      incompatible.add("additional filesystem write roots");
+    }
+    if (hasEntries(sandbox?.excludedCommands)) {
+      incompatible.add("sandbox-excluded commands");
+    }
+    if (sandbox?.enableWeakerNestedSandbox === true) {
+      incompatible.add("weaker nested sandboxing");
+    }
+    if (sandbox?.enableWeakerNetworkIsolation === true) {
+      incompatible.add("weaker network isolation");
+    }
+    if (sandbox?.allowAppleEvents === true) {
+      incompatible.add("Apple Events outside code-execution isolation");
+    }
+    if (sandbox?.ripgrep) incompatible.add("a custom ripgrep executable");
+    if (sandbox?.bwrapPath || sandbox?.socatPath) {
+      incompatible.add("custom sandbox-runtime executables");
+    }
+    if (hasViolationExceptions(sandbox?.ignoreViolations)) {
+      incompatible.add("ignored sandbox violations");
+    }
+    if (network?.allowAllUnixSockets === true) {
+      incompatible.add("unrestricted Unix sockets");
+    }
+    if (hasEntries(network?.allowUnixSockets)) {
+      incompatible.add("additional Unix sockets");
+    }
+    if (network?.allowLocalBinding === true) {
+      incompatible.add("local network listeners");
+    }
+    if (hasEntries(network?.allowMachLookup)) {
+      incompatible.add("additional Mach services");
+    }
+  }
+  if (incompatible.size === 0) return;
+  throw new Error(
+    "Claude Design containment is incompatible with administrator-managed " +
+      `Claude settings that enable ${[...incompatible].join(", ")}.`,
+  );
+}
+
+/** Turn an absolute host path into a Claude Edit-rule pattern only when the
+ * provider can represent that path literally. Claude rules embed gitignore
+ * syntax inside `Edit(...)`; current Claude Code does not provide a verified
+ * escaping that is both syntactically accepted and literal for every `*`,
+ * `?`, `[`, `]`, `(`, `)`, or `\\` combination. A broad/malformed deny is not
+ * a security boundary, so territory admission fails closed for those unusual
+ * host paths. Newline/NUL are rejected for the same reason. */
+export function claudeAbsoluteEditDenyRule(absolutePath: string): string {
+  const resolved = path.resolve(absolutePath);
+  const cannotEncodeLiterally = [...resolved].some((character) => {
+    const code = character.charCodeAt(0);
+    return (
+      code === 0 ||
+      character === "\r" ||
+      character === "\n" ||
+      character === "*" ||
+      character === "?" ||
+      character === "[" ||
+      character === "]" ||
+      character === "(" ||
+      character === ")" ||
+      character === "\\"
+    );
+  });
+  if (cannotEncodeLiterally) {
+    throw new Error(
+      "Claude Design containment cannot safely encode this workspace path; " +
+        "move the workspace to a path without glob, bracket, parenthesis, or backslash characters.",
+    );
+  }
+  const posix = resolved.split(path.sep).join("/");
+  const literal = posix.replace(/^\/+/, "//");
+  return `Edit(${literal}/**)`;
+}
+
+/** Highest-precedence built-in edit rules for the exact immutable territory. */
+export function claudeTerritoryEditDenyRules(
+  territory: AgentFilesystemTerritory,
+): string[] {
+  if (territory.agentRole !== "code") {
+    throw new Error("Claude Design territory requires a code actor.");
+  }
+  return territory.writeCapabilities.deniedPaths.map(
+    claudeAbsoluteEditDenyRule,
+  );
+}
+
+/** The exact command sandbox used by live territory-bearing Claude queries.
+ * Exported so the release attack test exercises production policy rather than
+ * a hand-copied look-alike. */
+export function claudeTerritorySandbox(
+  territory: AgentFilesystemTerritory,
+): NonNullable<Options["sandbox"]> {
+  if (territory.agentRole !== "code") {
+    throw new Error("Claude Design territory requires a code actor.");
+  }
+  return {
+    enabled: true,
+    failIfUnavailable: true,
+    autoAllowBashIfSandboxed: false,
+    // A model cannot opt a Bash command out of the sandbox, even in Zeros'
+    // Full Access posture.
+    allowUnsandboxedCommands: false,
+    filesystem: {
+      disabled: false,
+      // The chat may be opened in a nested folder. Grant write over the
+      // canonical workspace explicitly, then carve Design, policy, and Git
+      // metadata back to read-only below.
+      allowWrite: [territory.workspaceRoot],
+      denyWrite: [...territory.writeCapabilities.deniedPaths],
+    },
+    // A contained code process never needs to talk back to the engine's
+    // loopback HTTP/WS surface or host Unix sockets. This closes the indirect
+    // Design-service route even if a bearer leaks through another bug.
+    network: {
+      // Preserve ordinary remote package/web access while denying the engine
+      // and other loopback services. With settings sources disabled, an
+      // explicit wildcard avoids turning containment into blanket offline.
+      allowedDomains: ["*"],
+      deniedDomains: ["localhost", "127.0.0.1", "::1"],
+      strictAllowlist: true,
+      allowAllUnixSockets: false,
+      allowLocalBinding: false,
+    },
+  };
+}
+
+async function qualifiedClaudeRuntimeVersion(cliPath: string): Promise<string> {
+  const retained = claudeRuntimeVersionByPath.get(cliPath);
+  if (retained) return retained;
+  const flight = execFileAsync(cliPath, ["--version"], { timeout: 10_000 })
+    .then(({ stdout }) => {
+      const version = stdout.match(
+        /\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?\b/,
+      )?.[0];
+      if (!version) {
+        throw new Error("Claude Code returned no parseable runtime version.");
+      }
+      return version;
+    })
+    .catch((error) => {
+      claudeRuntimeVersionByPath.delete(cliPath);
+      throw error;
+    });
+  claudeRuntimeVersionByPath.set(cliPath, flight);
+  return flight;
+}
 
 type ClaudeMode = "default" | "plan" | "accept-edits" | "auto" | "bypass";
 
@@ -174,6 +536,23 @@ function toSdkPermissionMode(mode: ClaudeMode): PermissionMode {
     default:
       return "default";
   }
+}
+
+/** Claude's native bypassPermissions mode disables the permission layer that
+ * protects its in-process Write/Edit tools. The OS command sandbox still
+ * contains Bash descendants, but it cannot make those built-in tools safe.
+ * A Design-bearing code session therefore never enters native bypass: the
+ * closest truthful posture is acceptEdits, whose explicit deny rules remain
+ * authoritative. This also clamps persisted or forged mode ids, not only the
+ * mode picker. */
+function containedClaudeMode(
+  mode: ClaudeMode,
+  territory: AgentFilesystemTerritory | undefined,
+  executionBoundary?: PreparedBoundary,
+): ClaudeMode {
+  return territory && !executionBoundary && mode === "bypass"
+    ? "accept-edits"
+    : mode;
 }
 
 /** File-modification tools. For these, the SDK's only "always allow" suggestion
@@ -625,6 +1004,16 @@ interface SdkSession {
    *  workspace layers, RCE-gated). Undefined → fall back to the global
    *  ctx.mcpServers in buildOptions. */
   mcpServers?: McpServerRegistration[];
+  /** Immutable code-actor write boundary. The active query is rebuilt instead
+   * of mutating this authority in place. */
+  territory?: AgentFilesystemTerritory;
+  /** Uniform ZSR outer boundary. When present provider-native feature
+   * suppression is unnecessary; every hook/MCP/plugin child inherits ZSR. */
+  executionBoundary?: PreparedBoundary;
+  /** Engine-owned orientation delivered through Claude's native system prompt
+   * channel. Kept with session state so every lazy query recreation and resume
+   * receives the same non-user instruction. */
+  systemInstruction?: string;
   browserUse: boolean;
   permissionMode: ClaudeMode;
   /** Live model override set via setModel(). Wins over env.ANTHROPIC_MODEL
@@ -645,6 +1034,10 @@ interface SdkSession {
   input: InputQueue<SDKUserMessage>;
   /** Long-lived consumer loop draining the query's output. */
   consumer: Promise<void> | null;
+  /** Observable process groups for territory-bound query generations. The SDK
+   * may recreate a query on idle/restart; all generations remain here until
+   * their complete group has been proven dead. */
+  readonly containedProcesses: Set<ContainedClaudeProcess>;
   /** Per-session translator (SDKMessage → SessionNotification). Resets its
    *  per-turn state on each `result`, so it's safe to reuse across turns. */
   translator: ClaudeStreamTranslator;
@@ -718,9 +1111,68 @@ interface SdkSession {
 }
 
 const SDK_SESSION_FILE = "claude-sdk.json";
+const execFileAsync = promisify(execFile);
+
+/** Prove the same OS primitive the Claude command sandbox will use can be
+ * installed on this host. Checking only that `bwrap` exists is insufficient:
+ * container capability/seccomp policy can still make namespace creation fail
+ * (the common Daytona/CI failure). The SDK repeats this gate when query starts
+ * with `failIfUnavailable:true`; this admission probe keeps a logical session
+ * from being published before that failure is known. */
+export async function probeClaudeSandboxRuntime(
+  platform: NodeJS.Platform = process.platform,
+): Promise<void> {
+  if (platform === "darwin") {
+    await execFileAsync(
+      "/usr/bin/sandbox-exec",
+      ["-p", "(version 1)(allow default)", "/usr/bin/true"],
+      { timeout: 5_000 },
+    );
+    return;
+  }
+  if (platform === "linux") {
+    // `socat` is part of Claude's documented Linux sandbox dependency set.
+    // Probe it separately so an unavailable network proxy can never make the
+    // SDK silently abandon strict sandbox startup.
+    await execFileAsync("socat", ["-V"], { timeout: 5_000 });
+    await execFileAsync(
+      "bwrap",
+      [
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-net",
+        "--ro-bind",
+        "/",
+        "/",
+        "--proc",
+        "/proc",
+        "/bin/true",
+      ],
+      { timeout: 5_000 },
+    );
+    return;
+  }
+  throw new Error(
+    `Claude filesystem containment is unsupported on ${platform}`,
+  );
+}
 
 export class ClaudeSdkAdapter implements AgentAdapter {
   readonly agentId = "claude";
+  readonly enforcesFilesystemTerritory = true;
+  readonly filesystemTerritoryBackend = "provider-native" as const;
+  readonly filesystemTerritoryRestrictions = [
+    "additional-directories-disabled",
+    "local-mcp-disabled",
+    "plugins-disabled",
+    "provider-bypass-mode-disabled",
+    "shadow-git-unavailable",
+    "local-services-unavailable",
+  ] as const;
+  /** Claude's Agent SDK exposes a native `systemPrompt` append channel. Using
+   * it keeps the territory rule out of user speech and reapplies it after
+   * compaction, idle recreation, and resume. */
+  readonly nativeSystemInstruction = true;
 
   private readonly ctx: AgentAdapterContext;
   private readonly sessions = new Map<string, SdkSession>();
@@ -743,16 +1195,80 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   /** Injectable so tests can drive the lifecycle with a scripted query
    *  without spawning a real `claude` process. Defaults to the SDK's. */
   private readonly queryFn: typeof query;
+  /** Injectable only so unit tests can exercise the immutable authority
+   * contract without depending on the test host's namespace policy. */
+  private readonly sandboxProbe: (platform?: NodeJS.Platform) => Promise<void>;
+  private readonly runtimeVersionProbe: (cliPath: string) => Promise<string>;
+  private readonly settingsResolver: ClaudeSettingsResolver;
+  private readonly oauthTokenProvider: ClaudeOAuthTokenProvider | undefined;
   /** Test-only millisecond override; production always uses the bounded env. */
   private readonly idleTimeoutOverrideMs: number | undefined;
 
   constructor(
     ctx: AgentAdapterContext,
-    opts?: { queryFn?: typeof query; idleTimeoutMs?: number },
+    opts?: {
+      queryFn?: typeof query;
+      idleTimeoutMs?: number;
+      sandboxProbe?: (platform?: NodeJS.Platform) => Promise<void>;
+      runtimeVersionProbe?: (cliPath: string) => Promise<string>;
+      settingsResolver?: ClaudeSettingsResolver;
+      oauthTokenProvider?: ClaudeOAuthTokenProvider;
+    },
   ) {
     this.ctx = ctx;
     this.queryFn = opts?.queryFn ?? query;
     this.idleTimeoutOverrideMs = opts?.idleTimeoutMs;
+    this.sandboxProbe = opts?.sandboxProbe ?? probeClaudeSandboxRuntime;
+    this.runtimeVersionProbe =
+      opts?.runtimeVersionProbe ?? qualifiedClaudeRuntimeVersion;
+    this.settingsResolver = opts?.settingsResolver ?? resolveSettings;
+    const oauthAuthority = defaultMacClaudeOAuthAuthority(homedir());
+    this.oauthTokenProvider =
+      opts?.oauthTokenProvider ??
+      (oauthAuthority
+        ? ({ forceRefresh, signal }) =>
+            oauthAuthority.getAccessToken({ forceRefresh, signal })
+        : undefined);
+  }
+
+  async prepareFilesystemTerritory(
+    territory: AgentFilesystemTerritory,
+    opts?: { cliBinary?: string },
+  ): Promise<void> {
+    if (territory.agentRole !== "code") {
+      throw new Error("unsupported agent filesystem role");
+    }
+    // Validate every provider-native policy representation during admission,
+    // not lazily on the first prompt. An unrepresentable literal path must
+    // prevent the logical session from being published.
+    claudeTerritoryEditDenyRules(territory);
+    claudeTerritorySandbox(territory);
+    // Resolve the pinned CLI and exercise the OS boundary before a logical
+    // session can be published. The SDK repeats this check at query startup.
+    const cli = resolveClaudeCli({ override: opts?.cliBinary });
+    if (!cli.path) throw new Error(claudeCliMissingMessage());
+    if (!isPinnedClaudeRuntime(cli.source)) {
+      throw new Error(
+        "Claude Design containment requires the Claude runtime pinned and " +
+          "shipped with this Zeros build; custom and PATH runtimes are not qualified.",
+      );
+    }
+    const runtimeVersion = await this.runtimeVersionProbe(cli.path);
+    if (
+      compareVersions(runtimeVersion, CLAUDE_DESIGN_CONTAINMENT_MIN_VERSION) < 0
+    ) {
+      throw new Error(
+        `Claude Design containment requires Claude Code >= ` +
+          `${CLAUDE_DESIGN_CONTAINMENT_MIN_VERSION}; this build resolved ` +
+          `${runtimeVersion}.`,
+      );
+    }
+    const resolvedSettings = await this.settingsResolver({
+      cwd: territory.workspaceRoot,
+      settingSources: [],
+    });
+    assertClaudeManagedPolicyCompatible(resolvedSettings);
+    await this.sandboxProbe(process.platform);
   }
 
   // ── initialize ────────────────────────────────────────
@@ -871,22 +1387,44 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     prompt: string;
     env?: Record<string, string>;
     timeoutMs?: number;
+    executionBoundary?: PreparedBoundary;
   }): Promise<string> {
     const abort = new AbortController();
     const timer = setTimeout(() => abort.abort(), opts.timeoutMs ?? 30_000);
+    const containedProcesses = new Set<ContainedClaudeProcess>();
     try {
       const q = this.queryFn({
         prompt: opts.prompt,
         options: {
-          cwd: homedir(),
+          cwd: opts.executionBoundary ? this.ctx.projectRoot : homedir(),
           // Same env contract as buildOptions: the SDK REPLACES the
           // subprocess env when `env` is set, so spread process.env.
-          ...(opts.env && Object.keys(opts.env).length > 0
+          ...(opts.executionBoundary
+            ? { env: stripEngineAuthorityEnv({ ...(opts.env ?? {}) }) }
+            : opts.env && Object.keys(opts.env).length > 0
             ? {
                 env: preserveAmbientConfigRoots({
                   ...(process.env as Record<string, string>),
                   ...opts.env,
                 }),
+              }
+            : {}),
+          ...(opts.executionBoundary
+            ? {
+                spawnClaudeCodeProcess: (spawnOptions) =>
+                  spawnContainedClaudeProcess(
+                    spawnOptions,
+                    {
+                      onSpawn: (tracked) => containedProcesses.add(tracked),
+                      onStderr: (data) => {
+                        const line = data.trimEnd();
+                        if (line) {
+                          this.ctx.emit.onAgentStderr(this.agentId, line);
+                        }
+                      },
+                    },
+                    opts.executionBoundary,
+                  ),
               }
             : {}),
           model: opts.model,
@@ -911,6 +1449,12 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       return text;
     } finally {
       clearTimeout(timer);
+      abort.abort();
+      await Promise.all(
+        [...containedProcesses].map((tracked) =>
+          terminateContainedClaudeProcess(tracked).catch(() => undefined),
+        ),
+      );
     }
   }
 
@@ -922,6 +1466,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
     browserUse?: AgentBrowserUse;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
     const initialize = await this.initialize();
@@ -943,7 +1490,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         // pill shows it immediately. A persisted per-chat mode overrides it via
         // the renderer's reconcile right after bind.
         currentModeId: state.permissionMode,
-        availableModes: MODES,
+        availableModes:
+          state.territory && !state.executionBoundary ? CONTAINED_MODES : MODES,
       } as never,
     } as never;
     return { session, initialize };
@@ -957,24 +1505,54 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     env?: Record<string, string>;
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
+    systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
     browserUse?: AgentBrowserUse;
   }): Promise<LoadSessionResponse> {
     const executionId = opts.executionId ?? opts.sessionId ?? randomUUID();
     const existing = this.sessions.get(executionId);
     if (existing) {
-      existing.cwd = opts.cwd;
-      existing.env = opts.env;
-      existing.cliBinary = opts.cliBinary?.trim() || undefined;
-      existing.mcpServers = opts.mcpServers;
-      const browserUse = opts.browserUse?.kind === "claude-agent-sdk";
-      if (existing.browserUse !== browserUse && existing.query) {
-        // Chrome/no-Chrome are subprocess flags, not live SDK settings. Keep an
-        // in-flight turn intact and resume-rebuild at the next prompt boundary.
-        existing.pendingRestart = true;
+      const territoryChanged =
+        existing.territory?.designDirectory !==
+          opts.territory?.designDirectory ||
+        JSON.stringify(existing.territory?.protectedDesignDirectories ?? []) !==
+          JSON.stringify(opts.territory?.protectedDesignDirectories ?? []) ||
+        JSON.stringify(
+          existing.territory?.writeCapabilities.deniedPaths ?? [],
+        ) !==
+          JSON.stringify(opts.territory?.writeCapabilities.deniedPaths ?? []);
+      const instructionChanged =
+        existing.systemInstruction !== opts.systemInstruction;
+      const boundaryChanged =
+        existing.executionBoundary !== opts.executionBoundary;
+      if (territoryChanged || instructionChanged || boundaryChanged) {
+        // Authority is creation-time state. Never retarget a live query that
+        // may own scheduled/background work under the old sandbox.
+        this.sessions.delete(executionId);
+        await this.teardown(existing);
+      } else {
+        existing.cwd = opts.cwd;
+        existing.env = opts.env;
+        existing.cliBinary = opts.cliBinary?.trim() || undefined;
+        existing.mcpServers = opts.mcpServers;
+        existing.territory = opts.territory;
+        existing.executionBoundary = opts.executionBoundary;
+        existing.systemInstruction = opts.systemInstruction;
+        const browserUse = opts.browserUse?.kind === "claude-agent-sdk";
+        if (existing.browserUse !== browserUse && existing.query) {
+          // Chrome/no-Chrome are subprocess flags, not live SDK settings. Keep an
+          // in-flight turn intact and resume-rebuild at the next prompt boundary.
+          existing.pendingRestart = true;
+        }
+        existing.browserUse = browserUse;
+        this.refreshIdleTeardown(existing);
+        return loadResponseWithModes(
+          existing.permissionMode,
+          false,
+          Boolean(existing.territory && !existing.executionBoundary),
+        );
       }
-      existing.browserUse = browserUse;
-      this.refreshIdleTeardown(existing);
-      return loadResponseWithModes(existing.permissionMode);
     }
     await ensureSessionDir(executionId);
     const state = this.makeState(executionId, opts);
@@ -1008,6 +1586,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       ...loadResponseWithModes(
         state.permissionMode,
         state.claudeSessionId == null,
+        Boolean(state.territory && !state.executionBoundary),
       ),
       executionId,
       ...(state.claudeSessionId
@@ -1035,6 +1614,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       env?: Record<string, string>;
       cliBinary?: string;
       mcpServers?: McpServerRegistration[];
+      systemInstruction?: string;
+      territory?: AgentFilesystemTerritory;
+      executionBoundary?: PreparedBoundary;
       browserUse?: AgentBrowserUse;
     },
   ): SdkSession {
@@ -1044,10 +1626,17 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       env: opts.env,
       cliBinary: opts.cliBinary?.trim() || undefined,
       mcpServers: opts.mcpServers,
+      territory: opts.territory,
+      executionBoundary: opts.executionBoundary,
+      systemInstruction: opts.systemInstruction,
       browserUse: opts.browserUse?.kind === "claude-agent-sdk",
       // Fresh chat → honour the user's configured default mode (settings.json
       // hierarchy); a persisted per-chat mode overrides via reconcile.
-      permissionMode: resolveDefaultPermissionMode(opts.cwd),
+      permissionMode: containedClaudeMode(
+        resolveDefaultPermissionMode(opts.cwd),
+        opts.territory,
+        opts.executionBoundary,
+      ),
       claudeSessionId: null,
       // Protocol-v8 builds persisted chats.session_id and can only reopen a
       // Claude session directory by this Zeros locator. Keep it as the
@@ -1057,6 +1646,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       query: null,
       input: new InputQueue<SDKUserMessage>(),
       consumer: null,
+      containedProcesses: new Set(),
       translator: new ClaudeStreamTranslator({
         sessionId: zerosSessionId,
         emit: (n) => this.ctx.emit.onSessionUpdate(this.agentId, n),
@@ -1191,6 +1781,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     } catch {
       /* already closed */
     }
+    const retiringProcesses = [...state.containedProcesses];
+    void this.terminateContainedProcesses(state, retiringProcesses).catch(
+      (error) => {
+        console.error(
+          `[agents] claude-sdk idle process cleanup failed for ${state.zerosSessionId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    );
     console.info(
       `[claude-sdk] released idle query for ${state.zerosSessionId}`,
     );
@@ -1390,6 +1988,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       });
       // Mirrors buildOptions' flag decision: the query just built carries
       // allowDangerouslySkipPermissions iff it was created in bypass.
+      state.permissionMode = containedClaudeMode(
+        state.permissionMode,
+        state.territory,
+        state.executionBoundary,
+      );
       state.queryAllowsBypass = state.permissionMode === "bypass";
     } catch (err) {
       state.query = null;
@@ -2031,10 +2634,18 @@ export class ClaudeSdkAdapter implements AgentAdapter {
 
   async setMode(opts: { sessionId: string; modeId: string }): Promise<void> {
     const state = this.mustState(opts.sessionId);
-    const mode = normalizeModeId(opts.modeId);
+    const requestedMode = normalizeModeId(opts.modeId);
+    const mode = requestedMode
+      ? containedClaudeMode(
+          requestedMode,
+          state.territory,
+          state.executionBoundary,
+        )
+      : null;
     // The mode we report back to the renderer — normally the requested id,
     // but a model-gated "auto" degrades to accept-edits (see catch below).
-    let appliedId = opts.modeId;
+    let appliedId =
+      requestedMode && mode !== requestedMode ? mode : opts.modeId;
     if (mode) {
       state.permissionMode = mode;
       // Apply live to an alive query (the SDK supports mid-session mode
@@ -2079,7 +2690,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         state.pendingRestart = true;
       }
 
-      // KEY FIX: if the user switches to fully-permissive "Full Access"
+      // For code-only sessions, if the user switches to "Full Access"
       // (bypass) while a tool-permission prompt is OPEN, the turn is
       // blocked inside canUseTool waiting on a decision — and setMode alone
       // never releases it, so the agent "stops" mid-turn (the reported
@@ -2126,6 +2737,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     if (!advertised || state.disposed || state.query !== q) return;
     if (advertised === toSdkPermissionMode(state.permissionMode)) return;
     let applied = defaultModeTokenToClaudeMode(advertised);
+    if (applied) {
+      applied = containedClaudeMode(
+        applied,
+        state.territory,
+        state.executionBoundary,
+      );
+    }
     if (state.permissionMode === "auto") {
       try {
         await q.setPermissionMode("acceptEdits");
@@ -2942,7 +3560,6 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     pending.detach();
 
     const mapped = answerMcpElicitation(pending.native, { outcome });
-    if (mapped.openUrl) openExternalUrl(mapped.openUrl);
     const sdkResult: ElicitationResult = {
       action: mapped.response.action,
       ...(mapped.response.content
@@ -3088,7 +3705,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
    *  to a short-lived throwaway query when no chat is open. Best-effort — any
    *  failure (or an API-key / 3P backend, which carries no account identity)
    *  returns null so the panel shows "—". */
-  async getAccountInfo(): Promise<AccountDetails | null> {
+  async getAccountInfo(opts?: {
+    liveOnly?: boolean;
+    env?: Record<string, string>;
+    executionBoundary?: PreparedBoundary;
+  }): Promise<AccountDetails | null> {
     // Fast path: reuse a live session's query — no extra process.
     for (const state of this.sessions.values()) {
       if (!state.query) continue;
@@ -3099,6 +3720,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       }
       break;
     }
+    if (opts?.liveOnly) return null;
     // No live query → spin a throwaway one. accountInfo() is a control
     // request, so we keep an empty (never-fed) input open so no turn runs,
     // then close it. NOTE: that accountInfo() resolves on a pre-turn query is
@@ -3106,10 +3728,41 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // cloud sandbox; on failure this degrades to null (panel shows "—").
     const input = new InputQueue<SDKUserMessage>();
     let q: Query | null = null;
+    const containedProcesses = new Set<ContainedClaudeProcess>();
     try {
       q = this.queryFn({
         prompt: input,
-        options: { cwd: this.ctx.projectRoot },
+        options: {
+          cwd: this.ctx.projectRoot,
+          ...(opts?.executionBoundary
+            ? { env: stripEngineAuthorityEnv({ ...(opts.env ?? {}) }) }
+            : opts?.env
+              ? {
+                  env: preserveAmbientConfigRoots({
+                    ...(process.env as Record<string, string>),
+                    ...opts.env,
+                  }),
+                }
+              : {}),
+          ...(opts?.executionBoundary
+            ? {
+                spawnClaudeCodeProcess: (spawnOptions) =>
+                  spawnContainedClaudeProcess(
+                    spawnOptions,
+                    {
+                      onSpawn: (tracked) => containedProcesses.add(tracked),
+                      onStderr: (data) => {
+                        const line = data.trimEnd();
+                        if (line) {
+                          this.ctx.emit.onAgentStderr(this.agentId, line);
+                        }
+                      },
+                    },
+                    opts.executionBoundary,
+                  ),
+              }
+            : {}),
+        },
       });
       const info = await Promise.race([
         q.accountInfo(),
@@ -3127,6 +3780,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       } catch {
         /* already closed */
       }
+      await Promise.all(
+        [...containedProcesses].map((tracked) =>
+          terminateContainedClaudeProcess(tracked).catch(() => undefined),
+        ),
+      );
     }
   }
 
@@ -3195,16 +3853,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     try {
       state.query?.close();
     } catch {
-      // Genuinely benign, and deliberately NOT fail-closed for the lifecycle
-      // reaper: abort() and input.end() above have already unwound the
-      // transport, so a throw here means the query is down — which is the
-      // outcome we wanted. The SDK owns the CLI child, so this call cannot
-      // distinguish "already closed" from "teardown failed"; reporting the
-      // ambiguity as a failure only blocks archive on a session that is gone.
-      // Codex is where a real process-group stop is observable (see
-      // CodexAppServerAdapter.disposeSession).
+      // The retained process-group handle below is authoritative. `close()`
+      // throwing is benign only because teardown still proves that group gone.
     }
     state.query = null;
+    const processResults = await Promise.allSettled(
+      [...state.containedProcesses].map((tracked) =>
+        terminateContainedClaudeProcess(tracked),
+      ),
+    );
     if (state.consumer) {
       await state.consumer.catch(() => {});
     }
@@ -3213,6 +3870,28 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         `[agents] claude-sdk session-dir cleanup failed for ${state.zerosSessionId}: ${err instanceof Error ? err.message : String(err)}`,
       );
     });
+    const processFailure = processResults.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (processFailure) throw processFailure.reason;
+  }
+
+  private async terminateContainedProcesses(
+    state: SdkSession,
+    processes: readonly ContainedClaudeProcess[],
+  ): Promise<void> {
+    const results = await Promise.allSettled(
+      processes.map((tracked) => terminateContainedClaudeProcess(tracked)),
+    );
+    for (let index = 0; index < results.length; index += 1) {
+      if (results[index]?.status === "fulfilled") {
+        state.containedProcesses.delete(processes[index]!);
+      }
+    }
+    const failure = results.find(
+      (result): result is PromiseRejectedResult => result.status === "rejected",
+    );
+    if (failure) throw failure.reason;
   }
 
   // ── internals ─────────────────────────────────────────
@@ -3265,11 +3944,26 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // Extra working dirs (the `/add-dir` command) + the tool allow/deny rules.
     // All three live together inside permissions (the whole-object replacement
     // contract above), each defaulting to [] so a removal actually clears.
-    const additionalDirectories = parseAdditionalDirs(
-      env?.ZEROS_ADDITIONAL_DIRS,
-    );
+    // A protected territory is one canonical workspace authority. Claude's
+    // additionalDirectories are writable according to the active permission
+    // mode, so carrying them into a contained session would silently widen
+    // that authority beyond the tree whose aliases and lifecycle Zeros
+    // validated. Keep /add-dir available for ordinary code-only sessions; a
+    // future capability broker can reintroduce explicitly read-only context
+    // mounts without weakening this boundary.
+    const providerNativeTerritory = state.territory && !state.executionBoundary;
+    const additionalDirectories = providerNativeTerritory
+      ? []
+      : parseAdditionalDirs(env?.ZEROS_ADDITIONAL_DIRS);
     const allow = parseToolList(env?.CLAUDE_ALLOWED_TOOLS);
     const deny = parseToolList(env?.CLAUDE_DISALLOWED_TOOLS);
+    if (state.territory) {
+      // Built-in Write/Edit tools are in-process, so the command sandbox alone
+      // is insufficient. The highest-precedence flag rule closes those paths;
+      // the same absolute directory in sandbox.filesystem.denyWrite closes
+      // shell/editor/Git descendants, including children created later.
+      deny.push(...claudeTerritoryEditDenyRules(state.territory));
+    }
     return {
       // effortLevel is omitted for the "max"/invalid/absent tier. updateConfig
       // turns an absent effort into explicit null before live apply so the SDK
@@ -3286,6 +3980,14 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   }
 
   private buildOptions(state: SdkSession): Options {
+    // Defense against stale persisted state or a future control-path bug. The
+    // query options below must never combine a protected territory with the
+    // SDK's permission-layer bypass.
+    state.permissionMode = containedClaudeMode(
+      state.permissionMode,
+      state.territory,
+      state.executionBoundary,
+    );
     const env = state.env;
     // A live setModel() override wins over the creation-time env model.
     const model = state.model ?? env?.ANTHROPIC_MODEL?.trim();
@@ -3293,6 +3995,33 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // ride the flag-settings layer so updateConfig can mutate them mid-session
     // via applyFlagSettings — buildFlagSettings is the shared derivation.
     const settings = this.buildFlagSettings(state);
+    if (state.territory && !state.executionBoundary) {
+      // Filesystem command hooks run with the host user's full authority, not
+      // inside the Bash sandbox. Territory sessions therefore suppress every
+      // user/project/local hook and inline skill shell block. Our in-process
+      // lifecycle callbacks below remain active because they are SDK options,
+      // not loaded command hooks.
+      settings.disableAllHooks = true;
+      settings.disableSkillShellExecution = true;
+      settings.disableRemoteControl = true;
+      settings.disableAgentView = true;
+      settings.disableWorkflows = true;
+      settings.disableArtifact = true;
+      // Hide every built-in subagent surface. A child agent may otherwise run
+      // with authority that is not represented by this adapter's session map.
+      // Future design specialists are spawned by Zeros under their own role,
+      // never through a coding agent's native Agent tool.
+      settings.permissions = {
+        ...settings.permissions,
+        deny: [
+          ...(settings.permissions?.deny ?? []),
+          "Agent",
+          "Workflows",
+          "Artifact",
+          "mcp__*",
+        ],
+      };
+    }
     // "max" is NOT a Settings.effortLevel — it's only a top-level Options.effort
     // tier. So the top-level `effort` is set ONLY for "max"; every other tier
     // (low/medium/high/xhigh/ultracode⇒xhigh) is carried inside `settings`.
@@ -3303,6 +4032,17 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       effortEnv === "max" ? "max" : undefined;
     const maxTurns = Number.parseInt(env?.CLAUDE_MAX_TURNS ?? "", 10);
     const appendSys = env?.CLAUDE_APPEND_SYSTEM_PROMPT?.trim();
+    // Territory is an engine invariant, so never trust a caller to supply the
+    // corresponding prose. The gateway normally passes the complete native
+    // instruction; this fallback keeps direct adapter consumers safe too.
+    const nativeInstruction =
+      state.systemInstruction?.trim() ||
+      (state.territory
+        ? buildCodeAgentDesignTerritoryNotice(state.territory.designDirectory)
+        : "");
+    const systemAppend = [appendSys, nativeInstruction]
+      .filter((value): value is string => Boolean(value))
+      .join("\n\n");
     // Overload/unavailable fallback. Never fall back to the model
     // that's already primary (a self-fallback would mask real outages). The
     // SDK re-tries the primary at the start of each user turn, so a blip
@@ -3329,9 +4069,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     // Per-session registry (gateway-resolved for this cwd: user + repo +
     // workspace layers, RCE-gated) wins; fall back to the global view.
     const sessionMcp = state.mcpServers ?? this.ctx.mcpServers;
-    const configuredMcpServers =
+    const mcpServers: Options["mcpServers"] =
       sessionMcp.length > 0
-        ? Object.fromEntries(
+        ? (Object.fromEntries(
             sessionMcp.map((s) => [
               s.name,
               s.transport === "stdio"
@@ -3347,9 +4087,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
                     ...(s.headers ? { headers: s.headers } : {}),
                   },
             ]),
-          )
+          ) as Options["mcpServers"])
         : undefined;
-    const mcpServers = configuredMcpServers;
 
     // Resolve the `claude` executable OURSELVES rather than letting the SDK do
     // it. See binary-resolver.ts — the SDK's lookup can only work where a real
@@ -3380,19 +4119,59 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       );
     }
 
-    const options: Options = {
+    const options: ClaudeOptionsWithOAuthRefresh = {
       cwd: state.cwd,
       // The SDK REPLACES the subprocess env entirely when `env` is set, so
       // we MUST spread process.env (PATH/HOME/keychain access depend on it).
-      ...(env && Object.keys(env).length > 0
+      ...(state.executionBoundary ||
+      state.territory ||
+      (env && Object.keys(env).length > 0)
         ? {
-            env: preserveAmbientConfigRoots({
-              ...(process.env as Record<string, string>),
-              ...env,
-            }),
+            env: state.executionBoundary
+              ? stripEngineAuthorityEnv({ ...(env ?? {}) })
+              : state.territory
+                ? claudeContainedProcessEnv(
+                    process.env as Record<string, string>,
+                    env,
+                  )
+                : preserveAmbientConfigRoots({
+                    ...(process.env as Record<string, string>),
+                    ...env,
+                  }),
           }
         : {}),
       permissionMode: toSdkPermissionMode(state.permissionMode),
+      ...(state.territory && !state.executionBoundary
+        ? {
+            sandbox: claudeTerritorySandbox(state.territory),
+          }
+        : {}),
+      ...(state.executionBoundary || state.territory
+        ? {
+            spawnClaudeCodeProcess: (spawnOptions) =>
+              spawnContainedClaudeProcess(
+                spawnOptions,
+                {
+                  onSpawn: (tracked) => state.containedProcesses.add(tracked),
+                  onStderr: (data) => {
+                    const line = data.trimEnd();
+                    if (line) this.ctx.emit.onAgentStderr(this.agentId, line);
+                  },
+                },
+                state.executionBoundary,
+              ),
+          }
+        : {}),
+      ...(this.oauthTokenProvider && !hasExplicitClaudeCredential(state.env)
+        ? {
+            // The pinned CLI emits this control request only when it needs an
+            // OAuth refresh. The trusted engine serializes the rotating
+            // Keychain token and returns only the access token; neither the
+            // refresh token nor Keychain Mach service enters the sandbox.
+            getOAuthToken: ({ signal }: { signal: AbortSignal }) =>
+              this.oauthTokenProvider!({ forceRefresh: true, signal }),
+          }
+        : {}),
       // `bypassPermissions` is INERT without this companion flag — the SDK
       // "requires allowDangerouslySkipPermissions" and keeps calling canUseTool
       // (so "Full Access" kept prompting per action). Scope it to
@@ -3478,10 +4257,32 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // a live typing animation (streamPartials) and de-dupes against the
       // final full message.
       includePartialMessages: true,
-      // Load the user's own settings (model/MCP/project config) like the
-      // CLI does — auth comes from the keychain regardless.
-      settingSources: ["user", "project", "local"],
-      extraArgs: claudeNativeBrowserExtraArgs(state.browserUse),
+      // A territory-bearing process cannot inherit repo/user hooks, plugins,
+      // MCP servers, or `sandbox.excludedCommands`: those are independent
+      // host-authority paths and may execute outside Claude's command sandbox.
+      // Auth remains available through the keychain. Ordinary code-only
+      // sessions preserve the existing Claude settings hierarchy.
+      settingSources:
+        state.territory && !state.executionBoundary
+          ? []
+          : ["user", "project", "local"],
+      // Claude's Chrome integration is another independent host-authority
+      // path, so the same territory clamp force-disables it (--no-chrome).
+      extraArgs: claudeNativeBrowserExtraArgs(
+        state.browserUse && !(state.territory && !state.executionBoundary),
+      ),
+      // MCP servers execute outside the local command sandbox. A code actor
+      // with a protected Design territory therefore gets no MCP mutation path
+      // until Zeros can broker and authorize each tool independently.
+      ...(state.territory && !state.executionBoundary
+        ? {
+            strictMcpConfig: true,
+            mcpServers: {} as NonNullable<Options["mcpServers"]>,
+            plugins: [],
+          }
+        : mcpServers
+          ? { mcpServers }
+          : {}),
       abortController: state.abort,
       stderr: (data: string) => {
         const line = data.trimEnd();
@@ -3510,11 +4311,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       systemPrompt: {
         type: "preset",
         preset: "claude_code",
-        ...(appendSys ? { append: appendSys } : {}),
+        ...(systemAppend ? { append: systemAppend } : {}),
       },
-      ...(mcpServers
-        ? { mcpServers: mcpServers as Options["mcpServers"] }
-        : {}),
       // ALWAYS pass an explicit executable. The SDK's own fallback — resolving
       // its platform package relative to sdk.mjs — is IMPOSSIBLE in the packaged
       // app (bun-compiled single-file engine: sdk.mjs lives in $bunfs and there
@@ -3648,15 +4446,21 @@ const MODES = [
   },
 ] as const;
 
+const CONTAINED_MODES = MODES.filter((mode) => mode.id !== "bypass");
+
 /** A LoadSessionResponse that re-advertises the mode list, so a resumed
  *  chat's permission pill uses the agent modes (and routes "Full Access"
  *  to bypass) instead of falling back to the generic local pill. */
 function loadResponseWithModes(
   currentModeId: ClaudeMode,
   resumedFresh = false,
+  contained = false,
 ): LoadSessionResponse {
   return {
-    modes: { currentModeId, availableModes: MODES },
+    modes: {
+      currentModeId,
+      availableModes: contained ? CONTAINED_MODES : MODES,
+    },
     ...(resumedFresh ? { resumedFresh: true } : {}),
   } as never as LoadSessionResponse;
 }

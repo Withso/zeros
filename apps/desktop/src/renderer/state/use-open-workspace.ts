@@ -13,10 +13,6 @@ import {
 } from "../shell/prefetch-workspace-surface";
 import { prepareChatView } from "../shell/conversation/chat-intent";
 import { resolveWorkspacePresentationKind } from "./workspace-resolution";
-import {
-  isInternalFeatureActive,
-  useInternalFeatureActive,
-} from "../features/settings/internal-features";
 
 /** Open a workspace: switch to the workspace view and land on the chat the user
  *  last had there (else any chat at that path, else auto-spawn the starred
@@ -28,21 +24,17 @@ export function useOpenWorkspace(): (
 ) => void {
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
-  const designWorkspacesActive =
-    useInternalFeatureActive("designWorkspaces");
   return useCallback(
     (workspace: WorkspaceNavigationTarget) => {
       const presentationKind = resolveWorkspacePresentationKind({
         confirmedKind: workspace.kind,
         folder: workspace.path,
       });
-      if (
-        presentationKind === "design" &&
-        (!designWorkspacesActive ||
-          !isInternalFeatureActive("designWorkspaces"))
-      ) {
-        return;
-      }
+      // A design-MODE workspace opens regardless of the Internal flag: the
+      // route itself decides what renders (the canvas when the flag is on,
+      // the "design mode is disabled" placeholder with its un-gated exit
+      // otherwise). Refusing to open here — as pre-mode builds did — left a
+      // dead click and no way to reach the workspace to switch it back.
       // Pointer/focus intent normally starts these reads earlier; repeat here
       // for keyboard/programmatic navigation. Both paths dedupe by exact key.
       prefetchWorkspaceSurface(workspace);
@@ -91,6 +83,6 @@ export function useOpenWorkspace(): (
         dispatch,
       });
     },
-    [designWorkspacesActive, dispatch, sessions],
+    [dispatch, sessions],
   );
 }

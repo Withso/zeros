@@ -26,8 +26,18 @@ export type {
   SetupState,
   Workspace,
   WorkspaceKind,
+  WorkspaceMode,
   WorkspaceStatus,
 } from "./types";
+
+// ── Design mode (one workspace, two modes) ────────────────
+export {
+  enterDesignMode,
+  exitDesignMode,
+  reconcileDesignModeTransition,
+  ensureDesignDocumentCommitted,
+  renameDesignDirectory,
+} from "./design-mode";
 
 export {
   deriveBranchNameFromPrompt,
@@ -93,6 +103,7 @@ export {
   pruneOrphanWorkspaceBranchOwnershipRefs,
   reconcileInterruptedWorkspaceLifecycles,
   restoreWorkspace,
+  setSyntheticGitWorkspaceResolver,
   setWorkspaceStatus,
   migrateWorktreesToNewRoot,
   whenSeedingSettled,
@@ -212,6 +223,7 @@ export type {
 
 export {
   discardHunk,
+  inspectApplyPatchPaths,
   stageHunk,
   stagePaths,
   unstageHunk,
@@ -297,6 +309,32 @@ export {
   updatePr,
   verifyGithubToken,
 } from "./github";
+
+// Provider-neutral hosted-review boundary. GitHub is the only production
+// adapter today; future forges implement this same app-owned contract without
+// changing workspace identity.
+export { githubForgeAdapter, GithubForgeAdapter } from "./github-forge";
+export type { GithubForgeOperations } from "./github-forge";
+export {
+  assertForgeRepositoryIdentity,
+  changeRequestIdentity,
+  changeRequestToLegacyPr,
+  ForgeContractError,
+} from "./forge";
+export type {
+  ChangeRequest,
+  ChangeRequestCommentInput,
+  ChangeRequestCommentResult,
+  ChangeRequestCreateInput,
+  ChangeRequestIdentity,
+  ChangeRequestMergeInput,
+  ChangeRequestMergeResult,
+  ChangeRequestUpdateInput,
+  ForgeAdapter,
+  ForgeId,
+  ForgeRepositoryIdentity,
+  GitObjectId,
+} from "./forge";
 export type {
   AuthStatusResult,
   CreatePrOptions,

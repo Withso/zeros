@@ -29,13 +29,24 @@
 // subprocess at composer-focus time (handled by AgentChat).
 // ──────────────────────────────────────────────────────────
 
-import React, { useEffect, useLayoutEffect, useRef } from "react";
+import React, {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   useChatById,
   usePendingAutoSend,
   useWorkspaceDispatch,
   type ChatThread,
 } from "../../state/store";
+import { useWorkspaceStore } from "../../state/workspace-store";
+import {
+  getLiveChatDraft,
+  liveChatDraftHasText,
+  subscribeToLiveChatDrafts,
+} from "../../features/agent/composer-live-drafts";
 import {
   useAgentSessions,
   useChatSession,
@@ -58,6 +69,13 @@ import { NoFolderPanel } from "../no-folder-panel";
 import { useChatCwd } from "../use-chat-cwd";
 import { useWorkspaceProvisioning } from "../../state/pending-workspaces";
 import { finishPreparedChatView } from "./chat-intent";
+import {
+  adoptedPristineSpawnBind,
+  INITIAL_PRISTINE_SPAWN_BIND,
+  nextPristineSpawnDecision,
+  type PristineSpawnBind,
+} from "./pristine-agent-switch";
+import { deferBootSessionAdmission } from "./lazy-boot-resume";
 import {
   rememberProvisionalBinding,
   resolveAutoBindChatSettings,
@@ -366,6 +384,56 @@ function ChatBody({
     ? `${chat.model ?? ""}|${chat.effort}|${chat.fast ? "1" : "0"}|${JSON.stringify(chat.additionalDirectories ?? [])}`
     : "";
   const envKeyRef = useRef(envKey);
+  // Which agent this view has actually bound, and whether a pristine agent
+  // switch has already been deferred (pristine-agent-switch.ts owns the rule).
+  // ChatBody is not keyed by chatId, so this is scoped to the chat it was
+  // recorded for and reset when the view is pointed at a different one.
+  const bindRef = useRef<{ chatId: string; bind: PristineSpawnBind }>({
+    chatId,
+    bind: INITIAL_PRISTINE_SPAWN_BIND,
+  });
+  if (bindRef.current.chatId !== chatId) {
+    bindRef.current = { chatId, bind: INITIAL_PRISTINE_SPAWN_BIND };
+  }
+  // Lazy boot resume (lazy-boot-resume.ts): only the workspace's focused
+  // conversation may MINT an execution on mount. Other surfaced panes re-adopt
+  // if the engine still owns one and otherwise stay idle until touched. Read as
+  // a live selector so a pane becoming focused re-runs the spawn effect below.
+  const isFocusedChat = useWorkspaceStore(
+    (state) => state.activeChatId === chatId,
+  );
+
+  // Typing is intent, and it is the earliest honest signal of it. A deferred
+  // pristine-switch spawn starts here rather than at Send, so the admission
+  // overlaps the typing and the eventual send is accepted into the queued-
+  // message card instead of blocking on a spinner. One-way per chat: it only
+  // ever arms the spawn, so it cannot thrash. Seeded from the persisted draft
+  // for a chat reopened with text already in it.
+  const [composerHasText, setComposerHasText] = useState(() =>
+    liveChatDraftHasText(
+      getLiveChatDraft(chatId) ??
+        useWorkspaceStore.getState().chatComposerDrafts[chatId] ??
+        null,
+    ),
+  );
+  const composerTextChatRef = useRef(chatId);
+  if (composerTextChatRef.current !== chatId) {
+    composerTextChatRef.current = chatId;
+    setComposerHasText(
+      liveChatDraftHasText(
+        getLiveChatDraft(chatId) ??
+          useWorkspaceStore.getState().chatComposerDrafts[chatId] ??
+          null,
+      ),
+    );
+  }
+  useEffect(() => {
+    if (composerHasText) return;
+    return subscribeToLiveChatDrafts((draftChatId, draft) => {
+      if (draftChatId !== chatId || !liveChatDraftHasText(draft)) return;
+      setComposerHasText(true);
+    });
+  }, [chatId, composerHasText]);
 
   // Initial spawn (idempotent). ensureSession short-circuits if the
   // same (chatId, agentId) pair is already ready. When the chat has a
@@ -412,6 +480,26 @@ function ChatBody({
         existing.status !== "reconnecting"
       ) {
         envKeyRef.current = envKey;
+        bindRef.current = { chatId, bind: adoptedPristineSpawnBind(agentId) };
+        return;
+      }
+
+      // Stepping through the agent picker on a chat that was never used must
+      // not pay a boundary admission per hop. pristine-agent-switch.ts owns
+      // the rule and its sticky bookkeeping; a deferred spawn lands on first
+      // use instead, which agent-chat's send path already self-heals.
+      const spawnDecision = nextPristineSpawnDecision({
+        agentId,
+        bind: bindRef.current.bind,
+        hasTranscript: existing?.hasTranscript ?? false,
+        messageCount: existing?.messages.length ?? 0,
+        chatTitle: chat?.title,
+        pendingAutoSend,
+        composerHasText,
+      });
+      bindRef.current = { chatId, bind: spawnDecision.bind };
+      if (spawnDecision.defer) {
+        envKeyRef.current = envKey;
         return;
       }
 
@@ -423,6 +511,15 @@ function ChatBody({
         (chat?.sessionId
           ? legacyProviderBinding(agentId, chat.sessionId)
           : undefined);
+      // An unfocused, untouched pane may re-adopt but never mint. See
+      // lazy-boot-resume.ts for why, and AgentLoadSessionMessage.adoptOnly for
+      // what the engine does with it.
+      const adoptOnly = deferBootSessionAdmission({
+        isFocusedChat,
+        pendingAutoSend,
+        composerHasText,
+        preparing,
+      });
       // Pass cwd verbatim so the gateway can surface
       // "no project folder bound" as an explicit error instead of silently
       // falling back to engine projectRoot.
@@ -434,9 +531,14 @@ function ChatBody({
             agentName,
             cwd,
             env,
+            ...(adoptOnly ? { adoptOnly: true } : {}),
           })
           .then((adopted) => {
             if (cancelled || adopted) return;
+            // Adopt-only miss: nothing was admitted and nothing was learned
+            // about the binding. Leave the chat idle with its transcript and
+            // resume id intact — it admits for real on focus/keystroke/send.
+            if (adoptOnly) return;
             // A definitive provider "not found" is the only load failure that
             // invalidates durable identity. Clear all compatibility mirrors
             // before creating the replacement so the broken handle cannot be
@@ -457,16 +559,25 @@ function ChatBody({
           existing?.hasTranscript === true ||
           (existing?.messages.length ?? 0) > 0;
         if (!hasPriorContext) {
-          void session.ensureSession(agentId, { agentName, cwd, env });
+          // Nothing durable to adopt and nothing on screen to keep warm — an
+          // unfocused pane in that state simply waits for its first touch.
+          if (!adoptOnly) {
+            void session.ensureSession(agentId, { agentName, cwd, env });
+          }
         } else {
           // Probe by Zeros conversation id first. A renderer reload can lose
           // its volatile execution route before a newly-learned provider
           // binding was persisted; the engine can still reattach it. Only a
           // confirmed miss creates a new execution.
           void sessions
-            .loadIntoChat(chatId, agentId, null, { agentName, cwd, env })
+            .loadIntoChat(chatId, agentId, null, {
+              agentName,
+              cwd,
+              env,
+              ...(adoptOnly ? { adoptOnly: true } : {}),
+            })
             .then((adopted) => {
-              if (cancelled || adopted) return;
+              if (cancelled || adopted || adoptOnly) return;
               void session.ensureSession(agentId, { agentName, cwd, env });
             });
         }
@@ -487,6 +598,13 @@ function ChatBody({
     preparing,
     pendingAutoSend,
     workspaceProvisioning,
+    // Re-runs once, on the first keystroke, to start a deferred spawn. It only
+    // ever transitions false → true per chat, so this cannot loop.
+    composerHasText,
+    // Re-runs when this pane becomes (or stops being) the focused conversation,
+    // which is what ends a lazy-boot deferral. A chat that already admitted has
+    // a live session and takes the early-return above, so refocusing is cheap.
+    isFocusedChat,
   ]);
 
   // Persist only the provider binding. The Zeros execution id stays in the

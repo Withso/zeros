@@ -16,43 +16,32 @@ import type { PendingWorkspaceCreate } from "./pending-workspaces";
 
 const EMPTY_PENDING: PendingWorkspaceCreate[] = [];
 
-/** Remove internal design rows before they reach any shared workspace surface.
- * Returns the bridge-owned array unchanged whenever possible so turning the
- * gate on does not add churn to hot navigation selectors. */
+/** Under the mode model (one workspace, two modes) design-MODE rows are
+ * ordinary workspaces and are NEVER hidden: hiding them when the Internal
+ * flag is off would strand a real worktree with no way to archive it or
+ * switch it back to code mode. What the flag gates is the design SURFACE —
+ * a blocked route mounts the "design mode is disabled" placeholder (see
+ * shell/design-workspace-access.ts), whose exit action is deliberately
+ * un-gated. Kept as a pass-through (same signature) so the many call sites
+ * and their memo inputs stay untouched; retired entirely once the flag
+ * graduates. */
 export function filterWorkspacesForDesignAccess(
   rows: readonly Workspace[],
-  designWorkspacesActive: boolean,
+  _designWorkspacesActive: boolean,
 ): Workspace[] {
-  if (designWorkspacesActive) return rows as Workspace[];
-  let anyFiltered = false;
-  const out: Workspace[] = [];
-  for (const workspace of rows) {
-    if (workspace.kind === "design") {
-      anyFiltered = true;
-      continue;
-    }
-    out.push(workspace);
-  }
-  return anyFiltered ? out : (rows as Workspace[]);
+  return rows as Workspace[];
 }
 
-/** Pending design creates are internal state too: hiding only confirmed rows
- * would briefly leak a "Setting up" tab and inflate repository counts. */
+/** Same pass-through as above for in-flight creates: a pending design create
+ * is a real create (the row lands moments later), so hiding its "Setting up"
+ * tab would make the workspace pop into existence unexplained. Creating in
+ * design mode is already flag-gated at the entry point (create-workspace.ts),
+ * so a pending design create implies the flag was on moments ago. */
 export function filterPendingCreatesForDesignAccess(
   rows: readonly PendingWorkspaceCreate[],
-  designWorkspacesActive: boolean,
+  _designWorkspacesActive: boolean,
 ): PendingWorkspaceCreate[] {
-  if (designWorkspacesActive) return rows as PendingWorkspaceCreate[];
-  let anyFiltered = false;
-  const out: PendingWorkspaceCreate[] = [];
-  for (const pending of rows) {
-    if (pending.kind === "design") {
-      anyFiltered = true;
-      continue;
-    }
-    out.push(pending);
-  }
-  return anyFiltered ? out : (rows as PendingWorkspaceCreate[]);
+  return rows as PendingWorkspaceCreate[];
 }
 
 /** The single visibility filter: drop only rows the server has confirmed

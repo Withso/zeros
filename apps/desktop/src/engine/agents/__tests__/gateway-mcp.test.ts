@@ -22,10 +22,12 @@ import type {
   McpServerRegistration,
   NewSessionResponse,
 } from "../types";
+import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
 function makeGateway() {
   return new AgentGateway({
     projectRoot: "/tmp/zeros-test",
+    executionBoundary: testExecutionBoundary(),
     events: {
       onSessionUpdate: () => {},
       onPermissionRequest: () => {},

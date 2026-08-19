@@ -21,15 +21,31 @@ import { randomUUID } from "node:crypto";
 import { BridgeClient } from "./lib/bridge-client";
 import {
   loadState,
-  saveState,
+  loadSnapshotAttestation,
   makeDaytona,
+  withCloudValidationMutationLock,
   bridgeWsUrl,
-  ENGINE_CLOUD_PORT,
-  healthUrl,
   type CloudValidationState,
 } from "./config";
+import { relaunchQualifiedCloudEngine } from "./runtime";
+import { selectCloudPrimaryWorkspaceId } from "./lib/workspace-target";
 
 const MARKER = `zeros-cloud-validation-${randomUUID().slice(0, 8)}`;
+
+function accountToken(): string {
+  const token = process.env.ZEROS_ACCOUNT_ACCESS_TOKEN;
+  if (
+    !token ||
+    token !== token.trim() ||
+    token.length > 16_384 ||
+    /[\0\r\n]/.test(token)
+  ) {
+    throw new Error(
+      "ZEROS_ACCOUNT_ACCESS_TOKEN is required for qualified cloud account binding",
+    );
+  }
+  return token;
+}
 
 function ok(label: string) {
   console.log(`  \x1b[32m✓\x1b[0m ${label}`);
@@ -47,8 +63,12 @@ async function runBridgeChecks(
 ): Promise<void> {
   const client = new BridgeClient({
     url: bridgeWsUrl(state.previewUrl),
-    previewToken: state.previewToken,
+    // Legacy standard preview state needs a header. Qualified browser ingress
+    // is signed in the hostname; Daytona documents the two token types as
+    // non-interchangeable.
+    previewToken: state.engineIngress ? undefined : state.previewToken,
     cloudToken: state.cloudToken,
+    accountToken: accountToken(),
   });
 
   // 1. Handshake
@@ -61,10 +81,19 @@ async function runBridgeChecks(
     fail(`[${phase}] handshake`, err);
   }
 
+  let workspaceId: string;
+  try {
+    workspaceId = selectCloudPrimaryWorkspaceId(
+      await client.request("workspace.list"),
+    );
+  } catch (err) {
+    fail(`[${phase}] workspace discovery`, err);
+  }
+
   // 2. file.tree (files-over-RPC) on the project root.
   try {
     const result = (await client.request("file.tree", {
-      workspaceId: "local-main",
+      workspaceId,
       limit: 50,
     })) as { files?: string[] };
     const n = result?.files?.length ?? 0;
@@ -94,7 +123,7 @@ async function runBridgeChecks(
       try {
         await client.ptyCreate({
           sessionId,
-          cwd: client.engineRoot,
+          cwd: workspaceId,
           ephemeral: true,
         });
         // Small delay so the shell is ready to receive input.
@@ -139,57 +168,28 @@ async function main() {
   const daytona = makeDaytona();
   const sandbox = await daytona.get(state.sandboxId);
 
-  const tStop = Date.now();
-  await sandbox.stop();
-  await sandbox.waitUntilStopped();
-  ok(`stop() complete (${((Date.now() - tStop) / 1000).toFixed(1)}s)`);
+  const refreshed = await withCloudValidationMutationLock(async () => {
+    const tStop = Date.now();
+    await sandbox.stop();
+    await sandbox.waitUntilStopped();
+    ok(`stop() complete (${((Date.now() - tStop) / 1000).toFixed(1)}s)`);
 
-  const tStart = Date.now();
-  await sandbox.start();
-  await sandbox.waitUntilStarted();
-  ok(
-    `start() complete (${((Date.now() - tStart) / 1000).toFixed(1)}s) — RAM cleared, engine must re-boot`,
-  );
-
-  // The engine process is gone because RAM was cleared; re-launch it. Then
-  // re-fetch the rotated preview token.
-  const session = "zeros-engine";
-  await sandbox.process.createSession(session).catch(() => {});
-  await sandbox.process.executeSessionCommand(session, {
-    command: "/usr/local/bin/start-engine.sh",
-    runAsync: true,
-  });
-
-  const link = await sandbox.getPreviewLink(ENGINE_CLOUD_PORT);
-  const refreshed: CloudValidationState = {
-    ...state,
-    previewUrl: link.url,
-    previewToken: link.token,
-  };
-
-  // Wait for /health to go green after the cold boot.
-  const hUrl = healthUrl(link.url);
-  let healthy = false;
-  for (let i = 0; i < 40 && !healthy; i++) {
-    try {
-      const res = await fetch(hUrl, {
-        headers: { "x-daytona-preview-token": link.token },
-      });
-      healthy =
-        res.ok && ((await res.json()) as { status?: string })?.status === "ok";
-    } catch {
-      /* booting */
-    }
-    if (!healthy) await new Promise((r) => setTimeout(r, 1500));
-  }
-  if (!healthy)
-    fail(
-      "post-wake /health",
-      new Error("engine did not come back after start()"),
+    const tStart = Date.now();
+    await sandbox.start();
+    await sandbox.waitUntilStarted();
+    ok(
+      `start() complete (${((Date.now() - tStart) / 1000).toFixed(1)}s) — RAM cleared, engine must re-boot`,
     );
-  ok("post-wake /health green");
 
-  saveState(refreshed);
+    // RAM was cleared. Re-attest the actual resumed image and live ZSR canary
+    // before a privileged coordinator is allowed to start.
+    return relaunchQualifiedCloudEngine(
+      sandbox,
+      state,
+      loadSnapshotAttestation(),
+    );
+  });
+  ok("post-wake /health green");
   await runBridgeChecks(refreshed, "post-wake");
 
   console.log(

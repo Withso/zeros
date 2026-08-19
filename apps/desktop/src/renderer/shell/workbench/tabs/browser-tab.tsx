@@ -61,6 +61,7 @@ import {
   type PendingComposerAppend,
 } from "../../../state/store";
 import { nativeInvoke, useNativeRuntime } from "../../../platform/runtime";
+import { useAgentSessions } from "../../../features/agent/sessions-hooks";
 import {
   BROWSER_DEFAULT_HEIGHT,
   BROWSER_DEFAULT_WIDTH,
@@ -86,6 +87,16 @@ import {
 import { toast } from "../../../shared/ui/primitives/elements";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import type { ComposerAttachment } from "@/renderer/features/agent/composer-attachments";
+import {
+  clearPreviewRuntimeForTab,
+  consumePreviewNavigation,
+  isPreviewRuntimeUrlForTab,
+  previewNavigationForTab,
+  previewNavigationDescriptor,
+  previewRuntimeStateForTab,
+  redactPreviewRuntimeTextForTab,
+  stagePreviewNavigation,
+} from "../../../features/browser/preview-navigation";
 import { useBrowserSessionAgentPresence } from "@/renderer/features/browser/browser-session-activity-store";
 import {
   hasOpenNativeBrowserBlockingOverlay,
@@ -99,6 +110,8 @@ import { listenForNativeSurfaceOverlayIntent } from "@/renderer/shared/ui/native
 // ordinary http(s) sites; Design/Canvas are gated separately to loopback URLs.
 
 const EMPTY_BROWSER_VARIANTS: BrowserTabVariant[] = [];
+const PREVIEW_RENEW_AHEAD_MS = 5 * 60_000;
+const PREVIEW_RENEW_RETRY_MS = 15_000;
 
 // ── Component ─────────────────────────────────────────────
 
@@ -578,6 +591,7 @@ function dismissNativeBrowserOverlay() {
 
 function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   const dispatch = useWorkspaceDispatch();
+  const sessions = useAgentSessions();
   const updateTab = useCallback(
     (updates: Partial<Omit<WorkbenchTab, "id" | "type">>) => {
       dispatch({ type: "UPDATE_WORKBENCH_TAB", id: tab.id, scope, updates });
@@ -596,12 +610,147 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   // Persisted URLs are still treated as untrusted input: only canonical http(s)
   // pages are restored. External http(s) sites are valid browser content.
   const safeTabUrl = normalizeBrowserUrl(tab.url ?? "") ?? "";
+  const [previewRuntime, setPreviewRuntime] = useState(() => {
+    const runtime = previewRuntimeStateForTab(tab.id, safeTabUrl);
+    return runtime && runtime.expiresAt > Date.now() ? runtime : null;
+  });
+  const [previewRenewRetryAt, setPreviewRenewRetryAt] = useState(0);
+  const previewRenewingRef = useRef(false);
+  const previewRenewalErrorShownRef = useRef(false);
+  // Preview admission capabilities never enter the persisted WorkbenchTab.
+  // Peek is render-pure/idempotent for React Strict Mode; consume only after
+  // this mount commits. Later remounts use the safe URL + established cookie.
+  const [initialFrameUrl] = useState(
+    () =>
+      previewNavigationForTab(tab.id, safeTabUrl) ??
+      (tab.previewSource ? "about:blank" : safeTabUrl),
+  );
+  useEffect(() => {
+    consumePreviewNavigation(tab.id);
+  }, [tab.id]);
   const frameName = `zeros-browser-${tab.id}`;
   const webview = useIframeWebview({
-    initialUrl: safeTabUrl,
+    initialUrl: initialFrameUrl,
     frameName,
+    trustedPreviewOrigin: previewRuntime?.origin,
   });
-  const effectiveUrl = webview.state.currentUrl || safeTabUrl;
+  const replacePreviewUrl = webview.replace;
+
+  // Browser credentials are deliberately volatile. Re-exchange the safe
+  // chat/display-port identity before the one-hour inner cookie (or provider
+  // signed origin) expires. Hidden retained tabs stay inert; becoming active
+  // performs an immediate catch-up when their prior grant elapsed.
+  useEffect(() => {
+    const source = tab.previewSource;
+    if (!active || !source || !safeTabUrl) return;
+    const current = previewRuntimeStateForTab(tab.id, safeTabUrl);
+    const now = Date.now();
+    const dueAt = Math.max(
+      previewRenewRetryAt,
+      current ? current.expiresAt - PREVIEW_RENEW_AHEAD_MS : now,
+    );
+    let cancelled = false;
+    const timer = window.setTimeout(
+      () => {
+        if (previewRenewingRef.current) return;
+        previewRenewingRef.current = true;
+        void (async () => {
+          try {
+            const owner = sessions.getSession(source.chatId);
+            const livePort = owner?.boundaryPorts?.ports.find(
+              (port) => port.port === source.port,
+            );
+            if (!livePort) {
+              throw new Error("preview listener is not active");
+            }
+            const opened = await sessions.openBoundaryPort(
+              source.chatId,
+              livePort.id,
+            );
+            const descriptor = previewNavigationDescriptor(opened);
+            if (descriptor.volatileOrigin) {
+              if (!electron) {
+                throw new Error("native preview authorization is unavailable");
+              }
+              const authorized = await nativeInvoke<{ ok: boolean }>(
+                "browser:authorize-preview-origin",
+                {
+                  frameName,
+                  origin: descriptor.runtimeOrigin,
+                  expiresAt: descriptor.expiresAt,
+                },
+              );
+              if (!authorized.ok) {
+                throw new Error("preview origin was not authorized");
+              }
+            }
+            if (cancelled) return;
+            const staged = stagePreviewNavigation(tab.id, opened);
+            setPreviewRuntime({
+              origin: staged.runtimeOrigin,
+              expiresAt: staged.expiresAt,
+              volatileOrigin: staged.volatileOrigin,
+            });
+            consumePreviewNavigation(tab.id);
+            replacePreviewUrl(opened.admissionUrl);
+            previewRenewalErrorShownRef.current = false;
+            setPreviewRenewRetryAt(
+              staged.expiresAt - Date.now() <= PREVIEW_RENEW_AHEAD_MS
+                ? Date.now() + PREVIEW_RENEW_RETRY_MS
+                : 0,
+            );
+          } catch {
+            if (cancelled) return;
+            if (!current || current.expiresAt <= Date.now()) {
+              setPreviewRuntime(null);
+            }
+            if (
+              (!current || current.expiresAt <= Date.now()) &&
+              !previewRenewalErrorShownRef.current
+            ) {
+              previewRenewalErrorShownRef.current = true;
+              toast.error("Preview connection is being restored", {
+                description:
+                  "Zeros will reconnect when the session listener is ready.",
+              });
+            }
+            setPreviewRenewRetryAt(Date.now() + PREVIEW_RENEW_RETRY_MS);
+          } finally {
+            previewRenewingRef.current = false;
+          }
+        })();
+      },
+      Math.max(0, dueAt - now),
+    );
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    active,
+    electron,
+    frameName,
+    previewRenewRetryAt,
+    previewRuntime?.expiresAt,
+    safeTabUrl,
+    sessions,
+    tab.id,
+    tab.previewSource,
+    replacePreviewUrl,
+  ]);
+
+  const observedUrl =
+    webview.state.currentUrl === "about:blank" && tab.previewSource
+      ? safeTabUrl
+      : webview.state.currentUrl || initialFrameUrl || safeTabUrl;
+  const previewRuntimeActive = isPreviewRuntimeUrlForTab(
+    tab.id,
+    safeTabUrl,
+    observedUrl,
+  );
+  const effectiveUrl = previewRuntimeActive
+    ? safeTabUrl
+    : webview.state.currentUrl || safeTabUrl;
   const localToolsEnabled = isLoopbackUrl(effectiveUrl);
   const chipVisible = localToolsEnabled && webview.selectedElements.length > 0;
   const designModeActive = webview.designModeActive;
@@ -693,17 +842,54 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   // tab strip label updates and a reload restores the right URL.
   useEffect(() => {
     const url = webview.state.currentUrl;
+    if (url === "about:blank" && tab.previewSource) return;
+    if (url && isPreviewRuntimeUrlForTab(tab.id, safeTabUrl, url)) return;
     if (!webview.state.isLoading && url && url !== tab.url) {
-      updateTab({ url });
+      clearPreviewRuntimeForTab(tab.id);
+      setPreviewRuntime(null);
+      if (electron) {
+        void nativeInvoke("browser:revoke-preview-origin", { frameName }).catch(
+          () => undefined,
+        );
+      }
+      updateTab({ url, previewSource: undefined });
     }
-  }, [webview.state.currentUrl, webview.state.isLoading, tab.url, updateTab]);
+  }, [
+    electron,
+    frameName,
+    webview.state.currentUrl,
+    webview.state.isLoading,
+    safeTabUrl,
+    tab.id,
+    tab.previewSource,
+    tab.url,
+    updateTab,
+  ]);
+
+  useEffect(
+    () => () => {
+      clearPreviewRuntimeForTab(tab.id);
+      void nativeInvoke("browser:revoke-preview-origin", { frameName }).catch(
+        () => undefined,
+      );
+    },
+    [frameName, tab.id],
+  );
 
   useEffect(() => {
     const t = webview.state.title;
-    if (!webview.state.isLoading && t && t !== tab.title) {
-      updateTab({ title: t });
+    const safeTitle = redactPreviewRuntimeTextForTab(tab.id, safeTabUrl, t);
+    if (!webview.state.isLoading && safeTitle && safeTitle !== tab.title) {
+      updateTab({ title: safeTitle });
     }
-  }, [webview.state.title, webview.state.isLoading, tab.title, updateTab]);
+  }, [
+    safeTabUrl,
+    tab.id,
+    tab.title,
+    updateTab,
+    webview.state.isLoading,
+    webview.state.title,
+  ]);
 
   // ── ⌘+Shift+D global shortcut ────────────────────────────
   //
@@ -1149,7 +1335,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
       html: snapshot.html,
       css: snapshot.css,
       sourceSelector: snapshot.sourceSelector,
-      sourceUrl: webview.state.currentUrl || safeTabUrl || anchor.href || "",
+      sourceUrl: effectiveUrl || anchor.href || "",
       componentName: snapshot.componentName ?? anchor.componentName,
       sourceViewportWidth: forkWidth,
       sourceContentHeight: forkHeight,
@@ -1190,7 +1376,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
   }, [
     canvasMode,
     webview,
-    safeTabUrl,
+    effectiveUrl,
     tabVariants,
     effW,
     effH,
@@ -1202,6 +1388,18 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
     <div className="bg-bg1 flex h-full min-h-0 flex-col">
       <BrowserChrome
         webview={webview}
+        displayUrl={effectiveUrl}
+        onNavigate={(url) => {
+          clearPreviewRuntimeForTab(tab.id);
+          setPreviewRuntime(null);
+          if (electron) {
+            void nativeInvoke("browser:revoke-preview-origin", {
+              frameName,
+            }).catch(() => undefined);
+          }
+          updateTab({ previewSource: undefined });
+          webview.navigate(url);
+        }}
         electron={electron}
         localToolsEnabled={localToolsEnabled}
         canvasMode={canvasMode}
@@ -1342,7 +1540,7 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
                       submitElementsToChat({
                         text,
                         elements: webview.selectedElements,
-                        tabUrl: webview.state.currentUrl || safeTabUrl || "",
+                        tabUrl: effectiveUrl || "",
                         activeChatId: useWorkspaceStore.getState().activeChatId,
                         dispatch,
                       });
@@ -1395,6 +1593,8 @@ function IframeBrowserTab({ tab, active, scope }: BrowserTabProps) {
 
 interface BrowserChromeProps {
   webview: ReturnType<typeof useIframeWebview>;
+  displayUrl: string;
+  onNavigate: (url: string) => void;
   electron: boolean;
   localToolsEnabled: boolean;
   canvasMode: boolean;
@@ -1403,6 +1603,8 @@ interface BrowserChromeProps {
 
 function BrowserChrome({
   webview,
+  displayUrl,
+  onNavigate,
   electron,
   localToolsEnabled,
   canvasMode,
@@ -1410,7 +1612,6 @@ function BrowserChrome({
 }: BrowserChromeProps) {
   const {
     state,
-    navigate,
     back,
     forward,
     reload,
@@ -1421,15 +1622,15 @@ function BrowserChrome({
     setDesignMode,
   } = webview;
   const inputRef = useRef<HTMLInputElement>(null);
-  const [address, setAddress] = useState(() => state.currentUrl);
+  const [address, setAddress] = useState(() => displayUrl);
   const [focused, setFocused] = useState(false);
 
   // Sync the address to the webview's canonical URL when the user isn't editing.
   // Without this guard, an internal navigation would yank the cursor
   // out mid-typing.
   useEffect(() => {
-    if (!focused) setAddress(state.currentUrl);
-  }, [state.currentUrl, focused]);
+    if (!focused) setAddress(displayUrl);
+  }, [displayUrl, focused]);
 
   const handleSubmit = useCallback(
     (e: React.FormEvent<HTMLFormElement>) => {
@@ -1440,10 +1641,11 @@ function BrowserChrome({
         return;
       }
       setAddress(url);
-      navigate(url);
+      if (url === displayUrl && state.currentUrl !== displayUrl) reload();
+      else onNavigate(url);
       inputRef.current?.blur();
     },
-    [address, navigate],
+    [address, displayUrl, onNavigate, reload, state.currentUrl],
   );
 
   return (

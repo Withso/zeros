@@ -28,8 +28,12 @@
 //
 // ──────────────────────────────────────────────────────────
 
+import { constants as fsConstants } from "node:fs";
 import * as fsp from "node:fs/promises";
+import { createRequire } from "node:module";
 import * as path from "node:path";
+
+import { buildSpawnEnvWithLoginPath } from "../shared/login-shell-path";
 
 // tsup compiles the engine to CJS, so the ambient `require` is the
 // right resolver. We use require.resolve to find the platform package,
@@ -41,6 +45,115 @@ export interface CodexBinarySource {
   readonly path: string;
   /** Where this resolution came from — useful for diagnostics + log lines. */
   readonly source: "bundled" | "override" | "fallback";
+  /** Native target directory that Codex must be able to re-execute inside its
+   * own provider sandbox. Kept read-only by the territory profile. */
+  readonly sandboxRuntimeRoot?: string;
+}
+
+function sandboxRuntimeRootForBinary(binaryPath: string): string | undefined {
+  const binDirectory = path.dirname(binaryPath);
+  if (path.basename(binDirectory) !== "bin") return undefined;
+  return path.resolve(binDirectory, "..");
+}
+
+function platformRuntimeTarget():
+  | { packageName: string; triple: string }
+  | undefined {
+  const targets: Record<string, { packageName: string; triple: string }> = {
+    "darwin:x64": {
+      packageName: "@openai/codex-darwin-x64",
+      triple: "x86_64-apple-darwin",
+    },
+    "darwin:arm64": {
+      packageName: "@openai/codex-darwin-arm64",
+      triple: "aarch64-apple-darwin",
+    },
+    "linux:x64": {
+      packageName: "@openai/codex-linux-x64",
+      triple: "x86_64-unknown-linux-musl",
+    },
+    "linux:arm64": {
+      packageName: "@openai/codex-linux-arm64",
+      triple: "aarch64-unknown-linux-musl",
+    },
+    "win32:x64": {
+      packageName: "@openai/codex-win32-x64",
+      triple: "x86_64-pc-windows-msvc",
+    },
+    "win32:arm64": {
+      packageName: "@openai/codex-win32-arm64",
+      triple: "aarch64-pc-windows-msvc",
+    },
+  };
+  return targets[`${process.platform}:${process.arch}`];
+}
+
+async function resolveNpmSandboxRuntimeRoot(
+  wrapperPackagePath: string,
+): Promise<string | undefined> {
+  const target = platformRuntimeTarget();
+  if (!target) return undefined;
+  try {
+    const fromWrapper = createRequire(wrapperPackagePath);
+    const platformPackagePath = fromWrapper.resolve(
+      `${target.packageName}/package.json`,
+    );
+    const runtimeRoot = path.join(
+      path.dirname(platformPackagePath),
+      "vendor",
+      target.triple,
+    );
+    const binary = path.join(
+      runtimeRoot,
+      "bin",
+      process.platform === "win32" ? "codex.exe" : "codex",
+    );
+    return (await pathExists(binary)) ? runtimeRoot : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Resolve one executable from a trusted PATH snapshot and return its physical
+ * absolute path. ZSR intentionally refuses relative commands: resolving here
+ * preserves the normal global-CLI fallback without letting the sandbox choose
+ * a different executable after admission. */
+export async function resolveExecutableFromPath(
+  binary: string,
+  searchPath: string,
+  pathExt = process.env.PATHEXT ?? ".EXE;.BAT;.CMD",
+): Promise<string | null> {
+  if (
+    !binary ||
+    binary.includes("\0") ||
+    binary.includes("/") ||
+    binary.includes("\\")
+  ) {
+    return null;
+  }
+  const extensions =
+    process.platform === "win32"
+      ? pathExt.split(";").filter(Boolean)
+      : [""];
+  for (const directory of searchPath.split(path.delimiter)) {
+    if (!directory || !path.isAbsolute(directory)) continue;
+    for (const extension of extensions) {
+      try {
+        const resolved = await fsp.realpath(
+          path.join(directory, binary + extension),
+        );
+        const stat = await fsp.stat(resolved);
+        if (!stat.isFile()) continue;
+        if (process.platform !== "win32") {
+          await fsp.access(resolved, fsConstants.X_OK);
+        }
+        return resolved;
+      } catch {
+        // Continue through the exact PATH snapshot.
+      }
+    }
+  }
+  return null;
 }
 
 /** Resolve a codex binary path. Cascading fallback:
@@ -50,12 +163,11 @@ export interface CodexBinarySource {
  *    A missing staged file is returned so spawn reports the corrupt package;
  *    silently running an unrelated global version would violate the pin.
  *  - If `@openai/codex` is installed in node_modules, use its `.bin/codex` wrapper.
- *  - Otherwise, return the literal `codex` so the spawning code can rely on
- *    `PATH` lookup (login-shell PATH is layered in by the runtime).
+ *  - Otherwise, resolve the global CLI to one physical absolute path from the
+ *    login-shell PATH before ZSR admission.
  *
- *  This function deliberately does NOT throw on "not found" — that's the
- *  spawning code's job (so the failure surfaces as a clean adapter error
- *  with stderr context rather than an unhandled rejection here). */
+ *  A missing global fallback throws here because ZSR cannot safely defer PATH
+ *  selection until after its immutable filesystem policy is issued. */
 export async function resolveCodexBinary(
   opts: {
     override?: string;
@@ -86,7 +198,11 @@ export async function resolveCodexBinary(
   const fromEnv = process.env.ZEROS_CODEX_CLI_PATH?.trim();
   if (fromEnv) {
     if (await pathExists(fromEnv)) {
-      return { path: fromEnv, source: "bundled" };
+      return {
+        path: fromEnv,
+        source: "bundled",
+        sandboxRuntimeRoot: sandboxRuntimeRootForBinary(fromEnv),
+      };
     }
     console.error(
       `[codex/binary-resolver] ZEROS_CODEX_CLI_PATH '${fromEnv}' not found — ` +
@@ -99,6 +215,7 @@ export async function resolveCodexBinary(
   //    accurate path even when node_modules is hoisted unusually.
   try {
     const pkgPath = require.resolve("@openai/codex/package.json");
+    const sandboxRuntimeRoot = await resolveNpmSandboxRuntimeRoot(pkgPath);
     // The wrapper is two dirs up at `bin/codex.js`, but we want the
     // `.bin/codex` shim instead (because it's already executable and
     // shells set up SHEBANG correctly). Walk up from package.json:
@@ -113,7 +230,7 @@ export async function resolveCodexBinary(
         process.platform === "win32" ? "codex.cmd" : "codex",
       );
       if (await pathExists(shim)) {
-        return { path: shim, source: "bundled" };
+        return { path: shim, source: "bundled", sandboxRuntimeRoot };
       }
     }
     // Fall back to invoking the wrapper script via node directly.
@@ -122,23 +239,35 @@ export async function resolveCodexBinary(
       // Caller spawns via node — we communicate that by returning the
       // wrapper path; the runtime detects `.js` extension and prepends
       // `process.execPath`.
-      return { path: wrapper, source: "bundled" };
+      return { path: wrapper, source: "bundled", sandboxRuntimeRoot };
     }
   } catch {
     /* @openai/codex not installed — fall through */
   }
 
-  // 4. System PATH fallback. The runtime layers in login-shell PATH
-  //    before spawn, so a Homebrew / nvm / asdf install resolves.
+  // 4. System PATH fallback. Resolve from the same sanitized login-shell PATH
+  //    that the runtime supplies to the child, before the immutable ZSR policy
+  //    is issued. Passing the literal "codex" would make the sandbox choose an
+  //    executable after admission and is therefore rejected by wrapSpawn.
   //    NOTE this is a genuinely DIFFERENT CLI from the pinned bundled one —
   //    `check:codex-pin` guards the bundled version, not this. Say so, because a
   //    silent arrival here is what made packaged Codex drift from dev.
+  const spawnEnv = await buildSpawnEnvWithLoginPath({});
+  const fallback = await resolveExecutableFromPath(
+    "codex",
+    spawnEnv.PATH ?? "",
+  );
+  if (!fallback) {
+    throw new Error(
+      "Codex CLI is unavailable on the sanitized login-shell PATH. Install Codex or configure an absolute executable path.",
+    );
+  }
   console.warn(
-    "[codex/binary-resolver] no bundled codex resolved (no ZEROS_CODEX_CLI_PATH, " +
-      "no @openai/codex in node_modules) — falling back to `codex` on PATH, which " +
+    `[codex/binary-resolver] no bundled codex resolved (no ZEROS_CODEX_CLI_PATH, ` +
+      `no @openai/codex in node_modules) — falling back to ${fallback}, which ` +
       "is NOT the version pinned by this build",
   );
-  return { path: "codex", source: "fallback" };
+  return { path: fallback, source: "fallback" };
 }
 
 /** Walk up from `start` looking for a `node_modules` directory whose

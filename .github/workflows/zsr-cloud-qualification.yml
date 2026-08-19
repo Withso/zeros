@@ -1,0 +1,184 @@
+name: ZSR cloud qualification
+
+# Paid, credentialed, manual-only graduation of the exact Daytona image. This
+# is deliberately separate from fork/PR preflight. Configure required reviewers
+# on the `zsr-cloud-qualification` GitHub Environment before adding its secrets.
+# A run is accepted only from main, mints a non-production asymmetric account
+# identity, requires all three live providers, and deletes sandbox + snapshot.
+
+on:
+  workflow_dispatch:
+    inputs:
+      region:
+        description: Daytona region
+        required: true
+        default: eu
+        type: choice
+        options:
+          - eu
+          - us
+      soak_hours:
+        description: Authenticated WSS soak duration
+        required: true
+        default: "4"
+        type: choice
+        options:
+          - "1"
+          - "4"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zsr-cloud-qualification-${{ inputs.region }}
+  # A replacement run must not hard-cancel the process that owns paid-resource
+  # cleanup. Operators can cancel explicitly; the EXIT trap still runs.
+  cancel-in-progress: false
+
+jobs:
+  qualify:
+    name: Daytona image + live provider matrix
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-24.04
+    timeout-minutes: 355
+    environment: zsr-cloud-qualification
+    steps:
+      - name: Enforce immutable workflow source
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::Cloud qualification must be dispatched from main."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install trusted main dependencies
+        # Provider/agent credentials are scoped to the later qualification step,
+        # so dependency lifecycle scripts cannot read them.
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify qualification source before releasing credentials
+        run: |
+          pnpm typecheck
+          pnpm exec vitest run --config vitest.config.ts \
+            scripts/__tests__/cloud-bridge-client.test.ts \
+            scripts/__tests__/cloud-egress-probe.test.ts \
+            scripts/__tests__/cloud-provider-cleanup.test.ts \
+            scripts/__tests__/cloud-validation-identity.test.ts \
+            scripts/__tests__/cloud-workspace-qualification-gates.test.ts \
+            scripts/__tests__/cloud-workspace-runtime.test.ts \
+            scripts/__tests__/cloud-workspace-validation-config.test.ts \
+            apps/desktop/src/engine/transport/__tests__/cloud-transport.test.ts \
+            apps/desktop/src/engine/auth/__tests__/verify-jwt.test.ts \
+            packages/protocol/src/__tests__/schemas.test.ts
+
+      - name: Mint per-run asymmetric validation identity
+        # The private RSA KeyObject never leaves this process. Only its public
+        # key and an eight-hour account JWT reach later steps; neither is a
+        # production tenant grant.
+        run: pnpm tsx scripts/cloud-workspace-validation/prepare-ci-identity.ts
+
+      - name: Qualify exact cloud image and clean all paid resources
+        env:
+          DAYTONA_API_KEY: ${{ secrets.DAYTONA_API_KEY }}
+          DAYTONA_TARGET: ${{ inputs.region }}
+          ANTHROPIC_API_KEY: ${{ secrets.ZSR_CLOUD_ANTHROPIC_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.ZSR_CLOUD_OPENAI_API_KEY }}
+          CURSOR_API_KEY: ${{ secrets.ZSR_CLOUD_CURSOR_API_KEY }}
+          ZEROS_CLOUD_REQUIRED_AGENTS: claude,codex,cursor
+          ZEROS_SOAK_HOURS: ${{ inputs.soak_hours }}
+          ZEROS_SOAK_MAX_DROPS: "0"
+          ZEROS_REPO_URL: https://github.com/${{ github.repository }}.git
+          ZEROS_REPO_REF: main
+          ZEROS_REPO_COMMIT: ${{ github.sha }}
+          ZEROS_SNAPSHOT_NAME: zeros-zsr-ci-${{ github.run_id }}-${{ github.run_attempt }}
+          ZEROS_CLOUD_VALIDATION_STATE_DIR: ${{ runner.temp }}/zeros-zsr-cloud-${{ github.run_id }}-${{ github.run_attempt }}
+          # Backstop for a runner VM that is killed before bash can execute its
+          # EXIT trap. A later run also reaps CI snapshots older than 24h.
+          ZEROS_CLOUD_VALIDATION_AUTO_DELETE_MINUTES: "720"
+          ZEROS_CLOUD_ALLOW_SNAPSHOT_DELETE: "1"
+        run: |
+          set -euo pipefail
+
+          for required in DAYTONA_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY CURSOR_API_KEY ZEROS_ACCOUNT_ACCESS_TOKEN ZEROS_ACCOUNT_JWT_PUBLIC_KEY; do
+            if [ -z "${!required:-}" ]; then
+              echo "::error::Missing protected cloud-qualification value: $required"
+              exit 1
+            fi
+          done
+
+          snapshot_baked=0
+          provisioned=0
+          coordinator_pid=""
+
+          cleanup() {
+            status=$?
+            trap - EXIT INT TERM
+            cleanup_failed=0
+            if [ -n "$coordinator_pid" ]; then
+              kill "$coordinator_pid" 2>/dev/null || true
+              wait "$coordinator_pid" 2>/dev/null || true
+            fi
+            if [ "$provisioned" -eq 1 ]; then
+              pnpm tsx scripts/cloud-workspace-validation/lifecycle.ts --delete || cleanup_failed=1
+            fi
+            # Snapshot cleanup is independent of sandbox/preview cleanup. A
+            # failure in one must not strand the other paid resource too.
+            if [ "$snapshot_baked" -eq 1 ]; then
+              pnpm tsx scripts/cloud-workspace-validation/delete-ephemeral-snapshot.ts || cleanup_failed=1
+            fi
+            if [ "$cleanup_failed" -ne 0 ]; then
+              echo "::error::Cloud qualification resource cleanup was incomplete."
+              status=1
+            fi
+            if [ "$status" -eq 0 ]; then
+              echo "## ZSR cloud qualification" >> "$GITHUB_STEP_SUMMARY"
+              echo "Exact image admission, account binding, Claude/Codex/Cursor, bridge, PTY, egress, lifecycle, soak, SSH, and verified resource cleanup passed." >> "$GITHUB_STEP_SUMMARY"
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          check_coordinator() {
+            if ! kill -0 "$coordinator_pid" 2>/dev/null; then
+              wait "$coordinator_pid" || true
+              echo "::error::The external capability coordinator stopped unexpectedly."
+              return 1
+            fi
+          }
+
+          run_with_coordinator() {
+            "$@"
+            check_coordinator
+          }
+
+          pnpm tsx scripts/cloud-workspace-validation/cleanup-stale-ephemeral-snapshots.ts
+          snapshot_baked=1
+          pnpm tsx scripts/cloud-workspace-validation/bake-snapshot.ts
+          pnpm tsx scripts/cloud-workspace-validation/provision.ts
+          provisioned=1
+
+          pnpm tsx scripts/cloud-workspace-validation/preview-coordinator.ts &
+          coordinator_pid=$!
+          sleep 2
+          check_coordinator
+
+          run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/test-client.ts
+          run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/agent-smoke.ts
+          run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/egress.ts
+          run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/lifecycle.ts
+          run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/soak-wss.ts
+          run_with_coordinator pnpm tsx scripts/cloud-workspace-validation/ssh-forward.ts

@@ -13,6 +13,7 @@
 import { getSetting, setSetting } from "../../platform/settings";
 import { getSecret } from "../../platform/secrets";
 import { isNativeRuntime } from "../../platform/runtime";
+import { isTransportShaped } from "../../platform/bridge/failure";
 import { loadProjects } from "../../state/projects-store";
 import { getRepoSettings } from "../repositories/repo-settings";
 import { getProviderPrefs } from "./provider-prefs";
@@ -175,7 +176,10 @@ export async function ensureEnvSecretsInVault(
     }
   } catch (err) {
     // Leave the flag unset — retried on the next boot.
-    console.warn("[zeros] env-secret vault migration failed (will retry):", err);
+    console.warn(
+      "[zeros] env-secret vault migration failed (will retry):",
+      err,
+    );
   }
 }
 
@@ -213,6 +217,10 @@ export async function pruneRetiredProviders(
       stale,
     );
   } catch (err) {
+    // An engine swap aborts this by design; it already says it retries next
+    // boot, so saying it loudly on every swap only hides real failures.
+    const message = err instanceof Error ? err.message : String(err);
+    if (isTransportShaped(message)) return;
     console.warn(
       "[zeros] prune-retired-providers failed (will retry next boot):",
       err,

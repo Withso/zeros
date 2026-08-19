@@ -21,7 +21,10 @@ import {
   recoveredSessionIdentity,
   recoveryLoadLocator,
   resumeFailureInvalidatesBinding,
+  sendAdmissionPark,
   sendNeedsSessionRecovery,
+  sendSessionRecoveryMode,
+  sharedAdmissionFlightAction,
   shouldQueuePrompt,
   takePrebindDirty,
 } from "../session-reload-lifecycle";
@@ -206,6 +209,30 @@ describe("session reload lifecycle", () => {
         flushing: false,
       }),
     ).toBe(true);
+  });
+
+  it("upgrades a real admission that shared an adopt-only probe which missed", () => {
+    expect(
+      sharedAdmissionFlightAction({
+        activeAdoptOnly: true,
+        requestedAdoptOnly: false,
+        hasLiveSession: false,
+      }),
+    ).toBe("retry");
+    expect(
+      sharedAdmissionFlightAction({
+        activeAdoptOnly: true,
+        requestedAdoptOnly: false,
+        hasLiveSession: true,
+      }),
+    ).toBe("reuse");
+    expect(
+      sharedAdmissionFlightAction({
+        activeAdoptOnly: true,
+        requestedAdoptOnly: true,
+        hasLiveSession: false,
+      }),
+    ).toBe("reuse");
   });
 
   it("rejects stale bind callbacks after close or a replacement execution", () => {
@@ -644,6 +671,8 @@ describe("send-time session recovery", () => {
     ).toEqual({
       executionId: "replacement-execution",
       sessionId: "replacement-execution",
+      boundary: null,
+      boundaryPorts: null,
       providerBinding: replacementBinding,
       providerMetadata: { version: 1 },
     });
@@ -657,6 +686,120 @@ describe("send-time session recovery", () => {
     expect(sendNeedsSessionRecovery("ready")).toBe(false);
     expect(sendNeedsSessionRecovery("warming")).toBe(false);
     expect(sendNeedsSessionRecovery("streaming")).toBe(false);
+  });
+
+  it("blocks a send only for a chat whose last spawn ended badly", () => {
+    // Nothing in flight and nothing broken: the message is accepted instantly
+    // and the session builds behind it (§5.0).
+    expect(sendSessionRecoveryMode("idle")).toBe("park");
+    expect(sendSessionRecoveryMode("reconnecting")).toBe("park");
+    // An explicit retry after fixing something: the failure belongs on the send.
+    expect(sendSessionRecoveryMode("failed")).toBe("await");
+    expect(sendSessionRecoveryMode("auth-required")).toBe("await");
+    // Already live or already warming: shouldQueuePrompt owns these.
+    expect(sendSessionRecoveryMode("ready")).toBe("none");
+    expect(sendSessionRecoveryMode("warming")).toBe("none");
+    expect(sendSessionRecoveryMode("streaming")).toBe("none");
+  });
+
+  it("parks a send behind a session that is only just starting", () => {
+    // The pairing that makes §5.0 work: ensureSession publishes `warming`
+    // synchronously, and a warming chat queues rather than blocking.
+    expect(sendSessionRecoveryMode("idle")).toBe("park");
+    expect(
+      shouldQueuePrompt({
+        status: "warming",
+        hasLocalSend: false,
+        hasQueuedSends: false,
+        queueHeld: false,
+        flushing: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("parks any send that still needs an admission before it can dispatch", () => {
+    // The invisible-first-send bug: a send into a chat whose session hadn't
+    // been minted yet fell into the turn body and awaited the FULL admission
+    // with the composer already cleared and no bubble anywhere — while the
+    // SECOND send (queued behind the first's local lock) rendered instantly.
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: false,
+        status: "idle",
+        appliedChatEnvKey: undefined,
+        expectedEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+      }),
+    ).toBe("session-build");
+    // Ready-but-sessionless (a razor-thin exit race) parks the same way.
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: false,
+        status: "ready",
+        appliedChatEnvKey: undefined,
+        expectedEnvKey: undefined,
+      }),
+    ).toBe("session-build");
+    // A live session whose recorded env stamp no longer matches the pills
+    // needs a force-respawn — also an admission, also parked.
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: true,
+        status: "ready",
+        appliedChatEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+        expectedEnvKey: '{"OPENAI_MODEL":"gpt-5.6-sol"}',
+      }),
+    ).toBe("drift-respawn");
+    // Matching stamp, unstamped legacy slot, or no thread env: dispatch now.
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: true,
+        status: "ready",
+        appliedChatEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+        expectedEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+      }),
+    ).toBeNull();
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: true,
+        status: "ready",
+        appliedChatEnvKey: undefined,
+        expectedEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+      }),
+    ).toBeNull();
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: true,
+        status: "ready",
+        appliedChatEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+        expectedEnvKey: undefined,
+      }),
+    ).toBeNull();
+    // A streaming turn or an agentless chat is never parked here — the queue
+    // branch and the turn body's own guards own those.
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: false,
+        status: "streaming",
+        appliedChatEnvKey: undefined,
+        expectedEnvKey: undefined,
+      }),
+    ).toBeNull();
+    expect(
+      sendAdmissionPark({
+        hasAgent: false,
+        hasSession: false,
+        status: "idle",
+        appliedChatEnvKey: undefined,
+        expectedEnvKey: undefined,
+      }),
+    ).toBeNull();
   });
 
   it("forgets a binding only when the provider confirms it expired", () => {

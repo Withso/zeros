@@ -218,7 +218,7 @@ export function repoKey(root: string): string {
 }
 
 /** The per-engine-root runtime directory inside the app-data home. Holds the
- *  engine bootstrap manifest (`engine.json`: pid/port/instance/token) + the `busy`
+ *  engine bootstrap manifest (`engine.json`: pid/port/instance) + the `busy`
  *  heartbeat — the metadata that USED to be written into the served repo as
  *  `<root>/.zeros/{.port,.token,.busy}`. Keyed by repoKey so concurrent engines
  *  for different repos don't collide; dev vs prod stay separated by the

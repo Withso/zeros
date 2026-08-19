@@ -65,6 +65,19 @@ function tableNames(db: Database.Database): Set<string> {
   );
 }
 
+function tableColumnsForTest(
+  db: Database.Database,
+  table: string,
+): Set<string> {
+  return new Set(
+    (
+      db.prepare(`PRAGMA table_info("${table}")`).all() as Array<{
+        name: string;
+      }>
+    ).map((column) => column.name),
+  );
+}
+
 describe("Zeros DB — migration ladder data safety (forward-only)", () => {
   it("applies the whole ladder empty→head (contiguous 1..latest) and re-running is a no-op", () => {
     const db = new Database(":memory:");
@@ -127,6 +140,41 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
       expect(
         chatColumns.some((column) => column.name === "provider_metadata"),
       ).toBe(true);
+      expect(
+        workspaceColumns.find((column) => column.name === "view_mode"),
+      ).toMatchObject({
+        name: "view_mode",
+        notnull: 1,
+        dflt_value: "'code'",
+      });
+      db.prepare(
+        `INSERT INTO workspaces (
+           id, repo_slug, repo_root, branch, base_branch, path, status,
+           created_at, kind
+         ) VALUES ('view-mode-probe', 'repo', '/repo', 'zeros/probe', 'main',
+                   '/workspaces/probe', 'in-progress', 1, 'design')`,
+      ).run();
+      expect(
+        db
+          .prepare("SELECT kind, view_mode FROM workspaces WHERE id = ?")
+          .get("view-mode-probe"),
+      ).toEqual({ kind: "design", view_mode: "design" });
+      db.prepare("UPDATE workspaces SET view_mode = 'code' WHERE id = ?").run(
+        "view-mode-probe",
+      );
+      expect(
+        db
+          .prepare("SELECT kind, view_mode FROM workspaces WHERE id = ?")
+          .get("view-mode-probe"),
+      ).toEqual({ kind: "code", view_mode: "code" });
+      db.prepare("UPDATE workspaces SET kind = 'design' WHERE id = ?").run(
+        "view-mode-probe",
+      );
+      expect(
+        db
+          .prepare("SELECT kind, view_mode FROM workspaces WHERE id = ?")
+          .get("view-mode-probe"),
+      ).toEqual({ kind: "design", view_mode: "design" });
 
       // Idempotent: a second run on the same DB applies nothing and never throws
       // (re-applying a migration's CREATE/ALTER would throw — proves the
@@ -214,6 +262,67 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
       expect(
         chatColumns.some((column) => column.name === "provider_metadata"),
       ).toBe(true);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("repairs provider identity after retired foundation drafts consumed migrations 28-30", () => {
+    const db = new Database(":memory:");
+    try {
+      applyUpTo(db, 27);
+      db.prepare(
+        `INSERT INTO chats (id, folder, agent_id, title, session_id)
+         VALUES ('draft-chat', '/repo', 'codex', 'Draft chat', 'legacy-thread')`,
+      ).run();
+
+      // Internal checkpoint builds used these migration numbers for
+      // autonomous-foundation drafts. A later build could legitimately add
+      // the final v31/v32 workspace columns while v28-v30 remained recorded,
+      // leaving the database at head without provider_binding/provider_metadata.
+      db.exec(`
+        ALTER TABLE workspaces ADD COLUMN view_mode TEXT NOT NULL DEFAULT 'code'
+          CHECK (view_mode IN ('code', 'design'));
+        INSERT INTO schema_migrations (version, name) VALUES
+          (28, 'workspace view mode compatibility + durable generation identity'),
+          (29, 'durable workspace commands, revisions, events, and outbox'),
+          (30, 'content-addressed artifact metadata and retention pins');
+
+        ALTER TABLE workspaces ADD COLUMN organization_id TEXT;
+        ALTER TABLE workspaces ADD COLUMN placement TEXT NOT NULL DEFAULT 'local'
+          CHECK (placement IN ('local', 'cloud'))
+          CHECK (placement = 'local' OR organization_id IS NOT NULL);
+        CREATE INDEX idx_workspaces_organization
+          ON workspaces(organization_id, placement, archived_at);
+        INSERT INTO schema_migrations (version, name) VALUES
+          (31, 'workspaces: organization owner + local/cloud placement'),
+          (32, 'workspace view mode compatibility projection');
+      `);
+
+      runMigrations(db);
+
+      expect(appliedVersions(db).at(-1)).toBe(latestSchemaVersion());
+      const chatColumns = tableColumnsForTest(db, "chats");
+      expect(chatColumns.has("provider_binding")).toBe(true);
+      expect(chatColumns.has("provider_metadata")).toBe(true);
+      const row = db
+        .prepare(
+          `SELECT provider_binding, provider_metadata
+             FROM chats
+            WHERE id = 'draft-chat'`,
+        )
+        .get() as {
+        provider_binding: string | null;
+        provider_metadata: string | null;
+      };
+      expect(JSON.parse(row.provider_binding ?? "null")).toEqual({
+        version: 1,
+        providerId: "codex",
+        kind: "legacy",
+        resumeId: "legacy-thread",
+        legacySessionId: "legacy-thread",
+      });
+      expect(row.provider_metadata).toBeNull();
     } finally {
       db.close();
     }
@@ -326,6 +435,51 @@ describe("Zeros DB — migration ladder data safety (forward-only)", () => {
           )
           .run(),
       ).not.toThrow();
+    } finally {
+      db.close();
+    }
+  });
+
+  it("repairs a development database that recorded view mode as draft migration 28", () => {
+    const db = new Database(":memory:");
+    try {
+      applyUpTo(db, 27);
+      const viewModeMigration = MIGRATIONS.find(
+        (migration) => migration.version === 32,
+      );
+      expect(viewModeMigration).toBeDefined();
+      db.exec(viewModeMigration!.up);
+      db.prepare(
+        "INSERT INTO schema_migrations (version, name) VALUES (28, ?)",
+      ).run("workspace view mode compatibility projection");
+      db.prepare(
+        `INSERT INTO chats (id, agent_id, session_id, title)
+         VALUES ('draft-chat', 'claude', 'legacy-session', 'Draft')`,
+      ).run();
+
+      expect(() => runMigrations(db)).not.toThrow();
+      expect(appliedVersions(db)).toEqual(
+        Array.from({ length: latestSchemaVersion() }, (_, index) => index + 1),
+      );
+      const chat = db
+        .prepare(
+          `SELECT provider_binding, provider_metadata
+             FROM chats WHERE id = 'draft-chat'`,
+        )
+        .get() as {
+        provider_binding: string;
+        provider_metadata: string | null;
+      };
+      expect(JSON.parse(chat.provider_binding)).toMatchObject({
+        providerId: "claude",
+        kind: "legacy",
+        resumeId: "legacy-session",
+      });
+      expect(chat.provider_metadata).toBeNull();
+      expect(tableColumnsForTest(db, "workspaces").has("organization_id")).toBe(
+        true,
+      );
+      expect(tableColumnsForTest(db, "workspaces").has("view_mode")).toBe(true);
     } finally {
       db.close();
     }

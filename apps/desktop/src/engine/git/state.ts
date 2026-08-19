@@ -42,9 +42,11 @@ import {
 import type {
   Workspace,
   WorkspaceKind,
+  WorkspaceViewMode,
   WorkspaceStatus,
   PrState,
 } from "./types";
+import { workspaceViewMode } from "./types";
 
 export const WORKSPACE_OWNERSHIP_META_KEY = "workspace.ownership.v1";
 
@@ -170,6 +172,7 @@ export function closeState(): void {
 interface WorkspaceRow {
   id: string;
   kind: string;
+  view_mode: string;
   organization_id: string | null;
   placement: string;
   repo_slug: string;
@@ -194,7 +197,8 @@ interface WorkspaceRow {
 function rowToWorkspace(r: WorkspaceRow): Workspace {
   return {
     id: r.id,
-    kind: r.kind === "design" ? "design" : "code",
+    viewMode: r.view_mode === "design" ? "design" : "code",
+    kind: r.view_mode === "design" ? "design" : "code",
     organizationId: r.organization_id,
     placement: r.placement === "cloud" ? "cloud" : "local",
     repoSlug: r.repo_slug,
@@ -222,15 +226,17 @@ export function insertWorkspace(w: Workspace): void {
   handle
     .prepare(
       `INSERT INTO workspaces
-        (id, kind, organization_id, placement, repo_slug, repo_root, branch, base_branch, path, status,
+        (id, kind, view_mode, organization_id, placement,
+         repo_slug, repo_root, branch, base_branch, path, status,
          created_at, archived_at, stash_ref, archived_head, archive_snapshot,
          pr_number, pr_state, pr_url,
          agent_id, last_active_at, setup_state)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       w.id,
-      w.kind === "design" ? "design" : "code",
+      workspaceViewMode(w),
+      workspaceViewMode(w),
       w.organizationId ?? null,
       w.placement === "cloud" ? "cloud" : "local",
       w.repoSlug,
@@ -371,6 +377,7 @@ export function listWorkspaces(filter?: {
 
 export type WorkspacePatch = Partial<{
   kind: WorkspaceKind;
+  viewMode: WorkspaceViewMode;
   status: WorkspaceStatus;
   archivedAt: number | null;
   stashRef: string | null;
@@ -389,6 +396,7 @@ export type WorkspacePatch = Partial<{
 
 const PATCH_COLUMN_MAP: Record<keyof WorkspacePatch, string> = {
   kind: "kind",
+  viewMode: "view_mode",
   status: "status",
   archivedAt: "archived_at",
   stashRef: "stash_ref",
@@ -406,11 +414,20 @@ const PATCH_COLUMN_MAP: Record<keyof WorkspacePatch, string> = {
 };
 
 export function updateWorkspace(id: string, patch: WorkspacePatch): void {
-  const keys = Object.keys(patch) as Array<keyof WorkspacePatch>;
+  // `view_mode` is the canonical presentation field, while `kind` remains a
+  // rolling-upgrade projection. Normalize either spelling into one atomic
+  // update so callers and SQLite recovery tools never observe a split value.
+  const normalized: WorkspacePatch = { ...patch };
+  if (patch.viewMode !== undefined || patch.kind !== undefined) {
+    const mode = patch.viewMode ?? patch.kind!;
+    normalized.viewMode = mode;
+    normalized.kind = mode;
+  }
+  const keys = Object.keys(normalized) as Array<keyof WorkspacePatch>;
   if (keys.length === 0) return;
   const handle = open();
   const setClause = keys.map((k) => `${PATCH_COLUMN_MAP[k]} = ?`).join(", ");
-  const values = keys.map((k) => patch[k] ?? null);
+  const values = keys.map((k) => normalized[k] ?? null);
   handle
     .prepare(`UPDATE workspaces SET ${setClause} WHERE id = ?`)
     .run(...values, id);
@@ -439,9 +456,7 @@ export function reassignLocalWorkspaceOrganization(
          ORDER BY repo_slug, id`,
       )
       .all(fromOrganizationId);
-    const repoSlugs = Array.from(
-      new Set(affected.map((row) => row.repo_slug)),
-    );
+    const repoSlugs = Array.from(new Set(affected.map((row) => row.repo_slug)));
     const result = handle
       .prepare(
         `UPDATE workspaces SET organization_id = ?

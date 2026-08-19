@@ -49,7 +49,8 @@ import { build } from "esbuild";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const TMP_DIR = path.join(ROOT, ".zeros", "claude-smoke");
-const RESOLVER = "apps/desktop/src/engine/agents/adapters/claude-sdk/binary-resolver.ts";
+const RESOLVER =
+  "apps/desktop/src/engine/agents/adapters/claude-sdk/binary-resolver.ts";
 const TIMEOUT_MS = 90_000;
 
 /** Errors that mean the CLI never got far enough to be rejected by the server —
@@ -65,7 +66,13 @@ const AUTH_RETRY_STATUSES = new Set([401, 403]);
 function die(msg, detail) {
   console.error(`\n✗ FAIL — ${msg}`);
   if (detail) {
-    console.error(String(detail).split("\n").slice(0, 24).map((l) => `    ${l}`).join("\n"));
+    console.error(
+      String(detail)
+        .split("\n")
+        .slice(0, 24)
+        .map((l) => `    ${l}`)
+        .join("\n"),
+    );
   }
   process.exit(1);
 }
@@ -119,7 +126,9 @@ console.log(`▸ resolved: ${cli.path}`);
 console.log(`▸ tier:     ${cli.source} (pinned)`);
 
 // An empty HOME is the token-safety interlock — see the header.
-const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-claude-smoke-home-"));
+const fakeHome = fs.mkdtempSync(
+  path.join(os.tmpdir(), "zeros-claude-smoke-home-"),
+);
 const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-claude-smoke-"));
 process.env.HOME = fakeHome;
 process.env.USERPROFILE = fakeHome;
@@ -200,13 +209,14 @@ try {
         cost: msg.total_cost_usd ?? 0,
         outputTokens: msg.usage?.output_tokens ?? 0,
       };
-      if (msg.is_error) failure = msg.result ?? msg.subtype ?? "(error result, no text)";
+      if (msg.is_error)
+        failure = msg.result ?? msg.subtype ?? "(error result, no text)";
     }
   }
 } catch (err) {
   // The SDK rethrows an error result as an exception once the stream ends, so
   // this is the normal path for a rejected turn — not an exceptional one.
-  failure = err?.message ?? String(err);
+  if (!authRetry) failure = err?.message ?? String(err);
 }
 clearTimeout(timer);
 // An observed rejection outranks the "aborted by user" message our own abort
@@ -231,7 +241,9 @@ if (realInference) {
   );
 }
 if (!failure) {
-  die("the query produced neither an error nor assistant output — the SDK↔CLI handshake did not complete.");
+  die(
+    "the query produced neither an error nor assistant output — the SDK↔CLI handshake did not complete.",
+  );
 }
 if (timedOut) {
   die(
@@ -261,6 +273,10 @@ if (!AUTH_ERR_RX.test(oneLine)) {
 
 console.log(`▸ rejected: ${oneLine.slice(0, 160)}`);
 console.log(`▸ spend:    $${spend.cost} / ${spend.outputTokens} output tokens`);
-console.log(`\n✓ PASS — the Agent SDK launched the pinned claude (${cli.source} tier),`);
-console.log("  completed the handshake, and reached a server auth rejection. No tokens spent.");
+console.log(
+  `\n✓ PASS — the Agent SDK launched the pinned claude (${cli.source} tier),`,
+);
+console.log(
+  "  completed the handshake, and reached a server auth rejection. No tokens spent.",
+);
 process.exit(0);

@@ -12,6 +12,8 @@ import {
   mkdir,
   readFile,
   rm,
+  stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -318,6 +320,46 @@ describe("runFile — Bun native subprocess boundary", () => {
       stderr: "fatal: worktree is locked",
     });
   });
+
+  it("kills a Bun subprocess when its owning capability is aborted", async () => {
+    let finish!: (code: number) => void;
+    const exited = new Promise<number>((resolve) => {
+      finish = resolve;
+    });
+    const kill = vi.fn(() => finish(137));
+    vi.stubGlobal("Bun", {
+      spawn: vi.fn(() => ({
+        stdout: new Response("").body,
+        stderr: new Response("").body,
+        exited,
+        signalCode: "SIGKILL",
+        killed: true,
+        kill,
+      })),
+    });
+    const controller = new AbortController();
+    const running = runFile("git", ["fetch", "origin"], {
+      signal: controller.signal,
+    });
+
+    controller.abort(new Error("capability revoked"));
+
+    await expect(running).rejects.toThrow("capability revoked");
+    expect(kill).toHaveBeenCalledWith("SIGKILL");
+  });
+
+  it("cancels a Node subprocess through AbortSignal", async () => {
+    vi.stubGlobal("Bun", undefined);
+    const controller = new AbortController();
+    const running = runFile(
+      process.execPath,
+      ["-e", "setInterval(() => undefined, 1000)"],
+      { signal: controller.signal, timeoutMs: 5_000 },
+    );
+    controller.abort(new Error("capability revoked"));
+
+    await expect(running).rejects.toMatchObject({ name: "AbortError" });
+  });
 });
 
 describe("runGit — transient lock retry", () => {
@@ -337,6 +379,7 @@ describe("runGit — transient lock retry", () => {
   });
 
   afterEach(async () => {
+    delete process.env.ZEROS_TEST_GIT_SSH_COMMAND;
     setGitCredentialSourceForTesting(null);
     await closeGitCredentialBrokerForTesting();
     try {
@@ -365,6 +408,243 @@ describe("runGit — transient lock retry", () => {
     await writeFile(path.join(repo, "c.txt"), "c\n");
     const res = await runGit(repo, ["add", "c.txt"]);
     expect(res.stdout).toBe("");
+  });
+
+  it("never executes a repository hook with engine authority", async () => {
+    const sentinel = path.join(dir, "pre-commit-ran");
+    const hook = path.join(repo, ".git", "hooks", "pre-commit");
+    await writeFile(hook, `#!/bin/sh\nprintf ran > '${sentinel}'\n`, "utf8");
+    await chmod(hook, 0o700);
+    await writeFile(path.join(repo, "hook.txt"), "safe\n");
+
+    await runGit(repo, ["add", "hook.txt"]);
+    await runGit(repo, ["commit", "-m", "engine commit"]);
+
+    await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects a command-line alias before repository bytes can run", async () => {
+    const sentinel = path.join(dir, "alias-ran");
+    const executable = path.join(dir, "alias-command");
+    await writeFile(
+      executable,
+      `#!/bin/sh\nprintf ran > '${sentinel}'\n`,
+      "utf8",
+    );
+    await chmod(executable, 0o700);
+
+    await expect(
+      runGit(repo, ["-c", `alias.pwn=!${executable}`, "pwn"]),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("stages bytes without running a configured clean filter", async () => {
+    const sentinel = path.join(dir, "filter-ran");
+    const executable = path.join(dir, "clean-filter");
+    await writeFile(
+      executable,
+      `#!/bin/sh\nprintf ran > '${sentinel}'\ncat\n`,
+      "utf8",
+    );
+    await chmod(executable, 0o700);
+    await execFileAsync(
+      "git",
+      ["config", "filter.zeros-engine.clean", executable],
+      { cwd: repo },
+    );
+    await execFileAsync(
+      "git",
+      ["config", "filter.zeros-engine.required", "true"],
+      { cwd: repo },
+    );
+    await writeFile(
+      path.join(repo, ".gitattributes"),
+      "*.asset filter=zeros-engine\n",
+    );
+    await writeFile(path.join(repo, "safe.asset"), "original bytes\n");
+
+    await runGit(repo, ["add", ".gitattributes", "safe.asset"]);
+
+    await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+    const staged = await runGit(repo, ["show", ":safe.asset"]);
+    expect(staged.stdout).toBe("original bytes\n");
+  });
+
+  it("strips an external diff program from the inherited and caller env", async () => {
+    const sentinel = path.join(dir, "external-diff-ran");
+    const executable = path.join(dir, "external-diff");
+    await writeFile(
+      executable,
+      `#!/bin/sh\nprintf ran > '${sentinel}'\n`,
+      "utf8",
+    );
+    await chmod(executable, 0o700);
+    await writeFile(path.join(repo, "a.txt"), "changed\n");
+    process.env.GIT_EXTERNAL_DIFF = executable;
+    try {
+      const result = await runGit(repo, ["diff", "--", "a.txt"], {
+        env: { GIT_EXTERNAL_DIFF: executable },
+      });
+      expect(result.stdout).toContain("-a");
+      expect(result.stdout).toContain("+changed");
+    } finally {
+      delete process.env.GIT_EXTERNAL_DIFF;
+    }
+    await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not invoke an unknown remote helper from PATH", async () => {
+    const sentinel = path.join(dir, "remote-helper-ran");
+    const bin = path.join(dir, "bin");
+    const executable = path.join(bin, "git-remote-pwn");
+    await mkdir(bin, { recursive: true });
+    await writeFile(
+      executable,
+      `#!/bin/sh\nprintf ran > '${sentinel}'\nexit 1\n`,
+      "utf8",
+    );
+    await chmod(executable, 0o700);
+
+    await expect(
+      runGit(repo, ["ls-remote", "pwn::payload"], {
+        env: { PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}` },
+      }),
+    ).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED" });
+    await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not invoke a configured fsmonitor hook", async () => {
+    const sentinel = path.join(dir, "fsmonitor-ran");
+    const executable = path.join(dir, "fsmonitor");
+    await writeFile(
+      executable,
+      `#!/bin/sh\nprintf ran > '${sentinel}'\n`,
+      "utf8",
+    );
+    await chmod(executable, 0o700);
+    // Warm the policy cache before changing the canonical config. The second
+    // call must fingerprint-invalidate it rather than trusting stale keys.
+    await runGit(repo, ["status", "--short"]);
+    await execFileAsync("git", ["config", "core.fsmonitor", executable], {
+      cwd: repo,
+    });
+
+    await runGit(repo, ["status", "--short"]);
+
+    await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not invoke a configured merge driver", async () => {
+    const sentinel = path.join(dir, "merge-driver-ran");
+    const executable = path.join(dir, "merge-driver");
+    await writeFile(
+      executable,
+      `#!/bin/sh\nprintf ran > '${sentinel}'\nexit 1\n`,
+      "utf8",
+    );
+    await chmod(executable, 0o700);
+    await execFileAsync(
+      "git",
+      ["config", "merge.zeros-engine.driver", `${executable} %O %A %B`],
+      { cwd: repo },
+    );
+    await writeFile(
+      path.join(repo, ".gitattributes"),
+      "merge.txt merge=zeros-engine\n",
+    );
+    await writeFile(path.join(repo, "merge.txt"), "base\n");
+    await execFileAsync("git", ["add", ".gitattributes", "merge.txt"], {
+      cwd: repo,
+    });
+    await execFileAsync("git", ["commit", "-q", "-m", "merge base"], {
+      cwd: repo,
+    });
+    await execFileAsync("git", ["checkout", "-q", "-b", "feature"], {
+      cwd: repo,
+    });
+    await writeFile(path.join(repo, "merge.txt"), "feature\n");
+    await execFileAsync("git", ["commit", "-qam", "feature"], { cwd: repo });
+    await execFileAsync("git", ["checkout", "-q", "main"], { cwd: repo });
+    await writeFile(path.join(repo, "merge.txt"), "main\n");
+    await execFileAsync("git", ["commit", "-qam", "main"], { cwd: repo });
+
+    const result = await runGit(repo, ["merge", "feature"], {
+      treatAsExpected: ["conflict"],
+    });
+
+    expect(result.expectedError).toBe("conflict");
+    await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not invoke configured signing programs", async () => {
+    const sentinel = path.join(dir, "gpg-ran");
+    const executable = path.join(dir, "fake-gpg");
+    await writeFile(
+      executable,
+      `#!/bin/sh\nprintf ran > '${sentinel}'\nexit 1\n`,
+      "utf8",
+    );
+    await chmod(executable, 0o700);
+    await execFileAsync("git", ["config", "commit.gpgSign", "true"], {
+      cwd: repo,
+    });
+    await execFileAsync("git", ["config", "gpg.program", executable], {
+      cwd: repo,
+    });
+    await writeFile(path.join(repo, "unsigned.txt"), "safe\n");
+
+    await runGit(repo, ["add", "unsigned.txt"]);
+    await runGit(repo, ["commit", "-m", "unsigned engine commit"]);
+
+    await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects a config include that resolves into code territory", async () => {
+    const sentinel = path.join(dir, "included-config-ran");
+    // Spell the include through another physical path. macOS does this for
+    // every temporary directory (`/var` resolves to `/private/var`), but an
+    // explicit alias keeps the regression reproducible on Linux too.
+    const repoAlias = path.join(dir, "repo-alias");
+    await symlink(repo, repoAlias, "dir");
+    const executable = path.join(repoAlias, "included-fsmonitor");
+    const includedConfig = path.join(repoAlias, "agent-writable.config");
+    await writeFile(
+      executable,
+      `#!/bin/sh\nprintf ran > '${sentinel}'\n`,
+      "utf8",
+    );
+    await chmod(executable, 0o700);
+    await writeFile(
+      includedConfig,
+      `[core]\n\tfsmonitor = ${executable}\n`,
+      "utf8",
+    );
+    await runGit(repo, ["status", "--short"]);
+    await execFileAsync("git", ["config", "include.path", includedConfig], {
+      cwd: repo,
+    });
+
+    await expect(runGit(repo, ["status", "--short"])).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+    });
+    await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects a custom upload-pack before it can run", async () => {
+    const sentinel = path.join(dir, "upload-pack-ran");
+    const executable = path.join(dir, "upload-pack");
+    await writeFile(
+      executable,
+      `#!/bin/sh\nprintf ran > '${sentinel}'\nexit 1\n`,
+      "utf8",
+    );
+    await chmod(executable, 0o700);
+
+    await expect(
+      runGit(repo, ["fetch", `--upload-pack=${executable}`, repo]),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("authenticates a real HTTP git push through the broker and resets stale helpers", async () => {
@@ -429,6 +709,263 @@ describe("runGit — transient lock retry", () => {
     } finally {
       await server.close();
     }
+  });
+
+  it("authenticates a pull through the current branch's configured upstream", async () => {
+    const remoteRoot = path.join(dir, "http-pull-root");
+    const bareRemote = path.join(remoteRoot, "remote.git");
+    await mkdir(remoteRoot, { recursive: true });
+    await execFileAsync("git", ["init", "-q", "--bare", bareRemote]);
+    await execFileAsync("git", [
+      "--git-dir",
+      bareRemote,
+      "config",
+      "http.receivepack",
+      "true",
+    ]);
+    const server = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "pull-secret",
+    });
+    await execFileAsync("git", ["remote", "add", "origin", server.url], {
+      cwd: repo,
+    });
+
+    let credentialReads = 0;
+    setGitCredentialSourceForTesting({
+      supports({ protocol, host }) {
+        return protocol === "http" && host === "127.0.0.1";
+      },
+      async getCredential() {
+        credentialReads += 1;
+        return {
+          username: "x-access-token",
+          password: "pull-secret",
+        };
+      },
+    });
+
+    try {
+      await runGit(repo, ["push", "-u", "origin", "main"], {
+        timeoutMs: 10_000,
+      });
+      credentialReads = 0;
+      server.observed.length = 0;
+
+      await expect(
+        runGit(repo, ["pull", "--ff-only"], { timeoutMs: 10_000 }),
+      ).resolves.toMatchObject({ stdout: expect.any(String) });
+      expect(credentialReads).toBeGreaterThan(0);
+      expect(server.observed).toContainEqual({
+        username: "x-access-token",
+        password: "pull-secret",
+      });
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("brokers an admitted non-GitHub credential through the user's global helper", async () => {
+    const remoteRoot = path.join(dir, "ambient-http-root");
+    const bareRemote = path.join(remoteRoot, "remote.git");
+    const hostHome = path.join(dir, "host-home");
+    const helper = path.join(dir, "ambient-helper");
+    const helperLog = path.join(dir, "ambient-helper.log");
+    await Promise.all([
+      mkdir(remoteRoot, { recursive: true }),
+      mkdir(hostHome, { recursive: true }),
+    ]);
+    await execFileAsync("git", ["init", "-q", "--bare", bareRemote]);
+    await execFileAsync("git", [
+      "--git-dir",
+      bareRemote,
+      "config",
+      "http.receivepack",
+      "true",
+    ]);
+    await writeFile(
+      helper,
+      [
+        "#!/bin/sh",
+        `printf 'called\\n' >> '${helperLog}'`,
+        '[ "${1:-}" = get ] || exit 0',
+        "printf 'username=x-access-token\\npassword=ambient-secret\\n'",
+        "",
+      ].join("\n"),
+    );
+    await chmod(helper, 0o700);
+    await writeFile(
+      path.join(hostHome, ".gitconfig"),
+      `[credential]\n\thelper = ${helper}\n`,
+    );
+    const server = await startAuthenticatedGitServer({
+      projectRoot: remoteRoot,
+      password: "ambient-secret",
+    });
+    await execFileAsync("git", ["remote", "add", "origin", server.url], {
+      cwd: repo,
+    });
+
+    const previousHome = process.env.HOME;
+    const previousXdg = process.env.XDG_CONFIG_HOME;
+    process.env.HOME = hostHome;
+    delete process.env.XDG_CONFIG_HOME;
+    try {
+      await expect(
+        runGit(repo, ["push", "-u", "origin", "main"], {
+          timeoutMs: 10_000,
+        }),
+      ).resolves.toMatchObject({ stdout: expect.any(String) });
+      expect(server.observed).toContainEqual({
+        username: "x-access-token",
+        password: "ambient-secret",
+      });
+      expect((await readFile(helperLog, "utf8")).trim().split("\n")).toEqual([
+        "called",
+      ]);
+    } finally {
+      if (previousHome === undefined) delete process.env.HOME;
+      else process.env.HOME = previousHome;
+      if (previousXdg === undefined) delete process.env.XDG_CONFIG_HOME;
+      else process.env.XDG_CONFIG_HOME = previousXdg;
+      await server.close();
+    }
+  });
+
+  it("scopes and revokes an ambient credential capability exactly", async () => {
+    const hostHome = path.join(dir, "ambient-capability-home");
+    const helper = path.join(dir, "ambient-capability-helper");
+    await mkdir(hostHome, { recursive: true });
+    await writeFile(
+      helper,
+      [
+        "#!/bin/sh",
+        '[ "${1:-}" = get ] || exit 0',
+        "printf 'username=ambient-user\\npassword=ambient-capability-secret\\n'",
+        "",
+      ].join("\n"),
+    );
+    await chmod(helper, 0o700);
+    await writeFile(
+      path.join(hostHome, ".gitconfig"),
+      `[credential]\n\thelper = ${helper}\n`,
+    );
+    const { stdout: gitBinaryOutput } = await execFileAsync("which", ["git"]);
+    const invocation = await prepareGitCredentialInvocation(
+      {
+        contextId: "workspace:ambient-capability",
+        protocol: "https",
+        host: "example.com",
+        authority: "example.com",
+        username: "ambient-user",
+        path: "owner/repo.git",
+      },
+      {
+        ambient: {
+          gitBinary: gitBinaryOutput.trim(),
+          home: hostHome,
+        },
+      },
+    );
+    expect(invocation).not.toBeNull();
+    expect(Object.values(invocation!.env)).not.toContain(
+      "ambient-capability-secret",
+    );
+    const askpass = invocation!.env.GIT_ASKPASS;
+    const exactEnv = { ...process.env, ...invocation!.env };
+    const exact = await runFile(
+      askpass,
+      ["Password for 'https://ambient-user@example.com': "],
+      { env: exactEnv },
+    );
+    expect(exact.stdout.trim()).toBe("ambient-capability-secret");
+
+    const mismatchedEnvironments: Array<Record<string, string | undefined>> = [
+      { ...exactEnv, ZEROS_GIT_AUTH_HOST: "example.org" },
+      { ...exactEnv, ZEROS_GIT_AUTH_PATH: "other/repo.git" },
+      { ...exactEnv, ZEROS_GIT_AUTH_CONTEXT: "workspace:other" },
+    ];
+    for (const env of mismatchedEnvironments) {
+      const promptHost = env.ZEROS_GIT_AUTH_HOST ?? "example.com";
+      await expect(
+        runFile(
+          askpass,
+          [`Password for 'https://ambient-user@${promptHost}': `],
+          { env },
+        ),
+      ).rejects.toSatisfy(
+        (error: unknown) =>
+          !JSON.stringify(error).includes("ambient-capability-secret"),
+      );
+    }
+
+    invocation!.release?.();
+    await expect(
+      runFile(askpass, ["Password for 'https://ambient-user@example.com': "], {
+        env: exactEnv,
+      }),
+    ).rejects.toSatisfy(
+      (error: unknown) =>
+        !JSON.stringify(error).includes("ambient-capability-secret"),
+    );
+  });
+
+  it("uses the fixed SSH transport while ignoring repository SSH commands", async () => {
+    const remoteRoot = path.join(dir, "ssh-root");
+    const bareRemote = path.join(remoteRoot, "remote.git");
+    const fakeSsh = path.join(dir, "fake-ssh");
+    const maliciousSsh = path.join(dir, "malicious-ssh");
+    const maliciousLog = path.join(dir, "malicious-ssh.log");
+    await mkdir(remoteRoot, { recursive: true });
+    await execFileAsync("git", ["init", "-q", "--bare", bareRemote]);
+    await writeFile(
+      fakeSsh,
+      [
+        "#!/bin/sh",
+        'if [ "$1" = -G ]; then exit 0; fi',
+        "command=",
+        'for value in "$@"; do command="$value"; done',
+        'case "$command" in',
+        "  'git-upload-pack '*|'git-receive-pack '*) exec /bin/sh -c \"$command\" ;;",
+        "  *) exit 1 ;;",
+        "esac",
+        "",
+      ].join("\n"),
+    );
+    await writeFile(
+      maliciousSsh,
+      `#!/bin/sh\nprintf ran > '${maliciousLog}'\nexit 1\n`,
+    );
+    await Promise.all([chmod(fakeSsh, 0o700), chmod(maliciousSsh, 0o700)]);
+    await execFileAsync(
+      "git",
+      ["remote", "add", "origin", `ssh://example.invalid${bareRemote}`],
+      { cwd: repo },
+    );
+    await execFileAsync("git", ["config", "core.sshCommand", maliciousSsh], {
+      cwd: repo,
+    });
+    process.env.ZEROS_TEST_GIT_SSH_COMMAND = fakeSsh;
+
+    await expect(
+      runGit(repo, ["push", "origin", "main"], { timeoutMs: 10_000 }),
+    ).resolves.toMatchObject({ stdout: expect.any(String) });
+
+    await expect(stat(maliciousLog)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(
+      (
+        await execFileAsync("git", [
+          "--git-dir",
+          bareRemote,
+          "rev-parse",
+          "refs/heads/main",
+        ])
+      ).stdout.trim(),
+    ).toBe(
+      (
+        await execFileAsync("git", ["rev-parse", "HEAD"], { cwd: repo })
+      ).stdout.trim(),
+    );
   });
 
   it("refuses an embedded remote credential when the broker owns that host", async () => {
@@ -666,33 +1203,23 @@ describe("runGit — transient lock retry", () => {
   });
 });
 
-// The env git receives is composed of three layers and the ORDER is load-bearing:
-// a launcher-PRUNED copy of process.env, then the caller's `opts.env`, then the
-// engine's own auth vars last so nothing can redirect the credential helper.
-// Those first two arrived from different branches — the prune from the terminal
-// work, the auth vars from the credential broker — and nothing else in the suite
-// pinned them TOGETHER. Collapsing back to either single layer would be silent:
-// git would re-inherit the launching `pnpm run` context (so a repo's pre-commit
-// hook resolves the user's linters to Zeros' pinned copies), or lose opts.env.
-describe("runGit — child env composition", () => {
+describe("runGit — constrained child environment", () => {
   let dir: string;
   let repo: string;
-  const LAUNCHER = {
-    npm_execpath: "/usr/local/lib/pnpm.cjs",
-    npm_lifecycle_event: "electron:dev",
-    npm_config_verify_deps_before_run: "install",
-  };
 
   beforeEach(async () => {
     dir = await mkdtemp(path.join(tmpdir(), "zeros-gitenv-test-"));
     repo = path.join(dir, "repo");
     await mkdir(repo, { recursive: true });
     await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: repo });
+    await writeFile(path.join(repo, "tracked.txt"), "tracked\n");
   });
 
   afterEach(async () => {
-    for (const key of Object.keys(LAUNCHER)) delete process.env[key];
-    delete process.env.ZEROS_GITENV_PROBE;
+    delete process.env.GIT_CONFIG_COUNT;
+    delete process.env.GIT_CONFIG_KEY_0;
+    delete process.env.GIT_CONFIG_VALUE_0;
+    delete process.env.GIT_INDEX_FILE;
     try {
       await rm(dir, { recursive: true, force: true });
     } catch {
@@ -700,46 +1227,67 @@ describe("runGit — child env composition", () => {
     }
   });
 
-  /** git's OWN child env, read back through a `!`-prefixed alias — the same
-   *  shell git hands a hook, so this observes what actually escapes. */
-  async function childEnv(
-    callerEnv?: Record<string, string | undefined>,
-  ): Promise<Record<string, string>> {
-    const res = await runGit(
-      repo,
-      ["-c", "alias.dumpenv=!env", "dumpenv"],
-      callerEnv ? { env: callerEnv } : {},
-    );
-    const out: Record<string, string> = {};
-    for (const line of res.stdout.split("\n")) {
-      const eq = line.indexOf("=");
-      if (eq > 0) out[line.slice(0, eq)] = line.slice(eq + 1);
-    }
-    return out;
-  }
+  it("keeps the narrow snapshot author/committer environment contract", async () => {
+    await runGit(repo, ["add", "tracked.txt"]);
+    const tree = (await runGit(repo, ["write-tree"])).stdout.trim();
+    const commit = (
+      await runGit(repo, ["commit-tree", tree, "-m", "snapshot"], {
+        env: {
+          GIT_AUTHOR_NAME: "Snapshot Author",
+          GIT_AUTHOR_EMAIL: "author@zeros.invalid",
+          GIT_COMMITTER_NAME: "Snapshot Committer",
+          GIT_COMMITTER_EMAIL: "committer@zeros.invalid",
+        },
+      })
+    ).stdout.trim();
 
-  it("prunes the launching script's context out of git's own children", async () => {
-    Object.assign(process.env, LAUNCHER);
-    const env = await childEnv();
-    for (const key of Object.keys(LAUNCHER)) {
-      expect(env[key], `${key} must not reach a git hook`).toBeUndefined();
-    }
+    const object = await runGit(repo, ["cat-file", "-p", commit]);
+    expect(object.stdout).toContain(
+      "author Snapshot Author <author@zeros.invalid>",
+    );
+    expect(object.stdout).toContain(
+      "committer Snapshot Committer <committer@zeros.invalid>",
+    );
   });
 
-  it("merges opts.env OVER the pruned base, and still prunes", async () => {
-    Object.assign(process.env, LAUNCHER);
-    process.env.ZEROS_GITENV_PROBE = "from-process";
-    const env = await childEnv({ ZEROS_GITENV_PROBE: "from-opts" });
-    expect(env.ZEROS_GITENV_PROBE).toBe("from-opts");
-    // The prune has to survive a caller-supplied env too. The pre-merge shape
-    // only built an env object when there WAS one, so this is the case a
-    // conditional would skip.
-    for (const key of Object.keys(LAUNCHER)) {
-      expect(
-        env[key],
-        `${key} must not survive an opts.env merge`,
-      ).toBeUndefined();
-    }
+  it("strips GIT_CONFIG_COUNT injection from process and caller env", async () => {
+    const sentinel = path.join(dir, "config-env-ran");
+    const fsmonitor = path.join(dir, "fsmonitor");
+    await writeFile(
+      fsmonitor,
+      `#!/bin/sh\nprintf ran > '${sentinel}'\n`,
+      "utf8",
+    );
+    await chmod(fsmonitor, 0o700);
+    process.env.GIT_CONFIG_COUNT = "1";
+    process.env.GIT_CONFIG_KEY_0 = "core.fsmonitor";
+    process.env.GIT_CONFIG_VALUE_0 = fsmonitor;
+
+    await runGit(repo, ["status", "--short"], {
+      env: {
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "core.fsmonitor",
+        GIT_CONFIG_VALUE_0: fsmonitor,
+      },
+    });
+
+    await expect(stat(sentinel)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not inherit a process-level Git index redirect", async () => {
+    const redirectedIndex = path.join(dir, "attacker-index");
+    process.env.GIT_INDEX_FILE = redirectedIndex;
+
+    await runGit(repo, ["add", "tracked.txt"]);
+
+    await expect(stat(redirectedIndex)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+    await expect(runGit(repo, ["show", ":tracked.txt"])).resolves.toMatchObject(
+      {
+        stdout: "tracked\n",
+      },
+    );
   });
 });
 
@@ -755,6 +1303,45 @@ describe("workspace git/gh credential shims", () => {
     await closeGitCredentialBrokerForTesting();
     await rm(dir, { recursive: true, force: true });
   });
+
+  // Cloud-worker identity projection uses Linux uid/gid and ownership
+  // semantics. macOS exercises the ordinary same-user broker path elsewhere;
+  // asking it to grant a Linux worker identity is an invalid production state.
+  it.runIf(process.platform === "linux")(
+    "projects a broker read-only to the qualified cloud worker identity",
+    async () => {
+      setGitCredentialSourceForTesting({
+        supports({ protocol, host }) {
+          return protocol === "https" && host === "github.com";
+        },
+        async getCredential() {
+          return { username: "x-access-token", password: "worker-secret" };
+        },
+      });
+      const ownerUid = process.getuid?.() ?? 1_000;
+      const ownerGid = process.getgid?.() ?? 1_000;
+      const prepared = await prepareGitCredentialShellEnvironment(
+        "workspace:test",
+        process.env.PATH ?? "",
+        {
+          uid: ownerUid === 0 ? 10_001 : ownerUid,
+          gid: ownerGid === 0 ? 10_001 : ownerGid,
+        },
+      );
+      expect(prepared).not.toBeNull();
+
+      const socket = prepared!.env.ZEROS_GIT_AUTH_SOCKET;
+      const helper = prepared!.env.ZEROS_GIT_AUTH_HELPER;
+      const socketDir = await stat(path.dirname(socket));
+      const socketStat = await stat(socket);
+      const helperDir = await stat(path.dirname(helper));
+      const helperStat = await stat(helper);
+      expect(socketDir.mode & 0o777).toBe(0o710);
+      expect(socketStat.mode & 0o777).toBe(0o660);
+      expect(helperDir.mode & 0o777).toBe(0o750);
+      expect(helperStat.mode & 0o777).toBe(0o750);
+    },
+  );
 
   it("serves the current credential to GitHub without putting it in the shell environment", async () => {
     let token = "first-broker-secret";

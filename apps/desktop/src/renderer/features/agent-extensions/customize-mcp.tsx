@@ -52,6 +52,7 @@ import {
 } from "../../shared/ui/primitives/dialog";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { useBridge } from "../../platform/bridge/use-bridge";
+import { shellOpenUrl } from "../../platform/app";
 import {
   bridgeMcpGatewayAuthorize,
   bridgeMcpGatewayBeginAuth,
@@ -76,6 +77,7 @@ import {
 } from "./mcp-server-model";
 import { McpImportDialog } from "./mcp-import-dialog";
 import type { ResolvedCustomizeScope } from "./customize-page";
+import { shouldUseHeadlessMcpAuth } from "./mcp-auth-flow";
 
 // The filled-card recipe the Models settings page uses — rows separated by
 // hairline dividers inside one rounded `--bg1-highlight` surface.
@@ -530,8 +532,9 @@ export function CustomizeMcpSection({
   const writeSeq = useRef(0);
 
   // ── Gateway controls (user scope only) — the one user-global gateway
-  // fronts every auth:"oauth"/"header" backend. Desktop-only; every call is
-  // best-effort so a remote/cloud bridge just leaves the chips empty.
+  // fronts every auth:"oauth"/"header" backend. Local engines open the
+  // browser directly; cloud engines return a URL that this trusted renderer
+  // opens on the user's device.
   const bridge = useBridge();
   const [gwStatus, setGwStatus] = useState<
     Map<string, GatewayBackendStatusWire>
@@ -584,6 +587,19 @@ export function CustomizeMcpSection({
         toast.success(`Signed in to ${name} — ${st.toolCount} tools`);
       else toast.error(`${name}: ${st.detail ?? st.state}`);
     } catch (e) {
+      if (shouldUseHeadlessMcpAuth(e)) {
+        try {
+          const url = await bridgeMcpGatewayBeginAuth(bridge, name);
+          setHeadlessAuth({ server: name, url });
+          await shellOpenUrl(url);
+          return;
+        } catch (headlessError) {
+          toast.error(
+            `Couldn't start sign-in for ${name}: ${headlessError instanceof Error ? headlessError.message : String(headlessError)}`,
+          );
+          return;
+        }
+      }
       toast.error(
         `Couldn't sign in to ${name}: ${e instanceof Error ? e.message : String(e)}`,
       );

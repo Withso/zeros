@@ -9,6 +9,7 @@ import type { McpServerRegistration } from "../../../types";
 import {
   codexPromptRequestsBrowserSkill,
   codexBrowserThreadConfig,
+  codexNativeBrowserUnavailableReason,
   injectCodexBrowserSkillInput,
   mergeCodexNativeBrowserMcp,
   resolveCodexNativeBrowserRuntime,
@@ -25,6 +26,27 @@ afterEach(async () => {
 });
 
 describe("Codex browser tool adapter", () => {
+  it("fails closed for a contained macOS Browser runtime", () => {
+    expect(
+      codexNativeBrowserUnavailableReason({
+        contained: true,
+        platform: "darwin",
+      }),
+    ).toMatch(/cannot safely run inside the macOS containment boundary/i);
+    expect(
+      codexNativeBrowserUnavailableReason({
+        contained: false,
+        platform: "darwin",
+      }),
+    ).toBeNull();
+    expect(
+      codexNativeBrowserUnavailableReason({
+        contained: true,
+        platform: "linux",
+      }),
+    ).toBeNull();
+  });
+
   it("injects the exact official Browser skill path for explicit web interaction", () => {
     const input = [
       {

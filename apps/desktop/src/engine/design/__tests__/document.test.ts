@@ -77,13 +77,24 @@ describe("design document", () => {
       },
     });
 
-    const created = await createDesignFrame(root, { title: "Landing page" });
+    const created = await createDesignFrame(root, {
+      title: "Landing page",
+      geometry: { x: 125, y: -40, w: 640, h: 360, z: 7 },
+    });
     expect(created.file).toBe("landing-page.html");
+    expect(created).toMatchObject({
+      x: 125,
+      y: -40,
+      width: 640,
+      height: 360,
+      z: 7,
+    });
     const source = await readFile(
       path.join(root, DESIGN_DIRECTORY_NAME, created.file),
       "utf8",
     );
     expect(source).toContain('name="zeros-frame"');
+    expect(source).toContain("width=640,height=360");
     expect(source).toContain('href="./tokens.css"');
     expect(source).not.toContain("<script");
     expect(source).toContain("Shape this frame with the canvas and inspector.");
@@ -116,6 +127,37 @@ describe("design document", () => {
       height: 720,
       z: 3,
     });
+  });
+
+  it("atomically creates transparent top-level text with stable source ownership", async () => {
+    const created = await createDesignFrame(root, {
+      title: "Canvas text",
+      geometry: { x: 125, y: 80, w: 180, h: 32, z: 4 },
+      seed: {
+        kind: "text",
+        nodeId: "text-loose-1",
+        text: "Loose <text> & source",
+        fixedSize: false,
+      },
+    });
+    const source = await readFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, created.file),
+      "utf8",
+    );
+
+    expect(created).toMatchObject({
+      kind: "text",
+      x: 125,
+      y: 80,
+      width: 180,
+      height: 32,
+      nodeCount: 1,
+    });
+    expect(source).toContain("kind=text");
+    expect(source).toContain('data-oid="text-loose-1"');
+    expect(source).toContain("Loose &lt;text&gt; &amp; source");
+    expect(source).toMatch(/background:\s*transparent\s*!important/);
+    expect(source).not.toContain("Shape this frame");
   });
 
   it("migrates version-1 canvas metadata forward without losing geometry", async () => {

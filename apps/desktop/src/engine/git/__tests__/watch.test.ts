@@ -81,6 +81,46 @@ describe("startGitWatcher", () => {
     });
   });
 
+  it("marks Design recognition-file changes without classifying every source edit", async () => {
+    const root = await mkdtemp(join(tmpdir(), "zeros-design-marker-watch-"));
+    roots.push(root);
+    await mkdir(join(root, ".git", "logs"), { recursive: true });
+    await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
+    await writeFile(join(root, ".git", "index"), "index");
+    await writeFile(join(root, ".git", "logs", "HEAD"), "");
+
+    const changes: GitWatchChange[] = [];
+    const watcher = startGitWatcher(
+      () => [{ root, workspaceId: "workspace-design-marker" }],
+      (change) => changes.push(change),
+      {
+        pollIntervalMs: 25,
+        worktreeDebounceMs: 10,
+        awaitWriteFinishMs: 20,
+        usePolling: true,
+        worktreePollIntervalMs: 10,
+      },
+    );
+    watchers.push(watcher);
+    await watcher.ready;
+
+    await mkdir(join(root, "New Design"), { recursive: true });
+    await writeFile(join(root, "New Design", ".zeros-canvas.json"), "{}\n");
+    await waitFor(() =>
+      changes.some((change) => change.designRecognitionChanged === true),
+    );
+    const observed = changes.find(
+      (change) => change.designRecognitionChanged === true,
+    );
+
+    expect(observed).toMatchObject({
+      workspaceIds: ["workspace-design-marker"],
+      coarse: false,
+      worktreeChanged: true,
+      designRecognitionChanged: true,
+    });
+  });
+
   it("observes changes below generated-looking directory names", async () => {
     const root = await mkdtemp(join(tmpdir(), "zeros-generated-watch-"));
     roots.push(root);
@@ -168,6 +208,8 @@ describe("startGitWatcher", () => {
     await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
     await writeFile(join(root, ".git", "index"), "index");
     await writeFile(join(root, ".git", "logs", "HEAD"), "");
+    const container = join(root, ".claude", "worktrees");
+    await mkdir(container, { recursive: true });
 
     let changes = 0;
     const watcher = startGitWatcher(
@@ -187,8 +229,8 @@ describe("startGitWatcher", () => {
     watchers.push(watcher);
     await watcher.ready;
 
-    const nested = join(root, ".claude", "worktrees", "nested");
-    await mkdir(nested, { recursive: true });
+    const nested = join(container, "nested");
+    await mkdir(nested);
     await waitFor(() => changes > 0);
 
     // Prove Chokidar subscribed before the marker landed. The ignore callback
@@ -212,7 +254,7 @@ describe("startGitWatcher", () => {
     await waitFor(() => changes > before);
   });
 
-  it("invalidates when terminal git changes the index without a source event", async () => {
+  it("rechecks Design recognition when terminal git changes the index without a source event", async () => {
     const root = await mkdtemp(join(tmpdir(), "zeros-git-state-watch-"));
     roots.push(root);
     await mkdir(join(root, ".git", "logs"), { recursive: true });
@@ -248,6 +290,7 @@ describe("startGitWatcher", () => {
     expect(observed).toEqual({
       workspaceIds: ["workspace-index"],
       coarse: false,
+      designRecognitionChanged: true,
     });
     expect(observed?.worktreeChanged).toBeUndefined();
   });

@@ -192,7 +192,7 @@ export function folderIsWithinRoot(
  *  forms (the "No workspace selected" flicker in a fresh worktree). */
 export function findWorkspaceForFolder<T extends { path: string }>(
   folder: string | null | undefined,
-  workspaces: T[],
+  workspaces: readonly T[],
 ): T | null {
   if (!folder) return null;
   return workspaces.find((w) => folderIsWithinRoot(folder, w.path)) ?? null;

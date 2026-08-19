@@ -66,19 +66,19 @@ export function cursorProjectSlug(cwd: string): string {
 /** Locate the subagent transcript file for a (cwd, subagentAgentId). The
  *  parent agent-dir name varies (`agent-<id>` vs bare `<id>`), so we scan one
  *  level and probe `<dir>/subagents/<subagentId>.jsonl`. Returns null when not
- *  found (best-effort — never throws). */
+ *  found (best-effort — never throws).
+ *
+ *  `home` MUST be the home the Cursor host actually ran with. Under ZSR that is
+ *  the session's projected HOME, not `homedir()` — a contained agent writes its
+ *  transcripts into the projection, so defaulting to the real home silently
+ *  found nothing and every subagent card came up empty. */
 export function findSubagentTranscriptPath(
   cwd: string,
   subagentAgentId: string,
+  opts?: { home?: string },
 ): string | null {
   try {
-    const root = join(
-      homedir(),
-      ".cursor",
-      "projects",
-      cursorProjectSlug(cwd),
-      "agent-transcripts",
-    );
+    const root = agentTranscriptsRoot(cwd, opts);
     if (!existsSync(root)) return null;
     const file = `${subagentAgentId}.jsonl`;
     for (const entry of readdirSync(root)) {
@@ -96,8 +96,9 @@ export function findSubagentTranscriptPath(
 export function loadSubagentTranscript(
   cwd: string,
   subagentAgentId: string,
+  opts?: { home?: string },
 ): ParsedSubagentTranscript | null {
-  const path = findSubagentTranscriptPath(cwd, subagentAgentId);
+  const path = findSubagentTranscriptPath(cwd, subagentAgentId, opts);
   if (!path) return null;
   let text: string;
   try {
@@ -152,7 +153,13 @@ export function findSubagentByPrompt(
   cwd: string,
   promptText: string,
   claimed: ReadonlySet<string>,
-  opts?: { nowMs?: number; windowMs?: number; sinceMs?: number; root?: string },
+  opts?: {
+    nowMs?: number;
+    windowMs?: number;
+    sinceMs?: number;
+    root?: string;
+    home?: string;
+  },
 ): string | null {
   const nowMs = opts?.nowMs ?? Date.now();
   const windowMs = opts?.windowMs ?? 15 * 60 * 1000;
@@ -162,7 +169,7 @@ export function findSubagentByPrompt(
     opts?.sinceMs != null ? opts.sinceMs - 5_000 : 0,
     nowMs - windowMs,
   );
-  const root = opts?.root ?? agentTranscriptsRoot(cwd);
+  const root = opts?.root ?? agentTranscriptsRoot(cwd, opts);
   let candidates = listSubagentTranscriptFiles(root)
     .filter((c) => !claimed.has(c.agentId) && c.mtimeMs >= minMtime)
     .sort((a, b) => b.mtimeMs - a.mtimeMs);
@@ -197,10 +204,15 @@ interface SubagentTranscriptFile {
   mtimeMs: number;
 }
 
-/** The `~/.cursor/projects/<slug(cwd)>/agent-transcripts` root for a cwd. */
-export function agentTranscriptsRoot(cwd: string): string {
+/** The `<home>/.cursor/projects/<slug(cwd)>/agent-transcripts` root for a cwd.
+ *  `home` defaults to the engine's own home for the uncontained/legacy path;
+ *  every ZSR session passes its projected HOME instead. */
+export function agentTranscriptsRoot(
+  cwd: string,
+  opts?: { home?: string },
+): string {
   return join(
-    homedir(),
+    opts?.home ?? homedir(),
     ".cursor",
     "projects",
     cursorProjectSlug(cwd),

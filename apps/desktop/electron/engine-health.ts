@@ -3,6 +3,24 @@ export interface OwnedEngineManifest {
   instance: string;
 }
 
+/** The engine deliberately retires stale kernel process domains and private
+ * OrbStack workers before it publishes any renderer authority. A cold repair
+ * can therefore take longer than an ordinary boot while the exact child is
+ * still healthy. Keep that recovery bounded by the longest single OrbStack
+ * create/recovery operation instead of treating the old ten-second UI budget
+ * as a process-lifecycle deadline. */
+export const ENGINE_STARTUP_TIMEOUT_MS = 10 * 60_000;
+
+export function engineStartupWaitDecision(input: {
+  readonly elapsedMs: number;
+  readonly childExited: boolean;
+  readonly timeoutMs?: number;
+}): "wait" | "child-exited" | "timed-out" {
+  if (input.childExited) return "child-exited";
+  const timeoutMs = input.timeoutMs ?? ENGINE_STARTUP_TIMEOUT_MS;
+  return input.elapsedMs >= timeoutMs ? "timed-out" : "wait";
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }

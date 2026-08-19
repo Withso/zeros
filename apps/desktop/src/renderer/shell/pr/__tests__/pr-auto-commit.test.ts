@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  AUTO_COMMIT_PATHSPECS,
   buildAutoCommitMessage,
   describeAutoCommitBlock,
   describeAutoCommitFailure,
@@ -15,15 +14,6 @@ const EMPTY = {
   conflicted: [],
   conflictState: null,
 } as const;
-
-describe("auto-commit pathspecs", () => {
-  // `git add -- . ':(exclude).zeros'`: one literal directory pathspec (never
-  // misread as a glob, unlike a file literally named `weird[1].txt`) minus the
-  // one tree every Changes surface hides.
-  it("sweeps the worktree but never the hidden .zeros tree", () => {
-    expect(AUTO_COMMIT_PATHSPECS).toEqual([".", ":(exclude).zeros"]);
-  });
-});
 
 describe("summarizePendingWork", () => {
   it("unions staged, unstaged and untracked paths without duplicates", () => {

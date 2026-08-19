@@ -92,6 +92,17 @@ plugin manifest, trusted Browser client, Codex executable, architecture, or
 platform does not match, Browser use fails closed for that thread; the normal
 Codex agent remains available and no Zeros browser tools are substituted.
 
+On macOS, an app-server already running inside a deny-bearing ZSR profile cannot
+launch the official `node_repl`: the helper asks `cua_node` to install its own
+mandatory Seatbelt profile, and macOS rejects that nested sandbox. Zeros does
+not move the helper outside ZSR, because its plugin and trusted-code inputs are
+user-writable and an out-of-boundary helper would become a filesystem-authority
+escape. Browser therefore fails closed for contained macOS threads, emits a
+diagnostic, and leaves the ordinary Codex session usable. Platforms without
+the nested-Seatbelt conflict keep the direct verified registration. Runtime
+discovery failures follow the same optional-capability behavior; Zeros never
+removes ZSR or substitutes a custom browser surface.
+
 After `thread/start` or `thread/resume` returns the native thread id, the engine
 registers `{ nativeSessionId, browserSessionId }` with the authenticated
 loopback service. The Electron main process exposes a private socket under

@@ -68,6 +68,10 @@ export function getWorkspaceDesignApi(workspacePath: string): DesignApi {
     return retained;
   }
   const api = new DesignApi(new WorkspaceDesignRepository(key), {
+    // This instance is retained exclusively behind WorkspaceService's local,
+    // workspace-id-resolved human Design surface. Any future agent/transport
+    // adapter must construct its own fail-closed, capability-authorized API.
+    authorization: { kind: "trusted-in-process" },
     maxSessions: 16,
     maxSessionBytes: 32 * 1024 * 1024,
   });

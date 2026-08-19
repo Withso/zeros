@@ -93,6 +93,36 @@
      `bg-[var(--selected-glass)]`. Per-theme mix: a light-gray lift in Dark,
      a white lift in Light. */
   --selected-glass: color-mix(in oklab, var(--bg5) 25%, transparent);
+
+  /* Design workspace. These are interaction signals rather than general app
+     accents: selection/padding stay Figma-blue, while inter-item gaps use a
+     distinct pink so nested layout geometry remains readable at low zoom. */
+  --design-selection-stroke: #0C8CE9;
+  --design-hover-stroke: #0C8CE9;
+  --design-selection-handle-fill: #FFFFFF;
+  --design-selection-label-bg: #0C8CE9;
+  --design-selection-label-fg: #FFFFFF;
+  /* Host-side text creation mirrors the generated white canvas document
+     before an authored frame exists to provide computed typography. */
+  --design-canvas-default-text: #111111;
+  --design-padding-stroke: #0C8CE9;
+  --design-gap-stroke: #F531B3;
+  --design-spacing-line-border: #FFFFFF;
+  --design-selection-soft: color-mix(
+    in oklab,
+    var(--design-selection-stroke) 12%,
+    transparent
+  );
+  --design-padding-soft: color-mix(
+    in oklab,
+    var(--design-padding-stroke) 14%,
+    transparent
+  );
+  --design-gap-soft: color-mix(
+    in oklab,
+    var(--design-gap-stroke) 14%,
+    transparent
+  );
 }
 
 /* ── Light theme ── */

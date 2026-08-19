@@ -64,12 +64,30 @@ export interface DesignApiAuthorizationContext {
   dryRun: boolean;
 }
 
+export type DesignApiAuthorization =
+  | {
+      /** Explicit trust for the desktop's in-process human Design surface.
+       * Never use this authority at a transport or agent boundary. */
+      kind: "trusted-in-process";
+    }
+  | {
+      /** Every write is delegated to the caller-supplied policy decision. */
+      kind: "authorize";
+      /** Authenticated identity bound by the adapter. An untrusted transaction
+       * cannot obtain another actor's authority by changing its actor field. */
+      actor: DesignActor;
+      authorize: (
+        context: DesignApiAuthorizationContext,
+      ) => boolean | Promise<boolean>;
+    };
+
 export interface DesignApiOptions {
   maxSessions?: number;
   maxSessionBytes?: number;
-  authorize?: (
-    context: DesignApiAuthorizationContext,
-  ) => boolean | Promise<boolean>;
+  /** Authority is intentionally explicit. Omitting it makes every operation
+   * fail closed. This runtime default protects JavaScript and future transport
+   * adapters; the trusted human surface opts in with `trusted-in-process`. */
+  authorization?: DesignApiAuthorization;
   renderer?: DesignHeadlessRenderer;
 }
 
@@ -397,6 +415,15 @@ export class DesignApiRepositoryConflictError extends Error {
   }
 }
 
+const TRUSTED_IN_PROCESS_ACTOR: DesignActor = {
+  kind: "system",
+  id: "trusted-in-process",
+};
+
+function sameDesignActor(left: DesignActor, right: DesignActor): boolean {
+  return left.kind === right.kind && left.id === right.id;
+}
+
 export class DesignApi {
   private readonly sessions = new Map<string, SessionEntry>();
   private readonly documentTurns = new Map<string, Promise<void>>();
@@ -425,6 +452,7 @@ export class DesignApi {
   async open(documentId: string): Promise<DesignDocumentSummary> {
     const exactDocumentId = validatedDocumentId(documentId);
     return this.withDocumentTurn(exactDocumentId, async () => {
+      await this.authorizeRead(exactDocumentId, "document.open");
       const entry = await this.load(exactDocumentId);
       return this.summary(entry);
     });
@@ -439,6 +467,7 @@ export class DesignApi {
     const file = designRelativeFileSchema.parse(input.file);
     const expectedRevision = validatedExpectedRevision(input.expectedRevision);
     return this.withDocumentTurn(documentId, async () => {
+      await this.authorizeRead(documentId, "source.read");
       const entry = await this.load(documentId);
       const state = entry.session.currentState();
       this.assertRevision(state, expectedRevision);
@@ -461,6 +490,7 @@ export class DesignApi {
     const documentId = validatedDocumentId(input.documentId);
     const expectedRevision = validatedExpectedRevision(input.expectedRevision);
     return this.withDocumentTurn(documentId, async () => {
+      await this.authorizeRead(documentId, "foundation.read");
       const entry = await this.load(documentId);
       const state = entry.session.currentState();
       this.assertRevision(state, expectedRevision);
@@ -483,6 +513,7 @@ export class DesignApi {
     const documentId = validatedDocumentId(input.documentId);
     const expectedRevision = validatedExpectedRevision(input.expectedRevision);
     return this.withDocumentTurn(documentId, async () => {
+      await this.authorizeRead(documentId, "projection.read");
       const entry = await this.load(documentId);
       const state = entry.session.currentState();
       this.assertRevision(state, expectedRevision);
@@ -544,6 +575,7 @@ export class DesignApi {
     }
     const matched = validatedRuntimeEvidence(input.matched);
     return this.withDocumentTurn(documentId, async () => {
+      await this.authorizeRead(documentId, "provenance.read");
       const entry = await this.load(documentId);
       const state = entry.session.currentState();
       this.assertRevision(state, expectedRevision);
@@ -658,6 +690,7 @@ export class DesignApi {
     const expectedRevision = validatedExpectedRevision(input.expectedRevision);
     const viewport = requiredViewport(input.viewport);
     const state = await this.withDocumentTurn(documentId, async () => {
+      await this.authorizeRead(documentId, "document.render");
       const entry = await this.load(documentId);
       const current = entry.session.currentState();
       this.assertRevision(current, expectedRevision);
@@ -762,6 +795,13 @@ export class DesignApi {
     transaction: DesignTransaction,
     dryRun: boolean,
   ): Promise<void> {
+    const authorization = this.options.authorization;
+    if (
+      authorization?.kind === "authorize" &&
+      !sameDesignActor(transaction.actor, authorization.actor)
+    ) {
+      throw new DesignApiAuthorizationError();
+    }
     return this.authorizeContext({
       documentId: transaction.documentId,
       actor: transaction.actor,
@@ -772,11 +812,36 @@ export class DesignApi {
     });
   }
 
+  private async authorizeRead(
+    documentId: string,
+    operationType: string,
+  ): Promise<void> {
+    const authorization = this.options.authorization;
+    if (!authorization) throw new DesignApiAuthorizationError();
+    const actor =
+      authorization.kind === "authorize"
+        ? designActorSchema.parse(authorization.actor)
+        : TRUSTED_IN_PROCESS_ACTOR;
+    return this.authorizeContext({
+      documentId,
+      actor,
+      operationTypes: [operationType],
+      dryRun: true,
+    });
+  }
+
   private async authorizeContext(
     context: DesignApiAuthorizationContext,
   ): Promise<void> {
-    if (!this.options.authorize) return;
-    const allowed = await this.options.authorize(context);
+    const authorization = this.options.authorization;
+    if (authorization?.kind === "trusted-in-process") return;
+    if (!authorization || authorization.kind !== "authorize") {
+      throw new DesignApiAuthorizationError();
+    }
+    if (!sameDesignActor(context.actor, authorization.actor)) {
+      throw new DesignApiAuthorizationError();
+    }
+    const allowed = await authorization.authorize(context);
     if (!allowed) throw new DesignApiAuthorizationError();
   }
 

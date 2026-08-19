@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  engineStartupWaitDecision,
   isExpectedEngineHealth,
   parseOwnedEngineManifest,
   zeroContactRespawnBackoffMs,
@@ -88,5 +89,31 @@ describe("zeroContactRespawnBackoffMs", () => {
     expect(
       zeroContactRespawnBackoffMs(3, { probeWindowMs: 1_000, capMs: 3_000 }),
     ).toBe(3_000);
+  });
+});
+
+describe("engineStartupWaitDecision", () => {
+  it("keeps waiting through a legitimate recovery that exceeds ten seconds", () => {
+    expect(
+      engineStartupWaitDecision({
+        elapsedMs: 10_208,
+        childExited: false,
+      }),
+    ).toBe("wait");
+  });
+
+  it("fails promptly when the exact spawned child exits", () => {
+    expect(
+      engineStartupWaitDecision({ elapsedMs: 250, childExited: true }),
+    ).toBe("child-exited");
+  });
+
+  it("keeps recovery bounded", () => {
+    expect(
+      engineStartupWaitDecision({
+        elapsedMs: 10 * 60_000,
+        childExited: false,
+      }),
+    ).toBe("timed-out");
   });
 });

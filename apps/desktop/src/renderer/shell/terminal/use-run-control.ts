@@ -176,13 +176,13 @@ export function useRunControl(
     (actionId: string) => {
       if (!folderKey) return;
       const sessionId = runSessionId(folderKey, actionId);
-      void workspaceStopRun({ sessionId }).catch((err) => {
+      void workspaceStopRun({ workspaceId, sessionId }).catch((err) => {
         toast.error(
           `Couldn't stop the run: ${err instanceof Error ? err.message : String(err)}`,
         );
       });
     },
-    [folderKey],
+    [folderKey, workspaceId],
   );
 
   return { actions, actionsReady, defaultAction, runIdFor, startRun, stopRun };

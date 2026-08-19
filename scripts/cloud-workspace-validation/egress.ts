@@ -10,6 +10,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { loadState, makeDaytona } from "./config";
+import { assertCommandExitCode } from "./lib/qualification-gates";
 
 async function main() {
   const state = loadState();
@@ -34,6 +35,7 @@ async function main() {
   );
   process.stdout.write(res.result ?? "");
   console.log(`  (probe exit ${res.exitCode})\n`);
+  assertCommandExitCode("required cloud egress probe", res.exitCode);
 }
 
 main().catch((err) => {

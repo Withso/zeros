@@ -15,9 +15,17 @@
 
 import { BridgeClient } from "./lib/bridge-client";
 import { loadState, bridgeWsUrl, type CloudValidationState } from "./config";
+import {
+  evaluateSoakGate,
+  parseSoakOptions,
+  type SoakGateVerdict,
+} from "./lib/qualification-gates";
 
-const HOURS = Number(process.env.ZEROS_SOAK_HOURS ?? "4");
-const PING_MS = Number(process.env.ZEROS_SOAK_PING_MS ?? "25000");
+const {
+  hours: HOURS,
+  pingMs: PING_MS,
+  maxDrops: MAX_DROPS,
+} = parseSoakOptions(process.env);
 
 interface Stats {
   pings: number;
@@ -44,15 +52,16 @@ function ts() {
 async function connect(state: CloudValidationState): Promise<BridgeClient> {
   const client = new BridgeClient({
     url: bridgeWsUrl(state.previewUrl),
-    previewToken: state.previewToken,
+    previewToken: state.engineIngress ? undefined : state.previewToken,
     cloudToken: state.cloudToken,
+    accountToken: process.env.ZEROS_ACCOUNT_ACCESS_TOKEN,
     requestTimeoutMs: 20_000,
   });
   await client.connect();
   return client;
 }
 
-function printSummary() {
+function printSummary(verdict: SoakGateVerdict) {
   const elapsedMin = ((Date.now() - stats.startedAt) / 60000).toFixed(1);
   console.log(`\n── Soak summary (${elapsedMin} min) ──`);
   console.log(`  pings:           ${stats.pings}`);
@@ -61,9 +70,9 @@ function printSummary() {
   console.log(`  reconnects:      ${stats.reconnects}`);
   console.log(`  longest gap:     ${(stats.longestGapMs / 1000).toFixed(1)}s`);
   console.log(
-    stats.drops === 0
-      ? `  \x1b[32mVERDICT: no drops — the bridge survives the proxy idle window.\x1b[0m\n`
-      : `  \x1b[33mVERDICT: ${stats.drops} drop(s) — inspect timing vs the proxy idle TTL (#3846).\x1b[0m\n`,
+    verdict.ok
+      ? `  \x1b[32mVERDICT: PASS — ${verdict.reason}.\x1b[0m\n`
+      : `  \x1b[31mVERDICT: FAIL — ${verdict.reason}.\x1b[0m\n`,
   );
 }
 
@@ -75,18 +84,26 @@ async function main() {
   );
   console.log(`  (Ctrl-C to stop early)\n`);
 
-  process.on("SIGINT", () => {
-    printSummary();
-    process.exit(0);
+  process.once("SIGINT", () => {
+    const verdict = evaluateSoakGate({
+      drops: stats.drops,
+      maxDrops: MAX_DROPS,
+      connected: false,
+      completed: false,
+    });
+    printSummary(verdict);
+    process.exit(130);
   });
 
   let client = await connect(state);
-  console.log(`  ${ts()} connected`);
+  await client.ping();
+  stats.pings++;
+  let connected = true;
+  console.log(`  ${ts()} connected and authenticated`);
   let lastOk = Date.now();
 
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, PING_MS));
-    const t0 = Date.now();
     try {
       await client.ping();
       stats.pings++;
@@ -101,6 +118,7 @@ async function main() {
     } catch (err) {
       stats.pingFailures++;
       stats.drops++;
+      connected = false;
       console.log(
         `  ${ts()} \x1b[33mping failed\x1b[0m: ${(err as Error).message} — reconnecting…`,
       );
@@ -112,25 +130,43 @@ async function main() {
       // Re-load state (provision may have refreshed the preview token after a wake).
       const fresh = loadState();
       try {
-        client = await connect(fresh);
+        const replacement = await connect(fresh);
+        try {
+          // ENGINE_READY precedes CONNECTED account verification. A reconnect
+          // is live only after one authenticated request crosses the bridge.
+          await replacement.ping();
+        } catch (error) {
+          replacement.close();
+          throw error;
+        }
+        client = replacement;
+        connected = true;
         stats.reconnects++;
+        stats.pings++;
+        const gap = Date.now() - lastOk;
+        if (gap > stats.longestGapMs) stats.longestGapMs = gap;
         lastOk = Date.now();
-        console.log(`  ${ts()} reconnected`);
+        console.log(`  ${ts()} reconnected and authenticated`);
       } catch (re) {
         console.log(
           `  ${ts()} \x1b[31mreconnect failed\x1b[0m: ${(re as Error).message} (retrying next tick)`,
         );
       }
     }
-    void t0;
   }
 
   client.close();
-  printSummary();
+  const verdict = evaluateSoakGate({
+    drops: stats.drops,
+    maxDrops: MAX_DROPS,
+    connected,
+    completed: true,
+  });
+  printSummary(verdict);
+  if (!verdict.ok) throw new Error(`cloud WSS soak failed: ${verdict.reason}`);
 }
 
 main().catch((err) => {
   console.error("\n  ✗ soak failed:\n", err);
-  printSummary();
   process.exit(1);
 });

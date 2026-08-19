@@ -24,6 +24,8 @@ import { generateInviteToken, hashInviteToken } from "./invites.js";
 import { randomSuffix, slugify } from "./auth.js";
 import { inviteEmailHtml, sendEmail, type EmailConfig } from "./email.js";
 import { rateLimit } from "./ratelimit.js";
+import type { CloudWorkspaceBackendConfig } from "./config.js";
+import { createCloudWorkspaceRoutes } from "./cloud-workspaces/routes.js";
 
 const INVITE_LINK_BASE =
   process.env.INVITE_LINK_BASE?.trim().replace(/\/+$/, "") ||
@@ -132,7 +134,11 @@ const ORGANIZATION_SUMMARY_SQL = `
     ORDER BY t.id LIMIT 1
   ) dt ON true`;
 
-export function createRoutes(pool: pg.Pool, email?: EmailConfig): Hono {
+export function createRoutes(
+  pool: pg.Pool,
+  email?: EmailConfig,
+  cloudWorkspaces: CloudWorkspaceBackendConfig | null = null,
+): Hono {
   const app = new Hono();
 
   app.get("/v1/me", async (c) => {
@@ -164,6 +170,7 @@ export function createRoutes(pool: pg.Pool, email?: EmailConfig): Hono {
     createOrganizationRouter(pool, email, false),
   );
   app.route("/v1/teams", createOrganizationRouter(pool, email, true));
+  app.route("/", createCloudWorkspaceRoutes(pool, cloudWorkspaces));
 
   app.post(
     "/v1/invitations/accept",

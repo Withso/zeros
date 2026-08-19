@@ -21,6 +21,12 @@
 // whose Electron type is `subFrame`. The renderer document and scripts, XHR,
 // styles, images, and other subresources retain their original headers.
 //
+// Daytona signed-preview origins are a separate exact, volatile allowlist.
+// Requests to one of those origins receive only the provider's documented
+// warning-page bypass header; no provider API key or preview token is present.
+// The authorization is frame-scoped for picker injection, expires with the
+// signed origin, and is replaced atomically when the renderer renews it.
+//
 // Iframe trade-offs:
 //   - Lose per-tab Chromium process isolation. All iframes share the
 //     main renderer process. A bad iframe can affect others. For an
@@ -39,11 +45,28 @@
 // security-sensitive browser-session decision, not ordinary renderer layout.
 
 import { type Session } from "electron";
+import { previewFrameAuthorizations } from "./preview-frame-authorizations";
 
 /** Strip iframe-blocking headers from this session's http(s)
  *  responses. Idempotent — calling twice replaces the listener.
  *  Pass `win.webContents.session` from createMainWindow(). */
 export function installIframeHeaderStripping(session: Session): void {
+  session.webRequest.onBeforeSendHeaders(
+    { urls: ["https://*/*"] },
+    (details, callback) => {
+      if (!previewFrameAuthorizations.allowsOrigin(details.url)) {
+        callback({ cancel: false });
+        return;
+      }
+      callback({
+        cancel: false,
+        requestHeaders: {
+          ...details.requestHeaders,
+          "X-Daytona-Skip-Preview-Warning": "true",
+        },
+      });
+    },
+  );
   session.webRequest.onHeadersReceived(
     // Filter: only http(s) — file:// renderer assets pass through.
     { urls: ["http://*/*", "https://*/*"] },

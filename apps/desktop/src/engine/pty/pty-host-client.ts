@@ -53,6 +53,7 @@ export interface PtyHostSpawnSpec {
 
 interface SessionEntry {
   pid: number;
+  spawnCbs: Array<(pid: number) => void>;
   dataCbs: Array<(data: string) => void>;
   exitCbs: Array<
     (
@@ -253,8 +254,7 @@ class PtyHost {
         ? Math.min(
             RESPAWN_BACKOFF_CAP_MS,
             RESPAWN_BACKOFF_BASE_MS *
-              2 **
-                Math.max(0, this.consecutiveEarlyDeaths - (fatal ? 1 : 2)),
+              2 ** Math.max(0, this.consecutiveEarlyDeaths - (fatal ? 1 : 2)),
           )
         : 0;
       this.respawnBlockedUntil = holdOff ? Date.now() + holdOffMs : 0;
@@ -322,6 +322,15 @@ class PtyHost {
     switch (t) {
       case "spawned":
         entry.pid = typeof m.pid === "number" ? m.pid : 0;
+        if (entry.pid > 0) {
+          for (const cb of entry.spawnCbs.splice(0)) {
+            try {
+              cb(entry.pid);
+            } catch {
+              /* observer threw — PTY ownership stays with the host */
+            }
+          }
+        }
         return;
       case "data": {
         if (typeof m.data !== "string") return;
@@ -382,6 +391,7 @@ class PtyHost {
     const id = String(this.nextId++);
     const entry: SessionEntry = {
       pid: 0,
+      spawnCbs: [],
       dataCbs: [],
       exitCbs: [],
       spawnFailed: false,
@@ -420,6 +430,10 @@ class PtyHost {
     return {
       get pid() {
         return entry.pid;
+      },
+      onSpawned: (cb) => {
+        if (entry.pid > 0) cb(entry.pid);
+        else entry.spawnCbs.push(cb);
       },
       onData: (cb) => {
         entry.dataCbs.push(cb);

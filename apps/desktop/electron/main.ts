@@ -89,6 +89,7 @@ import {
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
 import {
   isBrowserConfirmationDecision,
   isBrowserProductId,
@@ -865,18 +866,16 @@ function createMainWindow(): BrowserWindow {
   // via shell.openExternal; everything else is denied. (Browser-tab content is
   // <iframe>, not window.open, so this doesn't touch it.)
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("http://") || url.startsWith("https://")) {
-      void shell.openExternal(url);
-    }
+    const externalUrl = normalizeExternalHttpUrl(url);
+    if (externalUrl) void shell.openExternal(externalUrl);
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (event, url) => {
     // Allow only the app's own document (dev server / packaged file://).
     if (url.startsWith(DEV_URL) || url.startsWith("file://")) return;
     event.preventDefault();
-    if (url.startsWith("http://") || url.startsWith("https://")) {
-      void shell.openExternal(url);
-    }
+    const externalUrl = normalizeExternalHttpUrl(url);
+    if (externalUrl) void shell.openExternal(externalUrl);
   });
 
   // CSP for the app's OWN document (packaged file:// only — the dev server needs

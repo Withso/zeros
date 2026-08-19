@@ -28,7 +28,7 @@
 
 import { spawn } from "node:child_process";
 
-import { preserveAmbientConfigRoots } from "./config-isolation";
+import { stripEngineAuthorityEnv } from "./config-isolation";
 import {
   pruneLauncherScriptEnv,
   sanitizeProbedPath,
@@ -44,6 +44,39 @@ const MAX_PROBE_ATTEMPTS = 3;
 let cached: string | null = null;
 let resolving: Promise<string> | null = null;
 let failedAttempts = 0;
+let configuredRunner: LoginShellPathRunner | null = null;
+
+export interface LoginShellPathRunner {
+  readonly cacheKey: string;
+  run(
+    command: string,
+    args: readonly string[],
+    options: { readonly timeoutMs: number },
+  ): Promise<{ readonly stdout: string }>;
+}
+
+/** The engine installs a ZSR-backed runner before warming the probe. This is
+ * process-global because PATH discovery itself is process-global. */
+export function configureLoginShellPathRunner(
+  runner: LoginShellPathRunner,
+): void {
+  if (
+    !runner ||
+    typeof runner.run !== "function" ||
+    !runner.cacheKey ||
+    runner.cacheKey.length > 512
+  ) {
+    throw new Error("login-shell PATH runner is invalid");
+  }
+  if (configuredRunner?.cacheKey === runner.cacheKey) {
+    configuredRunner = runner;
+    return;
+  }
+  configuredRunner = runner;
+  cached = null;
+  resolving = null;
+  failedAttempts = 0;
+}
 
 /** Get the user's login-shell PATH, with caching. Returns the
  *  inherited PATH on Windows or on resolution failure.
@@ -84,6 +117,7 @@ export function resetLoginShellPathForTests(): void {
   cached = null;
   resolving = null;
   failedAttempts = 0;
+  configuredRunner = null;
 }
 
 interface ProbeResult {
@@ -92,10 +126,33 @@ interface ProbeResult {
   ok: boolean;
 }
 
-function resolveOnce(): Promise<ProbeResult> {
+function pathFromProbeOutput(stdout: string): string | null {
+  if (Buffer.byteLength(stdout, "utf8") > 64 * 1024) return null;
+  const lines = stdout
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const candidate = lines.at(-1) ?? "";
+  return candidate && candidate.includes("/") && !/[\0\r\n]/.test(candidate)
+    ? candidate
+    : null;
+}
+
+async function resolveOnce(): Promise<ProbeResult> {
   const shell = process.env.SHELL || "/bin/zsh";
+  const fallback = process.env.PATH ?? "";
+  if (configuredRunner) {
+    try {
+      const result = await configuredRunner.run(shell, ["-ilc", "echo $PATH"], {
+        timeoutMs: RESOLVE_TIMEOUT_MS,
+      });
+      const value = pathFromProbeOutput(result.stdout);
+      return value ? { value, ok: true } : { value: fallback, ok: false };
+    } catch {
+      return { value: fallback, ok: false };
+    }
+  }
   return new Promise((resolve) => {
-    const fallback = process.env.PATH ?? "";
     let stdout = "";
     let settled = false;
 
@@ -133,18 +190,20 @@ function resolveOnce(): Promise<ProbeResult> {
 
     child.on("error", () => settle(fallback, false));
     child.on("close", () => {
-      const trimmed = stdout.trim();
+      const value = pathFromProbeOutput(stdout);
       // Extra defensive: ensure we got *something* PATH-shaped.
-      if (trimmed && trimmed.includes("/")) settle(trimmed, true);
+      if (value) settle(value, true);
       else settle(fallback, false);
     });
   });
 }
 
-/** Build a spawn env that uses the login-shell PATH while preserving
- *  every other variable in `extraEnv` (caller-provided overrides win). */
+/** Build a spawn env that uses the login-shell PATH while preserving every
+ * variable in the caller's COMPLETE environment. If no environment is
+ * supplied (legacy probes only), ambient state is used. A supplied map is
+ * authoritative: this function must never spread `process.env` back into it. */
 export async function buildSpawnEnvWithLoginPath(
-  extraEnv: Record<string, string> = {},
+  completeEnv?: Record<string, string>,
 ): Promise<Record<string, string>> {
   // sanitizeProbedPath: the probe runs a login shell with OUR env, so when a
   // `pnpm run` script launched Zeros the result still leads with that repo's
@@ -153,15 +212,14 @@ export async function buildSpawnEnvWithLoginPath(
   // below drops the launcher's npm_config_*/INIT_CWD before the agent runs a
   // package manager. See apps/desktop/src/engine/env/launcher-env.ts.
   const path = sanitizeProbedPath(await getLoginShellPath());
-  const env: Record<string, string> = {
-    ...(process.env as Record<string, string>),
-  };
+  const env: Record<string, string> = completeEnv
+    ? { ...completeEnv }
+    : Object.fromEntries(
+        Object.entries(process.env).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
+      );
   pruneLauncherScriptEnv(env);
-  // Guard config roots last so neither process.env nor extraEnv can point
-  // the agent at an isolated config dir (breaks MCP/rules pass-through).
-  return preserveAmbientConfigRoots({
-    ...env,
-    PATH: path,
-    ...extraEnv,
-  });
+  if (!env.PATH) env.PATH = path;
+  return stripEngineAuthorityEnv(env);
 }

@@ -52,6 +52,7 @@ import {
   type StdioAgentProcess,
 } from "../shared/stdio-process";
 import type { McpServerRegistration } from "../../types";
+import type { PreparedBoundary } from "../../containment/types";
 import {
   JSON_RPC_NO_RESPONSE,
   JsonRpcStdioClient,
@@ -336,6 +337,8 @@ export interface CodexAppServerBootOptions {
   cliBinary?: string;
   /** Extra env to layer on top of process.env + login-shell PATH. */
   env?: Record<string, string>;
+  /** Zeros-owned outer process boundary for this app-server and every child. */
+  executionBoundary?: PreparedBoundary;
   /** Client identity reported in `initialize.clientInfo`. */
   clientInfo: { name: string; version: string; title?: string };
   /** MCP servers to register via `-c mcp_servers.<name>.…` overrides at
@@ -530,6 +533,26 @@ const TURN_INACTIVITY_TIMEOUT_MS = PERMISSION_RESPONSE_TIMEOUT_MS;
 // adapters share one cap.
 const APPROVAL_TIMEOUT_MS = PERMISSION_RESPONSE_TIMEOUT_MS;
 
+/** Per-process Codex configuration. A ZSR child cannot access the host
+ * keychain by design, so both Codex and MCP OAuth refreshes must remain in the
+ * private CODEX_HOME that the outer boundary owns and promotes atomically. */
+export function codexAppServerFeatureArgs(contained: boolean): string[] {
+  return [
+    "-c",
+    "features.default_mode_request_user_input=true",
+    "-c",
+    "suppress_unstable_features_warning=true",
+    ...(contained
+      ? [
+          "-c",
+          'cli_auth_credentials_store="file"',
+          "-c",
+          'mcp_oauth_credentials_store="file"',
+        ]
+      : []),
+  ];
+}
+
 /** Boot a codex app-server. Resolves with a ready-to-use handle once
  *  the initialize handshake succeeds and the version check passes.
  *  Throws on:
@@ -567,18 +590,16 @@ export async function bootCodexAppServerRuntime(
   //     append "Warning: Under-development features enabled…" to EVERY
   //     turn's output. We enabled the feature deliberately; the per-turn
   //     banner is pure noise for the user.
-  const featureArgs = [
-    "-c",
-    "features.default_mode_request_user_input=true",
-    "-c",
-    "suppress_unstable_features_warning=true",
-  ];
+  const featureArgs = codexAppServerFeatureArgs(
+    Boolean(opts.executionBoundary),
+  );
 
   const proc = spawnStdioAgent({
     command,
     args: [...baseArgs, "app-server", ...featureArgs, ...mcpArgs],
     cwd: opts.cwd,
     env,
+    executionBoundary: opts.executionBoundary,
     logTag,
   });
 

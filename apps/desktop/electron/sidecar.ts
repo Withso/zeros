@@ -30,7 +30,7 @@ import {
   statSync,
   unlinkSync,
 } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash } from "node:crypto";
 import { request as httpRequest } from "node:http";
 import { createRequire } from "node:module";
 import os from "node:os";
@@ -52,6 +52,7 @@ import {
   MCP_VAULT_ACCOUNT,
   parseVaultBlob,
   parseVaultControl,
+  parseEngineLocalAuthorityControl,
   vaultSeedLine,
 } from "../src/engine/agents/gateway/vault-persist";
 import {
@@ -60,6 +61,8 @@ import {
   shouldReapRangeListener,
 } from "./orphan-engines";
 import {
+  ENGINE_STARTUP_TIMEOUT_MS,
+  engineStartupWaitDecision,
   isExpectedEngineHealth,
   parseOwnedEngineManifest,
   zeroContactRespawnBackoffMs,
@@ -88,6 +91,8 @@ interface SidecarStateShape {
   port: number | null;
   /** Per-boot nonce from the owned manifest; /health must echo it. */
   instance: string | null;
+  /** Per-child loopback bearer received on private fd 3. Never in env/logs. */
+  localToken: string | null;
   root: string | null;
   /** Flipped true by `shutdown()` so the watchdog stops respawning. */
   shuttingDown: boolean;
@@ -101,6 +106,7 @@ const state: SidecarStateShape = {
   child: null,
   port: null,
   instance: null,
+  localToken: null,
   root: null,
   shuttingDown: false,
   spawnGeneration: 0,
@@ -308,6 +314,127 @@ function resolveCursorHostPaths(): {
     if (existsSync(dev)) script = dev;
   }
   return { script, sdkEntry };
+}
+
+/** Resolve the product-owned ZSR supervisor. It always runs under Electron's
+ * Node mode, never under the Bun-compiled engine, because the exact-pinned SRT
+ * component and its per-session module globals require an isolated Node
+ * process. */
+function resolveZsrSupervisorPath(): string | null {
+  if (IS_PACKAGED) {
+    const packaged = path.join(process.resourcesPath, "zsr-supervisor.mjs");
+    return existsSync(packaged) ? packaged : null;
+  }
+  const dev = path.resolve(
+    __dirname,
+    "..",
+    "apps",
+    "desktop",
+    "src",
+    "engine",
+    "agents",
+    "containment",
+    "zsr-supervisor.mjs",
+  );
+  return existsSync(dev) ? dev : null;
+}
+
+/** Resolve SRT's required ripgrep helper without relying on the launcher's
+ * PATH. Packaged builds execute the staged Resources copy; development first
+ * accepts that same build output, then resolves the pinned optional package. */
+function resolveZsrRipgrepPath(): string | null {
+  const explicit = process.env.ZEROS_ZSR_RIPGREP_PATH?.trim();
+  if (explicit) return existsSync(explicit) ? explicit : null;
+
+  const staged = IS_PACKAGED
+    ? path.join(process.resourcesPath, "zsr-rg")
+    : path.resolve(__dirname, "..", "binaries", "zsr-rg");
+  if (existsSync(staged)) return staged;
+  if (IS_PACKAGED) return null;
+
+  try {
+    const packageName = "@vscode/ripgrep";
+    const packageEntry = require.resolve(packageName);
+    const fromPackage = createRequire(packageEntry);
+    const binary = process.platform === "win32" ? "rg.exe" : "rg";
+    const platformPackage = `@vscode/ripgrep-${process.platform}-${process.arch}`;
+    const resolved = fromPackage.resolve(`${platformPackage}/bin/${binary}`);
+    return existsSync(resolved) ? resolved : null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveZsrContainerWorkerPath(): string | null {
+  if (IS_PACKAGED) {
+    const packaged = path.join(
+      process.resourcesPath,
+      "zsr-container-worker.mjs",
+    );
+    return existsSync(packaged) ? packaged : null;
+  }
+  const dev = path.resolve(
+    __dirname,
+    "..",
+    "apps",
+    "desktop",
+    "src",
+    "engine",
+    "agents",
+    "containment",
+    "zsr-container-worker.mjs",
+  );
+  return existsSync(dev) ? dev : null;
+}
+
+function resolveZsrOrbStackContainerHostPath(): string | null {
+  const candidate = IS_PACKAGED
+    ? path.join(process.resourcesPath, "zsr-orbstack-container-host.mjs")
+    : path.resolve(
+        __dirname,
+        "..",
+        "apps",
+        "desktop",
+        "src",
+        "engine",
+        "agents",
+        "containment",
+        "zsr-orbstack-container-host.mjs",
+      );
+  return existsSync(candidate) ? candidate : null;
+}
+
+function resolveZsrOrbStackCloudInitPath(): string | null {
+  const candidate = IS_PACKAGED
+    ? path.join(process.resourcesPath, "zsr-orbstack-cloud-init.yaml")
+    : path.resolve(
+        __dirname,
+        "..",
+        "apps",
+        "desktop",
+        "src",
+        "engine",
+        "agents",
+        "containment",
+        "zsr-orbstack-cloud-init.yaml",
+      );
+  return existsSync(candidate) ? candidate : null;
+}
+
+function resolveZsrMacosProcessDomainHelperPath(): string | null {
+  if (process.platform !== "darwin") return null;
+  const candidate = IS_PACKAGED
+    ? path.join(process.resourcesPath, "zsr-macos-process-domain")
+    : path.resolve(__dirname, "..", "binaries", "zsr-macos-process-domain");
+  return existsSync(candidate) ? candidate : null;
+}
+
+function resolveZsrGitDispatchBinaryPath(): string | null {
+  if (process.platform !== "darwin") return null;
+  const candidate = IS_PACKAGED
+    ? path.join(process.resourcesPath, "zsr-git-dispatch")
+    : path.resolve(__dirname, "..", "binaries", "zsr-git-dispatch");
+  return existsSync(candidate) ? candidate : null;
 }
 
 /** Resolve the Claude Code CLI the engine should hand the Agent SDK as
@@ -777,6 +904,7 @@ async function killCurrentChild(): Promise<void> {
   state.child = null;
   state.port = null;
   state.instance = null;
+  state.localToken = null;
   if (!current || current.killed) return;
   const pid = current.pid;
 
@@ -786,7 +914,7 @@ async function killCurrentChild(): Promise<void> {
   // whole group so the hosts get their own SIGTERM too, not just via the engine.
   signalEngineTree(current, pid, "SIGTERM");
 
-  // Wait up to 5 s for graceful exit. The `exit` event fires when
+  // Wait up to 15 s for graceful exit. The `exit` event fires when
   // the process actually terminates (whether from SIGTERM or any
   // other cause). Resolve early if it lands within the window.
   //
@@ -796,9 +924,14 @@ async function killCurrentChild(): Promise<void> {
   // 1-2 s end-to-end. At 2 s we were SIGKILLing on every HMR
   // respawn ("engine PID … ignored SIGTERM; SIGKILLed") which left
   // half-flushed SQLite writes and in-flight
-  // permission promises in undefined states. 5 s is comfortably
-  // longer than the slowest observed dispose path while still bounded
-  // enough that a genuinely-hung engine doesn't block respawn forever.
+  // permission promises in undefined states.
+  //
+  // 2026-08-17: bumped from 5 s → 15 s to stay above the engine's own 12 s
+  // shutdown cap (apps/desktop/src/cli.ts). ZSR session teardown promotes
+  // provider-HOME/shadow-Git state and retires process-domain descriptors;
+  // SIGKILLing through that is what turned every dev restart into a
+  // "recovered N crashed process domain(s)" boot. A clean exit still
+  // resolves this wait immediately, so fast restarts stay fast.
   await new Promise<void>((resolve) => {
     let done = false;
     const t = setTimeout(() => {
@@ -806,7 +939,7 @@ async function killCurrentChild(): Promise<void> {
         done = true;
         resolve();
       }
-    }, 5000);
+    }, 15_000);
     current.once("exit", () => {
       if (!done) {
         done = true;
@@ -1047,9 +1180,9 @@ async function reapOrphanEngines(skipPid?: number): Promise<void> {
 }
 
 /**
- * Spawn the engine with `projectRoot` as its working directory. Kills
- * any previous child first, then polls for `<root>/.zeros/.port` (up
- * to 10 s) to discover the actually-bound port.
+ * Spawn the engine with `projectRoot` as its working directory. Kills any
+ * previous child first, then waits through bounded stale-containment recovery
+ * for the exact child to publish and answer through its owned manifest.
  */
 // Single-flight chain across ALL respawn drivers: the HMR code-watcher, the
 // crash watchdog, IPC engineRestart/openProjectFolder, and deep-link handling
@@ -1216,10 +1349,10 @@ async function doSpawnEngine(
   await killCurrentChild();
 
   const { cmd, args: engineArgs } = resolveEngineSpawn();
-  // The engine writes its bootstrap manifest (port + /ws token) here — in the
-  // app-data dir keyed by repo, NOT into <projectRoot>/.zeros anymore. We read
-  // the port back from it below. Delete a stale one first so a slow boot can't
-  // read the previous run's port.
+  // The engine writes its bootstrap manifest (port + boot identity, never the
+  // /ws bearer) here — in the app-data dir keyed by repo, NOT into
+  // <projectRoot>/.zeros. We read the port back below. Delete a stale one first
+  // so a slow boot can't read the previous run's port.
   const manifestFile = path.join(engineRuntimeDir(projectRoot), "engine.json");
   try {
     unlinkSync(manifestFile);
@@ -1283,6 +1416,32 @@ async function doSpawnEngine(
   // to `node` on PATH; see pty-host-client.ts.)
   extraEnv.ZEROS_PTY_HOST_RUNTIME = process.execPath;
   extraEnv.ZEROS_PTY_HOST_RUNTIME_ELECTRON = "1";
+  extraEnv.ZEROS_ZSR_SUPERVISOR_RUNTIME = process.execPath;
+  const zsrSupervisor = resolveZsrSupervisorPath();
+  if (zsrSupervisor) extraEnv.ZEROS_ZSR_SUPERVISOR_SCRIPT = zsrSupervisor;
+  const zsrRipgrep = resolveZsrRipgrepPath();
+  if (zsrRipgrep) extraEnv.ZEROS_ZSR_RIPGREP_PATH = zsrRipgrep;
+  const zsrContainerWorker = resolveZsrContainerWorkerPath();
+  if (zsrContainerWorker) {
+    extraEnv.ZEROS_ZSR_CONTAINER_WORKER_SCRIPT = zsrContainerWorker;
+  }
+  const zsrOrbStackContainerHost = resolveZsrOrbStackContainerHostPath();
+  if (zsrOrbStackContainerHost) {
+    extraEnv.ZEROS_ZSR_ORBSTACK_CONTAINER_HOST_SCRIPT =
+      zsrOrbStackContainerHost;
+  }
+  const zsrOrbStackCloudInit = resolveZsrOrbStackCloudInitPath();
+  if (zsrOrbStackCloudInit) {
+    extraEnv.ZEROS_ZSR_ORBSTACK_CLOUD_INIT = zsrOrbStackCloudInit;
+  }
+  const zsrMacosProcessDomain = resolveZsrMacosProcessDomainHelperPath();
+  if (zsrMacosProcessDomain) {
+    extraEnv.ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER = zsrMacosProcessDomain;
+  }
+  const zsrGitDispatch = resolveZsrGitDispatchBinaryPath();
+  if (zsrGitDispatch) {
+    extraEnv.ZEROS_ZSR_GIT_DISPATCH_BINARY = zsrGitDispatch;
+  }
 
   // Parent-death watchdog opt-in: the engine self-exits (bounded graceful
   // stop) when THIS Electron process dies without cleanly stopping it —
@@ -1384,18 +1543,11 @@ async function doSpawnEngine(
   extraEnv.ZEROS_REQUIRE_ACCOUNT =
     process.env.ZEROS_REQUIRE_ACCOUNT?.trim() || (IS_DEV ? "0" : "1");
 
-  // Per-launch secret the engine requires on its loopback /ws upgrade. The
-  // renderer fetches it over IPC (get_engine_token) — a website that opens a
-  // cross-origin ws:// to 127.0.0.1 cannot read it, so it can't pose as a local
-  // client. Stable for the app's lifetime so an in-place engine respawn keeps
-  // the same token the renderer already cached.
-  extraEnv.ZEROS_LOCAL_WS_TOKEN = LOCAL_WS_TOKEN;
-
-  // Tell the engine that fd 3 is a private host→engine control pipe (added to
-  // `stdio` below). The MCP gateway writes its OAuth token vault there for
-  // safeStorage persistence — a channel the host never logs (unlike stdout) and
-  // the relay never sees. Absent this flag (a standalone / CLI engine), the engine
-  // doesn't write there, so a stray fd 3 is never touched.
+  // Tell the engine that fd 3 is a private engine→host control pipe (added to
+  // `stdio` below). The engine publishes its per-process loopback authority and
+  // MCP OAuth-vault persistence messages there — a channel the host never logs
+  // (unlike stdout) and the relay never sees. Absent this flag (a standalone /
+  // CLI engine), the engine does not touch a stray fd 3.
   extraEnv.ZEROS_CONTROL_FD = "3";
 
   const child = spawn(
@@ -1415,7 +1567,8 @@ async function doSpawnEngine(
     {
       cwd: projectRoot,
       // [stdin, stdout, stderr, control] — fd 3 is the engine→host control pipe
-      // (ZEROS_CONTROL_FD) for the MCP OAuth vault; the rest are the usual pipes.
+      // (ZEROS_CONTROL_FD) for local authority and the MCP OAuth vault; the rest
+      // are the usual pipes.
       stdio: ["pipe", "pipe", "pipe", "pipe"],
       // process.env is spread first; extraEnv overrides it. The engine is
       // local-only (no relay); only the loopback bridge listens.
@@ -1433,6 +1586,15 @@ async function doSpawnEngine(
       detached: process.platform !== "win32",
     },
   );
+
+  // Publish the exact child before attaching fd-3 listeners. The engine emits
+  // its authority immediately at start; assigning later risks dropping a
+  // legitimate early control message as belonging to no active generation.
+  state.child = child;
+  state.root = projectRoot;
+  state.localToken = null;
+  // Wrapping add; JS numbers are safe up to 2^53.
+  state.spawnGeneration = (state.spawnGeneration + 1) & 0xffffffff;
 
   // Forward child stdout/stderr line-by-line through the parent's
   // overridden console.log / console.error so they land in main.log
@@ -1475,14 +1637,18 @@ async function doSpawnEngine(
   forwardLines(child.stderr, (line) => {
     console.error(`[engine] ${stripAnsi(line)}`);
   });
-  // fd 3 — the engine→host control pipe. The MCP gateway hands back its OAuth
-  // token vault here for safeStorage persistence. Deliberately not routed
-  // to console/log: the line carries plaintext tokens, and stdout/stderr are
-  // forwarded to main.log / engine.log. `parseVaultControl` ignores anything that
-  // isn't a vault message, so the channel is safe to extend later.
+  // fd 3 — the engine→host control pipe. It carries the child-minted loopback
+  // bearer plus MCP vault persistence. Deliberately never routed to logs.
   forwardLines(
     (child.stdio[3] as unknown as NodeJS.ReadableStream | null) ?? null,
     (line) => {
+      const authority = parseEngineLocalAuthorityControl(line);
+      if (authority) {
+        // Bind the secret to the exact child generation whose pipe delivered
+        // it. A stale child racing after replacement cannot overwrite state.
+        if (state.child === child) state.localToken = authority;
+        return;
+      }
       const snapshot = parseVaultControl(line);
       if (!snapshot) return;
       try {
@@ -1578,11 +1744,6 @@ async function doSpawnEngine(
     }
   }
 
-  state.child = child;
-  state.root = projectRoot;
-  // Wrapping add; JS numbers are safe up to 2^53.
-  state.spawnGeneration = (state.spawnGeneration + 1) & 0xffffffff;
-
   // Seed GitHub credentials over the private parent→child pipe. Keeping this
   // out of the spawn environment prevents the engine's terminal and agent
   // subprocesses from inheriting a durable credential.
@@ -1620,8 +1781,26 @@ async function doSpawnEngine(
     }
   });
 
-  const deadline = Date.now() + 10_000;
-  while (Date.now() < deadline) {
+  const startupBeganAt = Date.now();
+  while (true) {
+    const waitDecision = engineStartupWaitDecision({
+      elapsedMs: Date.now() - startupBeganAt,
+      childExited: child.exitCode !== null || child.signalCode !== null,
+    });
+    if (waitDecision === "child-exited") {
+      throw new Error(
+        `engine child exited before binding ` +
+          `(code=${child.exitCode ?? "none"}, signal=${child.signalCode ?? "none"})`,
+      );
+    }
+    if (waitDecision === "timed-out") {
+      // A child that binds just after its supervisor gives up must not race the
+      // next generation for the manifest or a channel-owned port.
+      await killCurrentChild();
+      throw new Error(
+        `engine did not bind within ${ENGINE_STARTUP_TIMEOUT_MS / 60_000} minutes`,
+      );
+    }
     let manifest: ReturnType<typeof parseOwnedEngineManifest> = null;
     try {
       const raw = readFileSync(manifestFile, "utf-8");
@@ -1639,7 +1818,7 @@ async function doSpawnEngine(
     // engine, whose /ws token differs → the socket upgrade is rejected and
     // every request dies as "Request timeout: WORKSPACE_REQUEST". Only accept
     // a manifest written by the child we just spawned.
-    if (manifest) {
+    if (manifest && state.localToken) {
       const rangeEnd = requestedPort + portSpan - 1;
       if (manifest.port < requestedPort || manifest.port > rangeEnd) {
         console.error(
@@ -1670,8 +1849,6 @@ async function doSpawnEngine(
     }
     await new Promise<void>((r) => setTimeout(r, 100));
   }
-
-  throw new Error("engine did not bind within 10 seconds");
 }
 
 /** Idempotent engine shutdown. Flips the shutting-down flag so the
@@ -1695,17 +1872,15 @@ export function shutdown(): void {
   state.child = null;
   state.port = null;
   state.instance = null;
+  state.localToken = null;
   state.root = null;
 }
 
-/** Per-launch loopback /ws auth token. Minted once per app launch, handed
- *  to every engine spawn via ZEROS_LOCAL_WS_TOKEN, and served to the renderer
- *  over IPC (get_engine_token). A website can reach 127.0.0.1 but can't read
- *  this, so it can't authenticate as the local renderer. */
-const LOCAL_WS_TOKEN = randomBytes(32).toString("hex");
-
 export function currentLocalToken(): string {
-  return LOCAL_WS_TOKEN;
+  if (!state.localToken) {
+    throw new Error("engine launch authority is not ready");
+  }
+  return state.localToken;
 }
 
 /** Courier the selected GitHub credential to the running engine over stdin —

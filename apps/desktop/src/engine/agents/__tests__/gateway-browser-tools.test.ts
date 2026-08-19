@@ -20,16 +20,21 @@ vi.mock("../../browser/browser-tool-client", () => ({
     env,
 }));
 vi.mock("../../git/state", () => ({
+  // The mocked canonical workspace path must contain the cwd these tests pass:
+  // admission refuses a cwd outside its canonical workspace before any
+  // browser capability is resolved.
   getWorkspaceById: vi.fn(() => ({
-    path: "/tmp/zeros-workspace-root",
+    path: "/tmp",
     repoRoot: "/tmp",
   })),
+  listWorkspaces: vi.fn(() => []),
 }));
 vi.mock("../../git/target-branch", () => ({
   resolveWorkspaceTargetRef: vi.fn(async () => null),
 }));
 
 import { AgentGateway } from "../gateway";
+import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
 describe("AgentGateway Zeros browser ownership", () => {
   beforeEach(() => {
@@ -59,6 +64,7 @@ describe("AgentGateway Zeros browser ownership", () => {
     } as unknown as AgentAdapter;
     const gateway = new AgentGateway({
       projectRoot: "/tmp",
+      executionBoundary: testExecutionBoundary(),
       events: {
         onSessionUpdate: () => {},
         onPermissionRequest: () => {},
@@ -88,7 +94,7 @@ describe("AgentGateway Zeros browser ownership", () => {
     expect(acquire).toHaveBeenCalledWith({
       workspaceId: "workspace-zeros",
       conversationId: "conversation-zeros",
-      workspaceRoot: "/tmp/zeros-workspace-root",
+      workspaceRoot: "/tmp",
       mainRepoRoot: "/tmp",
     });
     expect(received).toEqual({
@@ -124,6 +130,7 @@ describe("AgentGateway Zeros browser ownership", () => {
       } as unknown as AgentAdapter;
       const gateway = new AgentGateway({
         projectRoot: "/tmp",
+        executionBoundary: testExecutionBoundary(),
         events: {
           onSessionUpdate: () => {},
           onPermissionRequest: () => {},
@@ -178,6 +185,7 @@ describe("AgentGateway Zeros browser ownership", () => {
     } as unknown as AgentAdapter;
     const gateway = new AgentGateway({
       projectRoot: "/tmp",
+      executionBoundary: testExecutionBoundary(),
       events: {
         onSessionUpdate: () => {},
         onPermissionRequest: () => {},
@@ -219,6 +227,7 @@ describe("AgentGateway Zeros browser ownership", () => {
     } as unknown as AgentAdapter;
     const gateway = new AgentGateway({
       projectRoot: "/tmp",
+      executionBoundary: testExecutionBoundary(),
       events: {
         onSessionUpdate: () => {},
         onPermissionRequest: () => {},
@@ -281,6 +290,7 @@ describe("AgentGateway Zeros browser ownership", () => {
     } as unknown as AgentAdapter;
     const gateway = new AgentGateway({
       projectRoot: "/tmp",
+      executionBoundary: testExecutionBoundary(),
       events: {
         onSessionUpdate: () => {},
         onPermissionRequest: () => {},
@@ -326,6 +336,7 @@ describe("AgentGateway Zeros browser ownership", () => {
     const received = new Map<string, AgentBrowserUse | undefined>();
     const gateway = new AgentGateway({
       projectRoot: "/tmp",
+      executionBoundary: testExecutionBoundary(),
       events: {
         onSessionUpdate: () => {},
         onPermissionRequest: () => {},
