@@ -290,7 +290,7 @@ describe("ZSR supervisor launch contract", () => {
         ZEROS_ZSR_GIT_DISPATCH_CONFIG: expected,
       },
     });
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
   it("still rejects a container launcher outside immutable private tools", async () => {

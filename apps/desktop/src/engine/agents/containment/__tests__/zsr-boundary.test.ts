@@ -300,6 +300,50 @@ describe("ZSR execution boundary", () => {
     });
   });
 
+  it("deduplicates physical aliases for an ambient container socket", async () => {
+    const socketRoot = path.join(root, "container-runtime");
+    const socketAlias = path.join(root, "container-runtime-alias");
+    const socket = path.join(socketRoot, "docker.sock");
+    await mkdir(socketRoot);
+    await writeFile(socket, "socket placeholder\n");
+    await symlink(socketRoot, socketAlias, "dir");
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+    });
+    const prepared = await boundary.prepare({
+      executionId: "ambient-container-alias",
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+    });
+    try {
+      const launch = prepared.wrapSpawn({
+        command: process.execPath,
+        args: ["-e", "process.exit(0)"],
+        cwd: workspace,
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          DOCKER_HOST: `unix://${socket}`,
+          CONTAINER_HOST: `unix://${path.join(socketAlias, "docker.sock")}`,
+        },
+      });
+      const commandPath = launch.args[launch.args.indexOf("--command") + 1];
+      const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
+        deniedContainerSockets: string[];
+      };
+
+      expect(
+        descriptor.deniedContainerSockets.filter((candidate) =>
+          candidate.startsWith(root),
+        ),
+      ).toEqual([socket]);
+    } finally {
+      await prepared.stopAndProve();
+    }
+  });
+
   it("owns an asynchronous direct-spawn ENOENT before process registration", async () => {
     const runtime = path.join(root, "ephemeral-node");
     await writeFile(

@@ -522,6 +522,15 @@ const AMBIENT_CONTAINER_SELECTOR_ENV = new Set([
   "PODMAN_HOST",
 ]);
 
+function physicalPathIfPresent(candidate: string): string {
+  const normalized = path.normalize(candidate);
+  try {
+    return realpathSync(normalized);
+  } catch {
+    return normalized;
+  }
+}
+
 /** Known or explicitly advertised host-daemon sockets. Linux masks existing
  * endpoints in the mount namespace; macOS subtracts connect/bind operations in
  * SRT's host-parity Seatbelt profile. The list is deliberately endpoint-shaped
@@ -530,20 +539,23 @@ const AMBIENT_CONTAINER_SELECTOR_ENV = new Set([
 function ambientContainerSocketPaths(
   environment: Readonly<Record<string, string>>,
 ): string[] {
-  const sockets = new Set<string>([
-    "/private/var/run/docker.sock",
-    "/run/docker.sock",
-    "/run/podman/podman.sock",
-    "/var/run/docker.sock",
-    "/var/run/podman/podman.sock",
-  ]);
+  const sockets = new Set<string>();
   const addSocket = (candidate: string | undefined): void => {
     const value = candidate?.trim();
     if (!value || value.includes("\0")) return;
     const socket = value.startsWith("unix://") ? value.slice(7) : value;
     if (!path.isAbsolute(socket)) return;
-    sockets.add(path.normalize(socket));
+    sockets.add(physicalPathIfPresent(socket));
   };
+  for (const socket of [
+    "/private/var/run/docker.sock",
+    "/run/docker.sock",
+    "/run/podman/podman.sock",
+    "/var/run/docker.sock",
+    "/var/run/podman/podman.sock",
+  ]) {
+    addSocket(socket);
+  }
   for (const name of ["DOCKER_HOST", "CONTAINER_HOST", "PODMAN_HOST"]) {
     addSocket(environment[name]);
   }
@@ -1061,7 +1073,7 @@ class PreparedZsrBoundary implements PreparedBoundary {
     const descriptor = nextCommandDescriptorPath(this.policy.paths);
     const allowedUnixSockets = new Set(
       this.policy.document.runtime.allowedUnixSockets.map((socket) =>
-        path.normalize(socket),
+        physicalPathIfPresent(socket),
       ),
     );
     const deniedContainerSockets = ambientContainerSocketPaths(
