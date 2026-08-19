@@ -43,6 +43,15 @@ describe("repository layout contracts", () => {
     expect(preflight).toContain("ZSR_LINUX_ARM64_RESULT:");
   });
 
+  it("uses the HTTPS Ubuntu archive before the amd64 containment install", () => {
+    const preflight = read(".github/workflows/preflight.yml");
+    const archive = preflight.indexOf("https://archive.ubuntu.com/ubuntu");
+    const update = preflight.indexOf("sudo apt-get update");
+
+    expect(archive).toBeGreaterThanOrEqual(0);
+    expect(archive).toBeLessThan(update);
+  });
+
   it("fails closed when an explicit containment test path disappears", () => {
     const rootPackage = JSON.parse(read("package.json")) as {
       scripts: Record<string, string>;

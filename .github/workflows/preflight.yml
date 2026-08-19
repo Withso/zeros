@@ -154,6 +154,16 @@ jobs:
         # protection globally. The smoke command keeps image/profile drift from
         # surfacing later as opaque containment-test failures.
         run: |
+          # ubuntu-latest currently puts an HTTP Azure endpoint first in this
+          # generated mirror list. A dead endpoint can leave apt waiting for
+          # every package index for the lifetime of the job even after it finds
+          # the HTTPS fallback. Use that healthy archive directly on amd64.
+          runner_ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+          if [ -f "$runner_ubuntu_sources" ]; then
+            sudo sed -i \
+              's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
+              "$runner_ubuntu_sources"
+          fi
           sudo apt-get update
           sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap socat
           sudo install -m 0644 \
