@@ -93,6 +93,10 @@ extraResources:
   # app.asar/node_modules lookup at the security boundary.
   - from: binaries/zsr-supervisor.mjs
     to: zsr-supervisor.mjs
+  # SRT requires ripgrep while it constructs the sandbox. Stage the exact
+  # optional-dependency binary rather than assuming Homebrew/system PATH.
+  - from: binaries/zsr-rg
+    to: zsr-rg
   - from: binaries/zsr-container-worker.mjs
     to: zsr-container-worker.mjs
   - from: binaries/zsr-orbstack-container-host.mjs

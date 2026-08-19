@@ -781,8 +781,9 @@ jobs:
         # GIT_CONFIG_* trio restates that for this one path so the job can't
         # silently start failing if upstream ever drops that line.
         #
-        # No `--config`: the default ruleset is used, so there is no allowlist file
-        # that could silently mute a rule.
+        # No `--config`: the default ruleset is used. `.gitleaksignore` may
+        # suppress only reviewed, exact finding fingerprints; broad rule/path
+        # allowlists remain prohibited.
         #
         # `LOG_OPTS` is routed through `env:` for the same reason the range step
         # routes `BASE_SHA`: a `${{ }}` value spliced straight into `run:` is a

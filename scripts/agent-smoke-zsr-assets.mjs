@@ -9,6 +9,7 @@ const ZSR_ASSETS = {
     "zsr-orbstack-container-host.mjs",
   ZEROS_ZSR_ORBSTACK_CLOUD_INIT: "zsr-orbstack-cloud-init.yaml",
   ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER: "zsr-macos-process-domain",
+  ZEROS_ZSR_RIPGREP_PATH: "zsr-rg",
 };
 
 const DARWIN_ONLY_ASSETS = new Set([

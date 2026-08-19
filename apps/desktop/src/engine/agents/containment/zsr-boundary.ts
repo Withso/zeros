@@ -19,6 +19,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 
 import {
@@ -96,6 +97,68 @@ const PORT_DISCOVERY_INTERVAL_MS = 250;
 const PORT_DISCOVERY_MISSING_POLLS = 8;
 const MAX_AUTO_PORT_LEASES = 64;
 const COMMAND_DESCRIPTOR_VERSION = 6 as const;
+
+function canonicalExecutablePath(candidate: string): string | null {
+  if (!path.isAbsolute(candidate) || candidate.includes("\0")) return null;
+  try {
+    const canonical = realpathSync(candidate);
+    const stat = lstatSync(canonical);
+    return stat.isFile() && !stat.isSymbolicLink() && (stat.mode & 0o111) !== 0
+      ? canonical
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/** SRT shells out to ripgrep while constructing filesystem policy. Keep that
+ * dependency product-owned: packaged builds use the staged supervisor sibling,
+ * source builds use the exact optional dependency, and cloud images may retain
+ * their qualified system binary as a final fallback. */
+function resolveZsrRipgrepPath(
+  projectRoot: string,
+  supervisorScript: string,
+  explicit?: string,
+): string | null {
+  const configured = explicit?.trim();
+  if (configured) return canonicalExecutablePath(configured) ?? configured;
+
+  for (const candidate of [
+    path.join(path.dirname(supervisorScript), "zsr-rg"),
+    path.join(projectRoot, "binaries", "zsr-rg"),
+  ]) {
+    const canonical = canonicalExecutablePath(candidate);
+    if (canonical) return canonical;
+  }
+
+  try {
+    const packageName = "@vscode/ripgrep";
+    const sourceRequire = createRequire(
+      typeof __filename === "string"
+        ? __filename
+        : path.join(process.cwd(), "package.json"),
+    );
+    const packageEntry = sourceRequire.resolve(packageName);
+    const packageRequire = createRequire(packageEntry);
+    const binary = process.platform === "win32" ? "rg.exe" : "rg";
+    const platformPackage = `@vscode/ripgrep-${process.platform}-${process.arch}`;
+    const canonical = canonicalExecutablePath(
+      packageRequire.resolve(`${platformPackage}/bin/${binary}`),
+    );
+    if (canonical) return canonical;
+  } catch {
+    // A compiled engine has no node_modules; packaged and cloud fallbacks remain.
+  }
+
+  const binary = process.platform === "win32" ? "rg.exe" : "rg";
+  for (const directory of (process.env.PATH ?? "").split(path.delimiter)) {
+    if (!path.isAbsolute(directory)) continue;
+    const canonical = canonicalExecutablePath(path.join(directory, binary));
+    if (canonical) return canonical;
+  }
+  return null;
+}
+
 /** TLS-trust variables whose absence the admission canary pins. Host parity
  * must leave every one exactly as the caller set it and never synthesize one.
  * The admission canary asserts that, because the only user-visible symptom of
@@ -369,6 +432,7 @@ async function discoverBoundaryGitRepositories(
 function supervisorBootstrapEnv(
   policy: PreparedZsrPolicy,
   cloudToolchain?: CloudWorkerToolchain,
+  ripgrepPath?: string | null,
 ): Record<string, string> {
   return {
     PATH: process.env.PATH ?? "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
@@ -395,6 +459,7 @@ function supervisorBootstrapEnv(
     ...(process.env.ZEROS_PTY_HOST_RUNTIME_ELECTRON === "1"
       ? { ELECTRON_RUN_AS_NODE: "1" }
       : {}),
+    ...(ripgrepPath ? { ZEROS_ZSR_RIPGREP_PATH: ripgrepPath } : {}),
     ...(cloudToolchain
       ? {
           ZEROS_ZSR_BWRAP_PATH: cloudToolchain.bwrap,
@@ -567,6 +632,8 @@ export interface ZsrBoundaryOptions {
   projectRoot: string;
   supervisorScript?: string;
   supervisorRuntime?: string;
+  /** Product-owned ripgrep executable required by SRT policy construction. */
+  ripgrepPath?: string;
   containerWorkerScript?: string;
   /** Linux helper copied into the dedicated OrbStack container machine. */
   macosContainerHostScript?: string;
@@ -950,6 +1017,7 @@ class PreparedZsrBoundary implements PreparedBoundary {
     private readonly runtime: string,
     private readonly supervisorScript: string,
     private readonly cloudWorkerToolchain: CloudWorkerToolchain | undefined,
+    private readonly ripgrepPath: string | null,
     private readonly gitIntegrationBroker: ZsrGitIntegrationBroker | null,
     private readonly macosContainerWorker: MacosContainerWorkerLease | null,
     private readonly macosProcessDomain: MacosProcessDomain | null,
@@ -1037,7 +1105,11 @@ class PreparedZsrBoundary implements PreparedBoundary {
         descriptor,
       ],
       cwd: request.cwd,
-      env: supervisorBootstrapEnv(this.policy, this.cloudWorkerToolchain),
+      env: supervisorBootstrapEnv(
+        this.policy,
+        this.cloudWorkerToolchain,
+        this.ripgrepPath,
+      ),
       stdio: request.stdio ?? "pipe",
     };
   }
@@ -1451,6 +1523,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
   readonly backend: "zeros-srt" | "cloud-worker";
   private readonly supervisorScript: string;
   private readonly supervisorRuntime: string;
+  private readonly ripgrepPath: string | null;
   private readonly containerWorkerSource: string;
   private readonly macosContainerHostSource: string;
   private readonly macosContainerCloudInit: string;
@@ -1480,6 +1553,14 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       process.env.ZEROS_ZSR_SUPERVISOR_RUNTIME ??
       process.env.ZEROS_PTY_HOST_RUNTIME ??
       process.execPath;
+    this.ripgrepPath = resolveZsrRipgrepPath(
+      options.projectRoot,
+      this.supervisorScript,
+      options.ripgrepPath ??
+        (options.cloudWorkerToolchain
+          ? undefined
+          : process.env.ZEROS_ZSR_RIPGREP_PATH),
+    );
     this.containerWorkerSource =
       options.containerWorkerScript ??
       process.env.ZEROS_ZSR_CONTAINER_WORKER_SCRIPT ??
@@ -1595,6 +1676,12 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       !existsSync(this.supervisorRuntime)
     ) {
       reasons.push("ZSR supervisor runtime is missing");
+    }
+    if (
+      !this.ripgrepPath ||
+      canonicalExecutablePath(this.ripgrepPath) === null
+    ) {
+      reasons.push("ZSR ripgrep runtime is missing");
     }
     if (process.platform === "darwin" && reasons.length === 0) {
       try {
@@ -2153,6 +2240,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       this.supervisorRuntime,
       this.supervisorScript,
       this.options.cloudWorkerToolchain,
+      this.ripgrepPath,
       gitIntegrationBroker,
       macosContainerWorker,
       macosProcessDomain,

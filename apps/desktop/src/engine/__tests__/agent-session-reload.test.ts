@@ -358,32 +358,42 @@ describe("agent session continuity across a local renderer reload", () => {
   });
 
   it("classifies a conversation with no live execution or binding as an expected miss", async () => {
-    const engine = new ZerosEngine({ root: process.cwd(), port: 29_898 });
-    const state = internals(engine);
-    const { client, messages } = testClient();
-    state.router.register(client);
-    const loadSession = vi.spyOn(state.agents, "loadSession");
-
-    await state.handleMessage(
-      {
-        type: "AGENT_LOAD_SESSION",
-        id: "load-missing-conversation",
-        source: "browser",
-        timestamp: 1,
-        agentId: "codex",
-        chatId: "conversation-missing",
-        cwd: process.cwd(),
-      },
-      client,
+    const dbDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "zeros-missing-conversation-"),
     );
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    try {
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_898 });
+      const state = internals(engine);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      const loadSession = vi.spyOn(state.agents, "loadSession");
 
-    expect(loadSession).not.toHaveBeenCalled();
-    expect(messages).toEqual([
-      expect.objectContaining({
-        type: "AGENT_ERROR",
-        failure: expect.objectContaining({ kind: "session-expired" }),
-      }),
-    ]);
+      await state.handleMessage(
+        {
+          type: "AGENT_LOAD_SESSION",
+          id: "load-missing-conversation",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          chatId: "conversation-missing",
+          cwd: process.cwd(),
+        },
+        client,
+      );
+
+      expect(loadSession).not.toHaveBeenCalled();
+      expect(messages).toEqual([
+        expect.objectContaining({
+          type: "AGENT_ERROR",
+          failure: expect.objectContaining({ kind: "session-expired" }),
+        }),
+      ]);
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 
   it("never degrades a dead executionId into a provider resume locator", async () => {

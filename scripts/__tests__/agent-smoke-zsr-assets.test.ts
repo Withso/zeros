@@ -62,6 +62,7 @@ describe("live agent smoke ZSR assets", () => {
         "/repo/binaries/zsr-orbstack-cloud-init.yaml",
       ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER:
         "/repo/binaries/zsr-macos-process-domain",
+      ZEROS_ZSR_RIPGREP_PATH: "/repo/binaries/zsr-rg",
     });
   });
 
@@ -104,6 +105,7 @@ describe("live agent smoke ZSR assets", () => {
       "zsr-container-worker.mjs",
       "zsr-orbstack-container-host.mjs",
       "zsr-orbstack-cloud-init.yaml",
+      "zsr-rg",
     ];
     try {
       await mkdir(path.dirname(cursorHost), { recursive: true });

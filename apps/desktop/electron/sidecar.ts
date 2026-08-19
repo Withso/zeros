@@ -339,6 +339,32 @@ function resolveZsrSupervisorPath(): string | null {
   return existsSync(dev) ? dev : null;
 }
 
+/** Resolve SRT's required ripgrep helper without relying on the launcher's
+ * PATH. Packaged builds execute the staged Resources copy; development first
+ * accepts that same build output, then resolves the pinned optional package. */
+function resolveZsrRipgrepPath(): string | null {
+  const explicit = process.env.ZEROS_ZSR_RIPGREP_PATH?.trim();
+  if (explicit) return existsSync(explicit) ? explicit : null;
+
+  const staged = IS_PACKAGED
+    ? path.join(process.resourcesPath, "zsr-rg")
+    : path.resolve(__dirname, "..", "binaries", "zsr-rg");
+  if (existsSync(staged)) return staged;
+  if (IS_PACKAGED) return null;
+
+  try {
+    const packageName = "@vscode/ripgrep";
+    const packageEntry = require.resolve(packageName);
+    const fromPackage = createRequire(packageEntry);
+    const binary = process.platform === "win32" ? "rg.exe" : "rg";
+    const platformPackage = `@vscode/ripgrep-${process.platform}-${process.arch}`;
+    const resolved = fromPackage.resolve(`${platformPackage}/bin/${binary}`);
+    return existsSync(resolved) ? resolved : null;
+  } catch {
+    return null;
+  }
+}
+
 function resolveZsrContainerWorkerPath(): string | null {
   if (IS_PACKAGED) {
     const packaged = path.join(
@@ -1393,6 +1419,8 @@ async function doSpawnEngine(
   extraEnv.ZEROS_ZSR_SUPERVISOR_RUNTIME = process.execPath;
   const zsrSupervisor = resolveZsrSupervisorPath();
   if (zsrSupervisor) extraEnv.ZEROS_ZSR_SUPERVISOR_SCRIPT = zsrSupervisor;
+  const zsrRipgrep = resolveZsrRipgrepPath();
+  if (zsrRipgrep) extraEnv.ZEROS_ZSR_RIPGREP_PATH = zsrRipgrep;
   const zsrContainerWorker = resolveZsrContainerWorkerPath();
   if (zsrContainerWorker) {
     extraEnv.ZEROS_ZSR_CONTAINER_WORKER_SCRIPT = zsrContainerWorker;

@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { build } from "esbuild";
+import { rgPath } from "@vscode/ripgrep";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const entry = path.join(
@@ -50,6 +51,7 @@ const gitDispatchEntry = path.join(
   "apps/desktop/src/engine/agents/containment/zsr-git-dispatch.c",
 );
 const gitDispatchOutput = path.join(root, "binaries/zsr-git-dispatch");
+const ripgrepOutput = path.join(root, "binaries/zsr-rg");
 
 await mkdir(path.dirname(output), { recursive: true });
 await build({
@@ -74,6 +76,11 @@ await copyFile(containerWorkerEntry, containerWorkerOutput);
 await chmod(containerWorkerOutput, 0o755);
 await copyFile(orbStackHostEntry, orbStackHostOutput);
 await chmod(orbStackHostOutput, 0o755);
+const ripgrepTemporaryOutput = `${ripgrepOutput}.tmp-${process.pid}`;
+await rm(ripgrepTemporaryOutput, { force: true });
+await copyFile(rgPath, ripgrepTemporaryOutput);
+await chmod(ripgrepTemporaryOutput, 0o555);
+await rename(ripgrepTemporaryOutput, ripgrepOutput);
 const cloudInitTemporaryOutput = `${orbStackCloudInitOutput}.tmp-${process.pid}`;
 await rm(cloudInitTemporaryOutput, { force: true });
 await copyFile(orbStackCloudInitEntry, cloudInitTemporaryOutput);
@@ -157,7 +164,7 @@ if (process.platform === "darwin") {
   await rename(gitDispatchTemporaryOutput, gitDispatchOutput);
 }
 console.log(
-  `[build-zsr-supervisor] wrote ${output}, ${containerWorkerOutput}, ${orbStackHostOutput}, ${orbStackCloudInitOutput}${
+  `[build-zsr-supervisor] wrote ${output}, ${containerWorkerOutput}, ${orbStackHostOutput}, ${orbStackCloudInitOutput}, ${ripgrepOutput}${
     process.platform === "darwin"
       ? `, ${macosProcessDomainOutput}, and ${gitDispatchOutput}`
       : ""

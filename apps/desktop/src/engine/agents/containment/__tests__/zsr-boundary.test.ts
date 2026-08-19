@@ -242,6 +242,10 @@ describe("ZSR execution boundary", () => {
     expect(launch.env.SENTINEL).toBeUndefined();
     expect(launch.env.OPENAI_API_KEY).toBeUndefined();
     expect(launch.env.SRT_DEBUG).toBe("1");
+    expect(path.isAbsolute(launch.env.ZEROS_ZSR_RIPGREP_PATH ?? "")).toBe(true);
+    await expect(
+      access(launch.env.ZEROS_ZSR_RIPGREP_PATH!),
+    ).resolves.toBeUndefined();
 
     const commandPath = launch.args[launch.args.indexOf("--command") + 1];
     expect((await stat(commandPath)).mode & 0o777).toBe(0o600);
@@ -267,6 +271,7 @@ describe("ZSR execution boundary", () => {
       true,
     );
     expect(descriptor.env.ZEROS_LOCAL_WS_TOKEN).toBeUndefined();
+    expect(descriptor.env.ZEROS_ZSR_RIPGREP_PATH).toBeUndefined();
     for (const ambientContainerSelector of [
       "DOCKER_HOST",
       "DOCKER_CONTEXT",

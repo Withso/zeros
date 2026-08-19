@@ -416,6 +416,12 @@ function linuxHelpers(policyRoot, cloudWorker) {
 }
 
 function completeConfig(policy, policyPath, commandPath, command) {
+  const ripgrep =
+    process.env.ZEROS_ZSR_RIPGREP_PATH ||
+    executableOnPath(process.platform === "win32" ? "rg.exe" : "rg");
+  if (!ripgrep) {
+    throw new Error("absolute ripgrep unavailable");
+  }
   return {
     hostParity: true,
     filesystem: {
@@ -450,6 +456,9 @@ function completeConfig(policy, policyPath, commandPath, command) {
       allowLocalBinding: true,
     },
     allowPty: true,
+    ripgrep: {
+      command: canonicalExecutable(ripgrep, "ripgrep"),
+    },
     // Host-parity starts from `(allow default)`, so this switch alone cannot
     // subtract Launch Services. `containedTarget` adds the explicit nested
     // denies that make the setting effective for the full descendant tree.

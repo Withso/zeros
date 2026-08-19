@@ -15,6 +15,7 @@ import {
   SandboxRuntimeConfigSchema,
 } from "@anthropic-ai/sandbox-runtime";
 import { wrapCommandWithSandboxMacOS } from "@anthropic-ai/sandbox-runtime/dist/sandbox/macos-sandbox-utils.js";
+import { rgPath } from "@vscode/ripgrep";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 const SUPERVISOR = path.join(
@@ -54,6 +55,7 @@ describe("ZSR host-parity supervisor", () => {
       },
       allowPty: true,
       allowAppleEvents: false,
+      ripgrep: { command: rgPath },
     });
 
     try {
@@ -72,6 +74,8 @@ describe("ZSR host-parity supervisor", () => {
     expect(source).toContain("hostParity: true");
     expect(source).toContain("linuxPrivilegedWorker");
     expect(source).toContain("allowAppleEvents: false");
+    expect(source).toContain("ZEROS_ZSR_RIPGREP_PATH");
+    expect(source).toContain("ripgrep:");
     expect(source).not.toContain("allowAppleEvents: true");
     expect(source).toContain("(deny appleevent-send)");
     expect(source).toContain("(deny lsopen)");

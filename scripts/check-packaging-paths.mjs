@@ -54,6 +54,7 @@ const CODEX_STAGED = [
 ];
 const ZSR_STAGED = [
   "binaries/zsr-supervisor.mjs",
+  "binaries/zsr-rg",
   "binaries/zsr-container-worker.mjs",
   "binaries/zsr-orbstack-container-host.mjs",
   "binaries/zsr-orbstack-cloud-init.yaml",
@@ -256,6 +257,14 @@ if (
     "build-zsr-supervisor must compile the reviewed Darwin process-domain and Git-dispatch C sources with the Apple toolchain",
   );
 }
+if (
+  !/@vscode\/ripgrep/.test(zsrBuildSource) ||
+  !/zsr-rg/.test(zsrBuildSource)
+) {
+  errs.push(
+    "build-zsr-supervisor must stage the pinned ripgrep binary required by SRT",
+  );
+}
 if (!/ZEROS_ZSR_MACOS_PROCESS_DOMAIN_HELPER/.test(sidecarSource)) {
   errs.push(
     "the Electron sidecar must pass the packaged macOS process-domain helper to the engine",
@@ -269,6 +278,11 @@ if (!/ZEROS_ZSR_GIT_DISPATCH_BINARY/.test(sidecarSource)) {
 if (!/ZEROS_ZSR_CONTAINER_WORKER_SCRIPT/.test(sidecarSource)) {
   errs.push(
     "the Electron sidecar must pass the packaged container-worker launcher to the engine",
+  );
+}
+if (!/ZEROS_ZSR_RIPGREP_PATH/.test(sidecarSource)) {
+  errs.push(
+    "the Electron sidecar must pass the packaged ZSR ripgrep binary to the engine",
   );
 }
 if (
