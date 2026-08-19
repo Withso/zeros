@@ -241,7 +241,10 @@ describe("ZSR supervisor launch contract", () => {
       [SUPERVISOR, "--policy", policyPath, "--command", commandPath],
       {
         cwd: workspace,
-        env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
+        env: {
+          PATH: process.env.PATH ?? "/usr/bin:/bin",
+          ZEROS_ZSR_RIPGREP_PATH: rgPath,
+        },
         encoding: "utf8",
       },
     );

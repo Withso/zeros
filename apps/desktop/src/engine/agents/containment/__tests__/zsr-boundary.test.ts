@@ -281,11 +281,14 @@ describe("ZSR execution boundary", () => {
     ]) {
       expect(descriptor.env[ambientContainerSelector]).toBeUndefined();
     }
+    const dockerSocket = await realpath("/var/run/docker.sock").catch(
+      () => "/var/run/docker.sock",
+    );
     expect(descriptor.deniedContainerSockets).toEqual(
       expect.arrayContaining([
         "/ambient/container.sock",
         "/ambient/podman.sock",
-        "/var/run/docker.sock",
+        dockerSocket,
       ]),
     );
     expect(descriptor).not.toHaveProperty("credentialCapabilities");
