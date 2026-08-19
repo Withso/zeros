@@ -230,6 +230,27 @@ async function runPinnedClaude(opts: {
   return messages;
 }
 
+function toolResultProblem(
+  messages: SDKMessage[],
+  toolUseId: string,
+): string | undefined {
+  for (const message of messages) {
+    if (message.type !== "user" || !Array.isArray(message.message.content)) {
+      continue;
+    }
+    const result = message.message.content.find(
+      (block) =>
+        block.type === "tool_result" && block.tool_use_id === toolUseId,
+    );
+    if (!result || result.type !== "tool_result") continue;
+    if (!result.is_error) return undefined;
+    return typeof result.content === "string"
+      ? result.content
+      : (JSON.stringify(result.content) ?? "Claude returned an empty error.");
+  }
+  return `Claude emitted no tool result for ${toolUseId}.`;
+}
+
 describe("Claude code-territory enforcement", () => {
   it("blocks real built-in Write/Edit calls in the pinned runtime", async () => {
     const current = await fixture();
@@ -297,7 +318,7 @@ describe("Claude code-territory enforcement", () => {
         exit 0
       `;
 
-      await withMockClaude(
+      const runtimeMessages = await withMockClaude(
         [
           {
             type: "tool_use",
@@ -315,8 +336,11 @@ describe("Claude code-territory enforcement", () => {
             baseUrl,
             sandbox: claudeTerritorySandbox(current.territory),
             allowBash: true,
-          }).then(() => undefined),
+          }),
       );
+      expect(
+        toolResultProblem(runtimeMessages, "toolu_bash_attack"),
+      ).toBeUndefined();
 
       await expect(
         readFile(path.join(current.root, "code", "writable.txt"), "utf8"),

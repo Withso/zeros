@@ -169,8 +169,25 @@ jobs:
           sudo install -m 0644 \
             /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
             /etc/apparmor.d/bwrap-userns-restrict
+          # Noble's 4.0 profile predates AppArmor's mediate_deleted fix
+          # (apparmor/apparmor!1272). Claude's secure bwrap root uses detached
+          # staging paths, so apply that audited profile delta before loading it.
+          sudo sed -i \
+            's/flags=(attach_disconnected)/flags=(attach_disconnected,mediate_deleted)/g' \
+            /etc/apparmor.d/bwrap-userns-restrict
+          profile_flags=$(grep -Fc \
+            'flags=(attach_disconnected,mediate_deleted)' \
+            /etc/apparmor.d/bwrap-userns-restrict || true)
+          test "$profile_flags" -eq 2
           sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
-          bwrap --ro-bind / / --unshare-user --die-with-parent -- /bin/true
+          bwrap \
+            --ro-bind / / \
+            --unshare-pid \
+            --unshare-user \
+            --cap-drop ALL \
+            --proc /proc \
+            --die-with-parent \
+            -- /bin/true
 
       - name: Fetch origin/main (for the migration forward-only guard)
         run: git fetch --no-tags origin main || echo "origin/main unavailable — guard runs HEAD-only"
@@ -583,8 +600,25 @@ jobs:
           sudo install -m 0644 \
             /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
             /etc/apparmor.d/bwrap-userns-restrict
+          # Noble's 4.0 profile predates AppArmor's mediate_deleted fix
+          # (apparmor/apparmor!1272). Claude's secure bwrap root uses detached
+          # staging paths, so apply that audited profile delta before loading it.
+          sudo sed -i \
+            's/flags=(attach_disconnected)/flags=(attach_disconnected,mediate_deleted)/g' \
+            /etc/apparmor.d/bwrap-userns-restrict
+          profile_flags=$(grep -Fc \
+            'flags=(attach_disconnected,mediate_deleted)' \
+            /etc/apparmor.d/bwrap-userns-restrict || true)
+          test "$profile_flags" -eq 2
           sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
-          bwrap --ro-bind / / --unshare-user --die-with-parent -- /bin/true
+          bwrap \
+            --ro-bind / / \
+            --unshare-pid \
+            --unshare-user \
+            --cap-drop ALL \
+            --proc /proc \
+            --die-with-parent \
+            -- /bin/true
 
       - name: Resolve and boot the arm64 agent runtimes
         run: |
