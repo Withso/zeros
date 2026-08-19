@@ -8,9 +8,12 @@ import {
   accessSync,
   chmodSync,
   chownSync,
+  closeSync,
   constants as fsConstants,
+  fstatSync,
   lstatSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -902,14 +905,30 @@ function findWorktreeTerritory(cwd: string): {
   for (;;) {
     const dotGit = path.join(current, ".git");
     try {
-      const value = lstatSync(dotGit);
-      if (value.isDirectory()) {
-        return { root: current, metadata: [realpathSync(dotGit)] };
-      }
-      if (value.isFile()) {
-        const match = /^gitdir:\s*(.+?)\s*$/im.exec(
-          readFileSync(dotGit, "utf8").slice(0, 16_384),
+      let descriptor: number;
+      try {
+        descriptor = openSync(
+          dotGit,
+          fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
         );
+      } catch (error) {
+        // Windows does not consistently allow opening a directory as a file
+        // descriptor. This fallback never reads a checked path; it only
+        // preserves recognition of a physical .git directory there.
+        const value = lstatSync(dotGit);
+        if (value.isDirectory() && !value.isSymbolicLink()) {
+          return { root: current, metadata: [realpathSync(dotGit)] };
+        }
+        throw error;
+      }
+      try {
+        const value = fstatSync(descriptor);
+        if (value.isDirectory()) {
+          return { root: current, metadata: [realpathSync(dotGit)] };
+        }
+        if (!value.isFile()) throw new Error("unsupported .git entry");
+        const source = readFileSync(descriptor, "utf8").slice(0, 16_384);
+        const match = /^gitdir:\s*(.+?)\s*$/im.exec(source);
         if (match?.[1]) {
           const gitDir = realpathSync(path.resolve(current, match[1]));
           const metadata = [gitDir];
@@ -925,6 +944,8 @@ function findWorktreeTerritory(cwd: string): {
           }
           return { root: current, metadata };
         }
+      } finally {
+        closeSync(descriptor);
       }
     } catch {
       /* keep walking */

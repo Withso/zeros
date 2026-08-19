@@ -281,17 +281,6 @@ async function readSessionOwner(
   | { state: "readable"; pid?: number }
 > {
   const metadataPath = path.join(sessionRoot, "meta.json");
-  let linkMetadata;
-  try {
-    linkMetadata = await fsp.lstat(metadataPath);
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "ENOENT"
-      ? { state: "missing" }
-      : { state: "invalid" };
-  }
-  if (!linkMetadata.isFile() || linkMetadata.isSymbolicLink()) {
-    return { state: "invalid" };
-  }
   let handle;
   try {
     handle = await fsp.open(
@@ -304,8 +293,18 @@ async function readSessionOwner(
       : { state: "invalid" };
   }
   try {
+    let linkMetadata;
+    try {
+      linkMetadata = await fsp.lstat(metadataPath);
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? { state: "missing" }
+        : { state: "invalid" };
+    }
     const openedMetadata = await handle.stat();
     if (
+      !linkMetadata.isFile() ||
+      linkMetadata.isSymbolicLink() ||
       !openedMetadata.isFile() ||
       openedMetadata.nlink !== 1 ||
       openedMetadata.dev !== linkMetadata.dev ||

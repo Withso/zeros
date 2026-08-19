@@ -146,6 +146,7 @@ describe("cloud preview link contract", () => {
     );
     const admitted = await fetch(localAdmission, { redirect: "manual" });
     expect(admitted.status).toBe(200);
+    expect(admitted.headers.get("refresh")).toBe("0; url=/");
     const cookie = admitted.headers.get("set-cookie")?.split(";")[0] ?? "";
     const response = await fetch(`http://127.0.0.1:${ingressPort}/`, {
       headers: { Cookie: cookie },

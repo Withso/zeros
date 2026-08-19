@@ -1,7 +1,8 @@
 import { spawn } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
 import {
   lstat,
-  readFile,
+  open,
   readdir,
   realpath,
   rename,
@@ -481,7 +482,10 @@ export async function recoverMacosProcessDomains(
   options: RecoverMacosProcessDomainsOptions,
 ): Promise<MacosProcessDomainRecoveryResult> {
   const runner = options.runner ?? macosProcessDomainCommandRunner;
-  const descriptorPaths: string[] = [];
+  const descriptors: Array<{
+    readonly metadataPath: string;
+    readonly source: string;
+  }> = [];
   for (const session of await safeDirectoryEntries(options.sessionsRoot)) {
     if (!session.isDirectory() || session.isSymbolicLink()) continue;
     const boundaryRoot = path.join(
@@ -497,16 +501,30 @@ export async function recoverMacosProcessDomains(
         "commands",
         "process-domain.json",
       );
-      const metadata = await lstat(candidate).catch((error) => {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      let handle;
+      try {
+        handle = await open(
+          candidate,
+          fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+        );
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
         throw error;
-      });
-      if (metadata?.isFile() && !metadata.isSymbolicLink()) {
-        descriptorPaths.push(candidate);
+      }
+      try {
+        const metadata = await handle.stat();
+        if (metadata.isFile() && metadata.nlink === 1) {
+          descriptors.push({
+            metadataPath: candidate,
+            source: await handle.readFile("utf8"),
+          });
+        }
+      } finally {
+        await handle.close();
       }
     }
   }
-  if (descriptorPaths.length === 0) {
+  if (descriptors.length === 0) {
     return { discovered: 0, recovered: 0, active: 0, preserved: 0 };
   }
   const helperPath = await assertTrustedHelper(options.helperPath);
@@ -515,14 +533,8 @@ export async function recoverMacosProcessDomains(
   let active = 0;
   let preserved = 0;
   const failures: unknown[] = [];
-  for (const metadataPath of descriptorPaths) {
+  for (const { metadataPath, source } of descriptors) {
     try {
-      const metadata = await lstat(metadataPath).catch((error) => {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-        throw error;
-      });
-      if (!metadata) continue;
-      if (!metadata.isFile() || metadata.isSymbolicLink()) continue;
       const generationRoot = path.dirname(path.dirname(metadataPath));
       const generation = path.basename(generationRoot);
       const markerPath = path.join(
@@ -531,7 +543,7 @@ export async function recoverMacosProcessDomains(
         "process-domain.marker",
       );
       const policyPath = path.join(generationRoot, "policy.json");
-      const descriptor = parseDescriptor(await readFile(metadataPath, "utf8"), {
+      const descriptor = parseDescriptor(source, {
         generation,
         markerPath,
         policyPath,
@@ -580,7 +592,7 @@ export async function recoverMacosProcessDomains(
     );
   }
   return {
-    discovered: descriptorPaths.length,
+    discovered: descriptors.length,
     recovered,
     active,
     preserved,

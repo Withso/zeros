@@ -1,4 +1,11 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import {
+  closeSync,
+  fstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
@@ -32,6 +39,26 @@ function document(now: number) {
       },
     ],
   };
+}
+
+function readInstalledDocument(file: string): {
+  readonly value: unknown;
+  readonly file: boolean;
+  readonly mode: number;
+  readonly links: number;
+} {
+  const descriptor = openSync(file, "r");
+  try {
+    const metadata = fstatSync(descriptor);
+    return {
+      value: JSON.parse(readFileSync(descriptor, "utf8")),
+      file: metadata.isFile(),
+      mode: metadata.mode,
+      links: metadata.nlink,
+    };
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function encode(value: unknown): string {
@@ -72,18 +99,26 @@ describe("immutable cloud preview-link installer", () => {
     const root = mkdtempSync(path.join(os.tmpdir(), "zeros-preview-install-"));
     roots.push(root);
     const output = path.join(root, "cloud-preview-links.json");
-    const expectedUid = statSync(root).uid;
+    const rootDescriptor = openSync(root, "r");
+    let expectedUid: number;
+    try {
+      expectedUid = fstatSync(rootDescriptor).uid;
+    } finally {
+      closeSync(rootDescriptor);
+    }
 
     installCloudPreviewLinkPayload(encode(document(now)), {
       output,
       expectedUid,
       now,
     });
-    expect(JSON.parse(readFileSync(output, "utf8"))).toEqual(document(now));
-    const stat = statSync(output);
-    expect(stat.isFile()).toBe(true);
-    expect(stat.nlink).toBe(1);
-    if (process.platform !== "win32") expect(stat.mode & 0o777).toBe(0o600);
+    const installed = readInstalledDocument(output);
+    expect(installed.value).toEqual(document(now));
+    expect(installed.file).toBe(true);
+    expect(installed.links).toBe(1);
+    if (process.platform !== "win32") {
+      expect(installed.mode & 0o777).toBe(0o600);
+    }
 
     const rotated = {
       ...document(now),
@@ -94,6 +129,6 @@ describe("immutable cloud preview-link installer", () => {
       expectedUid,
       now,
     });
-    expect(JSON.parse(readFileSync(output, "utf8"))).toEqual(rotated);
+    expect(readInstalledDocument(output).value).toEqual(rotated);
   });
 });

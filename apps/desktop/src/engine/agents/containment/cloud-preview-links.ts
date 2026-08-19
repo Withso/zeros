@@ -1,6 +1,9 @@
 import {
-  existsSync,
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
   lstatSync,
+  openSync,
   readFileSync,
   realpathSync,
 } from "node:fs";
@@ -179,22 +182,44 @@ export function loadCloudPreviewLinks(
   file = CLOUD_PREVIEW_LINKS_PATH,
   now = Date.now(),
 ): CloudPreviewLinks {
-  if (!existsSync(file)) {
-    throw new Error("cloud preview link state is unavailable");
+  let descriptor: number;
+  try {
+    descriptor = openSync(
+      file,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      throw new Error("cloud preview link state is unavailable");
+    }
+    throw error;
   }
-  if (
-    process.platform !== "linux" ||
-    typeof process.geteuid !== "function" ||
-    process.geteuid() !== 0
-  ) {
-    throw new Error("cloud preview links require a root Linux coordinator");
+  try {
+    if (
+      process.platform !== "linux" ||
+      typeof process.geteuid !== "function" ||
+      process.geteuid() !== 0
+    ) {
+      throw new Error("cloud preview links require a root Linux coordinator");
+    }
+    assertRootControlledPrivateFile(file);
+    const stat = fstatSync(descriptor);
+    const current = lstatSync(file);
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      stat.dev !== current.dev ||
+      stat.ino !== current.ino
+    ) {
+      throw new Error("cloud preview link state is not root-controlled");
+    }
+    if (stat.size < 2 || stat.size > MAX_LINK_FILE_BYTES) {
+      throw new Error("cloud preview link state has an invalid size");
+    }
+    return parseCloudPreviewLinks(readFileSync(descriptor, "utf8"), now);
+  } finally {
+    closeSync(descriptor);
   }
-  assertRootControlledPrivateFile(file);
-  const stat = lstatSync(file);
-  if (stat.size < 2 || stat.size > MAX_LINK_FILE_BYTES) {
-    throw new Error("cloud preview link state has an invalid size");
-  }
-  return parseCloudPreviewLinks(readFileSync(file, "utf8"), now);
 }
 
 interface CloudPreviewGatewayFactoryOptions {

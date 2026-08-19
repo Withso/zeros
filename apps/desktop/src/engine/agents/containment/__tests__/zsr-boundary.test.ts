@@ -4,6 +4,7 @@ import {
   chmod,
   mkdtemp,
   mkdir,
+  open,
   readFile,
   realpath,
   rm,
@@ -248,8 +249,15 @@ describe("ZSR execution boundary", () => {
     ).resolves.toBeUndefined();
 
     const commandPath = launch.args[launch.args.indexOf("--command") + 1];
-    expect((await stat(commandPath)).mode & 0o777).toBe(0o600);
-    const descriptor = JSON.parse(await readFile(commandPath, "utf8")) as {
+    const commandHandle = await open(commandPath, "r");
+    let commandDocument: string;
+    try {
+      expect((await commandHandle.stat()).mode & 0o777).toBe(0o600);
+      commandDocument = await commandHandle.readFile("utf8");
+    } finally {
+      await commandHandle.close();
+    }
+    const descriptor = JSON.parse(commandDocument) as {
       deniedContainerSockets: string[];
       env: Record<string, string>;
       [key: string]: unknown;

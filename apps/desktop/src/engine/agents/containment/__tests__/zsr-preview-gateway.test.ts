@@ -56,9 +56,12 @@ describe("ZsrPreviewGateway", () => {
     expect(cookie).toContain("SameSite=None");
     expect(cookie).toContain("Secure");
     expect(cookie).toContain("Partitioned");
-    expect(await admission.text()).not.toContain(
+    expect(admission.headers.get("refresh")).toBe("0; url=/");
+    const admissionBody = await admission.text();
+    expect(admissionBody).not.toContain(
       new URL(capabilityUrl).searchParams.get("__zsr_cap"),
     );
+    expect(admissionBody).not.toContain("<script");
 
     // Admission capabilities are one-use even before the cookie-backed page
     // navigation happens.

@@ -2,7 +2,11 @@
 
 import { createHash } from "node:crypto";
 import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
   lstatSync,
+  openSync,
   readFileSync,
   readlinkSync,
   realpathSync,
@@ -103,24 +107,35 @@ try {
 }
 
 try {
-  const stat = lstatSync(consumed);
-  if (
-    !stat.isFile() ||
-    stat.isSymbolicLink() ||
-    stat.uid !== 0 ||
-    stat.nlink !== 1 ||
-    (stat.mode & 0o077) !== 0 ||
-    stat.size < 2 ||
-    stat.size > MAX_PROOF_BYTES ||
-    realpathSync(consumed) !== consumed
-  ) {
-    fail("the runtime qualification proof is unsafe");
-  }
   let proof;
+  const descriptor = openSync(
+    consumed,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
   try {
-    proof = JSON.parse(readFileSync(consumed, "utf8"));
-  } catch {
-    fail("the runtime qualification proof is malformed");
+    const stat = fstatSync(descriptor);
+    const current = lstatSync(consumed);
+    if (
+      !stat.isFile() ||
+      stat.uid !== 0 ||
+      stat.nlink !== 1 ||
+      current.isSymbolicLink() ||
+      stat.dev !== current.dev ||
+      stat.ino !== current.ino ||
+      (stat.mode & 0o077) !== 0 ||
+      stat.size < 2 ||
+      stat.size > MAX_PROOF_BYTES ||
+      realpathSync(consumed) !== consumed
+    ) {
+      fail("the runtime qualification proof is unsafe");
+    }
+    try {
+      proof = JSON.parse(readFileSync(descriptor, "utf8"));
+    } catch {
+      fail("the runtime qualification proof is malformed");
+    }
+  } finally {
+    closeSync(descriptor);
   }
   if (
     !exactKeys(proof, [

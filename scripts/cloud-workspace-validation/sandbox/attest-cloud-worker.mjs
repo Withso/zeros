@@ -3,8 +3,12 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
   lstatSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   readlinkSync,
@@ -242,19 +246,32 @@ if (process.argv[2] !== LOCKED_ARGUMENT) {
 
 const lockToken = process.argv[3];
 try {
-  const stat = lstatSync(lockToken);
-  if (
-    path.dirname(lockToken) !== ADMISSION_DIRECTORY ||
-    !stat.isFile() ||
-    stat.isSymbolicLink() ||
-    stat.uid !== 0 ||
-    stat.nlink !== 1 ||
-    (stat.mode & 0o077) !== 0 ||
-    !/^[a-f0-9]{64}$/.test(readFileSync(lockToken, "utf8").trim())
-  ) {
+  if (path.dirname(lockToken) !== ADMISSION_DIRECTORY) {
     throw new Error("invalid lock handoff");
   }
-  unlinkSync(lockToken);
+  const descriptor = openSync(
+    lockToken,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const stat = fstatSync(descriptor);
+    const current = lstatSync(lockToken);
+    if (
+      !stat.isFile() ||
+      stat.uid !== 0 ||
+      stat.nlink !== 1 ||
+      current.isSymbolicLink() ||
+      stat.dev !== current.dev ||
+      stat.ino !== current.ino ||
+      (stat.mode & 0o077) !== 0 ||
+      !/^[a-f0-9]{64}$/.test(readFileSync(descriptor, "utf8").trim())
+    ) {
+      throw new Error("invalid lock handoff");
+    }
+    unlinkSync(lockToken);
+  } finally {
+    closeSync(descriptor);
+  }
 } catch {
   process.stderr.write("cloud attestation lock handoff is invalid\n");
   process.exit(1);

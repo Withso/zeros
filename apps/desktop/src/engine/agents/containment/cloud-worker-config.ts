@@ -1,4 +1,12 @@
-import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+} from "node:fs";
 import path from "node:path";
 
 import type {
@@ -129,22 +137,45 @@ function assertRootControlledPath(
 export function loadCloudWorkerConfiguration(
   file = CLOUD_WORKER_CONFIG_PATH,
 ): CloudWorkerConfiguration | null {
-  if (!existsSync(file)) return null;
-  if (
-    process.platform !== "linux" ||
-    typeof process.geteuid !== "function" ||
-    process.geteuid() !== 0
-  ) {
-    throw new Error("cloud-worker configuration requires a root Linux engine");
+  let descriptor: number;
+  try {
+    descriptor = openSync(
+      file,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
   }
-  assertRootControlledPath(file);
-  const stat = lstatSync(file);
-  if (stat.size < 2 || stat.size > MAX_CONFIG_BYTES) {
-    throw new Error("cloud-worker configuration has an invalid size");
+  let configuration: CloudWorkerConfiguration;
+  try {
+    if (
+      process.platform !== "linux" ||
+      typeof process.geteuid !== "function" ||
+      process.geteuid() !== 0
+    ) {
+      throw new Error("cloud-worker configuration requires a root Linux engine");
+    }
+    assertRootControlledPath(file);
+    const stat = fstatSync(descriptor);
+    const current = lstatSync(file);
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      stat.dev !== current.dev ||
+      stat.ino !== current.ino
+    ) {
+      throw new Error("cloud-worker configuration is not root-controlled");
+    }
+    if (stat.size < 2 || stat.size > MAX_CONFIG_BYTES) {
+      throw new Error("cloud-worker configuration has an invalid size");
+    }
+    configuration = parseCloudWorkerConfiguration(
+      readFileSync(descriptor, "utf8"),
+    );
+  } finally {
+    closeSync(descriptor);
   }
-  const configuration = parseCloudWorkerConfiguration(
-    readFileSync(file, "utf8"),
-  );
   for (const candidate of Object.values(configuration.toolchain)) {
     assertRootControlledPath(candidate);
   }

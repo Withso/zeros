@@ -1,6 +1,7 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, open, readFile, rm } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { chmod, lstat, mkdir, open, rm } from "node:fs/promises";
 import { homedir, userInfo } from "node:os";
 import path from "node:path";
 
@@ -659,41 +660,51 @@ export async function withMacClaudeRefreshLock<T>(
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       try {
-        const metadata = await lstat(lockPath);
-        if (!metadata.isFile() || metadata.isSymbolicLink()) {
-          throw new Error("Claude OAuth refresh lock is unsafe");
-        }
-        if (
-          metadata.size <= 256 &&
-          Date.now() - metadata.mtimeMs > REFRESH_LOCK_STALE_MS
-        ) {
-          let retireStaleLock = metadata.size === 0;
-          if (!retireStaleLock) {
-            try {
-              const parsed = JSON.parse(await readFile(lockPath, "utf8")) as {
-                version?: unknown;
-                pid?: unknown;
-              };
-              retireStaleLock =
-                parsed.version === 1 &&
-                Number.isSafeInteger(parsed.pid) &&
-                Number(parsed.pid) > 0 &&
-                !isProcessAlive(Number(parsed.pid));
-            } catch {
-              // A crash between O_EXCL creation and the fsynced owner record
-              // can leave an empty or partial JSON file. Every production task
-              // holding this lock has a deadline well below the stale window,
-              // so an old malformed record cannot represent a valid owner.
-              retireStaleLock = true;
+        const staleHandle = await open(
+          lockPath,
+          fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+        );
+        try {
+          const metadata = await staleHandle.stat();
+          if (!metadata.isFile() || metadata.nlink !== 1) {
+            throw new Error("Claude OAuth refresh lock is unsafe");
+          }
+          if (
+            metadata.size <= 256 &&
+            Date.now() - metadata.mtimeMs > REFRESH_LOCK_STALE_MS
+          ) {
+            let retireStaleLock = metadata.size === 0;
+            if (!retireStaleLock) {
+              try {
+                const parsed = JSON.parse(
+                  await staleHandle.readFile("utf8"),
+                ) as {
+                  version?: unknown;
+                  pid?: unknown;
+                };
+                retireStaleLock =
+                  parsed.version === 1 &&
+                  Number.isSafeInteger(parsed.pid) &&
+                  Number(parsed.pid) > 0 &&
+                  !isProcessAlive(Number(parsed.pid));
+              } catch {
+                // A crash between O_EXCL creation and the fsynced owner record
+                // can leave an empty or partial JSON file. Every production task
+                // holding this lock has a deadline well below the stale window,
+                // so an old malformed record cannot represent a valid owner.
+                retireStaleLock = true;
+              }
+            }
+            if (retireStaleLock) {
+              const current = await lstat(lockPath);
+              if (current.dev === metadata.dev && current.ino === metadata.ino) {
+                await rm(lockPath, { force: true });
+                continue;
+              }
             }
           }
-          if (retireStaleLock) {
-            const current = await lstat(lockPath);
-            if (current.dev === metadata.dev && current.ino === metadata.ino) {
-              await rm(lockPath, { force: true });
-              continue;
-            }
-          }
+        } finally {
+          await staleHandle.close();
         }
       } catch (lockError) {
         if ((lockError as NodeJS.ErrnoException).code === "ENOENT") continue;

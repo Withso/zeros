@@ -2,7 +2,7 @@ import {
   link,
   mkdtemp,
   mkdir,
-  readFile,
+  open,
   realpath,
   rm,
   stat,
@@ -169,16 +169,24 @@ describe("ZSR host-parity policy builder", () => {
       expect.arrayContaining(["shadowGit", "networkBridge", "networkClientState"]),
     );
     expect((await stat(prepared.paths.root)).mode & 0o777).toBe(0o700);
-    expect((await stat(prepared.paths.policy)).mode & 0o777).toBe(0o600);
-    expect(
-      (await stat(prepared.paths.processIdentityMarker)).mode & 0o777,
-    ).toBe(0o400);
-    expect(await readFile(prepared.paths.processIdentityMarker, "utf8")).toBe(
-      `${prepared.document.generation}\n`,
-    );
-    expect(JSON.parse(await readFile(prepared.paths.policy, "utf8"))).toEqual(
-      prepared.document,
-    );
+    const markerHandle = await open(prepared.paths.processIdentityMarker, "r");
+    try {
+      expect((await markerHandle.stat()).mode & 0o777).toBe(0o400);
+      expect(await markerHandle.readFile("utf8")).toBe(
+        `${prepared.document.generation}\n`,
+      );
+    } finally {
+      await markerHandle.close();
+    }
+    const policyHandle = await open(prepared.paths.policy, "r");
+    try {
+      expect((await policyHandle.stat()).mode & 0o777).toBe(0o600);
+      expect(JSON.parse(await policyHandle.readFile("utf8"))).toEqual(
+        prepared.document,
+      );
+    } finally {
+      await policyHandle.close();
+    }
   });
 
   it("refuses a pre-existing hard-link alias to database authority", async () => {

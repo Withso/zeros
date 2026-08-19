@@ -4,8 +4,12 @@ import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
   chmodSync,
+  closeSync,
+  constants as fsConstants,
   existsSync,
+  fstatSync,
   lstatSync,
+  openSync,
   readFileSync,
   realpathSync,
   unlinkSync,
@@ -34,29 +38,40 @@ function readJson(file, label) {
   if (!path.isAbsolute(file) || file.includes("\0")) {
     throw new Error(`${label} path must be absolute`);
   }
-  const stat = lstatSync(file);
-  if (
-    !stat.isFile() ||
-    stat.isSymbolicLink() ||
-    stat.nlink !== 1 ||
-    stat.size > MAX_DESCRIPTOR_BYTES
-  ) {
-    throw new Error(`${label} descriptor must be one bounded regular file`);
+  const descriptor = openSync(
+    file,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const stat = fstatSync(descriptor);
+    const current = lstatSync(file);
+    if (
+      !stat.isFile() ||
+      stat.nlink !== 1 ||
+      current.isSymbolicLink() ||
+      stat.dev !== current.dev ||
+      stat.ino !== current.ino ||
+      stat.size > MAX_DESCRIPTOR_BYTES
+    ) {
+      throw new Error(`${label} descriptor must be one bounded regular file`);
+    }
+    if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
+      throw new Error(`${label} descriptor has the wrong owner`);
+    }
+    if ((stat.mode & 0o077) !== 0) {
+      throw new Error(`${label} descriptor permissions are too broad`);
+    }
+    if (realpathSync(file) !== file) {
+      throw new Error(`${label} descriptor path is not canonical`);
+    }
+    const parsed = JSON.parse(readFileSync(descriptor, "utf8"));
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`${label} descriptor must be an object`);
+    }
+    return parsed;
+  } finally {
+    closeSync(descriptor);
   }
-  if (typeof process.getuid === "function" && stat.uid !== process.getuid()) {
-    throw new Error(`${label} descriptor has the wrong owner`);
-  }
-  if ((stat.mode & 0o077) !== 0) {
-    throw new Error(`${label} descriptor permissions are too broad`);
-  }
-  if (realpathSync(file) !== file) {
-    throw new Error(`${label} descriptor path is not canonical`);
-  }
-  const parsed = JSON.parse(readFileSync(file, "utf8"));
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error(`${label} descriptor must be an object`);
-  }
-  return parsed;
 }
 
 function requireAbsolutePaths(values, label) {

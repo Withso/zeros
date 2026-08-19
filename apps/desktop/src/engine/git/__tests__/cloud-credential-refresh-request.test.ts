@@ -1,4 +1,4 @@
-import { lstat, mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, open, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -43,10 +43,16 @@ describe("cloud GitHub credential refresh request", () => {
       reason: "credential-invalid",
     });
     expect(request.ownerSubjectSha256).toMatch(/^[a-f0-9]{64}$/);
-    const metadata = await lstat(file);
-    expect(metadata.mode & 0o777).toBe(0o600);
-    expect(metadata.nlink).toBe(1);
-    const serialized = await readFile(file, "utf8");
+    const handle = await open(file, "r");
+    let serialized: string;
+    try {
+      const metadata = await handle.stat();
+      expect(metadata.mode & 0o777).toBe(0o600);
+      expect(metadata.nlink).toBe(1);
+      serialized = await handle.readFile("utf8");
+    } finally {
+      await handle.close();
+    }
     expect(serialized).not.toContain("account-owner");
     expect(serialized).not.toMatch(/token|password|authorization/i);
     expect(

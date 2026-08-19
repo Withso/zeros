@@ -413,21 +413,17 @@ export class ZsrPreviewGateway implements BoundaryPreviewGateway {
 
   private sendAdmissionBootstrap(response: ServerResponse, url: URL): void {
     this.setCapabilityCookie(response);
-    const destination = JSON.stringify(this.sanitizedTargetPath(url)).replaceAll(
-      "<",
-      "\\u003c",
-    );
     const body =
       "<!doctype html><meta charset=utf-8>" +
-      "<title>Opening preview…</title>" +
-      `<script>location.replace(${destination})</script>`;
+      "<title>Opening preview…</title>";
     response.writeHead(200, {
       "Content-Type": "text/html; charset=utf-8",
       "Content-Length": Buffer.byteLength(body),
+      Refresh: `0; url=${this.sanitizedTargetPath(url)}`,
       "Cache-Control": "no-store",
       "Referrer-Policy": "no-referrer",
       "Content-Security-Policy":
-        "default-src 'none'; script-src 'unsafe-inline'; base-uri 'none'; frame-ancestors *",
+        "default-src 'none'; base-uri 'none'; frame-ancestors *",
       "X-Content-Type-Options": "nosniff",
     });
     response.end(body);

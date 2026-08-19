@@ -3,8 +3,12 @@
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
   linkSync,
   lstatSync,
+  openSync,
   readFileSync,
   realpathSync,
   renameSync,
@@ -74,26 +78,37 @@ function parseRequest(value) {
 }
 
 function readPhysicalRequest(file, expectedUid) {
-  const metadata = lstatSync(file);
-  if (
-    !metadata.isFile() ||
-    metadata.isSymbolicLink() ||
-    metadata.uid !== expectedUid ||
-    metadata.nlink !== 1 ||
-    (metadata.mode & 0o777) !== 0o600 ||
-    metadata.size < 2 ||
-    metadata.size > MAX_DOCUMENT_BYTES ||
-    realpathSync(file) !== file
-  ) {
-    throw new Error("cloud GitHub refresh request is unsafe");
-  }
-  let parsed;
+  const descriptor = openSync(
+    file,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
   try {
-    parsed = JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    throw new Error("cloud GitHub refresh request is invalid");
+    const metadata = fstatSync(descriptor);
+    const current = lstatSync(file);
+    if (
+      !metadata.isFile() ||
+      metadata.uid !== expectedUid ||
+      metadata.nlink !== 1 ||
+      current.isSymbolicLink() ||
+      metadata.dev !== current.dev ||
+      metadata.ino !== current.ino ||
+      (metadata.mode & 0o777) !== 0o600 ||
+      metadata.size < 2 ||
+      metadata.size > MAX_DOCUMENT_BYTES ||
+      realpathSync(file) !== file
+    ) {
+      throw new Error("cloud GitHub refresh request is unsafe");
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(readFileSync(descriptor, "utf8"));
+    } catch {
+      throw new Error("cloud GitHub refresh request is invalid");
+    }
+    return parseRequest(parsed);
+  } finally {
+    closeSync(descriptor);
   }
-  return parseRequest(parsed);
 }
 
 export function readCloudGithubRefreshRequest(

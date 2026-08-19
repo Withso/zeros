@@ -1,6 +1,10 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import {
+  closeSync,
+  constants as fsConstants,
+  fstatSync,
   lstatSync,
+  openSync,
   readFileSync,
   realpathSync,
 } from "node:fs";
@@ -185,43 +189,54 @@ export function readCloudGithubCredentialProjection(options: {
   ) {
     throw new Error("cloud GitHub credential projection options are invalid");
   }
-  let stat;
+  let descriptor: number;
   try {
-    stat = lstatSync(file);
+    descriptor = openSync(
+      file,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new Error("cloud GitHub credential projection is unsafe");
   }
-  if (
-    !stat.isFile() ||
-    stat.isSymbolicLink() ||
-    stat.uid !== expectedUid ||
-    stat.nlink !== 1 ||
-    (stat.mode & 0o777) !== 0o600 ||
-    stat.size < 2 ||
-    stat.size > MAX_DOCUMENT_BYTES ||
-    realpathSync(file) !== file
-  ) {
-    throw new Error("cloud GitHub credential projection is unsafe");
-  }
-  const directory = path.dirname(file);
-  const directoryStat = lstatSync(directory);
-  if (
-    !directoryStat.isDirectory() ||
-    directoryStat.isSymbolicLink() ||
-    directoryStat.uid !== expectedUid ||
-    (directoryStat.mode & 0o077) !== 0 ||
-    realpathSync(directory) !== directory
-  ) {
-    throw new Error("cloud GitHub credential projection directory is unsafe");
-  }
-  let raw: unknown;
   try {
-    raw = JSON.parse(readFileSync(file, "utf8"));
-  } catch {
-    throw new Error("cloud GitHub credential document is invalid");
+    const stat = fstatSync(descriptor);
+    const current = lstatSync(file);
+    if (
+      !stat.isFile() ||
+      stat.uid !== expectedUid ||
+      stat.nlink !== 1 ||
+      current.isSymbolicLink() ||
+      stat.dev !== current.dev ||
+      stat.ino !== current.ino ||
+      (stat.mode & 0o777) !== 0o600 ||
+      stat.size < 2 ||
+      stat.size > MAX_DOCUMENT_BYTES ||
+      realpathSync(file) !== file
+    ) {
+      throw new Error("cloud GitHub credential projection is unsafe");
+    }
+    const directory = path.dirname(file);
+    const directoryStat = lstatSync(directory);
+    if (
+      !directoryStat.isDirectory() ||
+      directoryStat.isSymbolicLink() ||
+      directoryStat.uid !== expectedUid ||
+      (directoryStat.mode & 0o077) !== 0 ||
+      realpathSync(directory) !== directory
+    ) {
+      throw new Error("cloud GitHub credential projection directory is unsafe");
+    }
+    let raw: unknown;
+    try {
+      raw = JSON.parse(readFileSync(descriptor, "utf8"));
+    } catch {
+      throw new Error("cloud GitHub credential document is invalid");
+    }
+    return parseProjection(raw, options.ownerSubject, now);
+  } finally {
+    closeSync(descriptor);
   }
-  return parseProjection(raw, options.ownerSubject, now);
 }
 
 export interface CloudGithubCredentialProjectionWatcher {

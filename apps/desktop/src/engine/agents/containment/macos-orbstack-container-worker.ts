@@ -11,6 +11,8 @@ import {
   closeSync,
   constants,
   existsSync,
+  fchmodSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   openSync,
@@ -598,10 +600,10 @@ function prepareOrbStackRecoveryHold(
       0o600,
     );
     writeFileSync(descriptor, `${JSON.stringify(expected)}\n`, "utf8");
+    fchmodSync(descriptor, 0o600);
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = null;
-    chmodSync(holdPath, 0o600);
     return holdPath;
   } catch (error) {
     if (descriptor !== null) {
@@ -630,20 +632,35 @@ function prepareOrbStackRecoveryHold(
       throw error;
     }
   }
-  const metadata = lstatSync(holdPath);
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new Error("OrbStack recovery hold is not a physical file");
-  }
-  let existing: unknown;
+  const existingDescriptor = openSync(
+    holdPath,
+    constants.O_RDONLY | constants.O_NOFOLLOW,
+  );
   try {
-    existing = JSON.parse(readFileSync(holdPath, "utf8"));
-  } catch {
-    throw new Error("OrbStack recovery hold is malformed");
+    const metadata = fstatSync(existingDescriptor);
+    const current = lstatSync(holdPath);
+    if (
+      !metadata.isFile() ||
+      metadata.nlink !== 1 ||
+      current.isSymbolicLink() ||
+      metadata.dev !== current.dev ||
+      metadata.ino !== current.ino
+    ) {
+      throw new Error("OrbStack recovery hold is not a physical file");
+    }
+    let existing: unknown;
+    try {
+      existing = JSON.parse(readFileSync(existingDescriptor, "utf8"));
+    } catch {
+      throw new Error("OrbStack recovery hold is malformed");
+    }
+    if (JSON.stringify(existing) !== JSON.stringify(expected)) {
+      throw new Error("OrbStack recovery hold does not match its lease");
+    }
+    fchmodSync(existingDescriptor, 0o600);
+  } finally {
+    closeSync(existingDescriptor);
   }
-  if (JSON.stringify(existing) !== JSON.stringify(expected)) {
-    throw new Error("OrbStack recovery hold does not match its lease");
-  }
-  chmodSync(holdPath, 0o600);
   return holdPath;
 }
 
@@ -1780,21 +1797,36 @@ function readValidatedOrbStackRecoveryHold(
     sessionDirectory,
     ORBSTACK_MACHINE_RECOVERY_HOLD_FILE,
   );
-  let metadata;
+  let descriptor: number;
   try {
-    metadata = lstatSync(holdPath);
+    descriptor = openSync(
+      holdPath,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
   }
-  if (!metadata.isFile() || metadata.isSymbolicLink()) {
-    throw new Error("OrbStack recovery hold is not a physical file");
-  }
   let value: unknown;
   try {
-    value = JSON.parse(readFileSync(holdPath, "utf8"));
-  } catch {
-    throw new Error("OrbStack recovery hold is malformed");
+    const metadata = fstatSync(descriptor);
+    const current = lstatSync(holdPath);
+    if (
+      !metadata.isFile() ||
+      metadata.nlink !== 1 ||
+      current.isSymbolicLink() ||
+      metadata.dev !== current.dev ||
+      metadata.ino !== current.ino
+    ) {
+      throw new Error("OrbStack recovery hold is not a physical file");
+    }
+    try {
+      value = JSON.parse(readFileSync(descriptor, "utf8"));
+    } catch {
+      throw new Error("OrbStack recovery hold is malformed");
+    }
+  } finally {
+    closeSync(descriptor);
   }
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("OrbStack recovery hold is malformed");
