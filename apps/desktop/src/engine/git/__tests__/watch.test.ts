@@ -208,6 +208,8 @@ describe("startGitWatcher", () => {
     await writeFile(join(root, ".git", "HEAD"), "ref: refs/heads/main\n");
     await writeFile(join(root, ".git", "index"), "index");
     await writeFile(join(root, ".git", "logs", "HEAD"), "");
+    const container = join(root, ".claude", "worktrees");
+    await mkdir(container, { recursive: true });
 
     let changes = 0;
     const watcher = startGitWatcher(
@@ -227,8 +229,8 @@ describe("startGitWatcher", () => {
     watchers.push(watcher);
     await watcher.ready;
 
-    const nested = join(root, ".claude", "worktrees", "nested");
-    await mkdir(nested, { recursive: true });
+    const nested = join(container, "nested");
+    await mkdir(nested);
     await waitFor(() => changes > 0);
 
     // Prove Chokidar subscribed before the marker landed. The ignore callback

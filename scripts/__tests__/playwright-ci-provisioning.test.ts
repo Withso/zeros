@@ -10,6 +10,7 @@ import path from "node:path";
 
 const ROOT = path.resolve(__dirname, "..", "..");
 const WORKFLOWS_DIR = path.join(ROOT, ".github", "workflows");
+const VITEST_COMMAND = /^\s+(?:run:\s*)?pnpm test:git\s*$/m;
 
 type TestJob = {
   file: string;
@@ -33,7 +34,7 @@ function workflowTestJobs(): TestJob[] {
         heading.index,
         headings[index + 1]?.index ?? jobsSource.length,
       );
-      if (body.includes("run: pnpm test:git")) {
+      if (VITEST_COMMAND.test(body)) {
         jobs.push({ file, job: heading[1]!, body });
       }
     }
@@ -57,7 +58,7 @@ describe("Playwright-backed Vitest CI provisioning", () => {
     "installs Chromium before $file:$job runs Vitest",
     ({ body }) => {
       const install = body.indexOf("playwright install");
-      const test = body.indexOf("run: pnpm test:git");
+      const test = body.search(VITEST_COMMAND);
 
       expect(install).toBeGreaterThanOrEqual(0);
       expect(install).toBeLessThan(test);
