@@ -149,8 +149,18 @@ jobs:
 
       - name: Install contained-execution runtime
         # Codex uses bubblewrap; Claude's strict sandbox also requires socat.
-        # The containment gate executes the real provider profile on Linux.
-        run: sudo apt-get update && sudo apt-get install --yes bubblewrap socat
+        # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor,
+        # so load Ubuntu's narrow bwrap profile instead of weakening that host
+        # protection globally. The smoke command keeps image/profile drift from
+        # surfacing later as opaque containment-test failures.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap socat
+          sudo install -m 0644 \
+            /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+            /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          bwrap --ro-bind / / --unshare-user --die-with-parent -- /bin/true
 
       - name: Fetch origin/main (for the migration forward-only guard)
         run: git fetch --no-tags origin main || echo "origin/main unavailable — guard runs HEAD-only"
@@ -554,7 +564,17 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
       - name: Install contained-execution runtime
-        run: sudo apt-get update && sudo apt-get install --yes bubblewrap socat
+        # Keep the architecture qualification under Ubuntu's user-namespace
+        # restriction while granting only bwrap the namespace authority it
+        # needs. The direct smoke makes this runner prerequisite explicit.
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap socat
+          sudo install -m 0644 \
+            /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
+            /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          bwrap --ro-bind / / --unshare-user --die-with-parent -- /bin/true
 
       - name: Resolve and boot the arm64 agent runtimes
         run: |
