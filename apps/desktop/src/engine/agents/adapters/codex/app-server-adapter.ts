@@ -1712,6 +1712,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         territoryConfig = codexTerritoryConfig(
           opts.territory,
           codexConfiguredMcpNames(effective.config),
+          runtime.binarySource.sandboxRuntimeRoot,
         );
       }
     } catch (error) {

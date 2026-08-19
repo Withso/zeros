@@ -30,6 +30,7 @@
 
 import { constants as fsConstants } from "node:fs";
 import * as fsp from "node:fs/promises";
+import { createRequire } from "node:module";
 import * as path from "node:path";
 
 import { buildSpawnEnvWithLoginPath } from "../shared/login-shell-path";
@@ -44,6 +45,73 @@ export interface CodexBinarySource {
   readonly path: string;
   /** Where this resolution came from — useful for diagnostics + log lines. */
   readonly source: "bundled" | "override" | "fallback";
+  /** Native target directory that Codex must be able to re-execute inside its
+   * own provider sandbox. Kept read-only by the territory profile. */
+  readonly sandboxRuntimeRoot?: string;
+}
+
+function sandboxRuntimeRootForBinary(binaryPath: string): string | undefined {
+  const binDirectory = path.dirname(binaryPath);
+  if (path.basename(binDirectory) !== "bin") return undefined;
+  return path.resolve(binDirectory, "..");
+}
+
+function platformRuntimeTarget():
+  | { packageName: string; triple: string }
+  | undefined {
+  const targets: Record<string, { packageName: string; triple: string }> = {
+    "darwin:x64": {
+      packageName: "@openai/codex-darwin-x64",
+      triple: "x86_64-apple-darwin",
+    },
+    "darwin:arm64": {
+      packageName: "@openai/codex-darwin-arm64",
+      triple: "aarch64-apple-darwin",
+    },
+    "linux:x64": {
+      packageName: "@openai/codex-linux-x64",
+      triple: "x86_64-unknown-linux-musl",
+    },
+    "linux:arm64": {
+      packageName: "@openai/codex-linux-arm64",
+      triple: "aarch64-unknown-linux-musl",
+    },
+    "win32:x64": {
+      packageName: "@openai/codex-win32-x64",
+      triple: "x86_64-pc-windows-msvc",
+    },
+    "win32:arm64": {
+      packageName: "@openai/codex-win32-arm64",
+      triple: "aarch64-pc-windows-msvc",
+    },
+  };
+  return targets[`${process.platform}:${process.arch}`];
+}
+
+async function resolveNpmSandboxRuntimeRoot(
+  wrapperPackagePath: string,
+): Promise<string | undefined> {
+  const target = platformRuntimeTarget();
+  if (!target) return undefined;
+  try {
+    const fromWrapper = createRequire(wrapperPackagePath);
+    const platformPackagePath = fromWrapper.resolve(
+      `${target.packageName}/package.json`,
+    );
+    const runtimeRoot = path.join(
+      path.dirname(platformPackagePath),
+      "vendor",
+      target.triple,
+    );
+    const binary = path.join(
+      runtimeRoot,
+      "bin",
+      process.platform === "win32" ? "codex.exe" : "codex",
+    );
+    return (await pathExists(binary)) ? runtimeRoot : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Resolve one executable from a trusted PATH snapshot and return its physical
@@ -130,7 +198,11 @@ export async function resolveCodexBinary(
   const fromEnv = process.env.ZEROS_CODEX_CLI_PATH?.trim();
   if (fromEnv) {
     if (await pathExists(fromEnv)) {
-      return { path: fromEnv, source: "bundled" };
+      return {
+        path: fromEnv,
+        source: "bundled",
+        sandboxRuntimeRoot: sandboxRuntimeRootForBinary(fromEnv),
+      };
     }
     console.error(
       `[codex/binary-resolver] ZEROS_CODEX_CLI_PATH '${fromEnv}' not found — ` +
@@ -143,6 +215,7 @@ export async function resolveCodexBinary(
   //    accurate path even when node_modules is hoisted unusually.
   try {
     const pkgPath = require.resolve("@openai/codex/package.json");
+    const sandboxRuntimeRoot = await resolveNpmSandboxRuntimeRoot(pkgPath);
     // The wrapper is two dirs up at `bin/codex.js`, but we want the
     // `.bin/codex` shim instead (because it's already executable and
     // shells set up SHEBANG correctly). Walk up from package.json:
@@ -157,7 +230,7 @@ export async function resolveCodexBinary(
         process.platform === "win32" ? "codex.cmd" : "codex",
       );
       if (await pathExists(shim)) {
-        return { path: shim, source: "bundled" };
+        return { path: shim, source: "bundled", sandboxRuntimeRoot };
       }
     }
     // Fall back to invoking the wrapper script via node directly.
@@ -166,7 +239,7 @@ export async function resolveCodexBinary(
       // Caller spawns via node — we communicate that by returning the
       // wrapper path; the runtime detects `.js` extension and prepends
       // `process.execPath`.
-      return { path: wrapper, source: "bundled" };
+      return { path: wrapper, source: "bundled", sandboxRuntimeRoot };
     }
   } catch {
     /* @openai/codex not installed — fall through */

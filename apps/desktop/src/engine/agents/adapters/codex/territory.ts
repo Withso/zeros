@@ -45,9 +45,22 @@ function protectedPaths(territory: AgentFilesystemTerritory): string[] {
 
 function protectedFilesystemEntries(
   territory: AgentFilesystemTerritory,
+  sandboxRuntimeRoot?: string,
 ): Record<string, "read"> {
+  const paths = protectedPaths(territory);
+  if (sandboxRuntimeRoot) {
+    if (
+      sandboxRuntimeRoot.includes("\0") ||
+      !path.isAbsolute(sandboxRuntimeRoot)
+    ) {
+      throw new Error("Codex sandbox runtime root must be an absolute path.");
+    }
+    paths.push(path.resolve(sandboxRuntimeRoot));
+  }
   return Object.fromEntries(
-    protectedPaths(territory).map((absolute) => [absolute, "read"] as const),
+    [...new Set(paths)]
+      .sort()
+      .map((absolute) => [absolute, "read"] as const),
   );
 }
 
@@ -57,6 +70,7 @@ function protectedFilesystemEntries(
 export function codexTerritoryConfig(
   territory: AgentFilesystemTerritory,
   mcpServerNames: readonly string[] = [],
+  sandboxRuntimeRoot?: string,
 ): Record<string, JsonValue> {
   const disabledMcp = Object.fromEntries(
     mcpServerNames
@@ -71,7 +85,7 @@ export function codexTerritoryConfig(
         filesystem: {
           ":minimal": "read",
           ":workspace_roots": "write",
-          ...protectedFilesystemEntries(territory),
+          ...protectedFilesystemEntries(territory, sandboxRuntimeRoot),
         },
         // Design containment is a filesystem/authority boundary, not an
         // offline mode. Engine credentials are stripped and MCP/app surfaces
@@ -152,8 +166,11 @@ function escapeTomlString(value: string): string {
  * weaker profile than the live thread receives. */
 export function codexTerritoryProfileOverride(
   territory: AgentFilesystemTerritory,
+  sandboxRuntimeRoot?: string,
 ): string {
-  const protectedEntries = Object.keys(protectedFilesystemEntries(territory))
+  const protectedEntries = Object.keys(
+    protectedFilesystemEntries(territory, sandboxRuntimeRoot),
+  )
     .map((absolute) => `"${escapeTomlString(absolute)}"="read"`)
     .join(",");
   return (
@@ -197,7 +214,7 @@ export async function runCodexTerritoryCommand(
       "-C",
       territory.workspaceRoot,
       "-c",
-      codexTerritoryProfileOverride(territory),
+      codexTerritoryProfileOverride(territory, binary.sandboxRuntimeRoot),
       "-P",
       CODEX_CODE_TERRITORY_PROFILE,
       ...commandArgs,

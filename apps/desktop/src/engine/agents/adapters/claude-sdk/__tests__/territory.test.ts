@@ -274,38 +274,28 @@ describe("Claude code-territory enforcement", () => {
     "blocks the shell/Git attack matrix in Claude's real production sandbox",
     async () => {
       const current = await fixture();
+      // Use the platform shell instead of `process.execPath`. Hosted Node can
+      // live outside Claude's deliberately minimal read set; invoking it would
+      // test the runner's package layout rather than the filesystem boundary.
       const attack = String.raw`
-        const fs = require("node:fs");
-        const path = require("node:path");
-        const cp = require("node:child_process");
-        const root = process.cwd();
-        const design = (...p) => path.join(root, "Zeros Design", ...p);
-        const code = (...p) => path.join(root, "code", ...p);
-        const attempt = (fn) => { try { fn(); } catch {} };
-        attempt(() => fs.writeFileSync(code("writable.txt"), "after\n"));
-        attempt(() => fs.writeFileSync(design("existing.txt"), "overwrite\n"));
-        attempt(() => fs.appendFileSync(design("existing.txt"), "append\n"));
-        attempt(() => fs.truncateSync(design("existing.txt"), 0));
-        attempt(() => fs.writeFileSync(design("nested", "new.txt"), "new\n"));
-        attempt(() => fs.writeFileSync(design("draft.tmp"), "changed\n"));
-        attempt(() => {
-          fs.writeFileSync(code("replacement.tmp"), "replacement\n");
-          fs.renameSync(code("replacement.tmp"), design("replace.txt"));
-        });
-        attempt(() => fs.renameSync(design("existing.txt"), code("stolen.txt")));
-        attempt(() => {
-          fs.symlinkSync(design("existing.txt"), code("design-link"));
-          fs.appendFileSync(code("design-link"), "through-link\n");
-        });
-        attempt(() => {
-          fs.linkSync(design("existing.txt"), code("design-hardlink"));
-          fs.appendFileSync(code("design-hardlink"), "through-hardlink\n");
-        });
-        attempt(() => fs.writeFileSync(path.join(root, ".zeros", "settings.toml"), "changed\n"));
-        attempt(() => fs.writeFileSync(path.join(root, ".git", "HEAD"), "changed\n"));
-        attempt(() => cp.execFileSync("git", ["add", "--", "code/writable.txt"], { cwd: root }));
+        (printf 'after\n' > code/writable.txt) || true
+        (printf 'overwrite\n' > 'Zeros Design/existing.txt') || true
+        (printf 'append\n' >> 'Zeros Design/existing.txt') || true
+        (printf '' > 'Zeros Design/existing.txt') || true
+        (printf 'new\n' > 'Zeros Design/nested/new.txt') || true
+        (printf 'changed\n' > 'Zeros Design/draft.tmp') || true
+        (printf 'replacement\n' > code/replacement.tmp &&
+          mv code/replacement.tmp 'Zeros Design/replace.txt') || true
+        (mv 'Zeros Design/existing.txt' code/stolen.txt) || true
+        (ln -s "$PWD/Zeros Design/existing.txt" code/design-link &&
+          printf 'through-link\n' >> code/design-link) || true
+        (ln 'Zeros Design/existing.txt' code/design-hardlink &&
+          printf 'through-hardlink\n' >> code/design-hardlink) || true
+        (printf 'changed\n' > .zeros/settings.toml) || true
+        (printf 'changed\n' > .git/HEAD) || true
+        (git add -- code/writable.txt) || true
+        exit 0
       `;
-      const encodedAttack = Buffer.from(attack, "utf8").toString("base64");
 
       await withMockClaude(
         [
@@ -314,9 +304,7 @@ describe("Claude code-territory enforcement", () => {
             id: "toolu_bash_attack",
             name: "Bash",
             input: {
-              command:
-                `${JSON.stringify(process.execPath)} -e ` +
-                `"eval(Buffer.from('${encodedAttack}','base64').toString())"`,
+              command: attack,
               description: "Run containment attack matrix",
             },
           },

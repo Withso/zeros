@@ -63,7 +63,12 @@ afterEach(async () => {
 describe("Codex code-territory profile", () => {
   it("uses one canonical writable workspace with exact read-only carveouts", async () => {
     const { root, territory } = await fixture();
-    const profile = codexTerritoryConfig(territory, ["safe", "bad.name"]);
+    const runtimeRoot = path.resolve("/opt/zeros/codex-runtime/vendor/test");
+    const profile = codexTerritoryConfig(
+      territory,
+      ["safe", "bad.name"],
+      runtimeRoot,
+    );
     expect(profile.permissions).toEqual({
       [CODEX_CODE_TERRITORY_PROFILE]: {
         description: "Zeros code actor: workspace write with Design read-only",
@@ -74,6 +79,7 @@ describe("Codex code-territory profile", () => {
           [path.join(root, ".git")]: "read",
           [path.join(root, ".zeros")]: "read",
           [path.join(root, "Zeros Design")]: "read",
+          [runtimeRoot]: "read",
         },
         network: { enabled: true },
       },
@@ -87,9 +93,10 @@ describe("Codex code-territory profile", () => {
       request_permissions: false,
       tool_search: false,
     });
-    const override = codexTerritoryProfileOverride(territory);
+    const override = codexTerritoryProfileOverride(territory, runtimeRoot);
     expect(override).toContain(`workspace_roots={"${root}"=true}`);
     expect(override).toContain(`"${path.join(root, "Zeros Design")}"="read"`);
+    expect(override).toContain(`"${runtimeRoot}"="read"`);
     expect(override).toContain("network={enabled=true}");
   });
 
