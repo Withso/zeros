@@ -149,10 +149,10 @@ jobs:
 
       - name: Install contained-execution runtime
         # Codex uses bubblewrap; Claude's strict sandbox also requires socat.
-        # Ubuntu 24.04 restricts unprivileged user namespaces through AppArmor,
-        # so load Ubuntu's narrow bwrap profile instead of weakening that host
-        # protection globally. The smoke command keeps image/profile drift from
-        # surfacing later as opaque containment-test failures.
+        # Claude's seccomp layer creates a second capability-bearing user
+        # namespace. Ubuntu's bwrap AppArmor profile deliberately strips those
+        # nested capabilities, so satisfy the pinned runtime's documented host
+        # prerequisite only for each containment command, then restore it.
         run: |
           # ubuntu-latest currently puts an HTTP Azure endpoint first in this
           # generated mirror list. A dead endpoint can leave apt waiting for
@@ -165,21 +165,18 @@ jobs:
               "$runner_ubuntu_sources"
           fi
           sudo apt-get update
-          sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap socat
-          sudo install -m 0644 \
-            /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
-            /etc/apparmor.d/bwrap-userns-restrict
-          # Noble's 4.0 profile predates AppArmor's mediate_deleted fix
-          # (apparmor/apparmor!1272). Claude's secure bwrap root uses detached
-          # staging paths, so apply that audited profile delta before loading it.
-          sudo sed -i \
-            's/flags=(attach_disconnected)/flags=(attach_disconnected,mediate_deleted)/g' \
-            /etc/apparmor.d/bwrap-userns-restrict
-          profile_flags=$(grep -Fc \
-            'flags=(attach_disconnected,mediate_deleted)' \
-            /etc/apparmor.d/bwrap-userns-restrict || true)
-          test "$profile_flags" -eq 2
-          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          sudo apt-get install --yes bubblewrap socat
+          userns_restriction=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
+          trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns="$userns_restriction"' EXIT
+          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "0"
+          case "$(uname -m)" in
+            x86_64) seccomp_arch=x64 ;;
+            aarch64 | arm64) seccomp_arch=arm64 ;;
+            *) echo "Unsupported seccomp architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          apply_seccomp="$PWD/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/$seccomp_arch/apply-seccomp"
+          test -x "$apply_seccomp"
           bwrap \
             --ro-bind / / \
             --unshare-pid \
@@ -187,7 +184,7 @@ jobs:
             --cap-drop ALL \
             --proc /proc \
             --die-with-parent \
-            -- /bin/true
+            -- "$apply_seccomp" /bin/true
 
       - name: Fetch origin/main (for the migration forward-only guard)
         run: git fetch --no-tags origin main || echo "origin/main unavailable — guard runs HEAD-only"
@@ -213,7 +210,11 @@ jobs:
         # reconciliation, and absence of a coding-agent Design API/MCP path.
         env:
           ZEROS_REQUIRE_CONTAINMENT_RUNTIME: "1"
-        run: pnpm check:design-containment
+        run: |
+          userns_restriction=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
+          trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns="$userns_restriction"' EXIT
+          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+          pnpm check:design-containment
 
       - name: Verify model catalog (strict)
         # Structural validation + the CLI-version gate: a curated model whose
@@ -591,26 +592,23 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
       - name: Install contained-execution runtime
-        # Keep the architecture qualification under Ubuntu's user-namespace
-        # restriction while granting only bwrap the namespace authority it
-        # needs. The direct smoke makes this runner prerequisite explicit.
+        # Claude's seccomp layer needs a nested capability-bearing user
+        # namespace. Open that prerequisite only around the exact smoke, then
+        # restore Ubuntu's restriction before any unrelated command runs.
         run: |
           sudo apt-get update
-          sudo apt-get install --yes apparmor-profiles apparmor-utils bubblewrap socat
-          sudo install -m 0644 \
-            /usr/share/apparmor/extra-profiles/bwrap-userns-restrict \
-            /etc/apparmor.d/bwrap-userns-restrict
-          # Noble's 4.0 profile predates AppArmor's mediate_deleted fix
-          # (apparmor/apparmor!1272). Claude's secure bwrap root uses detached
-          # staging paths, so apply that audited profile delta before loading it.
-          sudo sed -i \
-            's/flags=(attach_disconnected)/flags=(attach_disconnected,mediate_deleted)/g' \
-            /etc/apparmor.d/bwrap-userns-restrict
-          profile_flags=$(grep -Fc \
-            'flags=(attach_disconnected,mediate_deleted)' \
-            /etc/apparmor.d/bwrap-userns-restrict || true)
-          test "$profile_flags" -eq 2
-          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          sudo apt-get install --yes bubblewrap socat
+          userns_restriction=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
+          trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns="$userns_restriction"' EXIT
+          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "0"
+          case "$(uname -m)" in
+            x86_64) seccomp_arch=x64 ;;
+            aarch64 | arm64) seccomp_arch=arm64 ;;
+            *) echo "Unsupported seccomp architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          apply_seccomp="$PWD/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/$seccomp_arch/apply-seccomp"
+          test -x "$apply_seccomp"
           bwrap \
             --ro-bind / / \
             --unshare-pid \
@@ -618,7 +616,7 @@ jobs:
             --cap-drop ALL \
             --proc /proc \
             --die-with-parent \
-            -- /bin/true
+            -- "$apply_seccomp" /bin/true
 
       - name: Resolve and boot the arm64 agent runtimes
         run: |
@@ -630,7 +628,11 @@ jobs:
         # This proves the generic Linux backend on real arm64. The production
         # cloud image separately supplies rootless Podman, delegated memory/PID
         # cgroups, and its signed cloud-worker admission artifact.
-        run: pnpm check:zsr
+        run: |
+          userns_restriction=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
+          trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns="$userns_restriction"' EXIT
+          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+          pnpm check:zsr
 
   # The repository ruleset already requires `source-sync (macOS)`. GitHub does
   # not automatically make newly-added sibling jobs required, so retain that

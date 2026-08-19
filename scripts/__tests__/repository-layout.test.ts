@@ -52,8 +52,16 @@ describe("repository layout contracts", () => {
     expect(archive).toBeLessThan(update);
   });
 
-  it("smokes the production bubblewrap namespace under the fixed AppArmor profile", () => {
+  it("smokes the production bubblewrap and seccomp namespace prerequisites", () => {
     const preflight = read(".github/workflows/preflight.yml");
+    expect(
+      preflight.match(/kernel\.apparmor_restrict_unprivileged_userns=0/g),
+    ).toHaveLength(4);
+    expect(
+      preflight.match(
+        /kernel\.apparmor_restrict_unprivileged_userns="\$userns_restriction"/g,
+      ),
+    ).toHaveLength(4);
     const installs = [
       ...preflight.matchAll(
         /      - name: Install contained-execution runtime\n([\s\S]*?)(?=\n      - name:|\n  [A-Za-z0-9_-]+:)/g,
@@ -62,21 +70,21 @@ describe("repository layout contracts", () => {
 
     expect(installs).toHaveLength(2);
     for (const install of installs) {
-      const profileFix = install.indexOf(
-        "flags=(attach_disconnected,mediate_deleted)",
-      );
-      const profileLoad = install.indexOf(
-        "apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict",
+      const usernsEnable = install.indexOf(
+        "kernel.apparmor_restrict_unprivileged_userns=0",
       );
       const sandboxSmoke = install.indexOf("--ro-bind / /");
 
-      expect(profileFix).toBeGreaterThanOrEqual(0);
-      expect(profileFix).toBeLessThan(profileLoad);
-      expect(profileLoad).toBeLessThan(sandboxSmoke);
+      expect(usernsEnable).toBeGreaterThanOrEqual(0);
+      expect(usernsEnable).toBeLessThan(sandboxSmoke);
+      expect(install).not.toContain("bwrap-userns-restrict");
       expect(install.slice(sandboxSmoke)).toContain("--unshare-user");
       expect(install.slice(sandboxSmoke)).toContain("--cap-drop ALL");
       expect(install.slice(sandboxSmoke)).toContain("--unshare-pid");
       expect(install.slice(sandboxSmoke)).toContain("--proc /proc");
+      expect(install.slice(sandboxSmoke)).toContain(
+        '"$apply_seccomp" /bin/true',
+      );
     }
   });
 
