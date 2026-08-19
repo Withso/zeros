@@ -98,6 +98,23 @@ const PORT_DISCOVERY_MISSING_POLLS = 8;
 const MAX_AUTO_PORT_LEASES = 64;
 const COMMAND_DESCRIPTOR_VERSION = 6 as const;
 
+function finalSupervisorDiagnostic(
+  stderr: string,
+  sensitiveValues: readonly string[],
+): string {
+  const finalLine = stderr
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .at(-1);
+  if (!finalLine) return "";
+  let safe = finalLine.replace(/\p{Cc}/gu, " ");
+  for (const value of sensitiveValues) {
+    if (value.length >= 4) safe = safe.replaceAll(value, "<redacted>");
+  }
+  return safe.slice(0, 512);
+}
+
 function canonicalExecutablePath(candidate: string): string | null {
   if (!path.isAbsolute(candidate) || candidate.includes("\0")) return null;
   try {
@@ -1943,10 +1960,12 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         if (exitTimer) clearTimeout(exitTimer);
       });
       if (exit.code !== 0) {
+        const diagnostic = finalSupervisorDiagnostic(
+          stderr,
+          Object.values(expectedEnv),
+        );
         throw new Error(
-          `host-parity canary exited ${exit.code ?? exit.signal}${
-            stderr ? " with supervisor diagnostics" : ""
-          }`,
+          `host-parity canary exited ${exit.code ?? exit.signal}${diagnostic ? `: ${diagnostic}` : ""}`,
         );
       }
       const result = JSON.parse(liveText ?? stdout.trim()) as {

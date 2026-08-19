@@ -1482,6 +1482,39 @@ process.stdout.write(JSON.stringify({
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("surfaces the final supervisor diagnostic when the admission canary exits", async () => {
+    await writeFile(
+      supervisor,
+      PASSING_SUPERVISOR.replace(
+        "if (descriptor.env.HOST_PARITY_CANARY) {",
+        String.raw`if (descriptor.env.HOST_PARITY_CANARY) {
+  process.stderr.write("setup detail that should stay hidden\n");
+  process.stderr.write("bwrap: namespace setup was denied\n");
+  process.exit(17);`,
+      ),
+      { mode: 0o700 },
+    );
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+    });
+
+    await expect(
+      boundary.prepare({
+        executionId: "host-parity-canary-diagnostic",
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+      }),
+    ).rejects.toThrow(
+      "host-parity canary exited 17: bwrap: namespace setup was denied",
+    );
+    await expect(
+      access(sessionDir("host-parity-canary-diagnostic")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("refuses container authority to a Design actor before backend validation", async () => {
     const boundary = new ZsrExecutionBoundary({
       projectRoot: root,
