@@ -13,6 +13,7 @@ import {
   readFile,
   rm,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -601,8 +602,13 @@ describe("runGit — transient lock retry", () => {
 
   it("rejects a config include that resolves into code territory", async () => {
     const sentinel = path.join(dir, "included-config-ran");
-    const executable = path.join(repo, "included-fsmonitor");
-    const includedConfig = path.join(repo, "agent-writable.config");
+    // Spell the include through another physical path. macOS does this for
+    // every temporary directory (`/var` resolves to `/private/var`), but an
+    // explicit alias keeps the regression reproducible on Linux too.
+    const repoAlias = path.join(dir, "repo-alias");
+    await symlink(repo, repoAlias, "dir");
+    const executable = path.join(repoAlias, "included-fsmonitor");
+    const includedConfig = path.join(repoAlias, "agent-writable.config");
     await writeFile(
       executable,
       `#!/bin/sh\nprintf ran > '${sentinel}'\n`,
@@ -1298,36 +1304,44 @@ describe("workspace git/gh credential shims", () => {
     await rm(dir, { recursive: true, force: true });
   });
 
-  it("projects a broker read-only to the qualified cloud worker identity", async () => {
-    setGitCredentialSourceForTesting({
-      supports({ protocol, host }) {
-        return protocol === "https" && host === "github.com";
-      },
-      async getCredential() {
-        return { username: "x-access-token", password: "worker-secret" };
-      },
-    });
-    const prepared = await prepareGitCredentialShellEnvironment(
-      "workspace:test",
-      process.env.PATH ?? "",
-      {
-        uid: process.getuid?.() ?? 1_000,
-        gid: process.getgid?.() ?? 1_000,
-      },
-    );
-    expect(prepared).not.toBeNull();
+  // Cloud-worker identity projection uses Linux uid/gid and ownership
+  // semantics. macOS exercises the ordinary same-user broker path elsewhere;
+  // asking it to grant a Linux worker identity is an invalid production state.
+  it.runIf(process.platform === "linux")(
+    "projects a broker read-only to the qualified cloud worker identity",
+    async () => {
+      setGitCredentialSourceForTesting({
+        supports({ protocol, host }) {
+          return protocol === "https" && host === "github.com";
+        },
+        async getCredential() {
+          return { username: "x-access-token", password: "worker-secret" };
+        },
+      });
+      const ownerUid = process.getuid?.() ?? 1_000;
+      const ownerGid = process.getgid?.() ?? 1_000;
+      const prepared = await prepareGitCredentialShellEnvironment(
+        "workspace:test",
+        process.env.PATH ?? "",
+        {
+          uid: ownerUid === 0 ? 10_001 : ownerUid,
+          gid: ownerGid === 0 ? 10_001 : ownerGid,
+        },
+      );
+      expect(prepared).not.toBeNull();
 
-    const socket = prepared!.env.ZEROS_GIT_AUTH_SOCKET;
-    const helper = prepared!.env.ZEROS_GIT_AUTH_HELPER;
-    const socketDir = await stat(path.dirname(socket));
-    const socketStat = await stat(socket);
-    const helperDir = await stat(path.dirname(helper));
-    const helperStat = await stat(helper);
-    expect(socketDir.mode & 0o777).toBe(0o710);
-    expect(socketStat.mode & 0o777).toBe(0o660);
-    expect(helperDir.mode & 0o777).toBe(0o750);
-    expect(helperStat.mode & 0o777).toBe(0o750);
-  });
+      const socket = prepared!.env.ZEROS_GIT_AUTH_SOCKET;
+      const helper = prepared!.env.ZEROS_GIT_AUTH_HELPER;
+      const socketDir = await stat(path.dirname(socket));
+      const socketStat = await stat(socket);
+      const helperDir = await stat(path.dirname(helper));
+      const helperStat = await stat(helper);
+      expect(socketDir.mode & 0o777).toBe(0o710);
+      expect(socketStat.mode & 0o777).toBe(0o660);
+      expect(helperDir.mode & 0o777).toBe(0o750);
+      expect(helperStat.mode & 0o777).toBe(0o750);
+    },
+  );
 
   it("serves the current credential to GitHub without putting it in the shell environment", async () => {
     let token = "first-broker-secret";

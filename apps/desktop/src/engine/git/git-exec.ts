@@ -935,40 +935,78 @@ function findWorktreeTerritory(cwd: string): {
   }
 }
 
-function configOriginPath(origin: string): string | null {
-  if (!origin.startsWith("file:")) return null;
-  const value = origin.slice("file:".length);
-  return value ? path.resolve(value) : null;
+/** Resolve a path to its physical spelling even when its leaf does not exist.
+ *
+ * Git can report a config/include path through a host alias (`/var` on macOS,
+ * a worktree symlink, etc.). Comparing that lexical spelling with the physical
+ * repository root would otherwise let code-owned configuration escape the
+ * territory check. Walking to the nearest existing ancestor also keeps a
+ * currently-missing include inside code territory classified correctly if it
+ * appears before a later invocation. */
+function physicalPath(candidate: string): string {
+  let current = path.resolve(candidate);
+  const suffix: string[] = [];
+  for (;;) {
+    try {
+      return path.join(realpathSync(current), ...suffix);
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return path.resolve(candidate);
+      suffix.unshift(path.basename(current));
+      current = parent;
+    }
+  }
 }
 
-function resolveIncludePath(value: string, origin: string): string | null {
-  const originPath = configOriginPath(origin);
-  let candidate = value;
-  if (candidate.startsWith("~/")) {
+function pathSpellings(candidate: string): string[] {
+  const lexical = path.resolve(candidate);
+  const physical = physicalPath(lexical);
+  return lexical === physical ? [lexical] : [lexical, physical];
+}
+
+function configOriginPaths(origin: string, cwd: string): string[] {
+  if (!origin.startsWith("file:")) return [];
+  const value = origin.slice("file:".length);
+  return value ? pathSpellings(path.resolve(cwd, value)) : [];
+}
+
+function resolveIncludePaths(
+  value: string,
+  origin: string,
+  cwd: string,
+): string[] {
+  let candidates: string[];
+  if (value.startsWith("~/")) {
     const home = process.env.HOME;
-    if (!home) return null;
-    candidate = path.join(home, candidate.slice(2));
-  } else if (candidate.includes("%(prefix)")) {
-    return null;
-  } else if (!path.isAbsolute(candidate)) {
-    if (!originPath) return null;
-    candidate = path.resolve(path.dirname(originPath), candidate);
+    if (!home) return [];
+    candidates = [path.join(home, value.slice(2))];
+  } else if (value.includes("%(prefix)")) {
+    return [];
+  } else if (path.isAbsolute(value)) {
+    candidates = [value];
+  } else {
+    candidates = configOriginPaths(origin, cwd).map((originPath) =>
+      path.resolve(path.dirname(originPath), value),
+    );
   }
-  return path.resolve(candidate);
+  return [...new Set(candidates.flatMap(pathSpellings))];
 }
 
 function assertNoCodeWritableConfig(
   territory: ReturnType<typeof findWorktreeTerritory>,
   entries: readonly GitConfigEntry[],
+  cwd: string,
 ): void {
   if (!territory) return;
   const isMetadata = (candidate: string): boolean =>
     territory.metadata.some((metadata) => pathInside(candidate, metadata));
   for (const entry of entries) {
-    const origin = configOriginPath(entry.origin);
-    if (origin && pathInside(origin, territory.root) && !isMetadata(origin)) {
+    const unsafeOrigin = configOriginPaths(entry.origin, cwd).find(
+      (origin) => pathInside(origin, territory.root) && !isMetadata(origin),
+    );
+    if (unsafeOrigin) {
       throw unsafeGitInvocation(
-        `Engine Git refuses configuration loaded from code territory: ${origin}`,
+        `Engine Git refuses configuration loaded from code territory: ${unsafeOrigin}`,
       );
     }
     const lower = entry.key.toLowerCase();
@@ -976,14 +1014,17 @@ function assertNoCodeWritableConfig(
       lower === "include.path" ||
       (lower.startsWith("includeif.") && lower.endsWith(".path"))
     ) {
-      const includePath = resolveIncludePath(entry.value, entry.origin);
-      if (
-        includePath &&
-        pathInside(includePath, territory.root) &&
-        !isMetadata(includePath)
-      ) {
+      const unsafeInclude = resolveIncludePaths(
+        entry.value,
+        entry.origin,
+        cwd,
+      ).find(
+        (includePath) =>
+          pathInside(includePath, territory.root) && !isMetadata(includePath),
+      );
+      if (unsafeInclude) {
         throw unsafeGitInvocation(
-          `Engine Git refuses a config include from code territory: ${includePath}`,
+          `Engine Git refuses a config include from code territory: ${unsafeInclude}`,
         );
       }
     }
@@ -1120,18 +1161,25 @@ function configFileFingerprint(candidate: string): string {
 function configSourcePaths(
   territory: ReturnType<typeof findWorktreeTerritory>,
   entries: readonly GitConfigEntry[],
+  cwd: string,
 ): string[] {
   const candidates = new Set<string>();
   for (const entry of entries) {
-    const origin = configOriginPath(entry.origin);
-    if (origin) candidates.add(origin);
+    for (const origin of configOriginPaths(entry.origin, cwd)) {
+      candidates.add(origin);
+    }
     const lower = entry.key.toLowerCase();
     if (
       lower === "include.path" ||
       (lower.startsWith("includeif.") && lower.endsWith(".path"))
     ) {
-      const includePath = resolveIncludePath(entry.value, entry.origin);
-      if (includePath) candidates.add(includePath);
+      for (const includePath of resolveIncludePaths(
+        entry.value,
+        entry.origin,
+        cwd,
+      )) {
+        candidates.add(includePath);
+      }
     }
   }
   const home = process.env.HOME;
@@ -1198,7 +1246,7 @@ async function dynamicEngineGitPolicy(
         "Engine Git configuration exceeds the safety limit.",
       );
     }
-    assertNoCodeWritableConfig(territory, entries);
+    assertNoCodeWritableConfig(territory, entries, cwd);
     const dynamic = new Map<string, readonly [string, string]>();
     for (const entry of entries) {
       const value = neutralConfigValue(entry.key);
@@ -1219,7 +1267,7 @@ async function dynamicEngineGitPolicy(
         "Engine Git executable configuration exceeds the safety limit.",
       );
     }
-    const sources = configSourcePaths(territory, entries);
+    const sources = configSourcePaths(territory, entries, cwd);
     engineGitPolicyCache.delete(cacheKey);
     engineGitPolicyCache.set(cacheKey, {
       dynamic: result,
