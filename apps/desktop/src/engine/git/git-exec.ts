@@ -907,7 +907,11 @@ function findWorktreeTerritory(cwd: string): {
     try {
       let descriptor: number;
       try {
-        descriptor = openSync(dotGit, "r");
+        descriptor = openSync(
+          dotGit,
+          fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+          0o600,
+        );
       } catch (error) {
         // Windows does not consistently allow opening a directory as a file
         // descriptor. This fallback never reads a checked path; it only
