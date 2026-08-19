@@ -201,7 +201,13 @@ jobs:
         run: pnpm exec playwright install --with-deps --only-shell chromium
 
       - name: Run vitest suite
-        run: pnpm test:git
+        # Runtime-discovered integration tests exercise the same nested
+        # bubblewrap/seccomp path as the explicit containment matrix below.
+        run: |
+          userns_restriction=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
+          trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns="$userns_restriction"' EXIT
+          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
+          pnpm test:git
 
       - name: Code + Design containment matrix
         # Stable release gate for the promise shipped today: provider profiles,

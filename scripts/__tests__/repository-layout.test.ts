@@ -56,12 +56,12 @@ describe("repository layout contracts", () => {
     const preflight = read(".github/workflows/preflight.yml");
     expect(
       preflight.match(/kernel\.apparmor_restrict_unprivileged_userns=0/g),
-    ).toHaveLength(4);
+    ).toHaveLength(5);
     expect(
       preflight.match(
         /kernel\.apparmor_restrict_unprivileged_userns="\$userns_restriction"/g,
       ),
-    ).toHaveLength(4);
+    ).toHaveLength(5);
     const installs = [
       ...preflight.matchAll(
         /      - name: Install contained-execution runtime\n([\s\S]*?)(?=\n      - name:|\n  [A-Za-z0-9_-]+:)/g,
@@ -86,6 +86,17 @@ describe("repository layout contracts", () => {
         '"$apply_seccomp" /bin/true',
       );
     }
+
+    const vitest = preflight.match(
+      /      - name: Run vitest suite\n([\s\S]*?)(?=\n      - name:|\n  [A-Za-z0-9_-]+:)/,
+    )?.[1];
+    expect(vitest).toContain(
+      "trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=\"$userns_restriction\"' EXIT",
+    );
+    expect(vitest).toContain(
+      "sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0",
+    );
+    expect(vitest).toContain("pnpm test:git");
   });
 
   it("fails closed when an explicit containment test path disappears", () => {
