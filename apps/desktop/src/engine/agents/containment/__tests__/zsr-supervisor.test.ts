@@ -77,8 +77,7 @@ describe("ZSR host-parity supervisor", () => {
     expect(source).toContain("ZEROS_ZSR_RIPGREP_PATH");
     expect(source).toContain("ripgrep:");
     expect(source).not.toContain("allowAppleEvents: true");
-    expect(source).toContain("(deny appleevent-send)");
-    expect(source).toContain("(deny lsopen)");
+    expect(source).not.toContain("subtractionProfile");
     expect(source).not.toMatch(/allowedBindPorts|allowedLocalPorts: \[\]/);
     expect(source).not.toMatch(
       /zsr-resource-limits|zsr-port-policy-control|zsr-credential-authority/,
@@ -106,6 +105,7 @@ describe("ZSR host-parity supervisor", () => {
   it("compiles macOS host parity as a write-only subtraction", () => {
     const design = "/Users/example/project/Zeros Design";
     const privatePolicy = "/Users/example/private/policy.json";
+    const ambientContainerSocket = "/private/var/run/docker.sock";
     const command = wrapCommandWithSandboxMacOS({
       command: "true",
       hostParity: true,
@@ -113,18 +113,33 @@ describe("ZSR host-parity supervisor", () => {
       allowUnixSockets: [],
       allowAllUnixSockets: true,
       allowLocalBinding: true,
-      readConfig: { denyOnly: [privatePolicy], allowWithinDeny: ["/"] },
+      readConfig: {
+        denyOnly: [privatePolicy, ambientContainerSocket],
+        allowWithinDeny: ["/"],
+      },
       writeConfig: {
         allowOnly: ["/"],
         denyWithinAllow: [design],
         allowWithinDeny: [],
       },
       allowPty: true,
+      allowAppleEvents: false,
       disableMandatoryWriteProtection: true,
     });
 
     expect(command).toContain("(allow default)");
     expect(command).not.toContain("(deny default");
+    expect(command).toContain("(deny appleevent-send)");
+    expect(command).toContain("(deny lsopen)");
+    expect(command).toContain(
+      '(deny mach-lookup (global-name "com.apple.coreservices.appleevents"))',
+    );
+    expect(command).toContain(
+      `(deny network-bind (local unix-socket (literal "${ambientContainerSocket}")))`,
+    );
+    expect(command).toContain(
+      `(deny network-outbound (remote unix-socket (literal "${ambientContainerSocket}")))`,
+    );
     expect(command).toContain(`(subpath "${design}")`);
     const broadReadAllow = command.indexOf(
       '(allow file-read*\n  (subpath "/")',
@@ -250,6 +265,32 @@ describe("ZSR supervisor launch contract", () => {
     expect(result.status).toBe(125);
     expect(result.stderr).toContain("invalid entry");
     expect(result.stderr).not.toContain("nested");
+  });
+
+  it("rejects a Git dispatcher configuration outside private tools", async () => {
+    const result = await rejectCommand({
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        ZEROS_ZSR_GIT_DISPATCH_CONFIG: path.join(root, "attacker.conf"),
+      },
+    });
+    expect(result.status).toBe(125);
+    expect(result.stderr).toContain("Git dispatcher configuration is invalid");
+  });
+
+  it("preserves the validated private Git dispatcher configuration", async () => {
+    const expected = path.join(privateRoot, "tools", "git-dispatch.conf");
+    const result = await rejectCommand({
+      args: [
+        "-e",
+        `process.exit(process.env.ZEROS_ZSR_GIT_DISPATCH_CONFIG === ${JSON.stringify(expected)} ? 0 : 91)`,
+      ],
+      env: {
+        PATH: process.env.PATH ?? "/usr/bin:/bin",
+        ZEROS_ZSR_GIT_DISPATCH_CONFIG: expected,
+      },
+    });
+    expect(result.status).toBe(0);
   });
 
   it("still rejects a container launcher outside immutable private tools", async () => {

@@ -264,6 +264,15 @@ async function localHostParityMain(cloudWorker = false) {
       if (name === "local-admission-fast-path") {
         return `code=${observed.codeAdmissionMs}ms design=${observed.designAdmissionMs}ms`;
       }
+      if (
+        name === "native-git-all-subcommands" &&
+        (!Array.isArray(code.gitStatuses) ||
+          code.gitStatuses.some((status) => status !== 0))
+      ) {
+        return `statuses=${JSON.stringify(code.gitStatuses)} stderr=${safeError(
+          code.rawGitErrors ?? "",
+        )}`;
+      }
       // Name the variables, not just the verdict: the failure this check exists
       // for is a rewritten TLS-trust path, and "which one" is the whole
       // remediation. Values are engine/host paths, never credentials.

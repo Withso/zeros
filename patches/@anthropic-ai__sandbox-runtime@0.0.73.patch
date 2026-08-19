@@ -2,7 +2,7 @@ diff --git a/dist/cli.js b/dist/cli.js
 old mode 100644
 new mode 100755
 diff --git a/dist/sandbox/linux-sandbox-utils.d.ts b/dist/sandbox/linux-sandbox-utils.d.ts
-index d3a3efdf46d039b24317cda40acc8ba3e5a424bb..a064fbe2e115555c542ae6f095d60e5f8b05dfa6 100644
+index d3a3efdf46d039b24317cda40acc8ba3e5a424bb..11aae3be0feba71fe0240cb39a8948b7815a6967 100644
 --- a/dist/sandbox/linux-sandbox-utils.d.ts
 +++ b/dist/sandbox/linux-sandbox-utils.d.ts
 @@ -43,6 +43,14 @@ export interface LinuxSandboxParams {
@@ -30,7 +30,7 @@ index d3a3efdf46d039b24317cda40acc8ba3e5a424bb..a064fbe2e115555c542ae6f095d60e5f
       * Directories to emit as `safe.directory` via `GIT_CONFIG_*` env
       * vars (see {@link buildPosixGitSafeDirEnv}). Under `--unshare-user`
 diff --git a/dist/sandbox/linux-sandbox-utils.js b/dist/sandbox/linux-sandbox-utils.js
-index 4c521f62da435e7de02d1a69ceda617ea51cca08..14028cb4d9381202dab089aa20b0d35e3c643367 100644
+index 4c521f62da435e7de02d1a69ceda617ea51cca08..be22df1bc12e35fc14612745d3ce8d7d20b9ae10 100644
 --- a/dist/sandbox/linux-sandbox-utils.js
 +++ b/dist/sandbox/linux-sandbox-utils.js
 @@ -29,7 +29,7 @@ function findSymlinkInPath(targetPath, allowedWritePaths) {
@@ -243,7 +243,7 @@ index 4c521f62da435e7de02d1a69ceda617ea51cca08..14028cb4d9381202dab089aa20b0d35e
          return wrappedCommand;
      }
 diff --git a/dist/sandbox/macos-sandbox-utils.d.ts b/dist/sandbox/macos-sandbox-utils.d.ts
-index 819c56a3f6bfb89fbacc008e6b0fcf6bf40901ed..3f5d06c9971e67ce519ea47ce9ed21a460d8432a 100644
+index 819c56a3f6bfb89fbacc008e6b0fcf6bf40901ed..a301eeb16056cbaf92f4c54218cbc9ed0864d7e3 100644
 --- a/dist/sandbox/macos-sandbox-utils.d.ts
 +++ b/dist/sandbox/macos-sandbox-utils.d.ts
 @@ -40,6 +40,7 @@ export interface MacOSSandboxParams {
@@ -271,7 +271,7 @@ index 819c56a3f6bfb89fbacc008e6b0fcf6bf40901ed..3f5d06c9971e67ce519ea47ce9ed21a4
      line: string;
      command?: string;
 diff --git a/dist/sandbox/macos-sandbox-utils.js b/dist/sandbox/macos-sandbox-utils.js
-index c3b6bd388235dccb965697cc07035d08aa9666eb..a78999103072b72687676a5915ad34bbc1a66aa2 100644
+index c3b6bd388235dccb965697cc07035d08aa9666eb..80d58fdaa1099ef8ea6449db5586ccf7eadf737f 100644
 --- a/dist/sandbox/macos-sandbox-utils.js
 +++ b/dist/sandbox/macos-sandbox-utils.js
 @@ -9,7 +9,9 @@ import { shouldIgnoreViolation } from './sandbox-violation-store.js';
@@ -356,7 +356,50 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..a78999103072b72687676a5915ad34bb
          '(version 1)',
          `(deny default (with message "${logTag}"))`,
          '',
-@@ -700,7 +728,7 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
+@@ -618,6 +646,20 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
+         ')',
+         '',
+     ];
++    if (hostParity && !allowAppleEvents) {
++        // A host-parity profile starts from `(allow default)`, so omitting the
++        // ordinary opt-in allows does not subtract ambient Launch Services or
++        // Apple Events authority. Emit the denials in this profile instead of
++        // nesting a second sandbox-exec: macOS can reject applying that nested
++        // profile after the outer SRT profile is active.
++        profile.push('; Host-parity Apple Events subtraction');
++        profile.push('(deny appleevent-send)');
++        profile.push('(deny lsopen)');
++        profile.push('(deny mach-lookup (global-name "com.apple.coreservices.appleevents"))');
++        profile.push('(deny mach-lookup (global-name "com.apple.CoreServices.coreservicesd"))');
++        profile.push('(deny mach-lookup (global-name "com.apple.coreservices.quarantine-resolver"))');
++        profile.push('');
++    }
+     // Network rules
+     profile.push('; Network');
+     if (!needsNetworkRestriction) {
+@@ -688,6 +730,21 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
+             profile.push(`(allow network-outbound (remote ip "localhost:${socksProxyPort}"))`);
+         }
+     }
++    if (hostParity && readConfig?.denyOnly) {
++        // Explicitly read-denied Unix socket paths are authority subtractions
++        // too. `allowAllUnixSockets` above is required for ordinary host parity;
++        // these last-match-wins rules remove only the exact protected endpoints.
++        const deniedSockets = [...new Set(readConfig.denyOnly
++                .filter(socketPath => !containsGlobChars(socketPath))
++                .map(normalizePathForSandbox))];
++        if (deniedSockets.length > 0) {
++            profile.push('; Host-parity Unix socket subtractions');
++            for (const socketPath of deniedSockets) {
++                profile.push(`(deny network-bind (local unix-socket (literal ${escapePath(socketPath)})))`);
++                profile.push(`(deny network-outbound (remote unix-socket (literal ${escapePath(socketPath)})))`);
++            }
++        }
++    }
+     profile.push('');
+     // Read rules
+     // Pass write-allowed paths so that move-blocking deny rules in the read section
+@@ -700,7 +757,7 @@ function generateSandboxProfile({ readConfig, writeConfig, httpProxyPort, socksP
      profile.push('');
      // Write rules
      profile.push('; File write');
@@ -365,7 +408,7 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..a78999103072b72687676a5915ad34bb
      // Read-denied paths inside write roots: the read section's unlink/create
      // re-allow for write roots (and the write section's file-write* allows)
      // must not leave them renameable. Last in the profile so nothing above
-@@ -739,7 +767,7 @@ function escapePath(pathStr) {
+@@ -739,7 +796,7 @@ function escapePath(pathStr) {
   * Wrap command with macOS sandbox
   */
  export function wrapCommandWithSandboxMacOS(params) {
@@ -374,7 +417,7 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..a78999103072b72687676a5915ad34bb
      // SBPL cannot redirect a read to different bytes, so whole-file masking
      // degrades to read-deny on macOS: the sandboxed process gets EPERM
      // instead of the sentinel. The DYLD interposer (a later step) lifts
-@@ -790,8 +818,10 @@ export function wrapCommandWithSandboxMacOS(params) {
+@@ -790,8 +847,10 @@ export function wrapCommandWithSandboxMacOS(params) {
          allowMachLookup,
          allowPty,
          allowGitConfig,
@@ -386,7 +429,7 @@ index c3b6bd388235dccb965697cc07035d08aa9666eb..a78999103072b72687676a5915ad34bb
      });
      // Generate proxy environment variables using shared utility
 diff --git a/dist/sandbox/sandbox-config.d.ts b/dist/sandbox/sandbox-config.d.ts
-index a5d9fe988f1f5c1cc1e48aef859c7276be37bb12..f92bf7cf45bb1806f83b6e6adf0476a2a31ef685 100644
+index a5d9fe988f1f5c1cc1e48aef859c7276be37bb12..ca969f537695ab1214f378a015d485594e99488d 100644
 --- a/dist/sandbox/sandbox-config.d.ts
 +++ b/dist/sandbox/sandbox-config.d.ts
 @@ -718,21 +718,27 @@ export declare const FilesystemConfigSchema: z.ZodObject<{
@@ -483,8 +526,9 @@ index a5d9fe988f1f5c1cc1e48aef859c7276be37bb12..f92bf7cf45bb1806f83b6e6adf0476a2
 +};
  export {};
  //# sourceMappingURL=sandbox-config.d.ts.map
+\ No newline at end of file
 diff --git a/dist/sandbox/sandbox-config.js b/dist/sandbox/sandbox-config.js
-index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..d236a50923bee68e906559affa4d7a06c1885ce9 100644
+index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..19b408e9f5ac0cf297a54f32e4660c701e95bba8 100644
 --- a/dist/sandbox/sandbox-config.js
 +++ b/dist/sandbox/sandbox-config.js
 @@ -761,10 +761,18 @@ export const FilesystemConfigSchema = z.object({
@@ -555,7 +599,7 @@ index 74c24ad4680083f6be1f6ffd12e4119ddbeee489..d236a50923bee68e906559affa4d7a06
      if (!creds)
          return;
 diff --git a/dist/sandbox/sandbox-manager.js b/dist/sandbox/sandbox-manager.js
-index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d26554589cb0439739ff2222e7c3064fd32f4770 100644
+index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..0f9093b527ea7cdf5a75aedf2cebce65e9e000a8 100644
 --- a/dist/sandbox/sandbox-manager.js
 +++ b/dist/sandbox/sandbox-manager.js
 @@ -657,6 +657,15 @@ async function initialize(runtimeConfig, sandboxAskCallback, enableLogMonitor =
@@ -673,7 +717,7 @@ index 5be4a4f0928908ab4d0ad437dd33b236e53e9b95..d26554589cb0439739ff2222e7c3064f
              await waitForNetworkInitialization();
          }
 diff --git a/dist/sandbox/sandbox-schemas.d.ts b/dist/sandbox/sandbox-schemas.d.ts
-index d753a3a3a500be8c485f511ec5a94d5921094b91..48e851637c5f009bf42bccad2a44e67d19cdec54 100644
+index d753a3a3a500be8c485f511ec5a94d5921094b91..743e2cb71b1ce5d15aa70553abd18ddab23dd01c 100644
 --- a/dist/sandbox/sandbox-schemas.d.ts
 +++ b/dist/sandbox/sandbox-schemas.d.ts
 @@ -34,6 +34,7 @@ export interface FsReadRestrictionConfig {

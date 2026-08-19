@@ -16,6 +16,7 @@ import path from "node:path";
 const POLICY_VERSION = 1;
 const COMMAND_VERSION = 6;
 const INTERNAL_ENV_PREFIX = "ZEROS_ZSR_";
+const GIT_DISPATCH_CONFIG_ENV = "ZEROS_ZSR_GIT_DISPATCH_CONFIG";
 const MAX_DESCRIPTOR_BYTES = 32 * 1024 * 1024;
 const MAX_POLICY_PATHS = 4_096;
 const MAX_ARGUMENTS = 8_192;
@@ -322,6 +323,14 @@ function validateCommand(command, policy, policyPath, commandPath) {
       throw new Error("command environment contains an invalid entry");
     }
   }
+  const gitDispatchConfig = command.env[GIT_DISPATCH_CONFIG_ENV];
+  if (
+    gitDispatchConfig !== undefined &&
+    gitDispatchConfig !==
+      path.join(path.dirname(policyPath), "tools", "git-dispatch.conf")
+  ) {
+    throw new Error("Git dispatcher configuration is invalid");
+  }
   requireAbsolutePaths(
     command.deniedContainerSockets,
     "deniedContainerSockets",
@@ -459,9 +468,9 @@ function completeConfig(policy, policyPath, commandPath, command) {
     ripgrep: {
       command: canonicalExecutable(ripgrep, "ripgrep"),
     },
-    // Host-parity starts from `(allow default)`, so this switch alone cannot
-    // subtract Launch Services. `containedTarget` adds the explicit nested
-    // denies that make the setting effective for the full descendant tree.
+    // The reviewed SRT patch turns this into explicit deny rules in the single
+    // host-parity Seatbelt profile. Do not add a nested sandbox-exec here:
+    // hosted macOS rejects applying it after the outer profile is active.
     allowAppleEvents: false,
     ...linuxHelpers(path.dirname(policyPath), policy.runtime.cloudWorker),
   };
@@ -475,7 +484,11 @@ function scrubSupervisorEnvironment() {
 
 function containedTarget(command) {
   const environment = Object.entries(command.env)
-    .filter(([name]) => !name.startsWith(INTERNAL_ENV_PREFIX))
+    .filter(
+      ([name]) =>
+        !name.startsWith(INTERNAL_ENV_PREFIX) ||
+        name === GIT_DISPATCH_CONFIG_ENV,
+    )
     .map(([name, value]) => `${name}=${value}`);
   const exact = ["/usr/bin/env", "-i", ...environment]
     .map(shellQuote)
@@ -495,34 +508,10 @@ function containedTarget(command) {
         ...command.args,
       ]
     : [command.command, ...command.args];
-  const target = `${exact} ${targetArgv.map(shellQuote).join(" ")}`;
-  if (process.platform !== "darwin") return target;
-  const subtractionProfile = [
-    "(version 1)",
-    "(allow default)",
-    "(deny appleevent-send)",
-    "(deny lsopen)",
-    '(deny mach-lookup (global-name "com.apple.coreservices.appleevents"))',
-    '(deny mach-lookup (global-name "com.apple.CoreServices.coreservicesd"))',
-    '(deny mach-lookup (global-name "com.apple.coreservices.quarantine-resolver"))',
-    ...command.deniedContainerSockets.flatMap((socket) => {
-      const literal = JSON.stringify(socket);
-      return [
-        `(deny network-bind (local unix-socket (literal ${literal})))`,
-        `(deny network-outbound (remote unix-socket (literal ${literal})))`,
-      ];
-    }),
-  ].join("\n");
-  return [
-    "/usr/bin/sandbox-exec",
-    "-p",
-    subtractionProfile,
-    "/bin/sh",
-    "-c",
-    target,
-  ]
-    .map(shellQuote)
-    .join(" ");
+  // Platform-specific restrictions belong to SRT's single generated profile.
+  // Applying a second sandbox-exec here can be rejected after the outer macOS
+  // Seatbelt profile is active.
+  return `${exact} ${targetArgv.map(shellQuote).join(" ")}`;
 }
 
 async function cleanupSandboxRuntime(sandboxManager) {

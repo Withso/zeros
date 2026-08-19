@@ -507,9 +507,9 @@ const AMBIENT_CONTAINER_SELECTOR_ENV = new Set([
 
 /** Known or explicitly advertised host-daemon sockets. Linux masks existing
  * endpoints in the mount namespace; macOS subtracts connect/bind operations in
- * a nested Seatbelt profile. The list is deliberately endpoint-shaped rather
- * than a broad runtime-directory deny so SSH agents and ordinary local tools
- * retain host parity. */
+ * SRT's host-parity Seatbelt profile. The list is deliberately endpoint-shaped
+ * rather than a broad runtime-directory deny so SSH agents and ordinary local
+ * tools retain host parity. */
 function ambientContainerSocketPaths(
   environment: Readonly<Record<string, string>>,
 ): string[] {

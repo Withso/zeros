@@ -657,7 +657,8 @@ process.stdout.write(JSON.stringify({
         sshAgentPreserved: codeReport.sshSocket === sentinelEnv.SSH_AUTH_SOCK,
         directRequestedPort:
           portLease.port === 5173 && portLease.targetPort === 5173,
-        prePushHook: (await readFile(hookMarker, "utf8")) === "ran\n",
+        prePushHook:
+          (await readFile(hookMarker, "utf8").catch(() => null)) === "ran\n",
         codeFileUnchangedByDesign:
           (await readFile(codeFile, "utf8")) === "host-parity-code\n",
         codeAdmissionMs,
