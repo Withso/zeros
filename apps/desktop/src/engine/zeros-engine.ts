@@ -799,6 +799,14 @@ export class ZerosEngine {
     string,
     Set<Promise<unknown>>
   >();
+  /** Enter-Design requests can discover first-use territory only after an
+   * asynchronous Git/settings preview. Their outer workspace promise is
+   * already in `workspaceProcessStarts` by the time that preview asks for the
+   * global Design transition, so the transition must distinguish the caller
+   * from older mutations it genuinely has to drain. */
+  private readonly designTerritoryTransitionCallers = new Set<
+    Promise<unknown>
+  >();
   /** Every code-authority admission, including agents, Setup/Run tasks, and
    * rowless local-main tasks. App-wide Design protection makes each one depend
    * on the global registered owner set, so registry expansion drains this
@@ -1013,7 +1021,11 @@ export class ZerosEngine {
       this.setMcpHeaderSecret(url, name, value),
     );
     this.workspace.setDesignTerritoryTransitioner((targets, mutation) =>
-      this.withDesignTerritoryTransition(targets, mutation),
+      this.withDesignTerritoryTransition(targets, mutation, {
+        // WorkspaceService may discover the transition only after an async
+        // preview, when its outer request is already in the lifecycle barrier.
+        initiatedByDesignTransitionCaller: true,
+      }),
     );
     this.pty = new PtyService(
       this.root,
@@ -2686,7 +2698,21 @@ export class ZerosEngine {
    * the previous gate is drained before old immutable boundaries are retired. */
   private async withGlobalDesignTerritoryTransition<T>(
     mutation: () => Promise<T>,
+    options: { initiatedByDesignTransitionCaller?: boolean } = {},
   ): Promise<T> {
+    // A lifecycle/registry operation that arrives while an Enter-Design
+    // preview is in flight must queue BEHIND that request. Otherwise it can
+    // acquire the global tail first, wait for the Enter request's workspace
+    // promise, and deadlock when that request subsequently queues behind it.
+    // The Enter request itself skips this pre-drain and joins the tail below.
+    if (!options.initiatedByDesignTransitionCaller) {
+      while (this.designTerritoryTransitionCallers.size > 0) {
+        await this.waitForWorkspaceProcessStartSnapshot(
+          "design-mode-transition",
+          [...this.designTerritoryTransitionCallers],
+        );
+      }
+    }
     let release!: () => void;
     const turn = new Promise<void>((resolve) => {
       release = resolve;
@@ -2698,7 +2724,9 @@ export class ZerosEngine {
       ...new Set([
         ...this.globalDesignAuthorityStarts,
         ...[...this.workspaceProcessStarts.values()].flatMap((starts) => [
-          ...starts,
+          ...[...starts].filter(
+            (start) => !this.designTerritoryTransitionCallers.has(start),
+          ),
         ]),
       ]),
     ];
@@ -2751,6 +2779,7 @@ export class ZerosEngine {
   private async withDesignTerritoryTransition<T>(
     targets: readonly { workspaceId: string; designDirectory: string }[],
     mutation: () => Promise<T>,
+    options: { initiatedByDesignTransitionCaller?: boolean } = {},
   ): Promise<T> {
     const ordered = [
       ...new Map(
@@ -2789,7 +2818,7 @@ export class ZerosEngine {
       // owner, so even a one-workspace pointer move changes every session's
       // immutable map. The global primitive snapshots all rowless/managed
       // starts and retires them before publication.
-      return await this.withGlobalDesignTerritoryTransition(mutation);
+      return await this.withGlobalDesignTerritoryTransition(mutation, options);
     } finally {
       for (const target of validated) {
         this.designTerritoryTransitions.delete(target.workspaceId);
@@ -2888,15 +2917,15 @@ export class ZerosEngine {
             failClosed: true,
           });
         }
-        this.router.clearOwner(sessionId);
-        this.sessionAgent.delete(sessionId);
-        this.sessionWorkspace.delete(sessionId);
-        this.sessionMessages.delete(sessionId);
-        this.sessionLoadResponses.delete(sessionId);
-        this.activePromptContexts.delete(sessionId);
-        this.promptSessions.delete(sessionId);
+        // Territory retirement is a complete execution invalidation, not just
+        // an adapter stop. In particular, clearAgentExecutionRoute also drops
+        // sessionChat and the exact conversationExecution reverse route. The
+        // old partial cleanup left those two maps pointing at a revoked
+        // execution; a stale renderer prompt could then republish it into
+        // sessionAgent and reach every provider as an execution the gateway
+        // had never admitted.
+        this.clearAgentExecutionRoute(sessionId);
         this.cancelRequested.delete(sessionId);
-        this.clearPendingAgentInteractions(sessionId);
       }
     } catch (error) {
       undrainSurvivors();
@@ -3087,9 +3116,53 @@ export class ZerosEngine {
     throw new GitError({
       code: "VALIDATION_FAILED",
       message,
-      remediation: "Wait for the workspace operation to finish, then try again.",
+      remediation:
+        "Wait for the workspace operation to finish, then try again.",
       context: { workspaceId },
     });
+  }
+
+  /** User-facing process admission waits behind the complete registered-owner
+   * transition queue instead of turning a short containment handoff into a
+   * terminal validation error. The loop matters because another transition
+   * can join the tail while the caller is parked. Conversation binds may abort
+   * the wait when a newer bind/close supersedes them. All non-transient
+   * workspace and containment failures are still revalidated by the caller's
+   * ordinary fail-closed assertion immediately after this returns. */
+  private async waitForGlobalDesignTerritoryTransition(
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    while (this.globalDesignTerritoryTransitionCount > 0) {
+      if (signal?.aborted) return false;
+      const transition = this.globalDesignTerritoryTransitionTail;
+      if (!signal) {
+        await transition;
+        continue;
+      }
+      const completed = await new Promise<boolean>((resolve) => {
+        let settled = false;
+        const finish = (result: boolean) => {
+          if (settled) return;
+          settled = true;
+          signal.removeEventListener("abort", onAbort);
+          resolve(result);
+        };
+        const onAbort = () => finish(false);
+        signal.addEventListener("abort", onAbort, { once: true });
+        void transition.then(() => finish(true));
+        if (signal.aborted) finish(false);
+      });
+      if (!completed) return false;
+    }
+    return !signal?.aborted;
+  }
+
+  private designTransitionInterruptedProcessStart(error: unknown): boolean {
+    return (
+      isGitError(error) &&
+      error.code === "VALIDATION_FAILED" &&
+      /Design territory is being updated\.?$/i.test(error.message)
+    );
   }
 
   /** Canonical managed owner for a process/session. Desktop clients normally
@@ -3124,6 +3197,7 @@ export class ZerosEngine {
   private trackWorkspaceProcessStart<T>(
     workspaceId: string | null | undefined,
     start: Promise<T>,
+    options: { designTerritoryTransitionCaller?: boolean } = {},
   ): Promise<T> {
     if (!workspaceId) return start;
     let starts = this.workspaceProcessStarts.get(workspaceId);
@@ -3132,11 +3206,15 @@ export class ZerosEngine {
       this.workspaceProcessStarts.set(workspaceId, starts);
     }
     const tracked = start.finally(() => {
+      this.designTerritoryTransitionCallers.delete(tracked);
       const current = this.workspaceProcessStarts.get(workspaceId);
       current?.delete(tracked);
       if (current?.size === 0) this.workspaceProcessStarts.delete(workspaceId);
     });
     starts.add(tracked);
+    if (options.designTerritoryTransitionCaller) {
+      this.designTerritoryTransitionCallers.add(tracked);
+    }
     return tracked;
   }
 
@@ -3695,6 +3773,7 @@ export class ZerosEngine {
   private async handleAgentMessage(
     msg: EngineMessage,
     client: TransportClient,
+    designAdmissionRetry = 0,
   ): Promise<void> {
     // Normalize the canonical route name once at the dispatch edge. Handlers and
     // adapters still accept `sessionId` during the compatibility window, but
@@ -3850,6 +3929,18 @@ export class ZerosEngine {
             spawnOpts.workspaceId,
             spawnOpts.cwd,
           );
+          const admissionSignal = this.conversationAdmissionSignal(
+            msg.chatId,
+            bindToken,
+          );
+          const admissionOpened =
+            await this.waitForGlobalDesignTerritoryTransition(admissionSignal);
+          if (
+            !admissionOpened ||
+            !this.conversationBindIsCurrent(msg.chatId, bindToken)
+          ) {
+            throw this.staleConversationBindFailure("newSession");
+          }
           this.assertAgentWorkspaceProcessStartAllowed(
             lifecycleWorkspaceId,
             spawnOpts.workspaceId,
@@ -3957,14 +4048,6 @@ export class ZerosEngine {
                     ? { providerMetadata: session.providerMetadata }
                     : {}),
                 });
-                if (msg.chatId) {
-                  this.persistProviderIdentityForChat(
-                    msg.chatId,
-                    msg.agentId,
-                    session.providerBinding,
-                    session.providerMetadata,
-                  );
-                }
                 try {
                   this.assertAgentWorkspaceProcessStartAllowed(
                     lifecycleWorkspaceId,
@@ -3978,6 +4061,19 @@ export class ZerosEngine {
                     .catch(() => {});
                   this.clearAgentExecutionRoute(executionId);
                   throw err;
+                }
+                // Do not durably attach a native provider thread until the
+                // final admission check succeeds. A territory transition that
+                // crossed the spawn will dispose this execution and retry the
+                // bind; persisting first would leave an unused provider thread
+                // as the chat's resume target if that retry were then closed.
+                if (msg.chatId) {
+                  this.persistProviderIdentityForChat(
+                    msg.chatId,
+                    msg.agentId,
+                    session.providerBinding,
+                    session.providerMetadata,
+                  );
                 }
                 return { initialize, session };
               })(),
@@ -4112,6 +4208,79 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
+          // A registered Design-owner transition revokes every provider's
+          // immutable execution boundary. Unlike create/load, a prompt cannot
+          // simply wait and continue on its old execution after that handoff;
+          // tell the renderer to resume the durable provider conversation on a
+          // freshly admitted route. Keep this prompt-specific and structured
+          // so a short workspace switch never becomes a provider error toast.
+          if (this.globalDesignTerritoryTransitionCount > 0) {
+            const message =
+              "Design territory changed while this prompt was starting. Reconnecting under the current workspace boundary.";
+            client.send(
+              createMessage({
+                type: "AGENT_PROMPT_FAILED",
+                source: "engine",
+                requestId: msg.id,
+                agentId: msg.agentId,
+                executionId: msg.sessionId,
+                sessionId: msg.sessionId,
+                error: message,
+                failure: {
+                  kind: "lifecycle-superseded",
+                  stage: "prompt",
+                  agentId: msg.agentId,
+                  message,
+                },
+              }),
+            );
+            return;
+          }
+          const lifecycleWorkspaceId = this.workspaceIdForAgentSession(
+            msg.sessionId,
+          );
+          // A live/ghost prompt record is also engine-minted execution
+          // authority. It can briefly outlive the route maps while an adapter
+          // exit is settling, and must reach the existing concurrency/ghost
+          // handling below. Territory retirement clears both together, so a
+          // revoked renderer payload cannot use this exception.
+          const inFlight = this.activePromptContexts.get(msg.sessionId);
+          // Execution identity is engine-minted admission authority. Never
+          // recreate it from an incoming prompt: a revoked route can linger in
+          // an older renderer for a few milliseconds after a territory change,
+          // and trusting that stale payload resurrected a route the gateway no
+          // longer owned (the Codex/Claude/Cursor "engine never admitted"
+          // failure). Purge any compatibility-era partial maps while rejecting
+          // it so the engine self-heals even across mixed-version reloads.
+          if (!this.sessionAgent.has(msg.sessionId) && !inFlight) {
+            // Workspace archive/delete intentionally leaves an owner tombstone
+            // after disposing the adapter. Revalidate it before clearing any
+            // compatibility-era partial route: a late execution-only prompt
+            // must still fail closed for a deleted managed workspace rather
+            // than erasing the evidence and treating it as an unmanaged route.
+            this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+            this.clearAgentExecutionRoute(msg.sessionId);
+            const message =
+              "This agent execution is no longer active. Reconnecting to its provider conversation.";
+            client.send(
+              createMessage({
+                type: "AGENT_PROMPT_FAILED",
+                source: "engine",
+                requestId: msg.id,
+                agentId: msg.agentId,
+                executionId: msg.sessionId,
+                sessionId: msg.sessionId,
+                error: message,
+                failure: {
+                  kind: "session-expired",
+                  stage: "prompt",
+                  agentId: msg.agentId,
+                  message,
+                },
+              }),
+            );
+            return;
+          }
           const promptChatId = this.sessionChat.get(msg.sessionId);
           if (promptChatId && this.conversationForkSources.has(promptChatId)) {
             client.send(
@@ -4132,7 +4301,6 @@ export class ZerosEngine {
           // concurrency invariant at the engine too so an older renderer (or
           // another client) cannot open a phantom second durable turn while
           // the provider is already responding on this session.
-          const inFlight = this.activePromptContexts.get(msg.sessionId);
           if (inFlight) {
             if (this.activePromptIsLive(inFlight)) {
               client.send(
@@ -4160,12 +4328,34 @@ export class ZerosEngine {
             this.activePromptContexts.delete(msg.sessionId);
             this.promptSessions.delete(msg.sessionId);
           }
-          const lifecycleWorkspaceId = this.workspaceIdForAgentSession(
-            msg.sessionId,
-          );
-          this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          try {
+            this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          } catch (error) {
+            if (!this.designTransitionInterruptedProcessStart(error)) {
+              throw error;
+            }
+            const message =
+              "Design territory changed while this prompt was starting. Reconnecting under the current workspace boundary.";
+            client.send(
+              createMessage({
+                type: "AGENT_PROMPT_FAILED",
+                source: "engine",
+                requestId: msg.id,
+                agentId: msg.agentId,
+                executionId: msg.sessionId,
+                sessionId: msg.sessionId,
+                error: message,
+                failure: {
+                  kind: "lifecycle-superseded",
+                  stage: "prompt",
+                  agentId: msg.agentId,
+                  message,
+                },
+              }),
+            );
+            return;
+          }
           this.router.setOwner(msg.sessionId, client.id);
-          this.sessionAgent.set(msg.sessionId, msg.agentId);
           const activePrompt: ActivePromptContext = {
             sessionId: msg.sessionId,
             agentId: msg.agentId,
@@ -4240,6 +4430,28 @@ export class ZerosEngine {
             this.emitTurnState(activePrompt, "failed");
             if (this.activePromptContexts.get(msg.sessionId) === activePrompt) {
               this.activePromptContexts.delete(msg.sessionId);
+            }
+            if (this.designTransitionInterruptedProcessStart(err)) {
+              const message =
+                "Design territory changed while this prompt was starting. Reconnecting under the current workspace boundary.";
+              client.send(
+                createMessage({
+                  type: "AGENT_PROMPT_FAILED",
+                  source: "engine",
+                  requestId: msg.id,
+                  agentId: msg.agentId,
+                  executionId: msg.sessionId,
+                  sessionId: msg.sessionId,
+                  error: message,
+                  failure: {
+                    kind: "lifecycle-superseded",
+                    stage: "prompt",
+                    agentId: msg.agentId,
+                    message,
+                  },
+                }),
+              );
+              return;
             }
             throw err;
           } finally {
@@ -4869,6 +5081,20 @@ export class ZerosEngine {
             client,
             "forkSession",
           );
+          const forkAdmissionSignal = this.conversationAdmissionSignal(
+            msg.destinationChatId,
+            bindToken,
+          );
+          const forkAdmissionOpened =
+            await this.waitForGlobalDesignTerritoryTransition(
+              forkAdmissionSignal,
+            );
+          if (
+            !forkAdmissionOpened ||
+            !this.conversationBindIsCurrent(msg.destinationChatId, bindToken)
+          ) {
+            throw this.staleConversationBindFailure("forkSession");
+          }
           this.assertAgentWorkspaceProcessStartAllowed(
             destinationWorkspaceId,
             forkSpawnOpts.workspaceId,
@@ -5190,6 +5416,20 @@ export class ZerosEngine {
             loadOpts.workspaceId,
             loadOpts.cwd,
           );
+          const loadAdmissionSignal = this.conversationAdmissionSignal(
+            msg.chatId,
+            bindToken,
+          );
+          const loadAdmissionOpened =
+            await this.waitForGlobalDesignTerritoryTransition(
+              loadAdmissionSignal,
+            );
+          if (
+            !loadAdmissionOpened ||
+            !this.conversationBindIsCurrent(msg.chatId, bindToken)
+          ) {
+            throw this.staleConversationBindFailure("loadSession");
+          }
           this.assertAgentWorkspaceProcessStartAllowed(
             lifecycleWorkspaceId,
             loadOpts.workspaceId,
@@ -5455,7 +5695,53 @@ export class ZerosEngine {
           );
           return;
       }
-    } catch (err) {
+    } catch (caught) {
+      let err = caught;
+      const retryableBind =
+        msg.type === "AGENT_NEW_SESSION"
+          ? {
+              conversationId: msg.chatId,
+              stage: "newSession" as const,
+            }
+          : msg.type === "AGENT_LOAD_SESSION"
+            ? {
+                conversationId: msg.chatId,
+                stage: "loadSession" as const,
+              }
+            : null;
+      if (
+        retryableBind &&
+        bindToFinish &&
+        this.designTransitionInterruptedProcessStart(err)
+      ) {
+        const signal = this.conversationAdmissionSignal(
+          retryableBind.conversationId,
+          bindToFinish.token,
+        );
+        const gateOpened =
+          await this.waitForGlobalDesignTerritoryTransition(signal);
+        const bindStillCurrent = this.conversationBindIsCurrent(
+          retryableBind.conversationId,
+          bindToFinish.token,
+        );
+        if (!gateOpened || !bindStillCurrent) {
+          err = this.staleConversationBindFailure(retryableBind.stage);
+        } else if (designAdmissionRetry < 3) {
+          // The admitted native execution was disposed by the guarded spawn
+          // path (or by the transition's all-session retirement). Re-enter the
+          // complete bind so cwd, credentials, durable provider identity, and
+          // lifecycle state are all revalidated against the new owner map.
+          await this.handleAgentMessage(msg, client, designAdmissionRetry + 1);
+          return;
+        } else {
+          err = new AgentFailureError({
+            kind: "lifecycle-superseded",
+            stage: retryableBind.stage,
+            message:
+              "The Design territory changed repeatedly while the agent was starting. Retry after workspace activity settles.",
+          });
+        }
+      }
       const agentId =
         "agentId" in msg ? (msg as { agentId?: string }).agentId : undefined;
       // Structured AgentFailure classification travels alongside the
@@ -6302,18 +6588,19 @@ export class ZerosEngine {
       // begins. This closes the cross-window stage/write/rebase-vs-archive gap.
       const lifecycleMutationWorkspaceId =
         this.workspace.lifecycleMutationWorkspaceId(op, params);
+      const isTranscriptWindow =
+        op === "messages.window" || op === "messages.windowOlder";
       if (
         lifecycleMutationWorkspaceId &&
-        this.globalDesignTerritoryTransitionCount > 0
+        this.globalDesignTerritoryTransitionCount > 0 &&
+        !isTranscriptWindow
       ) {
-        throw new GitError({
-          code: "VALIDATION_FAILED",
-          message: "Registered Design territory is being updated.",
-          remediation:
-            "Wait for the Design territory transition to finish, then retry.",
-          context: { workspaceId: lifecycleMutationWorkspaceId },
-        });
+        await this.waitForGlobalDesignTerritoryTransition();
       }
+      // Transcript windows are reads with an optional one-time legacy-image
+      // externalization. WorkspaceService deliberately skips that write while
+      // process admission is closed, so the already-safe transcript itself
+      // stays readable during a Design territory transition.
       const startedAt = Date.now();
       const dispatch = () =>
         this.workspace.handle(op, params, {
@@ -6340,11 +6627,10 @@ export class ZerosEngine {
         typeof params.patch === "string"
       ) {
         try {
-          inspectedHunkPaths =
-            await this.workspace.inspectGitApplyPatchPaths(
-              lifecycleMutationWorkspaceId,
-              params.patch,
-            );
+          inspectedHunkPaths = await this.workspace.inspectGitApplyPatchPaths(
+            lifecycleMutationWorkspaceId,
+            params.patch,
+          );
         } catch {
           // The service repeats the authoritative parse and returns its precise
           // validation error. An unparseable patch cannot mutate recognition,
@@ -6547,7 +6833,7 @@ export class ZerosEngine {
                       )
                     : this.withGlobalDesignTerritoryTransition(mutation);
                 })()
-            : dispatch();
+              : dispatch();
       // A registry-changing lifecycle owns the global gate and has already
       // drained the pre-existing workspace-start snapshot. Registering that
       // outer promise in the owner-local set would make archive/delete's
@@ -6558,6 +6844,14 @@ export class ZerosEngine {
           ? await this.trackWorkspaceProcessStart(
               lifecycleMutationWorkspaceId,
               operation,
+              {
+                // First Design entry discovers that it needs a territory
+                // transition only after async pointer/Git inspection inside
+                // WorkspaceService. Mark the already-registered outer promise
+                // so that nested transition drains older work, not itself.
+                designTerritoryTransitionCaller:
+                  op === "workspace.setMode" && params.mode === "design",
+              },
             )
           : await operation;
       // Leave evidence for the slow ones. Workspace ops log NOTHING today (the

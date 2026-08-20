@@ -80,8 +80,6 @@ import {
 } from "../state/use-projects";
 import {
   dedupePendingCreates,
-  filterPendingCreatesForDesignAccess,
-  filterWorkspacesForDesignAccess,
   selectLiveVisible,
 } from "../state/live-workspace-selectors";
 import {
@@ -91,7 +89,6 @@ import {
 import {
   findProjectForFolder,
   findWorkspaceForFolder,
-  resolveWorkspacePresentationKind,
 } from "../state/workspace-resolution";
 import { Button } from "../shared/ui/primitives/button";
 import {
@@ -120,7 +117,6 @@ import {
   isExperimentalEnabled,
   useExperimentalFeature,
 } from "../features/settings/experimental-features";
-import { useInternalFeatureActive } from "../features/settings/internal-features";
 import { useActiveOrganization } from "../features/team/team-store";
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
 import { createWorkspaceForProject } from "./create-workspace";
@@ -138,7 +134,8 @@ import {
 import {
   usePendingCreatesAll,
   usePendingCreatesFor,
-  usePendingWorkspaceKind,
+  pendingWorkspaceMode,
+  usePendingWorkspaceMode,
   useWorkspaceArchiving,
   useWorkspaceProvisioning,
 } from "../state/pending-workspaces";
@@ -172,10 +169,7 @@ const SELECTED_PROJECT_KEY = "zeros.top-bar.selected-project";
 /** Warm the exact workspace a repository switch will restore. This works even
  * while the repository's workspace-list key is cold because the persisted
  * folder itself is already a complete local navigation identity. */
-function prefetchProjectWorkspaceDestination(
-  project: Project,
-  designWorkspacesActive: boolean,
-): void {
+function prefetchProjectWorkspaceDestination(project: Project): void {
   prefetchWorkspacesFor(project.repoSlug);
   const state = useWorkspaceStore.getState();
   prefetchWorkspaceSurface(
@@ -189,7 +183,6 @@ function prefetchProjectWorkspaceDestination(
       // Synchronous read: this warms the cache from a plain event handler, and
       // it must agree with the destination handleSelectProject will pick.
       allowLocalMain: isExperimentalEnabled("workInLocalMain"),
-      allowDesignWorkspaces: designWorkspacesActive,
     }),
   );
 }
@@ -480,10 +473,9 @@ function WorkspaceTab({
   onArchive,
   tabRef,
 }: WorkspaceTabProps) {
-  // Gates only the ENTER item in the context menu; exit is never gated.
-  const designModeSwitchAvailable =
-    useInternalFeatureActive("designWorkspaces");
-  const designWorkspace = workspace.kind === "design";
+  const requestedMode = usePendingWorkspaceMode(workspace.id);
+  const modeSwitching = requestedMode !== null;
+  const designWorkspace = (requestedMode ?? workspace.kind) === "design";
   const agentChatIds = designWorkspace ? EMPTY_WORKSPACE_CHAT_IDS : chatIds;
   const streaming = useAnyChatStreaming(agentChatIds);
   const awaitingKind = useAnyChatAwaitingKind(agentChatIds);
@@ -500,7 +492,7 @@ function WorkspaceTab({
       data-active={active}
       data-workspace-tab="true"
       data-streaming={(!designWorkspace && streaming) || undefined}
-      aria-busy={archiving || undefined}
+      aria-busy={archiving || modeSwitching || undefined}
     >
       <Button
         type="button"
@@ -558,7 +550,7 @@ function WorkspaceTab({
           <RunWave size={12} className="text-blue-primary" />
         )}
       </Button>
-      {!archiving && (
+      {!archiving && !modeSwitching && (
         <div className={WORKSPACE_ACTION_OVERLAY_CLS}>
           <Tooltip label="Archive workspace" side="bottom">
             <button
@@ -583,8 +575,7 @@ function WorkspaceTab({
     <WorkspaceContextMenu
       workspace={workspace}
       onArchive={() => onArchive(workspace)}
-      archiveDisabled={archiving}
-      designModeSwitchAvailable={designModeSwitchAvailable}
+      archiveDisabled={archiving || modeSwitching}
       placement="below-trigger"
     >
       {tab}
@@ -657,8 +648,6 @@ interface ProjectPickerProps {
   onSelect: (project: Project) => void;
   /** Opens the Dispatcher scoped to the selected repository. */
   onCreate: () => void;
-  /** Effective Internal gate used by intent prefetch and route restoration. */
-  designWorkspacesActive: boolean;
 }
 
 function ProjectIconChip({
@@ -685,7 +674,6 @@ function ProjectPicker({
   openingRoot,
   onSelect,
   onCreate,
-  designWorkspacesActive,
 }: ProjectPickerProps) {
   const selectedOpening = openingRoot === selectedProject.repoRoot;
   const [iconDialogOpen, setIconDialogOpen] = useState(false);
@@ -735,17 +723,11 @@ function ProjectPicker({
                   <DropdownMenuItem
                     key={project.id}
                     onPointerEnter={() => {
-                      prefetchProjectWorkspaceDestination(
-                        project,
-                        designWorkspacesActive,
-                      );
+                      prefetchProjectWorkspaceDestination(project);
                       prefetchSettingsForRepo(project.repoRoot);
                     }}
                     onFocus={() => {
-                      prefetchProjectWorkspaceDestination(
-                        project,
-                        designWorkspacesActive,
-                      );
+                      prefetchProjectWorkspaceDestination(project);
                       prefetchSettingsForRepo(project.repoRoot);
                     }}
                     onSelect={() => onSelect(project)}
@@ -819,18 +801,13 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
   const [query, setQuery] = useState("");
   const [restoringId, setRestoringId] = useState<string | null>(null);
   const openWorkspace = useOpenWorkspace();
-  const designWorkspacesActive = useInternalFeatureActive("designWorkspaces");
   const activeOrganization = useActiveOrganization();
   const { workspaces, loading, error, refresh } = useArchivedWorkspaces(
     project.repoSlug,
   );
   const accessibleWorkspaces = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, workspaces],
+    () => filterRowsForOrganization(workspaces, activeOrganization),
+    [activeOrganization, workspaces],
   );
 
   const allForProject = useMemo(
@@ -983,17 +960,13 @@ export function TopBar() {
   const activePage = useActivePage();
   const activeRepoId = useActiveRepoId();
   const nativeRuntime = useNativeRuntime();
-  const designWorkspacesInternalActive =
-    useInternalFeatureActive("designWorkspaces");
-  const designWorkspacesActive =
-    designWorkspacesInternalActive &&
-    (nativeRuntime.ready || nativeRuntime.expectedElectron);
+  const designWorkspaceCreationAvailable =
+    nativeRuntime.ready || nativeRuntime.expectedElectron;
   const activeOrganization = useActiveOrganization();
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   // True while the active folder is a freshly-announced worktree whose create
   // is still landing — the list-validation effect below must not bounce it.
   const activeFolderProvisioning = useWorkspaceProvisioning(activeFolder);
-  const activeFolderPendingKind = usePendingWorkspaceKind(activeFolder);
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
   const { projects } = useProjects();
@@ -1069,24 +1042,9 @@ export function TopBar() {
   const [workInLocalMain] = useExperimentalFeature("workInLocalMain");
 
   const accessibleWorkspaces = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, workspaces],
+    () => filterRowsForOrganization(workspaces, activeOrganization),
+    [activeOrganization, workspaces],
   );
-  const activeFolderConfirmedWorkspace = useMemo(
-    () => findWorkspaceForFolder(activeFolder, workspaces),
-    [activeFolder, workspaces],
-  );
-  const activeFolderBlockedDesign =
-    !designWorkspacesActive &&
-    resolveWorkspacePresentationKind({
-      confirmedKind: activeFolderConfirmedWorkspace?.kind,
-      pendingKind: activeFolderPendingKind,
-      folder: activeFolder,
-    }) === "design";
 
   const visibleWorkspaces = useMemo(
     () =>
@@ -1116,15 +1074,8 @@ export function TopBar() {
   // protect a slow-create's announced path from the bounce-to-main effect.
   const rawPendingCreates = usePendingCreatesAll();
   const allPendingCreates = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterPendingCreatesForDesignAccess(
-          rawPendingCreates,
-          designWorkspacesActive,
-        ),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, rawPendingCreates],
+    () => filterRowsForOrganization(rawPendingCreates, activeOrganization),
+    [activeOrganization, rawPendingCreates],
   );
   const realWorkspaces = useMemo(
     () =>
@@ -1147,14 +1098,8 @@ export function TopBar() {
   );
   const pendingCreates = useMemo(
     () =>
-      filterRowsForOrganization(
-        filterPendingCreatesForDesignAccess(
-          rawProjectPendingCreates,
-          designWorkspacesActive,
-        ),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, rawProjectPendingCreates],
+      filterRowsForOrganization(rawProjectPendingCreates, activeOrganization),
+    [activeOrganization, rawProjectPendingCreates],
   );
   const dedupedPendingCreates = useMemo(
     () => dedupePendingCreates(pendingCreates, realWorkspaces),
@@ -1166,10 +1111,6 @@ export function TopBar() {
   // invalidate that identity; when it proves the worktree was deleted, move to
   // main as a new authoritative navigation (never as an initial-cache guess).
   useEffect(() => {
-    // MainShellBody owns internal-access recovery for this route. Never turn a
-    // hidden design destination into a coding destination here: doing so could
-    // auto-spawn an unrelated coding chat while staff identity is still loading.
-    if (activeFolderBlockedDesign) return;
     if (
       activePage !== "workspace" ||
       !activeFolder ||
@@ -1200,7 +1141,7 @@ export function TopBar() {
     // yank the user off the "Setting up workspace" surface they just opened.
     // The exact create intent clears on authoritative publication/rollback, so
     // this guard cannot be held by Workbench's separate presentation settling.
-    if (activeFolderProvisioning && !activeFolderBlockedDesign) return;
+    if (activeFolderProvisioning) return;
     // A slow create (past the ~60s settling cap) whose real row hasn't landed
     // yet must not be bounced to main — its placeholder create is still in
     // flight, so the announced path is legitimate even though it isn't listed.
@@ -1211,18 +1152,15 @@ export function TopBar() {
         rememberedFolder: activeFolder,
         cachedWorkspaces: accessibleWorkspaces,
         allowLocalMain: workInLocalMain,
-        allowDesignWorkspaces: designWorkspacesActive,
       }),
     );
   }, [
     activeFolder,
-    activeFolderBlockedDesign,
     activeFolderProvisioning,
     activePage,
     activeProject?.id,
     accessibleWorkspaces,
     allPendingCreates,
-    designWorkspacesActive,
     dispatch,
     loading,
     mainWorkspace,
@@ -1553,7 +1491,6 @@ export function TopBar() {
           ),
           cachedWorkspaces: peekWorkspacesFor(project.repoSlug),
           allowLocalMain: workInLocalMain,
-          allowDesignWorkspaces: designWorkspacesActive,
         }),
       );
     },
@@ -1561,7 +1498,6 @@ export function TopBar() {
       activePage,
       activeProject?.id,
       activeRepoId,
-      designWorkspacesActive,
       dispatch,
       openWorkspace,
       persistSelectedProject,
@@ -1582,10 +1518,10 @@ export function TopBar() {
 
   const handlePrefetchWorkspace = useCallback(
     (workspace: Workspace) => {
-      // Design-mode rows stay openable even with the Internal flag off (the
-      // route mounts a placeholder), so warm them like any other workspace.
       prefetchWorkspaceSurface(workspace);
-      if (workspace.kind === "design") return;
+      if ((pendingWorkspaceMode(workspace.id) ?? workspace.kind) === "design") {
+        return;
+      }
       const chatId = selectChatToRestoreForFolder(
         useWorkspaceStore.getState(),
         workspace.path,
@@ -1605,14 +1541,14 @@ export function TopBar() {
   const handleCreateWorkspace = useCallback(
     async (kind: "code" | "design") => {
       if (!selectedProject) return;
-      if (kind === "design" && !designWorkspacesActive) return;
+      if (kind === "design" && !designWorkspaceCreationAvailable) return;
       await createWorkspaceForProject({
         project: selectedProject,
         dispatch,
         kind,
       });
     },
-    [designWorkspacesActive, dispatch, selectedProject],
+    [designWorkspaceCreationAvailable, dispatch, selectedProject],
   );
 
   const pendingOnly =
@@ -1689,7 +1625,6 @@ export function TopBar() {
             openingRoot={openingRoot}
             onSelect={handleSelectProject}
             onCreate={() => openDispatcher(selectedProject.id)}
-            designWorkspacesActive={designWorkspacesActive}
           />
         </div>
       ) : pendingOnly ? (
@@ -1879,10 +1814,10 @@ export function TopBar() {
 
         {selectedProject && (
           <div className={TOP_BAR_ITEM_CLS}>
-            {/* Keep the shipped code-workspace action one click when Design is
-                unavailable. Internal staff who enable Design get the kind
-                picker; both paths retain the same plain plus affordance. */}
-            {designWorkspacesActive ? (
+            {/* The Design document API is desktop-local. Every desktop user
+                gets the kind picker; browser-only shells keep the existing
+                one-click Code action. */}
+            {designWorkspaceCreationAvailable ? (
               <DropdownMenu>
                 <Tooltip label="New workspace" side="bottom">
                   <DropdownMenuTrigger asChild>

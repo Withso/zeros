@@ -72,7 +72,10 @@ import { AddProjectProvider } from "./shell/add-project-provider";
 import { NoProjectsView } from "./shell/no-projects-view";
 import { HomeSidebar } from "./shell/home-sidebar";
 import { useActiveWorkspace } from "./state/use-active-workspace";
-import { usePendingWorkspaceKind } from "./state/pending-workspaces";
+import {
+  usePendingWorkspaceKind,
+  usePendingWorkspaceMode,
+} from "./state/pending-workspaces";
 import { resolveWorkspacePresentationKind } from "./state/workspace-resolution";
 import { notifyWorkspacesChanged, useProjects } from "./state/use-projects";
 import { deleteWorkspacePermanently } from "./state/archive-actions";
@@ -118,15 +121,12 @@ import { AuthProvider, AuthGate } from "./features/auth";
 import { Toaster, toast } from "./shared/ui/primitives/elements";
 import { TooltipProvider } from "./shared/ui/primitives/tooltip";
 import { useInstantViewSwitch } from "./shared/ui/use-instant-view-switch";
-import { useRetainedViewKeys } from "./shell/use-retained-view-keys";
+import {
+  useRetainedViewKeys,
+  useStableRetainedViewOrder,
+} from "./shell/use-retained-view-keys";
 import { useGitRefreshCoordinator } from "./shell/use-git-refresh-key";
 import { GithubAppNotifications } from "./platform/bridge/github-app-notifications";
-import {
-  useInternalFeatureActive,
-  useInternalUserResolutionSettled,
-} from "./features/settings/internal-features";
-import { shouldShowBlockedDesignModePlaceholder } from "./shell/design-workspace-access";
-import { DesignModeDisabledPanel } from "./shell/design-mode-disabled-panel";
 import type { Workspace } from "./platform/git";
 
 interface RetainedDesignWorkspace {
@@ -990,18 +990,15 @@ function MainShellBody({
     project: activeProject,
   } = useActiveWorkspace();
   const pendingWorkspaceKind = usePendingWorkspaceKind(activeWorkspaceFolder);
-  const designWorkspacesActive = useInternalFeatureActive("designWorkspaces");
-  const internalUserResolutionSettled = useInternalUserResolutionSettled();
+  const requestedWorkspaceKind = usePendingWorkspaceMode(activeWorkspace?.id);
   const designWorkspaceRequested =
     resolveWorkspacePresentationKind({
       confirmedKind: activeWorkspace?.kind,
+      requestedKind: requestedWorkspaceKind,
       pendingKind: pendingWorkspaceKind,
       folder: activeWorkspaceFolder,
     }) === "design";
-  const designWorkspaceActive =
-    designWorkspacesActive && designWorkspaceRequested;
-  const designWorkspaceBlocked =
-    designWorkspaceRequested && !designWorkspacesActive;
+  const designWorkspaceActive = designWorkspaceRequested;
   useOpenBrowserHotkey(
     activePage === "workspace" &&
       Boolean(activeWorkspaceFolder) &&
@@ -1010,7 +1007,7 @@ function MainShellBody({
   );
   const shellSurfaceRef = useRef<HTMLDivElement | null>(null);
   useInstantViewSwitch(
-    `${activePage}:${activeWorkspace?.id ?? activeRepoId ?? activeProject?.id ?? "none"}`,
+    `${activePage}:${activeWorkspace?.id ?? activeRepoId ?? activeProject?.id ?? "none"}:${designWorkspaceRequested ? "design" : "code"}`,
     shellSurfaceRef,
   );
   // Reveal a PR opened outside the engine (agent `gh pr create` / terminal): if
@@ -1018,21 +1015,6 @@ function MainShellBody({
   // Workbench PR-status island appears and the header "Create PR" button hides.
   useWorkspacePrSync(designWorkspaceRequested ? null : activeWorkspace);
   const dispatch = useWorkspaceDispatch();
-  // A persisted design destination can outlive its per-channel Internal flag
-  // (or the staff role can be revoked between launches). Under the mode model
-  // the workspace stays reachable: the route mounts a placeholder whose one
-  // action — exit design mode — is never flag-gated, instead of bouncing Home
-  // (which trapped the workspace in an unrenderable mode). Neither the design
-  // UI nor the coding harness mounts while blocked: the engine refuses
-  // agents/terminals for a design-mode row, so the harness would be dead
-  // controls; and fail-closed while staff identity is loading means no
-  // placeholder flash for a user whose flag is about to land.
-  const showDesignModeDisabledPanel = shouldShowBlockedDesignModePlaceholder({
-    workspaceRoute: activePage === "workspace",
-    designRequested: designWorkspaceRequested,
-    designActive: designWorkspaceActive,
-    internalUserResolutionSettled,
-  });
   const { projects } = useProjects();
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is
   // enabled. Mounted here so neither shortcut fires from Settings.
@@ -1094,7 +1076,7 @@ function MainShellBody({
   const activeDesignWorkspace = React.useMemo<RetainedDesignWorkspace | null>(
     () =>
       designWorkspaceActive &&
-      activeWorkspace?.kind === "design" &&
+      activeWorkspace &&
       activeWorkspaceFolder
         ? { workspace: activeWorkspace, folder: activeWorkspaceFolder }
         : null,
@@ -1109,13 +1091,22 @@ function MainShellBody({
     undefined,
     "design-workspaces",
   );
-  const designWorkspacesToRender = designWorkspaceIdsToRender.flatMap((id) => {
-    if (activeDesignWorkspace?.workspace.id === id) {
-      return [activeDesignWorkspace];
-    }
-    const retained = retainedDesignWorkspaceRef.current.get(id);
-    return retained ? [retained] : [];
-  });
+  // MRU chooses the two live Design surfaces, but rendering that changing
+  // order physically moves their iframe-owning DOM nodes. Chromium reloads a
+  // nested browsing context when it moves, so keep surviving A → B → A
+  // siblings in place and append only genuinely new workspaces.
+  const stableDesignWorkspaceIdsToRender = useStableRetainedViewOrder(
+    designWorkspaceIdsToRender,
+    "design-workspaces",
+  );
+  const designWorkspaceEntriesToRender =
+    stableDesignWorkspaceIdsToRender.flatMap((id) => {
+      if (activeDesignWorkspace?.workspace.id === id) {
+        return [activeDesignWorkspace];
+      }
+      const retained = retainedDesignWorkspaceRef.current.get(id);
+      return retained ? [retained] : [];
+    });
   React.useLayoutEffect(() => {
     if (activeDesignWorkspace) {
       retainedDesignWorkspaceRef.current.set(
@@ -1132,12 +1123,7 @@ function MainShellBody({
   // Only the workspace view swaps in the missing-worktree panel — the Home
   // sub-pages have no active worktree content to lose, so they render normally
   // even while the selected workspace's folder is gone.
-  if (
-    worktreeMissing &&
-    activeWorkspace &&
-    !designWorkspaceBlocked &&
-    activePage === "workspace"
-  ) {
+  if (worktreeMissing && activeWorkspace && activePage === "workspace") {
     // Drop the DB row + worktree folder (branch kept), scrub every renderer
     // surface keyed on it, and repoint to the project's Local main so the open
     // chat isn't stranded. Shared with the corrupted-workspace archive-failure
@@ -1201,72 +1187,61 @@ function MainShellBody({
               ].join(" ")}
               aria-hidden={isHome}
             >
-              {designWorkspaceBlocked ? (
-                showDesignModeDisabledPanel && activeWorkspace ? (
-                  <DesignModeDisabledPanel workspace={activeWorkspace} />
-                ) : (
-                  <div className="bg-bg1 flex min-h-0 min-w-0 flex-1" />
-                )
-              ) : (
-                <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-                  {designWorkspacesActive
-                    ? designWorkspacesToRender.map((entry) => {
-                        const entryActive =
-                          designWorkspaceActive &&
-                          entry.workspace.id ===
-                            activeDesignWorkspace?.workspace.id;
-                        // `visible` re-enables painting under any hidden
-                        // ancestor, so the active deck must drop it while a
-                        // Home page owns the window — otherwise its z-indexed
-                        // layer rows paint straight through the Home sidebar.
-                        const entryVisible = entryActive && !isHome;
-                        return (
-                          <div
-                            key={entry.workspace.id}
-                            data-design-retained-workspace={entry.workspace.id}
-                            {...(!entryVisible ? { inert: "" } : {})}
-                            aria-hidden={!entryVisible}
-                            className={[
-                              "absolute inset-0 flex min-h-0 min-w-0 overflow-hidden",
-                              entryVisible
-                                ? "pointer-events-auto visible"
-                                : "pointer-events-none invisible",
-                            ].join(" ")}
-                          >
-                            <DesignWorkspaceSidebar
-                              workspace={entry.workspace}
-                              folder={entry.folder}
-                              surfaceActive={entryActive && !isHome}
-                              canvasCollapsed={workbenchCollapsed}
-                            />
-                            <DesignWorkspaceColumn
-                              workspace={entry.workspace}
-                              folder={entry.folder}
-                              surfaceActive={
-                                entryActive && !isHome && !workbenchCollapsed
-                              }
-                              collapsed={workbenchCollapsed}
-                              onToggleWorkbench={toggleWorkbench}
-                            />
-                          </div>
-                        );
-                      })
-                    : null}
-                  {!designWorkspaceActive ? (
-                    <div className="absolute inset-0 flex min-h-0 min-w-0 overflow-hidden">
-                      <ConversationPane
-                        workbenchCollapsed={workbenchCollapsed}
-                        onToggleWorkbench={toggleWorkbench}
+              <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+                {designWorkspaceEntriesToRender.map((entry) => {
+                  const entryActive =
+                    designWorkspaceActive &&
+                    entry.workspace.id === activeDesignWorkspace?.workspace.id;
+                  // `visible` re-enables painting under any hidden ancestor,
+                  // so the active deck must drop it while a Home page owns the
+                  // window — otherwise its z-indexed layer rows paint straight
+                  // through the Home sidebar.
+                  const entryVisible = entryActive && !isHome;
+                  return (
+                    <div
+                      key={entry.workspace.id}
+                      data-design-retained-workspace={entry.workspace.id}
+                      {...(!entryVisible ? { inert: "" } : {})}
+                      aria-hidden={!entryVisible}
+                      className={[
+                        "absolute inset-0 flex min-h-0 min-w-0 overflow-hidden",
+                        entryVisible
+                          ? "pointer-events-auto visible"
+                          : "pointer-events-none invisible",
+                      ].join(" ")}
+                    >
+                      <DesignWorkspaceSidebar
+                        workspace={entry.workspace}
+                        folder={entry.folder}
+                        surfaceActive={entryActive && !isHome}
+                        canvasCollapsed={workbenchCollapsed}
                       />
-                      <WorkbenchPane
-                        onToggleWorkbench={toggleWorkbench}
-                        surfaceActive={!isHome && !workbenchCollapsed}
+                      <DesignWorkspaceColumn
+                        workspace={entry.workspace}
+                        folder={entry.folder}
+                        surfaceActive={
+                          entryActive && !isHome && !workbenchCollapsed
+                        }
                         collapsed={workbenchCollapsed}
+                        onToggleWorkbench={toggleWorkbench}
                       />
                     </div>
-                  ) : null}
-                </div>
-              )}
+                  );
+                })}
+                {!designWorkspaceActive ? (
+                  <div className="absolute inset-0 flex min-h-0 min-w-0 overflow-hidden">
+                    <ConversationPane
+                      workbenchCollapsed={workbenchCollapsed}
+                      onToggleWorkbench={toggleWorkbench}
+                    />
+                    <WorkbenchPane
+                      onToggleWorkbench={toggleWorkbench}
+                      surfaceActive={!isHome && !workbenchCollapsed}
+                      collapsed={workbenchCollapsed}
+                    />
+                  </div>
+                ) : null}
+              </div>
             </div>
           )}
           {showWelcome && !isHome && (

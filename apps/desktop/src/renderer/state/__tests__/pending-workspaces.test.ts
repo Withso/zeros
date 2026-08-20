@@ -1,7 +1,9 @@
 import { describe, it, expect, beforeEach, vi, afterEach } from "vitest";
 
 import {
+  beginWorkspaceModeSwitch,
   beginPendingCreate,
+  finishWorkspaceModeSwitch,
   finishPendingCreate,
   markWorkspaceSettling,
   clearWorkspaceSettling,
@@ -9,6 +11,7 @@ import {
   isWorkspaceArchiving,
   isWorkspaceProvisioning,
   markWorkspaceArchiving,
+  pendingWorkspaceMode,
   usePendingWorkspacesStore,
 } from "../pending-workspaces";
 
@@ -17,6 +20,7 @@ function reset(): void {
     creates: [],
     settlingFolders: {},
     archivingIds: {},
+    modeSwitches: {},
   });
 }
 
@@ -103,5 +107,17 @@ describe("pending-workspaces store", () => {
 
     clearWorkspaceArchiving("ws_existing");
     expect(usePendingWorkspacesStore.getState().creates).toHaveLength(1);
+  });
+
+  it("publishes a mode request immediately and ignores stale completions", () => {
+    const design = beginWorkspaceModeSwitch("ws_a", "design");
+    expect(pendingWorkspaceMode("ws_a")).toBe("design");
+
+    const code = beginWorkspaceModeSwitch("ws_a", "code");
+    finishWorkspaceModeSwitch("ws_a", design);
+    expect(pendingWorkspaceMode("ws_a")).toBe("code");
+
+    finishWorkspaceModeSwitch("ws_a", code);
+    expect(pendingWorkspaceMode("ws_a")).toBeNull();
   });
 });

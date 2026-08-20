@@ -38,6 +38,7 @@ import { clearChatPaneFolders, moveChatPaneFolder } from "./chat-panes-store";
 import { forgetDesignWorkspaceView } from "../features/design-workspace/state/design-workspace-ui";
 import { forgetDesignLayerDisclosure } from "../features/design-workspace/state/design-layer-disclosure";
 import { forgetDesignRuntimeWorkspace } from "../features/design-workspace/state/design-runtime-store";
+import { forgetDesignWorkspaceBootSnapshot } from "../features/design-workspace/state/design-workspace-boot-cache";
 import { isLocalMainWorkspace } from "./local-main-workspace";
 import { loadProjects, type Project } from "./projects-store";
 import {
@@ -65,7 +66,6 @@ import {
   folderIsWithinRoot,
 } from "./workspace-resolution";
 import { previousWorkspaceInOrder } from "./archive-navigation";
-import { isInternalFeatureActive } from "../features/settings/internal-features";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 
@@ -98,9 +98,7 @@ function pickRepointTarget(leaving: Workspace): {
   // Exclude rows whose confirmed mutation is pending — a burst-archive must
   // never repoint onto a workspace that is itself on its way out.
   const archivingIds = usePendingWorkspacesStore.getState().archivingIds;
-  const previous = previousWorkspaceInOrder(leaving, cached, archivingIds, {
-    allowDesignWorkspaces: isInternalFeatureActive("designWorkspaces"),
-  });
+  const previous = previousWorkspaceInOrder(leaving, cached, archivingIds);
   return previous
     ? { folder: previous.path, repoRoot: previous.repoRoot }
     : { folder: leaving.repoRoot, repoRoot: leaving.repoRoot };
@@ -192,6 +190,7 @@ function commitConfirmedDeletion(
   // the Changes snapshots. Archive intentionally does NOT purge: restore
   // reuses the id, and the retained caches repaint the restored PR instantly.
   forgetPrCachesForWorkspace(workspace.id);
+  forgetDesignWorkspaceBootSnapshot(workspace.id);
   forgetDesignWorkspaceView(workspace.id);
   const project = findProjectForFolder(workspace.repoRoot, loadProjects());
   clearTerminalFolders([workspace.path], project?.id);
@@ -616,9 +615,7 @@ function commitConfirmedRestore(
       });
     }
     commitWorkspaceRestored(restored);
-    // Navigation publishes for design-mode rows too: with the flag off the
-    // route mounts the "design mode is disabled" placeholder (un-gated exit)
-    // instead of a dead surface, so there's nothing to protect against.
+    // Design-mode rows are ordinary public navigation destinations.
     opts?.onRestored?.(result);
   });
   notifyWorkspacesChanged(original.repoSlug);
@@ -775,10 +772,7 @@ export async function restoreWorkspaceWithFeedback(
   workspace: Workspace,
   opts?: RestoreFeedbackOptions,
 ): Promise<void> {
-  // Design-MODE workspaces restore regardless of the Internal flag: under the
-  // mode model they're ordinary workspaces (the blocked route renders a
-  // placeholder with an un-gated exit), and refusing here would strand them
-  // in History with a dead Restore button.
+  // Design-MODE workspaces restore like every other workspace.
   if (restoringIds.has(workspace.id)) {
     opts?.onSettled?.(); // another restore owns this id — clear the caller's spinner
     return;

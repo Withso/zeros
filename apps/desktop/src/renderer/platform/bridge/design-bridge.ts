@@ -21,6 +21,12 @@ import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-run
 import type { RuntimeClient } from "./ws-client";
 import { workspaceOp } from "./workspace-bridge";
 
+// A cold aggregate snapshot intentionally parses, lints, and composes every
+// frame's lightweight render identity. Large documents can exceed the generic
+// 10s workspace RPC budget even on a healthy engine; the renderer retains a
+// warm exact-key snapshot while this bounded revalidation runs.
+const DESIGN_AGGREGATE_READ_TIMEOUT_MS = 30_000;
+
 export interface DesignFrameSummaryWire {
   file: string;
   title: string;
@@ -131,6 +137,23 @@ function validProtocolCapability(
     !!snapshot &&
     (snapshot.protocolCapability === null ||
       /^[a-f0-9]{64}$/.test(snapshot.protocolCapability))
+  );
+}
+
+export function isDesignWorkspaceSnapshotWire(
+  value: unknown,
+): value is DesignWorkspaceSnapshotWire {
+  const snapshot = value as DesignWorkspaceSnapshotWire | undefined;
+  if (!snapshot || !validProtocolCapability(snapshot)) return false;
+  return (
+    Array.isArray(snapshot.frames) &&
+    Array.isArray(snapshot.tokens) &&
+    Array.isArray(snapshot.assets) &&
+    typeof snapshot.tokenSourceVersion === "string" &&
+    typeof snapshot.lint?.workspacePath === "string" &&
+    Array.isArray(snapshot.lint.checkedFiles) &&
+    Array.isArray(snapshot.lint.violations) &&
+    typeof snapshot.lint.healedOids === "number"
   );
 }
 
@@ -409,18 +432,13 @@ export async function bridgeDesignSnapshot(
   bridge: RuntimeClient,
   workspaceId: string,
 ): Promise<DesignWorkspaceSnapshotWire> {
-  const result = (await workspaceOp(bridge, "design.snapshot", {
-    workspaceId,
-  })) as { snapshot?: DesignWorkspaceSnapshotWire };
-  if (
-    !result?.snapshot ||
-    !validProtocolCapability(result.snapshot) ||
-    !Array.isArray(result.snapshot.frames) ||
-    !Array.isArray(result.snapshot.tokens) ||
-    !Array.isArray(result.snapshot.assets) ||
-    typeof result.snapshot.tokenSourceVersion !== "string" ||
-    !Array.isArray(result.snapshot.lint?.violations)
-  ) {
+  const result = (await workspaceOp(
+    bridge,
+    "design.snapshot",
+    { workspaceId },
+    DESIGN_AGGREGATE_READ_TIMEOUT_MS,
+  )) as { snapshot?: DesignWorkspaceSnapshotWire };
+  if (!isDesignWorkspaceSnapshotWire(result?.snapshot)) {
     throw new Error("design.snapshot: malformed engine response");
   }
   return result.snapshot;

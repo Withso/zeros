@@ -6,9 +6,14 @@
  * the control is focused. The classes are feature-prefixed because several
  * editors render their popovers through portals outside the workspace root. */
 
-[data-design-workspace-surface] {
+[data-design-workspace-surface],
+[data-design-theme-editor],
+[data-design-motion-settings] {
   font-family: var(--font-sans);
   font-size: 13px;
+}
+
+[data-design-workspace-surface] {
   user-select: none;
 }
 
@@ -17,45 +22,9 @@
   user-select: text;
 }
 
-[data-design-workspace-surface]
-  :where(
-    button,
-    input,
-    textarea,
-    select,
-    label,
-    span,
-    div,
-    p,
-    code,
-    h1,
-    h2,
-    h3,
-    h4
-  ),
-[data-design-theme-editor]
-  :where(
-    button,
-    input,
-    textarea,
-    select,
-    label,
-    span,
-    div,
-    p,
-    code,
-    h1,
-    h2,
-    h3,
-    h4
-  ) {
-  font-family: var(--font-sans);
-  font-size: 13px;
-}
-
 /* Radix ScrollArea inserts an inline display:table sizing wrapper. That is
  * useful for code tables, but lets dense editor rows expand past their panel
- * after the 13px accessibility scale. Override the vendor wrapper only inside
+ * as labels and values grow. Override the vendor wrapper only inside
  * design-workspace chrome; the theme matrix is portaled and keeps 2D scroll. */
 [data-design-workspace-surface] [data-radix-scroll-area-viewport] > div {
   display: block !important;
@@ -100,6 +69,44 @@
   border-color: transparent;
   outline: 1px solid var(--highlighted-bright);
   outline-offset: -1px;
+}
+
+.zd-design-unit-trigger {
+  color: var(--muted-fg);
+}
+
+.zd-design-unit-trigger:hover,
+.zd-design-unit-trigger[data-state="open"] {
+  background-color: var(--bg2-hover);
+  color: var(--fg1);
+}
+
+/* Keyframe and reset actions float over the value only on intent. They no
+ * longer reserve half of a compact field while remaining visually hidden. */
+.zd-design-field-actions {
+  opacity: 0;
+  pointer-events: none;
+  background-color: inherit;
+  transition: opacity 120ms ease-out;
+}
+
+.zd-design-field-actions[data-has-unit="true"] {
+  right: 2.75rem;
+}
+
+.zd-design-field-actions[data-has-hint="true"] {
+  right: 0.625rem;
+}
+
+.zd-design-field-actions[data-has-unit="true"][data-has-hint="true"] {
+  right: 3.375rem;
+}
+
+[data-design-inspector-field]:hover > .zd-design-field-actions,
+.zd-design-field-actions:focus-within,
+.zd-design-field-actions-visible {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .zd-design-state-active {
@@ -335,6 +342,64 @@
 
 .zd-design-motion-track-selected {
   background-color: var(--design-selection-soft);
+}
+
+.zd-design-motion-timeline {
+  container-type: inline-size;
+}
+
+.zd-design-motion-header {
+  overflow: hidden;
+}
+
+.zd-design-motion-hint {
+  width: 0;
+  overflow: hidden;
+}
+
+.zd-design-control-applied[aria-invalid="true"] {
+  outline: 1px solid var(--red-primary);
+  outline-offset: -1px;
+}
+
+/* The layer column contracts with compact canvases while the timing lane keeps
+ * enough room for scrubbing and keyframes. A fixed 528px minimum made the
+ * header and rows drift into separate horizontal scroll positions. */
+.zd-design-motion-grid {
+  grid-template-columns: clamp(156px, 24cqw, 208px) minmax(240px, 1fr);
+  min-width: 396px;
+}
+
+@container (min-width: 1000px) {
+  .zd-design-motion-hint {
+    width: auto;
+    overflow: visible;
+  }
+}
+
+@container (max-width: 720px) {
+  .zd-design-motion-owner,
+  .zd-design-motion-footer-meta {
+    display: none;
+  }
+
+  .zd-design-motion-header {
+    padding-inline: 0.5rem;
+  }
+
+  .zd-design-motion-settings {
+    padding-inline: 0.5rem;
+  }
+
+  .zd-design-motion-setting-label {
+    display: none;
+  }
+}
+
+@container (max-width: 520px) {
+  .zd-design-motion-save-label {
+    display: none;
+  }
 }
 
 .zd-design-inline-spacing-handle,

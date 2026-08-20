@@ -51,7 +51,6 @@ import {
   watchTimedOutWorkspaceCreate,
 } from "../state/use-projects";
 import { toast } from "../shared/ui/primitives/elements";
-import { isInternalFeatureActive } from "../features/settings/internal-features";
 import { isExpectedElectron, isNativeRuntime } from "../platform/runtime";
 import {
   getActiveOrganizationIdSnapshot,
@@ -75,9 +74,10 @@ export async function createWorkspaceForProject(args: {
     getActiveOrganizationSnapshot(),
     getActiveOrganizationIdSnapshot(),
   );
-  const designCreationAllowed = () =>
-    isInternalFeatureActive("designWorkspaces") &&
-    (isNativeRuntime() || isExpectedElectron());
+  // The Design document API is intentionally desktop-local. This is a runtime
+  // capability check, not a rollout/access flag: every desktop user gets the
+  // Design option without account state or per-channel opt-in.
+  const designCreationAllowed = () => isNativeRuntime() || isExpectedElectron();
   if (kind === "design" && !designCreationAllowed()) {
     return false;
   }
@@ -102,8 +102,8 @@ export async function createWorkspaceForProject(args: {
     }
     return false;
   }
-  // Staff role or the per-channel switch can change while prepare crosses the
-  // bridge. Prepare is metadata-only, so stop before publishing pending state,
+  // Native bridge availability can change while prepare crosses the bridge.
+  // Prepare is metadata-only, so stop before publishing pending state,
   // navigation, or the filesystem-mutating create request.
   if (kind === "design" && !designCreationAllowed()) {
     return false;

@@ -173,17 +173,14 @@ describe("repository workspace restoration", () => {
   });
 
   it("preserves a cold remembered design path like any other folder (mode model)", () => {
-    // Design-MODE rows are ordinary destinations now: a blocked route renders
-    // the placeholder with its un-gated exit, so navigation never needs to
-    // avoid them. The cold remembered identity is kept pending validation,
-    // exactly as for a code folder.
+    // Design-MODE rows are ordinary public destinations. The cold remembered
+    // identity is kept pending validation exactly as for a code folder.
     expect(
       resolveRepoWorkspaceDestination({
         project,
         rememberedFolder:
           "/Users/test/zeros/design workspaces/zeros/remembered",
         cachedWorkspaces: undefined,
-        allowDesignWorkspaces: false,
       }),
     ).toMatchObject({
       path: "/Users/test/zeros/design workspaces/zeros/remembered",
@@ -191,7 +188,7 @@ describe("repository workspace restoration", () => {
     });
   });
 
-  it("selects a remembered design row regardless of the design flag (mode model)", () => {
+  it("selects a remembered design row like any other workspace", () => {
     const design = workspace("design", {
       kind: "design",
       archivedAt: null,
@@ -208,7 +205,6 @@ describe("repository workspace restoration", () => {
         rememberedFolder: design.path,
         cachedWorkspaces: [design, code],
         allowLocalMain: false,
-        allowDesignWorkspaces: false,
       }),
     ).toBe(design);
   });

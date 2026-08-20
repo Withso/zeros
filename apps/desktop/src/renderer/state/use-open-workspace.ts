@@ -13,6 +13,7 @@ import {
 } from "../shell/prefetch-workspace-surface";
 import { prepareChatView } from "../shell/conversation/chat-intent";
 import { resolveWorkspacePresentationKind } from "./workspace-resolution";
+import { pendingWorkspaceMode } from "./pending-workspaces";
 
 /** Open a workspace: switch to the workspace view and land on the chat the user
  *  last had there (else any chat at that path, else auto-spawn the starred
@@ -28,13 +29,11 @@ export function useOpenWorkspace(): (
     (workspace: WorkspaceNavigationTarget) => {
       const presentationKind = resolveWorkspacePresentationKind({
         confirmedKind: workspace.kind,
+        requestedKind: pendingWorkspaceMode(workspace.id),
         folder: workspace.path,
       });
-      // A design-MODE workspace opens regardless of the Internal flag: the
-      // route itself decides what renders (the canvas when the flag is on,
-      // the "design mode is disabled" placeholder with its un-gated exit
-      // otherwise). Refusing to open here — as pre-mode builds did — left a
-      // dead click and no way to reach the workspace to switch it back.
+      // A Design-mode workspace is an ordinary public destination. Opening it
+      // publishes the Design surface directly and never revives coding chat.
       // Pointer/focus intent normally starts these reads earlier; repeat here
       // for keyboard/programmatic navigation. Both paths dedupe by exact key.
       prefetchWorkspaceSurface(workspace);
