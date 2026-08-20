@@ -34,9 +34,11 @@ import {
   workspaceLifecycleStatus,
   workspaceList,
   type CreateWorkspaceFromBranchStatus,
+  type DesignWorkspaceSnapshotWire,
   type WorkspaceLifecycleStatus,
   type Workspace,
 } from "../platform/git";
+import { primeDesignWorkspaceSnapshot } from "../features/design-workspace/state/design-workspace-cache";
 import { invalidateRepoReadCaches } from "./read-caches";
 import {
   getActiveBridge,
@@ -481,6 +483,34 @@ export function commitWorkspaceRestored(workspace: Workspace): void {
     }
     patchArchivedCollections(workspace, "remove");
   });
+}
+
+/** Publish workspace.setMode's authoritative row mutation immediately. The
+ * response confirms only this field, so patch the newest exact-key row instead
+ * of replacing siblings or replaying the stale object captured by the menu. */
+export function commitWorkspaceMode(args: {
+  workspaceId: string;
+  repoSlug: string;
+  mode: "code" | "design";
+  snapshot?: DesignWorkspaceSnapshotWire;
+}): void {
+  if (args.mode === "design" && args.snapshot) {
+    // The active surface still sees the code row at this point, so seed the
+    // aggregate first. The following row publication reveals Design with data
+    // in its very first render instead of mounting into another bridge read.
+    primeDesignWorkspaceSnapshot(args.workspaceId, args.snapshot);
+  }
+  const prior = workspaceCache.peekSnapshot(args.repoSlug).data;
+  if (!prior) return;
+  let changed = false;
+  const next = prior.map((workspace) => {
+    if (workspace.id !== args.workspaceId || workspace.kind === args.mode) {
+      return workspace;
+    }
+    changed = true;
+    return { ...workspace, kind: args.mode };
+  });
+  if (changed) ingestWorkspaceRows(args.repoSlug, next);
 }
 
 /** Confirmed permanent deletion from either live or archived state. */

@@ -228,7 +228,7 @@ export async function requestWorkspaceList(
     | undefined;
   // This helper exists for the coding-agent cwd → workspace-id resolver. A
   // Design workspace must never become an additional-directory or agent cwd,
-  // even for staff who enabled the separate Design surface.
+  // because the public Design surface does not grant code-agent authority.
   return (result?.workspaces ?? []).filter(
     (workspace) => workspace.kind !== "design",
   );
@@ -1804,7 +1804,11 @@ export async function bridgeWorkspaceReassignLocalOrganization(
 export async function bridgeWorkspaceSetMode(
   bridge: RuntimeClient,
   args: { workspaceId: string; mode: "code" | "design" },
-): Promise<{ ok: true; mode: "code" | "design" }> {
+): Promise<{
+  ok: true;
+  mode: "code" | "design";
+  snapshot?: unknown;
+}> {
   // Entering Design ensures + commits its foundation; exit may materialize a
   // legacy sparse cone. Either can take seconds, so use the lifecycle budget
   // rather than the 10s default.
@@ -1816,6 +1820,7 @@ export async function bridgeWorkspaceSetMode(
   )) as {
     ok: true;
     mode: "code" | "design";
+    snapshot?: unknown;
   };
 }
 

@@ -16,34 +16,6 @@ import type { PendingWorkspaceCreate } from "./pending-workspaces";
 
 const EMPTY_PENDING: PendingWorkspaceCreate[] = [];
 
-/** Under the mode model (one workspace, two modes) design-MODE rows are
- * ordinary workspaces and are NEVER hidden: hiding them when the Internal
- * flag is off would strand a real worktree with no way to archive it or
- * switch it back to code mode. What the flag gates is the design SURFACE —
- * a blocked route mounts the "design mode is disabled" placeholder (see
- * shell/design-workspace-access.ts), whose exit action is deliberately
- * un-gated. Kept as a pass-through (same signature) so the many call sites
- * and their memo inputs stay untouched; retired entirely once the flag
- * graduates. */
-export function filterWorkspacesForDesignAccess(
-  rows: readonly Workspace[],
-  _designWorkspacesActive: boolean,
-): Workspace[] {
-  return rows as Workspace[];
-}
-
-/** Same pass-through as above for in-flight creates: a pending design create
- * is a real create (the row lands moments later), so hiding its "Setting up"
- * tab would make the workspace pop into existence unexplained. Creating in
- * design mode is already flag-gated at the entry point (create-workspace.ts),
- * so a pending design create implies the flag was on moments ago. */
-export function filterPendingCreatesForDesignAccess(
-  rows: readonly PendingWorkspaceCreate[],
-  _designWorkspacesActive: boolean,
-): PendingWorkspaceCreate[] {
-  return rows as PendingWorkspaceCreate[];
-}
-
 /** The single visibility filter: drop only rows the server has confirmed
  * archived. Deliberately KEEPS `present === false` (orphaned worktree) rows so
  * every surface's SET — and therefore its count — agrees; each surface still

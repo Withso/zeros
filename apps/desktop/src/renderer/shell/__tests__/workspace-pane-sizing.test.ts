@@ -163,6 +163,23 @@ describe("conversation/workbench sizing bounds stay in lockstep with CSS", () =>
     expect(workbench).not.toContain("return retainedKeys.map((key) => {");
   });
 
+  it("keeps retained Design workspace iframes in stable DOM order", () => {
+    const appShell = read("../../app-shell.tsx");
+    // Each retained Design workspace owns several live frame iframes. MRU may
+    // choose eviction, but rendering in MRU order moves those browsing
+    // contexts on A → B → A and forces Chromium to reload every frame.
+    expect(appShell).toContain(
+      "const stableDesignWorkspaceIdsToRender = useStableRetainedViewOrder(",
+    );
+    expect(appShell).toContain("designWorkspaceIdsToRender,");
+    expect(appShell).toContain(
+      "stableDesignWorkspaceIdsToRender.flatMap",
+    );
+    expect(appShell).not.toContain(
+      "designWorkspaceIdsToRender.flatMap((id) => {",
+    );
+  });
+
   it("visible surfaces reflow live — the shrink-side width floor is gone", () => {
     // The previous regime floored min-width on the pane bodies, so the
     // shrinking pane clipped its own live content at the moving seam (the

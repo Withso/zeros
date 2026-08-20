@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const platformMocks = vi.hoisted(() => ({
   applyTransaction: vi.fn(),
@@ -16,6 +16,12 @@ const platformMocks = vi.hoisted(() => ({
 const runtimeMocks = vi.hoisted(() => ({
   designFrameRuntime: vi.fn(),
   commitStyles: vi.fn(),
+}));
+
+const bridgeMocks = vi.hoisted(() => ({
+  connectedListener: null as
+    | ((client: unknown, info: { initial: boolean }) => void)
+    | null,
 }));
 
 vi.mock("../../../platform/git", async (importOriginal) => ({
@@ -36,6 +42,17 @@ vi.mock("../../../platform/bridge/design-frame-runtime", () => ({
   designFrameRuntime: runtimeMocks.designFrameRuntime,
 }));
 
+vi.mock("../../../platform/bridge/active-bridge", () => ({
+  onActiveBridgeConnected: vi.fn(
+    (
+      listener: (client: unknown, info: { initial: boolean }) => void,
+    ) => {
+      bridgeMocks.connectedListener = listener;
+      return () => {};
+    },
+  ),
+}));
+
 import type { DesignWorkspaceSnapshotWire } from "../../../platform/git";
 import {
   applyDesignWorkspaceRefreshVersion,
@@ -47,6 +64,7 @@ import {
   designFoundationCache,
   designFoundationKey,
   designWorkspaceSnapshotCache,
+  fetchDesignWorkspaceSnapshot,
   invalidateDesignWorkspaceSnapshot,
   reconcileDesignWorkspaceRuntimeAudit,
   refreshDesignWorkspaceSnapshot,
@@ -57,6 +75,11 @@ import {
   updateDesignFrameGeometryCached,
   warmDesignFrameDocument,
 } from "../state/design-workspace-cache";
+import {
+  designWorkspaceSnapshotMatchesPath,
+  safeDesignWorkspaceBootSnapshot,
+} from "../state/design-workspace-boot-cache";
+import { presentDesignWorkspaceSnapshotRead } from "../state/use-design-workspace";
 import {
   designRuntimeFrameState,
   resetDesignRuntimeStoreForTests,
@@ -134,6 +157,58 @@ describe("design workspace cache", () => {
     resetDesignWorkspaceCacheForTests();
     resetDesignRuntimeStoreForTests();
     resetDesignLivePreviewForTests();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("does not supersede a cold snapshot already queued for the first bridge connection", async () => {
+    const workspaceId = "ws_cold_bridge_connect";
+    let finishFirstRead: (value: DesignWorkspaceSnapshotWire) => void = () => {
+      throw new Error("The first Design snapshot read did not start.");
+    };
+    platformMocks.readSnapshot
+      .mockImplementationOnce(
+        () =>
+          new Promise<DesignWorkspaceSnapshotWire>((resolve) => {
+            finishFirstRead = resolve;
+          }),
+      )
+      .mockResolvedValue(snapshot());
+
+    const first = designWorkspaceSnapshotCache.load(workspaceId, () =>
+      platformMocks.readSnapshot(workspaceId),
+    );
+    await vi.waitFor(() => {
+      expect(platformMocks.readSnapshot).toHaveBeenCalledTimes(1);
+    });
+
+    bridgeMocks.connectedListener?.({} as never, { initial: false });
+    const observedInvalidation = designWorkspaceSnapshotCache.load(
+      workspaceId,
+      () => platformMocks.readSnapshot(workspaceId),
+    );
+    finishFirstRead(snapshot());
+
+    await Promise.all([first, observedInvalidation]);
+
+    expect(platformMocks.readSnapshot).toHaveBeenCalledTimes(1);
+    expect(
+      designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
+    ).toBeDefined();
+  });
+
+  it("recovers a cold idempotent snapshot read from one transient engine timeout", async () => {
+    const expected = snapshot();
+    platformMocks.readSnapshot
+      .mockRejectedValueOnce(new Error("Request timeout: WORKSPACE_REQUEST"))
+      .mockResolvedValueOnce(expected);
+
+    await expect(
+      fetchDesignWorkspaceSnapshot("ws_cold_timeout"),
+    ).resolves.toEqual(expected);
+    expect(platformMocks.readSnapshot).toHaveBeenCalledTimes(2);
   });
 
   it("re-reads a stale generation and replays the rejected mutation once", async () => {
@@ -1331,5 +1406,89 @@ describe("design workspace cache", () => {
     expect(designFoundationCache.getSnapshot(key).invalidationVersion).toBe(
       before + 1,
     );
+  });
+
+  it("hydrates a bounded safe preview across a renderer reload", async () => {
+    const workspaceId = "ws_boot_preview";
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+      clear: () => storage.clear(),
+      key: (index: number) => [...storage.keys()][index] ?? null,
+      get length() {
+        return storage.size;
+      },
+    } satisfies Storage);
+    const expected = snapshot();
+    platformMocks.readSnapshot.mockResolvedValue(expected);
+
+    await refreshDesignWorkspaceSnapshot(workspaceId);
+    expect(storage.size).toBeGreaterThan(0);
+
+    vi.resetModules();
+    const reloaded = await import("../state/design-workspace-cache");
+    const boot = reloaded.designWorkspaceSnapshotCache.peekSnapshot(workspaceId);
+
+    expect(boot.data?.frames).toEqual(expected.frames);
+    expect(boot.data?.tokens).toEqual(expected.tokens);
+    // The HTTP capability is derived from the engine's per-process secret and
+    // embedded asset bytes can be large; neither belongs in a renderer boot
+    // cache. The connected exact-key refresh restores both.
+    expect(boot.data?.protocolCapability).toBeNull();
+    expect(boot.data?.assets[0]?.dataUrl).toBeNull();
+    expect(boot.invalidationVersion).toBeGreaterThan(0);
+  });
+
+  it("never reuses a persisted preview for an adapted workspace path", () => {
+    const cached = snapshot();
+    expect(
+      designWorkspaceSnapshotMatchesPath(cached, "/work/design"),
+    ).toBe(true);
+    expect(
+      designWorkspaceSnapshotMatchesPath(cached, "/private/work/design"),
+    ).toBe(false);
+    expect(
+      designWorkspaceSnapshotMatchesPath(cached, "/work/restored-design"),
+    ).toBe(false);
+  });
+
+  it("surfaces an exact refresh failure after hiding a mismatched boot preview", () => {
+    const cached = snapshot();
+    const error = new Error("restored checkout is unavailable");
+    const presented = presentDesignWorkspaceSnapshotRead(
+      {
+        data: cached,
+        loading: false,
+        refreshing: false,
+        error,
+        updatedAt: 1,
+        invalidationVersion: 1,
+        refresh: vi.fn(),
+      },
+      "/work/restored-design",
+      true,
+    );
+
+    expect(presented.data).toBeUndefined();
+    expect(presented.loading).toBe(false);
+    expect(presented.error).toBe(error);
+  });
+
+  it("rejects malformed persisted snapshots instead of partially hydrating", () => {
+    const malformed = snapshot();
+    malformed.frames[0] = {
+      ...malformed.frames[0]!,
+      sourceVersion: "not-a-generation",
+    };
+    expect(safeDesignWorkspaceBootSnapshot(malformed)).toBeNull();
+
+    const unsafeGeometry = snapshot();
+    unsafeGeometry.frames[0] = {
+      ...unsafeGeometry.frames[0]!,
+      width: -1,
+    };
+    expect(safeDesignWorkspaceBootSnapshot(unsafeGeometry)).toBeNull();
   });
 });

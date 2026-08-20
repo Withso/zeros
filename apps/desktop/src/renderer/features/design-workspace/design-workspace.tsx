@@ -257,10 +257,13 @@ import {
   type DesignTransformValue,
 } from "./design-effect-values";
 import {
+  designStyleUnitOptions,
   designStylePropertyAffectsLayout,
   designStyleFieldValue,
   isDesignRuntimeStylePropertyAuthored,
   normalizeDesignStyleFieldInput,
+  parseDesignStyleNumericParts,
+  replaceDesignStyleNumericUnit,
   resolveDesignNumericExpression,
   scrubDesignNumericValue,
   withDesignPositionContext,
@@ -8912,6 +8915,7 @@ function DesignCanvas({
           key={`${workspaceId ?? "none"}:${selectedFrame?.file ?? "none"}:${selectedNodeDetails?.oid ?? "frame"}`}
           open={motionTimelineOpen}
           ownerKey={selectedFrame?.file ?? "frame"}
+          sessionOwnerKey={motionOverlayOwner}
           details={selectedNodeDetails}
           definitions={
             canvasFoundation.data?.foundation.keyframes ??
@@ -9112,6 +9116,37 @@ interface InspectorEditFieldProps {
   onCommit: (value: string) => Promise<unknown>;
 }
 
+interface InspectorFieldPresentation {
+  text: string;
+  unit: string | null;
+}
+
+function inspectorFieldPresentation(
+  property: string | undefined,
+  value: string,
+): InspectorFieldPresentation {
+  if (!property || value.trim() === "") return { text: value, unit: null };
+  const numeric = parseDesignStyleNumericParts(value);
+  if (!numeric) return { text: value, unit: null };
+  const units = designStyleUnitOptions(property, numeric.unit);
+  if (units.length === 0) return { text: value, unit: null };
+  return {
+    text: numeric.text,
+    unit: numeric.unit || units[0] || null,
+  };
+}
+
+function inspectorFieldDraftWithUnit(text: string, unit: string): string {
+  const candidate = text.trim();
+  // A leading plus and x/operator notation are equations against the value
+  // captured on focus. Leave them unitless until commit resolves the equation.
+  if (/^\+/.test(candidate) || /[xX()*/^]/.test(candidate)) return text;
+  if (/^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(candidate)) {
+    return `${candidate}${unit}`;
+  }
+  return text;
+}
+
 function InspectorEditField({
   label,
   value,
@@ -9127,9 +9162,11 @@ function InspectorEditField({
   onCommit,
 }: InspectorEditFieldProps) {
   const id = useId();
+  const fieldRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const baselineRef = useRef(String(value));
   const skipCommitRef = useRef(false);
+  const unitMenuOpenRef = useRef(false);
   const commitIntentRef = useRef(0);
   const scrubRef = useRef<{
     pointerId: number;
@@ -9142,6 +9179,23 @@ function InspectorEditField({
   const cancelPreviewRef = useRef(onCancelPreview);
   cancelPreviewRef.current = onCancelPreview;
   const [draft, setDraft] = useState(String(value));
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+  const [presentation, setPresentation] = useState<InspectorFieldPresentation>(
+    () => inspectorFieldPresentation(styleProperty, String(value)),
+  );
+
+  const setPresentedDraft = useCallback(
+    (next: string) => {
+      draftRef.current = next;
+      setDraft(next);
+      setPresentation(inspectorFieldPresentation(styleProperty, next));
+    },
+    [styleProperty],
+  );
+  const unitOptions = presentation.unit
+    ? designStyleUnitOptions(styleProperty ?? "", presentation.unit)
+    : [];
 
   const resolveDraft = (next: string, baseline: string) =>
     styleProperty
@@ -9152,8 +9206,8 @@ function InspectorEditField({
     if (document.activeElement === inputRef.current) return;
     const next = String(value);
     baselineRef.current = next;
-    setDraft(next);
-  }, [value]);
+    setPresentedDraft(next);
+  }, [setPresentedDraft, value]);
 
   useEffect(
     () => () => {
@@ -9200,7 +9254,7 @@ function InspectorEditField({
     });
   };
 
-  const commit = async (requestedDraft = draft) => {
+  const commit = async (requestedDraft = draftRef.current) => {
     if (skipCommitRef.current) {
       skipCommitRef.current = false;
       cancelPreview();
@@ -9208,7 +9262,7 @@ function InspectorEditField({
     }
     const baseline = baselineRef.current;
     const resolvedDraft = resolveDraft(requestedDraft, baseline);
-    if (resolvedDraft !== requestedDraft) setDraft(resolvedDraft);
+    if (resolvedDraft !== requestedDraft) setPresentedDraft(resolvedDraft);
     if (resolvedDraft === baseline) {
       cancelPreview();
       return;
@@ -9225,7 +9279,7 @@ function InspectorEditField({
       finishCommittedPreview();
     } catch (fieldError) {
       if (commitIntentRef.current !== intent) return;
-      setDraft(baseline);
+      setPresentedDraft(baseline);
       cancelPreview();
       toast.error(`Couldn't update ${label.toLowerCase()}`, {
         description: errorMessage(fieldError),
@@ -9234,7 +9288,7 @@ function InspectorEditField({
   };
 
   return (
-    <div className="group/design-field relative min-w-0">
+    <div ref={fieldRef} className="group/design-field relative min-w-0">
       <div
         data-design-inspector-field=""
         data-design-applied={applied ? "" : undefined}
@@ -9279,7 +9333,7 @@ function InspectorEditField({
             );
             if (next === null || next === scrub.latestValue) return;
             scrub.latestValue = next;
-            setDraft(next);
+            setPresentedDraft(next);
             preview(next);
           }}
           onPointerUp={(event) => {
@@ -9293,7 +9347,7 @@ function InspectorEditField({
             const scrub = scrubRef.current;
             if (!scrub || scrub.pointerId !== event.pointerId) return;
             scrubRef.current = null;
-            setDraft(baselineRef.current);
+            setPresentedDraft(baselineRef.current);
             cancelPreview();
           }}
         >
@@ -9304,7 +9358,7 @@ function InspectorEditField({
         <Input
           ref={inputRef}
           id={id}
-          value={draft}
+          value={presentation.text}
           placeholder={placeholder}
           disabled={disabled}
           title={hint}
@@ -9317,9 +9371,40 @@ function InspectorEditField({
             // Deliberately local. A canvas write per keystroke reflowed the
             // document on every character — and on a backspace it removed the
             // declaration outright before the next digit put it back.
-            setDraft(event.target.value);
+            const text = event.target.value;
+            const pastedNumeric = parseDesignStyleNumericParts(text);
+            if (
+              styleProperty &&
+              pastedNumeric?.unit &&
+              designStyleUnitOptions(
+                styleProperty,
+                pastedNumeric.unit,
+              ).includes(pastedNumeric.unit)
+            ) {
+              setPresentedDraft(text);
+              return;
+            }
+            if (
+              presentation.unit &&
+              (text.trim() === "" || /^[\d.+\-*/^xX()\s]*$/.test(text))
+            ) {
+              const next = inspectorFieldDraftWithUnit(text, presentation.unit);
+              draftRef.current = next;
+              setDraft(next);
+              setPresentation({ text, unit: presentation.unit });
+              return;
+            }
+            setPresentedDraft(text);
           }}
-          onBlur={() => void commit()}
+          onBlur={(event) => {
+            if (
+              unitMenuOpenRef.current ||
+              fieldRef.current?.contains(event.relatedTarget)
+            ) {
+              return;
+            }
+            void commit();
+          }}
           onKeyDown={(event) => {
             if (event.key === "Enter") {
               event.preventDefault();
@@ -9334,7 +9419,7 @@ function InspectorEditField({
               );
               if (next !== null) {
                 event.preventDefault();
-                setDraft(next);
+                setPresentedDraft(next);
               }
             } else if (event.key === "Escape") {
               event.preventDefault();
@@ -9348,66 +9433,128 @@ function InspectorEditField({
               // to trigger the effect again.
               const restored = String(value);
               baselineRef.current = restored;
-              setDraft(restored);
+              setPresentedDraft(restored);
               cancelPreview();
               event.currentTarget.blur();
             }
           }}
         />
-        {motion ? (
-          <Tooltip
-            label={
-              motion.trackActive
-                ? `Add ${label} keyframe at the playhead`
-                : `Animate ${label}`
-            }
-          >
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className={cn(
-                "mr-0.5 size-6 shrink-0 transition-opacity",
-                motion.modeActive || motion.trackActive
-                  ? "opacity-100"
-                  : "opacity-0 group-focus-within/design-field:opacity-100 group-hover/design-field:opacity-100",
-                motion.trackActive && "text-[var(--design-selection-stroke)]",
-              )}
-              aria-label={
-                motion.trackActive
-                  ? `Add ${label} keyframe at the playhead`
-                  : `Animate ${label}`
+        {presentation.unit && unitOptions.length > 0 ? (
+          <Select
+            value={presentation.unit}
+            disabled={disabled}
+            onOpenChange={(open) => {
+              if (open) {
+                unitMenuOpenRef.current = true;
+              } else if (unitMenuOpenRef.current) {
+                unitMenuOpenRef.current = false;
+                void commit();
               }
-              onPointerDown={(event) => event.stopPropagation()}
-              onClick={motion.onAddKeyframe}
+            }}
+            onValueChange={(unit) => {
+              unitMenuOpenRef.current = false;
+              const resolved = resolveDraft(
+                draftRef.current,
+                baselineRef.current,
+              );
+              const next = replaceDesignStyleNumericUnit(resolved, unit);
+              if (next === null) return;
+              setPresentedDraft(next);
+              void commit(next);
+            }}
+          >
+            <SelectTrigger
+              size="sm"
+              className="zd-design-unit-trigger h-full w-11 shrink-0 gap-0 rounded-none border-0 bg-transparent px-1 text-[10px] shadow-none [&>svg]:size-2.5"
+              aria-label={`Unit for ${label}`}
+              onPointerDown={() => {
+                unitMenuOpenRef.current = true;
+              }}
+              onBlur={(event) => {
+                if (
+                  unitMenuOpenRef.current ||
+                  fieldRef.current?.contains(event.relatedTarget)
+                ) {
+                  return;
+                }
+                void commit();
+              }}
             >
-              <Diamond
-                className={motion.trackActive ? "fill-current" : undefined}
-              />
-            </Button>
-          </Tooltip>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent align="end" className="min-w-20">
+              {unitOptions.map((unit) => (
+                <SelectItem key={unit} value={unit}>
+                  {unit}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         ) : null}
-        {applied ? (
-          <Tooltip label={`Remove authored ${label}`}>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="mr-0.5 size-6 shrink-0 opacity-0 transition-opacity group-focus-within/design-field:opacity-100 group-hover/design-field:opacity-100"
-              aria-label={`Remove authored ${label}`}
-              disabled={disabled}
-              onPointerDown={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-              }}
-              onClick={() => {
-                setDraft("");
-                void commit("");
-              }}
-            >
-              <X />
-            </Button>
-          </Tooltip>
+        {motion || applied ? (
+          <div
+            className={cn(
+              "zd-design-field-actions absolute top-0 right-0 flex h-full items-center rounded-r-sm",
+              (motion?.modeActive || motion?.trackActive) &&
+                "zd-design-field-actions-visible",
+            )}
+            data-has-unit={presentation.unit ? "true" : undefined}
+            data-has-hint={hint ? "true" : undefined}
+          >
+            {motion ? (
+              <Tooltip
+                label={
+                  motion.trackActive
+                    ? `Add ${label} keyframe at the playhead`
+                    : `Animate ${label}`
+                }
+              >
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className={cn(
+                    "size-6 shrink-0",
+                    motion.trackActive &&
+                      "text-[var(--design-selection-stroke)]",
+                  )}
+                  aria-label={
+                    motion.trackActive
+                      ? `Add ${label} keyframe at the playhead`
+                      : `Animate ${label}`
+                  }
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={motion.onAddKeyframe}
+                >
+                  <Diamond
+                    className={motion.trackActive ? "fill-current" : undefined}
+                  />
+                </Button>
+              </Tooltip>
+            ) : null}
+            {applied ? (
+              <Tooltip label={`Remove authored ${label}`}>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  className="size-6 shrink-0"
+                  aria-label={`Remove authored ${label}`}
+                  disabled={disabled}
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  }}
+                  onClick={() => {
+                    setPresentedDraft("");
+                    void commit("");
+                  }}
+                >
+                  <X />
+                </Button>
+              </Tooltip>
+            ) : null}
+          </div>
         ) : null}
         {hint ? (
           <span

@@ -17,6 +17,7 @@ import {
   Sparkles,
   Square,
   Type,
+  X,
 } from "lucide-react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
@@ -49,6 +50,11 @@ import {
   readDesignComputedStyle,
   serializeDesignCssDeclarations,
 } from "./design-style-values";
+import {
+  designStyleSearchSections,
+  designStyleSearchTerms,
+  matchesDesignStyleSearch,
+} from "./design-style-search";
 import { useDesignLivePreviewValue } from "./state/design-live-preview";
 
 interface DesignLivePreviewOwner {
@@ -112,16 +118,6 @@ function errorMessage(error: unknown): string {
     : "The style could not be updated.";
 }
 
-function matchesStyleSearch(text: string, filter: string): boolean {
-  const haystack = text.toLocaleLowerCase();
-  return filter
-    .trim()
-    .toLocaleLowerCase()
-    .split(/\s+/)
-    .filter(Boolean)
-    .every((token) => haystack.includes(token));
-}
-
 function StyleSection({
   title,
   icon,
@@ -140,7 +136,7 @@ function StyleSection({
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
-  if (filter && !matchesStyleSearch(`${title} ${keywords}`, filter)) {
+  if (filter && !matchesDesignStyleSearch(`${title} ${keywords}`, filter)) {
     return null;
   }
   const effectiveOpen = Boolean(filter) || open;
@@ -193,7 +189,7 @@ function PropertySelect({
     ? options
     : [{ value, label: value }, ...options];
   return (
-    <div className="grid min-w-0 grid-cols-[48px_minmax(0,1fr)] items-center gap-2">
+    <div className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] items-center gap-2">
       <span className="text-muted-fg truncate text-[10px]" title={label}>
         {label}
       </span>
@@ -201,6 +197,7 @@ function PropertySelect({
         <SelectTrigger
           size="sm"
           className="zd-design-control-quiet h-7 w-full min-w-0 px-2 text-[11px]"
+          aria-label={label}
         >
           <SelectValue />
         </SelectTrigger>
@@ -231,11 +228,17 @@ function FlexAlignmentControl({
 }) {
   const values = ["flex-start", "center", "flex-end"] as const;
   const column = direction.startsWith("column");
-  const selectedX = column ? align : justify;
-  const selectedY = column ? justify : align;
+  const resolvedAlign = align === "normal" ? "stretch" : align;
+  const resolvedJustify = justify === "normal" ? "flex-start" : justify;
+  const selectedX = column ? resolvedAlign : resolvedJustify;
+  const selectedY = column ? resolvedJustify : resolvedAlign;
   return (
-    <div className="grid grid-cols-[68px_minmax(0,1fr)] items-center gap-3">
-      <div className="zd-design-control-applied grid size-[68px] grid-cols-3 rounded-md p-1">
+    <div className="grid grid-cols-[68px_minmax(0,1fr)] items-start gap-3">
+      <div
+        className="zd-design-control-applied grid size-[68px] grid-cols-3 rounded-md p-1"
+        role="group"
+        aria-label="Quick alignment"
+      >
         {values.flatMap((vertical) =>
           values.map((horizontal) => {
             const selected = selectedX === horizontal && selectedY === vertical;
@@ -272,11 +275,34 @@ function FlexAlignmentControl({
           }),
         )}
       </div>
-      <div className="text-muted-fg flex flex-col gap-1.5 text-[10px]">
-        <span className="text-fg2">Alignment</span>
-        <span className="truncate">X · {selectedX}</span>
-        <span className="truncate">Y · {selectedY}</span>
-        <span>Click a point to align</span>
+      <div className="flex min-w-0 flex-col gap-1.5">
+        <PropertySelect
+          label="Align"
+          value={resolvedAlign}
+          disabled={disabled}
+          options={[
+            { value: "stretch", label: "Stretch" },
+            { value: "flex-start", label: "Start" },
+            { value: "center", label: "Center" },
+            { value: "flex-end", label: "End" },
+            { value: "baseline", label: "Baseline" },
+          ]}
+          onChange={(value) => onChange({ "align-items": value })}
+        />
+        <PropertySelect
+          label="Distribute"
+          value={resolvedJustify}
+          disabled={disabled}
+          options={[
+            { value: "flex-start", label: "Start" },
+            { value: "center", label: "Center" },
+            { value: "flex-end", label: "End" },
+            { value: "space-between", label: "Space between" },
+            { value: "space-around", label: "Space around" },
+            { value: "space-evenly", label: "Space evenly" },
+          ]}
+          onChange={(value) => onChange({ "justify-content": value })}
+        />
       </div>
     </div>
   );
@@ -299,16 +325,21 @@ function ChoiceGroup({
     ? options
     : [{ value, label: value, title: value }, ...options];
   return (
-    <div className="grid min-w-0 grid-cols-[48px_minmax(0,1fr)] items-center gap-2">
+    <div className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] items-center gap-2">
       <Label className="text-muted-fg truncate text-[10px]" title={label}>
         {label}
       </Label>
-      <div className="zd-design-segment-group grid h-7 grid-flow-col rounded-sm">
+      <div
+        className="zd-design-segment-group grid h-7 grid-flow-col rounded-sm"
+        role="group"
+        aria-label={label}
+      >
         {choices.map((option) => (
           <Tooltip key={option.value} label={option.title ?? option.label}>
             <button
               type="button"
               disabled={disabled}
+              aria-label={option.title ?? `${label}: ${option.label}`}
               aria-pressed={value === option.value}
               className={cn(
                 "zd-design-segment text-fg2 min-w-0 px-1 text-[10px] disabled:opacity-50",
@@ -412,6 +443,14 @@ function styleValue(
   fallback = "",
 ): string {
   return readDesignComputedStyle(details.styles, property) || fallback;
+}
+
+function spacingStyleValue(
+  details: DesignRuntimeNodeDetails,
+  property: "gap" | "row-gap" | "column-gap",
+): string {
+  const value = styleValue(details, property, "0px");
+  return value === "normal" ? "0px" : value;
 }
 
 const CSS_EXPORT_PROPERTIES = [
@@ -521,29 +560,6 @@ const CSS_EXPORT_PROPERTIES = [
 
 const OBJECT_FIT_TAGS = new Set(["img", "video", "canvas", "svg", "iframe"]);
 
-const STYLE_SEARCH_INDEX = [
-  "size position width height min max aspect ratio object fit overflow visibility z-index cursor pointer",
-  "layout display flex grid gap padding margin align justify wrap order basis column row",
-  "fill background gradient image border radius outline opacity blend isolation",
-  "typography text font color weight style stretch line height tracking spacing alignment decoration overflow break hyphens writing",
-  "effects shadow blur filter backdrop blend clip path",
-  "transform translate rotate scale skew origin perspective 3d",
-  "transition duration delay easing timing",
-  "motion animation keyframes timeline iterations direction fill mode",
-  "css declarations advanced code",
-];
-const STYLE_SEARCH_SECTION = [
-  "layout",
-  "layout",
-  "appearance",
-  "typography",
-  "effects",
-  "transform",
-  "transition",
-  "motion",
-  "css",
-] as const;
-
 export function DesignStyleEditor({
   details,
   livePreviewOwner,
@@ -612,13 +628,7 @@ export function DesignStyleEditor({
 
   const normalizedQuery = propertyQuery.trim().toLocaleLowerCase();
   const hasSearchMatch =
-    !normalizedQuery ||
-    STYLE_SEARCH_INDEX.some((terms, index) =>
-      matchesStyleSearch(
-        `${STYLE_SEARCH_SECTION[index] ?? ""} ${terms}`,
-        normalizedQuery,
-      ),
-    );
+    !normalizedQuery || designStyleSearchSections(normalizedQuery).length > 0;
   const display = styleValue(details, "display", "block");
   const flexLayout = display === "flex" || display === "inline-flex";
   const gridLayout = display === "grid" || display === "inline-grid";
@@ -630,22 +640,49 @@ export function DesignStyleEditor({
 
   return (
     <div data-design-style-editor className="flex flex-col">
-      <div className="bg-bg1 sticky top-0 z-10 flex h-11 items-center px-3">
+      <div className="bg-bg1 border-border1 sticky top-0 z-10 flex h-11 items-center border-b px-3">
         <div className="relative min-w-0 flex-1">
           <Search className="text-muted-fg pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2" />
           <Input
             value={propertyQuery}
-            className="zd-design-search h-7 pl-7 text-[11px]"
+            className="zd-design-search h-7 pr-7 pl-7 text-[11px]"
             aria-label="Find a style property"
             placeholder="Find a property"
             onChange={(event) => setPropertyQuery(event.currentTarget.value)}
+            onKeyDown={(event) => {
+              if (event.key !== "Escape" || !propertyQuery) return;
+              event.preventDefault();
+              setPropertyQuery("");
+            }}
           />
+          {propertyQuery ? (
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="absolute top-1/2 right-0.5 size-6 -translate-y-1/2"
+              aria-label="Clear property search"
+              onClick={() => setPropertyQuery("")}
+            >
+              <X />
+            </Button>
+          ) : null}
         </div>
       </div>
       {!hasSearchMatch ? (
-        <div className="text-muted-fg px-3 py-6 text-center text-xs">
-          No visual control matches “{propertyQuery}”. Use CSS for any valid
-          property.
+        <div className="text-muted-fg flex flex-col items-center gap-3 px-3 py-6 text-center text-xs">
+          <span>
+            No visual control matches “{propertyQuery}”. Use CSS for any valid
+            property.
+          </span>
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={() => setPropertyQuery("")}
+          >
+            Clear search
+          </Button>
         </div>
       ) : null}
       <StyleSection
@@ -654,7 +691,7 @@ export function DesignStyleEditor({
         defaultOpen
         summary={`${Math.round(details.rect.width)} × ${Math.round(details.rect.height)} · ${display}`}
         filter={normalizedQuery}
-        keywords={`${STYLE_SEARCH_INDEX[0]} ${STYLE_SEARCH_INDEX[1]}`}
+        keywords={designStyleSearchTerms("layout")}
       >
         <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
           Position &amp; size
@@ -722,14 +759,17 @@ export function DesignStyleEditor({
           ]}
           onChange={(value) => commit({ position: value }, "position")}
         />
-        <div className="grid grid-cols-2 gap-2">
-          {renderField("Z", "z-index", styleValue(details, "z-index", "auto"))}
-          {renderField(
-            "Box",
-            "box-sizing",
-            styleValue(details, "box-sizing", "border-box"),
-          )}
-        </div>
+        {renderField("Z", "z-index", styleValue(details, "z-index", "auto"))}
+        <PropertySelect
+          label="Box sizing"
+          value={styleValue(details, "box-sizing", "border-box")}
+          disabled={disabled}
+          options={[
+            { value: "border-box", label: "Border box" },
+            { value: "content-box", label: "Content box" },
+          ]}
+          onChange={(value) => commit({ "box-sizing": value }, "box sizing")}
+        />
         <PropertySelect
           label="Overflow"
           value={styleValue(details, "overflow", "visible")}
@@ -861,7 +901,7 @@ export function DesignStyleEditor({
           </>
         ) : null}
         <span className="text-muted-fg mt-1 text-[10px] font-medium tracking-wide uppercase">
-          Auto layout
+          Layout mode
         </span>
         <ChoiceGroup
           label="Display"
@@ -901,16 +941,16 @@ export function DesignStyleEditor({
               onChange={(styles) => commit(styles, "alignment")}
             />
             <div className="grid grid-cols-2 gap-2">
-              {renderField("Gap", "gap", styleValue(details, "gap", "0px"))}
+              {renderField("Gap", "gap", spacingStyleValue(details, "gap"))}
               {renderField(
                 "Row",
                 "row-gap",
-                styleValue(details, "row-gap", "0px"),
+                spacingStyleValue(details, "row-gap"),
               )}
               {renderField(
                 "Column",
                 "column-gap",
-                styleValue(details, "column-gap", "0px"),
+                spacingStyleValue(details, "column-gap"),
               )}
             </div>
             <PropertySelect
@@ -949,12 +989,12 @@ export function DesignStyleEditor({
               {renderField(
                 "Col gap",
                 "column-gap",
-                styleValue(details, "column-gap", "0px"),
+                spacingStyleValue(details, "column-gap"),
               )}
               {renderField(
                 "Row gap",
                 "row-gap",
-                styleValue(details, "row-gap", "0px"),
+                spacingStyleValue(details, "row-gap"),
               )}
             </div>
             <div className="grid grid-cols-2 gap-2">
@@ -1098,20 +1138,14 @@ export function DesignStyleEditor({
           )}
         </div>
         <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-          Item sizing
+          Child layout
         </span>
-        <ChoiceGroup
-          label="Grow"
-          value={styleValue(details, "flex-grow", "0")}
-          disabled={disabled}
-          options={[
-            { value: "0", label: "0", title: "Do not grow" },
-            { value: "1", label: "1", title: "Fill available space" },
-            { value: "2", label: "2", title: "Grow twice as much" },
-          ]}
-          onChange={(value) => commit({ "flex-grow": value }, "flex grow")}
-        />
         <div className="grid grid-cols-2 gap-2">
+          {renderField(
+            "Grow",
+            "flex-grow",
+            styleValue(details, "flex-grow", "0"),
+          )}
           {renderField(
             "Shrink",
             "flex-shrink",
@@ -1170,7 +1204,7 @@ export function DesignStyleEditor({
         defaultOpen
         summary={styleValue(details, "background-color", "transparent")}
         filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[2]}
+        keywords={designStyleSearchTerms("appearance")}
       >
         <div className="grid grid-cols-2 gap-2">
           {renderField(
@@ -1414,7 +1448,7 @@ export function DesignStyleEditor({
         defaultOpen={Boolean(details.text)}
         summary={styleValue(details, "font-size")}
         filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[3]}
+        keywords={designStyleSearchTerms("typography")}
       >
         {renderField("Font", "font-family", styleValue(details, "font-family"))}
         <div className="grid grid-cols-2 gap-2">
@@ -1644,7 +1678,7 @@ export function DesignStyleEditor({
         icon={<Sparkles />}
         summary={styleValue(details, "box-shadow", "none")}
         filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[4]}
+        keywords={designStyleSearchTerms("effects")}
       >
         <div className="group/motion flex min-w-0 items-center gap-1">
           <div className="min-w-0 flex-1">
@@ -1715,7 +1749,7 @@ export function DesignStyleEditor({
         icon={<RotateCw />}
         summary={styleValue(details, "transform", "none")}
         filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[5]}
+        keywords={designStyleSearchTerms("transform")}
       >
         <div className="group/motion flex min-w-0 items-center gap-1">
           <div className="min-w-0 flex-1">
@@ -1764,7 +1798,7 @@ export function DesignStyleEditor({
         icon={<Play />}
         summary={styleValue(details, "transition-duration", "0s")}
         filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[6]}
+        keywords={designStyleSearchTerms("transition")}
       >
         {renderField(
           "Property",
@@ -1805,7 +1839,7 @@ export function DesignStyleEditor({
         icon={<Diamond />}
         summary={styleValue(details, "animation-name", "none")}
         filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[7]}
+        keywords={designStyleSearchTerms("motion")}
       >
         <p className="text-muted-fg text-[11px] leading-4">
           Edit property tracks, keyframes, timing, and playback in the canvas
@@ -1829,7 +1863,7 @@ export function DesignStyleEditor({
         icon={<Code2 />}
         summary="Declarations"
         filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[8]}
+        keywords={designStyleSearchTerms("css")}
       >
         <div className="flex items-center justify-between gap-2">
           <span className="text-muted-fg text-xs">

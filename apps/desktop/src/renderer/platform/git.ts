@@ -120,6 +120,7 @@ import {
   bridgeDesignUpdateStyles,
   bridgeDesignWriteHtml,
   bridgeDesignInsertAsset,
+  isDesignWorkspaceSnapshotWire,
   type DesignFrameDocumentWire,
   type DesignFoundationRevisionWire,
   type DesignFoundationOpenWire,
@@ -752,9 +753,9 @@ export async function workspaceList(
     /** true → engine stamps `hasChanges` per live row (git probes). The Dashboard
      *  opts in; the sidebar does not, to keep its refetches git-free. */
     withChanges?: boolean;
-    /** Local façade option. Existing/code-only consumers stay isolated from
-     *  Design rows; the shared workspace store opts in and applies its Internal
-     *  runtime gate at each Design-capable surface. Never sent to the engine. */
+    /** Local façade option. Code-only consumers (notably coding-agent cwd
+     *  pickers) stay isolated from Design rows; public workspace stores opt in.
+     *  Never sent to the engine. */
     includeDesign?: boolean;
   } = {},
 ): Promise<Workspace[]> {
@@ -889,11 +890,28 @@ export async function workspaceSetStatus(args: {
 export async function workspaceSetMode(args: {
   workspaceId: string;
   mode: "code" | "design";
-}): Promise<void> {
-  await bridgeWorkspaceSetMode(
+}): Promise<{
+  ok: true;
+  mode: "code" | "design";
+  snapshot?: DesignWorkspaceSnapshotWire;
+}> {
+  const result = await bridgeWorkspaceSetMode(
     requireBridge("switch the workspace mode"),
     args,
   );
+  if (
+    result.ok !== true ||
+    (result.mode !== "code" && result.mode !== "design") ||
+    (result.snapshot !== undefined &&
+      !isDesignWorkspaceSnapshotWire(result.snapshot))
+  ) {
+    throw new Error("workspace.setMode: malformed engine response");
+  }
+  return {
+    ok: true,
+    mode: result.mode,
+    ...(result.snapshot ? { snapshot: result.snapshot } : {}),
+  };
 }
 
 /** Restore (unarchive) a workspace. The engine adapts the path/branch when the

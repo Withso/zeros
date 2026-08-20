@@ -177,6 +177,32 @@ export function statusForFailure(failure: AgentFailure): SessionStatus {
   return "failed";
 }
 
+/** Prompt dispatch is the one lifecycle stage where a superseded execution is
+ * recoverable by the caller. A registered Design-territory handoff revokes the
+ * old execution after the renderer has already committed the user's turn; the
+ * send path must resume the durable provider conversation and retry that exact
+ * prompt. Keep this narrower than isRecoverable: create/load supersession is
+ * owned by the bind lifecycle and must never start an independent retry loop. */
+export function promptFailureShouldRecover(failure: AgentFailure): boolean {
+  return (
+    isRecoverable(failure) ||
+    (failure.kind === "lifecycle-superseded" && failure.stage === "prompt")
+  );
+}
+
+/** Whether prompt recovery should first re-adopt the durable provider thread.
+ * Session expiry and a territory-revoked execution both invalidate only the
+ * ephemeral execution route; resuming before any cold fallback preserves
+ * Codex, Claude, and Cursor conversation context across workspace switches. */
+export function promptFailureShouldResumeProvider(
+  failure: AgentFailure,
+): boolean {
+  return (
+    failure.kind === "session-expired" ||
+    (failure.kind === "lifecycle-superseded" && failure.stage === "prompt")
+  );
+}
+
 /** A create/load that lost the engine's exact-conversation ownership race is
  * already replaced by newer lifecycle work. Match the legacy message too so a
  * current renderer paired with an older protocol-v8 engine does not mistake

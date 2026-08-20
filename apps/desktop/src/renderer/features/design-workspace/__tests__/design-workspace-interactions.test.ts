@@ -203,7 +203,8 @@ describe("design workspace interaction wiring", () => {
     expect(source).not.toContain(
       "preview(resolveDraft(next, baselineRef.current))",
     );
-    expect(source).toContain("setDraft(event.target.value);");
+    expect(source).toContain("const text = event.target.value;");
+    expect(source).toContain("setPresentedDraft(text);");
     expect(source).toContain(
       "if (!previewDirtyRef.current) preview(resolvedDraft);",
     );
@@ -701,6 +702,34 @@ describe("design workspace interaction wiring", () => {
     expect(styleEditorSource).toContain('"perspective-origin"');
     expect(styleEditorSource).toContain("showAdvancedAppearance");
     expect(styleEditorSource).toContain("showAdvancedTypography");
+  });
+
+  it("keeps the style inspector hierarchy compact without overriding every child", () => {
+    expect(uiSource.match(/font-size:\s*13px/g)).toHaveLength(1);
+    expect(uiSource).toContain(".zd-design-field-actions");
+    expect(source).toContain("aria-label={`Unit for ${label}`}");
+    expect(styleEditorSource).toContain('label="Box sizing"');
+  });
+
+  it("programmatically names style selects and segmented control groups", () => {
+    expect(styleEditorSource).toContain("aria-label={label}");
+    expect(styleEditorSource).toContain('role="group"');
+    expect(styleEditorSource).toContain(
+      "aria-label={option.title ?? `${label}: ${option.label}`}",
+    );
+  });
+
+  it("keeps the motion timeline usable at its minimum canvas width", () => {
+    expect(motionTimelineSource).toContain("zd-design-motion-grid");
+    expect(uiSource).toContain(".zd-design-motion-grid");
+    expect(motionTimelineSource).toContain("designMotionPlaybackStartOffset(");
+    expect(motionTimelineSource).toContain('aria-label="More motion settings"');
+  });
+
+  it("retains an unsaved motion draft by exact layer across selection changes", () => {
+    expect(motionTimelineSource).toContain("motionDraftCache");
+    expect(motionTimelineSource).toContain("sessionOwnerKey");
+    expect(source).toContain("sessionOwnerKey={motionOverlayOwner}");
   });
 
   it("returns the one-shot text tool to Select after entering or cancelling inline editing", () => {

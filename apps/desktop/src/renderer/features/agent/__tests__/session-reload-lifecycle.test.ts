@@ -12,6 +12,8 @@ import {
   cancelledSince,
   loadedSessionStatus,
   markPrebindDirty,
+  promptFailureShouldRecover,
+  promptFailureShouldResumeProvider,
   providerCapabilityRefreshCanRun,
   providerCapabilityRefreshNeeded,
   providerCapabilityRefreshExecution,
@@ -844,6 +846,34 @@ describe("send-time session recovery", () => {
     };
     expect(bindFailureWasSuperseded(legacyEngineFailure)).toBe(true);
     expect(resumeFailureInvalidatesBinding(legacyEngineFailure)).toBe(false);
+  });
+
+  it("silently rebinds a prompt interrupted by a territory restart without treating binds as retryable", () => {
+    const promptFailure = {
+      kind: "lifecycle-superseded" as const,
+      message: "Design territory changed while the prompt was starting.",
+      stage: "prompt" as const,
+    };
+    const bindFailure = { ...promptFailure, stage: "loadSession" as const };
+
+    expect(promptFailureShouldRecover(promptFailure)).toBe(true);
+    expect(promptFailureShouldResumeProvider(promptFailure)).toBe(true);
+    expect(promptFailureShouldRecover(bindFailure)).toBe(false);
+    expect(promptFailureShouldResumeProvider(bindFailure)).toBe(false);
+    expect(
+      promptFailureShouldResumeProvider({
+        kind: "session-expired",
+        message: "thread not found",
+        stage: "prompt",
+      }),
+    ).toBe(true);
+    expect(
+      promptFailureShouldResumeProvider({
+        kind: "transport-closed",
+        message: "connection reset",
+        stage: "prompt",
+      }),
+    ).toBe(false);
   });
 
   it("hands a warming chat's send to the queue instead", () => {

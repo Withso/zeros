@@ -1,4 +1,8 @@
-import React, { useRef, useState, type MouseEvent, type ReactNode } from "react";
+import React, {
+  useRef,
+  type MouseEvent,
+  type ReactNode,
+} from "react";
 import { Archive, Check, Code2, PenTool } from "lucide-react";
 
 import {
@@ -7,8 +11,16 @@ import {
   type Workspace,
   type WorkspaceStatus,
 } from "@/renderer/platform/git";
-import { notifyWorkspacesChanged } from "@/renderer/state/use-projects";
-import { useWorkspaceArchiving } from "@/renderer/state/pending-workspaces";
+import {
+  commitWorkspaceMode,
+  notifyWorkspacesChanged,
+} from "@/renderer/state/use-projects";
+import {
+  beginWorkspaceModeSwitch,
+  finishWorkspaceModeSwitch,
+  usePendingWorkspaceMode,
+  useWorkspaceArchiving,
+} from "@/renderer/state/pending-workspaces";
 import { isLocalMainWorkspace } from "@/renderer/state/local-main-workspace";
 import { LIFECYCLE_STATUSES } from "@/renderer/shared/lib/workspace-status";
 import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
@@ -31,12 +43,6 @@ export interface WorkspaceContextMenuProps {
   onArchive?: () => void;
   /** Show the Archive item greyed-out and inert for a caller-owned reason. */
   archiveDisabled?: boolean;
-  /** Whether "Switch to Design Mode" is offered (callers pass the
-   *  `designWorkspaces` Internal gate — shared/ cannot import features/).
-   *  Only ENTERING is gated; "Switch to Code Mode" always shows for a
-   *  design-mode row, so a disabled flag can never trap a workspace in a mode
-   *  whose surface no longer renders. */
-  designModeSwitchAvailable?: boolean;
   /** The right-click target — wrapped as the menu trigger via `asChild`. */
   children: ReactNode;
   /** Top-bar tabs anchor their context menu to the trigger's bottom-left rather
@@ -63,12 +69,13 @@ export function WorkspaceContextMenu({
   workspace,
   onArchive,
   archiveDisabled = false,
-  designModeSwitchAvailable = false,
   children,
   placement = "pointer",
 }: WorkspaceContextMenuProps) {
   const archiving = useWorkspaceArchiving(workspace.id);
-  const archiveInert = archiveDisabled || archiving;
+  const pendingMode = usePendingWorkspaceMode(workspace.id);
+  const switchingMode = pendingMode !== null;
+  const archiveInert = archiveDisabled || archiving || switchingMode;
   const setStatus = (status: WorkspaceStatus) => {
     if (status === workspace.status) return;
     void workspaceSetStatus({ workspaceId: workspace.id, status })
@@ -80,30 +87,35 @@ export function WorkspaceContextMenu({
       });
   };
 
-  // Mode switch — one workspace, two modes. ENTERING design mode is an
-  // Internal feature (the caller passes the gate — see the prop); EXITING is
-  // never gated so a disabled flag can't trap a workspace in a mode whose
-  // surface no longer renders. Hidden for the synthetic local-main trunk (no
-  // managed row to flip) and while a lifecycle operation owns the row
-  // (archive shares that signal).
-  const inDesignMode = workspace.kind === "design";
-  const showModeSwitch =
-    !isLocalMainWorkspace(workspace) &&
-    (inDesignMode ? true : designModeSwitchAvailable);
-  const [switchingMode, setSwitchingMode] = useState(false);
+  // Mode switch — one workspace, two modes. Hidden for the synthetic
+  // local-main trunk (no managed row to flip) and while a lifecycle operation
+  // owns the row (archive shares that signal).
+  const inDesignMode = (pendingMode ?? workspace.kind) === "design";
+  const showModeSwitch = !isLocalMainWorkspace(workspace);
   const setMode = (mode: "code" | "design") => {
-    if (switchingMode) return;
-    setSwitchingMode(true);
+    if (switchingMode || mode === workspace.kind) return;
+    const token = beginWorkspaceModeSwitch(workspace.id, mode);
     void workspaceSetMode({ workspaceId: workspace.id, mode })
-      .then(() => notifyWorkspacesChanged(workspace.repoSlug))
+      .then((result) => {
+        // Commit first, then remove the presentation overlay: every render
+        // observes either the requested kind or the confirmed identical kind.
+        commitWorkspaceMode({
+          workspaceId: workspace.id,
+          repoSlug: workspace.repoSlug,
+          mode: result.mode,
+          ...(result.snapshot ? { snapshot: result.snapshot } : {}),
+        });
+        finishWorkspaceModeSwitch(workspace.id, token);
+        notifyWorkspacesChanged(workspace.repoSlug);
+      })
       .catch((err: unknown) => {
+        finishWorkspaceModeSwitch(workspace.id, token);
         toast.error(
           err instanceof Error
             ? err.message
             : `Couldn't switch to ${mode} mode`,
         );
-      })
-      .finally(() => setSwitchingMode(false));
+      });
   };
 
   // Timestamp of the most recent menu close, used to eat the phantom click above.
