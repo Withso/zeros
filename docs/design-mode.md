@@ -1,7 +1,7 @@
 # Design mode — one workspace, separate authority
 
-**Status:** Internal feature (`designWorkspaces`), current engineering and
-product contract (2026-08-18).
+**Status:** Public desktop feature, enabled by default. Current engineering and
+product contract (2026-08-19).
 
 A Zeros workspace has one semantic identity and one full checkout. `viewMode`
 only selects the visible Code or Design surface; it never grants filesystem
@@ -13,6 +13,31 @@ field. `kind` remains a synchronized compatibility mirror for older call sites
 and serialized clients; neither field authorizes an actor. A code agent's role
 and immutable write territory are established independently when its runtime is
 created.
+
+The renderer publishes a user's Code/Design request as exact-workspace local
+presentation state in the click frame. It does not overwrite the last confirmed
+workspace-list snapshot. Once `workspace.setMode` succeeds, its authoritative
+field result is patched onto the newest exact-key row before the local request
+is removed; failure removes the request and returns to the retained confirmed
+surface. This prevents both the old RPC-latency pause and a one-frame bounce
+while background list revalidation completes.
+
+The successful transition receipt also carries the first aggregate Design
+snapshot. The renderer publishes that snapshot before revealing the Design
+surface, so entering Design does not repeat the initialization parse/lint pass.
+Subsequent reads use a bounded, exact-workspace stale-while-revalidate cache and
+share concurrent engine scans. The last four confirmed lightweight snapshots
+are mirrored under the versioned settings key
+`zeros-design-workspace-snapshots-v1` (750,000 characters per workspace and
+2,000,000 total) to make renderer reloads paint synchronously. Hydration strips
+embedded asset bytes and the engine-process protocol capability, validates the
+stored checkout path, and always revalidates against the new engine generation.
+Permanent deletion prunes the durable entry; archive retains it for restore.
+
+The shell retains at most two recently used Design workspace surfaces. MRU
+order chooses eviction only: surviving iframe-owning DOM siblings keep a stable
+physical order so Code/Design and Design/Design round trips do not reload their
+browsing contexts. Hidden surfaces remain inert and suspend active-only work.
 
 ## Current actor contract
 
@@ -113,6 +138,14 @@ changes and Git operations that add, remove, or replace recognized Design roots
 use the same retire-before-publish rule. A non-default folder manually created
 outside Zeros remains ordinary user filesystem state until a committed marker
 and controlled pointer transition establish its identity.
+
+That containment handoff is an admission queue, not a user-facing failure.
+Mode/lifecycle requests and new or resumed agent sessions arriving after the
+gate closes wait for the complete queued owner transition, then revalidate the
+workspace. If an owner transition crosses a native agent bind that was already
+admitted, the incomplete execution is disposed and the bind is retried against
+the new authority. The transient gate message must never surface as a Codex,
+Claude, or Cursor provider error.
 
 ## Shared-checkout scope
 
@@ -249,9 +282,10 @@ latency characteristics.
 
 - Pre-mode separate Design worktrees remain readable; legacy sparse cones and
   whole-tree ACLs are removed during boot/exit migration.
-- Design-surface operations remain desktop-only for relay clients, and Design
-  rows remain excluded from the remote workspace list while the surface is an
-  internal feature.
+- Design mode and Design workspace creation are available to every desktop
+  user without an Internal flag. Design-surface operations remain desktop-only,
+  and Design rows remain excluded from relay workspace lists because the
+  trusted Design Document API is not exposed through the remote transport.
 - Repositories without a recognized Design document continue to use the
   existing agent and Git behavior unless the prospective configured/default
   destination already exists. In that bootstrap case strong territory

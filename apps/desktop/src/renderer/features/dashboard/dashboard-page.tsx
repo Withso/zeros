@@ -40,11 +40,8 @@ import {
 } from "../../state/use-projects";
 import {
   dedupePendingCreates,
-  filterPendingCreatesForDesignAccess,
-  filterWorkspacesForDesignAccess,
   selectLiveVisible,
 } from "../../state/live-workspace-selectors";
-import { useInternalFeatureActive } from "../settings/internal-features";
 import {
   usePendingCreatesAll,
   useWorkspaceArchiving,
@@ -115,15 +112,10 @@ export function DashboardPage() {
   const { projects } = useProjects();
   const chats = useChats();
   const { workspaces: liveWorkspaces, loading } = useLiveWorkspaces();
-  const designWorkspacesActive = useInternalFeatureActive("designWorkspaces");
   const activeOrganization = useActiveOrganization();
   const accessibleLiveWorkspaces = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterWorkspacesForDesignAccess(liveWorkspaces, designWorkspacesActive),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, liveWorkspaces],
+    () => filterRowsForOrganization(liveWorkspaces, activeOrganization),
+    [activeOrganization, liveWorkspaces],
   );
   // Destructive membership is confirmed-only: a busy row stays in its current
   // status column until the engine publishes the archive/delete result.
@@ -133,24 +125,13 @@ export function DashboardPage() {
   );
   const rawPending = usePendingCreatesAll();
   const allPending = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterPendingCreatesForDesignAccess(rawPending, designWorkspacesActive),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, rawPending],
+    () => filterRowsForOrganization(rawPending, activeOrganization),
+    [activeOrganization, rawPending],
   );
   const { workspaces: rawArchivedWorkspaces } = useArchivedWorkspaces();
   const archivedWorkspaces = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterWorkspacesForDesignAccess(
-          rawArchivedWorkspaces,
-          designWorkspacesActive,
-        ),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, rawArchivedWorkspaces],
+    () => filterRowsForOrganization(rawArchivedWorkspaces, activeOrganization),
+    [activeOrganization, rawArchivedWorkspaces],
   );
   const openWorkspace = useOpenWorkspace();
   // Persist the requested repository identity. A removed/stale slug derives to
@@ -566,9 +547,6 @@ function DashboardCard({
   const archiveWorkspace = useArchiveWorkspace();
   const dispatch = useWorkspaceDispatch();
   const mutating = useWorkspaceArchiving(w.id);
-  // Gates only the ENTER item in the context menu; exit is never gated.
-  const designModeSwitchAvailable =
-    useInternalFeatureActive("designWorkspaces");
   const [busy, setBusy] = useState<null | "merge">(null);
   // Lazy, tri-state dirtiness probe (replaces the removed heavy withChanges list
   // column). `undefined` until the first probe resolves → resolveCardActionKind
@@ -702,7 +680,6 @@ function DashboardCard({
       workspace={w}
       onArchive={archive}
       archiveDisabled={mutating}
-      designModeSwitchAvailable={designModeSwitchAvailable}
     >
       <div
         role="button"

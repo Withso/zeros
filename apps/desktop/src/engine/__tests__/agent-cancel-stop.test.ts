@@ -28,11 +28,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { LoadSessionResponse } from "@zeros/protocol/agent-events";
 import type { EngineMessage } from "../types";
 import { ZerosEngine } from "../index";
-import {
-  closeZerosDb,
-  openZerosDb,
-  setZerosDbPathForTesting,
-} from "../db";
+import { closeZerosDb, openZerosDb, setZerosDbPathForTesting } from "../db";
 import { MessageRouter } from "../transport/router";
 import type { TransportClient } from "../transport/types";
 
@@ -66,9 +62,14 @@ interface TestEngineInternals {
     cancel: (...args: unknown[]) => Promise<void>;
     endSession: (...args: unknown[]) => Promise<void>;
     loadSession: (...args: unknown[]) => Promise<unknown>;
+    retirePooledUtilityBoundaries: (...args: unknown[]) => Promise<void>;
+    reopenPooledUtilityBoundaries: () => void;
   };
+  setup: { stopAllAndProve: () => Promise<void> };
+  runs: { stopAllAndProve: () => Promise<void> };
   sessionAgent: Map<string, string>;
   sessionChat: Map<string, string>;
+  sessionWorkspace: Map<string, string>;
   conversationExecution: Map<string, string>;
   conversationBindTokens: Map<string, number>;
   promptSessions: Set<string>;
@@ -83,6 +84,10 @@ interface TestEngineInternals {
   ): Promise<void>;
   activePromptIsLive(prompt: ActivePromptRecord): boolean;
   cancelLiveAgentSessions(sessionIds: Iterable<string>): Promise<boolean>;
+  retireAllCodeAgentSessionsForTerritoryChange(): Promise<void>;
+  withGlobalDesignTerritoryTransition<T>(
+    mutation: () => Promise<T>,
+  ): Promise<T>;
   handleMessage(message: EngineMessage, client: TransportClient): Promise<void>;
 }
 
@@ -561,6 +566,372 @@ describe("explicit session close during a live turn", () => {
 });
 
 describe("tab close while a provider session is still binding", () => {
+  it.each(["codex", "claude", "cursor"])(
+    "queues %s creation behind a registered Design territory update",
+    async (agentId) => {
+      const { state } = testEngine(30_025);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      vi.spyOn(state, "agentSpawnOpts").mockResolvedValue({});
+      vi.spyOn(state.agents, "ensureAgent").mockResolvedValue({});
+      const newSession = vi
+        .spyOn(state.agents, "newSession")
+        .mockResolvedValue({
+          executionId: `queued-${agentId}-execution`,
+          sessionId: `queued-${agentId}-execution`,
+        });
+      vi.spyOn(
+        state.agents,
+        "retirePooledUtilityBoundaries",
+      ).mockResolvedValue();
+      vi.spyOn(
+        state.agents,
+        "reopenPooledUtilityBoundaries",
+      ).mockImplementation(() => {});
+      vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
+      vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
+      vi.spyOn(
+        state,
+        "retireAllCodeAgentSessionsForTerritoryChange",
+      ).mockResolvedValue();
+      let releaseTransition!: () => void;
+      let transitionEntered!: () => void;
+      const transitionReady = new Promise<void>((resolve) => {
+        transitionEntered = resolve;
+      });
+      const transitionBlocked = new Promise<void>((resolve) => {
+        releaseTransition = resolve;
+      });
+      const transition = state.withGlobalDesignTerritoryTransition(async () => {
+        transitionEntered();
+        await transitionBlocked;
+      });
+      await transitionReady;
+
+      const start = state.handleMessage(newSessionMessage(agentId), client);
+      await Promise.resolve();
+
+      expect(newSession).not.toHaveBeenCalled();
+      expect(messages).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "AGENT_ERROR",
+            message: expect.stringMatching(/registered Design territory/i),
+          }),
+        ]),
+      );
+
+      releaseTransition();
+      await Promise.all([transition, start]);
+
+      expect(newSession).toHaveBeenCalledOnce();
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "AGENT_SESSION_CREATED",
+            session: expect.objectContaining({
+              executionId: `queued-${agentId}-execution`,
+            }),
+          }),
+        ]),
+      );
+      expect(messages).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "AGENT_ERROR" }),
+        ]),
+      );
+    },
+  );
+
+  it.each(["codex", "claude", "cursor"])(
+    "queues %s resume behind a registered Design territory update",
+    async (agentId) => {
+      const { state } = testEngine(30_027);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      vi.spyOn(state, "agentSpawnOpts").mockResolvedValue({});
+      const providerBinding = {
+        version: 1 as const,
+        providerId: agentId,
+        kind: "native" as const,
+        resumeId: `${agentId}-thread-queued`,
+      };
+      const loadSession = vi
+        .spyOn(state.agents, "loadSession")
+        .mockResolvedValue({
+          executionId: `queued-${agentId}-resume`,
+          providerBinding,
+        });
+      vi.spyOn(
+        state.agents,
+        "retirePooledUtilityBoundaries",
+      ).mockResolvedValue();
+      vi.spyOn(
+        state.agents,
+        "reopenPooledUtilityBoundaries",
+      ).mockImplementation(() => {});
+      vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
+      vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
+      vi.spyOn(
+        state,
+        "retireAllCodeAgentSessionsForTerritoryChange",
+      ).mockResolvedValue();
+      let releaseTransition!: () => void;
+      let transitionEntered!: () => void;
+      const transitionReady = new Promise<void>((resolve) => {
+        transitionEntered = resolve;
+      });
+      const transitionBlocked = new Promise<void>((resolve) => {
+        releaseTransition = resolve;
+      });
+      const transition = state.withGlobalDesignTerritoryTransition(async () => {
+        transitionEntered();
+        await transitionBlocked;
+      });
+      await transitionReady;
+
+      const resume = state.handleMessage(
+        {
+          type: "AGENT_LOAD_SESSION",
+          id: `load-queued-${agentId}`,
+          source: "browser",
+          timestamp: 1,
+          agentId,
+          chatId: "chat-1",
+          providerBinding,
+        } as EngineMessage,
+        client,
+      );
+      await Promise.resolve();
+
+      expect(loadSession).not.toHaveBeenCalled();
+      releaseTransition();
+      await Promise.all([transition, resume]);
+
+      expect(loadSession).toHaveBeenCalledOnce();
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "AGENT_SESSION_LOADED",
+            executionId: `queued-${agentId}-resume`,
+          }),
+        ]),
+      );
+      expect(messages).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "AGENT_ERROR" }),
+        ]),
+      );
+    },
+  );
+
+  it.each(["codex", "claude", "cursor"])(
+    "retries %s creation when a territory update closes admission mid-bind",
+    async (agentId) => {
+      const { state } = testEngine(30_026);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      vi.spyOn(state, "agentSpawnOpts").mockResolvedValue({});
+      vi.spyOn(state.agents, "ensureAgent").mockResolvedValue({});
+      let releaseFirst!: () => void;
+      const firstBlocked = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      const newSession = vi
+        .spyOn(state.agents, "newSession")
+        .mockImplementationOnce(async () => {
+          await firstBlocked;
+          return {
+            executionId: `superseded-${agentId}-execution`,
+            sessionId: `superseded-${agentId}-execution`,
+          };
+        })
+        .mockResolvedValueOnce({
+          executionId: `retried-${agentId}-execution`,
+          sessionId: `retried-${agentId}-execution`,
+        });
+      const endSession = vi
+        .spyOn(state.agents, "endSession")
+        .mockResolvedValue();
+      vi.spyOn(
+        state.agents,
+        "retirePooledUtilityBoundaries",
+      ).mockResolvedValue();
+      vi.spyOn(
+        state.agents,
+        "reopenPooledUtilityBoundaries",
+      ).mockImplementation(() => {});
+      vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
+      vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
+      vi.spyOn(
+        state,
+        "retireAllCodeAgentSessionsForTerritoryChange",
+      ).mockResolvedValue();
+
+      const start = state.handleMessage(newSessionMessage(agentId), client);
+      await vi.waitFor(() => expect(newSession).toHaveBeenCalledTimes(1));
+      const transition = state.withGlobalDesignTerritoryTransition(
+        async () => {},
+      );
+      releaseFirst();
+      await Promise.all([transition, start]);
+
+      expect(newSession).toHaveBeenCalledTimes(2);
+      expect(endSession).toHaveBeenCalledWith(
+        agentId,
+        `superseded-${agentId}-execution`,
+      );
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "AGENT_SESSION_CREATED",
+            session: expect.objectContaining({
+              executionId: `retried-${agentId}-execution`,
+            }),
+          }),
+        ]),
+      );
+      expect(messages).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "AGENT_ERROR" }),
+        ]),
+      );
+    },
+  );
+
+  it.each(["codex", "claude", "cursor"])(
+    "returns a recoverable %s prompt restart signal while Design territory is changing",
+    async (agentId) => {
+      const { state } = testEngine(30_028);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      state.sessionAgent.set("session-1", agentId);
+      state.sessionChat.set("session-1", "chat-1");
+      const prompt = vi.spyOn(state.agents, "prompt").mockResolvedValue({});
+      vi.spyOn(
+        state.agents,
+        "retirePooledUtilityBoundaries",
+      ).mockResolvedValue();
+      vi.spyOn(
+        state.agents,
+        "reopenPooledUtilityBoundaries",
+      ).mockImplementation(() => {});
+      vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
+      vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
+      vi.spyOn(
+        state,
+        "retireAllCodeAgentSessionsForTerritoryChange",
+      ).mockResolvedValue();
+      let releaseTransition!: () => void;
+      let transitionEntered!: () => void;
+      const transitionReady = new Promise<void>((resolve) => {
+        transitionEntered = resolve;
+      });
+      const transitionBlocked = new Promise<void>((resolve) => {
+        releaseTransition = resolve;
+      });
+      const transition = state.withGlobalDesignTerritoryTransition(async () => {
+        transitionEntered();
+        await transitionBlocked;
+      });
+      await transitionReady;
+
+      await state.handleMessage(
+        promptMessage({ agentId, sessionId: "session-1" }),
+        client,
+      );
+
+      expect(prompt).not.toHaveBeenCalled();
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "AGENT_PROMPT_FAILED",
+            failure: expect.objectContaining({
+              kind: "lifecycle-superseded",
+              stage: "prompt",
+            }),
+          }),
+        ]),
+      );
+      expect(messages).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: "AGENT_ERROR" }),
+        ]),
+      );
+
+      releaseTransition();
+      await transition;
+    },
+  );
+
+  it.each(["codex", "claude", "cursor"])(
+    "never resurrects a revoked %s execution from a stale renderer prompt",
+    async (agentId) => {
+      const { state } = testEngine(30_029);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      // This is the partial map left by the old territory-retirement path in
+      // the attached logs: the chat still named an execution, but the gateway
+      // had already revoked its live route.
+      state.sessionChat.set("session-1", "chat-1");
+      state.conversationExecution.set("chat-1", "session-1");
+      const prompt = vi.spyOn(state.agents, "prompt").mockResolvedValue({});
+
+      await state.handleMessage(
+        promptMessage({ agentId, sessionId: "session-1" }),
+        client,
+      );
+
+      expect(prompt).not.toHaveBeenCalled();
+      expect(state.sessionAgent.has("session-1")).toBe(false);
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "AGENT_PROMPT_FAILED",
+            failure: expect.objectContaining({
+              kind: "session-expired",
+              stage: "prompt",
+            }),
+          }),
+        ]),
+      );
+    },
+  );
+
+  it("preserves a deleted-workspace tombstone when refusing its stale prompt", async () => {
+    const { state } = testEngine(30_030);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionChat.set("session-1", "chat-1");
+    // Workspace cleanup deliberately keeps this managed-owner tombstone after
+    // disposing the provider. It is what makes a late execution-only message
+    // fail closed even after the workspace row itself is gone.
+    state.sessionWorkspace.set("session-1", "ws_deleted");
+    const prompt = vi.spyOn(state.agents, "prompt").mockResolvedValue({});
+
+    await state.handleMessage(
+      promptMessage({ agentId: "claude", sessionId: "session-1" }),
+      client,
+    );
+
+    expect(prompt).not.toHaveBeenCalled();
+    expect(state.sessionWorkspace.get("session-1")).toBe("ws_deleted");
+    expect(state.sessionChat.get("session-1")).toBe("chat-1");
+    expect(messages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "AGENT_ERROR",
+          message: expect.stringMatching(/workspace no longer exists/i),
+        }),
+      ]),
+    );
+    expect(messages).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "AGENT_PROMPT_FAILED" }),
+      ]),
+    );
+  });
+
   it("refuses a conversation-only close from a remote-restricted workspace", async () => {
     const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-close-auth-"));
     setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));

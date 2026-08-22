@@ -62,6 +62,7 @@ import { effortAdoptedEnvKey } from "./model-catalog";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import type { ChatEffort } from "../../state/store";
 import { sameProviderBinding } from "@zeros/protocol/identities";
+import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 
 const MAX_STDERR_LINES = 200;
 const MAX_BACKGROUND_TASKS_PER_CHAT = 100;
@@ -449,6 +450,16 @@ export interface SessionsStoreState {
    *  isn't cooled. When absent, the exit is agent-wide (a shared
    *  subprocess) and every non-terminal chat flips. */
   applyBridgeAgentExit: (agentId: string, sessionId?: string | null) => void;
+
+  /** Apply an exact execution-boundary update. A revoked boundary is stronger
+   *  than a generic subprocess-exit hint: it invalidates the route even while
+   *  a turn or bind is active, while preserving the durable provider identity
+   *  needed to resume the conversation on a replacement execution. */
+  applyBridgeBoundaryStatus: (
+    agentId: string,
+    executionId: string,
+    status: ExecutionBoundaryStatus,
+  ) => void;
 }
 
 export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
@@ -1281,6 +1292,76 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         }
       }
       return changed ? { sessions: next } : state;
+    });
+  },
+
+  applyBridgeBoundaryStatus: (agentId, executionId, status) => {
+    set((state) => {
+      const chatId = state.executionToChatId[executionId];
+      if (!chatId) return state;
+      const slot = state.sessions[chatId];
+      if (
+        !slot ||
+        slot.agentId !== agentId ||
+        (slot.executionId ?? slot.sessionId) !== executionId
+      ) {
+        return state;
+      }
+      if (status.state !== "revoked") {
+        if (slot.boundary === status) return state;
+        return {
+          sessions: {
+            ...state.sessions,
+            [chatId]: { ...slot, boundary: status },
+          },
+        };
+      }
+
+      // Revocation is authoritative and execution-scoped. Do not retain the
+      // route merely because a local send/rebind is active: doing so lets its
+      // next AGENT_PROMPT target an execution the engine has already removed.
+      // Keep transcript, cwd, usage and providerBinding/providerMetadata — they
+      // are conversation state and are exactly what silent re-adoption needs.
+      const terminal =
+        slot.status === "failed" || slot.status === "auth-required";
+      const sessions = {
+        ...state.sessions,
+        [chatId]: {
+          ...slot,
+          status: terminal ? slot.status : ("reconnecting" as SessionStatus),
+          error: terminal ? slot.error : null,
+          failure: terminal ? slot.failure : null,
+          executionId: null,
+          sessionId: null,
+          session: null,
+          boundary: null,
+          boundaryPorts: null,
+          activeTurnStartedAt: null,
+          pendingPermission: null,
+          pendingPermissions: [],
+          pendingQuestions: [],
+          backgroundTasks: [],
+          workflows: [],
+          waitingForBackgroundTasks: false,
+          backgroundTasksWaitingSince: null,
+        },
+      };
+      const cancellingChats = state.cancellingChats.has(chatId)
+        ? new Set(
+            [...state.cancellingChats].filter(
+              (candidate) => candidate !== chatId,
+            ),
+          )
+        : state.cancellingChats;
+      return {
+        sessions,
+        executionToChatId: rebuildIndex(sessions),
+        cancellingChats,
+        pendingLocalTurns: withoutPendingLocalTurn(
+          state.pendingLocalTurns,
+          chatId,
+        ),
+      };
     });
   },
 

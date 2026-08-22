@@ -31,12 +31,10 @@
 //      immediately rather than at token expiry. Signed out, control plane
 //      unconfigured, or fetch not yet landed ⇒ null ⇒ everything internal
 //      is off. Fail-closed in every direction.
-//   4. This is a shipped-app rollout gate, not a sandbox against the owner of
-//      the local Mac. `copyLogs` exposes only already-scrubbed local logs;
-//      design operations stay on the trusted local-desktop engine path (remote
-//      create drops `kind`, and design RPCs are not remote-allowlisted). Any
-//      future internal feature that unlocks server data or server-side power
-//      must also call backend `requireStaff` on the endpoint behind it.
+//   4. This is a shipped-app rollout gate, not an authority boundary.
+//      `copyLogs` exposes only already-scrubbed local logs. Any future internal
+//      feature that unlocks server data or server-side power must also call
+//      backend `requireStaff` on the endpoint behind it.
 //
 // Per-app scoping comes free: flags persist to localStorage, and each
 // channel (Zeros / Zeros Alpha / Zeros Beta / Zeros Dev, plus per-worktree
@@ -52,12 +50,7 @@
 
 import { useCallback, useSyncExternalStore } from "react";
 
-import {
-  getTeamStoreState,
-  useTeams,
-  type TeamStoreStatus,
-} from "../team/team-store";
-import { CONTROL_PLANE_URL } from "../team/control-plane";
+import { getTeamStoreState, useTeams } from "../team/team-store";
 
 // ── Who counts as internal ──────────────────────────────
 
@@ -81,31 +74,12 @@ export function useIsInternalUser(): boolean {
   return me?.user.staffRole != null;
 }
 
-/** Whether the database-backed staff lookup has reached an authoritative
- * answer. An unconfigured control plane is settled-unavailable immediately;
- * a configured first load stays pending until success or failure. */
-export function isInternalUserResolutionSettled(
-  status: TeamStoreStatus,
-  controlPlaneConfigured = CONTROL_PLANE_URL !== null,
-): boolean {
-  return !controlPlaneConfigured || status === "ready" || status === "error";
-}
-
-/** Hook used only for fail-closed route recovery: unresolved access may hide a
- * surface, but must not erase or redirect a staff user's remembered route. */
-export function useInternalUserResolutionSettled(): boolean {
-  const { status } = useTeams();
-  return isInternalUserResolutionSettled(status);
-}
-
 // ── The flags ───────────────────────────────────────────
 
 /** The set of internal feature flags.
  *  - `copyLogs` — ⇧⌘L copies the scrubbed recent-log tail (the exact
- *    bytes a feedback submission shares) to the clipboard.
- *  - `designWorkspaces` — exposes the native design-workspace UX to staff
- *    without connecting it to the coding-agent harness. */
-export type InternalFeature = "copyLogs" | "designWorkspaces";
+ *    bytes a feedback submission shares) to the clipboard. */
+export type InternalFeature = "copyLogs";
 
 const STORAGE_KEY = "zeros.internalFeatures";
 

@@ -32,7 +32,6 @@ import { useWorkspaceDispatch } from "../state/store";
 import { useOpenWorkspace } from "../state/use-open-workspace";
 import { useAgentSessions } from "../features/agent/sessions-hooks";
 import { isExperimentalEnabled } from "../features/settings/experimental-features";
-import { isInternalFeatureActive } from "../features/settings/internal-features";
 import {
   deriveProjectName,
   loadProjects,
@@ -45,7 +44,6 @@ import {
   peekWorkspacesFor,
   useProjects,
 } from "../state/use-projects";
-import { filterWorkspacesForDesignAccess } from "../state/live-workspace-selectors";
 import {
   workspaceInspectFolder,
   type InspectFolderResult,
@@ -233,10 +231,7 @@ export function AddProjectProvider({
       const land = (registered: Project) => {
         if (!isExperimentalEnabled("workInLocalMain")) {
           const alternative = leftmostLiveWorkspace(
-            filterWorkspacesForDesignAccess(
-              peekWorkspacesFor(registered.repoSlug) ?? [],
-              isInternalFeatureActive("designWorkspaces"),
-            ),
+            peekWorkspacesFor(registered.repoSlug) ?? [],
           );
           if (alternative) {
             openWorkspace(alternative);

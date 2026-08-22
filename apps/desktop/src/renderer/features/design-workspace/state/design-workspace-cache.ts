@@ -39,6 +39,7 @@ import type { DesignTransaction } from "@zeros/design-core";
 import type { DesignRuntimeGenerationPatch } from "@zeros/protocol/design-runtime";
 import { KeyedAsyncCache } from "../../../shared/lib/keyed-async-cache";
 import { onActiveBridgeConnected } from "../../../platform/bridge/active-bridge";
+import { classifyRpcError } from "../../../platform/bridge/failure";
 import { designFrameRuntime } from "../../../platform/bridge/design-frame-runtime";
 import { clearCommittedDesignLivePreviewStyles } from "./design-live-preview";
 import {
@@ -49,6 +50,11 @@ import {
   captureDesignRuntimeScreenshot,
   persistDesignRuntimeAuditSnapshot,
 } from "./design-selection";
+import {
+  queueDesignWorkspaceBootSnapshot,
+  readDesignWorkspaceBootSnapshots,
+  resetDesignWorkspaceBootCacheForTests,
+} from "./design-workspace-boot-cache";
 
 export const DESIGN_SNAPSHOT_MAX_AGE_MS = 10_000;
 const DESIGN_SNAPSHOT_CACHE_BYTES = 64 * 1024 * 1024;
@@ -97,6 +103,28 @@ const RUNTIME_AUDIT_RULE_IDS = new Set([
   "overflow",
   "spacing-scale",
 ]);
+
+/** Design reads are idempotent and exact-keyed, so a single transport bounce
+ * can be retried safely. Keep this boundary away from mutations: their reply
+ * may time out after the authored write landed, and replaying those would
+ * double-apply history or structure changes. */
+async function executeDesignReadWithTransientRetry<T>(
+  read: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await read();
+  } catch (error) {
+    const kind = classifyRpcError(error).kind;
+    if (
+      kind !== "timeout" &&
+      kind !== "transport-closed" &&
+      kind !== "lifecycle-superseded"
+    ) {
+      throw error;
+    }
+    return await read();
+  }
+}
 
 /** A filesystem watcher can observe an authored write before its bridge reply
  * reaches the renderer. Hold that echo until the reply has promoted the live
@@ -385,6 +413,12 @@ export const designWorkspaceSnapshotCache =
     maxWeight: DESIGN_SNAPSHOT_CACHE_BYTES,
     weightOf: retainedMemory,
   });
+for (const [workspaceId, snapshot] of readDesignWorkspaceBootSnapshots()) {
+  designWorkspaceSnapshotCache.setData(workspaceId, snapshot);
+  // A boot preview paints synchronously but is never considered authoritative
+  // for the new engine/filesystem generation.
+  designWorkspaceSnapshotCache.invalidate(workspaceId);
+}
 /** Full authored/srcDoc payloads exist only for non-protocol fallbacks and are
  * bounded to roughly the same order as the live iframe window. */
 export const designFrameDocumentCache =
@@ -403,15 +437,31 @@ export const designFoundationCache =
     weightOf: retainedMemory,
   });
 
+/** A request queued while the first socket is connecting has not observed the
+ * old engine: RuntimeClient sends it only after that socket becomes usable.
+ * Invalidating that request at the same connection event supersedes its
+ * generation and queues an identical second aggregate scan. Besides doubling
+ * cold-start work, the discarded scan can consume the whole bridge timeout.
+ *
+ * Settled values and failures still need revalidation after a real connection
+ * boundary. Active loads/refreshes already target the newly connected bridge,
+ * so leave those generations intact. */
+function invalidateSettledDesignCache<T>(cache: KeyedAsyncCache<T>): void {
+  for (const key of cache.keys()) {
+    const snapshot = cache.peekSnapshot(key);
+    if (snapshot.loading || snapshot.refreshing) continue;
+    cache.invalidate(key);
+  }
+}
+
 // A respawned engine re-composes every generation and authored revision, so
-// identities held across a connection boundary are unconditionally suspect.
-// Revalidate design state as soon as the bridge returns instead of waiting
-// for the next mutation to be rejected with a stale-generation error.
+// settled identities held across a connection boundary are suspect. Mounted
+// exact-key consumers revalidate them while retaining their confirmed data.
 onActiveBridgeConnected((_client, info) => {
   if (info.initial) return;
-  designWorkspaceSnapshotCache.invalidateAll();
-  designFrameDocumentCache.invalidateAll();
-  designFoundationCache.invalidateAll();
+  invalidateSettledDesignCache(designWorkspaceSnapshotCache);
+  invalidateSettledDesignCache(designFrameDocumentCache);
+  invalidateSettledDesignCache(designFoundationCache);
 });
 
 const FOUNDATION_KEY_SEPARATOR = "\u0000";
@@ -440,7 +490,9 @@ export async function fetchDesignFrameDocument(
   ) {
     throw new Error("Invalid design frame document cache key.");
   }
-  const document = await designFrame(workspaceId, frame);
+  const document = await executeDesignReadWithTransientRetry(() =>
+    designFrame(workspaceId, frame),
+  );
   if (document.sourceVersion !== sourceVersion) {
     throw new Error("Design frame changed while its fallback was loading.");
   }
@@ -484,7 +536,9 @@ export async function fetchDesignFoundation(
   ) {
     throw new Error("Invalid design foundation cache key.");
   }
-  return designFoundationOpen(workspaceId, frame);
+  return executeDesignReadWithTransientRetry(() =>
+    designFoundationOpen(workspaceId, frame),
+  );
 }
 
 function invalidateWorkspaceDesignFoundations(
@@ -820,7 +874,18 @@ function publishDesignWorkspaceSnapshot(
   const retained = applyRetainedRuntimeAuditViolations(workspaceId, next);
   const stable = stabilizeDesignWorkspaceSnapshot(previous, retained);
   designWorkspaceSnapshotCache.setData(workspaceId, stable);
+  queueDesignWorkspaceBootSnapshot(workspaceId, stable);
   return stable;
+}
+
+/** Seed the exact aggregate carried by a lifecycle/mutation receipt. Publishing
+ * before its owning route becomes visible removes a redundant bridge read from
+ * the navigation path. */
+export function primeDesignWorkspaceSnapshot(
+  workspaceId: string,
+  snapshot: DesignWorkspaceSnapshotWire,
+): DesignWorkspaceSnapshotWire {
+  return publishDesignWorkspaceSnapshot(workspaceId, snapshot);
 }
 
 /** Replace a carried runtime audit only after the browser's exact new
@@ -883,11 +948,15 @@ export function reconcileDesignWorkspaceRuntimeAudit(input: {
 export async function fetchDesignWorkspaceSnapshot(
   workspaceId: string,
 ): Promise<DesignWorkspaceSnapshotWire> {
-  const next = await designSnapshot(workspaceId);
-  return stabilizeDesignWorkspaceSnapshot(
+  const next = await executeDesignReadWithTransientRetry(() =>
+    designSnapshot(workspaceId),
+  );
+  const stable = stabilizeDesignWorkspaceSnapshot(
     designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data,
     applyRetainedRuntimeAuditViolations(workspaceId, next),
   );
+  queueDesignWorkspaceBootSnapshot(workspaceId, stable);
+  return stable;
 }
 
 export function warmDesignWorkspaceSnapshot(workspaceId: string): void {
@@ -1644,6 +1713,7 @@ export function resetDesignWorkspaceCacheForTests(): void {
   designWorkspaceSnapshotCache.clear();
   designFrameDocumentCache.clear();
   designFoundationCache.clear();
+  resetDesignWorkspaceBootCacheForTests();
   refreshVersionByWorkspace.clear();
 }
 

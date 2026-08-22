@@ -83,7 +83,6 @@ import {
   getActiveOrganizationSnapshot,
 } from "../../features/team/team-store";
 import { localWorkspaceOwner } from "../../features/team/organization-capabilities";
-import { useInternalFeatureActive } from "../../features/settings/internal-features";
 import { useNativeRuntime } from "../../platform/runtime";
 import { createWorkspaceForProject } from "../create-workspace";
 
@@ -130,11 +129,8 @@ export function DispatcherPage({
   const chats = useChats();
   const activeChatId = useActiveChatId();
   const nativeRuntime = useNativeRuntime();
-  const designWorkspacesInternalActive =
-    useInternalFeatureActive("designWorkspaces");
-  const designWorkspacesActive =
-    designWorkspacesInternalActive &&
-    (nativeRuntime.ready || nativeRuntime.expectedElectron);
+  const designWorkspaceCreationAvailable =
+    nativeRuntime.ready || nativeRuntime.expectedElectron;
 
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
@@ -194,7 +190,7 @@ export function DispatcherPage({
 
   const handleCreateDesign = async () => {
     const project = selectedProject;
-    if (!project || designBusy || !designWorkspacesActive) return;
+    if (!project || designBusy || !designWorkspaceCreationAvailable) return;
     setDesignBusy(true);
     try {
       await createWorkspaceForProject({
@@ -524,7 +520,7 @@ export function DispatcherPage({
           {/* Design workspaces do not have an agent prompt. Preserve their
               Internal-only direct-create route on the full-page surface that
               replaced the old per-repository trailing plus. */}
-          {designWorkspacesActive && (
+          {designWorkspaceCreationAvailable && (
             <Tooltip label="Create design workspace">
               <button
                 type="button"

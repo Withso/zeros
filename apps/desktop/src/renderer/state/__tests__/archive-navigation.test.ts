@@ -140,6 +140,25 @@ describe("workspaceNeighborAfterArchive", () => {
     ).toBe(newestAction);
   });
 
+  it("selects a Design neighbor like any other public workspace", () => {
+    const design = workspace("design", 100, {
+      kind: "design",
+      repoRoot: projectA.repoRoot,
+      repoSlug: projectA.repoSlug,
+      path: `${projectA.repoRoot}/worktrees/design`,
+    });
+    const leaving = row("leaving", projectA, 200);
+    expect(
+      workspaceNeighborAfterArchive({
+        leaving,
+        rows: [leaving, design],
+        projects,
+        filter: "grouped",
+        busyIds: { leaving: 1 },
+      }),
+    ).toBe(design);
+  });
+
   it("uses an archiving neighbor only when it is the last still-visible row", () => {
     const stable = row("stable", projectA, 300);
     const busy = row("busy", projectA, 200);

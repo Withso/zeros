@@ -146,6 +146,23 @@ describe("resolveWorkspacePresentationKind", () => {
     ).toBe("code");
   });
 
+  it("shows an explicit mode-switch request before the confirmed row refreshes", () => {
+    expect(
+      resolveWorkspacePresentationKind({
+        confirmedKind: "code",
+        requestedKind: "design",
+        folder: "/tmp/plain",
+      }),
+    ).toBe("design");
+    expect(
+      resolveWorkspacePresentationKind({
+        confirmedKind: "design",
+        requestedKind: "code",
+        folder: "/tmp/plain",
+      }),
+    ).toBe("code");
+  });
+
   it("uses pending and managed-path identity only before a row confirms", () => {
     expect(
       resolveWorkspacePresentationKind({

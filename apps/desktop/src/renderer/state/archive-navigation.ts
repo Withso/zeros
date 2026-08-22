@@ -23,7 +23,6 @@ export function workspaceNeighborAfterArchive(args: {
   filter: WorkspaceListFilter;
   busyIds: Readonly<Record<string, number>>;
   activity?: WorkspaceTabActivity;
-  allowDesignWorkspaces?: boolean;
 }): Workspace | null {
   const { leaving } = args;
   // A confirmed cache update can remove the row just before the archive
@@ -46,8 +45,7 @@ export function workspaceNeighborAfterArchive(args: {
     candidate.id !== leaving.id &&
     candidate.path !== leaving.path &&
     candidate.archivedAt == null &&
-    candidate.present !== false &&
-    (args.allowDesignWorkspaces !== false || candidate.kind !== "design");
+    candidate.present !== false;
 
   // Prefer a stable destination. If every surviving row is itself archiving,
   // keep the nearest one as a transient target rather than opening Create while

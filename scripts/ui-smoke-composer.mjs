@@ -1354,6 +1354,7 @@ try {
     !!resultBox &&
       !!filteredSearchBox &&
       resultBox.y >= filteredSearchBox.y + filteredSearchBox.height,
+    JSON.stringify({ resultBox, filteredSearchBox }),
   );
   const fableFavorite = modelRow("Fable 5").locator(
     "[data-model-favorite-action]",

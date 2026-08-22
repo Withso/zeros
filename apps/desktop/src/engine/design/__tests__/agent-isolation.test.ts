@@ -111,57 +111,56 @@ describe("design workspace agent isolation", () => {
     );
 
     const appShell = read("apps/desktop/src/renderer/app-shell.tsx");
-    expect(appShell).toContain('useInternalFeatureActive("designWorkspaces")');
+    expect(appShell).not.toContain(
+      'useInternalFeatureActive("designWorkspaces")',
+    );
     expect(appShell).toContain("<DesignWorkspaceSidebar");
     expect(appShell).toContain(
       'useNewTabHotkeys(activePage === "workspace" && !designWorkspaceRequested)',
     );
-    // Mode model: a blocked design route mounts the placeholder (with its
-    // never-gated "exit design mode" action) instead of bouncing Home — and
-    // the coding harness must still never mount as a fallback for it.
-    expect(appShell).toContain("shouldShowBlockedDesignModePlaceholder({");
-    expect(appShell).toContain("<DesignModeDisabledPanel");
+    // Design is a normal public presentation mode. It must not fall through
+    // to coding chat or a rollout-disabled placeholder.
+    expect(appShell).not.toContain("shouldShowBlockedDesignModePlaceholder");
+    expect(appShell).not.toContain("DesignModeDisabledPanel");
+    expect(appShell).not.toContain("designWorkspaceBlocked");
     expect(appShell).toContain(
       "useWorkspacePrSync(designWorkspaceRequested ? null : activeWorkspace)",
     );
     expect(appShell).toMatch(
-      /worktreeMissing\s*&&\s*activeWorkspace\s*&&\s*!designWorkspaceBlocked/,
+      /worktreeMissing\s*&&\s*activeWorkspace\s*&&\s*activePage === "workspace"/,
     );
     expect(appShell).not.toContain("designMode=");
   });
 
-  it("gates design creation on the Internal feature while modes stay reachable", () => {
+  it("publishes Design to every desktop user while retaining local-runtime boundaries", () => {
     const creation = read(
       "apps/desktop/src/renderer/shell/create-workspace.ts",
     );
-    expect(creation).toContain('isInternalFeatureActive("designWorkspaces")');
+    expect(creation).not.toContain("isInternalFeatureActive");
+    expect(creation).toContain("isNativeRuntime() || isExpectedElectron()");
     const archiveActions = read(
       "apps/desktop/src/renderer/state/archive-actions.ts",
     );
-    // Mode model: restore and its navigation are NEVER design-gated — a
-    // design-mode row must stay reachable (the blocked route renders the
-    // placeholder with its un-gated exit), so the old mayPublishNavigation
-    // gate must not creep back in.
+    // Restore and its navigation are never rollout-gated: a Design row is an
+    // ordinary public workspace destination.
     expect(archiveActions).not.toContain("mayPublishNavigation");
     expect(archiveActions).toContain("opts?.onRestored?.(result)");
-    expect(archiveActions).toMatch(
-      /isInternalFeatureActive\("designWorkspaces"\)\s*&&\s*\(isNativeRuntime\(\)\s*\|\|\s*isExpectedElectron\(\)\)/,
-    );
+    expect(archiveActions).not.toContain("isInternalFeatureActive");
 
     const topBar = read("apps/desktop/src/renderer/shell/top-bar.tsx");
-    expect(topBar).toContain('useInternalFeatureActive("designWorkspaces")');
-    expect(topBar).toMatch(
-      /designWorkspacesInternalActive\s*&&\s*\(nativeRuntime\.ready\s*\|\|\s*nativeRuntime\.expectedElectron\)/,
+    expect(topBar).not.toContain(
+      'useInternalFeatureActive("designWorkspaces")',
     );
-    expect(topBar).toContain("if (activeFolderBlockedDesign) return;");
+    expect(topBar).not.toContain("activeFolderBlockedDesign");
+    // The workspace-kind picker moved to the Create page; the top bar's "+"
+    // is a route to it and carries no Design gate of its own.
+    expect(topBar).not.toContain("designWorkspaceCreationAvailable");
     const createPage = read(
       "apps/desktop/src/renderer/shell/dispatcher/dispatcher-modal.tsx",
     );
-    expect(createPage).toContain(
-      'useInternalFeatureActive("designWorkspaces")',
-    );
+    expect(createPage).not.toContain("isInternalFeatureActive");
     expect(createPage).toMatch(
-      /designWorkspacesInternalActive\s*&&\s*\(nativeRuntime\.ready\s*\|\|\s*nativeRuntime\.expectedElectron\)/,
+      /designWorkspaceCreationAvailable\s*=\s*\n?\s*nativeRuntime\.ready\s*\|\|\s*nativeRuntime\.expectedElectron/,
     );
     expect(createPage).toContain('kind: "design"');
     expect(createPage).toContain("Create design workspace");
@@ -169,18 +168,52 @@ describe("design workspace agent isolation", () => {
     const settings = read(
       "apps/desktop/src/renderer/features/settings/settings-page.tsx",
     );
-    expect(settings).toContain('useInternalFeature("designWorkspaces")');
-    expect(settings).toContain('label="Design workspaces"');
+    expect(settings).not.toContain('useInternalFeature("designWorkspaces")');
+    expect(settings).not.toContain('label="Design workspaces"');
 
     const addProject = read(
       "apps/desktop/src/renderer/shell/add-project-provider.tsx",
     );
-    expect(addProject).toContain('isInternalFeatureActive("designWorkspaces")');
+    expect(addProject).not.toContain("isInternalFeatureActive");
+    const contextMenu = read(
+      "apps/desktop/src/renderer/shared/ui/workspace-context-menu.tsx",
+    );
+    expect(contextMenu).not.toContain("designModeSwitchAvailable");
+    expect(contextMenu).toContain(
+      "const showModeSwitch = !isLocalMainWorkspace(workspace)",
+    );
     const repositories = read(
       "apps/desktop/src/renderer/features/repositories/repositories-panel.tsx",
     );
     expect(repositories).toMatch(
       /workspaceList\(\{\s*repoSlug:\s*project\.repoSlug,\s*includeDesign:\s*true,?\s*\}\)/,
     );
+  });
+
+  it("keeps every Design product surface independent of Internal feature flags", () => {
+    const publicDesignSurfaces = [
+      "apps/desktop/src/renderer/app-shell.tsx",
+      "apps/desktop/src/renderer/shell/top-bar.tsx",
+      "apps/desktop/src/renderer/shell/home-sidebar.tsx",
+      "apps/desktop/src/renderer/shell/create-workspace.ts",
+      "apps/desktop/src/renderer/shell/add-project-provider.tsx",
+      "apps/desktop/src/renderer/features/dashboard/dashboard-page.tsx",
+      "apps/desktop/src/renderer/features/repositories/repo-page.tsx",
+      "apps/desktop/src/renderer/state/archive-actions.ts",
+      "apps/desktop/src/renderer/state/use-open-workspace.ts",
+      "apps/desktop/src/renderer/shared/ui/workspace-context-menu.tsx",
+    ]
+      .map(read)
+      .join("\n");
+    const internalFeatures = read(
+      "apps/desktop/src/renderer/features/settings/internal-features.ts",
+    );
+    const settings = read(
+      "apps/desktop/src/renderer/features/settings/settings-page.tsx",
+    );
+
+    expect(publicDesignSurfaces).not.toContain("designWorkspaces");
+    expect(internalFeatures).not.toContain('"designWorkspaces"');
+    expect(settings).not.toContain('label="Design workspaces"');
   });
 });

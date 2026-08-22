@@ -39,6 +39,7 @@ import { clearChatPaneFolders, moveChatPaneFolder } from "./chat-panes-store";
 import { forgetDesignWorkspaceView } from "../features/design-workspace/state/design-workspace-ui";
 import { forgetDesignLayerDisclosure } from "../features/design-workspace/state/design-layer-disclosure";
 import { forgetDesignRuntimeWorkspace } from "../features/design-workspace/state/design-runtime-store";
+import { forgetDesignWorkspaceBootSnapshot } from "../features/design-workspace/state/design-workspace-boot-cache";
 import { isLocalMainWorkspace } from "./local-main-workspace";
 import { loadProjects, type Project } from "./projects-store";
 import {
@@ -71,16 +72,10 @@ import {
   pendingWorkspaceNeighborAfterArchive,
   workspaceNeighborAfterArchive,
 } from "./archive-navigation";
-import { isInternalFeatureActive } from "../features/settings/internal-features";
 import type { WorkspaceTabActivity } from "./workspace-list-filter";
 import { getActiveOrganizationSnapshot } from "../features/team/team-store";
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
-import {
-  dedupePendingCreates,
-  filterPendingCreatesForDesignAccess,
-  filterWorkspacesForDesignAccess,
-} from "./live-workspace-selectors";
-import { isExpectedElectron, isNativeRuntime } from "../platform/runtime";
+import { dedupePendingCreates } from "./live-workspace-selectors";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 
@@ -112,15 +107,9 @@ function pickRepointTarget(leaving: Workspace): {
 } | null {
   const state = useWorkspaceStore.getState();
   const projects = loadProjects();
-  const designWorkspacesActive =
-    isInternalFeatureActive("designWorkspaces") &&
-    (isNativeRuntime() || isExpectedElectron());
   const activeOrganization = getActiveOrganizationSnapshot();
   const cached = filterRowsForOrganization(
-    filterWorkspacesForDesignAccess(
-      peekLiveWorkspaceUnion(),
-      designWorkspacesActive,
-    ),
+    peekLiveWorkspaceUnion(),
     activeOrganization,
   );
   const seenIds = new Set(cached.map((workspace) => workspace.id));
@@ -150,7 +139,6 @@ function pickRepointTarget(leaving: Workspace): {
     filter: state.workspaceListFilter,
     busyIds: archivingIds,
     activity,
-    allowDesignWorkspaces: designWorkspacesActive,
   });
   if (next && !(next.id in archivingIds)) {
     return {
@@ -167,10 +155,7 @@ function pickRepointTarget(leaving: Workspace): {
   // workspace arrived during the archive continuation.
   const pending = dedupePendingCreates(
     filterRowsForOrganization(
-      filterPendingCreatesForDesignAccess(
-        usePendingWorkspacesStore.getState().creates,
-        designWorkspacesActive,
-      ),
+      usePendingWorkspacesStore.getState().creates,
       activeOrganization,
     ),
     cached,
@@ -306,6 +291,7 @@ function commitConfirmedDeletion(
   // the Changes snapshots. Archive intentionally does NOT purge: restore
   // reuses the id, and the retained caches repaint the restored PR instantly.
   forgetPrCachesForWorkspace(workspace.id);
+  forgetDesignWorkspaceBootSnapshot(workspace.id);
   forgetDesignWorkspaceView(workspace.id);
   const project = findProjectForFolder(workspace.repoRoot, loadProjects());
   clearTerminalFolders([workspace.path], project?.id);
@@ -732,9 +718,7 @@ function commitConfirmedRestore(
       });
     }
     commitWorkspaceRestored(restored);
-    // Navigation publishes for design-mode rows too: with the flag off the
-    // route mounts the "design mode is disabled" placeholder (un-gated exit)
-    // instead of a dead surface, so there's nothing to protect against.
+    // Design-mode rows are ordinary public navigation destinations.
     opts?.onRestored?.(result);
   });
   notifyWorkspacesChanged(original.repoSlug);
@@ -891,10 +875,7 @@ export async function restoreWorkspaceWithFeedback(
   workspace: Workspace,
   opts?: RestoreFeedbackOptions,
 ): Promise<void> {
-  // Design-MODE workspaces restore regardless of the Internal flag: under the
-  // mode model they're ordinary workspaces (the blocked route renders a
-  // placeholder with an un-gated exit), and refusing here would strand them
-  // in History with a dead Restore button.
+  // Design-MODE workspaces restore like every other workspace.
   if (restoringIds.has(workspace.id)) {
     opts?.onSettled?.(); // another restore owns this id — clear the caller's spinner
     return;

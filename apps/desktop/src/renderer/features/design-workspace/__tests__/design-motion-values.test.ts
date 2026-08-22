@@ -6,11 +6,14 @@ import {
   designMotionIterationCount,
   designMotionFirstListValue,
   designMotionEasingIsValid,
+  designMotionNudgedOffset,
   designMotionOffsetAtTime,
+  designMotionPlaybackStartOffset,
   designMotionPresetKeyframes,
   designMotionPreviewCurrentTime,
   designMotionRulerMarks,
   designMotionTimeAtOffset,
+  designMotionTimeInputOffset,
   designMotionTranslationAtOffset,
   designMotionTranslationPoints,
   designMotionTracksAreValid,
@@ -167,6 +170,27 @@ describe("design motion timeline values", () => {
     expect(designMotionOffsetAtTime(600, 300)).toBe(100);
     expect(designMotionTimeAtOffset(33.3, 300)).toBe(100);
     expect(designMotionTimeAtOffset(125, 300)).toBe(300);
+  });
+
+  it("restarts playback from the beginning after the playhead reaches the end", () => {
+    expect(designMotionPlaybackStartOffset(100)).toBe(0);
+    expect(designMotionPlaybackStartOffset(140)).toBe(0);
+    expect(designMotionPlaybackStartOffset(72.34)).toBe(72.3);
+    expect(designMotionPlaybackStartOffset(-4)).toBe(0);
+  });
+
+  it("does not turn a temporarily blank time field into the first frame", () => {
+    expect(designMotionTimeInputOffset("", 400)).toBeNull();
+    expect(designMotionTimeInputOffset("later", 400)).toBeNull();
+    expect(designMotionTimeInputOffset("200", 400)).toBe(50);
+    expect(designMotionTimeInputOffset("600", 400)).toBe(100);
+  });
+
+  it("nudges keyframes precisely with optional coarse keyboard steps", () => {
+    expect(designMotionNudgedOffset(50, -1)).toBe(49);
+    expect(designMotionNudgedOffset(50, 1, true)).toBe(60);
+    expect(designMotionNudgedOffset(0, -1)).toBe(0);
+    expect(designMotionNudgedOffset(99.5, 1)).toBe(100);
   });
 
   it("projects transform translation keyframes into an inline canvas path", () => {

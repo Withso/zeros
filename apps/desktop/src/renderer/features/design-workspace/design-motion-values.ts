@@ -91,9 +91,8 @@ export function designMotionEasingIsValid(value: string): boolean {
   const linear = /^linear\((.*)\)$/i.exec(candidate);
   return Boolean(
     linear?.[1] &&
-      /^[\d.eE+,%\s-]+$/.test(linear[1]) &&
-      (linear[1].match(/[+-]?(?:\d+(?:\.\d*)?|\.\d+)/g)?.length ?? 0) >=
-        2,
+    /^[\d.eE+,%\s-]+$/.test(linear[1]) &&
+    (linear[1].match(/[+-]?(?:\d+(?:\.\d*)?|\.\d+)/g)?.length ?? 0) >= 2,
   );
 }
 
@@ -173,6 +172,13 @@ export function designMotionPresetKeyframes(
 
 function boundedOffset(offset: number): number {
   return Math.round(Math.min(100, Math.max(0, offset)) * 10) / 10;
+}
+
+/** Pressing play at the end should replay the motion instead of immediately
+ * stopping on its final frame. Other positions resume exactly where they are. */
+export function designMotionPlaybackStartOffset(offset: number): number {
+  const bounded = boundedOffset(offset);
+  return bounded >= 100 ? 0 : bounded;
 }
 
 function normalizedFrames(
@@ -257,6 +263,27 @@ export function designMotionTimeAtOffset(
 ): number {
   if (!Number.isFinite(duration) || duration <= 0) return 0;
   return Math.round((boundedOffset(offset) / 100) * duration);
+}
+
+/** Parse a committed time field without treating the empty editing state as
+ * JavaScript's numeric zero. */
+export function designMotionTimeInputOffset(
+  input: string,
+  duration: number,
+): number | null {
+  if (input.trim() === "") return null;
+  const time = Number(input);
+  return Number.isFinite(time)
+    ? designMotionOffsetAtTime(time, duration)
+    : null;
+}
+
+export function designMotionNudgedOffset(
+  offset: number,
+  direction: -1 | 1,
+  coarse = false,
+): number {
+  return boundedOffset(offset + direction * (coarse ? 10 : 1));
 }
 
 function readableTimelineStep(rawStep: number): number {
