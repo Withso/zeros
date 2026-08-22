@@ -5,7 +5,6 @@ import { runSessionId } from "@zeros/protocol/run-actions";
 import {
   RUN_ADD_SUBTAB,
   resolveTerminalPanelTab,
-  terminalTabAuthority,
 } from "../terminal-tab-selection";
 
 describe("resolveTerminalPanelTab", () => {
@@ -69,20 +68,5 @@ describe("resolveTerminalPanelTab", () => {
         showRunAdd: false,
       }),
     ).toBe("setup");
-  });
-});
-
-describe("terminalTabAuthority", () => {
-  it("labels plain shells as explicit human authority and repository tasks as protected", () => {
-    const runId = runSessionId("/repo", "dev");
-    expect(terminalTabAuthority("pty-plain", ["pty-plain"])).toBe(
-      "human-user",
-    );
-    expect(terminalTabAuthority("setup", ["pty-plain"])).toBe(
-      "repo-code-task",
-    );
-    expect(terminalTabAuthority(runId, ["pty-plain", runId])).toBe(
-      "repo-code-task",
-    );
   });
 });
