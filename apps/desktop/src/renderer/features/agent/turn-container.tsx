@@ -26,15 +26,8 @@
 //
 // ──────────────────────────────────────────────────────────
 
-import React, {
-  memo,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-} from "react";
-import { Plus, Pencil, Copy, Check, ChevronDown } from "lucide-react";
+import React, { memo, useCallback, useEffect, useRef, useState } from "react";
+import { Plus, Pencil, Copy, Check } from "lucide-react";
 import type {
   AgentTextMessageAttachment,
   MessageContentSegment,
@@ -253,13 +246,9 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
    *  action's icon. Callers also omit `onEdit` for these — the wire text is a
    *  generated brief the short label can't round-trip. */
   autoAction?: string;
-  /** Whether this chat is the one currently surfaced in its pane. The
-   *  keep-alive chat deck (conversation/chat-deck.tsx) keeps hidden chats
-   *  MOUNTED (visibility-hidden, not unmounted), so a prompt the user
-   *  expanded would stay expanded across a tab switch. Threading this lets
-   *  the clamped prompt collapse whenever the chat is hidden, so returning
-   *  to it shows the prompt truncated again. Defaults true (treat as
-   *  visible) for callers that don't track surfacing. */
+  /** Whether this chat is currently surfaced in its pane. The retained edit
+   *  composer uses this to keep hidden attachment previews inert. Defaults
+   *  true for callers that do not track surfacing. */
   surfaceActive?: boolean;
 }) {
   // Edit-mode draft state lives in
@@ -367,6 +356,10 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
   // Auto-sent bubbles ("sent by Zeros" — PR island / Create PR): the brown
   // treatment + the firing button's icon differentiates them from typed
   // messages. Copy-only (editable is false — callers omit onEdit).
+  // Sent prompts deliberately have no max-height: typed long-form messages
+  // remain fully visible. Oversized clipboard text is converted into a .txt
+  // attachment before send, but legacy and intentionally typed prose still
+  // renders without a truncation overlay.
   const AutoIcon = autoAction ? autoActionIcon(autoAction) : null;
   return (
     <div className="zeros-agent-turn-prompt group/usermsg relative flex flex-col items-end">
@@ -380,23 +373,24 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
             : "border-border1 bg-highlighted-bg",
         )}
       >
-        <ClampedUserPrompt
-          surfaceActive={surfaceActive}
-          fadeFrom={autoAction ? "from-brown-bg" : "from-highlighted-bg"}
-        >
-          {AutoIcon ? (
-            // 16px icon at 2px stroke, with a tight 6px gap to the label.
-            <div className="flex items-start gap-1.5">
-              <AutoIcon
-                className="text-brown-fg mt-0.5 size-4 shrink-0"
-                strokeWidth={2}
-              />
-              <div className="min-w-0">{children}</div>
-            </div>
-          ) : (
-            children
-          )}
-        </ClampedUserPrompt>
+        {/* Preserve the former reveal component's two block wrappers so
+            removing the clamp does not change fit-content width geometry. */}
+        <div className="relative">
+          <div>
+            {AutoIcon ? (
+              // 16px icon at 2px stroke, with a tight 6px gap to the label.
+              <div className="flex items-start gap-1.5">
+                <AutoIcon
+                  className="text-brown-fg mt-0.5 size-4 shrink-0"
+                  strokeWidth={2}
+                />
+                <div className="min-w-0">{children}</div>
+              </div>
+            ) : (
+              children
+            )}
+          </div>
+        </div>
       </div>
       {typeof originalText === "string" && (
         <UserMessageActions
@@ -409,101 +403,6 @@ export const TurnPromptHeader = memo(function TurnPromptHeader({
     </div>
   );
 });
-
-// ──────────────────────────────────────────────────────────
-// ClampedUserPrompt — max-height cap + "More" reveal
-// ──────────────────────────────────────────────────────────
-//
-// A sent prompt taller than PROMPT_MAX_HEIGHT is TRUNCATED, not scrolled:
-// the previous per-bubble scroll (max-h-[60vh] + hidden scrollbar) trapped
-// wheel events on a giant paste and read as a glitch. Instead the clipped
-// last line fades into the bubble bg and a "More" pill floats over it;
-// clicking reveals the full message.
-//
-// `expanded` is LOCAL state, but on its own that is NOT enough to collapse
-// on tab switch: the keep-alive chat deck (conversation/chat-deck.tsx) keeps
-// hidden chats MOUNTED (visibility-hidden), so this component survives a
-// switch-and-return with its state intact. We therefore also collapse
-// whenever the chat is hidden (surfaceActive=false) — so returning to a
-// chat shows the prompt clamped again and re-expanding needs another click.
-const PROMPT_MAX_HEIGHT = 600; // px — keep in sync with the max-h-[600px] literal below.
-
-function ClampedUserPrompt({
-  children,
-  fadeFrom,
-  surfaceActive,
-}: {
-  children: React.ReactNode;
-  /** Gradient start color matching the bubble bg so the truncation
-   *  dissolves into it — `from-highlighted-bg` (typed) / `from-brown-bg`
-   *  (auto-sent). Passed as a class since Tailwind v4 needs the literal. */
-  fadeFrom: string;
-  /** False while this chat is hidden behind another tab; drives the
-   *  collapse-on-hide the keep-alive deck would otherwise defeat. */
-  surfaceActive: boolean;
-}) {
-  const contentRef = useRef<HTMLDivElement>(null);
-  const [expanded, setExpanded] = useState(false);
-  const [overflowing, setOverflowing] = useState(false);
-
-  // Measure once on mount (a sent prompt's text is immutable) and on width
-  // reflow via the observer (the bubble narrows/widens as conversation pane resizes).
-  // scrollHeight reports the FULL content height even while the box is
-  // clamped (max-height + overflow-hidden don't shrink it), so the verdict
-  // stays correct across collapsed → expanded → resize. Layout effect so the
-  // clamp lands before paint (no unclamped flash on a long prompt).
-  useLayoutEffect(() => {
-    const el = contentRef.current;
-    if (!el) return;
-    const measure = () =>
-      setOverflowing(el.scrollHeight > PROMPT_MAX_HEIGHT + 1);
-    measure();
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
-
-  // Collapse when the chat is hidden so it reads collapsed on return.
-  useEffect(() => {
-    if (!surfaceActive) setExpanded(false);
-  }, [surfaceActive]);
-
-  const clamped = overflowing && !expanded;
-
-  return (
-    <div className="relative">
-      <div
-        ref={contentRef}
-        className={cn(clamped && "max-h-[600px] overflow-hidden")}
-      >
-        {children}
-      </div>
-      {clamped && (
-        <button
-          type="button"
-          aria-expanded={false}
-          onClick={() => setExpanded(true)}
-          // Whole bottom strip is the hit target: fade the clipped last line
-          // into the bubble bg (bottom-opaque → top-transparent) and center the
-          // "More" pill on it. h-14 (56px) ≈ two lines of feathering.
-          className={cn(
-            "group/more absolute inset-x-0 bottom-0 z-[1] flex h-14 cursor-pointer items-end justify-center bg-gradient-to-t to-transparent pb-1 focus-visible:outline-none",
-            fadeFrom,
-          )}
-        >
-          {/* The bubble changes polarity across themes: bg1-hover clears its
-              light fill, while the dark palettes need bg2-hover — neutral
-              Dark's highlighted-bg IS bg2, so bg2-hover is exactly the chip
-              fill that surface takes, and Orka's sits a point below it. */}
-          <span className="text-fg2 group-hover/more:bg-bg1-hover dark:group-hover/more:bg-bg2-hover group-hover/more:text-fg1 group-focus-visible/more:ring-highlighted-bright inline-flex items-center gap-0.5 rounded-sm px-1.5 py-0.5 text-xs font-medium transition-colors group-focus-visible/more:ring-1">
-            More
-            <ChevronDown className="size-3.5" strokeWidth={2} />
-          </span>
-        </button>
-      )}
-    </div>
-  );
-}
 
 // ──────────────────────────────────────────────────────────
 // UserMessageActions — hover row beneath a sent user bubble

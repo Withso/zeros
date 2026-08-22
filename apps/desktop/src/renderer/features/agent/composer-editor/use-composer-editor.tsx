@@ -50,6 +50,7 @@ import { ComposerSuggestionPopup } from "./suggestion-popup";
 import { ComposerEditorProvider } from "./composer-editor-context";
 import { serializeComposer, type ComposerSerialized } from "./serialize";
 import { filesToAttachments } from "./attachment-io";
+import { classifyComposerPaste, longPasteToAttachment } from "./long-paste";
 import {
   collectAttachmentIds,
   collectSourceKeys,
@@ -704,6 +705,7 @@ export function useComposerEditor(
   const insertFilesRef = useRef<
     (files: FileList | File[] | null | undefined) => Promise<void>
   >(async () => {});
+  const insertPastedTextRef = useRef<(text: string) => void>(() => {});
 
   const editor = useEditor({
     immediatelyRender: false,
@@ -714,13 +716,15 @@ export function useComposerEditor(
     editorProps: {
       attributes: { class: EDITOR_CLASS, "aria-label": "Message" },
       handlePaste: (_view, event) => {
-        const files = event.clipboardData?.files;
-        if (files && files.length > 0) {
-          event.preventDefault();
-          void insertFilesRef.current(files);
-          return true;
+        const payload = classifyComposerPaste(event.clipboardData);
+        if (!payload) return false;
+        event.preventDefault();
+        if (payload.kind === "files") {
+          void insertFilesRef.current(payload.files);
+        } else {
+          insertPastedTextRef.current(payload.text);
         }
-        return false;
+        return true;
       },
       handleDrop: (_view, event) => {
         const files = (event as DragEvent).dataTransfer?.files;
@@ -775,14 +779,13 @@ export function useComposerEditor(
     refreshPlaceholderDecoration();
   }, [placeholder, refreshPlaceholderDecoration]);
 
-  // While a dispatcher-created worktree is still being provisioned, every
-  // graph write is skipped (executeGraphSync — a write into the reserved path
-  // would fail `git worktree add` itself). This effect is the other half:
-  // the moment provisioning ends, sweep whatever the doc holds into the
-  // now-real worktree's graph, so the seeded attachments appear on the
-  // Context tab while setup/auto-send are still minutes away. False for
-  // every already-existing workspace, where the mount sweep in onCreate has
-  // already run.
+  // While a dispatcher-created worktree is still being provisioned,
+  // executeGraphSync retains every staged attachment in its exact-cwd queue —
+  // writing into the reserved path would make `git worktree add` fail. The
+  // queue flushes when provisioning ends; this idempotent document sweep is a
+  // second recovery layer for restored drafts and any write interrupted at
+  // the lifecycle boundary. False for every already-existing workspace,
+  // where the mount sweep in onCreate has already run.
   const provisioning = useWorkspaceProvisioning(cwd ?? null);
   useEffect(() => {
     if (provisioning) return;
@@ -824,6 +827,45 @@ export function useComposerEditor(
     [syncSourceKeys],
   );
   insertFilesRef.current = insertFiles;
+
+  // Unlike File.text(), the clipboard already gave us the exact string. Build
+  // and insert synchronously so fast follow-up typing cannot move the pill
+  // away from the selection where the paste happened.
+  const insertPastedText = useCallback(
+    (text: string) => {
+      const ed = editorRef.current;
+      if (!ed || ed.isDestroyed) return;
+      const v = optsRef.current;
+      const attachment = longPasteToAttachment(text, {
+        agentName: v.agentName,
+        agentSupportsImage: v.agentSupportsImage,
+        modelId: v.modelId,
+      });
+      // The side-store write MUST precede the editor transaction: onUpdate
+      // synchronously diffs this new node into the context graph and needs its
+      // bytes to be available during that same call stack.
+      attachmentMapRef.current.set(attachment.id, attachment);
+      ed.chain()
+        .focus()
+        .insertContent([
+          {
+            type: "attachment",
+            attrs: {
+              attachmentId: attachment.id,
+              name: attachment.name,
+              mimeType: attachment.mimeType,
+              kind: attachment.kind,
+            },
+          },
+          { type: "text", text: " " },
+        ])
+        .run();
+      setIsEmpty(ed.isEmpty);
+      syncSourceKeys(ed);
+    },
+    [syncSourceKeys],
+  );
+  insertPastedTextRef.current = insertPastedText;
 
   // ── synthesized (keyed) attachments ──
   //

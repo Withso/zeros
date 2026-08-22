@@ -38,12 +38,12 @@ describe("narrow transcript message overflow", () => {
     );
   });
 
-  it("keeps the sent-message reveal hover visible in both themes", () => {
+  it("renders every sent user message in full without a reveal overlay", () => {
     const turnContainer = code("../turn-container.tsx");
 
-    expect(turnContainer).toContain(
-      "group-hover/more:bg-bg1-hover dark:group-hover/more:bg-bg2-hover",
-    );
+    expect(turnContainer).not.toContain("ClampedUserPrompt");
+    expect(turnContainer).not.toContain("max-h-[600px]");
+    expect(turnContainer).not.toContain("group/more");
   });
 
   it("keeps checkpoint rows on the hover token for their bg2 surface", () => {
