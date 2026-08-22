@@ -474,6 +474,19 @@ const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
   "workspace.restore",
 ]);
 
+/** Context-graph operations are additive/durable user intent, not controls
+ * that should fail because an unrelated workspace is publishing a new Design
+ * owner. Hold them behind the authoritative global transition tail. This also
+ * covers transcript-window reads because they can lazily migrate legacy image
+ * bytes into `.context-graph/`. */
+const CONTEXT_GRAPH_TRANSITION_QUEUE_OPS = new Set<string>([
+  "attachment.write",
+  "messages.window",
+  "messages.windowOlder",
+  "context.graph.scaffold",
+  "context.graph.setShared",
+]);
+
 /** Generic file/index operations that can alter the repository evidence from
  * which semantic Design roots are compiled. Ordinary source writes stay on the
  * pre-ZSR fast path; only these exact marker/settings mutations close the
@@ -2681,6 +2694,31 @@ export class ZerosEngine {
     return this.workspaceProcessStartBlock(workspaceId) == null;
   }
 
+  /** Invoke `operation` in the same JavaScript turn as the final stable-state
+   * check. A plain `await transitionTail` helper would leave one microtask gap
+   * between its final check and the caller's dispatch; another transition
+   * could enter that gap and make a supposedly queued request fail again.
+   * Re-reading the tail here also covers transitions appended while waiting. */
+  private runWhenGlobalDesignTerritoryStable<T>(
+    operation: () => T | PromiseLike<T>,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const startWhenAllowed = () => {
+        if (this.globalDesignTerritoryTransitionCount > 0) {
+          const transitionTail = this.globalDesignTerritoryTransitionTail;
+          void transitionTail.then(startWhenAllowed, reject);
+          return;
+        }
+        try {
+          resolve(operation());
+        } catch (error) {
+          reject(error);
+        }
+      };
+      startWhenAllowed();
+    });
+  }
+
   /** Serialize a change to the app-wide set of registered Design owners. The
    * flag is published before the first await, then every admission that crossed
    * the previous gate is drained before old immutable boundaries are retired. */
@@ -3152,6 +3190,18 @@ export class ZerosEngine {
     this.globalDesignAuthorityStarts.add(tracked);
     if (!workspaceId) return tracked;
     return this.trackWorkspaceProcessStart(workspaceId, tracked);
+  }
+
+  /** Queue a first code-actor admission behind owner publication, then invoke
+   * and register its start atomically. The callback must perform its final
+   * conversation/workspace checks before its first await. */
+  private trackRepositoryCodeAuthorityStartWhenGlobalStable<T>(
+    workspaceId: string | null | undefined,
+    start: () => Promise<T>,
+  ): Promise<T> {
+    return this.runWhenGlobalDesignTerritoryStable(() =>
+      this.trackRepositoryCodeAuthorityStart(workspaceId, start()),
+    );
   }
 
   private beginConversationBind(
@@ -3846,20 +3896,27 @@ export class ZerosEngine {
           if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
             throw this.staleConversationBindFailure("newSession");
           }
+          // A concurrently-created workspace may keep the app-wide Design
+          // owner map in transition after this chat's own create has
+          // published. Hold first admission behind that authoritative tail;
+          // surfacing an AGENT_ERROR here would strand the queued auto-send.
           const lifecycleWorkspaceId = this.workspaceIdForProcess(
-            spawnOpts.workspaceId,
-            spawnOpts.cwd,
-          );
-          this.assertAgentWorkspaceProcessStartAllowed(
-            lifecycleWorkspaceId,
             spawnOpts.workspaceId,
             spawnOpts.cwd,
           );
           let provisionalExecutionId: string | undefined;
           const { initialize, session } =
-            await this.trackRepositoryCodeAuthorityStart(
+            await this.trackRepositoryCodeAuthorityStartWhenGlobalStable(
               lifecycleWorkspaceId,
-              (async () => {
+              async () => {
+                if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+                  throw this.staleConversationBindFailure("newSession");
+                }
+                this.assertAgentWorkspaceProcessStartAllowed(
+                  lifecycleWorkspaceId,
+                  spawnOpts.workspaceId,
+                  spawnOpts.cwd,
+                );
                 const initialize = await this.agents.ensureAgent(msg.agentId, {
                   env: spawnOpts.env,
                 });
@@ -3980,7 +4037,7 @@ export class ZerosEngine {
                   throw err;
                 }
                 return { initialize, session };
-              })(),
+              },
             );
           this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
           if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
@@ -4869,24 +4926,39 @@ export class ZerosEngine {
             client,
             "forkSession",
           );
-          this.assertAgentWorkspaceProcessStartAllowed(
-            destinationWorkspaceId,
-            forkSpawnOpts.workspaceId,
-            forkSpawnOpts.cwd,
-          );
-          const providerBinding = await this.trackRepositoryCodeAuthorityStart(
-            destinationWorkspaceId,
-            this.agents.forkProviderBinding(msg.agentId, sourceBinding, {
-              cwd: forkSpawnOpts.cwd,
-              env: forkSpawnOpts.env,
-              workspaceId: forkSpawnOpts.workspaceId,
-              cliBinary: forkSpawnOpts.cliBinary,
-              admissionSignal: this.conversationAdmissionSignal(
-                msg.destinationChatId,
-                bindToken,
-              ),
-            }),
-          );
+          const providerBinding =
+            await this.trackRepositoryCodeAuthorityStartWhenGlobalStable(
+              destinationWorkspaceId,
+              () => {
+                if (
+                  !this.conversationBindIsCurrent(
+                    msg.destinationChatId,
+                    bindToken,
+                  )
+                ) {
+                  throw this.staleConversationBindFailure("forkSession");
+                }
+                this.assertAgentWorkspaceProcessStartAllowed(
+                  destinationWorkspaceId,
+                  forkSpawnOpts.workspaceId,
+                  forkSpawnOpts.cwd,
+                );
+                return this.agents.forkProviderBinding(
+                  msg.agentId,
+                  sourceBinding,
+                  {
+                    cwd: forkSpawnOpts.cwd,
+                    env: forkSpawnOpts.env,
+                    workspaceId: forkSpawnOpts.workspaceId,
+                    cliBinary: forkSpawnOpts.cliBinary,
+                    admissionSignal: this.conversationAdmissionSignal(
+                      msg.destinationChatId,
+                      bindToken,
+                    ),
+                  },
+                );
+              },
+            );
           if (
             !this.conversationBindIsCurrent(msg.destinationChatId, bindToken)
           ) {
@@ -5163,35 +5235,37 @@ export class ZerosEngine {
           if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
             throw this.staleConversationBindFailure("loadSession");
           }
-          const currentPersistedChat = msg.chatId ? getChat(msg.chatId) : null;
-          const currentPersistedLocation = msg.chatId
-            ? getChatLocation(msg.chatId)
-            : null;
-          const currentPersistedWorkspaceId = this.workspaceIdForProcess(
-            currentPersistedLocation?.workspaceId,
-            currentPersistedLocation?.folder,
-          );
-          if (
-            Boolean(currentPersistedChat) !== Boolean(persistedChat) ||
-            (persistedChat &&
-              currentPersistedChat &&
-              (currentPersistedChat.agentId !== persistedChat.agentId ||
-                currentPersistedChat.folder !== persistedChat.folder ||
-                currentPersistedChat.sessionId !== persistedChat.sessionId ||
-                !sameProviderBinding(
-                  currentPersistedChat.providerBinding,
-                  persistedChat.providerBinding,
-                ) ||
-                currentPersistedWorkspaceId !== persistedWorkspaceId))
-          ) {
-            throw this.staleConversationBindFailure("loadSession");
-          }
+          const assertLoadTargetStillCurrent = () => {
+            if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
+              throw this.staleConversationBindFailure("loadSession");
+            }
+            const currentPersistedChat = msg.chatId
+              ? getChat(msg.chatId)
+              : null;
+            const currentPersistedLocation = msg.chatId
+              ? getChatLocation(msg.chatId)
+              : null;
+            const currentPersistedWorkspaceId = this.workspaceIdForProcess(
+              currentPersistedLocation?.workspaceId,
+              currentPersistedLocation?.folder,
+            );
+            if (
+              Boolean(currentPersistedChat) !== Boolean(persistedChat) ||
+              (persistedChat &&
+                currentPersistedChat &&
+                (currentPersistedChat.agentId !== persistedChat.agentId ||
+                  currentPersistedChat.folder !== persistedChat.folder ||
+                  currentPersistedChat.sessionId !== persistedChat.sessionId ||
+                  !sameProviderBinding(
+                    currentPersistedChat.providerBinding,
+                    persistedChat.providerBinding,
+                  ) ||
+                  currentPersistedWorkspaceId !== persistedWorkspaceId))
+            ) {
+              throw this.staleConversationBindFailure("loadSession");
+            }
+          };
           const lifecycleWorkspaceId = this.workspaceIdForProcess(
-            loadOpts.workspaceId,
-            loadOpts.cwd,
-          );
-          this.assertAgentWorkspaceProcessStartAllowed(
-            lifecycleWorkspaceId,
             loadOpts.workspaceId,
             loadOpts.cwd,
           );
@@ -5260,100 +5334,109 @@ export class ZerosEngine {
             });
           }
           let provisionalExecutionId: string | undefined;
-          let response = await this.trackRepositoryCodeAuthorityStart(
-            lifecycleWorkspaceId,
-            (async () => {
-              let adapterLoadCompleted = false;
-              try {
-                const loaded = await this.agents.loadSession(
-                  msg.agentId,
-                  providerBinding,
-                  {
-                    cwd: loadOpts.cwd,
-                    env: loadOpts.env,
-                    workspaceId: loadOpts.workspaceId,
-                    conversationId: msg.chatId,
-                    cliBinary: loadOpts.cliBinary,
-                    admissionSignal: this.conversationAdmissionSignal(
-                      msg.chatId,
-                      bindToken,
-                    ),
-                    onExecutionCreated: (executionId) => {
-                      if (
-                        !this.conversationBindIsCurrent(msg.chatId, bindToken)
-                      ) {
-                        throw this.staleConversationBindFailure("loadSession");
-                      }
-                      this.assertAgentWorkspaceProcessStartAllowed(
-                        lifecycleWorkspaceId,
-                      );
-                      provisionalExecutionId = executionId;
-                      this.registerAgentExecutionRoute({
-                        executionId,
-                        agentId: msg.agentId,
-                        ownerId: client.id,
-                        chatId: msg.chatId,
-                        workspaceId: lifecycleWorkspaceId,
-                      });
-                    },
-                  },
-                );
-                adapterLoadCompleted = true;
-                // Defensive compatibility for a mocked/older gateway that did
-                // not invoke the early callback. Keep registration inside the
-                // tracked start so a concurrent workspace reaper still sees it.
-                if (!provisionalExecutionId && loaded.executionId) {
-                  provisionalExecutionId = loaded.executionId;
-                  this.registerAgentExecutionRoute({
-                    executionId: loaded.executionId,
-                    agentId: msg.agentId,
-                    ownerId: client.id,
-                    chatId: msg.chatId,
-                    workspaceId: lifecycleWorkspaceId,
-                  });
-                }
+          let response =
+            await this.trackRepositoryCodeAuthorityStartWhenGlobalStable(
+              lifecycleWorkspaceId,
+              async () => {
+                assertLoadTargetStillCurrent();
                 this.assertAgentWorkspaceProcessStartAllowed(
                   lifecycleWorkspaceId,
+                  loadOpts.workspaceId,
+                  loadOpts.cwd,
                 );
-                return loaded;
-              } catch (err) {
-                if (provisionalExecutionId) {
-                  this.clearAgentExecutionRoute(provisionalExecutionId);
-                }
-                if (adapterLoadCompleted && provisionalExecutionId) {
-                  await this.agents
-                    .endSession(msg.agentId, provisionalExecutionId)
-                    .catch(() => {});
-                }
-                if (
-                  err instanceof AgentFailureError &&
-                  err.failure.kind === "session-expired" &&
-                  this.conversationBindIsCurrent(msg.chatId, bindToken) &&
-                  msg.chatId
-                ) {
-                  const cleared = clearChatProviderIdentity(
-                    msg.chatId,
+                let adapterLoadCompleted = false;
+                try {
+                  const loaded = await this.agents.loadSession(
                     msg.agentId,
-                    providerBinding.resumeId,
+                    providerBinding,
+                    {
+                      cwd: loadOpts.cwd,
+                      env: loadOpts.env,
+                      workspaceId: loadOpts.workspaceId,
+                      conversationId: msg.chatId,
+                      cliBinary: loadOpts.cliBinary,
+                      admissionSignal: this.conversationAdmissionSignal(
+                        msg.chatId,
+                        bindToken,
+                      ),
+                      onExecutionCreated: (executionId) => {
+                        if (
+                          !this.conversationBindIsCurrent(msg.chatId, bindToken)
+                        ) {
+                          throw this.staleConversationBindFailure(
+                            "loadSession",
+                          );
+                        }
+                        this.assertAgentWorkspaceProcessStartAllowed(
+                          lifecycleWorkspaceId,
+                        );
+                        provisionalExecutionId = executionId;
+                        this.registerAgentExecutionRoute({
+                          executionId,
+                          agentId: msg.agentId,
+                          ownerId: client.id,
+                          chatId: msg.chatId,
+                          workspaceId: lifecycleWorkspaceId,
+                        });
+                      },
+                    },
                   );
-                  if (cleared) {
-                    // This mutation bypasses WorkspaceService, so publish the
-                    // same keyed invalidation its write path would. Every open
-                    // renderer must forget the dead durable handle, not only
-                    // the surface whose load received AGENT_ERROR.
-                    this.broadcast(
-                      createMessage({
-                        type: "DB_CHANGED",
-                        source: "engine",
-                        kinds: ["chats"],
-                      }),
-                    );
+                  adapterLoadCompleted = true;
+                  // Defensive compatibility for a mocked/older gateway that did
+                  // not invoke the early callback. Keep registration inside the
+                  // tracked start so a concurrent workspace reaper still sees it.
+                  if (!provisionalExecutionId && loaded.executionId) {
+                    provisionalExecutionId = loaded.executionId;
+                    this.registerAgentExecutionRoute({
+                      executionId: loaded.executionId,
+                      agentId: msg.agentId,
+                      ownerId: client.id,
+                      chatId: msg.chatId,
+                      workspaceId: lifecycleWorkspaceId,
+                    });
                   }
+                  this.assertAgentWorkspaceProcessStartAllowed(
+                    lifecycleWorkspaceId,
+                  );
+                  return loaded;
+                } catch (err) {
+                  if (provisionalExecutionId) {
+                    this.clearAgentExecutionRoute(provisionalExecutionId);
+                  }
+                  if (adapterLoadCompleted && provisionalExecutionId) {
+                    await this.agents
+                      .endSession(msg.agentId, provisionalExecutionId)
+                      .catch(() => {});
+                  }
+                  if (
+                    err instanceof AgentFailureError &&
+                    err.failure.kind === "session-expired" &&
+                    this.conversationBindIsCurrent(msg.chatId, bindToken) &&
+                    msg.chatId
+                  ) {
+                    const cleared = clearChatProviderIdentity(
+                      msg.chatId,
+                      msg.agentId,
+                      providerBinding.resumeId,
+                    );
+                    if (cleared) {
+                      // This mutation bypasses WorkspaceService, so publish the
+                      // same keyed invalidation its write path would. Every open
+                      // renderer must forget the dead durable handle, not only
+                      // the surface whose load received AGENT_ERROR.
+                      this.broadcast(
+                        createMessage({
+                          type: "DB_CHANGED",
+                          source: "engine",
+                          kinds: ["chats"],
+                        }),
+                      );
+                    }
+                  }
+                  throw err;
                 }
-                throw err;
-              }
-            })(),
-          );
+              },
+            );
           const executionId = response.executionId;
           if (!executionId) {
             if (provisionalExecutionId) {
@@ -6302,23 +6385,40 @@ export class ZerosEngine {
       // begins. This closes the cross-window stage/write/rebase-vs-archive gap.
       const lifecycleMutationWorkspaceId =
         this.workspace.lifecycleMutationWorkspaceId(op, params);
+      let queuedContextGraphWorkspaceId: string | null = null;
       if (
         lifecycleMutationWorkspaceId &&
         this.globalDesignTerritoryTransitionCount > 0
       ) {
-        throw new GitError({
-          code: "VALIDATION_FAILED",
-          message: "Registered Design territory is being updated.",
-          remediation:
-            "Wait for the Design territory transition to finish, then retry.",
-          context: { workspaceId: lifecycleMutationWorkspaceId },
-        });
+        if (CONTEXT_GRAPH_TRANSITION_QUEUE_OPS.has(op)) {
+          queuedContextGraphWorkspaceId = lifecycleMutationWorkspaceId;
+        } else {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Registered Design territory is being updated.",
+            remediation:
+              "Wait for the Design territory transition to finish, then retry.",
+            context: { workspaceId: lifecycleMutationWorkspaceId },
+          });
+        }
       }
       const startedAt = Date.now();
-      const dispatch = () =>
-        this.workspace.handle(op, params, {
-          remote: hostRelay,
-        });
+      let queuedContextGraphOperation: Promise<unknown> | null = null;
+      const dispatch = () => {
+        const invoke = () =>
+          this.workspace.handle(op, params, {
+            remote: hostRelay,
+          });
+        if (!queuedContextGraphWorkspaceId) return invoke();
+        queuedContextGraphOperation ??=
+          this.runWhenGlobalDesignTerritoryStable(() =>
+            this.trackWorkspaceProcessStart(
+              queuedContextGraphWorkspaceId,
+              invoke(),
+            ),
+          );
+        return queuedContextGraphOperation;
+      };
       // Every worktree-rewriting Git op can introduce, remove, rename, or
       // retarget Design territory (including when the current tree has none).
       // Freeze process admission and retire live code sandboxes before Git
@@ -6553,8 +6653,9 @@ export class ZerosEngine {
       // outer promise in the owner-local set would make archive/delete's
       // process reaper wait on the operation that invoked it. Other mutations
       // remain tracked so a later lifecycle can drain them normally.
-      const result =
-        lifecycleMutationWorkspaceId && !changesDesignOwnerRegistry
+      const result = queuedContextGraphWorkspaceId
+        ? await operation
+        : lifecycleMutationWorkspaceId && !changesDesignOwnerRegistry
           ? await this.trackWorkspaceProcessStart(
               lifecycleMutationWorkspaceId,
               operation,

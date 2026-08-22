@@ -65,6 +65,7 @@ import {
 } from "../../features/agent/agents-cache";
 import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { dbDeleteChat } from "../../features/agent/agent-history-client";
+import { discardQueuedContextGraphWrites } from "../../features/agent/composer-editor/context-graph-staging";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
 import {
   workspaceCreate,
@@ -280,6 +281,7 @@ export function DispatcherModal({
     }
 
     const rollbackOptimisticChat = () => {
+      discardQueuedContextGraphWrites(prepared.path);
       clearWorkspaceSettling(prepared.path);
       dispatch({ type: "CONSUME_AUTO_SEND", chatId });
       dispatch({ type: "DELETE_CHAT", id: chatId });
@@ -293,6 +295,7 @@ export function DispatcherModal({
     const settleArchivedOptimisticChat = () => {
       // Archive preserves chat metadata/transcript/draft for restore. Cancel
       // only the first-send intent because its cwd intentionally went away.
+      discardQueuedContextGraphWrites(prepared.path);
       clearWorkspaceSettling(prepared.path);
       dispatch({ type: "CONSUME_AUTO_SEND", chatId });
       finishPendingCreate(pendingToken);

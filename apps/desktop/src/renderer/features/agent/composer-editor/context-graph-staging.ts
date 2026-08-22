@@ -53,7 +53,10 @@
 import { writeContextAttachment } from "../agent-history-client";
 import { utf8ToBase64 } from "../encode-attachments";
 import { HARD_TEXT_CAP_BYTES, MAX_IMAGE_BYTES } from "../agent-attachments";
-import { isWorkspaceProvisioning } from "../../../state/pending-workspaces";
+import {
+  isWorkspaceProvisioning,
+  usePendingWorkspacesStore,
+} from "../../../state/pending-workspaces";
 import { isNativeRuntime } from "../../../platform/runtime";
 import { toast } from "../../../shared/ui/primitives/elements";
 import { RECONSTRUCTED_ATTACHMENT_ID_PREFIX } from "./reconstruct";
@@ -152,9 +155,35 @@ export function isBuildSkewFailure(message: string): boolean {
  *  a paste burst or a doomed retry loop must cost one toast, not a stack. */
 const notifiedFailureCwds = new Set<string>();
 
+/** Attachments accepted before `git worktree add` owns the prepared path.
+ * Keyed by cwd + attachment id so concurrent workspace creates stay isolated
+ * and repeated attach-time sweeps collapse onto the same durable record. */
+interface QueuedContextGraphWrite {
+  attachmentId: string;
+  base64: string;
+  mimeType: string;
+  filename: string;
+}
+
+const queuedProvisioningWrites = new Map<
+  string,
+  Map<string, QueuedContextGraphWrite>
+>();
+
 /** Test-only: clear the once-per-workspace toast latch. */
 export function resetStagingFailureNoticesForTests(): void {
   notifiedFailureCwds.clear();
+}
+
+/** Test-only: prevent queued fixtures from crossing test boundaries. */
+export function resetQueuedContextGraphWritesForTests(): void {
+  queuedProvisioningWrites.clear();
+}
+
+/** A failed prepared create must never flush into its now-unowned reserved
+ * path. The create rollback calls this before dropping the provisioning key. */
+export function discardQueuedContextGraphWrites(cwd: string): void {
+  queuedProvisioningWrites.delete(cwd);
 }
 
 /** A staging op failed. Always logged (the renderer console rides the app's
@@ -181,6 +210,51 @@ function reportStagingFailure(
   });
 }
 
+function writeStagedAttachment(
+  cwd: string,
+  write: QueuedContextGraphWrite,
+): void {
+  // Promise.resolve() so a SYNCHRONOUS throw from the IPC façade reaches the
+  // same reporter as an async rejection — silent-catch was how a full day of
+  // skew-rejected writes went unnoticed.
+  void Promise.resolve()
+    .then(() =>
+      writeContextAttachment({
+        cwd,
+        ...write,
+      }),
+    )
+    .catch((err) => reportStagingFailure(cwd, write.filename, err));
+}
+
+function flushQueuedContextGraphWrites(cwd: string): void {
+  if (isWorkspaceProvisioning(cwd)) return;
+  const queued = queuedProvisioningWrites.get(cwd);
+  if (!queued) return;
+  // Detach the batch before dispatch so another attachment arriving while an
+  // async write is in flight forms the next exact batch instead of mutating
+  // the collection being iterated.
+  queuedProvisioningWrites.delete(cwd);
+  for (const attachment of queued.values()) {
+    writeStagedAttachment(cwd, attachment);
+  }
+}
+
+// A prepared path can accept composer input before it exists. Zustand
+// publishes finishPendingCreate synchronously; flush only the exact paths that
+// left provisioning, leaving every concurrently-created workspace isolated.
+usePendingWorkspacesStore.subscribe((state, previous) => {
+  if (state.creates === previous.creates) return;
+  const stillProvisioning = new Set(
+    state.creates.flatMap((create) => (create.path ? [create.path] : [])),
+  );
+  for (const create of previous.creates) {
+    if (create.path && !stillProvisioning.has(create.path)) {
+      flushQueuedContextGraphWrites(create.path);
+    }
+  }
+});
+
 /** Execute a plan against the workspace graph. Fire-and-forget on every axis:
  *  each write is independently caught and never awaited — unavailable IPC or
  *  a read-only disk must not break typing, and the send-path safety net
@@ -191,31 +265,33 @@ function reportStagingFailure(
  *  op (the graph is append-only) and a given id always carries the same
  *  bytes, so every interleaving settles on the same file.
  *
- *  A PROVISIONING cwd is skipped whole: the dispatcher reserves the worktree
- *  path before `git worktree add` creates it, and a stage write in that
- *  window would mkdir `.context-graph/` into the reserved path — worktree
- *  add refuses a non-empty directory, so the write wouldn't just be early,
- *  it would fail the workspace creation itself. Nothing is lost: the
- *  composer's provisioning-end sweep (use-composer-editor) re-stages the
- *  doc the moment the worktree lands. */
+ *  A PROVISIONING cwd is queued: the dispatcher reserves the worktree path
+ *  before `git worktree add` creates it, and a stage write in that window
+ *  would mkdir `.context-graph/` into the reserved path — worktree add refuses
+ *  a non-empty directory, so the write wouldn't just be early, it would fail
+ *  creation itself. Holding the attachment object here (rather than relying
+ *  only on a later document sweep) also survives chip removal, chat parking,
+ *  and composer unmount before the checkout lands. */
 export function executeGraphSync(cwd: string, plan: GraphSyncPlan): void {
-  if (isWorkspaceProvisioning(cwd)) return;
   for (const a of plan.stage) {
     const base64 = stageablePayload(a);
     if (!base64) continue;
-    // Promise.resolve() so a SYNCHRONOUS throw from the IPC façade reaches
-    // the same reporter as an async rejection — silent-catch was how a full
-    // day of skew-rejected writes went unnoticed.
-    void Promise.resolve()
-      .then(() =>
-        writeContextAttachment({
-          cwd,
-          attachmentId: a.id,
-          base64,
-          mimeType: a.mimeType,
-          filename: a.name,
-        }),
-      )
-      .catch((err) => reportStagingFailure(cwd, a.name, err));
+    let queued = queuedProvisioningWrites.get(cwd);
+    if (!queued) {
+      queued = new Map();
+      queuedProvisioningWrites.set(cwd, queued);
+    }
+    // Attachment ids are immutable graph identities. Preserve the exact first
+    // accepted payload: a later model-validation sweep must not overwrite it
+    // with an invalid view while the checkout is still landing.
+    if (!queued.has(a.id)) {
+      queued.set(a.id, {
+        attachmentId: a.id,
+        base64,
+        mimeType: a.mimeType,
+        filename: a.name,
+      });
+    }
   }
+  flushQueuedContextGraphWrites(cwd);
 }
