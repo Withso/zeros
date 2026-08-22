@@ -37,6 +37,7 @@ import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import {
   useWorkspaceStore,
   useWorkspaceDispatch,
+  recordWorkspaceActivity,
   useActiveChatId,
   useChatById,
   useBrowserPickerSelection,
@@ -384,7 +385,7 @@ export function AgentChat({
   });
   // Indirections so the once-built editor + early keybind handlers reach the
   // current handlers (which are defined below the editor hook).
-  const submitRef = useRef<() => void>(() => {});
+  const submitRef = useRef<(recordActivity?: boolean) => void>(() => {});
   const updateLiveDraftRef = useRef<() => void>(() => {});
   const composerFocusRef = useRef<() => void>(() => {});
   // Stable ctx object for MessageView memoization. Without useMemo, every
@@ -536,11 +537,12 @@ export function AgentChat({
   // RendererContext contract).
   const respondToQuestion = useCallback(
     (text: string) => {
+      if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
       session.sendPrompt(text, text).catch(() => {
         /* error surfaces via session.error */
       });
     },
-    [session],
+    [chatThread?.folder, session],
   );
   // pendingPermission is threaded into ctx so the matching
   // tool card can render its inline Allow/Deny cluster. respondToPermission
@@ -549,9 +551,10 @@ export function AgentChat({
     (
       response: import("../../platform/bridge/agent-events").RequestPermissionResponse,
     ) => {
+      if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
       session.respondToPermission(response);
     },
-    [session],
+    [chatThread?.folder, session],
   );
   // Sticky-policy mutators are bound to the active chatId so
   // the InlinePermissionCluster can fire-and-forget without knowing
@@ -612,6 +615,9 @@ export function AgentChat({
       if (trimmed.length === 0 && attachments.length === 0) {
         return;
       }
+      // The edit is accepted now; record before cancellation/attachment/SQLite
+      // awaits so a slow resubmit cannot later leapfrog another workspace.
+      if (chatThread?.folder) recordWorkspaceActivity(chatThread.folder);
       // If the user edits the
       // active turn's prompt mid-stream, cancel the in-flight turn
       // first so the agent's pending response gets aborted before
@@ -693,7 +699,7 @@ export function AgentChat({
           /* error surfaces via session.error */
         });
     },
-    [chatId, session],
+    [chatId, chatThread?.folder, session],
   );
 
   // Forward-ref to the composer hook's
@@ -1189,7 +1195,11 @@ export function AgentChat({
       if (draft) {
         dispatch({ type: "SET_CHAT_DRAFT", chatId: fresh.id, draft });
       }
-      dispatch({ type: "ADD_CHAT", chat: fresh });
+      dispatch({
+        type: "ADD_CHAT",
+        chat: fresh,
+        recordWorkspaceActivity: true,
+      });
     },
     [chatThread, chatId, dispatch, agentSessions, updateChatSettings],
   );
@@ -1454,7 +1464,11 @@ export function AgentChat({
           // ADD_CHAT also sets the new chat active → navigation. Archiving the
           // old chat AFTERWARD leaves it non-active, so focus stays on the new
           // one (no replacement-neighbor selection like the tab-close path).
-          dispatch({ type: "ADD_CHAT", chat: fresh });
+          dispatch({
+            type: "ADD_CHAT",
+            chat: fresh,
+            recordWorkspaceActivity: true,
+          });
           agentSessions.closeSession(chatId);
           dispatch({ type: "ARCHIVE_CHAT", id: chatId });
           return true;
@@ -3058,6 +3072,7 @@ export function AgentChat({
        *  hand-off path; the direct-send path derives them from the editor. */
       bubbleSegments?: MessageContentSegment[];
     },
+    recordActivity = true,
   ) => {
     // A transcript click starts an engine read and returns immediately (Rule
     // 11), so a cold-cache click followed by a fast Enter would snapshot the
@@ -3155,6 +3170,9 @@ export function AgentChat({
     // accept independent first messages without spawning into missing paths or
     // letting the newest request overwrite an older one.
     if (workspaceProvisioning && chatId && override === undefined && snapshot) {
+      if (recordActivity && chatThread?.folder) {
+        recordWorkspaceActivity(chatThread.folder);
+      }
       const draft = {
         text: snapshot.displayText,
         attachments: snapshot.attachments,
@@ -3218,6 +3236,13 @@ export function AgentChat({
         }
         return;
       }
+    }
+    // A validated prompt is a deliberate workspace action. Record it before
+    // any admission/attachment await so a slow send cannot jump ahead of work
+    // the user performs elsewhere in the meantime. Provisioning sends record
+    // above when they are accepted into the exact-chat queue.
+    if (recordActivity && chatThread?.folder) {
+      recordWorkspaceActivity(chatThread.folder);
     }
     // If the session bounced to reconnecting / failed / auth-required (or never
     // spawned), kick a fresh ensureSession and wait for it before sending. Both
@@ -3386,11 +3411,12 @@ export function AgentChat({
   const handleSend = async (
     override?: string,
     extras?: Parameters<typeof runSend>[1],
+    recordActivity = true,
   ): Promise<void> => {
     if (sendInFlightRef.current) return;
     sendInFlightRef.current = true;
     try {
-      await runSend(override, extras);
+      await runSend(override, extras, recordActivity);
     } finally {
       sendInFlightRef.current = false;
     }
@@ -3632,7 +3658,7 @@ export function AgentChat({
   // The editor's Enter keymap calls this through a ref (handleSend is defined
   // after the editor hook). Enter routes by mode: save the queued edit →
   // open the selected queued row → send the draft.
-  submitRef.current = () => {
+  submitRef.current = (recordActivity = true) => {
     if (editingQueuedRef.current) {
       void saveQueuedEdit();
       return;
@@ -3642,7 +3668,7 @@ export function AgentChat({
       startQueuedEdit(selected);
       return;
     }
-    void handleSend();
+    void handleSend(undefined, undefined, recordActivity);
   };
 
   // (Previous local queue flush effect removed — EmptyComposer now
@@ -3735,7 +3761,9 @@ export function AgentChat({
     // Consume first so React Strict effects and unrelated store notifications
     // cannot dispatch the same first turn twice while handleSend is awaiting.
     dispatch({ type: "CONSUME_AUTO_SEND", chatId });
-    submitRef.current();
+    // The original click was already recorded when this exact send was queued
+    // during provisioning. Its later automatic drain is not a new action.
+    submitRef.current(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     pendingAutoSend,

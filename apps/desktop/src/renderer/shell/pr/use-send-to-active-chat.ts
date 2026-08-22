@@ -22,7 +22,11 @@ import type {
   AgentTextMessageAttachment,
   MessageContentSegment,
 } from "../../features/agent/use-agent-session";
-import { useActiveChatId } from "../../state/store";
+import {
+  recordWorkspaceActivity,
+  useActiveChatId,
+  useWorkspaceStore,
+} from "../../state/store";
 import { toast } from "../../shared/ui/primitives/elements";
 
 export interface SendToActiveChatArgs {
@@ -61,6 +65,10 @@ export function useSendToActiveChat(): (args: SendToActiveChatArgs) => boolean {
         });
         return false;
       }
+      const folder = useWorkspaceStore
+        .getState()
+        .chats.find((chat) => chat.id === activeChatId)?.folder;
+      if (folder) recordWorkspaceActivity(folder);
       sessions
         .sendPrompt(
           activeChatId,

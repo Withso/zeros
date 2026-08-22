@@ -8,12 +8,20 @@ import type {
   WorkspacePage,
   WorkspaceState,
 } from "./store";
+import {
+  parseWorkspaceListFilter,
+  type WorkspaceListFilter,
+} from "./workspace-list-filter";
 
 const STORAGE_KEY = "zeros:ui-state:v1";
 const DEBOUNCE_MS = 300;
 
 export interface PersistedUiState {
   activePage: WorkspacePage;
+  workspaceListFilter: WorkspaceListFilter;
+  /** Deliberate action clock used only by the Active workspace filter. */
+  workspaceActivityByFolder: Record<string, number>;
+  createWorkspaceProjectId: string | null;
   /** Exact chat identity paired with the workspace route in this snapshot. */
   activeChatId: string | null;
   /** Last complete destination under Home; `repo` is paired with activeRepoId. */
@@ -38,6 +46,7 @@ export interface PersistedUiState {
 
 const VALID_PAGES = new Set<WorkspacePage>([
   "workspace",
+  "create",
   "settings",
   "dashboard",
   "customize",
@@ -55,6 +64,7 @@ const VALID_REPO_VIEWS = new Set<RepoPageView>([
 /** Persisted navigation identity is useful, but must not grow forever. */
 const MAX_SCOPED_NAV_ENTRIES = 128;
 const MAX_ACTIVE_CHAT_ENTRIES = 512;
+const MAX_WORKSPACE_ACTIVITY_ENTRIES = 512;
 
 function parsePage(raw: unknown, fallback: WorkspacePage): WorkspacePage {
   if (raw === "design" || raw === "themes") return "workspace";
@@ -107,6 +117,24 @@ function parseRepoViewMap(raw: unknown): Record<string, RepoPageView> {
   return Object.fromEntries(entries);
 }
 
+function parseBoundedTimestampMap(
+  raw: unknown,
+  limit: number,
+): Record<string, number> {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  return Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>)
+      .filter(
+        (entry): entry is [string, number] =>
+          entry[0].length > 0 &&
+          typeof entry[1] === "number" &&
+          Number.isFinite(entry[1]) &&
+          entry[1] >= 0,
+      )
+      .slice(-limit),
+  );
+}
+
 function readLegacySettingString(key: string): string {
   try {
     const raw = localStorage.getItem(`zeros-${key}`);
@@ -156,9 +184,26 @@ export function loadPersistedUiState(): Partial<PersistedUiState> {
     if ("activeChatId" in parsed) {
       out.activeChatId = parseStringOrNull(parsed.activeChatId);
     }
+    if ("workspaceListFilter" in parsed) {
+      out.workspaceListFilter = parseWorkspaceListFilter(
+        parsed.workspaceListFilter,
+      );
+    }
+    if ("workspaceActivityByFolder" in parsed) {
+      out.workspaceActivityByFolder = parseBoundedTimestampMap(
+        parsed.workspaceActivityByFolder,
+        MAX_WORKSPACE_ACTIVITY_ENTRIES,
+      );
+    }
+    if ("createWorkspaceProjectId" in parsed) {
+      out.createWorkspaceProjectId = parseStringOrNull(
+        parsed.createWorkspaceProjectId,
+      );
+    }
     if ("lastHomePage" in parsed) {
       const page = parsePage(parsed.lastHomePage, "dashboard");
-      out.lastHomePage = page === "workspace" ? "dashboard" : page;
+      out.lastHomePage =
+        page === "workspace" || page === "create" ? "dashboard" : page;
     }
     if ("activeRepoId" in parsed) {
       out.activeRepoId = parseStringOrNull(parsed.activeRepoId);
@@ -169,7 +214,12 @@ export function loadPersistedUiState(): Partial<PersistedUiState> {
     if (out.activePage === "repo" && !out.activeRepoId) {
       out.activePage = "dashboard";
     }
-    if (!out.lastHomePage && out.activePage && out.activePage !== "workspace") {
+    if (
+      !out.lastHomePage &&
+      out.activePage &&
+      out.activePage !== "workspace" &&
+      out.activePage !== "create"
+    ) {
       out.lastHomePage = out.activePage;
     }
     if (out.lastHomePage === "repo" && !out.activeRepoId) {
@@ -241,8 +291,15 @@ if (typeof window !== "undefined") {
 }
 
 export function schedulePersistUiState(state: WorkspaceState): void {
+  // Renderer state is also imported by pure Node/Vitest consumers (terminal
+  // store, reducers). Persistence is a browser concern; keep those imports
+  // side-effect-free instead of requiring every test/runtime to fake Window.
+  if (typeof window === "undefined") return;
   pendingSnapshot = {
     activePage: state.activePage,
+    workspaceListFilter: state.workspaceListFilter,
+    workspaceActivityByFolder: state.workspaceActivityByFolder,
+    createWorkspaceProjectId: state.createWorkspaceProjectId,
     activeChatId: state.activeChatId,
     lastHomePage: state.lastHomePage,
     activeRepoId: state.activeRepoId,

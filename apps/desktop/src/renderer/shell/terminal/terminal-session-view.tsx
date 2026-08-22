@@ -90,6 +90,7 @@ import {
 } from "./terminal-resize-scheduler";
 import { isContinuousLayoutResizeActive } from "./continuous-layout-resize";
 import { isUsableTerminalDimensions } from "./terminal-dimensions";
+import { recordWorkspaceActivity } from "../../state/workspace-store";
 
 // Mirrors `--font-mono` in `styles/zeros-tokens.css` exactly — xterm can't
 // read a CSS variable, so this string has to be kept in sync by hand.
@@ -396,6 +397,12 @@ export const TerminalSessionView = React.memo(function TerminalSessionView({
         exitedRef.current = false;
         void restart(term);
         return;
+      }
+      // Count a submitted terminal line, not each keystroke. This gives Active
+      // a meaningful command-level signal without making the lane churn while
+      // someone types or navigates inside a terminal UI.
+      if (data.includes("\r") || data.includes("\n")) {
+        recordWorkspaceActivity(cwd);
       }
       void ptyWrite({ sessionId, data }).catch(() => {
         /* drop — pty likely exited */

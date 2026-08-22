@@ -13,6 +13,7 @@ import {
   commitWorkspaceArchived,
   commitWorkspaceDeleted,
   commitWorkspaceRestored,
+  peekLiveWorkspaceUnion,
   peekWorkspacesFor,
   reloadWorkspacesFor,
   runWorkspaceDiscoveryForTesting,
@@ -47,6 +48,19 @@ function workspace(
 }
 
 describe("confirmed workspace cache transitions", () => {
+  it("exposes one synchronous deduplicated union for cross-repository navigation", () => {
+    const a = workspace("ws_union_a", "cache-union-a");
+    const b = workspace("ws_union_b", "cache-union-b");
+    setWorkspaceRowsForTesting(a.repoSlug, [a]);
+    setWorkspaceRowsForTesting(b.repoSlug, [b]);
+
+    const union = peekLiveWorkspaceUnion();
+    expect(union.filter((row) => row.id === a.id || row.id === b.id)).toEqual([
+      a,
+      b,
+    ]);
+  });
+
   it("does not call a rowless create rolled back while its exact flight is active", () => {
     const active: WorkspaceLifecycleStatus = {
       active: true,

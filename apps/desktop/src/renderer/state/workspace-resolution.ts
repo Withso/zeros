@@ -285,7 +285,7 @@ export function repoRootForCwd<T extends { path: string; repoRoot: string }>(
  */
 export function findProjectForFolder(
   folder: string | null | undefined,
-  projects: Project[],
+  projects: readonly Project[],
 ): Project | null {
   if (!folder) return null;
   // Normalize the /private symlink on BOTH sides, matching

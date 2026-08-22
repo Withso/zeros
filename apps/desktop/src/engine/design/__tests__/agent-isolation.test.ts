@@ -113,7 +113,9 @@ describe("design workspace agent isolation", () => {
     const appShell = read("apps/desktop/src/renderer/app-shell.tsx");
     expect(appShell).toContain('useInternalFeatureActive("designWorkspaces")');
     expect(appShell).toContain("<DesignWorkspaceSidebar");
-    expect(appShell).toContain("useNewTabHotkeys(!designWorkspaceRequested)");
+    expect(appShell).toContain(
+      'useNewTabHotkeys(activePage === "workspace" && !designWorkspaceRequested)',
+    );
     // Mode model: a blocked design route mounts the placeholder (with its
     // never-gated "exit design mode" action) instead of bouncing Home — and
     // the coding harness must still never mount as a fallback for it.
@@ -142,6 +144,9 @@ describe("design workspace agent isolation", () => {
     // gate must not creep back in.
     expect(archiveActions).not.toContain("mayPublishNavigation");
     expect(archiveActions).toContain("opts?.onRestored?.(result)");
+    expect(archiveActions).toMatch(
+      /isInternalFeatureActive\("designWorkspaces"\)\s*&&\s*\(isNativeRuntime\(\)\s*\|\|\s*isExpectedElectron\(\)\)/,
+    );
 
     const topBar = read("apps/desktop/src/renderer/shell/top-bar.tsx");
     expect(topBar).toContain('useInternalFeatureActive("designWorkspaces")');
@@ -149,10 +154,17 @@ describe("design workspace agent isolation", () => {
       /designWorkspacesInternalActive\s*&&\s*\(nativeRuntime\.ready\s*\|\|\s*nativeRuntime\.expectedElectron\)/,
     );
     expect(topBar).toContain("if (activeFolderBlockedDesign) return;");
-    expect(topBar).toMatch(/\{designWorkspacesActive \? \(\s*<DropdownMenu>/);
-    expect(topBar).toContain(
-      'onClick={() => void handleCreateWorkspace("code")}',
+    const createPage = read(
+      "apps/desktop/src/renderer/shell/dispatcher/dispatcher-modal.tsx",
     );
+    expect(createPage).toContain(
+      'useInternalFeatureActive("designWorkspaces")',
+    );
+    expect(createPage).toMatch(
+      /designWorkspacesInternalActive\s*&&\s*\(nativeRuntime\.ready\s*\|\|\s*nativeRuntime\.expectedElectron\)/,
+    );
+    expect(createPage).toContain('kind: "design"');
+    expect(createPage).toContain("Create design workspace");
 
     const settings = read(
       "apps/desktop/src/renderer/features/settings/settings-page.tsx",

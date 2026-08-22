@@ -13,6 +13,15 @@ import {
 } from "../shell/prefetch-workspace-surface";
 import { prepareChatView } from "../shell/conversation/chat-intent";
 import { resolveWorkspacePresentationKind } from "./workspace-resolution";
+import type { WorkspaceListFilter } from "./workspace-list-filter";
+
+interface OpenWorkspaceOptions {
+  /** Publish a repository-filter change with the workspace destination in the
+   * same store snapshot. Normal opens omit this and let the reducer preserve
+   * Grouped/Ungrouped/Active or follow the destination from a repository-only
+   * view. */
+  workspaceListFilter?: WorkspaceListFilter;
+}
 
 /** Open a workspace: switch to the workspace view and land on the chat the user
  *  last had there (else any chat at that path, else auto-spawn the starred
@@ -21,11 +30,12 @@ import { resolveWorkspacePresentationKind } from "./workspace-resolution";
  *  like the Dashboard, where the 3-column workspace view isn't mounted. */
 export function useOpenWorkspace(): (
   workspace: WorkspaceNavigationTarget,
+  options?: OpenWorkspaceOptions,
 ) => void {
   const dispatch = useWorkspaceDispatch();
   const sessions = useAgentSessions();
   return useCallback(
-    (workspace: WorkspaceNavigationTarget) => {
+    (workspace: WorkspaceNavigationTarget, options?: OpenWorkspaceOptions) => {
       const presentationKind = resolveWorkspacePresentationKind({
         confirmedKind: workspace.kind,
         folder: workspace.path,
@@ -48,6 +58,7 @@ export function useOpenWorkspace(): (
           repoRoot: workspace.repoRoot,
           chatId: null,
           validationPending: workspace.validationPending,
+          workspaceListFilter: options?.workspaceListFilter,
         });
         return;
       }
@@ -69,6 +80,7 @@ export function useOpenWorkspace(): (
         repoRoot: workspace.repoRoot,
         chatId: fallbackId,
         validationPending: workspace.validationPending,
+        workspaceListFilter: options?.workspaceListFilter,
       });
       if (fallbackId) {
         return;

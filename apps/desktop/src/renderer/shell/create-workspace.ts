@@ -21,10 +21,10 @@
 // optimistic state and surfaces a toast; the top bar's workspace-list
 // validation effect then picks a valid destination.
 //
-// NOT shared with the Dispatcher's create (dispatcher-modal.tsx), which
-// layers a prompt, a base branch, and auto-send onto the same skeleton.
-// That one is still a near-copy of this file — worth unifying, but its
-// extra semantics make it a separate change.
+// The Dispatcher's code-workspace create (dispatcher-modal.tsx) is separate
+// because it layers a prompt, a base branch, and auto-send onto the same
+// skeleton. Its Internal-only Design shortcut intentionally calls this shared
+// direct-create flow because Design has no agent prompt.
 // ──────────────────────────────────────────────────────────
 
 import { dbDeleteChat } from "../features/agent/agent-history-client";

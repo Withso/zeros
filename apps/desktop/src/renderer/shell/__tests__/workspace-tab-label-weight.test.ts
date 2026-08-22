@@ -25,13 +25,19 @@ function component(src: string, name: string): string {
   return next < 0 ? src.slice(start) : src.slice(start, start + 1 + next);
 }
 
-/** The className on the span that renders `{label}` in a component body.
- *  Tolerates Prettier wrapping the child onto its own line — the invariant is
- *  about the class list, not about the span fitting in 80 columns. */
+/** Every class utility on the span that renders `{label}` in a component body.
+ *  Anchored by walking back from `{label}` to its own opening tag, so this
+ *  tolerates Prettier wrapping AND a `className={cn(...)}` attribute — the
+ *  placeholder's conditional trailing-marker reservation is one. EVERY string
+ *  literal in the attribute is returned, so a font utility cannot hide inside a
+ *  conditional branch; the invariant is the class list, not the syntax. */
 function labelSpanClass(body: string): string {
-  const match = /<span className="([^"]*)">\s*\{label\}\s*<\/span>/.exec(body);
-  if (!match) throw new Error("label span not found");
-  return match[1];
+  const label = body.indexOf("{label}");
+  const opener = label < 0 ? -1 : body.lastIndexOf("<span", label);
+  if (opener < 0) throw new Error("label span not found");
+  const literals = body.slice(opener, label).match(/"[^"]*"/g);
+  if (!literals) throw new Error("label span className not found");
+  return literals.map((literal) => literal.slice(1, -1)).join(" ");
 }
 
 const ANY_FONT_WEIGHT =
@@ -67,12 +73,11 @@ describe("workspace tab label weight", () => {
   it("renders both tab variants from that same container class", () => {
     const topBar = source("apps/desktop/src/renderer/shell/top-bar.tsx");
 
-    expect(component(topBar, "WorkspaceTab")).toContain(
-      "className={WORKSPACE_TAB_CLS}",
-    );
-    expect(component(topBar, "PendingWorkspaceTab")).toContain(
-      "className={WORKSPACE_TAB_CLS}",
-    );
+    for (const name of ["WorkspaceTab", "PendingWorkspaceTab"]) {
+      expect(component(topBar, name)).toMatch(
+        /className=\{cn\(\s*WORKSPACE_TAB_CLS,/,
+      );
+    }
   });
 
   it("keeps every label span free of its own font utility", () => {
