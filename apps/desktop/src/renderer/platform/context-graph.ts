@@ -32,6 +32,9 @@ export interface ContextGraphItemWire {
   kind: ContextGraphKind;
   bytes: number;
   mtimeMs: number;
+  /** Metadata-change time disambiguates atomic same-size rewrites that land
+   *  inside one rounded mtime tick. Older engines may omit it. */
+  ctimeMs?: number;
   attachmentId?: string;
   previewText?: string;
 }

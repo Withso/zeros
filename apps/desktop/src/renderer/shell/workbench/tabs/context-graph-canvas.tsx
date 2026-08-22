@@ -57,6 +57,23 @@ interface PlacedItem {
   depthPlane: number;
 }
 
+/** React identity for a placed card. Kept as a pure helper so layout reflow
+ *  cannot accidentally become component identity. */
+export function contextGraphCardRenderKey(
+  placed: Pick<PlacedItem, "itemKey" | "row" | "column">,
+): string {
+  return placed.itemKey;
+}
+
+/** Revision used by the decoded-thumbnail cache. */
+export function contextGraphItemContentRevision(item: {
+  mtimeMs: number;
+  bytes: number;
+  ctimeMs?: number;
+}): string {
+  return `${item.mtimeMs}:${item.ctimeMs ?? "unknown"}:${item.bytes}`;
+}
+
 /** A category band's floating label. */
 interface SectionLabel {
   key: string;
@@ -97,8 +114,13 @@ const MIN_ZOOM = 0.08;
 // A 200% ceiling keeps close inspection useful without letting one 224px
 // footprint dominate the viewport. Depth motion is tuned independently.
 const MAX_ZOOM = 2;
-const MIN_THUMBNAIL_SCREEN_SIZE = 64;
-const THUMBNAIL_DIMENSIONS = [256, 512, 1024, 1536] as const;
+// A fitted 400-item graph reaches the 8% zoom floor, where a card is only
+// ~18 CSS pixels wide. It still needs recognizable pixels: skipping the load
+// entirely leaves every newly attached image as a permanent placeholder while
+// older cached cards happen to remain visible. Tiny buckets keep that overview
+// inexpensive; the existing visibility observer and four-flight queue still
+// bound how much work can start at once.
+const THUMBNAIL_DIMENSIONS = [64, 128, 256, 512, 1024, 1536] as const;
 // Slight close-up oversampling keeps screenshot text crisp through fractional
 // compositor scales instead of aiming for the bare physical-pixel minimum.
 const THUMBNAIL_DETAIL_OVERSAMPLE = 1.35;
@@ -152,11 +174,9 @@ function boundedParallaxOffset(
   return maxOffset * Math.tanh((displacement * strength) / maxOffset);
 }
 
-/** At a distant overview, decoding images that are only a few pixels wide
- *  adds memory/IPC work without adding legible information. The placeholders
- *  keep the diamond readable until a card reaches an inspectable size. */
+/** Active image cards always receive at least the tiny overview preview. */
 export function shouldLoadImageThumbnailsAtScale(scale: number): boolean {
-  return scale * CARD_SIZE >= MIN_THUMBNAIL_SCREEN_SIZE;
+  return Number.isFinite(scale) && scale > 0;
 }
 
 /** Choose the smallest bounded preview that covers the card's physical-pixel
@@ -166,7 +186,7 @@ export function contextGraphThumbnailDimension(
   scale: number,
   devicePixelRatio: number,
 ): ContextGraphThumbnailDimension {
-  if (!Number.isFinite(scale) || !shouldLoadImageThumbnailsAtScale(scale)) {
+  if (!shouldLoadImageThumbnailsAtScale(scale)) {
     return 0;
   }
   const density = Number.isFinite(devicePixelRatio)
@@ -473,8 +493,21 @@ function cacheImageUrl(key: string, value: CachedImageThumbnail | null): void {
 
 interface QueuedImageLoad {
   cancelled: boolean;
+  priority: number;
+  sequence: number;
   run: () => Promise<CachedImageThumbnail | null | undefined>;
   resolve: (value: CachedImageThumbnail | null | undefined) => void;
+}
+
+/** New/modified images jump ahead of an existing overview backlog. Four
+ *  already-active decodes remain bounded and are never interrupted. */
+export function contextGraphImageLoadPriority(item: {
+  mtimeMs: number;
+  ctimeMs?: number;
+}): number {
+  const mtimeMs = Number.isFinite(item.mtimeMs) ? item.mtimeMs : 0;
+  const ctimeMs = Number.isFinite(item.ctimeMs) ? (item.ctimeMs ?? 0) : 0;
+  return Math.max(mtimeMs, ctimeMs);
 }
 
 /** Only a deterministic size-policy refusal is permanent for an exact mtime.
@@ -487,6 +520,7 @@ export function contextGraphThumbnailFailureIsPermanent(
 
 const imageLoadQueue: QueuedImageLoad[] = [];
 let activeImageLoads = 0;
+let imageLoadSequence = 0;
 const MAX_CONCURRENT_IMAGE_LOADS = 4;
 
 /** Bound native decode/IPC work globally so fit-to-view over a large graph
@@ -513,7 +547,10 @@ function pumpImageLoads(): void {
   }
 }
 
-function scheduleImageLoad(run: QueuedImageLoad["run"]): {
+function scheduleImageLoad(
+  priority: number,
+  run: QueuedImageLoad["run"],
+): {
   promise: Promise<CachedImageThumbnail | null | undefined>;
   cancel: () => void;
 } {
@@ -523,8 +560,17 @@ function scheduleImageLoad(run: QueuedImageLoad["run"]): {
       resolve = done;
     },
   );
-  const task: QueuedImageLoad = { cancelled: false, run, resolve };
+  const task: QueuedImageLoad = {
+    cancelled: false,
+    priority,
+    sequence: imageLoadSequence++,
+    run,
+    resolve,
+  };
   imageLoadQueue.push(task);
+  imageLoadQueue.sort(
+    (a, b) => b.priority - a.priority || a.sequence - b.sequence,
+  );
   pumpImageLoads();
   return {
     promise,
@@ -1037,10 +1083,11 @@ export function ContextGraphCanvas({
             // Runtime-computed canvas extent; transform is written directly.
             style={{ width: layout.width, height: layout.height }}
           >
-            {placedByDepth[depthPlane]!.map(
-              ({ item, itemKey, x, y, row, column }) => (
+            {placedByDepth[depthPlane]!.map((placed) => {
+              const { item, itemKey, x, y } = placed;
+              return (
                 <ContextGraphCard
-                  key={`${itemKey}|${row}:${column}`}
+                  key={contextGraphCardRenderKey(placed)}
                   cwd={cwd}
                   item={item}
                   itemKey={itemKey}
@@ -1054,8 +1101,8 @@ export function ContextGraphCanvas({
                     !!item.attachmentId && pendingToggles.has(item.attachmentId)
                   }
                 />
-              ),
-            )}
+              );
+            })}
           </div>
         ))}
         <Button
@@ -1158,7 +1205,7 @@ const ContextGraphCard = React.memo(function ContextGraphCard({
       {shareControl}
       {isImage ? (
         <ImageCardMedia
-          key={`${cwd}|${itemKey}|${item.mtimeMs}`}
+          key={`${cwd}|${itemKey}|${contextGraphItemContentRevision(item)}`}
           cwd={cwd}
           item={item}
           itemKey={itemKey}
@@ -1224,7 +1271,8 @@ function ImageCardMedia({
   observeImage,
   imageThumbnailLoader,
 }: Omit<CardProps, "x" | "y" | "onToggleShared" | "togglePending">) {
-  const baseCacheKey = `${IMAGE_THUMBNAIL_CACHE_VERSION}|${cwd}|${itemKey}|${item.mtimeMs}`;
+  const baseCacheKey = `${IMAGE_THUMBNAIL_CACHE_VERSION}|${cwd}|${itemKey}|${contextGraphItemContentRevision(item)}`;
+  const imageLoadPriority = contextGraphImageLoadPriority(item);
   // Keep the last confirmed preview visible while a sharper bucket loads.
   const [thumbnail, setThumbnail] = useState<CachedImageThumbnail | null>(() =>
     bestCachedImage(baseCacheKey, thumbnailDimension),
@@ -1250,31 +1298,34 @@ function ImageCardMedia({
     let cancelled = false;
     let scheduled: ReturnType<typeof scheduleImageLoad> | null = null;
     const stopObserving = observeImage(el, () => {
-      scheduled = scheduleImageLoad(async () => {
-        const res = await imageThumbnailLoader(
-          cwd,
-          item.relPath,
-          thumbnailDimension,
-        );
-        if (!res) return undefined;
-        if (res.kind !== "image") {
-          return contextGraphThumbnailFailureIsPermanent(res)
-            ? null
-            : undefined;
-        }
-        if (!(await decodeThumbnail(res)) || !res.dataUrl) return undefined;
-        return {
-          dataUrl: res.dataUrl,
-          requestedDimension: res.fullResolution
-            ? THUMBNAIL_DIMENSIONS.at(-1)!
-            : thumbnailDimension,
-          width: res.width,
-          height: res.height,
-          sourceWidth: res.sourceWidth,
-          sourceHeight: res.sourceHeight,
-          orientation: res.orientation,
-        };
-      });
+      scheduled = scheduleImageLoad(
+        imageLoadPriority,
+        async () => {
+          const res = await imageThumbnailLoader(
+            cwd,
+            item.relPath,
+            thumbnailDimension,
+          );
+          if (!res) return undefined;
+          if (res.kind !== "image") {
+            return contextGraphThumbnailFailureIsPermanent(res)
+              ? null
+              : undefined;
+          }
+          if (!(await decodeThumbnail(res)) || !res.dataUrl) return undefined;
+          return {
+            dataUrl: res.dataUrl,
+            requestedDimension: res.fullResolution
+              ? THUMBNAIL_DIMENSIONS.at(-1)!
+              : thumbnailDimension,
+            width: res.width,
+            height: res.height,
+            sourceWidth: res.sourceWidth,
+            sourceHeight: res.sourceHeight,
+            orientation: res.orientation,
+          };
+        },
+      );
       void scheduled.promise.then((next) => {
         // `undefined` is cancellation/transport failure: leave the key
         // retryable when this tab becomes active again.
@@ -1292,6 +1343,7 @@ function ImageCardMedia({
     thumbnailDimension,
     thumbnail,
     baseCacheKey,
+    imageLoadPriority,
     cwd,
     item.relPath,
     observeImage,
@@ -1317,7 +1369,6 @@ function ImageCardMedia({
               thumbnail.orientation,
             ),
           }}
-          loading="lazy"
           decoding="async"
           draggable={false}
           className="border-border1 group-hover/context-card:border-border4 h-auto max-h-full w-auto max-w-full rounded-lg border object-contain transition-colors"
