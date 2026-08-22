@@ -54,11 +54,8 @@ import type { Project } from "../../state/projects-store";
 import { useProjects, useWorkspacesFor } from "../../state/use-projects";
 import {
   dedupePendingCreates,
-  filterPendingCreatesForDesignAccess,
-  filterWorkspacesForDesignAccess,
   selectLiveVisible,
 } from "../../state/live-workspace-selectors";
-import { useInternalFeatureActive } from "../settings/internal-features";
 import { useActiveOrganization } from "../team/team-store";
 import { filterRowsForOrganization } from "../team/organization-capabilities";
 import {
@@ -169,16 +166,12 @@ function RepoWorkspaceRow({
   const w = row.workspace;
   const archiveWorkspace = useArchiveWorkspace();
   const archiving = useWorkspaceArchiving(w.id);
-  // Gates only the ENTER item in the context menu; exit is never gated.
-  const designModeSwitchAvailable =
-    useInternalFeatureActive("designWorkspaces");
   const stop = (e: React.MouseEvent) => e.stopPropagation();
   return (
     <WorkspaceContextMenu
       workspace={w}
       onArchive={() => void archiveWorkspace(w, { label: row.title })}
       archiveDisabled={archiving}
-      designModeSwitchAvailable={designModeSwitchAvailable}
     >
       <div
         role="button"
@@ -230,15 +223,10 @@ function RepoWorkspacesList({ project }: { project: Project }) {
   const { workspaces: allWorkspaces, loading } = useWorkspacesFor(
     project.repoSlug,
   );
-  const designWorkspacesActive = useInternalFeatureActive("designWorkspaces");
   const activeOrganization = useActiveOrganization();
   const accessibleWorkspaces = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterWorkspacesForDesignAccess(allWorkspaces, designWorkspacesActive),
-        activeOrganization,
-      ),
-    [activeOrganization, allWorkspaces, designWorkspacesActive],
+    () => filterRowsForOrganization(allWorkspaces, activeOrganization),
+    [activeOrganization, allWorkspaces],
   );
   // Shared selector: a row leaves only after the engine confirms archive/delete;
   // while in flight it remains here, inert and visibly busy.
@@ -248,15 +236,8 @@ function RepoWorkspacesList({ project }: { project: Project }) {
   );
   const rawPendingCreates = usePendingCreatesFor(project.repoSlug);
   const pendingCreates = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterPendingCreatesForDesignAccess(
-          rawPendingCreates,
-          designWorkspacesActive,
-        ),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, rawPendingCreates],
+    () => filterRowsForOrganization(rawPendingCreates, activeOrganization),
+    [activeOrganization, rawPendingCreates],
   );
   const pending = useMemo(
     () => dedupePendingCreates(pendingCreates, accessibleWorkspaces),
@@ -399,18 +380,12 @@ export function RepoPage({ project }: { project: Project }) {
   const pageActive = useActivePage() === "repo";
   const dispatch = useWorkspaceDispatch();
   const { projects } = useProjects();
-  const designSettingsActive = useInternalFeatureActive("designWorkspaces");
   // The active hub tab is owned by this exact repository and restored from the
   // synchronous Zustand snapshot on its first render.
   const persistedView = useWorkspaceStore((state) =>
     selectRepoPageView(state, project.id),
   );
-  // A persisted Design tab can outlive the Internal flag; fall back to
-  // Workspaces rather than rendering a tabless body.
-  const view =
-    persistedView === "design" && !designSettingsActive
-      ? "workspaces"
-      : persistedView;
+  const view = persistedView;
 
   // Recently visited repo/view trees survive repository and section switches.
   // This retains local form state and Keychain-backed rows; the shared settings
@@ -521,11 +496,7 @@ export function RepoPage({ project }: { project: Project }) {
                 <TabsTrigger value="workspaces" className="text-xs">
                   Workspaces
                 </TabsTrigger>
-                {CONFIG_VIEWS.filter(
-                  // The Design tab (the committed design-folder pointer) is an
-                  // Internal surface; every other section is always offered.
-                  (s) => s.id !== "design" || designSettingsActive,
-                ).map((s) => (
+                {CONFIG_VIEWS.map((s) => (
                   <TabsTrigger
                     key={s.id}
                     value={s.id}

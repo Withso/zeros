@@ -64,11 +64,6 @@ export function resolveRepoWorkspaceDestination(args: {
   rememberedFolder: string | null | undefined;
   cachedWorkspaces: readonly Workspace[] | undefined;
   allowLocalMain?: boolean;
-  /** Inert under the mode model — design-MODE rows are ordinary destinations
-   *  (a blocked route renders the placeholder with its un-gated exit). Kept
-   *  in the signature so the three call sites and their memo inputs stay
-   *  untouched; retired with the flag. */
-  allowDesignWorkspaces?: boolean;
 }): WorkspaceNavigationTarget {
   const { project, cachedWorkspaces } = args;
   const allowLocalMain = args.allowLocalMain !== false;

@@ -24,6 +24,7 @@ import { warmIgnoredRoots } from "./workbench/tabs/ignored-entries-cache";
 import { resolveReviewProvider } from "./pr/review-provider";
 import { parseRemote } from "./pr/github-url";
 import { warmDesignWorkspaceSnapshot } from "@/renderer/features/design-workspace/state/design-workspace-cache";
+import { pendingWorkspaceMode } from "@/renderer/state/pending-workspaces";
 
 /** Complete identity needed to navigate before an authoritative workspace list
  * is warm. Engine Workspace rows satisfy this shape directly. */
@@ -38,13 +39,20 @@ export function prefetchWorkspaceSurface(
 ): void {
   const folder = workspace.path;
   if (!folder) return;
+  const requestedKind = pendingWorkspaceMode(workspace.id);
   if (
     resolveWorkspacePresentationKind({
       confirmedKind: workspace.kind,
+      requestedKind,
       folder,
     }) === "design"
   ) {
-    if (workspace.id) warmDesignWorkspaceSnapshot(workspace.id);
+    // First Design entry has published its surface intent but has not created
+    // the document yet. Do not race an eager snapshot read into that gap; the
+    // active Design surface starts the exact-key read after setMode confirms.
+    if (workspace.kind === "design" && workspace.id) {
+      warmDesignWorkspaceSnapshot(workspace.id);
+    }
     return;
   }
   warmWorkspaceFiles(folder);

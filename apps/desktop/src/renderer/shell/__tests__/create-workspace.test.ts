@@ -13,7 +13,6 @@ const spawnPreparedDefaultChat = vi.fn((_args: unknown) => ({
   agentId: null,
 }));
 const toastError = vi.fn();
-const isInternalFeatureActive = vi.fn((_feature: string) => true);
 const isNativeRuntime = vi.fn(() => true);
 const isExpectedElectron = vi.fn(() => true);
 const discardQueuedContextGraphWrites = vi.fn();
@@ -58,21 +57,15 @@ vi.mock("../../state/pending-workspaces", () => ({
   clearWorkspaceSettling: vi.fn(),
 }));
 vi.mock("../../state/spawn-default-chat", () => ({
-  spawnPreparedDefaultChat: (args: unknown) =>
-    spawnPreparedDefaultChat(args),
-}));
-vi.mock("../../features/settings/internal-features", () => ({
-  isInternalFeatureActive: (feature: string) =>
-    isInternalFeatureActive(feature),
+  spawnPreparedDefaultChat: (args: unknown) => spawnPreparedDefaultChat(args),
 }));
 vi.mock("../../platform/runtime", () => ({
   isNativeRuntime: () => isNativeRuntime(),
   isExpectedElectron: () => isExpectedElectron(),
 }));
 
-const { createWorkspaceForProject, repoNeedsFirstWorkspace } = await import(
-  "../create-workspace"
-);
+const { createWorkspaceForProject, repoNeedsFirstWorkspace } =
+  await import("../create-workspace");
 
 function workspace(overrides: Partial<Workspace> = {}): Workspace {
   return {
@@ -106,7 +99,6 @@ const project = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  isInternalFeatureActive.mockReturnValue(true);
   isNativeRuntime.mockReturnValue(true);
   isExpectedElectron.mockReturnValue(true);
 });
@@ -141,9 +133,9 @@ describe("repoNeedsFirstWorkspace — the auto-create-on-add guard", () => {
     expect(reloadWorkspacesFor).not.toHaveBeenCalled();
 
     vi.clearAllMocks();
-    peekWorkspacesFor.mockReturnValueOnce(undefined).mockReturnValue([
-      workspace(),
-    ]);
+    peekWorkspacesFor
+      .mockReturnValueOnce(undefined)
+      .mockReturnValue([workspace()]);
     reloadWorkspacesFor.mockResolvedValue(true);
     expect(await repoNeedsFirstWorkspace("zeros")).toBe(false);
     expect(reloadWorkspacesFor).toHaveBeenCalledWith("zeros");
@@ -173,7 +165,7 @@ describe("repoNeedsFirstWorkspace — the auto-create-on-add guard", () => {
 });
 
 describe("createWorkspaceForProject", () => {
-  it("refuses Design creation outside the desktop runtime even for staff with the flag", async () => {
+  it("refuses Design creation outside the desktop runtime", async () => {
     isNativeRuntime.mockReturnValue(false);
     isExpectedElectron.mockReturnValue(false);
 
@@ -188,33 +180,10 @@ describe("createWorkspaceForProject", () => {
     expect(workspaceCreate).not.toHaveBeenCalled();
   });
 
-  it("refuses design creation before prepare unless the effective Internal gate holds", async () => {
-    isInternalFeatureActive.mockReturnValue(false);
-    workspacePrepareCreate.mockResolvedValue({
-      workspaceId: "ws_design",
-      path: "/design workspaces/zeros/landing-page",
-      repoSlug: "zeros",
-      branch: "zeros/design-landing-page",
-    });
-    workspaceCreate.mockResolvedValue({ status: "in-progress" });
-    reloadWorkspacesFor.mockResolvedValue(true);
-    peekWorkspacesFor.mockReturnValue([
-      workspace({ id: "ws_design", kind: "design" }),
-    ]);
-    const dispatch = vi.fn();
-
-    expect(
-      await createWorkspaceForProject({ project, dispatch, kind: "design" }),
-    ).toBe(false);
-    expect(isInternalFeatureActive).toHaveBeenCalledWith("designWorkspaces");
-    expect(workspacePrepareCreate).not.toHaveBeenCalled();
-    expect(workspaceCreate).not.toHaveBeenCalled();
-    expect(dispatch).not.toHaveBeenCalled();
-  });
-
-  it("rechecks design access after the asynchronous prepare boundary", async () => {
+  it("rechecks desktop availability after the asynchronous prepare boundary", async () => {
     workspacePrepareCreate.mockImplementation(async () => {
-      isInternalFeatureActive.mockReturnValue(false);
+      isNativeRuntime.mockReturnValue(false);
+      isExpectedElectron.mockReturnValue(false);
       return {
         workspaceId: "ws_design",
         path: "/design workspaces/zeros/landing-page",
@@ -239,9 +208,9 @@ describe("createWorkspaceForProject", () => {
       code: "VALIDATION_FAILED",
       message: "this repository has no commits yet",
     });
-    expect(await createWorkspaceForProject({ project, dispatch: vi.fn() })).toBe(
-      false,
-    );
+    expect(
+      await createWorkspaceForProject({ project, dispatch: vi.fn() }),
+    ).toBe(false);
     expect(workspaceCreate).not.toHaveBeenCalled();
     expect(toastError).toHaveBeenCalledWith(
       expect.stringContaining("no commits yet"),
@@ -259,9 +228,9 @@ describe("createWorkspaceForProject", () => {
     workspaceCreate.mockResolvedValue({ status: "in-progress" });
     reloadWorkspacesFor.mockResolvedValue(true);
     peekWorkspacesFor.mockReturnValue([workspace({ id: "ws_1" })]);
-    expect(await createWorkspaceForProject({ project, dispatch: vi.fn() })).toBe(
-      true,
-    );
+    expect(
+      await createWorkspaceForProject({ project, dispatch: vi.fn() }),
+    ).toBe(true);
     expect(workspaceCreate).toHaveBeenCalledWith(
       expect.objectContaining({ preparedId: "ws_1" }),
     );

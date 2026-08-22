@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  designStyleUnitOptions,
   designStylePropertyAffectsLayout,
   designStyleFieldValue,
   isDesignRuntimeStylePropertyAuthored,
   normalizeDesignStyleFieldInput,
+  parseDesignStyleNumericParts,
+  replaceDesignStyleNumericUnit,
   resolveDesignNumericExpression,
   scrubDesignNumericValue,
   parseDesignCssDeclarations,
@@ -127,6 +130,39 @@ describe("design style values", () => {
     expect(scrubDesignNumericValue("12px", 3.5)).toBe("15.5px");
     expect(scrubDesignNumericValue("0.75", -0.25)).toBe("0.5");
     expect(scrubDesignNumericValue("auto", 10)).toBeNull();
+  });
+
+  it("separates simple numeric values from their editable CSS units", () => {
+    expect(parseDesignStyleNumericParts("32px")).toEqual({
+      number: 32,
+      text: "32",
+      unit: "px",
+    });
+    expect(parseDesignStyleNumericParts(".5REM")).toEqual({
+      number: 0.5,
+      text: "0.5",
+      unit: "rem",
+    });
+    expect(parseDesignStyleNumericParts("calc(100% - 8px)")).toBeNull();
+    expect(parseDesignStyleNumericParts("auto")).toBeNull();
+  });
+
+  it("offers property-aware unit changes without corrupting complex CSS", () => {
+    expect(designStyleUnitOptions("width")).toEqual([
+      "px",
+      "%",
+      "em",
+      "rem",
+      "vw",
+      "vh",
+    ]);
+    expect(designStyleUnitOptions("grid-auto-columns")).toContain("fr");
+    expect(designStyleUnitOptions("border-width")).not.toContain("%");
+    expect(designStyleUnitOptions("transition-duration")).toEqual(["ms", "s"]);
+    expect(designStyleUnitOptions("opacity")).toEqual([]);
+    expect(replaceDesignStyleNumericUnit("32px", "%")).toBe("32%");
+    expect(replaceDesignStyleNumericUnit("0", "px")).toBe("0px");
+    expect(replaceDesignStyleNumericUnit("auto", "%")).toBeNull();
   });
 
   it("resolves field equations against the focused baseline", () => {

@@ -772,6 +772,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     "design inspector keeps themes out of element styles",
     (await page.getByText("Themes", { exact: true }).count()) === 0,
   );
+  check(
+    "style selects and segmented controls expose their visible property labels",
+    (await page.getByRole("combobox", { name: "Box sizing" }).isVisible()) &&
+      (await page.getByRole("group", { name: "Display" }).isVisible()),
+  );
   const propertySearch = page.getByLabel("Find a style property");
   const quietInspectorField = page
     .locator("[data-design-inspector-field]")
@@ -813,12 +818,12 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         })
       : null;
   check(
-    "authored inspector values use a filled 13px proportional control",
+    "authored inspector values use a filled compact numeric control",
     !!appliedInspectorVisual &&
       appliedInspectorVisual.background !== "rgba(0, 0, 0, 0)" &&
       appliedInspectorVisual.borderWidth === "0px" &&
-      appliedInspectorVisual.fontSize === "13px" &&
-      !appliedInspectorVisual.fontFamily?.toLowerCase().includes("mono"),
+      appliedInspectorVisual.fontSize === "11px" &&
+      appliedInspectorVisual.fontFamily?.toLowerCase().includes("mono"),
   );
   const authoredMarginTop = page.locator(
     '[data-design-style-property="margin-top"]',
@@ -829,7 +834,10 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   check(
     "an authored margin shorthand fills every affected side field",
     (await authoredMarginTop.getAttribute("data-design-applied")) === "" &&
-      (await authoredMarginTop.locator("input").inputValue()) === "0px" &&
+      (await authoredMarginTop.locator("input").inputValue()) === "0" &&
+      (
+        await authoredMarginTop.getByLabel("Unit for T").textContent()
+      )?.includes("px") &&
       (await authoredMarginTop.evaluate(
         (element) =>
           getComputedStyle(element).backgroundColor !== "rgba(0, 0, 0, 0)",
@@ -838,7 +846,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   check(
     "an untouched style field shows its computed value without a fill",
     (await untouchedPaddingTop.getAttribute("data-design-applied")) === null &&
-      (await untouchedPaddingTop.locator("input").inputValue()) === "0px" &&
+      (await untouchedPaddingTop.locator("input").inputValue()) === "0" &&
       (await untouchedPaddingTop
         .locator("input")
         .getAttribute("placeholder")) === "-" &&
@@ -877,6 +885,35 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       "design-neutral-style-commit",
     ),
   );
+  const untouchedPaddingUnit = untouchedPaddingTop.getByLabel("Unit for T");
+  await untouchedPaddingUnit.click();
+  await page.getByRole("option", { name: "%", exact: true }).click();
+  check(
+    "a numeric field changes units without rewriting its value",
+    await waitFor(
+      () =>
+        homeRuntime
+          .locator('[data-oid="home-heading"]')
+          .evaluate(
+            (element) =>
+              element.style.getPropertyValue("padding-top") === "12%",
+          )
+          .catch(() => false),
+      "design-style-unit-percent",
+    ),
+  );
+  await untouchedPaddingUnit.click();
+  await page.getByRole("option", { name: "px", exact: true }).click();
+  await waitFor(
+    () =>
+      homeRuntime
+        .locator('[data-oid="home-heading"]')
+        .evaluate(
+          (element) => element.style.getPropertyValue("padding-top") === "12px",
+        )
+        .catch(() => false),
+    "design-style-unit-pixels",
+  );
   // An empty field means "remove the authored declaration", so this restores
   // the fixture without leaving a 0px of its own behind.
   await untouchedPaddingInput.fill("");
@@ -897,7 +934,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     "Escape restores the computed value without authoring a style",
     await waitFor(
       async () =>
-        (await untouchedPaddingInput.inputValue()) === "0px" &&
+        (await untouchedPaddingInput.inputValue()) === "0" &&
         (await homeRuntime
           .locator('[data-oid="home-heading"]')
           .evaluate(
@@ -1170,7 +1207,10 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         fields.every(
           (field) =>
             field.getAttribute("data-design-applied") === "" &&
-            field.querySelector("input")?.value === "72px" &&
+            field.querySelector("input")?.value === "72" &&
+            field
+              .querySelector('button[aria-label^="Unit for "]')
+              ?.textContent?.includes("px") &&
             getComputedStyle(field).backgroundColor !== "rgba(0, 0, 0, 0)",
         ),
       )),
@@ -1822,7 +1862,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     "design-authored-padding-restore-heading",
   );
   check(
-    "13px editor chrome remains horizontally contained",
+    "compact editor chrome remains horizontally contained",
     await page.evaluate(() =>
       [
         ...document.querySelectorAll(
@@ -1839,7 +1879,19 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       .isVisible()
       .catch(() => false),
   );
-  await propertySearch.fill("");
+  await propertySearch.fill("box-sizing");
+  check(
+    "property search accepts exact CSS property names",
+    await page
+      .getByText("Box sizing", { exact: true })
+      .isVisible()
+      .catch(() => false),
+  );
+  await propertySearch.press("Escape");
+  check(
+    "Escape clears property search",
+    (await propertySearch.inputValue()) === "",
+  );
   const elementResizeLabels = await homeFrame
     .locator(
       '.zd-design-selection-handle[aria-label^="Resize Make the next move unmistakable. from "]',
@@ -2323,6 +2375,23 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     "motion opens as a persistent canvas timeline",
     await motionTimeline.isVisible(),
   );
+  await motionTimeline.getByLabel("More motion settings").click();
+  check(
+    "secondary motion controls remain available in a focused settings popover",
+    (await page.getByLabel("Animation name").isVisible()) &&
+      (await page.getByLabel("Animation delay").isVisible()) &&
+      (await page.getByLabel("Animation iterations").isVisible()) &&
+      (await page.getByLabel("Animation direction").isVisible()) &&
+      (await page.getByLabel("Animation fill mode").isVisible()),
+  );
+  await page.keyboard.press("Escape");
+  check(
+    "motion settings dismiss without closing the timeline",
+    (await waitFor(
+      () => page.getByLabel("Animation name").isHidden(),
+      "design-motion-settings-dismiss",
+    )) && (await motionTimeline.isVisible()),
+  );
   check(
     "a new layer starts with no inherited or placeholder keyframes",
     (await motionTimeline.locator(".zd-design-motion-keyframe").count()) ===
@@ -2349,6 +2418,16 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     .getByRole("button", { name: /opacity keyframe at/ })
     .first();
   await firstOpacityKeyframe.click();
+  await firstOpacityKeyframe.press("ArrowRight");
+  check(
+    "keyboard arrows retime a focused keyframe",
+    (await motionTimeline
+      .getByRole("button", { name: /opacity keyframe at 1%/ })
+      .count()) === 1,
+  );
+  await motionTimeline
+    .getByRole("button", { name: /opacity keyframe at 1%/ })
+    .press("Home");
   const deleteSelectedKeyframe = motionTimeline.getByRole("button", {
     name: "Delete selected keyframe",
   });
@@ -2408,6 +2487,25 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   const motionDurationBeforeHotCommit =
     motionTimeline.getByLabel("Animation duration");
   await motionDurationBeforeHotCommit.fill("450ms");
+  await page.locator('[data-design-layer-id="home-copy"]').click();
+  await waitFor(
+    () =>
+      page
+        .locator('[data-design-layer-id="home-copy"][aria-selected="true"]')
+        .isVisible()
+        .catch(() => false),
+    "design-motion-draft-other-layer",
+  );
+  await page.locator('[data-design-layer-id="home-heading"]').click();
+  check(
+    "unsaved motion survives a layer selection round trip",
+    await waitFor(
+      async () =>
+        (await motionTimeline.getByLabel("Animation duration").inputValue()) ===
+        "450ms",
+      "design-motion-draft-selection-round-trip",
+    ),
+  );
   await page.evaluate(() => {
     const iframe = document.querySelector(
       '[data-design-frame="home.html"] iframe',
@@ -2738,10 +2836,16 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     ),
   );
   await page.getByRole("button", { name: "Seek motion to 450ms" }).click();
+  const soughtMotionTime = await waitFor(
+    async () =>
+      (await motionTimeline.getByLabel("Motion current time").inputValue()) ===
+      "450",
+    "design-motion-canvas-seek",
+  );
   check(
     "canvas motion points seek the exact timeline time",
-    (await motionTimeline.getByLabel("Motion current time").inputValue()) ===
-      "450",
+    soughtMotionTime,
+    await motionTimeline.getByLabel("Motion current time").inputValue(),
   );
   const motionPreset = motionTimeline.getByLabel("Motion preset");
   await motionPreset.click();

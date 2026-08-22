@@ -882,10 +882,10 @@ export function setWorkspaceRemoteRestricted(
 }
 
 /** The set of workspace ids the owner has hidden from remote (relay) clients.
- *  Design workspaces are always local-only while their product surface is an
- *  Internal feature; they join the owner's explicit opt-outs in the same set
- *  so workspace discovery, chats, PTYs, and agent starts share one boundary.
- *  One query keeps the remote list filter O(1) per row. */
+ *  Design workspaces use a trusted desktop-local API and remain local-only;
+ *  they join the owner's explicit opt-outs in the same set so discovery,
+ *  chats, PTYs, and agent starts share one boundary. One query keeps the
+ *  remote list filter O(1) per row. */
 export function listRemoteRestrictedWorkspaceIds(): Set<string> {
   const rows = open()
     .prepare<[], { workspace_id: string }>(

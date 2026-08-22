@@ -48,7 +48,10 @@ import {
   fetchDesignFoundation,
 } from "./state/design-workspace-cache";
 import { useDesignWorkspaceUiStore } from "./state/design-workspace-ui";
-import { usePendingWorkspaceKind } from "../../state/pending-workspaces";
+import {
+  usePendingWorkspaceKind,
+  usePendingWorkspaceMode,
+} from "../../state/pending-workspaces";
 import { resolveWorkspacePresentationKind } from "../../state/workspace-resolution";
 import { Button, ScrollArea, Tooltip, toast } from "../../shared/ui/primitives";
 import { cn } from "../../shared/ui/cn";
@@ -229,9 +232,11 @@ function ActiveDesignWorkspaceSidebarPanels({
 }) {
   const { workspace, folder } = useActiveWorkspace();
   const pendingKind = usePendingWorkspaceKind(folder);
+  const requestedKind = usePendingWorkspaceMode(workspace?.id);
   const isDesign =
     resolveWorkspacePresentationKind({
       confirmedKind: workspace?.kind,
+      requestedKind,
       pendingKind,
       folder,
     }) === "design";

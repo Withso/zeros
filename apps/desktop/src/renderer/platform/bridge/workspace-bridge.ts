@@ -121,8 +121,9 @@ const LOCAL_GIT_TIMEOUT_MS = 30_000;
 
 /** Context-graph mutations can intentionally wait behind workspace creation's
  * app-wide Design-owner publication. Give those queued requests the same
- * budget as the create that owns the transition. Transcript windows share the
- * budget because reading a legacy image can migrate it into the graph. */
+ * budget as the create that owns the transition. Transcript windows are served
+ * throughout that transition, but share the budget because reading a legacy
+ * image can migrate it into the graph. */
 const CONTEXT_GRAPH_QUEUE_TIMEOUT_MS = 60_000;
 
 /** Send a WORKSPACE_REQUEST and await its WORKSPACE_RESPONSE / WORKSPACE_ERROR
@@ -234,7 +235,7 @@ export async function requestWorkspaceList(
     | undefined;
   // This helper exists for the coding-agent cwd → workspace-id resolver. A
   // Design workspace must never become an additional-directory or agent cwd,
-  // even for staff who enabled the separate Design surface.
+  // because the public Design surface does not grant code-agent authority.
   return (result?.workspaces ?? []).filter(
     (workspace) => workspace.kind !== "design",
   );
@@ -1826,7 +1827,11 @@ export async function bridgeWorkspaceReassignLocalOrganization(
 export async function bridgeWorkspaceSetMode(
   bridge: RuntimeClient,
   args: { workspaceId: string; mode: "code" | "design" },
-): Promise<{ ok: true; mode: "code" | "design" }> {
+): Promise<{
+  ok: true;
+  mode: "code" | "design";
+  snapshot?: unknown;
+}> {
   // Entering Design ensures + commits its foundation; exit may materialize a
   // legacy sparse cone. Either can take seconds, so use the lifecycle budget
   // rather than the 10s default.
@@ -1838,6 +1843,7 @@ export async function bridgeWorkspaceSetMode(
   )) as {
     ok: true;
     mode: "code" | "design";
+    snapshot?: unknown;
   };
 }
 

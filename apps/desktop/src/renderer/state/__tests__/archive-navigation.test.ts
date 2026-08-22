@@ -77,15 +77,13 @@ describe("previousWorkspaceInOrder", () => {
     ).toBe(predecessor);
   });
 
-  it("skips a hidden Design predecessor when Design access is disabled", () => {
+  it("selects a Design predecessor like any other public workspace", () => {
     const code = workspace("code", 1);
     const design = workspace("design", 2, { kind: "design" });
     const leaving = workspace("leaving", 3);
 
-    expect(
-      previousWorkspaceInOrder(leaving, [code, design, leaving], {}, {
-        allowDesignWorkspaces: false,
-      }),
-    ).toBe(code);
+    expect(previousWorkspaceInOrder(leaving, [code, design, leaving], {})).toBe(
+      design,
+    );
   });
 });

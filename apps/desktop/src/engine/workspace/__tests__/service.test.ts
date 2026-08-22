@@ -642,6 +642,33 @@ describe("WorkspaceService", () => {
     }
   });
 
+  it("shares concurrent aggregate Design snapshot scans for one workspace", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-snapshot-single-flight",
+      kind: "design",
+    });
+    try {
+      const [first, second] = (await Promise.all([
+        svc.handle("design.snapshot", { workspaceId: design.workspaceId }),
+        svc.handle("design.snapshot", { workspaceId: design.workspaceId }),
+      ])) as Array<{ snapshot: object }>;
+
+      // Sharing the exact result object pins that only one filesystem parse /
+      // lint / render-identity pass owned this concurrent cold generation.
+      expect(first.snapshot).toBe(second.snapshot);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
   it("publishes validated Design screenshots without replacing the cache on malformed input", async () => {
     execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
     execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
@@ -723,12 +750,22 @@ describe("WorkspaceService", () => {
       // Concurrent duality: the switch enforces nothing and blocks on
       // nothing — agents/terminals keep running through it in both
       // directions. (The old census refusal is retired.)
-      await expect(
-        svc.handle("workspace.setMode", {
-          workspaceId: created.workspaceId,
-          mode: "design",
-        }),
-      ).resolves.toEqual({ ok: true, mode: "design" });
+      const entered = (await svc.handle("workspace.setMode", {
+        workspaceId: created.workspaceId,
+        mode: "design",
+      })) as {
+        ok: true;
+        mode: "design";
+        snapshot?: { frames: unknown[]; tokenSourceVersion: string };
+      };
+      expect(entered).toMatchObject({
+        ok: true,
+        mode: "design",
+        snapshot: {
+          frames: expect.any(Array),
+          tokenSourceVersion: expect.any(String),
+        },
+      });
       const afterEnter = (await svc.handle("workspace.list")) as {
         workspaces: Array<{ id: string; kind?: string }>;
       };
