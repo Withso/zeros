@@ -17,11 +17,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const writeContextAttachment = vi.fn();
 const readImageAttachment = vi.fn();
+const readTextAttachment = vi.fn();
 
 vi.mock("../agent-history-client", () => ({
   writeContextAttachment: (...args: unknown[]) =>
     writeContextAttachment(...args),
   readImageAttachment: (...args: unknown[]) => readImageAttachment(...args),
+  readTextAttachment: (...args: unknown[]) => readTextAttachment(...args),
 }));
 
 import {
@@ -99,6 +101,8 @@ describe("textAttachmentBlock", () => {
 describe("encodeAttachments — text attachments reach the agent", () => {
   beforeEach(() => {
     writeContextAttachment.mockReset();
+    readTextAttachment.mockReset();
+    readTextAttachment.mockResolvedValue(null);
     writeContextAttachment.mockResolvedValue({
       absolutePath: "/repo/.context-graph/local/attachments/att-img/shot.png",
       relativePath: ".context-graph/local/attachments/att-img/shot.png",
@@ -230,6 +234,139 @@ describe("encodeAttachments — text attachments reach the agent", () => {
     );
     expect(blocks).toEqual([]);
     expect(skipped).toHaveLength(1);
+  });
+
+  it("rehydrates a graph-backed text body before edit-resend", async () => {
+    // The counterpart of the image rehydrate below. A long clipboard paste is
+    // a .txt attachment (composer-editor/long-paste.ts), so without this an
+    // ordinary edit-and-resend dropped the pasted body outright.
+    readTextAttachment.mockResolvedValue("hello world");
+
+    const { blocks, bubbleAttachments, skipped } = await encodeAttachments(
+      [
+        textAttachment({
+          id: "att-edit-k2-1",
+          text: "",
+          contextAttachmentId: "original",
+        }),
+      ],
+      VISION,
+    );
+
+    expect(readTextAttachment).toHaveBeenCalledWith({
+      cwd: "/repo",
+      attachmentId: "original",
+      diskPath: undefined,
+    });
+    expect(blocks).toEqual([
+      { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
+    ]);
+    // The DURABLE id, not the fresh `att-edit-` one: the next edit of this
+    // resubmitted message has to find the same record.
+    expect(bubbleAttachments[0]).toMatchObject({ attachmentId: "original" });
+    expect(skipped).toEqual([]);
+  });
+
+  it("prefers an exact disk reference over an id lookup when the bubble has one", async () => {
+    readTextAttachment.mockResolvedValue("hello world");
+    await encodeAttachments(
+      [
+        textAttachment({
+          id: "att-edit-k2-2",
+          text: "",
+          diskPath: ".context-graph/shared/attachments/original/notes.txt",
+          contextAttachmentId: "original",
+        }),
+      ],
+      VISION,
+    );
+
+    expect(readTextAttachment).toHaveBeenCalledWith({
+      cwd: "/repo",
+      attachmentId: "original",
+      diskPath: ".context-graph/shared/attachments/original/notes.txt",
+    });
+  });
+
+  it("reports the body as unavailable when its graph record is gone", async () => {
+    readTextAttachment.mockResolvedValue(null);
+    const { blocks, skipped } = await encodeAttachments(
+      [
+        textAttachment({
+          id: "att-edit-k2-3",
+          text: "",
+          contextAttachmentId: "gone",
+        }),
+      ],
+      VISION,
+    );
+    expect(blocks).toEqual([]);
+    expect(skipped).toEqual([
+      {
+        name: "notes.txt",
+        reason: "its contents aren't available to re-send — attach it again",
+      },
+    ]);
+  });
+
+  it("reports rather than fails the send when the graph is unreachable", async () => {
+    readTextAttachment.mockRejectedValue(new Error("no bridge"));
+    const { blocks, skipped } = await encodeAttachments(
+      [
+        textAttachment({
+          id: "att-edit-k2-4",
+          text: "",
+          contextAttachmentId: "original",
+        }),
+        imageAttachment(),
+      ],
+      VISION,
+    );
+    // The rest of the prompt still goes; only the unrecoverable chip is named.
+    expect(blocks).toEqual([
+      { type: "image", mimeType: "image/png", data: "aGVsbG8=" },
+    ]);
+    expect(skipped).toEqual([
+      {
+        name: "notes.txt",
+        reason: "its contents aren't available to re-send — attach it again",
+      },
+    ]);
+  });
+
+  it("does not look for a record a chip never had", async () => {
+    // A legacy text chip carries neither reference; skip the round trip.
+    await encodeAttachments([textAttachment({ text: undefined })], VISION);
+    expect(readTextAttachment).not.toHaveBeenCalled();
+  });
+
+  it("keeps one durable id across repeated edit-resends", async () => {
+    readTextAttachment.mockResolvedValue("hello world");
+    const first = await encodeAttachments([textAttachment()], VISION);
+    const durableId = first.bubbleAttachments[0]!.attachmentId!;
+    const reconstructed = messageToEditorContent({
+      text: "",
+      attachments: first.bubbleAttachments,
+    });
+    const second = await encodeAttachments(reconstructed.attachments, VISION);
+    const third = await encodeAttachments(
+      messageToEditorContent({
+        text: "",
+        attachments: second.bubbleAttachments,
+      }).attachments,
+      VISION,
+    );
+
+    expect(durableId).toBe("att-1");
+    expect(second.bubbleAttachments[0]).toMatchObject({
+      attachmentId: durableId,
+    });
+    expect(third.bubbleAttachments[0]).toMatchObject({
+      attachmentId: durableId,
+    });
+    expect(third.blocks).toEqual([
+      { type: "text", text: '<file name="notes.txt">\nhello world\n</file>' },
+    ]);
   });
 });
 

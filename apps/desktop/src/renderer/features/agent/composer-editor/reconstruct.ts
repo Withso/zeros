@@ -4,9 +4,14 @@
 //
 // Editing a user message rebuilds the WHOLE message as inline editor content:
 // text + mention pills + attachment pills, exactly where they were composed
-// (no separate "originals" chip row). Image bytes are recovered from the
-// persisted disk reference (legacy messages still decode their data URL);
-// text-file bodies weren't stored, so they reconstruct empty.
+// (no separate "originals" chip row).
+//
+// Attachment BYTES are deliberately not rebuilt here: a transcript row keeps a
+// durable context-graph reference (`diskPath` / `attachmentId`), never a second
+// copy of the file, and legacy image rows still carry their data URL. So an
+// attachment chip reconstructs with an empty payload plus that reference, and
+// encode-attachments.ts resolves the real bytes — image AND text — from the
+// graph at send time, for that send only.
 // ──────────────────────────────────────────────────────────
 
 import type {

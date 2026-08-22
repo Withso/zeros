@@ -20,9 +20,10 @@
 // than broken.
 //
 // Text attachments are INLINED into the prompt as `<file name="…">body</file>`
-// — there is no disk round-trip and no @path indirection. That is deliberate:
-// "the agent knows what happened" must not degrade to "the agent could find
-// out" (agents routinely skim or skip a referenced file).
+// — no @path indirection. That is deliberate: "the agent knows what happened"
+// must not degrade to "the agent could find out" (agents routinely skim or
+// skip a referenced file). The only disk round-trip is on the EDIT path, where
+// the chip being re-sent holds no bytes of its own — see the text branch.
 //
 // 2026-08-02: every valid attachment is ADDITIONALLY persisted into the
 // workspace's context graph (`.context-graph/<scope>/attachments/<id>/<file>`)
@@ -30,16 +31,20 @@
 // (composer-editor/context-graph-staging.ts) the graph copy normally already
 // exists by the time a send encodes; the write here is an idempotent safety
 // net (the engine skips byte-identical re-writes), kept because the send is the
-// last moment the bytes are certainly in memory. Text copies remain a
-// best-effort side effect because their prompt block already carries the body.
-// Image copies are awaited for every agent: transcript JSON keeps only the
-// returned disk path, never a full-resolution data URL. Vision agents still
-// receive the transient inline block; non-vision agents receive the path.
+// last moment the bytes are certainly in memory. Text copies stay a
+// fire-and-forget side effect because their prompt block already carries the
+// body — but that copy is also the ONLY surviving source for an edit-resend,
+// so a failed one costs the user the attachment on a later edit, not just a
+// missing canvas card. Image copies are awaited for every agent: transcript
+// JSON keeps only the returned disk path, never a full-resolution data URL.
+// Vision agents still receive the transient inline block; non-vision agents
+// receive the path.
 // ──────────────────────────────────────────────────────────
 
 import { imageReferenceBlock } from "./agent-attachments";
 import {
   readImageAttachment,
+  readTextAttachment,
   writeContextAttachment,
 } from "./agent-history-client";
 import { RECONSTRUCTED_ATTACHMENT_ID_PREFIX } from "./composer-editor/reconstruct";
@@ -206,12 +211,33 @@ export async function encodeAttachments(
     }
 
     if (a.kind === "text") {
+      // Edit-in-place rebuilds a text chip from the sent bubble, which keeps
+      // the durable graph reference but never the bytes (reconstruct.ts). Read
+      // them back from that record — the same recovery the image branch below
+      // does from `diskPath` — so an edited resend carries the file the
+      // original send did. Without it EVERY resend of a message holding a text
+      // attachment dropped it, and long clipboard pastes (composer-editor/
+      // long-paste.ts) turned that rare case into an ordinary one.
+      let body = a.text;
+      const textAttachmentId = durableAttachmentId(a);
+      if (!body && ctx.cwd && (a.contextAttachmentId || a.diskPath)) {
+        try {
+          body =
+            (await readTextAttachment({
+              cwd: ctx.cwd,
+              attachmentId: textAttachmentId,
+              diskPath: a.diskPath,
+            })) ?? "";
+        } catch {
+          // Unreachable graph / absent transport. Fall through to the report
+          // below rather than failing the whole send.
+        }
+      }
       // An empty body is not an empty file — it is a body we do not have.
-      // The edit-resubmit path reconstructs text chips from the sent bubble,
-      // which stores the NAME but never the bytes, so re-sending would emit
-      // `<file name="x.txt"></file>` and tell the agent that chat was empty.
-      // Saying nothing and reporting it beats asserting something false.
-      if (!a.text) {
+      // Emitting `<file name="x.txt"></file>` would tell the agent that file
+      // was empty. Saying nothing and reporting it beats asserting something
+      // false.
+      if (!body) {
         skipped.push({
           name: a.name,
           reason: "its contents aren't available to re-send — attach it again",
@@ -220,19 +246,23 @@ export async function encodeAttachments(
       }
       blocks.push({
         type: "text" as const,
-        text: textAttachmentBlock(a.name, a.text),
+        text: textAttachmentBlock(a.name, body),
       });
       const bubbleAttachment: AgentTextMessageAttachment = {
         name: a.name,
         mimeType: a.mimeType,
         kind: "text",
-        attachmentId: a.id,
+        // The DURABLE id, not this chip's composer id: a reconstructed chip
+        // gets a fresh `att-edit-…` id that owns no graph record, so persisting
+        // it would leave the resubmitted bubble pointing at nothing and break
+        // recovery on the next edit.
+        attachmentId: textAttachmentId,
       };
       bubbleAttachments.push(bubbleAttachment);
       bubbleAttachmentById.set(a.id, bubbleAttachment);
       // The prompt carries the body inline; the graph copy is what makes the
       // attachment visible on the Context tab canvas.
-      stageInContextGraph(ctx, a, utf8ToBase64(a.text));
+      stageInContextGraph(ctx, a, utf8ToBase64(body));
       continue;
     }
 
