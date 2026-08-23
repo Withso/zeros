@@ -2,13 +2,12 @@
 // turn-partition — split a turn into "working" vs "final output"
 // ──────────────────────────────────────────────────────────
 //
-// The turn shape we render: while the agent works it streams
-// reasoning + tool calls + in-between narration;
-// the LAST thing it says is the actual answer. We render the answer
-// brightly and fold everything else into one collapsible "working"
-// group (dimmed while live, a single summary chip once done).
+// The live turn is an append-only completion feed: terminal tool calls appear
+// as they finish, while provisional prose/reasoning stays unmounted. Once the
+// engine publishes the terminal boundary, the complete answer appears in one
+// render and the historical work folds into one summary chip.
 //
-// `partitionTurn` is the pure boundary detector:
+// `partitionTurn` owns both projections:
 //   - finalOutput = the trailing run of agent/system TEXT messages
 //     (the concluding answer) plus the few records that explicitly render
 //     beside it. Walk from the end; stop at the first working event.
@@ -16,17 +15,14 @@
 //     narration, sub-agents, and late background-task lifecycle records.
 //
 // Thinking (role:"thought") is NOT output — it's reasoning — so it
-// always stays in the working group even when it's the last event.
+// stays in settled working history and never becomes the final answer.
 //
-// LIVE turns have NO concluded answer yet. While the agent is still
-// streaming, trailing text is provisional: the agent may emit more
-// tools next, which would turn that "answer" back into in-between
-// narration. Committing to the boundary early renders the tail text
-// OUTSIDE the working feed (separated by the list's `gap-4`, carrying
-// its own `py-2`), so its gap is far larger than the flat in-feed
-// rhythm — and snaps tight the moment the next event lands. Pass
-// `live: true` to defer the boundary entirely (everything is working);
-// the answer separates out only once the turn settles.
+// LIVE turns have NO concluded answer yet. Trailing text may still be followed
+// by another tool, so rendering it early both streams an unwanted draft and
+// moves the same DOM between dim working history and bright final output. With
+// `live: true`, only immutable non-prose records and terminal tools render;
+// tools are ordered by their completion update so concurrent work never inserts
+// ahead of a row already on screen.
 // ──────────────────────────────────────────────────────────
 
 import type { AgentMessage, AgentToolMessage } from "./use-agent-session";
@@ -42,10 +38,10 @@ export interface TurnPartition {
 
 export interface PartitionOptions {
   /** True while the turn is still streaming. A live turn has no concluded
-   *  answer yet, so the boundary is deferred: everything stays in `working`
-   *  and `finalOutput` is empty. This keeps the trailing narration in the
-   *  working feed (uniform spacing) instead of lurching out and back as the
-   *  tail flips between text and tool. Defaults to false (settled turn). */
+   *  answer yet, so `finalOutput` stays empty. `working` is the append-only
+   *  projection of terminal tools and immutable records; provisional prose,
+   *  reasoning, and unfinished tools remain unmounted. Defaults to false
+   *  (settled turn). */
   live?: boolean;
 }
 
@@ -107,14 +103,55 @@ function isFinalOutputEvent(e: AgentMessage): boolean {
   return isOutputText(e) || isManualCompaction(e) || isBudgetStop(e);
 }
 
+/** A live transcript is an append-only completion feed. Provisional prose is
+ * withheld until the turn settles, and a tool becomes visible only after its
+ * terminal update carries the final title/output/status. Immutable notices
+ * remain visible immediately so errors and blocking records cannot disappear. */
+function isCommittedLiveEvent(event: AgentMessage): boolean {
+  if (event.kind === "tool") {
+    return event.status === "completed" || event.status === "failed";
+  }
+  return event.kind !== "text" && event.kind !== "thinking";
+}
+
+function liveCommitTime(event: AgentMessage): number {
+  const candidate =
+    event.kind === "tool"
+      ? (event.settledAt ?? event.updatedAt)
+      : event.createdAt;
+  return Number.isFinite(candidate) ? candidate : 0;
+}
+
+function committedLiveEvents(events: AgentMessage[]): AgentMessage[] {
+  const committed: Array<{
+    event: AgentMessage;
+    sourceIndex: number;
+    committedAt: number;
+  }> = [];
+  events.forEach((event, sourceIndex) => {
+    if (!isCommittedLiveEvent(event)) return;
+    committed.push({
+      event,
+      sourceIndex,
+      committedAt: liveCommitTime(event),
+    });
+  });
+  committed.sort(
+    (a, b) => a.committedAt - b.committedAt || a.sourceIndex - b.sourceIndex,
+  );
+  return committed.map(({ event }) => event);
+}
+
 export function partitionTurn(
   events: AgentMessage[],
   options?: PartitionOptions,
 ): TurnPartition {
-  // A live turn hasn't concluded its answer yet — keep it all working.
-  // (A manual compaction can't be live-working content: it only happens
-  // idle or queues to run post-turn, so no special case here.)
-  if (options?.live) return { working: events, finalOutput: [] };
+  // A live turn has no concluded answer. Show only immutable records and
+  // terminal tools, ordered by completion so concurrent calls append instead
+  // of inserting ahead of rows the user has already seen.
+  if (options?.live) {
+    return { working: committedLiveEvents(events), finalOutput: [] };
+  }
   // Most turns have one contiguous answer suffix. Settled background-task
   // lifecycle rows are the exception: the provider can append them after the
   // answer, but they still render as tool calls in the working group. Walk

@@ -152,6 +152,25 @@ export function loadedSessionStatus(promptActive: boolean): SessionStatus {
   return promptActive ? "streaming" : "ready";
 }
 
+/** Token-rate content can wait for the next paint, but the terminal turn state
+ * is the commit boundary for the transcript. Flush that notification together
+ * with every preceding chunk so React can reveal the complete answer in one
+ * render instead of briefly treating a partial buffered message as final. */
+export function agentUpdateFlushMode(update: {
+  sessionUpdate?: string;
+  state?: string;
+}): "frame" | "turn-boundary" {
+  if (
+    update.sessionUpdate === "turn_state" &&
+    (update.state === "completed" ||
+      update.state === "failed" ||
+      update.state === "cancelled")
+  ) {
+    return "turn-boundary";
+  }
+  return "frame";
+}
+
 /** Decide whether a caller may reuse a matching admission flight. Lazy boot
  * probes deliberately admit nothing when no live execution exists, so a later
  * focus/send request that shared such a flight must immediately perform its
