@@ -461,7 +461,9 @@ export function FileViewer({
     // destinations) close, while tracked paths stay open and switch to Edit.
     // The explicit scope prevents an async completion from touching another
     // worktree after the user switches away.
-    void discardPath(workspaceId, targetPath)
+    void discardPath(workspaceId, targetPath, {
+      expectedNew: isNewFile === true,
+    })
       .then((outcome) => {
         dispatch({
           type: "RECONCILE_WORKBENCH_FILE_DISCARD",
@@ -493,7 +495,7 @@ export function FileViewer({
           current === targetPath ? null : current,
         );
       });
-  }, [workspaceId, cwd, path, discardTarget, dispatch]);
+  }, [workspaceId, cwd, path, discardTarget, dispatch, isNewFile]);
   // Highlighting is owned by <HighlightedCode> (sync once warm → no flash).
   const codeLang = isMarkdown ? "markdown" : getLang(path);
 
@@ -566,19 +568,23 @@ export function FileViewer({
           )}
           {/* Discard — ONLY when opened from the All-changes filter on a file
               with uncommitted work (discardable) and a writable target. */}
-          {discardable && !sourceReadOnly && (!fileMissing || diffAvailable) && (
-            <Tooltip label="Discard changes">
-              <button
-                type="button"
-                onClick={() => setDiscardTarget(path)}
-                disabled={discardingPath === path}
-                aria-busy={discardingPath === path}
-                className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-6 items-center justify-center rounded-sm transition-colors disabled:cursor-wait disabled:opacity-50"
+          {discardable &&
+            !sourceReadOnly &&
+            (!fileMissing || diffAvailable) && (
+              <Tooltip
+                label={isNewFile ? "Delete untracked file" : "Discard changes"}
               >
-                <Undo2 className="size-3.5" />
-              </button>
-            </Tooltip>
-          )}
+                <button
+                  type="button"
+                  onClick={() => setDiscardTarget(path)}
+                  disabled={discardingPath === path}
+                  aria-busy={discardingPath === path}
+                  className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-6 items-center justify-center rounded-sm transition-colors disabled:cursor-wait disabled:opacity-50"
+                >
+                  <Undo2 className="size-3.5" />
+                </button>
+              </Tooltip>
+            )}
           {/* Unified ⇄ split — only in Diff mode. */}
           {diffShown && (
             <div className="bg-bg2 flex items-center rounded-md p-0.5">
