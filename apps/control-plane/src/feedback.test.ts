@@ -8,7 +8,10 @@ import { createFeedbackRoutes } from "./feedback.js";
 
 const sender: AuthedUser = {
   id: "00000000-0000-0000-0000-000000000001",
-  providerSub: "auth0|000000000000000000000001",
+  identity: {
+    provider: "auth0",
+    subject: "auth0|000000000000000000000001",
+  },
   email: "real-sender@example.test",
   displayName: "Real Sender",
   avatarUrl: null,
@@ -232,7 +235,7 @@ describe("feedback route", () => {
       .body as Record<string, unknown>;
     expect(contact).toMatchObject({
       role: "user",
-      external_id: sender.providerSub,
+      external_id: sender.id,
       email: sender.email,
       name: sender.displayName,
     });

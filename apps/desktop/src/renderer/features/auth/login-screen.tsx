@@ -2,12 +2,10 @@
 // LoginScreen — sign in via the browser
 // ──────────────────────────────────────────────────────────
 //
-// Rendered by <AuthGate> when signed out. The DESKTOP owns no credentials and
-// runs no OAuth: it opens the system browser at the web hub
-// (app.zeros.build/launch), which signs the user in (Google/GitHub on
-// auth.zeros.build) and hands an OPAQUE, single-use ticket back over a zeros://
-// deep link that the app redeems for a session (see auth-context.tsx). When the
-// handoff lands, onAuthStateChange flips the gate and this screen unmounts.
+// Rendered by <AuthGate> when signed out. Electron main owns WorkOS PKCE, binds
+// an ephemeral loopback callback, and stores the resulting rotating token pair;
+// this renderer only waits for a metadata-only completion event. The legacy
+// Auth0 web-ticket/deep-link flow remains selectable until Phase 5.
 //
 // On click the button switches to "Opening browser…" (animated dots) and stays
 // there for the whole browser round-trip, with a Cancel affordance beneath it.
@@ -43,7 +41,7 @@ export function LoginScreen() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // Desktop sign-in in flight: the system browser is open and we're waiting for
-  // the zeros:// deep link to flip the gate. false = idle.
+  // either the main-owned loopback callback or legacy deep link to flip the gate.
   const [waiting, setWaiting] = useState(false);
 
   // "Opening browser…" covers both the brief startBrowserSignIn call (busy) and

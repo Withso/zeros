@@ -357,13 +357,13 @@ dbDescribe("GitHub App OAuth handoff", () => {
     await runMigrations(pool);
     userA = await ensureUser(pool, {
       provider: "auth0",
-      providerSub: randomUUID(),
+      providerSubject: randomUUID(),
       email: `github-a-${randomUUID()}@example.com`,
       displayName: "GitHub A",
     });
     userB = await ensureUser(pool, {
       provider: "auth0",
-      providerSub: randomUUID(),
+      providerSubject: randomUUID(),
       email: `github-b-${randomUUID()}@example.com`,
       displayName: "GitHub B",
     });
@@ -390,7 +390,7 @@ dbDescribe("GitHub App OAuth handoff", () => {
   it("uses direct OAuth when another device already recorded this account's installation", async () => {
     const crossDeviceUser = await ensureUser(pool, {
       provider: "auth0",
-      providerSub: randomUUID(),
+      providerSubject: randomUUID(),
       email: `github-cross-device-${randomUUID()}@example.com`,
       displayName: "GitHub Cross Device",
     });
@@ -432,7 +432,7 @@ dbDescribe("GitHub App OAuth handoff", () => {
   it("uses the install URL when a confirmed-empty desktop explicitly requests recovery", async () => {
     const authorizationOnlyUser = await ensureUser(pool, {
       provider: "auth0",
-      providerSub: randomUUID(),
+      providerSubject: randomUUID(),
       email: `github-force-install-${randomUUID()}@example.com`,
       displayName: "GitHub Force Install",
     });
@@ -511,7 +511,7 @@ dbDescribe("GitHub App OAuth handoff", () => {
     expect(replayedHandoff.status).toBe(404);
   });
 
-  it("binds the handoff to the Auth0 user who started it", async () => {
+  it("binds the handoff to the Zeros account that started it", async () => {
     const nonce = "c".repeat(43);
     const started = await startFlow(appA, nonce);
     expect((await callback(appA, started.state)).status).toBe(302);

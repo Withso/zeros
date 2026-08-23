@@ -6,8 +6,14 @@
 
 import { json, TOKENISH } from "../../lib/handoff-security";
 import type { Env } from "../../lib/session";
+import { legacyDesktopHandoffEnabled } from "../../lib/workos-browser.mjs";
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  if (!legacyDesktopHandoffEnabled(env)) {
+    return json({ error: "desktop_auth_migration_pending" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
   let body: { refresh_token?: unknown };
   try {
     body = await request.json();

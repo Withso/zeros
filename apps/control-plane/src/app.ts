@@ -7,7 +7,7 @@
 // that position is the whole contract for the two routes that must answer
 // without a bearer token. A 401 where a 503 belongs is invisible to a
 // per-router test and indistinguishable, from the desktop, from an expired
-// Auth0 session.
+// authentication session.
 // ──────────────────────────────────────────────────────────
 
 import { Hono } from "hono";
@@ -29,6 +29,7 @@ import {
   createGithubUnconfiguredRoutes,
 } from "./github.js";
 import { createFeedbackRoutes } from "./feedback.js";
+import { createWorkOSIdentityEventRoutes } from "./workos-events.js";
 
 export function createApp(
   config: Config,
@@ -46,6 +47,16 @@ export function createApp(
       return c.json({ ok: false }, 503);
     }
   });
+
+  // WorkOS lifecycle events arrive through the Cloudflare auth broker, which
+  // has already verified the provider signature. This separate credential is
+  // mounted before bearer auth and is never a WorkOS API key.
+  if (config.auth.provider === "workos" && config.authBrokerSecret) {
+    app.route(
+      "/",
+      createWorkOSIdentityEventRoutes(pool, config.authBrokerSecret),
+    );
+  }
 
   // CORS: the callers are the Electron renderer (localhost dev origin /
   // packaged origin) and later app.zeros.build. Auth is a bearer token —
@@ -73,16 +84,17 @@ export function createApp(
   });
 
   // GitHub calls the callback from the system browser, so it cannot carry the
-  // desktop user's Auth0 bearer token. Its one-time state is the
+  // desktop user's bearer token. Its one-time state is the
   // authorization. Register it before the auth middleware; every other GitHub
-  // route stays behind the normal Auth0, body-limit, and per-user rate limits.
+  // route stays behind the normal authentication, body-limit, and per-user
+  // rate limits.
   //
   // The unconfigured stand-in mounts in the SAME pre-auth position on purpose.
   // Behind the middleware it was unreachable without a token, so the one
   // caller that never has one — GitHub's browser callback — got `401 Missing
   // bearer token` where `503 github_not_configured` belongs, and a desktop
-  // whose Auth0 session had merely lapsed could not tell "GitHub App sign-in
-  // is off on this control plane" from "sign in again".
+  // whose authentication session had merely lapsed could not tell "GitHub App
+  // sign-in is off on this control plane" from "sign in again".
   if (config.github) {
     app.route("/", createGithubPublicRoutes(pool, config.github));
   } else {
@@ -114,7 +126,7 @@ export function createApp(
     c.req.path === "/v1/feedback" ? next() : defaultBodyLimit(c, next),
   );
 
-  // Everything under /v1 requires a verified Auth0-issued JWT.
+  // Everything under /v1 requires a verified JWT from the selected provider.
   app.use("/v1/*", createAuthMiddleware(config, pool));
 
   // Per-user ceiling across ALL /v1 routes. The sensitive endpoints keep their

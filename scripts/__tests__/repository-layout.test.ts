@@ -37,6 +37,20 @@ describe("repository layout contracts", () => {
     expect(codeql).toContain("    name: codeql");
   });
 
+  it("keeps the reviewed WorkOS Gitleaks false positive exact", () => {
+    const fingerprint =
+      "8bf0f9e959046859c835fc2938b07e7c7afb7c7a:apps/desktop/electron/workos-desktop-client.ts:linkedin-client-id:30";
+    const ignore = read(".gitleaksignore");
+    const desktopClient = read(
+      "apps/desktop/electron/workos-desktop-client.ts",
+    );
+
+    expect(ignore).toContain(fingerprint);
+    expect(desktopClient).toContain(
+      '"LinkedInOAuth", // gitleaks:allow — WorkOS authentication method name, not a client identifier',
+    );
+  });
+
   it("keeps required source-sync red until every ZSR architecture qualifies", () => {
     const preflight = read(".github/workflows/preflight.yml");
 
@@ -376,6 +390,7 @@ describe("repository layout contracts", () => {
       "@tiptap/extension-bubble-menu@3.26.0",
       "@tiptap/extension-floating-menu@3.26.0",
       "@types/trusted-types@2.0.7",
+      "@workos-inc/node@10.10.0",
     ]) {
       expect(licenses).toContain(packageName);
     }
@@ -385,7 +400,8 @@ describe("repository layout contracts", () => {
     );
     expect(licenses).not.toContain("@openai/codex@0.149.0-linux-x64");
     expect(generator).not.toContain('"--no-optional"');
-    expect(generator).toContain("apps/web gained production dependencies");
+    expect(generator).toContain("runNpmLicenseInventory");
+    expect(generator).toContain("web auth/session Worker");
   });
 
   it("stages the pinned Codex runtime instead of falling back to PATH", () => {

@@ -2,7 +2,7 @@
 //
 // The control plane is the confidential-client boundary: the GitHub client secret
 // never ships in Electron. OAuth state + PKCE verifier are single-use (10 min);
-// the resulting token pair crosses a second, Auth0-user-bound handoff row for
+// the resulting token pair crosses a second, Zeros-account-bound handoff row for
 // at most 90 seconds before Electron persists it in safeStorage.
 
 import {
@@ -1162,7 +1162,7 @@ export function createGithubUnconfiguredRoutes(): Hono {
   return app;
 }
 
-/** Public callback. Mount this before the `/v1/*` Auth0 middleware. */
+/** Public callback. Mount this before the `/v1/*` authentication middleware. */
 export function createGithubPublicRoutes(
   pool: pg.Pool,
   config: GithubBackendConfig,
@@ -1319,7 +1319,7 @@ export function createGithubPublicRoutes(
   return app;
 }
 
-/** Authenticated routes. Mount after the standard Auth0 middleware. */
+/** Authenticated routes. Mount after the standard authentication middleware. */
 export function createGithubRoutes(
   pool: pg.Pool,
   config: GithubBackendConfig,
@@ -1897,7 +1897,10 @@ export function createGithubRoutes(
         gitHttpUsername: "x-access-token",
         variantKey: config.variantKey,
         ownerSubjectSha256: createHash("sha256")
-          .update(user.providerSub, "utf8")
+          // Compatibility field consumed by the deferred cloud-workspace
+          // credential protocol. Its v1 wire meaning remains provider subject
+          // until that protocol receives an explicit account-ID migration.
+          .update(user.identity.subject, "utf8")
           .digest("hex"),
       });
     },

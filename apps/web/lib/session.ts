@@ -1,14 +1,18 @@
-// Reads the Auth0-backed KV session (written by functions/auth/callback.ts via
-// lib/oauth.ts — same host, since the auth.zeros.build project was folded in
-// here) and mints independent, per-device token pairs for the desktop handoff.
+// Provider-neutral browser-session facade. Auth0 compatibility sessions remain
+// in KV; WorkOS sessions are opaque-cookie lookups into a strongly consistent
+// Durable Object and never expose refresh material to Pages or the browser.
 //
-// New session cookies are HOST-ONLY (app.zeros.build); reads below don't care
-// about scope, so legacy Domain=.zeros.build cookies from the retired
-// auth.zeros.build era keep working until they expire.
+import {
+  configuredAuthProvider,
+  readWorkOSBrowserSession,
+  refreshWorkOSBrowserSession,
+} from "./workos-browser.mjs";
 
 export interface Env {
   /** Explicit deployment identity. Required by the Cloudflare build guard. */
   ZEROS_DEPLOY_ENV?: "alpha" | "beta" | "production";
+  /** Selects the compatibility Auth0 flow or the WorkOS browser flow. */
+  AUTH_PROVIDER?: "auth0" | "workos";
   AUTH0_DOMAIN: string;
   AUTH0_CLIENT_ID: string;
   AUTH0_CLIENT_SECRET: string;
@@ -33,7 +37,13 @@ export interface Env {
   MARKETING_HOSTS?: string;
   /** Authenticated organization API. Defaults to https://api.zeros.build. */
   CONTROL_PLANE_URL?: string;
+  /** WorkOS webhook verification and the independent broker-to-resource-server
+   * credential. Neither value is the WorkOS API key. */
+  WORKOS_WEBHOOK_SECRET?: string;
+  AUTH_BROKER_SECRET?: string;
   SESSIONS: KVNamespace;
+  /** Strong WorkOS flow/session authority, hosted by session-worker/worker.ts. */
+  AUTH_SESSIONS?: DurableObjectNamespace;
   /**
    * Cloudflare Pages static-asset binding. Used by `_middleware.ts` to serve the
    * marketing SPA on marketing hosts without running app Functions (which would
@@ -53,6 +63,14 @@ export type SessionData = {
    *  deleted/blocked user's 30-day KV session doesn't keep showing "signed in".
    *  Optional: sessions minted before this field existed revalidate on next read. */
   verifiedAt?: number;
+};
+
+export type SessionSnapshot = {
+  sessionId: string;
+  data: SessionData;
+  /** A transient WorkOS refresh failure retains identity/session state but has
+   *  no bearer that should be sent upstream until a later retry succeeds. */
+  refreshStatus?: "active" | "transient";
 };
 
 export const SESSION_COOKIE = "zeros_session";
@@ -84,7 +102,10 @@ export function parseCookieHeader(header: string): { name: string; value: string
 export async function getSessionWithId(
   env: Env,
   request: Request,
-): Promise<{ sessionId: string; data: SessionData } | null> {
+): Promise<SessionSnapshot | null> {
+  if (configuredAuthProvider(env) === "workos") {
+    return readWorkOSBrowserSession(env, request);
+  }
   if (!env.SESSIONS) {
     throw new Error(
       "SESSIONS KV binding is not configured on this Pages project/environment — check Settings > Functions > KV namespace bindings.",
@@ -118,7 +139,12 @@ export async function getSession(env: Env, request: Request): Promise<SessionDat
 export async function getVerifiedSessionWithId(
   env: Env,
   request: Request,
-): Promise<{ sessionId: string; data: SessionData } | null> {
+): Promise<SessionSnapshot | null> {
+  // The WorkOS coordinator refreshes before returning a near-expiry access
+  // token and serializes every exchange for this opaque session id.
+  if (configuredAuthProvider(env) === "workos") {
+    return getSessionWithId(env, request);
+  }
   const found = await getSessionWithId(env, request);
   if (!found) return null;
   const { sessionId, data } = found;
@@ -173,6 +199,36 @@ type RefreshResponse = { access_token: string; refresh_token?: string; expires_i
 export type RefreshResult =
   | { ok: true; data: RefreshResponse }
   | { ok: false; terminal: boolean };
+
+export type BrowserSessionRefreshResult =
+  | { ok: true; data: SessionData }
+  | { ok: false; terminal: boolean };
+
+/** Refresh the selected provider's browser session. WorkOS performs and
+ * persists the rotation inside the per-session Durable Object. Auth0 retains
+ * the released KV behavior until the compatibility provider is removed. */
+export async function refreshBrowserSession(
+  env: Env,
+  sessionId: string,
+  current: SessionData,
+): Promise<BrowserSessionRefreshResult> {
+  if (configuredAuthProvider(env) === "workos") {
+    const result = await refreshWorkOSBrowserSession(env, sessionId);
+    if (result.status === "active") return { ok: true, data: result.data };
+    return { ok: false, terminal: result.status === "terminal" };
+  }
+  if (!current.refreshToken) return { ok: false, terminal: false };
+  const granted = await refreshGrant(env, current.refreshToken);
+  if (!granted.ok) return granted;
+  const updated: SessionData = {
+    ...current,
+    accessToken: granted.data.access_token,
+    refreshToken: granted.data.refresh_token ?? current.refreshToken,
+    verifiedAt: Date.now(),
+  };
+  await putSession(env, sessionId, updated, SESSION_TTL_S);
+  return { ok: true, data: updated };
+}
 
 /** One extra /oauth/token refresh-grant call against Auth0, producing a token
  *  pair distinct from whatever the browser hub is currently holding — this is

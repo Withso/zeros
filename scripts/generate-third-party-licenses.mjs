@@ -18,15 +18,6 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const OUTPUT = join(ROOT, "THIRD-PARTY-LICENSES.txt");
 const CHECK = process.argv.includes("--check");
 const ROOT_LOCKFILE = readFileSync(join(ROOT, "pnpm-lock.yaml"), "utf8");
-const WEB_MANIFEST = JSON.parse(
-  readFileSync(join(ROOT, "apps", "web", "package.json"), "utf8"),
-);
-
-if (Object.keys(WEB_MANIFEST.dependencies || {}).length > 0) {
-  throw new Error(
-    "apps/web gained production dependencies; add its npm lock graph to the license generator before release.",
-  );
-}
 
 // electron-builder.yml currently emits macOS arm64 artifacts only. pnpm
 // installs optional native packages for the CI host, so a raw inventory would
@@ -178,6 +169,54 @@ function runPnpmLicenseInventory(cwd, surface, { standalone = false } = {}) {
         });
       }
     }
+  }
+  return [...records.values()];
+}
+
+/** The Cloudflare web/auth deployment is intentionally an independent npm
+ * root. npm lockfile v3 marks dev-only entries, so its installed production
+ * graph can join the same exact package/license inventory without asking pnpm
+ * to interpret a foreign lockfile. */
+function runNpmLicenseInventory(cwd, surface) {
+  const lockPath = join(cwd, "package-lock.json");
+  const lock = JSON.parse(readFileSync(lockPath, "utf8"));
+  if (!lock.packages || typeof lock.packages !== "object") {
+    throw new Error(`${lockPath}: expected an npm lockfile with package records`);
+  }
+  const records = new Map();
+  for (const [relativePath, locked] of Object.entries(lock.packages)) {
+    if (!relativePath || locked.dev === true) continue;
+    const packagePath = join(cwd, relativePath);
+    const manifestPath = join(packagePath, "package.json");
+    if (!existsSync(manifestPath)) {
+      throw new Error(
+        `${relativePath}: production npm package is not installed at ${packagePath}`,
+      );
+    }
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    const name = String(manifest.name || locked.name || "");
+    const version = String(manifest.version || locked.version || "");
+    if (!name || !version) {
+      throw new Error(`${relativePath}: installed npm package has no name/version`);
+    }
+    const key = `${name}@${version}`;
+    const previous = records.get(key);
+    if (previous) {
+      previous.surfaces.add(surface);
+      continue;
+    }
+    records.set(key, {
+      name,
+      version,
+      license: String(manifest.license || locked.license || "Unknown"),
+      author: displayAuthor(manifest.author),
+      homepage: String(manifest.homepage || ""),
+      repository: repositoryUrl(manifest),
+      repositoryKey: repositoryKey(manifest),
+      packagePath,
+      surfaces: new Set([surface]),
+      documentIds: [],
+    });
   }
   return [...records.values()];
 }
@@ -388,11 +427,16 @@ const marketingRecords = runPnpmLicenseInventory(
   "marketing standalone deployment",
   { standalone: true },
 );
+const webRecords = runNpmLicenseInventory(
+  join(ROOT, "apps", "web"),
+  "web auth/session Worker",
+);
 const recordsByKey = new Map();
 for (const record of [
   ...rootRecords,
   ...controlPlaneRecords,
   ...marketingRecords,
+  ...webRecords,
   electronRuntimeRecord(),
 ]) {
   const key = `${record.name}@${record.version}`;
@@ -528,10 +572,9 @@ const lines = [
   "-----",
   "This inventory covers production packages resolved by the root pnpm",
   "workspace (desktop, shared packages, and the development marketing graph),",
-  "the independently locked control plane, the standalone",
-  "marketing graph deployed by Cloudflare, and the Electron runtime embedded",
-  "in the desktop application. The independently locked web app currently has",
-  "no production dependencies; generation fails if that changes. Optional",
+  "the independently locked control plane, the standalone marketing graph",
+  "deployed by Cloudflare, the independently locked web auth/session Worker,",
+  "and the Electron runtime embedded in the desktop application. Optional",
   "JavaScript dependencies are included. Host-native optional packages are",
   "normalized to the macOS arm64",
   "release contents: the staged Claude runtime, the staged Codex runtime, the",

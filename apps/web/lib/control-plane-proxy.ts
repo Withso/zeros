@@ -1,9 +1,8 @@
 import {
   getVerifiedSessionWithId,
-  putSession,
-  refreshGrant,
-  SESSION_TTL_S,
+  refreshBrowserSession,
   type Env,
+  type SessionSnapshot,
   type SessionData,
 } from "./session";
 import {
@@ -44,7 +43,7 @@ async function upstreamRequest(
 export async function proxyControlPlane(
   request: Request,
   env: Env,
-  verifiedSession?: { sessionId: string; data: SessionData },
+  verifiedSession?: SessionSnapshot,
 ): Promise<Response> {
   const requestUrl = new URL(request.url);
   const pathname = requestUrl.pathname.replace(/^\/api(?=\/)/, "");
@@ -73,6 +72,13 @@ export async function proxyControlPlane(
   const found =
     verifiedSession ?? (await getVerifiedSessionWithId(env, request));
   if (!found) return jsonError(401, "signed_out", "Sign in again");
+  if (found.refreshStatus === "transient") {
+    return jsonError(
+      503,
+      "auth_unavailable",
+      "Sign-in service is temporarily unavailable; retry shortly",
+    );
+  }
   let session: SessionData = found.data;
   const pathAndSearch = `${pathname}${requestUrl.search}`;
   let upstream = await upstreamRequest(
@@ -85,20 +91,14 @@ export async function proxyControlPlane(
 
   // Browser sessions outlive access tokens. Refresh once on an upstream 401,
   // rotate the KV grant, then replay the exact bounded request body.
-  if (upstream.status === 401 && session.refreshToken) {
-    const granted = await refreshGrant(env, session.refreshToken);
+  if (upstream.status === 401) {
+    const granted = await refreshBrowserSession(env, found.sessionId, session);
     if (granted.ok) {
       // The first response will never be returned after a successful refresh.
       // Release its stream before replaying so Workers does not retain an
       // unread 401 body for the rest of the request.
       await cancelUnusedResponseBody(upstream);
-      session = {
-        ...session,
-        accessToken: granted.data.access_token,
-        refreshToken: granted.data.refresh_token ?? session.refreshToken,
-        verifiedAt: Date.now(),
-      };
-      await putSession(env, found.sessionId, session, SESSION_TTL_S);
+      session = granted.data;
       upstream = await upstreamRequest(
         env,
         pathAndSearch,
@@ -106,6 +106,15 @@ export async function proxyControlPlane(
         session.accessToken,
         body,
       );
+    } else {
+      await cancelUnusedResponseBody(upstream);
+      return granted.terminal
+        ? jsonError(401, "signed_out", "Sign in again")
+        : jsonError(
+            503,
+            "auth_unavailable",
+            "Sign-in service is temporarily unavailable; retry shortly",
+          );
     }
   }
 

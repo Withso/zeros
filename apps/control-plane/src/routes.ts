@@ -152,9 +152,8 @@ export function createRoutes(
       ),
     );
     const organizations = result.rows.map(organizationSummary);
-    // Compatibility: old clients treat these tenant roots as flat Teams.
-    // providerSub is integration identity for backend-only fan-out (feedback),
-    // not part of the public account wire shape.
+    // Compatibility: old clients treat these tenant roots as flat Teams. The
+    // provider binding is server-only and never enters the account wire shape.
     const publicUser = {
       id: user.id,
       email: user.email,

@@ -10,6 +10,7 @@ function cloudflareEnv(channel) {
     CF_PAGES_BRANCH:
       channel === "alpha" ? "main" : "release/1.2.3",
     ZEROS_DEPLOY_ENV: channel,
+    AUTH_PROVIDER: "auth0",
     AUTH0_DOMAIN: "login.zeros.build",
     AUTH0_CLIENT_ID: "public-client-id",
     AUTH0_CLIENT_SECRET: "test-secret",
@@ -27,6 +28,47 @@ test("accepts the exact Alpha, Beta, and Production channel wiring", () => {
   for (const channel of ["alpha", "beta", "production"]) {
     assert.deepEqual(deploymentEnvironmentErrors(cloudflareEnv(channel)), []);
   }
+});
+
+test("accepts WorkOS Pages wiring without copying session-Worker credentials", () => {
+  for (const channel of ["alpha", "beta", "production"]) {
+    const env = cloudflareEnv(channel);
+    env.AUTH_PROVIDER = "workos";
+    env.WORKOS_SESSION_WORKER = `zeros-auth-sessions-${channel}`;
+    delete env.AUTH0_DOMAIN;
+    delete env.AUTH0_CLIENT_ID;
+    delete env.AUTH0_CLIENT_SECRET;
+    delete env.AUTH0_AUDIENCE;
+    assert.deepEqual(deploymentEnvironmentErrors(env), []);
+  }
+});
+
+test("WorkOS Pages rejects a cross-channel coordinator and misplaced broker secrets", () => {
+  const env = cloudflareEnv("alpha");
+  env.AUTH_PROVIDER = "workos";
+  env.WORKOS_SESSION_WORKER = "zeros-auth-sessions-production";
+  env.WORKOS_API_KEY = "must-not-be-reported";
+  env.WORKOS_COOKIE_PASSWORD = "also-must-not-be-reported";
+  delete env.AUTH0_DOMAIN;
+  delete env.AUTH0_CLIENT_ID;
+  delete env.AUTH0_CLIENT_SECRET;
+  delete env.AUTH0_AUDIENCE;
+
+  const errors = deploymentEnvironmentErrors(env);
+  assert.ok(errors.some((error) => error.includes("zeros-auth-sessions-alpha")));
+  assert.ok(errors.some((error) => error.includes("WORKOS_API_KEY")));
+  assert.ok(errors.some((error) => error.includes("WORKOS_COOKIE_PASSWORD")));
+  assert.ok(errors.every((error) => !error.includes("must-not-be-reported")));
+});
+
+test("hosted builds require an explicit auth provider selector", () => {
+  const env = cloudflareEnv("alpha");
+  delete env.AUTH_PROVIDER;
+  assert.ok(
+    deploymentEnvironmentErrors(env).includes(
+      "AUTH_PROVIDER must be auth0 or workos",
+    ),
+  );
 });
 
 test("rejects a Pages build with no named deployment environment", () => {

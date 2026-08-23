@@ -21,7 +21,7 @@ d("organization routes", () => {
     const sub = randomUUID();
     return ensureUser(pool, {
       provider: "auth0",
-      providerSub: sub,
+      providerSubject: sub,
       email: `${name.toLowerCase()}-${sub}@example.com`,
       displayName: name,
     });
@@ -81,6 +81,7 @@ d("organization routes", () => {
     };
     expect(body.organizations).toHaveLength(1);
     expect(body.user).not.toHaveProperty("providerSub");
+    expect(body.user).not.toHaveProperty("identity");
     expect(body.teams).toEqual(body.organizations);
     expect(body.organizations[0]).toMatchObject({
       name: "Ada",
