@@ -100,6 +100,9 @@ export function cursorModelStateFingerprint(
   apiKey: string,
   processKey: Uint8Array,
 ): string {
+  // Cursor API keys are provider-generated tokens, and this value is an
+  // ephemeral keyed cache pseudonym—not a persisted password verifier.
+  // codeql[js/insufficient-password-hash]
   return createHmac("sha256", processKey).update(apiKey).digest("hex");
 }
 
