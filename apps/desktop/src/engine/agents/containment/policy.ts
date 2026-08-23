@@ -67,7 +67,9 @@ async function assertEngineAuthorityFileHasNoAlias(
   }
 }
 
-async function assertWorktreeSeedsHaveNoAliases(seedRoot: string): Promise<void> {
+async function assertWorktreeSeedsHaveNoAliases(
+  seedRoot: string,
+): Promise<void> {
   let rootMetadata;
   try {
     rootMetadata = await lstat(seedRoot);
@@ -76,7 +78,9 @@ async function assertWorktreeSeedsHaveNoAliases(seedRoot: string): Promise<void>
     throw error;
   }
   if (!rootMetadata.isDirectory() || rootMetadata.isSymbolicLink()) {
-    throw new Error("engine worktree-seed authority is not a physical directory");
+    throw new Error(
+      "engine worktree-seed authority is not a physical directory",
+    );
   }
   const entries = await readdir(seedRoot, { withFileTypes: true });
   if (entries.length > MAX_WORKTREE_SEED_DIRECTORIES) {
@@ -469,6 +473,80 @@ export async function prepareZsrPolicy(
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
+  const protectedWorkspaceInputs = request.protectedWorkspaceDirectories ?? [];
+  if (protectedWorkspaceInputs.length > 16) {
+    throw new Error("at most 16 protected workspace directories are allowed");
+  }
+  if (
+    protectedWorkspaceInputs.some(
+      (entry) =>
+        !path.isAbsolute(entry) ||
+        entry.includes("\0") ||
+        path.resolve(entry) === path.parse(path.resolve(entry)).root,
+    )
+  ) {
+    throw new Error(
+      "protected workspace directories must be bounded absolute paths",
+    );
+  }
+  const protectedWorkspaceDirectories = uniqueSorted(
+    await Promise.all(protectedWorkspaceInputs.map(canonicalExistingOrLexical)),
+  );
+  for (const directory of protectedWorkspaceDirectories) {
+    await mkdir(directory, { recursive: true, mode: 0o700 });
+    const metadata = await lstat(directory);
+    if (
+      !metadata.isDirectory() ||
+      metadata.isSymbolicLink() ||
+      (await realpath(directory)) !== directory
+    ) {
+      throw new Error(
+        "protected workspace directories must be physical directories",
+      );
+    }
+  }
+  const protectedWorkspaceWriteInputs =
+    request.protectedWorkspaceWriteDirectories ?? [];
+  if (protectedWorkspaceWriteInputs.length > 256) {
+    throw new Error(
+      "at most 256 protected workspace write directories are allowed",
+    );
+  }
+  if (
+    protectedWorkspaceWriteInputs.some(
+      (entry) => !path.isAbsolute(entry) || entry.includes("\0"),
+    )
+  ) {
+    throw new Error(
+      "protected workspace write directories must be absolute paths",
+    );
+  }
+  const protectedWorkspaceWriteDirectories = uniqueSorted(
+    await Promise.all(
+      protectedWorkspaceWriteInputs.map(canonicalExistingOrLexical),
+    ),
+  );
+  for (const island of protectedWorkspaceWriteDirectories) {
+    if (
+      !protectedWorkspaceDirectories.some(
+        (directory) =>
+          island !== directory && pathIsInsideOrEqual(island, directory),
+      )
+    ) {
+      throw new Error(
+        "protected workspace write directories must be inside a protected collection",
+      );
+    }
+    if (
+      ![workspaceRoot, ...additional].some((grant) =>
+        pathIsInsideOrEqual(island, grant),
+      )
+    ) {
+      throw new Error(
+        "protected workspace write directories must be inside an authorized root",
+      );
+    }
+  }
   const protectedCodeInputs = request.protectedCodeDirectories ?? [];
   if (protectedCodeInputs.length > 256) {
     throw new Error("at most 256 protected code directories are allowed");
@@ -542,7 +620,7 @@ export async function prepareZsrPolicy(
   const allowWrite = uniqueSorted([
     hostFilesystemRoot,
     ...(codeWriteAuthority
-      ? []
+      ? [workspaceRoot, ...additional, ...protectedWorkspaceWriteDirectories]
       : [...protectedDesignDirectories, ...localHostParityWriteIslands]),
     ...(paths.containerState ? [paths.containerState] : []),
   ]);
@@ -574,6 +652,10 @@ export async function prepareZsrPolicy(
     ...(paths.containerState ? [paths.containerState] : []),
   ]);
   const denyWrite = uniqueSorted([
+    // This stable parent deny applies to both inverse actor roles. Their
+    // respective allowWrite islands below it reopen only current code roots or
+    // discovered Design roots, never a sibling that appears after admission.
+    ...protectedWorkspaceDirectories,
     ...(codeWriteAuthority
       ? [
           ...protectedDesignDirectories,

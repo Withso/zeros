@@ -2,12 +2,11 @@
 // WorkspaceFileTree — @pierre/trees workspace file tree
 // ──────────────────────────────────────────────────────────
 //
-// The virtualized, gitignore-aware file tree behind TWO surfaces:
+// The virtualized, gitignore-aware file tree behind two Files surfaces:
 //   • the workbench File tab's SIDEBAR (FilesTab) — persistent selection that
-//     mirrors the tab's open file (`selectedPath`); its shared outer header
-//     drives search through WorkspaceFileTreeHandle.
-//   • a LAUNCHER (deselectAfterOpen, historically terminal panel's "All Files") — a launcher
-//     (deselectAfterOpen) with no selection mirror and no search bar.
+//     mirrors the tab's open file (`selectedPath`).
+//   • the SEARCH SIDEBAR — mounts only after a query and behaves as a launcher
+//     (`deselectAfterOpen`) with no selection mirror.
 //
 // It owns the tree model, the workspace file listing
 // (listWorkspaceFiles — the same gitignore-aware listing the @-mention
@@ -101,17 +100,6 @@ const TREE_THEME_VARS = {
   // per level — too airy for a file tree. 2px lands ~15.5px per level while
   // the guides stay centered under their parent folder icons.
   "--trees-level-gap-override": "2px",
-} as React.CSSProperties;
-
-/** The same knobs re-based onto the floating-popover surface (--bg3, which is
- *  one lift step above --bg1 in dark). Rows follow the bg3 recipes the menu
- *  primitives use (hover → bg3-hover, like CommandItem); the selected chip
- *  keeps the base tree's bg2-hover step so a focused search match still reads
- *  over a hovered row. Used by the collapsed Files tab's floating panel. */
-const TREE_OVERLAY_THEME_VARS = {
-  ...TREE_THEME_VARS,
-  "--trees-bg-override": "var(--bg3)",
-  "--trees-bg-muted-override": "var(--bg3-hover)",
 } as React.CSSProperties;
 
 // Folders render a disclosure chevron ("dropdown") by default. We hide it
@@ -302,11 +290,6 @@ interface WorkspaceFileTreeProps {
    *  never re-fires. FilesTab leaves this off so its selection highlight
    *  persists (its viewer mirrors the selected row). */
   deselectAfterOpen?: boolean;
-  /** Surface the tree sits on. "base" (default) — the column's --bg1, the
-   *  sidebar recipes. "overlay" — a floating popover (--bg3): the root and
-   *  row states swap to the popover recipes so the popup reads as one
-   *  surface (in dark, bg3 is a visible lift step above bg1). */
-  surface?: "base" | "overlay";
   /** Bump to force a re-list (e.g. the Source panel's Refresh button). */
   reloadKey?: number;
   /** Owner-keyed scroll memory for the library's Shadow-DOM virtual scroller.
@@ -337,7 +320,6 @@ export const WorkspaceFileTree = React.forwardRef<
     onOpenFile,
     onOpenInNewTab,
     onCopyPath,
-    surface = "base",
     deselectAfterOpen,
     reloadKey,
     scrollMemoryKey,
@@ -751,14 +733,10 @@ export const WorkspaceFileTree = React.forwardRef<
     <div
       ref={treeRootRef}
       className={cn(
-        "relative h-full min-h-0 overflow-hidden",
-        // The overlay's owning FilesTreePanel already paints bg3 around this
-        // child; keeping the shared tree root transparent avoids granting this
-        // whole dual-surface file a file-granular bg3 lint exemption.
-        surface === "overlay" ? "bg-transparent" : "bg-bg1",
+        "bg-bg1 relative h-full min-h-0 overflow-hidden",
         className,
       )}
-      style={surface === "overlay" ? TREE_OVERLAY_THEME_VARS : TREE_THEME_VARS}
+      style={TREE_THEME_VARS}
     >
       {hasSearchAccessory && (
         // Dropped into the gutter the shadow CSS reserves past the input's

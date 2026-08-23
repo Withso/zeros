@@ -3,8 +3,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-describe("Files tab popup containment", () => {
-  it("clips the fixed-height tree popup to the tab body", () => {
+describe("Files tab containment", () => {
+  it("clips the unified sidebar and file body to the tab surface", () => {
     const source = readFileSync(
       fileURLToPath(new URL("../files-tab.tsx", import.meta.url)),
       "utf8",

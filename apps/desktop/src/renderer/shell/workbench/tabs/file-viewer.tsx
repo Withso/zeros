@@ -2,8 +2,8 @@
 // FileViewer — read-only file content pane (Files tab)
 // ──────────────────────────────────────────────────────────
 //
-// Right column of the Files tab (and the body of a pre-opened Files
-// tab). Fetches one file via the `read_file` IPC and renders it:
+// Content column of the Files tab (and the body of a pre-opened Files tab).
+// Fetches one file via the `read_file` IPC and renders it:
 //   • text   → shiki-highlighted source with a line-number gutter
 //   • md     → Preview (rendered) / Code (highlighted source) toggle
 //   • image  → inline <img> from the data URL
@@ -125,10 +125,19 @@ interface FileViewerProps {
   /** Read-only target → hide the Discard action regardless. */
   readOnly?: boolean;
   /** Rendered at the START of the header row, before the path breadcrumbs. The
-   *  workbench Changes and Files tabs inject their sidebar controls here while the
-   *  respective sidebar is hidden, so toolbar + file + viewer controls read as
-   *  ONE row. */
+   *  workbench Changes tab injects its sidebar controls here while its sidebar
+   *  is hidden, so toolbar + file + viewer controls read as ONE row. */
   headerLeading?: React.ReactNode;
+  /** Rendered at the END of the header row, after the viewer controls. The
+   *  Files tab injects its fixed right-sidebar controls here, keeping those
+   *  actions on one full-width row whether the tree is visible or hidden. */
+  headerTrailing?: React.ReactNode;
+  /** Give this viewer's header the Files-tab second-row separator. Changes
+   *  embeds the same viewer but retains its existing seamless toolbar. */
+  headerBorder?: boolean;
+  /** Rendered beside the file content but below the full-width header. The
+   *  Files tab injects its resize seam and right-side tree body here. */
+  bodyTrailing?: React.ReactNode;
   /** Where "open another file" lands (the Viewed auto-advance sweep). Default:
    *  the shared workbench open flow (follow/reuse the active File tab). The Changes
    *  tab overrides this to advance its OWN selection in place — without it the
@@ -201,6 +210,9 @@ export function FileViewer({
   refreshKey,
   readOnly,
   headerLeading,
+  headerTrailing,
+  headerBorder,
+  bodyTrailing,
   onOpenPath,
 }: FileViewerProps) {
   const viewerRef = useRef<HTMLDivElement | null>(null);
@@ -529,18 +541,35 @@ export function FileViewer({
     <div ref={viewerRef} className="bg-bg1 flex h-full min-h-0 flex-col">
       {/* Header — path breadcrumbs + (mode toggle) + copy, one row. h-9 +
           px-2: the same chrome band height + inset as the browser toolbar
-          and the terminal sub-tab strip (was h-10/px-3). No bottom border —
-          the file view flows straight into the code with no seam. */}
-      <div className="bg-bg1 flex h-9 shrink-0 items-center justify-between gap-2 px-2">
+          and the terminal sub-tab strip (was h-10/px-3). The Files surface
+          opts into a bottom border because this is its second chrome row. */}
+      <div
+        data-testid="files-viewer-header"
+        className={cn(
+          "bg-bg1 flex h-9 shrink-0 items-center justify-between gap-2 px-2",
+          headerBorder && "border-border1 border-b",
+        )}
+      >
         <div className="flex min-w-0 items-center gap-2">
           {headerLeading}
-          {path ? (
-            <PathBreadcrumbs path={path} />
-          ) : (
-            <span className="text-fg2 truncate text-xs font-medium">
-              No file open
-            </span>
-          )}
+          <div
+            data-testid="file-path-actions"
+            className="flex min-w-0 items-center gap-1"
+          >
+            {path ? (
+              <PathBreadcrumbs path={path} />
+            ) : (
+              <span className="text-fg2 truncate text-xs font-medium">
+                No file open
+              </span>
+            )}
+            {canCopy && (
+              <CodeBlockCopyButton
+                text={result!.content ?? ""}
+                className="size-6 shrink-0"
+              />
+            )}
+          </div>
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {/* Viewed — when the file has changes. Dims its Changes-list row and
@@ -566,19 +595,21 @@ export function FileViewer({
           )}
           {/* Discard — ONLY when opened from the All-changes filter on a file
               with uncommitted work (discardable) and a writable target. */}
-          {discardable && !sourceReadOnly && (!fileMissing || diffAvailable) && (
-            <Tooltip label="Discard changes">
-              <button
-                type="button"
-                onClick={() => setDiscardTarget(path)}
-                disabled={discardingPath === path}
-                aria-busy={discardingPath === path}
-                className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-6 items-center justify-center rounded-sm transition-colors disabled:cursor-wait disabled:opacity-50"
-              >
-                <Undo2 className="size-3.5" />
-              </button>
-            </Tooltip>
-          )}
+          {discardable &&
+            !sourceReadOnly &&
+            (!fileMissing || diffAvailable) && (
+              <Tooltip label="Discard changes">
+                <button
+                  type="button"
+                  onClick={() => setDiscardTarget(path)}
+                  disabled={discardingPath === path}
+                  aria-busy={discardingPath === path}
+                  className="text-fg2 hover:bg-bg2-hover hover:text-fg1 flex size-6 items-center justify-center rounded-sm transition-colors disabled:cursor-wait disabled:opacity-50"
+                >
+                  <Undo2 className="size-3.5" />
+                </button>
+              </Tooltip>
+            )}
           {/* Unified ⇄ split — only in Diff mode. */}
           {diffShown && (
             <div className="bg-bg2 flex items-center rounded-md p-0.5">
@@ -608,12 +639,6 @@ export function FileViewer({
               ))}
             </div>
           )}
-          {canCopy && (
-            <CodeBlockCopyButton
-              text={result!.content ?? ""}
-              className="size-6"
-            />
-          )}
           {showToggle && (
             <div className="bg-bg2 flex items-center rounded-md p-0.5 text-xs">
               {modeOptions.map((v) => (
@@ -633,120 +658,126 @@ export function FileViewer({
               ))}
             </div>
           )}
+          {headerTrailing}
         </div>
       </div>
 
-      {/* Body. */}
-      <div
-        className="min-h-0 flex-1 overflow-hidden"
-        aria-busy={readLoading || diffLoading || undefined}
-      >
-        {readFailed && !diffShown && (
-          <Placeholder
-            Icon={FileX2}
-            text="Couldn't reach the file reader — try restarting the app"
-          />
-        )}
-        {result?.kind === "binary" && !diffShown && (
-          <Placeholder
-            Icon={FileX2}
-            text="Binary file — preview not available"
-          />
-        )}
-        {result?.kind === "too-large" && !diffShown && (
-          <Placeholder
-            Icon={FileX2}
-            text={`File too large to preview (${(result.bytes / 1_000_000).toFixed(1)} MB)`}
-          />
-        )}
-        {result?.kind === "error" && !fileMissing && !diffShown && (
-          <Placeholder
-            Icon={FileX2}
-            text={result.error ?? "Couldn't read this file"}
-          />
-        )}
-        {missingDisposition === "show-missing" && !diffShown && (
-          <Placeholder Icon={FileX2} text="file no longer exists on disk" />
-        )}
-        {result?.kind === "image" && !diffShown && (
-          <div className="flex h-full items-center justify-center overflow-auto p-4">
-            {result.dataUrl ? (
-              <img
-                src={result.dataUrl}
-                alt={path}
-                className="max-h-full max-w-full object-contain"
-              />
-            ) : (
-              <Placeholder Icon={ImageOff} text="Image unavailable" />
-            )}
-          </div>
-        )}
-        {diffShown &&
-          (notInCommit ? (
-            <Placeholder
-              Icon={FileQuestion}
-              text={`${baseOf(path)} isn’t part of this commit`}
-            />
-          ) : diffFailed ? (
+      {/* Body row. Optional trailing content starts below the fixed header. */}
+      <div className="flex min-h-0 flex-1 overflow-hidden">
+        <div
+          data-testid="files-viewer-body"
+          className="min-h-0 min-w-0 flex-1 overflow-hidden"
+          aria-busy={readLoading || diffLoading || undefined}
+        >
+          {readFailed && !diffShown && (
             <Placeholder
               Icon={FileX2}
-              text={
-                diffSnapshot.error?.message ?? "Couldn't read this file's diff"
-              }
+              text="Couldn't reach the file reader — try restarting the app"
             />
-          ) : diffLoading ? (
-            <div className="h-full" aria-busy="true" />
-          ) : (
-            <DiffView
-              patch={diffPatch}
-              diffStyle={diffStyle}
-              scrollKey={diffScrollKey}
+          )}
+          {result?.kind === "binary" && !diffShown && (
+            <Placeholder
+              Icon={FileX2}
+              text="Binary file — preview not available"
             />
-          ))}
-        {previewShown && previewHtml !== null && (
-          <div
-            ref={previewScrollRef}
-            className="h-full overflow-x-hidden overflow-y-auto px-5 py-4"
-          >
-            <MarkdownPreview html={previewHtml} />
-          </div>
-        )}
-        {sourceShown && sourceReadOnly && (
-          <div className="flex h-full min-h-0 flex-col">
-            {designReadOnly && (
-              <div className="text-fg3 bg-bg2 border-bd1 shrink-0 border-b px-5 py-2 text-xs">
-                Design files are edited in Design Mode and committed with “Save
-                designs”.
-              </div>
-            )}
-            <div className="min-h-0 flex-1">
-              <CodeView
-                content={result?.content ?? ""}
-                lang={codeLang}
-                scrollKey={JSON.stringify([scrollKeyBase, "source"])}
-              />
+          )}
+          {result?.kind === "too-large" && !diffShown && (
+            <Placeholder
+              Icon={FileX2}
+              text={`File too large to preview (${(result.bytes / 1_000_000).toFixed(1)} MB)`}
+            />
+          )}
+          {result?.kind === "error" && !fileMissing && !diffShown && (
+            <Placeholder
+              Icon={FileX2}
+              text={result.error ?? "Couldn't read this file"}
+            />
+          )}
+          {missingDisposition === "show-missing" && !diffShown && (
+            <Placeholder Icon={FileX2} text="file no longer exists on disk" />
+          )}
+          {result?.kind === "image" && !diffShown && (
+            <div className="flex h-full items-center justify-center overflow-auto p-4">
+              {result.dataUrl ? (
+                <img
+                  src={result.dataUrl}
+                  alt={path}
+                  className="max-h-full max-w-full object-contain"
+                />
+              ) : (
+                <Placeholder Icon={ImageOff} text="Image unavailable" />
+              )}
             </div>
-          </div>
-        )}
-        {/* Keep a writable editor mounted while Diff/Preview is selected. Its
+          )}
+          {diffShown &&
+            (notInCommit ? (
+              <Placeholder
+                Icon={FileQuestion}
+                text={`${baseOf(path)} isn’t part of this commit`}
+              />
+            ) : diffFailed ? (
+              <Placeholder
+                Icon={FileX2}
+                text={
+                  diffSnapshot.error?.message ??
+                  "Couldn't read this file's diff"
+                }
+              />
+            ) : diffLoading ? (
+              <div className="h-full" aria-busy="true" />
+            ) : (
+              <DiffView
+                patch={diffPatch}
+                diffStyle={diffStyle}
+                scrollKey={diffScrollKey}
+              />
+            ))}
+          {previewShown && previewHtml !== null && (
+            <div
+              ref={previewScrollRef}
+              className="h-full overflow-x-hidden overflow-y-auto px-5 py-4"
+            >
+              <MarkdownPreview html={previewHtml} />
+            </div>
+          )}
+          {sourceShown && sourceReadOnly && (
+            <div className="flex h-full min-h-0 flex-col">
+              {designReadOnly && (
+                <div className="text-fg3 bg-bg2 border-bd1 shrink-0 border-b px-5 py-2 text-xs">
+                  Design files are edited in Design Mode and committed with
+                  “Save designs”.
+                </div>
+              )}
+              <div className="min-h-0 flex-1">
+                <CodeView
+                  content={result?.content ?? ""}
+                  lang={codeLang}
+                  scrollKey={JSON.stringify([scrollKeyBase, "source"])}
+                />
+              </div>
+            </div>
+          )}
+          {/* Keep a writable editor mounted while Diff/Preview is selected. Its
             draft + dirty registration then survive every workbench view switch;
             only the owning File tab closing (or a destructive reset revision)
             intentionally unmounts it. */}
-        {isText && !sourceReadOnly && (
-          <div
-            className={cn("h-full", !sourceShown && "hidden")}
-            aria-hidden={!sourceShown || undefined}
-          >
-            <SourceEditor
-              key={`${cwd}::${path}::${contentRevision ?? 0}`}
-              editorId={tabId}
-              cwd={cwd ?? ""}
-              path={path}
-              content={result?.content ?? ""}
-              offscreen={!sourceShown}
-            />
-          </div>
-        )}
+          {isText && !sourceReadOnly && (
+            <div
+              className={cn("h-full", !sourceShown && "hidden")}
+              aria-hidden={!sourceShown || undefined}
+            >
+              <SourceEditor
+                key={`${cwd}::${path}::${contentRevision ?? 0}`}
+                editorId={tabId}
+                cwd={cwd ?? ""}
+                path={path}
+                content={result?.content ?? ""}
+                offscreen={!sourceShown}
+              />
+            </div>
+          )}
+        </div>
+        {bodyTrailing}
       </div>
 
       {discardTarget === path && (

@@ -1,11 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import {
-  existsSync,
-  lstatSync,
-  realpathSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, lstatSync, realpathSync, writeFileSync } from "node:fs";
 import {
   chmod,
   chown,
@@ -293,9 +288,7 @@ function localWorkspaceContainerIdentity(request: BoundaryRequest): {
       // union. Unmounted sibling roots cannot change this VM's descriptor and
       // must not force a second private machine/port for the same workspace.
       .filter((root) =>
-        projectionRoots.some((projected) =>
-          pathInsideOrEqual(root, projected),
-        ),
+        projectionRoots.some((projected) => pathInsideOrEqual(root, projected)),
       )
       .sort(),
     executable: request.containerWorker?.executable
@@ -603,6 +596,19 @@ const canOpenForWrite = (probe) => {
     return true;
   } catch { return false; }
 };
+const canCreateFile = (file) => {
+  let created = false;
+  try {
+    fs.writeFileSync(file, "probe\n", { flag: "wx", mode: 0o600 });
+    created = true;
+    return true;
+  } catch { return false; }
+  finally {
+    if (created) {
+      try { fs.unlinkSync(file); } catch {}
+    }
+  }
+};
 let codeWrite = false;
 try {
   fs.writeFileSync(spec.codeFile, "ok\n", { flag: "wx", mode: 0o600 });
@@ -610,6 +616,7 @@ try {
   fs.unlinkSync(spec.codeFile);
 } catch {}
 const designWrite = spec.designProbes.map(canOpenForWrite);
+const protectedWorkspaceWrite = spec.protectedWorkspaceFiles.map(canCreateFile);
 let designAliasWrite = spec.designProbes.length === 0;
 if (spec.designAlias) {
   const first = spec.designProbes[0];
@@ -640,6 +647,7 @@ const result = {
   codeWrite,
   designWrite,
   designAliasWrite,
+  protectedWorkspaceWrite,
   hostRead,
   canonicalGitRead,
   environmentExact,
@@ -739,11 +747,9 @@ async function prepareCloudWorkerPrivateState(
   unixSockets: readonly string[],
 ): Promise<void> {
   await Promise.all(
-    [
-      policy.paths.home,
-      policy.paths.scratch,
-      policy.paths.providerState,
-    ].map((directory) => grantWritableTreeToWorker(directory, identity)),
+    [policy.paths.home, policy.paths.scratch, policy.paths.providerState].map(
+      (directory) => grantWritableTreeToWorker(directory, identity),
+    ),
   );
   if (policy.paths.containerState) {
     const metadata = await lstat(policy.paths.containerState);
@@ -806,9 +812,7 @@ async function waitForGroup(pid: number, timeoutMs: number): Promise<boolean> {
 /** Host-parity sessions use the workspace repository directly. Legacy status
  * states remain in the protocol, but this backend reports only native or
  * not-applicable. */
-function boundaryGitState(
-  request: BoundaryRequest,
-): ExecutionBoundaryGitState {
+function boundaryGitState(request: BoundaryRequest): ExecutionBoundaryGitState {
   // `.git` is a directory in a normal checkout and a file in a linked worktree;
   // either proves the session is operating inside a repository. A submodule or
   // nested owner resolves to its own root before admission, so this does not
@@ -1853,6 +1857,28 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       ? path.join(canaryRoot, "design-alias")
       : null;
     if (designAlias) await symlink(designDirectories[0]!, designAlias, "dir");
+    const protectedWorkspaceDirectories = [
+      ...new Set(
+        (request.protectedWorkspaceDirectories ?? []).flatMap((directory) => {
+          try {
+            const physical = realpathSync(directory);
+            const metadata = lstatSync(physical);
+            return metadata.isDirectory() && !metadata.isSymbolicLink()
+              ? [physical]
+              : [];
+          } catch {
+            // Policy preparation materializes every collection. If one
+            // vanished before the canary, the runtime's prospective deny still
+            // fails closed; there is no directory to probe.
+            return [];
+          }
+        }),
+      ),
+    ];
+    const protectedWorkspaceFiles = protectedWorkspaceDirectories.map(
+      (directory) =>
+        path.join(directory, `.zeros-zsr-managed-write-${randomUUID()}`),
+    );
     const releaseFile = path.join(canaryRoot, "process-domain-release");
     const processDomain =
       process.platform === "darwin" ? { releaseFile } : null;
@@ -1876,6 +1902,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       designDirectories,
       designProbes,
       designAlias,
+      protectedWorkspaceFiles,
       hostReadFile: this.supervisorRuntime,
       canonicalGitFiles: existsSync(canonicalGitHead) ? [canonicalGitHead] : [],
       expectedEnv,
@@ -1984,6 +2011,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         codeWrite?: boolean;
         designWrite?: boolean[];
         designAliasWrite?: boolean;
+        protectedWorkspaceWrite?: boolean[];
         hostRead?: boolean;
         canonicalGitRead?: boolean;
         environmentExact?: boolean;
@@ -2009,6 +2037,14 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       }
       if (designAlias && result.designAliasWrite !== designShouldBeWritable) {
         reasons.push("host-parity Design alias write split is not enforced");
+      }
+      if (
+        !result.protectedWorkspaceWrite ||
+        result.protectedWorkspaceWrite.length !==
+          protectedWorkspaceFiles.length ||
+        result.protectedWorkspaceWrite.some(Boolean)
+      ) {
+        reasons.push("host-parity managed-workspace collection is writable");
       }
       if (!result.hostRead) reasons.push("host-parity cannot read the host");
       if (!result.canonicalGitRead) {
@@ -2038,6 +2074,9 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     } finally {
       await rm(canaryRoot, { recursive: true, force: true });
       await rm(codeFile, { force: true });
+      await Promise.all(
+        protectedWorkspaceFiles.map((file) => rm(file, { force: true })),
+      );
     }
   }
 
@@ -2371,5 +2410,4 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       control?.signal,
     );
   }
-
 }

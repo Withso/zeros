@@ -35,7 +35,13 @@ import { tmpdir } from "node:os";
 // We import directly from the workspace state module (not the git
 // barrel) to avoid pulling GitHub auth/Octokit wiring into the engine
 // bundle.
-import { getWorkspaceById, listWorkspaces } from "../git/state";
+import {
+  designWorktreesRoot,
+  getWorkspaceById,
+  legacyWorktreesRoot,
+  listWorkspaces,
+  worktreesRoot,
+} from "../git/state";
 import { listKnownRepoRoots } from "../db/projects";
 import { resolveWorkspaceTargetRef } from "../git/target-branch";
 import { mergeSpawnEnv } from "../settings/spawn-env";
@@ -124,6 +130,7 @@ import {
 import { redactSensitive } from "@zeros/protocol/scrub";
 import {
   AdmissionCancelledError,
+  type BoundaryTerritoryContributionSnapshot,
   type BoundaryRequest,
   type ContainerWorkerRequest,
   type ExecutionBoundary,
@@ -404,21 +411,10 @@ export function agentTerritoryIdentity(
 
 const MAX_ADDITIONAL_TERRITORY_ROOTS = 32;
 
-interface TerritoryContributionSnapshot {
-  /** Semantic Git/workspace owner whose Design pointer drives this carveout. */
-  workspaceRoot: string;
-  /** Exact user-authorized roots belonging to this owner. A secondary owner
-   * contributes only protected paths overlapping these grants. */
-  grants: readonly string[];
-  /** Primary workspace authority is always compared in full. */
-  full: boolean;
-  identity: string | null;
-}
-
 interface ResolvedTerritorySet {
   territory: AgentFilesystemTerritory | undefined;
   registeredDesignAuthorityIdentity: string | null;
-  contributions: readonly TerritoryContributionSnapshot[];
+  contributions: readonly BoundaryTerritoryContributionSnapshot[];
   additionalRoots: readonly string[];
   additionalGitWorkspaceRoots: readonly string[];
 }
@@ -504,6 +500,47 @@ function pathInsideOrEqual(candidate: string, root: string): boolean {
     (relative !== ".." &&
       !relative.startsWith(`..${path.sep}`) &&
       !path.isAbsolute(relative))
+  );
+}
+
+/** Resolve missing managed roots through their deepest physical ancestor. A
+ * newly-created sibling does not exist when an older boundary is admitted, so
+ * exact `realpathSync(root)` with a lexical fallback would split aliases such
+ * as macOS `/var` and `/private/var` at the security boundary. */
+function canonicalProspectivePath(candidate: string): string {
+  const missing: string[] = [];
+  let cursor = path.resolve(candidate);
+  for (;;) {
+    try {
+      const existing = realpathSync(cursor);
+      return path.join(existing, ...missing.reverse());
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) throw error;
+      missing.push(path.basename(cursor));
+      cursor = parent;
+    }
+  }
+}
+
+/** Stable collection-level subtraction for local actors. These parents
+ * exist independently of the workspace registry, so a future sibling is
+ * already read-only to every admitted boundary before Git creates it. */
+export function protectedManagedWorkspaceDirectories(): string[] {
+  return [worktreesRoot(), designWorktreesRoot(), legacyWorktreesRoot()]
+    .map(canonicalProspectivePath)
+    .filter((candidate, index, all) => all.indexOf(candidate) === index)
+    .sort((left, right) => left.localeCompare(right));
+}
+
+export function isProtectedManagedWorkspacePath(
+  candidate: string,
+  protectedDirectories: readonly string[] = protectedManagedWorkspaceDirectories(),
+): boolean {
+  const canonical = canonicalProspectivePath(candidate);
+  return protectedDirectories.some((directory) =>
+    pathInsideOrEqual(canonical, directory),
   );
 }
 
@@ -627,7 +664,14 @@ export function codeAgentWriteAuthorityIdentity(
 export async function previewRegisteredCodeWriteAuthorityIdentity(): Promise<
   string | null
 > {
-  const owners = registeredCodeTerritorySnapshot().owners;
+  const protectedWorkspaceDirectories = protectedManagedWorkspaceDirectories();
+  const owners = registeredCodeTerritorySnapshot().owners.filter(
+    (owner) =>
+      !isProtectedManagedWorkspacePath(
+        owner.path,
+        protectedWorkspaceDirectories,
+      ),
+  );
   const territories: AgentFilesystemTerritory[] = [];
   for (const owner of owners) {
     const territory = await previewCodeAgentTerritory({
@@ -1200,7 +1244,15 @@ export class AgentGateway {
    * an attached workspace invalidate the otherwise unrelated primary cwd. */
   private readonly executionToTerritoryContributions = new Map<
     string,
-    readonly TerritoryContributionSnapshot[]
+    readonly BoundaryTerritoryContributionSnapshot[]
+  >();
+  /** Territory snapshots are published as soon as resolution completes, before
+   * MCP lookup or kernel-boundary preparation can yield. External Design
+   * reconciliation can therefore compare a racing admission with the exact
+   * owner state it captured instead of conservatively restarting it. */
+  private readonly provisionalTerritoryContributions = new Map<
+    string,
+    readonly BoundaryTerritoryContributionSnapshot[]
   >();
   /** Redacted status paired with the exact execution admission. */
   private readonly executionToBoundaryStatus = new Map<
@@ -1331,13 +1383,19 @@ export class AgentGateway {
   ): boolean {
     const normalizedWorkspace = path.resolve(workspaceRoot);
     const next = agentTerritoryIdentity(territory);
-    for (const sessionId of this.executionToAgent.keys()) {
-      const contribution = this.executionToTerritoryContributions
-        .get(sessionId)
-        ?.find(
-          (candidate) =>
-            path.resolve(candidate.workspaceRoot) === normalizedWorkspace,
-        );
+    const candidates = new Set([
+      ...this.executionToAgent.keys(),
+      ...this.executionToTerritoryContributions.keys(),
+      ...this.provisionalTerritoryContributions.keys(),
+    ]);
+    for (const sessionId of candidates) {
+      const contribution = (
+        this.executionToTerritoryContributions.get(sessionId) ??
+        this.provisionalTerritoryContributions.get(sessionId)
+      )?.find(
+        (candidate) =>
+          path.resolve(candidate.workspaceRoot) === normalizedWorkspace,
+      );
       if (contribution) {
         const nextContribution = contribution.full
           ? territory
@@ -1377,6 +1435,7 @@ export class AgentGateway {
     const candidates = new Set([
       ...this.executionToAgent.keys(),
       ...this.executionToTerritoryContributions.keys(),
+      ...this.provisionalTerritoryContributions.keys(),
     ]);
     for (const sessionId of candidates) {
       if (this.executionToWorkspace.get(sessionId) === workspaceId) {
@@ -1384,7 +1443,9 @@ export class AgentGateway {
         continue;
       }
       const contributions =
-        this.executionToTerritoryContributions.get(sessionId) ?? [];
+        this.executionToTerritoryContributions.get(sessionId) ??
+        this.provisionalTerritoryContributions.get(sessionId) ??
+        [];
       if (
         contributions.some(
           (candidate) =>
@@ -1404,6 +1465,19 @@ export class AgentGateway {
 
   workspaceHasSessions(workspaceId: string, workspaceRoot: string): boolean {
     return this.workspaceSessionIds(workspaceId, workspaceRoot).length > 0;
+  }
+
+  private async withProvisionalTerritory<T>(
+    executionId: string,
+    contributions: readonly BoundaryTerritoryContributionSnapshot[],
+    run: () => Promise<T>,
+  ): Promise<T> {
+    this.provisionalTerritoryContributions.set(executionId, contributions);
+    try {
+      return await run();
+    } finally {
+      this.provisionalTerritoryContributions.delete(executionId);
+    }
   }
 
   /** Establish the code actor's immutable territory before an adapter starts.
@@ -1501,11 +1575,20 @@ export class AgentGateway {
 
     const registered = registeredCodeTerritorySnapshot();
     const registeredWorkspaces = registered.workspaces;
-    const registeredOwnerPaths = new Set(
-      registered.owners.map((owner) => owner.path),
+    const protectedWorkspaceDirectories =
+      protectedManagedWorkspaceDirectories();
+    const exactRegisteredOwners = registered.owners.filter(
+      (owner) =>
+        !isProtectedManagedWorkspacePath(
+          owner.path,
+          protectedWorkspaceDirectories,
+        ),
+    );
+    const exactRegisteredOwnerPaths = new Set(
+      exactRegisteredOwners.map((owner) => owner.path),
     );
     const registeredTerritories: AgentFilesystemTerritory[] = [];
-    if (primary && registeredOwnerPaths.has(canonicalWorkspace)) {
+    if (primary && exactRegisteredOwnerPaths.has(canonicalWorkspace)) {
       registeredTerritories.push(primary);
     }
     const ownerGrants = new Map<
@@ -1538,7 +1621,7 @@ export class AgentGateway {
     // These are deny-only contributions. Do not add them to `additionalRoots`
     // or `additionalGitWorkspaceRoots`: registration in Zeros is not a write
     // grant from one workspace to another.
-    for (const owner of registered.owners) {
+    for (const owner of exactRegisteredOwners) {
       addOwnerGrant(owner.path, owner.repoRoot, owner.path, { full: true });
     }
     for (const root of additionalRoots) {
@@ -1552,8 +1635,8 @@ export class AgentGateway {
         // can invalidate a resumed execution rather than widening it.
         owner = root;
       }
-      const registeredOwner = registeredWorkspaces.find(
-        (workspace) => workspace.path === owner,
+      const registeredOwner = registered.owners.find(
+        (candidate) => candidate.path === owner,
       );
       addOwnerGrant(owner, registeredOwner?.repoRoot ?? owner, root, {
         attached: true,
@@ -1564,6 +1647,23 @@ export class AgentGateway {
       for (const workspace of registeredWorkspaces) {
         if (pathInsideOrEqual(workspace.path, root)) {
           addOwnerGrant(workspace.path, workspace.repoRoot, root, {
+            attached: true,
+          });
+        }
+      }
+      // Open project roots can also sit below a browsed parent. Managed roots
+      // were omitted from the default exact deny union above, so re-add every
+      // explicitly covered owner as a grant-scoped contribution before its
+      // exact writable island is reopened in the ZSR policy.
+      for (const registeredOwner of registered.owners) {
+        if (
+          isProtectedManagedWorkspacePath(
+            registeredOwner.path,
+            protectedWorkspaceDirectories,
+          ) &&
+          pathsOverlap(registeredOwner.path, root)
+        ) {
+          addOwnerGrant(registeredOwner.path, registeredOwner.repoRoot, root, {
             attached: true,
           });
         }
@@ -1593,7 +1693,7 @@ export class AgentGateway {
           : territoryForGrants(ownerTerritory, grants);
         if (contribution) {
           additions.push(contribution);
-          if (registeredOwnerPaths.has(owner)) {
+          if (exactRegisteredOwnerPaths.has(owner)) {
             registeredTerritories.push(contribution);
           }
           if (ownerGrant.attached && existsSync(path.join(owner, ".git"))) {
@@ -1745,6 +1845,29 @@ export class AgentGateway {
     const registeredCodeOwners = registeredSnapshot.owners.map(
       (owner) => owner.path,
     );
+    // Both halves of the inverse authority model pre-deny managed workspace
+    // collections. Code actors reopen their own checkout; Design actors reopen
+    // only discovered Design islands. This keeps a future sibling protected
+    // from every already-admitted actor before Git creates it.
+    const protectedWorkspaceDirectories =
+      protectedManagedWorkspaceDirectories();
+    const protectedWorkspaceWriteDirectories =
+      actor !== "design-agent"
+        ? registeredSnapshot.owners
+            .map((owner) => owner.path)
+            .filter((owner) =>
+              protectedWorkspaceDirectories.some(
+                (directory) =>
+                  owner !== directory && pathInsideOrEqual(owner, directory),
+              ),
+            )
+            .filter((owner) =>
+              additionalReadWriteRoots.some((grant) =>
+                pathInsideOrEqual(owner, grant),
+              ),
+            )
+            .sort((left, right) => left.localeCompare(right))
+        : [];
     let effectiveTerritory = territory;
     if (actor === "design-agent") {
       const registeredTerritories: AgentFilesystemTerritory[] = [];
@@ -1791,9 +1914,7 @@ export class AgentGateway {
         ? [
             ...new Set([
               path.resolve(canonicalWorkspace),
-              ...additionalGitWorkspaceRoots.map((root) =>
-                path.resolve(root),
-              ),
+              ...additionalGitWorkspaceRoots.map((root) => path.resolve(root)),
               ...registeredCodeOwners,
             ]),
           ].sort((left, right) => left.localeCompare(right))
@@ -1829,6 +1950,12 @@ export class AgentGateway {
       ...(effectiveTerritory ? { territory: effectiveTerritory } : {}),
       ...(additionalReadWriteRoots.length > 0
         ? { additionalReadWriteRoots }
+        : {}),
+      ...(protectedWorkspaceDirectories.length > 0
+        ? { protectedWorkspaceDirectories }
+        : {}),
+      ...(protectedWorkspaceWriteDirectories.length > 0
+        ? { protectedWorkspaceWriteDirectories }
         : {}),
       ...(protectedCodeDirectories.length > 0
         ? { protectedCodeDirectories }
@@ -1986,6 +2113,7 @@ export class AgentGateway {
     stage: "newSession" | "loadSession" | "forkSession",
     request: BoundaryRequest,
     registeredDesignAuthorityIdentity: string | null,
+    territoryContributions: readonly BoundaryTerritoryContributionSnapshot[],
     operation: (context: {
       boundary: PreparedBoundary;
       executionId: string;
@@ -2016,6 +2144,20 @@ export class AgentGateway {
         throw new Error(
           "pooled utility boundary has stale registered Design authority",
         );
+      }
+      const admittedContributions = lease.boundary.territoryContributions;
+      if (admittedContributions === undefined) {
+        Object.defineProperty(lease.boundary, "territoryContributions", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: territoryContributions,
+        });
+      } else if (
+        JSON.stringify(admittedContributions) !==
+        JSON.stringify(territoryContributions)
+      ) {
+        throw new Error("pooled utility boundary has stale local territory");
       }
       const result = await operation({
         boundary: lease.boundary,
@@ -2082,6 +2224,29 @@ export class AgentGateway {
         identity,
       ) ?? false
     );
+  }
+
+  pooledUtilityWorkspaceTerritoryChanged(
+    workspaceRoot: string,
+    territory: AgentFilesystemTerritory | undefined,
+  ): boolean {
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    for (const contributions of this.utilityBoundariesInstance?.territoryContributionSnapshots() ??
+      []) {
+      if (!contributions) return true;
+      const contribution = contributions.find(
+        (candidate) =>
+          path.resolve(candidate.workspaceRoot) === normalizedWorkspace,
+      );
+      if (!contribution) continue;
+      const nextContribution = contribution.full
+        ? territory
+        : territoryForGrants(territory, contribution.grants);
+      if (contribution.identity !== agentTerritoryIdentity(nextContribution)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** A rejected stop proof is process-wide, not session-local. Preserve the
@@ -2828,6 +2993,7 @@ export class AgentGateway {
         "newSession",
         request,
         territorySet.registeredDesignAuthorityIdentity,
+        territorySet.contributions,
         async ({ boundary }) => {
           const currentPrimary = await previewCodeAgentTerritory({
             cwd: probeRoot,
@@ -3101,6 +3267,7 @@ export class AgentGateway {
       "newSession",
       request,
       territorySet.registeredDesignAuthorityIdentity,
+      territorySet.contributions,
       async ({ boundary }) => {
         await this.assertAdditionalTerritorySetStillCurrent(
           territorySet,
@@ -3209,18 +3376,19 @@ export class AgentGateway {
         cwd,
         cwd,
         territorySet.territory,
-      env,
-      adapter.agentId,
-      [],
-      territorySet.additionalRoots,
-      territorySet.additionalGitWorkspaceRoots,
-      false,
-    );
+        env,
+        adapter.agentId,
+        [],
+        territorySet.additionalRoots,
+        territorySet.additionalGitWorkspaceRoots,
+        false,
+      );
       const text = await this.withUtilityBoundary(
         adapter.agentId,
         "newSession",
         request,
         territorySet.registeredDesignAuthorityIdentity,
+        territorySet.contributions,
         async ({ boundary }) => {
           await this.assertAdditionalTerritorySetStillCurrent(
             territorySet,
@@ -3364,43 +3532,57 @@ export class AgentGateway {
       instructionCtx,
     );
     const executionId = randomUUID();
-    const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
-    const preparedBoundary = await this.prepareExecutionBoundary(
-      executionId,
-      cwd,
-      canonicalWorkspaceRoot,
-      adapter,
-      territory,
-      sessionEnv,
-      mcpServers,
-      "newSession",
-      territorySet.additionalRoots,
-      territorySet.additionalGitWorkspaceRoots,
-      opts.admissionSignal ? { admissionSignal: opts.admissionSignal } : {},
-    );
-    try {
-      await this.assertAdditionalTerritorySetStillCurrent(
-        territorySet,
-        adapter,
-        cwd,
-        canonicalWorkspaceRoot,
-        mainRepoRoot,
-        sessionEnv,
-        "newSession",
-      );
-    } catch (error) {
-      await this.retirePreparedBoundaryAfterFailure(
+    const { mcpServers, preparedBoundary } =
+      await this.withProvisionalTerritory(
         executionId,
-        preparedBoundary,
-        error,
+        territorySet.contributions,
+        async () => {
+          const mcpServers = await this.resolveSessionMcp(
+            agentId,
+            cwd,
+            mainRepoRoot,
+          );
+          const preparedBoundary = await this.prepareExecutionBoundary(
+            executionId,
+            cwd,
+            canonicalWorkspaceRoot,
+            adapter,
+            territory,
+            sessionEnv,
+            mcpServers,
+            "newSession",
+            territorySet.additionalRoots,
+            territorySet.additionalGitWorkspaceRoots,
+            opts.admissionSignal
+              ? { admissionSignal: opts.admissionSignal }
+              : {},
+          );
+          try {
+            await this.assertAdditionalTerritorySetStillCurrent(
+              territorySet,
+              adapter,
+              cwd,
+              canonicalWorkspaceRoot,
+              mainRepoRoot,
+              sessionEnv,
+              "newSession",
+            );
+          } catch (error) {
+            await this.retirePreparedBoundaryAfterFailure(
+              executionId,
+              preparedBoundary,
+              error,
+            );
+          }
+          this.executionBoundaries.set(executionId, preparedBoundary);
+          this.executionToCwd.set(executionId, cwd);
+          this.executionToTerritoryContributions.set(
+            executionId,
+            territorySet.contributions,
+          );
+          return { mcpServers, preparedBoundary };
+        },
       );
-    }
-    this.executionBoundaries.set(executionId, preparedBoundary);
-    this.executionToCwd.set(executionId, cwd);
-    this.executionToTerritoryContributions.set(
-      executionId,
-      territorySet.contributions,
-    );
     const boundary = preparedBoundary.status;
     const browserUse = await this.resolveBrowserUse(
       agentId,
@@ -3590,48 +3772,60 @@ export class AgentGateway {
       cwd,
       instructionCtx,
     );
-    const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
-    const preparedBoundary = await this.prepareExecutionBoundary(
-      executionId,
-      cwd,
-      canonicalWorkspaceRoot,
-      adapter,
-      territory,
-      sessionEnv,
-      mcpServers,
-      "loadSession",
-      territorySet.additionalRoots,
-      territorySet.additionalGitWorkspaceRoots,
-      {
-        providerResumeId: providerBinding.resumeId,
-        ...(opts.admissionSignal
-          ? { admissionSignal: opts.admissionSignal }
-          : {}),
-      },
-    );
-    try {
-      await this.assertAdditionalTerritorySetStillCurrent(
-        territorySet,
-        adapter,
-        cwd,
-        canonicalWorkspaceRoot,
-        mainRepoRoot,
-        sessionEnv,
-        "loadSession",
-      );
-    } catch (error) {
-      await this.retirePreparedBoundaryAfterFailure(
+    const { mcpServers, preparedBoundary } =
+      await this.withProvisionalTerritory(
         executionId,
-        preparedBoundary,
-        error,
+        territorySet.contributions,
+        async () => {
+          const mcpServers = await this.resolveSessionMcp(
+            agentId,
+            cwd,
+            mainRepoRoot,
+          );
+          const preparedBoundary = await this.prepareExecutionBoundary(
+            executionId,
+            cwd,
+            canonicalWorkspaceRoot,
+            adapter,
+            territory,
+            sessionEnv,
+            mcpServers,
+            "loadSession",
+            territorySet.additionalRoots,
+            territorySet.additionalGitWorkspaceRoots,
+            {
+              providerResumeId: providerBinding.resumeId,
+              ...(opts.admissionSignal
+                ? { admissionSignal: opts.admissionSignal }
+                : {}),
+            },
+          );
+          try {
+            await this.assertAdditionalTerritorySetStillCurrent(
+              territorySet,
+              adapter,
+              cwd,
+              canonicalWorkspaceRoot,
+              mainRepoRoot,
+              sessionEnv,
+              "loadSession",
+            );
+          } catch (error) {
+            await this.retirePreparedBoundaryAfterFailure(
+              executionId,
+              preparedBoundary,
+              error,
+            );
+          }
+          this.executionBoundaries.set(executionId, preparedBoundary);
+          this.executionToCwd.set(executionId, cwd);
+          this.executionToTerritoryContributions.set(
+            executionId,
+            territorySet.contributions,
+          );
+          return { mcpServers, preparedBoundary };
+        },
       );
-    }
-    this.executionBoundaries.set(executionId, preparedBoundary);
-    this.executionToCwd.set(executionId, cwd);
-    this.executionToTerritoryContributions.set(
-      executionId,
-      territorySet.contributions,
-    );
     const boundary = preparedBoundary.status;
     const browserUse = await this.resolveBrowserUse(
       agentId,
@@ -3836,78 +4030,88 @@ export class AgentGateway {
       cwd,
       instructionCtx,
     );
-    const mcpServers = await this.resolveSessionMcp(agentId, cwd, mainRepoRoot);
     const forkExecutionId = `fork-${randomUUID()}`;
-    const preparedBoundary = await this.prepareExecutionBoundary(
+    return this.withProvisionalTerritory(
       forkExecutionId,
-      cwd,
-      canonicalWorkspaceRoot,
-      adapter,
-      territory,
-      sessionEnv,
-      mcpServers,
-      "forkSession",
-      territorySet.additionalRoots,
-      territorySet.additionalGitWorkspaceRoots,
-      {
-        providerResumeId: providerBinding.resumeId,
-        ...(opts.admissionSignal
-          ? { admissionSignal: opts.admissionSignal }
-          : {}),
+      territorySet.contributions,
+      async () => {
+        const mcpServers = await this.resolveSessionMcp(
+          agentId,
+          cwd,
+          mainRepoRoot,
+        );
+        const preparedBoundary = await this.prepareExecutionBoundary(
+          forkExecutionId,
+          cwd,
+          canonicalWorkspaceRoot,
+          adapter,
+          territory,
+          sessionEnv,
+          mcpServers,
+          "forkSession",
+          territorySet.additionalRoots,
+          territorySet.additionalGitWorkspaceRoots,
+          {
+            providerResumeId: providerBinding.resumeId,
+            ...(opts.admissionSignal
+              ? { admissionSignal: opts.admissionSignal }
+              : {}),
+          },
+        );
+        try {
+          await this.assertAdditionalTerritorySetStillCurrent(
+            territorySet,
+            adapter,
+            cwd,
+            canonicalWorkspaceRoot,
+            mainRepoRoot,
+            sessionEnv,
+            "forkSession",
+          );
+        } catch (error) {
+          await this.retirePreparedBoundaryAfterFailure(
+            forkExecutionId,
+            preparedBoundary,
+            error,
+          );
+        }
+        let result: { providerBinding: ProviderBinding };
+        try {
+          result = await awaitAdapterStartup({
+            agentId,
+            stage: "forkSession",
+            operation: adapter.forkProviderBinding!({
+              providerBinding,
+              cwd,
+              env: sessionEnv,
+              cliBinary: spawn.cliBinary,
+              mcpServers,
+              ...(systemInstruction ? { systemInstruction } : {}),
+              ...(territory ? { territory } : {}),
+              executionBoundary: preparedBoundary,
+            }),
+            onLateSettlement: () =>
+              this.retirePreparedBoundary(forkExecutionId, preparedBoundary),
+          });
+        } finally {
+          await this.retirePreparedBoundary(forkExecutionId, preparedBoundary);
+        }
+        const forkedBinding = coerceProviderBinding(result.providerBinding);
+        if (
+          !forkedBinding ||
+          forkedBinding.kind !== "native" ||
+          forkedBinding.providerId !== agentId ||
+          forkedBinding.resumeId === providerBinding.resumeId
+        ) {
+          throw new AgentFailureError({
+            kind: "protocol-error",
+            stage: "forkSession",
+            message: `Agent ${agentId} returned an invalid provider fork binding.`,
+          });
+        }
+        return forkedBinding;
       },
     );
-    try {
-      await this.assertAdditionalTerritorySetStillCurrent(
-        territorySet,
-        adapter,
-        cwd,
-        canonicalWorkspaceRoot,
-        mainRepoRoot,
-        sessionEnv,
-        "forkSession",
-      );
-    } catch (error) {
-      await this.retirePreparedBoundaryAfterFailure(
-        forkExecutionId,
-        preparedBoundary,
-        error,
-      );
-    }
-    let result: { providerBinding: ProviderBinding };
-    try {
-      result = await awaitAdapterStartup({
-        agentId,
-        stage: "forkSession",
-        operation: adapter.forkProviderBinding({
-          providerBinding,
-          cwd,
-          env: sessionEnv,
-          cliBinary: spawn.cliBinary,
-          mcpServers,
-          ...(systemInstruction ? { systemInstruction } : {}),
-          ...(territory ? { territory } : {}),
-          executionBoundary: preparedBoundary,
-        }),
-        onLateSettlement: () =>
-          this.retirePreparedBoundary(forkExecutionId, preparedBoundary),
-      });
-    } finally {
-      await this.retirePreparedBoundary(forkExecutionId, preparedBoundary);
-    }
-    const forkedBinding = coerceProviderBinding(result.providerBinding);
-    if (
-      !forkedBinding ||
-      forkedBinding.kind !== "native" ||
-      forkedBinding.providerId !== agentId ||
-      forkedBinding.resumeId === providerBinding.resumeId
-    ) {
-      throw new AgentFailureError({
-        kind: "protocol-error",
-        stage: "forkSession",
-        message: `Agent ${agentId} returned an invalid provider fork binding.`,
-      });
-    }
-    return forkedBinding;
   }
 
   /** Tear down a single session's resources when its chat tab is closed.
@@ -3938,6 +4142,7 @@ export class AgentGateway {
       this.executionToDesignDirectory.delete(executionId);
       this.executionToTerritoryIdentity.delete(executionId);
       this.executionToTerritoryContributions.delete(executionId);
+      this.provisionalTerritoryContributions.delete(executionId);
       this.executionToBoundaryStatus.delete(executionId);
       this.stopObservingBoundaryPorts(executionId);
       const failures: unknown[] = [];
@@ -4012,6 +4217,7 @@ export class AgentGateway {
     this.executionToDesignDirectory.delete(sessionId);
     this.executionToTerritoryIdentity.delete(sessionId);
     this.executionToTerritoryContributions.delete(sessionId);
+    this.provisionalTerritoryContributions.delete(sessionId);
     this.executionToBoundaryStatus.delete(sessionId);
     const adapter = this.adapters.get(resolvedAgentId);
     let failure: unknown;
@@ -4527,6 +4733,7 @@ export class AgentGateway {
     this.executionToDesignDirectory.clear();
     this.executionToTerritoryIdentity.clear();
     this.executionToTerritoryContributions.clear();
+    this.provisionalTerritoryContributions.clear();
     this.executionToBoundaryStatus.clear();
     this.sessionsTerritoryNoticePending.clear();
     this.sessionsCwdHinted.clear();

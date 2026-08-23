@@ -2,13 +2,13 @@
 // useSidebarResizeDrag — the workbench sidebar seam drag gesture
 // ──────────────────────────────────────────────────────────
 //
-// One pointer-captured drag handler shared by the File tab's tree sidebar and
-// the Changes tab's changed-file sidebar. Both resize the SAME committed width
-// preference (files-sidebar-width), so the seam behaves identically wherever
-// it appears: writes the sidebar element's width per rAF tick during the drag
-// and commits ONE store update (persist + broadcast) on release. Geometry is
-// resolved once at pointer-down — the captured pointer means the column can't
-// resize mid-drag.
+// One pointer-captured drag handler shared by the File tab's right tree sidebar
+// and the Changes tab's left changed-file sidebar. Both resize the SAME
+// committed width preference (files-sidebar-width), so the seam behaves
+// identically apart from its anchored edge: writes the sidebar element's width
+// per rAF tick during the drag and commits ONE store update (persist +
+// broadcast) on release. Geometry is resolved once at pointer-down — the
+// captured pointer means the column can't resize mid-drag.
 
 import { useCallback } from "react";
 
@@ -21,6 +21,22 @@ import {
 // Past this much horizontal travel the seam gesture counts as a DRAG (commits
 // a width); anything less is a click and must not persist a stale value.
 const DRAG_THRESHOLD_PX = 3;
+
+export type SidebarSide = "left" | "right";
+
+/** Resolve sidebar width from the seam pointer. Left panes grow as the pointer
+ * moves right; right panes grow as it moves left. Kept pure so the two anchor
+ * directions cannot silently drift while sharing the same gesture. */
+export function sidebarWidthFromPointer(
+  clientX: number,
+  containerLeft: number,
+  containerWidth: number,
+  side: SidebarSide,
+): number {
+  return side === "right"
+    ? containerLeft + containerWidth - clientX
+    : clientX - containerLeft;
+}
 
 /** Cancel a queued paint and synchronously apply its latest pointer position.
  * Returns whether a frame was flushed so the caller can clear its handle. */
@@ -36,11 +52,12 @@ export function flushPendingSidebarResize(
 }
 
 /** Pointer-down handler for the sidebar seam. `containerRef` is the two-pane
- *  root (measured once per gesture); `sidebarRef` is the left pane whose width
- *  the live drag writes directly (no React re-render per pointer tick). */
+ *  root (measured once per gesture); `sidebarRef` is the pane whose width the
+ *  live drag writes directly (no React re-render per pointer tick). */
 export function useSidebarResizeDrag(
   containerRef: React.RefObject<HTMLDivElement | null>,
   sidebarRef: React.RefObject<HTMLDivElement | null>,
+  side: SidebarSide = "left",
 ): (e: React.PointerEvent<HTMLDivElement>) => void {
   return useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -76,7 +93,12 @@ export function useSidebarResizeDrag(
 
       const apply = () => {
         rafId = null;
-        const raw = lastClientX - rect.left;
+        const raw = sidebarWidthFromPointer(
+          lastClientX,
+          rect.left,
+          rect.width,
+          side,
+        );
         // Pixel-clamped (sidebar floor + viewer reservation) then converted
         // to a share of the container, so the live width always equals what
         // the commit will persist — no snap-back on release. Percentage
@@ -147,6 +169,6 @@ export function useSidebarResizeDrag(
       window.addEventListener("pointercancel", finish);
       window.addEventListener("blur", finish);
     },
-    [containerRef, sidebarRef],
+    [containerRef, sidebarRef, side],
   );
 }

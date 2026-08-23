@@ -2,7 +2,7 @@
 // boundary where setup, run actions, terminals, and agent sessions are brought
 // to rest before a managed checkout can be moved or removed.
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -91,6 +91,12 @@ interface ReaperInternals {
     proveWorkspaceBoundaryStopped(workspaceId: string): Promise<void>;
     stopAllAndProve(): Promise<void>;
     start(args: unknown): Promise<void>;
+    hasRepositoryCodeAuthority(): boolean;
+    registeredDesignAuthorityChanged(identity: string | null): boolean;
+    workspaceTerritoryChanged(
+      workspaceRoot: string,
+      territoryIdentity: string | null,
+    ): boolean;
   };
   runs: {
     stopAllForWorkspace(workspaceId: string): void;
@@ -98,6 +104,12 @@ interface ReaperInternals {
     proveWorkspaceBoundariesStopped(workspaceId: string): Promise<void>;
     stopAllAndProve(): Promise<void>;
     start(args: unknown): Promise<unknown>;
+    hasRepositoryCodeAuthority(): boolean;
+    registeredDesignAuthorityChanged(identity: string | null): boolean;
+    workspaceTerritoryChanged(
+      workspaceRoot: string,
+      territoryIdentity: string | null,
+    ): boolean;
   };
   agents: {
     ensureAgent(...args: unknown[]): Promise<unknown>;
@@ -124,6 +136,10 @@ interface ReaperInternals {
     hasPooledUtilityCodeAuthority(): boolean;
     pooledUtilityRegisteredDesignAuthorityChanged(
       identity: string | null,
+    ): boolean;
+    pooledUtilityWorkspaceTerritoryChanged(
+      workspaceRoot: string,
+      territoryIdentity: string | null,
     ): boolean;
   };
   sessionAgent: Map<string, string>;
@@ -170,12 +186,19 @@ interface ReaperInternals {
     msg: Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>,
     client: TransportClient,
   ): Promise<void>;
-  handleAgentMessage(msg: EngineMessage, client: TransportClient): Promise<void>;
+  handleAgentMessage(
+    msg: EngineMessage,
+    client: TransportClient,
+  ): Promise<void>;
   agentSpawnOpts(
     msg: EngineMessage,
     client: TransportClient,
     stage: "newSession" | "loadSession" | "forkSession",
-  ): Promise<{ workspaceId?: string; cwd?: string; env?: Record<string, string> }>;
+  ): Promise<{
+    workspaceId?: string;
+    cwd?: string;
+    env?: Record<string, string>;
+  }>;
   workspaceIdForProcess(
     workspaceId: string | null | undefined,
     cwd: string | null | undefined,
@@ -1295,6 +1318,49 @@ describe("Design territory agent retirement", () => {
     expect(transition).toHaveBeenCalledOnce();
   });
 
+  it.each(["workspace.create", "workspace.createFromBranch"])(
+    "keeps an active sibling session live during safe managed %s",
+    async (op) => {
+      const repoRoot = await mkdtemp(
+        path.join(tmpdir(), "zeros-stable-managed-create-"),
+      );
+      const state = internals(
+        new ZerosEngine({ root: repoRoot, port: 29_926 }),
+      );
+      vi.spyOn(state.workspace, "isWriteOp").mockReturnValue(false);
+      vi.spyOn(state.workspace, "lifecycleMutationWorkspaceId").mockReturnValue(
+        null,
+      );
+      vi.spyOn(state.workspace, "handle").mockResolvedValue(null);
+      const known = vi
+        .spyOn(projectState, "listKnownRepoRoots")
+        .mockReturnValue([repoRoot]);
+      const transition = vi.spyOn(
+        state,
+        "withGlobalDesignTerritoryTransition",
+      );
+
+      try {
+        await state.handleWorkspaceMessage(
+          {
+            type: "WORKSPACE_REQUEST",
+            id: "stable-managed-create",
+            source: "browser",
+            timestamp: 1,
+            op,
+            params: { repoRoot },
+          } as Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>,
+          client("local"),
+        );
+
+        expect(transition).not.toHaveBeenCalled();
+      } finally {
+        known.mockRestore();
+        await rm(repoRoot, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.each([
     ["file.write", { path: ".zeros/settings.toml" }],
     ["file.write", { path: "New Design/.zeros-canvas.json" }],
@@ -1927,6 +1993,41 @@ describe("Design territory agent retirement", () => {
     }
   });
 
+  it("retires a managed repository task when its reopened local Design territory changes", async () => {
+    const base = await mkdtemp(
+      path.join(tmpdir(), "zeros-task-local-territory-"),
+    );
+    const state = internals(new ZerosEngine({ root: base, port: 29_928 }));
+    vi.spyOn(state.agents, "workspaceTerritoryChanged").mockReturnValue(false);
+    vi.spyOn(state.runs, "hasRepositoryCodeAuthority").mockReturnValue(true);
+    vi.spyOn(state.runs, "registeredDesignAuthorityChanged").mockReturnValue(
+      false,
+    );
+    const localChanged = vi
+      .spyOn(state.runs, "workspaceTerritoryChanged")
+      .mockReturnValue(true);
+    const known = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue([base]);
+    const transition = vi
+      .spyOn(state, "withGlobalDesignTerritoryTransition")
+      .mockImplementation(async (mutation) => mutation());
+
+    try {
+      state.scheduleDesignTerritoryReconcile(
+        [{ id: "ws_task_local", path: base, repoRoot: base }],
+        "settings",
+      );
+      await state.designTerritoryReconcileChain;
+
+      expect(localChanged).toHaveBeenCalledOnce();
+      expect(transition).toHaveBeenCalledOnce();
+    } finally {
+      known.mockRestore();
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
   it("globally retires pooled provider authority after an external territory change", async () => {
     const base = await mkdtemp(path.join(tmpdir(), "zeros-utility-territory-"));
     const state = internals(new ZerosEngine({ root: base, port: 29_923 }));
@@ -1989,7 +2090,45 @@ describe("Design territory agent retirement", () => {
     }
   });
 
-  it("drains an agent admission racing external territory recognition", async () => {
+  it("retires a pooled utility when its reopened managed territory changes", async () => {
+    const base = await mkdtemp(
+      path.join(tmpdir(), "zeros-utility-local-territory-"),
+    );
+    const state = internals(new ZerosEngine({ root: base, port: 29_929 }));
+    vi.spyOn(state.agents, "workspaceTerritoryChanged").mockReturnValue(false);
+    vi.spyOn(state.agents, "hasPooledUtilityCodeAuthority").mockReturnValue(
+      true,
+    );
+    vi.spyOn(
+      state.agents,
+      "pooledUtilityRegisteredDesignAuthorityChanged",
+    ).mockReturnValue(false);
+    const localChanged = vi
+      .spyOn(state.agents, "pooledUtilityWorkspaceTerritoryChanged")
+      .mockReturnValue(true);
+    const known = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue([base]);
+    const transition = vi
+      .spyOn(state, "withGlobalDesignTerritoryTransition")
+      .mockImplementation(async (mutation) => mutation());
+
+    try {
+      state.scheduleDesignTerritoryReconcile(
+        [{ id: "ws_utility_local", path: base, repoRoot: base }],
+        "recognition",
+      );
+      await state.designTerritoryReconcileChain;
+
+      expect(localChanged).toHaveBeenCalledOnce();
+      expect(transition).toHaveBeenCalledOnce();
+    } finally {
+      known.mockRestore();
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("lets a pre-resolution admission observe external territory recognition without restarting it", async () => {
     const base = await mkdtemp(
       path.join(tmpdir(), "zeros-agent-territory-race-"),
     );
@@ -1998,8 +2137,9 @@ describe("Design territory agent retirement", () => {
     const transition = vi
       .spyOn(state, "withGlobalDesignTerritoryTransition")
       .mockImplementation(async (mutation) => mutation());
-    // An admission has crossed the old gate but has not published its session
-    // identity yet, so workspaceTerritoryChanged cannot observe it.
+    // An admission that has not published a provisional snapshot has not
+    // finished resolving authority. Its mandatory post-prepare recheck will
+    // observe this publication before any provider bytes can start.
     state.globalDesignAuthorityStarts.add(new Promise(() => {}));
 
     try {
@@ -2009,8 +2149,83 @@ describe("Design territory agent retirement", () => {
       );
       await state.designTerritoryReconcileChain;
 
-      expect(transition).toHaveBeenCalledOnce();
+      expect(transition).not.toHaveBeenCalled();
     } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("batches a changed multi-owner reconcile behind one transition", async () => {
+    const base = await mkdtemp(
+      path.join(tmpdir(), "zeros-agent-multi-owner-race-"),
+    );
+    const worktree = await mkdtemp(path.join(base, "worktree-"));
+    const main = await mkdtemp(path.join(base, "main-"));
+    const state = internals(new ZerosEngine({ root: base, port: 29_925 }));
+    vi.spyOn(state.agents, "workspaceTerritoryChanged").mockReturnValue(true);
+    const resolved = vi.spyOn(agentGateway, "resolveCodeAgentTerritory");
+    const transition = vi
+      .spyOn(state, "withGlobalDesignTerritoryTransition")
+      .mockImplementation(async (mutation) => mutation());
+    // A workspace event can emit one reconciliation for both its main checkout
+    // and worktree. The whole owner batch belongs to one authority handoff;
+    // reopening the gate between owners can admit a stale boundary.
+
+    try {
+      state.scheduleDesignTerritoryReconcile(
+        [{ id: "ws_agent_race", path: worktree, repoRoot: main }],
+        "recognition",
+      );
+      await state.designTerritoryReconcileChain;
+
+      expect(transition).toHaveBeenCalledOnce();
+      expect(
+        resolved.mock.calls.map(([options]) => options.workspaceRoot),
+      ).toEqual(expect.arrayContaining([worktree, main]));
+    } finally {
+      resolved.mockRestore();
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("does not restart a racing admission for a managed sibling whose main owner is already current", async () => {
+    const previousWorkspacesDir = process.env.ZEROS_WORKSPACES_DIR;
+    const base = await mkdtemp(
+      path.join(tmpdir(), "zeros-managed-owner-race-"),
+    );
+    const managed = path.join(base, "workspaces");
+    process.env.ZEROS_WORKSPACES_DIR = managed;
+    await mkdir(managed, { recursive: true });
+    const worktree = await mkdtemp(path.join(managed, "workspace-"));
+    const main = await mkdtemp(path.join(base, "main-"));
+    const state = internals(new ZerosEngine({ root: main, port: 29_927 }));
+    vi.spyOn(state.agents, "workspaceTerritoryChanged").mockReturnValue(false);
+    vi.spyOn(state.agents, "workspaceHasSessions").mockImplementation(
+      (_workspaceId, workspaceRoot) => workspaceRoot === main,
+    );
+    const known = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue([main]);
+    const transition = vi
+      .spyOn(state, "withGlobalDesignTerritoryTransition")
+      .mockImplementation(async (mutation) => mutation());
+    state.globalDesignAuthorityStarts.add(new Promise(() => {}));
+
+    try {
+      state.scheduleDesignTerritoryReconcile(
+        [{ id: "ws_managed_race", path: worktree, repoRoot: main }],
+        "git-refs",
+      );
+      await state.designTerritoryReconcileChain;
+
+      expect(transition).not.toHaveBeenCalled();
+    } finally {
+      known.mockRestore();
+      if (previousWorkspacesDir === undefined) {
+        delete process.env.ZEROS_WORKSPACES_DIR;
+      } else {
+        process.env.ZEROS_WORKSPACES_DIR = previousWorkspacesDir;
+      }
       await rm(base, { recursive: true, force: true });
     }
   });

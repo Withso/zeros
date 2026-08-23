@@ -4,6 +4,7 @@ import {
   mkdir,
   mkdtemp,
   realpath,
+  rename,
   rm,
   symlink,
   writeFile,
@@ -164,11 +165,97 @@ describe("repository task boundary factory", () => {
     }
   });
 
+  it("pre-protects managed siblings for Setup and Run boundaries", async () => {
+    const previousWorkspacesDir = process.env.ZEROS_WORKSPACES_DIR;
+    const container = await realpath(
+      await mkdtemp(path.join(os.tmpdir(), "zeros-repo-managed-boundary-")),
+    );
+    temporaryDirectories.push(container);
+    const managed = path.join(container, "workspaces");
+    process.env.ZEROS_WORKSPACES_DIR = managed;
+    const workspaceSource = await designRepo();
+    const siblingSource = await designRepo();
+    const registeredMain = await designRepo();
+    const workspace = path.join(managed, "zeros", "Shocking");
+    const sibling = path.join(managed, "zeros", "Onyx");
+    await mkdir(path.dirname(workspace), { recursive: true });
+    await Promise.all([
+      rename(workspaceSource, workspace),
+      rename(siblingSource, sibling),
+    ]);
+    const workspaceSpy = vi.spyOn(gitState, "listWorkspaces").mockReturnValue([
+      {
+        id: "ws_shocking",
+        path: workspace,
+        repoRoot: registeredMain,
+        placement: "local",
+      },
+      {
+        id: "ws_onyx",
+        path: sibling,
+        repoRoot: registeredMain,
+        placement: "local",
+      },
+    ] as ReturnType<typeof gitState.listWorkspaces>);
+    const projectSpy = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue([registeredMain]);
+    const requests: BoundaryRequest[] = [];
+    const factory = createRepoTaskBoundaryFactory(
+      testExecutionBoundary({
+        onPrepare: (candidate) => requests.push(candidate),
+      }),
+    );
+    let prepared: Awaited<ReturnType<typeof factory>> | undefined;
+    const onAuthorityResolved = vi.fn();
+
+    try {
+      prepared = await factory({
+        executionId: "repo-task-managed-sibling",
+        cwd: workspace,
+        workspaceRoot: workspace,
+        repoRoot: registeredMain,
+        onAuthorityResolved,
+      });
+      const request = requests.at(-1);
+
+      expect(request?.protectedWorkspaceDirectories).toContain(managed);
+      expect(request?.territory?.protectedDesignDirectories).toContain(
+        path.join(workspace, "Zeros Design"),
+      );
+      expect(request?.territory?.protectedDesignDirectories).toContain(
+        path.join(registeredMain, "Zeros Design"),
+      );
+      expect(request?.territory?.protectedDesignDirectories).not.toContain(
+        path.join(sibling, "Zeros Design"),
+      );
+      expect(onAuthorityResolved).toHaveBeenCalledOnce();
+      expect(prepared.territoryContributions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ workspaceRoot: workspace, full: true }),
+          expect.objectContaining({
+            workspaceRoot: registeredMain,
+            full: true,
+          }),
+        ]),
+      );
+    } finally {
+      await prepared?.stopAndProve();
+      projectSpy.mockRestore();
+      workspaceSpy.mockRestore();
+      if (previousWorkspacesDir === undefined) {
+        delete process.env.ZEROS_WORKSPACES_DIR;
+      } else {
+        process.env.ZEROS_WORKSPACES_DIR = previousWorkspacesDir;
+      }
+    }
+  });
+
   it("does not label an unregistered rowless task's own Design deny as registered authority", async () => {
     const root = await designRepo();
-    const workspaceSpy = vi.spyOn(gitState, "listWorkspaces").mockReturnValue(
-      [] as ReturnType<typeof gitState.listWorkspaces>,
-    );
+    const workspaceSpy = vi
+      .spyOn(gitState, "listWorkspaces")
+      .mockReturnValue([] as ReturnType<typeof gitState.listWorkspaces>);
     const projectSpy = vi
       .spyOn(projectState, "listKnownRepoRoots")
       .mockReturnValue([]);
