@@ -1,8 +1,9 @@
 // ──────────────────────────────────────────────────────────
 // Config — every knob comes from the environment, validated at boot.
 //
-// Auth0 is the identity issuer only. We derive its JWKS and issuer URLs from
-// AUTH0_DOMAIN and verify tokens locally; authorization remains in Postgres.
+// Authentication is selected explicitly. Legacy Auth0 deployments may still
+// derive their verification URLs from AUTH0_DOMAIN during the staged cutover;
+// WorkOS and future providers must supply the exact issuer/JWKS contract.
 // ──────────────────────────────────────────────────────────
 
 import { z } from "zod";
@@ -13,8 +14,9 @@ import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 const EnvSchema = z.object({
   /** Postgres connection string (Railway: the service's DATABASE_URL). */
   DATABASE_URL: z.string().min(1),
+  AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
   /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
-  AUTH0_DOMAIN: z.string().min(1),
+  AUTH0_DOMAIN: z.string().trim().min(1).optional(),
   /**
    * Accepted `iss` claims, comma-separated; defaults to
    * `https://${AUTH0_DOMAIN}/`. A custom Auth0 domain deployment lists BOTH
@@ -24,8 +26,13 @@ const EnvSchema = z.object({
   AUTH_ISSUER: z.string().optional(),
   /** Override the JWKS URL; defaults to `https://${AUTH0_DOMAIN}/.well-known/jwks.json`. */
   AUTH_JWKS_URL: z.string().url().optional(),
-  /** Expected `aud` claim — the Auth0 API identifier registered for this backend. */
+  /** Expected `aud` claim for this resource server. */
   AUTH_AUDIENCE: z.string().min(1),
+  /** Allowed WorkOS Applications. Required only in WorkOS mode. */
+  AUTH_WEB_CLIENT_ID: z.string().trim().min(1).optional(),
+  AUTH_DESKTOP_CLIENT_ID: z.string().trim().min(1).optional(),
+  /** Independent Cloudflare broker credential. This is not a WorkOS API key. */
+  AUTH_BROKER_SECRET: z.string().min(32).optional(),
   PORT: z.coerce.number().int().positive().default(8080),
   /** "production" tightens error bodies; anything else is dev-friendly. */
   NODE_ENV: z.string().default("development"),
@@ -139,11 +146,26 @@ export type CloudWorkspaceBackendConfig = {
   reconcileIntervalMs: number;
 };
 
+export type AuthBackendConfig =
+  | {
+      provider: "auth0";
+      issuers: string[];
+      jwksUrl: string;
+      audience: string;
+    }
+  | {
+      provider: "workos";
+      issuer: string;
+      jwksUrl: string;
+      audience: string;
+      webClientId: string;
+      desktopClientId: string;
+    };
+
 export type Config = {
   databaseUrl: string;
-  authIssuers: string[];
-  authJwksUrl: string;
-  authAudience: string;
+  auth: AuthBackendConfig;
+  authBrokerSecret?: string | null;
   port: number;
   isProduction: boolean;
   /** Null when no GitHub App is registered for this environment. */
@@ -261,6 +283,117 @@ function validatedBrowserUrl(
     );
   }
   return url.toString();
+}
+
+function validatedAuthUrl(
+  raw: string,
+  name: string,
+  nodeEnv: string,
+): string {
+  const value = raw.trim();
+  const url = new URL(value);
+  const devLoopback =
+    nodeEnv !== "production" &&
+    url.protocol === "http:" &&
+    (url.hostname === "127.0.0.1" ||
+      url.hostname === "[::1]" ||
+      url.hostname === "localhost");
+  if (
+    (url.protocol !== "https:" && !devLoopback) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      `Invalid environment: ${name} must use HTTPS (or dev loopback HTTP) and contain no credentials, query, or fragment`,
+    );
+  }
+  // The issuer is an exact JWT string contract, including trailing slashes.
+  // Preserve the operator-provided spelling after URL validation.
+  return value;
+}
+
+function requiredAuthValue(
+  value: string | undefined,
+  name: string,
+): string {
+  const normalized = value?.trim();
+  if (!normalized) {
+    throw new Error(`Invalid environment: ${name} is required`);
+  }
+  return normalized;
+}
+
+function loadAuthConfig(
+  env: z.infer<typeof EnvSchema>,
+): AuthBackendConfig {
+  if (env.AUTH_PROVIDER === "workos") {
+    const issuerValues = requiredAuthValue(env.AUTH_ISSUER, "AUTH_ISSUER")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (issuerValues.length !== 1) {
+      throw new Error(
+        "Invalid environment: AUTH_ISSUER must contain exactly one issuer in WorkOS mode",
+      );
+    }
+    const webClientId = requiredAuthValue(
+      env.AUTH_WEB_CLIENT_ID,
+      "AUTH_WEB_CLIENT_ID",
+    );
+    const desktopClientId = requiredAuthValue(
+      env.AUTH_DESKTOP_CLIENT_ID,
+      "AUTH_DESKTOP_CLIENT_ID",
+    );
+    if (webClientId === desktopClientId) {
+      throw new Error(
+        "Invalid environment: AUTH_WEB_CLIENT_ID and AUTH_DESKTOP_CLIENT_ID must be different",
+      );
+    }
+    return {
+      provider: "workos",
+      issuer: validatedAuthUrl(
+        issuerValues[0]!,
+        "AUTH_ISSUER",
+        env.NODE_ENV,
+      ),
+      jwksUrl: validatedAuthUrl(
+        requiredAuthValue(env.AUTH_JWKS_URL, "AUTH_JWKS_URL"),
+        "AUTH_JWKS_URL",
+        env.NODE_ENV,
+      ),
+      audience: env.AUTH_AUDIENCE,
+      webClientId,
+      desktopClientId,
+    };
+  }
+
+  const domain = env.AUTH0_DOMAIN?.replace(/\/+$/, "") || null;
+  if (!domain && (!env.AUTH_ISSUER?.trim() || !env.AUTH_JWKS_URL?.trim())) {
+    throw new Error(
+      "Invalid environment: AUTH0_DOMAIN is required unless both AUTH_ISSUER and AUTH_JWKS_URL are configured",
+    );
+  }
+  const base = domain ? `https://${domain}` : null;
+  const issuers = (env.AUTH_ISSUER ?? `${base}/`)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => validatedAuthUrl(value, "AUTH_ISSUER", env.NODE_ENV));
+  if (issuers.length === 0) {
+    throw new Error("Invalid environment: AUTH_ISSUER is required");
+  }
+  return {
+    provider: "auth0",
+    issuers,
+    jwksUrl: validatedAuthUrl(
+      env.AUTH_JWKS_URL ?? `${base}/.well-known/jwks.json`,
+      "AUTH_JWKS_URL",
+      env.NODE_ENV,
+    ),
+    audience: env.AUTH_AUDIENCE,
+  };
 }
 
 /** Resolve the optional GitHub App block. Throws only so `loadConfig` can turn
@@ -560,11 +693,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   const e = parsed.data;
   validateRailwayEnvironment(env, e.AUTH_AUDIENCE);
-  const base = `https://${e.AUTH0_DOMAIN.replace(/\/+$/, "")}`;
-  const issuers = (e.AUTH_ISSUER ?? `${base}/`)
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const auth = loadAuthConfig(e);
+  if (auth.provider === "workos" && !e.AUTH_BROKER_SECRET) {
+    throw new Error(
+      "Invalid environment: AUTH_BROKER_SECRET is required in WorkOS mode",
+    );
+  }
 
   // An operator who supplied NONE of the GitHub variables has simply not
   // registered an App yet — that is a normal state and stays quiet. Anything
@@ -590,9 +724,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     databaseUrl: e.DATABASE_URL,
-    authIssuers: issuers,
-    authJwksUrl: e.AUTH_JWKS_URL ?? `${base}/.well-known/jwks.json`,
-    authAudience: e.AUTH_AUDIENCE,
+    auth,
+    authBrokerSecret:
+      auth.provider === "workos" ? e.AUTH_BROKER_SECRET! : null,
     port: e.PORT,
     isProduction: e.NODE_ENV === "production",
     github,

@@ -14,6 +14,10 @@ import { cookieJar, createSession, exchangeCode, safeReturnFor, sessionCookie } 
 import { parseCookieHeader, SESSION_COOKIE, type Env } from "../../lib/session";
 import { esc, html, shell } from "../../lib/page";
 import { appOrigin } from "../../lib/hosts";
+import {
+  configuredAuthProvider,
+  finishWorkOSBrowserAuth,
+} from "../../lib/workos-browser.mjs";
 
 function failPage(env: Env, reason: string): Response {
   const inner = `<div class="title">Sign-in didn't finish</div>
@@ -23,6 +27,9 @@ function failPage(env: Env, reason: string): Response {
 }
 
 export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
+  if (configuredAuthProvider(env) === "workos") {
+    return finishWorkOSBrowserAuth(request, env);
+  }
   const url = new URL(request.url);
   const providerError = url.searchParams.get("error_description") ?? url.searchParams.get("error");
   if (providerError) {

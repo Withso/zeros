@@ -25,7 +25,7 @@ import {
   migrateLegacyGithubCredential,
 } from "./github-credential-store";
 import { githubCredentialForEngine } from "./github-engine-credential";
-import { getSessionUserForMain } from "./ipc/commands/auth-session";
+import { getProductAccountIdForMain } from "./ipc/commands/auth-session";
 
 interface GithubSettingsTable {
   auth_method?: unknown;
@@ -112,10 +112,7 @@ export async function replaceGithubAppCredentialIfCurrent(
  *  The method-addressed durable store remains the source of truth. */
 async function selectedWorkingCredential(): Promise<GithubCredential | null> {
   const selected = await githubCredentialStore.getSelectedCredential();
-  return githubCredentialForEngine(
-    selected,
-    getSessionUserForMain()?.sub ?? null,
-  );
+  return githubCredentialForEngine(selected, getProductAccountIdForMain());
 }
 
 export const githubSelectedTokenStore: TokenStore = {
@@ -150,7 +147,7 @@ export const githubSelectedTokenStore: TokenStore = {
       const refreshed = await refreshGithubAppCredential({ force: true });
       const projected = githubCredentialForEngine(
         refreshed,
-        getSessionUserForMain()?.sub ?? null,
+        getProductAccountIdForMain(),
       );
       return projected?.method === "github-app" &&
         projected.accessToken !== rejectedToken

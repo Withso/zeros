@@ -9,8 +9,10 @@ schema and is deployed independently from the desktop application.
 ## Runtime boundary
 
 - Node.js 22, Hono, PostgreSQL, `jose`, and plain SQL migrations.
-- Auth0 issues access tokens; this service verifies JWT signatures, issuer,
-  audience, expiry, and required claims locally against JWKS.
+- The selected identity provider issues access tokens; this service verifies
+  JWT signatures, exact issuer, audience, expiry, and required claims locally
+  against JWKS. WorkOS mode additionally enforces the Web/Desktop Application
+  allowlist and session/token identifiers.
 - PostgreSQL owns application authorization and tenant data. Request
   transactions use the restricted `zeros_app` role with row-level security.
 - `GET /healthz` is public so Railway can evaluate service health.
@@ -49,10 +51,14 @@ Core environment variables:
 | Variable | Purpose |
 | --- | --- |
 | `DATABASE_URL` | PostgreSQL connection string; use Railway's private-network URL in production |
-| `AUTH0_DOMAIN` | Auth0 tenant domain without a scheme |
+| `AUTH_PROVIDER` | `auth0` during compatibility rollout, or `workos` after client cutover |
 | `AUTH_AUDIENCE` | Expected access-token audience |
-| `AUTH_ISSUER` | Optional comma-separated issuer override |
-| `AUTH_JWKS_URL` | Optional JWKS endpoint override |
+| `AUTH_ISSUER` | Exact issuer; required in WorkOS mode, optionally comma-separated only for legacy Auth0 |
+| `AUTH_JWKS_URL` | Exact public JWKS endpoint; required in WorkOS mode |
+| `AUTH_WEB_CLIENT_ID` | Allowed WorkOS Web Application client ID |
+| `AUTH_DESKTOP_CLIENT_ID` | Allowed WorkOS Desktop Application client ID |
+| `AUTH_BROKER_SECRET` | WorkOS mode only: independent Pages-to-Railway lifecycle-event credential, 32+ characters |
+| `AUTH0_DOMAIN` | Legacy Auth0 fallback used only when explicit issuer/JWKS values are absent |
 | `PORT` | HTTP port, default `8080` |
 | `NODE_ENV` | Use `production` for production-safe error responses |
 
@@ -97,6 +103,40 @@ pnpm test:control-plane
 drop and recreate the `public` schema and intentionally skip when that variable
 is absent. CI supplies PostgreSQL and verifies that those suites did not skip.
 
+### Clean authentication cutover reset
+
+Prefer attaching a fresh channel-local Postgres service and running migrations.
+When Alpha or Beta must be reset in place, `reset:database` provides a guarded
+full-schema reset. It never supports Production, is read-only by default, and
+does not print the database URL.
+
+1. Point `DATABASE_URL` at the exact Alpha or Beta database through the normal
+   secret environment and run a plan:
+
+   ```bash
+   CONTROL_PLANE_RESET_CHANNEL=alpha pnpm reset:database
+   ```
+
+2. Record the target fingerprint and row counts. Take a restorable backup and
+   complete a restore drill before continuing.
+3. Copy the non-secret approval value printed by the plan. Because the empty
+   schema replays the full migration ladder, also include every currently
+   required controlled-downtime migration approval (currently `0009`), then
+   execute:
+
+   ```bash
+   CONTROL_PLANE_RESET_CHANNEL=alpha \
+   CONTROL_PLANE_RESET_BACKUP_CONFIRMED=true \
+   CONTROL_PLANE_RESET_APPROVAL='reset:alpha:<target-fingerprint>' \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0009_organization_team_hierarchy.sql \
+   pnpm reset:database -- --execute
+   ```
+
+Execution drops and recreates the entire `public` schema, then replays every
+migration. It is not a partial user deletion. `RAILWAY_ENVIRONMENT_NAME`, when
+present, must exactly match the selected channel. Keep the previous database or
+backup available until Alpha acceptance is complete.
+
 ## Railway deployment
 
 Configure the Railway service root as `apps/control-plane`. The colocated
@@ -106,14 +146,15 @@ Dockerfile builder.
 
 Use one Railway project with persistent `alpha`, `beta`, and `production`
 environments. Each environment has its own control-plane instance, Postgres,
-Auth0 audience, GitHub App, feedback destinations, and public domain.
+authentication contract, GitHub App, feedback destinations, and public domain.
 Production autodeploy stays disabled; only Alpha tracks `main`.
 
 Before a production deployment:
 
 1. Provision PostgreSQL with backups and a pinned supported major version.
-2. Set `DATABASE_URL`, `AUTH0_DOMAIN`, `AUTH_AUDIENCE`, and
-   `NODE_ENV=production` in Railway.
+2. Set `DATABASE_URL`, the selected provider's complete `AUTH_*` block, and
+   `NODE_ENV=production` in Railway. WorkOS mode includes an independent
+   `AUTH_BROKER_SECRET` shared with Pages, but never a WorkOS API key.
 3. Use the private PostgreSQL service URL, not a public database endpoint.
 4. Run the verification commands below against the exact commit being
    deployed.
@@ -128,6 +169,25 @@ The service and desktop release independently. API changes therefore remain
 backward compatible until deployed desktop versions no longer use the previous
 contract. Add new fields or routes first; remove old ones only after observed
 client migration.
+
+### WorkOS account lifecycle
+
+In WorkOS mode, `POST /internal/auth/workos/events` is mounted before bearer
+authentication and accepts only the matching `AUTH_BROKER_SECRET`. Cloudflare
+Pages verifies the provider's raw-body webhook signature first, reduces the
+payload to bounded `user.updated` or `user.deleted` fields, and forwards it
+through this independent channel credential.
+
+Migration `0011_workos_identity_events.sql` records event IDs idempotently.
+Verified updates refresh a subject-linked profile; an occupied email records
+`email_conflict` without transferring ownership. A deletion soft-deletes only
+the Zeros account authentication row, so organizations, memberships, audit
+history, and other product data remain intact. Unlinked subjects are recorded
+for operator review and never auto-provision or auto-link by email. Recovery
+operators inspect only rows with `status IN ('unlinked', 'email_conflict')`,
+verify control of both identities out of band, and make any identity-link change
+as a separately reviewed database operation; replaying the webhook is never an
+ownership-transfer mechanism.
 
 ## Organization API
 
@@ -223,7 +283,7 @@ Copy the provider IDs—not the display names—into `INTERCOM_TAG_IDS` and
 accepts `issue` from released desktop builds and normalizes it to `bug` before
 selecting either provider ID.
 
-Identity always comes from the verified Auth0 user, never the JSON body. The
+Identity always comes from the verified provider token, never the JSON body. The
 body is strict, messages and scrubbed logs are bounded, and the route has both
 a pre-auth five-per-minute Railway client-IP limit and a five-per-minute
 per-user limit. Its larger body allowance applies only after both authentication
@@ -243,7 +303,7 @@ upload while Intercom receives only a readable tail.
   persisted settings through the API.
 - OAuth codes, access tokens, refresh tokens, invitation tokens, and database
   credentials must never appear in logs or error bodies.
-- Per-user rate limits run before external-provider work; Auth0 and signup
+- Per-user rate limits run before external-provider work; provider and signup
   protections bound identity provisioning separately.
 - Public responses do not reveal whether an unrelated account exists.
 

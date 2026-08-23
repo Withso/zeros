@@ -48,15 +48,40 @@ export function deploymentEnvironmentErrors(env) {
     return errors;
   }
 
-  for (const name of [
-    "AUTH0_DOMAIN",
-    "AUTH0_CLIENT_ID",
-    "AUTH0_CLIENT_SECRET",
-    "AUTH0_AUDIENCE",
-    "APP_ORIGIN",
-    "CONTROL_PLANE_URL",
-  ]) {
+  const authProvider = (env.AUTH_PROVIDER || "").trim().toLowerCase();
+  if (authProvider !== "auth0" && authProvider !== "workos") {
+    errors.push("AUTH_PROVIDER must be auth0 or workos");
+  }
+
+  for (const name of ["APP_ORIGIN", "CONTROL_PLANE_URL"]) {
     if (!(env[name] || "").trim()) errors.push(`${name} is required`);
+  }
+
+  if (authProvider === "auth0") {
+    for (const name of [
+      "AUTH0_DOMAIN",
+      "AUTH0_CLIENT_ID",
+      "AUTH0_CLIENT_SECRET",
+      "AUTH0_AUDIENCE",
+    ]) {
+      if (!(env[name] || "").trim()) errors.push(`${name} is required`);
+    }
+  }
+
+  if (authProvider === "workos") {
+    const expectedWorker = `zeros-auth-sessions-${channel}`;
+    if ((env.WORKOS_SESSION_WORKER || "").trim() !== expectedWorker) {
+      errors.push(`WORKOS_SESSION_WORKER must be ${expectedWorker} for ${channel}`);
+    }
+    for (const brokerOnly of [
+      "WORKOS_API_KEY",
+      "WORKOS_COOKIE_PASSWORD",
+      "WORKOS_WEB_CLIENT_ID",
+    ]) {
+      if ((env[brokerOnly] || "").trim()) {
+        errors.push(`${brokerOnly} belongs only on the WorkOS session Worker`);
+      }
+    }
   }
 
   if (normalizedHttpsOrigin(env.APP_ORIGIN || "") !== expected.appOrigin) {
@@ -70,7 +95,10 @@ export function deploymentEnvironmentErrors(env) {
       `CONTROL_PLANE_URL must be ${expected.controlPlaneOrigin} for ${channel}`,
     );
   }
-  if ((env.AUTH0_AUDIENCE || "").trim() !== expected.controlPlaneOrigin) {
+  if (
+    authProvider === "auth0" &&
+    (env.AUTH0_AUDIENCE || "").trim() !== expected.controlPlaneOrigin
+  ) {
     errors.push(
       `AUTH0_AUDIENCE must be ${expected.controlPlaneOrigin} for ${channel}`,
     );

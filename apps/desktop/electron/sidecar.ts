@@ -46,7 +46,7 @@ import {
 } from "../src/engine/db/paths";
 import { secretsFilePath, getSecret, setSecret } from "./secret-store";
 import { githubCredentialStore } from "./github-auth-runtime";
-import { getSessionUserForMain } from "./ipc/commands/auth-session";
+import { getProductAccountIdForMain } from "./ipc/commands/auth-session";
 import { githubCredentialForEngine } from "./github-engine-credential";
 import {
   MCP_VAULT_ACCOUNT,
@@ -69,6 +69,11 @@ import {
 } from "./engine-health";
 import { createSharedBackpressureGate } from "./stream-backpressure";
 import { createBoundedLineForwarder } from "./bounded-line-forwarder";
+import {
+  resolveDesktopEngineAuthEnv,
+  stripWorkOSApiKeys,
+} from "./desktop-engine-auth-config";
+import { desktopAuthConfig } from "./workos-desktop-config";
 
 // Resolve lazily: main.ts imports this module before its body seeds the release
 // channel baked into a packaged build. Every actual sidecar operation runs after
@@ -1510,38 +1515,15 @@ async function doSpawnEngine(
     }
   }
 
-  // Account-binding config for the engine. The verifier is provider-neutral
-  // and configured through the normalized ZEROS_ACCOUNT_JWT_* contract.
-  // Values are forwarded so the engine can verify a REMOTE
-  // client's Auth0 JWT against the tenant's JWKS (public keys only — no secret
-  // ships in the app; rotation-safe) and bind the engine to its owner account
-  // ("my account, my machine"). LOCAL clients (the desktop's own renderer) are
-  // never gated, so in a local-only build this is inert — but it's kept here
-  // (NOT in a relay-only block) because desktop auth AND the future CloudTransport
-  // broker both reuse it. Only the relay URL forwarding was removed.
-  const auth0Domain = process.env.AUTH0_DOMAIN?.trim() || "";
-  extraEnv.ZEROS_ACCOUNT_JWT_JWKS_URL =
-    process.env.ZEROS_ACCOUNT_JWT_JWKS_URL?.trim() ||
-    (auth0Domain ? `https://${auth0Domain}/.well-known/jwks.json` : "");
-  // Pin the issuer in production (defense in depth atop the tenant-scoped JWKS +
-  // audience). Overridable via env; left UNPINNED in dev (a local/alternate
-  // tenant may use a different iss).
-  const jwtIss =
-    process.env.ZEROS_ACCOUNT_JWT_ISS?.trim() ||
-    (IS_DEV || !auth0Domain ? "" : `https://${auth0Domain}/`);
-  if (jwtIss) extraEnv.ZEROS_ACCOUNT_JWT_ISS = jwtIss;
-  // Auth0 requires an explicit audience — same value as the backend's
-  // AUTH_AUDIENCE. Without it the verifier falls back to its non-empty
-  // sentinel and rejects every token rather than skipping the check.
-  const jwtAud =
-    process.env.ZEROS_ACCOUNT_JWT_AUD?.trim() ||
-    process.env.AUTH_AUDIENCE?.trim();
-  if (jwtAud) extraEnv.ZEROS_ACCOUNT_JWT_AUD = jwtAud;
-  // Account-binding enforcement: REQUIRED in prod (mandatory sign-in), DEFAULT-OFF
-  // in dev (the "Zeros Dev" build is often run signed-out → unseeded owner). A real
-  // env override wins either way.
-  extraEnv.ZEROS_REQUIRE_ACCOUNT =
-    process.env.ZEROS_REQUIRE_ACCOUNT?.trim() || (IS_DEV ? "0" : "1");
+  // Account-binding config for the engine. Both code exchange and the engine
+  // verifier consume the same selected desktop-auth contract. In WorkOS mode
+  // this pins RS256, exact issuer/audience/client, and the complete required
+  // application claim set. The engine receives public verification material
+  // only; management API keys are scrubbed below.
+  Object.assign(
+    extraEnv,
+    resolveDesktopEngineAuthEnv(desktopAuthConfig(), process.env, IS_DEV),
+  );
 
   // Tell the engine that fd 3 is a private engine→host control pipe (added to
   // `stdio` below). The engine publishes its per-process loopback authority and
@@ -1572,7 +1554,7 @@ async function doSpawnEngine(
       stdio: ["pipe", "pipe", "pipe", "pipe"],
       // process.env is spread first; extraEnv overrides it. The engine is
       // local-only (no relay); only the loopback bridge listens.
-      env: { ...process.env, ...extraEnv },
+      env: stripWorkOSApiKeys({ ...process.env, ...extraEnv }),
       // Make the engine its OWN process-group leader (pgid == pid). WITHOUT this
       // the engine shares Electron-main's group, so killCurrentChild could only
       // signal the single engine pid — and when the engine was SIGKILLed (which
@@ -1901,7 +1883,7 @@ export async function pushGithubCredentialToEngine(): Promise<void> {
   }
   const engineCredential = githubCredentialForEngine(
     credential,
-    getSessionUserForMain()?.sub ?? null,
+    getProductAccountIdForMain(),
   );
   try {
     child.stdin.write(

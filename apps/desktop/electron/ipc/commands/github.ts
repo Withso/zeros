@@ -32,7 +32,10 @@ import {
   refreshGithubAppCredential,
 } from "../../github-app-flow";
 import { GithubPatUndoStore } from "../../github-pat-undo";
-import { getSessionUserForMain } from "./auth-session";
+import {
+  getProductAccountIdForMain,
+  getSessionUserForMain,
+} from "./auth-session";
 import { pushGithubCredentialToEngine } from "../../sidecar";
 import type { CommandHandler } from "../router";
 
@@ -122,7 +125,13 @@ async function storedMethodSummary(
   if (!credential) return disconnectedSummary(method);
   if (credential.method === "github-app") {
     const user = getSessionUserForMain();
-    if (!user || !credential.ownerSub || credential.ownerSub !== user.sub) {
+    const accountId = getProductAccountIdForMain();
+    if (
+      !user ||
+      !accountId ||
+      !credential.ownerSub ||
+      credential.ownerSub !== accountId
+    ) {
       return {
         method,
         health: "unavailable",
@@ -286,10 +295,7 @@ export async function getGithubAuthSnapshot(
   };
   if (rejectedPatToken) {
     const current = await githubCredentialStore.get("pat");
-    if (
-      current?.method !== "pat" ||
-      current.accessToken !== rejectedPatToken
-    ) {
+    if (current?.method !== "pat" || current.accessToken !== rejectedPatToken) {
       // A remove/replace won the race; this rejection describes an older copy.
       rejectedPatToken = null;
     } else if (selectedMethod === "pat" && pat.health === "connected") {
@@ -614,8 +620,7 @@ export const ghCredentialClear: CommandHandler = async (args) => {
     // reselect it after a transient GitHub incident; pushing here would only
     // feed the known-rejected token straight back into the engine.
     const current = await githubCredentialStore.get("pat");
-    rejectedPatToken =
-      current?.method === "pat" ? current.accessToken : null;
+    rejectedPatToken = current?.method === "pat" ? current.accessToken : null;
     return null;
   }
   if (method === "gh-cli") {

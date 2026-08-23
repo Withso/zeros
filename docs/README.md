@@ -13,6 +13,10 @@ contributors after the change that introduced them has shipped.
 - [Hosted deployment environments](deployment-environments.md) defines the
   Alpha → Beta → Production topology, isolation rules, promotion flow, and
   controlled rollout requirements.
+- [WorkOS authentication migration](workos-authentication-migration.md) records
+  the active clean-slate provider migration, durable identity/session contracts,
+  live token gates, and future Railway-template boundary. It is removed after
+  the lasting rules are folded into the deployment and architecture guides.
 - [Agent identity model](agent-identity-model.md) defines Zeros workspace,
   conversation, execution, and provider-binding ownership and lifecycle.
 - [Zeros browser service](browser-service.md) defines the shared browser tool,

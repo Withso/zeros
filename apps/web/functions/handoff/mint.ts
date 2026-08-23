@@ -14,10 +14,16 @@ import {
   json,
   TOKENISH,
 } from "../../lib/handoff-security";
+import { legacyDesktopHandoffEnabled } from "../../lib/workos-browser.mjs";
 
 const TICKET_TTL_S = 90; // ≤120s per the OAuth browser-session-handoff draft.
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  if (!legacyDesktopHandoffEnabled(env)) {
+    return json({ error: "desktop_auth_migration_pending" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
   let body: { challenge?: unknown; nonce?: unknown };
   try {
     body = await request.json();

@@ -40,9 +40,12 @@ const githubConfig: GithubBackendConfig = {
 function config(github: GithubBackendConfig | null): Config {
   return {
     databaseUrl: "postgres://unused",
-    authIssuers: ["https://tenant.example.test/"],
-    authJwksUrl: "https://tenant.example.test/.well-known/jwks.json",
-    authAudience: "https://api.example.test",
+    auth: {
+      provider: "auth0",
+      issuers: ["https://tenant.example.test/"],
+      jwksUrl: "https://tenant.example.test/.well-known/jwks.json",
+      audience: "https://api.example.test",
+    },
     port: 8080,
     isProduction: true,
     github,

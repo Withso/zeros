@@ -8,8 +8,14 @@
 import { refreshGrant, type Env } from "../../lib/session";
 import { json, TOKENISH } from "../../lib/handoff-security";
 import { clientIp, rateLimit } from "../../lib/ratelimit";
+import { legacyDesktopHandoffEnabled } from "../../lib/workos-browser.mjs";
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  if (!legacyDesktopHandoffEnabled(env)) {
+    return json({ error: "desktop_auth_migration_pending" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
   // Abuse ceiling on the refresh oracle: possession of a refresh token is the
   // only credential here, so cap single-source hammering (a stolen-token replay
   // farm / DoS). Generous — a real desktop refreshes rarely; brute force is

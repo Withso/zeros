@@ -376,6 +376,7 @@ describe("repository layout contracts", () => {
       "@tiptap/extension-bubble-menu@3.26.0",
       "@tiptap/extension-floating-menu@3.26.0",
       "@types/trusted-types@2.0.7",
+      "@workos-inc/node@10.10.0",
     ]) {
       expect(licenses).toContain(packageName);
     }
@@ -385,7 +386,8 @@ describe("repository layout contracts", () => {
     );
     expect(licenses).not.toContain("@openai/codex@0.146.0-linux-x64");
     expect(generator).not.toContain('"--no-optional"');
-    expect(generator).toContain("apps/web gained production dependencies");
+    expect(generator).toContain("runNpmLicenseInventory");
+    expect(generator).toContain("web auth/session Worker");
   });
 
   it("stages the pinned Codex runtime instead of falling back to PATH", () => {

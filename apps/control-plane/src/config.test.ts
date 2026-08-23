@@ -37,6 +37,82 @@ function cloudEnv(): NodeJS.ProcessEnv {
   };
 }
 
+function workosEnv(): NodeJS.ProcessEnv {
+  return {
+    DATABASE_URL: "postgres://user:pass@localhost:5432/zeros",
+    AUTH_PROVIDER: "workos",
+    AUTH_ISSUER: "https://identity.example.com/user_management/client_web",
+    AUTH_JWKS_URL: "https://identity.example.com/sso/jwks/client_web",
+    AUTH_AUDIENCE: "https://api.zeros.build",
+    AUTH_WEB_CLIENT_ID: "client_web",
+    AUTH_DESKTOP_CLIENT_ID: "client_desktop",
+    AUTH_BROKER_SECRET: "broker-secret-for-tests".repeat(2),
+  };
+}
+
+describe("provider-neutral authentication configuration", () => {
+  it("loads the explicit WorkOS resource-server contract without AUTH0_DOMAIN", () => {
+    expect(loadConfig(workosEnv()).auth).toEqual({
+      provider: "workos",
+      issuer: "https://identity.example.com/user_management/client_web",
+      jwksUrl: "https://identity.example.com/sso/jwks/client_web",
+      audience: "https://api.zeros.build",
+      webClientId: "client_web",
+      desktopClientId: "client_desktop",
+    });
+  });
+
+  it("fails closed when WorkOS client IDs are missing or shared", () => {
+    const missingDesktop = workosEnv();
+    delete missingDesktop.AUTH_DESKTOP_CLIENT_ID;
+    expect(() => loadConfig(missingDesktop)).toThrow(
+      /AUTH_DESKTOP_CLIENT_ID/,
+    );
+
+    expect(() =>
+      loadConfig({
+        ...workosEnv(),
+        AUTH_DESKTOP_CLIENT_ID: "client_web",
+      }),
+    ).toThrow(/must be different/);
+  });
+
+  it("requires the independent web-broker credential only in WorkOS mode", () => {
+    const missing = workosEnv();
+    delete missing.AUTH_BROKER_SECRET;
+    expect(() => loadConfig(missing)).toThrow(/AUTH_BROKER_SECRET/);
+
+    expect(loadConfig(baseEnv()).authBrokerSecret).toBeNull();
+    expect(loadConfig(workosEnv()).authBrokerSecret).toHaveLength(46);
+  });
+
+  it("keeps the legacy Auth0 deployment bootable during the staged cutover", () => {
+    expect(loadConfig(baseEnv()).auth).toEqual({
+      provider: "auth0",
+      issuers: ["https://tenant.example.com/"],
+      jwksUrl: "https://tenant.example.com/.well-known/jwks.json",
+      audience: "https://api.zeros.build",
+    });
+  });
+
+  it("accepts explicit provider-neutral Auth0 verification URLs", () => {
+    expect(
+      loadConfig({
+        DATABASE_URL: "postgres://user:pass@localhost:5432/zeros",
+        AUTH_PROVIDER: "auth0",
+        AUTH_ISSUER: "https://legacy-issuer.example/",
+        AUTH_JWKS_URL: "https://legacy-issuer.example/jwks.json",
+        AUTH_AUDIENCE: "https://api.zeros.build",
+      }).auth,
+    ).toEqual({
+      provider: "auth0",
+      issuers: ["https://legacy-issuer.example/"],
+      jwksUrl: "https://legacy-issuer.example/jwks.json",
+      audience: "https://api.zeros.build",
+    });
+  });
+});
+
 describe("GitHub backend configuration", () => {
   it("reads the confidential App configuration as one block", () => {
     const config = loadConfig(validEnv());
@@ -80,7 +156,7 @@ describe("GitHub backend configuration", () => {
     const config = loadConfig(baseEnv());
 
     expect(config.github).toBeNull();
-    expect(config.authAudience).toBe("https://api.zeros.build");
+    expect(config.auth.audience).toBe("https://api.zeros.build");
     expect(config.databaseUrl).toContain("postgres://");
   });
 

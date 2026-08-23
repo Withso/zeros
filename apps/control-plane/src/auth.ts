@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────────────────
-// Auth — verify Auth0-issued JWTs locally (JWKS) and JIT-mirror the user.
+// Auth — verify provider-issued JWTs locally (JWKS) and JIT-mirror the user.
 //
 // Sign-in provisions the user row plus the account's permanent Personal
 // organization and its default team. Collaborative organizations remain
@@ -9,25 +9,41 @@
 // jose's createRemoteJWKSet caches keys in memory and re-fetches only
 // when an unknown `kid` appears (key rotation).
 //
-// users.id is an internally-generated uuid, decoupled from Auth0's `sub`
-// (which isn't a uuid — it is `<connection>|<id>`, e.g. "oauth2|000000000").
-// user_identities maps (provider, provider_sub) -> users.id, so a future
-// provider swap only needs a new row shape here, not a schema change.
+// users.id is an internally-generated uuid, decoupled from every provider's
+// `sub`. user_identities maps (provider, provider_sub) -> users.id, so product
+// ownership never depends on an authentication-vendor identifier.
 // ──────────────────────────────────────────────────────────
 
 import { randomBytes } from "node:crypto";
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import {
+  createRemoteJWKSet,
+  jwtVerify,
+  type JWTPayload,
+  type JWTVerifyOptions,
+} from "jose";
 import type { MiddlewareHandler } from "hono";
 import type pg from "pg";
 import type { Config } from "./config.js";
 import { withSystemTx, type Tx } from "./db.js";
 import { HttpError, type StaffRole } from "./authz.js";
+import {
+  AuthTokenContractError,
+  authTokenVerifyOptions,
+  validateAuthTokenClaims,
+  type AuthTokenContractConfig,
+} from "./auth-token-contract.js";
+
+export type IdentityProvider = "auth0" | "workos";
 
 export type AuthedUser = {
+  /** Canonical Zeros account UUID. Product and integration ownership keys use
+   *  this value, never the provider subject below. */
   id: string;
-  /** Stable identity-provider subject. Kept server-side so integrations can
-   *  preserve their external identity across the feedback-worker migration. */
-  providerSub: string;
+  /** Server-only authentication binding needed for provider lifecycle work. */
+  identity: {
+    provider: IdentityProvider;
+    subject: string;
+  };
   email: string;
   displayName: string | null;
   avatarUrl: string | null;
@@ -70,7 +86,26 @@ export function createAuthMiddleware(
   config: Config,
   pool: pg.Pool,
 ): MiddlewareHandler {
-  const jwks = createRemoteJWKSet(new URL(config.authJwksUrl));
+  const jwks = createRemoteJWKSet(new URL(config.auth.jwksUrl));
+  const workosContract: AuthTokenContractConfig | null =
+    config.auth.provider === "workos"
+      ? {
+          issuer: config.auth.issuer,
+          audience: config.auth.audience,
+          webClientId: config.auth.webClientId,
+          desktopClientId: config.auth.desktopClientId,
+        }
+      : null;
+  const verifyOptions: JWTVerifyOptions =
+    config.auth.provider === "workos"
+      ? authTokenVerifyOptions(workosContract!)
+      : {
+          issuer: config.auth.issuers,
+          audience: config.auth.audience,
+          // Preserve the released Auth0 contract until its clients move.
+          algorithms: ["RS256"],
+          requiredClaims: ["exp", "sub"],
+        };
 
   return async (c, next) => {
     const header = c.req.header("authorization") ?? "";
@@ -79,18 +114,9 @@ export function createAuthMiddleware(
       return c.json({ error: { code: "unauthorized", message: "Missing bearer token" } }, 401);
     }
 
-    let payload;
+    let payload: JWTPayload;
     try {
-      ({ payload } = await jwtVerify(token, jwks, {
-        issuer: config.authIssuers,
-        audience: config.authAudience,
-        // Belt-and-braces pinning: the remote JWKS already only yields RS256
-        // keys, but an explicit allowlist removes any reliance on JWKS content
-        // (alg-confusion), and requiring `exp` means a signed-but-expiry-less
-        // token can never become immortal. Auth0 always sets both.
-        algorithms: ["RS256"],
-        requiredClaims: ["exp", "sub"],
-      }));
+      ({ payload } = await jwtVerify(token, jwks, verifyOptions));
     } catch (err) {
       // Surface jose's error code (JWKS_NO_MATCHING_KEY = old-key token,
       // JWT_CLAIM_VALIDATION_FAILED = issuer/audience mismatch, JWT_EXPIRED).
@@ -118,50 +144,113 @@ export function createAuthMiddleware(
       );
     }
 
-    const sub = typeof payload.sub === "string" ? payload.sub : null;
-    const email = claimString(payload, "email");
-    if (!sub || !email) {
-      console.warn(
-        `[auth] 401 token missing ${sub ? "email" : "sub"} (sub=${sub ?? "?"}) — ` +
-          `is the Auth0 Post-Login Action deployed and stamping ${CLAIM_NS}email onto the ACCESS token?`,
-      );
-      return c.json({ error: { code: "unauthorized", message: "Token missing sub/email" } }, 401);
-    }
-    // The invitation accept flow binds on `email` as the sole anti-takeover
-    // control (Part F), so an UNVERIFIED email must never authenticate. Fail
-    // CLOSED: require an explicit `email_verified: true`. A MISSING claim is
-    // rejected too — the Auth0 Action that stamps `email` onto this access token
-    // MUST also stamp `email_verified` (both Google and GitHub provide it); an
-    // absent claim means a misconfigured connection, not a trustworthy one, and
-    // silently trusting it would reopen the takeover vector. Mirrors the web
-    // layer (apps/web/lib/session.ts).
-    if (claimBool(payload, "email_verified") !== true) {
-      console.warn(`[auth] 401 email_unverified (sub=${sub})`);
-      return c.json(
-        { error: { code: "email_unverified", message: "Verify your email to continue" } },
-        401,
-      );
-    }
-    const displayName = claimString(payload, "name") || claimString(payload, "nickname") || null;
-    const picture = claimString(payload, "picture");
-    // Provider avatars are presentation metadata only. Keep an untrusted claim
-    // out of data:/javascript: sinks and cap it before mirroring to Postgres.
-    let avatarUrl: string | null = null;
-    if (picture && picture.length <= 2_048) {
+    let identity: {
+      provider: IdentityProvider;
+      providerSubject: string;
+      email: string;
+      displayName: string | null;
+      avatarUrl: string | null;
+    };
+    if (workosContract) {
       try {
-        const parsed = new URL(picture);
-        if (parsed.protocol === "https:") avatarUrl = parsed.toString();
-      } catch {
-        // Invalid provider claim: omit it; identity still authenticates.
+        const claims = validateAuthTokenClaims(payload, workosContract);
+        identity = {
+          provider: "workos",
+          providerSubject: claims.providerSubject,
+          email: claims.email,
+          displayName: claims.displayName,
+          avatarUrl: claims.avatarUrl,
+        };
+      } catch (error) {
+        const code =
+          error instanceof AuthTokenContractError
+            ? error.code
+            : "AUTH_CONTRACT_INVALID";
+        console.warn(`[auth] 401 WorkOS token contract rejected [${code}]`);
+        if (
+          error instanceof AuthTokenContractError &&
+          error.code === "AUTH_EMAIL_UNVERIFIED"
+        ) {
+          return c.json(
+            {
+              error: {
+                code: "email_unverified",
+                message: "Verify your email to continue",
+              },
+            },
+            401,
+          );
+        }
+        return c.json(
+          {
+            error: {
+              code: "unauthorized",
+              message: `Invalid access token contract [${code}]`,
+            },
+          },
+          401,
+        );
       }
+    } else {
+      const sub = typeof payload.sub === "string" ? payload.sub : null;
+      const email = claimString(payload, "email");
+      if (!sub || !email) {
+        console.warn("[auth] 401 Auth0 token missing required profile claims");
+        return c.json(
+          {
+            error: {
+              code: "unauthorized",
+              message: "Token missing sub/email",
+            },
+          },
+          401,
+        );
+      }
+      // Invitation acceptance binds on verified email, so a missing or false
+      // assertion must fail closed for the legacy provider too.
+      if (claimBool(payload, "email_verified") !== true) {
+        console.warn("[auth] 401 Auth0 token email is unverified");
+        return c.json(
+          {
+            error: {
+              code: "email_unverified",
+              message: "Verify your email to continue",
+            },
+          },
+          401,
+        );
+      }
+      const displayName =
+        claimString(payload, "name") ||
+        claimString(payload, "nickname") ||
+        null;
+      const picture = claimString(payload, "picture");
+      let avatarUrl: string | null = null;
+      if (picture && picture.length <= 2_048) {
+        try {
+          const parsed = new URL(picture);
+          if (
+            parsed.protocol === "https:" &&
+            !parsed.username &&
+            !parsed.password
+          ) {
+            avatarUrl = parsed.toString();
+          }
+        } catch {
+          // Invalid provider claim: omit it; identity still authenticates.
+        }
+      }
+      identity = {
+        provider: "auth0",
+        providerSubject: sub,
+        email,
+        displayName,
+        avatarUrl,
+      };
     }
 
     const user = await ensureUser(pool, {
-      provider: "auth0",
-      providerSub: sub,
-      email,
-      displayName,
-      avatarUrl,
+      ...identity,
     });
     c.set("user", user);
     await next();
@@ -170,11 +259,11 @@ export function createAuthMiddleware(
 
 // Backstop against just-in-time signup flooding. ensureUser mints a
 // user + identity row for any never-seen (provider, sub), so an
-// attacker holding many Auth0 identities could mass-create rows and bloat the
+// attacker holding many provider identities could mass-create rows and bloat the
 // DB. This caps NEW signups globally per window; RETURNING users are
 // never touched (the guard only fires on the create branch). In-memory and
 // per-instance like ratelimit.ts — abuse control, not a hard security boundary;
-// Auth0's own attack-protection is the first line. Tune SIGNUP_MAX_PER_WINDOW if
+// the provider's own attack protection is the first line. Tune the cap if
 // a real launch spike ever trips it (it logs when it does).
 const SIGNUP_WINDOW_MS = 60 * 60 * 1000; // 1h
 const SIGNUP_MAX_PER_WINDOW = 200;
@@ -205,8 +294,8 @@ function chargeSignupBudget(now: number): void {
 export async function ensureUser(
   pool: pg.Pool,
   input: {
-    provider: string;
-    providerSub: string;
+    provider: IdentityProvider;
+    providerSubject: string;
     email: string;
     displayName: string | null;
     avatarUrl?: string | null;
@@ -215,7 +304,7 @@ export async function ensureUser(
   return withSystemTx(pool, async (tx) => {
     let linked = await tx.query<{ user_id: string }>(
       `SELECT user_id FROM user_identities WHERE provider = $1 AND provider_sub = $2`,
-      [input.provider, input.providerSub],
+      [input.provider, input.providerSubject],
     );
     if (!linked.rows[0]) {
       // Serialize only the first-request path for one provider identity, then
@@ -226,13 +315,13 @@ export async function ensureUser(
       await tx.query(
         `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
         [
-          `identity:${input.provider.length}:${input.provider}:${input.providerSub}`,
+          `identity:${input.provider.length}:${input.provider}:${input.providerSubject}`,
         ],
       );
       linked = await tx.query<{ user_id: string }>(
         `SELECT user_id FROM user_identities
          WHERE provider = $1 AND provider_sub = $2`,
-        [input.provider, input.providerSub],
+        [input.provider, input.providerSubject],
       );
     }
 
@@ -258,7 +347,7 @@ export async function ensureUser(
            END,
            display_name = COALESCE(display_name, $3),
            avatar_url = COALESCE($4, avatar_url)
-         WHERE id = $1
+         WHERE id = $1 AND deleted_at IS NULL
          RETURNING id, email, display_name, avatar_url, staff_role`,
         [
           linked.rows[0].user_id,
@@ -267,7 +356,14 @@ export async function ensureUser(
           input.avatarUrl ?? null,
         ],
       );
-      row = updated.rows[0]!;
+      if (!updated.rows[0]) {
+        throw new HttpError(
+          401,
+          "account_deleted",
+          "This account is no longer active.",
+        );
+      }
+      row = updated.rows[0];
       if (row.email !== input.email) {
         console.warn(
           `[auth] token email for user ${row.id} conflicts with another account — keeping stored email`,
@@ -275,7 +371,7 @@ export async function ensureUser(
       }
     } else {
       // A brand-new identity → a real signup. Charge the global signup budget
-      // BEFORE creating anything, so a flood of fresh Auth0 subs can't mass-
+      // BEFORE creating anything, so a flood of fresh provider subs can't mass-
       // provision rows. Throws 429 past the window cap.
       chargeSignupBudget(Date.now());
       // Different provider identities can race with the same case-insensitive
@@ -315,7 +411,7 @@ export async function ensureUser(
         `INSERT INTO user_identities (user_id, provider, provider_sub)
          VALUES ($1, $2, $3)
          ON CONFLICT (provider, provider_sub) DO NOTHING`,
-        [row.id, input.provider, input.providerSub],
+        [row.id, input.provider, input.providerSubject],
       );
     }
 
@@ -323,7 +419,10 @@ export async function ensureUser(
 
     return {
       id: row.id,
-      providerSub: input.providerSub,
+      identity: {
+        provider: input.provider,
+        subject: input.providerSubject,
+      },
       email: row.email,
       displayName: row.display_name,
       avatarUrl: row.avatar_url,

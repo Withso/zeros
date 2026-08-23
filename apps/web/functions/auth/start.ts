@@ -13,8 +13,15 @@
 import { authorizeUrl, cookieJar, isKnownProvider, randomToken, safeReturnFor } from "../../lib/oauth";
 import { sha256B64url } from "../../lib/handoff-security";
 import type { Env } from "../../lib/session";
+import {
+  beginWorkOSBrowserAuth,
+  configuredAuthProvider,
+} from "../../lib/workos-browser.mjs";
 
 export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
+  if (configuredAuthProvider(env) === "workos") {
+    return beginWorkOSBrowserAuth(request, env);
+  }
   const url = new URL(request.url);
   const provider = url.searchParams.get("provider") ?? "";
   if (!isKnownProvider(provider)) {

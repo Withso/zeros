@@ -284,12 +284,22 @@ jobs:
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+          AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
+          AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
+          AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
+          AUTH_JWKS_URL: ${{ vars.AUTH_JWKS_URL }}
+          AUTH_AUDIENCE: ${{ vars.AUTH_AUDIENCE }}
         run: pnpm exec tsx scripts/release-environment.ts beta
 
       - name: Compile Electron main + preload (bakes channel=beta)
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+          AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
+          AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
+          AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
+          AUTH_JWKS_URL: ${{ vars.AUTH_JWKS_URL }}
+          AUTH_AUDIENCE: ${{ vars.AUTH_AUDIENCE }}
         run: pnpm electron:compile
 
       - name: Build Vite renderer
