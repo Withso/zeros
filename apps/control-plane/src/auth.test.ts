@@ -125,6 +125,7 @@ beforeAll(async () => {
       jwksUrl: `http://127.0.0.1:${port}/jwks.json`,
       audience: AUDIENCE,
     },
+    workos: null,
     port: 0,
     isProduction: false,
     feedback: null,

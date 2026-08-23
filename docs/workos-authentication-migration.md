@@ -27,9 +27,9 @@ WorkOS Organizations, WorkOS authorization, or a cloud-workspace dependency.
 
 | Surface                                      | Current authentication responsibility                                                                                                                       | Migration boundary                                                                                                                              |
 | -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Cloudflare Pages (`apps/web`)                | Starts Auth0 code+PKCE, exchanges codes, stores browser access/refresh tokens in Workers KV, proxies bearer requests, and brokers the desktop ticket.       | Becomes the WorkOS web/auth broker with a sealed or strongly consistent browser session. It stops minting desktop credentials.                  |
-| Railway control plane (`apps/control-plane`) | Derives Auth0 issuer/JWKS settings, verifies access-token signature/issuer/audience, JIT-provisions the database user, and performs Postgres authorization. | Accepts explicit provider-neutral verification settings and maps `provider=workos` to the same internal UUID model. It holds no WorkOS API key. |
-| Railway Postgres                             | Owns `users.id`, `user_identities`, Personal/organization/team membership, invitations, GitHub state, feedback identity, and optional cloud rows.           | Prefer a new empty database per channel for cutover; migrations/schema remain the product authority.                                            |
+| Cloudflare Pages (`apps/web`)                | Starts Auth0 code+PKCE, exchanges codes, stores browser access/refresh tokens in Workers KV, proxies bearer requests, and brokers the desktop ticket.       | Becomes a stateless same-origin WorkOS facade. Railway performs exchange and session operations; Pages stops minting desktop credentials.        |
+| Railway control plane (`apps/control-plane`) | Derives Auth0 issuer/JWKS settings, verifies access-token signature/issuer/audience, JIT-provisions the database user, and performs Postgres authorization. | Accepts explicit provider-neutral verification settings and owns WorkOS PKCE, sealed sessions, webhook verification, and management operations. |
+| Railway Postgres                             | Owns `users.id`, `user_identities`, Personal/organization/team membership, invitations, GitHub state, feedback identity, and optional cloud rows.           | Also owns hashed browser credentials/state and serialized sealed-session refresh; migrations/schema remain the product authority.               |
 | Electron main                                | Redeems the web ticket, keeps refresh material in `safeStorage`, refreshes through the web broker, and exposes only bounded session data to the renderer.   | Authenticates the Desktop Application directly with loopback PKCE; continues to keep tokens/verifier out of renderer IPC.                       |
 | Zeros engine                                 | Independently verifies Auth0 JWTs and uses the provider subject for owner/client comparisons and deferred cloud credential binding.                         | Pins the same WorkOS token contract; product/cloud ownership moves to internal account UUIDs or control-plane grants.                           |
 | GitHub App flow                              | Separately authorizes repository access and binds its credential to the Auth0 subject.                                                                      | Remains separate from WorkOS social login and rebinds credential ownership to the internal account UUID.                                        |
@@ -73,11 +73,14 @@ Primary implementation traces inspected during the audit:
   `/v1/me` or consume a control-plane-minted grant after authentication.
 - WorkOS performs authentication. Zeros Postgres remains authoritative for
   Personal, organizations, teams, roles, invitations, and row-level access.
-- Railway is a resource server. JWT verification must not require a WorkOS API
-  key or a network call to WorkOS on every application request.
-- Cloudflare owns browser sessions. Electron main owns the desktop public-client
-  authorization flow and its PKCE verifier; neither the renderer nor the
-  desktop package receives a WorkOS API key.
+- Railway is both the resource server and the server-side WorkOS broker. Normal
+  `/v1` JWT verification remains local and does not require a WorkOS API key or
+  network call; only explicit `/auth` exchange, refresh, logout, webhook, and
+  management operations use the Railway-only provider credential.
+- Railway/Postgres owns browser sessions. Cloudflare Pages is a stateless
+  same-origin facade. Electron main owns the desktop public-client authorization
+  flow and its PKCE verifier; neither the renderer nor desktop package receives
+  a WorkOS API key.
 - Web and desktop are different WorkOS Applications and must produce different
   WorkOS session IDs. Refreshing a web session is not a desktop sign-in.
 - Rotating refresh tokens must not use eventually consistent Workers KV as
@@ -106,11 +109,10 @@ fail closed with an account-recovery path; do not silently transfer ownership
 on email equality. Phase 1 implements that fail-closed collision behavior.
 
 WorkOS publishes `user.updated` and `user.deleted` as server-side events. Phase
-2 verifies their exact raw-body signature in Cloudflare, forwards only a
-bounded reduced event through an independent channel credential, and records
-idempotent recovery status in Railway Postgres. No event auto-links by email or
-cascade-deletes product data. A distinct suspension event is not assumed
-without a qualified WorkOS contract.
+2 verifies their exact raw-body signature on Railway, reduces the payload to a
+bounded lifecycle event, and records idempotent recovery status in Railway
+Postgres. No event auto-links by email or cascade-deletes product data. A
+distinct suspension event is not assumed without a qualified WorkOS contract.
 
 References: <https://workos.com/docs/authkit/identity-linking> and
 <https://workos.com/docs/events>
@@ -351,14 +353,14 @@ and Desktop default sign-out URI matches the Alpha application origin.
 Use WorkOS authorization code plus PKCE. The code exchange's returned `User`
 object is the trusted profile source; do not decode an unverified ID token.
 Bind a cryptographically random `state`, PKCE verifier, and relative return path
-inside short-lived sealed state; compare and consume it once at callback, and
-never accept an arbitrary return origin. Keep the resulting session in a
-`__Host-`-prefixed, `Secure`, `HttpOnly`, `SameSite=Lax`, `Path=/` cookie. Store
-rotating state in either a WorkOS sealed session or a strongly consistent
-session coordinator. Workers KV may remain an abuse-rate-limit or cache layer,
-but not the authority for refresh-token rotation. State-changing authenticated
-web routes retain explicit same-origin/CSRF defenses; `SameSite` is defense in
-depth, not the only check.
+inside short-lived server-side state; compare and consume it once at callback,
+and never accept an arbitrary return origin. Represent the resulting session to
+the browser with only a random `__Host-`-prefixed, `Secure`, `HttpOnly`,
+`SameSite=Lax`, `Path=/` credential cookie. Keep rotating state in a WorkOS
+sealed session under a strongly consistent server-side coordinator. Workers KV
+may remain an abuse-rate-limit or cache layer, but not the authority for
+refresh-token rotation. State-changing authenticated web routes retain explicit
+same-origin/CSRF defenses; `SameSite` is defense in depth, not the only check.
 
 ### Desktop
 
@@ -415,16 +417,17 @@ check instead of weakening ordinary requests with a WorkOS network dependency.
 Alpha must prove that the web Application's server credential can list and
 revoke sessions created by both Applications. If WorkOS scopes management calls
 per Application, the broker must use the documented environment-wide
-credential or both server-side credentials; the control-plane resource server
-still does not receive either secret.
+credential or both server-side credentials. Those credentials remain confined
+to Railway's auth routes and are never required by ordinary resource requests.
 
 Reference: <https://workos.com/docs/reference/authkit/session>
 
 ## Railway-template boundary
 
-A future Railway template should deploy the control plane and its Postgres
-without embedding a Zeros-owned identity-provider secret. Its authentication
-inputs are public verification/configuration values:
+A future Railway template should deploy this same control plane and its
+Postgres without embedding a Zeros-owned identity-provider secret. The person
+installing the template supplies credentials for their own WorkOS environment;
+the template may generate the cookie password. Public inputs are:
 
 | Variable                 | Meaning                                      |
 | ------------------------ | -------------------------------------------- |
@@ -435,10 +438,18 @@ inputs are public verification/configuration values:
 | `AUTH_DESKTOP_CLIENT_ID` | Allowed desktop Application client ID        |
 
 `DATABASE_URL` remains a Railway reference to the template-owned Postgres.
-WorkOS API keys are needed only in the auth/session broker or a future component
-that deliberately calls WorkOS management APIs. Template variables require
-descriptions; secrets are sealed or generated; service-to-database traffic uses
-private references.
+`APP_ORIGIN` identifies the template owner's web origin. `WORKOS_API_KEY` and
+`WORKOS_WEBHOOK_SECRET` are installer-supplied Railway secrets, while
+`WORKOS_COOKIE_PASSWORD` is a unique generated 32-byte-or-longer Railway
+secret. Template variables require descriptions; secrets are sealed or
+generated; service-to-database traffic uses private references. A custom WorkOS
+domain is optional—the WorkOS-hosted AuthKit domain is sufficient. A template
+may use platform-provided HTTPS domains for both frontend and API, so buying a
+custom domain is not a prerequisite. Those must remain separate origins; two
+services in one Railway project can each use a generated Railway domain.
+The template sets `ZEROS_SELF_HOSTED=true`; official Zeros deployments leave
+that variable unset so their exact channel, branch, audience, and app-origin
+assertions remain fail-closed.
 
 `/healthz` remains a local liveness/readiness check and must not depend on a live
 WorkOS request. A post-deploy synthetic login/token request proves the external
@@ -484,7 +495,7 @@ does not remove the work needed to make web and desktop sessions correct.
 | ------------------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------ |
 | Phase 0 contract/account qualification                        | 1–2 days; repository portion complete | Real token shape, cross-Application session management, Alpha dashboard access |
 | Provider-neutral control plane and identity ownership         | 2–4 days                              | Replacing provider-subject ownership without breaking GitHub/feedback paths    |
-| Cloudflare web login and sealed session                       | 3–5 days                              | Worker SDK/runtime compatibility and refresh race tests                        |
+| Railway web login and sealed Postgres session                 | 3–5 days                              | SDK compatibility and multi-replica refresh race tests                         |
 | Electron public-client loopback login                         | 4–7 days                              | App lifecycle, port/state races, secure persistence, logout/revocation         |
 | Alpha reset, deployment, synthetic checks, and failure drills | 2–4 days plus 3–7 elapsed soak days   | External OAuth-provider configuration and real failure behavior                |
 | Beta/Production promotion and Auth0 removal                   | 2–4 days plus channel soak            | Environment drift, production credentials, rollback rehearsal                  |
@@ -493,8 +504,8 @@ Expected total: **14–26 focused engineer-days**, normally **3–5 calendar wee
 for one senior engineer plus review**, followed by the chosen production soak.
 The deferred cloud-workspace implementation is excluded; only its stable
 internal-account boundary is included. The estimate moves down if the WorkOS
-Worker SDK and cross-Application revocation pass unchanged, and up if either
-requires a custom session coordinator/broker.
+Node SDK and cross-Application revocation pass unchanged, and up if either
+requires further provider-specific session coordination.
 
 The future public Railway template's bootstrap and instance-bound grant system
 is also excluded from the migration estimate. Its seam is defined above, but it
@@ -633,12 +644,13 @@ Implemented in the repository:
 
 - `AUTH_PROVIDER` selects the legacy Auth0/KV browser path or WorkOS. Hosted
   Pages builds require an explicit selector and exact channel origins; WorkOS
-  mode also requires a channel-matched session-Worker marker and rejects API
-  keys, cookie passwords, or WorkOS web client IDs copied into Pages.
-- A private `AuthSession` Durable Object exists independently for Alpha, Beta,
-  and Production. Its Worker has no public preview or `workers.dev` endpoint.
-  The WorkOS API key, Web Application ID, cookie password, PKCE verifier,
-  sealed session, session ID, and rotating refresh state remain inside it.
+  mode rejects retired Durable Object bindings/markers and any provider key,
+  cookie password, signing secret, or client contract copied into Pages.
+- The existing Railway control plane owns WorkOS independently for Alpha,
+  Beta, and Production. Channel-local Postgres stores only SHA-256 digests of
+  opaque browser credentials and OAuth state, plus the server-side PKCE
+  verifier and WorkOS-encrypted sealed session. Access tokens are not database
+  columns, and no WorkOS secret enters Pages or browser JavaScript.
 - The browser receives only random 256-bit `__Host-zeros_auth_flow` and
   `__Host-zeros_session` cookies with `Secure`, `HttpOnly`, `SameSite=Lax`, and
   `Path=/`. Authorization state is exact, expires after ten minutes, and is
@@ -647,12 +659,12 @@ Implemented in the repository:
 - The callback uses the trusted WorkOS code-exchange User and accepts only an
   explicitly verified email. Access tokens and sealed sessions are validated
   server-side before the session becomes active; none enter browser JavaScript.
-- Near-expiry reads serialize refresh per durable session and persist every
+- Near-expiry reads serialize refresh under PostgreSQL advisory/row locks and persist every
   successful rotation. Pre-rotation timeout, network, rate-limit, and supported
   server failures preserve the exact record. If rotation succeeds but a later
   local JWT verification is transiently unavailable, the replacement seal is
   persisted while the bearer is withheld. Terminal grant rejection deletes the
-  durable session.
+  database session.
 - The dashboard proxy reuses the exact verified session snapshot, rejects a
   transient auth state with 503, refreshes once after an upstream 401, and
   releases unread response bodies before replay. WorkOS logout deletes local
@@ -664,16 +676,17 @@ Implemented in the repository:
   supplies the independent Desktop Application flow.
 - `POST /auth/workos-webhook` verifies the exact raw payload with the
   channel-specific endpoint secret, accepts only `user.updated` and
-  `user.deleted`, and forwards a bounded event through `AUTH_BROKER_SECRET`.
-  Migration `0011` provides an RLS-protected idempotency/recovery ledger.
+  `user.deleted`, directly on Railway. Migration `0011` provides an
+  RLS-protected idempotency/recovery ledger.
   Updates never transfer an occupied email; deletions soft-delete authentication
   while preserving organizations, memberships, audit history, and product data.
-- The deployment runbook defines per-channel Worker, Durable Object, Pages,
-  webhook, and Railway bindings. WorkOS-hosted AuthKit domains remain the
-  selected path; a paid custom WorkOS domain is not required.
+- Migration `0012` provides the RLS-protected browser flow/session table. The
+  deployment runbook defines per-channel Railway, Postgres, Pages, and webhook
+  boundaries. WorkOS-hosted AuthKit domains remain the selected path; a paid
+  custom WorkOS domain is not required.
 
 The Phase 2 code is verified locally but not deployed or activated. The exposed
-Alpha qualification API key must be rotated before it enters the Worker. Because
+Alpha qualification API key must be rotated before it enters Railway. Because
 Railway deliberately accepts one issuer at a time, browser activation waits for
 the coordinated Phase 4 Alpha reset.
 
@@ -707,8 +720,9 @@ Implemented in the repository:
   refresh token. A replacement returned before a transient local verification
   failure is retained while its bearer is withheld; only an explicit
   `invalid_grant` clears the stored session.
-- A private Pages-to-Durable-Object revocation route verifies the desktop
-  bearer before trusting `sub` or `sid`. Current-device logout revokes that
+- A Railway revocation route verifies the desktop bearer before trusting `sub`
+  or `sid`; new desktops call it directly and Pages retains a stateless
+  compatibility pass-through for already-released builds. Current-device logout revokes that
   exact session. All-device logout paginates the WorkOS User's active sessions
   across both Applications and revokes each through the server-only Web API
   key. Local encrypted state clears even when that network operation is
@@ -728,8 +742,7 @@ Implemented in the repository:
 The Phase 3 code is locally verified but not activated. A packaged macOS
 interactive login/keychain/logout drill is a Phase 4 Alpha acceptance gate and
 cannot be claimed from this Linux repository environment. The exposed Alpha
-server API key must still be rotated before the private session Worker is
-deployed.
+server API key must still be rotated before Railway WorkOS mode is activated.
 
 ## Delivery phases after Phase 0
 

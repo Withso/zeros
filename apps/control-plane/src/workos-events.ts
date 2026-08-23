@@ -1,12 +1,14 @@
-import { timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
-import { bodyLimit } from "hono/body-limit";
 import type pg from "pg";
 import { z } from "zod";
 
 import { withSystemTx, type Tx } from "./db.js";
 
 const EventIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,512}$/);
+const MAX_WEBHOOK_BYTES = 64 * 1024;
+const SIGNATURE_TOLERANCE_MS = 3 * 60 * 1_000;
+const LIFECYCLE_EVENTS = new Set(["user.updated", "user.deleted"]);
 const AvatarSchema = z
   .string()
   .max(2_048)
@@ -39,12 +41,6 @@ export type WorkOSIdentityEventStatus =
   | "ignored_unverified"
   | "ignored_deleted"
   | "stale";
-
-export function brokerSecretMatches(expected: string, supplied: string): boolean {
-  const left = Buffer.from(expected, "utf8");
-  const right = Buffer.from(supplied, "utf8");
-  return left.length === right.length && timingSafeEqual(left, right);
-}
 
 async function finishEvent(
   tx: Tx,
@@ -108,6 +104,13 @@ async function applyInTransaction(
     await tx.query(
       `UPDATE users SET deleted_at = COALESCE(deleted_at, now()) WHERE id = $1`,
       [account.user_id],
+    );
+    // The provider deletion already ends the account. Remove every local
+    // opaque browser credential for this subject in the same transaction so a
+    // cached sealed session cannot keep the web shell looking signed in.
+    await tx.query(
+      `DELETE FROM workos_browser_sessions WHERE provider_sub = $1`,
+      [event.user.id],
     );
     return finishEvent(tx, event.eventId, "applied", account.user_id);
   }
@@ -174,41 +177,147 @@ export async function applyWorkOSIdentityEvent(
   return withSystemTx(pool, (tx) => applyInTransaction(tx, event));
 }
 
+function signatureValid(
+  rawBody: Buffer,
+  header: string,
+  secret: string,
+  now: number,
+): boolean {
+  const match = /^t=(\d+)\s*,\s*v1=([a-f0-9]{64})$/i.exec(header);
+  if (!match) return false;
+  const timestamp = Number(match[1]);
+  if (
+    !Number.isSafeInteger(timestamp) ||
+    Math.abs(now - timestamp) > SIGNATURE_TOLERANCE_MS
+  ) {
+    return false;
+  }
+  const supplied = Buffer.from(match[2]!, "hex");
+  const expected = createHmac("sha256", secret)
+    .update(`${timestamp}.`)
+    .update(rawBody)
+    .digest();
+  return (
+    supplied.length === expected.length && timingSafeEqual(supplied, expected)
+  );
+}
+
+async function boundedBody(request: Request): Promise<Buffer | null> {
+  const declared = Number(request.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_WEBHOOK_BYTES) return null;
+  if (!request.body) return Buffer.alloc(0);
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  while (true) {
+    const part = await reader.read();
+    if (part.done) break;
+    size += part.value.byteLength;
+    if (size > MAX_WEBHOOK_BYTES) {
+      await reader.cancel().catch(() => {});
+      return null;
+    }
+    chunks.push(part.value);
+  }
+  return Buffer.concat(
+    chunks.map((chunk) => Buffer.from(chunk)),
+    size,
+  );
+}
+
+function safeAvatar(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== "string" || value.length > 2_048) return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password
+      ? url.toString()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function lifecycleEvent(value: unknown): WorkOSIdentityEvent | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (
+    !EventIdSchema.safeParse(raw.id).success ||
+    (raw.event !== "user.updated" && raw.event !== "user.deleted") ||
+    typeof raw.created_at !== "string" ||
+    !Number.isFinite(Date.parse(raw.created_at)) ||
+    !raw.data ||
+    typeof raw.data !== "object"
+  ) {
+    return null;
+  }
+  const user = raw.data as Record<string, unknown>;
+  const candidate = {
+    eventId: raw.id,
+    eventType: raw.event,
+    createdAt: raw.created_at,
+    user: {
+      id: user.id,
+      email: user.email,
+      emailVerified: user.email_verified,
+      name: typeof user.name === "string" ? user.name : null,
+      profilePictureUrl: safeAvatar(user.profile_picture_url),
+    },
+  };
+  const parsed = WorkOSIdentityEventSchema.safeParse(candidate);
+  return parsed.success ? parsed.data : null;
+}
+
+function json(value: unknown, status: number): Response {
+  return Response.json(value, {
+    status,
+    headers: { "cache-control": "no-store", pragma: "no-cache" },
+  });
+}
+
 export function createWorkOSIdentityEventRoutes(
   pool: pg.Pool,
-  brokerSecret: string,
+  webhookSecret: string,
+  options: {
+    now?: () => number;
+    apply?: (
+      event: WorkOSIdentityEvent,
+    ) => Promise<{ status: WorkOSIdentityEventStatus }>;
+  } = {},
 ): Hono {
   const app = new Hono();
-  const path = "/internal/auth/workos/events";
-
-  app.use(path, async (c, next) => {
-    c.header("Cache-Control", "no-store");
-    c.header("Pragma", "no-cache");
+  app.post("/auth/workos-webhook", async (c) => {
+    const body = await boundedBody(c.req.raw);
+    if (!body) return json({ error: "body_too_large" }, 413);
     if (
-      !brokerSecretMatches(
-        brokerSecret,
-        c.req.header("x-zeros-auth-broker") ?? "",
+      !signatureValid(
+        body,
+        c.req.header("workos-signature") ?? "",
+        webhookSecret,
+        (options.now ?? Date.now)(),
       )
     ) {
-      return c.json(
-        { error: { code: "unauthorized", message: "Unauthorized" } },
-        401,
-      );
+      return json({ error: "invalid_signature" }, 401);
     }
-    await next();
-  });
-  app.use(path, bodyLimit({ maxSize: 64 * 1024 }));
-  app.post(path, async (c) => {
-    const raw = await c.req.json().catch(() => null);
-    const parsed = WorkOSIdentityEventSchema.safeParse(raw);
-    if (!parsed.success) {
-      return c.json(
-        { error: { code: "invalid_event", message: "Invalid lifecycle event" } },
-        422,
-      );
+    let raw: unknown;
+    try {
+      raw = JSON.parse(body.toString("utf8"));
+    } catch {
+      return json({ error: "invalid_event" }, 400);
     }
-    const result = await applyWorkOSIdentityEvent(pool, parsed.data);
-    return c.json({ ok: true, status: result.status });
+    const eventName =
+      raw && typeof raw === "object" && "event" in raw
+        ? (raw as { event?: unknown }).event
+        : null;
+    if (typeof eventName === "string" && !LIFECYCLE_EVENTS.has(eventName)) {
+      return json({ accepted: true, ignored: true }, 202);
+    }
+    const event = lifecycleEvent(raw);
+    if (!event) return json({ error: "invalid_event" }, 400);
+    const result = await (
+      options.apply ?? ((input) => applyWorkOSIdentityEvent(pool, input))
+    )(event);
+    return json({ accepted: true, status: result.status }, 202);
   });
   return app;
 }

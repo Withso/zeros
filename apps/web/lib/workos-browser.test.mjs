@@ -6,48 +6,16 @@ import {
   WORKOS_SESSION_COOKIE,
   beginWorkOSBrowserAuth,
   finishWorkOSBrowserAuth,
-  logoutWorkOSBrowserSession,
   legacyDesktopHandoffEnabled,
-  safeWorkOSReturnPath,
-  workosFlowCookie,
-  workosProvider,
-  workosSessionCookie,
+  logoutWorkOSBrowserSession,
+  readWorkOSBrowserSession,
+  refreshWorkOSBrowserSession,
 } from "./workos-browser.mjs";
 
-const FLOW_ID = "A".repeat(43);
+const SESSION_ID = "A".repeat(43);
 const APP_ORIGIN = "https://app-alpha.zeros.build";
-
-function setCookies(response) {
-  return typeof response.headers.getSetCookie === "function"
-    ? response.headers.getSetCookie()
-    : [response.headers.get("set-cookie") ?? ""];
-}
-
-function fakeNamespace(handler) {
-  const calls = [];
-  return {
-    calls,
-    idFromName(name) {
-      calls.push({ kind: "id", name });
-      return { name };
-    },
-    get(id) {
-      return {
-        async fetch(request) {
-          const body = request.method === "POST" ? await request.json() : null;
-          calls.push({ kind: "fetch", id: id.name, request, body });
-          return handler({ id: id.name, request, body });
-        },
-      };
-    },
-  };
-}
-
-test("WorkOS providers map to the qualified social connection names", () => {
-  assert.equal(workosProvider("google"), "GoogleOAuth");
-  assert.equal(workosProvider("github"), "GitHubOAuth");
-  assert.equal(workosProvider("unknown"), null);
-});
+const CONTROL_PLANE_URL = "https://api-alpha.zeros.build";
+const ENV = { APP_ORIGIN, CONTROL_PLANE_URL };
 
 test("the Auth0-era desktop ticket broker is disabled in WorkOS mode", () => {
   assert.equal(legacyDesktopHandoffEnabled({ AUTH_PROVIDER: "auth0" }), true);
@@ -58,125 +26,141 @@ test("the Auth0-era desktop ticket broker is disabled in WorkOS mode", () => {
   );
 });
 
-test("WorkOS returns are relative and bound to the exact application origin", () => {
-  assert.equal(
-    safeWorkOSReturnPath(
-      `${APP_ORIGIN}/invite?token=safe#finish`,
-      APP_ORIGIN,
-    ),
-    "/invite?token=safe#finish",
-  );
-  assert.equal(safeWorkOSReturnPath("/settings?tab=members", APP_ORIGIN), "/settings?tab=members");
-  assert.equal(safeWorkOSReturnPath("https://evil.example/steal", APP_ORIGIN), "/");
-  assert.equal(safeWorkOSReturnPath("//evil.example/steal", APP_ORIGIN), "/");
-  assert.equal(safeWorkOSReturnPath("javascript:alert(1)", APP_ORIGIN), "/");
-});
-
-test("host-only WorkOS cookies carry only opaque ids with the required flags", () => {
-  const flow = workosFlowCookie(FLOW_ID);
-  const session = workosSessionCookie(FLOW_ID);
-
-  for (const cookie of [flow, session]) {
-    assert.match(cookie, /^__Host-/);
-    assert.match(cookie, /; Path=\//);
-    assert.match(cookie, /; Secure/);
-    assert.match(cookie, /; HttpOnly/);
-    assert.match(cookie, /; SameSite=Lax/);
-    assert.doesNotMatch(cookie, /; Domain=/i);
-    assert.doesNotMatch(cookie, /access|refresh|verifier|state/i);
-  }
-  assert.match(flow, /Max-Age=600/);
-  assert.match(session, /Max-Age=2592000/);
-});
-
-test("auth start stores PKCE state in the coordinator, not browser cookies", async () => {
-  const namespace = fakeNamespace(({ request }) => {
-    assert.equal(new URL(request.url).pathname, "/flow/start");
-    return Response.json(
-      {
-        authorizationUrl:
-          "https://api.workos.com/user_management/authorize?state=server-state&code_challenge=server-challenge",
-      },
-      { status: 201 },
-    );
-  });
+test("auth start is a stateless facade for the matching Railway service", async () => {
+  const calls = [];
   const response = await beginWorkOSBrowserAuth(
     new Request(
-      `${APP_ORIGIN}/auth/start?provider=google&return=${encodeURIComponent(`${APP_ORIGIN}/invite?token=safe`)}`,
+      `${APP_ORIGIN}/auth/start?provider=google&return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
+      { headers: { cookie: "unrelated=value" } },
     ),
-    { APP_ORIGIN, AUTH_SESSIONS: namespace },
-    { randomId: () => FLOW_ID },
+    ENV,
+    {
+      fetch: async (url, init) => {
+        calls.push({ url, init });
+        return new Response(null, {
+          status: 303,
+          headers: {
+            location: "https://api.workos.com/user_management/authorize",
+            "set-cookie": `${WORKOS_FLOW_COOKIE}=${SESSION_ID}; Secure; HttpOnly`,
+          },
+        });
+      },
+    },
   );
 
   assert.equal(response.status, 303);
-  assert.match(response.headers.get("location"), /^https:\/\/api\.workos\.com\/user_management\/authorize\?/);
-  const cookies = setCookies(response).join("\n");
-  assert.match(cookies, new RegExp(`^${WORKOS_FLOW_COOKIE}=${FLOW_ID}`, "m"));
-  assert.doesNotMatch(cookies, /server-state|server-challenge|safe/);
-  const call = namespace.calls.find((entry) => entry.kind === "fetch");
-  assert.deepEqual(call.body, {
-    provider: "GoogleOAuth",
-    returnPath: "/invite?token=safe",
-  });
-});
-
-test("callback sets an opaque WorkOS session and clears one-time and legacy cookies", async () => {
-  const namespace = fakeNamespace(({ request, body }) => {
-    assert.equal(new URL(request.url).pathname, "/flow/complete");
-    assert.deepEqual(body, { code: "authorization-code", state: "expected-state" });
-    return Response.json({ ok: true, returnPath: "/dashboard" });
-  });
-  const response = await finishWorkOSBrowserAuth(
-    new Request(
-      `${APP_ORIGIN}/auth/callback?code=authorization-code&state=expected-state`,
-      { headers: { cookie: `${WORKOS_FLOW_COOKIE}=${FLOW_ID}` } },
-    ),
-    { APP_ORIGIN, AUTH_SESSIONS: namespace },
-  );
-
-  assert.equal(response.status, 303);
-  assert.equal(response.headers.get("location"), `${APP_ORIGIN}/dashboard`);
-  const cookies = setCookies(response).join("\n");
-  assert.match(cookies, new RegExp(`${WORKOS_SESSION_COOKIE}=${FLOW_ID}`));
-  assert.match(cookies, new RegExp(`${WORKOS_FLOW_COOKIE}=;`));
-  assert.match(cookies, /zeros_session=;/);
-  assert.doesNotMatch(cookies, /authorization-code|expected-state|access_token|refresh_token/);
-});
-
-test("callback failure never creates a browser session", async () => {
-  const namespace = fakeNamespace(() =>
-    Response.json({ ok: false, reason: "invalid_flow" }, { status: 401 }),
-  );
-  const response = await finishWorkOSBrowserAuth(
-    new Request(`${APP_ORIGIN}/auth/callback?code=code&state=wrong`, {
-      headers: { cookie: `${WORKOS_FLOW_COOKIE}=${FLOW_ID}` },
-    }),
-    { APP_ORIGIN, AUTH_SESSIONS: namespace },
-  );
-
-  assert.equal(response.status, 400);
   assert.equal(
-    setCookies(response).some((cookie) => cookie.startsWith(`${WORKOS_SESSION_COOKIE}=`)),
-    false,
+    calls[0].url,
+    `${CONTROL_PLANE_URL}/auth/start?provider=google&return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
+  );
+  assert.equal(calls[0].init.headers.get("cookie"), null);
+  assert.equal(calls[0].init.redirect, "manual");
+  assert.match(response.headers.get("set-cookie"), new RegExp(SESSION_ID));
+});
+
+test("callback and logout forward only their required opaque cookie", async () => {
+  const calls = [];
+  const fetch = async (url, init) => {
+    calls.push({ url, init });
+    return new Response(null, {
+      status: 303,
+      headers: { location: `${APP_ORIGIN}/` },
+    });
+  };
+  await finishWorkOSBrowserAuth(
+    new Request(`${APP_ORIGIN}/auth/callback?code=code&state=state`, {
+      headers: {
+        cookie: `${WORKOS_FLOW_COOKIE}=${SESSION_ID}; unrelated=private`,
+      },
+    }),
+    ENV,
+    { fetch },
+  );
+  await logoutWorkOSBrowserSession(
+    new Request(`${APP_ORIGIN}/auth/logout?return=%2Fafter`, {
+      headers: {
+        cookie: `${WORKOS_SESSION_COOKIE}=${SESSION_ID}; unrelated=private`,
+      },
+    }),
+    ENV,
+    { fetch },
+  );
+
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    [
+      `${CONTROL_PLANE_URL}/auth/callback?code=code&state=state`,
+      `${CONTROL_PLANE_URL}/auth/logout?return=%2Fafter`,
+    ],
+  );
+  assert.deepEqual(
+    calls.map((call) => call.init.headers.get("cookie")),
+    [
+      `${WORKOS_FLOW_COOKIE}=${SESSION_ID}`,
+      `${WORKOS_SESSION_COOKIE}=${SESSION_ID}`,
+    ],
   );
 });
 
-test("logout clears the browser cookie even when the coordinator is unavailable", async () => {
-  const namespace = fakeNamespace(() => {
-    throw new Error("coordinator unavailable");
-  });
-  const response = await logoutWorkOSBrowserSession(
-    new Request(`${APP_ORIGIN}/auth/logout`, {
-      headers: { cookie: `${WORKOS_SESSION_COOKIE}=${FLOW_ID}` },
+test("session lookup forwards only the opaque cookie and validates Railway data", async () => {
+  let forwarded;
+  const result = await readWorkOSBrowserSession(
+    ENV,
+    new Request(`${APP_ORIGIN}/`, {
+      headers: {
+        cookie: `${WORKOS_SESSION_COOKIE}=${SESSION_ID}; unrelated=private`,
+      },
     }),
-    { APP_ORIGIN, AUTH_SESSIONS: namespace },
+    {
+      fetch: async (url, init) => {
+        forwarded = { url, init };
+        return Response.json({
+          status: "active",
+          revision: 7,
+          data: {
+            sub: "user_01TEST",
+            email: "user@example.com",
+            name: "User",
+            accessToken: "signed-access-token",
+            refreshToken: null,
+            verifiedAt: 1_800_000_000_000,
+          },
+        });
+      },
+    },
   );
 
-  assert.equal(response.status, 303);
-  assert.equal(response.headers.get("location"), `${APP_ORIGIN}/`);
-  assert.ok(
-    setCookies(response).some((cookie) =>
-      cookie.startsWith(`${WORKOS_SESSION_COOKIE}=;`),
-    ),
+  assert.equal(forwarded.url, `${CONTROL_PLANE_URL}/auth/browser/session`);
+  assert.equal(
+    forwarded.init.headers.cookie,
+    `${WORKOS_SESSION_COOKIE}=${SESSION_ID}`,
   );
+  assert.equal(result.sessionId, SESSION_ID);
+  assert.equal(result.revision, 7);
+  assert.equal(result.data.accessToken, "signed-access-token");
+});
+
+test("forced refresh carries the revision observed with the rejected bearer", async () => {
+  let forwarded;
+  const result = await refreshWorkOSBrowserSession(ENV, SESSION_ID, 7, {
+    fetch: async (url, init) => {
+      forwarded = { url, init };
+      return Response.json({
+        status: "active",
+        revision: 8,
+        data: {
+          sub: "user_01TEST",
+          email: "user@example.com",
+          name: null,
+          accessToken: "signed-access-token-2",
+          refreshToken: null,
+          verifiedAt: 1_800_000_000_000,
+        },
+      });
+    },
+  });
+
+  assert.equal(forwarded.url, `${CONTROL_PLANE_URL}/auth/browser/refresh`);
+  assert.equal(forwarded.init.headers.get("x-zeros-session-revision"), "7");
+  assert.equal(result.status, "active");
 });

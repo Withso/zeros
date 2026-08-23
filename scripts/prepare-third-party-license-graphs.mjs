@@ -33,7 +33,7 @@ const graphs = [
     ],
   },
   {
-    name: "web auth/session Worker",
+    name: "web Pages functions",
     command: NPM,
     cwd: join(ROOT, "apps", "web"),
     args: ["ci", "--ignore-scripts"],

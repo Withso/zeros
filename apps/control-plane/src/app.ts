@@ -30,6 +30,13 @@ import {
 } from "./github.js";
 import { createFeedbackRoutes } from "./feedback.js";
 import { createWorkOSIdentityEventRoutes } from "./workos-events.js";
+import {
+  PostgresWorkOSBrowserSessionRepository,
+  WorkOSBrowserSessions,
+  createWorkOSBrowserSessionRoutes,
+} from "./workos-browser-sessions.js";
+import { createWorkOSDesktopRevocationRoutes } from "./workos-desktop-revocation.js";
+import { RailwayWorkOSProvider } from "./workos-provider.js";
 
 export function createApp(
   config: Config,
@@ -48,13 +55,27 @@ export function createApp(
     }
   });
 
-  // WorkOS lifecycle events arrive through the Cloudflare auth broker, which
-  // has already verified the provider signature. This separate credential is
-  // mounted before bearer auth and is never a WorkOS API key.
-  if (config.auth.provider === "workos" && config.authBrokerSecret) {
+  // Railway owns the complete WorkOS browser/desktop authentication boundary:
+  // authorization-code exchange, encrypted session state, serialized refresh,
+  // provider-signed lifecycle events, and desktop session revocation. These
+  // endpoints are intentionally mounted before /v1 bearer authentication;
+  // each carries its own stronger credential (PKCE state, opaque HttpOnly
+  // cookie, webhook signature, or a verified Desktop Application bearer).
+  if (config.auth.provider === "workos" && config.workos) {
+    const provider = new RailwayWorkOSProvider(config.auth, config.workos);
+    const sessions = new WorkOSBrowserSessions(
+      new PostgresWorkOSBrowserSessionRepository(pool),
+      provider,
+      config.workos.appOrigin,
+    );
     app.route(
       "/",
-      createWorkOSIdentityEventRoutes(pool, config.authBrokerSecret),
+      createWorkOSBrowserSessionRoutes(sessions, config.workos.appOrigin),
+    );
+    app.route("/", createWorkOSDesktopRevocationRoutes(provider));
+    app.route(
+      "/",
+      createWorkOSIdentityEventRoutes(pool, config.workos.webhookSecret),
     );
   }
 

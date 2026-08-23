@@ -90,9 +90,14 @@ export async function proxyControlPlane(
   );
 
   // Browser sessions outlive access tokens. Refresh once on an upstream 401,
-  // rotate the KV grant, then replay the exact bounded request body.
+  // rotate the Railway-held grant, then replay the exact bounded request body.
   if (upstream.status === 401) {
-    const granted = await refreshBrowserSession(env, found.sessionId, session);
+    const granted = await refreshBrowserSession(
+      env,
+      found.sessionId,
+      session,
+      found.revision,
+    );
     if (granted.ok) {
       // The first response will never be returned after a successful refresh.
       // Release its stream before replaying so Workers does not retain an
@@ -120,7 +125,11 @@ export async function proxyControlPlane(
 
   const contentType = await jsonContentTypeOrCancel(upstream);
   if (!contentType) {
-    return jsonError(502, "bad_gateway", "Organization service returned an invalid response");
+    return jsonError(
+      502,
+      "bad_gateway",
+      "Organization service returned an invalid response",
+    );
   }
   return new Response(upstream.body, {
     status: upstream.status,

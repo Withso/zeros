@@ -429,7 +429,7 @@ const marketingRecords = runPnpmLicenseInventory(
 );
 const webRecords = runNpmLicenseInventory(
   join(ROOT, "apps", "web"),
-  "web auth/session Worker",
+  "web Pages functions",
 );
 const recordsByKey = new Map();
 for (const record of [
@@ -573,7 +573,7 @@ const lines = [
   "This inventory covers production packages resolved by the root pnpm",
   "workspace (desktop, shared packages, and the development marketing graph),",
   "the independently locked control plane, the standalone marketing graph",
-  "deployed by Cloudflare, the independently locked web auth/session Worker,",
+  "deployed by Cloudflare, the independently locked web Pages functions,",
   "and the Electron runtime embedded in the desktop application. Optional",
   "JavaScript dependencies are included. Host-native optional packages are",
   "normalized to the macOS arm64",

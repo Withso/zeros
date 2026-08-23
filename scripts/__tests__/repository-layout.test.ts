@@ -401,7 +401,7 @@ describe("repository layout contracts", () => {
     expect(licenses).not.toContain("@openai/codex@0.149.0-linux-x64");
     expect(generator).not.toContain('"--no-optional"');
     expect(generator).toContain("runNpmLicenseInventory");
-    expect(generator).toContain("web auth/session Worker");
+    expect(generator).toContain("web Pages functions");
   });
 
   it("stages the pinned Codex runtime instead of falling back to PATH", () => {

@@ -69,18 +69,26 @@ export function deploymentEnvironmentErrors(env) {
   }
 
   if (authProvider === "workos") {
-    const expectedWorker = `zeros-auth-sessions-${channel}`;
-    if ((env.WORKOS_SESSION_WORKER || "").trim() !== expectedWorker) {
-      errors.push(`WORKOS_SESSION_WORKER must be ${expectedWorker} for ${channel}`);
-    }
-    for (const brokerOnly of [
+    // Pages is only a same-origin facade. All provider configuration and
+    // durable session authority belong to the matching Railway environment.
+    for (const railwayOnly of [
       "WORKOS_API_KEY",
       "WORKOS_COOKIE_PASSWORD",
       "WORKOS_WEB_CLIENT_ID",
+      "WORKOS_WEBHOOK_SECRET",
+      "AUTH_BROKER_SECRET",
+      "AUTH_DESKTOP_CLIENT_ID",
+      "AUTH_ISSUER",
+      "AUTH_JWKS_URL",
+      "AUTH_AUDIENCE",
+      "WORKOS_SESSION_WORKER",
     ]) {
-      if ((env[brokerOnly] || "").trim()) {
-        errors.push(`${brokerOnly} belongs only on the WorkOS session Worker`);
+      if ((env[railwayOnly] || "").trim()) {
+        errors.push(`${railwayOnly} belongs only on Railway in WorkOS mode`);
       }
+    }
+    if (env.AUTH_SESSIONS) {
+      errors.push("AUTH_SESSIONS Durable Object binding must be removed");
     }
   }
 
