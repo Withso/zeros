@@ -27,7 +27,7 @@ const AUTHENTICATION_METHODS = new Set([
   "GrokOAuth",
   "XOAuth",
   "IntuitOAuth",
-  "LinkedInOAuth",
+  "LinkedInOAuth", // gitleaks:allow — WorkOS authentication method name, not a client identifier
   "MicrosoftOAuth",
   "SalesforceOAuth",
   "SlackOAuth",

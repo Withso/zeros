@@ -37,6 +37,20 @@ describe("repository layout contracts", () => {
     expect(codeql).toContain("    name: codeql");
   });
 
+  it("keeps the reviewed WorkOS Gitleaks false positive exact", () => {
+    const fingerprint =
+      "8bf0f9e959046859c835fc2938b07e7c7afb7c7a:apps/desktop/electron/workos-desktop-client.ts:linkedin-client-id:30";
+    const ignore = read(".gitleaksignore");
+    const desktopClient = read(
+      "apps/desktop/electron/workos-desktop-client.ts",
+    );
+
+    expect(ignore).toContain(fingerprint);
+    expect(desktopClient).toContain(
+      '"LinkedInOAuth", // gitleaks:allow — WorkOS authentication method name, not a client identifier',
+    );
+  });
+
   it("keeps required source-sync red until every ZSR architecture qualifies", () => {
     const preflight = read(".github/workflows/preflight.yml");
 
