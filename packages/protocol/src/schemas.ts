@@ -46,6 +46,14 @@ export const KNOWN_MESSAGE_TYPES = [
   "AGENT_SET_MODEL",
   "AGENT_COMPACT",
   "AGENT_UPDATE_CONFIG",
+  "AGENT_MEMORY_SETTINGS_READ",
+  "AGENT_MEMORY_SETTINGS_UPDATE",
+  "AGENT_MEMORY_RESET",
+  "AGENT_CONFIGURATION_PROVENANCE_READ",
+  "AGENT_PROVIDER_QUOTA_READ",
+  "AGENT_GOAL_SET",
+  "AGENT_GOAL_CLEAR",
+  "AGENT_RETRY_SAFETY_REVIEW",
   "AGENT_LIST_SESSIONS",
   "AGENT_LOAD_SESSION",
   "AGENT_FORK_CONVERSATION",
@@ -67,6 +75,13 @@ export const KNOWN_MESSAGE_TYPES = [
   "AGENT_QUESTION_REQUEST",
   "AGENT_QUESTION_SETTLED",
   "AGENT_MODE_CHANGED",
+  "AGENT_MEMORY_SETTINGS",
+  "AGENT_MEMORY_RESET_COMPLETE",
+  "AGENT_CONFIGURATION_PROVENANCE",
+  "AGENT_PROVIDER_QUOTA",
+  "AGENT_PROVIDER_QUOTA_UPDATED",
+  "AGENT_GOAL_CHANGED",
+  "AGENT_SAFETY_REVIEW_RETRIED",
   "AGENT_SESSIONS_LIST",
   "AGENT_SESSION_LOADED",
   "AGENT_CONVERSATION_FORKED",
@@ -175,6 +190,14 @@ const AGENT_ID_REQUIRED_CLIENT_TYPES = new Set([
   "AGENT_SET_MODEL",
   "AGENT_COMPACT",
   "AGENT_UPDATE_CONFIG",
+  "AGENT_MEMORY_SETTINGS_READ",
+  "AGENT_MEMORY_SETTINGS_UPDATE",
+  "AGENT_MEMORY_RESET",
+  "AGENT_CONFIGURATION_PROVENANCE_READ",
+  "AGENT_PROVIDER_QUOTA_READ",
+  "AGENT_GOAL_SET",
+  "AGENT_GOAL_CLEAR",
+  "AGENT_RETRY_SAFETY_REVIEW",
   "AGENT_LIST_SESSIONS",
   "AGENT_FORK_CONVERSATION",
   "AGENT_LOAD_SESSION",
@@ -209,6 +232,64 @@ function isOptionalAgentEnv(value: unknown): boolean {
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isMemorySettingsUpdate(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length === 0) return false;
+  if (
+    keys.some(
+      (key) =>
+        key !== "localMemoriesEnabled" &&
+        key !== "toolAssistedGenerationEnabled",
+    )
+  ) {
+    return false;
+  }
+  return keys.every((key) => typeof value[key] === "boolean");
+}
+
+const AGENT_GOAL_STATUSES = new Set([
+  "active",
+  "paused",
+  "blocked",
+  "usageLimited",
+  "budgetLimited",
+  "complete",
+]);
+
+function isGoalUpdate(value: unknown): boolean {
+  if (!isPlainRecord(value)) return false;
+  const keys = Object.keys(value);
+  if (keys.length === 0) return false;
+  if (
+    keys.some(
+      (key) => key !== "objective" && key !== "status" && key !== "tokenBudget",
+    )
+  ) {
+    return false;
+  }
+  if (
+    value.objective !== undefined &&
+    (!isStr(value.objective) ||
+      value.objective.trim().length === 0 ||
+      value.objective.length > 4_000 ||
+      value.objective.includes("\0"))
+  ) {
+    return false;
+  }
+  if (
+    value.status !== undefined &&
+    (!isStr(value.status) || !AGENT_GOAL_STATUSES.has(value.status))
+  ) {
+    return false;
+  }
+  return (
+    value.tokenBudget === undefined ||
+    value.tokenBudget === null ||
+    (Number.isSafeInteger(value.tokenBudget) && Number(value.tokenBudget) > 0)
+  );
 }
 
 function isBoundedInteractionId(value: unknown): value is string {
@@ -428,6 +509,27 @@ function assertInboundPayload(env: Record<string, unknown>): void {
       // string→string object — reject arrays / nested objects / non-string vals.
       if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
       if (!isAgentEnv(env.env)) bad("env");
+      break;
+    case "AGENT_MEMORY_SETTINGS_READ":
+    case "AGENT_MEMORY_RESET":
+    case "AGENT_PROVIDER_QUOTA_READ":
+      break;
+    case "AGENT_CONFIGURATION_PROVENANCE_READ":
+      if (env.cwd !== undefined && !isNonEmptyStr(env.cwd)) bad("cwd");
+      break;
+    case "AGENT_MEMORY_SETTINGS_UPDATE":
+      if (!isMemorySettingsUpdate(env.settings)) bad("settings");
+      break;
+    case "AGENT_GOAL_SET":
+      if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
+      if (!isGoalUpdate(env.update)) bad("update");
+      break;
+    case "AGENT_GOAL_CLEAR":
+      if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
+      break;
+    case "AGENT_RETRY_SAFETY_REVIEW":
+      if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
+      if (!isBoundedInteractionId(env.retryId)) bad("retryId");
       break;
     case "AGENT_PERMISSION_RESPONSE":
       if (!isBoundedInteractionId(env.permissionId)) bad("permissionId");

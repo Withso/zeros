@@ -17,15 +17,20 @@ This integration is intentionally split into two layers:
 
 Codex protocol availability must never be interpreted as a reason to create a
 Codex-owned duplicate of a Zeros product domain. A Codex-specific product
-feature should consume this harness behind an engine-owned interface. It must
-not expose arbitrary app-server RPC to the renderer or shared agent protocol.
+feature consumes the narrow engine-owned ports documented in
+[Agent harness capability boundary](agent-harness-capability-boundary.md). It
+must not expose arbitrary app-server RPC to the renderer or shared agent
+protocol.
 
 ## Pin and generated bindings
 
 `@openai/codex`, `package.json#codexProtocolVersion`, and the generated tree at
 `apps/desktop/src/engine/agents/adapters/codex/generated/` move together. Run
-`pnpm codegen:codex` only as part of an intentional pin upgrade. Generated
-files are not edited by hand.
+`pnpm codegen:codex` only as part of an intentional pin upgrade. The pinned
+Codex CLI generates TypeScript and JSON Schema into a sibling staging tree;
+Zeros prunes retired bindings and publishes that tree only after every step
+succeeds. A failed exporter therefore leaves the last committed bindings
+intact. Generated files are not edited by hand.
 
 `pnpm check:codex-pin` verifies both the pin/generated-schema relationship and
 the compatibility manifest. A regenerated method cannot silently appear or
@@ -55,9 +60,86 @@ every classified method has a behavioral implementation or test.
 - Notification `forwarded`: generated typed subscription is available, but no
   canonical or product behavior is claimed.
 
-At the 0.146.0 pin this covers 211 methods: 128 client requests, 11 server
-requests, and 72 server notifications. Run `pnpm check:codex-coverage` for the
-offline drift check.
+At the 0.149.0 pin this covers 239 methods: 151 client requests, 11 server
+requests, and 77 server notifications. The 23 added client requests and five
+added notifications are classified without making product-support claims. Run
+`pnpm check:codex-coverage` for the offline drift check.
+
+## Qualified Phase 2 product paths
+
+The generated surface now backs two additional, narrow product behaviors:
+
+- A bare `/review` prompt runs the explicit `runReview` lifecycle wrapper,
+  which sends `review/start` inline against uncommitted changes and waits on the
+  same turn-completion correlation as `turn/start`. The entered/exited review
+  items are bookkeeping; the accompanying final `agentMessage` becomes the
+  ordinary Zeros answer so the findings cannot render twice.
+- The shared background-task Stop action resolves a Zeros-owned opaque task id
+  to its session-owned `(threadId, processId)` and sends only
+  `thread/backgroundTerminals/terminate`. List publication is replace-style and
+  latest-wins across termination races, bounded across the exact session, and
+  revalidated only while task rows remain visible so native process exit clears
+  the shared card. `thread/backgroundTerminals/clean` is not used because its
+  contract stops all running terminals, not completed records.
+
+Neither path adds a renderer-facing app-server method or parameter bridge.
+Native Codex history search/read remains outside the product surface; future
+conversation search is a Zeros-owned cross-harness domain.
+
+## Qualified Phase 3 product paths
+
+Phase 3 adds three more engine-owned capability domains and a bounded event
+projection; it does not expose a generic Codex capability bridge:
+
+- The memory port reads and compare-and-swap writes the user config layer for
+  `features.memories` and
+  `memories.disable_on_external_context`, synchronizes the native memory mode
+  on live threads, and exposes confirmed global `memory/reset` only to the local
+  desktop Settings surface. Provider work runs in the contained one-shot
+  runtime with MCP disabled.
+- The goal port maps exact live executions to `thread/goal/get`, `.set`, and
+  `.clear`. A bare, attachment-free `/goal` is Zeros' explicit UI trigger;
+  native goal updates remain provider-owned state and stale initial reads
+  cannot overwrite a later mutation or notification.
+- The safety port keeps denied Guardian actions bounded and engine-only. The
+  renderer receives a sanitized audit row plus a short-lived opaque retry id;
+  `thread/approveGuardianDeniedAction` consumes that authority once and revokes
+  it only after confirmed success. Retry ids are not folded into durable chat
+  messages.
+- Hook, MCP-progress, model-verification/reroute/buffering, environment,
+  external-import, Guardian, and MCP-health notifications are projected through
+  existing Zeros transcript primitives. Exact-thread filters reject child
+  events where the native contract is thread-scoped, late/replayed lifecycle
+  edges cannot reopen completed work, and native paths, callback URLs, raw
+  action payloads, and diagnostic strings stay adapter-side.
+
+Claude's independent native auto-memory option is carried through its Agent SDK
+adapter. Cursor currently exposes no equivalent public SDK setting, goal, or
+Guardian approval channel, so Zeros does not advertise synthetic parity.
+
+## Qualified consolidated provider settings and quota paths
+
+Two additional app-server reads stay behind narrow Zeros domains:
+
+- Configuration provenance calls `config/read` with layer inclusion inside a
+  contained one-shot runtime. Only stable layer labels and loaded/suppressed
+  state cross the adapter; file paths, config values, provider diagnostics, and
+  disabled-reason text remain engine-side. The narrow read remains available
+  for a future actionable diagnostic, but Models settings does not request or
+  present it and there is no raw configuration editor.
+- Account quota calls `account/rateLimits/read`; live
+  `account/rateLimits/updated` notifications are sparse-merged before a compact
+  Models → Codex Usage limits block is updated. Quota messages are local-host
+  diagnostics, never relay conversation state. `account/updated` logout clears
+  the cached snapshot and emits null immediately so data from a prior account
+  cannot remain visible.
+
+`account/usage/read`, reset-credit consumption, login/logout controls, provider
+dashboards, projects/sections/queues, imports, voice, remote control,
+environments, skills/plugins/hooks/apps/custom tools, and native MCP
+administration remain unprojected. Existing `turn/plan/updated` is a deliberate
+semantic no-op until Zeros owns a persistent cross-harness checklist product;
+it is not mislabeled as a tool call.
 
 ## Host requests and authentication
 

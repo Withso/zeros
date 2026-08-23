@@ -498,11 +498,10 @@ export type ChatThread = {
    *  deleted. The on-disk transcript is never touched by archive —
    *  only DELETE_CHAT removes the metadata entry. */
   archived?: boolean;
-  /** Chat that spawned this one via agent-switch. When set and this chat
-   *  has no messages yet, the composer offers a "summary handoff" pill
-   *  at the top so the user can paste the prior conversation into the
-   *  new agent's first turn. Cleared the moment the user either accepts
-   *  or dismisses the handoff. */
+  /** Zeros conversation that this chat branched from. This is product-owned
+   * lineage only: it never identifies or resumes a provider session. The
+   * current fork flow separately stages a bounded transcript attachment in
+   * the new composer. */
   sourceChatId?: string;
 };
 

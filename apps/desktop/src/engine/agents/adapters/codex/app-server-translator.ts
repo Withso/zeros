@@ -59,6 +59,7 @@ type ToolKind =
   | "mcp"
   | "question"
   | "compaction"
+  | "model_switch"
   | "other";
 
 // The renderer clips raw tool output at 20k characters. Keep one extra
@@ -86,6 +87,9 @@ export class CodexAppServerTranslator {
    *  can correlate item/completed back to the originating tool_call. */
   private readonly toolCallIds = new Map<string, string>();
   private readonly emittedToolCallIds = new Set<string>();
+  private readonly completedItemIds = new Set<string>();
+  private readonly safetyReviewToolCalls = new Map<string, string>();
+  private readonly completedSafetyReviewIds = new Set<string>();
 
   /** Monotonic suffix for error_notice ids — each retry attempt / advisory
    *  in a turn gets its OWN timeline row (never appended into one blob). */
@@ -239,12 +243,56 @@ export class CodexAppServerTranslator {
     this.manualCompactionExpected = false;
   }
 
+  /** Settle a successful opaque denied-action retry without retaining the
+   * renderer-facing retry token in durable transcript output. */
+  markSafetyReviewRetried(retryId: string): void {
+    const toolCallId = this.safetyReviewToolCalls.get(retryId);
+    if (!toolCallId) return;
+    this.safetyReviewToolCalls.delete(retryId);
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "safety_review_retry_available",
+        toolCallId,
+        retryId: null,
+      },
+    });
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId,
+        status: "completed",
+        rawOutput: {
+          zerosSafetyReview: { status: "approved", retried: true },
+        },
+      },
+    });
+  }
+
+  /** Revoke a bounded engine action that can no longer be resolved. The
+   * renderer removes only its ephemeral button; the durable audit row stays. */
+  revokeSafetyReviewRetry(retryId: string): void {
+    const toolCallId = this.safetyReviewToolCalls.get(retryId);
+    if (!toolCallId) return;
+    this.safetyReviewToolCalls.delete(retryId);
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "safety_review_retry_available",
+        toolCallId,
+        retryId: null,
+      },
+    });
+  }
+
   /** Reset terminal/streaming state at the start of a new turn. The
    *  thread id is not reset — it persists across turns. */
   startTurn(): void {
     this.turnPrefix = randomUUID();
     this.toolCallIds.clear();
     this.emittedToolCallIds.clear();
+    this.completedItemIds.clear();
     this.emittedMessageText.clear();
     this.emittedToolOutput.clear();
     this.hasSeenTurnTerminal = false;
@@ -313,6 +361,51 @@ export class CodexAppServerTranslator {
         break;
       case "item/fileChange/patchUpdated":
         this.onFilePatchUpdated(params);
+        break;
+      case "item/mcpToolCall/progress":
+        this.onMcpToolCallProgress(params);
+        break;
+      case "hook/started":
+        this.onHookLifecycle(params, false);
+        break;
+      case "hook/completed":
+        this.onHookLifecycle(params, true);
+        break;
+      case "model/rerouted":
+        this.onModelRerouted(params);
+        break;
+      case "model/verification":
+        this.onModelVerification(params);
+        break;
+      case "model/safetyBuffering/updated":
+        this.onSafetyBuffering(params);
+        break;
+      case "thread/environment/connected":
+        this.onEnvironmentConnection(params, true);
+        break;
+      case "thread/environment/disconnected":
+        this.onEnvironmentConnection(params, false);
+        break;
+      case "externalAgentConfig/import/progress":
+        this.onExternalConfigImport(params, false);
+        break;
+      case "externalAgentConfig/import/completed":
+        this.onExternalConfigImport(params, true);
+        break;
+      case "mcpServer/oauthLogin/completed":
+        this.onMcpOauthCompleted(params);
+        break;
+      case "mcpServer/startupStatus/updated":
+        this.onMcpStartupStatus(params);
+        break;
+      case "item/autoApprovalReview/started":
+        this.onSafetyReview(params, false);
+        break;
+      case "item/autoApprovalReview/completed":
+        this.onSafetyReview(params, true);
+        break;
+      case "autoApprovalReview/strictReviewRequired":
+        this.onStrictReviewRequired(params);
         break;
       case "error":
         this.onError(params);
@@ -466,6 +559,14 @@ export class CodexAppServerTranslator {
         }
         return;
 
+      case "enteredReviewMode":
+      case "exitedReviewMode":
+        // Native bookkeeping only. Inline review also emits its findings as a
+        // final agentMessage; projecting `exitedReviewMode.review` would print
+        // the same review twice. The user's `/review` bubble already names the
+        // action, so neither marker needs separate provider chrome.
+        return;
+
       case "contextCompaction": {
         // The two-state compaction row. rawInput.trigger
         // records WHO initiated it: "manual" (the user's Compact now /
@@ -559,6 +660,7 @@ export class CodexAppServerTranslator {
     const p = params as { item?: ThreadItemUnion };
     const item = p?.item;
     if (!item || typeof item.type !== "string") return;
+    this.completedItemIds.add(item.id);
     this.emittedToolOutput.delete(item.id);
 
     switch (item.type) {
@@ -574,6 +676,10 @@ export class CodexAppServerTranslator {
           );
         }
         this.emittedMessageText.delete(item.id);
+        return;
+
+      case "enteredReviewMode":
+      case "exitedReviewMode":
         return;
 
       case "commandExecution":
@@ -724,6 +830,318 @@ export class CodexAppServerTranslator {
         toolCallId,
         status: "in_progress",
         rawOutput: params ?? null,
+      },
+    });
+  }
+
+  private onMcpToolCallProgress(params: unknown): void {
+    const p = params as { itemId?: string; message?: string };
+    if (typeof p.itemId !== "string" || typeof p.message !== "string") return;
+    if (this.completedItemIds.has(p.itemId)) return;
+    const progress = { progress: truncate(p.message, 2_000) };
+    const existingToolCallId = this.toolCallIds.get(p.itemId);
+    if (existingToolCallId && this.emittedToolCallIds.has(existingToolCallId)) {
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: existingToolCallId,
+          status: "in_progress",
+          rawOutput: progress,
+        },
+      });
+      return;
+    }
+
+    const toolCallId = existingToolCallId ?? this.ensureToolCallId(p.itemId);
+    this.emitToolCallUpsert(toolCallId, {
+      nativeToolCallId: p.itemId,
+      title: "MCP tool",
+      kind: "mcp",
+      status: "in_progress",
+      rawOutput: progress,
+    });
+  }
+
+  private onHookLifecycle(params: unknown, completed: boolean): void {
+    const p = params as {
+      run?: {
+        id?: string;
+        eventName?: string;
+        status?: string;
+        statusMessage?: string | null;
+      };
+    };
+    if (typeof p.run?.id !== "string") return;
+    const toolCallId = this.ensureToolCallId(`hook:${p.run.id}`);
+    const eventName =
+      typeof p.run.eventName === "string"
+        ? truncate(p.run.eventName, 120)
+        : "workflow";
+    const failed = p.run.status === "failed" || p.run.status === "blocked";
+    this.emitToolCallUpsert(toolCallId, {
+      title: `Hook · ${eventName}`,
+      kind: "other",
+      status: completed ? (failed ? "failed" : "completed") : "in_progress",
+      rawInput: { eventName },
+      ...(completed
+        ? {
+            rawOutput: {
+              status:
+                typeof p.run.status === "string"
+                  ? truncate(p.run.status, 80)
+                  : "completed",
+              ...(typeof p.run.statusMessage === "string"
+                ? { message: truncate(p.run.statusMessage, 2_000) }
+                : {}),
+            },
+          }
+        : {}),
+    });
+  }
+
+  private onModelRerouted(params: unknown): void {
+    const p = params as {
+      fromModel?: string;
+      toModel?: string;
+      reason?: string;
+    };
+    if (typeof p.toModel !== "string") return;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: `model-switch-${randomUUID()}`,
+        title: "Model switched",
+        kind: "model_switch",
+        status: "completed",
+        rawInput: {
+          ...(typeof p.fromModel === "string"
+            ? { fromModel: truncate(p.fromModel, 160) }
+            : {}),
+          toModel: truncate(p.toModel, 160),
+          ...(typeof p.reason === "string"
+            ? { reason: truncate(p.reason, 240) }
+            : {}),
+        },
+      },
+    });
+  }
+
+  private onModelVerification(params: unknown): void {
+    const raw = (params as { verifications?: unknown }).verifications;
+    if (!Array.isArray(raw)) return;
+    const verifications = raw
+      .filter((value): value is string => typeof value === "string")
+      .slice(0, 20)
+      .map((value) => truncate(value, 160));
+    if (verifications.length === 0) return;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: `model-verification-${randomUUID()}`,
+        title: "Model verification",
+        kind: "other",
+        status: "completed",
+        rawOutput: { verifications },
+      },
+    });
+  }
+
+  private onSafetyBuffering(params: unknown): void {
+    const p = params as {
+      model?: string;
+      showBufferingUi?: boolean;
+      reasons?: unknown;
+    };
+    if (p.showBufferingUi !== true) return;
+    const reasons = Array.isArray(p.reasons)
+      ? p.reasons
+          .filter((value): value is string => typeof value === "string")
+          .slice(0, 8)
+          .map((value) => truncate(value, 240))
+      : [];
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "error_notice",
+        noticeId: `${this.turnPrefix}-safety-buffer-${this.noticeSeq++}`,
+        severity: "warning",
+        recoverable: true,
+        code: "model_safety_buffering",
+        message: `Codex is verifying this response${
+          typeof p.model === "string" ? ` with ${truncate(p.model, 160)}` : ""
+        }${reasons.length > 0 ? `: ${reasons.join(", ")}` : "."}`,
+      },
+    });
+  }
+
+  private onEnvironmentConnection(params: unknown, connected: boolean): void {
+    const environmentId = (params as { environmentId?: unknown }).environmentId;
+    if (typeof environmentId !== "string") return;
+    const toolCallId = this.ensureToolCallId(`environment:${environmentId}`);
+    this.emitToolCallUpsert(toolCallId, {
+      title: connected ? "Environment connected" : "Environment disconnected",
+      kind: "other",
+      status: "completed",
+      rawOutput: {
+        environment: truncate(environmentId, 160),
+        state: connected ? "connected" : "disconnected",
+      },
+    });
+  }
+
+  private onExternalConfigImport(params: unknown, completed: boolean): void {
+    const p = params as { importId?: string; itemTypeResults?: unknown };
+    if (typeof p.importId !== "string") return;
+    const results = Array.isArray(p.itemTypeResults)
+      ? p.itemTypeResults.slice(0, 32).map((value) => {
+          const result =
+            value && typeof value === "object"
+              ? (value as Record<string, unknown>)
+              : {};
+          return {
+            itemType:
+              typeof result.itemType === "string"
+                ? truncate(result.itemType, 120)
+                : "item",
+            successes: Array.isArray(result.successes)
+              ? result.successes.length
+              : 0,
+            failures: Array.isArray(result.failures)
+              ? result.failures.length
+              : 0,
+          };
+        })
+      : [];
+    const toolCallId = this.ensureToolCallId(`external-import:${p.importId}`);
+    this.emitToolCallUpsert(toolCallId, {
+      title: "Import agent configuration",
+      kind: "other",
+      status: completed ? "completed" : "in_progress",
+      rawInput: { importId: truncate(p.importId, 160) },
+      rawOutput: { results },
+    });
+  }
+
+  private onMcpOauthCompleted(params: unknown): void {
+    const p = params as { name?: string; success?: boolean };
+    if (typeof p.name !== "string" || p.success === true) return;
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "error_notice",
+        noticeId: `${this.turnPrefix}-mcp-oauth-${this.noticeSeq++}`,
+        severity: "error",
+        recoverable: true,
+        code: "mcp_oauth_failed",
+        // Provider error strings may contain callback URLs, local paths, or
+        // credential-shaped values. The app-server log retains diagnostics;
+        // the product row carries only bounded status.
+        message: `${truncate(p.name, 120)} MCP sign-in failed.`,
+      },
+    });
+  }
+
+  private onMcpStartupStatus(params: unknown): void {
+    const p = params as { name?: string; status?: string };
+    if (
+      typeof p.name !== "string" ||
+      typeof p.status !== "string" ||
+      p.status === "ready" ||
+      p.status === "starting"
+    ) {
+      return;
+    }
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "error_notice",
+        noticeId: `${this.turnPrefix}-mcp-status-${this.noticeSeq++}`,
+        severity: "warning",
+        recoverable: true,
+        code: "mcp_startup_status",
+        message: `${truncate(p.name, 120)} MCP is ${truncate(p.status, 80)}.`,
+      },
+    });
+  }
+
+  private onSafetyReview(params: unknown, completed: boolean): void {
+    const p = params as {
+      reviewId?: string;
+      review?: {
+        status?: string;
+        rationale?: string | null;
+        riskLevel?: string | null;
+      };
+      action?: { type?: string };
+      zerosRetryId?: string;
+    };
+    if (typeof p.reviewId !== "string") return;
+    if (!completed && this.completedSafetyReviewIds.has(p.reviewId)) return;
+    if (completed) {
+      if (this.completedSafetyReviewIds.has(p.reviewId)) return;
+      this.completedSafetyReviewIds.add(p.reviewId);
+      while (this.completedSafetyReviewIds.size > 100) {
+        const oldest = this.completedSafetyReviewIds.values().next().value;
+        if (typeof oldest !== "string") break;
+        this.completedSafetyReviewIds.delete(oldest);
+      }
+    }
+    const toolCallId = this.ensureToolCallId(`safety:${p.reviewId}`);
+    const status =
+      typeof p.review?.status === "string" ? p.review.status : "inProgress";
+    const retryId =
+      typeof p.zerosRetryId === "string" ? p.zerosRetryId : undefined;
+    if (retryId) this.safetyReviewToolCalls.set(retryId, toolCallId);
+    this.emitToolCallUpsert(toolCallId, {
+      title: completed ? "Safety review" : "Reviewing action safety",
+      kind: "other",
+      status: completed ? "completed" : "in_progress",
+      rawInput: {
+        actionType:
+          typeof p.action?.type === "string" ? p.action.type : "action",
+      },
+      rawOutput: {
+        zerosSafetyReview: {
+          status,
+          actionType:
+            typeof p.action?.type === "string" ? p.action.type : "action",
+          ...(typeof p.review?.riskLevel === "string"
+            ? { riskLevel: truncate(p.review.riskLevel, 80) }
+            : {}),
+          ...(typeof p.review?.rationale === "string"
+            ? { rationale: truncate(p.review.rationale, 2_000) }
+            : {}),
+        },
+      },
+    });
+    if (retryId) {
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "safety_review_retry_available",
+          toolCallId,
+          retryId,
+        },
+      });
+    }
+  }
+
+  private onStrictReviewRequired(params: unknown): void {
+    const p = params as { turnId?: string };
+    this.emit({
+      sessionId: this.sessionId,
+      update: {
+        sessionUpdate: "error_notice",
+        noticeId: `${this.turnPrefix}-strict-review-${this.noticeSeq++}`,
+        severity: "warning",
+        recoverable: true,
+        code: "strict_safety_review",
+        message: p.turnId
+          ? "Codex requires an explicit safety review before continuing."
+          : "A safety review is required before continuing.",
       },
     });
   }
@@ -919,6 +1337,8 @@ type ThreadItemUnion =
   | { type: "webSearch"; id: string; query?: string }
   | { type: "imageView"; id: string; path?: string }
   | { type: "imageGeneration"; id: string; status?: string; result?: string }
+  | { type: "enteredReviewMode"; id: string; review: string }
+  | { type: "exitedReviewMode"; id: string; review: string }
   | { type: "contextCompaction"; id: string };
 
 /** Generated `collabAgentToolCall` ThreadItem — one row per collab-tool

@@ -11,6 +11,7 @@ import type {
   ExecutionBoundaryPortsSnapshot,
   ExecutionBoundaryStatus,
 } from "@zeros/protocol/containment";
+import type { AgentGoal } from "@zeros/protocol/agent-events";
 
 /** Resolve the exact live route that may be torn down and resumed to pick up a
  * provider boot capability. This is intentionally narrower than ordinary
@@ -467,4 +468,57 @@ export function takePrebindDirty(
   if (dirty.get(chatId) !== sessionId) return false;
   dirty.delete(chatId);
   return true;
+}
+
+export interface PrebindGoalSnapshot {
+  chatId: string;
+  sessionId: string;
+  goal: AgentGoal | null;
+}
+
+function prebindGoalKey(chatId: string, sessionId: string): string {
+  return JSON.stringify([chatId, sessionId]);
+}
+
+/** Retain the last authoritative goal snapshot emitted before an exact
+ * renderer execution slot exists. Goal notifications are snapshots rather
+ * than transcript deltas, so replaying the final exact-key value is safe. */
+export function markPrebindGoalSnapshot(
+  snapshots: Map<string, PrebindGoalSnapshot>,
+  chatId: string,
+  sessionId: string,
+  goal: AgentGoal | null,
+  limit = 64,
+): void {
+  const key = prebindGoalKey(chatId, sessionId);
+  snapshots.delete(key);
+  snapshots.set(key, { chatId, sessionId, goal });
+  while (snapshots.size > limit) {
+    const oldest = snapshots.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    snapshots.delete(oldest);
+  }
+}
+
+/** Consume a pre-bind goal only for the execution being adopted. `undefined`
+ * means no snapshot; `null` is an authoritative goal clear. */
+export function takePrebindGoalSnapshot(
+  snapshots: Map<string, PrebindGoalSnapshot>,
+  chatId: string,
+  sessionId: string,
+): AgentGoal | null | undefined {
+  const key = prebindGoalKey(chatId, sessionId);
+  const snapshot = snapshots.get(key);
+  if (!snapshot) return undefined;
+  snapshots.delete(key);
+  return snapshot.goal;
+}
+
+export function clearPrebindGoalSnapshotsForChat(
+  snapshots: Map<string, PrebindGoalSnapshot>,
+  chatId: string,
+): void {
+  for (const [key, snapshot] of snapshots) {
+    if (snapshot.chatId === chatId) snapshots.delete(key);
+  }
 }

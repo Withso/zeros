@@ -359,6 +359,9 @@ const claudeModelsSchema = z
       .describe(
         "How long an idle Claude session stays warm (30 minutes to 5 hours).",
       ),
+    auto_memory_enabled: z
+      .boolean()
+      .describe("Allow Claude Code to maintain its native repository memory."),
   })
   .partial();
 const codexModelsSchema = z

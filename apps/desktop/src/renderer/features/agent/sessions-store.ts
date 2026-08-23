@@ -63,6 +63,7 @@ import { useWorkspaceStore } from "../../state/workspace-store";
 import type { ChatEffort } from "../../state/store";
 import { sameProviderBinding } from "@zeros/protocol/identities";
 import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
+import type { AgentGoal } from "@zeros/protocol/agent-events";
 
 const MAX_STDERR_LINES = 200;
 const MAX_BACKGROUND_TASKS_PER_CHAT = 100;
@@ -264,6 +265,8 @@ export const BLANK: AgentSessionState = {
   availableSubagents: [],
   backgroundTasks: [],
   workflows: [],
+  goal: null,
+  safetyReviewRetries: {},
   waitingForBackgroundTasks: false,
   backgroundTasksWaitingSince: null,
 };
@@ -334,6 +337,13 @@ export interface SessionsStoreState {
   // ── Pure mutators ───────────────────────────────────────
   setSession: (chatId: string, slot: AgentSessionState) => void;
   patchSession: (chatId: string, patch: Partial<AgentSessionState>) => void;
+  /** Apply a goal snapshot only while its exact execution still owns the chat.
+   * Used by both bridge pushes and awaited goal mutation replies. */
+  applyGoalSnapshot: (
+    chatId: string,
+    executionId: string,
+    goal: AgentGoal | null,
+  ) => boolean;
   /** Release only the heavyweight transcript payload for a chat that left the
    *  bounded retained-view deck. The live runtime shell and reverse routing
    *  index stay intact so turns, gates and scheduled work keep functioning. */
@@ -568,6 +578,14 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       ) {
         normalized = { ...normalized, executionId, sessionId: executionId };
       }
+      const previous = state.sessions[chatId];
+      if (
+        previous &&
+        (previous.executionId ?? previous.sessionId) !== executionId &&
+        Object.keys(normalized.safetyReviewRetries).length > 0
+      ) {
+        normalized = { ...normalized, safetyReviewRetries: {} };
+      }
       const next = { ...state.sessions, [chatId]: normalized };
       return {
         sessions: next,
@@ -606,6 +624,12 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       ) {
         updated = { ...updated, executionId, sessionId: executionId };
       }
+      if (
+        (existing.executionId ?? existing.sessionId) !== executionId &&
+        Object.keys(updated.safetyReviewRetries).length > 0
+      ) {
+        updated = { ...updated, safetyReviewRetries: {} };
+      }
       const next = { ...state.sessions, [chatId]: updated };
       // Only rebuild the reverse index if executionId changed — saves work
       // on the common path (token chunks don't touch routing identity).
@@ -617,6 +641,29 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           : state.executionToChatId,
       };
     });
+  },
+
+  applyGoalSnapshot: (chatId, executionId, goal) => {
+    let applied = false;
+    set((state) => {
+      const slot = state.sessions[chatId];
+      if (
+        !slot ||
+        (slot.executionId ?? slot.sessionId) !== executionId
+      ) {
+        return state;
+      }
+      applied = true;
+      if (slot.goal === goal) return state;
+      return {
+        ...state,
+        sessions: {
+          ...state.sessions,
+          [chatId]: { ...slot, goal },
+        },
+      };
+    });
+    return applied;
   },
 
   evictTranscript: (chatId) => {
@@ -788,6 +835,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       effort?: string;
       providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
       providerMetadata?: import("@zeros/protocol/identities").ProviderMetadata;
+      goal?: import("@zeros/protocol/agent-events").AgentGoal | null;
+      toolCallId?: string;
+      retryId?: string | null;
     };
 
     if (
@@ -810,6 +860,48 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         ...(upd.providerMetadata
           ? { providerMetadata: upd.providerMetadata }
           : {}),
+      });
+      return;
+    }
+
+    if (upd.sessionUpdate === "goal_update") {
+      get().applyGoalSnapshot(
+        chatId,
+        notification.executionId ?? notification.sessionId,
+        upd.goal ?? null,
+      );
+      return;
+    }
+
+    if (upd.sessionUpdate === "safety_review_retry_available") {
+      const sourceExecution =
+        notification.executionId ?? notification.sessionId;
+      set((state) => {
+        const slot = state.sessions[chatId];
+        if (
+          !slot ||
+          (slot.executionId ?? slot.sessionId) !== sourceExecution ||
+          typeof upd.toolCallId !== "string" ||
+          (typeof upd.retryId !== "string" && upd.retryId !== null)
+        ) {
+          return state;
+        }
+        const current = slot.safetyReviewRetries[upd.toolCallId];
+        if (
+          (upd.retryId === null && current === undefined) ||
+          current === upd.retryId
+        ) {
+          return state;
+        }
+        const safetyReviewRetries = { ...slot.safetyReviewRetries };
+        if (upd.retryId === null) delete safetyReviewRetries[upd.toolCallId];
+        else safetyReviewRetries[upd.toolCallId] = upd.retryId;
+        return {
+          sessions: {
+            ...state.sessions,
+            [chatId]: { ...slot, safetyReviewRetries },
+          },
+        };
       });
       return;
     }

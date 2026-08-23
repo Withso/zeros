@@ -138,6 +138,14 @@ const commandTable: Record<string, CommandHandler> = {
   "iframe:clear-cookies": notImpl("iframe:clear-cookies", 0),
   "iframe-picker:capture-region": notImpl("iframe-picker:capture-region", 0),
   "browser:reinject-picker": notImpl("browser:reinject-picker", 0),
+  "browser:authorize-preview-origin": notImpl(
+    "browser:authorize-preview-origin",
+    0,
+  ),
+  "browser:revoke-preview-origin": notImpl(
+    "browser:revoke-preview-origin",
+    0,
+  ),
   "browser:control-iframe": notImpl("browser:control-iframe", 0),
   browser_confirmation_respond: notImpl("browser_confirmation_respond", 0),
   browser_confirmation_requests: notImpl("browser_confirmation_requests", 0),

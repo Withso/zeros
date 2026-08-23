@@ -24,6 +24,7 @@ import React, {
   useRef,
 } from "react";
 import type {
+  AgentGoal,
   ContentBlock,
   InitializeResponse,
   SessionMode,
@@ -36,7 +37,13 @@ import type {
   AgentAgentsListMessage,
   AgentAgentInitializedMessage,
   AgentErrorMessage,
+  AgentGoalChangedMessage,
+  AgentConfigurationProvenanceMessage,
   AgentModeChangedMessage,
+  AgentMemoryResetCompleteMessage,
+  AgentMemorySettingsMessage,
+  AgentProviderQuotaMessage,
+  AgentProviderQuotaUpdatedMessage,
   AgentPromptBubble,
   AgentPromptCompleteMessage,
   AgentPromptFailedMessage,
@@ -44,6 +51,7 @@ import type {
   AgentSessionCreatedMessage,
   AgentSessionLoadedMessage,
   AgentSessionsListMessage,
+  AgentSafetyReviewRetriedMessage,
   AgentSteeredMessage,
 } from "../../platform/bridge/messages";
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
@@ -84,6 +92,7 @@ import {
 } from "./model-catalog";
 import { agentAppliesConfigLive } from "./live-config-support";
 import { useWorkspaceStore } from "../../state/workspace-store";
+import { providerQuotaCache } from "../../state/read-caches";
 import { requestUserSettingsSection } from "../settings/settings-navigation";
 import { shellOpenUrl } from "../../platform/app";
 import { externalUrlsForQuestionResponse } from "./question-external-actions";
@@ -113,8 +122,11 @@ import {
   bumpCancelGeneration,
   cancelGeneration,
   cancelledSince,
+  clearPrebindGoalSnapshotsForChat,
   loadedSessionStatus,
+  markPrebindGoalSnapshot,
   markPrebindDirty,
+  type PrebindGoalSnapshot,
   promptFailureShouldRecover,
   promptFailureShouldResumeProvider,
   providerCapabilityRefreshCanRun,
@@ -128,6 +140,7 @@ import {
   sharedAdmissionFlightAction,
   shouldQueuePrompt,
   statusForFailure,
+  takePrebindGoalSnapshot,
   takePrebindDirty,
 } from "./session-reload-lifecycle";
 import {
@@ -430,6 +443,9 @@ export function AgentSessionsProvider({
   // that exact chat/session dirty (bounded) and re-window once the turn settles;
   // replaying raw chunks would duplicate text already present in the DB window.
   const prebindDirtySessionsRef = useRef(new Map<string, string>());
+  const prebindGoalSnapshotsRef = useRef(
+    new Map<string, PrebindGoalSnapshot>(),
+  );
 
   // Per-chat in-flight ensureSession promises. Concurrent callers wait on
   // the existing promise instead of starting a duplicate. Force=true
@@ -810,6 +826,7 @@ export function AgentSessionsProvider({
       const state = useSessionsStore.getState();
       const sessionUpdate = msg.notification.update as {
         sessionUpdate?: string;
+        goal?: AgentGoal | null;
         tasks?: Array<{
           taskId: string;
           taskType?: string;
@@ -863,6 +880,21 @@ export function AgentSessionsProvider({
         state.executionToChatId[
           msg.notification.executionId ?? msg.notification.sessionId
         ];
+      const sourceExecution =
+        msg.notification.executionId ?? msg.notification.sessionId;
+      if (
+        chatId &&
+        sessionUpdate.sessionUpdate === "goal_update" &&
+        (state.sessions[chatId]?.executionId ??
+          state.sessions[chatId]?.sessionId) !== sourceExecution
+      ) {
+        markPrebindGoalSnapshot(
+          prebindGoalSnapshotsRef.current,
+          chatId,
+          sourceExecution,
+          sessionUpdate.goal ?? null,
+        );
+      }
       // Only a genuinely unbound/cold slot needs a later disk reconcile. A
       // different non-null session id is an intentionally superseded owner;
       // remembering its late pushes would retain a stale dirty key forever.
@@ -1019,6 +1051,14 @@ export function AgentSessionsProvider({
       schedule();
     });
 
+    const unsubProviderQuota = bridge.on(
+      "AGENT_PROVIDER_QUOTA_UPDATED",
+      (raw) => {
+        const message = raw as AgentProviderQuotaUpdatedMessage;
+        providerQuotaCache.setData(message.agentId, message.quota);
+      },
+    );
+
     const unsubStderr = bridge.on("AGENT_AGENT_STDERR", (raw) => {
       const msg = raw as { agentId: string; line: string };
       stderrBuffer.push({ agentId: msg.agentId, line: msg.line });
@@ -1070,6 +1110,7 @@ export function AgentSessionsProvider({
       unsubPermissionSettled();
       unsubQuestion();
       unsubQuestionSettled();
+      unsubProviderQuota();
       unsubStderr();
       unsubExit();
       // Answer-ack watchdogs are deliberately NOT cleared here: a bridge swap
@@ -1592,6 +1633,11 @@ export function AgentSessionsProvider({
               (resp.session.executionId
                 ? null
                 : legacyProviderBinding(agentId, resp.session.sessionId));
+            const prebindGoal = takePrebindGoalSnapshot(
+              prebindGoalSnapshotsRef.current,
+              chatId,
+              executionId,
+            );
             getStore().patchSession(chatId, {
               // Keep the session non-sendable until its persisted permission
               // mode has been applied. Publishing ready first allowed an
@@ -1617,7 +1663,12 @@ export function AgentSessionsProvider({
               // ACTUALLY created with, so sendPrompt can detect a stale
               // session (model/effort changed while warming) and respawn.
               appliedChatEnvKey: chatEnvDriftKey(options?.env),
+              ...(prebindGoal !== undefined ? { goal: prebindGoal } : {}),
             });
+            clearPrebindGoalSnapshotsForChat(
+              prebindGoalSnapshotsRef.current,
+              chatId,
+            );
             prebindDirtySessionsRef.current.delete(chatId);
             getStore().setWarmAgent(agentId, true);
             // Honour a permission posture picked in the empty composer
@@ -2358,10 +2409,22 @@ export function AgentSessionsProvider({
               providerMetadata: recoveryProviderMetadata,
             });
             if (!recovered) return null;
+            const prebindGoal = takePrebindGoalSnapshot(
+              prebindGoalSnapshotsRef.current,
+              chatId,
+              recovered.executionId,
+            );
             // Publish the new route before any retry (or a Stop observed after
             // the load). The old execution disappeared with the engine and can
             // no longer receive prompts, cancellation, or lifecycle events.
-            getStore().patchSession(chatId, recovered);
+            getStore().patchSession(chatId, {
+              ...recovered,
+              ...(prebindGoal !== undefined ? { goal: prebindGoal } : {}),
+            });
+            clearPrebindGoalSnapshotsForChat(
+              prebindGoalSnapshotsRef.current,
+              chatId,
+            );
             // The resume above can take up to a minute with the chat still
             // showing Stop. Re-check before re-sending: rebuildAndRetry treats
             // null as "couldn't resume" and its own post-await check turns that
@@ -2827,9 +2890,7 @@ export function AgentSessionsProvider({
           void (async () => {
             const refreshAgentId = current.agentId;
             if (!refreshAgentId || !bridge) return;
-            const stale = getStore().sessions[chatId]?.initialize?._meta as
-              | { models?: unknown; modelsDynamic?: unknown }
-              | undefined;
+            const stale = getStore().sessions[chatId]?.initialize?._meta;
             const stillFloored =
               !!stale?.modelsDynamic &&
               !(Array.isArray(stale.models) && stale.models.length > 0);
@@ -2839,9 +2900,7 @@ export function AgentSessionsProvider({
                 AgentAgentInitializedMessage | AgentErrorMessage
               >({ type: "AGENT_INIT_AGENT", agentId: refreshAgentId }, 30_000);
               if (initResp.type === "AGENT_ERROR") return;
-              const freshMeta = initResp.initialize?._meta as
-                | { models?: unknown }
-                | undefined;
+              const freshMeta = initResp.initialize?._meta;
               if (
                 !Array.isArray(freshMeta?.models) ||
                 freshMeta.models.length === 0
@@ -2850,9 +2909,7 @@ export function AgentSessionsProvider({
               }
               // Re-check the chat is still floored before patching (don't clobber
               // a concurrent update / a live model the user just picked).
-              const cur = getStore().sessions[chatId]?.initialize?._meta as
-                | { models?: unknown }
-                | undefined;
+              const cur = getStore().sessions[chatId]?.initialize?._meta;
               if (!(Array.isArray(cur?.models) && cur.models.length > 0)) {
                 getStore().patchSession(chatId, {
                   initialize: initResp.initialize,
@@ -3524,6 +3581,87 @@ export function AgentSessionsProvider({
     },
     [bridge, getStore],
   );
+
+  const setGoal = useCallback<SessionsActions["setGoal"]>(
+    async (chatId, update) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const current = getStore().sessions[chatId];
+      if (!current?.agentId || !current.sessionId) {
+        throw new Error("The agent session is not ready.");
+      }
+      const response = await bridge.request<
+        AgentGoalChangedMessage | AgentErrorMessage
+      >(
+        {
+          type: "AGENT_GOAL_SET",
+          agentId: current.agentId,
+          executionId: current.executionId ?? current.sessionId,
+          sessionId: current.sessionId,
+          update,
+        },
+        30_000,
+      );
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      getStore().applyGoalSnapshot(
+        chatId,
+        response.executionId ?? response.sessionId,
+        response.goal,
+      );
+      if (!response.goal) throw new Error("The agent did not return a goal.");
+      return response.goal;
+    },
+    [bridge, getStore],
+  );
+
+  const clearGoal = useCallback<SessionsActions["clearGoal"]>(
+    async (chatId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const current = getStore().sessions[chatId];
+      if (!current?.agentId || !current.sessionId) return;
+      const response = await bridge.request<
+        AgentGoalChangedMessage | AgentErrorMessage
+      >(
+        {
+          type: "AGENT_GOAL_CLEAR",
+          agentId: current.agentId,
+          executionId: current.executionId ?? current.sessionId,
+          sessionId: current.sessionId,
+        },
+        30_000,
+      );
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      getStore().applyGoalSnapshot(
+        chatId,
+        response.executionId ?? response.sessionId,
+        null,
+      );
+    },
+    [bridge, getStore],
+  );
+
+  const retrySafetyReview = useCallback<SessionsActions["retrySafetyReview"]>(
+    async (chatId, retryId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const current = getStore().sessions[chatId];
+      if (!current?.agentId || !current.sessionId) {
+        throw new Error("The agent session is not ready.");
+      }
+      const response = await bridge.request<
+        AgentSafetyReviewRetriedMessage | AgentErrorMessage
+      >(
+        {
+          type: "AGENT_RETRY_SAFETY_REVIEW",
+          agentId: current.agentId,
+          executionId: current.executionId ?? current.sessionId,
+          sessionId: current.sessionId,
+          retryId,
+        },
+        30_000,
+      );
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+    },
+    [bridge, getStore],
+  );
   // The bridge-notification flush is declared above these callbacks, so it
   // reaches them through refs (provider-reported effort adoption → live push).
   useEffect(() => {
@@ -3770,6 +3908,10 @@ export function AgentSessionsProvider({
   const reset = useCallback<SessionsActions["reset"]>(
     (chatId) => {
       prebindDirtySessionsRef.current.delete(chatId);
+      clearPrebindGoalSnapshotsForChat(
+        prebindGoalSnapshotsRef.current,
+        chatId,
+      );
       pendingHydratesRef.current.delete(chatId);
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
@@ -4067,6 +4209,78 @@ export function AgentSessionsProvider({
     [bridge],
   );
 
+  const readMemorySettings = useCallback<SessionsActions["readMemorySettings"]>(
+    async (agentId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const response = await bridge.request<
+        AgentMemorySettingsMessage | AgentErrorMessage
+      >({ type: "AGENT_MEMORY_SETTINGS_READ", agentId }, 30_000);
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      return response.settings;
+    },
+    [bridge],
+  );
+
+  const updateMemorySettings = useCallback<
+    SessionsActions["updateMemorySettings"]
+  >(
+    async (agentId, settings) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const response = await bridge.request<
+        AgentMemorySettingsMessage | AgentErrorMessage
+      >({ type: "AGENT_MEMORY_SETTINGS_UPDATE", agentId, settings }, 30_000);
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      return response.settings;
+    },
+    [bridge],
+  );
+
+  const resetMemory = useCallback<SessionsActions["resetMemory"]>(
+    async (agentId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const response = await bridge.request<
+        AgentMemoryResetCompleteMessage | AgentErrorMessage
+      >({ type: "AGENT_MEMORY_RESET", agentId }, 30_000);
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+    },
+    [bridge],
+  );
+
+  const readConfigurationProvenance = useCallback<
+    SessionsActions["readConfigurationProvenance"]
+  >(
+    async (agentId, cwd) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const response = await bridge.request<
+        AgentConfigurationProvenanceMessage | AgentErrorMessage
+      >(
+        {
+          type: "AGENT_CONFIGURATION_PROVENANCE_READ",
+          agentId,
+          cwd,
+        },
+        30_000,
+      );
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      return response.provenance;
+    },
+    [bridge],
+  );
+
+  const readProviderQuota = useCallback<
+    SessionsActions["readProviderQuota"]
+  >(
+    async (agentId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const response = await bridge.request<
+        AgentProviderQuotaMessage | AgentErrorMessage
+      >({ type: "AGENT_PROVIDER_QUOTA_READ", agentId }, 30_000);
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      return response.quota;
+    },
+    [bridge],
+  );
+
   const loadIntoChat = useCallback<SessionsActions["loadIntoChat"]>(
     async (chatId, agentId, providerBinding, options) => {
       if (!bridge) return true;
@@ -4274,6 +4488,11 @@ export function AgentSessionsProvider({
         const executionId = resp.executionId ?? resp.sessionId;
         const resolvedProviderBinding =
           resp.response.providerBinding ?? providerBinding;
+        const prebindGoal = takePrebindGoalSnapshot(
+          prebindGoalSnapshotsRef.current,
+          chatId,
+          executionId,
+        );
         getStore().patchSession(chatId, {
           // As on new-session bind, do not expose a sendable state until the
           // user's persisted native permission mode has reached the adapter.
@@ -4298,7 +4517,12 @@ export function AgentSessionsProvider({
           // Settings-drift guard: same stamp as ensureSession — the chat env
           // this resumed session was actually loaded with.
           appliedChatEnvKey: chatEnvDriftKey(options?.env),
+          ...(prebindGoal !== undefined ? { goal: prebindGoal } : {}),
         });
+        clearPrebindGoalSnapshotsForChat(
+          prebindGoalSnapshotsRef.current,
+          chatId,
+        );
         // Re-attach prompt telemetry correlation for a still-running turn so
         // permission/finish events after reload keep the original prompt_id.
         if (resp.promptActive === true && resp.promptId) {
@@ -4604,6 +4828,7 @@ export function AgentSessionsProvider({
   const disposeAll = useCallback<SessionsActions["disposeAll"]>(() => {
     getStore().clearAll();
     prebindDirtySessionsRef.current.clear();
+    prebindGoalSnapshotsRef.current.clear();
     pendingHydratesRef.current.clear();
     hydrateInFlightRef.current.clear();
     reconcileInFlightRef.current.clear();
@@ -4624,6 +4849,10 @@ export function AgentSessionsProvider({
       bumpCancelGeneration(cancelGenerationsRef.current, chatId);
       const slot = getStore().sessions[chatId];
       prebindDirtySessionsRef.current.delete(chatId);
+      clearPrebindGoalSnapshotsForChat(
+        prebindGoalSnapshotsRef.current,
+        chatId,
+      );
       pendingHydratesRef.current.delete(chatId);
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
@@ -4692,6 +4921,14 @@ export function AgentSessionsProvider({
       setModel,
       compactContext,
       updateConfig,
+      setGoal,
+      clearGoal,
+      retrySafetyReview,
+      readMemorySettings,
+      updateMemorySettings,
+      resetMemory,
+      readConfigurationProvenance,
+      readProviderQuota,
       removeQueued,
       editQueued,
       steerQueued,
@@ -4723,6 +4960,14 @@ export function AgentSessionsProvider({
       setModel,
       compactContext,
       updateConfig,
+      setGoal,
+      clearGoal,
+      retrySafetyReview,
+      readMemorySettings,
+      updateMemorySettings,
+      resetMemory,
+      readConfigurationProvenance,
+      readProviderQuota,
       removeQueued,
       editQueued,
       steerQueued,

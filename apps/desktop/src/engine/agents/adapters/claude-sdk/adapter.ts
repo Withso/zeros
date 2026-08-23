@@ -77,6 +77,7 @@ import {
   AgentFailureError,
   type AgentAdapter,
   type AgentBrowserUse,
+  type AgentCapabilityPorts,
   type AgentAdapterContext,
   type AgentFilesystemTerritory,
   type ContentBlock,
@@ -95,7 +96,9 @@ import {
   type StopReason,
   type TurnUsage,
 } from "../../types";
+import { advertiseAgentCapabilities } from "../../capabilities";
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
+import { configurationProvenanceFor } from "../../provider-diagnostics";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
 import {
   preserveAmbientConfigRoots,
@@ -141,6 +144,7 @@ import { defaultMacClaudeOAuthAuthority } from "../../containment/claude-oauth-a
 let loggedCliSource: ClaudeCliSourceKind | null = null;
 
 const CLAUDE_IDLE_TIMEOUT_ENV_VAR = "ZEROS_CLAUDE_IDLE_TIMEOUT_MINUTES";
+const CLAUDE_AUTO_MEMORY_ENV_VAR = "ZEROS_CLAUDE_AUTO_MEMORY";
 const DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES = 30;
 const ALLOWED_CLAUDE_IDLE_TIMEOUT_MINUTES = new Set([30, 60, 120, 300]);
 /** Claude Code first applies `Edit(path)` rules to its built-in Write tool at
@@ -1159,6 +1163,18 @@ export async function probeClaudeSandboxRuntime(
 
 export class ClaudeSdkAdapter implements AgentAdapter {
   readonly agentId = "claude";
+  readonly capabilityPorts = {
+    browser: { nativeSession: true },
+    configuration: {
+      readProvenance: async (opts) =>
+        configurationProvenanceFor("claude", {
+          protectedTerritory: Boolean(opts.territory),
+          suppressUnsafeSources: Boolean(
+            opts.territory && !opts.executionBoundary,
+          ),
+        }),
+    },
+  } satisfies AgentCapabilityPorts;
   readonly enforcesFilesystemTerritory = true;
   readonly filesystemTerritoryBackend = "provider-native" as const;
   readonly filesystemTerritoryRestrictions = [
@@ -1274,42 +1290,42 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   // ── initialize ────────────────────────────────────────
 
   async initialize(): Promise<InitializeResponse> {
-    if (this.cachedInitialize) return this.cachedInitialize;
-    this.cachedInitialize = {
-      protocolVersion: 1 as never,
-      agentInfo: { name: "Claude Code", version: "sdk" } as never,
-      agentCapabilities: {
-        loadSession: { enabled: true } as never,
-        promptCapabilities: {
-          image: true,
-          audio: false,
-          embeddedContext: true,
-        } as never,
-        mcpCapabilities: { http: true, sse: false } as never,
-        sessionCapabilities: { list: {} } as never,
-        // Mid-turn steering: steer() pushes a user message into the live
-        // streaming-input queue; the CLI's async command queue injects it
-        // into the running loop. Drives the queued-card "Send now" action.
-        steering: true,
-      } as never,
-      authMethods: [
-        {
-          id: "terminal",
-          name: "Sign in via Terminal",
-          description: "Open Terminal.app and run `claude /login`.",
+    if (!this.cachedInitialize) {
+      this.cachedInitialize = {
+        protocolVersion: 1,
+        agentInfo: { name: "Claude Code", version: "sdk" },
+        agentCapabilities: {
+          loadSession: true,
+          promptCapabilities: {
+            image: true,
+            audio: false,
+            embeddedContext: true,
+          },
+          // Mid-turn steering: steer() pushes a user message into the live
+          // streaming-input queue; the CLI's async command queue injects it
+          // into the running loop. Drives the queued-card "Send now" action.
+          steering: true,
         },
-      ] as never,
-      // Model carried via ANTHROPIC_MODEL. `modelsDynamic` (with no models yet)
-      // makes the gateway re-poll until discoverModels() fills `_meta.models`
-      // from the SDK's query.supportedModels() — which needs a live query, so it
-      // runs after the first prompt. The renderer's cold-start floor covers the
-      // picker until then.
-      _meta: {
-        modelEnvVar: "ANTHROPIC_MODEL",
-        modelsDynamic: true,
-      },
-    };
-    return this.cachedInitialize;
+        authMethods: [
+          {
+            type: "terminal",
+            id: "terminal",
+            name: "Sign in via Terminal",
+            description: "Open Terminal.app and run `claude /login`.",
+          },
+        ],
+        // Model carried via ANTHROPIC_MODEL. `modelsDynamic` (with no models
+        // yet) makes the gateway re-poll until discoverModels() fills
+        // `_meta.models` from the SDK's query.supportedModels() — which needs a
+        // live query, so it runs after the first prompt. The renderer's
+        // cold-start floor covers the picker until then.
+        _meta: {
+          modelEnvVar: "ANTHROPIC_MODEL",
+          modelsDynamic: true,
+        },
+      };
+    }
+    return advertiseAgentCapabilities(this, this.cachedInitialize);
   }
 
   /** Surface Claude's live model catalog onto the cached InitializeResponse's
@@ -1364,7 +1380,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           return;
         }
         const base = await this.initialize();
-        const meta = (base._meta ?? {}) as Record<string, unknown>;
+        const meta = base._meta ?? {};
         this.cachedInitialize = { ...base, _meta: { ...meta, models } };
       } catch {
         // Best-effort — the cold-start floor / catalog fallback still applies.
@@ -1402,13 +1418,13 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           ...(opts.executionBoundary
             ? { env: stripEngineAuthorityEnv({ ...(opts.env ?? {}) }) }
             : opts.env && Object.keys(opts.env).length > 0
-            ? {
-                env: preserveAmbientConfigRoots({
-                  ...(process.env as Record<string, string>),
-                  ...opts.env,
-                }),
-              }
-            : {}),
+              ? {
+                  env: preserveAmbientConfigRoots({
+                    ...(process.env as Record<string, string>),
+                    ...opts.env,
+                  }),
+                }
+              : {}),
           ...(opts.executionBoundary
             ? {
                 spawnClaudeCodeProcess: (spawnOptions) =>
@@ -1604,7 +1620,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
   }
 
   async listSessions(): Promise<ListSessionsResponse> {
-    return { sessions: [] } as never;
+    return { sessions: [] };
   }
 
   private makeState(
@@ -2822,6 +2838,7 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     delete carried.CLAUDE_FALLBACK_MODEL;
     delete carried.CLAUDE_MAX_BUDGET_USD;
     delete carried[CLAUDE_IDLE_TIMEOUT_ENV_VAR];
+    delete carried[CLAUDE_AUTO_MEMORY_ENV_VAR];
     state.env = { ...carried, ...opts.env };
     // The composer sends a complete native-config snapshot. Keep the live SDK
     // query and the creation-time state aligned even when this update arrives
@@ -3975,6 +3992,15 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       // `false` is what actually clears them on the live query.
       fastMode: fast,
       ultracode,
+      // Claude auto-memory is repo-scoped and live-mutable. Keep an explicit
+      // boolean so turning it off (or back on) clears the prior query value.
+      // The temporary provider-native Design fallback suppresses every
+      // machine-written context channel; the qualified outer ZSR path keeps
+      // the native capability available in its private provider home.
+      autoMemoryEnabled:
+        providerNativeTerritory || env?.[CLAUDE_AUTO_MEMORY_ENV_VAR] === "0"
+          ? false
+          : true,
       permissions: { additionalDirectories, allow, deny },
     };
   }

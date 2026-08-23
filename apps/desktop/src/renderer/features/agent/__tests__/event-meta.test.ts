@@ -7,6 +7,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  hasTransportTruncation,
   isNativeCodexBrowserToolCall,
   metaForEvent,
   nativeCodexBrowserPresentation,
@@ -40,6 +41,41 @@ describe("metaForEvent — Bash (execute) rows", () => {
   it("collapses whitespace/newlines in the command preview", () => {
     const meta = metaForEvent(exec({ command: "echo a\n  &&  echo   b" }));
     expect(meta.target).toBe("echo a && echo b");
+  });
+});
+
+describe("metaForEvent — Thinking duration", () => {
+  it("shows the provider-reported duration in the common row metadata", () => {
+    const meta = metaForEvent({
+      id: "thought-1",
+      kind: "text",
+      role: "thought",
+      text: "checking",
+      durationMs: 2_400,
+      createdAt: 1,
+    } as AgentMessage);
+    expect(meta.trailing).toBe("2s");
+  });
+});
+
+describe("Cursor transport disclosure", () => {
+  it("detects a bounded provider payload on either side of a tool row", () => {
+    expect(
+      hasTransportTruncation({
+        kind: "tool",
+        toolKind: "other",
+        rawInput: {},
+        rawOutput: { zerosTransport: { truncated: true } },
+      } as AgentToolMessage),
+    ).toBe(true);
+    expect(
+      hasTransportTruncation({
+        kind: "tool",
+        toolKind: "other",
+        rawInput: {},
+        rawOutput: { zerosTransport: { truncated: false } },
+      } as AgentToolMessage),
+    ).toBe(false);
   });
 });
 

@@ -15,10 +15,19 @@ import {
   resolveValidModelId,
   applyCursorReasoning,
   isCursorModelGatedError,
+  cursorAgentUsageDelta,
 } from "../adapter";
 import type { AgentAdapterContext, ContentBlock } from "../../../types";
 
-const { createSpy, resumeSpy, sendSpy, listSpy, modelsListSpy, storeGetSpy } =
+const {
+  createSpy,
+  resumeSpy,
+  sendSpy,
+  listSpy,
+  modelsListSpy,
+  storeGetSpy,
+  usageSpy,
+} =
   vi.hoisted(() => ({
     createSpy: vi.fn(),
     resumeSpy: vi.fn(),
@@ -26,6 +35,7 @@ const { createSpy, resumeSpy, sendSpy, listSpy, modelsListSpy, storeGetSpy } =
     listSpy: vi.fn(),
     modelsListSpy: vi.fn(),
     storeGetSpy: vi.fn(),
+    usageSpy: vi.fn(),
   }));
 
 vi.mock("@cursor/sdk", () => ({
@@ -53,7 +63,24 @@ const makeRun = (status = "finished") => ({
   cancel: async () => {},
 });
 
-const fakeAgent = { agentId: "agent-xyz", send: sendSpy, close: () => {} };
+const fakeAgent = {
+  agentId: "agent-xyz",
+  send: sendSpy,
+  getUsage: usageSpy,
+  close: () => {},
+};
+
+const EMPTY_AGENT_USAGE = {
+  usage: {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+  },
+  cost: { rawCostCents: 0, chargedCents: 0 },
+  runs: [],
+};
 
 function makeCtx(): AgentAdapterContext {
   return {
@@ -84,6 +111,7 @@ beforeEach(() => {
   // trusts picks (the SDK still validates server-side).
   modelsListSpy.mockReset().mockResolvedValue([]);
   storeGetSpy.mockReset().mockResolvedValue(null);
+  usageSpy.mockReset().mockResolvedValue(EMPTY_AGENT_USAGE);
   runSeq = 0;
 });
 
@@ -395,6 +423,58 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
       model: { id: "composer-2.5" },
     });
     expect(completed.response.effectiveModel).toBe("composer-2.5");
+    expect(sendSpy.mock.calls[0][1].idempotencyKey).toMatch(/^zeros-/);
+  });
+
+  it("uses the engine-owned turn identity for a stable provider idempotency key", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      turnId: "user-message-42",
+      prompt: TEXT,
+    });
+
+    const key = sendSpy.mock.calls[0][1].idempotencyKey;
+    expect(key).toMatch(/^zeros-[a-f0-9]{32}$/);
+    expect(key).not.toContain("user-message-42");
+  });
+
+  it("keeps the same provider idempotency key after the execution is recovered", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const first = await adapter.newSession({
+      executionId: "execution-before-recovery",
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+    await adapter.prompt({
+      sessionId: first.session.sessionId,
+      turnId: "user-message-retried",
+      prompt: TEXT,
+    });
+    const firstKey = sendSpy.mock.calls[0][1].idempotencyKey;
+
+    const recovered = await adapter.loadSession({
+      executionId: "execution-after-recovery",
+      providerBinding: {
+        version: 1,
+        kind: "native",
+        providerId: "cursor",
+        resumeId: "agent-xyz",
+      },
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+    await adapter.prompt({
+      sessionId: recovered.executionId!,
+      turnId: "user-message-retried",
+      prompt: TEXT,
+    });
+
+    expect(sendSpy.mock.calls[1][1].idempotencyKey).toBe(firstKey);
   });
 
   it("surfaces wait().result when a successful run streams no assistant event", async () => {
@@ -500,6 +580,64 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
     });
   });
 
+  it("merges provider-billed cost from getUsage into the common turn usage", async () => {
+    usageSpy
+      .mockResolvedValueOnce(EMPTY_AGENT_USAGE)
+      .mockResolvedValueOnce({
+        usage: {
+          inputTokens: 120,
+          outputTokens: 30,
+          cacheReadTokens: 80,
+          cacheWriteTokens: 4,
+          totalTokens: 150,
+          reasoningTokens: 7,
+        },
+        cost: { rawCostCents: 19, chargedCents: 12.5 },
+        runs: [],
+      });
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+
+    const completed = await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: TEXT,
+    });
+
+    expect(completed.response.usage).toEqual({
+      inputTokens: 120,
+      outputTokens: 30,
+      cacheReadTokens: 80,
+      cacheWriteTokens: 4,
+      reasoningTokens: 7,
+      totalCostUsd: 0.125,
+    });
+  });
+
+  it("never lets a hung billing lookup delay the agent turn", async () => {
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test" },
+    });
+    usageSpy.mockImplementation(() => new Promise(() => {}));
+    vi.useFakeTimers();
+    try {
+      const prompt = adapter.prompt({
+        sessionId: session.sessionId,
+        prompt: TEXT,
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(prompt).resolves.toMatchObject({
+        response: { stopReason: "end_turn" },
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("binds model on Agent.resume() so resumed chats don't throw 'explicit model'", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     await adapter.loadSession({
@@ -535,6 +673,163 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
     expect(sendOpts.model).toEqual({ id: "composer-2.5" });
   });
 
+  it("preserves live aliases, parameters, variants, and local selectability metadata", async () => {
+    modelsListSpy.mockResolvedValue([
+      {
+        id: "default",
+        displayName: "Router",
+        description: "Choose automatically",
+        aliases: ["auto"],
+      },
+      {
+        id: "composer-2.5",
+        displayName: "Composer 2.5",
+        description: "Cursor's coding model",
+        aliases: ["composer"],
+        parameters: [
+          {
+            id: "speed",
+            displayName: "Speed",
+            values: [{ value: "fast", displayName: "Fast" }],
+          },
+        ],
+        variants: [
+          {
+            displayName: "Balanced",
+            description: "Balanced defaults",
+            params: [{ id: "speed", value: "balanced" }],
+            isDefault: true,
+          },
+        ],
+      },
+    ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "composer-2.5" },
+    });
+
+    const models = (await adapter.initialize())._meta?.models ?? [];
+    expect(models.find((model) => model.value === "default")).toMatchObject({
+      label: "Router",
+      description: "Choose automatically",
+      aliases: ["auto"],
+      selectable: false,
+    });
+    expect(models.find((model) => model.value === "composer-2.5")).toMatchObject(
+      {
+        aliases: ["composer"],
+        selectable: true,
+        parameters: [
+          {
+            id: "speed",
+            label: "Speed",
+            values: [{ value: "fast", label: "Fast" }],
+          },
+        ],
+        variants: [
+          {
+            label: "Balanced",
+            description: "Balanced defaults",
+            parameters: [{ id: "speed", value: "balanced" }],
+            isDefault: true,
+          },
+        ],
+      },
+    );
+    expect(createSpy.mock.calls[0][0].model).toEqual({
+      id: "composer-2.5",
+      params: [{ id: "speed", value: "balanced" }],
+    });
+  });
+
+  it("allows a future runtime to explicitly advertise Router as locally selectable", async () => {
+    modelsListSpy.mockResolvedValue([
+      {
+        id: "default",
+        displayName: "Router",
+        selectable: true,
+      },
+      { id: "composer-2.5", displayName: "Composer 2.5" },
+    ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "default" },
+    });
+
+    expect(
+      (await adapter.initialize())._meta?.models?.find(
+        (model) => model.value === "default",
+      ),
+    ).toMatchObject({ selectable: true });
+    expect(createSpy.mock.calls[0][0].model).toEqual({ id: "default" });
+  });
+
+  it("invalidates account model metadata when the API key changes", async () => {
+    modelsListSpy
+      .mockResolvedValueOnce([
+        { id: "composer-2.5", displayName: "Account A Composer" },
+      ])
+      .mockResolvedValueOnce([
+        { id: "composer-2", displayName: "Account B Composer" },
+      ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_account_a" },
+    });
+    await adapter.newSession({
+      cwd: "/tmp/proj",
+      env: { CURSOR_API_KEY: "key_account_b" },
+    });
+
+    expect(modelsListSpy).toHaveBeenCalledTimes(2);
+    expect((await adapter.initialize())._meta?.models?.[0]?.label).toBe(
+      "Account B Composer",
+    );
+  });
+
+  it("keeps each live session on the model catalog discovered for its API key", async () => {
+    modelsListSpy
+      .mockResolvedValueOnce([
+        { id: "composer-2.5", displayName: "Account A Composer" },
+      ])
+      .mockResolvedValueOnce([
+        { id: "composer-2", displayName: "Account B Composer" },
+      ]);
+    const adapter = new CursorSdkAdapter(makeCtx());
+    const accountA = await adapter.newSession({
+      executionId: "execution-account-a",
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_account_a",
+        CURSOR_MODEL: "composer-2.5",
+      },
+    });
+    const accountB = await adapter.newSession({
+      executionId: "execution-account-b",
+      cwd: "/tmp/proj",
+      env: {
+        CURSOR_API_KEY: "key_account_b",
+        CURSOR_MODEL: "composer-2",
+      },
+    });
+    sendSpy.mockClear();
+
+    await adapter.prompt({
+      sessionId: accountA.session.sessionId,
+      prompt: TEXT,
+    });
+    await adapter.prompt({
+      sessionId: accountB.session.sessionId,
+      prompt: TEXT,
+    });
+
+    expect(sendSpy.mock.calls[0][1].model).toEqual({ id: "composer-2.5" });
+    expect(sendSpy.mock.calls[1][1].model).toEqual({ id: "composer-2" });
+  });
+
   it("applies live model, effort, and fast changes to the next send", async () => {
     modelsListSpy.mockResolvedValue([
       { id: "grok-4.5", displayName: "Grok 4.5" },
@@ -565,6 +860,46 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
 
     expect(sendSpy.mock.calls[0][1].model).toEqual({
       id: "grok-4.5-thinking-high-fast",
+    });
+  });
+});
+
+describe("cursorAgentUsageDelta (pure)", () => {
+  it("clamps cumulative counter regressions and converts charged cents to USD", () => {
+    expect(
+      cursorAgentUsageDelta(
+        {
+          usage: {
+            inputTokens: 100,
+            outputTokens: 20,
+            cacheReadTokens: 10,
+            cacheWriteTokens: 5,
+            totalTokens: 120,
+            reasoningTokens: 4,
+          },
+          cost: { rawCostCents: 8, chargedCents: 6 },
+          runs: [],
+        },
+        {
+          usage: {
+            inputTokens: 140,
+            outputTokens: 35,
+            cacheReadTokens: 8,
+            cacheWriteTokens: 9,
+            totalTokens: 175,
+            reasoningTokens: 7,
+          },
+          cost: { rawCostCents: 13, chargedCents: 9.5 },
+          runs: [],
+        },
+      ),
+    ).toEqual({
+      inputTokens: 40,
+      outputTokens: 15,
+      cacheReadTokens: 0,
+      cacheWriteTokens: 4,
+      reasoningTokens: 3,
+      totalCostUsd: 0.035,
     });
   });
 });
