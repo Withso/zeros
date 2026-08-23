@@ -14,13 +14,8 @@
     "assemble": "node scripts/assemble-marketing.mjs --skip-build",
     "dev": "npm run build && wrangler pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS --binding MARKETING_HOSTS=127.0.0.1,localhost",
     "dev:app": "npm run build && wrangler pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS",
-    "check:session-worker": "wrangler deploy --dry-run --env alpha --config session-worker/wrangler.jsonc && wrangler deploy --dry-run --env beta --config session-worker/wrangler.jsonc && wrangler deploy --dry-run --env production --config session-worker/wrangler.jsonc",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && node --test lib/*.test.mjs"
-  },
-  "dependencies": {
-    "@workos-inc/node": "10.10.0",
-    "jose": "6.2.2"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "5.20260823.1",

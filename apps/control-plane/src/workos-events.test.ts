@@ -1,49 +1,124 @@
-import { describe, expect, it } from "vitest";
+import { createHmac } from "node:crypto";
+import { describe, expect, it, vi } from "vitest";
 import type pg from "pg";
 
-import {
-  brokerSecretMatches,
-  createWorkOSIdentityEventRoutes,
-} from "./workos-events.js";
+import { createWorkOSIdentityEventRoutes } from "./workos-events.js";
 
-const SECRET = "s".repeat(48);
+const NOW = 1_800_000_000_000;
+const SECRET = "webhook-signing-secret-for-tests";
 const pool = {
   connect: () => {
     throw new Error("invalid requests must not reach Postgres");
   },
 } as unknown as pg.Pool;
 
-describe("WorkOS identity-event broker boundary", () => {
-  it("compares the complete broker credential without prefix acceptance", () => {
-    expect(brokerSecretMatches(SECRET, SECRET)).toBe(true);
-    expect(brokerSecretMatches(SECRET, `${SECRET}x`)).toBe(false);
-    expect(brokerSecretMatches(SECRET, SECRET.slice(0, -1))).toBe(false);
-    expect(brokerSecretMatches(SECRET, "")).toBe(false);
+function event(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    id: "event_01TEST",
+    event: "user.updated",
+    created_at: "2027-01-15T08:00:00.000Z",
+    data: {
+      id: "user_01TEST",
+      email: "user@example.com",
+      email_verified: true,
+      name: "Updated User",
+      profile_picture_url: "https://images.example.com/user.png",
+    },
+    ...overrides,
+  };
+}
+
+function signedRequest(
+  payload: unknown,
+  options: { timestamp?: number; signature?: string } = {},
+): Request {
+  const body = typeof payload === "string" ? payload : JSON.stringify(payload);
+  const timestamp = options.timestamp ?? NOW;
+  const signature = createHmac("sha256", SECRET)
+    .update(`${timestamp}.${body}`)
+    .digest("hex");
+  return new Request("https://api-alpha.zeros.build/auth/workos-webhook", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "workos-signature": `t=${timestamp}, v1=${options.signature ?? signature}`,
+    },
+    body,
+  });
+}
+
+describe("Railway WorkOS identity-event boundary", () => {
+  it("verifies the exact raw body before reducing and applying an event", async () => {
+    const apply = vi.fn(async () => ({ status: "applied" as const }));
+    const app = createWorkOSIdentityEventRoutes(pool, SECRET, {
+      now: () => NOW,
+      apply,
+    });
+    const response = await app.request(signedRequest(event()));
+
+    expect(response.status).toBe(202);
+    expect(apply).toHaveBeenCalledWith({
+      eventId: "event_01TEST",
+      eventType: "user.updated",
+      createdAt: "2027-01-15T08:00:00.000Z",
+      user: {
+        id: "user_01TEST",
+        email: "user@example.com",
+        emailVerified: true,
+        name: "Updated User",
+        profilePictureUrl: "https://images.example.com/user.png",
+      },
+    });
+    expect(response.headers.get("cache-control")).toBe("no-store");
   });
 
-  it("rejects a missing or wrong broker credential before reading the body", async () => {
-    const app = createWorkOSIdentityEventRoutes(pool, SECRET);
-    for (const supplied of [undefined, "wrong-secret"]) {
-      const response = await app.request("/internal/auth/workos/events", {
-        method: "POST",
-        headers: supplied ? { "x-zeros-auth-broker": supplied } : undefined,
-        body: "not-json",
-      });
+  it("rejects an invalid signature without parsing or applying the body", async () => {
+    const apply = vi.fn();
+    const app = createWorkOSIdentityEventRoutes(pool, SECRET, {
+      now: () => NOW,
+      apply,
+    });
+    const response = await app.request(
+      signedRequest(JSON.stringify(event(), null, 2), {
+        signature: "0".repeat(64),
+      }),
+    );
+    expect(response.status).toBe(401);
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it("rejects stale and future signatures", async () => {
+    const app = createWorkOSIdentityEventRoutes(pool, SECRET, {
+      now: () => NOW,
+      apply: vi.fn(),
+    });
+    for (const timestamp of [NOW - 180_001, NOW + 180_001]) {
+      const response = await app.request(signedRequest(event(), { timestamp }));
       expect(response.status).toBe(401);
-      expect(response.headers.get("cache-control")).toBe("no-store");
     }
   });
 
-  it("validates the reduced lifecycle event before opening a transaction", async () => {
-    const app = createWorkOSIdentityEventRoutes(pool, SECRET);
-    const response = await app.request("/internal/auth/workos/events", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-zeros-auth-broker": SECRET,
-      },
-      body: JSON.stringify({ eventType: "user.updated" }),
+  it("acknowledges unsubscribed events without touching Postgres", async () => {
+    const apply = vi.fn();
+    const app = createWorkOSIdentityEventRoutes(pool, SECRET, {
+      now: () => NOW,
+      apply,
     });
-    expect(response.status).toBe(422);
+    const response = await app.request(
+      signedRequest(event({ event: "organization.created" })),
+    );
+    expect(response.status).toBe(202);
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it("rejects oversized bodies before signature work", async () => {
+    const app = createWorkOSIdentityEventRoutes(pool, SECRET, {
+      now: () => NOW,
+      apply: vi.fn(),
+    });
+    const response = await app.request(signedRequest("x".repeat(65 * 1024)));
+    expect(response.status).toBe(413);
   });
 });

@@ -8,7 +8,7 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
-function controlPlaneBaseUrl(): string {
+export function controlPlaneBaseUrl(): string {
   const baked =
     typeof __ZEROS_CONTROL_PLANE_URL_BAKED__ === "string"
       ? __ZEROS_CONTROL_PLANE_URL_BAKED__

@@ -1,6 +1,6 @@
 // Provider-neutral browser-session facade. Auth0 compatibility sessions remain
-// in KV; WorkOS sessions are opaque-cookie lookups into a strongly consistent
-// Durable Object and never expose refresh material to Pages or the browser.
+// in KV; WorkOS sessions are opaque-cookie lookups into Railway/Postgres and
+// never expose refresh material to Pages or the browser.
 //
 import {
   configuredAuthProvider,
@@ -37,13 +37,7 @@ export interface Env {
   MARKETING_HOSTS?: string;
   /** Authenticated organization API. Defaults to https://api.zeros.build. */
   CONTROL_PLANE_URL?: string;
-  /** WorkOS webhook verification and the independent broker-to-resource-server
-   * credential. Neither value is the WorkOS API key. */
-  WORKOS_WEBHOOK_SECRET?: string;
-  AUTH_BROKER_SECRET?: string;
   SESSIONS: KVNamespace;
-  /** Strong WorkOS flow/session authority, hosted by session-worker/worker.ts. */
-  AUTH_SESSIONS?: DurableObjectNamespace;
   /**
    * Cloudflare Pages static-asset binding. Used by `_middleware.ts` to serve the
    * marketing SPA on marketing hosts without running app Functions (which would
@@ -71,6 +65,8 @@ export type SessionSnapshot = {
   /** A transient WorkOS refresh failure retains identity/session state but has
    *  no bearer that should be sent upstream until a later retry succeeds. */
   refreshStatus?: "active" | "transient";
+  /** Railway session revision observed with this bearer. */
+  revision?: number;
 };
 
 export const SESSION_COOKIE = "zeros_session";
@@ -80,7 +76,9 @@ export const SESSION_TTL_S = 60 * 60 * 24 * 30; // 30 days — the KV entry's TT
  *  A KV session is otherwise a 30-day cache that never rechecks the IdP. */
 export const SESSION_REVALIDATE_AFTER_MS = 60 * 60 * 24 * 1000; // 24h
 
-export function parseCookieHeader(header: string): { name: string; value: string }[] {
+export function parseCookieHeader(
+  header: string,
+): { name: string; value: string }[] {
   if (!header) return [];
   const out: { name: string; value: string }[] = [];
   for (const part of header.split(";")) {
@@ -95,10 +93,10 @@ export function parseCookieHeader(header: string): { name: string; value: string
   return out;
 }
 
-/** Read the live browser session (cookie → KV lookup), with its session id —
- *  needed by callers that may write an updated session back (see refreshGrant's
- *  rotation note). Returns null if signed out or the session has expired/been
- *  evicted. */
+/** Read the live browser session (cookie → selected provider authority), with
+ *  its session id. Auth0 callers may write an updated KV session back (see
+ *  refreshGrant's rotation note); WorkOS reads Railway/Postgres. Returns null
+ *  if signed out or the session has expired/been evicted. */
 export async function getSessionWithId(
   env: Env,
   request: Request,
@@ -119,7 +117,10 @@ export async function getSessionWithId(
 }
 
 /** Convenience wrapper for callers that only need the session data. */
-export async function getSession(env: Env, request: Request): Promise<SessionData | null> {
+export async function getSession(
+  env: Env,
+  request: Request,
+): Promise<SessionData | null> {
   const result = await getSessionWithId(env, request);
   return result?.data ?? null;
 }
@@ -140,8 +141,8 @@ export async function getVerifiedSessionWithId(
   env: Env,
   request: Request,
 ): Promise<SessionSnapshot | null> {
-  // The WorkOS coordinator refreshes before returning a near-expiry access
-  // token and serializes every exchange for this opaque session id.
+  // Railway refreshes before returning a near-expiry access token and
+  // serializes every exchange for this opaque session id in PostgreSQL.
   if (configuredAuthProvider(env) === "workos") {
     return getSessionWithId(env, request);
   }
@@ -177,7 +178,7 @@ export async function getVerifiedSessionWithId(
 
 /** Verified session data for page-render callers that do not need to rotate it
  * again. API proxy callers use the with-id variant so verification and
- * upstream authorization share one coherent KV snapshot. */
+ * upstream authorization share one coherent provider snapshot. */
 export async function getVerifiedSession(
   env: Env,
   request: Request,
@@ -186,7 +187,11 @@ export async function getVerifiedSession(
   return found?.data ?? null;
 }
 
-type RefreshResponse = { access_token: string; refresh_token?: string; expires_in: number };
+type RefreshResponse = {
+  access_token: string;
+  refresh_token?: string;
+  expires_in: number;
+};
 
 /** Outcome of a refresh-grant call, split so callers can tell a genuinely dead
  *  refresh token apart from a momentary outage:
@@ -205,15 +210,16 @@ export type BrowserSessionRefreshResult =
   | { ok: false; terminal: boolean };
 
 /** Refresh the selected provider's browser session. WorkOS performs and
- * persists the rotation inside the per-session Durable Object. Auth0 retains
- * the released KV behavior until the compatibility provider is removed. */
+ * persists the serialized rotation in Railway/Postgres. Auth0 retains the
+ * released KV behavior until the compatibility provider is removed. */
 export async function refreshBrowserSession(
   env: Env,
   sessionId: string,
   current: SessionData,
+  revision?: number,
 ): Promise<BrowserSessionRefreshResult> {
   if (configuredAuthProvider(env) === "workos") {
-    const result = await refreshWorkOSBrowserSession(env, sessionId);
+    const result = await refreshWorkOSBrowserSession(env, sessionId, revision);
     if (result.status === "active") return { ok: true, data: result.data };
     return { ok: false, terminal: result.status === "terminal" };
   }
@@ -241,7 +247,10 @@ export async function refreshBrowserSession(
  *  setting — verify against the Auth0 dashboard during setup. This function
  *  always returns the response verbatim; the caller decides what to persist
  *  where. */
-export async function refreshGrant(env: Env, refreshToken: string): Promise<RefreshResult> {
+export async function refreshGrant(
+  env: Env,
+  refreshToken: string,
+): Promise<RefreshResult> {
   let res: Response;
   try {
     res = await fetch(`https://${env.AUTH0_DOMAIN}/oauth/token`, {
@@ -283,6 +292,13 @@ export async function refreshGrant(env: Env, refreshToken: string): Promise<Refr
   return { ok: false, terminal };
 }
 
-export async function putSession(env: Env, sessionId: string, data: SessionData, ttlSeconds: number): Promise<void> {
-  await env.SESSIONS.put(`session:${sessionId}`, JSON.stringify(data), { expirationTtl: ttlSeconds });
+export async function putSession(
+  env: Env,
+  sessionId: string,
+  data: SessionData,
+  ttlSeconds: number,
+): Promise<void> {
+  await env.SESSIONS.put(`session:${sessionId}`, JSON.stringify(data), {
+    expirationTtl: ttlSeconds,
+  });
 }

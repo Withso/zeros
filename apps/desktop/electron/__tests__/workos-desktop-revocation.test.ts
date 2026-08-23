@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../app-base-url", () => ({
-  appBaseUrl: () => "https://app-alpha.zeros.build",
+vi.mock("../workos-desktop-account", () => ({
+  controlPlaneBaseUrl: () => "https://api-alpha.zeros.build",
 }));
 
 import { requestWorkOSDesktopRevocation } from "../workos-desktop-revocation";
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe("WorkOS desktop revocation broker client", () => {
+describe("WorkOS desktop Railway revocation client", () => {
   it("sends only the bearer and bounded revocation scope", async () => {
     const fetchMock = vi.fn(async () => Response.json({ revoked: 1 }));
     vi.stubGlobal("fetch", fetchMock);
@@ -17,7 +17,7 @@ describe("WorkOS desktop revocation broker client", () => {
       requestWorkOSDesktopRevocation("current", "signed-access-token"),
     ).resolves.toBe(true);
     expect(fetchMock).toHaveBeenCalledWith(
-      "https://app-alpha.zeros.build/auth/desktop-revoke",
+      "https://api-alpha.zeros.build/auth/desktop-revoke",
       expect.objectContaining({
         method: "POST",
         headers: {

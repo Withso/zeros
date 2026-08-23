@@ -15,11 +15,11 @@ that Beta validated.
 
 ## Deployment topology
 
-| Channel    | Source                                 | Railway                                                    | Cloudflare web                                              | Public origins                                          |
-| ---------- | -------------------------------------- | ---------------------------------------------------------- | ----------------------------------------------------------- | ------------------------------------------------------- |
-| Alpha      | `main`                                 | `alpha` environment: control plane + its own Postgres      | Pages `zeros-web-alpha`; Worker `zeros-auth-sessions-alpha` | `api-alpha.zeros.build`, `app-alpha.zeros.build`        |
-| Beta       | current `release/X.Y.Z`                | `beta` environment: control plane + its own Postgres       | Pages `zeros-web-beta`; Worker `zeros-auth-sessions-beta`   | `api-beta.zeros.build`, `app-beta.zeros.build`          |
-| Production | the same release commit Beta validated | `production` environment: control plane + its own Postgres | Pages `zeros-web`; Worker `zeros-auth-sessions-production`  | `api.zeros.build`, `app.zeros.build`, marketing domains |
+| Channel    | Source                                 | Railway                                                    | Cloudflare web          | Public origins                                          |
+| ---------- | -------------------------------------- | ---------------------------------------------------------- | ----------------------- | ------------------------------------------------------- |
+| Alpha      | `main`                                 | `alpha` environment: control plane + its own Postgres      | Pages `zeros-web-alpha` | `api-alpha.zeros.build`, `app-alpha.zeros.build`        |
+| Beta       | current `release/X.Y.Z`                | `beta` environment: control plane + its own Postgres       | Pages `zeros-web-beta`  | `api-beta.zeros.build`, `app-beta.zeros.build`          |
+| Production | the same release commit Beta validated | `production` environment: control plane + its own Postgres | Pages `zeros-web`       | `api.zeros.build`, `app.zeros.build`, marketing domains |
 
 This remains one backend codebase and one frontend codebase. Each channel is an
 isolated deployment instance with independent data, credentials, sessions, and
@@ -114,7 +114,10 @@ Set these independently in every environment:
 | `AUTH_JWKS_URL`              | exact Alpha WorkOS JWKS URL; optional override for Auth0 | exact Beta WorkOS JWKS URL; optional override for Auth0 | exact Production WorkOS JWKS URL; optional override for Auth0 |
 | `AUTH_WEB_CLIENT_ID`         | Alpha Web Application in WorkOS mode                     | Beta Web Application in WorkOS mode                     | Production Web Application in WorkOS mode                     |
 | `AUTH_DESKTOP_CLIENT_ID`     | Alpha Desktop Application in WorkOS mode                 | Beta Desktop Application in WorkOS mode                 | Production Desktop Application in WorkOS mode                 |
-| `AUTH_BROKER_SECRET`         | random Alpha Pages/Railway shared secret in WorkOS mode  | random Beta Pages/Railway shared secret in WorkOS mode  | random Production Pages/Railway shared secret in WorkOS mode  |
+| `APP_ORIGIN`                 | `https://app-alpha.zeros.build` in WorkOS mode            | `https://app-beta.zeros.build` in WorkOS mode            | `https://app.zeros.build` in WorkOS mode                       |
+| `WORKOS_API_KEY`             | Alpha server key in WorkOS mode                          | Beta server key in WorkOS mode                          | Production server key in WorkOS mode                          |
+| `WORKOS_COOKIE_PASSWORD`     | unique random Alpha 32+ character secret                 | unique random Beta 32+ character secret                 | unique random Production 32+ character secret                 |
+| `WORKOS_WEBHOOK_SECRET`      | Alpha endpoint signing secret                            | Beta endpoint signing secret                            | Production endpoint signing secret                            |
 | `AUTH0_DOMAIN`               | legacy fallback until Alpha cutover                      | legacy fallback until Beta cutover                      | legacy fallback until Production cutover                      |
 | `NODE_ENV`                   | `production`                                             | `production`                                            | `production`                                                  |
 | `INVITE_LINK_BASE`           | `https://app-alpha.zeros.build/invite`                   | `https://app-beta.zeros.build/invite`                   | `https://app.zeros.build/invite`                              |
@@ -127,9 +130,9 @@ credentials in Railway only.
 
 The issuer, JWKS URL, audience, and client IDs are public verification values;
 they still remain environment-local configuration so channels cannot drift or
-accept one another's tokens. A WorkOS API key is not a control-plane variable.
-It belongs only in the server-side WorkOS session Worker. The broker secret is
-an independently generated channel credential, not a provider credential.
+accept one another's tokens. The WorkOS API key, cookie password, and endpoint
+signing secret are Railway-only. Never put them in Pages, a desktop build,
+GitHub variables, command arguments, logs, or repository files.
 
 For the clean-slate identity cutover, prefer provisioning a fresh database and
 running all migrations. An Alpha/Beta in-place reset must use the guarded
@@ -205,46 +208,25 @@ Auth0 compatibility mode additionally requires:
 | `AUTH0_CLIENT_ID`     | Alpha client                    | Beta client                    | Production client         |
 | `AUTH0_CLIENT_SECRET` | Alpha secret                    | Beta secret                    | Production secret         |
 
-WorkOS mode instead requires this channel-local topology:
-
-| Setting                                     | Alpha                           | Beta                           | Production                         |
-| ------------------------------------------- | ------------------------------- | ------------------------------ | ---------------------------------- |
-| Pages `WORKOS_SESSION_WORKER`               | `zeros-auth-sessions-alpha`     | `zeros-auth-sessions-beta`     | `zeros-auth-sessions-production`   |
-| Pages `AUTH_SESSIONS` binding               | Alpha Worker's `AuthSession`    | Beta Worker's `AuthSession`    | Production Worker's `AuthSession`  |
-| Pages secret `WORKOS_WEBHOOK_SECRET`        | Alpha endpoint signing secret   | Beta endpoint signing secret   | Production endpoint signing secret |
-| Pages + Railway secret `AUTH_BROKER_SECRET` | same random Alpha value         | same random Beta value         | same random Production value       |
-| Worker secret `WORKOS_API_KEY`              | rotated Alpha server key        | Beta server key                | Production server key              |
-| Worker `WORKOS_WEB_CLIENT_ID`               | Alpha Web Application           | Beta Web Application           | Production Web Application         |
-| Worker secret `WORKOS_COOKIE_PASSWORD`      | unique random 32+ byte value    | unique random 32+ byte value   | unique random 32+ byte value       |
-| Worker `AUTH_DESKTOP_CLIENT_ID`             | Alpha Desktop Application       | Beta Desktop Application       | Production Desktop Application     |
-| Worker `AUTH_ISSUER`                        | exact Alpha issuer              | exact Beta issuer              | exact Production issuer            |
-| Worker `AUTH_JWKS_URL`                      | exact Alpha JWKS URL            | exact Beta JWKS URL            | exact Production JWKS URL          |
-| Worker `AUTH_AUDIENCE`                      | `https://api-alpha.zeros.build` | `https://api-beta.zeros.build` | `https://api.zeros.build`          |
-
-`WORKOS_WEB_CLIENT_ID` is public metadata but remains Worker-only so the Pages
-deployment cannot accidentally become the confidential exchange boundary.
-`WORKOS_API_KEY` and `WORKOS_COOKIE_PASSWORD` must never appear in Pages,
-Railway, GitHub, shell arguments, build logs, or repository files.
-
-Deploy the private Worker from `apps/web` with the pinned CLI only after its
-channel key is safe:
-
-```bash
-npm run check:session-worker
-npm exec -- wrangler deploy --env alpha --config session-worker/wrangler.jsonc
-```
-
-Repeat the deploy for `beta` and `production` only when those promotion stages
-begin. Set the two secrets with interactive `wrangler secret put` or the
-Cloudflare dashboard, and set the five public contract values in the matching
-Worker environment; do not paste secret values into commands. The Worker has
-both `workers_dev` and preview URLs disabled, and its public fetch handler
-always returns 404. Pages talks directly to its Durable Object namespace.
+WorkOS mode adds no provider-specific Pages secret or binding. Pages remains a
+same-origin facade using only the common `APP_ORIGIN` and
+`CONTROL_PLANE_URL`. Remove any retired `AUTH_SESSIONS` binding,
+`WORKOS_SESSION_WORKER`, `WORKOS_WEBHOOK_SECRET`, or `AUTH_BROKER_SECRET` from
+the Pages projects. Browser credentials are host-only random cookies; their
+digests, PKCE verifier, encrypted sealed session, and serialized refresh state
+live in the channel's Railway Postgres.
 
 For each WorkOS environment, register the exact channel URL
-`https://<app-host>/auth/workos-webhook` and subscribe only to `user.updated`
+`https://<api-host>/auth/workos-webhook` and subscribe only to `user.updated`
 and `user.deleted`. The WorkOS-hosted AuthKit domain is sufficient. A paid
 custom WorkOS authentication domain is optional and not part of this rollout.
+A self-hosted template can use platform-provided HTTPS domains instead of
+buying domains. Keep the frontend `APP_ORIGIN` separate from the API origin so
+server-only session responses are never same-origin browser endpoints; two
+services in one Railway project can each use their generated domain. Such a
+template sets `ZEROS_SELF_HOSTED=true`; official Alpha/Beta/Production services
+must leave it unset so the repository's exact channel and branch checks remain
+active.
 
 Phases 2 and 3 prepare this topology but do not activate it. Railway accepts one
 issuer at a time, while released builds remain on Auth0 until the coordinated

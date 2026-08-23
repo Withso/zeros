@@ -117,6 +117,19 @@ d("WorkOS user lifecycle events", () => {
       email,
       displayName: "Delete Me",
     });
+    await pool.query(
+      `INSERT INTO workos_browser_sessions (
+         credential_hash, kind, sealed_session, provider_session_id,
+         provider_sub, email, display_name, access_token_expires_at,
+         expires_at, revision
+       ) VALUES (
+         decode(md5(random()::text) || md5(random()::text), 'hex'),
+         'session', 'sealed-session-for-delete-test', 'session_delete_test',
+         $1, $2, 'Delete Me', now() + interval '5 minutes',
+         now() + interval '30 days', 1
+       )`,
+      [subject, email],
+    );
 
     expect(
       await applyWorkOSIdentityEvent(pool, event("user.deleted", subject, email)),
@@ -134,6 +147,12 @@ d("WorkOS user lifecycle events", () => {
       [user.id],
     );
     expect(productRows.rows[0]?.count).toBe(1);
+    const browserSessions = await pool.query(
+      `SELECT count(*)::int AS count
+       FROM workos_browser_sessions WHERE provider_sub = $1`,
+      [subject],
+    );
+    expect(browserSessions.rows[0]?.count).toBe(0);
   });
 
   it("records an unlinked event without provisioning an account", async () => {

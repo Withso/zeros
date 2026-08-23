@@ -26,9 +26,9 @@ for project/domain/branch mappings and the promotion runbook.
 ```
 GET  /                         → signed-in management dashboard; signed-out hub
 GET  /launch                   → session-aware desktop handoff
-GET  /auth/start|callback|logout
-POST /auth/workos-webhook      → signed WorkOS user lifecycle events
-POST /auth/desktop-revoke      → verified desktop current/all-session revocation
+GET  /auth/start|callback|logout → WorkOS mode forwards to Railway unchanged
+POST /auth/workos-webhook      → compatibility pass-through to Railway
+POST /auth/desktop-revoke      → compatibility pass-through for older desktops
 GET  /github/connected         → GitHub App completion + Open Zeros handoff
 GET  /invite?token=
 POST /handoff/{mint,redeem,refresh,revoke} → Auth0 compatibility only
@@ -69,14 +69,12 @@ npm run dev            # wrangler on 127.0.0.1:8788 with MARKETING_HOSTS=127.0.0
 ```bash
 npm run typecheck
 npm test               # web/session/auth regression tests
-npm run check:session-worker # dry-run all three Worker bundles
 ```
 
-The ordinary `dev` scripts keep the legacy Auth0/KV path. WorkOS mode also
-needs a separately running Durable Object Worker and an `AUTH_SESSIONS` service
-binding, so use a dedicated Cloudflare staging environment for an end-to-end
-browser login rather than copying its server credentials into local Pages
-bindings.
+The ordinary `dev` scripts keep the legacy Auth0/KV path. For a local WorkOS
+end-to-end browser login, run the Railway control plane locally with a loopback
+`CONTROL_PLANE_URL` and its own disposable Postgres. WorkOS credentials stay in
+that control-plane process; never copy them into local Pages bindings.
 
 ## Cloudflare Pages projects — shared settings
 
@@ -97,7 +95,6 @@ After changing `apps/marketing/package.json`, regenerate that lockfile:
 | **Root directory**         | `apps/web`                                                          |
 | **Production branch**      | Alpha: `main`; Beta/Production: selected `release/X.Y.Z`            |
 | **KV binding**             | `SESSIONS` — retained per project for Auth0 rollback/abuse controls |
-| **WorkOS binding**         | `AUTH_SESSIONS` — channel-matched `AuthSession` Durable Object      |
 | **Custom domains**         | Channel app domain; only Production also owns marketing domains     |
 
 Disable Preview deployments on these release projects. Configure the following
@@ -115,10 +112,10 @@ in each project's Production environment:
 
 Provider-specific Pages configuration:
 
-| Mode                | Variables and runtime secrets                                                                                                                                                 |
-| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Auth0 compatibility | `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, secret `AUTH0_CLIENT_SECRET`, and channel `AUTH0_AUDIENCE`                                                                                 |
-| WorkOS              | `WORKOS_SESSION_WORKER=zeros-auth-sessions-<channel>`; runtime secrets `WORKOS_WEBHOOK_SECRET` and `AUTH_BROKER_SECRET`; `AUTH_SESSIONS` bound to that channel's Worker class |
+| Mode                | Variables and runtime secrets                                                                             |
+| ------------------- | --------------------------------------------------------------------------------------------------------- |
+| Auth0 compatibility | `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, secret `AUTH0_CLIENT_SECRET`, and channel `AUTH0_AUDIENCE`             |
+| WorkOS              | No provider-specific Pages values. `APP_ORIGIN` and `CONTROL_PLANE_URL` select the matching Railway service. |
 
 `ASSETS` is provided automatically by Pages (static output). Do not add it manually.
 
@@ -135,31 +132,24 @@ Auth0 remains selectable for rollback until Phase 5. Use a separate Regular Web
 Application per channel with that environment's callback and logout origin.
 
 WorkOS browser sessions use authorization code plus PKCE. The browser cookie
-contains only a random 256-bit lookup ID. State, verifier, sealed session,
-access token, WorkOS session ID, and refresh rotation live in one channel-local
-Durable Object; Workers KV is not the rotation authority. The Worker has no
-public `workers.dev` or preview URL.
+contains only a random 256-bit lookup ID. Railway stores only its SHA-256
+digest. OAuth state is also hashed; the one-time PKCE verifier and encrypted
+WorkOS sealed session live in the channel-local Railway Postgres database.
+Refreshes are serialized there across service replicas, and access tokens are
+never stored as database columns.
 
-The Worker configuration is
-[`session-worker/wrangler.jsonc`](session-worker/wrangler.jsonc). Before any
-real deployment, rotate the API key disclosed during qualification. Then, for
-each channel:
+Cloudflare Pages is deliberately stateless in WorkOS mode. It forwards the
+app-host callback/cookie traffic to the exact `CONTROL_PLANE_URL`, which keeps
+the existing `https://app-*/auth/callback` contract and host-only cookies. Set
+`WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, `WORKOS_WEBHOOK_SECRET`, public
+WorkOS client/verification values, and `APP_ORIGIN` only on the matching
+Railway service. Remove any retired `AUTH_SESSIONS` binding,
+`WORKOS_SESSION_WORKER`, or `AUTH_BROKER_SECRET` from Pages.
 
-1. Run `npm run check:session-worker` and deploy the corresponding environment
-   with the pinned local Wrangler CLI.
-2. Set Worker secrets `WORKOS_API_KEY` and a random 32-byte-or-longer
-   `WORKOS_COOKIE_PASSWORD`. Set public Worker values `WORKOS_WEB_CLIENT_ID`,
-   `AUTH_DESKTOP_CLIENT_ID`, exact `AUTH_ISSUER`, exact `AUTH_JWKS_URL`, and
-   channel `AUTH_AUDIENCE`. Do not put either secret in Git, Pages, Railway,
-   command arguments, or logs.
-3. In Pages, bind `AUTH_SESSIONS` to the matching Worker's `AuthSession` class.
-   Set the non-secret worker-name marker shown in the table above.
-4. Register `https://<channel-app-host>/auth/workos-webhook` for only
-   `user.updated` and `user.deleted`. Put its signing secret in Pages as
-   `WORKOS_WEBHOOK_SECRET`.
-5. Generate an independent 32-byte-or-longer `AUTH_BROKER_SECRET` and set the
-   same value in Pages and that channel's Railway control plane. It is not a
-   WorkOS API key.
+Register `https://<channel-api-host>/auth/workos-webhook` for only
+`user.updated` and `user.deleted`. The old app-host webhook URL remains a
+byte-preserving compatibility pass-through during cutover, but holds no signing
+secret.
 
 WorkOS-hosted AuthKit domains are the Phase 2 choice. A paid custom WorkOS
 domain is optional and is not a release requirement.
@@ -211,7 +201,7 @@ apps/web/
   functions/invite.ts          → /invite
   functions/github/connected.ts → /github/connected
   functions/auth/*             → selectable Auth0/WorkOS browser auth + webhook
-  functions/auth/desktop-revoke.ts → private Worker desktop-session broker
+  functions/auth/desktop-revoke.ts → older-desktop Railway pass-through
   functions/handoff/*          → Auth0 desktop ticket compatibility APIs
   lib/hosts.ts                 → host classification + CSP
   lib/hub.ts                   → hub HTML
@@ -219,10 +209,9 @@ apps/web/
   lib/control-plane-proxy.ts   → server-side API/session boundary
   lib/oauth.ts                 → legacy Auth0 + cookies (APP_ORIGIN-aware)
   lib/session.ts               → provider-neutral browser-session facade
-  lib/workos-browser.mjs       → opaque cookies + Durable Object RPC
-  lib/workos-session-core.mjs  → atomic flow/session/refresh state machine
-  lib/workos-webhook.mjs       → raw-body signature verification + reduction
-  session-worker/worker.ts     → private WorkOS SDK Durable Object host
+  lib/workos-browser.mjs       → stateless Railway auth/session facade
+  lib/workos-railway.mjs       → exact control-plane origin boundary
+  lib/workos-webhook.mjs       → byte-preserving Railway pass-through
   public/_headers              → app CSP defaults (source; copied into dist/)
   public/robots.txt            → app Disallow (source; marketing overridden in middleware)
   public/dashboard.{css,js}    → responsive management client
@@ -245,9 +234,9 @@ apps/web/
 | Unknown path (either host) | Static `404.html` with a real 404 status — without that file, Pages' implicit SPA mode would serve the marketing homepage with 200 on `app.zeros.build/<unknown>` |
 | `*.pages.dev` / localhost  | Default to **app** (OAuth/hub); set `MARKETING_HOSTS` to preview marketing                                                                                        |
 | Session cookies            | Still host-only on app; never widened for marketing                                                                                                               |
-| Dashboard credentials      | Auth0 grants stay in compatibility KV; WorkOS sealed/refresh state stays in a Durable Object; browser boot data contains identity and organization summaries only |
+| Dashboard credentials      | Auth0 grants stay in compatibility KV; WorkOS sealed/refresh state stays in Railway/Postgres; browser boot data contains identity and organization summaries only |
 | WorkOS refresh outage      | Pre-rotation transient failures preserve the exact record; a post-rotation verification outage persists the replacement seal but withholds the bearer             |
-| WorkOS lifecycle event     | Exact raw-body signature is checked before only `user.updated`/`user.deleted` cross a separate broker credential; retries are idempotent                          |
+| WorkOS lifecycle event     | Pages preserves exact bytes; Railway verifies the signature before reducing `user.updated`/`user.deleted`; retries are idempotent                               |
 | Dashboard mutations        | Same-origin JSON plus custom-header gate; route and body allowlists reject ambient-cookie form attacks                                                            |
 | Personal                   | Name follows provider identity, local-only, permanent, and collaboration/billing sections are disabled                                                            |
 | Schema URLs                | Still served at `zeros.build/schemas/*` after cutover                                                                                                             |

@@ -13,6 +13,9 @@ schema and is deployed independently from the desktop application.
   JWT signatures, exact issuer, audience, expiry, and required claims locally
   against JWKS. WorkOS mode additionally enforces the Web/Desktop Application
   allowlist and session/token identifiers.
+- In WorkOS mode Railway also owns browser PKCE exchange, encrypted sealed
+  sessions, PostgreSQL-serialized refresh, webhook verification, and desktop
+  current/all-session revocation. Cloudflare Pages holds none of those secrets.
 - PostgreSQL owns application authorization and tenant data. Request
   transactions use the restricted `zeros_app` role with row-level security.
 - `GET /healthz` is public so Railway can evaluate service health.
@@ -57,7 +60,11 @@ Core environment variables:
 | `AUTH_JWKS_URL` | Exact public JWKS endpoint; required in WorkOS mode |
 | `AUTH_WEB_CLIENT_ID` | Allowed WorkOS Web Application client ID |
 | `AUTH_DESKTOP_CLIENT_ID` | Allowed WorkOS Desktop Application client ID |
-| `AUTH_BROKER_SECRET` | WorkOS mode only: independent Pages-to-Railway lifecycle-event credential, 32+ characters |
+| `APP_ORIGIN` | Exact channel app origin used for the browser callback and safe returns in WorkOS mode |
+| `WORKOS_API_KEY` | WorkOS server API key; Railway-only |
+| `WORKOS_COOKIE_PASSWORD` | Unique 32+ character key for WorkOS sealed sessions; Railway-only |
+| `WORKOS_WEBHOOK_SECRET` | Exact WorkOS endpoint signing secret; Railway-only |
+| `ZEROS_SELF_HOSTED` | Public templates only: `true` allows installer-owned platform domains; frontend and API origins must differ; official deployments leave it unset |
 | `AUTH0_DOMAIN` | Legacy Auth0 fallback used only when explicit issuer/JWKS values are absent |
 | `PORT` | HTTP port, default `8080` |
 | `NODE_ENV` | Use `production` for production-safe error responses |
@@ -153,8 +160,9 @@ Before a production deployment:
 
 1. Provision PostgreSQL with backups and a pinned supported major version.
 2. Set `DATABASE_URL`, the selected provider's complete `AUTH_*` block, and
-   `NODE_ENV=production` in Railway. WorkOS mode includes an independent
-   `AUTH_BROKER_SECRET` shared with Pages, but never a WorkOS API key.
+   `NODE_ENV=production` in Railway. WorkOS mode additionally requires
+   `APP_ORIGIN`, `WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, and
+   `WORKOS_WEBHOOK_SECRET`. None belongs in Pages or a desktop build.
 3. Use the private PostgreSQL service URL, not a public database endpoint.
 4. Run the verification commands below against the exact commit being
    deployed.
@@ -170,13 +178,20 @@ backward compatible until deployed desktop versions no longer use the previous
 contract. Add new fields or routes first; remove old ones only after observed
 client migration.
 
-### WorkOS account lifecycle
+### WorkOS browser sessions and account lifecycle
 
-In WorkOS mode, `POST /internal/auth/workos/events` is mounted before bearer
-authentication and accepts only the matching `AUTH_BROKER_SECRET`. Cloudflare
-Pages verifies the provider's raw-body webhook signature first, reduces the
-payload to bounded `user.updated` or `user.deleted` fields, and forwards it
-through this independent channel credential.
+In WorkOS mode, `GET /auth/start`, `GET /auth/callback`,
+`GET /auth/browser/session`, `POST /auth/browser/refresh`, and
+`GET /auth/logout` are Railway-owned. Migration `0012` stores only SHA-256
+digests of random browser credentials and OAuth state. PKCE verifiers are
+single-use, access tokens are not stored as table columns, and encrypted sealed
+sessions are refreshed under a PostgreSQL advisory/row lock so multiple
+Railway replicas cannot race rotation.
+
+`POST /auth/workos-webhook` verifies WorkOS's signature over the exact raw body
+on Railway, then accepts only bounded `user.updated` and `user.deleted` events.
+The existing app-host endpoint is a stateless pass-through during rollout; new
+WorkOS endpoint configuration should target the channel API origin directly.
 
 Migration `0011_workos_identity_events.sql` records event IDs idempotently.
 Verified updates refresh a subject-linked profile; an occupied email records
