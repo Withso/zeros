@@ -1,3 +1,4 @@
+import { parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -15,6 +16,24 @@ vi.mock("../login-screen", () => ({
 }));
 
 import { AuthGate } from "../auth-gate";
+
+/** The text a user would actually read, via a real HTML parse. Stripping tags
+ *  with `replace(/<[^>]+>/g, "")` is an incomplete sanitizer (CodeQL
+ *  js/incomplete-multi-character-sanitization) and genuinely wrong here: an
+ *  unterminated `<script src=x` or a `>` inside an attribute value survives
+ *  the pass and reappears as "text". Parsing has neither blind spot. */
+const visibleText = (markup: string) => {
+  const text: string[] = [];
+  const visit = (node: DefaultTreeAdapterTypes.Node) => {
+    // `in`, not `nodeName === "#text"`: parse5 types Element.nodeName as a
+    // plain string, so the literal never narrows. Only TextNode has `value`
+    // (a comment carries `data`), which is the check document.ts already uses.
+    if ("value" in node) text.push(node.value);
+    if ("childNodes" in node) node.childNodes.forEach(visit);
+  };
+  parseFragment(markup).childNodes.forEach(visit);
+  return text.join("").trim();
+};
 
 describe("AuthGate startup loader", () => {
   afterEach(() => {
@@ -50,9 +69,7 @@ describe("AuthGate startup loader", () => {
     expect(markup).not.toContain("<img");
     expect(markup).not.toContain("zeros-boot-ascii");
     expect(markup).not.toContain("Starting Zeros");
-    expect(
-      markup.match(/class="zeros-boot-halftone-layer /g),
-    ).toHaveLength(5);
-    expect(markup.replace(/<[^>]+>/g, "").trim()).toBe("");
+    expect(markup.match(/class="zeros-boot-halftone-layer /g)).toHaveLength(5);
+    expect(visibleText(markup)).toBe("");
   });
 });

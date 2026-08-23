@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { parseFragment, type DefaultTreeAdapterTypes } from "parse5";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -19,6 +20,23 @@ const bootMarkup =
   beforeRenderer.match(/<div\s+id="zeros-boot"[\s\S]*?<\/div>/)?.[0] ?? "";
 const bootStyles =
   html.match(/<style id="zeros-boot-styles">([\s\S]*?)<\/style>/)?.[1] ?? "";
+/** The text a user would actually read, via a real HTML parse. Stripping tags
+ *  with `replace(/<[^>]+>/g, "")` is an incomplete sanitizer (CodeQL
+ *  js/incomplete-multi-character-sanitization) and genuinely wrong here: an
+ *  unterminated `<script src=x` or a `>` inside an attribute value survives
+ *  the pass and reappears as "text". Parsing has neither blind spot. */
+const visibleText = (markup: string) => {
+  const text: string[] = [];
+  const visit = (node: DefaultTreeAdapterTypes.Node) => {
+    // `in`, not `nodeName === "#text"`: parse5 types Element.nodeName as a
+    // plain string, so the literal never narrows. Only TextNode has `value`
+    // (a comment carries `data`), which is the check document.ts already uses.
+    if ("value" in node) text.push(node.value);
+    if ("childNodes" in node) node.childNodes.forEach(visit);
+  };
+  parseFragment(markup).childNodes.forEach(visit);
+  return text.join("").trim();
+};
 const halftoneLayers = (markup: string) =>
   Array.from(
     markup.matchAll(
@@ -52,16 +70,14 @@ describe("pre-React boot surface", () => {
     expect(bootMarkup).toContain('role="status"');
     expect(bootMarkup).toContain('aria-live="polite"');
     expect(bootMarkup).toContain('aria-label="Loading Zeros"');
-    expect(html).toContain(
-      'href="/apps/desktop/src/assets/zeros-logo.png"',
-    );
+    expect(html).toContain('href="/apps/desktop/src/assets/zeros-logo.png"');
     expect(bootMarkup).toContain('class="zeros-boot-logo"');
     expect(bootMarkup).toContain('class="zeros-boot-halftone"');
     expect(bootMarkup).toContain('aria-hidden="true"');
     expect(bootMarkup).not.toContain("<img");
     expect(bootMarkup).not.toContain("zeros-boot-ascii");
     expect(halftoneLayers(bootMarkup)).toHaveLength(5);
-    expect(bootMarkup.replace(/<[^>]+>/g, "").trim()).toBe("");
+    expect(visibleText(bootMarkup)).toBe("");
     expect(beforeRenderer).not.toContain("Starting Zeros");
     expect(beforeRenderer).toContain('<div id="root"></div>');
   });
@@ -115,7 +131,7 @@ describe("pre-React boot surface", () => {
     expect(markup).not.toContain("<img");
     expect(markup).not.toContain("zeros-boot-ascii");
     expect(markup).not.toContain("Starting Zeros");
-    expect(markup.replace(/<[^>]+>/g, "").trim()).toBe("");
+    expect(visibleText(markup)).toBe("");
     expect(halftoneLayers(markup)).toEqual(halftoneLayers(bootMarkup));
   });
 
