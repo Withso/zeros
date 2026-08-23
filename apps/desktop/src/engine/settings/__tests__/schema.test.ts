@@ -213,6 +213,7 @@ describe("sanitizeLayer", () => {
         fallback_model: "claude-sonnet-5[1m]",
         budget_cap_usd: 5,
         idle_timeout_minutes: 300,
+        auto_memory_enabled: false,
       },
     };
 
@@ -227,6 +228,7 @@ describe("sanitizeLayer", () => {
           claude_code: {
             fallback_model: "none",
             idle_timeout_minutes: 301,
+            auto_memory_enabled: "yes",
           },
         },
       },
@@ -237,6 +239,7 @@ describe("sanitizeLayer", () => {
     });
     expect(invalid.warnings).toEqual([
       expect.stringContaining("models.claude_code.idle_timeout_minutes"),
+      expect.stringContaining("models.claude_code.auto_memory_enabled"),
     ]);
   });
 

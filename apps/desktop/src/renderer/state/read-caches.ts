@@ -19,6 +19,10 @@ import type {
   Workspace,
 } from "../platform/git";
 import type { GithubAuthSnapshot } from "@zeros/protocol/github-auth";
+import type {
+  AgentMemorySettings,
+  AgentProviderQuota,
+} from "@zeros/protocol/agent-events";
 import type { FilesToCopyPreviewWire } from "../platform/bridge/workspace-bridge";
 import type { TurnInfo } from "../platform/turns";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
@@ -35,6 +39,12 @@ export const WORKING_DIRECTORIES_MAX_AGE_MS = 60_000;
 /** GitHub API reads: PRs/owners change on human timescales; probing more than
  *  once a minute per key burns rate limit for no visible benefit. */
 export const GITHUB_READ_MAX_AGE_MS = 60_000;
+
+/** Provider settings are host-local diagnostics. Reopening or switching the
+ * provider tab is not an invalidation; explicit writes and engine reconnects
+ * refresh these snapshots. The bounded freshness window still catches edits
+ * made directly in a provider's native configuration. */
+export const PROVIDER_DIAGNOSTIC_MAX_AGE_MS = 60_000;
 
 /** Keyed by workspace id — remote branches offered as PR targets. */
 export const remoteBranchesCache = new KeyedAsyncCache<Branch[]>(32);
@@ -153,6 +163,12 @@ export const ghAuthStatusCache = new KeyedAsyncCache<GithubAuthSnapshot>(1);
 
 /** Single-key ("owners") — authed user + orgs for the publish dialog. */
 export const ghOwnersCache = new KeyedAsyncCache<GithubOwner[]>(1);
+
+/** Provider-global usage limits and memory settings, keyed by agent id. */
+export const providerQuotaCache =
+  new KeyedAsyncCache<AgentProviderQuota | null>(8);
+export const providerMemorySettingsCache =
+  new KeyedAsyncCache<AgentMemorySettings>(8);
 
 /** Files-to-copy preview, keyed by `filesToCopyPreviewKey(repoRoot, patterns)`.
  *
@@ -287,6 +303,8 @@ export function invalidateAllEngineReadCaches(): void {
   pickerWorkspacesCache.invalidateAll();
   ghAuthStatusCache.invalidateAll();
   ghOwnersCache.invalidateAll();
+  providerQuotaCache.invalidateAll();
+  providerMemorySettingsCache.invalidateAll();
   filesToCopyPreviewCache.invalidateAll();
   workingDirectoriesCache.invalidateAll();
   // Turn rows are engine state too: a reset (or a turn settling) on ANOTHER

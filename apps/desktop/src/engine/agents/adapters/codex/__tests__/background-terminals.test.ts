@@ -120,6 +120,30 @@ describe("Codex background terminals", () => {
     ]);
   });
 
+  it("uses a product label instead of exposing a native id for an empty command", () => {
+    const snapshot = reconcileBackgroundTerminals(
+      new Map(),
+      [
+        {
+          itemId: "native-item-secret",
+          processId: "native-process-secret",
+          command: "",
+          cwd: "/repo",
+          osPid: 1,
+          cpuPercent: null,
+          rssKb: null,
+        },
+      ],
+      100,
+      () => "zeros-task-id",
+    );
+
+    expect(snapshot.active.get("zeros-task-id")?.name).toBe(
+      "Background terminal",
+    );
+    expect(snapshot.active.get("zeros-task-id")?.command).toBeUndefined();
+  });
+
   it("discovers loaded descendants across pages for resumed collaboration trees", async () => {
     const request = vi
       .fn()

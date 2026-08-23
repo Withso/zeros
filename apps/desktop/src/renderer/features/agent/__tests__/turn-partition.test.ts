@@ -25,6 +25,22 @@ const backgroundTask = (
     toolKind: "background_task",
     status,
   }) as unknown as AgentMessage;
+const liveTool = (
+  id: string,
+  status: "pending" | "in_progress" | "completed" | "failed",
+  settledAt: number,
+  updatedAt = settledAt,
+): AgentMessage =>
+  ({
+    kind: "tool",
+    id,
+    toolCallId: id,
+    toolKind: "read",
+    status,
+    createdAt: 1,
+    updatedAt,
+    ...(status === "completed" || status === "failed" ? { settledAt } : {}),
+  }) as unknown as AgentMessage;
 
 const ids = (xs: AgentMessage[]) => xs.map((m) => (m as { id: string }).id);
 
@@ -123,14 +139,28 @@ describe("partitionTurn", () => {
   });
 
   describe("live turns defer the answer boundary", () => {
-    it("keeps trailing text in the working group while live", () => {
-      // The provisional tail must stay in the feed (uniform spacing) instead
-      // of peeling out as a separated answer that snaps back the moment the
-      // next tool lands. See turn-event-list.tsx and the
-      // .zeros-working-feed rules in styles/global/runtime-content.css.
-      const events = [tool("a"), agentText("b")];
+    it("withholds provisional prose and unfinished tools", () => {
+      const events = [
+        agentText("provisional"),
+        liveTool("pending", "pending", 10),
+        liveTool("running", "in_progress", 20),
+      ];
       const { working, finalOutput } = partitionTurn(events, { live: true });
-      expect(ids(working)).toEqual(["a", "b"]);
+      expect(working).toEqual([]);
+      expect(finalOutput).toEqual([]);
+    });
+
+    it("reveals completed and failed tools in completion order", () => {
+      // Concurrent calls are stored in start order. If the second one finishes
+      // first, the first completed row must stay put when the earlier call
+      // later settles; otherwise the live list visibly jumps.
+      const events = [
+        liveTool("finished-second", "completed", 30, 40),
+        liveTool("finished-first", "failed", 20, 100),
+        agentText("still-provisional"),
+      ];
+      const { working, finalOutput } = partitionTurn(events, { live: true });
+      expect(ids(working)).toEqual(["finished-first", "finished-second"]);
       expect(finalOutput).toEqual([]);
     });
 
@@ -141,11 +171,11 @@ describe("partitionTurn", () => {
       );
     });
 
-    it("a live turn of only text stays working (no premature answer)", () => {
+    it("a live turn of only text stays unmounted until it is final", () => {
       const { working, finalOutput } = partitionTurn([agentText("only")], {
         live: true,
       });
-      expect(ids(working)).toEqual(["only"]);
+      expect(working).toEqual([]);
       expect(finalOutput).toEqual([]);
     });
   });

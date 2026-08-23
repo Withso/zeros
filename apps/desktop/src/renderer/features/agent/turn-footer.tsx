@@ -15,11 +15,12 @@
 // turn predates recording or the chat isn't a git repo.
 // ──────────────────────────────────────────────────────────
 
-import { memo, useCallback, useMemo, useState } from "react";
+import { memo, useCallback, useMemo, useRef, useState } from "react";
 import {
   Copy,
   Check,
   CircleDollarSign,
+  GitFork,
   LogIn,
   MoreHorizontal,
   Play,
@@ -159,6 +160,11 @@ export function canPreviewTurnFileDiff(
   file: Pick<TurnInfo["files"][number], "additions" | "deletions">,
 ): boolean {
   return file.additions > 0 || file.deletions > 0;
+}
+
+/** A fork snapshot must describe a terminal turn, never a moving stream. */
+export function canForkTurn(live: boolean, outputText: string): boolean {
+  return !live && outputText.trim().length > 0;
 }
 
 function baseName(p: string): string {
@@ -341,6 +347,11 @@ interface TurnFooterProps {
   /** One-click resume after a recoverable stop: sends "Continue"
    *  to the same session (full context kept). Provided by the chat shell. */
   onContinue?: (reason: "max_tokens" | "budget_exhausted") => void;
+  /** Zeros-native branch: opens a fresh conversation and stages this turn's
+   * concise transcript. Provider sessions are never cloned by this action. */
+  onFork?: () => void;
+  /** Warm the exact historical transcript when the menu item gains intent. */
+  onForkIntent?: () => void;
   /** Background CLI sign-in (Claude/Codex auth-required failures only). When
    *  provided alongside the SIGN IN REQUIRED status, the static pill becomes
    *  a clickable "Sign in" button that drives the CLI login headlessly and
@@ -360,6 +371,8 @@ export const TurnFooter = memo(function TurnFooter({
   retrying,
   isLastTurn,
   onContinue,
+  onFork,
+  onForkIntent,
   signInPhase,
   onSignIn,
 }: TurnFooterProps) {
@@ -372,6 +385,7 @@ export const TurnFooter = memo(function TurnFooter({
   const [copied, setCopied] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const forkSelectedRef = useRef(false);
 
   // The recorded turn (authoritative duration, status/stop reason, usage,
   // authored files) as keyed server state: a remount — every chat-tab switch,
@@ -400,6 +414,7 @@ export const TurnFooter = memo(function TurnFooter({
       .join("\n\n")
       .trim();
   }, [events]);
+  const forkEnabled = canForkTurn(live, outputText);
 
   const onCopy = useCallback(async () => {
     if (!outputText) return;
@@ -762,7 +777,32 @@ export const TurnFooter = memo(function TurnFooter({
               </button>
             </DropdownMenuTrigger>
           </Tooltip>
-          <DropdownMenuContent align="start" className="w-52">
+          <DropdownMenuContent
+            align="start"
+            className="w-52"
+            onCloseAutoFocus={(event) => {
+              if (!forkSelectedRef.current) return;
+              forkSelectedRef.current = false;
+              // The trigger belongs to the source tab, which the fork action
+              // just hid. Keep Radix from returning focus to that inert tree;
+              // the freshly active chat owns the next composer focus pass.
+              event.preventDefault();
+            }}
+          >
+            {onFork && (
+              <DropdownMenuItem
+                disabled={!forkEnabled}
+                onPointerEnter={onForkIntent}
+                onFocus={onForkIntent}
+                onSelect={() => {
+                  forkSelectedRef.current = true;
+                  onFork();
+                }}
+              >
+                <GitFork className="size-3.5" />
+                Fork to new tab
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem
               disabled={resetting}
               onSelect={() => {

@@ -78,6 +78,42 @@ describe("applyUpdate — shared agent-message coalescer", () => {
     expect(tool!.title).toBe("Read");
   });
 
+  it("keeps the first terminal timestamp stable across late tool metadata", () => {
+    let msgs = applyUpdate([], {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "t1",
+        title: "AskUserQuestion",
+        status: "in_progress",
+        at: 10,
+      },
+    } as unknown as SessionNotification);
+    msgs = applyUpdate(msgs, {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        status: "completed",
+        rawOutput: { vendor: "result" },
+        at: 20,
+      },
+    } as unknown as SessionNotification);
+    msgs = applyUpdate(msgs, {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        rawOutput: { zerosQuestion: { outcome: "answered" } },
+        at: 30,
+      },
+    } as unknown as SessionNotification);
+
+    const tool = msgs[0] as AgentToolMessage;
+    expect(tool.updatedAt).toBe(30);
+    expect(tool.settledAt).toBe(20);
+  });
+
   it("does not mutate the input array (pure reducer)", () => {
     const before: AgentMessage[] = [];
     const after = applyUpdate(before, agentChunk("x", "m1"));
@@ -105,6 +141,48 @@ describe("applyUpdate — shared agent-message coalescer", () => {
     expect(msgs).toHaveLength(1); // adopted, not a second bubble
     expect((msgs[0] as AgentTextMessage).messageId).toBe("u1");
     expect((msgs[0] as AgentTextMessage).text).toBe("hello");
+  });
+
+  it("does not fold ephemeral safety retry ids into durable messages", () => {
+    const before: AgentMessage[] = [];
+    const after = applyUpdate(before, {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "safety_review_retry_available",
+        toolCallId: "review-1",
+        retryId: "opaque-retry",
+      },
+    });
+    expect(after).toBe(before);
+  });
+
+  it("coalesces a duration-only thinking completion onto the existing row", () => {
+    let msgs: AgentMessage[] = [];
+    msgs = applyUpdate(msgs, {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "checking" },
+        messageId: "thought-1",
+      },
+    });
+    msgs = applyUpdate(msgs, {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "" },
+        messageId: "thought-1",
+        durationMs: 2_400,
+      },
+    });
+
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({
+      kind: "text",
+      role: "thought",
+      text: "checking",
+      durationMs: 2_400,
+    });
   });
 });
 

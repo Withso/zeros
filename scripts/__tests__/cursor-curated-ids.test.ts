@@ -83,8 +83,18 @@ describe("resolvesAgainst", () => {
     // instead of weekly in the keyed job.
     const catalog = JSON.parse(
       readFileSync(path.join(ROOT, "catalogs", "models-v1.json"), "utf-8"),
-    ) as { families: { cursor: Array<{ value: string }> } };
-    const curated = catalog.families.cursor.map((m) => m.value);
+    ) as {
+      families: {
+        cursor: Array<{ value: string; liveRequired?: boolean }>;
+      };
+    };
+    const router = catalog.families.cursor.find(
+      (model) => model.value === "default",
+    );
+    expect(router?.liveRequired).toBe(true);
+    const curated = catalog.families.cursor
+      .filter((model) => model.liveRequired !== true)
+      .map((model) => model.value);
 
     expect(curated.length).toBeGreaterThan(0); // an empty list would prove nothing
     for (const id of curated) {

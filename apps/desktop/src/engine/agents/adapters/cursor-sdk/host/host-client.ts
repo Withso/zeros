@@ -52,6 +52,9 @@ import type {
   SdkAgent,
   SdkRun,
   CursorLocalStore,
+  CursorModelListItem,
+  CursorSdkSendOptions,
+  CursorAgentUsage,
 } from "../adapter";
 
 /** A reconstructed SDK error carrying the fields the adapter's classifier
@@ -115,6 +118,11 @@ const MAX_PARTIAL_LINE_CHARS = 32 * 1024 * 1024;
  * `warming` forever. `run.wait` explicitly opts out because it spans the
  * user-visible model turn and is cancelled by the owning prompt lifecycle. */
 const CONTROL_REQUEST_TIMEOUT_MS = 30_000;
+
+type HostRunQueueItem =
+  | { zerosCursorHostEvent: "message"; value: unknown }
+  | { zerosCursorHostEvent: "delta"; value: unknown }
+  | { zerosCursorHostEvent: "step"; value: unknown };
 
 export function toHostError(e: SerializedHostError | undefined): Error {
   const err = new Error(e?.message ?? "cursor host error") as Error & {
@@ -210,7 +218,7 @@ export class CursorHostClient {
   private nextReqId = 1;
   private nextRunId = 1;
   private readonly pending = new Map<number, Pending>();
-  private readonly queues = new Map<string, AsyncMsgQueue>();
+  private readonly queues = new Map<string, AsyncMsgQueue<HostRunQueueItem>>();
   /** Captured from a `fatal` line so the rejection that follows host death can
    *  explain WHY (e.g. @cursor/sdk couldn't load) instead of "host exited". */
   private fatalMessage: string | null = null;
@@ -317,7 +325,11 @@ export class CursorHostClient {
         const q = this.queues.get(runId);
         if (!q) return;
         if (m.ev === "run.msg") {
-          q.push(m.msg);
+          q.push({ zerosCursorHostEvent: "message", value: m.msg });
+        } else if (m.ev === "run.delta") {
+          q.push({ zerosCursorHostEvent: "delta", value: m.update });
+        } else if (m.ev === "run.step") {
+          q.push({ zerosCursorHostEvent: "step", value: m.step });
         } else if (m.ev === "run.streamEnd") {
           q.end();
           this.queues.delete(runId);
@@ -480,41 +492,83 @@ export class CursorHostClient {
   private makeRun(
     runId: string,
     sdkRunId: string | null,
-    queue: AsyncMsgQueue,
+    queue: AsyncMsgQueue<HostRunQueueItem>,
+    observers: Pick<CursorSdkSendOptions, "onDelta" | "onStep">,
   ): SdkRun {
     return {
       id: sdkRunId ?? undefined,
-      stream: () => queue[Symbol.asyncIterator](),
+      stream: async function* () {
+        for await (const item of queue) {
+          if (item.zerosCursorHostEvent === "delta") {
+            await observers.onDelta?.({ update: item.value });
+          } else if (item.zerosCursorHostEvent === "step") {
+            await observers.onStep?.({ step: item.value });
+          } else {
+            yield item.value;
+          }
+        }
+      },
       wait: () =>
-        this.request<{ status?: string; result?: string } | null>(
+        this.request<Awaited<ReturnType<SdkRun["wait"]>> | null>(
           "run.wait",
           { runId },
           0,
         ).then((r) => r ?? undefined),
-      cancel: () => this.request<void>("run.cancel", { runId }).then(() => {}),
+      cancel: async () => {
+        try {
+          await this.request<void>("run.cancel", { runId });
+        } finally {
+          // Cancellation is a hard local ordering boundary. End/delete first
+          // so provider callbacks already in flight cannot mutate a stopped
+          // turn after the host acknowledges the abort.
+          queue.end();
+          this.queues.delete(runId);
+        }
+      },
     };
   }
 
   private makeAgent(agentId: string): SdkAgent {
     return {
       agentId,
-      send: async (message: unknown, options?: unknown): Promise<SdkRun> => {
+      send: async (
+        message: unknown,
+        options?: CursorSdkSendOptions,
+      ): Promise<SdkRun> => {
         // Assign the runId + register its stream queue BEFORE the request, so a
         // run.msg event can never arrive before its queue exists.
         const runId = String(this.nextRunId++);
-        const queue = new AsyncMsgQueue();
+        const queue = new AsyncMsgQueue<HostRunQueueItem>();
         this.queues.set(runId, queue);
+        const { onDelta, onStep, ...wireOptions } = options ?? {};
         try {
           const res = await this.request<{ sdkRunId: string | null }>(
             "agent.send",
-            { agentId, runId, message, options: options ?? {} },
+            {
+              agentId,
+              runId,
+              message,
+              options: wireOptions,
+              observers: {
+                delta: typeof onDelta === "function",
+                step: typeof onStep === "function",
+              },
+            },
           );
-          return this.makeRun(runId, res?.sdkRunId ?? null, queue);
+          return this.makeRun(runId, res?.sdkRunId ?? null, queue, {
+            onDelta,
+            onStep,
+          });
         } catch (err) {
           this.queues.delete(runId);
           throw err;
         }
       },
+      getUsage: (options) =>
+        this.request<CursorAgentUsage>("agent.getUsage", {
+          agentId,
+          options: options ?? {},
+        }),
       close: () => {
         // Fire-and-forget; swallow rejection (host may already be gone).
         void this.request("agent.close", { agentId }).catch(() => {});
@@ -567,7 +621,7 @@ export class CursorHostClient {
       Cursor: {
         models: {
           list: (opts) =>
-            this.request<Array<{ id?: string; displayName?: string }>>(
+            this.request<CursorModelListItem[]>(
               "models.list",
               { opts: opts ?? {} },
             ),

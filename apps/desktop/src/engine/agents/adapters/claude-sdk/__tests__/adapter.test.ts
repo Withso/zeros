@@ -1003,8 +1003,10 @@ describe("ClaudeSdkAdapter", () => {
     });
 
     const getOAuthToken = (
-      captured[0] as typeof captured[number] & {
-        getOAuthToken?: (options: { signal: AbortSignal }) => Promise<string | null>;
+      captured[0] as (typeof captured)[number] & {
+        getOAuthToken?: (options: {
+          signal: AbortSignal;
+        }) => Promise<string | null>;
       }
     ).getOAuthToken;
     expect(getOAuthToken).toBeTypeOf("function");
@@ -1025,7 +1027,11 @@ describe("ClaudeSdkAdapter", () => {
     "CLAUDE_CODE_OAUTH_TOKEN",
   ])("does not override an explicit %s credential", async (credentialName) => {
     const { queryFn, captured } = makeScriptedQuery([
-      [initMsg("sdk-explicit-auth"), assistantText("ok"), resultOk("sdk-explicit-auth")],
+      [
+        initMsg("sdk-explicit-auth"),
+        assistantText("ok"),
+        resultOk("sdk-explicit-auth"),
+      ],
     ]);
     const oauthTokenProvider = vi.fn(async () => "host-access-token");
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), {
@@ -1042,7 +1048,7 @@ describe("ClaudeSdkAdapter", () => {
     });
 
     expect(
-      (captured[0] as typeof captured[number] & { getOAuthToken?: unknown })
+      (captured[0] as (typeof captured)[number] & { getOAuthToken?: unknown })
         .getOAuthToken,
     ).toBeUndefined();
     expect(oauthTokenProvider).not.toHaveBeenCalled();
@@ -3145,6 +3151,61 @@ describe("ClaudeSdkAdapter", () => {
     await adapter.dispose();
   });
 
+  it("passes Claude auto-memory as an explicit live-mutable SDK setting", async () => {
+    const { queryFn, captured, control } = makeScriptedQuery([
+      [initMsg("sdk-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({
+      cwd: "/tmp",
+      env: { ZEROS_CLAUDE_AUTO_MEMORY: "0" },
+    });
+    void adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    await tick();
+
+    expect(
+      (captured[0]?.settings as { autoMemoryEnabled?: boolean })
+        .autoMemoryEnabled,
+    ).toBe(false);
+
+    await adapter.updateConfig({
+      sessionId: session.sessionId,
+      env: { ZEROS_CLAUDE_AUTO_MEMORY: "1" },
+    });
+    expect(
+      (
+        control.flagSettings.at(-1) as {
+          autoMemoryEnabled?: boolean;
+        }
+      ).autoMemoryEnabled,
+    ).toBe(true);
+    await adapter.dispose();
+  });
+
+  it("force-disables auto memory in the provider-native Design fallback", async () => {
+    const { queryFn, captured } = makeScriptedQuery([
+      [initMsg("sdk-1"), resultOk("sdk-1")],
+    ]);
+    const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
+    const { session } = await adapter.newSession({
+      cwd: "/tmp/zeros-contained",
+      env: { ZEROS_CLAUDE_AUTO_MEMORY: "1" },
+      territory: codeTerritory(),
+    });
+    await adapter.prompt({
+      sessionId: session.sessionId,
+      prompt: [textBlock("hi")] as never,
+    });
+    expect(
+      (captured[0]?.settings as { autoMemoryEnabled?: boolean })
+        .autoMemoryEnabled,
+    ).toBe(false);
+    await adapter.dispose();
+  });
+
   it("keeps additional directories out of a Design-contained session", async () => {
     const { queryFn, captured } = makeScriptedQuery([
       [initMsg("sdk-1"), resultOk("sdk-1")],
@@ -4285,9 +4346,7 @@ describe("ClaudeSdkAdapter.steer", () => {
     const { queryFn } = makeScriptedQuery([]);
     const adapter = new ClaudeSdkAdapter(makeCtx([], []), { queryFn });
     const init = await adapter.initialize();
-    expect(
-      (init.agentCapabilities as unknown as { steering?: boolean })?.steering,
-    ).toBe(true);
+    expect(init.agentCapabilities?.steering).toBe(true);
     await adapter.dispose();
   });
 

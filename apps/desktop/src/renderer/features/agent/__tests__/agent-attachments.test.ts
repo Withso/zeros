@@ -67,6 +67,14 @@ describe("modelContextTokens", () => {
     );
   });
 
+  it("keeps the live-only Cursor Router on the conservative fallback", () => {
+    // The runtime supplies the Router's actual model choice per turn; there is
+    // no stable context window to encode before a live provider admits it.
+    expect(modelContextTokens("default")).toBe(
+      modelContextTokens("totally-unknown-model"),
+    );
+  });
+
   it("falls back for unknown / empty ids without throwing", () => {
     expect(modelContextTokens(null)).toBeGreaterThan(0);
     expect(modelContextTokens("totally-unknown-model")).toBeGreaterThan(0);
@@ -78,8 +86,11 @@ describe("modelContextTokens", () => {
     // exception (see above).
     const fallback = modelContextTokens("totally-unknown-model");
     for (const [family, list] of Object.entries(catalog.families)) {
-      for (const m of list as Array<{ value: string }>) {
-        if (m.value === "grok-4.5") continue;
+      for (const m of list as Array<{
+        value: string;
+        liveRequired?: boolean;
+      }>) {
+        if (m.value === "grok-4.5" || m.liveRequired === true) continue;
         expect(modelContextTokens(m.value), `${family}/${m.value}`).not.toBe(
           fallback,
         );

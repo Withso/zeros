@@ -22,6 +22,7 @@ vi.mock(
 );
 
 import {
+  canForkTurn,
   canPreviewTurnFileDiff,
   isInterruptedTurn,
   TurnFilePill,
@@ -103,6 +104,14 @@ describe("canPreviewTurnFileDiff", () => {
 
   it("keeps metadata-only 0/0 pills on the lightweight path", () => {
     expect(canPreviewTurnFileDiff({ additions: 0, deletions: 0 })).toBe(false);
+  });
+});
+
+describe("canForkTurn", () => {
+  it("requires a settled turn with actual agent output", () => {
+    expect(canForkTurn(false, "final answer")).toBe(true);
+    expect(canForkTurn(true, "partial streamed answer")).toBe(false);
+    expect(canForkTurn(false, "")).toBe(false);
   });
 });
 

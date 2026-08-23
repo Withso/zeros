@@ -65,6 +65,7 @@ import {
   Lock,
   Globe2,
   ChevronRight,
+  Trash2,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -72,10 +73,31 @@ import {
   useWorkspaceDispatch,
   useWorkspaceStore,
 } from "../../state/store";
+import { useCachedRead } from "../../state/use-cached-read";
+import {
+  providerMemorySettingsCache,
+  providerQuotaCache,
+  PROVIDER_DIAGNOSTIC_MAX_AGE_MS,
+} from "../../state/read-caches";
 import { Button, Input } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
+import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
 import { Switch } from "../../shared/ui/primitives/switch";
+import {
+  Tabs,
+  TabsContent,
+  TabsList,
+  TabsTrigger,
+} from "../../shared/ui/primitives/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "../../shared/ui/primitives/dialog";
 import {
   Select,
   SelectContent,
@@ -106,6 +128,7 @@ import { OpenSettingsFileButton } from "../../shared/ui/open-settings-file-butto
 import { GitHubSection } from "./github-section";
 import { prefetchGithubAuthSnapshot } from "./github-auth-prefetch";
 import { JoinTeamDialog } from "../team/join-team-dialog";
+import { retainedDialogOpen } from "./retained-surface";
 import {
   consumePendingInviteToken,
   subscribePendingInvite,
@@ -147,11 +170,16 @@ import {
   DEFAULT_BUDGET_CAP_USD,
   DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
   useClaudeBudgetCap,
+  useClaudeAutoMemoryEnabled,
   useClaudeFallbackModel,
   useClaudeIdleTimeoutMinutes,
 } from "../agent/reliability-settings";
 import { AgentIcon } from "../agent/agent-icon";
 import { useDefaultAgent, pickDefaultAgentId } from "./default-agent";
+import type {
+  AgentMemorySettings,
+  AgentProviderQuota,
+} from "@zeros/protocol/agent-events";
 
 type SectionId =
   | "general"
@@ -1089,12 +1117,74 @@ function IntegrationsPanel({
 const MODELS_SECTION_CLS =
   "bg-bg1-highlight divide-border1 rounded-lg px-3 [&>*]:py-3";
 
-function ModelsPanel() {
+function quotaResetLabel(resetsAt: number | undefined, now = Date.now()) {
+  if (resetsAt === undefined || !Number.isFinite(resetsAt)) return null;
+  const remaining = resetsAt - now;
+  if (remaining <= 0) return "reset pending";
+  if (remaining < 60 * 60 * 1_000) {
+    return `resets in ${Math.max(1, Math.ceil(remaining / 60_000))}m`;
+  }
+  if (remaining < 24 * 60 * 60 * 1_000) {
+    return `resets in ${Math.max(1, Math.ceil(remaining / 3_600_000))}h`;
+  }
+  return `resets ${new Intl.DateTimeFormat(undefined, {
+    weekday: "long",
+  }).format(new Date(resetsAt))}`;
+}
+
+function UsageLimitsBlock({ quota }: { quota: AgentProviderQuota | null }) {
+  if (!quota) return null;
+  const windowValue = (window: AgentProviderQuota["primary"]) => {
+    if (!window) return "Unavailable";
+    const reset = quotaResetLabel(window.resetsAt);
+    return `${Math.round(window.usedPercent)}% used${reset ? ` · ${reset}` : ""}`;
+  };
+  const credits = quota.credits
+    ? quota.credits.unlimited
+      ? "Unlimited"
+      : quota.credits.available
+        ? quota.credits.balance
+          ? `${quota.credits.balance} available`
+          : "Available"
+        : "Unavailable"
+    : "Unavailable";
+  return (
+    <div className="mt-4">
+      <div className="text-fg2 mb-2 px-1 text-xs font-medium">Usage limits</div>
+      <SettingsList className={MODELS_SECTION_CLS}>
+        <SettingsRow label="Primary">
+          <span className="text-fg2 text-xs tabular-nums">
+            {windowValue(quota.primary)}
+          </span>
+        </SettingsRow>
+        <SettingsRow label="Secondary">
+          <span className="text-fg2 text-xs tabular-nums">
+            {windowValue(quota.secondary)}
+          </span>
+        </SettingsRow>
+        <SettingsRow label="Credits">
+          <span className="text-fg2 text-xs tabular-nums">{credits}</span>
+        </SettingsRow>
+      </SettingsList>
+    </div>
+  );
+}
+
+function ModelsPanel({ surfaceActive = false }: { surfaceActive?: boolean }) {
   const sessions = useAgentSessions();
   const bridgeStatus = useBridgeStatus();
+  const [providerSettingsTab, setProviderSettingsTab] = useState<
+    "claude" | "codex"
+  >("claude");
+  const [codexMemoryBusy, setCodexMemoryBusy] = useState(false);
+  const [resetMemoryOpen, setResetMemoryOpen] = useState(false);
   const agents = useAgentsSnapshot();
   const { isEnabled } = useEnabledAgents();
   const { agentId: defaultAgentId, setDefault } = useDefaultAgent();
+
+  useEffect(() => {
+    if (!surfaceActive) setResetMemoryOpen(false);
+  }, [surfaceActive]);
 
   // Populate the shared agent-registry cache (same pattern as the "+" menu)
   // so the model list has data; stale-while-revalidate from the cache.
@@ -1103,11 +1193,37 @@ function ModelsPanel() {
     listAgentsRef.current = sessions.listAgents;
   }, [sessions]);
   useEffect(() => {
-    if (bridgeStatus !== "connected") return;
+    if (!surfaceActive || bridgeStatus !== "connected") return;
     loadAgents((force) => listAgentsRef.current(force)).catch(() => {
       /* engine respawn / bridge blip — the next connect re-runs */
     });
-  }, [bridgeStatus]);
+  }, [bridgeStatus, surfaceActive]);
+
+  const codexDiagnosticsActive =
+    surfaceActive &&
+    providerSettingsTab === "codex" &&
+    bridgeStatus === "connected";
+  const quotaRead = useCachedRead(
+    providerQuotaCache,
+    codexDiagnosticsActive ? "codex" : null,
+    (agentId) => sessions.readProviderQuota(agentId),
+    { maxAgeMs: PROVIDER_DIAGNOSTIC_MAX_AGE_MS },
+  );
+  const memoryRead = useCachedRead(
+    providerMemorySettingsCache,
+    codexDiagnosticsActive ? "codex" : null,
+    (agentId) => sessions.readMemorySettings(agentId),
+    { maxAgeMs: PROVIDER_DIAGNOSTIC_MAX_AGE_MS },
+  );
+  const codexQuota = quotaRead.data ?? null;
+  const codexMemory = memoryRead.data ?? null;
+
+  useEffect(() => {
+    if (!codexDiagnosticsActive || !memoryRead.error) return;
+    toast.error("Couldn't read Codex memory settings", {
+      description: memoryRead.error.message,
+    });
+  }, [codexDiagnosticsActive, memoryRead.error]);
 
   // Runnable, enabled agents whose family we have a curated catalog for
   // (claude / codex / cursor), name-sorted for a stable dropdown.
@@ -1136,6 +1252,8 @@ function ModelsPanel() {
   const [titleModel, setTitleModel] = useChatTitleModel();
   // Claude reliability knobs (fallback model + per-turn budget).
   const [fallbackModel, setFallbackModel] = useClaudeFallbackModel();
+  const [claudeAutoMemoryEnabled, setClaudeAutoMemoryEnabled] =
+    useClaudeAutoMemoryEnabled();
   const [budgetCap, setBudgetCap] = useClaudeBudgetCap();
   const [idleTimeoutMinutes, setIdleTimeoutMinutes] =
     useClaudeIdleTimeoutMinutes();
@@ -1147,6 +1265,51 @@ function ModelsPanel() {
     for (const chat of useWorkspaceStore.getState().chats) {
       if (agentFamily(chat.agentId) === "claude")
         sessions.updateConfig(chat.id);
+    }
+  };
+
+  const updateCodexMemory = async (
+    settings: Partial<
+      Pick<
+        AgentMemorySettings,
+        "localMemoriesEnabled" | "toolAssistedGenerationEnabled"
+      >
+    >,
+  ) => {
+    if (!codexMemory || codexMemoryBusy) return;
+    const previous = codexMemory;
+    providerMemorySettingsCache.setData("codex", {
+      ...codexMemory,
+      ...settings,
+    });
+    setCodexMemoryBusy(true);
+    try {
+      providerMemorySettingsCache.setData(
+        "codex",
+        await sessions.updateMemorySettings("codex", settings),
+      );
+    } catch (error) {
+      providerMemorySettingsCache.setData("codex", previous);
+      toast.error("Couldn't update Codex memory", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setCodexMemoryBusy(false);
+    }
+  };
+
+  const deleteCodexMemories = async () => {
+    if (codexMemoryBusy) return;
+    setCodexMemoryBusy(true);
+    try {
+      await sessions.resetMemory("codex");
+      setResetMemoryOpen(false);
+    } catch (error) {
+      toast.error("Couldn't delete Codex memories", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setCodexMemoryBusy(false);
     }
   };
   // The $-amount field edits locally and commits on blur/Enter so a
@@ -1294,118 +1457,232 @@ function ModelsPanel() {
         </SettingsRow>
       </SettingsList>
 
-      {/* Reliability: what happens when the chosen model is
-          overloaded or unavailable. Claude Code only (SDK-native) — the
-          section's "Claude" title makes that explicit (2026-07-20: the
-          per-row CLAUDE scope pills were replaced by this one heading). */}
-      <SettingsSection title="Claude">
-        <SettingsList className={MODELS_SECTION_CLS}>
-          <SettingsRow
-            label="Keep sessions active"
-            hint={
-              <>
-                <span className="block">
-                  How long Claude stays ready between turns
-                </span>
-                {idleTimeoutMinutes > DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES && (
-                  <span className="text-yellow-fg block">
-                    Longer sessions use more memory.
-                  </span>
-                )}
-              </>
-            }
-          >
-            <Select
-              value={String(idleTimeoutMinutes)}
-              onValueChange={(value) => {
-                const option = CLAUDE_IDLE_TIMEOUT_OPTIONS.find(
-                  (candidate) => String(candidate.minutes) === value,
-                );
-                if (!option) return;
-                setIdleTimeoutMinutes(option.minutes);
-                applyClaudeSettings();
-              }}
-            >
-              <SelectTrigger className="min-w-[150px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="min-w-[180px]">
-                {CLAUDE_IDLE_TIMEOUT_OPTIONS.map((option) => (
-                  <SelectItem
-                    key={option.minutes}
-                    value={String(option.minutes)}
-                  >
-                    {option.label}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </SettingsRow>
-          <SettingsRow
-            label="Fallback model"
-            hint="Used automatically when the primary model is overloaded or unavailable"
-          >
-            <Select
-              value={fallbackModel ?? "none"}
-              onValueChange={(v) => {
-                setFallbackModel(v === "none" ? null : v);
-                applyClaudeSettings();
-              }}
-            >
-              <SelectTrigger className="min-w-[150px]">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent className="min-w-[180px]">
-                {claudeModels.map((m) => (
-                  <SelectItem key={m.value} value={m.value}>
-                    {displayModelLabel("claude", m.label)}
-                  </SelectItem>
-                ))}
-                <SelectItem value="none">None (fail fast)</SelectItem>
-              </SelectContent>
-            </Select>
-          </SettingsRow>
-          {/* Budget: a hard per-turn ceiling that ends a turn cleanly
-          instead of letting it run away. Off by default. */}
-          <SettingsRow
-            label="Cap spend per turn"
-            hint="Ends the turn with a Turn-stopped record once the cap is hit"
-          >
-            <Switch
-              checked={budgetCap != null}
-              onCheckedChange={(on) => {
-                setBudgetCap(on ? DEFAULT_BUDGET_CAP_USD : null);
-                setBudgetDraft(null);
-                applyClaudeSettings();
-              }}
-              aria-label="Cap spend per turn"
-            />
-          </SettingsRow>
-          {budgetCap != null && (
-            <SettingsRow
-              label="Maximum per turn"
-              hint="The turn ends cleanly when it reaches this amount."
-            >
-              <div className="flex items-center gap-1.5">
-                <span className="text-muted-fg text-xs">$</span>
-                <Input
-                  type="number"
-                  min={0.5}
-                  step={0.5}
-                  value={budgetDraft ?? budgetCap.toFixed(2)}
-                  onChange={(e) => setBudgetDraft(e.target.value)}
-                  onBlur={commitBudgetDraft}
-                  onKeyDown={(e) => {
-                    if (e.key === "Enter") commitBudgetDraft();
+      <SettingsSection title="Provider settings">
+        <Tabs
+          value={providerSettingsTab}
+          onValueChange={(value) =>
+            setProviderSettingsTab(value as "claude" | "codex")
+          }
+        >
+          <TabsList aria-label="Provider settings" className="mb-2">
+            <TabsTrigger value="claude">Claude</TabsTrigger>
+            <TabsTrigger value="codex">Codex</TabsTrigger>
+          </TabsList>
+          <TabsContent value="claude" className="mt-0">
+            <SettingsList className={MODELS_SECTION_CLS}>
+              <SettingsRow
+                label="Auto memory"
+                hint="Let Claude remember useful project context for future chats"
+              >
+                <Switch
+                  checked={claudeAutoMemoryEnabled}
+                  onCheckedChange={(enabled) => {
+                    setClaudeAutoMemoryEnabled(enabled);
+                    applyClaudeSettings();
                   }}
-                  className="w-24 text-right font-mono tabular-nums"
-                  aria-label="Maximum spend per turn in dollars"
+                  aria-label="Claude auto memory"
                 />
-              </div>
-            </SettingsRow>
-          )}
-        </SettingsList>
+              </SettingsRow>
+              <SettingsRow
+                label="Keep sessions active"
+                hint={
+                  <>
+                    <span className="block">
+                      How long Claude stays ready between turns
+                    </span>
+                    {idleTimeoutMinutes >
+                      DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES && (
+                      <span className="text-yellow-fg block">
+                        Longer sessions use more memory.
+                      </span>
+                    )}
+                  </>
+                }
+              >
+                <Select
+                  value={String(idleTimeoutMinutes)}
+                  onValueChange={(value) => {
+                    const option = CLAUDE_IDLE_TIMEOUT_OPTIONS.find(
+                      (candidate) => String(candidate.minutes) === value,
+                    );
+                    if (!option) return;
+                    setIdleTimeoutMinutes(option.minutes);
+                    applyClaudeSettings();
+                  }}
+                >
+                  <SelectTrigger className="min-w-[150px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="min-w-[180px]">
+                    {CLAUDE_IDLE_TIMEOUT_OPTIONS.map((option) => (
+                      <SelectItem
+                        key={option.minutes}
+                        value={String(option.minutes)}
+                      >
+                        {option.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </SettingsRow>
+              <SettingsRow
+                label="Fallback model"
+                hint="Used automatically when the primary model is overloaded or unavailable"
+              >
+                <Select
+                  value={fallbackModel ?? "none"}
+                  onValueChange={(v) => {
+                    setFallbackModel(v === "none" ? null : v);
+                    applyClaudeSettings();
+                  }}
+                >
+                  <SelectTrigger className="min-w-[150px]">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="min-w-[180px]">
+                    {claudeModels.map((m) => (
+                      <SelectItem key={m.value} value={m.value}>
+                        {displayModelLabel("claude", m.label)}
+                      </SelectItem>
+                    ))}
+                    <SelectItem value="none">None (fail fast)</SelectItem>
+                  </SelectContent>
+                </Select>
+              </SettingsRow>
+              {/* Budget: a hard per-turn ceiling that ends a turn cleanly
+          instead of letting it run away. Off by default. */}
+              <SettingsRow
+                label="Cap spend per turn"
+                hint="Ends the turn with a Turn-stopped record once the cap is hit"
+              >
+                <Switch
+                  checked={budgetCap != null}
+                  onCheckedChange={(on) => {
+                    setBudgetCap(on ? DEFAULT_BUDGET_CAP_USD : null);
+                    setBudgetDraft(null);
+                    applyClaudeSettings();
+                  }}
+                  aria-label="Cap spend per turn"
+                />
+              </SettingsRow>
+              {budgetCap != null && (
+                <SettingsRow
+                  label="Maximum per turn"
+                  hint="The turn ends cleanly when it reaches this amount."
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-muted-fg text-xs">$</span>
+                    <Input
+                      type="number"
+                      min={0.5}
+                      step={0.5}
+                      value={budgetDraft ?? budgetCap.toFixed(2)}
+                      onChange={(e) => setBudgetDraft(e.target.value)}
+                      onBlur={commitBudgetDraft}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitBudgetDraft();
+                      }}
+                      className="w-24 text-right font-mono tabular-nums"
+                      aria-label="Maximum spend per turn in dollars"
+                    />
+                  </div>
+                </SettingsRow>
+              )}
+            </SettingsList>
+          </TabsContent>
+          <TabsContent value="codex" className="mt-0">
+            <SettingsList className={MODELS_SECTION_CLS}>
+              <SettingsRow
+                label="Local memories"
+                hint="Let Codex learn reusable project context on this device"
+              >
+                <Switch
+                  checked={codexMemory?.localMemoriesEnabled ?? false}
+                  disabled={
+                    bridgeStatus !== "connected" ||
+                    !codexMemory ||
+                    codexMemoryBusy
+                  }
+                  onCheckedChange={(enabled) =>
+                    void updateCodexMemory({ localMemoriesEnabled: enabled })
+                  }
+                  aria-label="Codex local memories"
+                />
+              </SettingsRow>
+              <SettingsRow
+                label="Learn from tool-assisted chats"
+                hint="Allow chats that use tools to contribute local memories"
+              >
+                <Switch
+                  checked={codexMemory?.toolAssistedGenerationEnabled ?? false}
+                  disabled={
+                    bridgeStatus !== "connected" ||
+                    !codexMemory ||
+                    !codexMemory.localMemoriesEnabled ||
+                    codexMemoryBusy
+                  }
+                  onCheckedChange={(enabled) =>
+                    void updateCodexMemory({
+                      toolAssistedGenerationEnabled: enabled,
+                    })
+                  }
+                  aria-label="Codex tool-assisted memory generation"
+                />
+              </SettingsRow>
+              <SettingsRow
+                label="Delete local memories"
+                hint="Remove memories Codex has learned on this device"
+              >
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={
+                    bridgeStatus !== "connected" ||
+                    !codexMemory?.canReset ||
+                    codexMemoryBusy
+                  }
+                  onClick={() => setResetMemoryOpen(true)}
+                >
+                  <Trash2 className="size-3.5" />
+                  Delete
+                </Button>
+              </SettingsRow>
+            </SettingsList>
+            <UsageLimitsBlock quota={codexQuota} />
+          </TabsContent>
+        </Tabs>
       </SettingsSection>
+
+      <Dialog
+        open={retainedDialogOpen(surfaceActive, resetMemoryOpen)}
+        onOpenChange={setResetMemoryOpen}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Delete Codex memories?</DialogTitle>
+            <DialogDescription>
+              This removes the local memories Codex has learned on this device.
+              It does not delete your Zeros chats.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              onClick={() => setResetMemoryOpen(false)}
+              disabled={codexMemoryBusy}
+            >
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              loading={codexMemoryBusy}
+              onClick={() => void deleteCodexMemories()}
+            >
+              Delete memories
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

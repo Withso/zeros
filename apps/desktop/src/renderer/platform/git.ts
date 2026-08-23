@@ -275,6 +275,14 @@ export interface FileChange {
   oldPath?: string;
 }
 
+/** Content-free row returned when a whole-tree patch is too large to
+ * materialize safely. The selected file still loads its exact patch. */
+export interface DiffFileSummary extends FileChange {
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
 export interface Hunk {
   filePath: string;
   oldStart: number;
@@ -1181,8 +1189,15 @@ export interface ChangeLineCounts {
   deletions: number;
 }
 
-export async function gitStatus(workspaceId: string): Promise<StatusResult> {
-  return bridgeGitStatus(requireBridge("read Git status"), workspaceId);
+export async function gitStatus(
+  workspaceId: string,
+  options: { paths?: string[]; includeTracking?: boolean } = {},
+): Promise<StatusResult> {
+  return bridgeGitStatus(
+    requireBridge("read Git status"),
+    workspaceId,
+    options,
+  );
 }
 
 export async function gitChangeCounts(
@@ -1333,7 +1348,13 @@ export async function gitDiff(args: {
   base?: string;
   head?: string;
   rawPatch?: boolean;
-}): Promise<{ hunks: Hunk[]; patch?: string }> {
+  summaryLimit?: number;
+}): Promise<{
+  hunks: Hunk[];
+  patch?: string;
+  files?: DiffFileSummary[];
+  summary?: boolean;
+}> {
   return bridgeGitDiff(requireBridge("read the Git diff"), args);
 }
 

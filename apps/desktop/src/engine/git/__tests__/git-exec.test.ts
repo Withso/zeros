@@ -321,6 +321,28 @@ describe("runFile — Bun native subprocess boundary", () => {
     });
   });
 
+  it("labels a native subprocess killed at its output cap", async () => {
+    vi.stubGlobal("Bun", {
+      spawn: vi.fn(() => ({
+        // Bun may truncate the readable stream at exactly maxBuffer even
+        // though the child emitted the byte that triggered termination.
+        stdout: new Response("1234").body,
+        stderr: new Response("").body,
+        exited: Promise.resolve(137),
+        signalCode: "SIGKILL",
+        killed: true,
+      })),
+    });
+
+    await expect(
+      runFile("git", ["diff"], { maxBufferBytes: 4 }),
+    ).rejects.toMatchObject({
+      code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER",
+      signal: "SIGKILL",
+      killed: true,
+    });
+  });
+
   it("kills a Bun subprocess when its owning capability is aborted", async () => {
     let finish!: (code: number) => void;
     const exited = new Promise<number>((resolve) => {

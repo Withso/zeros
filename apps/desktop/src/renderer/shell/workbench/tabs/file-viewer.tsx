@@ -473,7 +473,9 @@ export function FileViewer({
     // destinations) close, while tracked paths stay open and switch to Edit.
     // The explicit scope prevents an async completion from touching another
     // worktree after the user switches away.
-    void discardPath(workspaceId, targetPath)
+    void discardPath(workspaceId, targetPath, {
+      expectedNew: isNewFile === true,
+    })
       .then((outcome) => {
         dispatch({
           type: "RECONCILE_WORKBENCH_FILE_DISCARD",
@@ -505,7 +507,7 @@ export function FileViewer({
           current === targetPath ? null : current,
         );
       });
-  }, [workspaceId, cwd, path, discardTarget, dispatch]);
+  }, [workspaceId, cwd, path, discardTarget, dispatch, isNewFile]);
   // Highlighting is owned by <HighlightedCode> (sync once warm → no flash).
   const codeLang = isMarkdown ? "markdown" : getLang(path);
 
@@ -598,7 +600,9 @@ export function FileViewer({
           {discardable &&
             !sourceReadOnly &&
             (!fileMissing || diffAvailable) && (
-              <Tooltip label="Discard changes">
+              <Tooltip
+                label={isNewFile ? "Delete untracked file" : "Discard changes"}
+              >
                 <button
                   type="button"
                   onClick={() => setDiscardTarget(path)}

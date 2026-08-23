@@ -39,7 +39,12 @@ import type {
 import { claudeContextWindow } from "@zeros/protocol/model-context";
 
 import { isDevRuntime } from "../../../runtime";
-import type { ContentBlock, SessionNotification, TurnUsage } from "../../types";
+import type {
+  ContentBlock,
+  SessionNotification,
+  StopReason,
+  TurnUsage,
+} from "../../types";
 
 // engine ToolKind union — hoisted as a string set for runtime checks.
 // Mirrors @zeros/protocol/agent-events ToolKind, including
@@ -230,6 +235,65 @@ interface ClaudeResultEvent {
     }
   >;
   result?: string;
+}
+
+/** Claude Agent SDK 0.3.238 terminal reasons, kept explicit so an SDK upgrade
+ * cannot silently make a new early-ending condition look like a successful
+ * end_turn. Unknown future values return null and retain the conservative
+ * is_error/subtype fallback in onResult. */
+export type ClaudeTerminalReason =
+  | "blocking_limit"
+  | "rapid_refill_breaker"
+  | "prompt_too_long"
+  | "image_error"
+  | "model_error"
+  | "api_error"
+  | "malformed_tool_use_exhausted"
+  | "aborted_streaming"
+  | "aborted_tools"
+  | "stop_hook_prevented"
+  | "hook_stopped"
+  | "tool_deferred"
+  | "max_turns"
+  | "background_requested"
+  | "completed"
+  | "budget_exhausted"
+  | "structured_output_retry_exhausted"
+  | "tool_deferred_unavailable"
+  | "turn_setup_failed";
+
+export function mapClaudeTerminalReason(
+  reason: string | null | undefined,
+): StopReason | null {
+  switch (reason as ClaudeTerminalReason | undefined) {
+    case "blocking_limit":
+    case "rapid_refill_breaker":
+      return "blocking_limit";
+    case "prompt_too_long":
+      return "prompt_too_long";
+    case "max_turns":
+      return "max_turn_requests";
+    case "budget_exhausted":
+      return "budget_exhausted";
+    case "tool_deferred":
+    case "background_requested":
+    case "completed":
+      return "end_turn";
+    case "image_error":
+    case "model_error":
+    case "api_error":
+    case "malformed_tool_use_exhausted":
+    case "aborted_streaming":
+    case "aborted_tools":
+    case "stop_hook_prevented":
+    case "hook_stopped":
+    case "structured_output_retry_exhausted":
+    case "tool_deferred_unavailable":
+    case "turn_setup_failed":
+      return "refusal";
+    default:
+      return null;
+  }
 }
 
 interface ClaudeToolResultBlock {
@@ -2153,9 +2217,19 @@ export class ClaudeStreamTranslator {
     // budget/blocking results arrive as SDKResultError with is_error set.
     const terminalReason =
       typeof event.terminal_reason === "string" ? event.terminal_reason : null;
+    const mappedTerminalReason = mapClaudeTerminalReason(terminalReason);
+    const captureTerminalError = () => {
+      const raw =
+        typeof event.result === "string"
+          ? event.result
+          : typeof event.subtype === "string"
+            ? event.subtype
+            : "";
+      this.terminalErrorMsg = raw || "claude turn ended with an error";
+    };
     if (
       event.subtype === "error_max_budget_usd" ||
-      terminalReason === "budget_exhausted"
+      mappedTerminalReason === "budget_exhausted"
     ) {
       // The user's own spend cap ended the turn cleanly. Record it
       // as the "Turn stopped · BUDGET" tool call right above the footer (the
@@ -2177,32 +2251,30 @@ export class ClaudeStreamTranslator {
           },
         },
       });
-    } else if (terminalReason === "blocking_limit") {
-      this.lastStopReason = "blocking_limit";
-    } else if (terminalReason === "prompt_too_long") {
-      this.lastStopReason = "prompt_too_long";
     } else if (
       event.subtype === "error_max_turns" ||
-      terminalReason === "max_turns"
+      mappedTerminalReason === "max_turn_requests"
     ) {
       this.lastStopReason = "max_turn_requests";
+    } else if (
+      mappedTerminalReason !== null &&
+      mappedTerminalReason !== "end_turn"
+    ) {
+      this.lastStopReason = mappedTerminalReason;
+      if (mappedTerminalReason === "refusal") captureTerminalError();
     } else if (event.is_error) {
       this.lastStopReason = "refusal";
       // Capture the error text so the adapter can promote stale-resume
       // failures ("No conversation found …") to session-expired. The
       // text can live in `result` or, failing that, the subtype.
-      const raw =
-        typeof (event as { result?: unknown }).result === "string"
-          ? ((event as { result?: string }).result as string)
-          : typeof event.subtype === "string"
-            ? event.subtype
-            : "";
-      this.terminalErrorMsg = raw || "claude turn ended with an error";
+      captureTerminalError();
     } else if (event.stop_reason === "max_tokens") {
       // The output-token cap cut the answer mid-thought. Was dead
       // code before: the result settled as a clean end_turn and the truncated
       // answer rendered as complete.
       this.lastStopReason = "max_tokens";
+    } else if (mappedTerminalReason === "end_turn") {
+      this.lastStopReason = "end_turn";
     } else {
       this.lastStopReason = "end_turn";
     }

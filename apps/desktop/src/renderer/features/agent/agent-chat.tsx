@@ -73,6 +73,7 @@ import {
   useBrowserConfirmation,
 } from "../browser/browser-confirmation-store";
 import { PlanReviewCard } from "./plan-review-card";
+import { GoalCard } from "./goal-card";
 import { QuestionCard } from "./question-card";
 import { readPlan, isPlanReviewRequest } from "./renderers/plan-body";
 import { WorkspaceDirectoryPicker } from "./workspace-directory-picker";
@@ -108,6 +109,14 @@ import {
   registerLiveChatDraftRestorer,
   setLiveChatDraft,
 } from "./composer-live-drafts";
+import {
+  deliverTextAttachmentToChat,
+  hasPendingTextAttachmentDelivery,
+  registerLiveChatTextAttachmentStager,
+  trackPendingTextAttachmentDelivery,
+  waitForPendingTextAttachmentDeliveries,
+} from "./composer-text-attachment-delivery";
+import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
 import {
   composerOwnsFocus,
@@ -117,7 +126,10 @@ import {
   shouldReclaimComposerFocus,
 } from "./composer-focus";
 import { costBumpToastShown, markCostBumpToastShown } from "./device-local";
-import { slashCommandKind } from "../../platform/bridge/agent-events";
+import {
+  bareInlineSlashCommand,
+  slashCommandKind,
+} from "../../platform/bridge/agent-events";
 import type { ContentBlock } from "../../platform/bridge/agent-events";
 import {
   isTransportShaped,
@@ -747,6 +759,14 @@ export function AgentChat({
       session.messages,
     );
   }, [session.pendingQuestions, session.messages]);
+  const retrySafetyReviewRef = useRef(session.retrySafetyReview);
+  retrySafetyReviewRef.current = session.retrySafetyReview;
+  const retrySafetyReviewThroughRef = useCallback((retryId: string) => {
+    const retry = retrySafetyReviewRef.current;
+    return retry
+      ? retry(retryId)
+      : Promise.reject(new Error("Safety retry is unavailable."));
+  }, []);
   const messageCtx: RendererContext = useMemo(
     () => ({
       isStreaming,
@@ -758,6 +778,8 @@ export function AgentChat({
       pendingQuestionToolCallIds,
       pendingPermission: session.pendingPermission,
       respondToPermission,
+      retrySafetyReview: retrySafetyReviewThroughRef,
+      safetyReviewRetries: session.safetyReviewRetries,
       recordPolicy,
       chatId: chatId ?? null,
       setMode: setModeForCtx,
@@ -778,6 +800,8 @@ export function AgentChat({
       pendingQuestionToolCallIds,
       session.pendingPermission,
       respondToPermission,
+      retrySafetyReviewThroughRef,
+      session.safetyReviewRetries,
       recordPolicy,
       chatId,
       setModeForCtx,
@@ -1333,12 +1357,10 @@ export function AgentChat({
     [chatId, chatThread?.folder, dispatch, nativeReady, openBoundaryPort],
   );
 
-  // 2026-05-21: handleAgentSwitch + folderLabel removed. The
-  // agent-switch flow lived behind AgentPill's "switch agent" menu,
-  // which was retired when the AgentPill row came out of the chat
-  // surface. The handler created a new ChatThread with
-  // `sourceChatId` set, which then drove the SummaryHandoffPill —
-  // both now dead UI. Agents are picked via the "+" menu instead.
+  // 2026-05-21: handleAgentSwitch + folderLabel removed. The old
+  // SummaryHandoffPill went with that UI. `sourceChatId` now records only
+  // Zeros-native fork lineage; the fork action stages its transcript directly
+  // in the destination composer instead of rendering a second handoff pill.
 
   const chatFolder = chatThread?.folder || undefined;
   // Resolve the chat's repo origin so the #-PR picker can list PRs.
@@ -1358,6 +1380,7 @@ export function AgentChat({
   // The composer "+" → "Attach chat transcript" picker. Ephemeral: it is a
   // transient dialog, not a durable selection.
   const [transcriptPickerOpen, setTranscriptPickerOpen] = useState(false);
+  const [goalEditorOpen, setGoalEditorOpen] = useState(false);
 
   // Grant access to a directory (a worktree path or a Browse… pick). Appends
   // de-duped, skipping the cwd (already accessible).
@@ -1436,6 +1459,9 @@ export function AgentChat({
           // ("Compacting.." → "Context compacted").
           void session.compactContext?.();
           return true;
+        case "goal":
+          setGoalEditorOpen(true);
+          return true;
         case "clear": {
           // Close THIS chat and open a fresh one bound to the same
           // agent/model/workspace, then navigate to it. As with tab close,
@@ -1490,6 +1516,52 @@ export function AgentChat({
       isPlanMode,
     ],
   );
+
+  const saveGoal = useCallback(
+    async (objective: string) => {
+      if (!session.setGoal) throw new Error("Goals are unavailable.");
+      try {
+        await session.setGoal({ objective });
+      } catch (error) {
+        toast.error("Couldn't save the goal", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+    },
+    [session],
+  );
+
+  const setGoalStatus = useCallback(
+    async (status: "active" | "paused") => {
+      if (!session.setGoal) throw new Error("Goals are unavailable.");
+      try {
+        await session.setGoal({ status });
+      } catch (error) {
+        toast.error(
+          `Couldn't ${status === "paused" ? "pause" : "resume"} the goal`,
+          {
+            description: error instanceof Error ? error.message : String(error),
+          },
+        );
+        throw error;
+      }
+    },
+    [session],
+  );
+
+  const deleteGoal = useCallback(async () => {
+    if (!session.clearGoal) throw new Error("Goals are unavailable.");
+    try {
+      await session.clearGoal();
+      setGoalEditorOpen(false);
+    } catch (error) {
+      toast.error("Couldn't delete the goal", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }, [session]);
 
   // Embedded-terminal commands (Claude /mcp, /login, …): the picked command
   // name (without slash) while its banner/terminal is mounted above the
@@ -1612,6 +1684,23 @@ export function AgentChat({
   useEffect(() => {
     composerEditor?.setEditable(true);
   }, [composerEditor]);
+
+  // A fork publishes its new tab before the transcript read settles. Register
+  // only while THIS retained surface is active: insertTextAttachment focuses
+  // the editor, so a hidden destination must queue the chip instead of stealing
+  // focus from whichever chat the user moved to meanwhile.
+  useEffect(() => {
+    if (!chatId || !surfaceActive || !composerEditor) return;
+    return registerLiveChatTextAttachmentStager(chatId, (input) => {
+      const staged = stageTextAttachment(input);
+      if (staged && !staged.ok) {
+        toast.warning(
+          `Attached "${input.name}", but it won't be sent — ${staged.reason ?? "it exceeds this model's attachment budget"}.`,
+        );
+      }
+      return staged !== null;
+    });
+  }, [chatId, composerEditor, surfaceActive, stageTextAttachment]);
 
   // ── attach another chat's transcript ──
   //
@@ -1802,6 +1891,91 @@ export function AgentChat({
       unstageAttachment(transcriptSourceKey(sourceChatId));
     },
     [unstageAttachment],
+  );
+
+  const readForkTranscript = useCallback(
+    (throughMessageId: string, promptFallback: string) => {
+      if (!chatId || !chatThread) return null;
+      const sourceLabel = transcriptPillLabel({
+        title: chatThread.title,
+        summary: promptFallback,
+      });
+      return {
+        sourceLabel,
+        promise: loadTranscriptSnapshot({
+          chatId,
+          mode: "concise",
+          lastMessageAt: chatThread.updatedAt,
+          throughMessageId,
+          meta: { title: sourceLabel, folder: chatThread.folder },
+        }),
+      };
+    },
+    [chatId, chatThread],
+  );
+
+  /** Menu hover/focus pays the exact-key transcript read ahead of the click.
+   * Preview errors stay silent; selecting the action is the point at which a
+   * real read failure becomes user-visible. */
+  const warmForkToNewTab = useCallback(
+    (throughMessageId: string, promptFallback: string) => {
+      void readForkTranscript(throughMessageId, promptFallback)?.promise.catch(
+        () => {},
+      );
+    },
+    [readForkTranscript],
+  );
+
+  const forkToNewTab = useCallback(
+    (throughMessageId: string, promptFallback: string) => {
+      if (!chatThread) return;
+      const transcript = readForkTranscript(throughMessageId, promptFallback);
+      if (!transcript) return;
+
+      // Route + destination publish in one synchronous transition. The native
+      // provider binding, execution id, messages, queues, and drafts are not
+      // copied; only Zeros-owned chat settings and source lineage cross.
+      const fresh = createForkedChat(chatThread);
+      dispatch({ type: "ADD_CHAT", chat: fresh });
+
+      const delivery = transcript.promise
+        .then((snapshot) => {
+          // The user may permanently delete the destination while the bounded
+          // history walk is in flight. Do not retain an orphan delivery.
+          if (
+            !useWorkspaceStore
+              .getState()
+              .chats.some((candidate) => candidate.id === fresh.id)
+          ) {
+            return;
+          }
+          if (snapshot.count === 0) {
+            throw new Error("The selected turn has no concise transcript.");
+          }
+          deliverTextAttachmentToChat(
+            fresh.id,
+            buildForkTranscriptAttachment({
+              sourceChatId: chatThread.id,
+              sourceLabel: transcript.sourceLabel,
+              text: snapshot.text,
+              complete: snapshot.complete,
+            }),
+          );
+        })
+        .catch((error) => {
+          if (
+            !useWorkspaceStore
+              .getState()
+              .chats.some((candidate) => candidate.id === fresh.id)
+          ) {
+            return;
+          }
+          console.error("[Zeros] conversation fork transcript failed:", error);
+          toast.error("Couldn't attach the fork transcript — try again.");
+        });
+      trackPendingTextAttachmentDelivery(fresh.id, delivery);
+    },
+    [chatThread, dispatch, readForkTranscript],
   );
 
   /** Second click on a pill whose read hasn't landed. Marks the in-flight
@@ -2621,8 +2795,7 @@ export function AgentChat({
       const current = serializeComposerState();
       if (current && !current.isEmpty) return false;
       setComposerContent({
-        json:
-          draft.json ?? (draft.text.trim() ? textToDoc(draft.text) : null),
+        json: draft.json ?? (draft.text.trim() ? textToDoc(draft.text) : null),
         attachments: draft.attachments,
       });
       composerLiveRef.current = {
@@ -3091,11 +3264,19 @@ export function AgentChat({
     // opens a window in which a second Enter re-enters, snapshots the same
     // composer state, and sends it again.
     const hydrateNeeded = session.transcriptState !== "resident";
-    if (hydrateNeeded || transcriptAttachesRef.current.size > 0) {
+    const forkAttachmentPending = chatId
+      ? hasPendingTextAttachmentDelivery(chatId)
+      : false;
+    if (
+      hydrateNeeded ||
+      transcriptAttachesRef.current.size > 0 ||
+      forkAttachmentPending
+    ) {
       setSendPreparing(true);
       try {
         if (hydrateNeeded) await session.hydrateChat();
         await Promise.allSettled([...transcriptAttachesRef.current]);
+        if (chatId) await waitForPendingTextAttachmentDeliveries(chatId);
       } finally {
         setSendPreparing(false);
       }
@@ -3145,18 +3326,25 @@ export function AgentChat({
     // `/compact` runs the action instead of being sent as a prompt; a terminal
     // command (`/mcp`, `/login`, …) opens the embedded terminal. (The picker
     // path handles the same on select; this covers type-and-Enter.)
+    const importCount = extras?.imports?.length ?? 0;
+    const extraAttachCount =
+      (extras?.extraAttachments?.length ?? 0) +
+      (extras?.stagedAttachments?.length ?? 0);
+    const commandHasAttachments =
+      localAttachments.length > 0 || importCount > 0 || extraAttachCount > 0;
     const bareCommand = displayText.match(/^\/([A-Za-z0-9_-]+)$/);
-    if (bareCommand && runInlineSlashCommand(bareCommand[1])) {
+    const inlineCommand = bareInlineSlashCommand(
+      session.agentId ?? chatThread?.agentId,
+      displayText,
+      commandHasAttachments,
+    );
+    if (inlineCommand && runInlineSlashCommand(inlineCommand)) {
       if (override === undefined) {
         clearComposer();
         if (chatId) dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
       }
       return;
     }
-    const importCount = extras?.imports?.length ?? 0;
-    const extraAttachCount =
-      (extras?.extraAttachments?.length ?? 0) +
-      (extras?.stagedAttachments?.length ?? 0);
     if (
       displayText.length === 0 &&
       localAttachments.length === 0 &&
@@ -3196,7 +3384,11 @@ export function AgentChat({
     // Terminal-backed slash commands need the same real-cwd guarantee as an
     // agent turn. During provisioning they were queued above; once the path is
     // published, execute the action instead of sending its literal text.
-    if (bareCommand && openTerminalCommand(bareCommand[1])) {
+    if (
+      bareCommand &&
+      !commandHasAttachments &&
+      openTerminalCommand(bareCommand[1])
+    ) {
       if (override === undefined) {
         clearComposer();
         if (chatId) dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
@@ -3864,12 +4056,10 @@ export function AgentChat({
           banner does not interrupt transcript flow. The useEffect higher up fires
           toast.error("Claude Code: …") on every status transition. */}
 
-      {/* SummaryHandoffPill was removed. The "Add chat
-          summaries:" pill rendered above a fresh chat when the user
-          arrived via in-chat agent-switch (sourceChatId set). The
-          agent-switch flow itself was retired when AgentPill came
-          out of the chat surface — sourceChatId is no longer set
-          anywhere — so this pill became dead UI. */}
+      {/* SummaryHandoffPill was removed with in-chat agent switching.
+          Zeros-native forks stage their concise transcript directly in the
+          destination composer; sourceChatId remains product-owned lineage and
+          does not need its own banner. */}
 
       {/* Wave 4 (2026-05-16): the turn list now lives inside the
           canonical AI Elements <Conversation><ConversationContent>
@@ -4165,6 +4355,18 @@ export function AgentChat({
                             // context). The stop pill / budget card stays on
                             // this turn as history.
                             onContinue={() => void handleSend("Continue")}
+                            onFork={() =>
+                              forkToNewTab(
+                                turn.userPrompt!.id,
+                                turn.userPrompt!.text,
+                              )
+                            }
+                            onForkIntent={() =>
+                              warmForkToNewTab(
+                                turn.userPrompt!.id,
+                                turn.userPrompt!.text,
+                              )
+                            }
                             // Auth-required + Claude/Codex: the SIGN IN
                             // REQUIRED pill becomes a live Sign-in button
                             // (background CLI login → browser).
@@ -4296,6 +4498,14 @@ export function AgentChat({
               onClose={() => setTerminalCommand(null)}
             />
           )}
+          <GoalCard
+            goal={session.goal}
+            editing={goalEditorOpen}
+            onEditingChange={setGoalEditorOpen}
+            onSave={saveGoal}
+            onStatus={setGoalStatus}
+            onDelete={deleteGoal}
+          />
           {/* Composer task dock (<Plan>) REMOVED 2026-07-02: the plan/todo
             card was too agent-dependent to be trustworthy — it works for Codex
             (native plan), but is unpredictable for Claude/Cursor (they drive it

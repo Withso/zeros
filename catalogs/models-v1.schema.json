@@ -48,6 +48,11 @@
           "description": "The exact, verbatim model id sent to the agent (per-agent format — Cursor uses dots, Droid uses dated snapshots, OpenCode uses provider/model). Run `pnpm models:list <agent>` to copy a real id."
         },
         "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "liveRequired": {
+          "type": "boolean",
+          "description": "Hide this curated row until exact live discovery marks it selectable."
+        },
         "badge": { "type": "string" },
         "effortLevels": {
           "type": "array",

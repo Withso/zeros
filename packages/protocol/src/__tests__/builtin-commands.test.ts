@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  bareInlineSlashCommand,
   composerCommandsFor,
   getBuiltinCommands,
   mergeCommands,
@@ -155,9 +156,13 @@ describe("slashCommandKind (Claude command behavior)", () => {
   it("/model is NOT inline yet (falls through to text)", () => {
     expect(slashCommandKind("claude", "model")).toBe("text");
   });
-  it("codex: /compact is inline through thread/compact/start; everything else is text", () => {
+  it("codex: /compact and explicit /goal are inline; everything else is text", () => {
     expect(slashCommandKind("codex", "compact")).toBe("inline");
     expect(slashCommandKind("openai-codex", "compact")).toBe("inline");
+    expect(slashCommandKind("codex", "goal")).toBe("inline");
+    expect(
+      getBuiltinCommands("codex").some((item) => item.name === "goal"),
+    ).toBe(true);
     for (const name of ["plan", "clear", "mcp", "my-custom"]) {
       expect(slashCommandKind("codex", name)).toBe("text");
     }
@@ -167,6 +172,20 @@ describe("slashCommandKind (Claude command behavior)", () => {
       expect(slashCommandKind(id, "plan")).toBe("text");
       expect(slashCommandKind(id, "compact")).toBe("text");
     }
+  });
+});
+
+describe("bareInlineSlashCommand", () => {
+  it("routes only a bare attachment-free Codex /goal inline", () => {
+    expect(bareInlineSlashCommand("codex", "/goal", false)).toBe("goal");
+    expect(bareInlineSlashCommand("codex", "  /goal  ", false)).toBe("goal");
+    expect(bareInlineSlashCommand("codex", "/goal ship it", false)).toBeNull();
+    expect(bareInlineSlashCommand("codex", "/goal", true)).toBeNull();
+  });
+
+  it("does not consume provider text commands", () => {
+    expect(bareInlineSlashCommand("codex", "/review", false)).toBeNull();
+    expect(bareInlineSlashCommand("cursor", "/goal", false)).toBeNull();
   });
 });
 

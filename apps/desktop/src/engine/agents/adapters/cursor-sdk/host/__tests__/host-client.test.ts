@@ -232,6 +232,145 @@ describe("CursorHostClient proxy", () => {
     expect(await pWait).toEqual({ status: "completed" });
   });
 
+  it("marshals onDelta/onStep in stream order and keeps functions off the wire", async () => {
+    const { client, fake } = makeClient();
+    const pAgent = client.module().Agent.create({});
+    fake.emit({
+      k: "res",
+      id: fake.reqOf("agent.create")!.id,
+      ok: true,
+      result: { agentId: "a1" },
+    });
+    const agent = await pAgent;
+    const observed: string[] = [];
+    const pSend = agent.send(
+      { text: "x" },
+      {
+        idempotencyKey: "zeros-turn-1",
+        onDelta: async ({ update }) => {
+          observed.push(`delta:${String((update as { text?: string }).text)}`);
+        },
+        onStep: ({ step }) => {
+          observed.push(`step:${String((step as { type?: string }).type)}`);
+        },
+      },
+    );
+    const sendReq = fake.reqOf("agent.send")!;
+    const args = sendReq.args as {
+      runId: string;
+      options: Record<string, unknown>;
+      observers: { delta: boolean; step: boolean };
+    };
+    expect(args.options).toEqual({ idempotencyKey: "zeros-turn-1" });
+    expect(args.observers).toEqual({ delta: true, step: true });
+    fake.emit({
+      k: "res",
+      id: sendReq.id,
+      ok: true,
+      result: { sdkRunId: "sdk-1" },
+    });
+    const run = await pSend;
+    const streamed: unknown[] = [];
+    const done = (async () => {
+      for await (const message of run.stream()) streamed.push(message);
+    })();
+    fake.emit({
+      k: "ev",
+      ev: "run.delta",
+      runId: args.runId,
+      update: { type: "text-delta", text: "A" },
+    });
+    fake.emit({
+      k: "ev",
+      ev: "run.step",
+      runId: args.runId,
+      step: { type: "assistantMessage", message: { text: "A" } },
+    });
+    fake.emit({
+      k: "ev",
+      ev: "run.msg",
+      runId: args.runId,
+      msg: { type: "status", status: "FINISHED" },
+    });
+    fake.emit({ k: "ev", ev: "run.streamEnd", runId: args.runId });
+    await done;
+
+    expect(observed).toEqual(["delta:A", "step:assistantMessage"]);
+    expect(streamed).toEqual([{ type: "status", status: "FINISHED" }]);
+  });
+
+  it("drops callback events that arrive after cancellation", async () => {
+    const { client, fake } = makeClient();
+    const pAgent = client.module().Agent.create({});
+    fake.emit({
+      k: "res",
+      id: fake.reqOf("agent.create")!.id,
+      ok: true,
+      result: { agentId: "a1" },
+    });
+    const agent = await pAgent;
+    const onDelta = vi.fn();
+    const pSend = agent.send({ text: "x" }, { onDelta });
+    const sendReq = fake.reqOf("agent.send")!;
+    const runId = (sendReq.args as { runId: string }).runId;
+    fake.emit({
+      k: "res",
+      id: sendReq.id,
+      ok: true,
+      result: { sdkRunId: "sdk-1" },
+    });
+    const run = await pSend;
+    const cancelled = run.cancel();
+    const cancelReq = fake.reqOf("run.cancel")!;
+    fake.emit({ k: "res", id: cancelReq.id, ok: true, result: null });
+    await cancelled;
+    fake.emit({
+      k: "ev",
+      ev: "run.delta",
+      runId,
+      update: { type: "text-delta", text: "late" },
+    });
+
+    const streamed: unknown[] = [];
+    for await (const message of run.stream()) streamed.push(message);
+    expect(streamed).toEqual([]);
+    expect(onDelta).not.toHaveBeenCalled();
+  });
+
+  it("proxies billed agent usage and preserves cost metadata", async () => {
+    const { client, fake } = makeClient();
+    const pAgent = client.module().Agent.create({});
+    fake.emit({
+      k: "res",
+      id: fake.reqOf("agent.create")!.id,
+      ok: true,
+      result: { agentId: "a1" },
+    });
+    const agent = await pAgent;
+    const pending = agent.getUsage!();
+    const request = fake.reqOf("agent.getUsage")!;
+    expect(request.args).toEqual({ agentId: "a1", options: {} });
+    fake.emit({
+      k: "res",
+      id: request.id,
+      ok: true,
+      result: {
+        usage: {
+          inputTokens: 10,
+          outputTokens: 2,
+          cacheReadTokens: 3,
+          cacheWriteTokens: 0,
+          totalTokens: 12,
+        },
+        cost: { rawCostCents: 4.5, chargedCents: 3.25 },
+        runs: [],
+      },
+    });
+    await expect(pending).resolves.toMatchObject({
+      cost: { chargedCents: 3.25 },
+    });
+  });
+
   it("reassembles a host line split across stdout chunks (no drop)", async () => {
     const { client, fake } = makeClient();
     const mod = client.module();

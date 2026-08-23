@@ -16,7 +16,12 @@
 
 import { createContext } from "react";
 import type {
+  AgentConfigurationProvenance,
   ContentBlock,
+  AgentGoal,
+  AgentGoalStatus,
+  AgentMemorySettings,
+  AgentProviderQuota,
   InitializeResponse,
   QuestionResponse,
   RequestPermissionResponse,
@@ -136,6 +141,32 @@ export interface SessionsActions {
    *  store; this just applies the full composer env to the running session so
    *  the change takes effect on the next turn instead of only on a rebuild. */
   updateConfig(chatId: string): void;
+  setGoal(
+    chatId: string,
+    update: {
+      objective?: string;
+      status?: AgentGoalStatus;
+      tokenBudget?: number | null;
+    },
+  ): Promise<AgentGoal>;
+  clearGoal(chatId: string): Promise<void>;
+  retrySafetyReview(chatId: string, retryId: string): Promise<void>;
+  readMemorySettings(agentId: string): Promise<AgentMemorySettings>;
+  updateMemorySettings(
+    agentId: string,
+    settings: Partial<
+      Pick<
+        AgentMemorySettings,
+        "localMemoriesEnabled" | "toolAssistedGenerationEnabled"
+      >
+    >,
+  ): Promise<AgentMemorySettings>;
+  resetMemory(agentId: string): Promise<void>;
+  readConfigurationProvenance(
+    agentId: string,
+    cwd?: string,
+  ): Promise<AgentConfigurationProvenance>;
+  readProviderQuota(agentId: string): Promise<AgentProviderQuota | null>;
   /** Drop a still-pending queued send (by its placeholder message id) and
    *  remove its greyed bubble, before it flushes. */
   removeQueued(chatId: string, messageId: string): void;

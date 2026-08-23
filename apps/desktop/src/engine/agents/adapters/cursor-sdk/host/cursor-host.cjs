@@ -1056,6 +1056,10 @@ try {
 /** runId → { run, done } ; sdk agentId → SdkAgent ; storeId → store */
 const runs = new Map();
 const agents = new Map();
+// Run ids whose native callback events are still allowed onto the protocol.
+// Removing an id is the cancellation/terminal fence: late provider callbacks
+// become no-ops instead of mutating a stopped or already-reaped Zeros turn.
+const observedRuns = new Set();
 const stores = new Map();
 let nextRunId = 1;
 let nextStoreId = 1;
@@ -1247,6 +1251,37 @@ function send(msg) {
   }
 }
 
+/** Native callbacks may arrive faster than the engine can consume them. The
+ * SDK awaits callback promises, so serialize these writes and honor stdout's
+ * drain signal: pressure propagates back into Cursor instead of accumulating
+ * an unbounded second queue in this host. Ordinary request/stream writes remain
+ * on Node's ordered stdout stream; every callback has completed its write
+ * before the SDK proceeds to the corresponding completed stream message. */
+let callbackWriteChain = Promise.resolve();
+function sendCallbackEvent(msg) {
+  const line = JSON.stringify(msg) + "\n";
+  const write = () =>
+    new Promise((resolve) => {
+      try {
+        if (process.stdout.write(line)) {
+          resolve();
+          return;
+        }
+        const done = () => {
+          process.stdout.off("drain", done);
+          process.stdout.off("error", done);
+          resolve();
+        };
+        process.stdout.once("drain", done);
+        process.stdout.once("error", done);
+      } catch {
+        resolve();
+      }
+    });
+  callbackWriteChain = callbackWriteChain.then(write, write);
+  return callbackWriteChain;
+}
+
 /** Flatten an Error (incl. @cursor/sdk's typed errors) into a plain JSON object
  *  the engine can re-throw and classify. The SDK minifies its class names
  *  (constructor.name can be "a"), so we forward `.name` (the SDK sets it on the
@@ -1343,12 +1378,14 @@ function drainRun(runId, run, timing) {
       if (!sawContent) reportRunFirstItem(runId, timing, "no content streamed");
       const entry = runs.get(runId);
       if (entry && entry.run === run) entry.endedAt = Date.now();
+      observedRuns.delete(runId);
       send({ k: "ev", ev: "run.streamEnd", runId });
     } catch (err) {
       if (!sawContent) reportRunFirstItem(runId, timing, "stream failed");
       const entry = runs.get(runId);
       if (entry && entry.run === run) {
         runs.delete(runId);
+        observedRuns.delete(runId);
         try {
           const cancelled = run.cancel && run.cancel();
           if (cancelled && typeof cancelled.catch === "function") {
@@ -1372,6 +1409,7 @@ const endedRunSweep = setInterval(() => {
   for (const [runId, entry] of runs) {
     if (entry.endedAt && now - entry.endedAt > ENDED_RUN_TTL_MS) {
       runs.delete(runId);
+      observedRuns.delete(runId);
     }
   }
 }, 60_000);
@@ -1417,8 +1455,43 @@ async function handle(m) {
       // from the engine. The copy keeps that seam open without mutating the
       // decoded request.
       const sendOptions = { ...(args.options || {}) };
+      const runId =
+        typeof args.runId === "string" && args.runId
+          ? args.runId
+          : String(nextRunId++);
+      const observeDelta = args.observers && args.observers.delta === true;
+      const observeStep = args.observers && args.observers.step === true;
+      if (observeDelta || observeStep) observedRuns.add(runId);
+      if (observeDelta) {
+        sendOptions.onDelta = async ({ update }) => {
+          if (!observedRuns.has(runId)) return;
+          await sendCallbackEvent({
+            k: "ev",
+            ev: "run.delta",
+            runId,
+            update,
+          });
+        };
+      }
+      if (observeStep) {
+        sendOptions.onStep = async ({ step }) => {
+          if (!observedRuns.has(runId)) return;
+          await sendCallbackEvent({
+            k: "ev",
+            ev: "run.step",
+            runId,
+            step,
+          });
+        };
+      }
       const sendStartedAt = Date.now();
-      const run = await agent.send(args.message, sendOptions);
+      let run;
+      try {
+        run = await agent.send(args.message, sendOptions);
+      } catch (error) {
+        observedRuns.delete(runId);
+        throw error;
+      }
       const timing = {
         index: ++runsStarted,
         cold: runsStarted === 1,
@@ -1430,10 +1503,6 @@ async function handle(m) {
       // The engine assigns the runId and registers its stream queue BEFORE
       // sending this request, so no run.msg event can race ahead of the
       // queue's existence. Fall back to a host-generated id if absent.
-      const runId =
-        typeof args.runId === "string" && args.runId
-          ? args.runId
-          : String(nextRunId++);
       runs.set(runId, { run, endedAt: null });
       // Respond FIRST (so the engine pairs sdkRunId with the run), THEN start
       // draining — NDJSON over one pipe preserves order.
@@ -1454,6 +1523,15 @@ async function handle(m) {
       ok(id, null);
       return;
     }
+    case "agent.getUsage": {
+      const agent = agents.get(args.agentId);
+      if (!agent) throw new Error(`Agent ${args.agentId} not found`);
+      if (typeof agent.getUsage !== "function") {
+        throw new Error("Cursor SDK agent.getUsage is unavailable");
+      }
+      ok(id, await agent.getUsage(args.options || {}));
+      return;
+    }
     case "run.wait": {
       const entry = runs.get(args.runId);
       if (!entry) {
@@ -1467,6 +1545,7 @@ async function handle(m) {
         res = await entry.run.wait();
       } finally {
         runs.delete(args.runId);
+        observedRuns.delete(args.runId);
       }
       debugCursorTransport(
         `run ${args.runId} wait completed (status=${String(
@@ -1475,13 +1554,17 @@ async function handle(m) {
           typeof res?.result === "string" ? res.result.length : 0,
         )})`,
       );
-      ok(id, res ? { status: res.status, result: res.result } : null);
+      // Preserve every public RunResult field. New SDK versions add model /
+      // usage metadata here; narrowing to {status,result} silently discarded
+      // it at the process boundary.
+      ok(id, res ?? null);
       return;
     }
     case "run.cancel": {
       const entry = runs.get(args.runId);
       if (entry) {
         runs.delete(args.runId);
+        observedRuns.delete(args.runId);
         try {
           await entry.run.cancel();
         } catch {
@@ -1612,6 +1695,7 @@ async function shutdown() {
   // Stores need no teardown: they are file-backed JSONL, hold no connection or
   // handle, and every write is already awaited by the call that made it.
   runs.clear();
+  observedRuns.clear();
   agents.clear();
   stores.clear();
   localStores.clear();

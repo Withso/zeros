@@ -26,6 +26,31 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     expect(warnings).toEqual([]);
   });
 
+  it("validates live-only model metadata instead of treating it as unknown", () => {
+    const invalid = {
+      ...catalog,
+      families: {
+        ...catalog.families,
+        cursor: catalog.families.cursor.map((model, index) =>
+          index === 0
+            ? { ...model, description: 42, liveRequired: "yes" }
+            : model,
+        ),
+      },
+    };
+    const { errors, warnings } = validateCatalog(invalid);
+    expect(errors).toEqual([
+      "families.cursor[0].description must be a string",
+      "families.cursor[0].liveRequired must be a boolean",
+    ]);
+    expect(warnings).not.toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('unknown key "description"'),
+        expect.stringContaining('unknown key "liveRequired"'),
+      ]),
+    );
+  });
+
   it("gates Fable 5 / Sonnet 5 / Opus 5 so none ever silently downgrades", () => {
     // BUILD-TIME gate only (models:verify --strict + this vitest): on an older
     // CLI it warns so we never ship a curated model the pinned CLI can't run.
@@ -155,7 +180,7 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     expect(catalog.aliases.claude["opus"]).toBe("claude-opus-4-8");
   });
 
-  it("curates the 2026-07 codex family (5.6 Sol / Terra / Luna + 5.5) and the 2 cursor models", () => {
+  it("curates the 2026-07 codex family and Cursor's live Router plus 2 static models", () => {
     const codex = catalog.families.codex.map((m) => m.value);
     for (const v of [
       "gpt-5.6-sol",
@@ -171,7 +196,11 @@ describe("curated model catalog (catalogs/models-v1.json)", () => {
     // / grok-4.5-{level} (applyCursorReasoning; the bare base completes to
     // grok-4.5-xhigh when no level applies). The previously-curated
     // grok-4.5-xhigh lives in the aliases table so persisted picks resolve.
-    expect(cursor).toEqual(["composer-2.5", "grok-4.5"]);
+    expect(cursor).toEqual(["default", "composer-2.5", "grok-4.5"]);
+    expect(catalog.families.cursor[0]).toMatchObject({
+      value: "default",
+      liveRequired: true,
+    });
     expect(catalog.aliases.cursor["grok-4.5-xhigh"]).toBe("grok-4.5");
   });
 

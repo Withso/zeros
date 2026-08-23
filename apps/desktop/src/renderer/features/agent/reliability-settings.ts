@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────────────────
-// reliability-settings — Claude fallback, budget cap, and idle lifetime
+// reliability-settings — Claude fallback, budget cap, idle lifetime, and memory
 // ──────────────────────────────────────────────────────────
 //
 // Three global Claude Code knobs from Settings → Models:
@@ -36,6 +36,8 @@ const CLAUDE_FALLBACK_KEY = "claude-fallback-model";
 const CLAUDE_BUDGET_KEY = "claude-budget-cap-usd";
 /** Idle query lifetime in minutes. */
 const CLAUDE_IDLE_TIMEOUT_KEY = "claude-idle-timeout-minutes";
+/** Claude Code's repository-scoped native auto-memory switch. */
+const CLAUDE_AUTO_MEMORY_KEY = "claude-auto-memory-enabled";
 
 /** The sensible default fallback for the Claude family. */
 export const DEFAULT_CLAUDE_FALLBACK = "claude-sonnet-5[1m]";
@@ -43,6 +45,8 @@ export const DEFAULT_CLAUDE_FALLBACK = "claude-sonnet-5[1m]";
 export const DEFAULT_BUDGET_CAP_USD = 5;
 /** The default balances quick follow-up turns with bounded process memory. */
 export const DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES = 30;
+/** Claude Code enables auto memory natively unless the user turns it off. */
+export const DEFAULT_CLAUDE_AUTO_MEMORY_ENABLED = true;
 
 /** The complete, intentionally bounded set shown in Settings. */
 export const CLAUDE_IDLE_TIMEOUT_OPTIONS = [
@@ -114,6 +118,20 @@ export function setClaudeIdleTimeoutMinutes(
       ? minutes
       : DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
   );
+  notify();
+}
+
+export function getClaudeAutoMemoryEnabled(): boolean {
+  return (
+    getSetting<boolean>(
+      CLAUDE_AUTO_MEMORY_KEY,
+      DEFAULT_CLAUDE_AUTO_MEMORY_ENABLED,
+    ) !== false
+  );
+}
+
+export function setClaudeAutoMemoryEnabled(enabled: boolean): void {
+  setSetting(CLAUDE_AUTO_MEMORY_KEY, enabled === true);
   notify();
 }
 
@@ -200,6 +218,25 @@ export function useClaudeIdleTimeoutMinutes(): [
   }, []);
   const set = useCallback((next: ClaudeIdleTimeoutMinutes) => {
     setClaudeIdleTimeoutMinutes(next);
+  }, []);
+  return [value, set];
+}
+
+/** Hook: native Claude auto-memory toggle. */
+export function useClaudeAutoMemoryEnabled(): [
+  boolean,
+  (enabled: boolean) => void,
+] {
+  const [value, setValue] = useState<boolean>(getClaudeAutoMemoryEnabled);
+  useEffect(() => {
+    const sync = () => setValue(getClaudeAutoMemoryEnabled());
+    listeners.add(sync);
+    return () => {
+      listeners.delete(sync);
+    };
+  }, []);
+  const set = useCallback((enabled: boolean) => {
+    setClaudeAutoMemoryEnabled(enabled);
   }, []);
   return [value, set];
 }

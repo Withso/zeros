@@ -160,6 +160,87 @@ describe("modelsForAgent (curated catalog)", () => {
       list.find((m) => m.value === "claude-opus-4-8[1m]")?.supportsFast,
     ).toBe(false);
   });
+
+  it("shows a live-required Cursor Router only when the harness says it is locally selectable", () => {
+    expect(modelsForAgent("cursor", null).map((m) => m.value)).not.toContain(
+      "default",
+    );
+
+    const advertisedButNotRunnable = {
+      protocolVersion: 1,
+      _meta: {
+        models: [
+          {
+            value: "default",
+            label: "Router",
+            selectable: false,
+          },
+        ],
+      },
+    } as unknown as Parameters<typeof modelsForAgent>[1];
+    expect(
+      modelsForAgent("cursor", advertisedButNotRunnable).map((m) => m.value),
+    ).not.toContain("default");
+
+    const locallyRunnable = {
+      protocolVersion: 1,
+      _meta: {
+        models: [
+          {
+            value: "default",
+            label: "Router",
+            selectable: true,
+            description: "Let Cursor choose the model for this turn.",
+            aliases: ["auto"],
+            parameters: [
+              {
+                id: "speed",
+                displayName: "Speed",
+                values: [{ value: "fast", displayName: "Fast" }],
+              },
+            ],
+            variants: [
+              {
+                displayName: "Balanced",
+                params: [{ id: "speed", value: "balanced" }],
+                isDefault: true,
+              },
+            ],
+          },
+        ],
+      },
+    } as unknown as Parameters<typeof modelsForAgent>[1];
+    const router = modelsForAgent("cursor", locallyRunnable).find(
+      (m) => m.value === "default",
+    );
+    expect(router).toMatchObject({
+      label: "Router",
+      description: "Let Cursor choose the model for this turn.",
+      aliases: ["auto"],
+      selectable: true,
+    });
+    expect(router?.parameters?.[0]?.id).toBe("speed");
+    expect(router?.variants?.[0]?.isDefault).toBe(true);
+  });
+
+  it("hides any curated model that the live provider marks non-selectable", () => {
+    const initialize = {
+      protocolVersion: 1,
+      _meta: {
+        models: [
+          {
+            value: "composer-2.5",
+            label: "Composer 2.5",
+            selectable: false,
+          },
+        ],
+      },
+    } as unknown as Parameters<typeof modelsForAgent>[1];
+
+    expect(modelsForAgent("cursor", initialize).map((m) => m.value)).not.toContain(
+      "composer-2.5",
+    );
+  });
 });
 
 describe("modelEnvVarForAgent", () => {

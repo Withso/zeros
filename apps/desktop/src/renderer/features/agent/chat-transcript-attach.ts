@@ -23,6 +23,7 @@ import {
   type TranscriptMode,
 } from "./transcript-format";
 import type { ChatSummaryWire } from "./agent-history-client";
+import type { AgentMessage } from "./use-agent-session";
 
 /** How many pills the row draws before it collapses into "N more".
  *
@@ -144,6 +145,7 @@ interface CacheEntry {
    *  evicted without parsing the key back apart. */
   chatId: string;
   mode: TranscriptMode;
+  throughMessageId: string | null;
   promise: Promise<TranscriptSnapshot>;
 }
 
@@ -156,8 +158,13 @@ const cache: CacheEntry[] = [];
  *  streams, its summary row's lastMessageAt advances, the key changes, and the
  *  next read is a miss. Hover a streaming chat twice and you correctly see two
  *  different transcripts. */
-function cacheKey(chatId: string, mode: TranscriptMode, lastMessageAt: number) {
-  return `${chatId}:${mode}:${lastMessageAt}`;
+function cacheKey(
+  chatId: string,
+  mode: TranscriptMode,
+  lastMessageAt: number,
+  throughMessageId: string | null = null,
+) {
+  return JSON.stringify([chatId, mode, lastMessageAt, throughMessageId]);
 }
 
 export interface LoadTranscriptInput {
@@ -165,7 +172,48 @@ export interface LoadTranscriptInput {
   mode: TranscriptMode;
   /** From the summary row. Part of the cache key — see cacheKey. */
   lastMessageAt: number;
+  /** Opening user-message id of the last turn to include. Omitted means the
+   *  current end of the chat. Used by a historical footer's Zeros-native fork
+   *  so later turns can never leak into the staged handoff. */
+  throughMessageId?: string;
   meta: TranscriptMeta;
+}
+
+/** Bound a chronological transcript through one exact user-owned turn.
+ * Includes every event after that prompt until (but not including) the next
+ * user prompt. A missing target fails closed: silently falling back to the
+ * chat tail would attach work the user explicitly did not fork from. */
+export function transcriptMessagesThroughTurn(
+  messages: AgentMessage[],
+  throughMessageId: string,
+): AgentMessage[] {
+  const target = messages.findIndex(
+    (message) =>
+      message.id === throughMessageId &&
+      message.kind === "text" &&
+      message.role === "user" &&
+      !message.queued &&
+      !message.resumeBoundary,
+  );
+  if (target === -1) {
+    throw new Error(
+      `Transcript turn ${throughMessageId} is outside the loaded history.`,
+    );
+  }
+  let end = messages.length;
+  for (let index = target + 1; index < messages.length; index += 1) {
+    const message = messages[index];
+    if (
+      message.kind === "text" &&
+      message.role === "user" &&
+      !message.queued &&
+      !message.resumeBoundary
+    ) {
+      end = index;
+      break;
+    }
+  }
+  return messages.slice(0, end);
 }
 
 /** Read + format a chat's transcript, sharing work with any hover that already
@@ -174,7 +222,13 @@ export interface LoadTranscriptInput {
 export function loadTranscriptSnapshot(
   input: LoadTranscriptInput,
 ): Promise<TranscriptSnapshot> {
-  const key = cacheKey(input.chatId, input.mode, input.lastMessageAt);
+  const throughMessageId = input.throughMessageId ?? null;
+  const key = cacheKey(
+    input.chatId,
+    input.mode,
+    input.lastMessageAt,
+    throughMessageId,
+  );
   const hitAt = cache.findIndex((e) => e.key === key);
   if (hitAt !== -1) {
     // Touch: move to the MRU end so an actively-hovered chat isn't the one
@@ -186,8 +240,11 @@ export function loadTranscriptSnapshot(
 
   const promise = (async (): Promise<TranscriptSnapshot> => {
     const { messages, complete } = await loadFullTranscript(input.chatId);
+    const bounded = throughMessageId
+      ? transcriptMessagesThroughTurn(messages, throughMessageId)
+      : messages;
     const { text, count, truncated } = formatTranscript(
-      messages,
+      bounded,
       input.mode,
       input.meta,
     );
@@ -200,7 +257,11 @@ export function loadTranscriptSnapshot(
   // fill both slots with its own dead and live copies, evicting every other
   // chat the user is actually comparing.
   for (let i = cache.length - 1; i >= 0; i--) {
-    if (cache[i].chatId === input.chatId && cache[i].mode === input.mode) {
+    if (
+      cache[i].chatId === input.chatId &&
+      cache[i].mode === input.mode &&
+      cache[i].throughMessageId === throughMessageId
+    ) {
       cache.splice(i, 1);
     }
   }
@@ -208,6 +269,7 @@ export function loadTranscriptSnapshot(
     key,
     chatId: input.chatId,
     mode: input.mode,
+    throughMessageId,
     promise,
   };
   cache.push(entry);
@@ -244,6 +306,9 @@ export function hasCachedTranscriptForTesting(
   chatId: string,
   mode: TranscriptMode,
   lastMessageAt: number,
+  throughMessageId: string | null = null,
 ): boolean {
-  return cache.some((e) => e.key === cacheKey(chatId, mode, lastMessageAt));
+  return cache.some(
+    (e) => e.key === cacheKey(chatId, mode, lastMessageAt, throughMessageId),
+  );
 }
