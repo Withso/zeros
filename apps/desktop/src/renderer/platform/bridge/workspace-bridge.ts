@@ -21,6 +21,7 @@ import type {
   ChangeCounts,
   ChangeLineCounts,
   Hunk,
+  DiffFileSummary,
   Commit,
   Branch,
   DiffMode,
@@ -953,9 +954,12 @@ export async function bridgeContextGraphSetShared(
 export async function bridgeGitStatus(
   bridge: RuntimeClient,
   workspaceId: string,
+  options: { paths?: string[]; includeTracking?: boolean } = {},
 ): Promise<StatusResult> {
   return (await workspaceOp(bridge, "git.status", {
     workspaceId,
+    paths: options.paths,
+    includeTracking: options.includeTracking,
   })) as StatusResult;
 }
 
@@ -1017,8 +1021,14 @@ export async function bridgeGitDiff(
     base?: string;
     head?: string;
     rawPatch?: boolean;
+    summaryLimit?: number;
   },
-): Promise<{ hunks: Hunk[]; patch?: string }> {
+): Promise<{
+  hunks: Hunk[];
+  patch?: string;
+  files?: DiffFileSummary[];
+  summary?: boolean;
+}> {
   return (await workspaceOp(bridge, "git.diff", {
     workspaceId: args.workspaceId,
     filePath: args.filePath,
@@ -1027,7 +1037,13 @@ export async function bridgeGitDiff(
     base: args.base,
     head: args.head,
     rawPatch: args.rawPatch,
-  })) as { hunks: Hunk[]; patch?: string };
+    summaryLimit: args.summaryLimit,
+  })) as {
+    hunks: Hunk[];
+    patch?: string;
+    files?: DiffFileSummary[];
+    summary?: boolean;
+  };
 }
 
 /** Show a single commit (its file list + the raw multi-file patch) over the

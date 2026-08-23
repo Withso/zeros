@@ -33,6 +33,8 @@ function baseName(p: string): string {
 export type DiscardOutcome = "removed" | "reverted";
 export type DiscardOperation = "clean" | "unstage-clean" | "discard";
 
+const discardRequests = new Map<string, Promise<DiscardOutcome>>();
+
 /** Resolve the safe git operation and the workbench path lifecycle from a live
  *  status snapshot. Kept pure so untracked, staged-new, rename, and tracked
  *  cases are regression-testable without invoking git. */
@@ -90,12 +92,21 @@ export function planDiscard(
  *  committed file to clean — which only removes untracked files → a silent
  *  no-op. Self-resolving keeps the Changes-list and workbench Discard buttons
  *  behaving identically and correctly. */
-export async function discardPath(
+async function performDiscard(
   workspaceId: string,
   path: string,
+  expectedNew?: boolean,
 ): Promise<DiscardOutcome> {
-  const status = await gitStatus(workspaceId);
+  const status = await gitStatus(workspaceId, {
+    paths: [path],
+    includeTracking: false,
+  });
   const plan = planDiscard(status, path);
+  if (expectedNew !== undefined && plan.isNewFile !== expectedNew) {
+    throw new Error(
+      `${baseName(path)} changed since the confirmation opened; review its current Changes state and try again`,
+    );
+  }
   switch (plan.operation) {
     case "clean":
       await gitClean({ workspaceId, paths: [path] });
@@ -112,6 +123,26 @@ export async function discardPath(
       break;
   }
   return plan.outcome;
+}
+
+export function discardPath(
+  workspaceId: string,
+  path: string,
+  options: { expectedNew?: boolean } = {},
+): Promise<DiscardOutcome> {
+  const key = JSON.stringify([workspaceId, path, options.expectedNew]);
+  const pending = discardRequests.get(key);
+  if (pending) return pending;
+
+  const request = performDiscard(
+    workspaceId,
+    path,
+    options.expectedNew,
+  ).finally(() => {
+    if (discardRequests.get(key) === request) discardRequests.delete(key);
+  });
+  discardRequests.set(key, request);
+  return request;
 }
 
 /** Confirm before a destructive discard. ⌘/Ctrl+↵ confirms; default focus is
@@ -143,7 +174,9 @@ export function DiscardDialog({
     <Dialog open onOpenChange={(o) => !o && onCancel()}>
       <DialogContent showCloseButton={false} className="max-w-md">
         <DialogHeader>
-          <DialogTitle>Discard file changes?</DialogTitle>
+          <DialogTitle>
+            {isNew ? "Delete untracked file?" : "Discard file changes?"}
+          </DialogTitle>
           <DialogDescription>
             {isNew ? (
               <>
@@ -169,8 +202,8 @@ export function DiscardDialog({
             Cancel
           </Button>
           <Button variant="destructive" size="sm" onClick={onConfirm}>
-            Discard
-            <span className="ml-1 text-xxs opacity-70">⌘↵</span>
+            {isNew ? "Delete file" : "Discard"}
+            <span className="text-xxs ml-1 opacity-70">⌘↵</span>
           </Button>
         </DialogFooter>
       </DialogContent>

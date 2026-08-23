@@ -36,6 +36,7 @@
 import React, {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -86,10 +87,16 @@ import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useAddProject } from "../../add-project-provider";
 import {
   buildFileTree,
+  changedFilesFromDiffResult,
   parseUnifiedDiffFiles,
   type ChangedFile,
   type TreeNode,
 } from "./changes-parse";
+import {
+  LARGE_CHANGE_FILE_LIMIT,
+  eagerUntrackedPaths,
+  visibleChangeWindow,
+} from "./large-change-set";
 import { type Scope } from "./changes-scope";
 import { trackedFilesForScope } from "./changes-scope-files";
 import {
@@ -507,11 +514,27 @@ async function buildUntrackedFiles(
   folder: string,
   paths: string[],
 ): Promise<ChangedFile[]> {
-  const files = await Promise.all(
-    paths.map(async (p) => {
-      let additions = 0;
-      let hash = "";
-      if (folder) {
+  const files = new Map<string, ChangedFile>(
+    paths.map((p) => [
+      p,
+      {
+        path: p,
+        status: "untracked" as FileChangeStatus,
+        additions: 0,
+        deletions: 0,
+        patch: "",
+        binary: false,
+        staged: false,
+        committed: false,
+        isNewFile: true,
+        hash: "",
+      },
+    ]),
+  );
+  if (folder) {
+    const eager = eagerUntrackedPaths(paths);
+    await Promise.all(
+      [...eager].map(async (p) => {
         // Use the shared generation-guarded read. If a filesystem event lands
         // while this request is in flight, its stale result can satisfy only
         // this superseded caller; the cache queues and publishes the exact-key
@@ -528,29 +551,26 @@ async function buildUntrackedFiles(
           res?.kind === "error" &&
           res.error === "file no longer exists on disk"
         ) {
-          return null;
+          files.delete(p);
+          return;
         }
         if (res?.kind === "text" && res.content != null) {
-          additions = countLines(res.content);
-          hash = hashString(res.content);
+          const current = files.get(p);
+          if (current) {
+            files.set(p, {
+              ...current,
+              additions: countLines(res.content),
+              hash: hashString(res.content),
+            });
+          }
         }
-      }
-      const file: ChangedFile = {
-        path: p,
-        status: "untracked" as FileChangeStatus,
-        additions,
-        deletions: 0,
-        patch: "",
-        binary: false,
-        staged: false,
-        committed: false,
-        isNewFile: true,
-        hash,
-      };
-      return file;
-    }),
-  );
-  return files.filter((file): file is ChangedFile => file !== null);
+      }),
+    );
+  }
+  return paths.flatMap((path) => {
+    const file = files.get(path);
+    return file ? [file] : [];
+  });
 }
 
 /** Conflicted (unmerged) files → ChangedFile rows: no ± (they need resolving, not
@@ -839,9 +859,17 @@ export function useChangesModel({
               : "worktree-vs-head";
         const [status, scopeDiff] = await Promise.all([
           statusForGeneration(workspaceId, refreshKey),
-          gitDiff({ workspaceId, mode, rawPatch: true }),
+          gitDiff({
+            workspaceId,
+            mode,
+            rawPatch: true,
+            summaryLimit: LARGE_CHANGE_FILE_LIMIT,
+          }),
         ]);
-        const tracked = trackedFilesForScope(scopeDiff.patch ?? "", status);
+        const tracked = trackedFilesForScope(
+          changedFilesFromDiffResult(scopeDiff),
+          status,
+        );
         const includeUntracked =
           scope.kind === "uncommitted" || scope.kind === "unstaged";
         const untracked = includeUntracked
@@ -862,7 +890,12 @@ export function useChangesModel({
         // which tracked paths still have uncommitted work, so those read grey
         // (in-progress) while fully-committed changes colour by type.
         const [diffRes, status] = await Promise.all([
-          gitDiff({ workspaceId, mode: "worktree-vs-base", rawPatch: true }),
+          gitDiff({
+            workspaceId,
+            mode: "worktree-vs-base",
+            rawPatch: true,
+            summaryLimit: LARGE_CHANGE_FILE_LIMIT,
+          }),
           statusForGeneration(workspaceId, refreshKey),
         ]);
         const conflictedPaths = new Set(status.conflicted.map((f) => f.path));
@@ -876,7 +909,7 @@ export function useChangesModel({
             .filter((f) => f.status === "added")
             .map((f) => f.path),
         );
-        const tracked = parseUnifiedDiffFiles(diffRes.patch ?? "")
+        const tracked = changedFilesFromDiffResult(diffRes)
           // Conflicts render separately (red, first) — drop them here so a
           // mid-merge file isn't listed twice.
           .filter((f) => !conflictedPaths.has(f.path))
@@ -1012,7 +1045,9 @@ export function useChangesModel({
           // No status hint — discardPath self-resolves from `git status`, so a
           // file the diff-vs-base parser labelled "added" but that's actually
           // committed (tracked) gets reverted, not silently skipped.
-          const outcome = await discardPath(workspaceId, file.path);
+          const outcome = await discardPath(workspaceId, file.path, {
+            expectedNew: file.isNewFile === true,
+          });
           // Target the workspace where this async operation began. If the user
           // switched worktrees while git ran, a same-named tab there is safe.
           dispatch({
@@ -1121,7 +1156,23 @@ export function ChangesList({
    *  to the worktree restores the reader's place on return. */
   scrollKey?: string;
 }) {
-  const listScrollRef = useScrollMemoryRef(scrollKey ?? null);
+  const memoryRef = useScrollMemoryRef(scrollKey ?? null);
+  const [scrollElement, setScrollElement] = useState<HTMLElement | null>(null);
+  const listScrollRef = useCallback(
+    (node: HTMLDivElement | null) => {
+      memoryRef(node);
+      setScrollElement(node);
+    },
+    [memoryRef],
+  );
+  const flatFileCount = sections.reduce(
+    (total, section) => total + section.files.length,
+    0,
+  );
+  const virtualizeFlat =
+    view === "flat" &&
+    flatFileCount > LARGE_CHANGE_FILE_LIMIT &&
+    sections.every((section) => section.title == null);
   return (
     <div
       ref={listScrollRef}
@@ -1136,6 +1187,12 @@ export function ChangesList({
       {loading && !turnFilterActive && sections.length === 0 ? null : error &&
         sections.length === 0 ? null : sections.length === 0 ? (
         <div className="text-fg2 px-3 py-4 text-xs">No changes.</div>
+      ) : virtualizeFlat ? (
+        <VirtualizedFlatFiles
+          sections={sections}
+          scrollElement={scrollElement}
+          {...rowActions}
+        />
       ) : view === "flat" ? (
         sections.map((s) => (
           <FileSection key={s.kind} section={s} {...rowActions} />
@@ -1145,6 +1202,86 @@ export function ChangesList({
           <TreeSection key={s.kind} section={s} {...rowActions} />
         ))
       )}
+    </div>
+  );
+}
+
+/** Keep dependency-sized flat views to a few dozen mounted rows. Paths remain
+ * complete in the model (selection, counts, and tree mode stay authoritative);
+ * only offscreen DOM is elided. */
+function VirtualizedFlatFiles({
+  sections,
+  scrollElement,
+  selected,
+  viewedKey,
+  viewedVersion,
+  ...actions
+}: {
+  sections: Section[];
+  scrollElement: HTMLElement | null;
+} & RowActions) {
+  const files = useMemo(() => {
+    const ordered = sections.flatMap((section) => section.files);
+    return ordered.sort(
+      (left, right) =>
+        Number(isFileViewed(viewedKey, left.path)) -
+        Number(isFileViewed(viewedKey, right.path)),
+    );
+    // The viewed registry is external mutable state; its published version is
+    // the deliberate invalidation dependency (same contract as FileSection).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sections, viewedKey, viewedVersion]);
+  const [viewport, setViewport] = useState({ scrollTop: 0, height: 700 });
+  useLayoutEffect(() => {
+    if (!scrollElement) return;
+    const measure = () => {
+      setViewport((current) => {
+        const next = {
+          scrollTop: scrollElement.scrollTop,
+          height: scrollElement.clientHeight || current.height,
+        };
+        return next.scrollTop === current.scrollTop &&
+          next.height === current.height
+          ? current
+          : next;
+      });
+    };
+    measure();
+    scrollElement.addEventListener("scroll", measure, { passive: true });
+    const observer =
+      typeof ResizeObserver === "undefined"
+        ? null
+        : new ResizeObserver(measure);
+    observer?.observe(scrollElement);
+    return () => {
+      scrollElement.removeEventListener("scroll", measure);
+      observer?.disconnect();
+    };
+  }, [scrollElement]);
+  const window = visibleChangeWindow({
+    itemCount: files.length,
+    scrollTop: viewport.scrollTop,
+    viewportHeight: viewport.height,
+  });
+  const visible = files.slice(window.start, window.end);
+  return (
+    <div className="relative" style={{ height: window.totalHeight }}>
+      <div
+        className="absolute inset-x-0 top-0"
+        style={{ transform: `translateY(${window.offset}px)` }}
+      >
+        {visible.map((file) => (
+          <FileRow
+            key={file.path}
+            file={file}
+            depth={1}
+            showDir
+            isSelected={selected === file.path}
+            viewed={isFileViewed(viewedKey, file.path)}
+            {...actions}
+          />
+        ))}
+      </div>
     </div>
   );
 }
@@ -1611,7 +1748,7 @@ const FileRow = React.memo(function FileRow({
         {canDiscard && (
           <div className="relative z-10 col-start-1 row-start-1 flex items-center justify-self-end opacity-0 transition-opacity group-hover/change-row:opacity-100 focus-within:opacity-100">
             <RowBtn
-              title="Discard"
+              title={file.isNewFile ? "Delete untracked file" : "Discard"}
               disabled={busy}
               onClick={() => onDiscard(file)}
             >
@@ -1767,8 +1904,15 @@ function StatusGlyph({ status }: { status: FileChangeStatus }) {
 function TreeSection({ section, ...a }: { section: Section } & RowActions) {
   const tree = useMemo(() => buildFileTree(section.files), [section.files]);
   const [open, setOpen] = useState(true);
+  const collapseFolders = section.files.length > LARGE_CHANGE_FILE_LIMIT;
   const rows = tree.map((node) => (
-    <TreeRow key={node.name + (node.path ?? "")} node={node} depth={1} {...a} />
+    <TreeRow
+      key={node.name + (node.path ?? "")}
+      node={node}
+      depth={1}
+      collapseFolders={collapseFolders}
+      {...a}
+    />
   ));
   if (section.title == null) return <div>{rows}</div>;
   return (
@@ -1787,12 +1931,17 @@ function TreeSection({ section, ...a }: { section: Section } & RowActions) {
 function TreeRow({
   node,
   depth,
+  collapseFolders,
   selected,
   viewedKey,
   viewedVersion,
   ...actions
-}: { node: TreeNode; depth: number } & RowActions) {
-  const [open, setOpen] = useState(true);
+}: {
+  node: TreeNode;
+  depth: number;
+  collapseFolders: boolean;
+} & RowActions) {
+  const [open, setOpen] = useState(!collapseFolders);
   if (node.file) {
     return (
       <FileRow
@@ -1826,6 +1975,7 @@ function TreeRow({
             key={c.name + (c.path ?? "")}
             node={c}
             depth={depth + 1}
+            collapseFolders={collapseFolders}
             selected={selected}
             viewedKey={viewedKey}
             viewedVersion={viewedVersion}

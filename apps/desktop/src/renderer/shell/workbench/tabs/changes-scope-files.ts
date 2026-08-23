@@ -7,7 +7,7 @@ import { parseUnifiedDiffFiles, type ChangedFile } from "./changes-parse";
  * from leaking into the net Uncommitted list while retaining it in Staged and
  * Unstaged, whose patches genuinely contain it. */
 export function trackedFilesForScope(
-  patch: string,
+  patchOrFiles: string | ChangedFile[],
   status: Pick<StatusResult, "staged" | "unstaged" | "conflicted">,
 ): ChangedFile[] {
   const conflictedPaths = new Set(status.conflicted.map((file) => file.path));
@@ -20,7 +20,11 @@ export function trackedFilesForScope(
   const statusByPath = new Map(
     [...status.unstaged, ...status.staged].map((file) => [file.path, file]),
   );
-  return parseUnifiedDiffFiles(patch)
+  const files =
+    typeof patchOrFiles === "string"
+      ? parseUnifiedDiffFiles(patchOrFiles)
+      : patchOrFiles;
+  return files
     .filter((file) => !conflictedPaths.has(file.path))
     .map((file) => ({
       ...file,

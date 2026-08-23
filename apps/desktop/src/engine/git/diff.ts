@@ -15,6 +15,7 @@ import { resolveRepoGit } from "../settings/repo-git";
 import { isConflictEntry, parsePorcelainZ } from "./porcelain";
 import { getInProgressState } from "./repo";
 import { GitError } from "./errors";
+import { mapBounded } from "./bounded-parallel";
 import type {
   Commit,
   FileChange,
@@ -70,6 +71,15 @@ export interface StatusResult {
   behind: number | null;
   /** The upstream tracking ref (e.g. `origin/zeros/foo`), or null when unset. */
   upstream: string | null;
+}
+
+export interface StatusOptions {
+  /** Limit porcelain discovery to exact repo-relative paths. Used by per-file
+   *  discard so a generated tree with tens of thousands of changes is not
+   *  serialized merely to classify one selected path. */
+  paths?: string[];
+  /** Skip the unrelated upstream ahead/behind probe for targeted callers. */
+  includeTracking?: boolean;
 }
 
 /** File totals for the four live Changes scopes. Each total is computed from
@@ -168,17 +178,38 @@ function isInternal(p: string): boolean {
   return p === ".zeros" || p.startsWith(".zeros/");
 }
 
-export async function status(workspaceId: string): Promise<StatusResult> {
+export async function status(
+  workspaceId: string,
+  options: StatusOptions = {},
+): Promise<StatusResult> {
   const ws = await resolveRepoForGitOp(workspaceId);
   // `-z` means NUL-delimited, byte-exact paths. `-uall` lists every
   // untracked file individually (not collapsed to the dir) so the
   // Changes tab can stage them one by one.
-  const { stdout } = await runGit(ws.path, [
-    "status",
-    "--porcelain=v1",
-    "-z",
-    "-uall",
-  ]);
+  const args = ["status", "--porcelain=v1", "-z", "-uall"];
+  if (options.paths !== undefined) {
+    if (
+      !Array.isArray(options.paths) ||
+      options.paths.length === 0 ||
+      options.paths.length > 256 ||
+      options.paths.some(
+        (candidate) =>
+          typeof candidate !== "string" ||
+          candidate.length === 0 ||
+          candidate.includes("\0"),
+      )
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "status.paths must contain 1 to 256 non-empty paths",
+      });
+    }
+    args.push(
+      "--",
+      ...options.paths.map((candidate) => `:(literal)${candidate}`),
+    );
+  }
+  const { stdout } = await runGit(ws.path, args);
   const parsed = parsePorcelain(stdout);
   // Conflict state (merge/rebase/cherry-pick/revert mid-flight) so the UI
   // can show a banner; never let the probe fail the status read.
@@ -192,7 +223,10 @@ export async function status(workspaceId: string): Promise<StatusResult> {
   // can offer "Push" (unpushed local commits) / "Pull" (unpulled remote work).
   // A branch with no upstream (never pushed) yields null counts, which the UI
   // reads as "unknown" and skips those states.
-  const tracking = await upstreamAheadBehind(ws.path);
+  const tracking =
+    options.includeTracking === false
+      ? { ahead: null, behind: null, upstream: null }
+      : await upstreamAheadBehind(ws.path);
   return {
     staged: parsed.staged.filter((f) => !isInternal(f.path)),
     unstaged: parsed.unstaged.filter((f) => !isInternal(f.path)),
@@ -492,20 +526,24 @@ export async function hasWorkspaceChanges(
   }
 }
 
-/** Stamp `hasChanges` on a workspace list with PARALLEL best-effort git probes.
+const WORKSPACE_CHANGE_PROBE_CONCURRENCY = 4;
+
+/** Stamp `hasChanges` on a workspace list with bounded best-effort git probes.
  *  Only live rows are probed — archived / missing / synthetic-trunk rows get
  *  `false` — so the cost is bounded to the board's real worktrees. Used by
  *  workspace.list when the caller asks for change state (the Dashboard). */
 export async function stampChangeState(
   workspaces: Workspace[],
 ): Promise<Workspace[]> {
-  return Promise.all(
-    workspaces.map(async (w) => {
+  return mapBounded(
+    workspaces,
+    WORKSPACE_CHANGE_PROBE_CONCURRENCY,
+    async (w) => {
       if (w.archivedAt != null || w.present === false || w.repoSlug === "") {
         return { ...w, hasChanges: false };
       }
       return { ...w, hasChanges: await hasWorkspaceChanges(w.id) };
-    }),
+    },
   );
 }
 
@@ -595,12 +633,29 @@ export interface DiffOptions {
   /** Also return the raw unified-diff text in `DiffResult.patch`.
    *  `@pierre/diffs` <PatchDiff> consumes this directly — no parse. */
   rawPatch?: boolean;
+  /** Return a bounded metadata-only result once the comparison contains more
+   *  than this many tracked files. A whole-tree patch can be tens or hundreds
+   *  of megabytes for generated/vendor trees; the Changes list needs paths and
+   *  line totals first, while the selected file can fetch its exact patch on
+   *  demand. Omit to preserve the historical always-materialize behavior. */
+  summaryLimit?: number;
+}
+
+export interface DiffFileSummary extends FileChange {
+  additions: number;
+  deletions: number;
+  binary: boolean;
 }
 
 export interface DiffResult {
   hunks: Hunk[];
   /** Present when `rawPatch` was requested: the raw `git diff` stdout. */
   patch?: string;
+  /** Present when `summary === true`: content-free rows for a comparison whose
+   *  aggregate patch was deliberately not materialized. */
+  files?: DiffFileSummary[];
+  /** True when `files` replaces the aggregate patch. */
+  summary?: boolean;
 }
 
 /** Map the legacy `against` selector onto a DiffMode. */
@@ -649,6 +704,101 @@ function diffRangeArgs(opts: DiffOptions, baseBranch: string): string[] {
     default:
       return [];
   }
+}
+
+interface NumstatFile {
+  path: string;
+  oldPath?: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
+/** Parse `git diff --numstat -z` without ever splitting a path on whitespace.
+ *  Renames/copies use the documented three-token form: the tab record has an
+ *  empty path, followed by old and new paths as their own NUL records. */
+function parseNumstatFiles(out: string): NumstatFile[] {
+  const tokens = out.split("\0");
+  const files: NumstatFile[] = [];
+  for (let index = 0; index < tokens.length; ) {
+    const match = NUMSTAT_RECORD_RE.exec(tokens[index] ?? "");
+    if (!match) {
+      index += 1;
+      continue;
+    }
+    let filePath = match[3];
+    let oldPath: string | undefined;
+    if (filePath === "") {
+      oldPath = tokens[index + 1] ?? "";
+      filePath = tokens[index + 2] ?? "";
+      index += 3;
+    } else {
+      index += 1;
+    }
+    if (!filePath || isInternal(filePath)) continue;
+    const binary = match[1] === "-" || match[2] === "-";
+    files.push({
+      path: filePath,
+      ...(oldPath ? { oldPath } : {}),
+      additions: binary ? 0 : Number.parseInt(match[1], 10),
+      deletions: binary ? 0 : Number.parseInt(match[2], 10),
+      binary,
+    });
+  }
+  return files;
+}
+
+async function diffFileSummary(
+  worktreePath: string,
+  rangeArgs: readonly string[],
+  filePath?: string,
+): Promise<DiffFileSummary[]> {
+  const suffix = filePath ? ["--", filePath] : [];
+  const [{ stdout: numstat }, { stdout: names }] = await Promise.all([
+    runGit(
+      worktreePath,
+      [
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--no-color",
+        "--numstat",
+        "-z",
+        ...rangeArgs,
+        ...suffix,
+      ],
+      { maxBufferBytes: DIFF_MAX_BUFFER_BYTES },
+    ),
+    runGit(
+      worktreePath,
+      [
+        "-c",
+        "core.quotePath=false",
+        "diff",
+        "--no-color",
+        "--name-status",
+        "-z",
+        ...rangeArgs,
+        ...suffix,
+      ],
+      { maxBufferBytes: DIFF_MAX_BUFFER_BYTES },
+    ),
+  ]);
+  const stats = new Map(
+    parseNumstatFiles(numstat).map((file) => [file.path, file]),
+  );
+  return parseNameStatusZ(names)
+    .filter((file) => !!file.path && !isInternal(file.path))
+    .map((file) => {
+      const stat = stats.get(file.path);
+      return {
+        ...file,
+        oldPath: file.oldPath ?? stat?.oldPath,
+        additions: stat?.additions ?? 0,
+        deletions: stat?.deletions ?? 0,
+        binary: stat?.binary ?? false,
+      };
+    });
 }
 
 /** Resolve a persisted base-branch NAME to a concrete, reachable ref.
@@ -931,6 +1081,28 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
   // core.quotePath=false so non-ASCII paths appear unquoted in the
   // `diff --git` header → parseUnifiedDiff captures them (the remote secret
   // filter keys on that path; a quoted/unparsed path fails closed).
+  const rangeArgs = diffRangeArgs(rangeOpts, baseBranch);
+  let summaryFiles: DiffFileSummary[] | undefined;
+  if (opts.summaryLimit !== undefined) {
+    if (
+      !Number.isSafeInteger(opts.summaryLimit) ||
+      opts.summaryLimit < 0 ||
+      opts.summaryLimit > 100_000
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "diff.summaryLimit must be an integer between 0 and 100000",
+      });
+    }
+    // The metadata commands are path-only / numeric and remain small even when
+    // a generated tree would make the unified patch exceed the RPC/buffer cap.
+    // Preflight before materializing any file content so the fallback is fast,
+    // deterministic, and identical under Node and the production Bun runtime.
+    summaryFiles = await diffFileSummary(ws.path, rangeArgs, opts.filePath);
+    if (summaryFiles.length > opts.summaryLimit) {
+      return { hunks: [], files: summaryFiles, summary: true };
+    }
+  }
   const args: string[] = [
     "-c",
     "core.quotePath=false",
@@ -938,7 +1110,7 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
     "--no-color",
     "-U3",
   ];
-  args.push(...diffRangeArgs(rangeOpts, baseBranch));
+  args.push(...rangeArgs);
   if (opts.filePath) args.push("--", opts.filePath);
   let stdout: string;
   try {
@@ -952,6 +1124,13 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
       | { code?: unknown }
       | undefined;
     if (cause?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") {
+      // A small number of individually huge files can cross the byte cap even
+      // though it did not cross the row-count threshold. Adaptive callers have
+      // already paid for exact metadata, so preserve the usable list and let
+      // the selected file load independently instead of showing an error.
+      if (summaryFiles) {
+        return { hunks: [], files: summaryFiles, summary: true };
+      }
       throw new GitError({
         code: "GIT_COMMAND_FAILED",
         message: `diff is larger than ${Math.round(DIFF_MAX_BUFFER_BYTES / (1024 * 1024))} MB — too big to display; view individual files or commits instead`,

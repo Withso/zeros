@@ -4582,7 +4582,10 @@ export class WorkspaceService {
 
       // ── Read: git ─────────────────────────────────────────
       case "git.status": {
-        const result = await status(reqStr(params, "workspaceId"));
+        const result = await status(reqStr(params, "workspaceId"), {
+          paths: optStrArr(params, "paths"),
+          includeTracking: optBool(params, "includeTracking"),
+        });
         if (!remote) return result;
         // (#1) Mirror the file.tree/read/diff secret boundary: a remote client
         // must not ENUMERATE secret file paths via status either — `-uall` now
@@ -4659,9 +4662,11 @@ export class WorkspaceService {
           base: optStr(params, "base"),
           head: optStr(params, "head"),
           rawPatch: params.rawPatch === true,
+          summaryLimit: optNum(params, "summaryLimit"),
         });
         if (remote) {
           result.hunks = filterSecretHunks(result.hunks);
+          if (result.files) result.files = filterSecretFiles(result.files);
           // rawPatch returns a whole-tree multi-file patch (file CONTENT) — apply
           // the same per-section secret filter as git.show, or it would leak a
           // secret file's contents in the raw text.

@@ -100,6 +100,7 @@ function subprocessFailure(args: {
   command: string;
   commandArgs: string[];
   exitCode: number | string | null;
+  errorCode?: number | string | null;
   signal: string | null;
   killed: boolean;
   stdout: string;
@@ -111,7 +112,8 @@ function subprocessFailure(args: {
   return Object.assign(
     new Error(`${args.command} ${args.commandArgs.join(" ")} failed${suffix}`),
     {
-      code: args.exitCode,
+      code: args.errorCode ?? args.exitCode,
+      exitCode: args.exitCode,
       signal: args.signal,
       killed: args.killed,
       stdout: args.stdout,
@@ -141,6 +143,7 @@ export async function runFile(
   }
   const bun = bunSubprocessRuntime();
   if (bun) {
+    const maxBufferBytes = opts.maxBufferBytes ?? 16 * 1024 * 1024;
     let child: BunSubprocess;
     try {
       child = bun.spawn([command, ...args], {
@@ -152,7 +155,7 @@ export async function runFile(
             : new TextEncoder().encode(opts.input),
         stdout: "pipe",
         stderr: "pipe",
-        maxBuffer: opts.maxBufferBytes ?? 16 * 1024 * 1024,
+        maxBuffer: maxBufferBytes,
         ...(opts.timeoutMs && opts.timeoutMs > 0
           ? { timeout: opts.timeoutMs }
           : {}),
@@ -191,10 +194,22 @@ export async function runFile(
         : new DOMException("The operation was aborted", "AbortError");
     }
     if (exitCode !== 0) {
+      // Bun kills a child that crosses maxBuffer instead of raising Node's
+      // ERR_CHILD_PROCESS_STDIO_MAXBUFFER. Normalize the error shape so callers
+      // can distinguish an oversized result from an ordinary Git failure.
+      const outputBytes =
+        Buffer.byteLength(stdout, "utf8") + Buffer.byteLength(stderr, "utf8");
+      const exceededOutputCap =
+        child.killed &&
+        child.signalCode !== null &&
+        outputBytes >= maxBufferBytes;
       throw subprocessFailure({
         command,
         commandArgs: args,
         exitCode,
+        ...(exceededOutputCap
+          ? { errorCode: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" }
+          : {}),
         signal: child.signalCode,
         killed: child.killed,
         stdout,
