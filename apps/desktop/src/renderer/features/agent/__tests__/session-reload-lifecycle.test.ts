@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
+  agentUpdateFlushMode,
   bumpCancelGeneration,
   cancelGeneration,
   cancelledSince,
@@ -61,6 +62,23 @@ describe("session reload lifecycle", () => {
   it("restores an engine-active prompt as streaming instead of ready", () => {
     expect(loadedSessionStatus(true)).toBe("streaming");
     expect(loadedSessionStatus(false)).toBe("ready");
+  });
+
+  it("flushes the terminal turn boundary with all preceding content", () => {
+    for (const state of ["completed", "failed", "cancelled"] as const) {
+      expect(agentUpdateFlushMode({ sessionUpdate: "turn_state", state })).toBe(
+        "turn-boundary",
+      );
+    }
+    expect(
+      agentUpdateFlushMode({
+        sessionUpdate: "turn_state",
+        state: "running",
+      }),
+    ).toBe("frame");
+    expect(agentUpdateFlushMode({ sessionUpdate: "agent_message_chunk" })).toBe(
+      "frame",
+    );
   });
 
   it("reloads only an idle native Codex or Claude execution for a boot-scoped capability", () => {

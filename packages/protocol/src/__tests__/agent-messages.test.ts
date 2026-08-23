@@ -78,6 +78,42 @@ describe("applyUpdate — shared agent-message coalescer", () => {
     expect(tool!.title).toBe("Read");
   });
 
+  it("keeps the first terminal timestamp stable across late tool metadata", () => {
+    let msgs = applyUpdate([], {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "t1",
+        title: "AskUserQuestion",
+        status: "in_progress",
+        at: 10,
+      },
+    } as unknown as SessionNotification);
+    msgs = applyUpdate(msgs, {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        status: "completed",
+        rawOutput: { vendor: "result" },
+        at: 20,
+      },
+    } as unknown as SessionNotification);
+    msgs = applyUpdate(msgs, {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        rawOutput: { zerosQuestion: { outcome: "answered" } },
+        at: 30,
+      },
+    } as unknown as SessionNotification);
+
+    const tool = msgs[0] as AgentToolMessage;
+    expect(tool.updatedAt).toBe(30);
+    expect(tool.settledAt).toBe(20);
+  });
+
   it("does not mutate the input array (pure reducer)", () => {
     const before: AgentMessage[] = [];
     const after = applyUpdate(before, agentChunk("x", "m1"));

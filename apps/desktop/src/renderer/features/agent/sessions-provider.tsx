@@ -117,6 +117,7 @@ import { ActionsCtx, type SessionsActions } from "./sessions-context";
 import { questionRequestIsBrowserApproval } from "./pending-question-tools";
 import { nativeInvoke } from "../../platform/runtime";
 import {
+  agentUpdateFlushMode,
   bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
   bumpCancelGeneration,
@@ -944,7 +945,20 @@ export function AgentSessionsProvider({
           ? ({ ...msg.notification, chatId: msg.chatId } as SessionNotification)
           : msg.notification,
       );
-      schedule();
+      if (agentUpdateFlushMode(sessionUpdate) === "turn-boundary") {
+        // The engine sends terminal turn_state before AGENT_PROMPT_COMPLETE.
+        // Drain the final text/tool chunks and that terminal marker in this
+        // callback, as one transition. Otherwise the awaited prompt response
+        // can publish `ready` while those chunks still sit in the next-frame
+        // buffer, briefly mounting partial prose as a bright final answer.
+        if (rafHandle !== null) {
+          cancelAnimationFrame(rafHandle);
+          rafHandle = null;
+        }
+        flush();
+      } else {
+        schedule();
+      }
     });
 
     const unsubBoundaryPorts = bridge.on(
