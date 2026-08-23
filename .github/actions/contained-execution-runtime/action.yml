@@ -1,0 +1,66 @@
+name: Contained-execution runtime
+description: >-
+  Install the Linux host prerequisites the contained-execution (ZSR) suites need
+  and prove the pinned seccomp helper runs inside a nested user namespace. Run
+  this AFTER `pnpm install` — the helper is vendored under node_modules.
+
+# WHY THIS IS AN ACTION AND NOT COPIED SHELL: this provisioning is the difference
+# between a green suite and a red one, and it used to live as inline `run:` blocks
+# duplicated across jobs. preflight.yml grew the blocks; release.yml,
+# release-alpha.yml and release-beta.yml never did — so the SAME `pnpm test:git`
+# passed the PR gate and failed every release gate with
+# "[zsr-supervisor] absolute bwrap unavailable". Beta and Production both failed
+# that way on v0.1.10. One definition, referenced everywhere, is what stops the
+# provisioning and the suite drifting apart again.
+
+runs:
+  using: composite
+  steps:
+    - name: Install bubblewrap + socat
+      # Codex uses bubblewrap; Claude's strict sandbox also requires socat.
+      shell: bash
+      run: |
+        set -euo pipefail
+        # ubuntu-latest currently puts an HTTP Azure endpoint first in this
+        # generated mirror list. A dead endpoint can leave apt waiting for
+        # every package index for the lifetime of the job even after it finds
+        # the HTTPS fallback. Use that healthy archive directly on amd64.
+        #
+        # STRICTLY amd64: archive.ubuntu.com carries no arm64 packages (those
+        # live on ports.ubuntu.com), so rewriting an arm64 runner's mirror list
+        # to it would break `apt-get update` outright.
+        runner_ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
+        if [ "$(uname -m)" = "x86_64" ] && [ -f "$runner_ubuntu_sources" ]; then
+          sudo sed -i \
+            's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
+            "$runner_ubuntu_sources"
+        fi
+        sudo apt-get update
+        sudo apt-get install --yes bubblewrap socat
+
+    - name: Prove the pinned seccomp helper runs nested
+      # Cheap up-front proof that the host can actually host the runtime, so a
+      # missing prerequisite surfaces here instead of as a suite-wide failure
+      # tens of minutes into a release.
+      shell: bash
+      run: |
+        set -euo pipefail
+        case "$(uname -m)" in
+          x86_64) seccomp_arch=x64 ;;
+          aarch64 | arm64) seccomp_arch=arm64 ;;
+          *) echo "::error::Unsupported seccomp architecture: $(uname -m)"; exit 1 ;;
+        esac
+        apply_seccomp="$PWD/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/$seccomp_arch/apply-seccomp"
+        if [ ! -x "$apply_seccomp" ]; then
+          echo "::error::$apply_seccomp is missing — run this action AFTER 'pnpm install'."
+          exit 1
+        fi
+        bash "$PWD/scripts/ci/with-userns.sh" \
+          bwrap \
+            --ro-bind / / \
+            --unshare-pid \
+            --unshare-user \
+            --cap-drop ALL \
+            --proc /proc \
+            --die-with-parent \
+            -- "$apply_seccomp" /bin/true

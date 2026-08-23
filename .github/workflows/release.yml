@@ -94,6 +94,13 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install contained-execution runtime
+        # The suite below drives real bubblewrap/seccomp containment. Without
+        # these host prerequisites those tests fail with "absolute bwrap
+        # unavailable" — an environmental failure that reads exactly like a
+        # regression and blocked the v0.1.10 Production gate.
+        uses: ./.github/actions/contained-execution-runtime
+
       - name: Typecheck (app · electron · packages)
         # vite + tsup strip types via esbuild WITHOUT checking them, so before this
         # the ONLY type safety on the release path was that preflight gated the PR
@@ -112,7 +119,11 @@ jobs:
       - name: Run Vitest suite
         # Same suite as the standalone "Vitest suite" workflow — a red suite
         # blocks the release instead of shipping a known regression.
-        run: pnpm test:git
+        #
+        # Runs through with-userns.sh for the same reason preflight does: the
+        # contained-execution tests nest a capability-bearing user namespace that
+        # Ubuntu's bwrap AppArmor profile strips by default.
+        run: bash scripts/ci/with-userns.sh pnpm test:git
 
       - name: Ship guards (catalog · packaging · prod env · security)
         # Defense-in-depth on the ONLY path that produces a public DMG. These are
