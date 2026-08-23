@@ -5,6 +5,12 @@ import { describe, expect, it } from "vitest";
 
 const read = (path: string) => readFileSync(path, "utf8");
 
+// The Linux host prerequisites the contained-execution suites need. These used
+// to be inline shell duplicated across preflight.yml's jobs, which is how the
+// three release workflows came to be missing them entirely.
+const CONTAINMENT_ACTION =
+  ".github/actions/contained-execution-runtime/action.yml";
+
 function sourceFiles(root: string): string[] {
   return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
     const path = join(root, entry.name);
@@ -44,59 +50,51 @@ describe("repository layout contracts", () => {
   });
 
   it("uses the HTTPS Ubuntu archive before the amd64 containment install", () => {
-    const preflight = read(".github/workflows/preflight.yml");
-    const archive = preflight.indexOf("https://archive.ubuntu.com/ubuntu");
-    const update = preflight.indexOf("sudo apt-get update");
+    const action = read(CONTAINMENT_ACTION);
+    const archive = action.indexOf("https://archive.ubuntu.com/ubuntu");
+    const update = action.indexOf("sudo apt-get update");
 
     expect(archive).toBeGreaterThanOrEqual(0);
     expect(archive).toBeLessThan(update);
+    // archive.ubuntu.com serves no arm64 packages — those live on
+    // ports.ubuntu.com — so rewriting an arm64 runner's mirror list to it would
+    // break `apt-get update` outright. The arm64 ZSR job used to avoid that
+    // only by omitting the rewrite; one shared action makes the guard explicit.
+    expect(action).toContain('[ "$(uname -m)" = "x86_64" ]');
   });
 
   it("smokes the production bubblewrap and seccomp namespace prerequisites", () => {
-    const preflight = read(".github/workflows/preflight.yml");
-    expect(
-      preflight.match(/kernel\.apparmor_restrict_unprivileged_userns=0/g),
-    ).toHaveLength(5);
-    expect(
-      preflight.match(
-        /kernel\.apparmor_restrict_unprivileged_userns="\$userns_restriction"/g,
-      ),
-    ).toHaveLength(5);
-    const installs = [
-      ...preflight.matchAll(
-        /      - name: Install contained-execution runtime\n([\s\S]*?)(?=\n      - name:|\n  [A-Za-z0-9_-]+:)/g,
-      ),
-    ].map((match) => match[1]!);
+    const action = read(CONTAINMENT_ACTION);
+    const usernsEnable = action.indexOf("with-userns.sh");
+    const sandboxSmoke = action.indexOf("--ro-bind / /");
 
-    expect(installs).toHaveLength(2);
-    for (const install of installs) {
-      const usernsEnable = install.indexOf(
-        "kernel.apparmor_restrict_unprivileged_userns=0",
-      );
-      const sandboxSmoke = install.indexOf("--ro-bind / /");
+    expect(action).toContain("bubblewrap socat");
+    expect(usernsEnable).toBeGreaterThanOrEqual(0);
+    expect(usernsEnable).toBeLessThan(sandboxSmoke);
+    expect(action).not.toContain("bwrap-userns-restrict");
+    expect(action.slice(sandboxSmoke)).toContain("--unshare-user");
+    expect(action.slice(sandboxSmoke)).toContain("--cap-drop ALL");
+    expect(action.slice(sandboxSmoke)).toContain("--unshare-pid");
+    expect(action.slice(sandboxSmoke)).toContain("--proc /proc");
+    expect(action.slice(sandboxSmoke)).toContain('"$apply_seccomp" /bin/true');
+  });
 
-      expect(usernsEnable).toBeGreaterThanOrEqual(0);
-      expect(usernsEnable).toBeLessThan(sandboxSmoke);
-      expect(install).not.toContain("bwrap-userns-restrict");
-      expect(install.slice(sandboxSmoke)).toContain("--unshare-user");
-      expect(install.slice(sandboxSmoke)).toContain("--cap-drop ALL");
-      expect(install.slice(sandboxSmoke)).toContain("--unshare-pid");
-      expect(install.slice(sandboxSmoke)).toContain("--proc /proc");
-      expect(install.slice(sandboxSmoke)).toContain(
-        '"$apply_seccomp" /bin/true',
-      );
-    }
+  it("keeps the userns relaxation scoped to one command and restores it", () => {
+    // A job-wide relaxation would leave every later step — including
+    // third-party actions — running with unprivileged user namespaces
+    // permitted. This helper exists to keep that window one command wide.
+    const helper = read("scripts/ci/with-userns.sh");
 
-    const vitest = preflight.match(
-      /      - name: Run vitest suite\n([\s\S]*?)(?=\n      - name:|\n  [A-Za-z0-9_-]+:)/,
-    )?.[1];
-    expect(vitest).toContain(
-      "trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=\"$userns_restriction\"' EXIT",
+    expect(helper).toContain(
+      "KEY=kernel.apparmor_restrict_unprivileged_userns",
     );
-    expect(vitest).toContain(
-      "sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0",
-    );
-    expect(vitest).toContain("pnpm test:git");
+    expect(helper).toContain("trap restore EXIT");
+    expect(helper).toContain('sudo sysctl -q -w "$KEY=$restriction"');
+    expect(helper).toContain('sudo sysctl -q -w "$KEY=0"');
+    // It must run the caller's command rather than a hard-coded suite, and it
+    // must fail loudly rather than run that command still restricted.
+    expect(helper).toMatch(/^"\$@"$/m);
+    expect(helper).toContain('if [ "$applied" != "0" ]');
   });
 
   it("fails closed when an explicit containment test path disappears", () => {

@@ -61,8 +61,66 @@ permissions:
   contents: read
 
 jobs:
+  # ── Linux quality gate ───────────────────────────────────
+  #
+  # Typecheck, lint and the Vitest suite run HERE on ubuntu-latest rather than in
+  # the macOS packaging job below, which `needs:` this one — so a red suite still
+  # blocks publishing. Nothing was weakened; the gate moved to a host that can
+  # honour it.
+  #
+  # WHY IT MOVED: the suite drives real bubblewrap/seccomp containment, and
+  # bubblewrap cannot exist on macOS. Running it in the packaging job failed 18
+  # test files with "absolute bwrap unavailable" — an environmental failure that
+  # reads exactly like a regression — while preflight ran the identical
+  # `pnpm test:git` on Ubuntu and passed. Beta and Production both failed that
+  # way on the v0.1.10 cut.
+  #
+  # The ~1-2 min a second checkout + install costs is the price of a gate that
+  # can actually go green.
+  test:
+    name: Quality gate (typecheck · lint · vitest)
+    # Mirrors the packaging job: a fork has no signing secrets and no release
+    # permissions, so there is nothing here for it to gate.
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install contained-execution runtime
+        uses: ./.github/actions/contained-execution-runtime
+
+      - name: Typecheck (app · electron · packages)
+        # vite + tsup strip types via esbuild WITHOUT checking them, so without
+        # this nothing on the release path validates types at all.
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Install Playwright Chromium headless shell
+        # The Vitest suite contains real-browser design-runtime protocol tests.
+        # pnpm installs Playwright's API package but intentionally not its browser.
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+
+      - name: Run Vitest suite
+        run: bash scripts/ci/with-userns.sh pnpm test:git
+
   beta:
     name: Build + publish Beta (macOS arm64 · signed · NOT notarized)
+    needs: test
     # Don't fire on forks (no signing secrets / release perms there). Key this
     # to repository identity rather than an owner/name pair so an ownership
     # transfer cannot silently disable the beta release job again.
@@ -191,31 +249,13 @@ jobs:
 
       # ── Gates ────────────────────────────────────────────
       #
-      # These run as STEPS in this job rather than a separate `needs:` job on
-      # purpose: a separate job would re-checkout and re-install (~1-2 min) just to
-      # duplicate work this job already did. Placed before build:sidecar so a
-      # failure costs seconds instead of a full pack.
+      # Typecheck, lint and the Vitest suite live in the `test` job above (see the
+      # comment there for why they cannot run on macOS). This job `needs:` it, so
+      # they still gate every publish.
       #
-      # WHY THIS EXISTS: Beta is the cut Production is built from, so a Beta broken
-      # for reasons unrelated to the change under test wastes the whole
-      # stabilization window. Gate it exactly as hard as stable.
-      #
-      # NOTE: before this change NEITHER release workflow typechecked or linted.
-      # vite + tsup strip types via esbuild WITHOUT checking them, so nothing on
-      # either release path validated types at all.
-      - name: Typecheck (app · electron · packages)
-        run: pnpm typecheck
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Install Playwright Chromium headless shell
-        # The Vitest suite contains real-browser design-runtime protocol tests.
-        # pnpm installs Playwright's API package but intentionally not its browser.
-        run: pnpm exec playwright install --with-deps --only-shell chromium
-
-      - name: Run Vitest suite
-        run: pnpm test:git
+      # The guards BELOW stay here on purpose: they inspect macOS packaging inputs,
+      # and they are cheap, so they run before build:sidecar where a failure costs
+      # seconds instead of a full pack.
 
       - name: Ship guards (catalog · packaging · prod env · security)
         # The same set the stable release job runs. Each guards a concrete way the

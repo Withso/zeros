@@ -148,43 +148,7 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Install contained-execution runtime
-        # Codex uses bubblewrap; Claude's strict sandbox also requires socat.
-        # Claude's seccomp layer creates a second capability-bearing user
-        # namespace. Ubuntu's bwrap AppArmor profile deliberately strips those
-        # nested capabilities, so satisfy the pinned runtime's documented host
-        # prerequisite only for each containment command, then restore it.
-        run: |
-          # ubuntu-latest currently puts an HTTP Azure endpoint first in this
-          # generated mirror list. A dead endpoint can leave apt waiting for
-          # every package index for the lifetime of the job even after it finds
-          # the HTTPS fallback. Use that healthy archive directly on amd64.
-          runner_ubuntu_sources=/etc/apt/sources.list.d/ubuntu.sources
-          if [ -f "$runner_ubuntu_sources" ]; then
-            sudo sed -i \
-              's|mirror+file:/etc/apt/apt-mirrors.txt|https://archive.ubuntu.com/ubuntu|g' \
-              "$runner_ubuntu_sources"
-          fi
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap socat
-          userns_restriction=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
-          trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns="$userns_restriction"' EXIT
-          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
-          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "0"
-          case "$(uname -m)" in
-            x86_64) seccomp_arch=x64 ;;
-            aarch64 | arm64) seccomp_arch=arm64 ;;
-            *) echo "Unsupported seccomp architecture: $(uname -m)" >&2; exit 1 ;;
-          esac
-          apply_seccomp="$PWD/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/$seccomp_arch/apply-seccomp"
-          test -x "$apply_seccomp"
-          bwrap \
-            --ro-bind / / \
-            --unshare-pid \
-            --unshare-user \
-            --cap-drop ALL \
-            --proc /proc \
-            --die-with-parent \
-            -- "$apply_seccomp" /bin/true
+        uses: ./.github/actions/contained-execution-runtime
 
       - name: Fetch origin/main (for the migration forward-only guard)
         run: git fetch --no-tags origin main || echo "origin/main unavailable — guard runs HEAD-only"
@@ -203,11 +167,7 @@ jobs:
       - name: Run vitest suite
         # Runtime-discovered integration tests exercise the same nested
         # bubblewrap/seccomp path as the explicit containment matrix below.
-        run: |
-          userns_restriction=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
-          trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns="$userns_restriction"' EXIT
-          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
-          pnpm test:git
+        run: bash scripts/ci/with-userns.sh pnpm test:git
 
       - name: Code + Design containment matrix
         # Stable release gate for the promise shipped today: provider profiles,
@@ -216,11 +176,7 @@ jobs:
         # reconciliation, and absence of a coding-agent Design API/MCP path.
         env:
           ZEROS_REQUIRE_CONTAINMENT_RUNTIME: "1"
-        run: |
-          userns_restriction=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
-          trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns="$userns_restriction"' EXIT
-          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
-          pnpm check:design-containment
+        run: bash scripts/ci/with-userns.sh pnpm check:design-containment
 
       - name: Verify model catalog (strict)
         # Structural validation + the CLI-version gate: a curated model whose
@@ -598,31 +554,7 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
       - name: Install contained-execution runtime
-        # Claude's seccomp layer needs a nested capability-bearing user
-        # namespace. Open that prerequisite only around the exact smoke, then
-        # restore Ubuntu's restriction before any unrelated command runs.
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes bubblewrap socat
-          userns_restriction=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
-          trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns="$userns_restriction"' EXIT
-          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
-          test "$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)" = "0"
-          case "$(uname -m)" in
-            x86_64) seccomp_arch=x64 ;;
-            aarch64 | arm64) seccomp_arch=arm64 ;;
-            *) echo "Unsupported seccomp architecture: $(uname -m)" >&2; exit 1 ;;
-          esac
-          apply_seccomp="$PWD/node_modules/@anthropic-ai/sandbox-runtime/vendor/seccomp/$seccomp_arch/apply-seccomp"
-          test -x "$apply_seccomp"
-          bwrap \
-            --ro-bind / / \
-            --unshare-pid \
-            --unshare-user \
-            --cap-drop ALL \
-            --proc /proc \
-            --die-with-parent \
-            -- "$apply_seccomp" /bin/true
+        uses: ./.github/actions/contained-execution-runtime
 
       - name: Resolve and boot the arm64 agent runtimes
         run: |
@@ -634,11 +566,7 @@ jobs:
         # This proves the generic Linux backend on real arm64. The production
         # cloud image separately supplies rootless Podman, delegated memory/PID
         # cgroups, and its signed cloud-worker admission artifact.
-        run: |
-          userns_restriction=$(sysctl -n kernel.apparmor_restrict_unprivileged_userns)
-          trap 'sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns="$userns_restriction"' EXIT
-          sudo sysctl -q -w kernel.apparmor_restrict_unprivileged_userns=0
-          pnpm check:zsr
+        run: bash scripts/ci/with-userns.sh pnpm check:zsr
 
   # The repository ruleset already requires `source-sync (macOS)`. GitHub does
   # not automatically make newly-added sibling jobs required, so retain that
