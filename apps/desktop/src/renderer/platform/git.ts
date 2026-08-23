@@ -1239,14 +1239,16 @@ async function bridgeWorkspaceIdFor(
 }
 
 /** Which top-level tracked folders are materialized in this worktree.
- *  Engine-only (no native IPC fast path) — an on-demand popover read. */
+ *  Engine-only (no native IPC fast path). A known workspace id skips the
+ *  resolver/list round trip on the Files sidebar's cold path. */
 export async function listWorkingDirectories(
   cwd: string,
+  workspaceId?: string | null,
 ): Promise<WorkingDirectoriesWire> {
   const bridge = requireBridge("read working folders");
   return bridgeListWorkingDirectories(
     bridge,
-    await bridgeWorkspaceIdFor(bridge, cwd),
+    workspaceId?.trim() || (await bridgeWorkspaceIdFor(bridge, cwd)),
   );
 }
 
@@ -1254,11 +1256,12 @@ export async function listWorkingDirectories(
 export async function setWorkingDirectories(
   cwd: string,
   directories: string[],
+  workspaceId?: string | null,
 ): Promise<WorkingDirectoriesWire> {
   const bridge = requireBridge("update working folders");
   return bridgeSetWorkingDirectories(
     bridge,
-    await bridgeWorkspaceIdFor(bridge, cwd),
+    workspaceId?.trim() || (await bridgeWorkspaceIdFor(bridge, cwd)),
     directories,
   );
 }

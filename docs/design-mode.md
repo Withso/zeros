@@ -1,7 +1,7 @@
 # Design mode — one workspace, separate authority
 
 **Status:** Public desktop feature, enabled by default. Current engineering and
-product contract (2026-08-19).
+product contract (2026-08-23).
 
 A Zeros workspace has one semantic identity and one full checkout. `viewMode`
 only selects the visible Code or Design surface; it never grants filesystem
@@ -41,13 +41,13 @@ browsing contexts. Hidden surfaces remain inert and suspend active-only work.
 
 ## Current actor contract
 
-| Actor                                | Code / repository roots                                                     | Recognized Design directories                                               | Other host state                                                                        |
-| ------------------------------------ | --------------------------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Human Design surface                 | Read context; no code-write operation is exposed                            | Mutates through the trusted in-process Design Document API                  | Trusted app authority                                                                   |
-| Zeros-launched local code agent      | Read/write                                                                  | Read-only, for every recognized root; contents remain readable and listable | Normal host-parity access                                                               |
-| Zeros file/Git commands              | Read/write subject to command semantics                                     | Engine-owned Design mutations remain serialized                             | Trusted engine authority                                                                |
-| User terminal or external editor/Git | Full same-user OS authority                                                 | Read/write                                                                  | Outside the Zeros agent boundary                                                        |
-| Design-agent boundary substrate      | Repository roots read-only; minimal canonical Git metadata remains writable | Read/write for every recognized root                                        | Normal host-parity access outside admitted repository roots; no production consumer yet |
+| Actor                                | Code / repository roots                                                                                   | Recognized Design directories                                               | Other host state                                                                        |
+| ------------------------------------ | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Human Design surface                 | Read context; no code-write operation is exposed                                                          | Mutates through the trusted in-process Design Document API                  | Trusted app authority                                                                   |
+| Zeros-launched local code agent      | Current and explicitly attached roots read/write; unrelated Zeros-managed workspace collections read-only | Read-only, for every recognized root; contents remain readable and listable | Normal host-parity access                                                               |
+| Zeros file/Git commands              | Read/write subject to command semantics                                                                   | Engine-owned Design mutations remain serialized                             | Trusted engine authority                                                                |
+| User terminal or external editor/Git | Full same-user OS authority                                                                               | Read/write                                                                  | Outside the Zeros agent boundary                                                        |
+| Design-agent boundary substrate      | Managed workspace collections and registered repository roots read-only; minimal canonical Git metadata remains writable | Read/write for every recognized root                              | Normal host-parity access outside admitted repository roots; no production consumer yet |
 
 Reads are intentionally broad: code agents may inspect Design and designers may
 inspect code. Write authority is asymmetric and does not follow the selected UI
@@ -64,17 +64,20 @@ agent only when all of these conditions hold:
    checkout are real, symlink-free directory paths. The actual trees are walked,
    so ignored and untracked drafts and nested directories are covered. A
    pre-existing Design file with more than one hard link refuses admission.
-3. The local immutable profile preserves host write authority, then carves
-   every recognized Design root and generation-private ZSR descriptor back to
-   read-only. Canonical Git metadata stays ordinary and writable.
-4. The deny set is the canonical union of every registered local owner: each
-   managed worktree, its physical main checkout, every open project root, and
-   every explicitly admitted additional repository. Registering a root never
-   grants write access to that root; it only contributes its recognized Design
-   territory. Cloud-only and stale missing paths contribute no local authority.
-   Multiple Design roots are first-class; none is selected merely by the
-   current canvas or cwd. Thus an agent running in workspace A cannot write a
-   Design document registered through workspace B or its main checkout.
+3. The local immutable profile preserves host write authority, then makes each
+   stable Zeros-managed workspace collection read-only. It reopens only the
+   current workspace and managed islands covered by an explicit `/add-dir`
+   grant, then carves every recognized Design root and generation-private ZSR
+   descriptor inside those islands back to read-only. Canonical Git metadata
+   stays ordinary and writable.
+4. Physical main checkouts, open project roots, and other registered owners
+   outside managed collections still contribute exact Design denies.
+   Registering a root never grants write access to that root. Cloud-only and
+   stale missing paths contribute no local authority. Multiple Design roots
+   are first-class; none is selected merely by the current canvas or cwd. Thus
+   an agent running in workspace A cannot write a managed sibling at all unless
+   it was explicitly attached, and cannot write a recognized Design document
+   in an attached sibling or external registered owner.
 5. The engine installs the exact profile with Seatbelt on macOS or a
    mount-only bubblewrap profile on Linux before any provider byte starts.
    There is no instruction-only fallback.
@@ -146,6 +149,16 @@ workspace. If an owner transition crosses a native agent bind that was already
 admitted, the incomplete execution is disposed and the bind is retried against
 the new authority. The transient gate message must never surface as a Codex,
 Claude, or Cursor provider error.
+
+Creating a managed sibling—including creation from an existing branch—for an
+already registered main repository is not an authority handoff for existing
+actors: the stable parent collection was already read-only before the sibling
+path existed. Zeros publishes and fences the new owner without cancelling
+unrelated sessions, Setup/Run tasks, or pooled provider utilities. Those actors
+retain per-owner snapshots for every reopened island, so a real pointer or
+recognition change in an island they can write still uses
+retire-before-publish. Registering an external owner outside the stable managed
+collections remains a global handoff.
 
 ## Shared-checkout scope
 

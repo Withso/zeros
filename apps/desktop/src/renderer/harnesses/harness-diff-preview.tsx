@@ -22,10 +22,8 @@ async function main() {
     await import("../shell/workspace-file-data-cache");
   const { WorkspaceFileTree } =
     await import("../shell/workbench/tabs/workspace-file-tree");
-  const { FilesTreePanel } =
-    await import("../shell/workbench/tabs/files-tree-panel");
-  const { treePanelHeight } =
-    await import("../shell/workbench/tabs/files-tab-layout");
+  const { FilesSearchSidebar } =
+    await import("../shell/workbench/tabs/files-search-sidebar");
   const { primeWorkspaceFiles } =
     await import("../shell/workspace-files-cache");
   const { flushSync } = await import("react-dom");
@@ -121,55 +119,44 @@ async function main() {
     updatedAt: 0,
   } as never;
 
-  // The collapsed Files tab's floating tree popup, wired the way FilesTab
-  // wires it: the trigger measures the tab body at open time and freezes the
-  // popup height for that open (a later container resize must not reflow it),
-  // a row open closes the popup, and the trigger is exempt from the popup's
-  // outside-pointerdown dismissal so its click stays a toggle.
-  function TreePanelFixture() {
-    const [panel, setPanel] = React.useState<{ height: number } | null>(null);
-    const containerRef = React.useRef<HTMLDivElement | null>(null);
-    const triggerRef = React.useRef<HTMLButtonElement | null>(null);
+  // Files Search is a real sidebar mode: it fills the same resizable shell as
+  // the tree, starts with only its input, and keeps its column open after a
+  // result routes to the viewer.
+  function SearchSidebarFixture() {
+    const [open, setOpen] = React.useState(false);
+    const [width, setWidth] = React.useState(280);
     return (
       <div className="flex flex-col gap-2">
-        <button
-          ref={triggerRef}
-          type="button"
-          data-testid="tree-panel-trigger"
-          className="w-fit"
-          onClick={() =>
-            setPanel((open) =>
-              open
-                ? null
-                : {
-                    height: treePanelHeight(
-                      containerRef.current?.clientHeight ?? 0,
-                    ),
-                  },
-            )
-          }
-        >
-          Toggle tree panel
-        </button>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            data-testid="search-sidebar-trigger"
+            onClick={() => setOpen((value) => !value)}
+          >
+            Toggle search sidebar
+          </button>
+          <button
+            type="button"
+            data-testid="search-sidebar-resize"
+            onClick={() => setWidth((value) => (value === 280 ? 360 : 280))}
+          >
+            Resize shared sidebar
+          </button>
+        </div>
         <div
-          ref={containerRef}
-          data-testid="tree-panel-container"
-          className="border-border1 bg-bg1 relative h-[420px] w-[560px] overflow-hidden border"
+          data-testid="search-sidebar-shell"
+          className="border-border1 bg-bg1 h-[420px] overflow-hidden border"
+          style={{ width }}
         >
-          {panel && (
-            <FilesTreePanel
+          {open && (
+            <FilesSearchSidebar
               cwd={treeCwd}
               reloadKey={0}
-              height={panel.height}
-              dismissIgnoreRef={triggerRef}
-              onOpenFile={(path) => {
-                console.log("[harness] panel open", path);
-                setPanel(null);
-              }}
+              onOpenFile={(path) => console.log("[harness] search open", path)}
               onOpenInNewTab={(path) =>
-                console.log("[harness] panel new tab", path)
+                console.log("[harness] search new tab", path)
               }
-              onDismiss={() => setPanel(null)}
+              onClose={() => setOpen(false)}
             />
           )}
         </div>
@@ -288,7 +275,7 @@ async function main() {
               className="h-full"
             />
           </div>
-          <TreePanelFixture />
+          <SearchSidebarFixture />
           <div
             data-testid="markdown-preview-host"
             className="h-[180px] w-[450px] overflow-x-hidden overflow-y-auto"

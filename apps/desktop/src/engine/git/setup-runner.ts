@@ -24,10 +24,12 @@
 
 import type { PtyService } from "../pty/service";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { getWorkspaceById, updateWorkspace, listWorkspaces } from "./state";
 import type { SetupState } from "./types";
 import { buildSetupCommandEnv } from "./setup-hooks";
 import type {
+  BoundaryAuthoritySnapshot,
   PreparedBoundary,
   RepoTaskBoundaryFactory,
 } from "../agents/containment/types";
@@ -112,7 +114,10 @@ export class SetupManager {
   /** Starts whose login-shell environment is still resolving. They have no
    *  PTY or entry yet, so stop()/archive needs this separate cancellation
    *  handle to prevent a setup shell from appearing after shutdown. */
-  private readonly starting = new Map<string, { cancelled: boolean }>();
+  private readonly starting = new Map<
+    string,
+    { cancelled: boolean; authority?: BoundaryAuthoritySnapshot }
+  >();
   /** Monotonic run counter → a unique session id per run (rerun-race guard). */
   private gen = 0;
   /** Failed teardown proof survives reruns for this engine lifetime so a later
@@ -158,7 +163,8 @@ export class SetupManager {
   ): Promise<void> {
     const promise = Promise.resolve().then(() => boundary.stopAndProve());
     const records =
-      this.boundaryTeardowns.get(workspaceId) ?? new Set<BoundaryTeardownRecord>();
+      this.boundaryTeardowns.get(workspaceId) ??
+      new Set<BoundaryTeardownRecord>();
     const record = { promise } satisfies BoundaryTeardownRecord;
     records.add(record);
     this.boundaryTeardowns.set(workspaceId, records);
@@ -232,12 +238,51 @@ export class SetupManager {
    * identity yet, so a concurrent external territory event is conservatively
    * treated as changed and the global start drain resolves the race. */
   registeredDesignAuthorityChanged(identity: string | null): boolean {
-    if (this.starting.size > 0 || this.boundaryTeardowns.size > 0) return true;
+    if (this.boundaryTeardowns.size > 0) return true;
+    for (const flight of this.starting.values()) {
+      if (
+        flight.authority &&
+        flight.authority.registeredDesignAuthorityIdentity !== identity
+      ) {
+        return true;
+      }
+    }
     for (const entry of this.entries.values()) {
       if (entry.state !== "running" || entry.boundaryFinalized) continue;
       if (
         !entry.boundary ||
         entry.boundary.registeredDesignAuthorityIdentity !== identity
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  workspaceTerritoryChanged(
+    workspaceRoot: string,
+    territoryIdentity: string | null,
+  ): boolean {
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    const changed = (snapshot: BoundaryAuthoritySnapshot): boolean =>
+      snapshot.territoryContributions.some(
+        (contribution) =>
+          path.resolve(contribution.workspaceRoot) === normalizedWorkspace &&
+          contribution.identity !== territoryIdentity,
+      );
+    for (const flight of this.starting.values()) {
+      if (flight.authority && changed(flight.authority)) return true;
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.state !== "running" || entry.boundaryFinalized) continue;
+      const contributions = entry.boundary.territoryContributions;
+      if (
+        !contributions ||
+        changed({
+          registeredDesignAuthorityIdentity:
+            entry.boundary.registeredDesignAuthorityIdentity ?? null,
+          territoryContributions: contributions,
+        })
       ) {
         return true;
       }
@@ -306,7 +351,10 @@ export class SetupManager {
     // block checks identity, so it cannot retire this replacement's slot.
     const priorFlight = this.starting.get(args.workspaceId);
     if (priorFlight) priorFlight.cancelled = true;
-    const flight = { cancelled: false };
+    const flight: {
+      cancelled: boolean;
+      authority?: BoundaryAuthoritySnapshot;
+    } = { cancelled: false };
     this.starting.set(args.workspaceId, flight);
     // Orphan the previous run BEFORE killing it, then kill.
     //
@@ -349,6 +397,9 @@ export class SetupManager {
         workspaceRoot: cwd,
         repoRoot,
         env,
+        onAuthorityResolved: (authority) => {
+          if (!flight.cancelled) flight.authority = authority;
+        },
       });
       if (flight.cancelled) {
         await this.trackBoundaryTeardown(boundary, args.workspaceId);

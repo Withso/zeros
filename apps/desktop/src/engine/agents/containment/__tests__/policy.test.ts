@@ -166,7 +166,11 @@ describe("ZSR host-parity policy builder", () => {
       ]),
     );
     expect(Object.keys(prepared.paths)).not.toEqual(
-      expect.arrayContaining(["shadowGit", "networkBridge", "networkClientState"]),
+      expect.arrayContaining([
+        "shadowGit",
+        "networkBridge",
+        "networkClientState",
+      ]),
     );
     expect((await stat(prepared.paths.root)).mode & 0o777).toBe(0o700);
     const markerHandle = await open(prepared.paths.processIdentityMarker, "r");
@@ -189,6 +193,90 @@ describe("ZSR host-parity policy builder", () => {
     }
   });
 
+  it("pre-denies future managed siblings while reopening the current workspace", async () => {
+    const managed = path.join(temporaryRoot, "workspaces");
+    const workspace = path.join(managed, "repo", "Shocking");
+    const sibling = path.join(managed, "repo", "Onyx");
+    const design = path.join(workspace, "Zeros Design");
+    await Promise.all(
+      [design, sibling].map((directory) =>
+        mkdir(directory, { recursive: true }),
+      ),
+    );
+
+    const request: Omit<BoundaryRequest, "executionId"> = {
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      territory: territory(workspace, [design]),
+      protectedWorkspaceDirectories: [managed],
+    };
+    const prepared = await prepare(request);
+
+    expect(prepared.document.filesystem.denyWrite).toContain(managed);
+    expect(prepared.document.filesystem.allowWrite).toContain(workspace);
+    expect(prepared.document.filesystem.denyWrite).toContain(design);
+  });
+
+  it("materializes an absent protected collection before the runtime can stub it as a file", async () => {
+    const workspace = path.join(temporaryRoot, "existing-workspace");
+    const managed = path.join(temporaryRoot, "future", "workspaces");
+    await mkdir(workspace, { recursive: true });
+    await expect(stat(managed)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const prepared = await prepare({
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      protectedWorkspaceDirectories: [managed],
+    });
+
+    await expect(stat(managed)).resolves.toSatisfy((entry) =>
+      entry.isDirectory(),
+    );
+    expect(prepared.document.filesystem.denyWrite).toContain(managed);
+  });
+
+  it("reopens only existing managed islands covered by a broad explicit grant", async () => {
+    const workspace = path.join(temporaryRoot, "primary");
+    const managedParent = path.join(temporaryRoot, "shared");
+    const managed = path.join(managedParent, "workspaces");
+    const sibling = path.join(managed, "repo", "Onyx");
+    const siblingDesign = path.join(sibling, "Zeros Design");
+    await Promise.all(
+      [workspace, siblingDesign].map((directory) =>
+        mkdir(directory, { recursive: true }),
+      ),
+    );
+
+    const prepared = await prepare({
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      territory: territory(workspace, [siblingDesign]),
+      additionalReadWriteRoots: [managedParent],
+      protectedWorkspaceDirectories: [managed],
+      protectedWorkspaceWriteDirectories: [sibling],
+    });
+
+    expect(prepared.document.filesystem.allowWrite).toEqual(
+      expect.arrayContaining([managedParent, sibling, workspace]),
+    );
+    expect(prepared.document.filesystem.denyWrite).toEqual(
+      expect.arrayContaining([managed, siblingDesign]),
+    );
+
+    await expect(
+      prepare({
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+        protectedWorkspaceDirectories: [managed],
+        protectedWorkspaceWriteDirectories: [sibling],
+      }),
+    ).rejects.toThrow(/inside an authorized root/);
+  });
+
   it("refuses a pre-existing hard-link alias to database authority", async () => {
     const workspace = path.join(temporaryRoot, "authority-alias-workspace");
     const database = path.join(process.env.ZEROS_DATA_DIR!, "zeros.db");
@@ -200,7 +288,11 @@ describe("ZSR host-parity policy builder", () => {
     await link(database, path.join(temporaryRoot, "database-alias"));
 
     await expect(
-      prepare({ actor: "agent-code", cwd: workspace, workspaceRoot: workspace }),
+      prepare({
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+      }),
     ).rejects.toThrow(/engine authority.*hard-link/i);
   });
 
@@ -220,7 +312,11 @@ describe("ZSR host-parity policy builder", () => {
     await link(seed, path.join(temporaryRoot, "workspace-seed-alias.json"));
 
     await expect(
-      prepare({ actor: "agent-code", cwd: workspace, workspaceRoot: workspace }),
+      prepare({
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+      }),
     ).rejects.toThrow(/engine authority.*hard-link/i);
 
     await rm(path.join(temporaryRoot, "workspace-seed-alias.json"));
@@ -230,7 +326,11 @@ describe("ZSR host-parity policy builder", () => {
     await writeFile(backup, "backup\n");
     await link(backup, path.join(temporaryRoot, "notes-alias.backup"));
     await expect(
-      prepare({ actor: "agent-code", cwd: workspace, workspaceRoot: workspace }),
+      prepare({
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+      }),
     ).resolves.toBeDefined();
   });
 
@@ -241,8 +341,9 @@ describe("ZSR host-parity policy builder", () => {
     const siblingDesign = path.join(siblingWorkspace, "Zeros Design");
     const git = path.join(workspace, ".git");
     const extra = path.join(temporaryRoot, "extra");
+    const managedWorkspaces = path.join(temporaryRoot, "managed-workspaces");
     await Promise.all(
-      [design, siblingDesign, git, extra].map((directory) =>
+      [design, siblingDesign, git, extra, managedWorkspaces].map((directory) =>
         mkdir(directory, { recursive: true }),
       ),
     );
@@ -251,6 +352,7 @@ describe("ZSR host-parity policy builder", () => {
       workspaceRoot: workspace,
       territory: territory(workspace, [design, siblingDesign], [design, git]),
       additionalReadWriteRoots: [extra],
+      protectedWorkspaceDirectories: [managedWorkspaces],
       protectedCodeDirectories: [siblingWorkspace],
       allowedLocalPorts: [5432],
       trustedLocalPorts: [3000],
@@ -269,14 +371,21 @@ describe("ZSR host-parity policy builder", () => {
       ]),
     );
     expect(designPolicy.document.filesystem.denyWrite).toEqual(
-      expect.arrayContaining([workspace, siblingWorkspace, extra]),
+      expect.arrayContaining([
+        workspace,
+        siblingWorkspace,
+        extra,
+        managedWorkspaces,
+      ]),
     );
     expect(designPolicy.document.filesystem.denyWrite).not.toContain(design);
     expect(designPolicy.document.filesystem.denyWrite).not.toContain(
       siblingDesign,
     );
     expect(designPolicy.document.filesystem.denyWrite).not.toContain(git);
-    expect(designPolicy.document.runtime.allowedLocalPorts).toEqual([3000, 5432]);
+    expect(designPolicy.document.runtime.allowedLocalPorts).toEqual([
+      3000, 5432,
+    ]);
 
     const codePolicy = await prepare({ ...base, actor: "agent-code" });
     expect(codePolicy.document.filesystem.denyWrite).toEqual(

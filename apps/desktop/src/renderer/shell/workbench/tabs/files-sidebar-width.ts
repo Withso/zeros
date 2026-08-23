@@ -2,11 +2,11 @@
 // Files-tab sidebar width — shared, persisted drag state
 // ──────────────────────────────────────────────────────────
 //
-// The workbench File tab's file-tree sidebar is resizable (a pointer-captured
-// seam, like the conversation/workbench seam). Its width is ONE user preference,
-// not per-tab state: every File tab (including a dirty tab kept mounted
-// invisibly) reads the same module store, so dragging in one tab is
-// reflected everywhere and survives reloads via localStorage.
+// The workbench File tab's unified Tree/Search/Directories sidebar is resizable
+// (a pointer-captured seam, like the conversation/workbench seam). Its width is
+// ONE user preference, not per-tab or per-mode state: every File tab (including
+// a dirty tab kept mounted invisibly) reads the same module store, so dragging
+// any mode is reflected everywhere and survives reloads via localStorage.
 //
 // Proportional columns (2026-07-17): the preference is a FRACTION of the
 // two-pane container (rendered as a percentage width), not a pixel width —
@@ -30,7 +30,7 @@ const LEGACY_PX_STORAGE_KEY = "zeros:files-sidebar-width:v1";
  *  close to what the user had. */
 const LEGACY_MIGRATION_REFERENCE_PX = 800;
 
-/** Narrowest useful tree column (rows + filter bar stay readable). Must
+/** Narrowest useful Files sidebar (rows + search controls stay readable). Must
  *  match the sidebar's `min-w-[140px]` class at both render sites. */
 export const FILES_SIDEBAR_MIN_PX = 140;
 /** Fresh-install default — ~240px in a laptop-sized workbench. */
@@ -58,8 +58,8 @@ export function clampFilesSidebarWidth(
   return Math.min(Math.max(raw, FILES_SIDEBAR_MIN_PX), max);
 }
 
-/** Convert a live drag position (px from the container's left edge) into
- *  the fraction the store persists: pixel-clamped first (sidebar floor +
+/** Convert a requested live sidebar width into the fraction the store persists:
+ *  pixel-clamped first (sidebar floor +
  *  viewer reservation), then capped at the CSS `max-w-[70%]` share so the
  *  live width always equals what CSS renders — no snap-back on release. */
 export function clampFilesSidebarFraction(
@@ -135,8 +135,8 @@ function snapshot(): number {
   return fraction;
 }
 
-/** Reactive committed sidebar fraction (0..1) for the Files tab's left
- *  pane — render as a percentage width so it scales with the column. */
+/** Reactive committed sidebar fraction (0..1) for the unified Files sidebar —
+ *  render as a percentage width so it scales with the column. */
 export function useFilesSidebarFraction(): number {
   return useSyncExternalStore(subscribe, snapshot, snapshot);
 }

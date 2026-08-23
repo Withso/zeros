@@ -11,7 +11,7 @@
 // One row owned by Workbench above the retained Changes and Review tab bodies,
 // so creation/status stays mounted — and keeps one live snapshot — across a
 // hop between them. With a PR it IS the PR status island (live status +
-// one-tap actions); without one it's the same 40px row holding the
+// one-tap actions); without one it's the same borderless 40px row holding the
 // target-branch picker (left) and the Create PR split-button (right). The two
 // are mutually exclusive on `prNumber`, exactly like the old topbar
 // button/island pair — so an adopted-PR workspace can never see both at once.
@@ -59,7 +59,7 @@ export function PrStatusRow({
     );
   }
   return (
-    <div className="border-border1 bg-bg1 flex h-10 shrink-0 items-center gap-2 border-b px-2">
+    <div className="bg-bg1 flex h-10 shrink-0 items-center gap-2 px-2">
       {prWorkspace ? (
         <>
           {/* Left: pick the base branch (remote-only). Right: Create PR. */}

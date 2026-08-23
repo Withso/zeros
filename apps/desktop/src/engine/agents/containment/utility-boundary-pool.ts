@@ -40,7 +40,11 @@
 
 import { createHash } from "node:crypto";
 
-import type { BoundaryRequest, PreparedBoundary } from "./types";
+import type {
+  BoundaryRequest,
+  BoundaryTerritoryContributionSnapshot,
+  PreparedBoundary,
+} from "./types";
 
 /** How long an idle pooled boundary is kept before it is proven torn down.
  * Long enough to serve the burst that follows a boot or a settings save (probes
@@ -326,6 +330,15 @@ export class UtilityBoundaryPool {
   /** Live entry count — diagnostics and tests only. */
   size(): number {
     return this.entries.size;
+  }
+
+  territoryContributionSnapshots(): readonly (
+    | readonly BoundaryTerritoryContributionSnapshot[]
+    | undefined
+  )[] {
+    return [...this.entries.values()].map(
+      (entry) => entry.boundary.territoryContributions,
+    );
   }
 
   /** Whether any prepared utility boundary was admitted under a different
