@@ -100,6 +100,8 @@ interface ReaperInternals {
     start(args: unknown): Promise<unknown>;
   };
   agents: {
+    ensureAgent(...args: unknown[]): Promise<unknown>;
+    newSession(...args: unknown[]): Promise<unknown>;
     markBoundaryDraining(
       executionId: string,
       transition: "territory-restart",
@@ -168,6 +170,20 @@ interface ReaperInternals {
     msg: Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>,
     client: TransportClient,
   ): Promise<void>;
+  handleAgentMessage(msg: EngineMessage, client: TransportClient): Promise<void>;
+  agentSpawnOpts(
+    msg: EngineMessage,
+    client: TransportClient,
+    stage: "newSession" | "loadSession" | "forkSession",
+  ): Promise<{ workspaceId?: string; cwd?: string; env?: Record<string, string> }>;
+  workspaceIdForProcess(
+    workspaceId: string | null | undefined,
+    cwd: string | null | undefined,
+  ): string | null;
+  assertAgentWorkspaceProcessStartAllowed(
+    workspaceId: string | null | undefined,
+    ...targets: Array<string | null | undefined>
+  ): void;
 }
 
 function internals(engine: ZerosEngine): ReaperInternals {
@@ -963,6 +979,168 @@ describe("Design territory agent retirement", () => {
         baseBranch: "main",
       },
     });
+  });
+
+  // A durable context-graph mutation is additive user intent, so it waits for
+  // the complete transition queue — including a transition that joins the tail
+  // while it is already parked — instead of failing because an unrelated
+  // workspace is publishing a new Design owner. Transcript windows stay
+  // readable throughout and are covered separately above.
+  it.each([
+    [
+      "attachment.write",
+      {
+        workspaceId: "ws_attachment",
+        attachmentId: "att-1",
+        base64: "aGVsbG8=",
+        mimeType: "text/plain",
+        filename: "pasted-text.txt",
+      },
+    ],
+    ["context.graph.scaffold", { workspaceId: "ws_attachment" }],
+    [
+      "context.graph.setShared",
+      { workspaceId: "ws_attachment", attachmentId: "att-1", shared: true },
+    ],
+  ])(
+    "queues %s until registered Design territory is stable",
+    async (op, params) => {
+      const state = internals(
+        new ZerosEngine({
+          root: "/tmp/zeros-territory-attachment",
+          port: 29_938,
+        }),
+      );
+      vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
+      vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
+      vi.spyOn(
+        state,
+        "retireAllCodeAgentSessionsForTerritoryChange",
+      ).mockResolvedValue();
+      vi.spyOn(state.workspace, "lifecycleMutationWorkspaceId").mockReturnValue(
+        "ws_attachment",
+      );
+      const write = vi.spyOn(state.workspace, "handle").mockResolvedValue({
+        relativePath: ".context-graph/local/attachments/att-1/pasted-text.txt",
+      });
+      const receiver = client("local");
+      let releaseTransition!: () => void;
+      const transitionGate = new Promise<void>((resolve) => {
+        releaseTransition = resolve;
+      });
+      const transition = state.withGlobalDesignTerritoryTransition(
+        () => transitionGate,
+      );
+      await vi.waitFor(() =>
+        expect(state.workspaceAllowsProcessStart(null)).toBe(false),
+      );
+
+      const request = state.handleWorkspaceMessage(
+        {
+          type: "WORKSPACE_REQUEST",
+          id: `${op}-during-create`,
+          source: "browser",
+          timestamp: 1,
+          op,
+          params,
+        } as Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>,
+        receiver,
+      );
+      await Promise.resolve();
+      expect(write).not.toHaveBeenCalled();
+      expect(receiver.send).not.toHaveBeenCalled();
+
+      let releaseSecondTransition!: () => void;
+      const secondTransitionGate = new Promise<void>((resolve) => {
+        releaseSecondTransition = resolve;
+      });
+      const secondTransition = state.withGlobalDesignTerritoryTransition(
+        () => secondTransitionGate,
+      );
+      releaseTransition();
+      await transition;
+      await Promise.resolve();
+      expect(write).not.toHaveBeenCalled();
+      expect(receiver.send).not.toHaveBeenCalled();
+
+      releaseSecondTransition();
+      await Promise.all([secondTransition, request]);
+
+      expect(write).toHaveBeenCalledWith(op, params, { remote: false });
+      expect(receiver.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "WORKSPACE_RESPONSE",
+          requestId: `${op}-during-create`,
+        }),
+      );
+    },
+  );
+
+  it("queues first agent admission instead of surfacing a setup-time agent error", async () => {
+    const state = internals(
+      new ZerosEngine({ root: "/tmp/zeros-territory-agent", port: 29_939 }),
+    );
+    vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
+    vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
+    vi.spyOn(
+      state,
+      "retireAllCodeAgentSessionsForTerritoryChange",
+    ).mockResolvedValue();
+    vi.spyOn(state, "agentSpawnOpts").mockResolvedValue({
+      workspaceId: "ws_agent",
+      cwd: "/tmp/zeros-territory-agent/worktree",
+    });
+    vi.spyOn(state, "workspaceIdForProcess").mockReturnValue("ws_agent");
+    const admission = vi
+      .spyOn(state, "assertAgentWorkspaceProcessStartAllowed")
+      .mockImplementation(() => {});
+    vi.spyOn(state.agents, "ensureAgent").mockResolvedValue({});
+    const start = vi.spyOn(state.agents, "newSession").mockResolvedValue({
+      executionId: "queued-execution",
+      sessionId: "queued-execution",
+    });
+    let releaseTransition!: () => void;
+    const transitionGate = new Promise<void>((resolve) => {
+      releaseTransition = resolve;
+    });
+    const transition = state.withGlobalDesignTerritoryTransition(
+      () => transitionGate,
+    );
+    await vi.waitFor(() =>
+      expect(state.workspaceAllowsProcessStart(null)).toBe(false),
+    );
+
+    const receiver = client("local");
+    const request = state.handleAgentMessage(
+      {
+        type: "AGENT_NEW_SESSION",
+        id: "agent-during-create",
+        source: "browser",
+        timestamp: 1,
+        agentId: "claude",
+        chatId: "chat-during-create",
+        workspaceId: "ws_agent",
+        cwd: "/tmp/zeros-territory-agent/worktree",
+      } as Extract<EngineMessage, { type: "AGENT_NEW_SESSION" }>,
+      receiver,
+    );
+    await vi.waitFor(() => expect(state.agentSpawnOpts).toHaveBeenCalled());
+    expect(admission).not.toHaveBeenCalled();
+    expect(receiver.send).not.toHaveBeenCalled();
+
+    releaseTransition();
+    await Promise.all([transition, request]);
+    expect(admission).toHaveBeenCalled();
+    expect(start).toHaveBeenCalledOnce();
+    expect(receiver.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "AGENT_SESSION_CREATED",
+        requestId: "agent-during-create",
+      }),
+    );
+    expect(receiver.send).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: "AGENT_ERROR" }),
+    );
   });
 
   it("rejects a rowless main-checkout run while the global owner map changes", async () => {

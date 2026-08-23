@@ -37,6 +37,7 @@ import { setAuthAccessToken } from "./auth-token";
 import { isElectron, nativeInvoke, nativeListen } from "../../platform/runtime";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { CHANNEL } from "../../config/release-channel";
+import { useDismissStartupLoader } from "../../shared/ui/startup-loader";
 import {
   schemeForChannel,
   type Channel,
@@ -401,6 +402,10 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
 /** Full-screen fallback for a non-Electron context — there is no browser
  *  fallback for auth (desktop-only product, 2026-06-25). */
 function AuthConfigErrorScreen() {
+  // AuthGate is not mounted in a non-Electron context, so this terminal
+  // replacement surface owns dismissal of the HTML startup loader.
+  useDismissStartupLoader(true);
+
   return (
     <div className="bg-bg1 text-fg2 fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 px-6 text-center">
       <div className="text-fg1 text-sm font-medium">

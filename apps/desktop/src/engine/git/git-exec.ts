@@ -639,7 +639,7 @@ function unsafeGitInvocation(message: string): GitError {
     code: "VALIDATION_FAILED",
     message,
     remediation:
-      "Run repository-defined Git extensions in an agent or a “Run as me” terminal instead.",
+      "Run repository-defined Git extensions in an agent or a Terminal tab instead.",
   });
 }
 

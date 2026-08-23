@@ -15,6 +15,7 @@ const spawnPreparedDefaultChat = vi.fn((_args: unknown) => ({
 const toastError = vi.fn();
 const isNativeRuntime = vi.fn(() => true);
 const isExpectedElectron = vi.fn(() => true);
+const discardQueuedContextGraphWrites = vi.fn();
 
 vi.mock("../../state/use-projects", () => ({
   peekWorkspacesFor: (slug: string) => peekWorkspacesFor(slug),
@@ -39,6 +40,13 @@ vi.mock("../../shared/ui/primitives/elements", () => ({
 vi.mock("../../features/agent/agent-history-client", () => ({
   dbDeleteChat: vi.fn(async () => {}),
 }));
+vi.mock(
+  "../../features/agent/composer-editor/context-graph-staging",
+  () => ({
+    discardQueuedContextGraphWrites: (cwd: string) =>
+      discardQueuedContextGraphWrites(cwd),
+  }),
+);
 vi.mock("../../platform/observability/analytics/agent-events", () => ({
   trackWorkspaceOpened: vi.fn(),
 }));
@@ -230,6 +238,23 @@ describe("createWorkspaceForProject", () => {
       "kind",
     );
     expect(workspaceCreate.mock.calls[0]?.[0]).not.toHaveProperty("kind");
+  });
+
+  it("discards context-graph bytes queued for a create that rolls back", async () => {
+    workspacePrepareCreate.mockResolvedValue({
+      workspaceId: "ws_failed",
+      path: "/worktrees/failed",
+      repoSlug: "zeros",
+      branch: "zeros/failed-a872",
+    });
+    workspaceCreate.mockRejectedValue(new Error("checkout failed"));
+
+    expect(
+      await createWorkspaceForProject({ project, dispatch: vi.fn() }),
+    ).toBe(true);
+    expect(discardQueuedContextGraphWrites).toHaveBeenCalledWith(
+      "/worktrees/failed",
+    );
   });
 
   it("opens a design workspace without creating or attaching a coding-agent chat", async () => {

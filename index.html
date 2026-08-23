@@ -60,8 +60,247 @@
         }
       })();
     </script>
+    <!-- The dev server can return this document long before Vite has cold-
+         transformed and Chromium has evaluated the renderer graph. Load the
+         real mark directly from the HTML so startup never paints an empty
+         window while that graph is compiling. This node deliberately lives
+         outside #root: React's auth gate keeps it mounted until the first real
+         application/login surface is committed. -->
+    <link
+      rel="preload"
+      as="image"
+      href="/apps/desktop/src/assets/zeros-logo.png"
+    />
+    <style id="zeros-boot-styles">
+      :root {
+        --zeros-boot-bg: #121212;
+        --zeros-boot-ink-strong: #f2f2f0;
+        --zeros-boot-ink-mid: #b6b6b2;
+        --zeros-boot-ink-soft: #777774;
+      }
+
+      :root[data-theme="dark"][data-theme-palette="orka-black"] {
+        --zeros-boot-bg: #131111;
+      }
+
+      :root[data-theme="light"] {
+        --zeros-boot-bg: #ffffff;
+        --zeros-boot-ink-strong: #232322;
+        --zeros-boot-ink-mid: #555552;
+        --zeros-boot-ink-soft: #91918d;
+      }
+
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        background: var(--zeros-boot-bg);
+      }
+
+      #root {
+        min-height: 100%;
+      }
+
+      #zeros-boot {
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--zeros-boot-bg);
+      }
+
+      #zeros-boot[data-zeros-pre-react] {
+        opacity: 0;
+        animation: zeros-boot-reveal 1ms 120ms forwards;
+      }
+
+      .zeros-boot-logo {
+        position: relative;
+        display: block;
+        width: 80px;
+        height: 80px;
+        isolation: isolate;
+        user-select: none;
+        -webkit-user-drag: none;
+      }
+
+      .zeros-boot-halftone {
+        position: absolute;
+        inset: 0;
+        display: block;
+      }
+
+      .zeros-boot-halftone-layer {
+        position: absolute;
+        inset: 0;
+        display: block;
+        pointer-events: none;
+        -webkit-mask: url("/apps/desktop/src/assets/zeros-logo.png") center / contain
+          no-repeat;
+        mask: url("/apps/desktop/src/assets/zeros-logo.png") center / contain
+          no-repeat;
+      }
+
+      .zeros-boot-halftone--base {
+        background: var(--zeros-boot-ink-soft);
+        opacity: 0.2;
+      }
+
+      .zeros-boot-halftone--dots {
+        background-image: radial-gradient(
+          circle,
+          var(--zeros-boot-ink-mid) 0 0.75px,
+          transparent 0.9px
+        );
+        background-size: 3.5px 3.5px;
+        opacity: 0.78;
+      }
+
+      .zeros-boot-halftone--checks {
+        background-image: conic-gradient(
+          from 45deg,
+          transparent 0 25%,
+          var(--zeros-boot-ink-strong) 25% 50%,
+          transparent 50% 75%,
+          var(--zeros-boot-ink-mid) 75% 100%
+        );
+        background-size: 4px 4px;
+        clip-path: polygon(
+          0 0,
+          58% 0,
+          58% 24%,
+          100% 24%,
+          100% 52%,
+          76% 52%,
+          76% 100%,
+          45% 100%,
+          45% 74%,
+          0 74%
+        );
+        opacity: 0.88;
+        animation: zeros-boot-halftone-drift 5.8s ease-in-out infinite;
+        will-change: transform, opacity;
+      }
+
+      .zeros-boot-halftone--hatch {
+        background-image: linear-gradient(
+            90deg,
+            transparent 0 48%,
+            var(--zeros-boot-ink-strong) 48% 64%,
+            transparent 64% 100%
+          ),
+          repeating-linear-gradient(
+            135deg,
+            transparent 0 1.5px,
+            var(--zeros-boot-ink-mid) 1.5px 2.25px,
+            transparent 2.25px 4px
+          );
+        background-size:
+          4px 4px,
+          auto;
+        clip-path: polygon(
+          0 18%,
+          34% 18%,
+          34% 44%,
+          68% 44%,
+          68% 12%,
+          100% 12%,
+          100% 72%,
+          70% 72%,
+          70% 100%,
+          20% 100%,
+          20% 60%,
+          0 60%
+        );
+        opacity: 0.82;
+        animation: zeros-boot-halftone-drift 6.4s ease-in-out -2.1s infinite
+          reverse;
+        will-change: transform, opacity;
+      }
+
+      .zeros-boot-halftone--blocks {
+        background:
+          linear-gradient(var(--zeros-boot-ink-strong) 0 0) 10px 8px / 28px
+            14px no-repeat,
+          linear-gradient(var(--zeros-boot-ink-mid) 0 0) 48px 18px / 17px 23px
+            no-repeat,
+          linear-gradient(var(--zeros-boot-ink-strong) 0 0) 23px 34px / 28px
+            14px no-repeat,
+          linear-gradient(var(--zeros-boot-ink-mid) 0 0) 8px 54px / 23px 16px
+            no-repeat,
+          linear-gradient(var(--zeros-boot-ink-strong) 0 0) 50px 55px / 20px
+            13px no-repeat;
+        opacity: 0.84;
+        animation: zeros-boot-halftone-ink 5.2s ease-in-out -1.4s infinite;
+        will-change: transform, opacity;
+      }
+
+      @keyframes zeros-boot-reveal {
+        to {
+          opacity: 1;
+        }
+      }
+
+      @keyframes zeros-boot-halftone-drift {
+        0%,
+        100% {
+          transform: translate3d(-0.45px, 0.15px, 0);
+        }
+        50% {
+          transform: translate3d(0.45px, -0.15px, 0);
+        }
+      }
+
+      @keyframes zeros-boot-halftone-ink {
+        0%,
+        100% {
+          opacity: 0.78;
+          transform: translate3d(0, 0.25px, 0);
+        }
+        50% {
+          opacity: 0.9;
+          transform: translate3d(0, -0.25px, 0);
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .zeros-boot-halftone-layer {
+          animation: none;
+          transform: none;
+        }
+      }
+    </style>
   </head>
   <body>
+    <div
+      id="zeros-boot"
+      data-zeros-pre-react
+      role="status"
+      aria-live="polite"
+      aria-label="Loading Zeros"
+    >
+      <span class="zeros-boot-logo" aria-hidden="true">
+        <span class="zeros-boot-halftone">
+          <span
+            class="zeros-boot-halftone-layer zeros-boot-halftone--base"
+          ></span>
+          <span
+            class="zeros-boot-halftone-layer zeros-boot-halftone--dots"
+          ></span>
+          <span
+            class="zeros-boot-halftone-layer zeros-boot-halftone--checks"
+          ></span>
+          <span
+            class="zeros-boot-halftone-layer zeros-boot-halftone--hatch"
+          ></span>
+          <span
+            class="zeros-boot-halftone-layer zeros-boot-halftone--blocks"
+          ></span>
+        </span>
+      </span>
+    </div>
     <div id="root"></div>
     <script type="module" src="/apps/desktop/src/renderer/main.tsx"></script>
   </body>

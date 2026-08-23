@@ -386,11 +386,18 @@ describe("AgentGateway identity lifecycle", () => {
       disposeSession,
     } as unknown as AgentAdapter);
     const flight = gateway.newSession("slow-agent", { cwd: "/tmp" });
+    // Attach the rejection handler in the SAME tick the promise is created.
+    // The timer advance below rejects `flight` while the test is still inside
+    // fake-timer flushes, so a handler attached only after those awaits leaves
+    // a window where Node reports an unhandledRejection — which fails the
+    // whole Vitest run even though every test passed. That window is wide
+    // enough to lose on a loaded CI runner and never locally.
+    const settled = flight.catch((error: unknown) => error);
 
     try {
       await vi.waitFor(() => expect(adapterStart).toHaveBeenCalledOnce());
       await vi.advanceTimersByTimeAsync(90_001);
-      const failure = await flight.catch((error: unknown) => error);
+      const failure = await settled;
 
       expect(failure).toBeInstanceOf(Error);
       expect((failure as Error).message).toMatch(/startup timed out/i);
@@ -407,7 +414,7 @@ describe("AgentGateway identity lifecycle", () => {
       expect(disposeSession).toHaveBeenCalledTimes(2);
     } finally {
       releaseStart();
-      await flight.catch(() => undefined);
+      await settled;
       vi.useRealTimers();
     }
   });

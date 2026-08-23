@@ -25,6 +25,11 @@ import {
   bridgeWorkspaceDelete,
   bridgeWorkspaceLifecycleStatus,
   bridgeWorkspaceRestore,
+  bridgeAttachmentWrite,
+  bridgeContextGraphScaffold,
+  bridgeContextGraphSetShared,
+  bridgeMessageWindow,
+  bridgeMessageWindowOlder,
 } from "../workspace-bridge";
 import type { RuntimeClient } from "../ws-client";
 
@@ -105,6 +110,52 @@ describe("requestWorkspaceList", () => {
         }),
       ),
     ).rejects.toThrow("engine exploded");
+  });
+});
+
+describe("context-graph transition queue budgets", () => {
+  it.each([
+    [
+      "attachment.write",
+      (bridge: RuntimeClient) =>
+        bridgeAttachmentWrite(bridge, "ws1", {
+          attachmentId: "att-1",
+          base64: "aGVsbG8=",
+          mimeType: "text/plain",
+          filename: "pasted-text.txt",
+        }),
+    ],
+    [
+      "messages.window",
+      (bridge: RuntimeClient) => bridgeMessageWindow(bridge, "chat-1", 100),
+    ],
+    [
+      "messages.windowOlder",
+      (bridge: RuntimeClient) =>
+        bridgeMessageWindowOlder(bridge, "chat-1", 100, "msg-1"),
+    ],
+    [
+      "context.graph.scaffold",
+      (bridge: RuntimeClient) => bridgeContextGraphScaffold(bridge, "ws1"),
+    ],
+    [
+      "context.graph.setShared",
+      (bridge: RuntimeClient) =>
+        bridgeContextGraphSetShared(bridge, "ws1", "att-1", true),
+    ],
+  ])("gives %s the workspace-create timeout", async (op, run) => {
+    const seen: { op?: string; timeoutMs?: number } = {};
+    const bridge = {
+      request: async (msg: { op?: string }, timeoutMs?: number) => {
+        seen.op = msg.op;
+        seen.timeoutMs = timeoutMs;
+        return { type: "WORKSPACE_RESPONSE", op, result: {} };
+      },
+    } as unknown as RuntimeClient;
+    await run(bridge);
+
+    expect(seen.op).toBe(op);
+    expect(seen.timeoutMs).toBe(60_000);
   });
 });
 

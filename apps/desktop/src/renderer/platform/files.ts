@@ -168,17 +168,54 @@ function fileReadAsThumbnail(
 export async function readWorkspaceImageThumbnail(
   cwd: string,
   relPath: string,
-  maxDimension: 256 | 512 | 1024 | 1536 = 256,
+  maxDimension: 64 | 128 | 256 | 512 | 1024 | 1536 = 256,
 ): Promise<ReadImageThumbnailResult | null> {
   if (!cwd || !relPath || !isNativeRuntime()) return null;
   if (isKnownProjectRoot(cwd)) {
     return fileReadAsThumbnail(await readWorkspaceFile(cwd, relPath));
   }
-  return nativeInvoke<ReadImageThumbnailResult>("read_image_thumbnail", {
-    cwd,
-    path: relPath,
-    maxDimension,
-  });
+  let nativeResult: ReadImageThumbnailResult | null = null;
+  let nativeError: unknown;
+  try {
+    nativeResult = await nativeInvoke<ReadImageThumbnailResult>(
+      "read_image_thumbnail",
+      {
+        cwd,
+        path: relPath,
+        maxDimension,
+      },
+    );
+    // A deterministic safety refusal must not be bypassed by asking the engine
+    // for the complete source image. Successful native previews are already
+    // resolution-matched and remain the common local-worktree fast path.
+    if (nativeResult.kind === "image" || nativeResult.kind === "too-large") {
+      return nativeResult;
+    }
+  } catch (error) {
+    nativeError = error;
+  }
+
+  // Bridge-owned and rowless paths can be perfectly valid even when the local
+  // Electron process cannot resolve them. The graph list/write path already
+  // uses this workspace identity; use the same authority as a compatibility
+  // fallback for an unavailable/stale native command or a structured native
+  // decode/path error. Attachment images are capped by file.read's 5 MiB
+  // boundary, and the canvas decodes them through its bounded global queue.
+  try {
+    const { bridge, workspaceId } = await resolveBridgeFileTarget(
+      cwd,
+      "read the context image",
+    );
+    const bridged = fileReadAsThumbnail(
+      await bridgeFileRead(bridge, workspaceId, relPath),
+    );
+    return bridged?.kind === "image" || bridged?.kind === "too-large"
+      ? bridged
+      : (nativeResult ?? bridged);
+  } catch {
+    if (nativeError) throw nativeError;
+    return nativeResult;
+  }
 }
 
 /** Write `content` to one file under `cwd`. `relPath` is the repo-relative POSIX

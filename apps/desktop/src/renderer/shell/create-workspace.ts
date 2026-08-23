@@ -28,6 +28,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { dbDeleteChat } from "../features/agent/agent-history-client";
+import { discardQueuedContextGraphWrites } from "../features/agent/composer-editor/context-graph-staging";
 import { trackWorkspaceOpened } from "../platform/observability/analytics/agent-events";
 import {
   isGitErrorShape,
@@ -142,6 +143,7 @@ export async function createWorkspaceForProject(args: {
     });
   }
   const rollbackOptimisticChat = () => {
+    discardQueuedContextGraphWrites(prepared.path);
     clearWorkspaceSettling(prepared.path);
     if (chat) {
       dispatch({ type: "CONSUME_AUTO_SEND", chatId: chat.id });
@@ -153,6 +155,7 @@ export async function createWorkspaceForProject(args: {
   const settleArchivedOptimisticChat = () => {
     // Archive keeps this chat/draft for a later restore; only its queued first
     // turn is no longer runnable because the worktree was removed.
+    discardQueuedContextGraphWrites(prepared.path);
     clearWorkspaceSettling(prepared.path);
     if (chat) dispatch({ type: "CONSUME_AUTO_SEND", chatId: chat.id });
     finishPendingCreate(pendingToken);

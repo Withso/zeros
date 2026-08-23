@@ -22,7 +22,7 @@ async function main() {
   const loadHarnessThumbnail = async (
     _cwd: string,
     relPath: string,
-    maxDimension: 256 | 512 | 1024 | 1536 = 256,
+    maxDimension: 64 | 128 | 256 | 512 | 1024 | 1536 = 256,
   ) => {
     const seed = [...relPath].reduce(
       (sum, char) => sum + char.charCodeAt(0),

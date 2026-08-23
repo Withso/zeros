@@ -218,10 +218,22 @@ describe("startGitWatcher", () => {
         changes += 1;
       },
       {
-        // Exercise the native event path: this test covers the short window in
-        // which git has created the worktree directory but not its marker yet.
-        usePolling: false,
+        // Poll instead of native FS events, as every other test here does. The
+        // macOS CI runner (source-sync) dropped — not merely delayed — the
+        // FSEvents notification for the first mkdir after readiness, and
+        // nothing recovers a dropped one: every later step hangs off that
+        // single subscription, and pollIntervalMs is parked below so the
+        // git-state poll cannot re-signal. Polling re-stats rather than
+        // trusting delivery, so the directory is seen either way. This is also
+        // the mode that actually ships on macOS — a packaged engine forces
+        // polling because native FSEvents deadlocks Bun's compiled runtime.
+        // The window under test survives the switch regardless: it is a
+        // filesystem STATE window (worktree directory present, .git marker not
+        // yet), and the dynamic ignore re-check it guards lives in chokidar's
+        // shared readdir path, which both modes drive identically.
+        usePolling: true,
         pollIntervalMs: 60_000,
+        worktreePollIntervalMs: 10,
         worktreeDebounceMs: 10,
         awaitWriteFinishMs: 20,
       },

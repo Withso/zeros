@@ -119,6 +119,13 @@ const NETWORK_GIT_TIMEOUT_MS = 60_000;
  *  working tree or hook-heavy repo can outlive the 10s default. */
 const LOCAL_GIT_TIMEOUT_MS = 30_000;
 
+/** Context-graph mutations can intentionally wait behind workspace creation's
+ * app-wide Design-owner publication. Give those queued requests the same
+ * budget as the create that owns the transition. Transcript windows are served
+ * throughout that transition, but share the budget because reading a legacy
+ * image can migrate it into the graph. */
+const CONTEXT_GRAPH_QUEUE_TIMEOUT_MS = 60_000;
+
 /** Send a WORKSPACE_REQUEST and await its WORKSPACE_RESPONSE / WORKSPACE_ERROR
  *  (both echo requestId, so request() resolves on whichever arrives). Throws on
  *  a WORKSPACE_ERROR. */
@@ -704,7 +711,7 @@ export async function bridgeMessageWindow(
   chatId: string,
   limit: number,
   before?: number,
-  timeoutMs?: number,
+  timeoutMs = CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
 ): Promise<PersistedMessageWire[]> {
   const r = (await workspaceOp(
     bridge,
@@ -724,7 +731,7 @@ export async function bridgeMessageWindowOlder(
   chatId: string,
   limit: number,
   beforeMsgId: string,
-  timeoutMs?: number,
+  timeoutMs = CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
 ): Promise<PersistedMessageWire[]> {
   const r = (await workspaceOp(
     bridge,
@@ -866,10 +873,18 @@ export async function bridgeAttachmentWrite(
   bytes: number;
   skipped?: boolean;
 }> {
-  return (await workspaceOp(bridge, "attachment.write", {
-    workspaceId,
-    ...args,
-  })) as {
+  return (await workspaceOp(
+    bridge,
+    "attachment.write",
+    {
+      workspaceId,
+      ...args,
+    },
+    // A write accepted during another workspace's creation waits behind the
+    // engine's Design-owner transition instead of failing. Match the create
+    // request budget so the durable queued result can reach this caller.
+    CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
+  )) as {
     absolutePath: string;
     relativePath: string;
     mimeType: string;
@@ -904,9 +919,12 @@ export async function bridgeContextGraphScaffold(
   bridge: RuntimeClient,
   workspaceId: string,
 ): Promise<{ ok: boolean; created: boolean }> {
-  const r = (await workspaceOp(bridge, "context.graph.scaffold", {
-    workspaceId,
-  })) as { ok?: boolean; created?: boolean } | undefined;
+  const r = (await workspaceOp(
+    bridge,
+    "context.graph.scaffold",
+    { workspaceId },
+    CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
+  )) as { ok?: boolean; created?: boolean } | undefined;
   return { ok: r?.ok === true, created: r?.created === true };
 }
 
@@ -917,11 +935,16 @@ export async function bridgeContextGraphSetShared(
   attachmentId: string,
   shared: boolean,
 ): Promise<{ ok: boolean; moved: boolean }> {
-  const r = (await workspaceOp(bridge, "context.graph.setShared", {
-    workspaceId,
-    attachmentId,
-    shared,
-  })) as { ok?: boolean; moved?: boolean } | undefined;
+  const r = (await workspaceOp(
+    bridge,
+    "context.graph.setShared",
+    {
+      workspaceId,
+      attachmentId,
+      shared,
+    },
+    CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
+  )) as { ok?: boolean; moved?: boolean } | undefined;
   return { ok: r?.ok === true, moved: r?.moved === true };
 }
 

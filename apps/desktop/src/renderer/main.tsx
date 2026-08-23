@@ -13,6 +13,7 @@ import "../../../../styles/semantic-tokens.css";
 import "../../../../styles/globals.css";
 import { AppShell } from "./app-shell";
 import { ErrorBoundary } from "./shared/ui/error-boundary";
+import { dismissStartupLoader } from "./shared/ui/startup-loader";
 import { initRendererLogCapture } from "./platform/observability/logging/renderer-log";
 import { applyBootLayoutVars } from "./shell/boot-layout-vars";
 import { installResizeGestureFreeze } from "./shell/resize-gesture-freeze";
@@ -49,6 +50,9 @@ if (!rootEl) {
 // to it via the omnibox shorthand) into the in-app browser. Render
 // a small notice instead so the cause is unambiguous.
 if (window.parent !== window) {
+  // AuthGate never mounts on this terminal branch. Reveal the embedded-browser
+  // notice in the same commit instead of leaving the startup logo over it.
+  dismissStartupLoader();
   // Plain innerHTML (not React) because this fires before mounting
   // anything else — keep the path dependency-free. Token CSS is
   // already imported above so semantic classes resolve correctly.

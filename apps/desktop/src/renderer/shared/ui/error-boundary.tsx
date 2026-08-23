@@ -1,5 +1,6 @@
 import React from "react";
 import { captureException } from "../../platform/observability/analytics/posthog";
+import { dismissStartupLoader } from "./startup-loader";
 
 interface Props {
   children: React.ReactNode;
@@ -18,6 +19,10 @@ export class ErrorBoundary extends React.Component<Props, State> {
   }
 
   componentDidCatch(error: Error, info: React.ErrorInfo) {
+    // A throw above/before AuthGate means its normal layout-effect dismissal
+    // cannot run. The committed error surface must replace the logo instead of
+    // being hidden underneath it.
+    dismissStartupLoader();
     console.error("[Zeros] Component error:", error, info);
     // Report to PostHog error tracking. componentStack is just the
     // React component tree (names only — no props/user data), so it's

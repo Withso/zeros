@@ -634,10 +634,11 @@ export function AgentChat({
       }
       // Materialize every staged attachment into ContentBlocks (text → file
       // XML; image → ImageContent or disk-write+path-reference by vision
-      // support) + bubble metadata. Reconstructed original images carry their
-      // disk reference (legacy rows may still carry a data URL), so the encoder
-      // resolves their bytes only for this send and they re-send correctly;
-      // original text bodies weren't stored → empty.
+      // support) + bubble metadata. A reconstructed chip carries only its
+      // durable context-graph reference (legacy image rows may still carry a
+      // data URL), so the encoder resolves BOTH image bytes and text bodies
+      // back out of the graph for this send alone — neither is ever copied
+      // into the message or the composer document.
       //
       // Same encoder as the live send path (2026-07-30) — these were two
       // copies and only this one was right.
@@ -654,12 +655,12 @@ export function AgentChat({
         chatId,
         agentId: session.agentId,
       });
-      // This path drops MORE than the live one does, so it can least afford
-      // to stay quiet: a text chip reconstructed from a sent bubble carries
-      // its name but never its bytes — those are deliberately not persisted —
-      // so re-sending a message that had a transcript attached hits the
-      // encoder's empty-body branch EVERY time, not occasionally. Until now
-      // the chip simply vanished from the resubmitted bubble and the agent
+      // This path is the one that can drop an attachment for a reason the
+      // user never caused, so it can least afford to stay quiet: a
+      // reconstructed chip holds no bytes of its own, and the encoder's
+      // recovery read fails whenever the graph record was deleted, moved out
+      // of the workspace, or is unreachable. Before that report existed the
+      // chip simply vanished from the resubmitted bubble and the agent
       // received nothing, with no explanation anywhere.
       reportSkippedAttachments(skippedOnEdit, toast.warning);
       const mergedBubble = newBubbleMeta;

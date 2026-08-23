@@ -14,7 +14,10 @@
 // ──────────────────────────────────────────────────────────
 
 import { nativeInvoke } from "../../platform/runtime";
-import { notifyContextGraphChanged } from "../../platform/context-graph";
+import {
+  listContextGraph,
+  notifyContextGraphChanged,
+} from "../../platform/context-graph";
 import type { AgentMessage } from "./use-agent-session";
 import type {
   ProviderBinding,
@@ -420,6 +423,55 @@ export async function readImageAttachment(args: {
     mimeType: match[1] || args.mimeType,
     bytes: result.bytes,
   };
+}
+
+/** Locate a graph record from its durable attachment id. Images persist a
+ *  `diskPath` on the sent bubble; text attachments persist only the id, and
+ *  the physical filename is the ENGINE's sanitised form of the original name
+ *  (files/context-graph.ts owns that sanitiser precisely so nobody keeps a
+ *  second copy). So ask the store where the record is rather than rebuilding
+ *  the path here. A graph past the engine's listing cap can hide a record; the
+ *  caller then reports the attachment unavailable, exactly as before. */
+async function contextGraphPathForAttachment(
+  cwd: string,
+  attachmentId: string,
+): Promise<string | null> {
+  const graph = await listContextGraph(cwd);
+  return (
+    graph.items.find((item) => item.attachmentId === attachmentId)?.relPath ??
+    null
+  );
+}
+
+/** Resolve a text attachment's body back out of its context-graph record.
+ *
+ *  Edit-in-place rebuilds text chips WITHOUT their bytes: the sent bubble
+ *  keeps the graph reference, never the body (reconstruct.ts), because a
+ *  transcript row must not carry a second copy of every file. Without this
+ *  read, re-sending an edited message silently dropped every text attachment
+ *  it carried — including the `.txt` a long clipboard paste now becomes, which
+ *  used to be inline prompt text that round-tripped through edit for free.
+ *
+ *  Returns null when the record is gone or is no longer readable as text; the
+ *  caller reports that as a skipped attachment rather than sending an empty
+ *  `<file>` block that would tell the agent the file was empty. */
+export async function readTextAttachment(args: {
+  cwd: string;
+  attachmentId: string;
+  /** Preferred when the sent bubble carried one; images always do. */
+  diskPath?: string;
+}): Promise<string | null> {
+  const diskPath =
+    args.diskPath && isAgentAttachmentDiskPath(args.diskPath)
+      ? args.diskPath
+      : await contextGraphPathForAttachment(args.cwd, args.attachmentId);
+  if (!diskPath || !isAgentAttachmentDiskPath(diskPath)) return null;
+  const result = await readAgentAttachmentFile({
+    cwd: args.cwd,
+    diskPath,
+    attachmentId: args.attachmentId,
+  });
+  return result?.kind === "text" ? (result.content ?? null) : null;
 }
 
 // There is deliberately NO remove counterpart: the context graph is
