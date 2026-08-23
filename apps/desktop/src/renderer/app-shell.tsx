@@ -88,6 +88,7 @@ import { SettingsPage } from "./features/settings/settings-page";
 import { DashboardPage } from "./features/dashboard/dashboard-page";
 import { CustomizePage } from "./features/agent-extensions/customize-page";
 import { RepoPage } from "./features/repositories/repo-page";
+import { useWarmAutomaticRepositoryIcons } from "./features/repositories/repository-icons";
 import { onProjectChanged } from "./platform/app";
 import {
   loadStickyDefaults,
@@ -1023,6 +1024,7 @@ function MainShellBody({
   useWorkspacePrSync(designWorkspaceRequested ? null : activeWorkspace);
   const dispatch = useWorkspaceDispatch();
   const { projects } = useProjects();
+  useWarmAutomaticRepositoryIcons(projects);
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is
   // enabled. Mounted here so neither shortcut fires from Settings.
   useNewTabHotkeys(activePage === "workspace" && !designWorkspaceRequested);
@@ -1086,9 +1088,7 @@ function MainShellBody({
     (workspaceShellRetainedRef.current || activePage === "workspace");
   const activeDesignWorkspace = React.useMemo<RetainedDesignWorkspace | null>(
     () =>
-      designWorkspaceActive &&
-      activeWorkspace &&
-      activeWorkspaceFolder
+      designWorkspaceActive && activeWorkspace && activeWorkspaceFolder
         ? { workspace: activeWorkspace, folder: activeWorkspaceFolder }
         : null,
     [designWorkspaceActive, activeWorkspace, activeWorkspaceFolder],

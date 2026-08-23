@@ -32,6 +32,7 @@ import {
   getAutomaticRepositoryIcon,
   refreshAutomaticRepositoryIcon,
   resetAutomaticRepositoryIconsForTest,
+  warmAutomaticRepositoryIcons,
 } from "../../features/repositories/repository-icons";
 
 class MemStorage {
@@ -217,6 +218,99 @@ describe("automatic repository icon cache", () => {
       });
     });
     expect(getAutomaticRepositoryIcon("/repo", "origin-b")).toBeNull();
+  });
+
+  it("warms every registered repository with bounded detection concurrency", async () => {
+    let active = 0;
+    let maxActive = 0;
+    mocks.readWorkspaceFile.mockImplementation(async (repoRoot) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      await new Promise<void>((resolve) => setTimeout(resolve, 1));
+      active -= 1;
+      return {
+        kind: "image",
+        dataUrl: `data:image/png;base64,${repoRoot}`,
+      };
+    });
+    const projects = Array.from({ length: 12 }, (_, index) => ({
+      repoRoot: `/repo-${index}`,
+      originUrl: `origin-${index}`,
+    }));
+
+    await warmAutomaticRepositoryIcons(projects);
+
+    expect(maxActive).toBeLessThanOrEqual(3);
+    for (const project of projects) {
+      expect(
+        getAutomaticRepositoryIcon(project.repoRoot, project.originUrl)
+          ?.imageUrl,
+      ).toBe(`data:image/png;base64,${project.repoRoot}`);
+    }
+  });
+
+  it("waits for the bridged retry when warming joins a provisional read", async () => {
+    let releaseProvisional!: () => void;
+    const provisional = new Promise<void>((resolve) => {
+      releaseProvisional = resolve;
+    });
+    let releaseBridged!: () => void;
+    const bridged = new Promise<void>((resolve) => {
+      releaseBridged = resolve;
+    });
+    let firstCandidateReads = 0;
+    mocks.bridge.connected = false;
+    mocks.readWorkspaceFile.mockImplementation(async (_repoRoot, path) => {
+      if (path !== "public/apple-touch-icon.png") return MISS;
+      firstCandidateReads += 1;
+      if (firstCandidateReads === 1) {
+        await provisional;
+        return MISS;
+      }
+      await bridged;
+      return FAVICON;
+    });
+
+    ensureAutomaticRepositoryIcon("/repo", "origin");
+    await vi.waitFor(() => expect(firstCandidateReads).toBe(1));
+
+    mocks.bridge.connected = true;
+    let warmSettled = false;
+    const warming = warmAutomaticRepositoryIcons([
+      { repoRoot: "/repo", originUrl: "origin" },
+    ]).then(() => {
+      warmSettled = true;
+    });
+    releaseProvisional();
+
+    await vi.waitFor(() => expect(firstCandidateReads).toBe(2));
+    await Promise.resolve();
+    expect(warmSettled).toBe(false);
+
+    releaseBridged();
+    await warming;
+    expect(getAutomaticRepositoryIcon("/repo", "origin")?.imageUrl).toBe(
+      FAVICON.dataUrl,
+    );
+  });
+
+  it("ignores malformed persisted entries instead of exposing them to renderers", () => {
+    localStorage.setItem(
+      "zeros-repository-icons-auto-v1",
+      JSON.stringify({
+        ["/repo\0origin"]: {
+          bridged: true,
+          updatedAt: Date.now(),
+          icon: {
+            imageUrl: "javascript:alert(1)",
+            source: { kind: "repository-file" },
+          },
+        },
+      }),
+    );
+    resetAutomaticRepositoryIconsForTest();
+
+    expect(getAutomaticRepositoryIcon("/repo", "origin")).toBeNull();
   });
 
   it("bounds inactive runtime snapshots", () => {
