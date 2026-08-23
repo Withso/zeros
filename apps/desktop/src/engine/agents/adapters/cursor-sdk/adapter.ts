@@ -12,7 +12,7 @@
 // if the package / its native sqlite3 binding is missing.
 // ──────────────────────────────────────────────────────────
 
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import type { AdvertisedModel } from "@zeros/protocol/agent-events";
 import { isDevRuntime } from "../../../runtime";
@@ -87,6 +87,21 @@ const FALLBACK_MODEL_PREFERENCE = [
  *  error on plan-gated accounts. composer-1.5 is the older concrete fallback.
  *  Ordered most-capable-confirmed-good first. */
 const LOCAL_RETRY_MODELS = ["composer-2", "composer-1.5"];
+
+/** Process-local key for account cache partitions. The corresponding model
+ * state is memory-only, so a fresh key on every engine start preserves all
+ * required behavior while preventing a leaked fingerprint from becoming an
+ * offline API-key guessing oracle. */
+const CURSOR_MODEL_STATE_FINGERPRINT_KEY = randomBytes(32);
+
+/** Return a keyed pseudonym for an API key without retaining the credential in
+ * model discovery state. Exported to lock the security property in tests. */
+export function cursorModelStateFingerprint(
+  apiKey: string,
+  processKey: Uint8Array,
+): string {
+  return createHmac("sha256", processKey).update(apiKey).digest("hex");
+}
 
 /** How long a session start may wait for the account's model catalog before
  *  going ahead without it. See discoverModelsForSessionStart: the catalog only
@@ -947,7 +962,10 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  cachedInitialize._meta.models. Best-effort — failures leave the bundled
    *  catalog in place. */
   private activateModelState(apiKey: string): CursorModelState {
-    const fingerprint = createHash("sha256").update(apiKey).digest("hex");
+    const fingerprint = cursorModelStateFingerprint(
+      apiKey,
+      CURSOR_MODEL_STATE_FINGERPRINT_KEY,
+    );
     if (this.modelState.fingerprint === fingerprint) return this.modelState;
     this.modelState = createCursorModelState(fingerprint);
     if (this.cachedInitialize?._meta) {

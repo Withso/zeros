@@ -16,6 +16,7 @@ import {
   applyCursorReasoning,
   isCursorModelGatedError,
   cursorAgentUsageDelta,
+  cursorModelStateFingerprint,
 } from "../adapter";
 import type { AgentAdapterContext, ContentBlock } from "../../../types";
 
@@ -116,6 +117,26 @@ beforeEach(() => {
 });
 
 const TEXT: ContentBlock[] = [{ type: "text", text: "hi" } as ContentBlock];
+
+describe("cursorModelStateFingerprint (pure)", () => {
+  it("uses the process key when pseudonymizing account credentials", () => {
+    const firstProcessKey = new Uint8Array(32).fill(0x11);
+    const secondProcessKey = new Uint8Array(32).fill(0x22);
+    const apiKey = "key_account_a";
+
+    const fingerprint = cursorModelStateFingerprint(apiKey, firstProcessKey);
+
+    expect(fingerprint).toBe(
+      cursorModelStateFingerprint(apiKey, firstProcessKey),
+    );
+    expect(fingerprint).not.toBe(
+      cursorModelStateFingerprint(apiKey, secondProcessKey),
+    );
+    expect(fingerprint).not.toBe(
+      cursorModelStateFingerprint("key_account_b", firstProcessKey),
+    );
+  });
+});
 
 describe("resolveValidModelId (pure)", () => {
   it("trusts the id when the catalog is undiscovered (null)", () => {
