@@ -58,6 +58,7 @@ import { useWorkspaceDispatch } from "../../../state/store";
 import { useActiveWorkspace } from "../../../state/use-active-workspace";
 import { isLocalMainWorkspace } from "../../../state/local-main-workspace";
 import { useProjects } from "../../../state/use-projects";
+import { useBridge } from "../../../platform/bridge/use-bridge";
 import { repoPageViewForSection } from "../../../features/repositories/repo-page";
 import { useThemeId } from "../../../shared/theme/use-theme-variant";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
@@ -177,35 +178,50 @@ function WorkspaceSetup({
     typeof createTerminalResizeScheduler
   > | null>(null);
   const refetchRequestRef = useRef<Promise<void> | null>(null);
+  // A state-change broadcast that lands during an in-flight snapshot must earn
+  // one trailing exact-key read. Plain concurrent readers still share the
+  // current request; only a real invalidation queues another generation.
+  const refetchQueuedRef = useRef(false);
   // How many chars of the engine buffer we've already written to the xterm.
   const writtenRef = useRef(0);
   const [info, setInfo] = useState<WorkspaceSetupInfo | null>(null);
   const [busy, setBusy] = useState(false);
+  const bridge = useBridge();
 
   // Pull the buffer + state and delta-append any new bytes into the xterm. A
   // shrinking buffer (a fresh run reset it) → reset the grid + cursor.
-  const refetch = useCallback((): Promise<void> => {
+  const refetch = useCallback((ensureLatest = false): Promise<void> => {
     const existing = refetchRequestRef.current;
-    if (existing) return existing;
+    if (existing) {
+      if (ensureLatest) refetchQueuedRef.current = true;
+      return existing;
+    }
     const request = (async () => {
-      let next: WorkspaceSetupInfo;
-      try {
-        next = await workspaceSetupInfo({ workspaceId, repoRoot });
-      } catch {
-        return; // bridge not ready / transient — keep showing what we have
-      }
-      const term = xtermRef.current;
-      if (term) {
-        if (next.log.length < writtenRef.current) {
-          term.reset();
-          writtenRef.current = 0;
+      do {
+        refetchQueuedRef.current = false;
+        let next: WorkspaceSetupInfo;
+        try {
+          next = await workspaceSetupInfo({ workspaceId, repoRoot });
+        } catch {
+          // Bridge not ready / transient — keep showing what we have. A real
+          // invalidation that arrived during the failed read still gets its
+          // trailing attempt; otherwise the first-snapshot retry handles it.
+          if (refetchQueuedRef.current) continue;
+          return;
         }
-        if (next.log.length > writtenRef.current) {
-          term.write(next.log.slice(writtenRef.current));
-          writtenRef.current = next.log.length;
+        const term = xtermRef.current;
+        if (term) {
+          if (next.log.length < writtenRef.current) {
+            term.reset();
+            writtenRef.current = 0;
+          }
+          if (next.log.length > writtenRef.current) {
+            term.write(next.log.slice(writtenRef.current));
+            writtenRef.current = next.log.length;
+          }
         }
-      }
-      setInfo(next);
+        setInfo(next);
+      } while (refetchQueuedRef.current);
     })().finally(() => {
       if (refetchRequestRef.current === request) {
         refetchRequestRef.current = null;
@@ -214,6 +230,37 @@ function WorkspaceSetup({
     refetchRequestRef.current = request;
     return request;
   }, [workspaceId, repoRoot]);
+
+  // Setup may start/finish outside this component: automatic setup after a
+  // branch workspace is created, or a control action from another connected
+  // client. Subscribe only while this retained surface is visible, filter by
+  // the exact managed workspace when the event is scoped, and pull the full
+  // log/state snapshot. Rowless trunk broadcasts intentionally omit ids.
+  useEffect(() => {
+    if (!visible) return;
+    const off = bridge?.on("DB_CHANGED", (msg) => {
+      const change = msg as { kinds?: unknown; workspaceIds?: unknown };
+      if (
+        !Array.isArray(change.kinds) ||
+        !change.kinds.includes("setup")
+      ) {
+        return;
+      }
+      const changedWorkspaceIds = Array.isArray(change.workspaceIds)
+        ? change.workspaceIds.filter(
+            (id): id is string => typeof id === "string",
+          )
+        : [];
+      if (
+        changedWorkspaceIds.length > 0 &&
+        !changedWorkspaceIds.includes(workspaceId)
+      ) {
+        return;
+      }
+      void refetch(true);
+    });
+    return () => off?.();
+  }, [bridge, refetch, visible, workspaceId]);
 
   // Mount the xterm once, then do the initial fetch.
   useEffect(() => {
@@ -347,7 +394,7 @@ function WorkspaceSetup({
       // Reset the grid for the fresh run, then start tracking it.
       xtermRef.current?.reset();
       writtenRef.current = 0;
-      await refetch();
+      await refetch(true);
     } catch (err) {
       toast.error(
         `Couldn't run setup: ${err instanceof Error ? err.message : String(err)}`,
@@ -362,7 +409,7 @@ function WorkspaceSetup({
     setBusy(true);
     try {
       await workspaceStopSetup({ workspaceId, repoRoot });
-      await refetch();
+      await refetch(true);
     } catch (err) {
       toast.error(
         `Couldn't stop setup: ${err instanceof Error ? err.message : String(err)}`,

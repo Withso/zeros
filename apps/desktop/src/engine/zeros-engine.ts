@@ -1072,7 +1072,10 @@ export class ZerosEngine {
           createMessage({
             type: "DB_CHANGED",
             source: "engine",
-            kinds: ["workspaces"],
+            // `setup` lets the visible full-log surface refresh only for setup
+            // transitions; generic workspace writes keep using the lightweight
+            // status-only watcher instead of retransmitting up to 512 KB.
+            kinds: ["workspaces", "setup"],
             ...(workspaceId ? { workspaceIds: [workspaceId] } : {}),
           }),
         ),
@@ -1160,31 +1163,19 @@ export class ZerosEngine {
     // Setup tab ops (workspace.setupInfo / workspace.rerunSetup /
     // workspace.stopSetup) reach the SetupManager — which owns this.pty/
     // this.setup — through injected accessors, mirroring the gateway-accessor
-    // pattern above. All are local-only (not on any remote allowlist), so a
-    // relay client never reaches them.
-    this.workspace.setSetupRunner((workspaceId, command, target) => {
-      const startWhenAllowed = () => {
-        if (this.globalDesignTerritoryTransitionCount > 0) {
-          // Creation-from-branch can request Setup from inside the registry
-          // mutation that first publishes its owner. Dropping that request
-          // skips dependency installation; starting it now would compile the
-          // old app-wide deny union. Wait for the complete queued transition
-          // tail, then re-check in case another transition joined it.
-          const transition = this.globalDesignTerritoryTransitionTail;
-          void transition.then(startWhenAllowed);
-          return;
-        }
-        // Archive/delete or a missing checkout is terminal for this request;
-        // only the transient global registration gate is deferred.
-        if (!this.workspaceAllowsProcessStart(workspaceId)) return;
-        void this.trackRepositoryCodeAuthorityStart(
-          workspaceId,
-          this.setup.start({ workspaceId, command, target }),
-        ).catch((err) =>
-          console.error(`[setup] start failed for ${workspaceId}:`, err),
-        );
-      };
-      startWhenAllowed();
+    // pattern above. Managed-workspace controls are available to qualified
+    // cloud clients; a raw-path rowless trunk remains desktop-only.
+    this.workspace.setSetupRunner(async (workspaceId, command, target) => {
+      // Creation-from-branch can request Setup from inside the registry
+      // mutation that first publishes its owner. Wait behind the complete
+      // queued transition (including any turn that joins while parked), then
+      // revalidate every non-transient lifecycle/containment gate.
+      await this.waitForGlobalDesignTerritoryTransition();
+      this.assertWorkspaceProcessStartAllowed(workspaceId);
+      await this.trackRepositoryCodeAuthorityStart(
+        workspaceId,
+        this.setup.start({ workspaceId, command, target }),
+      );
     });
     this.workspace.setSetupStopper((workspaceId) =>
       this.setup.stop(workspaceId),
