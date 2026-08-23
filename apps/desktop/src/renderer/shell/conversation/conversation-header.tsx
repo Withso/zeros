@@ -98,6 +98,7 @@ import {
   type DetectedOpenApp,
 } from "../../platform/open-apps";
 import { AgentIcon } from "../../features/agent/agent-icon";
+import { RepositoryIcon } from "../../features/repositories/repository-icon";
 
 // ── className constants ──────────────────────────────────
 
@@ -140,10 +141,6 @@ const OPEN_IN_CHEVRON_BTN_CLS =
   "h-7 w-5 px-0 shrink-0 rounded-sm text-fg2 hover:text-fg1 hover:bg-bg2-hover/40 transition-[background-color,color] duration-120 ease-out";
 
 // ── Helpers ──────────────────────────────────────────────
-
-function projectInitial(name: string): string {
-  return (name.trim()[0] ?? "·").toUpperCase();
-}
 
 interface ResolvedContext {
   project: Project | null;
@@ -713,7 +710,7 @@ export function ConversationHeader({
     <div ref={topbarRef} className={TOPBAR_CLS}>
       <div className={BREADCRUMB_CLS}>
         <span className={PROJECT_ICON_CLS} aria-hidden="true">
-          {projectInitial(project.name)}
+          <RepositoryIcon project={project} className="size-full rounded-sm" />
         </span>
         <span className={PROJECT_NAME_CLS}>{project.name}</span>
         <span className={SEP_CLS} aria-hidden="true">

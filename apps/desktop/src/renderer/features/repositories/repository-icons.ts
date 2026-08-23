@@ -31,16 +31,26 @@ export const AUTOMATIC_REPOSITORY_ICON_PATHS = [
   "public/favicon.svg",
   "favicon.svg",
   "public/favicon.png",
+  "public/icon.svg",
   "public/icon.png",
+  "public/logo.svg",
   "public/logo.png",
   "favicon.png",
+  "icon.svg",
+  "icon.png",
+  "app/icon.svg",
   "app/icon.png",
+  "src/app/icon.svg",
   "src/app/icon.png",
   "public/favicon.ico",
   "favicon.ico",
   "app/favicon.ico",
   "static/favicon.ico",
+  "static/icon.png",
   "src-tauri/icons/icon.png",
+  "build/icon.png",
+  "build/icons/icon.png",
+  "resources/icon.png",
   "assets/icon.png",
   // This is a path inside the user's repository, not the Zeros source tree.
   "src/assets/icon.png",
@@ -155,6 +165,27 @@ export type RepositoryOwnerAvatarReader = (
   repoRoot: string,
 ) => Promise<GithubRepositoryOwnerAvatar | null>;
 
+const SAFE_DATA_IMAGE_URL_RE =
+  /^data:image\/(?:png|jpeg|gif|webp|bmp|x-icon|avif|svg\+xml);base64,/i;
+
+function isSafeDataImageUrl(value: unknown): value is string {
+  return typeof value === "string" && SAFE_DATA_IMAGE_URL_RE.test(value);
+}
+
+function isSafeHttpsImageUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const parsed = new URL(value);
+    return (
+      parsed.protocol === "https:" &&
+      parsed.username === "" &&
+      parsed.password === ""
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Resolve the first readable repository image in the documented lookup order,
  *  then the GitHub repository owner's avatar, then no image. Both readers are
  *  injectable so the complete priority and failure contract is unit-testable. */
@@ -166,7 +197,7 @@ export async function detectAutomaticRepositoryIcon(
   for (const sourcePath of AUTOMATIC_REPOSITORY_ICON_PATHS) {
     try {
       const result = await reader(repoRoot, sourcePath);
-      if (result?.kind === "image" && result.dataUrl) {
+      if (result?.kind === "image" && isSafeDataImageUrl(result.dataUrl)) {
         return {
           imageUrl: result.dataUrl,
           source: { kind: "repository-file", path: sourcePath },
@@ -179,7 +210,7 @@ export async function detectAutomaticRepositoryIcon(
 
   try {
     const avatar = await avatarReader(repoRoot);
-    if (avatar?.avatarUrl) {
+    if (avatar && isSafeHttpsImageUrl(avatar.avatarUrl)) {
       return {
         imageUrl: avatar.avatarUrl,
         source: {
@@ -217,7 +248,7 @@ function automaticIconTarget(
 
 // ── Automatic icon cache ─────────────────────────────────
 //
-// Detection is expensive (up to 17 workspace-file probes plus a GitHub API
+// Detection is expensive (many workspace-file probes plus a GitHub API
 // call), and the result almost never changes. So results — including "no icon
 // found" — are persisted across launches and every surface renders straight
 // from cache. Detection reruns only when:
@@ -252,14 +283,50 @@ interface StoredAutomaticIcon {
 const MAX_PERSISTED_ICON_CHARS = 300_000;
 const MAX_PERSISTED_ICONS = 48;
 
+function isAutomaticRepositoryIcon(
+  value: unknown,
+): value is AutomaticRepositoryIcon {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<AutomaticRepositoryIcon>;
+  if (candidate.imageUrl === null) return candidate.source === null;
+  if (typeof candidate.imageUrl !== "string" || !candidate.source) {
+    return false;
+  }
+  if (candidate.imageUrl.length > MAX_PERSISTED_ICON_CHARS) return false;
+
+  const source = candidate.source as Record<string, unknown>;
+  if (source.kind === "repository-file") {
+    const sourcePath = source.path;
+    return (
+      isSafeDataImageUrl(candidate.imageUrl) &&
+      typeof sourcePath === "string" &&
+      sourcePath.length > 0 &&
+      !sourcePath.startsWith("/") &&
+      !sourcePath.split("/").includes("..")
+    );
+  }
+  return (
+    source.kind === "github-avatar" &&
+    isSafeHttpsImageUrl(candidate.imageUrl) &&
+    typeof source.login === "string" &&
+    source.login.length > 0 &&
+    (source.ownerType === "user" ||
+      source.ownerType === "org" ||
+      source.ownerType === null)
+  );
+}
+
 function isStoredAutomaticIcon(value: unknown): value is StoredAutomaticIcon {
   if (!value || typeof value !== "object") return false;
   const candidate = value as Partial<StoredAutomaticIcon>;
   if (typeof candidate.bridged !== "boolean") return false;
-  if (typeof candidate.updatedAt !== "number") return false;
-  const icon = candidate.icon;
-  if (!icon || typeof icon !== "object") return false;
-  return icon.imageUrl === null || typeof icon.imageUrl === "string";
+  if (
+    typeof candidate.updatedAt !== "number" ||
+    !Number.isFinite(candidate.updatedAt)
+  ) {
+    return false;
+  }
+  return isAutomaticRepositoryIcon(candidate.icon);
 }
 
 let storedAutomaticIcons: Record<string, StoredAutomaticIcon> | null = null;
@@ -461,6 +528,83 @@ export function ensureAutomaticRepositoryIcon(
   originUrl?: string | null,
 ): void {
   ensureAutomaticIcon(automaticIconTarget(repoRoot, originUrl));
+}
+
+const AUTOMATIC_ICON_WARM_CONCURRENCY = 3;
+
+/** Warm every registered repository without issuing an unbounded burst of
+ * file/GitHub reads. Duplicate root+origin identities share one job, and the
+ * normal automatic cache still deduplicates against icons already mounted by
+ * visible surfaces. */
+export async function warmAutomaticRepositoryIcons(
+  projects: readonly Pick<Project, "repoRoot" | "originUrl">[],
+): Promise<void> {
+  const targetsByKey = new Map<string, AutomaticIconTarget>();
+  for (const project of projects) {
+    const target = automaticIconTarget(project.repoRoot, project.originUrl);
+    if (target.repoRoot) targetsByKey.set(target.key, target);
+  }
+  const targets = Array.from(targetsByKey.values());
+  let cursor = 0;
+
+  const worker = async () => {
+    while (cursor < targets.length) {
+      const target = targets[cursor];
+      cursor += 1;
+      if (!target) continue;
+      ensureAutomaticIcon(target);
+      // A visible surface may have started a provisional bridge-less read just
+      // before startup warming. Its completion synchronously schedules the
+      // trustworthy bridge-connected retry; keep that retry inside this
+      // worker's concurrency slot and do not report the repository as warm
+      // until the complete chain settles.
+      let pending = automaticInflight.get(target.key);
+      while (pending) {
+        await pending;
+        const followup = automaticInflight.get(target.key);
+        if (followup === pending) break;
+        pending = followup;
+      }
+    }
+  };
+
+  await Promise.all(
+    Array.from(
+      { length: Math.min(AUTOMATIC_ICON_WARM_CONCURRENCY, targets.length) },
+      worker,
+    ),
+  );
+}
+
+/** App-lifecycle owner for automatic icons. Persisted snapshots paint
+ * synchronously; after the bridge connects, every registered repository gets
+ * one bounded, idle background revalidation for this app session. */
+export function useWarmAutomaticRepositoryIcons(
+  projects: readonly Pick<Project, "repoRoot" | "originUrl">[],
+): void {
+  useEffect(() => {
+    let disposed = false;
+    let cancelScheduled = () => {};
+    const schedule = () => {
+      cancelScheduled();
+      const warm = () => {
+        if (!disposed) void warmAutomaticRepositoryIcons(projects);
+      };
+      if (typeof window.requestIdleCallback === "function") {
+        const id = window.requestIdleCallback(warm, { timeout: 1_000 });
+        cancelScheduled = () => window.cancelIdleCallback(id);
+      } else {
+        const id = window.setTimeout(warm, 0);
+        cancelScheduled = () => window.clearTimeout(id);
+      }
+    };
+    const stop = onActiveBridgeConnected(schedule);
+    return () => {
+      disposed = true;
+      cancelScheduled();
+      stop();
+    };
+  }, [projects]);
 }
 
 /** Non-hook cache read; null until the first detection (or persisted result)
