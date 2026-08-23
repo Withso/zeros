@@ -6,7 +6,7 @@
 // right-side work surface:
 //
 //   ┌─────────────────────────────────────────────────────┐
-//   │ Home · Create │ Repository │ main · workspaces · + │
+//   │ Home · Create · Filter │ repository/workspace tabs │
 //   ├─────────────────────────┬───────────────────────────┤
 //   │ Agent Workspace         │ Browser / panels          │
 //   │ chat                    │ tabs + workspace          │
@@ -22,6 +22,7 @@ import {
   useActiveChatId,
   useActivePage,
   useActiveRepoId,
+  useCreateWorkspaceProjectId,
   useWorkspaceDispatch,
   useWorkspaceStore,
   normalizeChatPermissionMode,
@@ -68,7 +69,11 @@ import { DesignWorkspaceColumn } from "./features/design-workspace/design-worksp
 import { DesignWorkspaceSidebar } from "./features/design-workspace/design-workspace-sidebar";
 import { useWorkspacePrSync } from "./shell/pr/use-workspace-pr-sync";
 import { WorktreeMissingPanel } from "./shell/worktree-missing-panel";
-import { AddProjectProvider } from "./shell/add-project-provider";
+import {
+  AddProjectProvider,
+  useAddProject,
+} from "./shell/add-project-provider";
+import { DispatcherPage } from "./shell/dispatcher/dispatcher-modal";
 import { NoProjectsView } from "./shell/no-projects-view";
 import { HomeSidebar } from "./shell/home-sidebar";
 import { useActiveWorkspace } from "./state/use-active-workspace";
@@ -984,6 +989,8 @@ function MainShellBody({
   useGitRefreshCoordinator();
   const activePage = useActivePage();
   const activeRepoId = useActiveRepoId();
+  const createWorkspaceProjectId = useCreateWorkspaceProjectId();
+  const { openProject, openGithubProject, quickStart } = useAddProject();
   const {
     workspace: activeWorkspace,
     folder: activeWorkspaceFolder,
@@ -1018,7 +1025,7 @@ function MainShellBody({
   const { projects } = useProjects();
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is
   // enabled. Mounted here so neither shortcut fires from Settings.
-  useNewTabHotkeys(!designWorkspaceRequested);
+  useNewTabHotkeys(activePage === "workspace" && !designWorkspaceRequested);
   const worktreeMissing =
     !!activeWorkspace && activeWorkspace.present === false;
   // Zero projects -> full-window welcome (logo + Open project / GitHub /
@@ -1029,6 +1036,7 @@ function MainShellBody({
   // page (workspaces + settings) reached from the rail's REPOS rows;
   // "customize" is agent capabilities (MCP now) scoped User / per-repo.
   const isHome =
+    activePage === "create" ||
     activePage === "dashboard" ||
     activePage === "customize" ||
     activePage === "settings" ||
@@ -1040,17 +1048,20 @@ function MainShellBody({
       ? (projects.find((p) => p.id === activeRepoId) ?? null)
       : null;
   const activeHomePageId = isHome
-    ? activePage === "settings"
-      ? "settings"
-      : activePage === "customize"
-        ? "customize"
-        : activeRepoProject
-          ? "repo"
-          : "dashboard"
+    ? activePage === "create"
+      ? "create"
+      : activePage === "settings"
+        ? "settings"
+        : activePage === "customize"
+          ? "customize"
+          : activeRepoProject
+            ? "repo"
+            : "dashboard"
     : null;
-  // All four Home sub-pages stay mounted after their first visit, preserving
-  // their local models and scroll-adjacent DOM while the active wrapper shows.
-  const homePageIdsToRender = useRetainedViewKeys(activeHomePageId, 4);
+  // Five bounded Home wrappers retain navigation layout. Create's portal-heavy
+  // composer mounts only while active below, so hidden menus/editors cannot
+  // keep effects, focus, or overlays alive behind another surface.
+  const homePageIdsToRender = useRetainedViewKeys(activeHomePageId, 5);
   // Keeps RepoPage's bounded per-repository deck alive while Dashboard or
   // Settings is visible; updated only by a valid repo route.
   const retainedRepoProjectRef = React.useRef(activeRepoProject);
@@ -1325,6 +1336,28 @@ function MainShellBody({
                     aria-hidden={activeHomePageId !== "repo"}
                   >
                     <RepoPage project={repoProjectForDeck} />
+                  </div>
+                )}
+                {homePageIdsToRender.includes("create") && (
+                  <div
+                    {...(activeHomePageId !== "create" ? { inert: "" } : {})}
+                    className={[
+                      "absolute inset-0 flex min-h-0 min-w-0",
+                      activeHomePageId === "create"
+                        ? "pointer-events-auto visible"
+                        : "pointer-events-none invisible",
+                    ].join(" ")}
+                    aria-hidden={activeHomePageId !== "create"}
+                  >
+                    {activeHomePageId === "create" && (
+                      <DispatcherPage
+                        active
+                        initialProjectId={createWorkspaceProjectId}
+                        onOpenProject={openProject}
+                        onOpenGithubProject={openGithubProject}
+                        onQuickStart={quickStart}
+                      />
+                    )}
                   </div>
                 )}
               </div>

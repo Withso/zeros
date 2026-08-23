@@ -1,6 +1,7 @@
 import type { ComposerAttachment } from "../features/agent/composer-attachments";
 import type { AgentTextMessageAttachment } from "../features/agent/use-agent-session";
 import type { WorkbenchScopeMap } from "../shell/workbench/tab-model";
+import type { WorkspaceListFilter } from "./workspace-list-filter";
 import type {
   ProviderBinding,
   ProviderMetadata,
@@ -22,6 +23,10 @@ export {
   selectLastWorkspaceFolderForRepo,
   selectRepoPageView,
   useActivePage,
+  useWorkspaceListFilter,
+  useWorkspaceActivityByFolder,
+  recordWorkspaceActivity,
+  useCreateWorkspaceProjectId,
   useActiveRepoId,
   useActiveChatId,
   useNewAgentFolder,
@@ -96,12 +101,15 @@ export type BrowserPickerSelection = {
 export type AppView = "onboarding" | "workspace";
 export type WorkspacePage =
   | "workspace"
+  | "create"
   | "settings"
   | "dashboard"
   | "customize"
   | "repo";
-/** Home's durable destinations. `repo` is paired with `activeRepoId`. */
-export type HomePage = Exclude<WorkspacePage, "workspace">;
+/** Home's durable destinations. Create shares the Home shell/sidebar but has
+ * its own top-bar destination and does not replace the Home button's memory. */
+export type HomePage = Exclude<WorkspacePage, "workspace" | "create">;
+export type { WorkspaceListFilter } from "./workspace-list-filter";
 /** One repository hub's durable inner destination. */
 export type RepoPageView =
   | "workspaces"
@@ -192,6 +200,18 @@ export type WorkspaceState = {
   browserPickerSelection: BrowserPickerSelection | null;
 
   activePage: WorkspacePage;
+
+  /** Persisted top-bar workspace presentation. Repository filters carry the
+   * semantic project id as `repo:<id>`. */
+  workspaceListFilter: WorkspaceListFilter;
+
+  /** Bounded, persisted clock of deliberate workspace actions, keyed by the
+   * exact folder that originated them. TopBar resolves descendants to their
+   * semantic workspace owner; passive navigation never writes this map. */
+  workspaceActivityByFolder: Record<string, number>;
+
+  /** Repository initially selected by the routed Create Workspace page. */
+  createWorkspaceProjectId: string | null;
 
   // Last destination inside the Home surface. Workspace navigation hides Home
   // without replacing this identity, so returning through the Home button

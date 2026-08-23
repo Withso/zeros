@@ -901,6 +901,23 @@ export function peekWorkspacesFor(repoSlug: string): Workspace[] | undefined {
   return workspaceCache.getSnapshot(repoSlug).data;
 }
 
+/** Pure synchronous snapshot of the same cross-repository rows painted by
+ * `useLiveWorkspaces`. Unlike `peekWorkspacesFor`, this intentionally includes
+ * provisional boot rows; callers that navigate to one must mark that target
+ * validation-pending until its exact repository key confirms it. */
+export function peekLiveWorkspaceUnion(): Workspace[] {
+  const union: Workspace[] = [];
+  const seenIds = new Set<string>();
+  for (const slug of collectLiveSlugs()) {
+    for (const workspace of workspaceCache.peekSnapshot(slug).data ?? []) {
+      if (seenIds.has(workspace.id)) continue;
+      seenIds.add(workspace.id);
+      union.push(workspace);
+    }
+  }
+  return union;
+}
+
 /** Remove every renderer-side snapshot owned by a deleted repository. */
 export function forgetWorkspacesFor(repoSlug: string): void {
   if (!repoSlug) return;

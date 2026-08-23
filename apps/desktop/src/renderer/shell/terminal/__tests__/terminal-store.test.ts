@@ -8,6 +8,7 @@ import {
   isSetupSessionId,
 } from "../terminal-store";
 import type { TerminalSession } from "../terminal-store";
+import { useWorkspaceStore } from "../../../state/workspace-store";
 
 // Covers the Phase-C multiplayer reconcile: the engine's SHARED terminal
 // registry is folded into a folder's tab strip — ADD terminals another device
@@ -16,6 +17,44 @@ import type { TerminalSession } from "../terminal-store";
 
 const ids = (folder: string) =>
   selectSessionsForFolder(useTerminalStore.getState(), folder).map((s) => s.id);
+
+describe("terminal-store workspace activity", () => {
+  beforeEach(() => {
+    useTerminalStore.setState({
+      sessions: [],
+      activeTerminalTabByFolder: {},
+    });
+    useWorkspaceStore.setState({ workspaceActivityByFolder: {} });
+  });
+
+  it("records user-created or explicitly run terminals, not automatic seeding", () => {
+    const terminal = useTerminalStore.getState();
+    terminal.createSession("/auto-seed", null, undefined, undefined, false);
+    expect(
+      useWorkspaceStore.getState().workspaceActivityByFolder["/auto-seed"],
+    ).toBeUndefined();
+
+    terminal.createSession("/user-terminal", null);
+    expect(
+      useWorkspaceStore.getState().workspaceActivityByFolder["/user-terminal"],
+    ).toEqual(expect.any(Number));
+
+    terminal.createSession(
+      "/run",
+      null,
+      "pnpm test",
+      "pty-run-activity",
+      false,
+    );
+    expect(
+      useWorkspaceStore.getState().workspaceActivityByFolder["/run"],
+    ).toBeUndefined();
+    terminal.createSession("/run", null, "pnpm test", "pty-run-activity", true);
+    expect(
+      useWorkspaceStore.getState().workspaceActivityByFolder["/run"],
+    ).toEqual(expect.any(Number));
+  });
+});
 
 describe("terminal-store syncEngineTerminals", () => {
   beforeEach(() => {

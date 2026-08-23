@@ -60,6 +60,13 @@ import {
   folderIsOwnedByProject,
   folderIsWithinRoot,
 } from "./workspace-resolution";
+import {
+  DEFAULT_WORKSPACE_LIST_FILTER,
+  parseWorkspaceListFilter,
+  workspaceListFilterForOpenedRepo,
+  workspaceListFilterProjectId,
+  type WorkspaceListFilter,
+} from "./workspace-list-filter";
 import type {
   AiSettings,
   AppView,
@@ -94,6 +101,20 @@ export type Action =
       selection: BrowserPickerSelection | null;
     }
   | { type: "SET_ACTIVE_PAGE"; page: WorkspacePage }
+  | { type: "SET_WORKSPACE_LIST_FILTER"; filter: WorkspaceListFilter }
+  | {
+      type: "RECORD_WORKSPACE_ACTIVITY";
+      folder: string;
+      /** Deterministic test/import seam. Ordinary callers use the monotonic
+       * renderer clock by omitting this. */
+      at?: number;
+    }
+  | {
+      type: "OPEN_CREATE_PAGE";
+      projectId?: string | null;
+      /** Used when the last visible workspace was removed. */
+      clearWorkspaceTarget?: boolean;
+    }
   /** Return to Home's last complete destination in one store snapshot. */
   | { type: "OPEN_HOME" }
   // A workspace click changes route + chat/scope as one store snapshot. This
@@ -114,6 +135,8 @@ export type Action =
        *  instead of yanking them into the workspace view. Defaults to false — a
        *  normal open always switches to "workspace". */
       preservePage?: boolean;
+      /** Explicit filter transition for a repository-picker navigation. */
+      workspaceListFilter?: WorkspaceListFilter;
     }
   | { type: "CONFIRM_WORKSPACE_TARGET"; folder: string }
   /** Clear a disappearing workspace before destructive owner teardown. */
@@ -174,6 +197,9 @@ export type Action =
         /** The announced worktree is exact but not published by the engine yet. */
         validationPending?: boolean;
       };
+      /** True only for an explicit user-created tab/workspace. Automatic
+       * default-chat repair must leave Active ordering untouched. */
+      recordWorkspaceActivity?: boolean;
     }
   | { type: "SET_ACTIVE_CHAT"; id: string | null }
   | { type: "DELETE_CHAT"; id: string }
@@ -314,6 +340,7 @@ const bootActiveChatId = resolveBootActiveChatId(
 
 const MAX_SCOPED_NAV_ENTRIES = 128;
 const MAX_ACTIVE_CHAT_MEMORIES = 512;
+const MAX_WORKSPACE_ACTIVITY_MEMORIES = 512;
 
 /** Write one scoped navigation value without allowing persisted maps to grow
  * forever. A touched key moves to the tail, making eviction MRU-like. */
@@ -334,6 +361,27 @@ function setBoundedRecord<T>(
     delete next[keys[index]];
   }
   return next;
+}
+
+function nextWorkspaceActivityRecord(
+  record: Record<string, number>,
+  rawFolder: string,
+  explicitAt?: number,
+): Record<string, number> {
+  const folder = rawFolder.trim();
+  if (!folder || folder === "__ambient__") return record;
+  const supplied =
+    typeof explicitAt === "number" &&
+    Number.isFinite(explicitAt) &&
+    explicitAt >= 0
+      ? explicitAt
+      : null;
+  // Date.now can repeat for two rapid actions. A strictly increasing fallback
+  // guarantees that the second workspace visibly reaches the first slot.
+  const at =
+    supplied ??
+    Math.max(Date.now(), ...Object.values(record).map((value) => value + 1));
+  return setBoundedRecord(record, folder, at, MAX_WORKSPACE_ACTIVITY_MEMORIES);
 }
 
 function removeRecordKey<T>(
@@ -421,6 +469,10 @@ const initialState: WorkspaceState = {
   project: null,
   browserPickerSelection: null,
   activePage: persistedUiState.activePage ?? "workspace",
+  workspaceListFilter:
+    persistedUiState.workspaceListFilter ?? DEFAULT_WORKSPACE_LIST_FILTER,
+  workspaceActivityByFolder: persistedUiState.workspaceActivityByFolder ?? {},
+  createWorkspaceProjectId: persistedUiState.createWorkspaceProjectId ?? null,
   lastHomePage: persistedUiState.lastHomePage ?? "dashboard",
   // Restored with activePage so a reload on a repo page reopens the same repo.
   // persist-ui-state guarantees the pair is consistent (a persisted "repo"
@@ -705,6 +757,19 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         if (state.activePage === "workspace") return state;
         return { ...state, activePage: action.page };
       }
+      if (action.page === "create") {
+        if (
+          state.activePage === "create" &&
+          state.pendingWorkspaceValidationFolder === null
+        ) {
+          return state;
+        }
+        return {
+          ...state,
+          activePage: "create",
+          pendingWorkspaceValidationFolder: null,
+        };
+      }
       if (action.page === "repo" && !state.activeRepoId) {
         return {
           ...state,
@@ -726,6 +791,53 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         lastHomePage: action.page as HomePage,
         pendingWorkspaceValidationFolder: null,
       };
+    case "SET_WORKSPACE_LIST_FILTER": {
+      const workspaceListFilter = parseWorkspaceListFilter(action.filter);
+      return state.workspaceListFilter === workspaceListFilter
+        ? state
+        : { ...state, workspaceListFilter };
+    }
+    case "RECORD_WORKSPACE_ACTIVITY": {
+      const workspaceActivityByFolder = nextWorkspaceActivityRecord(
+        state.workspaceActivityByFolder,
+        action.folder,
+        action.at,
+      );
+      return workspaceActivityByFolder === state.workspaceActivityByFolder
+        ? state
+        : { ...state, workspaceActivityByFolder };
+    }
+    case "OPEN_CREATE_PAGE": {
+      const createWorkspaceProjectId =
+        action.projectId === undefined
+          ? state.createWorkspaceProjectId
+          : action.projectId;
+      const clear = action.clearWorkspaceTarget === true;
+      if (
+        state.activePage === "create" &&
+        state.createWorkspaceProjectId === createWorkspaceProjectId &&
+        state.pendingWorkspaceValidationFolder === null &&
+        (!clear ||
+          (state.activeChatId === null &&
+            state.newAgentFolder === null &&
+            state.lastWorkspaceFolder === null))
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        activePage: "create",
+        createWorkspaceProjectId,
+        pendingWorkspaceValidationFolder: null,
+        ...(clear
+          ? {
+              activeChatId: null,
+              newAgentFolder: null,
+              lastWorkspaceFolder: null,
+            }
+          : {}),
+      };
+    }
     case "OPEN_HOME": {
       const page =
         state.lastHomePage === "repo" && !state.activeRepoId
@@ -755,6 +867,13 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         action.repoRoot,
         action.folder,
       );
+      const workspaceListFilter = action.workspaceListFilter
+        ? parseWorkspaceListFilter(action.workspaceListFilter)
+        : workspaceListFilterForOpenedRepo(
+            state.workspaceListFilter,
+            action.repoRoot,
+            loadProjects(),
+          );
       // A repoint (preservePage) fixes the active-workspace target but must not
       // navigate — it keeps whatever page is showing (e.g. the Dashboard). A
       // normal open always lands on the workspace view.
@@ -768,7 +887,8 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         state.lastWorkspaceFolder === action.folder &&
         state.lastWorkspaceByRepoRoot === lastWorkspaceByRepoRoot &&
         state.pendingWorkspaceValidationFolder ===
-          pendingWorkspaceValidationFolder
+          pendingWorkspaceValidationFolder &&
+        state.workspaceListFilter === workspaceListFilter
       ) {
         return state;
       }
@@ -779,6 +899,7 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         newAgentFolder,
         lastWorkspaceFolder: action.folder,
         lastWorkspaceByRepoRoot,
+        workspaceListFilter,
         pendingWorkspaceValidationFolder,
       };
     }
@@ -859,6 +980,9 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           removedFolders,
         );
       const removedActiveRepo = state.activeRepoId === action.projectId;
+      const removedWorkspaceFilter =
+        workspaceListFilterProjectId(state.workspaceListFilter) ===
+        action.projectId;
       const repoPageViewByProject = removeRecordKey(
         state.repoPageViewByProject,
         action.projectId,
@@ -884,6 +1008,13 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             ? "dashboard"
             : state.lastHomePage,
         activeRepoId: removedActiveRepo ? null : state.activeRepoId,
+        workspaceListFilter: removedWorkspaceFilter
+          ? DEFAULT_WORKSPACE_LIST_FILTER
+          : state.workspaceListFilter,
+        createWorkspaceProjectId:
+          state.createWorkspaceProjectId === action.projectId
+            ? null
+            : state.createWorkspaceProjectId,
         activeChatId:
           activeChatFolder && folderWasRemoved(activeChatFolder)
             ? null
@@ -897,6 +1028,10 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             : state.newAgentFolder,
         activeChatByFolder: removeRecordKeysMatching(
           state.activeChatByFolder,
+          folderWasRemoved,
+        ),
+        workspaceActivityByFolder: removeRecordKeysMatching(
+          state.workspaceActivityByFolder,
           folderWasRemoved,
         ),
         workbenchByScope: removeRecordKeysMatching(
@@ -951,6 +1086,10 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
           state.activeChatByFolder,
           folderWasRemoved,
         ),
+        workspaceActivityByFolder: removeRecordKeysMatching(
+          state.workspaceActivityByFolder,
+          folderWasRemoved,
+        ),
         workbenchByScope: removeRecordKeysMatching(
           state.workbenchByScope,
           folderWasRemoved,
@@ -1002,6 +1141,11 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
         newAgentFolder: moveMaybe(state.newAgentFolder),
         activeChatByFolder: moveRecordKeysMatching(
           state.activeChatByFolder,
+          belongsToMovedWorkspace,
+          moveFolder,
+        ),
+        workspaceActivityByFolder: moveRecordKeysMatching(
+          state.workspaceActivityByFolder,
           belongsToMovedWorkspace,
           moveFolder,
         ),
@@ -1061,6 +1205,12 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       // now carries its own folder).
       return {
         ...state,
+        workspaceActivityByFolder: action.recordWorkspaceActivity
+          ? nextWorkspaceActivityRecord(
+              state.workspaceActivityByFolder,
+              action.chat.folder,
+            )
+          : state.workspaceActivityByFolder,
         chats: [...state.chats, action.chat],
         activeChatId: action.chat.id,
         newAgentFolder: null,
@@ -1077,6 +1227,11 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
                 .validationPending
                 ? action.chat.folder
                 : null,
+              workspaceListFilter: workspaceListFilterForOpenedRepo(
+                state.workspaceListFilter,
+                action.openWorkspace.repoRoot,
+                loadProjects(),
+              ),
             }
           : {}),
       };
@@ -1454,6 +1609,13 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       };
       return {
         ...state,
+        workspaceActivityByFolder:
+          action.activate === false
+            ? state.workspaceActivityByFolder
+            : nextWorkspaceActivityRecord(
+                state.workspaceActivityByFolder,
+                scope,
+              ),
         workbenchByScope: setWorkbenchScope(
           state.workbenchByScope,
           scope,
@@ -1513,6 +1675,15 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       };
     }
     case "OPEN_WORKBENCH_TAB": {
+      const scope = action.scope ?? workbenchScopeKey(state);
+      const cur = state.workbenchByScope[scope] ?? defaultScopeFor(scope);
+      const target = cur.tabs.find((tab) => tab.id === action.id);
+      const nextFilePath = action.updates?.filePath;
+      const openedDifferentFile =
+        target?.type === "files" &&
+        typeof nextFilePath === "string" &&
+        nextFilePath.trim().length > 0 &&
+        nextFilePath.trim() !== target.filePath;
       const updated = action.updates
         ? reducer(state, {
             type: "UPDATE_WORKBENCH_TAB",
@@ -1521,7 +1692,16 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
             scope: action.scope,
           })
         : state;
-      return reducer(updated, {
+      const withActivity = openedDifferentFile
+        ? {
+            ...updated,
+            workspaceActivityByFolder: nextWorkspaceActivityRecord(
+              updated.workspaceActivityByFolder,
+              scope,
+            ),
+          }
+        : updated;
+      return reducer(withActivity, {
         type: "ACTIVATE_WORKBENCH_TAB",
         id: action.id,
         scope: action.scope,
@@ -1823,6 +2003,15 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
     ),
 }));
 
+/** Record one deliberate action without subscribing the caller to the store.
+ * Selection-only surfaces must never call this helper. */
+export function recordWorkspaceActivity(folder: string): void {
+  useWorkspaceStore.getState().dispatch({
+    type: "RECORD_WORKSPACE_ACTIVITY",
+    folder,
+  });
+}
+
 // ──────────────────────────────────────────────────────────
 // Reload-persistence (formerly the effects in WorkspaceProvider)
 // ──────────────────────────────────────────────────────────
@@ -1835,6 +2024,9 @@ export const useWorkspaceStore = create<WorkspaceStore>((set) => ({
 useWorkspaceStore.subscribe((s, prev) => {
   if (
     s.activePage !== prev.activePage ||
+    s.workspaceListFilter !== prev.workspaceListFilter ||
+    s.workspaceActivityByFolder !== prev.workspaceActivityByFolder ||
+    s.createWorkspaceProjectId !== prev.createWorkspaceProjectId ||
     s.lastHomePage !== prev.lastHomePage ||
     s.activeRepoId !== prev.activeRepoId ||
     s.repoPageViewByProject !== prev.repoPageViewByProject ||
@@ -1884,10 +2076,21 @@ export function useWorkspaceDispatch(): (action: Action) => void {
 // derived-folder reads in conversation/conversation-header & the store helper hooks.
 // ──────────────────────────────────────────────────────────
 
-/** `activePage` ("workspace" | "settings" | "dashboard" | "customize" |
- *  "repo"). */
+/** Current complete shell destination. */
 export function useActivePage(): WorkspaceState["activePage"] {
   return useWorkspaceStore((s) => s.activePage);
+}
+
+export function useWorkspaceListFilter(): WorkspaceListFilter {
+  return useWorkspaceStore((s) => s.workspaceListFilter);
+}
+
+export function useWorkspaceActivityByFolder(): Record<string, number> {
+  return useWorkspaceStore((s) => s.workspaceActivityByFolder);
+}
+
+export function useCreateWorkspaceProjectId(): string | null {
+  return useWorkspaceStore((s) => s.createWorkspaceProjectId);
 }
 
 /** The project id the Home-tab repo page targets (meaningful when

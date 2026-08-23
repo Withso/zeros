@@ -1,6 +1,6 @@
 // Scoped navigation regression coverage: repository and workspace round trips
 // must restore their own destination and publish it in one Zustand notification.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 const stubStore = new Map<string, string>();
 (globalThis as Record<string, unknown>).localStorage = {
@@ -35,6 +35,137 @@ function identities() {
 }
 
 describe("scoped navigation memory", () => {
+  it("retargets a repository-only top-bar filter in the same workspace-open notification", () => {
+    const { projectA, projectB, rootA, rootB } = identities();
+    const projects = [
+      {
+        id: projectA,
+        name: "Alpha",
+        repoRoot: rootA,
+        repoSlug: `alpha-${sequence}`,
+        originUrl: null,
+        addedAt: sequence,
+      },
+      {
+        id: projectB,
+        name: "Beta",
+        repoRoot: rootB,
+        repoSlug: `beta-${sequence}`,
+        originUrl: null,
+        addedAt: sequence,
+      },
+    ];
+    stubStore.set("zeros-projects-v1", JSON.stringify(projects));
+    stubStore.set("zeros-projects-v1-backup", JSON.stringify(projects));
+    const { dispatch } = useWorkspaceStore.getState();
+    dispatch({
+      type: "SET_WORKSPACE_LIST_FILTER",
+      filter: `repo:${projectA}`,
+    });
+    const snapshots: Array<[string, string]> = [];
+    const stop = useWorkspaceStore.subscribe((state) => {
+      snapshots.push([state.activePage, state.workspaceListFilter]);
+    });
+
+    try {
+      dispatch({
+        type: "OPEN_WORKSPACE",
+        folder: `${rootB}/worktree`,
+        repoRoot: rootB,
+        chatId: null,
+      });
+      expect(snapshots).toEqual([["workspace", `repo:${projectB}`]]);
+    } finally {
+      stop();
+      stubStore.delete("zeros-projects-v1");
+      stubStore.delete("zeros-projects-v1-backup");
+    }
+  });
+
+  it("preserves Grouped, Ungrouped, and Active when opening another repository", () => {
+    const { rootA } = identities();
+    const { dispatch } = useWorkspaceStore.getState();
+    for (const filter of ["grouped", "ungrouped", "active"] as const) {
+      dispatch({ type: "SET_WORKSPACE_LIST_FILTER", filter });
+      dispatch({
+        type: "OPEN_WORKSPACE",
+        folder: `${rootA}/${filter}`,
+        repoRoot: rootA,
+        chatId: null,
+      });
+      expect(useWorkspaceStore.getState().workspaceListFilter).toBe(filter);
+    }
+  });
+
+  it("records only an explicit workspace action, not navigation or tab selection", () => {
+    const { rootA } = identities();
+    const folder = `${rootA}/worktree`;
+    const { dispatch } = useWorkspaceStore.getState();
+    dispatch({ type: "RECORD_WORKSPACE_ACTIVITY", folder, at: 123 });
+    const recorded = useWorkspaceStore.getState().workspaceActivityByFolder;
+
+    dispatch({
+      type: "OPEN_WORKSPACE",
+      folder,
+      repoRoot: rootA,
+      chatId: null,
+    });
+    dispatch({ type: "SET_ACTIVE_CHAT", id: null });
+    dispatch({ type: "SET_ACTIVE_PAGE", page: "workspace" });
+    dispatch({ type: "ACTIVATE_WORKBENCH_TAB", id: "files" });
+
+    expect(useWorkspaceStore.getState().workspaceActivityByFolder).toBe(
+      recorded,
+    );
+    expect(recorded).toEqual(expect.objectContaining({ [folder]: 123 }));
+  });
+
+  it("keeps rapid activity writes strictly ordered when the wall clock ties", () => {
+    const { rootA } = identities();
+    const first = `${rootA}/first`;
+    const second = `${rootA}/second`;
+    const now = vi.spyOn(Date, "now").mockReturnValue(5_000);
+    try {
+      const { dispatch } = useWorkspaceStore.getState();
+      dispatch({ type: "RECORD_WORKSPACE_ACTIVITY", folder: first });
+      dispatch({ type: "RECORD_WORKSPACE_ACTIVITY", folder: second });
+      const activity = useWorkspaceStore.getState().workspaceActivityByFolder;
+      expect(activity[second]).toBeGreaterThan(activity[first]);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it("opens Create atomically without replacing Home memory and can clear a removed target", () => {
+    const { projectA, projectB, rootA } = identities();
+    const { dispatch } = useWorkspaceStore.getState();
+    dispatch({ type: "OPEN_REPO_PAGE", projectId: projectA });
+    dispatch({
+      type: "OPEN_WORKSPACE",
+      folder: `${rootA}/leaving`,
+      repoRoot: rootA,
+      chatId: null,
+    });
+
+    dispatch({ type: "OPEN_CREATE_PAGE", projectId: projectB });
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      activePage: "create",
+      lastHomePage: "repo",
+      activeRepoId: projectA,
+      createWorkspaceProjectId: projectB,
+      lastWorkspaceFolder: `${rootA}/leaving`,
+    });
+
+    dispatch({ type: "OPEN_CREATE_PAGE", clearWorkspaceTarget: true });
+    expect(useWorkspaceStore.getState()).toMatchObject({
+      activePage: "create",
+      lastHomePage: "repo",
+      activeChatId: null,
+      newAgentFolder: null,
+      lastWorkspaceFolder: null,
+    });
+  });
+
   it("restores each repository's own last workspace after A → B → A", () => {
     const { rootA, rootB } = identities();
     const worktreeA = `${rootA}/worktree-one`;
@@ -237,6 +368,11 @@ describe("scoped navigation memory", () => {
     });
     dispatch({ type: "ADD_CHAT", chat });
     dispatch({
+      type: "RECORD_WORKSPACE_ACTIVITY",
+      folder,
+      at: 1_001,
+    });
+    dispatch({
       type: "ADD_WORKBENCH_TAB",
       tab: {
         id: `removed-file-${sequence}`,
@@ -262,6 +398,7 @@ describe("scoped navigation memory", () => {
     expect(state.repoPageViewByProject[projectA]).toBeUndefined();
     expect(state.lastWorkspaceByRepoRoot[rootA]).toBeUndefined();
     expect(state.activeChatByFolder[folder]).toBeUndefined();
+    expect(state.workspaceActivityByFolder[folder]).toBeUndefined();
     expect(state.workbenchByScope[folder]).toBeUndefined();
   });
 
@@ -278,6 +415,11 @@ describe("scoped navigation memory", () => {
     });
     dispatch({ type: "RESET_WORKBENCH_TABS" });
     dispatch({
+      type: "RECORD_WORKSPACE_ACTIVITY",
+      folder,
+      at: 1_002,
+    });
+    dispatch({
       type: "REMOVE_WORKSPACE_UI_STATE",
       folder: workspaceRoot,
       repoRoot: rootA,
@@ -286,6 +428,7 @@ describe("scoped navigation memory", () => {
     const state = useWorkspaceStore.getState();
     expect(state.lastWorkspaceByRepoRoot[rootA]).toBe(rootA);
     expect(state.activeChatByFolder[folder]).toBeUndefined();
+    expect(state.workspaceActivityByFolder[folder]).toBeUndefined();
     expect(state.workbenchByScope[folder]).toBeUndefined();
     expect(state.lastWorkspaceFolder).toBe(rootA);
   });
@@ -310,6 +453,11 @@ describe("scoped navigation memory", () => {
       chatId: chat.id,
     });
     dispatch({ type: "RESET_WORKBENCH_TABS" });
+    dispatch({
+      type: "RECORD_WORKSPACE_ACTIVITY",
+      folder: fromSubdir,
+      at: 1_003,
+    });
     const stop = useWorkspaceStore.subscribe((state) => {
       snapshots.push([
         state.chats.find((entry) => entry.id === chat.id)?.folder,
@@ -328,11 +476,13 @@ describe("scoped navigation memory", () => {
     const state = useWorkspaceStore.getState();
     expect(snapshots).toEqual([[toSubdir, toSubdir]]);
     expect(state.lastWorkspaceFolder).toBe(toSubdir);
-    expect(
-      state.chats.find((entry) => entry.id === chat.id)?.folder,
-    ).toBe(toSubdir);
+    expect(state.chats.find((entry) => entry.id === chat.id)?.folder).toBe(
+      toSubdir,
+    );
     expect(state.activeChatByFolder[fromSubdir]).toBeUndefined();
     expect(state.activeChatByFolder[toSubdir]).toBe(chat.id);
+    expect(state.workspaceActivityByFolder[fromSubdir]).toBeUndefined();
+    expect(state.workspaceActivityByFolder[toSubdir]).toBe(1_003);
     expect(state.workbenchByScope[fromSubdir]).toBeUndefined();
     expect(state.workbenchByScope[toSubdir]).toBeDefined();
   });
@@ -384,6 +534,11 @@ describe("scoped navigation memory", () => {
         chatId: nestedChat.id,
       });
       dispatch({ type: "RESET_WORKBENCH_TABS" });
+      dispatch({
+        type: "RECORD_WORKSPACE_ACTIVITY",
+        folder: nestedFolder,
+        at: 1_004,
+      });
 
       dispatch({ type: "ADD_CHAT", chat: outerChat });
       dispatch({
@@ -393,6 +548,11 @@ describe("scoped navigation memory", () => {
         chatId: outerChat.id,
       });
       dispatch({ type: "RESET_WORKBENCH_TABS" });
+      dispatch({
+        type: "RECORD_WORKSPACE_ACTIVITY",
+        folder: outerFolder,
+        at: 1_005,
+      });
 
       dispatch({
         type: "REMOVE_WORKSPACE_UI_STATE",
@@ -402,8 +562,10 @@ describe("scoped navigation memory", () => {
 
       const state = useWorkspaceStore.getState();
       expect(state.activeChatByFolder[outerFolder]).toBeUndefined();
+      expect(state.workspaceActivityByFolder[outerFolder]).toBeUndefined();
       expect(state.workbenchByScope[outerFolder]).toBeUndefined();
       expect(state.activeChatByFolder[nestedFolder]).toBe(nestedChat.id);
+      expect(state.workspaceActivityByFolder[nestedFolder]).toBe(1_004);
       expect(state.workbenchByScope[nestedFolder]).toBeDefined();
       expect(state.lastWorkspaceByRepoRoot[nestedRoot]).toBe(nestedFolder);
     } finally {

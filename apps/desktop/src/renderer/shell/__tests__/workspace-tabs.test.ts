@@ -13,6 +13,8 @@ import {
   resolveRepoWorkspaceDestination,
   workspaceFadeVisibility,
   workspaceLabel,
+  workspacePinnedFadeOffsets,
+  workspacePinnedLeadTrailingInset,
   workspacePinSide,
   workspaceScrollLeftForTab,
   workspaceTabDescription,
@@ -489,6 +491,332 @@ describe("workspace fade placement", () => {
         afterPinnedLeft: false,
         beforePinnedRight: false,
       },
+    );
+  });
+
+  it("treats a pinned repository lead as a pinned edge on its own", () => {
+    // The lead reaches the leading edge before a selection deeper in its own
+    // repository does. The outer fade would then sit UNDER the opaque lead and
+    // the content emerging beside it would have a hard cut.
+    expect(
+      workspaceFadeVisibility({ left: true, right: true }, null, "left"),
+    ).toEqual({
+      outerLeft: false,
+      outerRight: true,
+      afterPinnedLeft: true,
+      beforePinnedRight: false,
+    });
+  });
+
+  it("does not invent a pinned edge the lead has not reached", () => {
+    expect(
+      workspaceFadeVisibility({ left: true, right: true }, null, null),
+    ).toEqual({
+      outerLeft: true,
+      outerRight: true,
+      afterPinnedLeft: false,
+      beforePinnedRight: false,
+    });
+  });
+
+  it("keeps a hidden edge unfaded when nothing is hidden there", () => {
+    // Both pinned at the trailing edge, but nothing is hidden to the left.
+    expect(
+      workspaceFadeVisibility({ left: false, right: true }, "right", "right"),
+    ).toEqual({
+      outerLeft: false,
+      outerRight: false,
+      afterPinnedLeft: false,
+      beforePinnedRight: true,
+    });
+  });
+});
+
+describe("grouped pinned repository lead", () => {
+  // The Grouped lane's geometry, mirroring top-bar.tsx.
+  const EDGE_INSET = 4;
+  const TAB_GAP = 4;
+  const LEAD_WIDTH = 28;
+  const LEAD_SLOT = LEAD_WIDTH + TAB_GAP;
+  const LEADING_INSET = EDGE_INSET + LEAD_SLOT;
+  const TAB_WIDTH = 120;
+  const CLIENT_WIDTH = 360;
+  const SCROLL_WIDTH = 940;
+
+  const leadTrailingInset = workspacePinnedLeadTrailingInset({
+    edgeInset: EDGE_INSET,
+    tabWidth: TAB_WIDTH,
+    gap: TAB_GAP,
+  });
+
+  function sides(scrollLeft: number, tabOffsetLeft: number, gapToLead: number) {
+    const shared = {
+      scrollLeft,
+      scrollWidth: SCROLL_WIDTH,
+      clientWidth: CLIENT_WIDTH,
+    };
+    return {
+      tab: workspacePinSide({
+        ...shared,
+        tabOffsetLeft,
+        tabWidth: TAB_WIDTH,
+        edgeInset: EDGE_INSET,
+        leadingInset: LEADING_INSET,
+      }),
+      lead: workspacePinSide({
+        ...shared,
+        tabOffsetLeft: tabOffsetLeft - LEAD_SLOT - gapToLead,
+        tabWidth: LEAD_WIDTH,
+        edgeInset: EDGE_INSET,
+        trailingInset: leadTrailingInset,
+      }),
+    };
+  }
+
+  it("parks the lead exactly one carrier ahead of the pinned pill", () => {
+    // The pill pins at `clientWidth - edgeInset - tabWidth`; the lead's own
+    // trailing inset has to land its right edge four pixels earlier.
+    const pillLeft = CLIENT_WIDTH - EDGE_INSET - TAB_WIDTH;
+    const leadRight = CLIENT_WIDTH - leadTrailingInset;
+    expect(pillLeft - leadRight).toBe(TAB_GAP);
+    expect(leadTrailingInset).toBe(EDGE_INSET + TAB_WIDTH + TAB_GAP);
+  });
+
+  it("reads a malformed pill width as zero rather than a negative inset", () => {
+    expect(
+      workspacePinnedLeadTrailingInset({
+        edgeInset: 4,
+        tabWidth: Number.NaN || -50,
+        gap: 4,
+      }),
+    ).toBe(8);
+  });
+
+  // Two separately-sticky siblings with scrollable content between them cannot
+  // be made to park simultaneously AND adjacently at both edges: closing the
+  // gap on one side opens it on the other. So the contract below is what the
+  // geometry can actually guarantee, swept over every scroll offset and over
+  // the pill's distance from its own repository icon — a group-leading
+  // selection (gap 0), one tab in, and three tabs in.
+  const SWEEP: Array<[number, number]> = [];
+  for (const gapToLead of [0, 124, 372]) {
+    for (const tabOffsetLeft of [LEADING_INSET, 300, 692, 800]) {
+      // The lead always precedes its pill in the lane, so a pill closer to the
+      // lane's start than its own icon could ever be is not a layout that
+      // exists. Sweeping it would assert against impossible geometry.
+      if (tabOffsetLeft < LEADING_INSET + gapToLead) continue;
+      SWEEP.push([gapToLead, tabOffsetLeft]);
+    }
+  }
+  function sweep(
+    assert: (
+      state: {
+        tab: ReturnType<typeof workspacePinSide>;
+        lead: ReturnType<typeof workspacePinSide>;
+      },
+      context: { scrollLeft: number; gapToLead: number; tabOffsetLeft: number },
+    ) => void,
+  ) {
+    for (const [gapToLead, tabOffsetLeft] of SWEEP) {
+      for (
+        let scrollLeft = 0;
+        scrollLeft <= SCROLL_WIDTH - CLIENT_WIDTH;
+        scrollLeft += 4
+      ) {
+        assert(sides(scrollLeft, tabOffsetLeft, gapToLead), {
+          scrollLeft,
+          gapToLead,
+          tabOffsetLeft,
+        });
+      }
+    }
+  }
+
+  it("pins the lead beside the pill at the leading edge, always", () => {
+    // The leading edge is the one that must never show a bare pinned pill: the
+    // pill's inset RESERVES the lead's slot there, so an unpinned lead would
+    // leave a 32px hole with scrolled tabs in it.
+    sweep(({ tab, lead }, at) => {
+      if (tab === "left") expect(lead, JSON.stringify(at)).toBe("left");
+    });
+  });
+
+  it("only pins the lead to the trailing edge behind its own pill", () => {
+    sweep(({ tab, lead }, at) => {
+      if (lead === "right") expect(tab, JSON.stringify(at)).toBe("right");
+    });
+  });
+
+  it("keeps an unpinned lead fully on screen while its pill is pinned", () => {
+    // The trailing edge is where the pair can separate: a selection deeper in
+    // its repository keeps the pill parked while the repository scrolls in
+    // behind it, and the icon rejoins the pill's flow slot on the way. That is
+    // only acceptable because the icon is never OFF screen during it — the
+    // repository the pinned pill belongs to stays identifiable throughout.
+    sweep(({ tab, lead }, at) => {
+      if (!tab || lead) return;
+      const leadLeft =
+        at.tabOffsetLeft - LEAD_SLOT - at.gapToLead - at.scrollLeft;
+      expect(leadLeft, JSON.stringify(at)).toBeGreaterThanOrEqual(EDGE_INSET);
+      expect(leadLeft + LEAD_WIDTH, JSON.stringify(at)).toBeLessThanOrEqual(
+        CLIENT_WIDTH - EDGE_INSET,
+      );
+    });
+  });
+
+  it("leaves the first tab of the first repository on its own flow slot", () => {
+    // Grouped always opens a repository with its icon, so the first tab's
+    // natural offset IS the reserved leading inset. Any disagreement here and
+    // CSS sticky would shove the unscrolled selection over its neighbour.
+    expect(
+      workspacePinSide({
+        scrollLeft: 0,
+        scrollWidth: SCROLL_WIDTH,
+        clientWidth: CLIENT_WIDTH,
+        tabOffsetLeft: LEADING_INSET,
+        tabWidth: TAB_WIDTH,
+        edgeInset: EDGE_INSET,
+        leadingInset: LEADING_INSET,
+      }),
+    ).toBeNull();
+  });
+
+  it("reveals a Grouped selection onto the inset it will pin at", () => {
+    // Landing it on the bare content inset would leave sticky pushing the
+    // revealed pill a lead-slot to the right, over the tab beside it.
+    expect(
+      workspaceScrollLeftForTab({
+        scrollLeft: 600,
+        scrollWidth: SCROLL_WIDTH,
+        clientWidth: CLIENT_WIDTH,
+        tabOffsetLeft: 300,
+        tabWidth: TAB_WIDTH,
+        edgeInset: EDGE_INSET,
+        leadingInset: LEADING_INSET,
+      }),
+    ).toBe(300 - LEADING_INSET);
+  });
+
+  it("still lands flush at the trailing edge, which reserves nothing", () => {
+    expect(
+      workspaceScrollLeftForTab({
+        scrollLeft: 0,
+        scrollWidth: SCROLL_WIDTH,
+        clientWidth: CLIENT_WIDTH,
+        tabOffsetLeft: 692,
+        tabWidth: TAB_WIDTH,
+        edgeInset: EDGE_INSET,
+        leadingInset: LEADING_INSET,
+      }),
+    ).toBe(692 + TAB_WIDTH - CLIENT_WIDTH + EDGE_INSET);
+  });
+
+  it("can hold the pair at OPPOSITE edges inside one long repository", () => {
+    // A repository wide enough to fill the lane on its own: its icon has
+    // reached the leading edge while its selection is still parked at the
+    // trailing one. Both are pinned, to different edges — which is why the
+    // fades below cannot share a single "is the lead pinned" slot.
+    const state = sides(450, LEADING_INSET + 700, 700);
+    expect(state.lead).toBe("left");
+    expect(state.tab).toBe("right");
+  });
+
+  it("charges each edge's fade only for what parked at that edge", () => {
+    const split = workspacePinnedFadeOffsets({
+      clientWidth: CLIENT_WIDTH,
+      tabWidth: TAB_WIDTH,
+      edgeInset: EDGE_INSET,
+      leadSlot: LEAD_SLOT,
+      fadeWidth: 24,
+      pinSide: "right",
+      leadPinSide: "left",
+    });
+    // Leading edge holds only the lead; trailing edge holds only the pill.
+    expect(split.afterPinnedLeft).toBe(EDGE_INSET + LEAD_SLOT);
+    expect(split.beforePinnedRight).toBe(
+      CLIENT_WIDTH - EDGE_INSET - TAB_WIDTH - 24,
+    );
+  });
+
+  it("places both fades outside the pinned pair when they share an edge", () => {
+    const left = workspacePinnedFadeOffsets({
+      clientWidth: CLIENT_WIDTH,
+      tabWidth: TAB_WIDTH,
+      edgeInset: EDGE_INSET,
+      leadSlot: LEAD_SLOT,
+      fadeWidth: 24,
+      pinSide: "left",
+      leadPinSide: "left",
+    });
+    expect(left.afterPinnedLeft).toBe(EDGE_INSET + LEAD_SLOT + TAB_WIDTH);
+
+    const right = workspacePinnedFadeOffsets({
+      clientWidth: CLIENT_WIDTH,
+      tabWidth: TAB_WIDTH,
+      edgeInset: EDGE_INSET,
+      leadSlot: LEAD_SLOT,
+      fadeWidth: 24,
+      pinSide: "right",
+      leadPinSide: "right",
+    });
+    expect(right.beforePinnedRight).toBe(
+      CLIENT_WIDTH - EDGE_INSET - TAB_WIDTH - LEAD_SLOT - 24,
+    );
+  });
+
+  it("keeps the un-led lane's fade placement byte-identical", () => {
+    // Ungrouped and Active paint no repository icons in the lane, so their
+    // offsets must be exactly what they were before the lead existed.
+    const offsets = workspacePinnedFadeOffsets({
+      clientWidth: CLIENT_WIDTH,
+      tabWidth: TAB_WIDTH,
+      edgeInset: EDGE_INSET,
+      leadSlot: LEAD_SLOT,
+      fadeWidth: 24,
+      pinSide: "left",
+      leadPinSide: null,
+    });
+    expect(offsets.afterPinnedLeft).toBe(EDGE_INSET + TAB_WIDTH);
+    expect(
+      workspacePinnedFadeOffsets({
+        clientWidth: CLIENT_WIDTH,
+        tabWidth: TAB_WIDTH,
+        edgeInset: EDGE_INSET,
+        leadSlot: LEAD_SLOT,
+        fadeWidth: 24,
+        pinSide: "right",
+        leadPinSide: null,
+      }).beforePinnedRight,
+    ).toBe(CLIENT_WIDTH - EDGE_INSET - TAB_WIDTH - 24);
+  });
+
+  it("never places a fade at a negative offset in a narrow lane", () => {
+    expect(
+      workspacePinnedFadeOffsets({
+        clientWidth: 100,
+        tabWidth: 180,
+        edgeInset: EDGE_INSET,
+        leadSlot: LEAD_SLOT,
+        fadeWidth: 24,
+        pinSide: "right",
+        leadPinSide: "right",
+      }).beforePinnedRight,
+    ).toBe(0);
+  });
+
+  it("keeps the symmetric shorthand behaving exactly as before", () => {
+    const symmetric = {
+      scrollLeft: 500,
+      scrollWidth: SCROLL_WIDTH,
+      clientWidth: CLIENT_WIDTH,
+      tabOffsetLeft: 100,
+      tabWidth: TAB_WIDTH,
+      edgeInset: EDGE_INSET,
+    };
+    expect(workspacePinSide(symmetric)).toBe("left");
+    expect(workspaceScrollLeftForTab(symmetric)).toBe(100 - EDGE_INSET);
+    expect(workspacePinSide({ ...symmetric, leadingInset: EDGE_INSET })).toBe(
+      workspacePinSide(symmetric),
     );
   });
 });

@@ -18,7 +18,6 @@ import React, {
 import {
   Archive,
   Check,
-  ChevronDown,
   ClipboardList,
   GitBranch,
   GitMerge,
@@ -28,6 +27,7 @@ import {
   Home,
   ImageIcon,
   LaptopMinimal,
+  ListFilter,
   MessageCircleQuestionMark,
   PenTool,
   Plus,
@@ -36,13 +36,12 @@ import {
 
 import { type Workspace } from "../platform/git";
 import { usePrIslandKind } from "./pr/pr-island-state-store";
-import { getSetting, setSetting } from "../platform/settings";
 import { useNativeRuntime } from "../platform/runtime";
 import { trackWorkspaceOpened } from "../platform/observability/analytics/agent-events";
 import { useAgentSessions } from "../features/agent/sessions-hooks";
 import {
   useAnyChatAwaitingKind,
-  useAnyChatStreaming,
+  useAnyChatAgentWorking,
 } from "../features/agent/sessions-store";
 import {
   isLocalMainWorkspace,
@@ -59,8 +58,11 @@ import {
   selectChatToRestoreForFolder,
   selectLastWorkspaceFolderForRepo,
   useActivePage,
+  useCreateWorkspaceProjectId,
   useActiveRepoId,
   useChats,
+  useWorkspaceActivityByFolder,
+  useWorkspaceListFilter,
   useWorkspaceDispatch,
   useWorkspaceStore,
 } from "../state/store";
@@ -74,6 +76,7 @@ import {
   peekWorkspacesFor,
   prefetchWorkspacesFor,
   useArchivedWorkspaces,
+  useLiveWorkspaces,
   useProjects,
   useSyncProjectsToEngine,
   useWorkspacesFor,
@@ -100,6 +103,7 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "../shared/ui/primitives/dropdown-menu";
 import {
@@ -119,7 +123,6 @@ import {
 } from "../features/settings/experimental-features";
 import { useActiveOrganization } from "../features/team/team-store";
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
-import { createWorkspaceForProject } from "./create-workspace";
 import { toast } from "../shared/ui/primitives/elements";
 import { Tooltip } from "../shared/ui/primitives/tooltip";
 import { RepositoryIcon } from "../features/repositories/repository-icon";
@@ -133,7 +136,7 @@ import {
 } from "./terminal/run-activity-store";
 import {
   usePendingCreatesAll,
-  usePendingCreatesFor,
+  type PendingWorkspaceCreate,
   pendingWorkspaceMode,
   usePendingWorkspaceMode,
   useWorkspaceArchiving,
@@ -147,13 +150,15 @@ import {
   filterArchivedWorkspaces,
   horizontalOverflow,
   navigationBoundarySeparatorVisible,
-  orderWorkspaceTabs,
   resolveRepoWorkspaceDestination,
   workspaceFadeVisibility,
   workspaceLabel,
+  workspacePinnedFadeOffsets,
+  workspacePinnedLeadTrailingInset,
   workspacePinSide,
   workspaceScrollLeftForTab,
   workspaceTabDescription,
+  type WorkspacePinSide,
 } from "./workspace-tabs";
 import { branchDisplayName } from "../shared/lib/branch-name";
 import { useCustomWindowDrag } from "./use-custom-window-drag";
@@ -161,10 +166,18 @@ import { useWorkspaceChangeLines } from "./use-workspace-change-lines";
 import { WorkspaceChangeCounts } from "./workspace-change-counts";
 import { ResourceMonitor } from "./resource-monitor";
 import { cn } from "../shared/ui/cn";
+import {
+  effectiveWorkspaceListFilter,
+  isMixedWorkspaceListFilter,
+  repositoryWorkspaceListFilter,
+  workspaceActivityTimestamp,
+  workspaceListFilterProjectId,
+  workspaceTabGroups,
+  type WorkspaceListFilter,
+  type WorkspaceTabActivity,
+} from "../state/workspace-list-filter";
 
 // --- CONSTANTS ---
-
-const SELECTED_PROJECT_KEY = "zeros.top-bar.selected-project";
 
 /** Warm the exact workspace a repository switch will restore. This works even
  * while the repository's workspace-list key is cold because the persisted
@@ -181,7 +194,7 @@ function prefetchProjectWorkspaceDestination(project: Project): void {
       ),
       cachedWorkspaces: peekWorkspacesFor(project.repoSlug),
       // Synchronous read: this warms the cache from a plain event handler, and
-      // it must agree with the destination handleSelectProject will pick.
+      // it must agree with the destination handleSelectFilter will pick.
       allowLocalMain: isExperimentalEnabled("workInLocalMain"),
     }),
   );
@@ -197,9 +210,6 @@ const ICON_BUTTON_CLS =
 // durable route selection, but it uses the same temporary rounded fill.
 const MENU_ICON_BUTTON_CLS =
   "h-7 w-7 shrink-0 rounded-md text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1";
-// The plus remains the existing compact 28px action rather than a destination.
-const INSET_ICON_BUTTON_CLS =
-  "shrink-0 text-fg2 hover:bg-sidebar-bg-hover hover:text-fg1";
 // Main is a named destination and follows the workspace pill metrics.
 const MAIN_TAB_CLS =
   "h-7 shrink-0 justify-start gap-2.5 rounded-md px-2.5 text-xs text-fg2 transition-none hover:bg-sidebar-bg-hover hover:text-fg1 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1 data-[active=true]:hover:bg-sidebar-bg-hover [&_svg]:size-3.5";
@@ -224,6 +234,98 @@ const PROJECT_CHIP_CLS =
 // conversation/chat-tabs.tsx) and is why that strip has never had the same snap.
 const WORKSPACE_TAB_CLS =
   "group/workspace relative flex h-7 min-w-[120px] max-w-[180px] shrink-0 select-none items-center overflow-hidden rounded-md px-2.5 text-left text-xs font-medium text-fg2 transition-none focus-within:bg-sidebar-bg-hover focus-within:text-fg2 data-[hovered=true]:bg-sidebar-bg-hover data-[hovered=true]:text-fg2 data-[active=true]:sticky data-[active=true]:left-1 data-[active=true]:right-1 data-[active=true]:z-20 data-[active=true]:bg-sidebar-bg-hover data-[active=true]:text-fg1 data-[active=true]:focus-within:text-fg1 data-[active=true]:data-[hovered=true]:text-fg1";
+// Once pinned, the selected pill floats over whichever tabs keep scrolling
+// underneath it. A two-pixel bar-coloured ring is the inward breathing room at
+// either edge and, because it paints behind the rounded box without affecting
+// layout, also prevents a Grouped surface or its border-y hairline from showing
+// through the pill's transparent corner pixels. Its outward half simply merges
+// into the existing four-pixel opaque viewport gutter. This stays shared across
+// Grouped, Ungrouped, Active and repository-only lanes.
+const WORKSPACE_PINNED_EDGE_CLS =
+  "group-data-[workspace-pin]/lane:data-[active=true]:ring-2 group-data-[workspace-pin]/lane:data-[active=true]:ring-sidebar-bg";
+// Grouped rows keep every repository segment on one continuous, 50%-opaque
+// bg2 surface. Only the outer perimeter receives the translucent border2
+// outline, so workspace boundaries never turn into internal divider seams.
+// The root stays square between items; a separate rounded state layer lets
+// hover and selection use the exact same fill without punching holes in that
+// surface at the tab's corners.
+const GROUPED_REPOSITORY_ITEM_CLS =
+  "isolate rounded-none border-y border-border2/50 bg-bg2/50 focus-within:bg-bg2/50 data-[hovered=true]:bg-bg2/50 data-[active=true]:bg-bg2/50";
+const GROUPED_WORKSPACE_STATE_CLS =
+  "pointer-events-none absolute inset-0 -z-10 rounded-md bg-sidebar-bg-hover opacity-0 group-focus-within/workspace:opacity-100 group-data-[hovered=true]/workspace:opacity-100 group-data-[active=true]/workspace:opacity-100";
+const GROUPED_PROJECT_MARKER_CLS =
+  "group/project relative isolate rounded-l-md rounded-r-none border-y border-l border-border2/50 bg-bg2/50 hover:bg-bg2/50 data-[active=true]:bg-bg2/50";
+const GROUPED_PROJECT_STATE_CLS =
+  "pointer-events-none absolute inset-0 -z-10 rounded-md bg-sidebar-bg-hover opacity-0 group-hover/project:opacity-100 group-focus-visible/project:opacity-100";
+// ── Grouped mode, pinned at an overflow edge ──────────────
+//
+// A pinned pill has LEFT its repository: the surface it capped, the icon that
+// named it, and the neighbours its square edges bridged to are all scrolled
+// away. So the group treatment comes off and the pair reverts to the same
+// borderless opaque selection every other lane pins — a plain repository icon
+// beside a rounded selected pill — instead of a square, half-transparent
+// fragment of a group floating at the edge.
+//
+// Written imperatively from the scroll-synchronous measure pass, because CSS
+// cannot yet ask whether a sticky element is stuck — but written onto THE LANE
+// (WORKSPACE_PIN_ATTR), never onto the pill itself. The pill is a React-owned
+// node that remounts, reorders and re-registers its ref on any of a dozen
+// unrelated updates; a marker written to whatever a ref map happened to hold
+// can end up on a node that is no longer the one on screen, and then the pinned
+// pill silently keeps its group treatment. The lane is one element that lives
+// as long as the strip, so the marker cannot miss it, and `data-active` on the
+// tab picks out which pill it applies to.
+//
+// Every selector is DELIBERATELY doubled — the lane's marker plus the tab's own
+// `data-[active=true]` is (0,3,0), which is what it takes to outrank the
+// single-variant grouped fills above. A single-variant override would tie with
+// `data-[active=true]:bg-bg2/50` and be settled by Tailwind's emission order.
+const GROUPED_PINNED_WORKSPACE_CLS =
+  "group-data-[workspace-pin]/lane:data-[active=true]:rounded-md group-data-[workspace-pin]/lane:data-[active=true]:border-0 group-data-[workspace-pin]/lane:data-[active=true]:bg-sidebar-bg-hover";
+// Retire the Grouped surface underneath the selected pill itself. This square,
+// bar-coloured layer sits at `-z-20`, below the rounded state layer at `-z-10`;
+// every other tab keeps the repository surface it genuinely sits on. The root's
+// overflow clips this mask at its own radius, so WORKSPACE_PINNED_EDGE_CLS owns
+// the separate job of clearing the transparent corner pixels and the two-pixel
+// inward gap outside that clip.
+const GROUPED_PINNED_WORKSPACE_MASK_CLS =
+  "pointer-events-none absolute inset-0 -z-20 hidden bg-sidebar-bg group-data-[workspace-pin]/lane:block";
+// The pill's own sticky inset in Grouped mode. It reserves the repository
+// lead's slot at the leading edge — the lead has nowhere to go if the pill
+// itself occupies the four-pixel inset — and keeps `right-1` from
+// WORKSPACE_TAB_CLS, because at the trailing edge the lead overlays the tabs
+// BEHIND the pill and needs no reservation. Mirrors
+// WORKSPACE_GROUPED_LEADING_INSET_PX.
+const GROUPED_WORKSPACE_STICKY_INSET_CLS = "data-[active=true]:left-9";
+// The selected workspace's repository icon travels with it: sticky at the same
+// two edges, one carrier ahead of the pill. `right` is JS-published because it
+// depends on the pill's content-sized width, and its fallback is `auto` — no
+// trailing stickiness at all — so a frame before the first measurement degrades
+// to "does not pin yet" instead of pinning at the wrong inset, on top of the
+// pill. `z-20` only WHILE pinned: an unpinned lead is ordinary lane content and
+// must keep fading under the overflow gradients (z-10) like the tabs around it.
+// `transition-none` is load-bearing, not tidying: the lead is a Button, and the
+// primitive's base `transition-colors` cross-fades background-color over 150ms.
+// Pinning swaps the half-transparent group surface for the opaque mask below,
+// so a fade means six frames of tabs scrolling THROUGH the pinned icon while
+// the radius beside it has already snapped. The workspace pills next to it are
+// `transition-none` for the same reason.
+// `border-0` retires the group cap's outline; the mask covers the padding box,
+// which is the whole 28px control only once those borders are gone.
+const GROUPED_STICKY_LEAD_CLS =
+  "sticky left-1 right-[var(--zeros-workspace-pinned-lead-right,auto)] transition-none group-data-[workspace-pin-lead]/lane:z-20 group-data-[workspace-pin-lead]/lane:rounded-md group-data-[workspace-pin-lead]/lane:border-0";
+// What a pinned lead paints behind itself: its own box plus the carrier between
+// it and the pinned pill, which would otherwise stay a four-pixel window onto
+// the tabs scrolling past. Painting it HERE rather than on the pill is what
+// makes it free — a child of the sticky lead inherits the browser-owned sticky
+// offset and needs no scroll-frame JS to stay put.
+//
+// Square, and at `-z-20` under the rounded hover layer, for one reason: the
+// mask hides a surface that is LIGHTER than it, so a rounded mask hands that
+// surface back at all four corners as bright wedges. The rounded state layer
+// above still shapes hover and focus like every other top-bar control.
+const GROUPED_PINNED_LEAD_MASK_CLS =
+  "pointer-events-none absolute inset-y-0 left-0 -right-1 -z-20 hidden bg-sidebar-bg group-data-[workspace-pin-lead]/lane:block";
 // `flex-auto`, never `flex-1`: flex-1 pins the basis at 0, which would erase
 // this button's contents from the tab's intrinsic width and collapse every tab
 // onto the 120px floor. `w-auto` undoes the Button base's `w-fit` for the same
@@ -232,10 +334,25 @@ const WORKSPACE_OPEN_BUTTON_CLS =
   "h-full w-auto min-w-0 flex-auto justify-start gap-2.5 border-0 bg-transparent p-0 text-left text-xs text-inherit shadow-none transition-none hover:bg-transparent hover:text-inherit [&_svg]:size-3.5";
 // Hover and selection share the same opaque pill fill, so one gradient serves
 // both archive-overlay states without a hard band behind the icon.
+// `rounded-r-md` matters only in Grouped mode and is not cosmetic there: this
+// overlay's right half is SOLID sidebar-bg-hover out to right-0, and a Grouped
+// tab's root is rounded-none, so `overflow-hidden` clips to a square box and the
+// overlay squared off the rounded right corners of the pill behind it
+// (GROUPED_WORKSPACE_STATE_CLS). Everywhere else the root is rounded-md and
+// already clips this to the same shape, so the utility is a no-op — which is why
+// it stays unconditional instead of branching on the filter.
 const WORKSPACE_ACTION_OVERLAY_CLS =
-  "pointer-events-none absolute inset-y-0 right-0 flex w-10 items-center justify-end bg-gradient-to-l from-sidebar-bg-hover from-50% to-transparent pr-1 opacity-0 transition-none group-data-[hovered=true]/workspace:opacity-100 focus-within:opacity-100";
+  "pointer-events-none absolute inset-y-0 right-0 z-20 flex w-10 items-center justify-end rounded-r-md bg-gradient-to-l from-sidebar-bg-hover from-50% to-transparent pr-1 opacity-0 transition-none group-data-[hovered=true]/workspace:opacity-100 focus-within:opacity-100";
 const WORKSPACE_ACTION_CLS =
   "pointer-events-auto inline-flex size-5 shrink-0 items-center justify-center rounded-sm text-fg2 transition-[background-color,color] duration-120 ease-out hover:bg-bg2-hover hover:text-fg1";
+// A mixed lane hands its leading glyph to the repository icon, so whatever the
+// leading slot used to say — agent state, or the design mode marker — moves
+// here. Absolutely positioned and therefore ZERO layout: the tab's intrinsic
+// width comes from the label, and the paired `-mr-5 pr-5` on the flow child is
+// what reserves room without changing the measured box. Shared by the real and
+// the optimistic tab so a pending → confirmed swap moves nothing.
+const WORKSPACE_TRAILING_STATE_CLS =
+  "from-sidebar-bg-hover via-sidebar-bg-hover pointer-events-none absolute inset-y-0 right-1 z-10 flex w-7 items-center justify-end bg-gradient-to-l to-transparent";
 // One four-pixel carrier owns every top-bar boundary. Its optional 1×14px
 // hairline is centered inside that width, so showing or hiding the separator
 // never changes spacing. The leading carrier in the workspace lane also keeps
@@ -244,7 +361,8 @@ const TOP_BAR_BOUNDARY_CLS =
   "pointer-events-none flex h-full w-1 shrink-0 items-center justify-center";
 const TOP_BAR_SEPARATOR_CLS = "bg-border1 h-[14px] w-px";
 const TOP_BAR_ITEM_CLS = "flex h-full shrink-0 items-center";
-const TOP_BAR_LEADING_ITEM_CLS = "flex h-full shrink-0 items-center pl-1";
+const TOP_BAR_LEADING_ACTIONS_CLS =
+  "flex h-full shrink-0 items-center gap-1 pl-1";
 const TOP_BAR_TRAILING_ITEM_CLS = "flex h-full shrink-0 items-center pr-1";
 const WORKSPACE_CONTENT_INSET_PX = 4;
 const WORKSPACE_STICKY_EDGE_INSET_PX = 4;
@@ -253,24 +371,73 @@ const WORKSPACE_STICKY_EDGE_INSET_PX = 4;
 // previous tab's right edge plus this width. A separate flex gap would count
 // twice and silently offset pin/fade placement.
 const WORKSPACE_TAB_GAP_PX = 4;
+// Grouped mode is the ONE case where two adjacent carriers mean different
+// things: inside a repository the carrier bridges one continuous surface, while
+// the carrier before the next repository icon is empty background separating two
+// surfaces. Four pixels reads as a seam there, so only that carrier widens to
+// eight. Deliberately NOT applied to the lane's leading carrier (it is the
+// sticky/content inset) nor to any in-group carrier, both of which the pin math
+// assumes equal to WORKSPACE_TAB_GAP_PX.
+const WORKSPACE_GROUP_GAP_CLS = "w-2";
+// MUST mirror the compact ProjectMarker's `size="icon"` (h-7 w-7).
+const WORKSPACE_PINNED_LEAD_WIDTH_PX = 28;
+// The horizontal space a pinned repository lead occupies in front of the pinned
+// pill: the icon plus the carrier the lead paints itself.
+const WORKSPACE_PINNED_LEAD_SLOT_PX =
+  WORKSPACE_PINNED_LEAD_WIDTH_PX + WORKSPACE_TAB_GAP_PX;
+// Where a Grouped pill pins at the LEADING edge — the lane inset plus the slot
+// its repository lead pins into. MUST mirror
+// GROUPED_WORKSPACE_STICKY_INSET_CLS's `left-9`. Grouped mode always opens a
+// repository with its icon, so the first tab's natural offset is exactly this
+// and the reservation costs the unscrolled lane nothing.
+const WORKSPACE_GROUPED_LEADING_INSET_PX =
+  WORKSPACE_STICKY_EDGE_INSET_PX + WORKSPACE_PINNED_LEAD_SLOT_PX;
+// Published on the scroller so the sticky lead's trailing inset tracks the
+// pinned pill's content-sized width without a React render per scroll frame.
+const WORKSPACE_PINNED_LEAD_RIGHT_VAR = "--zeros-workspace-pinned-lead-right";
+// The two pin markers, written on the LANE. `dataset` keys, so the attributes
+// are `data-workspace-pin` / `data-workspace-pin-lead` — keep them in step with
+// the `group-data-[…]/lane:` variants above.
+const WORKSPACE_PIN_ATTR = "workspacePin";
+const WORKSPACE_PIN_LEAD_ATTR = "workspacePinLead";
 const WORKSPACE_FADE_WIDTH_PX = 24;
+// Component-local FLIP motion: short enough to read as displacement rather
+// than a transition delay. Reduced-motion users always get the final layout.
+const WORKSPACE_REORDER_DURATION_MS = 160;
 
 function TopBarBoundary({
   showSeparator,
   edge = false,
+  groupedBackground = false,
+  groupGap = false,
+  suppressSeparator = false,
 }: {
   showSeparator: boolean;
   /** Let the leading line paint above the opaque sticky-edge gutter. */
   edge?: boolean;
+  /** Bridges adjacent Grouped items into one repository surface. */
+  groupedBackground?: boolean;
+  /** Widens the empty carrier that separates two Grouped repositories. */
+  groupGap?: boolean;
+  /** Group surfaces replace their internal separator hairlines. */
+  suppressSeparator?: boolean;
 }) {
   return (
     <span
-      className={cn(TOP_BAR_BOUNDARY_CLS, edge && "relative z-40")}
+      className={cn(
+        TOP_BAR_BOUNDARY_CLS,
+        edge && "relative z-40",
+        groupedBackground && "h-7 border-y border-border2/50 bg-bg2/50",
+        groupGap && WORKSPACE_GROUP_GAP_CLS,
+      )}
       data-top-bar-boundary="true"
       aria-hidden="true"
     >
       <span
-        className={cn(TOP_BAR_SEPARATOR_CLS, !showSeparator && "invisible")}
+        className={cn(
+          TOP_BAR_SEPARATOR_CLS,
+          (!showSeparator || suppressSeparator) && "invisible",
+        )}
       />
     </span>
   );
@@ -297,20 +464,51 @@ function placeWorkspaceFade(
 }
 
 /** A sticky element's `offsetLeft` becomes its clamped visual position in
- * Chromium. The preceding non-sticky tab still exposes the active tab's true
- * flow position, including while the active tab is pinned at either edge. */
-function workspaceTabNaturalOffsetLeft(tab: HTMLDivElement): number {
+ * Chromium, so the pinned pill and the pinned repository lead can never report
+ * their own flow position. Their preceding BOUNDARY CARRIER can: exactly one
+ * sits in front of every lane item, it is never sticky, and its right edge is
+ * the item's flow position by construction.
+ *
+ * Reading the carrier rather than the previous flow item also drops two
+ * assumptions the neighbour walk had to make — that the carrier between them is
+ * the base four pixels (Grouped widens the one before a repository icon to
+ * eight) and that the neighbour itself is in flow (the lead now is not). The
+ * neighbour walk stays as the fallback for a lane item rendered without one. */
+function workspaceTabNaturalOffsetLeft(tab: HTMLElement): number {
   let sibling = tab.previousElementSibling;
   while (sibling) {
-    if (
-      sibling instanceof HTMLDivElement &&
-      sibling.dataset.workspaceTab === "true"
-    ) {
-      return sibling.offsetLeft + sibling.offsetWidth + WORKSPACE_TAB_GAP_PX;
+    if (sibling instanceof HTMLElement) {
+      if (sibling.dataset.topBarBoundary === "true") {
+        return sibling.offsetLeft + sibling.offsetWidth;
+      }
+      if (
+        sibling.dataset.topBarFlowItem === "true" &&
+        sibling.dataset.topBarPinnedLead !== "true"
+      ) {
+        return sibling.offsetLeft + sibling.offsetWidth + WORKSPACE_TAB_GAP_PX;
+      }
     }
     sibling = sibling.previousElementSibling;
   }
   return WORKSPACE_CONTENT_INSET_PX;
+}
+
+/** Toggle one of the lane's pin markers, which CSS keys the pinned presentation
+ *  off. Mirrors the `data-hovered` contract: a direct DOM write, never a React
+ *  render, so the marker lands on the same frame as the browser-owned sticky
+ *  offset it describes. The lane outlives every tab in it, so unlike a per-tab
+ *  marker this needs no bookkeeping to follow the selection and no teardown. */
+function setLanePinMarker(
+  lane: HTMLElement | null,
+  attribute: string,
+  side: WorkspacePinSide,
+): void {
+  if (!lane) return;
+  if (side === null) {
+    if (lane.dataset[attribute] !== undefined) delete lane.dataset[attribute];
+    return;
+  }
+  if (lane.dataset[attribute] !== side) lane.dataset[attribute] = side;
 }
 
 /** Keep the repository's right-click menu below the compact title-bar control
@@ -397,6 +595,14 @@ interface WorkspaceTabProps {
   active: boolean;
   /** Live coding-chat ids in this worktree, used for agent activity state. */
   chatIds: readonly string[];
+  /** Owner icon painted when repositories share one mixed lane. */
+  project: Project | null;
+  /** Moves agent state to a zero-layout trailing overlay in mixed lanes. */
+  mixedRepositories: boolean;
+  /** Joins this tab to its repository's continuous Grouped surface. */
+  groupedRepository: boolean;
+  /** Rounds the trailing edge of the final tab in a Grouped repository. */
+  groupEnd: boolean;
   /** Opens the workspace; only code destinations restore or create chat. */
   onSelect: (workspace: Workspace) => void;
   /** Warms the exact chat/tree/file destination on pointer or keyboard intent. */
@@ -408,6 +614,26 @@ interface WorkspaceTabProps {
 }
 
 const EMPTY_WORKSPACE_CHAT_IDS: readonly string[] = Object.freeze([]);
+
+type TopBarNavItem =
+  | {
+      kind: "project";
+      key: string;
+      project: Project;
+      compact: boolean;
+    }
+  | {
+      kind: "workspace";
+      key: string;
+      project: Project;
+      workspace: Workspace;
+    }
+  | {
+      kind: "pending";
+      key: string;
+      project: Project;
+      pending: PendingWorkspaceCreate;
+    };
 
 // --- CHILD COMPONENTS ---
 
@@ -464,10 +690,64 @@ function prTabIcon(
   }
 }
 
+/** In mixed lanes, the repository identity lives inside each workspace tab. Its
+ * own right-click target must still expose repository actions without replacing
+ * the surrounding workspace context menu. */
+function WorkspaceProjectIcon({ project }: { project: Project }) {
+  const [iconDialogOpen, setIconDialogOpen] = useState(false);
+  const dispatch = useWorkspaceDispatch();
+  return (
+    <>
+      <ContextMenu>
+        <ContextMenuTrigger
+          asChild
+          onContextMenu={(event) => {
+            event.stopPropagation();
+            positionMenuBelowTrigger(event);
+          }}
+        >
+          <span className="inline-flex size-4 shrink-0 items-center justify-center">
+            <RepositoryIcon project={project} className="size-4 rounded-sm" />
+          </span>
+        </ContextMenuTrigger>
+        <ContextMenuContent className="w-48">
+          <ContextMenuItem
+            onSelect={() => window.setTimeout(() => setIconDialogOpen(true), 0)}
+          >
+            <ImageIcon />
+            <span>Change icon</span>
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={() =>
+              dispatch({
+                type: "OPEN_REPO_PAGE",
+                projectId: project.id,
+                view: DEFAULT_REPO_SETTINGS_VIEW,
+              })
+            }
+          >
+            <Settings />
+            <span>Repository Settings</span>
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
+      <RepositoryIconDialog
+        project={project}
+        open={iconDialogOpen}
+        onOpenChange={setIconDialogOpen}
+      />
+    </>
+  );
+}
+
 function WorkspaceTab({
   workspace,
   active,
   chatIds,
+  project,
+  mixedRepositories,
+  groupedRepository,
+  groupEnd,
   onSelect,
   onPrefetch,
   onArchive,
@@ -477,28 +757,67 @@ function WorkspaceTab({
   const modeSwitching = requestedMode !== null;
   const designWorkspace = (requestedMode ?? workspace.kind) === "design";
   const agentChatIds = designWorkspace ? EMPTY_WORKSPACE_CHAT_IDS : chatIds;
-  const streaming = useAnyChatStreaming(agentChatIds);
+  const working = useAnyChatAgentWorking(agentChatIds);
   const awaitingKind = useAnyChatAwaitingKind(agentChatIds);
   const islandKind = usePrIslandKind(workspace.id, workspace.prNumber);
   const runActionRunning = useAnyRunActionRunning(workspace.path);
   const changeLines = useWorkspaceChangeLines(workspace);
   const label = workspaceLabel(workspace);
   const archiving = useWorkspaceArchiving(workspace.id);
+  const trailingAgentState =
+    mixedRepositories &&
+    !archiving &&
+    !designWorkspace &&
+    (awaitingKind !== null || working);
+  // A mixed lane spends the leading glyph on repository identity, so the mode
+  // marker has to move rather than disappear: design is a different KIND of
+  // workspace, and its branch name (the same colour-word allocation code
+  // workspaces get) says nothing about that. Design rows never hold agent
+  // chats, so the two trailing states are mutually exclusive by construction.
+  // The condition mirrors the leading-glyph swap below EXACTLY — including
+  // `project` — so a row the lane could not attribute to a repository keeps its
+  // PenTool in the leading slot rather than painting one in both.
+  const trailingDesignMark =
+    mixedRepositories && !!project && !archiving && designWorkspace;
+  const trailingTabState = trailingAgentState || trailingDesignMark;
 
   const tab = (
     <div
       ref={tabRef}
-      className={WORKSPACE_TAB_CLS}
+      className={cn(
+        WORKSPACE_TAB_CLS,
+        groupedRepository && GROUPED_REPOSITORY_ITEM_CLS,
+        groupedRepository && groupEnd && "rounded-r-md border-r",
+        groupedRepository && GROUPED_WORKSPACE_STICKY_INSET_CLS,
+        groupedRepository && GROUPED_PINNED_WORKSPACE_CLS,
+        WORKSPACE_PINNED_EDGE_CLS,
+      )}
       data-active={active}
       data-workspace-tab="true"
-      data-streaming={(!designWorkspace && streaming) || undefined}
+      data-top-bar-flow-item="true"
+      data-streaming={(!designWorkspace && working) || undefined}
       aria-busy={archiving || modeSwitching || undefined}
     >
+      {groupedRepository && active && (
+        <span
+          className={GROUPED_PINNED_WORKSPACE_MASK_CLS}
+          aria-hidden="true"
+        />
+      )}
+      {groupedRepository && (
+        <span className={GROUPED_WORKSPACE_STATE_CLS} aria-hidden="true" />
+      )}
       <Button
         type="button"
         variant="ghost"
         size="default"
-        className={WORKSPACE_OPEN_BUTTON_CLS}
+        className={cn(
+          WORKSPACE_OPEN_BUTTON_CLS,
+          // Make room by borrowing from the elastic label, then cancel that
+          // padding's outer contribution. The tab's measured width therefore
+          // stays identical when the trailing state appears or disappears.
+          trailingTabState && "-mr-5 pr-5",
+        )}
         aria-current={active ? "page" : undefined}
         aria-label={workspaceTabDescription({
           label,
@@ -510,29 +829,33 @@ function WorkspaceTab({
         onFocus={() => onPrefetch(workspace)}
         onClick={() => onSelect(workspace)}
       >
-        <span
-          className="inline-flex size-4 shrink-0 items-center justify-center"
-          aria-hidden="true"
-        >
-          {archiving ? (
-            <ZerosSpinner size={16} label="Archiving workspace" />
-          ) : designWorkspace ? (
-            <PenTool className="size-3.5" strokeWidth={1.25} />
-          ) : awaitingKind === "plan" ? (
-            <ClipboardList className="size-3.5" strokeWidth={1.25} />
-          ) : awaitingKind === "input" ? (
-            <MessageCircleQuestionMark
-              className="size-3.5"
-              strokeWidth={1.25}
-            />
-          ) : streaming ? (
-            <ZerosSpinner size={16} variant="agent" label="Agent working" />
-          ) : (
-            (prTabIcon(workspace, islandKind) ?? (
-              <GitBranch className="size-3.5" strokeWidth={1.25} />
-            ))
-          )}
-        </span>
+        {mixedRepositories && project && !archiving ? (
+          <WorkspaceProjectIcon project={project} />
+        ) : (
+          <span
+            className="inline-flex size-4 shrink-0 items-center justify-center"
+            aria-hidden="true"
+          >
+            {archiving ? (
+              <ZerosSpinner size={16} label="Archiving workspace" />
+            ) : designWorkspace ? (
+              <PenTool className="size-3.5" strokeWidth={1.25} />
+            ) : awaitingKind === "plan" ? (
+              <ClipboardList className="size-3.5" strokeWidth={1.25} />
+            ) : awaitingKind === "input" ? (
+              <MessageCircleQuestionMark
+                className="size-3.5"
+                strokeWidth={1.25}
+              />
+            ) : working ? (
+              <ZerosSpinner size={16} variant="agent" label="Agent working" />
+            ) : (
+              (prTabIcon(workspace, islandKind) ?? (
+                <GitBranch className="size-3.5" strokeWidth={1.25} />
+              ))
+            )}
+          </span>
+        )}
         {/* The ONLY elastic child. Everything after it is shrink-0, so the tab's
             180px cap is spent truncating the branch name and never the numbers
             or the wave. `flex-auto` (basis auto) is what lets the name's real
@@ -550,6 +873,22 @@ function WorkspaceTab({
           <RunWave size={12} className="text-blue-primary" />
         )}
       </Button>
+      {trailingTabState && (
+        <span className={WORKSPACE_TRAILING_STATE_CLS} aria-hidden="true">
+          {trailingDesignMark ? (
+            <PenTool className="size-3.5" strokeWidth={1.25} />
+          ) : awaitingKind === "plan" ? (
+            <ClipboardList className="size-3.5" strokeWidth={1.25} />
+          ) : awaitingKind === "input" ? (
+            <MessageCircleQuestionMark
+              className="size-3.5"
+              strokeWidth={1.25}
+            />
+          ) : (
+            <ZerosSpinner size={16} variant="agent" label="Agent working" />
+          )}
+        </span>
+      )}
       {!archiving && !modeSwitching && (
         <div className={WORKSPACE_ACTION_OVERLAY_CLS}>
           <Tooltip label="Archive workspace" side="bottom">
@@ -602,52 +941,99 @@ function WorkspaceTab({
 function PendingWorkspaceTab({
   label,
   kind = "code",
+  project,
+  mixedRepositories = false,
+  groupedRepository = false,
+  groupEnd = false,
   active = false,
   tabRef,
 }: {
   label: string;
   kind?: "code" | "design";
+  project?: Project | null;
+  mixedRepositories?: boolean;
+  groupedRepository?: boolean;
+  groupEnd?: boolean;
   active?: boolean;
   /** Registers the optimistic tab with the same sticky/reveal machinery. */
   tabRef?: (node: HTMLDivElement | null) => void;
 }) {
+  // Same relocation the confirmed tab makes: a mixed lane's leading glyph is
+  // the repository icon, so the design marker moves to the zero-layout trailing
+  // slot. Both tabs render it identically, so the pending → confirmed swap
+  // neither drops nor re-adds the marker.
+  const trailingDesignMark =
+    mixedRepositories && !!project && kind === "design";
   return (
     <div
       ref={tabRef}
-      className={WORKSPACE_TAB_CLS}
+      className={cn(
+        WORKSPACE_TAB_CLS,
+        groupedRepository && GROUPED_REPOSITORY_ITEM_CLS,
+        groupedRepository && groupEnd && "rounded-r-md border-r",
+        groupedRepository && GROUPED_WORKSPACE_STICKY_INSET_CLS,
+        groupedRepository && GROUPED_PINNED_WORKSPACE_CLS,
+        WORKSPACE_PINNED_EDGE_CLS,
+      )}
       data-workspace-tab="true"
+      data-top-bar-flow-item="true"
       data-active={active}
       role="status"
       aria-live="polite"
     >
+      {groupedRepository && active && (
+        <span
+          className={GROUPED_PINNED_WORKSPACE_MASK_CLS}
+          aria-hidden="true"
+        />
+      )}
+      {groupedRepository && (
+        <span className={GROUPED_WORKSPACE_STATE_CLS} aria-hidden="true" />
+      )}
+      {mixedRepositories && project ? (
+        <WorkspaceProjectIcon project={project} />
+      ) : (
+        <span
+          className="inline-flex size-4 shrink-0 items-center justify-center"
+          aria-hidden="true"
+        >
+          {kind === "design" ? (
+            <PenTool className="size-3.5" strokeWidth={1.25} />
+          ) : (
+            <GitBranch className="size-3.5" strokeWidth={1.25} />
+          )}
+        </span>
+      )}
       <span
-        className="inline-flex size-4 shrink-0 items-center justify-center"
-        aria-hidden="true"
-      >
-        {kind === "design" ? (
-          <PenTool className="size-3.5" strokeWidth={1.25} />
-        ) : (
-          <GitBranch className="size-3.5" strokeWidth={1.25} />
+        className={cn(
+          "ml-2.5 min-w-0 flex-auto truncate text-left",
+          // Mirrors the confirmed tab's width-neutral reservation.
+          trailingDesignMark && "-mr-5 pr-5",
         )}
-      </span>
-      <span className="ml-2.5 min-w-0 flex-auto truncate text-left">
+      >
         {label}
       </span>
+      {trailingDesignMark && (
+        <span className={WORKSPACE_TRAILING_STATE_CLS} aria-hidden="true">
+          <PenTool className="size-3.5" strokeWidth={1.25} />
+        </span>
+      )}
     </div>
   );
 }
 
-interface ProjectPickerProps {
-  /** Repository currently supplying the workspace tabs. */
-  selectedProject: Project;
-  /** Every repository available to switch into. */
-  projects: Project[];
-  /** Repository root currently undergoing a native open/reconnect. */
+interface ProjectMarkerProps {
+  project: Project;
   openingRoot: string | null;
-  /** Updates repository context and, when appropriate, app content. */
-  onSelect: (project: Project) => void;
-  /** Opens the Dispatcher scoped to the selected repository. */
-  onCreate: () => void;
+  compact: boolean;
+  /** Starts the continuous repository surface in the Grouped lane. */
+  grouped?: boolean;
+  /** This repository owns the selected workspace, so its icon pins to whichever
+   *  overflow edge that workspace's pill reaches and stays beside it. The
+   *  measure pass finds it by `data-top-bar-pinned-lead`; no ref needed. */
+  pinnedLead?: boolean;
+  /** Grouped repository icons are useful shortcuts into that repository view. */
+  onSelect?: (project: Project) => void;
 }
 
 function ProjectIconChip({
@@ -668,118 +1054,86 @@ function ProjectIconChip({
   );
 }
 
-function ProjectPicker({
-  selectedProject,
-  projects,
+function ProjectMarker({
+  project,
   openingRoot,
+  compact,
+  grouped = false,
+  pinnedLead = false,
   onSelect,
-  onCreate,
-}: ProjectPickerProps) {
-  const selectedOpening = openingRoot === selectedProject.repoRoot;
+}: ProjectMarkerProps) {
+  const selectedOpening = openingRoot === project.repoRoot;
   const [iconDialogOpen, setIconDialogOpen] = useState(false);
-  // Context-menu navigation to the repo page's Settings tab.
   const dispatch = useWorkspaceDispatch();
 
   return (
     <>
-      <div className="flex min-w-0 items-center">
-        <ContextMenu>
-          <DropdownMenu>
-            <ContextMenuTrigger
-              asChild
-              onContextMenu={positionMenuBelowTrigger}
-            >
-              <DropdownMenuTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="default"
-                  className={PROJECT_TRIGGER_CLS}
-                  aria-label={`Switch repository: ${selectedProject.name}`}
-                >
-                  <ProjectIconChip
-                    project={selectedProject}
-                    opening={selectedOpening}
-                  />
-                  <span className="min-w-0 flex-1 truncate text-left">
-                    {selectedProject.name}
-                  </span>
-                  <ChevronDown className="ml-auto size-2.5" strokeWidth={1.5} />
-                </Button>
-              </DropdownMenuTrigger>
-            </ContextMenuTrigger>
-            <DropdownMenuContent
-              align="start"
-              sideOffset={5}
-              className="w-max max-w-72 min-w-[var(--radix-dropdown-menu-trigger-width)]"
-            >
-              <DropdownMenuItem onSelect={() => window.setTimeout(onCreate, 0)}>
-                <Plus />
-                <span>Create</span>
-              </DropdownMenuItem>
-              {projects.map((project) => {
-                const selected = project.id === selectedProject.id;
-                return (
-                  <DropdownMenuItem
-                    key={project.id}
-                    onPointerEnter={() => {
-                      prefetchProjectWorkspaceDestination(project);
-                      prefetchSettingsForRepo(project.repoRoot);
-                    }}
-                    onFocus={() => {
-                      prefetchProjectWorkspaceDestination(project);
-                      prefetchSettingsForRepo(project.repoRoot);
-                    }}
-                    onSelect={() => onSelect(project)}
-                    aria-current={selected ? "true" : undefined}
-                    className="min-w-0"
-                  >
-                    <ProjectIconChip
-                      project={project}
-                      opening={openingRoot === project.repoRoot}
-                    />
-                    <span className="max-w-52 min-w-0 flex-1 truncate">
-                      {project.name}
-                    </span>
-                    {selected && (
-                      <Check
-                        className="text-fg2 ml-auto size-3.5"
-                        strokeWidth={1.5}
-                      />
-                    )}
-                  </DropdownMenuItem>
-                );
-              })}
-            </DropdownMenuContent>
-          </DropdownMenu>
-
-          <ContextMenuContent className="w-48">
-            <ContextMenuItem
-              onSelect={() =>
-                window.setTimeout(() => setIconDialogOpen(true), 0)
-              }
-            >
-              <ImageIcon />
-              <span>Change icon</span>
-            </ContextMenuItem>
-            <ContextMenuItem
-              onSelect={() => {
-                dispatch({
-                  type: "OPEN_REPO_PAGE",
-                  projectId: selectedProject.id,
-                  view: DEFAULT_REPO_SETTINGS_VIEW,
-                });
-              }}
-            >
-              <Settings />
-              <span>Repository Settings</span>
-            </ContextMenuItem>
-          </ContextMenuContent>
-        </ContextMenu>
-      </div>
+      <ContextMenu>
+        <ContextMenuTrigger asChild onContextMenu={positionMenuBelowTrigger}>
+          <Button
+            type="button"
+            variant="ghost"
+            size={compact ? "icon" : "default"}
+            className={
+              compact
+                ? cn(
+                    ICON_BUTTON_CLS,
+                    grouped && GROUPED_PROJECT_MARKER_CLS,
+                    // AFTER the grouped surface: `sticky` and `relative` share
+                    // tailwind-merge's position group, so the lead only wins
+                    // that key by being declared last.
+                    pinnedLead && GROUPED_STICKY_LEAD_CLS,
+                  )
+                : PROJECT_TRIGGER_CLS
+            }
+            aria-label={
+              compact ? `Show ${project.name} workspaces` : project.name
+            }
+            data-top-bar-flow-item="true"
+            data-top-bar-pinned-lead={pinnedLead || undefined}
+            onClick={onSelect ? () => onSelect(project) : undefined}
+          >
+            {pinnedLead && (
+              <span
+                className={GROUPED_PINNED_LEAD_MASK_CLS}
+                aria-hidden="true"
+              />
+            )}
+            {grouped && (
+              <span className={GROUPED_PROJECT_STATE_CLS} aria-hidden="true" />
+            )}
+            <ProjectIconChip project={project} opening={selectedOpening} />
+            {!compact && (
+              <span className="min-w-0 flex-1 truncate text-left">
+                {project.name}
+              </span>
+            )}
+          </Button>
+        </ContextMenuTrigger>
+        <ContextMenuContent className="w-48">
+          <ContextMenuItem
+            onSelect={() => window.setTimeout(() => setIconDialogOpen(true), 0)}
+          >
+            <ImageIcon />
+            <span>Change icon</span>
+          </ContextMenuItem>
+          <ContextMenuItem
+            onSelect={() => {
+              dispatch({
+                type: "OPEN_REPO_PAGE",
+                projectId: project.id,
+                view: DEFAULT_REPO_SETTINGS_VIEW,
+              });
+            }}
+          >
+            <Settings />
+            <span>Repository Settings</span>
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
 
       <RepositoryIconDialog
-        project={selectedProject}
+        project={project}
         open={iconDialogOpen}
         onOpenChange={setIconDialogOpen}
       />
@@ -957,11 +1311,10 @@ function ArchivedWorkspacePicker({ project }: { project: Project }) {
 
 export function TopBar() {
   const chats = useChats();
+  const workspaceActivityByFolder = useWorkspaceActivityByFolder();
   const activePage = useActivePage();
   const activeRepoId = useActiveRepoId();
-  const nativeRuntime = useNativeRuntime();
-  const designWorkspaceCreationAvailable =
-    nativeRuntime.ready || nativeRuntime.expectedElectron;
+  const createWorkspaceProjectId = useCreateWorkspaceProjectId();
   const activeOrganization = useActiveOrganization();
   const activeFolder = useWorkspaceStore(selectActiveFolder);
   // True while the active folder is a freshly-announced worktree whose create
@@ -988,19 +1341,31 @@ export function TopBar() {
     [activeFolder, projects],
   );
 
-  // Stores the repository context while the Dashboard is active, where the
-  // current chat folder intentionally remains unchanged in the background.
-  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
-    () => getSetting<string | null>(SELECTED_PROJECT_KEY, null),
-  );
   // The whole row is a native window drag target except for its interactive
   // descendants, which useCustomWindowDrag excludes automatically.
   const topBarRef = useRef<HTMLElement | null>(null);
   useCustomWindowDrag(topBarRef);
 
-  const storedProject = useMemo(
-    () => projects.find((project) => project.id === selectedProjectId) ?? null,
-    [projects, selectedProjectId],
+  const requestedFilter = useWorkspaceListFilter();
+  const workspaceListFilter = useMemo(
+    () => effectiveWorkspaceListFilter(requestedFilter, projects),
+    [projects, requestedFilter],
+  );
+  useEffect(() => {
+    if (workspaceListFilter !== requestedFilter) {
+      dispatch({
+        type: "SET_WORKSPACE_LIST_FILTER",
+        filter: workspaceListFilter,
+      });
+    }
+  }, [dispatch, requestedFilter, workspaceListFilter]);
+  const filterProjectId = workspaceListFilterProjectId(workspaceListFilter);
+  const filterProject = useMemo(
+    () =>
+      filterProjectId
+        ? (projects.find((project) => project.id === filterProjectId) ?? null)
+        : null,
+    [filterProjectId, projects],
   );
   const routedRepoProject = useMemo(
     () =>
@@ -1009,30 +1374,33 @@ export function TopBar() {
         : null,
     [activePage, activeRepoId, projects],
   );
-  // Workspace content and visible tabs must agree. Dashboard has no active
-  // workspace content, so it is free to retain an independently picked repo.
-  const selectedProject =
-    activePage === "workspace" && activeProject
-      ? activeProject
-      : (routedRepoProject ??
-        storedProject ??
-        activeProject ??
-        projects[0] ??
-        null);
-
-  const persistSelectedProject = useCallback((projectId: string | null) => {
-    setSelectedProjectId(projectId);
-    setSetting(SELECTED_PROJECT_KEY, projectId);
-  }, []);
-
-  useEffect(() => {
-    const resolvedId = selectedProject?.id ?? null;
-    if (resolvedId !== selectedProjectId) persistSelectedProject(resolvedId);
-  }, [persistSelectedProject, selectedProject?.id, selectedProjectId]);
-
-  const { workspaces, loading, refreshing } = useWorkspacesFor(
-    selectedProject?.repoSlug ?? null,
+  const routedCreateProject = useMemo(
+    () =>
+      activePage === "create" && createWorkspaceProjectId
+        ? (projects.find(
+            (project) => project.id === createWorkspaceProjectId,
+          ) ?? null)
+        : null,
+    [activePage, createWorkspaceProjectId, projects],
   );
+  const contextProject =
+    filterProject ??
+    routedRepoProject ??
+    routedCreateProject ??
+    activeProject ??
+    projects[0] ??
+    null;
+
+  // The cross-repository strip projects one shared exact-key union. Keep a
+  // separate subscription to the active owner for route validation: only that
+  // settled key may reject a remembered destination.
+  const { workspaces: liveWorkspaces, loading: liveLoading } =
+    useLiveWorkspaces();
+  const {
+    workspaces: activeProjectWorkspaces,
+    loading: activeProjectLoading,
+    refreshing: activeProjectRefreshing,
+  } = useWorkspacesFor(activeProject?.repoSlug ?? null);
 
   // "Work in local main" (Settings → Experimental, off by default). This gates
   // the main TAB and where a repo switch lands — never the synthetic row
@@ -1042,23 +1410,38 @@ export function TopBar() {
   const [workInLocalMain] = useExperimentalFeature("workInLocalMain");
 
   const accessibleWorkspaces = useMemo(
-    () => filterRowsForOrganization(workspaces, activeOrganization),
-    [activeOrganization, workspaces],
+    () => filterRowsForOrganization(liveWorkspaces, activeOrganization),
+    [activeOrganization, liveWorkspaces],
+  );
+  const activeProjectAccessibleWorkspaces = useMemo(
+    () =>
+      filterRowsForOrganization(activeProjectWorkspaces, activeOrganization),
+    [activeOrganization, activeProjectWorkspaces],
   );
 
-  const visibleWorkspaces = useMemo(
+  const activeProjectDestinations = useMemo(
     () =>
-      selectedProject
-        ? withLocalMainWorkspace(selectedProject, accessibleWorkspaces)
+      activeProject
+        ? withLocalMainWorkspace(
+            activeProject,
+            activeProjectAccessibleWorkspaces,
+          )
         : [],
-    [accessibleWorkspaces, selectedProject],
+    [activeProject, activeProjectAccessibleWorkspaces],
   );
+  const mainWorkspace = activeProjectDestinations[0] ?? null;
+  const realWorkspaces = useMemo(
+    () => selectLiveVisible(accessibleWorkspaces),
+    [accessibleWorkspaces],
+  );
+  useWorkspaceRunActivitySync(realWorkspaces);
+
   // File indexes are the most visible cold-workspace waterfall. Warm a bounded
   // window only after the repository list settles and the browser is idle;
   // pointer/focus intent still handles the exact file/diff/chat destination.
   useEffect(() => {
-    if (loading || visibleWorkspaces.length === 0) return;
-    const targets = visibleWorkspaces.slice(0, 8);
+    if (liveLoading || realWorkspaces.length === 0) return;
+    const targets = realWorkspaces.slice(0, 8);
     const warm = () => {
       for (const workspace of targets) warmWorkspaceFiles(workspace.path);
     };
@@ -1068,8 +1451,7 @@ export function TopBar() {
     }
     const id = window.setTimeout(warm, 0);
     return () => window.clearTimeout(id);
-  }, [loading, visibleWorkspaces]);
-  const mainWorkspace = visibleWorkspaces[0] ?? null;
+  }, [liveLoading, realWorkspaces]);
   // In-flight creates across all repos — used both to render pending tabs and to
   // protect a slow-create's announced path from the bounce-to-main effect.
   const rawPendingCreates = usePendingCreatesAll();
@@ -1077,34 +1459,165 @@ export function TopBar() {
     () => filterRowsForOrganization(rawPendingCreates, activeOrganization),
     [activeOrganization, rawPendingCreates],
   );
-  const realWorkspaces = useMemo(
-    () =>
-      orderWorkspaceTabs(
-        // Shared selector (same one the Dashboard/repo hub/sidebar use) — drops
-        // only confirmed archived rows. An in-flight row stays here, inert with
-        // its spinner, until the engine confirms the destructive transition.
-        // visibleWorkspaces[0] is synthetic Local main; keep it out of the strip.
-        selectLiveVisible(visibleWorkspaces.slice(1)),
-      ),
-    [visibleWorkspaces],
-  );
-  useWorkspaceRunActivitySync(realWorkspaces);
-
-  // Optimistic creates share the live strip immediately. Keep the deduped
-  // collection stable so layout observation, pinning, and rendering all see
-  // the exact same tab identities during the pending → confirmed handoff.
-  const rawProjectPendingCreates = usePendingCreatesFor(
-    selectedProject?.repoSlug ?? null,
-  );
-  const pendingCreates = useMemo(
-    () =>
-      filterRowsForOrganization(rawProjectPendingCreates, activeOrganization),
-    [activeOrganization, rawProjectPendingCreates],
-  );
   const dedupedPendingCreates = useMemo(
-    () => dedupePendingCreates(pendingCreates, realWorkspaces),
-    [pendingCreates, realWorkspaces],
+    () => dedupePendingCreates(allPendingCreates, realWorkspaces),
+    [allPendingCreates, realWorkspaces],
   );
+
+  const chatIdsByWorkspace = useMemo(() => {
+    const liveChats = chats.filter((chat) => !chat.archived);
+    const ids = new Map<string, string[]>();
+    for (const workspace of realWorkspaces) ids.set(workspace.id, []);
+    for (const chat of liveChats) {
+      const workspace = findWorkspaceForFolder(chat.folder, realWorkspaces);
+      if (!workspace) continue;
+      ids.get(workspace.id)?.push(chat.id);
+    }
+    return ids;
+  }, [chats, realWorkspaces]);
+  const workspaceActivity = useMemo<WorkspaceTabActivity>(() => {
+    const activeAtByWorkspaceId = new Map<string, number>();
+    for (const [folder, activeAt] of Object.entries(
+      workspaceActivityByFolder,
+    )) {
+      const workspace = findWorkspaceForFolder(folder, realWorkspaces);
+      if (!workspace) continue;
+      activeAtByWorkspaceId.set(
+        workspace.id,
+        Math.max(activeAtByWorkspaceId.get(workspace.id) ?? 0, activeAt),
+      );
+    }
+    return { activeAtByWorkspaceId };
+  }, [realWorkspaces, workspaceActivityByFolder]);
+
+  const workspaceGroups = useMemo(
+    () =>
+      workspaceTabGroups(
+        workspaceListFilter,
+        projects,
+        realWorkspaces,
+        workspaceActivity,
+      ),
+    [projects, realWorkspaces, workspaceActivity, workspaceListFilter],
+  );
+  const navItems = useMemo<TopBarNavItem[]>(() => {
+    const pendingByProject = new Map<string, PendingWorkspaceCreate[]>();
+    for (const pending of dedupedPendingCreates) {
+      const project =
+        projects.find((candidate) => candidate.repoRoot === pending.repoRoot) ??
+        findProjectForFolder(pending.repoRoot, projects);
+      if (!project) continue;
+      const rows = pendingByProject.get(project.id);
+      if (rows) rows.push(pending);
+      else pendingByProject.set(project.id, [pending]);
+    }
+    for (const rows of pendingByProject.values()) {
+      rows.sort((a, b) => b.startedAt - a.startedAt);
+    }
+
+    if (isMixedWorkspaceListFilter(workspaceListFilter)) {
+      const pending = [...pendingByProject.entries()]
+        .flatMap(([projectId, rows]) =>
+          rows.map((row) => ({
+            row,
+            project: projects.find((candidate) => candidate.id === projectId),
+          })),
+        )
+        .filter(
+          (entry): entry is { row: PendingWorkspaceCreate; project: Project } =>
+            !!entry.project,
+        )
+        .sort((a, b) => b.row.startedAt - a.row.startedAt);
+      const pendingItems: TopBarNavItem[] = pending.map(({ row, project }) => ({
+        kind: "pending",
+        key: `pending:${row.token}`,
+        pending: row,
+        project,
+      }));
+      const workspaceItems: TopBarNavItem[] = [];
+      for (const workspace of workspaceGroups[0]?.workspaces ?? []) {
+        const project = findProjectForFolder(workspace.repoRoot, projects);
+        if (project) {
+          workspaceItems.push({
+            kind: "workspace",
+            key: `workspace:${workspace.id}`,
+            workspace,
+            project,
+          });
+        }
+      }
+      const items = [...pendingItems, ...workspaceItems];
+      if (workspaceListFilter !== "active") return items;
+      return items.sort((left, right) => {
+        const activeAt = (item: TopBarNavItem): number => {
+          if (item.kind === "workspace") {
+            return workspaceActivityTimestamp(
+              item.workspace,
+              workspaceActivity,
+            );
+          }
+          if (item.kind === "pending") {
+            return Math.max(
+              item.pending.startedAt,
+              item.pending.path
+                ? (workspaceActivityByFolder[item.pending.path] ?? 0)
+                : 0,
+            );
+          }
+          return Number.NEGATIVE_INFINITY;
+        };
+        // Stable sorting preserves the painted source order for equal clocks.
+        return activeAt(right) - activeAt(left);
+      });
+    }
+
+    const groupByProjectId = new Map(
+      workspaceGroups.flatMap((group) =>
+        group.project ? [[group.project.id, group] as const] : [],
+      ),
+    );
+    const visibleProjects = filterProject
+      ? [filterProject]
+      : projects.filter(
+          (project) =>
+            (groupByProjectId.get(project.id)?.workspaces.length ?? 0) > 0 ||
+            (pendingByProject.get(project.id)?.length ?? 0) > 0,
+        );
+    return visibleProjects.flatMap((project): TopBarNavItem[] => [
+      ...(workspaceListFilter === "grouped"
+        ? [
+            {
+              kind: "project" as const,
+              key: `project:${project.id}`,
+              project,
+              compact: true,
+            },
+          ]
+        : []),
+      ...(pendingByProject.get(project.id) ?? []).map((pending) => ({
+        kind: "pending" as const,
+        key: `pending:${pending.token}`,
+        project,
+        pending,
+      })),
+      ...(groupByProjectId.get(project.id)?.workspaces ?? []).map(
+        (workspace) => ({
+          kind: "workspace" as const,
+          key: `workspace:${workspace.id}`,
+          project,
+          workspace,
+        }),
+      ),
+    ]);
+  }, [
+    dedupedPendingCreates,
+    filterProject,
+    projects,
+    workspaceGroups,
+    workspaceActivity,
+    workspaceActivityByFolder,
+    workspaceListFilter,
+  ]);
 
   // A cold repository switch is allowed to publish its remembered folder
   // before the workspace list settles. Only a completed exact-key snapshot may
@@ -1114,19 +1627,18 @@ export function TopBar() {
     if (
       activePage !== "workspace" ||
       !activeFolder ||
-      !selectedProject ||
-      activeProject?.id !== selectedProject.id ||
-      activeFolder === selectedProject.repoRoot ||
-      loading ||
-      refreshing ||
-      peekWorkspacesFor(selectedProject.repoSlug) === undefined
+      !activeProject ||
+      activeFolder === activeProject.repoRoot ||
+      activeProjectLoading ||
+      activeProjectRefreshing ||
+      peekWorkspacesFor(activeProject.repoSlug) === undefined
     ) {
       return;
     }
     if (
       (mainWorkspace &&
         findWorkspaceForFolder(activeFolder, [mainWorkspace])) ||
-      findWorkspaceForFolder(activeFolder, accessibleWorkspaces)
+      findWorkspaceForFolder(activeFolder, activeProjectAccessibleWorkspaces)
     ) {
       if (
         useWorkspaceStore.getState().pendingWorkspaceValidationFolder ===
@@ -1148,9 +1660,9 @@ export function TopBar() {
     if (allPendingCreates.some((c) => c.path === activeFolder)) return;
     openWorkspace(
       resolveRepoWorkspaceDestination({
-        project: selectedProject,
+        project: activeProject,
         rememberedFolder: activeFolder,
-        cachedWorkspaces: accessibleWorkspaces,
+        cachedWorkspaces: activeProjectAccessibleWorkspaces,
         allowLocalMain: workInLocalMain,
       }),
     );
@@ -1158,60 +1670,32 @@ export function TopBar() {
     activeFolder,
     activeFolderProvisioning,
     activePage,
-    activeProject?.id,
-    accessibleWorkspaces,
+    activeProject,
+    activeProjectAccessibleWorkspaces,
     allPendingCreates,
     dispatch,
-    loading,
+    activeProjectLoading,
+    activeProjectRefreshing,
     mainWorkspace,
     openWorkspace,
-    refreshing,
-    selectedProject,
     workInLocalMain,
   ]);
 
-  const chatIdsByWorkspace = useMemo(() => {
-    const liveChats = chats.filter((chat) => !chat.archived);
-    const ids = new Map<string, string[]>();
-    for (const workspace of realWorkspaces) {
-      ids.set(
-        workspace.id,
-        liveChats
-          .filter((chat) => findWorkspaceForFolder(chat.folder, [workspace]))
-          .map((chat) => chat.id),
-      );
-    }
-    return ids;
-  }, [chats, realWorkspaces]);
-
   const activeWorkspaceId = useMemo(() => {
-    if (
-      activePage !== "workspace" ||
-      !activeFolder ||
-      !selectedProject ||
-      !mainWorkspace
-    ) {
-      return null;
-    }
-    const engineWorkspace = findWorkspaceForFolder(
-      activeFolder,
-      realWorkspaces,
+    if (activePage !== "workspace" || !activeFolder) return null;
+    const visible = navItems.flatMap((item) =>
+      item.kind === "workspace" ? [item.workspace] : [],
     );
+    const engineWorkspace = findWorkspaceForFolder(activeFolder, visible);
     if (engineWorkspace) return engineWorkspace.id;
     // Reuse the normalized folder resolver for `/private/var` ↔ `/var` and
     // chats rooted in a subdirectory of main. A raw prefix check would leave
     // the main icon inactive for those otherwise-valid paths.
-    const insideMainCheckout = !!findWorkspaceForFolder(activeFolder, [
-      mainWorkspace,
-    ]);
+    const insideMainCheckout = mainWorkspace
+      ? !!findWorkspaceForFolder(activeFolder, [mainWorkspace])
+      : false;
     return insideMainCheckout ? mainWorkspace.id : null;
-  }, [
-    activeFolder,
-    activePage,
-    mainWorkspace,
-    realWorkspaces,
-    selectedProject,
-  ]);
+  }, [activeFolder, activePage, mainWorkspace, navItems]);
   const activePendingCreate = useMemo(() => {
     if (activePage !== "workspace") return null;
     return (
@@ -1226,8 +1710,30 @@ export function TopBar() {
   const activeWorkspaceTabKey =
     activeWorkspaceId ?? activePendingCreate?.token ?? null;
 
+  const groupedLane = workspaceListFilter === "grouped";
+  /** The repository whose icon travels with the selected pill. Only Grouped
+   *  paints repository icons in the lane at all; the mixed lanes carry the
+   *  identity inside each tab, and a repository-only lane has nothing to
+   *  disambiguate. Null keeps every icon in ordinary flow. */
+  const pinnedLeadProjectId = useMemo(() => {
+    if (!groupedLane || !activeWorkspaceTabKey) return null;
+    const owner = navItems.find((item) =>
+      item.kind === "workspace"
+        ? item.workspace.id === activeWorkspaceTabKey
+        : item.kind === "pending"
+          ? item.pending.token === activeWorkspaceTabKey
+          : false,
+    );
+    return owner?.project.id ?? null;
+  }, [activeWorkspaceTabKey, groupedLane, navItems]);
+
   const workspaceNavRef = useRef<HTMLElement | null>(null);
   const workspaceTabRefs = useRef(new Map<string, HTMLDivElement>());
+  const workspaceReorderSnapshotRef = useRef<{
+    filter: WorkspaceListFilter;
+    positions: Map<string, number>;
+  } | null>(null);
+  const workspaceReorderAnimationsRef = useRef(new Map<string, Animation>());
   const workspaceOuterLeftFadeRef = useRef<HTMLDivElement | null>(null);
   const workspaceOuterRightFadeRef = useRef<HTMLDivElement | null>(null);
   const workspaceAfterPinnedLeftFadeRef = useRef<HTMLDivElement | null>(null);
@@ -1333,24 +1839,94 @@ export function TopBar() {
       clientWidth: nav.clientWidth,
     });
 
-    const activeId = activeWorkspaceTabKey;
-    const activeTab = activeId ? workspaceTabRefs.current.get(activeId) : null;
+    // Resolved from the DOM rather than from workspaceTabRefs. The pin
+    // decision, the markers and the fade offsets all have to describe the pill
+    // that is ON SCREEN, and a workspace-id-keyed ref map cannot promise that:
+    // it is torn down and repopulated through a fresh callback on every render
+    // and can hand back a node React has already replaced — which still
+    // measures a plausible 120px box, so the geometry stays believable while
+    // the marker lands on an element nobody can see. `data-active` is the same
+    // thing CSS sticky keys off, so this cannot disagree with what the browser
+    // pinned. The main checkout has no tab in this lane, so it selects nothing
+    // here and needs no separate guard.
+    const lane = nav.querySelector<HTMLElement>('[data-workspace-lane="true"]');
+    const activeTab = nav.querySelector<HTMLElement>(
+      '[data-workspace-tab="true"][data-active="true"]',
+    );
     const activeTabWidth = activeTab?.offsetWidth ?? 0;
     const activeTabNaturalLeft = activeTab
       ? workspaceTabNaturalOffsetLeft(activeTab)
       : 0;
-    const pinSide =
-      activeId && activeId !== mainWorkspace?.id && activeTab
+    const lead = nav.querySelector<HTMLElement>(
+      '[data-top-bar-pinned-lead="true"]',
+    );
+    // Grouped pins the pill one lead-slot in from the leading edge and flush at
+    // the trailing one. Read off the LANE MODE, not off the lead element:
+    // GROUPED_WORKSPACE_STICKY_INSET_CLS is on every Grouped tab, so that is
+    // the inset the browser is using whether or not a lead is rendered yet.
+    const leadingInset = groupedLane
+      ? WORKSPACE_GROUPED_LEADING_INSET_PX
+      : WORKSPACE_STICKY_EDGE_INSET_PX;
+    const pinSide = activeTab
+      ? workspacePinSide({
+          scrollLeft: nav.scrollLeft,
+          scrollWidth: nav.scrollWidth,
+          clientWidth: nav.clientWidth,
+          tabOffsetLeft: activeTabNaturalLeft,
+          tabWidth: activeTabWidth,
+          edgeInset: WORKSPACE_STICKY_EDGE_INSET_PX,
+          leadingInset,
+        })
+      : null;
+
+    // The lead resolves its OWN side against its OWN insets rather than
+    // inheriting the pill's, because the two genuinely differ. Two sticky
+    // siblings with scrollable content between them cannot be made to park
+    // simultaneously AND adjacently at both edges; closing the gap on one side
+    // opens it on the other. What the insets buy is the LEADING edge, where the
+    // pill's reserved slot means an unpinned lead would leave a hole: there the
+    // lead parks first and holds, as a group header, until its pill joins it.
+    // At the trailing edge the order reverses, so a selection deeper in its own
+    // repository keeps the pill parked while the icon rejoins its flow slot —
+    // acceptable only because the icon is on screen throughout (asserted in
+    // workspace-tabs.test.ts), never lost.
+    const leadTrailingInset = workspacePinnedLeadTrailingInset({
+      edgeInset: WORKSPACE_STICKY_EDGE_INSET_PX,
+      tabWidth: activeTabWidth,
+      gap: WORKSPACE_TAB_GAP_PX,
+    });
+    nav.style.setProperty(
+      WORKSPACE_PINNED_LEAD_RIGHT_VAR,
+      `${leadTrailingInset}px`,
+    );
+    const leadPinSide: WorkspacePinSide =
+      activeTab && lead
         ? workspacePinSide({
             scrollLeft: nav.scrollLeft,
             scrollWidth: nav.scrollWidth,
             clientWidth: nav.clientWidth,
-            tabOffsetLeft: activeTabNaturalLeft,
-            tabWidth: activeTabWidth,
+            tabOffsetLeft: workspaceTabNaturalOffsetLeft(lead),
+            tabWidth: lead.offsetWidth,
             edgeInset: WORKSPACE_STICKY_EDGE_INSET_PX,
+            trailingInset: leadTrailingInset,
           })
         : null;
-    const fades = workspaceFadeVisibility(overflow, pinSide);
+
+    setLanePinMarker(lane, WORKSPACE_PIN_ATTR, pinSide);
+    setLanePinMarker(lane, WORKSPACE_PIN_LEAD_ATTR, leadPinSide);
+
+    const fades = workspaceFadeVisibility(overflow, pinSide, leadPinSide);
+    // The pinned unit is whatever of [lead][pill] actually parked at THAT edge;
+    // the fades belong immediately outside it, never under it.
+    const fadeOffsets = workspacePinnedFadeOffsets({
+      clientWidth: nav.clientWidth,
+      tabWidth: activeTabWidth,
+      edgeInset: WORKSPACE_STICKY_EDGE_INSET_PX,
+      leadSlot: WORKSPACE_PINNED_LEAD_SLOT_PX,
+      fadeWidth: WORKSPACE_FADE_WIDTH_PX,
+      pinSide,
+      leadPinSide,
+    });
 
     // Scroll events can outpace React renders. Update only the lightweight
     // overlay styles here so the browser-owned sticky tab and its masks stay
@@ -1363,42 +1939,103 @@ export function TopBar() {
     placeWorkspaceFade(
       workspaceAfterPinnedLeftFadeRef.current,
       fades.afterPinnedLeft,
-      WORKSPACE_STICKY_EDGE_INSET_PX + activeTabWidth,
+      fadeOffsets.afterPinnedLeft,
     );
     placeWorkspaceFade(
       workspaceBeforePinnedRightFadeRef.current,
       fades.beforePinnedRight,
-      Math.max(
-        0,
-        nav.clientWidth -
-          WORKSPACE_STICKY_EDGE_INSET_PX -
-          activeTabWidth -
-          WORKSPACE_FADE_WIDTH_PX,
-      ),
+      fadeOffsets.beforePinnedRight,
     );
-  }, [activeWorkspaceTabKey, mainWorkspace?.id]);
+  }, [groupedLane]);
 
   const syncWorkspaceStrip = useCallback(() => {
     measureWorkspaceStrip();
     retargetWorkspaceHover();
   }, [measureWorkspaceStrip, retargetWorkspaceHover]);
 
-  // A repository switch starts its strip at the leading edge. This runs before
+  // A presentation switch starts its strip at the leading edge. This runs before
   // the measuring effect so no stale scroll position reaches the next paint.
   useLayoutEffect(() => {
     if (workspaceNavRef.current) workspaceNavRef.current.scrollLeft = 0;
-  }, [selectedProject?.id]);
+  }, [workspaceListFilter]);
 
   // Identity, not just count: archiving one workspace while another is created
   // in the same commit swaps a tab element without moving the length, and the
   // replacement would otherwise never get a resize subscription.
   const workspaceTabIdentity = useMemo(
-    () =>
-      [
-        ...realWorkspaces.map((workspace) => `workspace:${workspace.id}`),
-        ...dedupedPendingCreates.map((pending) => `pending:${pending.token}`),
-      ].join(","),
-    [dedupedPendingCreates, realWorkspaces],
+    () => navItems.map((item) => item.key).join(","),
+    [navItems],
+  );
+
+  // FLIP only the Active lane: layout publishes the correct order immediately,
+  // then compositor transforms briefly carry surviving tabs from their prior
+  // slots. No opacity, delayed data, or reserved animation space.
+  useLayoutEffect(() => {
+    const positions = new Map<string, number>();
+    for (const item of navItems) {
+      if (item.kind === "project") continue;
+      const key =
+        item.kind === "workspace" ? item.workspace.id : item.pending.token;
+      const node = workspaceTabRefs.current.get(key);
+      if (node) positions.set(key, workspaceTabNaturalOffsetLeft(node));
+    }
+
+    const previous = workspaceReorderSnapshotRef.current;
+    const animations = workspaceReorderAnimationsRef.current;
+    const reducedMotion =
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (workspaceListFilter !== "active" || reducedMotion) {
+      for (const animation of animations.values()) animation.cancel();
+      animations.clear();
+    } else if (previous?.filter === "active") {
+      for (const [key, nextLeft] of positions) {
+        const priorLeft = previous.positions.get(key);
+        const node = workspaceTabRefs.current.get(key);
+        if (priorLeft === undefined || !node) continue;
+        const delta = priorLeft - nextLeft;
+        if (Math.abs(delta) < 0.5 || typeof node.animate !== "function") {
+          continue;
+        }
+        animations.get(key)?.cancel();
+        const animation = node.animate(
+          [
+            { transform: `translate3d(${delta}px, 0, 0)` },
+            { transform: "translate3d(0, 0, 0)" },
+          ],
+          {
+            duration: WORKSPACE_REORDER_DURATION_MS,
+            easing: "ease-out",
+            fill: "both",
+          },
+        );
+        animations.set(key, animation);
+        animation.onfinish = () => {
+          if (animations.get(key) !== animation) return;
+          animation.cancel();
+          animations.delete(key);
+        };
+      }
+    }
+    for (const [key, animation] of animations) {
+      if (positions.has(key)) continue;
+      animation.cancel();
+      animations.delete(key);
+    }
+    workspaceReorderSnapshotRef.current = {
+      filter: workspaceListFilter,
+      positions,
+    };
+  }, [navItems, workspaceListFilter]);
+
+  useEffect(
+    () => () => {
+      for (const animation of workspaceReorderAnimationsRef.current.values()) {
+        animation.cancel();
+      }
+      workspaceReorderAnimationsRef.current.clear();
+    },
+    [],
   );
 
   // Recalculate masks when the window or tab content changes. Observing both
@@ -1436,7 +2073,18 @@ export function TopBar() {
       observer?.disconnect();
       window.removeEventListener("resize", syncWorkspaceStrip);
     };
-  }, [loading, workspaceTabIdentity, syncWorkspaceStrip]);
+    // The measure pass reads the selected tab and the repository lead out of the
+    // DOM, so it has no dependency on either — but it still has to RUN when
+    // they change, or the lane keeps a marker describing the previous
+    // selection. Tab identity misses both: reselecting inside one repository
+    // changes neither the tab list nor its order.
+  }, [
+    activeWorkspaceTabKey,
+    liveLoading,
+    pinnedLeadProjectId,
+    workspaceTabIdentity,
+    syncWorkspaceStrip,
+  ]);
 
   // Dashboard cards and newly-created chats can activate a workspace without
   // focusing its top-bar button. Reveal its natural slot before paint; native
@@ -1454,6 +2102,12 @@ export function TopBar() {
       tabOffsetLeft: workspaceTabNaturalOffsetLeft(activeTab),
       tabWidth: activeTab.offsetWidth,
       edgeInset: WORKSPACE_CONTENT_INSET_PX,
+      // Reveal ONTO the sticky inset the pill will occupy. Landing it on the
+      // bare content inset instead would leave sticky pushing the freshly
+      // revealed pill a lead-slot to the right, over its own neighbour.
+      leadingInset: groupedLane
+        ? WORKSPACE_GROUPED_LEADING_INSET_PX
+        : WORKSPACE_CONTENT_INSET_PX,
     });
     if (Math.abs(nav.scrollLeft - targetScrollLeft) > 0.5) {
       nav.scrollLeft = targetScrollLeft;
@@ -1461,24 +2115,31 @@ export function TopBar() {
     syncWorkspaceStrip();
   }, [
     activeWorkspaceTabKey,
+    groupedLane,
     mainWorkspace?.id,
+    // A filter switch restarts the strip at the leading edge (above). Identity
+    // alone can miss that: Ungrouped and Active can publish the SAME keys in
+    // the same order, which left the selected tab off-screen after the reset.
+    workspaceListFilter,
     workspaceTabIdentity,
     syncWorkspaceStrip,
   ]);
 
-  /** Repository switching restores the destination owned by that surface: a
-   * workspace route reopens the repo's remembered worktree, a repo route opens
-   * that repo's remembered hub tab, and Dashboard/Settings only change context. */
-  const handleSelectProject = useCallback(
-    (project: Project) => {
-      persistSelectedProject(project.id);
-      if (activePage === "repo") {
-        if (activeRepoId !== project.id) {
-          dispatch({ type: "OPEN_REPO_PAGE", projectId: project.id });
-        }
-        return;
-      }
-      if (activePage !== "workspace" || activeProject?.id === project.id) {
+  /** A repository-only selection and its restored workspace publish together.
+   * Grouped/Ungrouped/Active are metadata-only and normal workspace opens
+   * preserve them; the reducer handles cross-repository opens from lists. */
+  const handleSelectFilter = useCallback(
+    (nextFilter: WorkspaceListFilter) => {
+      const projectId = workspaceListFilterProjectId(nextFilter);
+      const project = projectId
+        ? (projects.find((candidate) => candidate.id === projectId) ?? null)
+        : null;
+      if (
+        !project ||
+        activePage !== "workspace" ||
+        activeProject?.id === project.id
+      ) {
+        dispatch({ type: "SET_WORKSPACE_LIST_FILTER", filter: nextFilter });
         return;
       }
       const state = useWorkspaceStore.getState();
@@ -1492,15 +2153,15 @@ export function TopBar() {
           cachedWorkspaces: peekWorkspacesFor(project.repoSlug),
           allowLocalMain: workInLocalMain,
         }),
+        { workspaceListFilter: nextFilter },
       );
     },
     [
       activePage,
       activeProject?.id,
-      activeRepoId,
       dispatch,
       openWorkspace,
-      persistSelectedProject,
+      projects,
       workInLocalMain,
     ],
   );
@@ -1518,6 +2179,8 @@ export function TopBar() {
 
   const handlePrefetchWorkspace = useCallback(
     (workspace: Workspace) => {
+      // Design rows are ordinary destinations, so warm the surface for them
+      // too — but never their coding chat.
       prefetchWorkspaceSurface(workspace);
       if ((pendingWorkspaceMode(workspace.id) ?? workspace.kind) === "design") {
         return;
@@ -1534,23 +2197,6 @@ export function TopBar() {
     [sessions],
   );
 
-  /** Create directly in the selected repository, then move into the new
-   * workspace. The global plus remains the richer Dispatcher entry point.
-   * The optimistic flow itself lives in ./create-workspace, shared with the
-   * repo-add paths that now open a workspace instead of the trunk. */
-  const handleCreateWorkspace = useCallback(
-    async (kind: "code" | "design") => {
-      if (!selectedProject) return;
-      if (kind === "design" && !designWorkspaceCreationAvailable) return;
-      await createWorkspaceForProject({
-        project: selectedProject,
-        dispatch,
-        kind,
-      });
-    },
-    [designWorkspaceCreationAvailable, dispatch, selectedProject],
-  );
-
   const pendingOnly =
     pendingProject &&
     !projects.some((project) => project.repoRoot === pendingProject.root)
@@ -1561,11 +2207,23 @@ export function TopBar() {
     activePage === "customize" ||
     activePage === "settings" ||
     activePage === "repo";
-  const mainTabVisible = workInLocalMain && !!mainWorkspace;
-  const mainActive = mainTabVisible && activeWorkspaceId === mainWorkspace.id;
-  const stripHasTabs =
-    realWorkspaces.length > 0 || dedupedPendingCreates.length > 0;
-  const hasProjectContext = !!selectedProject || !!pendingOnly;
+  const displayMainWorkspace = useMemo(
+    () =>
+      filterProject
+        ? (withLocalMainWorkspace(
+            filterProject,
+            realWorkspaces.filter(
+              (workspace) => workspace.repoRoot === filterProject.repoRoot,
+            ),
+          )[0] ?? null)
+        : null,
+    [filterProject, realWorkspaces],
+  );
+  const mainTabVisible = workInLocalMain && !!displayMainWorkspace;
+  const mainActive =
+    mainTabVisible && activeWorkspaceId === displayMainWorkspace.id;
+  const stripHasTabs = navItems.length > 0;
+  const [filterMenuOpen, setFilterMenuOpen] = useState(false);
 
   // The 40px title rail — h-10 is its TOTAL painted height, hairline included.
   // `pt-px` is what centers the row: the 1px border-b would otherwise make the
@@ -1591,7 +2249,7 @@ export function TopBar() {
       {/* Native macOS traffic-light reserve. Its empty width provides the
           boundary without adding a divider to the borderless navigation row. */}
       <div className="h-full w-[85px] shrink-0" aria-hidden="true" />
-      <div className={TOP_BAR_LEADING_ITEM_CLS}>
+      <div className={TOP_BAR_LEADING_ACTIONS_CLS}>
         {/* Home tab — entry to the Home surface (Dashboard / repo pages /
             Settings, switched via the HomeSidebar). Stays lit across every
             sub-page; returning from a workspace restores the last one. */}
@@ -1609,25 +2267,108 @@ export function TopBar() {
             <Home className="size-4" strokeWidth={1.5} />
           </Button>
         </Tooltip>
+        <Tooltip label="Create workspace" side="bottom">
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon"
+            className={ICON_BUTTON_CLS}
+            data-active={activePage === "create"}
+            aria-current={activePage === "create" ? "page" : undefined}
+            aria-label="Create workspace"
+            onClick={() => openDispatcher(contextProject?.id)}
+          >
+            <Plus className="size-4" strokeWidth={1.5} />
+          </Button>
+        </Tooltip>
+        <DropdownMenu open={filterMenuOpen} onOpenChange={setFilterMenuOpen}>
+          <Tooltip label="Filter workspaces" side="bottom">
+            <DropdownMenuTrigger asChild>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className={MENU_ICON_BUTTON_CLS}
+                data-active={filterMenuOpen}
+                aria-label="Filter workspaces"
+              >
+                <ListFilter className="size-4" strokeWidth={1.5} />
+              </Button>
+            </DropdownMenuTrigger>
+          </Tooltip>
+          <DropdownMenuContent align="start" sideOffset={5} className="w-56">
+            {(["grouped", "ungrouped", "active"] as const).map((filter) => (
+              <DropdownMenuItem
+                key={filter}
+                onSelect={() => handleSelectFilter(filter)}
+                aria-current={
+                  workspaceListFilter === filter ? "true" : undefined
+                }
+              >
+                <span>
+                  {filter === "grouped"
+                    ? "Grouped"
+                    : filter === "ungrouped"
+                      ? "Ungrouped"
+                      : "Active"}
+                </span>
+                {workspaceListFilter === filter && (
+                  <Check className="text-fg2 ml-auto size-3.5" />
+                )}
+              </DropdownMenuItem>
+            ))}
+            {projects.length > 0 && <DropdownMenuSeparator />}
+            {projects.map((project) => {
+              const filter = repositoryWorkspaceListFilter(project.id);
+              const selected = workspaceListFilter === filter;
+              return (
+                <DropdownMenuItem
+                  key={project.id}
+                  className="min-w-0"
+                  onPointerEnter={() => {
+                    prefetchProjectWorkspaceDestination(project);
+                    prefetchSettingsForRepo(project.repoRoot);
+                  }}
+                  onFocus={() => {
+                    prefetchProjectWorkspaceDestination(project);
+                    prefetchSettingsForRepo(project.repoRoot);
+                  }}
+                  onSelect={() => handleSelectFilter(filter)}
+                  aria-current={selected ? "true" : undefined}
+                >
+                  <ProjectIconChip
+                    project={project}
+                    opening={openingRoot === project.repoRoot}
+                  />
+                  <span className="min-w-0 flex-1 truncate">
+                    {project.name}
+                  </span>
+                  {selected && <Check className="text-fg2 ml-auto size-3.5" />}
+                </DropdownMenuItem>
+              );
+            })}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
 
-      {hasProjectContext && (
-        <TopBarBoundary
-          showSeparator={navigationBoundarySeparatorVisible(homeActive, false)}
-        />
-      )}
+      <TopBarBoundary
+        showSeparator={navigationBoundarySeparatorVisible(
+          homeActive || activePage === "create",
+          false,
+        )}
+      />
 
-      {selectedProject ? (
+      {filterProject && (
         <div className={TOP_BAR_ITEM_CLS}>
-          <ProjectPicker
-            selectedProject={selectedProject}
-            projects={projects}
+          <ProjectMarker
+            project={filterProject}
             openingRoot={openingRoot}
-            onSelect={handleSelectProject}
-            onCreate={() => openDispatcher(selectedProject.id)}
+            compact={false}
           />
         </div>
-      ) : pendingOnly ? (
+      )}
+
+      {!filterProject && pendingOnly ? (
         <div
           className="text-fg2 flex h-7 min-w-0 shrink-0 items-center gap-2 rounded-md px-2.5 text-xs"
           role="status"
@@ -1638,14 +2379,12 @@ export function TopBar() {
         </div>
       ) : null}
 
-      {/* Main remains fixed before the workspace tabs. The tab
-          strip sizes to its contents while there is room, keeping the plus
-          directly after the final tab. Once the row fills, only the workspace
-          nav shrinks and scrolls; the plus remains fixed. */}
+      {/* Experimental Local main remains fixed in a repository-only view.
+          Once the row fills, only the workspace lane shrinks and scrolls. */}
       <div className="flex h-full min-w-0 flex-1 items-stretch">
-        {workInLocalMain && mainWorkspace && (
+        {mainTabVisible && displayMainWorkspace && (
           <>
-            {hasProjectContext && (
+            {filterProject && (
               <TopBarBoundary
                 showSeparator={navigationBoundarySeparatorVisible(
                   false,
@@ -1662,9 +2401,11 @@ export function TopBar() {
                 aria-current={mainActive ? "page" : undefined}
                 aria-label="Open main checkout"
                 data-active={mainActive}
-                onPointerEnter={() => handlePrefetchWorkspace(mainWorkspace)}
-                onFocus={() => handlePrefetchWorkspace(mainWorkspace)}
-                onClick={() => handleSelectWorkspace(mainWorkspace)}
+                onPointerEnter={() =>
+                  handlePrefetchWorkspace(displayMainWorkspace)
+                }
+                onFocus={() => handlePrefetchWorkspace(displayMainWorkspace)}
+                onClick={() => handleSelectWorkspace(displayMainWorkspace)}
               >
                 <span
                   className="inline-flex size-4 shrink-0 items-center justify-center"
@@ -1684,11 +2425,15 @@ export function TopBar() {
               ref={workspaceNavRef}
               className="h-full min-w-0 overflow-x-auto overflow-y-hidden [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
               aria-label={
-                selectedProject
-                  ? `${selectedProject.name} workspaces`
-                  : "Workspaces"
+                filterProject
+                  ? `${filterProject.name} workspaces`
+                  : workspaceListFilter === "grouped"
+                    ? "Workspaces grouped by repository"
+                    : workspaceListFilter === "active"
+                      ? "Workspaces ordered by recent activity"
+                      : "Workspaces"
               }
-              aria-busy={loading || undefined}
+              aria-busy={liveLoading || undefined}
               onScroll={syncWorkspaceStrip}
               onPointerEnter={handleWorkspacePointer}
               onPointerMove={handleWorkspacePointer}
@@ -1699,77 +2444,112 @@ export function TopBar() {
               {/* Boundary carriers own the four-pixel spacing. gap-0 prevents
                   flex spacing from double-counting them; px-0 keeps the first
                   carrier itself as the exact sticky/content inset. */}
-              <div className="relative flex h-full w-max items-center gap-0 px-0">
-                {realWorkspaces.map((workspace, index) => {
-                  const active = activeWorkspaceTabKey === workspace.id;
-                  const leftActive =
-                    index === 0
-                      ? mainActive
-                      : activeWorkspaceTabKey === realWorkspaces[index - 1]?.id;
+              {/* `group/lane` is the pin markers' carrier: the measure pass
+                  writes data-workspace-pin / -lead here and the pinned pill and
+                  its repository lead style off it. */}
+              <div
+                className="group/lane relative flex h-full w-max items-center gap-0 px-0"
+                data-workspace-lane="true"
+              >
+                {navItems.map((item, index) => {
+                  const groupedRepository = workspaceListFilter === "grouped";
+                  const active =
+                    item.kind === "workspace"
+                      ? activeWorkspaceTabKey === item.workspace.id
+                      : item.kind === "pending"
+                        ? activeWorkspaceTabKey === item.pending.token
+                        : false;
+                  const previous = navItems[index - 1];
+                  const next = navItems[index + 1];
+                  const leftActive = previous
+                    ? previous.kind === "workspace"
+                      ? activeWorkspaceTabKey === previous.workspace.id
+                      : previous.kind === "pending"
+                        ? activeWorkspaceTabKey === previous.pending.token
+                        : false
+                    : mainActive;
+                  const groupEnd =
+                    groupedRepository &&
+                    item.kind !== "project" &&
+                    (!next || next.kind === "project");
+                  // Every repository begins with its icon, so a project item is
+                  // a group start by construction. `index > 0` keeps the lane's
+                  // leading carrier at the sticky/content inset instead of
+                  // indenting the whole strip by the wider group gap.
+                  const groupGap =
+                    groupedRepository && item.kind === "project" && index > 0;
                   return (
-                    <React.Fragment key={workspace.id}>
+                    <React.Fragment key={item.key}>
                       <TopBarBoundary
                         edge={index === 0}
+                        groupedBackground={
+                          groupedRepository && item.kind !== "project"
+                        }
+                        groupGap={groupGap}
+                        suppressSeparator={groupedRepository}
                         showSeparator={navigationBoundarySeparatorVisible(
                           leftActive,
                           active,
                         )}
                       />
-                      <WorkspaceTab
-                        workspace={workspace}
-                        active={active}
-                        chatIds={chatIdsByWorkspace.get(workspace.id) ?? []}
-                        onSelect={handleSelectWorkspace}
-                        onPrefetch={handlePrefetchWorkspace}
-                        onArchive={(target) => void archiveWorkspace(target)}
-                        tabRef={(node) =>
-                          registerWorkspaceTab(workspace.id, node)
-                        }
-                      />
+                      {item.kind === "project" ? (
+                        <ProjectMarker
+                          project={item.project}
+                          openingRoot={openingRoot}
+                          compact={item.compact}
+                          grouped={groupedRepository}
+                          pinnedLead={item.project.id === pinnedLeadProjectId}
+                          onSelect={(project) =>
+                            handleSelectFilter(
+                              repositoryWorkspaceListFilter(project.id),
+                            )
+                          }
+                        />
+                      ) : item.kind === "workspace" ? (
+                        <WorkspaceTab
+                          workspace={item.workspace}
+                          project={item.project}
+                          mixedRepositories={isMixedWorkspaceListFilter(
+                            workspaceListFilter,
+                          )}
+                          groupedRepository={groupedRepository}
+                          groupEnd={groupEnd}
+                          active={active}
+                          chatIds={
+                            chatIdsByWorkspace.get(item.workspace.id) ?? []
+                          }
+                          onSelect={handleSelectWorkspace}
+                          onPrefetch={handlePrefetchWorkspace}
+                          onArchive={(target) => void archiveWorkspace(target)}
+                          tabRef={(node) =>
+                            registerWorkspaceTab(item.workspace.id, node)
+                          }
+                        />
+                      ) : (
+                        <PendingWorkspaceTab
+                          kind={item.pending.kind}
+                          project={item.project}
+                          mixedRepositories={isMixedWorkspaceListFilter(
+                            workspaceListFilter,
+                          )}
+                          groupedRepository={groupedRepository}
+                          groupEnd={groupEnd}
+                          label={
+                            item.pending.branch
+                              ? branchDisplayName(item.pending.branch)
+                              : "New workspace"
+                          }
+                          active={active}
+                          tabRef={(node) =>
+                            registerWorkspaceTab(item.pending.token, node)
+                          }
+                        />
+                      )}
                     </React.Fragment>
                   );
                 })}
-                {/* Optimistic creates: one placeholder tab per in-flight
-                    workspace.create so the click has a visible result THIS
-                    frame; replaced by the real tab when the RPC lands (the
-                    branch filter hides the placeholder the moment the real row
-                    reaches the list, so the tab never doubles). Active when the
-                    user was navigated to its announced path. */}
-                {dedupedPendingCreates.map((pending, index) => {
-                  const active = activeWorkspaceTabKey === pending.token;
-                  const previousPending = dedupedPendingCreates[index - 1];
-                  const previousReal = realWorkspaces.at(-1);
-                  const leftActive = previousPending
-                    ? activeWorkspaceTabKey === previousPending.token
-                    : previousReal
-                      ? activeWorkspaceTabKey === previousReal.id
-                      : mainActive;
-                  return (
-                    <React.Fragment key={pending.token}>
-                      <TopBarBoundary
-                        edge={realWorkspaces.length === 0 && index === 0}
-                        showSeparator={navigationBoundarySeparatorVisible(
-                          leftActive,
-                          active,
-                        )}
-                      />
-                      <PendingWorkspaceTab
-                        kind={pending.kind}
-                        label={
-                          pending.branch
-                            ? branchDisplayName(pending.branch)
-                            : "New workspace"
-                        }
-                        active={active}
-                        tabRef={(node) =>
-                          registerWorkspaceTab(pending.token, node)
-                        }
-                      />
-                    </React.Fragment>
-                  );
-                })}
-                {/* The trailing carrier is the workspace → plus gap. Actions
-                    get spacing but no navigation separator. */}
+                {/* The removed per-repository plus leaves only this trailing
+                    four-pixel content inset. */}
                 <TopBarBoundary showSeparator={false} />
               </div>
             </nav>
@@ -1808,68 +2588,6 @@ export function TopBar() {
           </div>
         )}
 
-        {selectedProject && !stripHasTabs && (
-          <TopBarBoundary showSeparator={false} />
-        )}
-
-        {selectedProject && (
-          <div className={TOP_BAR_ITEM_CLS}>
-            {/* The Design document API is desktop-local. Every desktop user
-                gets the kind picker; browser-only shells keep the existing
-                one-click Code action. */}
-            {designWorkspaceCreationAvailable ? (
-              <DropdownMenu>
-                <Tooltip label="New workspace" side="bottom">
-                  <DropdownMenuTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon"
-                      className={INSET_ICON_BUTTON_CLS}
-                      aria-label="New workspace"
-                    >
-                      <Plus className="size-4" strokeWidth={1.5} />
-                    </Button>
-                  </DropdownMenuTrigger>
-                </Tooltip>
-                <DropdownMenuContent
-                  align="start"
-                  sideOffset={6}
-                  className="w-48"
-                >
-                  <DropdownMenuItem
-                    onSelect={() => void handleCreateWorkspace("code")}
-                  >
-                    <GitBranch className="text-fg2" />
-                    <span>Code workspace</span>
-                  </DropdownMenuItem>
-                  <DropdownMenuItem
-                    onSelect={() => void handleCreateWorkspace("design")}
-                  >
-                    <PenTool className="text-fg2" />
-                    <span>Design workspace</span>
-                  </DropdownMenuItem>
-                </DropdownMenuContent>
-              </DropdownMenu>
-            ) : (
-              <Tooltip label="New workspace" side="bottom">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon"
-                  className={INSET_ICON_BUTTON_CLS}
-                  aria-label="New workspace"
-                  onClick={() => void handleCreateWorkspace("code")}
-                >
-                  <Plus className="size-4" strokeWidth={1.5} />
-                </Button>
-              </Tooltip>
-            )}
-          </div>
-        )}
-
-        {selectedProject && <TopBarBoundary showSeparator={false} />}
-
         <div className="min-w-0 flex-1" aria-hidden="true" />
       </div>
 
@@ -1880,10 +2598,10 @@ export function TopBar() {
         <ResourceMonitor />
 
         <div className={TOP_BAR_TRAILING_ITEM_CLS}>
-          {selectedProject ? (
+          {contextProject ? (
             <ArchivedWorkspacePicker
-              key={selectedProject.id}
-              project={selectedProject}
+              key={contextProject.id}
+              project={contextProject}
             />
           ) : (
             <Tooltip

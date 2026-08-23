@@ -38,7 +38,7 @@ function headerClasses(src: string): string {
  *  Anchored on the tab map rather than on a class list, so reordering or adding
  *  utility classes cannot make this silently match the wrong element. */
 function stripClasses(src: string): string {
-  const map = src.indexOf("{realWorkspaces.map(");
+  const map = src.indexOf("{navItems.map(");
   if (map < 0) throw new Error("workspace tab map not found");
   const opener = src.lastIndexOf('className="', map);
   if (opener < 0) throw new Error("strip container className not found");
@@ -67,6 +67,29 @@ function classConstant(src: string, name: string): string {
   const match = new RegExp(`const ${name} =\\s*\\n?\\s*"([^"]*)"`).exec(src);
   if (!match) throw new Error(`${name} not found`);
   return match[1];
+}
+
+/** The class utilities on each span that renders `{label}` — one per tab
+ *  variant. Walks back from the child to its own opening tag and collects every
+ *  string literal in the attribute, so this holds for a plain `className="…"`
+ *  and for `className={cn(…)}` (the placeholder's conditional trailing-marker
+ *  reservation is one). `${label}` interpolations are skipped. */
+function labelSpanClasses(src: string): string[] {
+  const out: string[] = [];
+  for (
+    let at = src.indexOf("{label}");
+    at >= 0;
+    at = src.indexOf("{label}", at + 1)
+  ) {
+    if (src[at - 1] === "$") continue;
+    const opener = src.lastIndexOf("<span", at);
+    if (opener < 0) continue;
+    const literals = src.slice(opener, at).match(/"[^"]*"/g);
+    if (literals) {
+      out.push(literals.map((literal) => literal.slice(1, -1)).join(" "));
+    }
+  }
+  return out;
 }
 
 /** The value of a top-level `const NAME = <number>;`. */
@@ -139,6 +162,40 @@ describe("workspace tab strip gap", () => {
     ).toHaveLength(2);
   });
 
+  it("clears a two-pixel inward edge around every pinned pill", () => {
+    // A sticky pill floats over the scrolling lane. Without an opaque sliver
+    // immediately INSIDE the lane, the next workspace (and, in Grouped mode,
+    // its continuous surface and hairline) paints through the rounded corner.
+    // A ring paints below the rounded pill without changing its size, so its
+    // inward half is the requested breathing room while its outward half merges
+    // harmlessly into the existing opaque edge gutter. It is shared by every
+    // filter: Grouped, Ungrouped, Active and a repository-only lane all use the
+    // same sticky workspace component.
+    const topBar = source(TOP_BAR);
+    const pinned = classConstant(topBar, "WORKSPACE_PINNED_EDGE_CLS");
+
+    const ringWidth =
+      /group-data-\[workspace-pin\]\/lane:data-\[active=true\]:ring-(\d+)/.exec(
+        pinned,
+      );
+    expect(ringWidth).not.toBeNull();
+    expect(Number(ringWidth![1])).toBe(2);
+    expect(pinned).toContain(
+      "group-data-[workspace-pin]/lane:data-[active=true]:ring-sidebar-bg",
+    );
+
+    for (const [start, end] of [
+      ["function WorkspaceTab(", "function PendingWorkspaceTab("],
+      ["function PendingWorkspaceTab(", "interface ProjectMarkerProps"],
+    ] as const) {
+      const component = topBar.slice(
+        topBar.indexOf(start),
+        topBar.indexOf(end),
+      );
+      expect(component).toContain("WORKSPACE_PINNED_EDGE_CLS");
+    }
+  });
+
   it("uses centered subtle separators without putting borders on pills", () => {
     // The active tab should read as one floating selection, while inactive
     // workspaces get a short hairline in the boundary carrier. The carrier is
@@ -170,11 +227,35 @@ describe("workspace tab strip gap", () => {
     // concatenation silently produced invalid utilities such as
     // `w-pxinvisible` and `justify-centerrelative`, and the Tailwind Prettier
     // plugin normalizes away leading whitespace used as a workaround.
-    expect(boundary).toContain(
-      'cn(TOP_BAR_BOUNDARY_CLS, edge && "relative z-40")',
+    expect(boundary).toMatch(
+      /cn\(\s*TOP_BAR_BOUNDARY_CLS,\s*edge && "relative z-40",\s*groupedBackground\s*&&\s*"h-7 border-y border-border2\/50 bg-bg2\/50",\s*groupGap && WORKSPACE_GROUP_GAP_CLS,?\s*\)/,
     );
-    expect(boundary).toContain(
-      'cn(TOP_BAR_SEPARATOR_CLS, !showSeparator && "invisible")',
+    expect(boundary).toMatch(
+      /cn\(\s*TOP_BAR_SEPARATOR_CLS,\s*\(!showSeparator \|\| suppressSeparator\) && "invisible",?\s*\)/,
+    );
+  });
+
+  it("widens only the inter-group carrier and leaves pin math on the base width", () => {
+    // The group gap overrides the carrier's own w-1 through tailwind-merge, so
+    // it must stay LAST in that cn() and must not leak into WORKSPACE_TAB_GAP_PX
+    // — the pin reconstruction adds that constant after the previous flow item,
+    // and in Grouped mode a tab's previous flow item is always its own
+    // repository icon or the tab beside it, never across a group boundary.
+    const topBar = source(TOP_BAR);
+    const baseWidth = widthClassToPx(
+      classConstant(topBar, "TOP_BAR_BOUNDARY_CLS"),
+    );
+    const groupGap = widthClassToPx(
+      classConstant(topBar, "WORKSPACE_GROUP_GAP_CLS"),
+    );
+
+    expect(groupGap).toBeGreaterThan(baseWidth);
+    expect(numericConstant(topBar, "WORKSPACE_TAB_GAP_PX")).toBe(baseWidth);
+    expect(numericConstant(topBar, "WORKSPACE_CONTENT_INSET_PX")).toBe(
+      baseWidth,
+    );
+    expect(numericConstant(topBar, "WORKSPACE_STICKY_EDGE_INSET_PX")).toBe(
+      baseWidth,
     );
   });
 
@@ -204,11 +285,9 @@ describe("workspace tab strip gap", () => {
     expect(classConstant(topBar, "WORKSPACE_OPEN_BUTTON_CLS")).not.toMatch(
       /\bflex-1\b/,
     );
-    const labelSpans = topBar.match(
-      /<span className="[^"]*">\s*\{label\}\s*<\/span>/g,
-    );
+    const labelSpans = labelSpanClasses(topBar);
     expect(labelSpans).toHaveLength(2);
-    for (const span of labelSpans ?? []) {
+    for (const span of labelSpans) {
       expect(span).toMatch(/\bflex-auto\b/);
       expect(span).toMatch(/\btruncate\b/);
       expect(span).not.toMatch(/\bflex-1\b/);
@@ -295,23 +374,19 @@ describe("top-bar borderless navigation chrome", () => {
     expect(tabCls).toMatch(/data-\[active=true\]:text-fg1\b/);
   });
 
-  it("suppresses the carriers on both sides of selected real and pending tabs", () => {
+  it("suppresses carriers around selected real and pending entries in the unified lane", () => {
     const topBar = source(TOP_BAR);
-    const realMap = topBar.slice(
-      topBar.indexOf("{realWorkspaces.map("),
-      topBar.indexOf("{dedupedPendingCreates.map("),
-    );
-    const pendingMap = topBar.slice(
-      topBar.indexOf("{dedupedPendingCreates.map("),
-      topBar.indexOf("{/* The trailing carrier"),
+    const navMap = topBar.slice(
+      topBar.indexOf("{navItems.map("),
+      topBar.indexOf("{/* The removed per-repository plus"),
     );
 
-    for (const map of [realMap, pendingMap]) {
-      expect(map).toContain("const leftActive");
-      expect(map).toMatch(
-        /showSeparator=\{navigationBoundarySeparatorVisible\(\s*leftActive,\s*active,?\s*\)\}/,
-      );
-    }
+    expect(navMap).toContain('item.kind === "workspace"');
+    expect(navMap).toContain('item.kind === "pending"');
+    expect(navMap).toContain("const leftActive");
+    expect(navMap).toMatch(
+      /showSeparator=\{navigationBoundarySeparatorVisible\(\s*leftActive,\s*active,?\s*\)\}/,
+    );
   });
 
   it("registers the selected optimistic workspace with the same pin machinery", () => {
@@ -321,7 +396,7 @@ describe("top-bar borderless navigation chrome", () => {
     const topBar = source(TOP_BAR);
     const pending = topBar.slice(
       topBar.indexOf("function PendingWorkspaceTab"),
-      topBar.indexOf("interface ProjectPickerProps"),
+      topBar.indexOf("interface ProjectMarkerProps"),
     );
 
     expect(pending).toContain("tabRef");
@@ -330,7 +405,7 @@ describe("top-bar borderless navigation chrome", () => {
       /const activeWorkspaceTabKey\s*=\s*activeWorkspaceId\s*\?\?\s*activePendingCreate\?\.token\s*\?\?\s*null/,
     );
     expect(topBar).toContain('if (activePage !== "workspace") return null;');
-    expect(topBar).toContain("registerWorkspaceTab(pending.token, node)");
+    expect(topBar).toContain("registerWorkspaceTab(item.pending.token, node)");
     expect(topBar).toContain("activeWorkspaceTabKey");
   });
 });

@@ -5,7 +5,8 @@
 //   • Archiving the ACTIVE workspace strands the open chat on a deleted folder
 //     (the row leaves the live list, so the active workspace resolves to null —
 //     NOT present:false — and the "worktree missing" placeholder never fires).
-//     We repoint to the nearest surviving workspace on the left, then Local main.
+//     We repoint to the nearest surviving workspace in the painted filter, or
+//     the Create page when that filter has no workspace left.
 //   • Concurrent restore controls share renderer busy state; the engine also
 //     single-flights by id so other windows/devices cannot race `worktree add`.
 //   • Restore adapts the path/branch (occupied / checked-out-elsewhere / deleted)
@@ -52,6 +53,7 @@ import {
   commitWorkspaceDeleted,
   commitWorkspaceRestored,
   notifyWorkspacesChanged,
+  peekLiveWorkspaceUnion,
   peekWorkspacesFor,
 } from "./use-projects";
 import {
@@ -62,10 +64,18 @@ import {
 } from "./store";
 import {
   findProjectForFolder,
+  findWorkspaceForFolder,
   folderIsOwnedByProject,
   folderIsWithinRoot,
 } from "./workspace-resolution";
-import { previousWorkspaceInOrder } from "./archive-navigation";
+import {
+  pendingWorkspaceNeighborAfterArchive,
+  workspaceNeighborAfterArchive,
+} from "./archive-navigation";
+import type { WorkspaceTabActivity } from "./workspace-list-filter";
+import { getActiveOrganizationSnapshot } from "../features/team/team-store";
+import { filterRowsForOrganization } from "../features/team/organization-capabilities";
+import { dedupePendingCreates } from "./live-workspace-selectors";
 
 type Dispatch = ReturnType<typeof useWorkspaceDispatch>;
 
@@ -86,22 +96,95 @@ function workspaceOwnsFolder(
 }
 
 /** Where should the view land after `leaving` goes away (archive / delete)?
- * The user-visible tab order is creation order, with Local main pinned at the
- * left. Choose the nearest surviving worktree to the left; if none exists,
- * Local main is the exact fallback. Reads the cached exact-key list — no engine
- * round-trip or later repair effect on the navigation path. */
+ * Project the cached cross-repository union through the currently persisted
+ * top-bar filter, then choose the nearest surviving tab to the left (or the
+ * right edge fallback). Null means that filter is empty and Create owns the
+ * next workspace-route frame. No engine round-trip or later repair effect. */
 function pickRepointTarget(leaving: Workspace): {
   folder: string;
   repoRoot: string;
-} {
-  const cached = peekWorkspacesFor(leaving.repoSlug) ?? [];
+  validationPending: boolean;
+} | null {
+  const state = useWorkspaceStore.getState();
+  const projects = loadProjects();
+  const activeOrganization = getActiveOrganizationSnapshot();
+  const cached = filterRowsForOrganization(
+    peekLiveWorkspaceUnion(),
+    activeOrganization,
+  );
+  const seenIds = new Set(cached.map((workspace) => workspace.id));
+  if (!seenIds.has(leaving.id)) cached.push(leaving);
+
+  const activeAtByWorkspaceId = new Map<string, number>();
+  for (const [folder, activeAt] of Object.entries(
+    state.workspaceActivityByFolder,
+  )) {
+    const workspace = findWorkspaceForFolder(folder, cached);
+    if (!workspace) continue;
+    activeAtByWorkspaceId.set(
+      workspace.id,
+      Math.max(activeAtByWorkspaceId.get(workspace.id) ?? 0, activeAt),
+    );
+  }
+  const activity: WorkspaceTabActivity = {
+    activeAtByWorkspaceId,
+  };
   // Exclude rows whose confirmed mutation is pending — a burst-archive must
   // never repoint onto a workspace that is itself on its way out.
   const archivingIds = usePendingWorkspacesStore.getState().archivingIds;
-  const previous = previousWorkspaceInOrder(leaving, cached, archivingIds);
-  return previous
-    ? { folder: previous.path, repoRoot: previous.repoRoot }
-    : { folder: leaving.repoRoot, repoRoot: leaving.repoRoot };
+  const next = workspaceNeighborAfterArchive({
+    leaving,
+    rows: cached,
+    projects,
+    filter: state.workspaceListFilter,
+    busyIds: archivingIds,
+    activity,
+  });
+  if (next && !(next.id in archivingIds)) {
+    return {
+      folder: next.path,
+      repoRoot: next.repoRoot,
+      validationPending: peekWorkspacesFor(next.repoSlug) === undefined,
+    };
+  }
+
+  // A pending create is already a visible/openable tab with an exact prepared
+  // path. Do not jump to Create merely because its engine Workspace row has not
+  // landed yet; use the same left-then-right ordering contract as confirmed
+  // rows. Deduping against the cache drops a stale optimistic row whose real
+  // workspace arrived during the archive continuation.
+  const pending = dedupePendingCreates(
+    filterRowsForOrganization(
+      usePendingWorkspacesStore.getState().creates,
+      activeOrganization,
+    ),
+    cached,
+  );
+  const pendingNext = pendingWorkspaceNeighborAfterArchive({
+    leaving,
+    pending,
+    projects,
+    filter: state.workspaceListFilter,
+    activity,
+    activeAtByFolder: new Map(Object.entries(state.workspaceActivityByFolder)),
+  });
+  if (pendingNext?.path) {
+    return {
+      folder: pendingNext.path,
+      repoRoot: pendingNext.repoRoot,
+      validationPending: true,
+    };
+  }
+  // No stable confirmed/pending destination exists. Retain the existing burst
+  // archive behavior: briefly follow the nearest busy row; its own completion
+  // will resolve the next destination without flashing the Create page.
+  return next
+    ? {
+        folder: next.path,
+        repoRoot: next.repoRoot,
+        validationPending: peekWorkspacesFor(next.repoSlug) === undefined,
+      }
+    : null;
 }
 
 /** Detach renderer runtime slots once removal is authoritatively confirmed.
@@ -132,10 +215,10 @@ function detachWorkspaceRuntimeState(
 }
 
 /** If we just archived/deleted the workspace whose chat is the active target,
- *  its worktree is going away — repoint the active selection to the most
- *  recently active OTHER workspace in the repo (Local main only when none is
- *  left; see pickRepointTarget) so the (possibly hidden) open chat isn't
- *  stranded on a deleted folder. Lands on a REAL chat at the target when one
+ *  its worktree is going away — repoint the active selection to the neighbor
+ *  painted by the current Grouped/Ungrouped/Active/repository filter so the
+ *  (possibly
+ *  hidden) open chat isn't stranded on a deleted folder. Lands on a REAL chat at the target when one
  *  exists (last-viewed, else most-recent) — a null selection renders a dead
  *  Conversation pane. When the target has no live chat, pin the scope; the tab strip's
  *  selection keeper auto-spawns a default chat.
@@ -157,6 +240,21 @@ function repointViewIfActive(workspace: Workspace, dispatch: Dispatch): void {
   )
     return;
   const target = pickRepointTarget(workspace);
+  if (!target) {
+    if (state.activePage === "workspace") {
+      const project = findProjectForFolder(workspace.repoRoot, loadProjects());
+      dispatch({
+        type: "OPEN_CREATE_PAGE",
+        projectId: project?.id ?? null,
+        clearWorkspaceTarget: true,
+      });
+    } else {
+      // Dashboard/repository archive actions must not yank the visible Home
+      // page. Clear only the now-invalid dormant workspace target.
+      dispatch({ type: "CLEAR_WORKSPACE_TARGET" });
+    }
+    return;
+  }
   const restoreId = selectChatToRestoreForFolder(state, target.folder);
   dispatch({
     type: "OPEN_WORKSPACE",
@@ -164,6 +262,7 @@ function repointViewIfActive(workspace: Workspace, dispatch: Dispatch): void {
     repoRoot: target.repoRoot,
     chatId: restoreId,
     preservePage: true,
+    validationPending: target.validationPending,
   });
 }
 
@@ -177,8 +276,10 @@ function commitConfirmedDeletion(
   dispatch: Dispatch,
 ): void {
   unstable_batchedUpdates(() => {
-    detachWorkspaceRuntimeState(workspace, dispatch);
     repointViewIfActive(workspace, dispatch);
+    // Choose from the same activity ordering the user saw before detaching the
+    // departing agent sessions (detaching first could silently reorder it).
+    detachWorkspaceRuntimeState(workspace, dispatch);
     commitWorkspaceDeleted(workspace);
     clearWorkspaceArchiving(workspace.id);
   });
@@ -370,8 +471,10 @@ function commitConfirmedArchive(
     // Resolve the destination while the live cache still contains `original`;
     // commitWorkspaceArchived removes it synchronously. React batching prevents
     // that ordering from producing an intermediate visual frame.
-    detachWorkspaceRuntimeState(original, dispatch);
     repointViewIfActive(original, dispatch);
+    // Preserve the visible pre-detach activity order for the left-neighbor
+    // decision; the whole renderer transition remains one React batch.
+    detachWorkspaceRuntimeState(original, dispatch);
     commitWorkspaceArchived(archived);
     clearWorkspaceArchiving(original.id);
     opts?.onArchived?.(archived);

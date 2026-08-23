@@ -115,7 +115,9 @@ describe("design workspace agent isolation", () => {
       'useInternalFeatureActive("designWorkspaces")',
     );
     expect(appShell).toContain("<DesignWorkspaceSidebar");
-    expect(appShell).toContain("useNewTabHotkeys(!designWorkspaceRequested)");
+    expect(appShell).toContain(
+      'useNewTabHotkeys(activePage === "workspace" && !designWorkspaceRequested)',
+    );
     // Design is a normal public presentation mode. It must not fall through
     // to coding chat or a rollout-disabled placeholder.
     expect(appShell).not.toContain("shouldShowBlockedDesignModePlaceholder");
@@ -143,21 +145,25 @@ describe("design workspace agent isolation", () => {
     // ordinary public workspace destination.
     expect(archiveActions).not.toContain("mayPublishNavigation");
     expect(archiveActions).toContain("opts?.onRestored?.(result)");
+    expect(archiveActions).not.toContain("isInternalFeatureActive");
 
     const topBar = read("apps/desktop/src/renderer/shell/top-bar.tsx");
     expect(topBar).not.toContain(
       'useInternalFeatureActive("designWorkspaces")',
     );
-    expect(topBar).toMatch(
-      /designWorkspaceCreationAvailable\s*=\s*\(?\s*nativeRuntime\.ready\s*\|\|\s*nativeRuntime\.expectedElectron/,
-    );
     expect(topBar).not.toContain("activeFolderBlockedDesign");
-    expect(topBar).toMatch(
-      /\{designWorkspaceCreationAvailable \? \(\s*<DropdownMenu>/,
+    // The workspace-kind picker moved to the Create page; the top bar's "+"
+    // is a route to it and carries no Design gate of its own.
+    expect(topBar).not.toContain("designWorkspaceCreationAvailable");
+    const createPage = read(
+      "apps/desktop/src/renderer/shell/dispatcher/dispatcher-modal.tsx",
     );
-    expect(topBar).toContain(
-      'onClick={() => void handleCreateWorkspace("code")}',
+    expect(createPage).not.toContain("isInternalFeatureActive");
+    expect(createPage).toMatch(
+      /designWorkspaceCreationAvailable\s*=\s*\n?\s*nativeRuntime\.ready\s*\|\|\s*nativeRuntime\.expectedElectron/,
     );
+    expect(createPage).toContain('kind: "design"');
+    expect(createPage).toContain("Create design workspace");
 
     const settings = read(
       "apps/desktop/src/renderer/features/settings/settings-page.tsx",

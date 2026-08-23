@@ -188,6 +188,23 @@ export function horizontalOverflow(args: {
   };
 }
 
+/** A sticky element can carry a DIFFERENT inset at each edge, and the pin
+ * decision has to use the same pair the CSS does or the reported side flips a
+ * few pixels early or late. `edgeInset` remains the symmetric shorthand; the
+ * Grouped lane overrides `leadingInset` alone, because its pinned pill reserves
+ * the repository lead's slot on the left and still lands flush on the right. */
+function stickyInsets(args: {
+  edgeInset?: number;
+  leadingInset?: number;
+  trailingInset?: number;
+}): { leading: number; trailing: number } {
+  const shared = Math.max(0, args.edgeInset ?? 4);
+  return {
+    leading: Math.max(0, args.leadingInset ?? shared),
+    trailing: Math.max(0, args.trailingInset ?? shared),
+  };
+}
+
 /** Report the edge the active workspace's natural slot crossed. The caller
  * supplies a neighbor-derived natural offset because Chromium exposes a
  * sticky element's clamped visual position through its own `offsetLeft`. */
@@ -198,15 +215,67 @@ export function workspacePinSide(args: {
   tabOffsetLeft: number;
   tabWidth: number;
   edgeInset?: number;
+  leadingInset?: number;
+  trailingInset?: number;
 }): WorkspacePinSide {
   if (args.scrollWidth <= args.clientWidth + SCROLL_TOLERANCE_PX) return null;
 
-  const inset = Math.max(0, args.edgeInset ?? 4);
-  const viewportLeft = args.scrollLeft + inset;
-  const viewportRight = args.scrollLeft + args.clientWidth - inset;
+  const inset = stickyInsets(args);
+  const viewportLeft = args.scrollLeft + inset.leading;
+  const viewportRight = args.scrollLeft + args.clientWidth - inset.trailing;
   if (args.tabOffsetLeft < viewportLeft) return "left";
   if (args.tabOffsetLeft + args.tabWidth > viewportRight) return "right";
   return null;
+}
+
+/** The sticky `right` inset that parks a pinned repository lead immediately
+ * before the pinned pill: the pill's own trailing inset, plus the pill, plus
+ * the carrier between them. Pure so the one number CSS and the fade placement
+ * both depend on cannot drift between them. */
+export function workspacePinnedLeadTrailingInset(args: {
+  edgeInset: number;
+  tabWidth: number;
+  gap: number;
+}): number {
+  return (
+    Math.max(0, args.edgeInset) +
+    Math.max(0, args.tabWidth) +
+    Math.max(0, args.gap)
+  );
+}
+
+/** Where the two relocated fades sit once something has parked at that edge.
+ *
+ * Each edge is charged for ONLY what parked at THAT edge. The pill and its
+ * repository lead can legitimately split across both — a long repository whose
+ * icon has already reached the leading edge while its selection is still parked
+ * at the trailing one — and charging the trailing fade for a lead pinned at the
+ * leading edge would strand a lead-slot of unfaded content beside the pill. */
+export function workspacePinnedFadeOffsets(args: {
+  clientWidth: number;
+  tabWidth: number;
+  edgeInset: number;
+  leadSlot: number;
+  fadeWidth: number;
+  pinSide: WorkspacePinSide;
+  leadPinSide: WorkspacePinSide;
+}): { afterPinnedLeft: number; beforePinnedRight: number } {
+  const leadingLead = args.leadPinSide === "left" ? args.leadSlot : 0;
+  const trailingLead = args.leadPinSide === "right" ? args.leadSlot : 0;
+  return {
+    afterPinnedLeft:
+      args.edgeInset +
+      leadingLead +
+      (args.pinSide === "left" ? args.tabWidth : 0),
+    beforePinnedRight: Math.max(
+      0,
+      args.clientWidth -
+        args.edgeInset -
+        (args.pinSide === "right" ? args.tabWidth : 0) -
+        trailingLead -
+        args.fadeWidth,
+    ),
+  };
 }
 
 /** Move an externally selected tab's natural slot into view. CSS sticky keeps
@@ -220,25 +289,33 @@ export function workspaceScrollLeftForTab(args: {
   tabOffsetLeft: number;
   tabWidth: number;
   edgeInset?: number;
+  leadingInset?: number;
+  trailingInset?: number;
 }): number {
   const maxScrollLeft = Math.max(0, args.scrollWidth - args.clientWidth);
   const currentScrollLeft = Math.min(
     maxScrollLeft,
     Math.max(0, args.scrollLeft),
   );
-  const inset = Math.max(0, args.edgeInset ?? 4);
-  const viewportLeft = currentScrollLeft + inset;
-  const viewportRight = currentScrollLeft + args.clientWidth - inset;
+  const inset = stickyInsets(args);
+  const viewportLeft = currentScrollLeft + inset.leading;
+  const viewportRight = currentScrollLeft + args.clientWidth - inset.trailing;
 
+  // Land the natural slot ON the sticky inset, not merely inside the viewport:
+  // stopping short of it would leave CSS sticky pushing the revealed tab off
+  // its own flow position and over the neighbour beside it.
   if (args.tabOffsetLeft < viewportLeft) {
-    return Math.max(0, Math.min(maxScrollLeft, args.tabOffsetLeft - inset));
+    return Math.max(
+      0,
+      Math.min(maxScrollLeft, args.tabOffsetLeft - inset.leading),
+    );
   }
   if (args.tabOffsetLeft + args.tabWidth > viewportRight) {
     return Math.max(
       0,
       Math.min(
         maxScrollLeft,
-        args.tabOffsetLeft + args.tabWidth - args.clientWidth + inset,
+        args.tabOffsetLeft + args.tabWidth - args.clientWidth + inset.trailing,
       ),
     );
   }
@@ -248,16 +325,26 @@ export function workspaceScrollLeftForTab(args: {
 /** The fade at a pinned edge relocates to the inside edge of the active tab.
  * The opposite outer fade remains available when that edge still has hidden
  * content. Keeping this decision pure makes the scroll handler a synchronous
- * DOM update instead of a React render loop. */
+ * DOM update instead of a React render loop.
+ *
+ * `leadPinSide` is the Grouped lane's repository lead, resolved against its own
+ * insets and therefore genuinely independent of the pill's: it reaches the LEFT
+ * edge first when its selection sits deeper in the same repository, and a long
+ * enough repository can hold the two at OPPOSITE edges. So an edge counts as
+ * pinned if EITHER parked there — an outer fade would otherwise sit under the
+ * opaque lead and leave the content emerging beside it with a hard cut. */
 export function workspaceFadeVisibility(
   overflow: HorizontalOverflow,
   pinSide: WorkspacePinSide,
+  leadPinSide: WorkspacePinSide = null,
 ): WorkspaceFadeVisibility {
+  const pinnedLeft = pinSide === "left" || leadPinSide === "left";
+  const pinnedRight = pinSide === "right" || leadPinSide === "right";
   return {
-    outerLeft: overflow.left && pinSide !== "left",
-    outerRight: overflow.right && pinSide !== "right",
-    afterPinnedLeft: overflow.left && pinSide === "left",
-    beforePinnedRight: overflow.right && pinSide === "right",
+    outerLeft: overflow.left && !pinnedLeft,
+    outerRight: overflow.right && !pinnedRight,
+    afterPinnedLeft: overflow.left && pinnedLeft,
+    beforePinnedRight: overflow.right && pinnedRight,
   };
 }
 

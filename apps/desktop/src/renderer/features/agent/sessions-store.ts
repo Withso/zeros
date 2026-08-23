@@ -1541,6 +1541,47 @@ export function useAnyChatStreaming(chatIds: readonly string[]): boolean {
   });
 }
 
+/** Exact visual answer to "is an agent doing work?" Session admission alone
+ * is not work: every newly-opened chat warms an execution before the user has
+ * sent anything. A live/rebuilding turn, an owned optimistic turn, an active
+ * background task, or a running workflow is real work. */
+export function agentSessionHasActiveWork(
+  slot: AgentSessionState | undefined,
+  pendingLocalTurnId: string | null | undefined,
+): boolean {
+  if (pendingLocalTurnId) return true;
+  if (!slot) return false;
+  if (slot.status === "streaming") return true;
+  if (
+    (slot.status === "warming" || slot.status === "reconnecting") &&
+    slot.activeTurnStartedAt !== null
+  ) {
+    return true;
+  }
+  if (slot.backgroundTasks.length > 0) return true;
+  // Paused workflows remain resumable/stoppable lifecycle entries, but they
+  // are not executing and must not paint the "Agent working" spinner alone.
+  return slot.workflows.some((workflow) => workflow.status === "running");
+}
+
+/** Workspace-tab activity indicator. Unlike useAnyChatWorking (a conservative
+ * mutation-safety gate), this excludes pristine session warm-up. */
+export function useAnyChatAgentWorking(chatIds: readonly string[]): boolean {
+  return useSessionsStore((state) => {
+    for (const id of chatIds) {
+      if (
+        agentSessionHasActiveWork(
+          state.sessions[id],
+          state.pendingLocalTurns[id],
+        )
+      ) {
+        return true;
+      }
+    }
+    return false;
+  });
+}
+
 /** True if ANY chat in the given id list has an agent actively occupying its
  *  session — "warming" (a queued prompt is about to run), "streaming" (turn in
  *  flight), or "reconnecting" (respawn reviving an in-flight turn). Broader

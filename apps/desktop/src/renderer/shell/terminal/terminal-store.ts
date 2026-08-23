@@ -66,6 +66,7 @@ import {
   folderIsOwnedByProject,
   folderIsWithinRoot,
 } from "../../state/workspace-resolution";
+import { recordWorkspaceActivity } from "../../state/workspace-store";
 
 // Per-(folder, action) run session ids live in @zeros/protocol/run-actions now —
 // the ENGINE mints/validates the same ids (RunManager), so the hash has one
@@ -470,6 +471,7 @@ export const useTerminalStore = create<TerminalStoreState>((set, get) => ({
           });
           return next;
         });
+        if (activate) recordWorkspaceActivity(folder);
         return existing;
       }
     }
@@ -507,6 +509,7 @@ export const useTerminalStore = create<TerminalStoreState>((set, get) => ({
       return next;
     });
     const stored = get().sessions.find((sess) => sess.id === session.id);
+    if (activate) recordWorkspaceActivity(folder);
     return stored ?? session;
   },
 

@@ -11,7 +11,7 @@
 // permission posture are held locally (seeded from the default agent's
 // new-chat born defaults), so "Create" can stamp the fresh chat.
 //
-// Borderless + full-width by design: the modal is one continuous surface (no
+// Borderless + full-width by design: the Create page card is one continuous surface (no
 // card chrome, no separator), so this renders flush with consistent px-4 inset.
 //
 // Empty composer → Create still works: the parent creates the workspace on the
@@ -182,7 +182,7 @@ export function DispatcherComposer({
     availableCommands: [],
     placeholder: "What do you want to work on?",
     onSubmit: () => submitRef.current(),
-    // cwd here is the PRIMARY checkout (the workspace this modal creates
+    // cwd here is the PRIMARY checkout (the workspace this page creates
     // doesn't exist yet). Attach-time staging would write phantom cards into
     // the trunk's .context-graph; the send-path safety net stages these
     // attachments into the NEW worktree when the first prompt goes out.
