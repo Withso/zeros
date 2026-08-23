@@ -18,6 +18,7 @@
 
 import type {
   AvailableCommand,
+  AgentGoal,
   BackgroundTask,
   ContentBlock,
   InitializeResponse,
@@ -196,6 +197,11 @@ export interface AgentSessionState {
    * engine snapshots replace this ephemeral list; narrator lines live in the
    * ordinary tool-call transcript instead. */
   workflows: WorkflowProgress[];
+  /** Harness-native goal projected into Zeros session state. */
+  goal: AgentGoal | null;
+  /** Live engine-only safety actions keyed by their durable audit row. Opaque
+   * ids are never written into the transcript. */
+  safetyReviewRetries: Record<string, string>;
   /** Parent session is parked and waiting for the active task set to wake it. */
   waitingForBackgroundTasks: boolean;
   /** Start of the current continuous parked interval. Session-owned so a
@@ -275,6 +281,13 @@ export interface AgentSessionControls {
    *  allow-deny / maxTurns) to the live session without rebuilding it
    *  (fire-and-forget; carries the full composer env). */
   updateConfig?(): void;
+  setGoal?(update: {
+    objective?: string;
+    status?: AgentGoal["status"];
+    tokenBudget?: number | null;
+  }): Promise<AgentGoal>;
+  clearGoal?(): Promise<void>;
+  retrySafetyReview?(retryId: string): Promise<void>;
   /** Remove a still-pending QUEUED send (by its placeholder message id)
    *  before it flushes — the user changed their mind. */
   removeQueued?(messageId: string): void;

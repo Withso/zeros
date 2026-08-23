@@ -33,6 +33,7 @@ import {
   ENGINE_PORT_SPAN,
   isDevRuntime,
 } from "./runtime";
+import { shouldLogAgentDispatch } from "./agent-dispatch-logging";
 import { engineRuntimeDir, zerosDataDir } from "./db/paths";
 import {
   buildAccountAuthFromEnv,
@@ -317,6 +318,9 @@ const EXECUTION_ROUTED_AGENT_MESSAGES = new Set([
   "AGENT_SET_MODEL",
   "AGENT_COMPACT",
   "AGENT_UPDATE_CONFIG",
+  "AGENT_GOAL_SET",
+  "AGENT_GOAL_CLEAR",
+  "AGENT_RETRY_SAFETY_REVIEW",
   "AGENT_OPEN_BOUNDARY_PORT",
 ]);
 
@@ -1592,6 +1596,19 @@ export class ZerosEngine {
               ...(this.sessionChat.get(executionId)
                 ? { chatId: this.sessionChat.get(executionId) }
                 : {}),
+            }),
+          );
+        },
+        onProviderQuotaUpdated: (agentId, quota) => {
+          // Provider quotas are account-scoped host diagnostics, not shared
+          // conversation state. Never expose them to relay/cloud clients.
+          // A null push intentionally invalidates a stale account snapshot.
+          this.router.broadcastLocal(
+            createMessage({
+              type: "AGENT_PROVIDER_QUOTA_UPDATED",
+              source: "engine",
+              agentId,
+              quota,
             }),
           );
         },
@@ -3801,12 +3818,12 @@ export class ZerosEngine {
         msg = { ...msg, agentId: executionAgentId } as EngineMessage;
       }
     }
-    // Diagnostic: log every AGENT_* message at the dispatch boundary so
-    // we can tell from main.log whether prompts are even reaching the
-    // engine. Used to triage "user sent codex prompt, no response" —
-    // without this the only visible log was occasional adapter creation,
-    // and any "request never made it to the engine" bug was invisible.
-    {
+    // Keep lifecycle and user-authored actions visible at the dispatch
+    // boundary so main.log can answer whether a prompt reached the engine.
+    // Routine keyed reads are intentionally quiet: their failures still flow
+    // through AGENT_ERROR, and logging every cache probe obscures the actions
+    // this diagnostic exists to trace.
+    if (shouldLogAgentDispatch(msg.type)) {
       const requestId = (msg as { id?: string }).id;
       const agentId = (msg as { agentId?: string }).agentId;
       const executionId =
@@ -4474,7 +4491,12 @@ export class ZerosEngine {
             const response: PromptResponse = activePrompt.cancelledByUser
               ? { stopReason: "cancelled" }
               : await this.agents
-                  .prompt(msg.agentId, msg.sessionId, msg.prompt)
+                  .prompt(
+                    msg.agentId,
+                    msg.sessionId,
+                    msg.prompt,
+                    activePrompt.turnId,
+                  )
                   .finally(() => {
                     activePrompt.adapterSettled = true;
                   });
@@ -4864,6 +4886,72 @@ export class ZerosEngine {
           );
           return;
         }
+        case "AGENT_GOAL_SET": {
+          if (this.remoteMayNotActOnSession(msg.sessionId, client, false)) {
+            this.refuseSessionAccess(msg.id, msg.agentId, client);
+            return;
+          }
+          const goal = await this.agents.setGoal(msg.agentId, msg.sessionId, {
+            ...msg.update,
+            ...(msg.update.objective !== undefined
+              ? { objective: msg.update.objective.trim() }
+              : {}),
+          });
+          client.send(
+            createMessage({
+              type: "AGENT_GOAL_CHANGED",
+              source: "engine",
+              requestId: msg.id,
+              agentId: msg.agentId,
+              executionId: msg.sessionId,
+              sessionId: msg.sessionId,
+              goal,
+            }),
+          );
+          return;
+        }
+        case "AGENT_GOAL_CLEAR": {
+          if (this.remoteMayNotActOnSession(msg.sessionId, client, false)) {
+            this.refuseSessionAccess(msg.id, msg.agentId, client);
+            return;
+          }
+          await this.agents.clearGoal(msg.agentId, msg.sessionId);
+          client.send(
+            createMessage({
+              type: "AGENT_GOAL_CHANGED",
+              source: "engine",
+              requestId: msg.id,
+              agentId: msg.agentId,
+              executionId: msg.sessionId,
+              sessionId: msg.sessionId,
+              goal: null,
+            }),
+          );
+          return;
+        }
+        case "AGENT_RETRY_SAFETY_REVIEW": {
+          if (this.remoteMayNotActOnSession(msg.sessionId, client, false)) {
+            this.refuseSessionAccess(msg.id, msg.agentId, client);
+            return;
+          }
+          await this.agents.retryDeniedAction(
+            msg.agentId,
+            msg.sessionId,
+            msg.retryId,
+          );
+          client.send(
+            createMessage({
+              type: "AGENT_SAFETY_REVIEW_RETRIED",
+              source: "engine",
+              requestId: msg.id,
+              agentId: msg.agentId,
+              executionId: msg.sessionId,
+              sessionId: msg.sessionId,
+              retryId: msg.retryId,
+            }),
+          );
+          return;
+        }
         case "AGENT_SET_MODEL": {
           if (this.remoteMayNotActOnSession(msg.sessionId, client, false)) {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
@@ -4910,6 +4998,102 @@ export class ZerosEngine {
           // adapters without live config changes. Errors surface via the
           // outer handler's AGENT_ERROR.
           await this.agents.updateConfig(msg.agentId, msg.sessionId, updateEnv);
+          return;
+        }
+        case "AGENT_MEMORY_SETTINGS_READ": {
+          if (client.kind !== "local") {
+            throw new Error(
+              "Provider memory settings are available only on the local desktop.",
+            );
+          }
+          const settings = await this.agents.readMemorySettings(msg.agentId);
+          client.send(
+            createMessage({
+              type: "AGENT_MEMORY_SETTINGS",
+              source: "engine",
+              requestId: msg.id,
+              agentId: msg.agentId,
+              settings,
+            }),
+          );
+          return;
+        }
+        case "AGENT_CONFIGURATION_PROVENANCE_READ": {
+          if (client.kind !== "local") {
+            throw new Error(
+              "Provider configuration sources are available only on the local desktop.",
+            );
+          }
+          const provenance =
+            await this.agents.readConfigurationProvenance(
+              msg.agentId,
+              msg.cwd,
+            );
+          client.send(
+            createMessage({
+              type: "AGENT_CONFIGURATION_PROVENANCE",
+              source: "engine",
+              requestId: msg.id,
+              agentId: msg.agentId,
+              provenance,
+            }),
+          );
+          return;
+        }
+        case "AGENT_PROVIDER_QUOTA_READ": {
+          if (client.kind !== "local") {
+            throw new Error(
+              "Provider usage limits are available only on the local desktop.",
+            );
+          }
+          const quota = await this.agents.readProviderQuota(msg.agentId);
+          client.send(
+            createMessage({
+              type: "AGENT_PROVIDER_QUOTA",
+              source: "engine",
+              requestId: msg.id,
+              agentId: msg.agentId,
+              quota,
+            }),
+          );
+          return;
+        }
+        case "AGENT_MEMORY_SETTINGS_UPDATE": {
+          if (client.kind !== "local") {
+            throw new Error(
+              "Provider memory settings are available only on the local desktop.",
+            );
+          }
+          const settings = await this.agents.updateMemorySettings(
+            msg.agentId,
+            msg.settings,
+          );
+          client.send(
+            createMessage({
+              type: "AGENT_MEMORY_SETTINGS",
+              source: "engine",
+              requestId: msg.id,
+              agentId: msg.agentId,
+              settings,
+            }),
+          );
+          return;
+        }
+        case "AGENT_MEMORY_RESET": {
+          if (client.kind !== "local") {
+            throw new Error(
+              "Provider memory reset is available only on the local desktop.",
+            );
+          }
+          await this.agents.resetMemory(msg.agentId);
+          client.send(
+            createMessage({
+              type: "AGENT_MEMORY_RESET_COMPLETE",
+              source: "engine",
+              requestId: msg.id,
+              agentId: msg.agentId,
+            }),
+          );
           return;
         }
         case "AGENT_LIST_SESSIONS": {

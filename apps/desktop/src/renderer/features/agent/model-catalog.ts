@@ -36,6 +36,7 @@ import type {
 } from "../../state/store";
 import { getSetting } from "../../platform/settings";
 import {
+  getClaudeAutoMemoryEnabled,
   getClaudeBudgetCapUsd,
   getClaudeFallbackModel,
   getClaudeIdleTimeoutMinutes,
@@ -46,6 +47,23 @@ export type ModelOption = {
   value: string;
   label: string;
   badge?: string;
+  description?: string;
+  aliases?: string[];
+  parameters?: Array<{
+    id: string;
+    label?: string;
+    values: Array<{ value: string; label?: string }>;
+  }>;
+  variants?: Array<{
+    label: string;
+    description?: string;
+    parameters: Array<{ id: string; value: string }>;
+    isDefault?: boolean;
+  }>;
+  selectable?: boolean;
+  /** Curated product rule: render only after exact live discovery says the
+   * execution mode can send this model. */
+  liveRequired?: boolean;
   /** Per-model reasoning-effort ladder (ordered low→high). Authoritative for
    *  the EffortPill. Exact live discovery overrides the bundled fallback when
    *  present; otherwise the curated value stands. */
@@ -88,6 +106,86 @@ function coerceModelOption(x: unknown): ModelOption | null {
     label: o.label as string,
   };
   if (typeof o.badge === "string") out.badge = o.badge;
+  if (typeof o.description === "string") out.description = o.description;
+  if (Array.isArray(o.aliases)) {
+    out.aliases = o.aliases.filter(
+      (alias): alias is string => typeof alias === "string" && !!alias.trim(),
+    );
+  }
+  if (Array.isArray(o.parameters)) {
+    out.parameters = o.parameters.flatMap((candidate) => {
+      if (!candidate || typeof candidate !== "object") return [];
+      const parameter = candidate as Record<string, unknown>;
+      if (
+        typeof parameter.id !== "string" ||
+        !Array.isArray(parameter.values)
+      ) {
+        return [];
+      }
+      return [
+        {
+          id: parameter.id,
+          ...(typeof (parameter.label ?? parameter.displayName) === "string"
+            ? { label: (parameter.label ?? parameter.displayName) as string }
+            : {}),
+          values: parameter.values.flatMap((rawValue) => {
+            if (!rawValue || typeof rawValue !== "object") return [];
+            const value = rawValue as Record<string, unknown>;
+            return typeof value.value === "string"
+              ? [
+                  {
+                    value: value.value,
+                    ...(typeof (value.label ?? value.displayName) === "string"
+                      ? { label: (value.label ?? value.displayName) as string }
+                      : {}),
+                  },
+                ]
+              : [];
+          }),
+        },
+      ];
+    });
+  }
+  if (Array.isArray(o.variants)) {
+    out.variants = o.variants.flatMap((candidate) => {
+      if (!candidate || typeof candidate !== "object") return [];
+      const variant = candidate as Record<string, unknown>;
+      const label = variant.label ?? variant.displayName;
+      const parameters = variant.parameters ?? variant.params;
+      if (
+        typeof label !== "string" ||
+        !Array.isArray(parameters)
+      ) {
+        return [];
+      }
+      return [
+        {
+          label,
+          ...(typeof variant.description === "string"
+            ? { description: variant.description }
+            : {}),
+          parameters: parameters.flatMap((candidateParameter) => {
+            if (
+              !candidateParameter ||
+              typeof candidateParameter !== "object"
+            ) {
+              return [];
+            }
+            const parameter = candidateParameter as Record<string, unknown>;
+            return typeof parameter.id === "string" &&
+              typeof parameter.value === "string"
+              ? [{ id: parameter.id, value: parameter.value }]
+              : [];
+          }),
+          ...(typeof variant.isDefault === "boolean"
+            ? { isDefault: variant.isDefault }
+            : {}),
+        },
+      ];
+    });
+  }
+  if (typeof o.selectable === "boolean") out.selectable = o.selectable;
+  if (typeof o.liveRequired === "boolean") out.liveRequired = o.liveRequired;
   if (Array.isArray(o.effortLevels)) {
     out.effortLevels = o.effortLevels.filter(
       (e): e is ChatEffort =>
@@ -897,9 +995,7 @@ export function staticModesForAgent(agentId: string | null): SessionMode[] {
 function extractMetaModels(
   initialize: InitializeResponse | null,
 ): ModelOption[] | null {
-  const meta = initialize?._meta as
-    | { models?: unknown; modelEnvVar?: unknown }
-    | undefined;
+  const meta = initialize?._meta;
   if (!meta || !Array.isArray(meta.models)) return null;
   const valid = meta.models
     .map(coerceModelOption)
@@ -962,7 +1058,7 @@ export function modelsForAgent(
   const advertised = extractMetaModels(initialize);
 
   if (curated.length === 0) return advertised ?? [];
-  if (!advertised) return curated;
+  if (!advertised) return curated.filter((model) => !model.liveRequired);
 
   // The bundled catalog owns WHICH models are displayed. Exact live metadata
   // owns what this installed runtime/account can actually execute. In
@@ -971,18 +1067,32 @@ export function modelsForAgent(
   const liveBySlug = new Map<string, ModelOption>();
   for (const m of advertised)
     liveBySlug.set(normalizeModelSlug(family, m.value), m);
-  return curated.map((c) => {
+  return curated.flatMap((c) => {
     const live = liveBySlug.get(normalizeModelSlug(family, c.value));
-    if (!live) return c;
-    return {
+    if (live?.selectable === false) return [];
+    if (c.liveRequired && (!live || live.selectable !== true)) return [];
+    if (!live) return [c];
+    return [{
       ...c,
+      label: live.label || c.label,
+      ...(live.description !== undefined
+        ? { description: live.description }
+        : {}),
+      ...(live.aliases !== undefined ? { aliases: live.aliases } : {}),
+      ...(live.parameters !== undefined
+        ? { parameters: live.parameters }
+        : {}),
+      ...(live.variants !== undefined ? { variants: live.variants } : {}),
+      ...(live.selectable !== undefined
+        ? { selectable: live.selectable }
+        : {}),
       ...(live.effortLevels !== undefined
         ? { effortLevels: live.effortLevels }
         : {}),
       ...(typeof live.supportsFast === "boolean"
         ? { supportsFast: live.supportsFast }
         : {}),
-    };
+    }];
   });
 }
 
@@ -1015,7 +1125,7 @@ export function modelEnvVarForAgent(
   agentId: string | null,
   initialize: InitializeResponse | null,
 ): string | undefined {
-  const meta = initialize?._meta as { modelEnvVar?: unknown } | undefined;
+  const meta = initialize?._meta;
   if (typeof meta?.modelEnvVar === "string") return meta.modelEnvVar;
   return MODEL_ENV_VARS[agentFamily(agentId)];
 }
@@ -1192,6 +1302,7 @@ export function envForChatSettings(args: {
     const cap = getClaudeBudgetCapUsd();
     if (cap != null) env[BUDGET_CAP_ENV_VAR] = String(cap);
     env[CLAUDE_IDLE_TIMEOUT_ENV_VAR] = String(getClaudeIdleTimeoutMinutes());
+    env.ZEROS_CLAUDE_AUTO_MEMORY = getClaudeAutoMemoryEnabled() ? "1" : "0";
   }
   return env;
 }

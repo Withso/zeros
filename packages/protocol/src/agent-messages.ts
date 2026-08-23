@@ -37,6 +37,10 @@ export interface AgentTextMessage {
    *  blocks). Renderer shows a distinct "redacted" badge with no
    *  expandable body. Other roles ignore this field. */
   redacted?: boolean;
+  /** Provider-reported duration for a thought message. Kept on the legacy
+   * role-based text shape because that remains the durable representation
+   * folded by applyUpdate. */
+  durationMs?: number;
   /** Text emitted by a subagent (Claude `Task` /
    *  `Agent` tool) carries the parent Task's toolCallId. The renderer
    *  routes it inside the SubagentCard rather than the top-level
@@ -484,6 +488,7 @@ export function applyUpdate(
         upd.messageId ?? undefined,
         upd.redacted ?? undefined,
         upd.parentToolId ?? undefined,
+        upd.durationMs ?? undefined,
       );
     case "tool_call": {
       const tc = upd as unknown as ToolCall & { sessionUpdate: "tool_call" };
@@ -583,6 +588,7 @@ function appendText(
   messageId: string | undefined,
   redacted?: boolean,
   parentToolId?: string,
+  durationMs?: number,
 ): AgentMessage[] {
   if (!content || content.type !== "text" || typeof content.text !== "string") {
     return messages;
@@ -616,6 +622,9 @@ function appendText(
         // blocks within a single thinking message and we want the
         // composite to render as redacted.
         ...(redacted ? { redacted: true } : {}),
+        ...(typeof durationMs === "number" && Number.isFinite(durationMs)
+          ? { durationMs: Math.max(0, durationMs) }
+          : {}),
       },
     ];
   }
@@ -631,6 +640,9 @@ function appendText(
       messageId,
       ...(redacted ? { redacted: true } : {}),
       ...(parentToolId ? { parentToolId } : {}),
+      ...(typeof durationMs === "number" && Number.isFinite(durationMs)
+        ? { durationMs: Math.max(0, durationMs) }
+        : {}),
     },
   ];
 }

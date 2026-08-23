@@ -94,6 +94,7 @@ import type {
   AgentAdapter,
   AgentBrowserUse,
   AgentAdapterContext,
+  AgentCapabilityPorts,
   AgentGatewayEvents,
   AgentGatewayOptions,
   ContentBlock,
@@ -109,6 +110,10 @@ import type {
 import type { AgentFilesystemTerritory } from "./types";
 import type { AccountDetails, EnrichedRegistryAgent } from "../types";
 import { AgentFailureError } from "./types";
+import {
+  advertiseAgentCapabilities,
+  resolveAgentCapabilityPorts,
+} from "./capabilities";
 import { dedupeMcpServers, resolveMcpServersForRepo } from "./mcp-registry";
 import {
   coerceProviderBinding,
@@ -122,6 +127,7 @@ import {
   type ExecutionBoundaryStatus,
 } from "@zeros/protocol/containment";
 import { redactSensitive } from "@zeros/protocol/scrub";
+import type { AgentProviderQuota } from "@zeros/protocol/agent-events";
 import {
   AdmissionCancelledError,
   type BoundaryRequest,
@@ -777,9 +783,7 @@ export function resolveAgentCwd(
  *  model-less first snapshot — otherwise the model pill is stuck on the
  *  bundled fallback and never reflects the user's real Cursor models. */
 export function shouldRepollInitialize(init: InitializeResponse): boolean {
-  const meta = init._meta as
-    | { modelsDynamic?: unknown; models?: unknown }
-    | undefined;
+  const meta = init._meta;
   return (
     !!meta?.modelsDynamic &&
     !(Array.isArray(meta.models) && meta.models.length > 0)
@@ -1791,9 +1795,7 @@ export class AgentGateway {
         ? [
             ...new Set([
               path.resolve(canonicalWorkspace),
-              ...additionalGitWorkspaceRoots.map((root) =>
-                path.resolve(root),
-              ),
+              ...additionalGitWorkspaceRoots.map((root) => path.resolve(root)),
               ...registeredCodeOwners,
             ]),
           ].sort((left, right) => left.localeCompare(right))
@@ -2966,8 +2968,10 @@ export class AgentGateway {
         let value: AccountDetails | null = null;
         try {
           const adapter = await this.adapterFor(m.id);
-          if (adapter.getAccountInfo) {
-            value = (await adapter.getAccountInfo({ liveOnly: true })) ?? null;
+          const getAccountInfo =
+            resolveAgentCapabilityPorts(adapter).account?.getAccountInfo;
+          if (getAccountInfo) {
+            value = (await getAccountInfo({ liveOnly: true })) ?? null;
           }
         } catch {
           // Decorative account metadata is not an authentication oracle.
@@ -3020,7 +3024,10 @@ export class AgentGateway {
     // the adapter's own cached object), so the re-poll is safe and self-
     // limits once `models` lands.
     if (cached && !shouldRepollInitialize(cached)) return cached;
-    const init = await adapter.initialize();
+    const init = advertiseAgentCapabilities(
+      adapter,
+      await adapter.initialize(),
+    );
     this.agentInitializes.set(agentId, init);
     return init;
   }
@@ -3048,6 +3055,8 @@ export class AgentGateway {
       adapter: AgentAdapter;
       cwd: string;
       env: Record<string, string>;
+      cliBinary?: string;
+      territory?: AgentFilesystemTerritory;
       executionBoundary: PreparedBoundary;
     }) => Promise<T>;
   }): Promise<T> {
@@ -3115,6 +3124,8 @@ export class AgentGateway {
           adapter,
           cwd,
           env,
+          cliBinary: spawn.cliBinary,
+          territory: territorySet.territory,
           executionBoundary: boundary,
         });
       },
@@ -3133,7 +3144,9 @@ export class AgentGateway {
       // validator. Preserve their cheap compatibility no-op without preparing
       // an otherwise unused provider boundary.
       const adapter = await this.adapterFor(agentId);
-      if (!adapter.validateApiKey) return { ok: null };
+      if (!resolveAgentCapabilityPorts(adapter).account?.validateApiKey) {
+        return { ok: null };
+      }
       const result = await this.runProviderOneShot({
         agentId,
         executionPrefix: "validate-key",
@@ -3144,8 +3157,11 @@ export class AgentGateway {
           env,
           executionBoundary,
         }) => {
-          if (!containedAdapter.validateApiKey) return { ok: null };
-          return containedAdapter.validateApiKey(apiKey, {
+          const validateApiKey =
+            resolveAgentCapabilityPorts(containedAdapter).account
+              ?.validateApiKey;
+          if (!validateApiKey) return { ok: null };
+          return validateApiKey(apiKey, {
             cwd,
             env,
             executionBoundary,
@@ -3181,7 +3197,9 @@ export class AgentGateway {
   ): Promise<{ title: string | null; error?: string }> {
     try {
       const adapter = await this.adapterFor(agentId);
-      if (!adapter.generateText) return { title: null };
+      const generateText =
+        resolveAgentCapabilityPorts(adapter).textGeneration?.generateText;
+      if (!generateText) return { title: null };
       const cwd = path.resolve(this.projectRoot);
       const env = applyUserProviderConfig(cwd, agentId, {
         env: completeAgentSpawnEnv(opts.env),
@@ -3209,13 +3227,13 @@ export class AgentGateway {
         cwd,
         cwd,
         territorySet.territory,
-      env,
-      adapter.agentId,
-      [],
-      territorySet.additionalRoots,
-      territorySet.additionalGitWorkspaceRoots,
-      false,
-    );
+        env,
+        adapter.agentId,
+        [],
+        territorySet.additionalRoots,
+        territorySet.additionalGitWorkspaceRoots,
+        false,
+      );
       const text = await this.withUtilityBoundary(
         adapter.agentId,
         "newSession",
@@ -3231,7 +3249,7 @@ export class AgentGateway {
             env,
             "newSession",
           );
-          return adapter.generateText!({
+          return generateText({
             ...opts,
             env,
             timeoutMs: 30_000,
@@ -3780,7 +3798,9 @@ export class AgentGateway {
       });
     }
     const adapter = await this.adapterFor(agentId);
-    if (!adapter.forkProviderBinding) {
+    const forkProviderBinding =
+      resolveAgentCapabilityPorts(adapter).conversation?.forkProviderBinding;
+    if (!forkProviderBinding) {
       throw new AgentFailureError({
         kind: "protocol-error",
         stage: "forkSession",
@@ -3878,7 +3898,7 @@ export class AgentGateway {
       result = await awaitAdapterStartup({
         agentId,
         stage: "forkSession",
-        operation: adapter.forkProviderBinding({
+        operation: forkProviderBinding({
           providerBinding,
           cwd,
           env: sessionEnv,
@@ -4249,12 +4269,15 @@ export class AgentGateway {
     agentId: string,
     sessionId: string,
     prompt: ContentBlock[],
+    turnId?: string,
   ): Promise<PromptResponse> {
     await this.awaitAdapterStartupSettled(sessionId);
     const adapter = this.adapterForSession(sessionId, agentId, {
       requireLiveRoute: true,
     });
-    if (adapter.updateBrowserUse) {
+    const updateBrowserUse =
+      resolveAgentCapabilityPorts(adapter).browser?.updateUse;
+    if (updateBrowserUse) {
       const cwd = this.executionToCwd.get(sessionId);
       if (cwd) {
         let enabled = false;
@@ -4275,7 +4298,7 @@ export class AgentGateway {
             }`,
           );
         }
-        await adapter.updateBrowserUse({
+        await updateBrowserUse({
           sessionId,
           ...(enabled
             ? { browserUse: { kind: "claude-agent-sdk" as const } }
@@ -4294,6 +4317,7 @@ export class AgentGateway {
     try {
       const { response } = await adapter.prompt({
         sessionId,
+        ...(turnId ? { turnId } : {}),
         prompt: outgoing,
       });
       // A clean prompt is the strongest possible signal that auth is
@@ -4342,7 +4366,9 @@ export class AgentGateway {
     taskId: string,
   ): Promise<void> {
     const adapter = this.adapterForSession(sessionId, agentId);
-    if (!adapter.stopBackgroundTask) {
+    const stopTask =
+      resolveAgentCapabilityPorts(adapter).backgroundWork?.stopTask;
+    if (!stopTask) {
       throw new AgentFailureError({
         kind: "protocol-error",
         message: `agent ${adapter.agentId} does not support stopping background tasks`,
@@ -4350,7 +4376,7 @@ export class AgentGateway {
         agentId: adapter.agentId,
       });
     }
-    await adapter.stopBackgroundTask({ sessionId, taskId });
+    await stopTask({ sessionId, taskId });
   }
 
   /** Inject a user message into the running turn (mid-turn steering). No
@@ -4366,10 +4392,11 @@ export class AgentGateway {
     const adapter = this.adapterForSession(sessionId, agentId, {
       requireLiveRoute: true,
     });
-    if (!adapter.steer) {
+    const steer = resolveAgentCapabilityPorts(adapter).turnControl?.steer;
+    if (!steer) {
       throw new Error(`agent ${adapter.agentId} does not support steering`);
     }
-    await adapter.steer({ sessionId, prompt });
+    await steer({ sessionId, prompt });
   }
 
   async setMode(
@@ -4378,10 +4405,11 @@ export class AgentGateway {
     modeId: string,
   ): Promise<void> {
     const adapter = this.adapterForSession(sessionId, agentId);
-    if (!adapter.setMode) {
+    const setMode = resolveAgentCapabilityPorts(adapter).turnControl?.setMode;
+    if (!setMode) {
       throw new Error(`agent ${adapter.agentId} does not support set-mode`);
     }
-    await adapter.setMode({ sessionId, modeId });
+    await setMode({ sessionId, modeId });
   }
 
   /** Run a real context compaction on a live session through Codex
@@ -4390,10 +4418,12 @@ export class AgentGateway {
    *  triggers it. */
   async compactContext(agentId: string, sessionId: string): Promise<void> {
     const adapter = this.adapterForSession(sessionId, agentId);
-    if (!adapter.compactContext) {
+    const compactContext =
+      resolveAgentCapabilityPorts(adapter).turnControl?.compactContext;
+    if (!compactContext) {
       throw new Error(`agent ${adapter.agentId} does not support compaction`);
     }
-    await adapter.compactContext({ sessionId });
+    await compactContext({ sessionId });
   }
 
   /** Change a live session's model (no rebuild). No-op for adapters that
@@ -4405,8 +4435,10 @@ export class AgentGateway {
     model: string,
   ): Promise<void> {
     const adapter = this.adapterForSession(sessionId, agentId);
-    if (!adapter.setModel) return;
-    await adapter.setModel({ sessionId, model });
+    const setModel =
+      resolveAgentCapabilityPorts(adapter).runtimeConfiguration?.setModel;
+    if (!setModel) return;
+    await setModel({ sessionId, model });
   }
 
   /** Apply a mid-session config change (effort / fast / ultracode /
@@ -4420,8 +4452,175 @@ export class AgentGateway {
     env: Record<string, string>,
   ): Promise<void> {
     const adapter = this.adapterForSession(sessionId, agentId);
-    if (!adapter.updateConfig) return;
-    await adapter.updateConfig({ sessionId, env });
+    const updateConfig =
+      resolveAgentCapabilityPorts(adapter).runtimeConfiguration?.updateConfig;
+    if (!updateConfig) return;
+    await updateConfig({ sessionId, env });
+  }
+
+  async readMemorySettings(agentId: string) {
+    return this.runProviderOneShot({
+      agentId,
+      executionPrefix: "memory-read",
+      operation: ({ adapter, cwd, env, cliBinary, executionBoundary }) => {
+        const memory = resolveAgentCapabilityPorts(adapter).memory;
+        if (!memory) {
+          throw new Error(
+            `agent ${adapter.agentId} does not support memory settings`,
+          );
+        }
+        return memory.readSettings({
+          cwd,
+          env,
+          cliBinary,
+          executionBoundary,
+        });
+      },
+    });
+  }
+
+  async readConfigurationProvenance(agentId: string, cwd?: string) {
+    return this.runProviderOneShot({
+      agentId,
+      cwd,
+      executionPrefix: "configuration-provenance",
+      operation: ({
+        adapter,
+        cwd: resolvedCwd,
+        env,
+        cliBinary,
+        territory,
+        executionBoundary,
+      }) => {
+        const configuration =
+          resolveAgentCapabilityPorts(adapter).configuration;
+        if (!configuration) {
+          throw new Error(
+            `agent ${adapter.agentId} does not support configuration provenance`,
+          );
+        }
+        return configuration.readProvenance({
+          cwd: resolvedCwd,
+          env,
+          cliBinary,
+          territory,
+          executionBoundary,
+        });
+      },
+    });
+  }
+
+  async readProviderQuota(agentId: string): Promise<AgentProviderQuota | null> {
+    return this.runProviderOneShot({
+      agentId,
+      executionPrefix: "provider-quota",
+      operation: async ({
+        adapter,
+        cwd,
+        env,
+        cliBinary,
+        executionBoundary,
+      }) => {
+        const readQuota = resolveAgentCapabilityPorts(adapter).account?.readQuota;
+        if (!readQuota) return null;
+        return await readQuota({ cwd, env, cliBinary, executionBoundary });
+      },
+    });
+  }
+
+  async updateMemorySettings(
+    agentId: string,
+    settings: Parameters<
+      NonNullable<AgentCapabilityPorts["memory"]>["updateSettings"]
+    >[0]["settings"],
+  ) {
+    return this.runProviderOneShot({
+      agentId,
+      executionPrefix: "memory-update",
+      operation: ({ adapter, cwd, env, cliBinary, executionBoundary }) => {
+        const memory = resolveAgentCapabilityPorts(adapter).memory;
+        if (!memory) {
+          throw new Error(
+            `agent ${adapter.agentId} does not support memory settings`,
+          );
+        }
+        return memory.updateSettings({
+          cwd,
+          env,
+          cliBinary,
+          executionBoundary,
+          settings,
+        });
+      },
+    });
+  }
+
+  async resetMemory(agentId: string): Promise<void> {
+    await this.runProviderOneShot({
+      agentId,
+      executionPrefix: "memory-reset",
+      operation: async ({
+        adapter,
+        cwd,
+        env,
+        cliBinary,
+        executionBoundary,
+      }) => {
+        const memory = resolveAgentCapabilityPorts(adapter).memory;
+        if (!memory) {
+          throw new Error(
+            `agent ${adapter.agentId} does not support memory reset`,
+          );
+        }
+        await memory.reset({ cwd, env, cliBinary, executionBoundary });
+      },
+    });
+  }
+
+  async getGoal(agentId: string, sessionId: string) {
+    const adapter = this.adapterForSession(sessionId, agentId);
+    const goal = resolveAgentCapabilityPorts(adapter).goal;
+    if (!goal)
+      throw new Error(`agent ${adapter.agentId} does not support goals`);
+    return goal.get({ sessionId });
+  }
+
+  async setGoal(
+    agentId: string,
+    sessionId: string,
+    update: Parameters<
+      NonNullable<AgentCapabilityPorts["goal"]>["set"]
+    >[0]["update"],
+  ) {
+    const adapter = this.adapterForSession(sessionId, agentId);
+    const goal = resolveAgentCapabilityPorts(adapter).goal;
+    if (!goal)
+      throw new Error(`agent ${adapter.agentId} does not support goals`);
+    return goal.set({ sessionId, update });
+  }
+
+  async clearGoal(agentId: string, sessionId: string): Promise<void> {
+    const adapter = this.adapterForSession(sessionId, agentId);
+    const goal = resolveAgentCapabilityPorts(adapter).goal;
+    if (!goal)
+      throw new Error(`agent ${adapter.agentId} does not support goals`);
+    await goal.clear({ sessionId });
+  }
+
+  async retryDeniedAction(
+    agentId: string,
+    sessionId: string,
+    retryId: string,
+  ): Promise<void> {
+    const adapter = this.adapterForSession(sessionId, agentId);
+    const retry =
+      resolveAgentCapabilityPorts(adapter).safety?.retryDeniedAction;
+    if (!retry) {
+      throw new Error(
+        `agent ${adapter.agentId} does not support denied-action retry`,
+      );
+    }
+    await retry({ sessionId, retryId });
   }
 
   answerPermission(
@@ -4432,7 +4631,10 @@ export class AgentGateway {
     // pending. Fan out rather than tracking a permissionId→agent map
     // — simpler and avoids a second source of truth.
     for (const adapter of this.adapters.values()) {
-      adapter.respondToPermission({ permissionId, response });
+      resolveAgentCapabilityPorts(adapter).interaction?.respondToPermission?.({
+        permissionId,
+        response,
+      });
     }
   }
 
@@ -4449,7 +4651,11 @@ export class AgentGateway {
     let handled = false;
     for (const adapter of this.adapters.values()) {
       if (
-        adapter.respondToQuestion?.({ questionId, response, nativeRequestId })
+        resolveAgentCapabilityPorts(adapter).interaction?.respondToQuestion?.({
+          questionId,
+          response,
+          nativeRequestId,
+        })
       ) {
         handled = true;
       }

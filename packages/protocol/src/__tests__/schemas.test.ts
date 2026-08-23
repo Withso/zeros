@@ -274,6 +274,184 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
     ).toBe("AGENT_QUESTION_RESPONSE");
   });
 
+  it("validates the narrow agent-memory settings protocol", () => {
+    const browser = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...browser,
+        type: "AGENT_MEMORY_SETTINGS_READ",
+        agentId: "codex",
+      }).type,
+    ).toBe("AGENT_MEMORY_SETTINGS_READ");
+    expect(
+      parseBridgeMessage({
+        ...browser,
+        type: "AGENT_MEMORY_SETTINGS_UPDATE",
+        agentId: "codex",
+        settings: {
+          localMemoriesEnabled: true,
+          toolAssistedGenerationEnabled: false,
+        },
+      }).type,
+    ).toBe("AGENT_MEMORY_SETTINGS_UPDATE");
+    expect(
+      parseBridgeMessage({
+        ...browser,
+        type: "AGENT_MEMORY_RESET",
+        agentId: "codex",
+      }).type,
+    ).toBe("AGENT_MEMORY_RESET");
+
+    for (const malformed of [
+      { type: "AGENT_MEMORY_SETTINGS_READ", agentId: "" },
+      {
+        type: "AGENT_MEMORY_SETTINGS_UPDATE",
+        agentId: "codex",
+        settings: {},
+      },
+      {
+        type: "AGENT_MEMORY_SETTINGS_UPDATE",
+        agentId: "codex",
+        settings: { localMemoriesEnabled: "yes" },
+      },
+      {
+        type: "AGENT_MEMORY_SETTINGS_UPDATE",
+        agentId: "codex",
+        settings: { localMemoriesEnabled: true, arbitrary: true },
+      },
+    ]) {
+      expect(() => parseBridgeMessage({ ...browser, ...malformed })).toThrow();
+    }
+  });
+
+  it("validates read-only provider diagnostics without exposing native RPC", () => {
+    const browser = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...browser,
+        type: "AGENT_CONFIGURATION_PROVENANCE_READ",
+        agentId: "cursor",
+        cwd: "/workspace/project",
+      }).type,
+    ).toBe("AGENT_CONFIGURATION_PROVENANCE_READ");
+    expect(
+      parseBridgeMessage({
+        ...browser,
+        type: "AGENT_PROVIDER_QUOTA_READ",
+        agentId: "codex",
+      }).type,
+    ).toBe("AGENT_PROVIDER_QUOTA_READ");
+
+    for (const malformed of [
+      {
+        type: "AGENT_CONFIGURATION_PROVENANCE_READ",
+        agentId: "cursor",
+        cwd: "",
+      },
+      { type: "AGENT_PROVIDER_QUOTA_READ", agentId: "" },
+    ]) {
+      expect(() => parseBridgeMessage({ ...browser, ...malformed })).toThrow();
+    }
+
+    // This is deliberately a pair of narrow product reads. A native operation
+    // name/params escape hatch must remain an unknown bridge message.
+    expect(() =>
+      parseBridgeMessage({
+        ...browser,
+        type: "AGENT_PROVIDER_CAPABILITY_REQUEST",
+        agentId: "codex",
+        operation: "config/read",
+        params: { includeLayers: true },
+      }),
+    ).toThrow();
+  });
+
+  it("validates goal and one-shot safety actions at the wire boundary", () => {
+    const browser = { ...base, source: "browser" as const };
+    expect(
+      parseBridgeMessage({
+        ...browser,
+        type: "AGENT_GOAL_SET",
+        agentId: "codex",
+        sessionId: "session-1",
+        update: {
+          objective: "Ship Phase 3",
+          status: "active",
+          tokenBudget: null,
+        },
+      }).type,
+    ).toBe("AGENT_GOAL_SET");
+    expect(
+      parseBridgeMessage({
+        ...browser,
+        type: "AGENT_GOAL_CLEAR",
+        agentId: "codex",
+        sessionId: "session-1",
+      }).type,
+    ).toBe("AGENT_GOAL_CLEAR");
+    expect(
+      parseBridgeMessage({
+        ...browser,
+        type: "AGENT_RETRY_SAFETY_REVIEW",
+        agentId: "codex",
+        sessionId: "session-1",
+        retryId: "opaque-retry-1",
+      }).type,
+    ).toBe("AGENT_RETRY_SAFETY_REVIEW");
+
+    for (const malformed of [
+      {
+        type: "AGENT_GOAL_SET",
+        agentId: "codex",
+        sessionId: "session-1",
+        update: {},
+      },
+      {
+        type: "AGENT_GOAL_SET",
+        agentId: "codex",
+        sessionId: "session-1",
+        update: { objective: "   " },
+      },
+      {
+        type: "AGENT_GOAL_SET",
+        agentId: "codex",
+        sessionId: "session-1",
+        update: { objective: "x".repeat(4_001) },
+      },
+      {
+        type: "AGENT_GOAL_SET",
+        agentId: "codex",
+        sessionId: "session-1",
+        update: { status: "running" },
+      },
+      {
+        type: "AGENT_GOAL_SET",
+        agentId: "codex",
+        sessionId: "session-1",
+        update: { tokenBudget: 0 },
+      },
+      {
+        type: "AGENT_GOAL_SET",
+        agentId: "codex",
+        sessionId: "session-1",
+        update: { status: "paused", nativeMethod: "thread/goal/set" },
+      },
+      {
+        type: "AGENT_GOAL_CLEAR",
+        agentId: "codex",
+        sessionId: "",
+      },
+      {
+        type: "AGENT_RETRY_SAFETY_REVIEW",
+        agentId: "codex",
+        sessionId: "session-1",
+        retryId: "",
+      },
+    ]) {
+      expect(() => parseBridgeMessage({ ...browser, ...malformed })).toThrow();
+    }
+  });
+
   it("validates session-spawn environment maps at the wire boundary", () => {
     const b = { ...base, source: "browser" as const };
     expect(

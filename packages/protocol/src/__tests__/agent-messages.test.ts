@@ -106,6 +106,48 @@ describe("applyUpdate — shared agent-message coalescer", () => {
     expect((msgs[0] as AgentTextMessage).messageId).toBe("u1");
     expect((msgs[0] as AgentTextMessage).text).toBe("hello");
   });
+
+  it("does not fold ephemeral safety retry ids into durable messages", () => {
+    const before: AgentMessage[] = [];
+    const after = applyUpdate(before, {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "safety_review_retry_available",
+        toolCallId: "review-1",
+        retryId: "opaque-retry",
+      },
+    });
+    expect(after).toBe(before);
+  });
+
+  it("coalesces a duration-only thinking completion onto the existing row", () => {
+    let msgs: AgentMessage[] = [];
+    msgs = applyUpdate(msgs, {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "checking" },
+        messageId: "thought-1",
+      },
+    });
+    msgs = applyUpdate(msgs, {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "" },
+        messageId: "thought-1",
+        durationMs: 2_400,
+      },
+    });
+
+    expect(msgs).toHaveLength(1);
+    expect(msgs[0]).toMatchObject({
+      kind: "text",
+      role: "thought",
+      text: "checking",
+      durationMs: 2_400,
+    });
+  });
 });
 
 // Question-record durability (2026-07-04): the renderer stamps a resolution

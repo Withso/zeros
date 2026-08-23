@@ -79,6 +79,10 @@ export interface RendererContext {
   respondToPermission: (
     response: import("../../../platform/bridge/agent-events").RequestPermissionResponse,
   ) => void;
+  /** Retry one engine-retained denied safety action by opaque id. */
+  retrySafetyReview: (retryId: string) => Promise<void>;
+  /** Ephemeral retry ids keyed by the durable safety-review tool row. */
+  safetyReviewRetries?: Readonly<Record<string, string>>;
   /** Record a sticky "Always for X" rule before
    *  responding. Inline permission cluster fires this when the user
    *  picks an `allow_always` / `reject_always` option so future

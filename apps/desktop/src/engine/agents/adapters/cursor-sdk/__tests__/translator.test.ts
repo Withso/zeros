@@ -40,10 +40,211 @@ describe("CursorSdkTranslator", () => {
 
   it("maps thinking to agent_thought_chunk", () => {
     const { t, out } = capture();
-    t.feed({ type: "thinking", text: "pondering" });
+    t.feed({
+      type: "thinking",
+      text: "pondering",
+      thinking_duration_ms: 1_250,
+    });
     expect(updates(out)[0]).toMatchObject({
       sessionUpdate: "agent_thought_chunk",
+      durationMs: 1_250,
     });
+  });
+
+  it("uses onDelta/onStep as an ordered source without duplicating the SDK stream", () => {
+    const { t, out } = capture();
+    t.feedDelta({ type: "text-delta", text: "Hello" });
+    t.feedStep({
+      type: "assistantMessage",
+      message: { text: "Hello" },
+    });
+    // The ordinary SDK stream still carries a completed assistant message.
+    // Once native callbacks have supplied this category, it is a replay and
+    // must not append the answer a second time.
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "Hello" }],
+      },
+    });
+
+    expect(
+      updates(out).filter((u) => u.sessionUpdate === "agent_message_chunk"),
+    ).toHaveLength(1);
+  });
+
+  it("retains every completed callback step when a runtime omits deltas", () => {
+    const { t, out } = capture();
+    t.feedStep({
+      type: "assistantMessage",
+      message: { text: "first answer" },
+    });
+    t.feedStep({
+      type: "assistantMessage",
+      message: { text: "second answer" },
+    });
+    t.feedStep({
+      type: "thinkingMessage",
+      message: { text: "first thought", thinkingDurationMs: 10 },
+    });
+    t.feedStep({
+      type: "thinkingMessage",
+      message: { text: "second thought", thinkingDurationMs: 20 },
+    });
+    t.feedStep({
+      type: "toolCall",
+      message: {
+        type: "readToolCall",
+        args: { path: "a.ts" },
+        result: { success: { content: "a" } },
+      },
+    });
+    t.feedStep({
+      type: "toolCall",
+      message: {
+        type: "readToolCall",
+        args: { path: "b.ts" },
+        result: { success: { content: "b" } },
+      },
+    });
+
+    expect(
+      updates(out)
+        .filter((update) => update.sessionUpdate === "agent_message_chunk")
+        .map(
+          (update) =>
+            (update.content as { type: "text"; text: string }).text,
+        ),
+    ).toEqual(["first answer", "second answer"]);
+    expect(
+      updates(out)
+        .filter((update) => update.sessionUpdate === "agent_thought_chunk")
+        .map(
+          (update) =>
+            (update.content as { type: "text"; text: string }).text,
+        ),
+    ).toEqual(["first thought", "second thought"]);
+    expect(
+      updates(out).filter((update) => update.sessionUpdate === "tool_call"),
+    ).toHaveLength(2);
+  });
+
+  it("suppresses only the completed stream messages mirrored by callback steps", () => {
+    const { t, out } = capture();
+    t.feedStep({
+      type: "assistantMessage",
+      message: { text: "from callback" },
+    });
+    t.feed({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "from callback" },
+          { type: "text", text: "stream only" },
+        ],
+      },
+    });
+    t.feedStep({
+      type: "thinkingMessage",
+      message: { text: "callback thought", thinkingDurationMs: 10 },
+    });
+    t.feed({
+      type: "thinking",
+      text: "callback thought",
+      thinking_duration_ms: 10,
+    });
+    t.feed({ type: "thinking", text: "stream thought" });
+
+    const callbackTool = {
+      type: "readToolCall",
+      args: { path: "a.ts" },
+      result: { success: { content: "a" } },
+    };
+    t.feedStep({ type: "toolCall", message: callbackTool });
+    t.feed({
+      type: "tool_call",
+      call_id: "stream-mirror",
+      name: callbackTool.type,
+      status: "completed",
+      args: callbackTool.args,
+      result: callbackTool.result,
+    });
+    t.feed({
+      type: "tool_call",
+      call_id: "stream-only",
+      name: "readToolCall",
+      status: "completed",
+      args: { path: "b.ts" },
+      result: { success: { content: "b" } },
+    });
+
+    expect(
+      updates(out)
+        .filter((update) => update.sessionUpdate === "agent_message_chunk")
+        .map(
+          (update) =>
+            (update.content as { type: "text"; text: string }).text,
+        ),
+    ).toEqual(["from callback", "stream only"]);
+    expect(
+      updates(out)
+        .filter((update) => update.sessionUpdate === "agent_thought_chunk")
+        .map(
+          (update) =>
+            (update.content as { type: "text"; text: string }).text,
+        ),
+    ).toEqual(["callback thought", "stream thought"]);
+    expect(
+      updates(out).filter((update) => update.sessionUpdate === "tool_call"),
+    ).toHaveLength(2);
+  });
+
+  it("projects callback thinking duration onto the native thinking row", () => {
+    const { t, out } = capture();
+    t.feedDelta({ type: "thinking-delta", text: "checking" });
+    t.feedDelta({
+      type: "thinking-completed",
+      thinkingDurationMs: 2_400,
+    });
+
+    expect(updates(out)).toEqual([
+      expect.objectContaining({ sessionUpdate: "agent_thought_chunk" }),
+      expect.objectContaining({
+        sessionUpdate: "agent_thought_chunk",
+        durationMs: 2_400,
+      }),
+    ]);
+  });
+
+  it("updates one live tool card as callback arguments become complete", () => {
+    const { t, out } = capture();
+    t.feedDelta({
+      type: "tool-call-started",
+      callId: "native-1",
+      toolCall: { type: "readToolCall", args: { path: "a" } },
+    });
+    t.feedDelta({
+      type: "partial-tool-call",
+      callId: "native-1",
+      toolCall: { type: "readToolCall", args: { path: "app.ts" } },
+    });
+
+    expect(updates(out)).toEqual([
+      expect.objectContaining({
+        sessionUpdate: "tool_call",
+        status: "in_progress",
+      }),
+      expect.objectContaining({
+        sessionUpdate: "tool_call_update",
+        status: "in_progress",
+        rawInput: { path: "app.ts" },
+      }),
+    ]);
+    expect((updates(out)[0] as { toolCallId: string }).toolCallId).toBe(
+      (updates(out)[1] as { toolCallId: string }).toolCallId,
+    );
   });
 
   it("opens an in_progress card on tool_call running, then completes it", () => {
@@ -99,6 +300,143 @@ describe("CursorSdkTranslator", () => {
     expect(u[1]).toMatchObject({
       sessionUpdate: "tool_call_update",
       status: "failed",
+    });
+  });
+
+  it("renders createPlan and updateTodos as ordinary tool rows, not a Zeros checklist", () => {
+    const { t, out } = capture();
+    t.feed({
+      type: "tool_call",
+      call_id: "plan-1",
+      name: "createPlan",
+      status: "completed",
+      args: { plan: "1. Audit\n2. Fix" },
+      result: { status: "success", value: {} },
+    });
+    t.feed({
+      type: "tool_call",
+      call_id: "todo-1",
+      name: "updateTodos",
+      status: "completed",
+      args: { todos: [{ content: "Audit", status: "completed" }] },
+      result: {
+        status: "success",
+        value: {
+          todos: [{ content: "Audit", status: "completed" }],
+          totalCount: 1,
+        },
+      },
+    });
+
+    const toolRows = updates(out).filter(
+      (u) => u.sessionUpdate === "tool_call",
+    );
+    expect(toolRows).toEqual([
+      expect.objectContaining({
+        title: "Creating plan",
+        kind: "other",
+        status: "completed",
+      }),
+      expect.objectContaining({
+        title: "Updating todos",
+        kind: "other",
+        status: "completed",
+      }),
+    ]);
+    expect(
+      updates(out).some(
+        (u) => (u as { sessionUpdate?: string }).sessionUpdate === "plan_update",
+      ),
+    ).toBe(false);
+  });
+
+  it("surfaces generated images without persisting imageData in raw JSON", () => {
+    const { t, out } = capture();
+    const imageData = "aGVsbG8=";
+    t.feed({
+      type: "tool_call",
+      call_id: "image-1",
+      name: "generateImage",
+      status: "completed",
+      args: { description: "A small blue square", filePath: "/tmp/blue.png" },
+      result: {
+        status: "success",
+        value: { filePath: "/tmp/blue.png", imageData },
+      },
+    });
+
+    const row = updates(out)[0] as unknown as {
+      title: string;
+      rawOutput: unknown;
+      content?: Array<{ content?: { type?: string; data?: string } }>;
+    };
+    expect(row.title).toBe("Generating image");
+    expect(JSON.stringify(row.rawOutput)).not.toContain(imageData);
+    expect(row.rawOutput).toMatchObject({
+      status: "success",
+      value: { fileName: "blue.png" },
+    });
+    expect(row.content?.[0]?.content).toMatchObject({
+      type: "image",
+      data: imageData,
+    });
+  });
+
+  it("keeps screen recordings inspectable while redacting provider-local paths", () => {
+    const { t, out } = capture();
+    t.feed({
+      type: "tool_call",
+      call_id: "screen-1",
+      name: "recordScreen",
+      status: "completed",
+      args: { mode: "SAVE_RECORDING" },
+      result: {
+        status: "success",
+        value: {
+          path: "/private/provider/capture.mov",
+          recordingDurationMs: 3_400,
+          wasPriorRecordingCancelled: false,
+        },
+      },
+    });
+
+    expect(updates(out)[0]).toMatchObject({
+      title: "Saving screen recording",
+      kind: "other",
+      rawOutput: {
+        status: "success",
+        value: {
+          fileName: "capture.mov",
+          recordingDurationMs: 3_400,
+          wasPriorRecordingCancelled: false,
+        },
+      },
+    });
+    expect(JSON.stringify(updates(out)[0])).not.toContain("/private/provider");
+  });
+
+  it("preserves Cursor's truncation flags as safe inspectable metadata", () => {
+    const { t, out } = capture();
+    t.feed({
+      type: "tool_call",
+      call_id: "truncated-1",
+      name: "read",
+      status: "completed",
+      args: { path: "large.log" },
+      result: { status: "success", value: { content: "tail" } },
+      truncated: { args: true, result: true },
+    });
+
+    expect(updates(out)[0]).toMatchObject({
+      rawInput: {
+        path: "large.log",
+        zerosTransport: { truncated: true },
+      },
+      rawOutput: {
+        status: "success",
+        value: { content: "tail" },
+        zerosTransport: { truncated: true },
+      },
     });
   });
 

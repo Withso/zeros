@@ -633,6 +633,52 @@ describe("codex app-server initiated requests", () => {
     await runtime.dispose();
   });
 
+  it("starts an inline working-tree review and waits for its turn completion", async () => {
+    const fake = createFakeProcess();
+    harness.proc = fake.proc;
+    const runtime = await bootCodexAppServerRuntime({
+      cwd: "/tmp/project",
+      clientInfo: { name: "Zeros-test", version: "0.0.0" },
+    });
+
+    const review = runtime.runReview({
+      threadId: "thread-1",
+      delivery: "inline",
+      target: { type: "uncommittedChanges" },
+    });
+    const start = await fake.waitFor(
+      (frame) => frame.method === "review/start" && frame.id != null,
+    );
+    expect(start.params).toEqual({
+      threadId: "thread-1",
+      delivery: "inline",
+      target: { type: "uncommittedChanges" },
+    });
+    fake.send({
+      jsonrpc: "2.0",
+      id: start.id,
+      result: {
+        turn: { id: "review-turn-1", status: "inProgress" },
+        reviewThreadId: "thread-1",
+      },
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    fake.send({
+      jsonrpc: "2.0",
+      method: "turn/completed",
+      params: {
+        threadId: "thread-1",
+        turn: { id: "review-turn-1", status: "completed" },
+      },
+    });
+
+    await expect(review).resolves.toMatchObject({
+      turnId: "review-turn-1",
+      status: "completed",
+    });
+    await runtime.dispose();
+  });
+
   it("does not lose an unscoped terminal error that races the turn/start acknowledgement", async () => {
     const fake = createFakeProcess();
     harness.proc = fake.proc;

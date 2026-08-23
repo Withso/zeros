@@ -101,8 +101,7 @@ export function useChatSession(
       ),
     cancel: () => ctx.cancel(chatId),
     stopBackgroundTask,
-    openBoundaryPort: (portId: string) =>
-      ctx.openBoundaryPort(chatId, portId),
+    openBoundaryPort: (portId: string) => ctx.openBoundaryPort(chatId, portId),
     respondToPermission: (response) =>
       ctx.respondToPermission(chatId, response),
     respondToQuestion: (response) => ctx.respondToQuestion(chatId, response),
@@ -110,6 +109,9 @@ export function useChatSession(
     setModel: (model: string) => ctx.setModel(chatId, model),
     compactContext: () => ctx.compactContext(chatId),
     updateConfig: () => ctx.updateConfig(chatId),
+    setGoal: (update) => ctx.setGoal(chatId, update),
+    clearGoal: () => ctx.clearGoal(chatId),
+    retrySafetyReview: (retryId) => ctx.retrySafetyReview(chatId, retryId),
     removeQueued: (messageId: string) => ctx.removeQueued(chatId, messageId),
     editQueued: (messageId: string, payload: QueuedEditPayload) =>
       ctx.editQueued(chatId, messageId, payload),
