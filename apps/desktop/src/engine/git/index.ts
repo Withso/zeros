@@ -203,11 +203,13 @@ export type {
   ChangeLineCounts,
   ChangePathFilter,
   ConflictState,
+  DiffFileSummary,
   DiffMode,
   DiffOptions,
   DiffResult,
   LogOptions,
   ShowCommitResult,
+  StatusOptions,
   StatusResult,
 } from "./diff";
 

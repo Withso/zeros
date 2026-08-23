@@ -115,8 +115,11 @@ import {
 import { requestCloudGithubCredentialRefresh } from "./git/cloud-credential-refresh-request";
 import {
   AgentGateway,
+  agentTerritoryIdentity,
+  isProtectedManagedWorkspacePath,
   previewCodeAgentTerritory,
   previewRegisteredCodeWriteAuthorityIdentity,
+  registeredCodeTerritorySnapshot,
   resolveCodeAgentTerritory,
 } from "./agents/gateway";
 import { ZsrExecutionBoundary } from "./agents/containment/zsr-boundary";
@@ -3039,73 +3042,103 @@ export class ZerosEngine {
             throw error;
           }
         }
-        for (const workspace of targets) {
-          if (workspace.archivedAt != null || !fs.existsSync(workspace.path)) {
-            continue;
+        type ReconcileTarget = (typeof targets)[number];
+        const publish = async (workspace: ReconcileTarget) => {
+          if (source === "git-refs") {
+            await reconcileDesignDirAfterExternalGit(workspace);
           }
-          await withDesignWorkspaceMutation(workspace.path, async () => {
-            let prospective: Awaited<
-              ReturnType<typeof previewCodeAgentTerritory>
-            >;
-            try {
-              prospective = await previewCodeAgentTerritory({
-                cwd: workspace.path,
-                workspaceRoot: workspace.path,
-                repoRoot: workspace.repoRoot,
-              });
-            } catch (error) {
-              // A new invalid pointer, symlink, or hard-link alias is itself an
-              // authority change. Retire anything already running, then let the
-              // territory reconcile keep process admission fail-closed.
-              // A session or repository task owned by any other workspace has
-              // this registered owner in its immutable deny union. There is no
-              // meaningful owner-local fast path once preview becomes invalid.
-              await this.withGlobalDesignTerritoryTransition(async () => {
-                await fenceWorkspaceDesignDirectoryIfPresent(workspace);
-              });
-              throw error;
-            }
-
-            const changed =
-              // An agent admission that crossed the old gate has not yet
-              // published a session contribution for workspaceTerritoryChanged
-              // to compare. Drain it conservatively so it cannot spawn with a
-              // map that became stale between its final preview and publish.
-              this.globalDesignAuthorityStarts.size > 0 ||
-              (pooledUtilityAuthorityActive &&
-                this.agents.pooledUtilityRegisteredDesignAuthorityChanged(
-                  registeredAuthorityIdentity,
-                )) ||
-              this.agents.workspaceTerritoryChanged(
-                workspace.id,
-                workspace.path,
-                prospective,
-              ) ||
-              (repositoryTasksActive &&
-                (this.setup.registeredDesignAuthorityChanged(
-                  registeredAuthorityIdentity,
-                ) ||
-                  this.runs.registeredDesignAuthorityChanged(
-                    registeredAuthorityIdentity,
-                  )));
-            const publish = async () => {
-              if (source === "git-refs") {
-                await reconcileDesignDirAfterExternalGit(workspace);
-              }
-              await resolveCodeAgentTerritory({
-                cwd: workspace.path,
-                workspaceRoot: workspace.path,
-                repoRoot: workspace.repoRoot,
-              });
-              await fenceWorkspaceDesignDirectoryIfPresent(workspace);
-            };
-            if (!changed) {
-              await publish();
-              return;
-            }
-            await this.withGlobalDesignTerritoryTransition(publish);
+          await resolveCodeAgentTerritory({
+            cwd: workspace.path,
+            workspaceRoot: workspace.path,
+            repoRoot: workspace.repoRoot,
           });
-        }
+          await fenceWorkspaceDesignDirectoryIfPresent(workspace);
+        };
+        const preview = (workspace: ReconcileTarget) =>
+          previewCodeAgentTerritory({
+            cwd: workspace.path,
+            workspaceRoot: workspace.path,
+            repoRoot: workspace.repoRoot,
+          });
+        const reconcileTargetsFrom = async (
+          startIndex: number,
+          globalGateHeld: boolean,
+        ): Promise<void> => {
+          for (let index = startIndex; index < targets.length; index += 1) {
+            const workspace = targets[index]!;
+            if (
+              workspace.archivedAt != null ||
+              !fs.existsSync(workspace.path)
+            ) {
+              continue;
+            }
+            const needsTransition = await withDesignWorkspaceMutation(
+              workspace.path,
+              async (): Promise<boolean> => {
+                let prospective: Awaited<
+                  ReturnType<typeof previewCodeAgentTerritory>
+                >;
+                try {
+                  prospective = await preview(workspace);
+                } catch (error) {
+                  // A new invalid pointer, symlink, or hard-link alias is itself
+                  // an authority change. Request the global gate without holding
+                  // this owner-local lock, then re-read and fence the exact state
+                  // under that gate before surfacing a persistent failure.
+                  if (!globalGateHeld) return true;
+                  await fenceWorkspaceDesignDirectoryIfPresent(workspace);
+                  throw error;
+                }
+
+                const changed =
+                  !globalGateHeld &&
+                  ((pooledUtilityAuthorityActive &&
+                    this.agents.pooledUtilityRegisteredDesignAuthorityChanged(
+                      registeredAuthorityIdentity,
+                    )) ||
+                    (pooledUtilityAuthorityActive &&
+                      this.agents.pooledUtilityWorkspaceTerritoryChanged(
+                        workspace.path,
+                        prospective,
+                      )) ||
+                    this.agents.workspaceTerritoryChanged(
+                      workspace.id,
+                      workspace.path,
+                      prospective,
+                    ) ||
+                    (repositoryTasksActive &&
+                      (this.setup.registeredDesignAuthorityChanged(
+                        registeredAuthorityIdentity,
+                      ) ||
+                        this.setup.workspaceTerritoryChanged(
+                          workspace.path,
+                          agentTerritoryIdentity(prospective),
+                        ) ||
+                        this.runs.registeredDesignAuthorityChanged(
+                          registeredAuthorityIdentity,
+                        ) ||
+                        this.runs.workspaceTerritoryChanged(
+                          workspace.path,
+                          agentTerritoryIdentity(prospective),
+                        ))));
+                if (changed) return true;
+                await publish(workspace);
+                return false;
+              },
+            );
+            if (!needsTransition) continue;
+
+            // Every registered owner contributes to one immutable app-wide
+            // deny union. Keep the global gate closed through the rest of this
+            // batch: releasing it after each owner lets the same workspace-start
+            // retry enter between owners and exhaust its bounded retry budget.
+            await this.withGlobalDesignTerritoryTransition(() =>
+              reconcileTargetsFrom(index, true),
+            );
+            return;
+          }
+        };
+        await reconcileTargetsFrom(0, false);
       })
       .catch((error) => {
         console.warn(
@@ -6867,8 +6900,39 @@ export class ZerosEngine {
         );
       const firstDesignWriteTarget =
         designInitTarget && !designDirExistedBefore ? designInitTarget : null;
+      const stableManagedWorkspaceCreate = (() => {
+        if (
+          (op !== "workspace.create" &&
+            op !== "workspace.createFromBranch") ||
+          typeof params.repoRoot !== "string"
+        ) {
+          return false;
+        }
+        try {
+          // createWorkspace always places the new checkout below the stable
+          // managed collection. It is safe to avoid the destructive global
+          // transition only when the separately reachable main checkout was
+          // already part of the admitted authority map (or is itself below a
+          // pre-denied collection). Require the caller's physical spelling so
+          // a symlink swap cannot turn this proof into a different owner.
+          const requested = path.resolve(params.repoRoot);
+          const physical = fs.realpathSync(requested);
+          if (physical !== requested) return false;
+          return (
+            isProtectedManagedWorkspacePath(physical) ||
+            registeredCodeTerritorySnapshot().owners.some(
+              (owner) => owner.path === physical,
+            )
+          );
+        } catch {
+          // Registry/path uncertainty keeps the old fail-closed transition.
+          // WorkspaceService will surface its precise validation error.
+          return false;
+        }
+      })();
       const changesDesignOwnerRegistry = (() => {
         if (!DESIGN_OWNER_REGISTRY_CHANGE_OPS.has(op)) return false;
+        if (stableManagedWorkspaceCreate) return false;
         if (
           op !== "project.upsert" &&
           op !== "project.bulkUpsert" &&

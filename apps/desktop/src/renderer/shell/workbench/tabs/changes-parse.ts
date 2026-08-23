@@ -7,7 +7,10 @@
 // status) AND the per-file patch for the diff pane both come from a single
 // engine round-trip — no per-file diff calls, no separate --numstat.
 
-import type { FileChangeStatus } from "@/renderer/platform/git";
+import type {
+  DiffFileSummary,
+  FileChangeStatus,
+} from "@/renderer/platform/git";
 
 export interface ChangedFile {
   /** Repo-relative POSIX path (the b-side / destination). */
@@ -114,6 +117,21 @@ export function parseUnifiedDiffFiles(patch: string): ChangedFile[] {
     });
   }
   return files;
+}
+
+/** Normalize the adaptive Git response. Small comparisons retain their exact
+ * per-file patches; large comparisons carry content-free metadata and let the
+ * selected/hovered file use the existing exact-key per-file diff cache. */
+export function changedFilesFromDiffResult(result: {
+  patch?: string;
+  files?: DiffFileSummary[];
+  summary?: boolean;
+}): ChangedFile[] {
+  if (!result.summary) return parseUnifiedDiffFiles(result.patch ?? "");
+  return (result.files ?? []).map((file) => ({
+    ...file,
+    patch: "",
+  }));
 }
 
 // ── Folder-tree grouping (for the tree view mode) ────────────

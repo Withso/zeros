@@ -35,6 +35,7 @@
 
 import type { PtyService } from "../pty/service";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { buildRunCommandEnv } from "../pty/shell-setup";
 import { isRunSessionId } from "@zeros/protocol/run-actions";
 import {
@@ -43,6 +44,7 @@ import {
   setWorkspaceMeta,
 } from "../git/state";
 import type {
+  BoundaryAuthoritySnapshot,
   PreparedBoundary,
   RepoTaskBoundaryFactory,
 } from "../agents/containment/types";
@@ -167,7 +169,11 @@ export class RunManager {
    *  silently missing it and letting the PTY appear afterwards. */
   private readonly starting = new Map<
     string,
-    { workspaceId: string | null; cancelled: boolean }
+    {
+      workspaceId: string | null;
+      cancelled: boolean;
+      authority?: BoundaryAuthoritySnapshot;
+    }
   >();
   /** Failed teardown proof is durable for this engine lifetime. A later
    * archive/delete must still see it even when the run entry was superseded. */
@@ -313,14 +319,53 @@ export class RunManager {
    * subtraction. Rowless tasks participate exactly like managed workspaces;
    * an in-flight start is conservatively changed until its identity publishes. */
   registeredDesignAuthorityChanged(identity: string | null): boolean {
-    if (this.starting.size > 0 || this.allBoundaryTeardowns.size > 0) {
+    if (this.allBoundaryTeardowns.size > 0) {
       return true;
+    }
+    for (const flight of this.starting.values()) {
+      if (
+        flight.authority &&
+        flight.authority.registeredDesignAuthorityIdentity !== identity
+      ) {
+        return true;
+      }
     }
     for (const entry of this.entries.values()) {
       if (entry.state !== "running" || entry.boundaryFinalized) continue;
       if (
         !entry.boundary ||
         entry.boundary.registeredDesignAuthorityIdentity !== identity
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  workspaceTerritoryChanged(
+    workspaceRoot: string,
+    territoryIdentity: string | null,
+  ): boolean {
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    const changed = (snapshot: BoundaryAuthoritySnapshot): boolean =>
+      snapshot.territoryContributions.some(
+        (contribution) =>
+          path.resolve(contribution.workspaceRoot) === normalizedWorkspace &&
+          contribution.identity !== territoryIdentity,
+      );
+    for (const flight of this.starting.values()) {
+      if (flight.authority && changed(flight.authority)) return true;
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.state !== "running" || entry.boundaryFinalized) continue;
+      const contributions = entry.boundary?.territoryContributions;
+      if (
+        !contributions ||
+        changed({
+          registeredDesignAuthorityIdentity:
+            entry.boundary?.registeredDesignAuthorityIdentity ?? null,
+          territoryContributions: contributions,
+        })
       ) {
         return true;
       }
@@ -397,7 +442,11 @@ export class RunManager {
     // error, no toast — the user had to click Rerun twice. `stop()` now retires
     // the slot so a later start takes a fresh one.
     if (this.starting.has(args.sessionId)) return { alreadyRunning: true };
-    const flight = { workspaceId: args.workspaceId, cancelled: false };
+    const flight: {
+      workspaceId: string | null;
+      cancelled: boolean;
+      authority?: BoundaryAuthoritySnapshot;
+    } = { workspaceId: args.workspaceId, cancelled: false };
     this.starting.set(args.sessionId, flight);
     try {
       return await this.spawnRun(args, prev, flight);
@@ -414,7 +463,7 @@ export class RunManager {
   private async spawnRun(
     args: RunStartArgs,
     prev: RunEntry | undefined,
-    flight: { cancelled: boolean },
+    flight: { cancelled: boolean; authority?: BoundaryAuthoritySnapshot },
   ): Promise<RunStartResult> {
     if (prev && !prev.settled) {
       // PTY gone but its exit not yet processed (a stop's kill in flight, or
@@ -442,6 +491,9 @@ export class RunManager {
       workspaceRoot: args.cwd,
       repoRoot: args.repoRoot ?? args.cwd,
       ...(env ? { env } : {}),
+      onAuthorityResolved: (authority) => {
+        if (!flight.cancelled) flight.authority = authority;
+      },
     });
     if (flight.cancelled) {
       await this.trackBoundaryTeardown(boundary, args.workspaceId);

@@ -45,19 +45,44 @@ describe("repository icons", () => {
       "public/favicon.svg",
       "favicon.svg",
       "public/favicon.png",
+      "public/icon.svg",
       "public/icon.png",
+      "public/logo.svg",
       "public/logo.png",
       "favicon.png",
+      "icon.svg",
+      "icon.png",
+      "app/icon.svg",
       "app/icon.png",
+      "src/app/icon.svg",
       "src/app/icon.png",
       "public/favicon.ico",
       "favicon.ico",
       "app/favicon.ico",
       "static/favicon.ico",
+      "static/icon.png",
       "src-tauri/icons/icon.png",
+      "build/icon.png",
+      "build/icons/icon.png",
+      "resources/icon.png",
       "assets/icon.png",
       "src/assets/icon.png",
     ]);
+  });
+
+  it("discovers the conventional Electron packaging icon used by Zeros", async () => {
+    const reader = vi.fn(async (_root: string, path: string) =>
+      path === "build/icons/icon.png"
+        ? { kind: "image", dataUrl: "data:image/png;base64,ELECTRON" }
+        : { kind: "error" },
+    );
+
+    await expect(
+      detectAutomaticRepositoryIcon("/repo", reader),
+    ).resolves.toEqual({
+      imageUrl: "data:image/png;base64,ELECTRON",
+      source: { kind: "repository-file", path: "build/icons/icon.png" },
+    });
   });
 
   it("uses the documented automatic lookup order and stops at the first image", async () => {
@@ -166,6 +191,19 @@ describe("repository icons", () => {
     const avatarReader = vi.fn(async () => {
       throw new Error("offline");
     });
+
+    await expect(
+      detectAutomaticRepositoryIcon("/repo", reader, avatarReader),
+    ).resolves.toEqual({ imageUrl: null, source: null });
+  });
+
+  it("rejects an unsafe GitHub avatar URL", async () => {
+    const reader = vi.fn(async () => ({ kind: "error" }));
+    const avatarReader = vi.fn(async () => ({
+      login: "acme",
+      type: "org" as const,
+      avatarUrl: "javascript:alert(1)",
+    }));
 
     await expect(
       detectAutomaticRepositoryIcon("/repo", reader, avatarReader),

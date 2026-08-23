@@ -86,6 +86,7 @@ import {
 import { localWorkspaceOwner } from "../../features/team/organization-capabilities";
 import { useNativeRuntime } from "../../platform/runtime";
 import { createWorkspaceForProject } from "../create-workspace";
+import { RepositoryIcon } from "../../features/repositories/repository-icon";
 
 interface DispatcherPageProps {
   /** Retained Home surfaces stay mounted. Gate effects and selection resets to
@@ -452,7 +453,14 @@ export function DispatcherPage({
                   className="text-fg1 hover:bg-bg2-hover inline-flex items-center gap-1.5 rounded-sm px-2 py-1 text-sm font-medium transition-colors"
                 >
                   <span className="bg-bg2-hover inline-flex size-4 items-center justify-center rounded-sm text-xs">
-                    {(selectedProject?.name[0] ?? "·").toUpperCase()}
+                    {selectedProject ? (
+                      <RepositoryIcon
+                        project={selectedProject}
+                        className="size-full rounded-sm"
+                      />
+                    ) : (
+                      "·"
+                    )}
                   </span>
                   <span className="max-w-[180px] truncate">
                     {selectedProject?.name ?? "Select a project"}
@@ -476,7 +484,10 @@ export function DispatcherPage({
                   onSelect={() => setSelectedProjectId(p.id)}
                 >
                   <span className="bg-bg2-hover inline-flex size-4 items-center justify-center rounded-sm text-xs">
-                    {(p.name[0] ?? "·").toUpperCase()}
+                    <RepositoryIcon
+                      project={p}
+                      className="size-full rounded-sm"
+                    />
                   </span>
                   <span className="truncate">{p.name}</span>
                 </DropdownMenuItem>

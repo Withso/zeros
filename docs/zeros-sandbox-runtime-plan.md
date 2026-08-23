@@ -1,6 +1,6 @@
 # Zeros Sandbox Runtime — host parity and Design authority
 
-**Status:** current implementation contract, 2026-08-19.
+**Status:** current implementation contract, 2026-08-23.
 
 Zeros Sandbox Runtime (ZSR) is an actor-scoped filesystem boundary. It preserves
 the behavior of the deployment in which the agent runs and subtracts only the
@@ -14,12 +14,12 @@ that protected document remain separate maintainer-approved work.
 
 ## Runtime contract
 
-| Actor / deployment | Writable filesystem | Host-parity behavior |
-| --- | --- | --- |
-| Local code or repository task | Normal host writes except every recognized Design directory and engine authority/control descriptors | Real HOME/XDG state, provider credentials, Git configuration, hooks, network, ordinary Unix sockets/local services, processes, devices, ports, and readable filesystem; macOS app-launch authority and ambient container endpoints are subtracted |
-| Local Design actor substrate | Every registered code owner is read-only; recognized Design directories and the current repository's minimal Git metadata islands are writable | Same local host behavior and subtractions; no production feature selects this actor yet |
-| Cloud code or repository task | Same code/Design subtraction inside the tenant VM; engine state is also unreadable/unwritable | The VM is the tenant boundary. The agent runs as the configured non-root worker UID with the VM's real HOME, provider credentials, network, services, and device/process behavior |
-| Cloud Design actor substrate | App-wide inverse code/Design write map inside the tenant VM | Same cloud host parity; not product-wired |
+| Actor / deployment            | Writable filesystem                                                                                                                                                               | Host-parity behavior                                                                                                                                                                                                                              |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local code or repository task | Current and explicitly attached roots are writable except recognized Design; unrelated Zeros-managed workspace collections and engine authority/control descriptors are read-only | Real HOME/XDG state, provider credentials, Git configuration, hooks, network, ordinary Unix sockets/local services, processes, devices, ports, and readable filesystem; macOS app-launch authority and ambient container endpoints are subtracted |
+| Local Design actor substrate  | Managed workspace collections and every external registered code owner are read-only; recognized Design directories and the current repository's minimal Git metadata islands are writable             | Same local host behavior and subtractions; no production feature selects this actor yet                                                                                                                                                           |
+| Cloud code or repository task | Same code/Design subtraction inside the tenant VM; engine state is also unreadable/unwritable                                                                                     | The VM is the tenant boundary. The agent runs as the configured non-root worker UID with the VM's real HOME, provider credentials, network, services, and device/process behavior                                                                 |
+| Cloud Design actor substrate  | App-wide inverse code/Design write map inside the tenant VM                                                                                                                       | Same cloud host parity; not product-wired                                                                                                                                                                                                         |
 
 Host parity is explicit in the patched Sandbox Runtime configuration. On macOS
 the generated Seatbelt profile begins with ordinary host authority and appends
@@ -35,18 +35,26 @@ worker UID/GID with locked securebits, empty capability sets, and
 
 ## App-wide actor symmetry
 
-The authority map is built from the canonical union of every registered local
-owner: managed worktrees, physical main checkouts, open project roots, and
-explicit additional repositories. Registration is deny-only; it never grants a
-sibling checkout to the current actor.
+The authority map combines stable collection-level subtraction for
+Zeros-managed worktrees with exact canonical subtraction for physical main
+checkouts, open project roots, and explicit additional repositories.
+Registration is deny-only; it never grants a sibling checkout to the current
+actor. A code boundary reopens its current managed workspace and only the
+already-existing managed islands covered by an explicit broader `/add-dir`
+grant. A future sibling remains read-only because it was covered before its path
+existed.
 
 - A code actor may write code across its normal authorized roots but may not
   write any recognized Design directory in any registered owner.
 - A Design actor may write recognized Design directories but may not write code
   in any registered owner.
-- Adding, deleting, archiving, restoring, or changing a semantic owner closes
-  new admissions, retires existing code/task/utility boundaries, proves their
-  process domains empty, and only then publishes the new owner set.
+- Adding an external owner, removing an owner, or changing a recognized
+  territory closes new admissions, retires every affected code/task/utility
+  boundary, proves its process domain empty, and only then publishes the new
+  authority. Creating a managed sibling for an already registered repository
+  does not retire unrelated actors: their immutable collection deny already
+  covers it. Per-owner provisional snapshots preserve the same race guarantee
+  for a writable current or explicitly attached managed island.
 - Immutable profiles are never patched in place. The next use admits a new
   generation.
 

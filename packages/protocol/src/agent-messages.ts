@@ -175,6 +175,10 @@ export interface AgentToolMessage {
   parentToolId?: string;
   createdAt: number;
   updatedAt: number;
+  /** Time of the first terminal status. Unlike updatedAt, this never changes
+   *  when late output/stamp metadata lands, so a live completion feed can keep
+   *  an already-revealed row in place. Absent on legacy persisted rows. */
+  settledAt?: number;
 }
 
 // ──────────────────────────────────────────────────────────
@@ -428,6 +432,10 @@ function mergeRawOutput(prev: unknown, next: unknown): unknown {
   return { output: next, zerosQuestion: stamp };
 }
 
+function isSettledToolStatus(status: AgentToolMessage["status"]): boolean {
+  return status === "completed" || status === "failed";
+}
+
 export function applyUpdate(
   messages: AgentMessage[],
   notification: SessionNotification,
@@ -492,6 +500,8 @@ export function applyUpdate(
       );
     case "tool_call": {
       const tc = upd as unknown as ToolCall & { sessionUpdate: "tool_call" };
+      const status = tc.status ?? "pending";
+      const at = typeof tc.at === "number" ? tc.at : Date.now();
       const msg: AgentToolMessage = {
         id: `tool-${tc.toolCallId}`,
         kind: "tool",
@@ -499,7 +509,7 @@ export function applyUpdate(
         nativeToolCallId: tc.nativeToolCallId ?? undefined,
         title: tc.title ?? tc.toolCallId,
         toolKind: tc.kind ?? undefined,
-        status: tc.status ?? "pending",
+        status,
         content: tc.content ?? undefined,
         locations: tc.locations ?? undefined,
         rawInput: tc.rawInput,
@@ -508,8 +518,9 @@ export function applyUpdate(
         parentToolId: tc.parentToolId ?? undefined,
         // Replay carries the original event time via `at`; live turns omit
         // it so we stamp now. Keeps resumed-chat durations accurate.
-        createdAt: typeof tc.at === "number" ? tc.at : Date.now(),
-        updatedAt: typeof tc.at === "number" ? tc.at : Date.now(),
+        createdAt: at,
+        updatedAt: at,
+        ...(isSettledToolStatus(status) ? { settledAt: at } : {}),
       };
       return [...messages, msg];
     }
@@ -519,9 +530,11 @@ export function applyUpdate(
       };
       return messages.map((m) => {
         if (m.kind !== "tool" || m.toolCallId !== upd2.toolCallId) return m;
+        const status = upd2.status ?? m.status;
+        const updatedAt = typeof upd2.at === "number" ? upd2.at : Date.now();
         return {
           ...m,
-          status: upd2.status ?? m.status,
+          status,
           title: upd2.title ?? m.title,
           toolKind: upd2.kind ?? m.toolKind,
           content: upd2.content ?? m.content,
@@ -529,7 +542,10 @@ export function applyUpdate(
           rawInput: upd2.rawInput ?? m.rawInput,
           rawOutput: mergeRawOutput(m.rawOutput, upd2.rawOutput),
           mergeKey: upd2.mergeKey ?? m.mergeKey,
-          updatedAt: typeof upd2.at === "number" ? upd2.at : Date.now(),
+          updatedAt,
+          settledAt:
+            m.settledAt ??
+            (isSettledToolStatus(status) ? updatedAt : undefined),
         };
       });
     }

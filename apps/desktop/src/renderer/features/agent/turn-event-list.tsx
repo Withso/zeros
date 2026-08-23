@@ -5,17 +5,18 @@
 // 2026-06-18. A turn splits into two parts (see turn-partition.ts):
 //
 //   • the WORKING group — tools, thinking, in-between narration,
-//     sub-agents — handed to one EventStripe. While the turn is
-//     live the stripe is expanded + dimmed (the reasoning feed);
-//     once it settles ordinary work collapses to a single summary
-//     chip ("<N> tool calls, <M> messages, <K> agents"). Browser actions are
-//     nested inside that same group and reappear when it is expanded.
+//     sub-agents — handed to one EventStripe. While live, its visible
+//     projection contains only completed/failed tools and immutable records;
+//     prose, reasoning, and unfinished calls stay unmounted. Once the turn
+//     settles, the full work history collapses to a single summary chip
+//     ("<N> tool calls, <M> messages, <K> agents"). Browser actions are nested
+//     inside that same group and reappear when it is expanded.
 //
-//   • the FINAL OUTPUT — the trailing agent text — rendered
-//     brightly below the group as the actual answer.
+//   • the FINAL OUTPUT — the trailing agent text — mounted brightly below the
+//     group only after the terminal turn boundary.
 //
-// The shape is deliberate: watch the agent work, then the work
-// folds away and the answer remains.
+// The shape is deliberate: completed actions arrive one by one, then the work
+// folds away and the complete answer appears at once.
 // ──────────────────────────────────────────────────────────
 
 import { memo, useMemo, type ReactNode } from "react";
@@ -81,23 +82,18 @@ export const TurnEventList = memo(function TurnEventList({
   // final answer (finalOutput) is what remains bright.
   const live = isActive && !!isStreaming;
 
-  // Pass `live` so a streaming turn keeps its (provisional) trailing narration
-  // INSIDE the working feed — same uniform gap as the rest — instead of peeling
-  // it out as a separated `finalOutput` whose larger gap (this list's `gap-4` +
-  // the Message's `py-2`) would snap tight the instant the next event lands.
-  // The answer only separates out once it settles.
+  // Pass `live` so partitionTurn withholds provisional prose and unfinished
+  // calls. The terminal boundary switches directly from the append-only tool
+  // completion feed to collapsed history + the complete final output.
   const { working, finalOutput } = useMemo(
     () => partitionTurn(events, { live }),
     [events, live],
   );
 
   // The tail shimmer + TIMER always runs while the turn is live, including
-  // while a subagent/task runs. Subagent rows are collapsed by default, so
-  // without the tail shimmer a running Agent/Task
-  // turn showed no working cue at all). A running Agent/Task row ALSO spins
-  // its own leading icon (tool-subagent / tool-cursor-task) so the row reads
-  // as working even when it's scrolled far from this tail — but only the
-  // tail carries the elapsed timer, so the time is never shown twice.
+  // while an unfinished tool/subagent row is intentionally withheld. It is the
+  // single stable working cue between completed rows and carries the one elapsed
+  // timer for the turn.
   //
   // The shimmer and the workflow row answer different questions and so have
   // different gates — see tail-indicators.ts for why they must not be folded

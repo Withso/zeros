@@ -275,6 +275,14 @@ export interface FileChange {
   oldPath?: string;
 }
 
+/** Content-free row returned when a whole-tree patch is too large to
+ * materialize safely. The selected file still loads its exact patch. */
+export interface DiffFileSummary extends FileChange {
+  additions: number;
+  deletions: number;
+  binary: boolean;
+}
+
 export interface Hunk {
   filePath: string;
   oldStart: number;
@@ -1181,8 +1189,15 @@ export interface ChangeLineCounts {
   deletions: number;
 }
 
-export async function gitStatus(workspaceId: string): Promise<StatusResult> {
-  return bridgeGitStatus(requireBridge("read Git status"), workspaceId);
+export async function gitStatus(
+  workspaceId: string,
+  options: { paths?: string[]; includeTracking?: boolean } = {},
+): Promise<StatusResult> {
+  return bridgeGitStatus(
+    requireBridge("read Git status"),
+    workspaceId,
+    options,
+  );
 }
 
 export async function gitChangeCounts(
@@ -1224,14 +1239,16 @@ async function bridgeWorkspaceIdFor(
 }
 
 /** Which top-level tracked folders are materialized in this worktree.
- *  Engine-only (no native IPC fast path) — an on-demand popover read. */
+ *  Engine-only (no native IPC fast path). A known workspace id skips the
+ *  resolver/list round trip on the Files sidebar's cold path. */
 export async function listWorkingDirectories(
   cwd: string,
+  workspaceId?: string | null,
 ): Promise<WorkingDirectoriesWire> {
   const bridge = requireBridge("read working folders");
   return bridgeListWorkingDirectories(
     bridge,
-    await bridgeWorkspaceIdFor(bridge, cwd),
+    workspaceId?.trim() || (await bridgeWorkspaceIdFor(bridge, cwd)),
   );
 }
 
@@ -1239,11 +1256,12 @@ export async function listWorkingDirectories(
 export async function setWorkingDirectories(
   cwd: string,
   directories: string[],
+  workspaceId?: string | null,
 ): Promise<WorkingDirectoriesWire> {
   const bridge = requireBridge("update working folders");
   return bridgeSetWorkingDirectories(
     bridge,
-    await bridgeWorkspaceIdFor(bridge, cwd),
+    workspaceId?.trim() || (await bridgeWorkspaceIdFor(bridge, cwd)),
     directories,
   );
 }
@@ -1330,7 +1348,13 @@ export async function gitDiff(args: {
   base?: string;
   head?: string;
   rawPatch?: boolean;
-}): Promise<{ hunks: Hunk[]; patch?: string }> {
+  summaryLimit?: number;
+}): Promise<{
+  hunks: Hunk[];
+  patch?: string;
+  files?: DiffFileSummary[];
+  summary?: boolean;
+}> {
   return bridgeGitDiff(requireBridge("read the Git diff"), args);
 }
 

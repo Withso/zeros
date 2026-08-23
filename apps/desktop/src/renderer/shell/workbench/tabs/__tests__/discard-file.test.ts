@@ -101,6 +101,10 @@ describe("planDiscard", () => {
     );
 
     await expect(discardPath("workspace", "new.ts")).resolves.toBe("removed");
+    expect(gitMocks.gitStatus).toHaveBeenCalledWith("workspace", {
+      paths: ["new.ts"],
+      includeTracking: false,
+    });
     expect(gitMocks.gitUnstage).toHaveBeenCalledWith({
       workspaceId: "workspace",
       paths: ["new.ts"],
@@ -127,5 +131,39 @@ describe("planDiscard", () => {
       workspaceId: "workspace",
       paths: ["old.ts", "new.ts"],
     });
+  });
+
+  it("coalesces simultaneous discard confirmations for the same path", async () => {
+    let resolveStatus!: (value: StatusResult) => void;
+    gitMocks.gitStatus.mockReturnValue(
+      new Promise<StatusResult>((resolve) => {
+        resolveStatus = resolve;
+      }),
+    );
+
+    const first = discardPath("workspace", "scratch.txt");
+    const second = discardPath("workspace", "scratch.txt");
+    resolveStatus(status({ untracked: ["scratch.txt"] }));
+
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      "removed",
+      "removed",
+    ]);
+    expect(gitMocks.gitStatus).toHaveBeenCalledTimes(1);
+    expect(gitMocks.gitClean).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses to delete a path that was confirmed as a tracked revert", async () => {
+    gitMocks.gitStatus.mockResolvedValue(
+      status({ untracked: ["changed-while-dialog-was-open.txt"] }),
+    );
+
+    await expect(
+      discardPath("workspace", "changed-while-dialog-was-open.txt", {
+        expectedNew: false,
+      }),
+    ).rejects.toThrow(/changed since the confirmation opened/i);
+    expect(gitMocks.gitClean).not.toHaveBeenCalled();
+    expect(gitMocks.gitDiscard).not.toHaveBeenCalled();
   });
 });

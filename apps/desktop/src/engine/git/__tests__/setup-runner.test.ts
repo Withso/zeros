@@ -187,6 +187,65 @@ describe("SetupManager", () => {
     expect(wrapped).toEqual([true]);
   });
 
+  it("publishes a starting setup's resolved authority before boundary admission finishes", async () => {
+    const wsId = "ws_authority-setup";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc } = fakePty();
+    let releaseBoundary!: () => void;
+    const boundaryGate = new Promise<void>((resolve) => {
+      releaseBoundary = resolve;
+    });
+    let publishAuthority!: () => void;
+    const authorityReady = new Promise<void>((resolve) => {
+      publishAuthority = resolve;
+    });
+    const boundary = {
+      wrapSpawn: (request: unknown) => request,
+      revoke: async () => {},
+      stopAndProve: async () => {},
+    } as unknown as PreparedBoundary;
+    const workspaceRoot = `/tmp/worktrees/test-repo/${wsId}`;
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      async () => ({ PATH: "/bin" }),
+      async (request) => {
+        request.onAuthorityResolved?.({
+          registeredDesignAuthorityIdentity: "global-current",
+          territoryContributions: [
+            {
+              workspaceRoot,
+              grants: [workspaceRoot],
+              full: true,
+              identity: "local-current",
+            },
+          ],
+        });
+        publishAuthority();
+        await boundaryGate;
+        return boundary;
+      },
+    );
+    const start = mgr.start({ workspaceId: wsId, command: "pnpm install" });
+
+    try {
+      await authorityReady;
+      expect(mgr.registeredDesignAuthorityChanged("global-current")).toBe(
+        false,
+      );
+      expect(mgr.registeredDesignAuthorityChanged("global-next")).toBe(true);
+      expect(
+        mgr.workspaceTerritoryChanged(workspaceRoot, "local-current"),
+      ).toBe(false);
+      expect(mgr.workspaceTerritoryChanged(workspaceRoot, "local-next")).toBe(
+        true,
+      );
+    } finally {
+      releaseBoundary();
+      await start;
+    }
+  });
+
   it("a KILLED run never scores a pass — node-pty reports kill() as exitCode 0", async () => {
     // Verified against real node-pty: `p.kill()` → { exitCode: 0, signal: 1 }. A
     // verdict read off the code alone therefore called ANY killed install a PASS

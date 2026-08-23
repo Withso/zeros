@@ -94,6 +94,7 @@ if (descriptor.env.HOST_PARITY_CANARY) {
     codeWrite: !designWritable,
     designWrite: spec.designDirectories.map(() => designWritable),
     designAliasWrite: spec.designDirectories.length > 0 ? designWritable : true,
+    protectedWorkspaceWrite: spec.protectedWorkspaceFiles.map(() => false),
     hostRead: true,
     canonicalGitRead: true,
     environmentExact: Object.entries(spec.expectedEnv).every(
@@ -306,9 +307,11 @@ describe("ZSR execution boundary", () => {
     expect(descriptor).not.toHaveProperty("internalProxyPorts");
 
     await prepared.stopAndProve();
-    await expect(access(sessionDir(request.executionId))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    await expect(access(sessionDir(request.executionId))).rejects.toMatchObject(
+      {
+        code: "ENOENT",
+      },
+    );
   });
 
   it("deduplicates physical aliases for an ambient container socket", async () => {
@@ -567,6 +570,8 @@ describe("ZSR execution boundary", () => {
   (process.platform === "linux" ? it : it.skip)(
     "enforces the host-parity write fence in the real Linux runtime",
     async () => {
+      const managedWorkspaces = path.join(root, "managed-workspaces");
+      workspace = path.join(managedWorkspaces, "repo", "Shocking");
       const design = path.join(workspace, "Zeros Design");
       const protectedFile = path.join(design, "protected.txt");
       const hostVisibleFile = path.join(root, "host-visible.log");
@@ -576,6 +581,7 @@ describe("ZSR execution boundary", () => {
       await Promise.all([
         mkdir(design, { recursive: true }),
         mkdir(hostHome, { recursive: true }),
+        mkdir(managedWorkspaces, { recursive: true }),
       ]);
       await Promise.all([
         writeFile(protectedFile, "original\n"),
@@ -611,6 +617,7 @@ describe("ZSR execution boundary", () => {
         providerStateEnv: { HOME: hostHome },
         cwd: workspace,
         workspaceRoot: workspace,
+        protectedWorkspaceDirectories: [managedWorkspaces],
         territory: {
           agentRole: "code",
           workspaceRoot: workspace,
@@ -1125,7 +1132,12 @@ process.stdout.write(JSON.stringify({
       const design = path.join(workspace, "Zeros Design");
       const designFile = path.join(design, "canvas.json");
       const outside = path.join(root, "outside-cache");
-      await mkdir(design, { recursive: true });
+      const managedWorkspaces = path.join(root, "managed-workspaces");
+      await Promise.all(
+        [design, managedWorkspaces].map((directory) =>
+          mkdir(directory, { recursive: true }),
+        ),
+      );
       await writeFile(designFile, "before\n");
       await runFile("git", ["init", "-b", "main"], { cwd: workspace });
       await runFile("git", ["config", "user.name", "Zeros Test"], {
@@ -1147,6 +1159,7 @@ process.stdout.write(JSON.stringify({
         actor: "design-agent",
         cwd: workspace,
         workspaceRoot: workspace,
+        protectedWorkspaceDirectories: [managedWorkspaces],
         territory: {
           agentRole: "code",
           workspaceRoot: workspace,
@@ -1167,14 +1180,17 @@ process.stdout.write(JSON.stringify({
             String.raw`
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
-const [codeFile, designFile, outsideFile] = process.argv.slice(1);
+const [codeFile, designFile, outsideFile, futureWorkspaceFile] = process.argv.slice(1);
 let codeDenied = false;
 try { fs.writeFileSync(codeFile, "code\n", { flag: "wx" }); } catch { codeDenied = true; }
+let futureWorkspaceDenied = false;
+try { fs.writeFileSync(futureWorkspaceFile, "code\n", { flag: "wx" }); } catch { futureWorkspaceDenied = true; }
 fs.writeFileSync(designFile, "after\n");
 fs.writeFileSync(outsideFile, "cache\n");
 const git = spawnSync("git", ["add", "Zeros Design/canvas.json"], { encoding: "utf8" });
 process.stdout.write(JSON.stringify({
   codeDenied,
+  futureWorkspaceDenied,
   design: fs.readFileSync(designFile, "utf8"),
   gitStatus: git.status,
   gitStderr: git.stderr,
@@ -1182,6 +1198,7 @@ process.stdout.write(JSON.stringify({
             path.join(workspace, "forbidden-code.txt"),
             designFile,
             outside,
+            path.join(managedWorkspaces, "future-workspace"),
           ],
           cwd: workspace,
           env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
@@ -1195,6 +1212,7 @@ process.stdout.write(JSON.stringify({
         await expect(child.wait()).resolves.toMatchObject({ code: 0 });
         expect(JSON.parse(stdout)).toEqual({
           codeDenied: true,
+          futureWorkspaceDenied: true,
           design: "after\n",
           gitStatus: 0,
           gitStderr: "",
@@ -1357,9 +1375,7 @@ process.stdout.write(JSON.stringify({
     });
 
     const first = await boundary.prepare(request("physical-one", firstAlias));
-    const second = await boundary.prepare(
-      request("physical-two", secondAlias),
-    );
+    const second = await boundary.prepare(request("physical-two", secondAlias));
     expect(reservations).toBe(2);
 
     await Promise.all([first.stopAndProve(), second.stopAndProve()]);
@@ -1416,7 +1432,6 @@ process.stdout.write(JSON.stringify({
       });
     },
   );
-
 
   (process.platform === "linux" ? it : it.skip)(
     "documents the accepted commit-then-merge Design materialization trade",
@@ -1537,6 +1552,37 @@ process.stdout.write(JSON.stringify({
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("fails admission when the host-parity canary can create a future managed sibling", async () => {
+    const managed = path.join(root, "managed-workspaces");
+    await mkdir(managed, { recursive: true });
+    await writeFile(
+      supervisor,
+      PASSING_SUPERVISOR.replace(
+        "protectedWorkspaceWrite: spec.protectedWorkspaceFiles.map(() => false),",
+        "protectedWorkspaceWrite: spec.protectedWorkspaceFiles.map(() => true),",
+      ),
+      { mode: 0o700 },
+    );
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+    });
+
+    await expect(
+      boundary.prepare({
+        executionId: "host-parity-managed-collection-failure",
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+        protectedWorkspaceDirectories: [managed],
+      }),
+    ).rejects.toThrow(/managed-workspace collection is writable/);
+    await expect(
+      access(sessionDir("host-parity-managed-collection-failure")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("surfaces the final supervisor diagnostic when the admission canary exits", async () => {
     await writeFile(
       supervisor,
@@ -1650,5 +1696,4 @@ process.stdout.write(JSON.stringify({
     await expect(tracked.wait()).resolves.toMatchObject({ signal: "SIGTERM" });
     await expect(lease.revoke()).resolves.toBeUndefined();
   });
-
 });

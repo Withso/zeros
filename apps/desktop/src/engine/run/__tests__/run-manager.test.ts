@@ -18,7 +18,10 @@ import {
 } from "../../git/state";
 import type { Workspace } from "../../git/types";
 import type { PtyService } from "../../pty/service";
-import type { PreparedBoundary } from "../../agents/containment/types";
+import type {
+  PreparedBoundary,
+  RepoTaskBoundaryFactory,
+} from "../../agents/containment/types";
 import { RunManager } from "../run-manager";
 
 /** A minimal PtyService stand-in — RunManager only calls has/kill/create. */
@@ -155,12 +158,8 @@ describe("RunManager", () => {
       workspaceId: string | null;
       repoRoot?: string | null;
     }) => Promise<Record<string, string> | undefined>,
-    boundaryFactory: (request: {
-      executionId: string;
-      cwd: string;
-      workspaceRoot: string;
-      repoRoot: string;
-    }) => Promise<PreparedBoundary> = async () => preparedTestBoundary(),
+    boundaryFactory: RepoTaskBoundaryFactory = async () =>
+      preparedTestBoundary(),
   ) =>
     new RunManager(
       pty,
@@ -229,6 +228,56 @@ describe("RunManager", () => {
     });
     expect(requests[0]!.executionId).toMatch(/^repo-run-/);
     expect(created[0]?.wrapped).toBe(true);
+  });
+
+  it("publishes a starting run's resolved authority before boundary admission finishes", async () => {
+    const { svc } = fakePty();
+    let releaseBoundary!: () => void;
+    const boundaryGate = new Promise<void>((resolve) => {
+      releaseBoundary = resolve;
+    });
+    let publishAuthority!: () => void;
+    const authorityReady = new Promise<void>((resolve) => {
+      publishAuthority = resolve;
+    });
+    const boundary = preparedTestBoundary();
+    const mgr = make(
+      svc,
+      [],
+      async () => ({ PATH: "/login/bin" }),
+      async (request) => {
+        request.onAuthorityResolved?.({
+          registeredDesignAuthorityIdentity: "global-current",
+          territoryContributions: [
+            {
+              workspaceRoot: FOLDER,
+              grants: [FOLDER],
+              full: true,
+              identity: "local-current",
+            },
+          ],
+        });
+        publishAuthority();
+        await boundaryGate;
+        return boundary;
+      },
+    );
+    const start = mgr.start(startArgs());
+
+    try {
+      await authorityReady;
+      expect(mgr.registeredDesignAuthorityChanged("global-current")).toBe(
+        false,
+      );
+      expect(mgr.registeredDesignAuthorityChanged("global-next")).toBe(true);
+      expect(mgr.workspaceTerritoryChanged(FOLDER, "local-current")).toBe(
+        false,
+      );
+      expect(mgr.workspaceTerritoryChanged(FOLDER, "local-next")).toBe(true);
+    } finally {
+      releaseBoundary();
+      await start;
+    }
   });
 
   it("replaces an untracked legacy run with a contained process", async () => {
