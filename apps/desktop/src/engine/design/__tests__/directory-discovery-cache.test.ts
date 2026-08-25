@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -40,7 +40,10 @@ describe("discoverDesignDirectories evidence-keyed cache", () => {
     await git(repo, "init", "-q", "-b", "main");
     await writeFile(path.join(repo, "code.txt"), "code\n");
     await mkdir(path.join(repo, "Zeros Design"), { recursive: true });
-    await writeFile(path.join(repo, "Zeros Design", ".zeros-canvas.json"), "{}\n");
+    await writeFile(
+      path.join(repo, "Zeros Design", ".zeros-canvas.json"),
+      "{}\n",
+    );
     await git(repo, "add", ".");
     await git(repo, "commit", "-q", "-m", "init");
   });
@@ -108,6 +111,74 @@ describe("discoverDesignDirectories evidence-keyed cache", () => {
     // The clone's index differs (fresh file), but its HEAD oid is identical,
     // so the expensive full-tree scan is served from cache.
     expect(after.hits).toBeGreaterThan(before.hits);
+  });
+
+  // A linked worktree's `.git` is a FILE holding `gitdir: …`, so this is the
+  // branch that classifies and then reads that entry. Conductor runs every
+  // agent in one, and it owns a per-worktree index — the identity the cache
+  // keys on — so both halves are exercised here.
+  it("keys a linked worktree on its own index, not the main checkout's", async () => {
+    const linked = path.join(root, "linked");
+    await git(repo, "worktree", "add", "-q", "-b", "wt", linked);
+    expect(await discoverDesignDirectories(linked)).toEqual(["Zeros Design"]);
+    const afterCold = designDiscoveryCacheStatsForTests();
+    expect(await discoverDesignDirectories(linked)).toEqual(["Zeros Design"]);
+    expect(designDiscoveryCacheStatsForTests().hits).toBeGreaterThan(
+      afterCold.hits,
+    );
+
+    // Staging into the worktree writes the worktree's index. The cached
+    // listing must not survive it.
+    await mkdir(path.join(linked, "linked-design"), { recursive: true });
+    await writeFile(
+      path.join(linked, "linked-design", ".zeros-canvas.json"),
+      "{}\n",
+    );
+    await git(linked, "add", "linked-design/.zeros-canvas.json");
+    expect(await discoverDesignDirectories(linked)).toEqual([
+      "linked-design",
+      "Zeros Design",
+    ]);
+    // The main checkout shares HEAD but not that index, so it is unaffected.
+    expect(await discoverDesignDirectories(repo)).toEqual(["Zeros Design"]);
+  });
+
+  // A `.git` reached through a symlink cannot be pinned to one inode, so it
+  // establishes no index identity and its listing is never cached. Both repos
+  // here are UNBORN on purpose: with no HEAD the immutable-tree cache sits out
+  // entirely, leaving the index side as the only thing the counters can move.
+  it("refuses to cache an index reached through a symlinked .git", async () => {
+    const seed = async (dir: string): Promise<void> => {
+      await mkdir(path.join(dir, "Zeros Design"), { recursive: true });
+      await writeFile(
+        path.join(dir, "Zeros Design", ".zeros-canvas.json"),
+        "{}\n",
+      );
+      await git(dir, "add", "Zeros Design/.zeros-canvas.json");
+    };
+
+    // Control: a real `.git` on an unborn repo caches its index listing.
+    const unborn = path.join(root, "unborn");
+    await mkdir(unborn, { recursive: true });
+    await git(unborn, "init", "-q", "-b", "main");
+    await seed(unborn);
+    const beforeControl = designDiscoveryCacheStatsForTests();
+    expect(await discoverDesignDirectories(unborn)).toEqual(["Zeros Design"]);
+    expect(designDiscoveryCacheStatsForTests().misses).toBe(
+      beforeControl.misses + 1,
+    );
+
+    // Same repository, reached through an aliased `.git`: identical answer,
+    // but nothing is recorded, so every call re-reads the real index.
+    const aliased = path.join(root, "aliased");
+    await mkdir(aliased, { recursive: true });
+    await symlink(path.join(unborn, ".git"), path.join(aliased, ".git"));
+    const before = designDiscoveryCacheStatsForTests();
+    expect(await discoverDesignDirectories(aliased)).toEqual(["Zeros Design"]);
+    expect(await discoverDesignDirectories(aliased)).toEqual(["Zeros Design"]);
+    const after = designDiscoveryCacheStatsForTests();
+    expect(after.misses).toBe(before.misses);
+    expect(after.hits).toBe(before.hits);
   });
 
   it("keeps working in a non-Git directory without caching", async () => {

@@ -33,7 +33,8 @@
 // ──────────────────────────────────────────────────────────
 
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readdir, readFile, realpath, stat } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { lstat, mkdir, open, readdir, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { GitError } from "../git/errors";
@@ -344,17 +345,33 @@ function recallBounded<K, V>(cache: Map<K, V>, key: K): V | undefined {
 async function indexEvidenceSignature(cwd: string): Promise<string | null> {
   try {
     const gitEntry = path.join(cwd, ".git");
-    const entryStat = await lstat(gitEntry);
+    // Classify and read `.git` through ONE descriptor. Statting the path and
+    // then reading it by path again is a check-then-use on two different
+    // resolutions: the entry can be swapped between them, so the bytes fed to
+    // the gitdir parser need not be the bytes that were classified. The handle
+    // pins the exact inode for both. O_NOFOLLOW keeps the previous lstat
+    // semantics — a symlinked `.git` fails to open (ELOOP) and lands in the
+    // outer catch, which is the same "no cacheable identity" answer lstat gave
+    // by reporting neither a directory nor a regular file.
+    const handle = await open(
+      gitEntry,
+      fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+    );
     let gitDir: string;
-    if (entryStat.isDirectory()) {
-      gitDir = gitEntry;
-    } else if (entryStat.isFile()) {
-      const contents = await readFile(gitEntry, "utf8");
-      const match = /^gitdir:\s*(.+)\s*$/m.exec(contents);
-      if (!match?.[1]) return null;
-      gitDir = path.resolve(cwd, match[1]);
-    } else {
-      return null;
+    try {
+      const entryStat = await handle.stat();
+      if (entryStat.isDirectory()) {
+        gitDir = gitEntry;
+      } else if (entryStat.isFile()) {
+        const contents = await handle.readFile("utf8");
+        const match = /^gitdir:\s*(.+)\s*$/m.exec(contents);
+        if (!match?.[1]) return null;
+        gitDir = path.resolve(cwd, match[1]);
+      } else {
+        return null;
+      }
+    } finally {
+      await handle.close();
     }
     const indexPath = path.join(gitDir, "index");
     try {
