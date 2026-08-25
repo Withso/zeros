@@ -5,10 +5,10 @@
 // A turn's working content — tool calls, thinking, in-between
 // narration, sub-agents — renders as ONE group:
 //
-//   • While the turn is LIVE (the agent is working): fully
-//     EXPANDED with NO header chip, every row dimmed, each
-//     individual item collapsed to one line. The user watches
-//     the agent reason + act in real time.
+//   • While the turn is LIVE: fully EXPANDED with NO header chip. The top-level
+//     caller supplies an append-only projection of completed/failed tools and
+//     immutable records, so unfinished calls and provisional prose never mount
+//     here. Each completed action lands as one compact row.
 //
 //   • Once the turn settles (live=false): ordinary work
 //     COLLAPSES into one chip —
@@ -55,9 +55,10 @@ import {
 interface EventStripeProps {
   events: AgentMessage[];
   ctx: RendererContext;
-  /** True while the turn is actively streaming — the agent is "working."
-   *  A live group renders fully expanded, no header chip, rows dimmed. Once
-   *  the turn finishes (live=false) it collapses into one summary chip. */
+  /** True while the turn is actively streaming. A live group renders fully
+   *  expanded with no header chip; TurnEventList has already reduced top-level
+   *  events to committed rows. Once the turn finishes (live=false), the full
+   *  history collapses into one summary chip. */
   live: boolean;
   /** Sub-agent bodies pass this: always render the (dimmed) children, never
    *  the collapse chip — the SubagentCard row is the collapse boundary. */

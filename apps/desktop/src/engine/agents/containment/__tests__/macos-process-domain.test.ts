@@ -383,4 +383,42 @@ describe("macOS ZSR process domain", () => {
       readFile(path.join(commandRoot, "process-domain.json"), "utf8"),
     ).resolves.toBe("{}");
   });
+
+  it("retires metadata idempotently so a retried teardown does not throw", async () => {
+    const runner: MacosProcessDomainCommandRunner = async (_helper, args) => ({
+      exitCode: 0,
+      stdout:
+        args[0] === "self-test"
+          ? JSON.stringify({
+              version: 1,
+              platform: "darwin",
+              processIdentity: true,
+              sandboxInspection: true,
+              callerSandboxed: false,
+            })
+          : args[0] === "identity"
+            ? identity(Number(args[1]))
+            : JSON.stringify({ version: 1 }),
+      stderr: "",
+    });
+    const domain = await MacosProcessDomain.create({
+      helperPath,
+      markerPath,
+      policyPath,
+      metadataPath,
+      generation: newTerritoryGeneration(),
+      enginePid: 4321,
+      runner,
+    });
+    // First retire renames the descriptor to `.reaped`.
+    await expect(domain.retireMetadata()).resolves.toBeUndefined();
+    await expect(stat(metadataPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      stat(`${metadataPath}.reaped`),
+    ).resolves.toBeDefined();
+    // A retried teardown (or preparation-cleanup double-call) must not throw
+    // ENOENT — this is what lets the gateway's recovery loop resume a wedged
+    // teardown instead of churning forever. Finding A regression guard.
+    await expect(domain.retireMetadata()).resolves.toBeUndefined();
+  });
 });

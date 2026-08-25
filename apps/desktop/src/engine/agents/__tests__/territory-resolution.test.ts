@@ -386,6 +386,29 @@ describe("code-agent territory resolution", () => {
     expect(existsSync(defaultDesignRoot)).toBe(false);
   });
 
+  it("reserves the default Design territory when a managed agent admission opts in", async () => {
+    const root = await prospectiveDesignFixture();
+    await writeFile(path.join(root, ".zeros", "settings.toml"), "");
+    const defaultDesignRoot = path.join(root, "Zeros Design");
+
+    const territory = await resolveCodeAgentTerritory({
+      cwd: path.join(root, "src"),
+      workspaceRoot: root,
+      repoRoot: root,
+      reserveDefaultDesignDirectory: true,
+    });
+
+    expect(territory).toMatchObject({
+      workspaceRoot: root,
+      designDirectory: defaultDesignRoot,
+      protectedDesignDirectories: [defaultDesignRoot],
+    });
+    expect(territory!.writeCapabilities.deniedPaths).toContain(
+      defaultDesignRoot,
+    );
+    expect(await readdir(defaultDesignRoot)).toEqual([]);
+  });
+
   it("refuses unsafe or aliased parents for a prospective Design destination", async () => {
     const root = await prospectiveDesignFixture();
     const outside = await realpath(
@@ -866,6 +889,62 @@ describe("code-agent territory resolution", () => {
     expect(gw.workspaceSessionIds("attached-workspace", attached)).toEqual([]);
   });
 
+  it("publishes provisional territory while boundary admission is in flight", async () => {
+    const primary = await singleDesignFixture();
+    const baseBoundary = testExecutionBoundary();
+    let releasePrepare!: () => void;
+    const prepareGate = new Promise<void>((resolve) => {
+      releasePrepare = resolve;
+    });
+    let publishExecutionId!: (executionId: string) => void;
+    const executionIdReady = new Promise<string>((resolve) => {
+      publishExecutionId = resolve;
+    });
+    const executionBoundary: ExecutionBoundary = {
+      ...baseBoundary,
+      prepare: async (request, control) => {
+        publishExecutionId(request.executionId);
+        await prepareGate;
+        return baseBoundary.prepare(request, control);
+      },
+    };
+    const gw = gateway(executionBoundary);
+    const adapter = {
+      agentId: "contained",
+      newSession: vi.fn(async (opts: { executionId?: string }) => ({
+        session: {
+          executionId: opts.executionId!,
+          sessionId: opts.executionId!,
+        },
+        initialize: {},
+      })),
+      disposeSession: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } as unknown as AgentAdapter;
+    (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
+      "contained",
+      adapter,
+    );
+    const admission = gw.newSession("contained", { cwd: primary });
+
+    try {
+      const executionId = await executionIdReady;
+      expect(gw.workspaceSessionIds("rowless-primary", primary)).toEqual([
+        executionId,
+      ]);
+      expect(
+        gw.workspaceTerritoryChanged("rowless-primary", primary, undefined),
+      ).toBe(true);
+    } finally {
+      releasePrepare();
+      const session = await admission;
+      await gw.endSession("contained", session.executionId, {
+        failClosed: true,
+      });
+      await gw.dispose();
+    }
+  });
+
   it("subtracts every registered local Design root without granting its checkout", async () => {
     const primary = await prospectiveDesignFixture();
     await writeFile(path.join(primary, ".zeros", "settings.toml"), "");
@@ -994,6 +1073,139 @@ describe("code-agent territory resolution", () => {
     }
   });
 
+  it("protects future managed siblings without adding each sibling to the immutable territory", async () => {
+    const previousWorkspacesDir = process.env.ZEROS_WORKSPACES_DIR;
+    const container = await realpath(
+      await mkdtemp(path.join(tmpdir(), "zeros-managed-territory-")),
+    );
+    roots.push(container);
+    const managed = path.join(container, "workspaces");
+    process.env.ZEROS_WORKSPACES_DIR = managed;
+    const primarySource = await prospectiveDesignFixture();
+    const siblingSource = await prospectiveDesignFixture();
+    await Promise.all([
+      writeFile(path.join(primarySource, ".zeros", "settings.toml"), ""),
+      writeFile(path.join(siblingSource, ".zeros", "settings.toml"), ""),
+    ]);
+    const registeredMain = await singleDesignFixture();
+    const primary = path.join(managed, "zeros", "Shocking");
+    const sibling = path.join(managed, "zeros", "Onyx");
+    await Promise.all([
+      mkdir(path.dirname(primary), { recursive: true }),
+      mkdir(path.dirname(sibling), { recursive: true }),
+    ]);
+    await rename(primarySource, primary);
+    await rename(siblingSource, sibling);
+    const managedWorkspaces = [
+      {
+        id: "ws_shocking",
+        path: primary,
+        repoRoot: registeredMain,
+        placement: "local",
+      },
+      {
+        id: "ws_onyx",
+        path: sibling,
+        repoRoot: registeredMain,
+        placement: "local",
+      },
+    ] as ReturnType<typeof gitState.listWorkspaces>;
+    const workspaceSpy = vi
+      .spyOn(gitState, "listWorkspaces")
+      .mockReturnValue(managedWorkspaces);
+    const workspaceByIdSpy = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockImplementation(
+        (workspaceId) =>
+          managedWorkspaces.find((workspace) => workspace.id === workspaceId) ??
+          null,
+      );
+    const projectSpy = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue([registeredMain]);
+    const requests: BoundaryRequest[] = [];
+    const gw = gateway(
+      testExecutionBoundary({
+        onPrepare: (request) => requests.push(request),
+      }),
+    );
+    const adapter = {
+      agentId: "contained",
+      listSessions: vi.fn(async () => ({ sessions: [] })),
+      newSession: vi.fn(async (opts: { executionId?: string }) => ({
+        session: {
+          executionId: opts.executionId!,
+          sessionId: opts.executionId!,
+        },
+        initialize: {},
+      })),
+      disposeSession: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } as unknown as AgentAdapter;
+    (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
+      "contained",
+      adapter,
+    );
+
+    try {
+      await gw.listSessions("contained", { cwd: primary });
+      expect(await readdir(path.join(primary, "Zeros Design"))).toEqual([]);
+      requests.length = 0;
+
+      const session = await gw.newSession("contained", {
+        cwd: primary,
+        workspaceId: "ws_shocking",
+      });
+      const request = requests[0] as BoundaryRequest & {
+        protectedWorkspaceDirectories?: readonly string[];
+      };
+
+      expect(request.protectedWorkspaceDirectories).toContain(managed);
+      expect(request.territory?.protectedDesignDirectories).toContain(
+        path.join(primary, "Zeros Design"),
+      );
+      expect(await readdir(path.join(primary, "Zeros Design"))).toEqual([]);
+      expect(request.territory?.protectedDesignDirectories).toContain(
+        path.join(registeredMain, "Zeros Design"),
+      );
+      expect(request.territory?.protectedDesignDirectories).not.toContain(
+        path.join(sibling, "Zeros Design"),
+      );
+      expect(gw.workspaceSessionIds("ws_onyx", sibling)).toEqual([]);
+
+      await gw.endSession("contained", session.executionId, {
+        failClosed: true,
+      });
+
+      requests.length = 0;
+      const attachedSession = await gw.newSession("contained", {
+        cwd: primary,
+        workspaceId: "ws_shocking",
+        env: { ZEROS_ADDITIONAL_DIRS: JSON.stringify([managed]) },
+      });
+      expect(requests[0]?.protectedWorkspaceWriteDirectories).toEqual(
+        expect.arrayContaining([primary, sibling]),
+      );
+      expect(requests[0]?.territory?.protectedDesignDirectories).toContain(
+        path.join(sibling, "Zeros Design"),
+      );
+      expect(await readdir(path.join(sibling, "Zeros Design"))).toEqual([]);
+      await gw.endSession("contained", attachedSession.executionId, {
+        failClosed: true,
+      });
+    } finally {
+      await gw.dispose();
+      projectSpy.mockRestore();
+      workspaceByIdSpy.mockRestore();
+      workspaceSpy.mockRestore();
+      if (previousWorkspacesDir === undefined) {
+        delete process.env.ZEROS_WORKSPACES_DIR;
+      } else {
+        process.env.ZEROS_WORKSPACES_DIR = previousWorkspacesDir;
+      }
+    }
+  });
+
   it("subtracts every registered Design root from all provider one-shot boundaries", async () => {
     const primary = await prospectiveDesignFixture();
     await writeFile(path.join(primary, ".zeros", "settings.toml"), "");
@@ -1068,6 +1280,20 @@ describe("code-agent territory resolution", () => {
           registered,
         );
       }
+      const registeredTerritory = await previewCodeAgentTerritory({
+        cwd: registered,
+        workspaceRoot: registered,
+        repoRoot: registered,
+      });
+      expect(
+        gw.pooledUtilityWorkspaceTerritoryChanged(
+          registered,
+          registeredTerritory,
+        ),
+      ).toBe(false);
+      expect(
+        gw.pooledUtilityWorkspaceTerritoryChanged(registered, undefined),
+      ).toBe(true);
     } finally {
       await gw.dispose();
       projectSpy.mockRestore();
@@ -1136,6 +1362,13 @@ describe("code-agent territory resolution", () => {
           siblingWorktree,
           siblingMain,
           siblingProject,
+        ]),
+      );
+      expect(request.protectedWorkspaceDirectories).toEqual(
+        expect.arrayContaining([
+          gitState.worktreesRoot(),
+          gitState.designWorktreesRoot(),
+          gitState.legacyWorktreesRoot(),
         ]),
       );
       expect(request.territory?.protectedDesignDirectories).toEqual(

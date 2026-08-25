@@ -36,7 +36,7 @@ d("cloud workspace endpoint grants", () => {
     const subject = randomUUID();
     const owner = await ensureUser(pool, {
       provider: "auth0",
-      providerSub: subject,
+      providerSubject: subject,
       email: `grant-${subject}@example.test`,
       displayName: "Grant Owner",
     });

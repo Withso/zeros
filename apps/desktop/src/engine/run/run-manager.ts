@@ -35,6 +35,7 @@
 
 import type { PtyService } from "../pty/service";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { buildRunCommandEnv } from "../pty/shell-setup";
 import { isRunSessionId } from "@zeros/protocol/run-actions";
 import {
@@ -43,6 +44,8 @@ import {
   setWorkspaceMeta,
 } from "../git/state";
 import type {
+  BoundaryAuthoritySnapshot,
+  BoundaryTerritoryContributionSnapshot,
   PreparedBoundary,
   RepoTaskBoundaryFactory,
 } from "../agents/containment/types";
@@ -134,6 +137,10 @@ interface RunEntry {
 
 interface BoundaryTeardownRecord {
   readonly promise: Promise<void>;
+  readonly workspaceId: string | null;
+  readonly territoryContributions:
+    | readonly BoundaryTerritoryContributionSnapshot[]
+    | undefined;
 }
 
 const missingRepoTaskBoundary: RepoTaskBoundaryFactory = async () => {
@@ -167,7 +174,11 @@ export class RunManager {
    *  silently missing it and letting the PTY appear afterwards. */
   private readonly starting = new Map<
     string,
-    { workspaceId: string | null; cancelled: boolean }
+    {
+      workspaceId: string | null;
+      cancelled: boolean;
+      authority?: BoundaryAuthoritySnapshot;
+    }
   >();
   /** Failed teardown proof is durable for this engine lifetime. A later
    * archive/delete must still see it even when the run entry was superseded. */
@@ -226,7 +237,11 @@ export class RunManager {
     workspaceId: string | null,
   ): Promise<void> {
     const promise = Promise.resolve().then(() => boundary.stopAndProve());
-    const record = { promise } satisfies BoundaryTeardownRecord;
+    const record = {
+      promise,
+      workspaceId,
+      territoryContributions: boundary.territoryContributions,
+    } satisfies BoundaryTeardownRecord;
     this.allBoundaryTeardowns.add(record);
     void promise.then(
       () => this.allBoundaryTeardowns.delete(record),
@@ -309,18 +324,120 @@ export class RunManager {
     }
   }
 
+  /** Retire only run boundaries whose immutable authority includes one
+   * managed workspace. Rowless and sibling runs stay live unless their exact
+   * contribution list says they attached the workspace being changed. */
+  async stopForWorkspaceTerritoryAndProve(
+    workspaceId: string,
+    workspaceRoot: string,
+  ): Promise<void> {
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    const includesWorkspace = (
+      owner: string | null,
+      contributions:
+        | readonly BoundaryTerritoryContributionSnapshot[]
+        | undefined,
+    ): boolean =>
+      owner === workspaceId ||
+      contributions?.some(
+        (contribution) =>
+          path.resolve(contribution.workspaceRoot) === normalizedWorkspace,
+      ) === true;
+
+    const sessionIds = new Set<string>();
+    for (const [sessionId, flight] of this.starting) {
+      if (
+        includesWorkspace(
+          flight.workspaceId,
+          flight.authority?.territoryContributions,
+        )
+      ) {
+        sessionIds.add(sessionId);
+      }
+    }
+    const entries: RunEntry[] = [];
+    for (const entry of this.entries.values()) {
+      if (
+        includesWorkspace(
+          entry.workspaceId,
+          entry.boundary?.territoryContributions,
+        )
+      ) {
+        sessionIds.add(entry.sessionId);
+        entries.push(entry);
+      }
+    }
+    for (const sessionId of sessionIds) this.stop(sessionId);
+    for (const entry of entries) void this.finalizeBoundary(entry);
+
+    const records = [...this.allBoundaryTeardowns].filter((record) =>
+      includesWorkspace(record.workspaceId, record.territoryContributions),
+    );
+    const results = await Promise.allSettled(
+      records.map((record) => record.promise),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "repository run boundaries for this Design territory were not proven stopped. Restart Zeros before changing it.",
+      );
+    }
+  }
+
   /** Compare active repository tasks with the current app-wide Design
    * subtraction. Rowless tasks participate exactly like managed workspaces;
    * an in-flight start is conservatively changed until its identity publishes. */
   registeredDesignAuthorityChanged(identity: string | null): boolean {
-    if (this.starting.size > 0 || this.allBoundaryTeardowns.size > 0) {
+    if (this.allBoundaryTeardowns.size > 0) {
       return true;
+    }
+    for (const flight of this.starting.values()) {
+      if (
+        flight.authority &&
+        flight.authority.registeredDesignAuthorityIdentity !== identity
+      ) {
+        return true;
+      }
     }
     for (const entry of this.entries.values()) {
       if (entry.state !== "running" || entry.boundaryFinalized) continue;
       if (
         !entry.boundary ||
         entry.boundary.registeredDesignAuthorityIdentity !== identity
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  workspaceTerritoryChanged(
+    workspaceRoot: string,
+    territoryIdentity: string | null,
+  ): boolean {
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    const changed = (snapshot: BoundaryAuthoritySnapshot): boolean =>
+      snapshot.territoryContributions.some(
+        (contribution) =>
+          path.resolve(contribution.workspaceRoot) === normalizedWorkspace &&
+          contribution.identity !== territoryIdentity,
+      );
+    for (const flight of this.starting.values()) {
+      if (flight.authority && changed(flight.authority)) return true;
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.state !== "running" || entry.boundaryFinalized) continue;
+      const contributions = entry.boundary?.territoryContributions;
+      if (
+        !contributions ||
+        changed({
+          registeredDesignAuthorityIdentity:
+            entry.boundary?.registeredDesignAuthorityIdentity ?? null,
+          territoryContributions: contributions,
+        })
       ) {
         return true;
       }
@@ -397,7 +514,11 @@ export class RunManager {
     // error, no toast — the user had to click Rerun twice. `stop()` now retires
     // the slot so a later start takes a fresh one.
     if (this.starting.has(args.sessionId)) return { alreadyRunning: true };
-    const flight = { workspaceId: args.workspaceId, cancelled: false };
+    const flight: {
+      workspaceId: string | null;
+      cancelled: boolean;
+      authority?: BoundaryAuthoritySnapshot;
+    } = { workspaceId: args.workspaceId, cancelled: false };
     this.starting.set(args.sessionId, flight);
     try {
       return await this.spawnRun(args, prev, flight);
@@ -414,7 +535,7 @@ export class RunManager {
   private async spawnRun(
     args: RunStartArgs,
     prev: RunEntry | undefined,
-    flight: { cancelled: boolean },
+    flight: { cancelled: boolean; authority?: BoundaryAuthoritySnapshot },
   ): Promise<RunStartResult> {
     if (prev && !prev.settled) {
       // PTY gone but its exit not yet processed (a stop's kill in flight, or
@@ -442,6 +563,9 @@ export class RunManager {
       workspaceRoot: args.cwd,
       repoRoot: args.repoRoot ?? args.cwd,
       ...(env ? { env } : {}),
+      onAuthorityResolved: (authority) => {
+        if (!flight.cancelled) flight.authority = authority;
+      },
     });
     if (flight.cancelled) {
       await this.trackBoundaryTeardown(boundary, args.workspaceId);

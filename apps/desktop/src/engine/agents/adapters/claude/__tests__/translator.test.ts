@@ -9,7 +9,10 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { ClaudeStreamTranslator } from "../translator";
+import {
+  ClaudeStreamTranslator,
+  mapClaudeTerminalReason,
+} from "../translator";
 import type { SessionNotification } from "../../../types";
 
 function collect() {
@@ -2631,6 +2634,47 @@ describe("ClaudeStreamTranslator string message.content (2026-07-12)", () => {
 });
 
 describe("ClaudeStreamTranslator distinct stop reasons", () => {
+  it("exhaustively maps every terminal reason in Claude Agent SDK 0.3.238", () => {
+    const cases = {
+      blocking_limit: "blocking_limit",
+      rapid_refill_breaker: "blocking_limit",
+      prompt_too_long: "prompt_too_long",
+      image_error: "refusal",
+      model_error: "refusal",
+      api_error: "refusal",
+      malformed_tool_use_exhausted: "refusal",
+      aborted_streaming: "refusal",
+      aborted_tools: "refusal",
+      stop_hook_prevented: "refusal",
+      hook_stopped: "refusal",
+      tool_deferred: "end_turn",
+      max_turns: "max_turn_requests",
+      background_requested: "end_turn",
+      completed: "end_turn",
+      budget_exhausted: "budget_exhausted",
+      structured_output_retry_exhausted: "refusal",
+      tool_deferred_unavailable: "refusal",
+      turn_setup_failed: "refusal",
+    } as const;
+
+    for (const [reason, expected] of Object.entries(cases)) {
+      expect(mapClaudeTerminalReason(reason), reason).toBe(expected);
+    }
+    expect(mapClaudeTerminalReason("future_reason")).toBeNull();
+  });
+
+  it("promotes a structured terminal failure even when is_error is omitted", () => {
+    const { t } = collect();
+    t.feed({
+      type: "result",
+      subtype: "success",
+      terminal_reason: "turn_setup_failed",
+      result: "Unable to prepare the turn",
+    });
+    expect(t.stopReason).toBe("refusal");
+    expect(t.terminalError).toBe("Unable to prepare the turn");
+  });
+
   it("maps a success result with stop_reason max_tokens → 'max_tokens' (was dead code)", () => {
     const { t } = collect();
     t.feed({ type: "result", subtype: "success", stop_reason: "max_tokens" });

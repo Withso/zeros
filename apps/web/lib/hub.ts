@@ -35,6 +35,7 @@ import {
   type DashboardMe,
 } from "./dashboard.mjs";
 import { proxyControlPlane } from "./control-plane-proxy";
+import { legacyDesktopHandoffEnabled } from "./workos-browser.mjs";
 
 const HANDOFF_COOKIE = "zeros_handoff";
 const HANDOFF_TTL_S = 600; // 10 min — matches the desktop's pending-nonce window.
@@ -226,6 +227,12 @@ export async function renderHub(request: Request, env: Env): Promise<Response> {
       return finish(shell("Signed in", signedInNoHandoff(env)));
     }
     return finish(await dashboard(request, env, verified!));
+  }
+  // WorkOS desktop credentials must come from the independent public-client
+  // flow in Phase 3. Never fall back to copying or refreshing this browser
+  // session through the Auth0-era ticket broker.
+  if (!legacyDesktopHandoffEnabled(env)) {
+    return finish(shell("Signed in", signedInNoHandoff(env)));
   }
   return finish(shell("Launch Zeros", launchInner(env, ctx)));
 }

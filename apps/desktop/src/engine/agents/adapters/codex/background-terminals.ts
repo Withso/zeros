@@ -6,6 +6,8 @@
 // module keeps pagination/bounds and lifecycle reconciliation pure enough to
 // race-test without booting a Codex child process.
 
+import { createHash } from "node:crypto";
+
 import type { BackgroundTask } from "@zeros/protocol/agent-events";
 
 import type { ThreadBackgroundTerminal } from "./generated/v2/ThreadBackgroundTerminal";
@@ -34,6 +36,25 @@ type Request = (
   params: unknown,
   opts?: { timeoutMs?: number },
 ) => Promise<unknown>;
+
+/** Renderer task ids are opaque, deterministic Zeros identities. The native
+ * tuple contributes to a one-way, execution-scoped digest but never crosses
+ * the adapter boundary; the private routing map retains the exact tuple. */
+export function codexBackgroundTaskId(
+  executionId: string,
+  threadId: string,
+  processId: string,
+): string {
+  const digest = createHash("sha256")
+    .update(executionId)
+    .update("\0")
+    .update(threadId)
+    .update("\0")
+    .update(processId)
+    .digest("hex")
+    .slice(0, 32);
+  return `background-task:${digest}`;
+}
 
 /** Fetch every page up to the renderer's explicit bound. Repeated cursors are
  * treated as an exhausted stream so a buggy server cannot spin forever. */
@@ -135,7 +156,7 @@ export function reconcileBackgroundTerminals(
     const taskId = taskIdForTerminal(terminal);
     if (!taskId || active.has(taskId)) continue;
     const prior = previous.get(taskId);
-    const name = terminal.command || `Terminal ${terminal.processId}`;
+    const name = terminal.command || "Background terminal";
     const unchanged =
       prior?.name === name &&
       prior.taskType === "codex_terminal" &&

@@ -184,15 +184,15 @@ const RetainedBrowserView = React.memo(function RetainedBrowserView({
 });
 
 // Header: h-10 spans the window's 0..40px title strip so its content centers
-// at y=20 — the traffic lights' midline — matching repository panel/conversation pane. The border-b
-// (2026-07-14) seats the tab strip on a 1px divider so the header reads as
-// the column's chrome band, separate from the tab bodies below.
-const WORKBENCH_HEADER_CLS =
-  "border-border1 flex h-10 shrink-0 items-center gap-1 border-b pr-2";
+// at y=20 — the traffic lights' midline — matching repository panel/conversation
+// pane. It stays borderless: second-row chrome owns any separator it needs
+// (Files' viewer toolbar or a created PR's framed status row).
+const WORKBENCH_HEADER_CLS = "flex h-10 shrink-0 items-center gap-1 pr-2";
 
 // Workbench fills the height terminal panel leaves. The seam resizer enforces a usable
 // pixel floor while dragging; min-h-0 lets flex resize it without overflow.
-const WORKBENCH_CONTENT_CLS = "flex min-h-0 flex-1 flex-col overflow-hidden bg-bg1";
+const WORKBENCH_CONTENT_CLS =
+  "flex min-h-0 flex-1 flex-col overflow-hidden bg-bg1";
 
 // ── "Setting up workspace" — the settling window for a fresh create ────────
 // While a just-created workspace's surface assembles, both tab rows are
@@ -282,7 +282,8 @@ export function WorkbenchPane({
   const showSharedPrStatusRow =
     !!activeWorkspace &&
     !isLocalMainWorkspace(activeWorkspace) &&
-    (activeWorkbenchTab?.type === "changes" || activeWorkbenchTab?.type === "review");
+    (activeWorkbenchTab?.type === "changes" ||
+      activeWorkbenchTab?.type === "review");
   // Recent clean File views join the always-retained Browser/source surfaces;
   // this preserves tree/editor layout without mounting an unbounded tab set.
   const availableWorkbenchIds = useMemo(
@@ -387,7 +388,8 @@ export function WorkbenchPane({
     seenPrByWorkspace.current.set(workspaceId, prNumber);
     if (prev !== null || prNumber == null) return; // not a live null → PR flip
     const WORKBENCH_IDLE_MS = 10_000;
-    if (Date.now() - lastWorkbenchInteractionRef.current < WORKBENCH_IDLE_MS) return;
+    if (Date.now() - lastWorkbenchInteractionRef.current < WORKBENCH_IDLE_MS)
+      return;
     if (isWorkbenchEditorDirty()) return;
     if (reviewTabIdRef.current) {
       dispatch({ type: "ACTIVATE_WORKBENCH_TAB", id: reviewTabIdRef.current });
@@ -469,7 +471,11 @@ export function WorkbenchPane({
           <>
             {/* ── Workbench: File / Changes / Review + added File/Browser tabs. ── */}
             <div className={WORKBENCH_CONTENT_CLS}>
-              <div ref={headerRef} className={WORKBENCH_HEADER_CLS}>
+              <div
+                ref={headerRef}
+                data-testid="workbench-header"
+                className={WORKBENCH_HEADER_CLS}
+              >
                 <div className="h-full min-w-0 flex-1">
                   <WorkbenchTabStrip
                     tabs={tabs}

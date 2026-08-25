@@ -39,8 +39,13 @@
 // ──────────────────────────────────────────────────────────
 
 import { createHash } from "node:crypto";
+import path from "node:path";
 
-import type { BoundaryRequest, PreparedBoundary } from "./types";
+import type {
+  BoundaryRequest,
+  BoundaryTerritoryContributionSnapshot,
+  PreparedBoundary,
+} from "./types";
 
 /** How long an idle pooled boundary is kept before it is proven torn down.
  * Long enough to serve the burst that follows a boot or a settings save (probes
@@ -64,6 +69,9 @@ interface PoolEntry {
   readonly key: string;
   readonly executionId: string;
   readonly boundary: PreparedBoundary;
+  readonly territoryContributions:
+    | readonly BoundaryTerritoryContributionSnapshot[]
+    | undefined;
   readonly generation: string;
   /** Serializes leases for this key. Resolves when the current holder releases. */
   tail: Promise<void>;
@@ -99,6 +107,26 @@ export function utilityBoundaryKey(request: BoundaryRequest): string {
     .slice(0, 32);
 }
 
+/** Complete pool key: request identity (minus executionId) plus the exact
+ * per-owner contribution snapshot. Shared with the warm session-boundary pool
+ * so "byte-identical request" means the same thing on both sides. */
+export function pooledBoundaryRequestKey(
+  request: BoundaryRequest,
+  territoryContributions:
+    | readonly BoundaryTerritoryContributionSnapshot[]
+    | undefined,
+): string {
+  const contributionKey = createHash("sha256")
+    .update(
+      territoryContributions === undefined
+        ? "legacy-unknown"
+        : stableStringify(territoryContributions),
+    )
+    .digest("hex")
+    .slice(0, 16);
+  return `${utilityBoundaryKey(request)}:${contributionKey}`;
+}
+
 /** JSON with object keys sorted at every depth, so two structurally equal
  * requests always digest identically regardless of construction order. */
 function stableStringify(value: unknown): string {
@@ -126,6 +154,13 @@ export class UtilityBoundaryPool {
    * back: an admission that began before disposeAll must never publish into the
    * reopened pool after the old territory was retired. */
   private lifecycleEpoch = 0;
+  /** Managed-workspace transitions are narrower than disposeAll: they close
+   * admission only for utility requests whose authority includes that exact
+   * workspace. Counts allow overlapping serialized transitions to share the
+   * same root without one reopening it underneath the other. */
+  private readonly suspendedWorkspaceTerritories = new Map<string, number>();
+  private readonly workspaceTerritoryEpochs = new Map<string, number>();
+  private workspaceTerritoryEpoch = 0;
 
   constructor(private readonly options: UtilityBoundaryPoolOptions) {
     this.idleMs = options.idleMs ?? UTILITY_BOUNDARY_IDLE_MS;
@@ -133,8 +168,31 @@ export class UtilityBoundaryPool {
 
   /** Take the (single) lease for this request, admitting a boundary only if no
    * warm one exists for the identical request. Callers must release. */
-  async acquire(request: BoundaryRequest): Promise<UtilityBoundaryLease> {
-    const key = utilityBoundaryKey(request);
+  async acquire(
+    request: BoundaryRequest,
+    territoryContributions?: readonly BoundaryTerritoryContributionSnapshot[],
+  ): Promise<UtilityBoundaryLease> {
+    // Capture transition generations before the first possible queue await.
+    // A request already waiting behind an identical busy/cold admission still
+    // carries its pre-transition authority; sampling only after it wakes would
+    // let that stale request look newly admitted once the gate reopened.
+    const requestedLifecycleEpoch = this.lifecycleEpoch;
+    const requestedWorkspaceEpoch = this.workspaceTerritoryEpoch;
+    const requestedTerritoryEpochs = territoryContributions?.map(
+      (contribution) => {
+        const root = path.resolve(contribution.workspaceRoot);
+        return [root, this.workspaceTerritoryEpochs.get(root) ?? 0] as const;
+      },
+    );
+    const transitionCrossed = (): boolean =>
+      requestedLifecycleEpoch !== this.lifecycleEpoch ||
+      (territoryContributions === undefined
+        ? requestedWorkspaceEpoch !== this.workspaceTerritoryEpoch
+        : (requestedTerritoryEpochs ?? []).some(
+            ([root, epoch]) =>
+              (this.workspaceTerritoryEpochs.get(root) ?? 0) !== epoch,
+          ));
+    const key = pooledBoundaryRequestKey(request, territoryContributions);
     // Queue behind whatever holds this key, so at most one one-shot at a time
     // uses a pooled boundary. Waiting is correct rather than merely convenient:
     // these are background operations, and serializing them also stops them
@@ -154,8 +212,18 @@ export class UtilityBoundaryPool {
       if (!waiting.busy) break;
       await waiting.tail.catch(() => undefined);
     }
+    if (transitionCrossed()) {
+      throw new Error(
+        "utility boundary admission was invalidated by a territory transition",
+      );
+    }
     if (this.disposed) {
       throw new Error("utility boundary pool is disposed");
+    }
+    if (this.workspaceTerritorySuspended(territoryContributions)) {
+      throw new Error(
+        "utility boundary admission is blocked by a workspace territory transition",
+      );
     }
     let entry = this.entries.get(key);
     if (entry && !entry.busy && !entry.retiring) {
@@ -174,7 +242,6 @@ export class UtilityBoundaryPool {
     // rejection solely through this coordination promise.
     void pendingAdmission.catch(() => undefined);
     this.pendingAdmissions.set(key, pendingAdmission);
-    const admissionEpoch = this.lifecycleEpoch;
     // The FIRST caller's executionId becomes the pooled boundary's id. It only
     // forms paths and log labels (the security identity is `generation`), so
     // reusing it is safe — and it keeps `[zsr] admitted …` lines and session
@@ -184,7 +251,11 @@ export class UtilityBoundaryPool {
     let admissionFailed = false;
     try {
       const boundary = await this.options.prepare(request);
-      if (this.disposed || admissionEpoch !== this.lifecycleEpoch) {
+      if (
+        this.disposed ||
+        transitionCrossed() ||
+        this.workspaceTerritorySuspended(territoryContributions)
+      ) {
         // disposeAll may have completed and reopen() may already have cleared the
         // boolean while prepare() was still building this boundary. The epoch is
         // the durable proof that it crossed a territory transition. Retire it
@@ -198,6 +269,7 @@ export class UtilityBoundaryPool {
         key,
         executionId,
         boundary,
+        territoryContributions,
         generation: String(boundary.generation),
         tail: Promise.resolve(),
         busy: false,
@@ -238,7 +310,13 @@ export class UtilityBoundaryPool {
           // reason about (a half-written private HOME, a wedged child). Retire
           // rather than hand it to the next caller: a fresh admission is cheap
           // next to a wrong reuse.
-          if (outcome === "failed" || this.disposed) {
+          if (
+            outcome === "failed" ||
+            this.disposed ||
+            entry.retiring ||
+            this.entries.get(entry.key) !== entry ||
+            this.workspaceTerritorySuspended(entry.territoryContributions)
+          ) {
             await this.retire(entry);
             return;
           }
@@ -317,6 +395,63 @@ export class UtilityBoundaryPool {
     }
   }
 
+  /** Close admission for one exact managed owner before its pointer or
+   * recognized Design roots change. This is synchronous so no matching cold
+   * admission can cross the caller's first await. */
+  suspendWorkspaceTerritory(workspaceRoot: string): void {
+    const root = path.resolve(workspaceRoot);
+    this.suspendedWorkspaceTerritories.set(
+      root,
+      (this.suspendedWorkspaceTerritories.get(root) ?? 0) + 1,
+    );
+    this.workspaceTerritoryEpoch += 1;
+    this.workspaceTerritoryEpochs.set(
+      root,
+      (this.workspaceTerritoryEpochs.get(root) ?? 0) + 1,
+    );
+  }
+
+  /** Prove every pooled boundary that depends on one managed workspace has
+   * stopped. Unrelated provider probes/titles remain warm and usable. */
+  async disposeWorkspaceTerritory(workspaceRoot: string): Promise<void> {
+    const root = path.resolve(workspaceRoot);
+    const errors: unknown[] = [];
+    await Promise.all(
+      [...this.entries.values()]
+        .filter((entry) =>
+          this.territoryContributionsInclude(
+            entry.territoryContributions,
+            root,
+          ),
+        )
+        .map(async (entry) => {
+          try {
+            await this.retire(entry);
+          } catch (error) {
+            errors.push(error);
+          }
+        }),
+    );
+    if (errors.length > 0) {
+      throw errors.length === 1
+        ? errors[0]
+        : new AggregateError(
+            errors,
+            "pooled utility boundaries for this workspace could not all be proven stopped",
+          );
+    }
+  }
+
+  resumeWorkspaceTerritory(workspaceRoot: string): void {
+    const root = path.resolve(workspaceRoot);
+    const count = this.suspendedWorkspaceTerritories.get(root) ?? 0;
+    if (count <= 1) {
+      this.suspendedWorkspaceTerritories.delete(root);
+    } else {
+      this.suspendedWorkspaceTerritories.set(root, count - 1);
+    }
+  }
+
   /** Re-open the pool after a disposeAll (a territory transition ends, the
    * engine continues). Entries are already gone; only the latch resets. */
   reopen(): void {
@@ -326,6 +461,41 @@ export class UtilityBoundaryPool {
   /** Live entry count — diagnostics and tests only. */
   size(): number {
     return this.entries.size;
+  }
+
+  territoryContributionSnapshots(): readonly (
+    | readonly BoundaryTerritoryContributionSnapshot[]
+    | undefined
+  )[] {
+    return [...this.entries.values()].map(
+      (entry) => entry.territoryContributions,
+    );
+  }
+
+  private territoryContributionsInclude(
+    contributions: readonly BoundaryTerritoryContributionSnapshot[] | undefined,
+    workspaceRoot: string,
+  ): boolean {
+    // A compatibility-era unlabelled utility cannot prove independence, so it
+    // follows the restrictive path. Production gateway admissions always pass
+    // the explicit contribution snapshot.
+    if (contributions === undefined) return true;
+    return contributions.some(
+      (contribution) =>
+        path.resolve(contribution.workspaceRoot) === workspaceRoot,
+    );
+  }
+
+  private workspaceTerritorySuspended(
+    contributions: readonly BoundaryTerritoryContributionSnapshot[] | undefined,
+  ): boolean {
+    if (this.suspendedWorkspaceTerritories.size === 0) return false;
+    if (contributions === undefined) return true;
+    return contributions.some((contribution) =>
+      this.suspendedWorkspaceTerritories.has(
+        path.resolve(contribution.workspaceRoot),
+      ),
+    );
   }
 
   /** Whether any prepared utility boundary was admitted under a different

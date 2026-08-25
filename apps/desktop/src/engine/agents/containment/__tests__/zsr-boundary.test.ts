@@ -22,6 +22,9 @@ import { runFile } from "../../../git/git-exec";
 import type { MacosProcessDomainCommandRunner } from "../macos-process-domain";
 import {
   cleanupZsrPreparationProcessDomain,
+  resumeSharedContainerWorkerIdling,
+  stopIdleSharedContainerWorkers,
+  suspendSharedContainerWorkerIdling,
   ZsrExecutionBoundary as RuntimeZsrExecutionBoundary,
   type ZsrBoundaryOptions,
 } from "../zsr-boundary";
@@ -94,6 +97,7 @@ if (descriptor.env.HOST_PARITY_CANARY) {
     codeWrite: !designWritable,
     designWrite: spec.designDirectories.map(() => designWritable),
     designAliasWrite: spec.designDirectories.length > 0 ? designWritable : true,
+    protectedWorkspaceWrite: spec.protectedWorkspaceFiles.map(() => false),
     hostRead: true,
     canonicalGitRead: true,
     environmentExact: Object.entries(spec.expectedEnv).every(
@@ -164,6 +168,9 @@ describe("ZSR execution boundary", () => {
     else process.env.ZEROS_DATA_DIR = previousDataDir;
     if (previousSrtDebug === undefined) delete process.env.SRT_DEBUG;
     else process.env.SRT_DEBUG = previousSrtDebug;
+    // Shared container workers may idle past a test's own teardown; flush them
+    // so one test's warm entry can never leak into the next.
+    await stopIdleSharedContainerWorkers().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   });
 
@@ -187,6 +194,42 @@ describe("ZSR execution boundary", () => {
 
     await expect(stat(policyRoot)).resolves.toBeDefined();
     expect(retireMetadata).not.toHaveBeenCalled();
+  });
+
+  it("attributes a debug admission to bounded stages instead of one opaque total", async () => {
+    process.env.SRT_DEBUG = "1";
+    const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errored = vi.spyOn(console, "error").mockImplementation(() => {});
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+    });
+    const prepared = await boundary.prepare({
+      executionId: "execution-stage-timing",
+      actor: "agent-code",
+      providerId: "codex",
+      cwd: workspace,
+      workspaceRoot: workspace,
+    });
+    let stopped = false;
+    try {
+      expect(logged).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^\[zsr\] admitted host-parity codex in \d+ms \(.+canary=\d+ms.*\)$/,
+        ),
+      );
+      await prepared.stopAndProve();
+      stopped = true;
+      expect(logged).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[zsr\] retired codex in \d+ms \(/),
+      );
+      expect(errored).not.toHaveBeenCalled();
+    } finally {
+      if (!stopped) await prepared.stopAndProve();
+      logged.mockRestore();
+      errored.mockRestore();
+    }
   });
 
   it("preserves host authority while keeping the supervisor bootstrap private", async () => {
@@ -306,9 +349,11 @@ describe("ZSR execution boundary", () => {
     expect(descriptor).not.toHaveProperty("internalProxyPorts");
 
     await prepared.stopAndProve();
-    await expect(access(sessionDir(request.executionId))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
+    await expect(access(sessionDir(request.executionId))).rejects.toMatchObject(
+      {
+        code: "ENOENT",
+      },
+    );
   });
 
   it("deduplicates physical aliases for an ambient container socket", async () => {
@@ -567,6 +612,8 @@ describe("ZSR execution boundary", () => {
   (process.platform === "linux" ? it : it.skip)(
     "enforces the host-parity write fence in the real Linux runtime",
     async () => {
+      const managedWorkspaces = path.join(root, "managed-workspaces");
+      workspace = path.join(managedWorkspaces, "repo", "Shocking");
       const design = path.join(workspace, "Zeros Design");
       const protectedFile = path.join(design, "protected.txt");
       const hostVisibleFile = path.join(root, "host-visible.log");
@@ -576,6 +623,7 @@ describe("ZSR execution boundary", () => {
       await Promise.all([
         mkdir(design, { recursive: true }),
         mkdir(hostHome, { recursive: true }),
+        mkdir(managedWorkspaces, { recursive: true }),
       ]);
       await Promise.all([
         writeFile(protectedFile, "original\n"),
@@ -611,6 +659,7 @@ describe("ZSR execution boundary", () => {
         providerStateEnv: { HOME: hostHome },
         cwd: workspace,
         workspaceRoot: workspace,
+        protectedWorkspaceDirectories: [managedWorkspaces],
         territory: {
           agentRole: "code",
           workspaceRoot: workspace,
@@ -1125,7 +1174,12 @@ process.stdout.write(JSON.stringify({
       const design = path.join(workspace, "Zeros Design");
       const designFile = path.join(design, "canvas.json");
       const outside = path.join(root, "outside-cache");
-      await mkdir(design, { recursive: true });
+      const managedWorkspaces = path.join(root, "managed-workspaces");
+      await Promise.all(
+        [design, managedWorkspaces].map((directory) =>
+          mkdir(directory, { recursive: true }),
+        ),
+      );
       await writeFile(designFile, "before\n");
       await runFile("git", ["init", "-b", "main"], { cwd: workspace });
       await runFile("git", ["config", "user.name", "Zeros Test"], {
@@ -1147,6 +1201,7 @@ process.stdout.write(JSON.stringify({
         actor: "design-agent",
         cwd: workspace,
         workspaceRoot: workspace,
+        protectedWorkspaceDirectories: [managedWorkspaces],
         territory: {
           agentRole: "code",
           workspaceRoot: workspace,
@@ -1167,14 +1222,17 @@ process.stdout.write(JSON.stringify({
             String.raw`
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
-const [codeFile, designFile, outsideFile] = process.argv.slice(1);
+const [codeFile, designFile, outsideFile, futureWorkspaceFile] = process.argv.slice(1);
 let codeDenied = false;
 try { fs.writeFileSync(codeFile, "code\n", { flag: "wx" }); } catch { codeDenied = true; }
+let futureWorkspaceDenied = false;
+try { fs.writeFileSync(futureWorkspaceFile, "code\n", { flag: "wx" }); } catch { futureWorkspaceDenied = true; }
 fs.writeFileSync(designFile, "after\n");
 fs.writeFileSync(outsideFile, "cache\n");
 const git = spawnSync("git", ["add", "Zeros Design/canvas.json"], { encoding: "utf8" });
 process.stdout.write(JSON.stringify({
   codeDenied,
+  futureWorkspaceDenied,
   design: fs.readFileSync(designFile, "utf8"),
   gitStatus: git.status,
   gitStderr: git.stderr,
@@ -1182,6 +1240,7 @@ process.stdout.write(JSON.stringify({
             path.join(workspace, "forbidden-code.txt"),
             designFile,
             outside,
+            path.join(managedWorkspaces, "future-workspace"),
           ],
           cwd: workspace,
           env: { PATH: process.env.PATH ?? "/usr/bin:/bin" },
@@ -1195,6 +1254,7 @@ process.stdout.write(JSON.stringify({
         await expect(child.wait()).resolves.toMatchObject({ code: 0 });
         expect(JSON.parse(stdout)).toEqual({
           codeDenied: true,
+          futureWorkspaceDenied: true,
           design: "after\n",
           gitStatus: 0,
           gitStderr: "",
@@ -1292,7 +1352,140 @@ process.stdout.write(JSON.stringify({
     await first.stopAndProve();
     expect(stops).toBe(0);
     await second.stopAndProve();
+    // The last release defers the machine stop for the idle window so the next
+    // session in this workspace reuses the warm worker instead of paying the
+    // full create again.
+    expect(stops).toBe(0);
+    const third = await boundary.prepare(request("workspace-worker-three"));
+    expect(reservations).toBe(1);
+    await third.stopAndProve();
+    expect(stops).toBe(0);
+    await stopIdleSharedContainerWorkers();
     expect(stops).toBe(1);
+  });
+
+  it("stops the shared OrbStack worker inline while workspace idling is suspended", async () => {
+    const design = path.join(workspace, "Zeros Design");
+    await mkdir(design, { recursive: true });
+    let stops = 0;
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      macosContainerWorkerFactory: () => ({
+        reserve: async () => ({
+          hostPort: 43_411,
+          machineName: "zeros-zsr-suspended",
+          environment: {},
+          start: async () => undefined,
+          stopAndProve: async () => {
+            stops += 1;
+          },
+        }),
+      }),
+    });
+    const request = {
+      executionId: "suspend-idling",
+      actor: "agent-code" as const,
+      cwd: workspace,
+      workspaceRoot: workspace,
+      territory: {
+        agentRole: "code" as const,
+        workspaceRoot: workspace,
+        designDirectory: design,
+        protectedDesignDirectories: [design],
+        designRecognitionPaths: [],
+        writeCapabilities: {
+          workspace: "write" as const,
+          deniedPaths: [design, path.join(workspace, ".git")],
+        },
+      },
+      containerWorker: {
+        runtime: "podman" as const,
+        backend: "orbstack-machine" as const,
+        executable: process.execPath,
+      },
+      containerWorkflowExpected: true,
+    };
+    const prepared = await boundary.prepare(request);
+    suspendSharedContainerWorkerIdling(workspace);
+    try {
+      // A Design territory transition suspends idling for the workspace, so
+      // the release must stop (and prove) the machine inline rather than
+      // leaving a machine with the superseded protection map warm.
+      await prepared.stopAndProve();
+      expect(stops).toBe(1);
+    } finally {
+      resumeSharedContainerWorkerIdling(workspace);
+    }
+  });
+
+  it("retires an idle worker admitted under a superseded key before admitting its replacement", async () => {
+    const firstDesign = path.join(workspace, "Zeros Design");
+    const secondDesign = path.join(workspace, "Second Design");
+    await Promise.all([
+      mkdir(firstDesign, { recursive: true }),
+      mkdir(secondDesign, { recursive: true }),
+    ]);
+    let reservations = 0;
+    let stops = 0;
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      macosContainerWorkerFactory: () => ({
+        reserve: async () => {
+          reservations += 1;
+          return {
+            hostPort: 43_500 + reservations,
+            machineName: `zeros-zsr-superseded-${reservations}`,
+            environment: {},
+            start: async () => undefined,
+            stopAndProve: async () => {
+              stops += 1;
+            },
+          };
+        },
+      }),
+    });
+    const request = (executionId: string, designDirectory: string) => ({
+      executionId,
+      actor: "agent-code" as const,
+      cwd: workspace,
+      workspaceRoot: workspace,
+      territory: {
+        agentRole: "code" as const,
+        workspaceRoot: workspace,
+        designDirectory,
+        protectedDesignDirectories: [designDirectory],
+        designRecognitionPaths: [],
+        writeCapabilities: {
+          workspace: "write" as const,
+          deniedPaths: [designDirectory, path.join(workspace, ".git")],
+        },
+      },
+      containerWorker: {
+        runtime: "podman" as const,
+        backend: "orbstack-machine" as const,
+        executable: process.execPath,
+      },
+      containerWorkflowExpected: true,
+    });
+    const before = await boundary.prepare(
+      request("superseded-key-one", firstDesign),
+    );
+    await before.stopAndProve();
+    expect(stops).toBe(0);
+    // The workspace's territory changed: the next admission carries a
+    // different shared key and must retire the stale idle machine first.
+    const after = await boundary.prepare(
+      request("superseded-key-two", secondDesign),
+    );
+    expect(reservations).toBe(2);
+    expect(stops).toBe(1);
+    await after.stopAndProve();
+    await stopIdleSharedContainerWorkers();
+    expect(stops).toBe(2);
   });
 
   it("keys shared OrbStack workers by the physical protected-root projection", async () => {
@@ -1357,12 +1550,12 @@ process.stdout.write(JSON.stringify({
     });
 
     const first = await boundary.prepare(request("physical-one", firstAlias));
-    const second = await boundary.prepare(
-      request("physical-two", secondAlias),
-    );
+    const second = await boundary.prepare(request("physical-two", secondAlias));
     expect(reservations).toBe(2);
 
     await Promise.all([first.stopAndProve(), second.stopAndProve()]);
+    expect(stops).toBe(0);
+    await stopIdleSharedContainerWorkers();
     expect(stops).toBe(2);
   });
 
@@ -1416,7 +1609,6 @@ process.stdout.write(JSON.stringify({
       });
     },
   );
-
 
   (process.platform === "linux" ? it : it.skip)(
     "documents the accepted commit-then-merge Design materialization trade",
@@ -1537,6 +1729,37 @@ process.stdout.write(JSON.stringify({
     ).rejects.toMatchObject({ code: "ENOENT" });
   });
 
+  it("fails admission when the host-parity canary can create a future managed sibling", async () => {
+    const managed = path.join(root, "managed-workspaces");
+    await mkdir(managed, { recursive: true });
+    await writeFile(
+      supervisor,
+      PASSING_SUPERVISOR.replace(
+        "protectedWorkspaceWrite: spec.protectedWorkspaceFiles.map(() => false),",
+        "protectedWorkspaceWrite: spec.protectedWorkspaceFiles.map(() => true),",
+      ),
+      { mode: 0o700 },
+    );
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+    });
+
+    await expect(
+      boundary.prepare({
+        executionId: "host-parity-managed-collection-failure",
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+        protectedWorkspaceDirectories: [managed],
+      }),
+    ).rejects.toThrow(/managed-workspace collection is writable/);
+    await expect(
+      access(sessionDir("host-parity-managed-collection-failure")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("surfaces the final supervisor diagnostic when the admission canary exits", async () => {
     await writeFile(
       supervisor,
@@ -1650,5 +1873,4 @@ process.stdout.write(JSON.stringify({
     await expect(tracked.wait()).resolves.toMatchObject({ signal: "SIGTERM" });
     await expect(lease.revoke()).resolves.toBeUndefined();
   });
-
 });

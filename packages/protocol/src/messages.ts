@@ -10,6 +10,11 @@
 // ──────────────────────────────────────────────────────────
 
 import type {
+  AgentConfigurationProvenance,
+  AgentGoal,
+  AgentGoalStatus,
+  AgentMemorySettings,
+  AgentProviderQuota,
   ContentBlock,
   InitializeResponse,
   ListSessionsResponse,
@@ -230,9 +235,9 @@ export interface EngineReadyMessage extends BaseMessage {
 
 /** Engine → clients broadcast: a list-changing write hit the engine DB. Clients
  *  refetch the named lists so a change on one device shows up live on the others
- *  through cross-device synchronization. `kinds` names which lists changed (e.g. "chats",
- *  "projects"); optional opaque ids scope the pull, but row data is never sent
- *  in the event itself. */
+ *  through cross-device synchronization. `kinds` names which lists or keyed
+ *  surfaces changed (e.g. "chats", "projects", "setup"); optional opaque ids
+ *  scope the pull, but row data is never sent in the event itself. */
 export interface DbChangedMessage extends BaseMessage {
   type: "DB_CHANGED";
   kinds: string[];
@@ -662,6 +667,125 @@ export interface AgentUpdateConfigMessage extends BaseMessage {
   sessionId: string;
   executionId?: ExecutionId;
   env: Record<string, string>;
+}
+
+/** Read or update harness-native memory using a narrow Zeros product surface.
+ * The renderer supplies no path, config key, or native method name. */
+export interface AgentMemorySettingsReadMessage extends BaseMessage {
+  type: "AGENT_MEMORY_SETTINGS_READ";
+  agentId: string;
+}
+
+export interface AgentMemorySettingsUpdateMessage extends BaseMessage {
+  type: "AGENT_MEMORY_SETTINGS_UPDATE";
+  agentId: string;
+  settings: Partial<
+    Pick<
+      AgentMemorySettings,
+      "localMemoriesEnabled" | "toolAssistedGenerationEnabled"
+    >
+  >;
+}
+
+export interface AgentMemorySettingsMessage extends BaseMessage {
+  type: "AGENT_MEMORY_SETTINGS";
+  requestId: string;
+  agentId: string;
+  settings: AgentMemorySettings;
+}
+
+export interface AgentMemoryResetMessage extends BaseMessage {
+  type: "AGENT_MEMORY_RESET";
+  agentId: string;
+}
+
+export interface AgentMemoryResetCompleteMessage extends BaseMessage {
+  type: "AGENT_MEMORY_RESET_COMPLETE";
+  requestId: string;
+  agentId: string;
+}
+
+/** Read-only product diagnostics. These intentionally expose no provider
+ * operation name, arbitrary params, raw config, or account credentials. */
+export interface AgentConfigurationProvenanceReadMessage extends BaseMessage {
+  type: "AGENT_CONFIGURATION_PROVENANCE_READ";
+  agentId: string;
+  cwd?: string;
+}
+
+export interface AgentConfigurationProvenanceMessage extends BaseMessage {
+  type: "AGENT_CONFIGURATION_PROVENANCE";
+  requestId: string;
+  agentId: string;
+  provenance: AgentConfigurationProvenance;
+}
+
+export interface AgentProviderQuotaReadMessage extends BaseMessage {
+  type: "AGENT_PROVIDER_QUOTA_READ";
+  agentId: string;
+}
+
+export interface AgentProviderQuotaMessage extends BaseMessage {
+  type: "AGENT_PROVIDER_QUOTA";
+  requestId: string;
+  agentId: string;
+  quota: AgentProviderQuota | null;
+}
+
+/** Account-scoped local-desktop push from a live provider notification. */
+export interface AgentProviderQuotaUpdatedMessage extends BaseMessage {
+  type: "AGENT_PROVIDER_QUOTA_UPDATED";
+  agentId: string;
+  /** null invalidates a previously confirmed account snapshot (for example,
+   * immediately after the provider reports logout). */
+  quota: AgentProviderQuota | null;
+}
+
+/** Goal lifecycle stays session-scoped and provider-neutral. */
+export interface AgentGoalSetMessage extends BaseMessage {
+  type: "AGENT_GOAL_SET";
+  agentId: string;
+  sessionId: string;
+  executionId?: ExecutionId;
+  update: {
+    objective?: string;
+    status?: AgentGoalStatus;
+    tokenBudget?: number | null;
+  };
+}
+
+export interface AgentGoalClearMessage extends BaseMessage {
+  type: "AGENT_GOAL_CLEAR";
+  agentId: string;
+  sessionId: string;
+  executionId?: ExecutionId;
+}
+
+export interface AgentGoalChangedMessage extends BaseMessage {
+  type: "AGENT_GOAL_CHANGED";
+  requestId: string;
+  agentId: string;
+  sessionId: string;
+  executionId?: ExecutionId;
+  goal: AgentGoal | null;
+}
+
+/** Retry one engine-retained denied action. `retryId` is opaque to clients. */
+export interface AgentRetrySafetyReviewMessage extends BaseMessage {
+  type: "AGENT_RETRY_SAFETY_REVIEW";
+  agentId: string;
+  sessionId: string;
+  executionId?: ExecutionId;
+  retryId: string;
+}
+
+export interface AgentSafetyReviewRetriedMessage extends BaseMessage {
+  type: "AGENT_SAFETY_REVIEW_RETRIED";
+  requestId: string;
+  agentId: string;
+  sessionId: string;
+  executionId?: ExecutionId;
+  retryId: string;
 }
 
 export interface AgentListSessionsMessage extends BaseMessage {
@@ -1185,6 +1309,14 @@ export type BridgeMessage =
   | AgentSetModelMessage
   | AgentCompactMessage
   | AgentUpdateConfigMessage
+  | AgentMemorySettingsReadMessage
+  | AgentMemorySettingsUpdateMessage
+  | AgentMemoryResetMessage
+  | AgentConfigurationProvenanceReadMessage
+  | AgentProviderQuotaReadMessage
+  | AgentGoalSetMessage
+  | AgentGoalClearMessage
+  | AgentRetrySafetyReviewMessage
   | AgentListSessionsMessage
   | AgentLoadSessionMessage
   | AgentForkConversationMessage
@@ -1207,6 +1339,13 @@ export type BridgeMessage =
   | AgentQuestionRequestMessage
   | AgentQuestionSettledMessage
   | AgentModeChangedMessage
+  | AgentMemorySettingsMessage
+  | AgentMemoryResetCompleteMessage
+  | AgentConfigurationProvenanceMessage
+  | AgentProviderQuotaMessage
+  | AgentProviderQuotaUpdatedMessage
+  | AgentGoalChangedMessage
+  | AgentSafetyReviewRetriedMessage
   | AgentSteeredMessage
   | AgentSessionsListMessage
   | AgentSessionLoadedMessage

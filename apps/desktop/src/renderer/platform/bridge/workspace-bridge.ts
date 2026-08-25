@@ -21,6 +21,7 @@ import type {
   ChangeCounts,
   ChangeLineCounts,
   Hunk,
+  DiffFileSummary,
   Commit,
   Branch,
   DiffMode,
@@ -953,9 +954,12 @@ export async function bridgeContextGraphSetShared(
 export async function bridgeGitStatus(
   bridge: RuntimeClient,
   workspaceId: string,
+  options: { paths?: string[]; includeTracking?: boolean } = {},
 ): Promise<StatusResult> {
   return (await workspaceOp(bridge, "git.status", {
     workspaceId,
+    paths: options.paths,
+    includeTracking: options.includeTracking,
   })) as StatusResult;
 }
 
@@ -1017,8 +1021,14 @@ export async function bridgeGitDiff(
     base?: string;
     head?: string;
     rawPatch?: boolean;
+    summaryLimit?: number;
   },
-): Promise<{ hunks: Hunk[]; patch?: string }> {
+): Promise<{
+  hunks: Hunk[];
+  patch?: string;
+  files?: DiffFileSummary[];
+  summary?: boolean;
+}> {
   return (await workspaceOp(bridge, "git.diff", {
     workspaceId: args.workspaceId,
     filePath: args.filePath,
@@ -1027,7 +1037,13 @@ export async function bridgeGitDiff(
     base: args.base,
     head: args.head,
     rawPatch: args.rawPatch,
-  })) as { hunks: Hunk[]; patch?: string };
+    summaryLimit: args.summaryLimit,
+  })) as {
+    hunks: Hunk[];
+    patch?: string;
+    files?: DiffFileSummary[];
+    summary?: boolean;
+  };
 }
 
 /** Show a single commit (its file list + the raw multi-file patch) over the
@@ -1833,17 +1849,14 @@ export async function bridgeWorkspaceSetMode(
   snapshot?: unknown;
 }> {
   // Entering Design ensures + commits its foundation; exit may materialize a
-  // legacy sparse cone. First entry also queues behind code-authority work
-  // admitted before the Design territory transition closed admission. Those
-  // operations own their own bounded lifecycle, so do not layer a response
-  // timer that clears the renderer's optimistic mode while the engine is still
-  // completing the requested transition. A transport disconnect still rejects
-  // the in-flight request through RuntimeClient's normal recovery path.
+  // legacy sparse cone. Either can take seconds, so use the lifecycle budget
+  // rather than the 10s default. The engine bounds its own admission drain, so
+  // this budget sits above that and lets the real error surface first.
   return (await workspaceOp(
     bridge,
     "workspace.setMode",
     { ...args },
-    0,
+    60_000,
   )) as {
     ok: true;
     mode: "code" | "design";

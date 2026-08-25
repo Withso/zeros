@@ -44,6 +44,7 @@ import {
   openPrsCache,
 } from "../../state/read-caches";
 import { useCachedRead } from "../../state/use-cached-read";
+import { RepositoryIcon } from "../../features/repositories/repository-icon";
 
 const NO_BRANCHES: Branch[] = [];
 const NO_PRS: PR[] = [];
@@ -212,7 +213,10 @@ export function CreateFromSource({
             {project && (
               <span className="text-fg2 inline-flex shrink-0 items-center gap-1.5 text-xs">
                 <span className="bg-bg3-hover inline-flex size-4 items-center justify-center rounded-sm text-xs">
-                  {(project.name[0] ?? "·").toUpperCase()}
+                  <RepositoryIcon
+                    project={project}
+                    className="size-full rounded-sm"
+                  />
                 </span>
                 <span className="max-w-[120px] truncate">{project.name}</span>
               </span>

@@ -12,15 +12,18 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const PNPM = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
+const NPM = process.platform === "win32" ? "npm.cmd" : "npm";
 
 const graphs = [
   {
     name: "control plane",
+    command: PNPM,
     cwd: join(ROOT, "apps", "control-plane"),
     args: ["install", "--frozen-lockfile", "--ignore-scripts"],
   },
   {
     name: "standalone marketing deployment",
+    command: PNPM,
     cwd: join(ROOT, "apps", "marketing"),
     args: [
       "install",
@@ -29,11 +32,17 @@ const graphs = [
       "--ignore-scripts",
     ],
   },
+  {
+    name: "web Pages functions",
+    command: NPM,
+    cwd: join(ROOT, "apps", "web"),
+    args: ["ci", "--ignore-scripts"],
+  },
 ];
 
 for (const graph of graphs) {
   console.log(`Hydrating ${graph.name} license graph...`);
-  const result = spawnSync(PNPM, graph.args, {
+  const result = spawnSync(graph.command, graph.args, {
     cwd: graph.cwd,
     env: process.env,
     stdio: "inherit",

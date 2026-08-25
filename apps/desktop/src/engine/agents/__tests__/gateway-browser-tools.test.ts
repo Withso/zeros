@@ -28,6 +28,9 @@ vi.mock("../../git/state", () => ({
     repoRoot: "/tmp",
   })),
   listWorkspaces: vi.fn(() => []),
+  worktreesRoot: vi.fn(() => "/managed/worktrees"),
+  designWorktreesRoot: vi.fn(() => "/managed/design-worktrees"),
+  legacyWorktreesRoot: vi.fn(() => "/managed/legacy-worktrees"),
 }));
 vi.mock("../../git/target-branch", () => ({
   resolveWorkspaceTargetRef: vi.fn(async () => null),

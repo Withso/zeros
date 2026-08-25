@@ -48,10 +48,12 @@ const VALID_EFFORTS = ["low", "medium", "high", "xhigh", "max", "ultracode"];
 const KNOWN_KEYS = new Set([
   "value",
   "label",
+  "description",
   "badge",
   "effortLevels",
   "supportsFast",
   "minCliVersion",
+  "liveRequired",
 ]);
 
 /** Strip a "[1m]"-style context suffix → base id (for alias-target matching). */
@@ -99,6 +101,9 @@ export function validateCatalog(catalog) {
       if (typeof m.label !== "string" || m.label.length === 0) {
         errors.push(`${at}.label must be a non-empty string`);
       }
+      if (m.description !== undefined && typeof m.description !== "string") {
+        errors.push(`${at}.description must be a string`);
+      }
       if (m.effortLevels !== undefined) {
         if (!Array.isArray(m.effortLevels)) {
           errors.push(`${at}.effortLevels must be an array`);
@@ -115,6 +120,9 @@ export function validateCatalog(catalog) {
       }
       if (m.minCliVersion !== undefined && typeof m.minCliVersion !== "string") {
         errors.push(`${at}.minCliVersion must be a string`);
+      }
+      if (m.liveRequired !== undefined && typeof m.liveRequired !== "boolean") {
+        errors.push(`${at}.liveRequired must be a boolean`);
       }
       for (const k of Object.keys(m)) {
         if (!KNOWN_KEYS.has(k)) warnings.push(`${at} has unknown key "${k}"`);

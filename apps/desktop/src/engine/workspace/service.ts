@@ -1475,6 +1475,12 @@ interface DesignTerritoryTransitionTarget {
   designDirectory: string;
 }
 
+interface DesignTerritoryTransitionOptions {
+  /** First publication may skip retirement only when every live immutable
+   * contribution already contains this prospective Design subtraction. */
+  firstDesignCreation?: boolean;
+}
+
 export class WorkspaceService {
   /** Engine-owned authority transition around a mutation that changes the
    * active Design territory. The service owns the settings/document operation;
@@ -1484,6 +1490,7 @@ export class WorkspaceService {
     | ((
         targets: readonly DesignTerritoryTransitionTarget[],
         mutation: () => Promise<unknown>,
+        options?: DesignTerritoryTransitionOptions,
       ) => Promise<unknown>)
     | null = null;
 
@@ -1606,16 +1613,24 @@ export class WorkspaceService {
   ): void {
     this.gatewayHeaderSecretSetter = fn;
   }
-  /** Starts (or restarts) a background setup PTY. Wired by the engine (which
-   *  owns the PtyService + SetupManager); driven by the LOCAL-ONLY
-   *  workspace.rerunSetup op. `target` carries the cwd/repo for a ROWLESS run
-   *  (the trunk / "main" synthetic workspace); a real workspace omits it and
-   *  the SetupManager resolves everything from the row. */
+  /** Starts (or restarts) a contained background setup PTY. Wired by the
+   *  engine (which owns the PtyService + SetupManager); managed workspaces are
+   *  available to qualified local/cloud clients. `target` carries the cwd/repo
+   *  for a LOCAL-ONLY ROWLESS run (the trunk / "main" synthetic workspace); a
+   *  real workspace omits it and SetupManager resolves everything from the row. */
   private setupRunner:
-    | ((workspaceId: string, command: string, target?: SetupTarget) => void)
+    | ((
+        workspaceId: string,
+        command: string,
+        target?: SetupTarget,
+      ) => void | Promise<void>)
     | null = null;
   setSetupRunner(
-    fn: (workspaceId: string, command: string, target?: SetupTarget) => void,
+    fn: (
+      workspaceId: string,
+      command: string,
+      target?: SetupTarget,
+    ) => void | Promise<void>,
   ): void {
     this.setupRunner = fn;
   }
@@ -1650,21 +1665,27 @@ export class WorkspaceService {
     fn: (
       targets: readonly DesignTerritoryTransitionTarget[],
       mutation: () => Promise<unknown>,
+      options?: DesignTerritoryTransitionOptions,
     ) => Promise<unknown>,
   ): void {
     this.designTerritoryTransitioner = fn;
   }
 
-  /** A Design territory may only be created or repointed after every code
-   * process admitted under the prior authority map is gone. Unit-level service
-   * users that never spawn agents may leave the hook unwired; the engine path
-   * is fail-closed and always supplies it. */
+  /** A Design territory may be published only after the engine proves every
+   * live process already carries the same subtraction or retires the obsolete
+   * ones. Unit-level service users that never spawn processes may leave the
+   * hook unwired; the engine path is fail-closed and always supplies it. */
   private async withDesignTerritoryTransition<T>(
     targets: readonly DesignTerritoryTransitionTarget[],
     mutation: () => Promise<T>,
+    options?: DesignTerritoryTransitionOptions,
   ): Promise<T> {
     if (!this.designTerritoryTransitioner) return mutation();
-    return (await this.designTerritoryTransitioner(targets, mutation)) as T;
+    return (await this.designTerritoryTransitioner(
+      targets,
+      mutation,
+      options,
+    )) as T;
   }
   /** Retires the engine's exact recursive filesystem subscription before a
    * managed checkout is moved for archive/delete. The returned release lets a
@@ -1739,14 +1760,16 @@ export class WorkspaceService {
   ): void {
     this.runLogGetter = fn;
   }
-  /** Resolve + kick off a workspace's background setup PTY (host shell — LOCAL
-   *  ONLY). Used by workspace.rerunSetup and create-from-branch so dependency
-   *  setup is explicit for an existing workspace and automatic only for a newly
-   *  created checkout.
+  /** Resolve + kick off a workspace's contained background setup PTY. Used by
+   *  workspace.rerunSetup and create-from-branch so dependency setup is
+   *  explicit for an existing workspace and automatic only for a newly created
+   *  checkout.
    *  Returns whether a setup command was found + started; no-op (false) when the
    *  repo has no setup configured or the runner isn't wired (e.g. unit tests).
-   *  Fire-and-forget — the PTY runs in the background (Setup tab), so callers
-   *  don't await completion. */
+   *  Waits only for admission + PTY spawn; the setup command itself continues
+   *  in the background. This keeps the rerun acknowledgement aligned with the
+   *  first observable `running` snapshot without holding the RPC until setup
+   *  completes. */
   private assertWorkspaceProcessStartAllowed(ws: Workspace): void {
     const lifecycle = getWorkspaceLifecycleStatus(ws.id);
     const unavailable =
@@ -1781,7 +1804,7 @@ export class WorkspaceService {
     // Re-check after that await, immediately before the engine registers the
     // tracked SetupManager start.
     this.assertWorkspaceProcessStartAllowed(ws);
-    this.setupRunner?.(ws.id, command);
+    await this.setupRunner?.(ws.id, command);
     return true;
   }
   /** Same, for the trunk / "main" — the renderer's synthetic `local:<repoSlug>`
@@ -1798,7 +1821,7 @@ export class WorkspaceService {
       allowAutoSetup: true,
     });
     if (!command) return false;
-    this.setupRunner?.(workspaceId, command, {
+    await this.setupRunner?.(workspaceId, command, {
       cwd: repoRoot,
       repoRoot,
       baseBranch: "",
@@ -4882,7 +4905,10 @@ export class WorkspaceService {
 
       // ── Read: git ─────────────────────────────────────────
       case "git.status": {
-        const result = await status(reqStr(params, "workspaceId"));
+        const result = await status(reqStr(params, "workspaceId"), {
+          paths: optStrArr(params, "paths"),
+          includeTracking: optBool(params, "includeTracking"),
+        });
         if (!remote) return result;
         // (#1) Mirror the file.tree/read/diff secret boundary: a remote client
         // must not ENUMERATE secret file paths via status either — `-uall` now
@@ -4959,9 +4985,11 @@ export class WorkspaceService {
           base: optStr(params, "base"),
           head: optStr(params, "head"),
           rawPatch: params.rawPatch === true,
+          summaryLimit: optNum(params, "summaryLimit"),
         });
         if (remote) {
           result.hunks = filterSecretHunks(result.hunks);
+          if (result.files) result.files = filterSecretFiles(result.files);
           // rawPatch returns a whole-tree multi-file patch (file CONTENT) — apply
           // the same per-section secret filter as git.show, or it would leak a
           // secret file's contents in the raw text.
@@ -5630,17 +5658,17 @@ export class WorkspaceService {
         const current: WorkspaceMode =
           workspace.kind === "design" ? "design" : "code";
         if (current === mode) return { ok: true, mode };
-        // Concurrent duality: switching views over an EXISTING territory does
-        // not restart a correctly-contained code agent. On first Design use,
-        // however, the directory is about to appear after that agent's
-        // creation-time authority map was fixed. The engine transition hook
-        // retires those sessions and blocks new starts around that one mutation.
+        // Concurrent duality: switching views does not restart a correctly
+        // contained code agent. Managed admission reserves the default Design
+        // vnode in advance; the hook proves every live contribution already
+        // subtracts it and retires only a legacy/stale boundary that does not.
         if (mode === "design") {
           await enterDesignMode(workspace, {
             withFirstTerritoryCreation: (designDirectory, mutation) =>
               this.withDesignTerritoryTransition(
                 [{ workspaceId, designDirectory }],
                 mutation,
+                { firstDesignCreation: true },
               ),
           });
           // Hand the renderer the aggregate generated by this same lifecycle

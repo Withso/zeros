@@ -35,6 +35,7 @@ export {
   useBrowserPickerSelection,
   usePendingChatSubmission,
   usePendingAutoSend,
+  usePendingAutoSendAt,
   usePendingComposerAppend,
   useChats,
   useChatById,
@@ -252,7 +253,14 @@ export type WorkspaceState = {
   // the session is ready, AgentChat serializes its own composer and consumes
   // only that id. A map (rather than the former single slot) lets many workspace
   // creates queue independently without the newest one overwriting the others.
-  pendingAutoSend: Record<string, true>;
+  //
+  // The value is WHEN the turn was parked (epoch ms). It is what bounds the
+  // wait: a park whose session never settles has no status transition to be
+  // noticed by, so without a stamp it could sit armed and unreported forever —
+  // which is precisely what it did. Persisted with the draft that is its
+  // payload (persist-composer-drafts) so a reload inside the setup window
+  // still delivers the message instead of stranding it in the composer.
+  pendingAutoSend: Record<string, number>;
 
   // ⌥+click in the browser-tab element picker
   // appends element context to the active chat's composer WITHOUT
@@ -518,11 +526,10 @@ export type ChatThread = {
    *  deleted. The on-disk transcript is never touched by archive —
    *  only DELETE_CHAT removes the metadata entry. */
   archived?: boolean;
-  /** Chat that spawned this one via agent-switch. When set and this chat
-   *  has no messages yet, the composer offers a "summary handoff" pill
-   *  at the top so the user can paste the prior conversation into the
-   *  new agent's first turn. Cleared the moment the user either accepts
-   *  or dismisses the handoff. */
+  /** Zeros conversation that this chat branched from. This is product-owned
+   * lineage only: it never identifies or resumes a provider session. The
+   * current fork flow separately stages a bounded transcript attachment in
+   * the new composer. */
   sourceChatId?: string;
 };
 

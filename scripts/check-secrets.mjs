@@ -69,6 +69,10 @@ const RULES = [
     name: "Stripe live secret key",
     re: /\b(?:sk|rk)_live_[A-Za-z0-9]{24,}/,
   },
+  {
+    name: "WorkOS API key (sk_)",
+    re: /\bsk_(?:(?:test|live)_)?[A-Za-z0-9_-]{32,}\b/,
+  },
   { name: "AWS access key id (AKIA)", re: /\bAKIA[0-9A-Z]{16}\b/ },
   {
     name: "Private key block",
@@ -132,7 +136,7 @@ function supabaseJwtRole(line) {
  *  as real. Rules whose match is a whole URL have no prefix to strip, so the
  *  full match is scored and they never qualify. */
 const SECRET_PREFIX_RE =
-  /^(?:AKIA|AIza|github_pat_|gh[pousr]_|glpat-|npm_|xox[baprs]-|lin_api_|(?:sk|rk)_live_|sk-ant-(?:api\d\d-)?|sk-proj-|sk-|phx_|sb_secret_)/;
+  /^(?:AKIA|AIza|github_pat_|gh[pousr]_|glpat-|npm_|xox[baprs]-|lin_api_|(?:sk|rk)_live_|sk_(?:(?:test|live)_)?|sk-ant-(?:api\d\d-)?|sk-proj-|sk-|phx_|sb_secret_)/;
 
 function looksLikePlaceholder(match) {
   const body = match.replace(SECRET_PREFIX_RE, "").replace(/[^A-Za-z0-9]/g, "");

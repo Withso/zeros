@@ -82,6 +82,8 @@ const commandTable: Record<string, CommandHandler> = {
   auth_get_session_user: notImpl("auth_get_session_user", 5),
   auth_clear_session: notImpl("auth_clear_session", 5),
   auth_sign_out_everywhere: notImpl("auth_sign_out_everywhere", 5),
+  auth_start_signin: notImpl("auth_start_signin", 5),
+  auth_cancel_signin: notImpl("auth_cancel_signin", 5),
 
   // ── Web sign-in handoff — the website owns OAuth; the desktop redeems an
   // opaque single-use ticket for a session. Verifier stays in main safeStorage.
@@ -138,6 +140,14 @@ const commandTable: Record<string, CommandHandler> = {
   "iframe:clear-cookies": notImpl("iframe:clear-cookies", 0),
   "iframe-picker:capture-region": notImpl("iframe-picker:capture-region", 0),
   "browser:reinject-picker": notImpl("browser:reinject-picker", 0),
+  "browser:authorize-preview-origin": notImpl(
+    "browser:authorize-preview-origin",
+    0,
+  ),
+  "browser:revoke-preview-origin": notImpl(
+    "browser:revoke-preview-origin",
+    0,
+  ),
   "browser:control-iframe": notImpl("browser:control-iframe", 0),
   browser_confirmation_respond: notImpl("browser_confirmation_respond", 0),
   browser_confirmation_requests: notImpl("browser_confirmation_requests", 0),

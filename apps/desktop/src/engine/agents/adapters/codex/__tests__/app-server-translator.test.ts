@@ -218,6 +218,50 @@ describe("CodexAppServerTranslator", () => {
       expect(c0.content.text).toBe("First");
       expect(c1.content.text).toBe(" and second");
     });
+
+    it("renders the review's final agent message once and hides native mode bookkeeping", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "enteredReviewMode",
+          id: "review-entered",
+          review: "Review the working tree",
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "exitedReviewMode",
+          id: "review-exited",
+          review: "Found one blocking race in src/store.ts.",
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "agentMessage",
+          id: "review-final-message",
+          text: "Found one blocking race in src/store.ts.",
+        },
+        threadId: "t1",
+        turnId: "u1",
+      });
+
+      const chunks = env.out.emitted.filter(
+        (n) => n.update.sessionUpdate === "agent_message_chunk",
+      );
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0].update).toMatchObject({
+        content: {
+          type: "text",
+          text: "Found one blocking race in src/store.ts.",
+        },
+      });
+      expect(
+        env.out.emitted.some((n) => n.update.sessionUpdate === "tool_call"),
+      ).toBe(false);
+    });
   });
 
   describe("tool-call lifecycle", () => {
@@ -706,7 +750,7 @@ describe("CodexAppServerTranslator", () => {
       });
     });
 
-    it("fileChange emits tool_call(edit) with mergeKey when path is present", () => {
+    it("fileChange describes every path in a batched edit without merging it as one file", () => {
       env.t.handle("item/started", {
         item: {
           type: "fileChange",
@@ -727,10 +771,29 @@ describe("CodexAppServerTranslator", () => {
         title: string;
       };
       expect(u.kind).toBe("edit");
-      // mergeKey uses the first changed path so consecutive edits to
-      // the same file collapse into one card.
-      expect(u.mergeKey).toBe("edit:src/app.ts");
-      expect(u.title).toMatch(/src\/app\.ts/);
+      expect(u.mergeKey).toBeUndefined();
+      expect(u.title).toBe("Editing 2 files");
+    });
+
+    it("keeps the path and merge key for a single-file edit", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "fileChange",
+          id: "fc-single",
+          changes: [{ path: "src/app.ts" }],
+        },
+        threadId: "t1",
+        turnId: "u1",
+        startedAtMs: 0,
+      });
+      const call = env.out.emitted.find(
+        (n) => n.update.sessionUpdate === "tool_call",
+      );
+      expect(call?.update).toMatchObject({
+        kind: "edit",
+        mergeKey: "edit:src/app.ts",
+        title: "Editing src/app.ts",
+      });
     });
 
     it("mcpToolCall with error completes as failed", () => {
@@ -1511,6 +1574,199 @@ describe("CodexAppServerTranslator", () => {
       const upd = env.out.emitted[0].update as { used: number; size: number };
       expect(upd.used).toBe(12_345);
       expect(upd.size).toBe(0);
+    });
+  });
+
+  describe("rich lifecycle parity", () => {
+    it("updates an existing MCP row with bounded progress", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "mcpToolCall",
+          id: "mcp-1",
+          server: "docs",
+          tool: "search",
+        },
+      });
+      env.t.handle("item/mcpToolCall/progress", {
+        itemId: "mcp-1",
+        message: "Searching the index",
+      });
+      expect(env.out.emitted.at(-1)?.update).toMatchObject({
+        sessionUpdate: "tool_call_update",
+        status: "in_progress",
+        rawOutput: { progress: "Searching the index" },
+      });
+      expect(env.out.emitted.at(-1)?.update).not.toHaveProperty("title");
+    });
+
+    it("does not let late MCP progress reopen a completed row", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "mcpToolCall",
+          id: "mcp-late",
+          server: "docs",
+          tool: "search",
+          arguments: {},
+        },
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "mcpToolCall",
+          id: "mcp-late",
+          server: "docs",
+          tool: "search",
+          arguments: {},
+          status: "completed",
+          result: { content: [] },
+          error: null,
+        },
+      });
+      const settledCount = env.out.emitted.length;
+      env.t.handle("item/mcpToolCall/progress", {
+        itemId: "mcp-late",
+        message: "Late progress",
+      });
+      expect(env.out.emitted).toHaveLength(settledCount);
+      expect(env.out.emitted.at(-1)?.update).toMatchObject({
+        sessionUpdate: "tool_call_update",
+        status: "completed",
+      });
+    });
+
+    it("renders hook lifecycle without leaking paths or bigint fields", () => {
+      const run = {
+        id: "hook-1",
+        eventName: "afterTool",
+        status: "running",
+        sourcePath: "/private/hooks/secret.sh",
+        displayOrder: 1n,
+      };
+      env.t.handle("hook/started", { run });
+      env.t.handle("hook/completed", {
+        run: { ...run, status: "completed", statusMessage: "Checked" },
+      });
+      const serialized = JSON.stringify(env.out.emitted);
+      expect(serialized).toContain("Hook · afterTool");
+      expect(serialized).toContain("Checked");
+      expect(serialized).not.toContain("/private/hooks/secret.sh");
+    });
+
+    it("maps reroute, verification, and opt-in safety buffering", () => {
+      env.t.handle("model/rerouted", {
+        fromModel: "gpt-primary",
+        toModel: "gpt-safe",
+        reason: "highRiskCyberActivity",
+      });
+      env.t.handle("model/verification", {
+        verifications: ["trustedAccessForCyber"],
+      });
+      env.t.handle("model/safetyBuffering/updated", {
+        model: "gpt-safe",
+        reasons: ["verification"],
+        showBufferingUi: false,
+      });
+      expect(env.out.emitted).toHaveLength(2);
+      env.t.handle("model/safetyBuffering/updated", {
+        model: "gpt-safe",
+        reasons: ["verification"],
+        showBufferingUi: true,
+      });
+      expect(env.out.emitted.map((item) => item.update.sessionUpdate)).toEqual([
+        "tool_call",
+        "tool_call",
+        "error_notice",
+      ]);
+    });
+
+    it("sanitizes Guardian actions and removes the opaque retry id after retry", () => {
+      env.t.handle("item/autoApprovalReview/completed", {
+        reviewId: "review-1",
+        review: {
+          status: "denied",
+          riskLevel: "high",
+          rationale: "Needs approval",
+        },
+        action: {
+          type: "command",
+          command: "do-not-leak --token secret",
+          cwd: "/private/repo",
+        },
+        zerosRetryId: "opaque-retry",
+      });
+      let serialized = JSON.stringify(env.out.emitted);
+      expect(serialized).toContain("opaque-retry");
+      expect(serialized).toContain("Needs approval");
+      expect(serialized).not.toContain("do-not-leak");
+      expect(serialized).not.toContain("/private/repo");
+
+      const completedCount = env.out.emitted.length;
+      env.t.handle("item/autoApprovalReview/started", {
+        reviewId: "review-1",
+        review: { status: "inProgress" },
+        action: { type: "command" },
+      });
+      expect(env.out.emitted).toHaveLength(completedCount);
+
+      env.t.markSafetyReviewRetried("opaque-retry");
+      serialized = JSON.stringify(env.out.emitted.at(-1));
+      expect(serialized).toContain('"retried":true');
+      expect(serialized).not.toContain("opaque-retry");
+    });
+
+    it("reduces environment and import events to bounded product summaries", () => {
+      env.t.handle("thread/environment/connected", {
+        environmentId: "env-1",
+      });
+      expect(env.out.emitted[0]?.update).toMatchObject({
+        sessionUpdate: "tool_call",
+        title: "Environment connected",
+        status: "completed",
+      });
+      env.t.handle("thread/environment/disconnected", {
+        environmentId: "env-1",
+      });
+      expect(env.out.emitted[1]?.update).toMatchObject({
+        sessionUpdate: "tool_call_update",
+        title: "Environment disconnected",
+        status: "completed",
+        rawOutput: { environment: "env-1", state: "disconnected" },
+      });
+      env.t.handle("externalAgentConfig/import/completed", {
+        importId: "import-1",
+        itemTypeResults: [
+          {
+            itemType: "sessions",
+            successes: [{ cwd: "/private/source", title: "Secret title" }],
+            failures: [{ message: "sensitive failure" }],
+          },
+        ],
+      });
+      const serialized = JSON.stringify(env.out.emitted);
+      expect(serialized).toContain("env-1");
+      expect(serialized).toContain('"successes":1');
+      expect(serialized).toContain('"failures":1');
+      expect(serialized).not.toContain("/private/source");
+      expect(serialized).not.toContain("Secret title");
+      expect(serialized).not.toContain("sensitive failure");
+    });
+
+    it("does not project native MCP diagnostic strings into chat", () => {
+      env.t.handle("mcpServer/oauthLogin/completed", {
+        name: "docs",
+        success: false,
+        error: "token=secret at /private/callback",
+      });
+      env.t.handle("mcpServer/startupStatus/updated", {
+        name: "repo",
+        status: "failed",
+        error: "API_KEY=secret at /private/server",
+      });
+      const serialized = JSON.stringify(env.out.emitted);
+      expect(serialized).toContain("docs MCP sign-in failed");
+      expect(serialized).toContain("repo MCP is failed");
+      expect(serialized).not.toContain("token=secret");
+      expect(serialized).not.toContain("API_KEY=secret");
+      expect(serialized).not.toContain("/private/");
     });
   });
 

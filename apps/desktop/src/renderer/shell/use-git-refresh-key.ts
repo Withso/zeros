@@ -42,6 +42,7 @@ import {
 import {
   invalidateAllEngineReadCaches,
   invalidateExternalGitRefCaches,
+  invalidateWorkingDirectoriesReadCache,
 } from "../state/read-caches";
 import { invalidateAgentsCache } from "../features/agent/agents-cache";
 import {
@@ -230,12 +231,22 @@ function publishRefreshVersion(
 function publishRefreshForCwds(
   changedCwds: readonly (string | null | undefined)[],
   coarse = false,
+  workingDirectoriesAlreadyInvalidated = false,
 ): void {
   const normalizedCwds = changedCwds.map(normalizeRefreshCwd);
   const hasUnknownCwd = normalizedCwds.some((cwd) => cwd === null);
   const exactCwds = new Set(
     normalizedCwds.filter((cwd): cwd is string => cwd !== null),
   );
+  if (!workingDirectoriesAlreadyInvalidated) {
+    if (coarse || hasUnknownCwd) {
+      invalidateWorkingDirectoriesReadCache();
+    } else {
+      for (const cwd of exactCwds) {
+        invalidateWorkingDirectoriesReadCache(cwd);
+      }
+    }
+  }
   if (coarse || hasUnknownCwd) {
     invalidateAllWorkspaceFiles();
     invalidateAllWorkspaceFileData();
@@ -266,8 +277,16 @@ function publishRefreshForCwds(
   );
 }
 
-function publishRefresh(changedCwd?: string, coarse = false): void {
-  publishRefreshForCwds([changedCwd], coarse);
+function publishRefresh(
+  changedCwd?: string,
+  coarse = false,
+  workingDirectoriesAlreadyInvalidated = false,
+): void {
+  publishRefreshForCwds(
+    [changedCwd],
+    coarse,
+    workingDirectoriesAlreadyInvalidated,
+  );
 }
 
 function publishRefreshForWorkspaceIds(
@@ -284,6 +303,7 @@ function publishRefreshForWorkspaceIds(
     return;
   }
   for (const workspaceId of workspaceIds) {
+    invalidateWorkingDirectoriesReadCache(undefined, workspaceId);
     const cwds = Array.from(knownCwdsByWorkspaceId.get(workspaceId) ?? []);
     for (const cwd of cwds) invalidateWorkspaceFiles(cwd);
     if (cwds.length === 0) {
@@ -532,7 +552,10 @@ function refreshAfterBridgeConnection(initial: boolean): void {
   // windows; mounted consumers revalidate silently, closed ones pay nothing.
   invalidateAllEngineReadCaches();
   invalidateAgentsCache();
-  publishRefresh(undefined, true);
+  // invalidateAllEngineReadCaches already advanced Working folders. Avoid a
+  // duplicate invalidation while the coarse publication refreshes file/diff
+  // caches and every Git generation below.
+  publishRefresh(undefined, true, true);
 }
 
 /** Test-only bridge boundary publication without mounting the coordinator. */

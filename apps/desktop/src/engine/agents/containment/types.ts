@@ -42,6 +42,16 @@ export interface BoundaryRequest {
   /** User-authorized roots from the equivalent normal workspace posture.
    * The policy builder subtracts protected authority after adding these. */
   additionalReadWriteRoots?: readonly string[];
+  /** Stable parent directories that contain Zeros-managed worktrees. Code
+   * actors receive these as read-only collections, then reopen only their
+   * current workspace and explicitly authorized islands. This protects a
+   * sibling before its checkout or Design marker exists, so creating it does
+   * not require rebuilding unrelated live boundaries. */
+  protectedWorkspaceDirectories?: readonly string[];
+  /** Existing managed workspaces covered by a broader user-authorized root.
+   * These exact islands preserve `/add-dir` semantics without reopening future
+   * siblings that were not present when this immutable boundary was admitted. */
+  protectedWorkspaceWriteDirectories?: readonly string[];
   /** App-wide physical repository owners whose code territory a Design actor
    * must not write. Registered owners are deny-only: this never grants a
    * sibling checkout to a code actor or makes it an attached directory. */
@@ -122,11 +132,27 @@ export interface RepoTaskBoundaryRequest {
   /** PATH/login-shell discovery uses the normal contained filesystem/network
    * baseline but must not provision local-service or container capabilities. */
   serviceCapabilities?: "full" | "none";
+  /** Publish the exact authority snapshot before boundary preparation yields.
+   * Lifecycle reconciliation uses it to distinguish a safe owner event that
+   * preceded resolution from a mutation that made this admission stale. */
+  onAuthorityResolved?: (snapshot: BoundaryAuthoritySnapshot) => void;
 }
 
 export type RepoTaskBoundaryFactory = (
   request: RepoTaskBoundaryRequest,
 ) => Promise<PreparedBoundary>;
+
+export interface BoundaryTerritoryContributionSnapshot {
+  readonly workspaceRoot: string;
+  readonly grants: readonly string[];
+  readonly full: boolean;
+  readonly identity: string | null;
+}
+
+export interface BoundaryAuthoritySnapshot {
+  readonly registeredDesignAuthorityIdentity: string | null;
+  readonly territoryContributions: readonly BoundaryTerritoryContributionSnapshot[];
+}
 
 /** Synchronous spawn descriptor used by provider APIs (notably Claude's SDK)
  * whose custom-process callback cannot await. Policy preparation and the live
@@ -237,6 +263,10 @@ export interface PreparedBoundary {
   /** Cwd-independent identity of the registered Design write subtraction used
    * by Setup/Run repository tasks. Ordinary agent boundaries may omit it. */
   readonly registeredDesignAuthorityIdentity?: string | null;
+  /** Per-owner slices reopened by this boundary. Managed sibling collections
+   * are stable deny regions, so only these explicitly writable slices need to
+   * participate in pointer-change invalidation. */
+  readonly territoryContributions?: readonly BoundaryTerritoryContributionSnapshot[];
   /** The effective HOME this session's provider actually runs with — the same
    * path the boundary injects as `HOME` at spawn. Local desktop host-parity
    * and cloud host-parity boundaries both return the deployment's real HOME. */
@@ -276,6 +306,9 @@ export interface ExecutionBoundary {
     request: BoundaryRequest,
     control?: AdmissionControl,
   ): Promise<PreparedBoundary>;
+  /** Lift the admission hold for one generation after a retried teardown
+   * proved it stopped. Backends without a process-lifetime latch may omit it. */
+  clearRetirementFailure?(generation: TerritoryGeneration): void;
 }
 
 /** Out-of-band scheduling control for one admission. Deliberately NOT part of

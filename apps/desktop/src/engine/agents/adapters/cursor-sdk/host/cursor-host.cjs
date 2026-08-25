@@ -666,45 +666,85 @@ function coveredSpan(ops) {
   return covered;
 }
 
-/** Attribute a slow pre-first-item window to the operations inside it. */
+/** One line naming the slowest op in a window, for the compact report. */
+function slowestOpSummary(ops) {
+  const slowest = ops[0];
+  if (!slowest) return "";
+  const others = ops.length - 1;
+  return (
+    `; slowest ${slowest.kind} ${slowest.label} ${slowest.elapsed}ms` +
+    (others > 0 ? ` (+${others} more)` : "")
+  );
+}
+
+/** Printed once, the first time a compact report is emitted, so the reader
+ *  knows the staircase still exists without paying for it on every turn. */
+let breakdownHintPrinted = false;
+
+/** Attribute a slow pre-first-item window to the operations inside it.
+ *
+ *  DEFAULT: one line. A cold Cursor session is slow on purpose (see the
+ *  prewarm block) and used to spend 12+ stderr lines saying so on EVERY run,
+ *  which drowned the surrounding engine log. The headline plus a slowest-op
+ *  callout is what anyone reads first; the per-operation staircase — which is
+ *  the part that actually distinguishes "one slow call" from "ten serial
+ *  calls" — is worth its length only when someone is looking, so it lives
+ *  behind ZEROS_CURSOR_TRANSPORT_DEBUG=1. */
 function reportFirstItemLatency(runId, from, to, extra) {
   const waited = to - from;
-  process.stderr.write(
-    `[cursor-host] run ${runId} first model output after ${waited}ms (${extra})\n`,
-  );
   const candidates = opsOverlapping(from, to).filter(
     (op) => op.elapsed >= 250 || cursorTransportDebug,
   );
   if (candidates.length === 0) {
     process.stderr.write(
-      "[cursor-host]   ↳ no outbound request or child process overlapped the " +
-        "wait — the time is inside @cursor/sdk's own work (settings layers, " +
-        "workspace scan) or its already-open connection\n",
+      `[cursor-host] run ${runId} first model output after ${waited}ms ` +
+        `(${extra}) — no outbound request or child process overlapped the ` +
+        `wait; the time is inside @cursor/sdk's own work (settings layers, ` +
+        `workspace scan) or its already-open connection\n`,
     );
     return;
   }
-  // Ordered by START, not duration: read top to bottom and the serial chain is
-  // visible as a staircase of offsets, while concurrent calls share one.
-  const byStart = [...candidates].sort((left, right) => left.offset - right.offset);
-  for (const op of byStart.slice(0, 14)) {
-    process.stderr.write(
-      `[cursor-host]   ↳ @${String(op.offset).padStart(6)}ms ` +
-        `${String(op.elapsed).padStart(6)}ms ${op.kind} ${op.label} ` +
-        `(${op.outcome})\n`,
-    );
-  }
-  if (byStart.length > 14) {
-    process.stderr.write(
-      `[cursor-host]   ↳ …and ${byStart.length - 14} shorter operation(s)\n`,
-    );
-  }
   const covered = coveredSpan(candidates);
-  process.stderr.write(
-    `[cursor-host]   ∑ ${candidates.length} traced operation(s) covered ` +
-      `${covered}ms of the ${waited}ms wait ` +
-      `(${Math.round((covered / Math.max(waited, 1)) * 100)}%); ` +
-      `${waited - covered}ms was untraced in-process work\n`,
-  );
+  const attribution =
+    `${covered}ms across ${candidates.length} traced op(s) ` +
+    `(${Math.round((covered / Math.max(waited, 1)) * 100)}%), ` +
+    `${waited - covered}ms untraced in-process`;
+
+  if (!cursorTransportDebug) {
+    process.stderr.write(
+      `[cursor-host] run ${runId} first model output after ${waited}ms ` +
+        `(${extra}) — ${attribution}${slowestOpSummary(candidates)}\n`,
+    );
+    if (!breakdownHintPrinted) {
+      breakdownHintPrinted = true;
+      process.stderr.write(
+        "[cursor-host] (set ZEROS_CURSOR_TRANSPORT_DEBUG=1 for the " +
+          "per-operation breakdown of these waits)\n",
+      );
+    }
+  } else {
+    process.stderr.write(
+      `[cursor-host] run ${runId} first model output after ${waited}ms (${extra})\n`,
+    );
+    // Ordered by START, not duration: read top to bottom and the serial chain
+    // is visible as a staircase of offsets, while concurrent calls share one.
+    const byStart = [...candidates].sort(
+      (left, right) => left.offset - right.offset,
+    );
+    for (const op of byStart.slice(0, 14)) {
+      process.stderr.write(
+        `[cursor-host]   ↳ @${String(op.offset).padStart(6)}ms ` +
+          `${String(op.elapsed).padStart(6)}ms ${op.kind} ${op.label} ` +
+          `(${op.outcome})\n`,
+      );
+    }
+    if (byStart.length > 14) {
+      process.stderr.write(
+        `[cursor-host]   ↳ …and ${byStart.length - 14} shorter operation(s)\n`,
+      );
+    }
+    process.stderr.write(`[cursor-host]   ∑ ${attribution}\n`);
+  }
   // The dominant case is worth naming rather than leaving as a row in a table:
   // an MCP server the provider spawned, killed at its connect budget, having
   // consumed most of the window. A stdio MCP server that has to authorize
@@ -773,10 +813,19 @@ function installFirstTurnTracer() {
   // plain socket, `secureConnect` for TLS; `error`/`close` cover the failures,
   // which is the case that matters — an outbound socket the sandbox never lets
   // reach anything is precisely the shape of stall this exists to name.
+  //
+  // A TLSSocket emits `connect` too — at TCP-established, BEFORE the
+  // handshake — so a `tls` op almost always ends there. Say `tcp-connected`
+  // rather than `connected` so the number is not misread as handshake time:
+  // "tls api2.cursor.sh:443 2018ms (connected)" is DNS + TCP, and the fix for
+  // that (resolver, IPv6 fallback, connection reuse) is nowhere near the fix
+  // for a slow handshake.
   const traceSocket = (socket, kind, label) => {
     if (!socket || typeof socket.once !== "function") return socket;
     const end = beginOp(kind, label);
-    socket.once("connect", () => end("connected"));
+    socket.once("connect", () =>
+      end(kind === "tls" ? "tcp-connected" : "connected"),
+    );
     socket.once("secureConnect", () => end("tls-ready"));
     socket.once("error", (error) => end(error?.code || error?.message || "error"));
     socket.once("close", () => end("closed before connect"));
@@ -1056,6 +1105,10 @@ try {
 /** runId → { run, done } ; sdk agentId → SdkAgent ; storeId → store */
 const runs = new Map();
 const agents = new Map();
+// Run ids whose native callback events are still allowed onto the protocol.
+// Removing an id is the cancellation/terminal fence: late provider callbacks
+// become no-ops instead of mutating a stopped or already-reaped Zeros turn.
+const observedRuns = new Set();
 const stores = new Map();
 let nextRunId = 1;
 let nextStoreId = 1;
@@ -1247,6 +1300,37 @@ function send(msg) {
   }
 }
 
+/** Native callbacks may arrive faster than the engine can consume them. The
+ * SDK awaits callback promises, so serialize these writes and honor stdout's
+ * drain signal: pressure propagates back into Cursor instead of accumulating
+ * an unbounded second queue in this host. Ordinary request/stream writes remain
+ * on Node's ordered stdout stream; every callback has completed its write
+ * before the SDK proceeds to the corresponding completed stream message. */
+let callbackWriteChain = Promise.resolve();
+function sendCallbackEvent(msg) {
+  const line = JSON.stringify(msg) + "\n";
+  const write = () =>
+    new Promise((resolve) => {
+      try {
+        if (process.stdout.write(line)) {
+          resolve();
+          return;
+        }
+        const done = () => {
+          process.stdout.off("drain", done);
+          process.stdout.off("error", done);
+          resolve();
+        };
+        process.stdout.once("drain", done);
+        process.stdout.once("error", done);
+      } catch {
+        resolve();
+      }
+    });
+  callbackWriteChain = callbackWriteChain.then(write, write);
+  return callbackWriteChain;
+}
+
 /** Flatten an Error (incl. @cursor/sdk's typed errors) into a plain JSON object
  *  the engine can re-throw and classify. The SDK minifies its class names
  *  (constructor.name can be "a"), so we forward `.name` (the SDK sets it on the
@@ -1343,12 +1427,14 @@ function drainRun(runId, run, timing) {
       if (!sawContent) reportRunFirstItem(runId, timing, "no content streamed");
       const entry = runs.get(runId);
       if (entry && entry.run === run) entry.endedAt = Date.now();
+      observedRuns.delete(runId);
       send({ k: "ev", ev: "run.streamEnd", runId });
     } catch (err) {
       if (!sawContent) reportRunFirstItem(runId, timing, "stream failed");
       const entry = runs.get(runId);
       if (entry && entry.run === run) {
         runs.delete(runId);
+        observedRuns.delete(runId);
         try {
           const cancelled = run.cancel && run.cancel();
           if (cancelled && typeof cancelled.catch === "function") {
@@ -1372,6 +1458,7 @@ const endedRunSweep = setInterval(() => {
   for (const [runId, entry] of runs) {
     if (entry.endedAt && now - entry.endedAt > ENDED_RUN_TTL_MS) {
       runs.delete(runId);
+      observedRuns.delete(runId);
     }
   }
 }, 60_000);
@@ -1417,8 +1504,43 @@ async function handle(m) {
       // from the engine. The copy keeps that seam open without mutating the
       // decoded request.
       const sendOptions = { ...(args.options || {}) };
+      const runId =
+        typeof args.runId === "string" && args.runId
+          ? args.runId
+          : String(nextRunId++);
+      const observeDelta = args.observers && args.observers.delta === true;
+      const observeStep = args.observers && args.observers.step === true;
+      if (observeDelta || observeStep) observedRuns.add(runId);
+      if (observeDelta) {
+        sendOptions.onDelta = async ({ update }) => {
+          if (!observedRuns.has(runId)) return;
+          await sendCallbackEvent({
+            k: "ev",
+            ev: "run.delta",
+            runId,
+            update,
+          });
+        };
+      }
+      if (observeStep) {
+        sendOptions.onStep = async ({ step }) => {
+          if (!observedRuns.has(runId)) return;
+          await sendCallbackEvent({
+            k: "ev",
+            ev: "run.step",
+            runId,
+            step,
+          });
+        };
+      }
       const sendStartedAt = Date.now();
-      const run = await agent.send(args.message, sendOptions);
+      let run;
+      try {
+        run = await agent.send(args.message, sendOptions);
+      } catch (error) {
+        observedRuns.delete(runId);
+        throw error;
+      }
       const timing = {
         index: ++runsStarted,
         cold: runsStarted === 1,
@@ -1430,10 +1552,6 @@ async function handle(m) {
       // The engine assigns the runId and registers its stream queue BEFORE
       // sending this request, so no run.msg event can race ahead of the
       // queue's existence. Fall back to a host-generated id if absent.
-      const runId =
-        typeof args.runId === "string" && args.runId
-          ? args.runId
-          : String(nextRunId++);
       runs.set(runId, { run, endedAt: null });
       // Respond FIRST (so the engine pairs sdkRunId with the run), THEN start
       // draining — NDJSON over one pipe preserves order.
@@ -1454,6 +1572,15 @@ async function handle(m) {
       ok(id, null);
       return;
     }
+    case "agent.getUsage": {
+      const agent = agents.get(args.agentId);
+      if (!agent) throw new Error(`Agent ${args.agentId} not found`);
+      if (typeof agent.getUsage !== "function") {
+        throw new Error("Cursor SDK agent.getUsage is unavailable");
+      }
+      ok(id, await agent.getUsage(args.options || {}));
+      return;
+    }
     case "run.wait": {
       const entry = runs.get(args.runId);
       if (!entry) {
@@ -1467,6 +1594,7 @@ async function handle(m) {
         res = await entry.run.wait();
       } finally {
         runs.delete(args.runId);
+        observedRuns.delete(args.runId);
       }
       debugCursorTransport(
         `run ${args.runId} wait completed (status=${String(
@@ -1475,13 +1603,17 @@ async function handle(m) {
           typeof res?.result === "string" ? res.result.length : 0,
         )})`,
       );
-      ok(id, res ? { status: res.status, result: res.result } : null);
+      // Preserve every public RunResult field. New SDK versions add model /
+      // usage metadata here; narrowing to {status,result} silently discarded
+      // it at the process boundary.
+      ok(id, res ?? null);
       return;
     }
     case "run.cancel": {
       const entry = runs.get(args.runId);
       if (entry) {
         runs.delete(args.runId);
+        observedRuns.delete(args.runId);
         try {
           await entry.run.cancel();
         } catch {
@@ -1612,6 +1744,7 @@ async function shutdown() {
   // Stores need no teardown: they are file-backed JSONL, hold no connection or
   // handle, and every write is already awaited by the call that made it.
   runs.clear();
+  observedRuns.clear();
   agents.clear();
   stores.clear();
   localStores.clear();

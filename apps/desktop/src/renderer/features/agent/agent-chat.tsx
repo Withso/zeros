@@ -43,6 +43,7 @@ import {
   useBrowserPickerSelection,
   usePendingChatSubmission,
   usePendingAutoSend,
+  usePendingAutoSendAt,
   usePendingComposerAppend,
   type ChatThread,
 } from "../../state/store";
@@ -73,6 +74,7 @@ import {
   useBrowserConfirmation,
 } from "../browser/browser-confirmation-store";
 import { PlanReviewCard } from "./plan-review-card";
+import { GoalCard } from "./goal-card";
 import { QuestionCard } from "./question-card";
 import { readPlan, isPlanReviewRequest } from "./renderers/plan-body";
 import { WorkspaceDirectoryPicker } from "./workspace-directory-picker";
@@ -108,6 +110,14 @@ import {
   registerLiveChatDraftRestorer,
   setLiveChatDraft,
 } from "./composer-live-drafts";
+import {
+  deliverTextAttachmentToChat,
+  hasPendingTextAttachmentDelivery,
+  registerLiveChatTextAttachmentStager,
+  trackPendingTextAttachmentDelivery,
+  waitForPendingTextAttachmentDeliveries,
+} from "./composer-text-attachment-delivery";
+import { buildForkTranscriptAttachment, createForkedChat } from "./fork-chat";
 import { resolveComposerPlaceholder } from "./composer-placeholder";
 import {
   composerOwnsFocus,
@@ -117,7 +127,10 @@ import {
   shouldReclaimComposerFocus,
 } from "./composer-focus";
 import { costBumpToastShown, markCostBumpToastShown } from "./device-local";
-import { slashCommandKind } from "../../platform/bridge/agent-events";
+import {
+  bareInlineSlashCommand,
+  slashCommandKind,
+} from "../../platform/bridge/agent-events";
 import type { ContentBlock } from "../../platform/bridge/agent-events";
 import {
   isTransportShaped,
@@ -174,7 +187,12 @@ import {
   permissionModeShowsFrame,
   staticModesForAgent,
 } from "./model-catalog";
-import { sendSessionRecoveryMode } from "./session-reload-lifecycle";
+import {
+  QUEUED_FIRST_TURN_MAX_WAIT_MS,
+  queuedFirstTurnAction,
+  sendSessionRecoveryMode,
+  unreadableTranscriptSendAction,
+} from "./session-reload-lifecycle";
 import { requestAiChatTitle, settledFirstPromptForTitle } from "./chat-title";
 import {
   newChatBornDefaults,
@@ -338,6 +356,9 @@ export function AgentChat({
   const browserPickerSelection = useBrowserPickerSelection();
   const pendingChatSubmission = usePendingChatSubmission();
   const pendingAutoSend = usePendingAutoSend(chatId);
+  // The stamp, not just the flag: the park's release site bounds its own wait
+  // (see queuedFirstTurnAction).
+  const pendingAutoSendAt = usePendingAutoSendAt(chatId);
   const pendingComposerAppend = usePendingComposerAppend();
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
@@ -747,6 +768,14 @@ export function AgentChat({
       session.messages,
     );
   }, [session.pendingQuestions, session.messages]);
+  const retrySafetyReviewRef = useRef(session.retrySafetyReview);
+  retrySafetyReviewRef.current = session.retrySafetyReview;
+  const retrySafetyReviewThroughRef = useCallback((retryId: string) => {
+    const retry = retrySafetyReviewRef.current;
+    return retry
+      ? retry(retryId)
+      : Promise.reject(new Error("Safety retry is unavailable."));
+  }, []);
   const messageCtx: RendererContext = useMemo(
     () => ({
       isStreaming,
@@ -758,6 +787,8 @@ export function AgentChat({
       pendingQuestionToolCallIds,
       pendingPermission: session.pendingPermission,
       respondToPermission,
+      retrySafetyReview: retrySafetyReviewThroughRef,
+      safetyReviewRetries: session.safetyReviewRetries,
       recordPolicy,
       chatId: chatId ?? null,
       setMode: setModeForCtx,
@@ -778,6 +809,8 @@ export function AgentChat({
       pendingQuestionToolCallIds,
       session.pendingPermission,
       respondToPermission,
+      retrySafetyReviewThroughRef,
+      session.safetyReviewRetries,
       recordPolicy,
       chatId,
       setModeForCtx,
@@ -1333,12 +1366,10 @@ export function AgentChat({
     [chatId, chatThread?.folder, dispatch, nativeReady, openBoundaryPort],
   );
 
-  // 2026-05-21: handleAgentSwitch + folderLabel removed. The
-  // agent-switch flow lived behind AgentPill's "switch agent" menu,
-  // which was retired when the AgentPill row came out of the chat
-  // surface. The handler created a new ChatThread with
-  // `sourceChatId` set, which then drove the SummaryHandoffPill —
-  // both now dead UI. Agents are picked via the "+" menu instead.
+  // 2026-05-21: handleAgentSwitch + folderLabel removed. The old
+  // SummaryHandoffPill went with that UI. `sourceChatId` now records only
+  // Zeros-native fork lineage; the fork action stages its transcript directly
+  // in the destination composer instead of rendering a second handoff pill.
 
   const chatFolder = chatThread?.folder || undefined;
   // Resolve the chat's repo origin so the #-PR picker can list PRs.
@@ -1358,6 +1389,7 @@ export function AgentChat({
   // The composer "+" → "Attach chat transcript" picker. Ephemeral: it is a
   // transient dialog, not a durable selection.
   const [transcriptPickerOpen, setTranscriptPickerOpen] = useState(false);
+  const [goalEditorOpen, setGoalEditorOpen] = useState(false);
 
   // Grant access to a directory (a worktree path or a Browse… pick). Appends
   // de-duped, skipping the cwd (already accessible).
@@ -1436,6 +1468,9 @@ export function AgentChat({
           // ("Compacting.." → "Context compacted").
           void session.compactContext?.();
           return true;
+        case "goal":
+          setGoalEditorOpen(true);
+          return true;
         case "clear": {
           // Close THIS chat and open a fresh one bound to the same
           // agent/model/workspace, then navigate to it. As with tab close,
@@ -1490,6 +1525,52 @@ export function AgentChat({
       isPlanMode,
     ],
   );
+
+  const saveGoal = useCallback(
+    async (objective: string) => {
+      if (!session.setGoal) throw new Error("Goals are unavailable.");
+      try {
+        await session.setGoal({ objective });
+      } catch (error) {
+        toast.error("Couldn't save the goal", {
+          description: error instanceof Error ? error.message : String(error),
+        });
+        throw error;
+      }
+    },
+    [session],
+  );
+
+  const setGoalStatus = useCallback(
+    async (status: "active" | "paused") => {
+      if (!session.setGoal) throw new Error("Goals are unavailable.");
+      try {
+        await session.setGoal({ status });
+      } catch (error) {
+        toast.error(
+          `Couldn't ${status === "paused" ? "pause" : "resume"} the goal`,
+          {
+            description: error instanceof Error ? error.message : String(error),
+          },
+        );
+        throw error;
+      }
+    },
+    [session],
+  );
+
+  const deleteGoal = useCallback(async () => {
+    if (!session.clearGoal) throw new Error("Goals are unavailable.");
+    try {
+      await session.clearGoal();
+      setGoalEditorOpen(false);
+    } catch (error) {
+      toast.error("Couldn't delete the goal", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+      throw error;
+    }
+  }, [session]);
 
   // Embedded-terminal commands (Claude /mcp, /login, …): the picked command
   // name (without slash) while its banner/terminal is mounted above the
@@ -1612,6 +1693,23 @@ export function AgentChat({
   useEffect(() => {
     composerEditor?.setEditable(true);
   }, [composerEditor]);
+
+  // A fork publishes its new tab before the transcript read settles. Register
+  // only while THIS retained surface is active: insertTextAttachment focuses
+  // the editor, so a hidden destination must queue the chip instead of stealing
+  // focus from whichever chat the user moved to meanwhile.
+  useEffect(() => {
+    if (!chatId || !surfaceActive || !composerEditor) return;
+    return registerLiveChatTextAttachmentStager(chatId, (input) => {
+      const staged = stageTextAttachment(input);
+      if (staged && !staged.ok) {
+        toast.warning(
+          `Attached "${input.name}", but it won't be sent — ${staged.reason ?? "it exceeds this model's attachment budget"}.`,
+        );
+      }
+      return staged !== null;
+    });
+  }, [chatId, composerEditor, surfaceActive, stageTextAttachment]);
 
   // ── attach another chat's transcript ──
   //
@@ -1802,6 +1900,91 @@ export function AgentChat({
       unstageAttachment(transcriptSourceKey(sourceChatId));
     },
     [unstageAttachment],
+  );
+
+  const readForkTranscript = useCallback(
+    (throughMessageId: string, promptFallback: string) => {
+      if (!chatId || !chatThread) return null;
+      const sourceLabel = transcriptPillLabel({
+        title: chatThread.title,
+        summary: promptFallback,
+      });
+      return {
+        sourceLabel,
+        promise: loadTranscriptSnapshot({
+          chatId,
+          mode: "concise",
+          lastMessageAt: chatThread.updatedAt,
+          throughMessageId,
+          meta: { title: sourceLabel, folder: chatThread.folder },
+        }),
+      };
+    },
+    [chatId, chatThread],
+  );
+
+  /** Menu hover/focus pays the exact-key transcript read ahead of the click.
+   * Preview errors stay silent; selecting the action is the point at which a
+   * real read failure becomes user-visible. */
+  const warmForkToNewTab = useCallback(
+    (throughMessageId: string, promptFallback: string) => {
+      void readForkTranscript(throughMessageId, promptFallback)?.promise.catch(
+        () => {},
+      );
+    },
+    [readForkTranscript],
+  );
+
+  const forkToNewTab = useCallback(
+    (throughMessageId: string, promptFallback: string) => {
+      if (!chatThread) return;
+      const transcript = readForkTranscript(throughMessageId, promptFallback);
+      if (!transcript) return;
+
+      // Route + destination publish in one synchronous transition. The native
+      // provider binding, execution id, messages, queues, and drafts are not
+      // copied; only Zeros-owned chat settings and source lineage cross.
+      const fresh = createForkedChat(chatThread);
+      dispatch({ type: "ADD_CHAT", chat: fresh });
+
+      const delivery = transcript.promise
+        .then((snapshot) => {
+          // The user may permanently delete the destination while the bounded
+          // history walk is in flight. Do not retain an orphan delivery.
+          if (
+            !useWorkspaceStore
+              .getState()
+              .chats.some((candidate) => candidate.id === fresh.id)
+          ) {
+            return;
+          }
+          if (snapshot.count === 0) {
+            throw new Error("The selected turn has no concise transcript.");
+          }
+          deliverTextAttachmentToChat(
+            fresh.id,
+            buildForkTranscriptAttachment({
+              sourceChatId: chatThread.id,
+              sourceLabel: transcript.sourceLabel,
+              text: snapshot.text,
+              complete: snapshot.complete,
+            }),
+          );
+        })
+        .catch((error) => {
+          if (
+            !useWorkspaceStore
+              .getState()
+              .chats.some((candidate) => candidate.id === fresh.id)
+          ) {
+            return;
+          }
+          console.error("[Zeros] conversation fork transcript failed:", error);
+          toast.error("Couldn't attach the fork transcript — try again.");
+        });
+      trackPendingTextAttachmentDelivery(fresh.id, delivery);
+    },
+    [chatThread, dispatch, readForkTranscript],
   );
 
   /** Second click on a pill whose read hasn't landed. Marks the in-flight
@@ -2621,8 +2804,7 @@ export function AgentChat({
       const current = serializeComposerState();
       if (current && !current.isEmpty) return false;
       setComposerContent({
-        json:
-          draft.json ?? (draft.text.trim() ? textToDoc(draft.text) : null),
+        json: draft.json ?? (draft.text.trim() ? textToDoc(draft.text) : null),
         attachments: draft.attachments,
       });
       composerLiveRef.current = {
@@ -3047,6 +3229,61 @@ export function AgentChat({
       agentId: session.agentId ?? chatThread?.agentId ?? null,
     });
 
+  /** The chat whose send is already parked on an unreadable transcript. One
+   *  automatic retry: the drain re-enters runSend, which re-hydrates, and if
+   *  the read fails AGAIN there is no point cycling park → drain → park at
+   *  hydrate-RPC speed. Cleared whenever the transcript reads normally, so a
+   *  later disconnect gets its own retry. */
+  const transcriptParkedChatRef = useRef<string | null>(null);
+
+  /** Park a send that arrived while this chat's transcript could not be read
+   *  (engine respawning, transport dropped, a cold read that failed). Same
+   *  mechanism as the provisioning park: keep the exact TipTap document as the
+   *  chat's draft, arm its one-shot auto-send, and let the readiness drain
+   *  dispatch it. Says so either way — the one thing this must never do again
+   *  is nothing. */
+  const parkUnreadableTranscriptSend = (
+    parkChatId: string,
+    override?: string,
+  ): void => {
+    const snapshot = override === undefined ? serializeComposerState() : null;
+    const action = unreadableTranscriptSendAction({
+      hasPayload: snapshot
+        ? !snapshot.isEmpty
+        : (override ?? "").trim().length > 0,
+      payloadInComposer: snapshot !== null,
+      alreadyRetried: transcriptParkedChatRef.current === parkChatId,
+      status: session.status,
+    });
+    if (action === "ignore") return;
+    const alreadyArmed =
+      useWorkspaceStore.getState().pendingAutoSend[parkChatId] !== undefined;
+    if (action === "report" || !snapshot) {
+      if (!alreadyArmed) {
+        toast.warning("Couldn’t send yet", {
+          description:
+            "This chat is still reconnecting. Your message is in the composer — send it again in a moment.",
+          id: `chat-send-transcript-unavailable-${parkChatId}`,
+        });
+      }
+      return;
+    }
+    transcriptParkedChatRef.current = parkChatId;
+    const draft = {
+      text: snapshot.displayText,
+      attachments: snapshot.attachments,
+      json: snapshot.json,
+    };
+    composerLiveRef.current = draft;
+    dispatch({ type: "SET_CHAT_DRAFT", chatId: parkChatId, draft });
+    if (alreadyArmed) return;
+    dispatch({ type: "REQUEST_AUTO_SEND", chatId: parkChatId });
+    toast.info("Message queued", {
+      description: "It will send as soon as this chat reconnects.",
+      id: `workspace-message-queued-${parkChatId}`,
+    });
+  };
+
   const runSend = async (
     override?: string,
     extras?: {
@@ -3091,11 +3328,19 @@ export function AgentChat({
     // opens a window in which a second Enter re-enters, snapshots the same
     // composer state, and sends it again.
     const hydrateNeeded = session.transcriptState !== "resident";
-    if (hydrateNeeded || transcriptAttachesRef.current.size > 0) {
+    const forkAttachmentPending = chatId
+      ? hasPendingTextAttachmentDelivery(chatId)
+      : false;
+    if (
+      hydrateNeeded ||
+      transcriptAttachesRef.current.size > 0 ||
+      forkAttachmentPending
+    ) {
       setSendPreparing(true);
       try {
         if (hydrateNeeded) await session.hydrateChat();
         await Promise.allSettled([...transcriptAttachesRef.current]);
+        if (chatId) await waitForPendingTextAttachmentDeliveries(chatId);
       } finally {
         setSendPreparing(false);
       }
@@ -3109,7 +3354,15 @@ export function AgentChat({
     // hydrateChat), so bailing here would silently swallow the send BEFORE the
     // provisioning branch below could queue it and say so. Let that one case
     // fall through — the provisioning branch keeps the draft and queues an
-    // auto-send; every other missing/partial state still returns untouched.
+    // auto-send.
+    //
+    // Every OTHER unreadable state used to `return` here and say NOTHING: the
+    // composer kept the text, no bubble appeared, no toast, and pressing Enter
+    // again did the same nothing. That is the second half of the reported
+    // "I sent it before the workspace was ready and it never went" — an engine
+    // respawn or a dropped transport is exactly when the hydrate above fails,
+    // and it is the same pre-ready window the provisioning park already
+    // covers. So park it the same way and let the reconnect drain it.
     {
       const storeTranscriptState = chatId
         ? useSessionsStore.getState().sessions[chatId]?.transcriptState
@@ -3119,8 +3372,11 @@ export function AgentChat({
         storeTranscriptState !== "resident" &&
         !(storeTranscriptState === undefined && workspaceProvisioning)
       ) {
+        parkUnreadableTranscriptSend(chatId, override);
         return;
       }
+      // Readable again — re-arm the single automatic retry above.
+      transcriptParkedChatRef.current = null;
     }
     // Normal send → snapshot the editor (text + inline pills); the hand-off
     // path (override) supplies the text + pre-built blocks directly.
@@ -3145,18 +3401,25 @@ export function AgentChat({
     // `/compact` runs the action instead of being sent as a prompt; a terminal
     // command (`/mcp`, `/login`, …) opens the embedded terminal. (The picker
     // path handles the same on select; this covers type-and-Enter.)
+    const importCount = extras?.imports?.length ?? 0;
+    const extraAttachCount =
+      (extras?.extraAttachments?.length ?? 0) +
+      (extras?.stagedAttachments?.length ?? 0);
+    const commandHasAttachments =
+      localAttachments.length > 0 || importCount > 0 || extraAttachCount > 0;
     const bareCommand = displayText.match(/^\/([A-Za-z0-9_-]+)$/);
-    if (bareCommand && runInlineSlashCommand(bareCommand[1])) {
+    const inlineCommand = bareInlineSlashCommand(
+      session.agentId ?? chatThread?.agentId,
+      displayText,
+      commandHasAttachments,
+    );
+    if (inlineCommand && runInlineSlashCommand(inlineCommand)) {
       if (override === undefined) {
         clearComposer();
         if (chatId) dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
       }
       return;
     }
-    const importCount = extras?.imports?.length ?? 0;
-    const extraAttachCount =
-      (extras?.extraAttachments?.length ?? 0) +
-      (extras?.stagedAttachments?.length ?? 0);
     if (
       displayText.length === 0 &&
       localAttachments.length === 0 &&
@@ -3182,7 +3445,7 @@ export function AgentChat({
       composerLiveRef.current = draft;
       dispatch({ type: "SET_CHAT_DRAFT", chatId, draft });
       const alreadyQueued =
-        useWorkspaceStore.getState().pendingAutoSend[chatId] === true;
+        useWorkspaceStore.getState().pendingAutoSend[chatId] !== undefined;
       if (!alreadyQueued) {
         dispatch({ type: "REQUEST_AUTO_SEND", chatId });
         toast.info("Message queued", {
@@ -3196,7 +3459,11 @@ export function AgentChat({
     // Terminal-backed slash commands need the same real-cwd guarantee as an
     // agent turn. During provisioning they were queued above; once the path is
     // published, execute the action instead of sending its literal text.
-    if (bareCommand && openTerminalCommand(bareCommand[1])) {
+    if (
+      bareCommand &&
+      !commandHasAttachments &&
+      openTerminalCommand(bareCommand[1])
+    ) {
       if (override === undefined) {
         clearComposer();
         if (chatId) dispatch({ type: "CLEAR_CHAT_DRAFT", chatId });
@@ -3752,22 +4019,72 @@ export function AgentChat({
   // its own rich editor document. This is intentionally independent of current
   // route/surface: rapid create→create navigation still drains every queued
   // chat, while the exact id prevents another mounted pane from consuming it.
+  //
+  // It is also the park's RELEASE site (queuedFirstTurnAction): a spawn that
+  // ends terminally, or a wait that outlasts the bound, hands the message back
+  // and says so instead of holding it silently — the reported "I sent it
+  // before the workspace was ready and it just sat there".
   useEffect(() => {
-    if (!chatId || !pendingAutoSend || workspaceProvisioning) return;
-    if (session.status !== "ready" || session.pendingPermission) return;
-    if (composerEmpty) return;
-    // Don't retire the intent into a send that handleSend would drop because
-    // another one is mid-preparation; this effect re-runs when that clears.
-    if (sendInFlightRef.current) return;
-    // Consume first so React Strict effects and unrelated store notifications
-    // cannot dispatch the same first turn twice while handleSend is awaiting.
-    dispatch({ type: "CONSUME_AUTO_SEND", chatId });
-    // The original click was already recorded when this exact send was queued
-    // during provisioning. Its later automatic drain is not a new action.
-    submitRef.current(false);
+    if (!chatId || pendingAutoSendAt === null) return;
+    const decide = (): "wait" | "send" | "release" =>
+      queuedFirstTurnAction({
+        status: session.status,
+        provisioning: workspaceProvisioning,
+        hasPermissionGate: !!session.pendingPermission,
+        composerEmpty,
+        // Don't retire the intent into a send that handleSend would drop
+        // because another one is mid-preparation; this effect re-runs when
+        // that clears.
+        sendInFlight: sendInFlightRef.current,
+        armedForMs: Date.now() - pendingAutoSendAt,
+      });
+    const apply = (action: "wait" | "send" | "release"): void => {
+      if (action === "wait") return;
+      // Consume first so React Strict effects and unrelated store
+      // notifications cannot dispatch the same first turn twice while
+      // handleSend is awaiting.
+      dispatch({ type: "CONSUME_AUTO_SEND", chatId });
+      if (action === "release") {
+        toast.warning("A queued message wasn’t sent", {
+          description:
+            "This chat couldn’t start, so your message is still in the composer — send it again once the chat is ready.",
+          id: `workspace-message-queued-released-${chatId}`,
+        });
+        return;
+      }
+      // The original click was already recorded when this exact send was
+      // queued during provisioning. Its later automatic drain is not a new
+      // action.
+      submitRef.current(false);
+    };
+    const action = decide();
+    if (action !== "wait") {
+      apply(action);
+      return;
+    }
+    // A session that never settles produces no further status transition, so
+    // re-running on state alone can't notice it. Re-check once the bound
+    // elapses — the only way the wait becomes reportable at all.
+    const remaining =
+      QUEUED_FIRST_TURN_MAX_WAIT_MS - (Date.now() - pendingAutoSendAt) + 250;
+    const timer = window.setTimeout(
+      () => {
+        // Re-read live state: this fires minutes later, and only the store
+        // knows whether the park is still armed by then.
+        if (
+          useWorkspaceStore.getState().pendingAutoSend[chatId] !==
+          pendingAutoSendAt
+        ) {
+          return;
+        }
+        apply(decide());
+      },
+      Math.max(remaining, 0),
+    );
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    pendingAutoSend,
+    pendingAutoSendAt,
     workspaceProvisioning,
     session.status,
     session.pendingPermission,
@@ -3864,12 +4181,10 @@ export function AgentChat({
           banner does not interrupt transcript flow. The useEffect higher up fires
           toast.error("Claude Code: …") on every status transition. */}
 
-      {/* SummaryHandoffPill was removed. The "Add chat
-          summaries:" pill rendered above a fresh chat when the user
-          arrived via in-chat agent-switch (sourceChatId set). The
-          agent-switch flow itself was retired when AgentPill came
-          out of the chat surface — sourceChatId is no longer set
-          anywhere — so this pill became dead UI. */}
+      {/* SummaryHandoffPill was removed with in-chat agent switching.
+          Zeros-native forks stage their concise transcript directly in the
+          destination composer; sourceChatId remains product-owned lineage and
+          does not need its own banner. */}
 
       {/* Wave 4 (2026-05-16): the turn list now lives inside the
           canonical AI Elements <Conversation><ConversationContent>
@@ -4165,6 +4480,18 @@ export function AgentChat({
                             // context). The stop pill / budget card stays on
                             // this turn as history.
                             onContinue={() => void handleSend("Continue")}
+                            onFork={() =>
+                              forkToNewTab(
+                                turn.userPrompt!.id,
+                                turn.userPrompt!.text,
+                              )
+                            }
+                            onForkIntent={() =>
+                              warmForkToNewTab(
+                                turn.userPrompt!.id,
+                                turn.userPrompt!.text,
+                              )
+                            }
                             // Auth-required + Claude/Codex: the SIGN IN
                             // REQUIRED pill becomes a live Sign-in button
                             // (background CLI login → browser).
@@ -4296,6 +4623,14 @@ export function AgentChat({
               onClose={() => setTerminalCommand(null)}
             />
           )}
+          <GoalCard
+            goal={session.goal}
+            editing={goalEditorOpen}
+            onEditingChange={setGoalEditorOpen}
+            onSave={saveGoal}
+            onStatus={setGoalStatus}
+            onDelete={deleteGoal}
+          />
           {/* Composer task dock (<Plan>) REMOVED 2026-07-02: the plan/todo
             card was too agent-dependent to be trustworthy — it works for Codex
             (native plan), but is unpredictable for Claude/Cursor (they drive it

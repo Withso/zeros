@@ -10,6 +10,8 @@
 import { describe, it, expect } from "vitest";
 import {
   extractDiffSource,
+  extractDiffSources,
+  editBatchLabel,
   outputLineCounts,
   countLineDelta,
   computeEditBaselines,
@@ -179,6 +181,29 @@ describe("extractDiffSource — Codex apply_patch (changes[])", () => {
       },
     });
     expect(extractDiffSource(m)).toMatchObject({ path: "/abs/a.ts", after: "one\n" });
+  });
+
+  it("retains every change in one atomic multi-file patch", () => {
+    const m = tool({
+      rawInput: {
+        changes: [
+          { path: "/abs/london.md", kind: { type: "add" }, diff: "# London\n" },
+          { path: "/abs/new-york.md", kind: { type: "add" }, diff: "# New York\n" },
+          { path: "/abs/paris.md", kind: { type: "add" }, diff: "# Paris\n" },
+          { path: "/abs/rome.md", kind: { type: "add" }, diff: "# Rome\n" },
+          { path: "/abs/tokyo.md", kind: { type: "add" }, diff: "# Tokyo\n" },
+        ],
+      },
+    });
+    const sources = extractDiffSources(m);
+    expect(sources).toEqual([
+      expect.objectContaining({ path: "/abs/london.md", write: true }),
+      expect.objectContaining({ path: "/abs/new-york.md", write: true }),
+      expect.objectContaining({ path: "/abs/paris.md", write: true }),
+      expect.objectContaining({ path: "/abs/rome.md", write: true }),
+      expect.objectContaining({ path: "/abs/tokyo.md", write: true }),
+    ]);
+    expect(editBatchLabel(sources)).toBe("Write 5 files");
   });
 });
 

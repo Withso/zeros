@@ -161,7 +161,7 @@ describe("context-graph transition queue budgets", () => {
 });
 
 describe("workspace mode transition budget", () => {
-  it("keeps the request open while admitted workspace activity drains", async () => {
+  it("uses the lifecycle budget so the engine's own error surfaces first", async () => {
     const seen: { op?: string; timeoutMs?: number } = {};
     const bridge = {
       request: async (msg: { op?: string }, timeoutMs?: number) => {
@@ -181,7 +181,7 @@ describe("workspace mode transition budget", () => {
     });
 
     expect(seen.op).toBe("workspace.setMode");
-    expect(seen.timeoutMs).toBe(0);
+    expect(seen.timeoutMs).toBe(60_000);
   });
 });
 

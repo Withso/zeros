@@ -118,6 +118,39 @@ describe("advanced Git operations", () => {
       expect(d.patch).toContain("+more");
     });
 
+    it("returns bounded file metadata instead of an oversized aggregate patch", async () => {
+      await appendFile(path.join(wsPath, "README.md"), "more\n");
+      await writeFile(path.join(wsPath, "generated.txt"), "generated\n");
+      await git(wsPath, "add", "generated.txt");
+
+      const d = await diff({
+        workspaceId,
+        mode: "worktree-vs-head",
+        rawPatch: true,
+        summaryLimit: 1,
+      });
+
+      expect(d.summary).toBe(true);
+      expect(d.patch).toBeUndefined();
+      expect(d.hunks).toEqual([]);
+      expect(d.files).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            path: "README.md",
+            status: "modified",
+            additions: 1,
+            deletions: 0,
+          }),
+          expect.objectContaining({
+            path: "generated.txt",
+            status: "added",
+            additions: 1,
+            deletions: 0,
+          }),
+        ]),
+      );
+    });
+
     it("mode refs compares two branches (3-dot)", async () => {
       await writeFile(path.join(wsPath, "feat.txt"), "feat\n");
       await git(wsPath, "add", ".");
@@ -190,6 +223,24 @@ describe("advanced Git operations", () => {
   });
 
   describe("reset, discard, and clean", () => {
+    it("limits targeted status discovery to the selected path", async () => {
+      await appendFile(path.join(wsPath, "README.md"), "selected\n");
+      await writeFile(path.join(wsPath, "unrelated.txt"), "unrelated\n");
+
+      const selected = await status(workspaceId, {
+        paths: ["README.md"],
+        includeTracking: false,
+      });
+
+      expect(selected.unstaged).toEqual([
+        { path: "README.md", status: "modified" },
+      ]);
+      expect(selected.untracked).toEqual([]);
+      expect(selected.ahead).toBeNull();
+      expect(selected.behind).toBeNull();
+      expect(selected.upstream).toBeNull();
+    });
+
     it("reset mixed unstages without touching the working tree", async () => {
       await writeFile(path.join(wsPath, "r.txt"), "r\n");
       await stagePaths({ workspaceId, paths: ["r.txt"] });

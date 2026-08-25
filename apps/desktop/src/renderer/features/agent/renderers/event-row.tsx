@@ -27,7 +27,12 @@ import { Minus, Plus } from "lucide-react";
 
 import { cn } from "@/renderer/shared/ui/cn";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
-import { metaForEvent, statusTone, type EventMeta } from "./event-meta";
+import {
+  hasTransportTruncation,
+  metaForEvent,
+  statusTone,
+  type EventMeta,
+} from "./event-meta";
 import { FileTag } from "./file-tag";
 import type { RendererContext } from "./types";
 import { DiffHoverCard } from "./diff-hover-preview";
@@ -92,6 +97,8 @@ export const EventRow = memo(function EventRow({
   const meta = metaOverride ?? metaForEvent(message);
   const [open, setOpen] = useState(defaultOpen ?? false);
   const isTool = message.kind === "tool";
+  const transportTruncated =
+    isTool && hasTransportTruncation(message as AgentToolMessage);
   const status = isTool ? (message as AgentToolMessage).status : undefined;
   const sTone =
     toneOverride ?? (isTool ? statusTone(status as any) : undefined);
@@ -194,6 +201,14 @@ export const EventRow = memo(function EventRow({
             {meta.trailing}
           </span>
         ) : null)}
+      {transportTruncated && (
+        <span
+          className="bg-yellow-bg text-yellow-fg shrink-0 rounded-sm px-1.5 py-0.5 text-[10px] font-medium"
+          title="The provider truncated this tool payload"
+        >
+          Truncated
+        </span>
+      )}
     </button>
   );
 

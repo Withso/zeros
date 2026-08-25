@@ -1,6 +1,6 @@
 {
   "$schema": "./models-v1.schema.json",
-  "version": 9,
+  "version": 10,
   "updatedAt": "2026-08-08",
   "notes": "Curated model-picker source of truth. See catalogs/README.md for capability precedence, compatibility contracts, runtime context handling, verification, and update requirements.",
   "families": {
@@ -66,6 +66,14 @@
       }
     ],
     "cursor": [
+      {
+        "value": "default",
+        "label": "Router",
+        "description": "Let Cursor choose the model for this turn.",
+        "liveRequired": true,
+        "effortLevels": [],
+        "supportsFast": false
+      },
       {
         "value": "composer-2.5",
         "label": "Composer 2.5",

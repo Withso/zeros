@@ -3513,7 +3513,9 @@ describe("WorkspaceService", () => {
     });
     const setupStarts: string[] = [];
     const runStarts: string[] = [];
-    svc.setSetupRunner((workspaceId) => setupStarts.push(workspaceId));
+    svc.setSetupRunner((workspaceId) => {
+      setupStarts.push(workspaceId);
+    });
     svc.setRunStarter(async ({ workspaceId }) => {
       if (workspaceId) runStarts.push(workspaceId);
       return { alreadyRunning: false };
@@ -3773,7 +3775,9 @@ describe("WorkspaceService", () => {
     // Record every background-setup kickoff (the engine wires this to its
     // SetupManager in production; here we just capture the call).
     const calls: { id: string; command: string }[] = [];
-    svc.setSetupRunner((id, command) => calls.push({ id, command }));
+    svc.setSetupRunner((id, command) => {
+      calls.push({ id, command });
+    });
 
     const created = await createWorkspace({
       repoRoot: dir,
@@ -3837,7 +3841,9 @@ describe("WorkspaceService", () => {
       sessionId: string;
       expectedWorkspaceId?: string;
     }> = [];
-    svc.setSetupRunner((workspaceId) => setupStarts.push(workspaceId));
+    svc.setSetupRunner((workspaceId) => {
+      setupStarts.push(workspaceId);
+    });
     svc.setSetupStopper((workspaceId) => setupStops.push(workspaceId));
     svc.setRunStarter(async ({ workspaceId }) => {
       if (workspaceId) runStarts.push(workspaceId);
@@ -3908,9 +3914,9 @@ describe("WorkspaceService", () => {
 
     const runs: { id: string; command: string; target?: unknown }[] = [];
     const stops: string[] = [];
-    svc.setSetupRunner((id, command, target) =>
-      runs.push({ id, command, target }),
-    );
+    svc.setSetupRunner((id, command, target) => {
+      runs.push({ id, command, target });
+    });
     svc.setSetupStopper((id) => stops.push(id));
 
     const localId = "local:svcrepo";
@@ -3947,8 +3953,8 @@ describe("WorkspaceService", () => {
     expect(runs[0]!.command).toContain("echo trunk-deps");
     expect(runs[0]!.target).toMatchObject({ cwd: dir, repoRoot: dir });
 
-    // stopSetup reaches the stopper; a remote client is refused (host shell
-    // control stays desktop-only, like rerunSetup).
+    // stopSetup reaches the stopper; a remote client is refused because raw
+    // rowless-path control stays desktop-only, like rerunSetup.
     await svc.handle("workspace.stopSetup", {
       workspaceId: localId,
       repoRoot: dir,
@@ -3961,6 +3967,72 @@ describe("WorkspaceService", () => {
         { remote: true },
       ),
     ).rejects.toThrow();
+  });
+
+  it("acknowledges a setup rerun only after the setup runner is admitted", async () => {
+    await svc.handle("settings.write", {
+      layer: "repo",
+      repoRoot: dir,
+      patch: { scripts: { setup: "echo trunk-deps" } },
+    });
+
+    let releaseRunner = () => {};
+    const runnerBlocked = new Promise<void>((resolve) => {
+      releaseRunner = resolve;
+    });
+    let announceRunner = () => {};
+    const runnerStarted = new Promise<void>((resolve) => {
+      announceRunner = resolve;
+    });
+    svc.setSetupRunner(async () => {
+      announceRunner();
+      await runnerBlocked;
+    });
+
+    let acknowledged = false;
+    const rerun = svc
+      .handle("workspace.rerunSetup", {
+        workspaceId: "local:svcrepo",
+        repoRoot: dir,
+      })
+      .then((result) => {
+        acknowledged = true;
+        return result;
+      });
+
+    try {
+      await runnerStarted;
+      // Let the request's async command-resolution chain settle. The retry RPC
+      // must still be pending while the engine admission itself is pending.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(acknowledged).toBe(false);
+    } finally {
+      releaseRunner();
+    }
+
+    await expect(rerun).resolves.toMatchObject({
+      ok: true,
+      hasCommand: true,
+    });
+  });
+
+  it("propagates an asynchronous setup admission failure to the rerun caller", async () => {
+    await svc.handle("settings.write", {
+      layer: "repo",
+      repoRoot: dir,
+      patch: { scripts: { setup: "echo trunk-deps" } },
+    });
+    svc.setSetupRunner(async () => {
+      await Promise.resolve();
+      throw new Error("setup admission refused");
+    });
+
+    await expect(
+      svc.handle("workspace.rerunSetup", {
+        workspaceId: "local:svcrepo",
+        repoRoot: dir,
+      }),
+    ).rejects.toThrow(/setup admission refused/i);
   });
 
   // ── Working directories: the watcher must go deaf for the rewrite ──

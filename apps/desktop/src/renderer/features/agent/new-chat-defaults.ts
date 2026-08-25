@@ -61,13 +61,16 @@ import {
   setPermissionPreference,
 } from "./permission-preferences";
 import {
+  DEFAULT_CLAUDE_AUTO_MEMORY_ENABLED,
   DEFAULT_CLAUDE_FALLBACK,
   DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
+  getClaudeAutoMemoryEnabled,
   getClaudeBudgetCapUsd,
   getClaudeFallbackModel,
   getClaudeIdleTimeoutMinutes,
   isClaudeIdleTimeoutMinutes,
   setClaudeBudgetCapUsd,
+  setClaudeAutoMemoryEnabled,
   setClaudeFallbackModel,
   setClaudeIdleTimeoutMinutes,
 } from "./reliability-settings";
@@ -432,6 +435,7 @@ function buildModelsTable(): Record<string, unknown> {
       fallback_model: getClaudeFallbackModel() ?? "none",
       budget_cap_usd: getClaudeBudgetCapUsd(),
       idle_timeout_minutes: getClaudeIdleTimeoutMinutes(),
+      auto_memory_enabled: getClaudeAutoMemoryEnabled(),
     },
     codex: { default_thinking_level: null },
   };
@@ -589,6 +593,13 @@ export function hydrateModelsFromSettings(models: unknown): void {
     if (getClaudeIdleTimeoutMinutes() !== idleTimeout) {
       setClaudeIdleTimeoutMinutes(idleTimeout);
     }
+    const autoMemory =
+      typeof cc?.auto_memory_enabled === "boolean"
+        ? cc.auto_memory_enabled
+        : DEFAULT_CLAUDE_AUTO_MEMORY_ENABLED;
+    if (getClaudeAutoMemoryEnabled() !== autoMemory) {
+      setClaudeAutoMemoryEnabled(autoMemory);
+    }
   } finally {
     suppressMirror = false;
   }
@@ -606,6 +617,8 @@ export function hasModelDefaults(): boolean {
   if (getClaudeFallbackModel() !== DEFAULT_CLAUDE_FALLBACK) return true;
   if (getClaudeBudgetCapUsd() != null) return true;
   if (getClaudeIdleTimeoutMinutes() !== DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES)
+    return true;
+  if (getClaudeAutoMemoryEnabled() !== DEFAULT_CLAUDE_AUTO_MEMORY_ENABLED)
     return true;
   // Legacy values count only until the exact-model migration marker lands.
   if (!hasModelPreferenceStorage()) {

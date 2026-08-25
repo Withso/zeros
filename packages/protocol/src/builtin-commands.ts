@@ -80,6 +80,10 @@ const BUILTIN_COMMANDS: Record<string, AvailableCommand[]> = {
     },
     { name: "diff", description: "Show the current git diff" },
     { name: "review", description: "Review the working tree for issues" },
+    {
+      name: "goal",
+      description: "Set or manage a persistent goal for this conversation",
+    },
     { name: "plan", description: "Switch to planning mode" },
     {
       name: "mention",
@@ -234,7 +238,7 @@ const CLAUDE_TERMINAL_COMMANDS = new Set<string>([
  *  Claude's CLI does — sending it as a prompt just makes the model role-play
  *  a summary while the real window stays full — so Zeros routes it to the
  *  real `thread/compact/start` RPC instead. */
-const CODEX_INLINE_ACTIONS = new Set<string>(["compact"]);
+const CODEX_INLINE_ACTIONS = new Set<string>(["compact", "goal"]);
 
 export function slashCommandKind(
   agentId: string | null | undefined,
@@ -248,4 +252,19 @@ export function slashCommandKind(
   if (CLAUDE_INLINE_ACTIONS.has(name)) return "inline";
   if (CLAUDE_TERMINAL_COMMANDS.has(name)) return "terminal";
   return "text";
+}
+
+/** Return the command name only when the entire composer payload is an
+ * attachment-free inline command. Keeping this predicate shared prevents a
+ * provider-owned command from accidentally consuming a normal prompt such as
+ * `/goal ship the release` or a `/goal` prompt carrying context files. */
+export function bareInlineSlashCommand(
+  agentId: string | null | undefined,
+  text: string,
+  hasAttachments: boolean,
+): string | null {
+  if (hasAttachments) return null;
+  const match = text.trim().match(/^\/([A-Za-z0-9_-]+)$/);
+  if (!match) return null;
+  return slashCommandKind(agentId, match[1]) === "inline" ? match[1] : null;
 }

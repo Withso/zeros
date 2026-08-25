@@ -7,10 +7,13 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
+  agentUpdateFlushMode,
   bumpCancelGeneration,
   cancelGeneration,
   cancelledSince,
+  clearPrebindGoalSnapshotsForChat,
   loadedSessionStatus,
+  markPrebindGoalSnapshot,
   markPrebindDirty,
   promptFailureShouldRecover,
   promptFailureShouldResumeProvider,
@@ -28,6 +31,7 @@ import {
   sendSessionRecoveryMode,
   sharedAdmissionFlightAction,
   shouldQueuePrompt,
+  takePrebindGoalSnapshot,
   takePrebindDirty,
 } from "../session-reload-lifecycle";
 import { BLANK, useSessionsStore } from "../sessions-store";
@@ -58,6 +62,23 @@ describe("session reload lifecycle", () => {
   it("restores an engine-active prompt as streaming instead of ready", () => {
     expect(loadedSessionStatus(true)).toBe("streaming");
     expect(loadedSessionStatus(false)).toBe("ready");
+  });
+
+  it("flushes the terminal turn boundary with all preceding content", () => {
+    for (const state of ["completed", "failed", "cancelled"] as const) {
+      expect(agentUpdateFlushMode({ sessionUpdate: "turn_state", state })).toBe(
+        "turn-boundary",
+      );
+    }
+    expect(
+      agentUpdateFlushMode({
+        sessionUpdate: "turn_state",
+        state: "running",
+      }),
+    ).toBe("frame");
+    expect(agentUpdateFlushMode({ sessionUpdate: "agent_message_chunk" })).toBe(
+      "frame",
+    );
   });
 
   it("reloads only an idle native Codex or Claude execution for a boot-scoped capability", () => {
@@ -584,6 +605,43 @@ describe("session reload lifecycle", () => {
       ["chat-1", "session-1b"],
       ["chat-3", "session-3"],
     ]);
+  });
+
+  it("replays an early goal snapshot only into its exact execution", () => {
+    const goals = new Map();
+    const goal = {
+      objective: "Ship the renderer fix",
+      status: "active" as const,
+      tokenBudget: null,
+      tokensUsed: 4,
+      timeUsedSeconds: 2,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    markPrebindGoalSnapshot(goals, "chat-1", "old-session", goal);
+
+    expect(
+      takePrebindGoalSnapshot(goals, "chat-1", "new-session"),
+    ).toBeUndefined();
+    expect(takePrebindGoalSnapshot(goals, "chat-1", "old-session")).toEqual(
+      goal,
+    );
+  });
+
+  it("retains null goal clears and bounds pre-bind goal snapshots", () => {
+    const goals = new Map();
+    markPrebindGoalSnapshot(goals, "chat-1", "session-1", null, 2);
+    markPrebindGoalSnapshot(goals, "chat-2", "session-2", null, 2);
+    markPrebindGoalSnapshot(goals, "chat-3", "session-3", null, 2);
+
+    expect(goals.size).toBe(2);
+    expect(
+      takePrebindGoalSnapshot(goals, "chat-1", "session-1"),
+    ).toBeUndefined();
+    expect(takePrebindGoalSnapshot(goals, "chat-2", "session-2")).toBeNull();
+
+    clearPrebindGoalSnapshotsForChat(goals, "chat-3");
+    expect(goals.size).toBe(0);
   });
 });
 

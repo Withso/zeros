@@ -1,11 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import {
-  existsSync,
-  lstatSync,
-  realpathSync,
-  writeFileSync,
-} from "node:fs";
+import { existsSync, lstatSync, realpathSync, writeFileSync } from "node:fs";
 import {
   chmod,
   chown,
@@ -94,6 +89,12 @@ const SLOW_ADMISSION_REPORT_MS = 1_500;
  * nothing until now. */
 const SLOW_RETIREMENT_REPORT_MS = 1_500;
 const PORT_DISCOVERY_INTERVAL_MS = 250;
+/** Idle cadence once nothing has changed for the hot window. Discovery spawns
+ * a native helper per poll, so a quiet long-lived session should not pay a
+ * 4 Hz process tax forever; any registration or observed change snaps the
+ * cadence back to the fast interval. */
+const PORT_DISCOVERY_IDLE_INTERVAL_MS = 1_500;
+const PORT_DISCOVERY_HOT_WINDOW_MS = 10_000;
 const PORT_DISCOVERY_MISSING_POLLS = 8;
 const MAX_AUTO_PORT_LEASES = 64;
 const COMMAND_DESCRIPTOR_VERSION = 6 as const;
@@ -199,10 +200,32 @@ export const CA_TRUST_ENV_NAMES = [
   "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
 ] as const;
 
+/** How long a released private OrbStack worker stays warm before its machine
+ * is deleted. Rebuilding the VM costs the user roughly a minute on their next
+ * `docker`/`podman` command, so a short idle window converts session churn in
+ * one workspace into instant container reuse. Idling is refused entirely while
+ * the workspace's Design territory is in transition (see the suspension hooks
+ * below), because an idle machine keeps the mount protections of the boundary
+ * that created it. */
+const SHARED_CONTAINER_WORKER_IDLE_MS_DEFAULT = 300_000;
+
+function sharedContainerWorkerIdleMs(): number {
+  const configured = Number.parseInt(
+    process.env.ZEROS_ZSR_CONTAINER_WORKER_IDLE_MS ?? "",
+    10,
+  );
+  return Number.isInteger(configured) && configured >= 0
+    ? configured
+    : SHARED_CONTAINER_WORKER_IDLE_MS_DEFAULT;
+}
+
 interface SharedMacosContainerEntry {
+  readonly key: string;
+  readonly workspaceRoot: string;
   readonly lease: Promise<MacosContainerWorkerLease>;
   readonly controlExecutionId: string;
   references: number;
+  idleTimer?: NodeJS.Timeout;
   stopping?: Promise<void>;
 }
 
@@ -211,14 +234,126 @@ const sharedMacosContainerWorkers = new Map<
   SharedMacosContainerEntry
 >();
 
+/** Workspace roots whose released workers must stop immediately instead of
+ * idling. A count supports overlapping transitions, mirroring the utility
+ * pool's suspension semantics. The `null` key is the global gate. */
+const suspendedContainerWorkerIdling = new Map<string | null, number>();
+
+/** Canonical key for a workspace root used across shared-container idling.
+ * The shared-worker key derives its roots via realpath (see
+ * localWorkspaceContainerIdentity), so idling suspend/stop must resolve
+ * symlinks the same way or an engine-passed non-canonical path could miss the
+ * realpath'd entry. Falls back to a lexical resolve for a not-yet-existing
+ * path. */
+function containerWorkspaceKey(workspaceRoot: string): string {
+  return physicalPathIfPresent(path.resolve(workspaceRoot));
+}
+
+function containerWorkerIdlingSuspended(workspaceRoot: string): boolean {
+  if (sharedContainerWorkerIdleMs() === 0) return true;
+  if ((suspendedContainerWorkerIdling.get(null) ?? 0) > 0) return true;
+  return (
+    (suspendedContainerWorkerIdling.get(containerWorkspaceKey(workspaceRoot)) ??
+      0) > 0
+  );
+}
+
+/** Close (or reopen) the idle window. While suspended, a release stops the
+ * machine inline and its proof failure surfaces exactly where the pre-idle
+ * design surfaced it: in the releasing boundary's teardown. */
+export function suspendSharedContainerWorkerIdling(
+  workspaceRoot?: string,
+): void {
+  const key =
+    workspaceRoot === undefined ? null : containerWorkspaceKey(workspaceRoot);
+  suspendedContainerWorkerIdling.set(
+    key,
+    (suspendedContainerWorkerIdling.get(key) ?? 0) + 1,
+  );
+}
+
+export function resumeSharedContainerWorkerIdling(
+  workspaceRoot?: string,
+): void {
+  const key =
+    workspaceRoot === undefined ? null : containerWorkspaceKey(workspaceRoot);
+  const count = suspendedContainerWorkerIdling.get(key) ?? 0;
+  if (count <= 1) suspendedContainerWorkerIdling.delete(key);
+  else suspendedContainerWorkerIdling.set(key, count - 1);
+}
+
+function retireSharedContainerEntry(
+  entry: SharedMacosContainerEntry,
+): Promise<void> {
+  if (entry.idleTimer) {
+    clearTimeout(entry.idleTimer);
+    entry.idleTimer = undefined;
+  }
+  if (entry.stopping) return entry.stopping;
+  const flight = (async () => {
+    const lease = await entry.lease.catch(() => null);
+    if (lease) await lease.stopAndProve();
+    await removeSessionDir(entry.controlExecutionId);
+  })();
+  entry.stopping = flight;
+  flight.then(
+    () => {
+      if (sharedMacosContainerWorkers.get(entry.key) === entry) {
+        sharedMacosContainerWorkers.delete(entry.key);
+      }
+    },
+    () => {
+      // Keep the failed entry latched in the map. The machine name is derived
+      // from the shared key, so admitting a fresh worker before this one is
+      // proven gone would collide with the surviving machine; the next acquire
+      // retries this same retirement instead.
+      entry.stopping = undefined;
+    },
+  );
+  return flight;
+}
+
+/** Stop every idle shared worker now (all of them, or one workspace's).
+ * Territory transitions call this before publishing a changed Design map so a
+ * warm machine admitted under the old protections cannot outlive them. */
+export async function stopIdleSharedContainerWorkers(
+  workspaceRoot?: string,
+): Promise<void> {
+  const root =
+    workspaceRoot === undefined ? null : containerWorkspaceKey(workspaceRoot);
+  const failures: unknown[] = [];
+  await Promise.all(
+    [...sharedMacosContainerWorkers.values()]
+      .filter(
+        (entry) =>
+          entry.references === 0 &&
+          (root === null || entry.workspaceRoot === root),
+      )
+      .map(async (entry) => {
+        try {
+          await retireSharedContainerEntry(entry);
+        } catch (error) {
+          failures.push(error);
+        }
+      }),
+  );
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(
+      failures,
+      "idle shared container workers could not all be proven stopped",
+    );
+  }
+}
+
 class SharedMacosContainerWorkerLease implements MacosContainerWorkerLease {
   readonly hostPort: number;
   readonly machineName: string;
   readonly environment: Readonly<Record<string, string>>;
   private stopPromise: Promise<void> | null = null;
+  private released = false;
 
   constructor(
-    private readonly key: string,
     private readonly entry: SharedMacosContainerEntry,
     private readonly delegate: MacosContainerWorkerLease,
   ) {
@@ -235,23 +370,46 @@ class SharedMacosContainerWorkerLease implements MacosContainerWorkerLease {
 
   stopAndProve(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
-    this.stopPromise = (async () => {
-      this.entry.references -= 1;
-      if (this.entry.references > 0) return;
-      this.entry.stopping = (async () => {
-        await this.delegate.stopAndProve();
-        await removeSessionDir(this.entry.controlExecutionId);
-      })();
-      try {
-        await this.entry.stopping;
-      } finally {
-        if (sharedMacosContainerWorkers.get(this.key) === this.entry) {
-          sharedMacosContainerWorkers.delete(this.key);
-        }
+    const attempt = (async () => {
+      if (!this.released) {
+        this.released = true;
+        this.entry.references -= 1;
       }
+      if (this.entry.references > 0) return;
+      if (containerWorkerIdlingSuspended(this.entry.workspaceRoot)) {
+        await retireSharedContainerEntry(this.entry);
+        return;
+      }
+      // Keep the machine warm for the idle window. A failed deferred stop
+      // latches the entry (see retireSharedContainerEntry) so the shared
+      // machine name can never be double-allocated.
+      if (this.entry.idleTimer) clearTimeout(this.entry.idleTimer);
+      const timer = setTimeout(() => {
+        entryIdleStop(this.entry);
+      }, sharedContainerWorkerIdleMs());
+      timer.unref?.();
+      this.entry.idleTimer = timer;
     })();
-    return this.stopPromise;
+    // The catch runs asynchronously (after this const initializes), so
+    // referencing `wrapped` inside it is safe.
+    const wrapped: Promise<void> = attempt.catch((error) => {
+      // The release itself is durable; only the stop proof may be retried.
+      if (this.stopPromise === wrapped) this.stopPromise = null;
+      throw error;
+    });
+    this.stopPromise = wrapped;
+    return wrapped;
   }
+}
+
+function entryIdleStop(entry: SharedMacosContainerEntry): void {
+  if (entry.references > 0) return;
+  void retireSharedContainerEntry(entry).catch((error) => {
+    console.error(
+      `[zsr] idle container worker ${entry.controlExecutionId} could not be proven stopped: ` +
+        (error instanceof Error ? error.message : String(error)),
+    );
+  });
 }
 
 function localWorkspaceContainerIdentity(request: BoundaryRequest): {
@@ -293,9 +451,7 @@ function localWorkspaceContainerIdentity(request: BoundaryRequest): {
       // union. Unmounted sibling roots cannot change this VM's descriptor and
       // must not force a second private machine/port for the same workspace.
       .filter((root) =>
-        projectionRoots.some((projected) =>
-          pathInsideOrEqual(root, projected),
-        ),
+        projectionRoots.some((projected) => pathInsideOrEqual(root, projected)),
       )
       .sort(),
     executable: request.containerWorker?.executable
@@ -308,16 +464,48 @@ function localWorkspaceContainerIdentity(request: BoundaryRequest): {
 
 async function acquireSharedMacosContainerWorker(
   key: string,
+  workspaceRoot: string,
   controlExecutionId: string,
   create: () => Promise<MacosContainerWorkerLease>,
 ): Promise<MacosContainerWorkerLease> {
+  // A territory or grant change produces a different key for the same
+  // workspace. Retire any idle worker still warm under the superseded key
+  // before admitting the new one, so at most one warm machine serves a
+  // workspace and a stale protection map never outlives its replacement.
+  const canonicalWorkspace = containerWorkspaceKey(workspaceRoot);
+  for (const stale of [...sharedMacosContainerWorkers.values()]) {
+    if (
+      stale.key !== key &&
+      stale.workspaceRoot === canonicalWorkspace &&
+      stale.references === 0 &&
+      !stale.stopping
+    ) {
+      await retireSharedContainerEntry(stale);
+    }
+  }
   let entry = sharedMacosContainerWorkers.get(key);
   if (entry?.stopping) {
-    await entry.stopping;
-    return acquireSharedMacosContainerWorker(key, controlExecutionId, create);
+    // A failed retirement keeps the entry latched; retry the stop proof here
+    // rather than colliding with the surviving machine's shared name.
+    await entry.stopping.catch(() => undefined);
+    if (sharedMacosContainerWorkers.get(key) === entry) {
+      await retireSharedContainerEntry(entry);
+    }
+    return acquireSharedMacosContainerWorker(
+      key,
+      workspaceRoot,
+      controlExecutionId,
+      create,
+    );
+  }
+  if (entry?.idleTimer) {
+    clearTimeout(entry.idleTimer);
+    entry.idleTimer = undefined;
   }
   if (!entry) {
     entry = {
+      key,
+      workspaceRoot: canonicalWorkspace,
       lease: Promise.resolve().then(create),
       controlExecutionId,
       references: 0,
@@ -326,7 +514,7 @@ async function acquireSharedMacosContainerWorker(
   }
   entry.references += 1;
   try {
-    return new SharedMacosContainerWorkerLease(key, entry, await entry.lease);
+    return new SharedMacosContainerWorkerLease(entry, await entry.lease);
   } catch (error) {
     entry.references -= 1;
     if (
@@ -603,6 +791,19 @@ const canOpenForWrite = (probe) => {
     return true;
   } catch { return false; }
 };
+const canCreateFile = (file) => {
+  let created = false;
+  try {
+    fs.writeFileSync(file, "probe\n", { flag: "wx", mode: 0o600 });
+    created = true;
+    return true;
+  } catch { return false; }
+  finally {
+    if (created) {
+      try { fs.unlinkSync(file); } catch {}
+    }
+  }
+};
 let codeWrite = false;
 try {
   fs.writeFileSync(spec.codeFile, "ok\n", { flag: "wx", mode: 0o600 });
@@ -610,6 +811,7 @@ try {
   fs.unlinkSync(spec.codeFile);
 } catch {}
 const designWrite = spec.designProbes.map(canOpenForWrite);
+const protectedWorkspaceWrite = spec.protectedWorkspaceFiles.map(canCreateFile);
 let designAliasWrite = spec.designProbes.length === 0;
 if (spec.designAlias) {
   const first = spec.designProbes[0];
@@ -640,6 +842,7 @@ const result = {
   codeWrite,
   designWrite,
   designAliasWrite,
+  protectedWorkspaceWrite,
   hostRead,
   canonicalGitRead,
   environmentExact,
@@ -739,11 +942,9 @@ async function prepareCloudWorkerPrivateState(
   unixSockets: readonly string[],
 ): Promise<void> {
   await Promise.all(
-    [
-      policy.paths.home,
-      policy.paths.scratch,
-      policy.paths.providerState,
-    ].map((directory) => grantWritableTreeToWorker(directory, identity)),
+    [policy.paths.home, policy.paths.scratch, policy.paths.providerState].map(
+      (directory) => grantWritableTreeToWorker(directory, identity),
+    ),
   );
   if (policy.paths.containerState) {
     const metadata = await lstat(policy.paths.containerState);
@@ -806,9 +1007,7 @@ async function waitForGroup(pid: number, timeoutMs: number): Promise<boolean> {
 /** Host-parity sessions use the workspace repository directly. Legacy status
  * states remain in the protocol, but this backend reports only native or
  * not-applicable. */
-function boundaryGitState(
-  request: BoundaryRequest,
-): ExecutionBoundaryGitState {
+function boundaryGitState(request: BoundaryRequest): ExecutionBoundaryGitState {
   // `.git` is a directory in a normal checkout and a file in a linked worktree;
   // either proves the session is operating inside a repository. A submodule or
   // nested owner resolves to its own root before admission, so this does not
@@ -913,7 +1112,7 @@ class TrackedBoundaryProcess implements BoundaryProcess {
 
   stopAndProve(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
-    this.stopPromise = (async () => {
+    const attempt = (async () => {
       const startedAt = Date.now();
       if (process.platform === "win32") {
         if (this.child.exitCode === null && this.child.signalCode === null) {
@@ -943,7 +1142,15 @@ class TrackedBoundaryProcess implements BoundaryProcess {
         );
       }
     })();
-    return this.stopPromise;
+    // The kill ladder is idempotent, so a failed proof (typically a process
+    // stuck in uninterruptible IO surviving SIGKILL) may be retried by a later
+    // call instead of pinning the first rejection forever.
+    const wrapped: Promise<void> = attempt.catch((error) => {
+      if (this.stopPromise === wrapped) this.stopPromise = null;
+      throw error;
+    });
+    this.stopPromise = wrapped;
+    return wrapped;
   }
 }
 
@@ -985,7 +1192,7 @@ class TrackedBoundaryProcessGroup implements BoundaryProcess {
 
   stopAndProve(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
-    this.stopPromise = (async () => {
+    const attempt = (async () => {
       if (!processGroupExists(this.pid)) return;
       await this.signal("SIGTERM");
       if (await waitForGroup(this.pid, GRACE_MS)) return;
@@ -996,7 +1203,12 @@ class TrackedBoundaryProcessGroup implements BoundaryProcess {
         );
       }
     })();
-    return this.stopPromise;
+    const wrapped: Promise<void> = attempt.catch((error) => {
+      if (this.stopPromise === wrapped) this.stopPromise = null;
+      throw error;
+    });
+    this.stopPromise = wrapped;
+    return wrapped;
   }
 }
 
@@ -1032,13 +1244,28 @@ class PreparedZsrBoundary implements PreparedBoundary {
     { lease: PortLease; missingPolls: number }
   >();
   private portDiscoveryTimer: NodeJS.Timeout | null = null;
+  private portDiscoveryLoopActive = false;
   private portDiscoveryInFlight = false;
   private portDiscoveryReady = false;
+  private portDiscoveryHotUntil = 0;
   private portDiscoveryState: PortDiscoveryStatus["state"] = "idle";
   private portDiscoveryIssue: PortDiscoveryIssue | null = null;
   private revoked = false;
   private revokePromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
+  /** Per-stage teardown latches. A failed stopAndProve may be retried by the
+   * gateway's recovery loop, but the reclaim stage DELETES the process-domain
+   * marker/policy/metadata that reap()/retireMetadata() consume, and
+   * retireMetadata() is a non-idempotent rename. Re-running an already-proven
+   * stage against deleted state would wedge the retry forever, so each stage
+   * records its success and a retry resumes from the first unproven stage. The
+   * ordering invariant that makes this safe: reclaim (which deletes the inputs)
+   * only runs once `domainRetired` is set, and reap/metadata are skipped once
+   * set — so their inputs still exist on any retry that re-runs them. */
+  private domainReaped = false;
+  private domainRetired = false;
+  private stateReclaimed = false;
+  private sessionDirRemoved = false;
 
   constructor(
     private readonly request: BoundaryRequest,
@@ -1211,15 +1438,40 @@ class PreparedZsrBoundary implements PreparedBoundary {
     return lease;
   }
 
+  /** Snap discovery back to the fast cadence. Called on process registration
+   * and whenever a poll observes the listener set changing, so startup and
+   * teardown transitions stay responsive while a quiet steady state polls at
+   * the idle cadence. */
+  private markPortDiscoveryHot(): void {
+    this.portDiscoveryHotUntil = Date.now() + PORT_DISCOVERY_HOT_WINDOW_MS;
+  }
+
+  private schedulePortDiscoveryPoll(): void {
+    if (this.revoked || !this.portDiscoveryLoopActive) return;
+    const delay =
+      Date.now() < this.portDiscoveryHotUntil
+        ? PORT_DISCOVERY_INTERVAL_MS
+        : PORT_DISCOVERY_IDLE_INTERVAL_MS;
+    const timer = setTimeout(() => {
+      this.portDiscoveryTimer = null;
+      void this.pollPortDiscovery().finally(() =>
+        this.schedulePortDiscoveryPoll(),
+      );
+    }, delay);
+    timer.unref();
+    this.portDiscoveryTimer = timer;
+  }
+
   private startPortDiscovery(): void {
-    if (this.revoked || this.portDiscoveryTimer) return;
+    this.markPortDiscoveryHot();
+    if (this.revoked || this.portDiscoveryLoopActive) return;
+    this.portDiscoveryLoopActive = true;
     this.portDiscoveryState = "discovering";
     this.portDiscoveryIssue = null;
     this.publishPorts();
-    const poll = () => void this.pollPortDiscovery();
-    this.portDiscoveryTimer = setInterval(poll, PORT_DISCOVERY_INTERVAL_MS);
-    this.portDiscoveryTimer.unref();
-    poll();
+    void this.pollPortDiscovery().finally(() =>
+      this.schedulePortDiscoveryPoll(),
+    );
   }
 
   private async listDiscoveredTcpListeners(): Promise<
@@ -1284,6 +1536,7 @@ class PreparedZsrBoundary implements PreparedBoundary {
         }
         failureIssue = "lease-allocation-failed";
         const lease = await this.leaseDiscoveredPort(listener);
+        this.markPortDiscoveryHot();
         if (this.revoked) {
           await lease.revoke();
           return;
@@ -1292,6 +1545,9 @@ class PreparedZsrBoundary implements PreparedBoundary {
       }
       for (const [port, state] of this.discoveredPorts) {
         if (seen.has(port)) continue;
+        // A disappearing listener is a transition too: confirm the drop at the
+        // fast cadence instead of stretching it across idle polls.
+        this.markPortDiscoveryHot();
         state.missingPolls += 1;
         if (state.missingPolls < PORT_DISCOVERY_MISSING_POLLS) continue;
         this.discoveredPorts.delete(port);
@@ -1439,9 +1695,10 @@ class PreparedZsrBoundary implements PreparedBoundary {
     this.revoked = true;
     this.portDiscoveryState = "revoked";
     this.portDiscoveryIssue = null;
-    if (this.portDiscoveryTimer) clearInterval(this.portDiscoveryTimer);
+    this.portDiscoveryLoopActive = false;
+    if (this.portDiscoveryTimer) clearTimeout(this.portDiscoveryTimer);
     this.portDiscoveryTimer = null;
-    this.revokePromise = (async () => {
+    const attempt = (async () => {
       const results = await Promise.allSettled([
         ...[...this.portLeases].map((lease) => lease.revoke()),
         this.macosContainerWorker?.stopAndProve() ?? Promise.resolve(),
@@ -1461,12 +1718,20 @@ class PreparedZsrBoundary implements PreparedBoundary {
         );
       }
     })();
-    return this.revokePromise;
+    // Every revocation step is idempotent (leases self-deactivate, the broker
+    // close latches, the container lease release is durable), so a failed
+    // revoke may be retried; `revoked` itself stays latched either way.
+    const wrapped: Promise<void> = attempt.catch((error) => {
+      if (this.revokePromise === wrapped) this.revokePromise = null;
+      throw error;
+    });
+    this.revokePromise = wrapped;
+    return wrapped;
   }
 
   stopAndProve(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
-    this.stopPromise = (async () => {
+    const attempt = (async () => {
       const startedAt = Date.now();
       const retirementStages = new Map<string, number>();
       let stageStartedAt = startedAt;
@@ -1485,53 +1750,77 @@ class PreparedZsrBoundary implements PreparedBoundary {
 
       failures.push(...(await this.stopTrackedProcessesAndProve()));
       stage("processes");
-      if (this.macosProcessDomain) {
+      // Reap is best-effort-always (it kills a domain-escaped descendant even
+      // when a tracked group survived), but skipped once proven so a retry
+      // never touches a marker the reclaim stage already deleted.
+      if (this.macosProcessDomain && !this.domainReaped) {
         try {
           await this.macosProcessDomain.reap();
+          this.domainReaped = true;
         } catch (error) {
           failures.push(error);
         }
       }
       stage("domain");
-      if (failures.length === 0 && this.macosProcessDomain) {
+      if (
+        failures.length === 0 &&
+        this.macosProcessDomain &&
+        !this.domainRetired
+      ) {
         try {
           await this.macosProcessDomain.retireMetadata();
+          this.domainRetired = true;
         } catch (error) {
           failures.push(error);
         }
+      } else if (!this.macosProcessDomain) {
+        this.domainRetired = true;
       }
       stage("metadata");
 
-      if (failures.length === 0) {
+      // Reclaim deletes the reap/metadata inputs, so it must run only after
+      // those stages are proven and never before them on a retry.
+      if (
+        failures.length === 0 &&
+        this.domainRetired &&
+        !this.stateReclaimed
+      ) {
         const reclaimed = await Promise.allSettled([
           rm(this.policy.paths.root, { recursive: true, force: true }),
           rm(this.policy.paths.network, { recursive: true, force: true }),
         ]);
-        failures.push(
-          ...reclaimed.flatMap((result) =>
-            result.status === "rejected" ? [result.reason] : [],
-          ),
+        const reclaimFailures = reclaimed.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
         );
+        failures.push(...reclaimFailures);
+        if (reclaimFailures.length === 0) this.stateReclaimed = true;
       }
       stage("reclaim");
-      if (failures.length === 0) {
+      if (
+        failures.length === 0 &&
+        this.stateReclaimed &&
+        !this.sessionDirRemoved
+      ) {
         try {
           await removeSessionDir(this.request.executionId);
+          this.sessionDirRemoved = true;
         } catch (error) {
           failures.push(error);
         }
       }
       const retirement = Date.now() - startedAt;
       if (retirement >= SLOW_RETIREMENT_REPORT_MS || process.env.SRT_DEBUG) {
-        console.error(
-          `[zsr] retired ${this.request.providerId ?? this.request.actor} in ` +
-            `${retirement}ms (` +
-            [...retirementStages]
-              .filter(([, ms]) => ms > 0)
-              .map(([name, ms]) => `${name}=${ms}ms`)
-              .join(" ") +
-            `)`,
-        );
+        const retirementMessage =
+          `[zsr] ${failures.length > 0 ? "retirement failed for" : "retired"} ` +
+          `${this.request.providerId ?? this.request.actor} in ` +
+          `${retirement}ms (` +
+          [...retirementStages]
+            .filter(([, ms]) => ms > 0)
+            .map(([name, ms]) => `${name}=${ms}ms`)
+            .join(" ") +
+          `)`;
+        if (failures.length > 0) console.error(retirementMessage);
+        else console.log(retirementMessage);
       }
       if (failures.length === 1) throw failures[0];
       if (failures.length > 1) {
@@ -1540,11 +1829,19 @@ class PreparedZsrBoundary implements PreparedBoundary {
           "execution boundary teardown failed",
         );
       }
-    })().catch((error) => {
+    })();
+    // A later call may retry a failed proof (the gateway's recovery loop does
+    // exactly that). The per-stage latches above make a retry RESUME from the
+    // first unproven stage rather than re-run stages whose inputs an earlier
+    // stage already deleted. Each failure is still reported through the
+    // retirement latch first.
+    const wrapped: Promise<void> = attempt.catch((error) => {
       this.onRetirementFailure(error);
+      if (this.stopPromise === wrapped) this.stopPromise = null;
       throw error;
     });
-    return this.stopPromise;
+    this.stopPromise = wrapped;
+    return wrapped;
   }
 }
 
@@ -1733,6 +2030,13 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     };
   }
 
+  /** A retried teardown proved this generation stopped after all; lift its
+   * admission hold. Preparation-cleanup failures (which have no live boundary
+   * to retry) keep their hold until a fresh engine runs durable recovery. */
+  clearRetirementFailure(generation: TerritoryGeneration): void {
+    this.retirementFailures.delete(generation);
+  }
+
   async recoverStaleProcesses(): Promise<MacosProcessDomainRecoveryResult> {
     let processRecovery: MacosProcessDomainRecoveryResult;
     if (process.platform === "darwin") {
@@ -1853,6 +2157,28 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       ? path.join(canaryRoot, "design-alias")
       : null;
     if (designAlias) await symlink(designDirectories[0]!, designAlias, "dir");
+    const protectedWorkspaceDirectories = [
+      ...new Set(
+        (request.protectedWorkspaceDirectories ?? []).flatMap((directory) => {
+          try {
+            const physical = realpathSync(directory);
+            const metadata = lstatSync(physical);
+            return metadata.isDirectory() && !metadata.isSymbolicLink()
+              ? [physical]
+              : [];
+          } catch {
+            // Policy preparation materializes every collection. If one
+            // vanished before the canary, the runtime's prospective deny still
+            // fails closed; there is no directory to probe.
+            return [];
+          }
+        }),
+      ),
+    ];
+    const protectedWorkspaceFiles = protectedWorkspaceDirectories.map(
+      (directory) =>
+        path.join(directory, `.zeros-zsr-managed-write-${randomUUID()}`),
+    );
     const releaseFile = path.join(canaryRoot, "process-domain-release");
     const processDomain =
       process.platform === "darwin" ? { releaseFile } : null;
@@ -1876,6 +2202,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       designDirectories,
       designProbes,
       designAlias,
+      protectedWorkspaceFiles,
       hostReadFile: this.supervisorRuntime,
       canonicalGitFiles: existsSync(canonicalGitHead) ? [canonicalGitHead] : [],
       expectedEnv,
@@ -1984,6 +2311,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         codeWrite?: boolean;
         designWrite?: boolean[];
         designAliasWrite?: boolean;
+        protectedWorkspaceWrite?: boolean[];
         hostRead?: boolean;
         canonicalGitRead?: boolean;
         environmentExact?: boolean;
@@ -2009,6 +2337,14 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       }
       if (designAlias && result.designAliasWrite !== designShouldBeWritable) {
         reasons.push("host-parity Design alias write split is not enforced");
+      }
+      if (
+        !result.protectedWorkspaceWrite ||
+        result.protectedWorkspaceWrite.length !==
+          protectedWorkspaceFiles.length ||
+        result.protectedWorkspaceWrite.some(Boolean)
+      ) {
+        reasons.push("host-parity managed-workspace collection is writable");
       }
       if (!result.hostRead) reasons.push("host-parity cannot read the host");
       if (!result.canonicalGitRead) {
@@ -2038,6 +2374,9 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     } finally {
       await rm(canaryRoot, { recursive: true, force: true });
       await rm(codeFile, { force: true });
+      await Promise.all(
+        protectedWorkspaceFiles.map((file) => rm(file, { force: true })),
+      );
     }
   }
 
@@ -2048,7 +2387,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         available: false,
         secureNestedIsolation: false,
         reasons: [
-          "a prior execution boundary could not be proven stopped; restart Zeros to run stale process-domain recovery",
+          "a prior execution boundary could not be proven stopped; Zeros is retrying cleanup automatically — retry shortly, or restart Zeros to run stale process-domain recovery",
         ],
       };
     }
@@ -2067,6 +2406,15 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     let gitIntegrationBroker: ZsrGitIntegrationBroker | null = null;
     let policy: PreparedZsrPolicy | null = null;
     let designGitRepositories: readonly CanonicalGitRepository[] = [];
+    const admissionStages = new Map<string, number>();
+    const preflightFinishedAt = Date.now();
+    admissionStages.set("preflight", preflightFinishedAt - admissionStartedAt);
+    let stageStartedAt = preflightFinishedAt;
+    const stage = (name: string): void => {
+      const now = Date.now();
+      admissionStages.set(name, now - stageStartedAt);
+      stageStartedAt = now;
+    };
     // Checked before each step that acquires something. A cancel between two
     // steps unwinds through the same cleanup path as any other admission
     // failure, so the caller can never observe a half-acquired boundary.
@@ -2076,6 +2424,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     try {
       abortIfCancelled();
       await this.claimSessionOwnership(request);
+      stage("ownership");
       if (request.containerWorker?.backend === "orbstack-machine") {
         const containerIdentity = localWorkspaceContainerIdentity(request);
         const containerControl = await ensureSessionDir(
@@ -2084,6 +2433,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         try {
           macosContainerWorker = await acquireSharedMacosContainerWorker(
             containerIdentity.key,
+            request.workspaceRoot,
             containerIdentity.controlExecutionId,
             async () => {
               const controller = this.macosContainerWorker(
@@ -2133,6 +2483,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
           }
         }
       }
+      stage("container-reserve");
 
       abortIfCancelled();
       if (request.actor === "design-agent") {
@@ -2140,6 +2491,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
           includeDesignActor: true,
         });
       }
+      stage("territory");
       abortIfCancelled();
       policy = await prepareZsrPolicy(request, generation, {
         ...(this.options.cloudWorker
@@ -2163,6 +2515,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
             }
           : {}),
       });
+      stage("policy");
       const toolWork = (async () => {
         if (request.containerWorker?.backend !== "embedded-linux") return;
         const target = path.join(
@@ -2219,6 +2572,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
           result.status === "rejected",
       );
       if (preparationFailure) throw preparationFailure.reason;
+      stage("resources");
       if (this.options.cloudWorker) {
         await prepareCloudWorkerPrivateState(
           policy,
@@ -2228,6 +2582,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
             : [],
         );
       }
+      stage("cloud-state");
       // Deliberately AFTER the await: the process domain must be assigned before
       // any throw, or a cancel that lands here would abandon a live kernel
       // fingerprint instead of retiring it in the cleanup path below.
@@ -2238,6 +2593,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
           protectedRoots: request.territory?.protectedDesignDirectories ?? [],
         });
       }
+      stage("activation");
     } catch (error) {
       return this.throwAfterPreparationCleanup(
         generation,
@@ -2285,6 +2641,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         policy!,
         request,
       );
+      stage("canary");
       if (reasons.length > 0) throw new Error(reasons.join("; "));
       // The canary is the longest single step of a parity admission, so this is
       // the check most likely to fire. It runs after the verdict rather than
@@ -2293,8 +2650,12 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       abortIfCancelled();
       const elapsed = Date.now() - admissionStartedAt;
       if (elapsed >= SLOW_ADMISSION_REPORT_MS || process.env.SRT_DEBUG) {
+        const breakdown = [...admissionStages]
+          .map(([name, ms]) => `${name}=${ms}ms`)
+          .join(" ");
         console.log(
-          `[zsr] admitted host-parity ${request.providerId ?? request.actor} in ${elapsed}ms`,
+          `[zsr] admitted host-parity ${request.providerId ?? request.actor} in ` +
+            `${elapsed}ms (${breakdown})`,
         );
       }
       return boundary;
@@ -2371,5 +2732,4 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       control?.signal,
     );
   }
-
 }

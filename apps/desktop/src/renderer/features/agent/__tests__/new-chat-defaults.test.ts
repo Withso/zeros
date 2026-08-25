@@ -32,8 +32,10 @@ import {
 } from "../new-chat-defaults";
 import {
   DEFAULT_CLAUDE_IDLE_TIMEOUT_MINUTES,
+  getClaudeAutoMemoryEnabled,
   getClaudeIdleTimeoutMinutes,
   isClaudeWakeupBeyondIdleTimeout,
+  setClaudeAutoMemoryEnabled,
   setClaudeIdleTimeoutMinutes,
 } from "../reliability-settings";
 import {
@@ -218,6 +220,41 @@ describe("Claude idle timeout (Settings → Models → Claude)", () => {
     ).toBe(true);
     expect(isClaudeWakeupBeyondIdleTimeout(now - 1, 30, now)).toBe(false);
     expect(isClaudeWakeupBeyondIdleTimeout(Number.NaN, 30, now)).toBe(false);
+  });
+});
+
+describe("Claude auto memory (Settings → Models → Claude)", () => {
+  beforeEach(() => installLocalStorage());
+  afterEach(() => {
+    delete (globalThis as { localStorage?: Storage }).localStorage;
+  });
+
+  it("defaults on and round-trips an explicit disabled choice", () => {
+    expect(getClaudeAutoMemoryEnabled()).toBe(true);
+    setClaudeAutoMemoryEnabled(false);
+    expect(getClaudeAutoMemoryEnabled()).toBe(false);
+
+    hydrateModelsFromSettings({
+      claude_code: { auto_memory_enabled: true },
+    });
+    expect(getClaudeAutoMemoryEnabled()).toBe(true);
+
+    hydrateModelsFromSettings({
+      claude_code: { auto_memory_enabled: false },
+    });
+    expect(getClaudeAutoMemoryEnabled()).toBe(false);
+  });
+
+  it("treats an absent or malformed file value as the native enabled default", () => {
+    setClaudeAutoMemoryEnabled(false);
+    hydrateModelsFromSettings({});
+    expect(getClaudeAutoMemoryEnabled()).toBe(true);
+
+    setClaudeAutoMemoryEnabled(false);
+    hydrateModelsFromSettings({
+      claude_code: { auto_memory_enabled: "yes" },
+    });
+    expect(getClaudeAutoMemoryEnabled()).toBe(true);
   });
 });
 

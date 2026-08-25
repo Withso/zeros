@@ -12,8 +12,10 @@
 // if the package / its native sqlite3 binding is missing.
 // ──────────────────────────────────────────────────────────
 
-import { randomUUID } from "node:crypto";
+import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { providerBindingForResume } from "@zeros/protocol/identities";
+import type { AdvertisedModel } from "@zeros/protocol/agent-events";
 import { isDevRuntime } from "../../../runtime";
 
 import { AgentFailureError } from "../../types";
@@ -28,11 +30,11 @@ import type {
   McpServerRegistration,
   NewSessionResponse,
   PromptResponse,
-  RequestPermissionResponse,
   SessionMode,
   StopReason,
   TurnUsage,
 } from "../../types";
+import { advertiseAgentCapabilities } from "../../capabilities";
 import { CursorSdkTranslator } from "./translator";
 import {
   loadSubagentTranscript,
@@ -49,6 +51,7 @@ import {
 import { wrapSdkWithLocalStore, type RawCursorSdk } from "./local-store";
 import type { PreparedBoundary } from "../../containment/types";
 import { durableCursorStateRoot } from "./state-overlay";
+import { configurationProvenanceFor } from "../../provider-diagnostics";
 
 const AGENT_ID = "cursor";
 /** Cursor LOCAL SDK agents (we always run `local: { cwd }`) require an
@@ -86,12 +89,34 @@ const FALLBACK_MODEL_PREFERENCE = [
  *  Ordered most-capable-confirmed-good first. */
 const LOCAL_RETRY_MODELS = ["composer-2", "composer-1.5"];
 
+/** Process-local key for account cache partitions. The corresponding model
+ * state is memory-only, so a fresh key on every engine start preserves all
+ * required behavior while preventing a leaked fingerprint from becoming an
+ * offline API-key guessing oracle. */
+const CURSOR_MODEL_STATE_FINGERPRINT_KEY = randomBytes(32);
+
+/** Return a keyed pseudonym for an API key without retaining the credential in
+ * model discovery state. Exported to lock the security property in tests. */
+export function cursorModelStateFingerprint(
+  apiKey: string,
+  processKey: Uint8Array,
+): string {
+  // Cursor API keys are provider-generated tokens, and this value is an
+  // ephemeral keyed cache pseudonym—not a persisted password verifier.
+  // codeql[js/insufficient-password-hash]
+  return createHmac("sha256", processKey).update(apiKey).digest("hex");
+}
+
 /** How long a session start may wait for the account's model catalog before
  *  going ahead without it. See discoverModelsForSessionStart: the catalog only
  *  refines model validation, so a slow first network round-trip must not become
  *  the user's session-start latency. Generous enough that a healthy network
  *  answers inside it; short enough that a wedged one costs a blink. */
 const MODEL_DISCOVERY_START_BUDGET_MS = 2_500;
+// Billing is supplementary telemetry. The SDK may consult a provider/local
+// store that is temporarily unavailable, so cap both before/after snapshots;
+// an agent turn must never inherit the control client's much longer timeout.
+const CURSOR_USAGE_READ_BUDGET_MS = 500;
 
 /** A turn whose first streamed item takes longer than this is reported with its
  *  measured latency. Chosen to sit above ordinary model time-to-first-token and
@@ -326,10 +351,72 @@ export interface SdkRun {
   >;
   cancel(): Promise<void>;
 }
+
+export interface CursorTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  totalTokens: number;
+  reasoningTokens?: number;
+}
+
+export interface CursorAgentUsage {
+  usage: CursorTokenUsage;
+  cost?: { rawCostCents: number; chargedCents: number };
+  runs: Array<{
+    runId: string;
+    usage: CursorTokenUsage;
+    cost?: { rawCostCents: number; chargedCents: number };
+  }>;
+}
+
+export interface CursorSdkSendOptions {
+  model?: unknown;
+  mode?: string;
+  local?: Record<string, unknown>;
+  idempotencyKey?: string;
+  onStep?: (args: { step: unknown }) => void | Promise<void>;
+  onDelta?: (args: { update: unknown }) => void | Promise<void>;
+}
+
 export interface SdkAgent {
   readonly agentId: string;
-  send(message: unknown, options?: unknown): Promise<SdkRun>;
+  send(message: unknown, options?: CursorSdkSendOptions): Promise<SdkRun>;
+  getUsage?(options?: { runId?: string }): Promise<CursorAgentUsage>;
   close?(): void;
+}
+
+export interface CursorModelParameterValue {
+  value: string;
+  displayName?: string;
+}
+
+export interface CursorModelParameter {
+  id: string;
+  displayName?: string;
+  values?: CursorModelParameterValue[];
+}
+
+export interface CursorModelVariant {
+  displayName: string;
+  description?: string;
+  params?: Array<{ id: string; value: string }>;
+  isDefault?: boolean;
+}
+
+export interface CursorModelListItem {
+  id?: string;
+  displayName?: string;
+  description?: string;
+  aliases?: string[];
+  /** Newer runtimes may explicitly declare whether an entry can be selected
+   * by local SDK clients. Keep both spellings at the adapter boundary so a
+   * future Cursor Router can light up without changing Zeros' catalog. */
+  selectable?: boolean;
+  supportsLocal?: boolean;
+  parameters?: CursorModelParameter[];
+  variants?: CursorModelVariant[];
 }
 
 /** Parse ZEROS_ADDITIONAL_DIRS (the `/add-dir` JSON array of absolute paths)
@@ -381,6 +468,232 @@ function cursorTurnUsage(raw: unknown): TurnUsage | undefined {
     : undefined;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function nonNegativeDelta(after: number, before: number): number {
+  return Math.max(0, after - before);
+}
+
+/** Convert Cursor's cumulative, provider-billed agent usage into one Zeros
+ * turn. Counter regressions can occur when the provider reconciles or resets a
+ * local usage group; clamp those fields independently rather than reporting a
+ * negative bill. chargedCents (not rawCostCents) is the amount the account was
+ * actually charged, including discounts/plan inclusion. */
+export function cursorAgentUsageDelta(
+  before: CursorAgentUsage | undefined,
+  after: CursorAgentUsage | undefined,
+): TurnUsage | undefined {
+  if (!before || !after) return undefined;
+  const usage: TurnUsage = {
+    inputTokens: nonNegativeDelta(
+      after.usage.inputTokens,
+      before.usage.inputTokens,
+    ),
+    outputTokens: nonNegativeDelta(
+      after.usage.outputTokens,
+      before.usage.outputTokens,
+    ),
+    cacheReadTokens: nonNegativeDelta(
+      after.usage.cacheReadTokens,
+      before.usage.cacheReadTokens,
+    ),
+    cacheWriteTokens: nonNegativeDelta(
+      after.usage.cacheWriteTokens,
+      before.usage.cacheWriteTokens,
+    ),
+    ...(after.usage.reasoningTokens !== undefined ||
+    before.usage.reasoningTokens !== undefined
+      ? {
+          reasoningTokens: nonNegativeDelta(
+            after.usage.reasoningTokens ?? 0,
+            before.usage.reasoningTokens ?? 0,
+          ),
+        }
+      : {}),
+    ...(after.cost && before.cost
+      ? {
+          totalCostUsd:
+            nonNegativeDelta(
+              after.cost.chargedCents,
+              before.cost.chargedCents,
+            ) / 100,
+        }
+      : {}),
+  };
+  return Object.values(usage).some(
+    (value) => typeof value === "number" && value > 0,
+  )
+    ? usage
+    : undefined;
+}
+
+function mergeCursorTurnUsage(
+  streamed: TurnUsage | undefined,
+  billed: TurnUsage | undefined,
+): TurnUsage | undefined {
+  if (!streamed) return billed;
+  if (!billed) return streamed;
+  return {
+    inputTokens: streamed.inputTokens ?? billed.inputTokens,
+    outputTokens: streamed.outputTokens ?? billed.outputTokens,
+    cacheReadTokens: streamed.cacheReadTokens ?? billed.cacheReadTokens,
+    cacheWriteTokens: streamed.cacheWriteTokens ?? billed.cacheWriteTokens,
+    reasoningTokens: streamed.reasoningTokens ?? billed.reasoningTokens,
+    totalCostUsd: billed.totalCostUsd ?? streamed.totalCostUsd,
+  };
+}
+
+async function readCursorAgentUsage(
+  agent: SdkAgent,
+): Promise<CursorAgentUsage | undefined> {
+  if (typeof agent.getUsage !== "function") return undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      agent.getUsage(),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(resolve, CURSOR_USAGE_READ_BUDGET_MS, undefined);
+        timer.unref?.();
+      }),
+    ]);
+  } catch {
+    // Usage/cost is telemetry. A temporarily unavailable billing endpoint must
+    // never fail or delay an otherwise valid agent turn.
+    return undefined;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function cursorTurnIdempotencyKey(
+  sessionId: string,
+  turnId: string | undefined,
+): string {
+  const stableTurn = turnId?.trim() || randomUUID();
+  const digest = createHash("sha256")
+    .update(sessionId)
+    .update("\0")
+    .update(stableTurn)
+    .digest("hex")
+    .slice(0, 32);
+  return `zeros-${digest}`;
+}
+
+const CURSOR_EFFORT_VALUES = new Set([
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultracode",
+]);
+
+/** Preserve Cursor's full model record at the adapter boundary while deriving
+ * only the common capabilities Zeros already knows how to render. */
+export function cursorAdvertisedModel(
+  item: CursorModelListItem,
+): AdvertisedModel | null {
+  const id = typeof item.id === "string" ? item.id.trim() : "";
+  if (!id) return null;
+  const parameters = (item.parameters ?? []).flatMap((parameter) => {
+    if (!parameter || typeof parameter.id !== "string") return [];
+    return [
+      {
+        id: parameter.id,
+        ...(typeof parameter.displayName === "string"
+          ? { label: parameter.displayName }
+          : {}),
+        values: (parameter.values ?? []).flatMap((value) =>
+          value && typeof value.value === "string"
+            ? [
+                {
+                  value: value.value,
+                  ...(typeof value.displayName === "string"
+                    ? { label: value.displayName }
+                    : {}),
+                },
+              ]
+            : [],
+        ),
+      },
+    ];
+  });
+  const variants = (item.variants ?? []).flatMap((variant) => {
+    if (!variant || typeof variant.displayName !== "string") return [];
+    return [
+      {
+        label: variant.displayName,
+        ...(typeof variant.description === "string"
+          ? { description: variant.description }
+          : {}),
+        parameters: (variant.params ?? []).flatMap((parameter) =>
+          parameter &&
+          typeof parameter.id === "string" &&
+          typeof parameter.value === "string"
+            ? [{ id: parameter.id, value: parameter.value }]
+            : [],
+        ),
+        ...(typeof variant.isDefault === "boolean"
+          ? { isDefault: variant.isDefault }
+          : {}),
+      },
+    ];
+  });
+  const effortLevels = parameters
+    .filter((parameter) => /effort|reason|thinking/i.test(parameter.id))
+    .flatMap((parameter) => parameter.values.map((value) => value.value))
+    .filter((value, index, values) => {
+      const normalized = value.toLowerCase();
+      return (
+        CURSOR_EFFORT_VALUES.has(normalized) &&
+        values.findIndex((candidate) => candidate.toLowerCase() === normalized) ===
+          index
+      );
+    });
+  const hasSpeedMetadata = parameters.some((parameter) =>
+    /speed|fast/i.test(parameter.id),
+  );
+  const supportsFast =
+    parameters.some((parameter) =>
+      parameter.values.some((value) => /fast/i.test(value.value)),
+    ) ||
+    variants.some(
+      (variant) =>
+        /fast/i.test(variant.label) ||
+        variant.parameters.some((parameter) => /fast/i.test(parameter.value)),
+    );
+  return {
+    value: id,
+    label:
+      typeof item.displayName === "string" && item.displayName.trim()
+        ? item.displayName
+        : id,
+    ...(typeof item.description === "string"
+      ? { description: item.description }
+      : {}),
+    ...(Array.isArray(item.aliases)
+      ? {
+          aliases: item.aliases.filter(
+            (alias): alias is string =>
+              typeof alias === "string" && alias.trim().length > 0,
+          ),
+        }
+      : {}),
+    ...(parameters.length > 0 ? { parameters } : {}),
+    ...(variants.length > 0 ? { variants } : {}),
+    selectable:
+      typeof item.selectable === "boolean"
+        ? item.selectable
+        : typeof item.supportsLocal === "boolean"
+          ? item.supportsLocal
+          : !AUTO_SELECT_IDS.has(id.toLowerCase()),
+    ...(effortLevels.length > 0 ? { effortLevels } : {}),
+    ...(supportsFast || hasSpeedMetadata ? { supportsFast } : {}),
+  };
+}
+
 /** What we hand @cursor/sdk's `mcpServers` — structurally a Cursor
  *  McpServerConfig (the SDK infers stdio from `command`, http from `url`; the
  *  `type` field is optional). */
@@ -425,7 +738,7 @@ export interface CursorSdkModule {
     models: {
       list(
         opts?: Record<string, unknown>,
-      ): Promise<Array<{ id?: string; displayName?: string }>>;
+      ): Promise<CursorModelListItem[]>;
     };
   };
   /** Build this workspace's local executor ahead of the first `send()` —
@@ -462,14 +775,28 @@ export interface CursorSdkModule {
   };
 }
 
-/** The SDK's file-ignore / codebase-search service needs a ripgrep binary
- *  and reads its path from CURSOR_RIPGREP_PATH (it does NOT bundle one — the
- *  Phase-3 probe showed "Ripgrep path not configured" without this). We
- *  resolve it from the optional `@vscode/ripgrep` dep via a variable
- *  specifier so tsc doesn't hard-require the package; if it's absent the
- *  ignore-mapping degrades but the agent still runs (non-fatal). */
+/** Select the SDK's ripgrep executable from already-qualified deployment
+ * configuration. Packaged Zeros stages one binary for ZSR and Cursor; the
+ * compiled engine cannot resolve the source package, so ignoring that staged
+ * path produced a burst of "Ripgrep path not configured" errors per session. */
+export function cursorRipgrepPathFromEnvironment(
+  env: Readonly<Record<string, string | undefined>>,
+): string | null {
+  const explicit = env.CURSOR_RIPGREP_PATH?.trim();
+  if (explicit) return explicit;
+  const staged = env.ZEROS_ZSR_RIPGREP_PATH?.trim();
+  return staged && isAbsolute(staged) ? staged : null;
+}
+
+/** The SDK's file-ignore / codebase-search service needs a ripgrep binary and
+ * reads its path from CURSOR_RIPGREP_PATH. Prefer the product-owned packaged
+ * helper, then resolve the optional source dependency for development. */
 async function ensureRipgrep(): Promise<void> {
-  if (process.env.CURSOR_RIPGREP_PATH) return;
+  const configured = cursorRipgrepPathFromEnvironment(process.env);
+  if (configured) {
+    process.env.CURSOR_RIPGREP_PATH = configured;
+    return;
+  }
   try {
     const spec = "@vscode/ripgrep";
     // @vscode/ripgrep is CJS — dynamic import may surface rgPath on the
@@ -524,6 +851,10 @@ interface Session {
   zerosSessionId: string;
   cwd: string;
   apiKey: string;
+  /** Account-scoped discovery and runtime denylist captured at admission. The
+   * adapter may later activate another API key without changing this session's
+   * model semantics. */
+  modelState: CursorModelState;
   modelId: string;
   modeId: CursorSdkModeId;
   agent: SdkAgent;
@@ -552,6 +883,32 @@ interface Session {
    *  A mode change flips the DESIRED value (autoReviewFor(modeId)); when it
    *  diverges, the next prompt rebuilds the agent to reconcile. */
   appliedAutoReview: boolean;
+  /** autoReview shapes this session has already asked the host to build an
+   *  executor for. @cursor/sdk keys its workspace executor on autoReview (with
+   *  cwd, apiKey, settingSources, sandbox and MCP), so the two possible values
+   *  are two SEPARATE executors — and rebuilding one costs the full workspace
+   *  resolution. At most two entries, so this cannot grow with toggling. */
+  prewarmedAutoReview: Set<boolean>;
+}
+
+interface CursorModelState {
+  fingerprint: string | null;
+  discoveredModelIds: Set<string> | null;
+  discoveredModels: Map<string, CursorModelListItem>;
+  discoveredModelAliases: Map<string, string>;
+  deniedModels: Set<string>;
+  discovery: Promise<void> | null;
+}
+
+function createCursorModelState(fingerprint: string | null): CursorModelState {
+  return {
+    fingerprint,
+    discoveredModelIds: null,
+    discoveredModels: new Map(),
+    discoveredModelAliases: new Map(),
+    deniedModels: new Set(),
+    discovery: null,
+  };
 }
 
 interface CursorSessionRuntime {
@@ -563,103 +920,162 @@ interface CursorSessionRuntime {
 
 export class CursorSdkAdapter implements AgentAdapter {
   readonly agentId = AGENT_ID;
+  readonly capabilityPorts = {
+    configuration: {
+      readProvenance: async (opts) =>
+        configurationProvenanceFor("cursor", {
+          protectedTerritory: Boolean(opts.territory),
+          suppressUnsafeSources: Boolean(
+            opts.territory && !opts.executionBoundary,
+          ),
+        }),
+    },
+  } satisfies import("../../types").AgentCapabilityPorts;
   private readonly ctx: AgentAdapterContext;
   private readonly sessions = new Map<string, Session>();
   private cachedInitialize: InitializeResponse | null = null;
-  /** The account's live model catalog (ids) from Cursor.models.list(). null
-   *  until discovered — used to validate model picks and populate the picker. */
-  private discoveredModelIds: Set<string> | null = null;
-  /** Once-per-process discovery guard. */
-  private modelDiscovery: Promise<void> | null = null;
-  /** Models the local RunSSE backend has rejected as unrunnable for THIS
-   *  account at runtime (Max-Mode/plan gating) — distinct from the catalog
-   *  check, which can't predict it. resolveModel skips these so a denied
-   *  default (e.g. composer-2.5 on a gated plan) isn't re-tried every turn. */
-  private readonly deniedModels = new Set<string>();
+  /** The most recently activated account feeds initialize metadata and new
+   * admissions. Existing sessions retain the state object captured for their
+   * own API key. */
+  private modelState = createCursorModelState(null);
   constructor(ctx: AgentAdapterContext) {
     this.ctx = ctx;
   }
 
   async initialize(): Promise<InitializeResponse> {
-    if (this.cachedInitialize) return this.cachedInitialize;
-    this.cachedInitialize = {
-      protocolVersion: 1 as never,
-      agentInfo: { name: "Cursor Agent", version: "sdk" } as never,
-      agentCapabilities: {
-        loadSession: { enabled: true },
-        promptCapabilities: {
-          image: true, // SDKImage — base64 or url
-          audio: false,
-          embeddedContext: false,
+    if (!this.cachedInitialize) {
+      this.cachedInitialize = {
+        protocolVersion: 1,
+        agentInfo: { name: "Cursor Agent", version: "sdk" },
+        agentCapabilities: {
+          loadSession: true,
+          promptCapabilities: {
+            image: true, // SDKImage — base64 or url
+            audio: false,
+            embeddedContext: false,
+          },
         },
-        mcpCapabilities: { http: true, sse: true },
-        sessionCapabilities: { list: {} },
-      } as never,
-      // Model pill writes CURSOR_MODEL; newSession reads it. modelsDynamic
-      // tells the gateway to re-read initialize after a real contained session
-      // populates `models`. Initialization itself never starts SDK/provider
-      // work merely because the engine inherited CURSOR_API_KEY.
-      _meta: { modelEnvVar: "CURSOR_MODEL", modelsDynamic: true },
-      authMethods: [
-        {
-          id: "api_key",
-          name: "Cursor API key",
-          description:
-            "Paste a Cursor API key (Dashboard → API Keys). Injected as CURSOR_API_KEY; bills to your Cursor plan.",
-        },
-      ] as never,
-    } as InitializeResponse;
-    return this.cachedInitialize;
+        // Model pill writes CURSOR_MODEL; newSession reads it. modelsDynamic
+        // tells the gateway to re-read initialize after a real contained
+        // session populates `models`. Initialization itself never starts
+        // SDK/provider work merely because the engine inherited CURSOR_API_KEY.
+        _meta: { modelEnvVar: "CURSOR_MODEL", modelsDynamic: true },
+        authMethods: [
+          {
+            type: "env_var",
+            id: "api_key",
+            name: "Cursor API key",
+            description:
+              "Paste a Cursor API key (Dashboard → API Keys). Injected as CURSOR_API_KEY; bills to your Cursor plan.",
+            vars: [
+              {
+                name: "CURSOR_API_KEY",
+                label: "Cursor API key",
+                secret: true,
+              },
+            ],
+          },
+        ],
+      };
+    }
+    return advertiseAgentCapabilities(this, this.cachedInitialize);
   }
 
   /** Pull the account's model catalog once and cache it: validates model
    *  picks (resolveValidModelId) and feeds the picker via
    *  cachedInitialize._meta.models. Best-effort — failures leave the bundled
    *  catalog in place. */
+  private activateModelState(apiKey: string): CursorModelState {
+    const fingerprint = cursorModelStateFingerprint(
+      apiKey,
+      CURSOR_MODEL_STATE_FINGERPRINT_KEY,
+    );
+    if (this.modelState.fingerprint === fingerprint) return this.modelState;
+    this.modelState = createCursorModelState(fingerprint);
+    if (this.cachedInitialize?._meta) {
+      const meta = { ...this.cachedInitialize._meta };
+      delete meta.models;
+      this.cachedInitialize = { ...this.cachedInitialize, _meta: meta };
+    }
+    return this.modelState;
+  }
+
   private async discoverModels(
     apiKey: string,
     sessionSdk?: CursorSdkModule,
   ): Promise<void> {
-    if (this.modelDiscovery) return this.modelDiscovery;
-    this.modelDiscovery = (async () => {
+    const state = this.activateModelState(apiKey);
+    if (state.discovery) return state.discovery;
+    state.discovery = (async () => {
       try {
         const sdk = sessionSdk ?? (await loadSdk());
         if (!sdk.Cursor?.models?.list) return;
         const list = await sdk.Cursor.models.list({ apiKey });
         const ids = new Set<string>();
-        const models: Array<{ value: string; label: string }> = [];
+        const records = new Map<string, CursorModelListItem>();
+        const aliases = new Map<string, string>();
+        const models: AdvertisedModel[] = [];
         for (const m of list ?? []) {
-          const id = typeof m.id === "string" ? m.id : null;
-          if (!id || AUTO_SELECT_IDS.has(id.toLowerCase())) continue;
-          ids.add(id);
-          models.push({
-            value: id,
-            label: typeof m.displayName === "string" ? m.displayName : id,
-          });
+          const advertised = cursorAdvertisedModel(m);
+          if (!advertised) continue;
+          const id = advertised.value;
+          records.set(id, m);
+          models.push(advertised);
+          if (advertised.selectable) ids.add(id);
+          for (const alias of advertised.aliases ?? []) {
+            aliases.set(alias, id);
+            if (advertised.selectable) ids.add(alias);
+          }
         }
-        if (ids.size === 0) return;
-        this.discoveredModelIds = ids;
+        if (models.length === 0) return;
+        state.discoveredModelIds = ids;
+        state.discoveredModels = records;
+        state.discoveredModelAliases = aliases;
         models.sort((a, b) => a.label.localeCompare(b.label));
-        if (this.cachedInitialize) {
-          const meta = (this.cachedInitialize._meta ?? {}) as Record<
-            string,
-            unknown
-          >;
-          this.cachedInitialize = {
-            ...this.cachedInitialize,
-            _meta: { ...meta, models },
-          };
-        }
+        if (this.modelState !== state) return;
+        // Direct adapter tests and one-shot consumers may call newSession
+        // before initialize. Materialize the base snapshot here so discovery
+        // is never lost merely because call order differed from the gateway's.
+        if (!this.cachedInitialize) await this.initialize();
+        const meta = this.cachedInitialize?._meta ?? {};
+        this.cachedInitialize = {
+          ...(this.cachedInitialize as InitializeResponse),
+          _meta: { ...meta, models },
+        };
       } catch (err) {
         // Reset the guard so a later session can retry the catalog pull.
-        this.modelDiscovery = null;
+        state.discovery = null;
         this.ctx.emit.onAgentStderr(
           AGENT_ID,
           `[cursor-sdk] model discovery failed: ${String(err)}`,
         );
       }
     })();
-    return this.modelDiscovery;
+    return state.discovery;
+  }
+
+  private modelSelection(
+    modelId: string,
+    state: CursorModelState = this.modelState,
+  ): {
+    id: string;
+    params?: Array<{ id: string; value: string }>;
+  } {
+    const id = state.discoveredModelAliases.get(modelId) ?? modelId;
+    const model = state.discoveredModels.get(id);
+    const defaultVariant = model?.variants?.find(
+      (variant) => variant.isDefault === true,
+    );
+    const params = defaultVariant?.params?.filter(
+      (parameter) =>
+        parameter &&
+        typeof parameter.id === "string" &&
+        typeof parameter.value === "string",
+    );
+    return {
+      id,
+      ...(params && params.length > 0 ? { params } : {}),
+    };
   }
 
   /** Wait for the catalog only as long as it is worth waiting.
@@ -681,12 +1097,13 @@ export class CursorSdkAdapter implements AgentAdapter {
   private async discoverModelsForSessionStart(
     apiKey: string,
     sessionSdk: CursorSdkModule,
-  ): Promise<void> {
+  ): Promise<CursorModelState> {
+    const state = this.activateModelState(apiKey);
     const discovery = this.discoverModels(apiKey, sessionSdk);
-    if (this.discoveredModelIds) {
+    if (state.discoveredModelIds) {
       // Already warm from an earlier session: awaiting is free.
       await discovery;
-      return;
+      return state;
     }
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -702,6 +1119,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     }
     // Never let the un-awaited remainder become an unhandled rejection.
     void discovery.catch(() => undefined);
+    return state;
   }
 
   /** Production gateway sessions never load @cursor/sdk in the trusted engine
@@ -762,7 +1180,11 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  the same cwd / apiKey / local / mcpServers the agent is about to be created
    *  with. `model` and `mode` are deliberately omitted — they are not part of
    *  that key, and requiring the model here would put model discovery back in
-   *  front of the prewarm, which is the wait we are trying to overlap. */
+   *  front of the prewarm, which is the wait we are trying to overlap.
+   *
+   *  `autoReview` IS part of that key, so it is a parameter rather than a
+   *  constant: the two values name two different executors (see
+   *  prewarmForDesiredMode). */
   private prewarmWorkspace(
     sdk: CursorSdkModule,
     apiKey: string,
@@ -771,6 +1193,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env?: Record<string, string>;
       mcpServers?: McpServerRegistration[];
     },
+    autoReview: boolean = autoReviewFor(CURSOR_DEFAULT_MODE),
   ): void {
     if (!sdk.platform?.prewarm) return;
     const sessionMcp = this.mcpServers(opts.mcpServers);
@@ -778,11 +1201,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       .prewarm({
         apiKey,
         cwd: opts.cwd,
-        local: this.buildLocalOpts(
-          opts.cwd,
-          opts.env,
-          autoReviewFor(CURSOR_DEFAULT_MODE),
-        ),
+        local: this.buildLocalOpts(opts.cwd, opts.env, autoReview),
         ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
       })
       .catch((error: unknown) => {
@@ -793,6 +1212,43 @@ export class CursorSdkAdapter implements AgentAdapter {
           }`,
         );
       });
+  }
+
+  /** Build the executor a mode change is going to need, at the moment the mode
+   *  changes, instead of inside the send that discovers it is missing.
+   *
+   *  `autoReview` is a create-time @cursor/sdk option AND part of its workspace
+   *  executor cache key, so "Auto" and "not Auto" are two separate executors.
+   *  ensureAutoReview() reconciles the agent lazily at prompt time — correct,
+   *  and deliberately so (see its doc) — but the `Agent.resume` it issues has
+   *  to resolve a workspace that was never built: the full rules / skills /
+   *  ignore / MCP walk, measured at 8-12s on this repo, landing squarely on the
+   *  user's first message. The session-start prewarm does not cover it, because
+   *  that one warmed the OTHER shape.
+   *
+   *  Fire-and-forget, exactly like the session-start prewarm: a mode toggle must
+   *  stay instant, and every failure here is recoverable by the send. The lazy
+   *  reconcile is untouched — A→B→A still settles to one agent rebuild — this
+   *  only makes sure the executor it lands on is already warm.
+   *
+   *  Guarded on the shapes already requested, so holding a toggle down cannot
+   *  queue redundant builds. There are only two shapes, so the set is bounded. */
+  private prewarmForDesiredMode(session: Session): void {
+    const want = autoReviewFor(session.modeId);
+    // Already baked into the live agent — nothing to rebuild, so nothing to warm.
+    if (want === session.appliedAutoReview) return;
+    if (session.prewarmedAutoReview.has(want)) return;
+    session.prewarmedAutoReview.add(want);
+    this.prewarmWorkspace(
+      session.sdk,
+      session.apiKey,
+      {
+        cwd: session.cwd,
+        ...(session.env ? { env: session.env } : {}),
+        ...(session.mcpServers ? { mcpServers: session.mcpServers } : {}),
+      },
+      want,
+    );
   }
 
   /** Stop a dedicated Cursor host. State is already durable under host parity;
@@ -829,6 +1285,7 @@ export class CursorSdkAdapter implements AgentAdapter {
   private resolveModel(
     envModel: string | undefined,
     env?: Record<string, string>,
+    state: CursorModelState = this.modelState,
   ): string {
     // Env-var names are Zeros conventions (mirror EFFORT_ENV_VAR /
     // FAST_MODE_ENV_VAR in model-catalog.ts, which is renderer-side and must not
@@ -836,7 +1293,17 @@ export class CursorSdkAdapter implements AgentAdapter {
     // literals. envForChatSettings emits ZEROS_FAST_MODE only when ON ("1").
     const effort = env?.ZEROS_THINKING_EFFORT;
     const fast = env?.ZEROS_FAST_MODE === "1";
-    const base = resolveCursorModelId(envModel);
+    const requested = envModel?.trim();
+    // Current Cursor SDKs expose `default`/`auto` as catalog metadata but do
+    // not accept it through Agent.create, hence resolveCursorModelId's safe
+    // Composer fallback. If a future runtime explicitly marks Router locally
+    // selectable, discovery includes the exact id/alias in this set and that
+    // provider capability takes precedence over the legacy fallback.
+    const liveRequested =
+      requested && state.discoveredModelIds?.has(requested)
+        ? (state.discoveredModelAliases.get(requested) ?? requested)
+        : undefined;
+    const base = liveRequested ?? resolveCursorModelId(envModel);
     // Apply the reasoning swap before catalog validation. The curated Grok
     // base is the level-free `grok-4.5`, which is NOT a live id itself:
     // validating it first would fall back to Composer before the effort
@@ -849,28 +1316,31 @@ export class CursorSdkAdapter implements AgentAdapter {
       base,
       effort,
       fast,
-      this.discoveredModelIds,
+      state.discoveredModelIds,
     );
     const resolved =
       swapped !== base
         ? swapped
         : applyCursorReasoning(
-            resolveValidModelId(base, this.discoveredModelIds),
+            resolveValidModelId(base, state.discoveredModelIds),
             effort,
             fast,
-            this.discoveredModelIds,
+            state.discoveredModelIds,
           );
-    if (!this.deniedModels.has(resolved)) return resolved;
-    return this.pickRetryModel(resolved) ?? resolved;
+    if (!state.deniedModels.has(resolved)) return resolved;
+    return this.pickRetryModel(resolved, state) ?? resolved;
   }
 
   /** Pick a confirmed-good local model different from `failed` (and not
    *  already denied, and present in the account's catalog when known). null
    *  when there's nothing else worth trying. */
-  private pickRetryModel(failed: string): string | null {
+  private pickRetryModel(
+    failed: string,
+    state: CursorModelState = this.modelState,
+  ): string | null {
     for (const m of LOCAL_RETRY_MODELS) {
-      if (m === failed || this.deniedModels.has(m)) continue;
-      if (!this.discoveredModelIds || this.discoveredModelIds.has(m)) return m;
+      if (m === failed || state.deniedModels.has(m)) continue;
+      if (!state.discoveredModelIds || state.discoveredModelIds.has(m)) return m;
     }
     return null;
   }
@@ -944,15 +1414,22 @@ export class CursorSdkAdapter implements AgentAdapter {
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
     // model: <id>". resolveModel falls back to a known-good model when the
     // selection isn't offered by this account.
-    await this.discoverModelsForSessionStart(apiKey, runtime.sdk);
-    const modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env);
+    const modelState = await this.discoverModelsForSessionStart(
+      apiKey,
+      runtime.sdk,
+    );
+    const modelId = this.resolveModel(
+      opts.env?.CURSOR_MODEL,
+      opts.env,
+      modelState,
+    );
     const sdk = runtime.sdk;
     const sessionMcp = this.mcpServers(opts.mcpServers);
     let agent: SdkAgent;
     try {
       agent = await sdk.Agent.create({
         apiKey,
-        model: { id: modelId },
+        model: this.modelSelection(modelId, modelState),
         // Pin cwd at BOTH the top level and on `local`. @cursor/sdk's local
         // executor roots shell commands at `local.cwd ?? process.cwd()`; the
         // host's process.cwd() is a neutral non-repo dir (see resolveHostCwd in
@@ -978,6 +1455,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       zerosSessionId: executionId,
       cwd: opts.cwd,
       apiKey,
+      modelState,
       modelId,
       modeId: CURSOR_DEFAULT_MODE,
       agent,
@@ -989,6 +1467,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: opts.mcpServers,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
+      prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
     };
     this.sessions.set(executionId, session);
 
@@ -1036,8 +1515,15 @@ export class CursorSdkAdapter implements AgentAdapter {
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
     // model: <id>". resolveModel falls back to a known-good model when the
     // selection isn't offered by this account.
-    await this.discoverModelsForSessionStart(apiKey, runtime.sdk);
-    const modelId = this.resolveModel(opts.env?.CURSOR_MODEL, opts.env);
+    const modelState = await this.discoverModelsForSessionStart(
+      apiKey,
+      runtime.sdk,
+    );
+    const modelId = this.resolveModel(
+      opts.env?.CURSOR_MODEL,
+      opts.env,
+      modelState,
+    );
     const sdk = runtime.sdk;
     // Per-session MCP registry (gateway-resolved for this cwd). `Agent.resume`
     // takes a Partial<AgentOptions>, which accepts `mcpServers` — so we re-inject
@@ -1061,7 +1547,7 @@ export class CursorSdkAdapter implements AgentAdapter {
         // `send()` throws "Local SDK agents require an explicit `model`" —
         // the exact error users hit on every reopened chat. `resume` takes a
         // Partial<AgentOptions>, which accepts `model`.
-        model: { id: modelId },
+        model: this.modelSelection(modelId, modelState),
         // Pin cwd here too — a resumed agent's executor roots at `local.cwd`,
         // and resuming a chat in a different worktree MUST retarget it (else
         // shells run wherever the agent was first created, or fall back to the
@@ -1103,7 +1589,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       try {
         agent = await sdk.Agent.create({
           apiKey,
-          model: { id: modelId },
+          model: this.modelSelection(modelId, modelState),
           // Same cwd pinning as the primary create — the fresh fallback agent
           // must also root at the worktree, never the host's process.cwd().
           cwd: opts.cwd,
@@ -1125,6 +1611,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       zerosSessionId: executionId,
       cwd: opts.cwd,
       apiKey,
+      modelState,
       modelId,
       modeId: CURSOR_DEFAULT_MODE,
       agent,
@@ -1136,6 +1623,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: opts.mcpServers,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
+      prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
     });
     return {
       executionId,
@@ -1196,6 +1684,7 @@ export class CursorSdkAdapter implements AgentAdapter {
 
   async prompt(opts: {
     sessionId: string;
+    turnId?: string;
     prompt: ContentBlock[];
   }): Promise<{ stopReason: StopReason; response: PromptResponse }> {
     const session = this.sessions.get(opts.sessionId);
@@ -1222,6 +1711,11 @@ export class CursorSdkAdapter implements AgentAdapter {
     // only takes effect after the agent is rebuilt — do it lazily here so
     // toggling modes without sending costs nothing and A→B→A settles to one.
     await this.ensureAutoReview(session);
+    const usageBefore = await readCursorAgentUsage(session.agent);
+    const idempotencyKey = cursorTurnIdempotencyKey(
+      session.agent.agentId,
+      opts.turnId,
+    );
 
     // A Cursor LOCAL run can terminate `status:"error"` with NOTHING useful in
     // run.wait() — the SDK persists the real reason to its local SQLite store
@@ -1241,8 +1735,10 @@ export class CursorSdkAdapter implements AgentAdapter {
           ? this.resolveModel(
               session.env?.CURSOR_MODEL ?? session.modelId,
               session.env,
+              session.modelState,
             )
-          : (this.pickRetryModel(session.modelId) ?? session.modelId);
+          : (this.pickRetryModel(session.modelId, session.modelState) ??
+            session.modelId);
 
       // Fresh translator per attempt so a retried run doesn't inherit the
       // failed run's partial state. A model-gated run errors before emitting
@@ -1300,6 +1796,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       // [cursor-host] attribution lines that say what was blocking.
       const turnStartedAt = Date.now();
       let sawModelOutput = false;
+      let callbackUsage: TurnUsage | undefined;
 
       let run: SdkRun;
       try {
@@ -1312,8 +1809,23 @@ export class CursorSdkAdapter implements AgentAdapter {
           // Auto & Full access both run as sdk "agent"; they differ only by the
           // (create-time) autoReview already baked in via ensureAutoReview().
           mode: sdkModeFor(session.modeId),
-          model: { id: modelId },
+          model: this.modelSelection(modelId, session.modelState),
           local: { force: true },
+          // The engine-owned turn id survives renderer reconnect/resend. Hash
+          // it before crossing the harness boundary so provider logs never
+          // receive Zeros' durable identity verbatim. A model-gate fallback is
+          // a distinct provider attempt and gets a deterministic suffix.
+          idempotencyKey:
+            attempt === 1
+              ? idempotencyKey
+              : `${idempotencyKey}-retry-${attempt}`,
+          onDelta: ({ update }) => {
+            if (isRecord(update) && update.type === "turn-ended") {
+              callbackUsage = cursorTurnUsage(update.usage);
+            }
+            translator.feedDelta(update);
+          },
+          onStep: ({ step }) => translator.feedStep(step),
         });
       } catch (err) {
         throw this.classify(err, "prompt");
@@ -1389,7 +1901,14 @@ export class CursorSdkAdapter implements AgentAdapter {
       // User-requested cancel — benign, end the turn cleanly.
       if (session.cancelRequested) {
         const stopReason = translator.stopReason;
-        const usage = cursorTurnUsage(waitResult?.usage) ?? streamedUsage;
+        const billedUsage = cursorAgentUsageDelta(
+          usageBefore,
+          await readCursorAgentUsage(session.agent),
+        );
+        const usage = mergeCursorTurnUsage(
+          cursorTurnUsage(waitResult?.usage) ?? callbackUsage ?? streamedUsage,
+          billedUsage,
+        );
         return {
           stopReason,
           response: {
@@ -1428,7 +1947,14 @@ export class CursorSdkAdapter implements AgentAdapter {
           });
         }
         const stopReason = translator.stopReason;
-        const usage = cursorTurnUsage(waitResult?.usage) ?? streamedUsage;
+        const billedUsage = cursorAgentUsageDelta(
+          usageBefore,
+          await readCursorAgentUsage(session.agent),
+        );
+        const usage = mergeCursorTurnUsage(
+          cursorTurnUsage(waitResult?.usage) ?? callbackUsage ?? streamedUsage,
+          billedUsage,
+        );
         return {
           stopReason,
           response: {
@@ -1456,14 +1982,14 @@ export class CursorSdkAdapter implements AgentAdapter {
         streamError == null &&
         typeof recovered === "string" &&
         isCursorModelGatedError(recovered) &&
-        this.pickRetryModel(modelId)
+        this.pickRetryModel(modelId, session.modelState)
       ) {
-        this.deniedModels.add(modelId);
+        session.modelState.deniedModels.add(modelId);
         this.ctx.emit.onAgentStderr(
           AGENT_ID,
           `[cursor-sdk] model "${modelId}" can't run locally on this ` +
             `account (${recovered.slice(0, 160)}); retrying with ` +
-            `${this.pickRetryModel(modelId)}.`,
+            `${this.pickRetryModel(modelId, session.modelState)}.`,
         );
         continue;
       }
@@ -1537,6 +2063,9 @@ export class CursorSdkAdapter implements AgentAdapter {
       opts.modeId === "auto"
     ) {
       session.modeId = opts.modeId;
+      // Still cheap — fire-and-forget — but it starts the workspace build that
+      // reconcile will otherwise do inside the user's next send.
+      this.prewarmForDesiredMode(session);
     }
   }
 
@@ -1547,7 +2076,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     const model = opts.model.trim();
     if (!session || !model) return;
     session.env = { ...(session.env ?? {}), CURSOR_MODEL: model };
-    session.modelId = this.resolveModel(model, session.env);
+    session.modelId = this.resolveModel(model, session.env, session.modelState);
   }
 
   /** Apply the renderer's complete composer snapshot. Effort and Fast are
@@ -1567,7 +2096,11 @@ export class CursorSdkAdapter implements AgentAdapter {
     delete carried.ZEROS_ADDITIONAL_DIRS;
     delete carried.ZEROS_PERMISSION_MODE;
     session.env = { ...carried, ...opts.env };
-    session.modelId = this.resolveModel(session.env.CURSOR_MODEL, session.env);
+    session.modelId = this.resolveModel(
+      session.env.CURSOR_MODEL,
+      session.env,
+      session.modelState,
+    );
   }
 
   /** Rebuild the agent (Agent.resume) when the mode's desired autoReview no
@@ -1584,7 +2117,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       const sessionMcp = this.mcpServers(session.mcpServers);
       session.agent = await sdk.Agent.resume(session.agent.agentId, {
         apiKey: session.apiKey,
-        model: { id: session.modelId },
+        model: this.modelSelection(session.modelId, session.modelState),
         cwd: session.cwd,
         local: this.buildLocalOpts(session.cwd, session.env, want),
         ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
@@ -1599,24 +2132,6 @@ export class CursorSdkAdapter implements AgentAdapter {
           }`,
       );
     }
-  }
-
-  respondToPermission(_opts: {
-    permissionId: string;
-    response: RequestPermissionResponse;
-  }): void {
-    // File-based preToolUse hook round-trip is not supported by this adapter.
-  }
-
-  respondToQuestion(_opts: {
-    questionId: string;
-    response: import("../../types").QuestionResponse;
-    nativeRequestId?: string;
-  }): boolean {
-    // No-op: the Cursor SDK exposes no host-answerable question channel, so
-    // Cursor never raises a blocking QuestionRequest. Present for interface
-    // parity; the gateway calls this optionally. Never the handler.
-    return false;
   }
 
   async disposeSession(sessionId: string): Promise<void> {
@@ -1734,9 +2249,10 @@ export class CursorSdkAdapter implements AgentAdapter {
       executionBoundary: opts.executionBoundary,
     });
     const sdk = runtime.sdk;
+    const modelState = await this.discoverModelsForSessionStart(apiKey, sdk);
     // Validate the pick against discovered ids like a real send would —
     // an unknown id falls back to the account's best composer.
-    const modelId = this.resolveModel(opts.model, opts.env);
+    const modelId = this.resolveModel(opts.model, opts.env, modelState);
     let agent: SdkAgent | null = null;
     // The throwaway agent is never registered in this.sessions, so the
     // session-teardown paths can't reach it — close it here on every exit
@@ -1744,14 +2260,18 @@ export class CursorSdkAdapter implements AgentAdapter {
     try {
       agent = await sdk.Agent.create({
         apiKey,
-        model: { id: modelId },
+        model: this.modelSelection(modelId, modelState),
         cwd,
         local: this.buildLocalOpts(cwd, opts.env),
         mode: "plan",
       });
       const run = await agent.send(
         { text: `${opts.systemPrompt}\n\n${opts.prompt}` },
-        { mode: "plan", model: { id: modelId }, local: { force: true } },
+        {
+          mode: "plan",
+          model: this.modelSelection(modelId, modelState),
+          local: { force: true },
+        },
       );
       const waitResult = await Promise.race([
         run.wait(),

@@ -12,14 +12,14 @@
     "build": "node scripts/verify-deployment-env.mjs && node scripts/assemble-marketing.mjs",
     "build:standalone": "node scripts/verify-deployment-env.mjs && node scripts/assemble-marketing.mjs --standalone-install",
     "assemble": "node scripts/assemble-marketing.mjs --skip-build",
-    "dev": "npm run build && npx wrangler@4 pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS --binding MARKETING_HOSTS=127.0.0.1,localhost",
-    "dev:app": "npm run build && npx wrangler@4 pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS",
+    "dev": "npm run build && wrangler pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS --binding MARKETING_HOSTS=127.0.0.1,localhost",
+    "dev:app": "npm run build && wrangler pages dev dist --port 8788 --ip 127.0.0.1 --compatibility-date=2026-07-10 --kv SESSIONS",
     "typecheck": "tsc --noEmit",
     "test": "npm run typecheck && node --test lib/*.test.mjs"
   },
-  "dependencies": {},
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20240512.0",
-    "typescript": "^5.6.3"
+    "@cloudflare/workers-types": "5.20260823.1",
+    "typescript": "^5.6.3",
+    "wrangler": "4.125.0"
   }
 }

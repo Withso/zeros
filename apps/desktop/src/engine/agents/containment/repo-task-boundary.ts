@@ -6,13 +6,19 @@ import {
   codeAgentWriteAuthorityIdentity,
   deriveContainerWorker,
   expectsContainerWorkflow,
+  isProtectedManagedWorkspacePath,
   mergeCodeAgentTerritories,
   previewCodeAgentTerritory,
+  protectedManagedWorkspaceDirectories,
   registeredCodeTerritorySnapshot,
   resolveCodeAgentTerritory,
 } from "../gateway";
 import type { AgentFilesystemTerritory } from "../types";
-import type { ExecutionBoundary, RepoTaskBoundaryFactory } from "./types";
+import type {
+  BoundaryAuthoritySnapshot,
+  ExecutionBoundary,
+  RepoTaskBoundaryFactory,
+} from "./types";
 
 /** Adapt the provider-neutral execution boundary to setup/run/test/build
  * commands whose bytes come from a repository. These commands get the same
@@ -39,6 +45,14 @@ export function createRepoTaskBoundaryFactory(
       persistRecognition: true,
     });
     const territory = resolvedTerritory.territory;
+    const authoritySnapshot: BoundaryAuthoritySnapshot = {
+      registeredDesignAuthorityIdentity:
+        resolvedTerritory.registeredDesignAuthorityIdentity,
+      territoryContributions: resolvedTerritory.territoryContributions,
+    };
+    request.onAuthorityResolved?.(authoritySnapshot);
+    const protectedWorkspaceDirectories =
+      protectedManagedWorkspaceDirectories();
     const includeServiceCapabilities = request.serviceCapabilities !== "none";
     const containerWorker = includeServiceCapabilities
       ? deriveContainerWorker(request.env)
@@ -66,6 +80,9 @@ export function createRepoTaskBoundaryFactory(
       cwd,
       workspaceRoot,
       ...(territory ? { territory } : {}),
+      ...(protectedWorkspaceDirectories.length > 0
+        ? { protectedWorkspaceDirectories }
+        : {}),
       ...(repoRoot !== workspaceRoot
         ? { additionalReadWriteRoots: [repoRoot] }
         : {}),
@@ -86,6 +103,12 @@ export function createRepoTaskBoundaryFactory(
         writable: false,
         value: resolvedTerritory.registeredDesignAuthorityIdentity,
       });
+      Object.defineProperty(prepared, "territoryContributions", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: resolvedTerritory.territoryContributions,
+      });
       const current = await resolveRepoTaskTerritory({
         cwd,
         workspaceRoot,
@@ -96,6 +119,8 @@ export function createRepoTaskBoundaryFactory(
         current.repoHasTerritory !== resolvedTerritory.repoHasTerritory ||
         current.registeredDesignAuthorityIdentity !==
           resolvedTerritory.registeredDesignAuthorityIdentity ||
+        JSON.stringify(current.territoryContributions) !==
+          JSON.stringify(resolvedTerritory.territoryContributions) ||
         agentTerritoryIdentity(current.territory) !==
           agentTerritoryIdentity(territory)
       ) {
@@ -127,14 +152,23 @@ async function resolveRepoTaskTerritory(options: {
   territory: AgentFilesystemTerritory | undefined;
   repoHasTerritory: boolean;
   registeredDesignAuthorityIdentity: string | null;
+  territoryContributions: BoundaryAuthoritySnapshot["territoryContributions"];
 }> {
   const resolveTerritory = options.persistRecognition
     ? resolveCodeAgentTerritory
     : previewCodeAgentTerritory;
+  const registered = registeredCodeTerritorySnapshot();
+  const managedWorkspacePaths = new Set(
+    registered.workspaces.map((workspace) => workspace.path),
+  );
   const workspaceTerritory = await resolveTerritory({
     cwd: options.cwd,
     workspaceRoot: options.workspaceRoot,
     repoRoot: options.repoRoot,
+    ...(options.persistRecognition &&
+    managedWorkspacePaths.has(options.workspaceRoot)
+      ? { reserveDefaultDesignDirectory: true }
+      : {}),
   });
   const repoTerritory =
     options.repoRoot === options.workspaceRoot
@@ -149,25 +183,30 @@ async function resolveRepoTaskTerritory(options: {
     workspaceTerritory,
     repoTerritory ? [repoTerritory] : [],
   );
-  const registeredOwners = registeredCodeTerritorySnapshot().owners;
-  const registeredOwnerPaths = new Set(
-    registeredOwners.map((owner) => owner.path),
+  const registeredOwners = registered.owners;
+  const protectedWorkspaceDirectories = protectedManagedWorkspaceDirectories();
+  const exactRegisteredOwners = registeredOwners.filter(
+    (owner) =>
+      !isProtectedManagedWorkspacePath(
+        owner.path,
+        protectedWorkspaceDirectories,
+      ),
+  );
+  const exactRegisteredOwnerPaths = new Set(
+    exactRegisteredOwners.map((owner) => owner.path),
   );
   const registeredTerritories: AgentFilesystemTerritory[] = [];
   if (
     workspaceTerritory &&
-    registeredOwnerPaths.has(options.workspaceRoot)
+    exactRegisteredOwnerPaths.has(options.workspaceRoot)
   ) {
     registeredTerritories.push(workspaceTerritory);
   }
-  if (
-    repoTerritory &&
-    registeredOwnerPaths.has(options.repoRoot)
-  ) {
+  if (repoTerritory && exactRegisteredOwnerPaths.has(options.repoRoot)) {
     registeredTerritories.push(repoTerritory);
   }
   const additionalRegisteredTerritories: AgentFilesystemTerritory[] = [];
-  for (const owner of registeredOwners) {
+  for (const owner of exactRegisteredOwners) {
     if (
       owner.path === options.workspaceRoot ||
       owner.path === options.repoRoot
@@ -197,6 +236,26 @@ async function resolveRepoTaskTerritory(options: {
         undefined,
         registeredTerritories,
       ),
+    ),
+    territoryContributions: [
+      {
+        workspaceRoot: options.workspaceRoot,
+        grants: [options.workspaceRoot],
+        full: true,
+        identity: agentTerritoryIdentity(workspaceTerritory),
+      },
+      ...(options.repoRoot !== options.workspaceRoot
+        ? [
+            {
+              workspaceRoot: options.repoRoot,
+              grants: [options.repoRoot],
+              full: true,
+              identity: agentTerritoryIdentity(repoTerritory),
+            },
+          ]
+        : []),
+    ].sort((left, right) =>
+      left.workspaceRoot.localeCompare(right.workspaceRoot),
     ),
   };
 }

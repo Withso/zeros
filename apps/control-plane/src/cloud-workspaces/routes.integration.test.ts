@@ -44,7 +44,7 @@ d("cloud workspace API contracts", () => {
     const sub = randomUUID();
     return ensureUser(pool, {
       provider: "auth0",
-      providerSub: sub,
+      providerSubject: sub,
       email: `${name.toLowerCase()}-${sub}@example.com`,
       displayName: name,
     });

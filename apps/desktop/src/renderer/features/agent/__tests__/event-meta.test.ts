@@ -7,6 +7,7 @@
 
 import { describe, it, expect } from "vitest";
 import {
+  hasTransportTruncation,
   isNativeCodexBrowserToolCall,
   metaForEvent,
   nativeCodexBrowserPresentation,
@@ -40,6 +41,69 @@ describe("metaForEvent — Bash (execute) rows", () => {
   it("collapses whitespace/newlines in the command preview", () => {
     const meta = metaForEvent(exec({ command: "echo a\n  &&  echo   b" }));
     expect(meta.target).toBe("echo a && echo b");
+  });
+});
+
+describe("metaForEvent — Thinking duration", () => {
+  it("shows the provider-reported duration in the common row metadata", () => {
+    const meta = metaForEvent({
+      id: "thought-1",
+      kind: "text",
+      role: "thought",
+      text: "checking",
+      durationMs: 2_400,
+      createdAt: 1,
+    } as AgentMessage);
+    expect(meta.trailing).toBe("2s");
+  });
+
+  it("drops the chip when the duration would only ever read 0s", () => {
+    // Cursor reports thinking_duration_ms on nearly every thought and it is
+    // almost always sub-second, so the right edge of every Thinking row wore
+    // a meaningless "0s".
+    for (const durationMs of [0, 1, 250, 999]) {
+      const meta = metaForEvent({
+        id: `thought-${durationMs}`,
+        kind: "text",
+        role: "thought",
+        text: "checking",
+        durationMs,
+        createdAt: 1,
+      } as AgentMessage);
+      expect(meta.trailing).toBeUndefined();
+    }
+  });
+
+  it("leaves the row bare when the provider reports no duration at all", () => {
+    const meta = metaForEvent({
+      id: "thought-none",
+      kind: "text",
+      role: "thought",
+      text: "checking",
+      createdAt: 1,
+    } as AgentMessage);
+    expect(meta.trailing).toBeUndefined();
+  });
+});
+
+describe("Cursor transport disclosure", () => {
+  it("detects a bounded provider payload on either side of a tool row", () => {
+    expect(
+      hasTransportTruncation({
+        kind: "tool",
+        toolKind: "other",
+        rawInput: {},
+        rawOutput: { zerosTransport: { truncated: true } },
+      } as AgentToolMessage),
+    ).toBe(true);
+    expect(
+      hasTransportTruncation({
+        kind: "tool",
+        toolKind: "other",
+        rawInput: {},
+        rawOutput: { zerosTransport: { truncated: false } },
+      } as AgentToolMessage),
+    ).toBe(false);
   });
 });
 

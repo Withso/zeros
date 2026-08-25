@@ -28,12 +28,68 @@ import {
   hasCachedTranscriptForTesting,
   loadTranscriptSnapshot,
   splitTranscriptPills,
+  transcriptMessagesThroughTurn,
   transcriptFileName,
   transcriptPillLabel,
   transcriptSlug,
   transcriptSourceKey,
   TRANSCRIPT_PILL_CAP,
 } from "../chat-transcript-attach";
+import type { AgentMessage } from "../use-agent-session";
+
+describe("transcriptMessagesThroughTurn", () => {
+  const text = (id: string, role: "user" | "assistant", value: string) =>
+    ({
+      id,
+      kind: "text",
+      role,
+      text: value,
+      createdAt: 1,
+    }) as AgentMessage;
+
+  it("keeps the selected turn and excludes every later turn", () => {
+    const messages = [
+      text("u1", "user", "first"),
+      text("a1", "assistant", "first answer"),
+      text("u2", "user", "second"),
+      text("a2", "assistant", "second answer"),
+      text("u3", "user", "third"),
+      text("a3", "assistant", "third answer"),
+    ];
+
+    expect(transcriptMessagesThroughTurn(messages, "u2")).toEqual(
+      messages.slice(0, 4),
+    );
+  });
+
+  it("does not mistake a queued send or resume marker for the next turn", () => {
+    const selected = text("u1", "user", "first");
+    const queued = {
+      ...text("queued", "user", "send later"),
+      queued: true,
+    };
+    const resume = {
+      ...text("resume", "user", "resume boundary"),
+      resumeBoundary: true,
+    };
+    const answer = text("a1", "assistant", "first answer");
+    const next = text("u2", "user", "second");
+    const messages = [selected, queued, resume, answer, next];
+
+    expect(transcriptMessagesThroughTurn(messages, "u1")).toEqual(
+      messages.slice(0, 4),
+    );
+  });
+
+  it("fails closed when the requested turn is outside the loaded history", () => {
+    expect(() =>
+      transcriptMessagesThroughTurn(
+        [text("u1", "user", "first")],
+        "missing-turn",
+      ),
+    ).toThrow(/missing-turn/);
+  });
+});
 
 describe("transcriptPillLabel", () => {
   it("uses a real title", () => {
@@ -133,7 +189,10 @@ describe("transcriptSlug / transcriptFileName", () => {
   });
 
   it("clips a long slug without leaving a trailing dash before the extension", () => {
-    const name = transcriptFileName("a".repeat(30) + " " + "b".repeat(60), "full");
+    const name = transcriptFileName(
+      "a".repeat(30) + " " + "b".repeat(60),
+      "full",
+    );
     expect(name.endsWith("-.full.txt")).toBe(false);
     expect(name.endsWith(".full.txt")).toBe(true);
   });
@@ -158,7 +217,9 @@ describe("splitTranscriptPills", () => {
   });
 
   it("shows everything at exactly the cap", () => {
-    const { shown, overflow } = splitTranscriptPills(items(TRANSCRIPT_PILL_CAP));
+    const { shown, overflow } = splitTranscriptPills(
+      items(TRANSCRIPT_PILL_CAP),
+    );
     expect(shown).toHaveLength(TRANSCRIPT_PILL_CAP);
     expect(overflow).toEqual([]);
   });
@@ -200,7 +261,9 @@ describe("loadTranscriptSnapshot", () => {
     });
   });
 
-  const input = (over: Partial<Parameters<typeof loadTranscriptSnapshot>[0]> = {}) => ({
+  const input = (
+    over: Partial<Parameters<typeof loadTranscriptSnapshot>[0]> = {},
+  ) => ({
     chatId: "c1",
     mode: "concise" as const,
     lastMessageAt: 100,
@@ -250,6 +313,57 @@ describe("loadTranscriptSnapshot", () => {
     expect(formatTranscript).toHaveBeenNthCalledWith(2, [{}], "full", {});
   });
 
+  it("keys historical fork snapshots by their exact cutoff turn", async () => {
+    const messages = [
+      {
+        id: "u1",
+        kind: "text",
+        role: "user",
+        text: "first",
+        createdAt: 1,
+      },
+      {
+        id: "a1",
+        kind: "text",
+        role: "assistant",
+        text: "first answer",
+        createdAt: 2,
+      },
+      {
+        id: "u2",
+        kind: "text",
+        role: "user",
+        text: "second",
+        createdAt: 3,
+      },
+      {
+        id: "a2",
+        kind: "text",
+        role: "assistant",
+        text: "second answer",
+        createdAt: 4,
+      },
+    ];
+    loadFullTranscript.mockResolvedValue({ messages, complete: true });
+
+    await loadTranscriptSnapshot(input({ throughMessageId: "u1" }));
+    await loadTranscriptSnapshot(input({ throughMessageId: "u2" }));
+
+    expect(loadFullTranscript).toHaveBeenCalledTimes(2);
+    expect(formatTranscript).toHaveBeenNthCalledWith(
+      1,
+      messages.slice(0, 2),
+      "concise",
+      {},
+    );
+    expect(formatTranscript).toHaveBeenNthCalledWith(
+      2,
+      messages,
+      "concise",
+      {},
+    );
+  });
+
   it("evicts beyond two entries so a pointer sweep can't pin the row's memory", async () => {
     await loadTranscriptSnapshot(input({ chatId: "a" }));
     await loadTranscriptSnapshot(input({ chatId: "b" }));
@@ -290,7 +404,9 @@ describe("loadTranscriptSnapshot", () => {
 
   it("does not cache a failed read, so retry can actually retry", async () => {
     loadFullTranscript.mockRejectedValueOnce(new Error("engine down"));
-    await expect(loadTranscriptSnapshot(input())).rejects.toThrow("engine down");
+    await expect(loadTranscriptSnapshot(input())).rejects.toThrow(
+      "engine down",
+    );
     expect(hasCachedTranscriptForTesting("c1", "concise", 100)).toBe(false);
     await expect(loadTranscriptSnapshot(input())).resolves.toMatchObject({
       text: "TEXT",

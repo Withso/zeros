@@ -1,3 +1,7 @@
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { describe, expect, it } from "vitest";
 
 // @ts-expect-error — .mjs has no type declarations; it exports pure helpers.
@@ -127,5 +131,44 @@ describe("Codex protocol coverage", () => {
         ],
       }),
     ).toThrow(/coverage version.*0\.146\.0.*pin.*0\.147\.0/i);
+  });
+
+  it("classifies adapter-owned client requests as handled", () => {
+    const repositoryRoot = resolve(
+      dirname(fileURLToPath(import.meta.url)),
+      "../..",
+    );
+    const coverage = JSON.parse(
+      readFileSync(
+        resolve(
+          repositoryRoot,
+          "apps/desktop/src/engine/agents/adapters/codex/protocol-coverage.json",
+        ),
+        "utf8",
+      ),
+    ) as {
+      clientRequests: {
+        handled: string[];
+        "generated-only": string[];
+      };
+    };
+    const adapterOwnedRequests = [
+      "account/rateLimits/read",
+      "account/read",
+      "model/list",
+      "skills/list",
+      "thread/backgroundTerminals/list",
+      "thread/backgroundTerminals/terminate",
+      "thread/compact/start",
+      "thread/list",
+      "turn/steer",
+    ];
+
+    expect(coverage.clientRequests.handled).toEqual(
+      expect.arrayContaining(adapterOwnedRequests),
+    );
+    expect(coverage.clientRequests["generated-only"]).not.toEqual(
+      expect.arrayContaining(adapterOwnedRequests),
+    );
   });
 });

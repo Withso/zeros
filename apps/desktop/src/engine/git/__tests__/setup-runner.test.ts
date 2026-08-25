@@ -187,6 +187,65 @@ describe("SetupManager", () => {
     expect(wrapped).toEqual([true]);
   });
 
+  it("publishes a starting setup's resolved authority before boundary admission finishes", async () => {
+    const wsId = "ws_authority-setup";
+    insertWorkspace(sampleWorkspace(wsId));
+    const { svc } = fakePty();
+    let releaseBoundary!: () => void;
+    const boundaryGate = new Promise<void>((resolve) => {
+      releaseBoundary = resolve;
+    });
+    let publishAuthority!: () => void;
+    const authorityReady = new Promise<void>((resolve) => {
+      publishAuthority = resolve;
+    });
+    const boundary = {
+      wrapSpawn: (request: unknown) => request,
+      revoke: async () => {},
+      stopAndProve: async () => {},
+    } as unknown as PreparedBoundary;
+    const workspaceRoot = `/tmp/worktrees/test-repo/${wsId}`;
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      async () => ({ PATH: "/bin" }),
+      async (request) => {
+        request.onAuthorityResolved?.({
+          registeredDesignAuthorityIdentity: "global-current",
+          territoryContributions: [
+            {
+              workspaceRoot,
+              grants: [workspaceRoot],
+              full: true,
+              identity: "local-current",
+            },
+          ],
+        });
+        publishAuthority();
+        await boundaryGate;
+        return boundary;
+      },
+    );
+    const start = mgr.start({ workspaceId: wsId, command: "pnpm install" });
+
+    try {
+      await authorityReady;
+      expect(mgr.registeredDesignAuthorityChanged("global-current")).toBe(
+        false,
+      );
+      expect(mgr.registeredDesignAuthorityChanged("global-next")).toBe(true);
+      expect(
+        mgr.workspaceTerritoryChanged(workspaceRoot, "local-current"),
+      ).toBe(false);
+      expect(mgr.workspaceTerritoryChanged(workspaceRoot, "local-next")).toBe(
+        true,
+      );
+    } finally {
+      releaseBoundary();
+      await start;
+    }
+  });
+
   it("a KILLED run never scores a pass — node-pty reports kill() as exitCode 0", async () => {
     // Verified against real node-pty: `p.kill()` → { exitCode: 0, signal: 1 }. A
     // verdict read off the code alone therefore called ANY killed install a PASS
@@ -362,6 +421,89 @@ describe("SetupManager", () => {
     expect(revoke).toHaveBeenCalledOnce();
     expect(stopAndProve).toHaveBeenCalledOnce();
     expect(getWorkspaceById(wsId)?.setupState).toBe("stopped");
+  });
+
+  it("retires only the setup boundary that depends on a changed managed workspace", async () => {
+    const siblingId = "ws_scoped-setup-sibling";
+    const targetId = "ws_scoped-setup-target";
+    const sibling = sampleWorkspace(siblingId);
+    const target = sampleWorkspace(targetId);
+    insertWorkspace(sibling);
+    insertWorkspace(target);
+    const { svc, killed } = fakePty();
+    const siblingStop = vi.fn(async () => {});
+    const targetStop = vi.fn(async () => {});
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      undefined,
+      async (request) =>
+        ({
+          ...preparedTestBoundary(),
+          territoryContributions: [
+            {
+              workspaceRoot: request.workspaceRoot,
+              grants: [request.workspaceRoot],
+              full: true,
+              identity: null,
+            },
+          ],
+          stopAndProve:
+            request.workspaceRoot === target.path ? targetStop : siblingStop,
+        }) as PreparedBoundary,
+    );
+    await mgr.start({ workspaceId: siblingId, command: "pnpm install" });
+    await mgr.start({ workspaceId: targetId, command: "pnpm install" });
+
+    await mgr.stopForWorkspaceTerritoryAndProve(targetId, target.path);
+
+    expect(killed).toEqual([setupSessionId(targetId, 2)]);
+    expect(targetStop).toHaveBeenCalledOnce();
+    expect(siblingStop).not.toHaveBeenCalled();
+    expect(getWorkspaceById(siblingId)?.setupState).toBe("running");
+    expect(getWorkspaceById(targetId)?.setupState).toBe("stopped");
+  });
+
+  it("retires a setup owned elsewhere when it explicitly includes the changed workspace", async () => {
+    const ownerId = "ws_attached-setup-owner";
+    const targetId = "ws_attached-setup-target";
+    const owner = sampleWorkspace(ownerId);
+    const target = sampleWorkspace(targetId);
+    insertWorkspace(owner);
+    insertWorkspace(target);
+    const { svc, killed } = fakePty();
+    const stopAndProve = vi.fn(async () => {});
+    const mgr = new SetupManager(
+      svc,
+      () => {},
+      undefined,
+      async () =>
+        ({
+          ...preparedTestBoundary(),
+          territoryContributions: [
+            {
+              workspaceRoot: owner.path,
+              grants: [owner.path],
+              full: true,
+              identity: null,
+            },
+            {
+              workspaceRoot: target.path,
+              grants: [target.path],
+              full: true,
+              identity: null,
+            },
+          ],
+          stopAndProve,
+        }) as PreparedBoundary,
+    );
+    await mgr.start({ workspaceId: ownerId, command: "pnpm install" });
+
+    await mgr.stopForWorkspaceTerritoryAndProve(targetId, target.path);
+
+    expect(killed).toEqual([setupSessionId(ownerId, 1)]);
+    expect(stopAndProve).toHaveBeenCalledOnce();
+    expect(getWorkspaceById(ownerId)?.setupState).toBe("stopped");
   });
 
   it("retains a superseded setup teardown failure after the replacement start aborts", async () => {

@@ -56,6 +56,11 @@ import { appBaseUrl } from "../../app-base-url";
 // "supabase:" session namespace (auth-storage.ts) so the two never collide.
 const PENDING_KEY = "handoff-verifier:pending";
 
+/** Compatibility cleanup used by the unified cancel/start command. */
+export function cancelLegacyAuthHandoff(): void {
+  deleteSecret(PENDING_KEY);
+}
+
 /** Base URL of the web hub that hosts /handoff/redeem. Fixed to the deployed app
  *  in prod; overridable via env ONLY for local/preview iteration. NEVER
  *  renderer-supplied (that would let an XSS point the handoff at an attacker). */
