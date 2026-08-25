@@ -353,9 +353,14 @@ async function indexEvidenceSignature(cwd: string): Promise<string | null> {
     // semantics — a symlinked `.git` fails to open (ELOOP) and lands in the
     // outer catch, which is the same "no cacheable identity" answer lstat gave
     // by reporting neither a directory nor a regular file.
+    // The 0o600 is the mode a CREATED file would get. O_RDONLY without
+    // O_CREAT cannot create one, so it is inert today; it is stated anyway so
+    // the call is owner-only by construction if a creating flag is ever added,
+    // and so static analysis does not have to infer that from the flags.
     const handle = await open(
       gitEntry,
       fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+      0o600,
     );
     let gitDir: string;
     try {
