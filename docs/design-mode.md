@@ -41,13 +41,13 @@ browsing contexts. Hidden surfaces remain inert and suspend active-only work.
 
 ## Current actor contract
 
-| Actor                                | Code / repository roots                                                                                   | Recognized Design directories                                               | Other host state                                                                        |
-| ------------------------------------ | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| Human Design surface                 | Read context; no code-write operation is exposed                                                          | Mutates through the trusted in-process Design Document API                  | Trusted app authority                                                                   |
-| Zeros-launched local code agent      | Current and explicitly attached roots read/write; unrelated Zeros-managed workspace collections read-only | Read-only, for every recognized root; contents remain readable and listable | Normal host-parity access                                                               |
-| Zeros file/Git commands              | Read/write subject to command semantics                                                                   | Engine-owned Design mutations remain serialized                             | Trusted engine authority                                                                |
-| User terminal or external editor/Git | Full same-user OS authority                                                                               | Read/write                                                                  | Outside the Zeros agent boundary                                                        |
-| Design-agent boundary substrate      | Managed workspace collections and registered repository roots read-only; minimal canonical Git metadata remains writable | Read/write for every recognized root                              | Normal host-parity access outside admitted repository roots; no production consumer yet |
+| Actor                                | Code / repository roots                                                                                                  | Recognized Design directories                                               | Other host state                                                                        |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Human Design surface                 | Read context; no code-write operation is exposed                                                                         | Mutates through the trusted in-process Design Document API                  | Trusted app authority                                                                   |
+| Zeros-launched local code agent      | Current and explicitly attached roots read/write; unrelated Zeros-managed workspace collections read-only                | Read-only, for every recognized root; contents remain readable and listable | Normal host-parity access                                                               |
+| Zeros file/Git commands              | Read/write subject to command semantics                                                                                  | Engine-owned Design mutations remain serialized                             | Trusted engine authority                                                                |
+| User terminal or external editor/Git | Full same-user OS authority                                                                                              | Read/write                                                                  | Outside the Zeros agent boundary                                                        |
+| Design-agent boundary substrate      | Managed workspace collections and registered repository roots read-only; minimal canonical Git metadata remains writable | Read/write for every recognized root                                        | Normal host-parity access outside admitted repository roots; no production consumer yet |
 
 Reads are intentionally broad: code agents may inspect Design and designers may
 inspect code. Write authority is asymmetric and does not follow the selected UI
@@ -123,22 +123,28 @@ proved, the agent does not start or the authority transition does not complete.
 
 A folder name alone is not semantic Design identity. A document becomes
 recognized by a committed `.zeros-canvas.json` marker or by Zeros' controlled
-first Design initialization. Repositories with neither a recognized document
-nor an existing configured/default destination preserve ordinary code-agent
-behavior.
+first Design initialization. Plain-folder and external repositories with
+neither a recognized document nor an existing configured/default destination
+preserve ordinary code-agent behavior.
 
-There is one conservative bootstrap exception to semantic recognition: when
-the configured/default `Zeros Design/` destination already exists, code-agent
-admission protects that real subtree as prospective territory even if its
-marker is still untracked or absent. This closes the checkout-hook/manual-seed
-gap without treating its content as an editable Design document. Arbitrary
-non-default folder names are not adopted by name alone.
+There is one conservative bootstrap exception to semantic recognition. Before
+a local managed-workspace code agent, Setup task, or Run task is admitted,
+Zeros creates an empty `Zeros Design/` vnode through the trusted Design
+directory API and protects it as prospective territory. Managed roots attached
+through `/add-dir` receive the same reservation before that immutable boundary
+starts. Explicit configured destinations and existing default destinations are
+also protected even while their marker is absent. This closes both first-use
+and checkout-hook/manual-seed gaps without treating the empty reservation as an
+editable Design document. Arbitrary non-default folder names are not adopted by
+name alone.
 
-On first initialization—including an untracked default folder seeded by a
-checkout hook—Zeros blocks new starts and retires sessions admitted before the
-territory existed, then initializes, commits, and publishes it. Pointer
-changes and Git operations that add, remove, or replace recognized Design roots
-use the same retire-before-publish rule. A non-default folder manually created
+On first initialization, Zeros compares that prospective identity with every
+live agent, Setup, Run, and pooled-utility contribution. When all already deny
+the reserved destination, it initializes, commits, and publishes without
+stopping them. A legacy/stale session admitted before the destination existed
+is retired first. Pointer changes and Git operations that add, remove, or
+replace recognized Design roots still use retire-before-publish because their
+immutable path set genuinely changes. A non-default folder manually created
 outside Zeros remains ordinary user filesystem state until a committed marker
 and controlled pointer transition establish its identity.
 
@@ -233,26 +239,30 @@ process admission reopens. The filesystem/Git watchers reconcile external
 HEAD/ref/index, exact canvas-marker, and settings movement and retire sessions
 whose captured semantic territory no longer matches.
 
-Mode changes themselves do not restart an agent when the territory is
-unchanged. Archive, restore, delete, first Design creation, Design-directory
-settings changes, and territory-changing Git rewrites use fail-closed process
-drain and lifecycle sequencing. Because every code boundary contains the
-app-wide registered-owner union, adding, removing, archiving, restoring, or
-unhiding a project/workspace blocks all new repository-code admissions, cancels
-pending starts, proves every Setup/Run boundary stopped, and retires every
-code-agent and pooled utility boundary before publishing the new owner set.
-Overlapping changes remain queued behind one continuously closed admission
-gate. Chats resume under a newly admitted profile on their next use; stale
-immutable profiles are never patched in place.
+Mode changes and first publication of a pre-reserved destination do not restart
+an agent when the territory is unchanged. Archive, restore, delete,
+Design-directory settings changes, and territory-changing Git rewrites use
+fail-closed process drain and lifecycle sequencing. A managed-workspace change
+blocks starts for that exact owner and retires only Setup/Run, code-agent, and
+pooled utility boundaries whose immutable contribution map names it. This
+includes an agent owned by another workspace that explicitly attached the
+changing owner through `/add-dir`; unrelated sibling agents and in-flight
+starts remain live. Adding a code-only external project or removing an external
+project does not retire live work. Registering an external/main owner that
+already carries Design authority adds a new app-wide subtraction and therefore
+still drains every repository-code boundary behind one continuously closed
+global gate. Chats resume under a newly admitted profile on their next use;
+stale immutable profiles are never patched in place.
 
 External Git-ref/index changes, metadata-signature changes to settings files,
 and exact `.zeros-canvas.json` create/change/remove events enter the same
 reconciliation path. The watcher previews the semantic territory first, so
 ordinary source saves and ref updates that do not change Design ownership do
-not restart agents. A changed or invalid owner drains the old app-wide
-authority before the new territory is recorded and fenced. External tools still
-run outside Zeros' actor boundary, so their multi-file rewrites and the watcher
-transition are not one atomic operation.
+not restart agents. A changed or invalid managed owner drains its exact old
+authority; a changed external/main owner drains the app-wide authority before
+the new territory is recorded and fenced. External tools still run outside
+Zeros' actor boundary, so their multi-file rewrites and the watcher transition
+are not one atomic operation.
 
 ## Design API terminology
 
@@ -299,7 +309,8 @@ latency characteristics.
   user without an Internal flag. Design-surface operations remain desktop-only,
   and Design rows remain excluded from relay workspace lists because the
   trusted Design Document API is not exposed through the remote transport.
-- Repositories without a recognized Design document continue to use the
-  existing agent and Git behavior unless the prospective configured/default
-  destination already exists. In that bootstrap case strong territory
-  admission activates conservatively before semantic recognition.
+- Plain-folder repositories without a recognized Design document continue to
+  use the existing agent and Git behavior unless a prospective
+  configured/default destination already exists. Managed workspace admissions
+  reserve the default destination so strong territory protection is active
+  before semantic recognition and first Design publication is non-disruptive.

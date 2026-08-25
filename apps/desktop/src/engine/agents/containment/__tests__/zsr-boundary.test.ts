@@ -22,6 +22,9 @@ import { runFile } from "../../../git/git-exec";
 import type { MacosProcessDomainCommandRunner } from "../macos-process-domain";
 import {
   cleanupZsrPreparationProcessDomain,
+  resumeSharedContainerWorkerIdling,
+  stopIdleSharedContainerWorkers,
+  suspendSharedContainerWorkerIdling,
   ZsrExecutionBoundary as RuntimeZsrExecutionBoundary,
   type ZsrBoundaryOptions,
 } from "../zsr-boundary";
@@ -165,6 +168,9 @@ describe("ZSR execution boundary", () => {
     else process.env.ZEROS_DATA_DIR = previousDataDir;
     if (previousSrtDebug === undefined) delete process.env.SRT_DEBUG;
     else process.env.SRT_DEBUG = previousSrtDebug;
+    // Shared container workers may idle past a test's own teardown; flush them
+    // so one test's warm entry can never leak into the next.
+    await stopIdleSharedContainerWorkers().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   });
 
@@ -188,6 +194,42 @@ describe("ZSR execution boundary", () => {
 
     await expect(stat(policyRoot)).resolves.toBeDefined();
     expect(retireMetadata).not.toHaveBeenCalled();
+  });
+
+  it("attributes a debug admission to bounded stages instead of one opaque total", async () => {
+    process.env.SRT_DEBUG = "1";
+    const logged = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errored = vi.spyOn(console, "error").mockImplementation(() => {});
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+    });
+    const prepared = await boundary.prepare({
+      executionId: "execution-stage-timing",
+      actor: "agent-code",
+      providerId: "codex",
+      cwd: workspace,
+      workspaceRoot: workspace,
+    });
+    let stopped = false;
+    try {
+      expect(logged).toHaveBeenCalledWith(
+        expect.stringMatching(
+          /^\[zsr\] admitted host-parity codex in \d+ms \(.+canary=\d+ms.*\)$/,
+        ),
+      );
+      await prepared.stopAndProve();
+      stopped = true;
+      expect(logged).toHaveBeenCalledWith(
+        expect.stringMatching(/^\[zsr\] retired codex in \d+ms \(/),
+      );
+      expect(errored).not.toHaveBeenCalled();
+    } finally {
+      if (!stopped) await prepared.stopAndProve();
+      logged.mockRestore();
+      errored.mockRestore();
+    }
   });
 
   it("preserves host authority while keeping the supervisor bootstrap private", async () => {
@@ -1310,7 +1352,140 @@ process.stdout.write(JSON.stringify({
     await first.stopAndProve();
     expect(stops).toBe(0);
     await second.stopAndProve();
+    // The last release defers the machine stop for the idle window so the next
+    // session in this workspace reuses the warm worker instead of paying the
+    // full create again.
+    expect(stops).toBe(0);
+    const third = await boundary.prepare(request("workspace-worker-three"));
+    expect(reservations).toBe(1);
+    await third.stopAndProve();
+    expect(stops).toBe(0);
+    await stopIdleSharedContainerWorkers();
     expect(stops).toBe(1);
+  });
+
+  it("stops the shared OrbStack worker inline while workspace idling is suspended", async () => {
+    const design = path.join(workspace, "Zeros Design");
+    await mkdir(design, { recursive: true });
+    let stops = 0;
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      macosContainerWorkerFactory: () => ({
+        reserve: async () => ({
+          hostPort: 43_411,
+          machineName: "zeros-zsr-suspended",
+          environment: {},
+          start: async () => undefined,
+          stopAndProve: async () => {
+            stops += 1;
+          },
+        }),
+      }),
+    });
+    const request = {
+      executionId: "suspend-idling",
+      actor: "agent-code" as const,
+      cwd: workspace,
+      workspaceRoot: workspace,
+      territory: {
+        agentRole: "code" as const,
+        workspaceRoot: workspace,
+        designDirectory: design,
+        protectedDesignDirectories: [design],
+        designRecognitionPaths: [],
+        writeCapabilities: {
+          workspace: "write" as const,
+          deniedPaths: [design, path.join(workspace, ".git")],
+        },
+      },
+      containerWorker: {
+        runtime: "podman" as const,
+        backend: "orbstack-machine" as const,
+        executable: process.execPath,
+      },
+      containerWorkflowExpected: true,
+    };
+    const prepared = await boundary.prepare(request);
+    suspendSharedContainerWorkerIdling(workspace);
+    try {
+      // A Design territory transition suspends idling for the workspace, so
+      // the release must stop (and prove) the machine inline rather than
+      // leaving a machine with the superseded protection map warm.
+      await prepared.stopAndProve();
+      expect(stops).toBe(1);
+    } finally {
+      resumeSharedContainerWorkerIdling(workspace);
+    }
+  });
+
+  it("retires an idle worker admitted under a superseded key before admitting its replacement", async () => {
+    const firstDesign = path.join(workspace, "Zeros Design");
+    const secondDesign = path.join(workspace, "Second Design");
+    await Promise.all([
+      mkdir(firstDesign, { recursive: true }),
+      mkdir(secondDesign, { recursive: true }),
+    ]);
+    let reservations = 0;
+    let stops = 0;
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+      macosContainerWorkerFactory: () => ({
+        reserve: async () => {
+          reservations += 1;
+          return {
+            hostPort: 43_500 + reservations,
+            machineName: `zeros-zsr-superseded-${reservations}`,
+            environment: {},
+            start: async () => undefined,
+            stopAndProve: async () => {
+              stops += 1;
+            },
+          };
+        },
+      }),
+    });
+    const request = (executionId: string, designDirectory: string) => ({
+      executionId,
+      actor: "agent-code" as const,
+      cwd: workspace,
+      workspaceRoot: workspace,
+      territory: {
+        agentRole: "code" as const,
+        workspaceRoot: workspace,
+        designDirectory,
+        protectedDesignDirectories: [designDirectory],
+        designRecognitionPaths: [],
+        writeCapabilities: {
+          workspace: "write" as const,
+          deniedPaths: [designDirectory, path.join(workspace, ".git")],
+        },
+      },
+      containerWorker: {
+        runtime: "podman" as const,
+        backend: "orbstack-machine" as const,
+        executable: process.execPath,
+      },
+      containerWorkflowExpected: true,
+    });
+    const before = await boundary.prepare(
+      request("superseded-key-one", firstDesign),
+    );
+    await before.stopAndProve();
+    expect(stops).toBe(0);
+    // The workspace's territory changed: the next admission carries a
+    // different shared key and must retire the stale idle machine first.
+    const after = await boundary.prepare(
+      request("superseded-key-two", secondDesign),
+    );
+    expect(reservations).toBe(2);
+    expect(stops).toBe(1);
+    await after.stopAndProve();
+    await stopIdleSharedContainerWorkers();
+    expect(stops).toBe(2);
   });
 
   it("keys shared OrbStack workers by the physical protected-root projection", async () => {
@@ -1379,6 +1554,8 @@ process.stdout.write(JSON.stringify({
     expect(reservations).toBe(2);
 
     await Promise.all([first.stopAndProve(), second.stopAndProve()]);
+    expect(stops).toBe(0);
+    await stopIdleSharedContainerWorkers();
     expect(stops).toBe(2);
   });
 

@@ -554,6 +554,99 @@ describe("RunManager", () => {
     expect(mgr.info([SID], null).dev).toMatchObject({ state: "stopped" });
   });
 
+  it("keeps sibling runs live while retiring the changed workspace territory", async () => {
+    const targetId = "ws_scoped-run-target";
+    const target = sampleWorkspace(targetId);
+    insertWorkspace(target);
+    const targetSessionId = runSessionId(target.path, "dev");
+    const { svc, killed } = fakePty();
+    const siblingStop = vi.fn(async () => {});
+    const targetStop = vi.fn(async () => {});
+    const mgr = make(
+      svc,
+      [],
+      undefined,
+      async (request) =>
+        ({
+          ...preparedTestBoundary(),
+          territoryContributions: [
+            {
+              workspaceRoot: request.workspaceRoot,
+              grants: [request.workspaceRoot],
+              full: true,
+              identity: null,
+            },
+          ],
+          stopAndProve:
+            request.workspaceRoot === target.path ? targetStop : siblingStop,
+        }) as PreparedBoundary,
+    );
+    await mgr.start(startArgs());
+    await mgr.start(
+      startArgs({
+        sessionId: targetSessionId,
+        workspaceId: targetId,
+        cwd: target.path,
+      }),
+    );
+
+    await mgr.stopForWorkspaceTerritoryAndProve(targetId, target.path);
+
+    expect(killed).toEqual([targetSessionId]);
+    expect(targetStop).toHaveBeenCalledOnce();
+    expect(siblingStop).not.toHaveBeenCalled();
+    expect(mgr.info([SID], WS).dev).toMatchObject({
+      state: "running",
+      live: true,
+    });
+  });
+
+  it("retires a rowless run that explicitly includes the changed workspace", async () => {
+    const targetId = "ws_attached-run-target";
+    const target = sampleWorkspace(targetId);
+    insertWorkspace(target);
+    const rowlessRoot = "/tmp/zeros-attached-rowless-run";
+    const rowlessSessionId = runSessionId(rowlessRoot, "dev");
+    const { svc, killed } = fakePty();
+    const stopAndProve = vi.fn(async () => {});
+    const mgr = make(
+      svc,
+      [],
+      undefined,
+      async () =>
+        ({
+          ...preparedTestBoundary(),
+          territoryContributions: [
+            {
+              workspaceRoot: rowlessRoot,
+              grants: [rowlessRoot],
+              full: true,
+              identity: null,
+            },
+            {
+              workspaceRoot: target.path,
+              grants: [target.path],
+              full: true,
+              identity: null,
+            },
+          ],
+          stopAndProve,
+        }) as PreparedBoundary,
+    );
+    await mgr.start(
+      startArgs({
+        sessionId: rowlessSessionId,
+        workspaceId: null,
+        cwd: rowlessRoot,
+      }),
+    );
+
+    await mgr.stopForWorkspaceTerritoryAndProve(targetId, target.path);
+
+    expect(killed).toEqual([rowlessSessionId]);
+    expect(stopAndProve).toHaveBeenCalledOnce();
+  });
+
   it("retains a superseded rowless run teardown failure across replacement", async () => {
     const { svc, live } = fakePty();
     let admitted = 0;

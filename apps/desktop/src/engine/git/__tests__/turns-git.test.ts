@@ -242,6 +242,169 @@ describe("turns-git", () => {
     ]);
   });
 
+  it("attributes every file in a shell apply_patch batch", () => {
+    const command = String.raw`/bin/zsh -lc 'apply_patch <<'"'"'PATCH'"'"'
+*** Begin Patch
+*** Add File: london.md
++# London
+*** Add File: new-york.md
++# New York
+*** Update File: src/paris.md
+@@
+-Paris
++# Paris
+*** Delete File: old/rome.md
+*** Update File: tokyo.md
+*** Move to: cities/tokyo.md
+@@
+-Tokyo
++# Tokyo
+*** End Patch
+PATCH'`;
+    const execute = {
+      id: "tool-apply-patch",
+      kind: "tool",
+      toolCallId: "apply-patch",
+      title: "Apply patch",
+      toolKind: "execute",
+      status: "completed",
+      rawInput: { command, cwd: root },
+      createdAt: 1,
+      updatedAt: 1,
+    } as AgentMessage;
+
+    expect(
+      authoredPathsFromMessages([execute], root).sort((a, b) =>
+        a.path.localeCompare(b.path),
+      ),
+    ).toEqual([
+      { path: "cities/tokyo.md", kind: "renamed" },
+      { path: "london.md", kind: "edit" },
+      { path: "new-york.md", kind: "edit" },
+      { path: "old/rome.md", kind: "delete" },
+      { path: "src/paris.md", kind: "edit" },
+      { path: "tokyo.md", kind: "renamed" },
+    ]);
+  });
+
+  it("attributes every file in an inline git apply batch", () => {
+    const command = String.raw`/bin/zsh -lc "git apply --recount - <<'PATCH'
+diff --git a/src/existing.ts b/src/existing.ts
+--- a/src/existing.ts
++++ b/src/existing.ts
+@@ -1 +1 @@
+-old
++new
+diff --git a/src/created.ts b/src/created.ts
+new file mode 100644
+--- /dev/null
++++ b/src/created.ts
+@@ -0,0 +1 @@
++created
+diff --git a/src/deleted.ts b/src/deleted.ts
+deleted file mode 100644
+--- a/src/deleted.ts
++++ /dev/null
+@@ -1 +0,0 @@
+-deleted
+diff --git a/src/old-name.ts b/src/new-name.ts
+similarity index 100%
+rename from src/old-name.ts
+rename to src/new-name.ts
+diff --git "a/src/with space.ts" "b/src/with space.ts"
+--- "a/src/with space.ts"
++++ "b/src/with space.ts"
+@@ -1 +1 @@
+-old
++new
+PATCH"`;
+    const execute = {
+      id: "tool-git-apply",
+      kind: "tool",
+      toolCallId: "git-apply",
+      title: "Apply Git patch",
+      toolKind: "execute",
+      status: "completed",
+      rawInput: { command, cwd: root },
+      rawOutput: { exitCode: 0, output: null },
+      createdAt: 1,
+      updatedAt: 1,
+    } as AgentMessage;
+
+    expect(
+      authoredPathsFromMessages([execute], root).sort((a, b) =>
+        a.path.localeCompare(b.path),
+      ),
+    ).toEqual([
+      { path: "src/created.ts", kind: "edit" },
+      { path: "src/deleted.ts", kind: "delete" },
+      { path: "src/existing.ts", kind: "edit" },
+      { path: "src/new-name.ts", kind: "renamed" },
+      { path: "src/old-name.ts", kind: "renamed" },
+      { path: "src/with space.ts", kind: "edit" },
+    ]);
+  });
+
+  it("attributes apply_patch bodies echoed through shell output", () => {
+    const execute = {
+      id: "tool-stdin-apply-patch",
+      kind: "tool",
+      toolCallId: "stdin-apply-patch",
+      title: "Running /bin/zsh -lc apply_patch",
+      toolKind: "execute",
+      status: "completed",
+      rawInput: { command: "/bin/zsh -lc apply_patch", cwd: root },
+      rawOutput: {
+        exitCode: 0,
+        output: [
+          "*** Begin Patch",
+          "*** Update File: src/one.ts",
+          "@@",
+          "-old",
+          "+new",
+          "*** Add File: src/two.ts",
+          "+new",
+          "*** End Patch",
+        ].join("\r\n"),
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    } as AgentMessage;
+
+    expect(
+      authoredPathsFromMessages([execute], root).sort((a, b) =>
+        a.path.localeCompare(b.path),
+      ),
+    ).toEqual([
+      { path: "src/one.ts", kind: "edit" },
+      { path: "src/two.ts", kind: "edit" },
+    ]);
+  });
+
+  it("does not attribute a patch that a non-patch shell command only prints", () => {
+    const execute = {
+      id: "tool-print-patch",
+      kind: "tool",
+      toolCallId: "print-patch",
+      title: "Print an example",
+      toolKind: "execute",
+      status: "completed",
+      rawInput: { command: "printf 'example'", cwd: root },
+      rawOutput: {
+        exitCode: 0,
+        output: [
+          "*** Begin Patch",
+          "*** Update File: unrelated.ts",
+          "*** End Patch",
+        ].join("\n"),
+      },
+      createdAt: 1,
+      updatedAt: 1,
+    } as AgentMessage;
+
+    expect(authoredPathsFromMessages([execute], root)).toEqual([]);
+  });
+
   it("never attributes the worktree root — a '.' pathspec would sweep in concurrent work", () => {
     const execute = (id: string, command: string): AgentMessage =>
       ({

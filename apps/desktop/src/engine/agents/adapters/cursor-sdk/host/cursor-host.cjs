@@ -666,45 +666,85 @@ function coveredSpan(ops) {
   return covered;
 }
 
-/** Attribute a slow pre-first-item window to the operations inside it. */
+/** One line naming the slowest op in a window, for the compact report. */
+function slowestOpSummary(ops) {
+  const slowest = ops[0];
+  if (!slowest) return "";
+  const others = ops.length - 1;
+  return (
+    `; slowest ${slowest.kind} ${slowest.label} ${slowest.elapsed}ms` +
+    (others > 0 ? ` (+${others} more)` : "")
+  );
+}
+
+/** Printed once, the first time a compact report is emitted, so the reader
+ *  knows the staircase still exists without paying for it on every turn. */
+let breakdownHintPrinted = false;
+
+/** Attribute a slow pre-first-item window to the operations inside it.
+ *
+ *  DEFAULT: one line. A cold Cursor session is slow on purpose (see the
+ *  prewarm block) and used to spend 12+ stderr lines saying so on EVERY run,
+ *  which drowned the surrounding engine log. The headline plus a slowest-op
+ *  callout is what anyone reads first; the per-operation staircase — which is
+ *  the part that actually distinguishes "one slow call" from "ten serial
+ *  calls" — is worth its length only when someone is looking, so it lives
+ *  behind ZEROS_CURSOR_TRANSPORT_DEBUG=1. */
 function reportFirstItemLatency(runId, from, to, extra) {
   const waited = to - from;
-  process.stderr.write(
-    `[cursor-host] run ${runId} first model output after ${waited}ms (${extra})\n`,
-  );
   const candidates = opsOverlapping(from, to).filter(
     (op) => op.elapsed >= 250 || cursorTransportDebug,
   );
   if (candidates.length === 0) {
     process.stderr.write(
-      "[cursor-host]   ↳ no outbound request or child process overlapped the " +
-        "wait — the time is inside @cursor/sdk's own work (settings layers, " +
-        "workspace scan) or its already-open connection\n",
+      `[cursor-host] run ${runId} first model output after ${waited}ms ` +
+        `(${extra}) — no outbound request or child process overlapped the ` +
+        `wait; the time is inside @cursor/sdk's own work (settings layers, ` +
+        `workspace scan) or its already-open connection\n`,
     );
     return;
   }
-  // Ordered by START, not duration: read top to bottom and the serial chain is
-  // visible as a staircase of offsets, while concurrent calls share one.
-  const byStart = [...candidates].sort((left, right) => left.offset - right.offset);
-  for (const op of byStart.slice(0, 14)) {
-    process.stderr.write(
-      `[cursor-host]   ↳ @${String(op.offset).padStart(6)}ms ` +
-        `${String(op.elapsed).padStart(6)}ms ${op.kind} ${op.label} ` +
-        `(${op.outcome})\n`,
-    );
-  }
-  if (byStart.length > 14) {
-    process.stderr.write(
-      `[cursor-host]   ↳ …and ${byStart.length - 14} shorter operation(s)\n`,
-    );
-  }
   const covered = coveredSpan(candidates);
-  process.stderr.write(
-    `[cursor-host]   ∑ ${candidates.length} traced operation(s) covered ` +
-      `${covered}ms of the ${waited}ms wait ` +
-      `(${Math.round((covered / Math.max(waited, 1)) * 100)}%); ` +
-      `${waited - covered}ms was untraced in-process work\n`,
-  );
+  const attribution =
+    `${covered}ms across ${candidates.length} traced op(s) ` +
+    `(${Math.round((covered / Math.max(waited, 1)) * 100)}%), ` +
+    `${waited - covered}ms untraced in-process`;
+
+  if (!cursorTransportDebug) {
+    process.stderr.write(
+      `[cursor-host] run ${runId} first model output after ${waited}ms ` +
+        `(${extra}) — ${attribution}${slowestOpSummary(candidates)}\n`,
+    );
+    if (!breakdownHintPrinted) {
+      breakdownHintPrinted = true;
+      process.stderr.write(
+        "[cursor-host] (set ZEROS_CURSOR_TRANSPORT_DEBUG=1 for the " +
+          "per-operation breakdown of these waits)\n",
+      );
+    }
+  } else {
+    process.stderr.write(
+      `[cursor-host] run ${runId} first model output after ${waited}ms (${extra})\n`,
+    );
+    // Ordered by START, not duration: read top to bottom and the serial chain
+    // is visible as a staircase of offsets, while concurrent calls share one.
+    const byStart = [...candidates].sort(
+      (left, right) => left.offset - right.offset,
+    );
+    for (const op of byStart.slice(0, 14)) {
+      process.stderr.write(
+        `[cursor-host]   ↳ @${String(op.offset).padStart(6)}ms ` +
+          `${String(op.elapsed).padStart(6)}ms ${op.kind} ${op.label} ` +
+          `(${op.outcome})\n`,
+      );
+    }
+    if (byStart.length > 14) {
+      process.stderr.write(
+        `[cursor-host]   ↳ …and ${byStart.length - 14} shorter operation(s)\n`,
+      );
+    }
+    process.stderr.write(`[cursor-host]   ∑ ${attribution}\n`);
+  }
   // The dominant case is worth naming rather than leaving as a row in a table:
   // an MCP server the provider spawned, killed at its connect budget, having
   // consumed most of the window. A stdio MCP server that has to authorize
@@ -773,10 +813,19 @@ function installFirstTurnTracer() {
   // plain socket, `secureConnect` for TLS; `error`/`close` cover the failures,
   // which is the case that matters — an outbound socket the sandbox never lets
   // reach anything is precisely the shape of stall this exists to name.
+  //
+  // A TLSSocket emits `connect` too — at TCP-established, BEFORE the
+  // handshake — so a `tls` op almost always ends there. Say `tcp-connected`
+  // rather than `connected` so the number is not misread as handshake time:
+  // "tls api2.cursor.sh:443 2018ms (connected)" is DNS + TCP, and the fix for
+  // that (resolver, IPv6 fallback, connection reuse) is nowhere near the fix
+  // for a slow handshake.
   const traceSocket = (socket, kind, label) => {
     if (!socket || typeof socket.once !== "function") return socket;
     const end = beginOp(kind, label);
-    socket.once("connect", () => end("connected"));
+    socket.once("connect", () =>
+      end(kind === "tls" ? "tcp-connected" : "connected"),
+    );
     socket.once("secureConnect", () => end("tls-ready"));
     socket.once("error", (error) => end(error?.code || error?.message || "error"));
     socket.once("close", () => end("closed before connect"));

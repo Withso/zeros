@@ -817,6 +817,7 @@ export function authoredPathsFromMessages(
           fromDir,
           root,
           input?.cwd,
+          t.rawOutput,
         )) {
           byPath.set(authored.path, authored.kind);
         }

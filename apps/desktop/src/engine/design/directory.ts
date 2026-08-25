@@ -33,7 +33,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { existsSync } from "node:fs";
-import { lstat, mkdir, readdir, realpath, stat } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { GitError } from "../git/errors";
@@ -296,6 +296,105 @@ async function isEmptyProspectiveDesignDirectory(
   );
 }
 
+/** Marker-directory caches for discoverDesignDirectories(). Both are keyed by
+ * the exact evidence Git itself reads, so an entry can never be fresher or
+ * staler than the repository state that produced it:
+ *
+ *   - index evidence is keyed by the index file's physical identity
+ *     (inode + size + timestamps). Git replaces the index atomically via
+ *     rename, so every index write mints a new inode and misses the cache.
+ *   - HEAD evidence is keyed by the resolved commit oid. A commit's tree is
+ *     content-addressed, so the marker set for one oid is immutable — and
+ *     shareable across worktrees/workspaces sitting on the same commit, which
+ *     is exactly the managed-sibling case where the full-tree `ls-tree -r`
+ *     scan used to be repaid per admission.
+ *
+ * A miss on either side re-runs the real Git command; failures are never
+ * cached, so the fail-closed propagation below is unchanged. */
+const MAX_DISCOVERY_CACHE_ENTRIES = 256;
+const indexMarkerCache = new Map<
+  string,
+  { signature: string; directories: readonly string[] }
+>();
+const headTreeMarkerCache = new Map<string, readonly string[]>();
+let discoveryCacheHits = 0;
+let discoveryCacheMisses = 0;
+
+function rememberBounded<K, V>(cache: Map<K, V>, key: K, value: V): void {
+  cache.delete(key);
+  cache.set(key, value);
+  if (cache.size > MAX_DISCOVERY_CACHE_ENTRIES) {
+    const oldest = cache.keys().next();
+    if (!oldest.done) cache.delete(oldest.value);
+  }
+}
+
+function recallBounded<K, V>(cache: Map<K, V>, key: K): V | undefined {
+  const value = cache.get(key);
+  if (value === undefined) return undefined;
+  // Refresh recency so hot workspaces are not evicted by one-off lookups.
+  cache.delete(key);
+  cache.set(key, value);
+  return value;
+}
+
+/** Physical identity of the index file whose contents `git ls-files` reads.
+ * Returns null when the identity cannot be established (non-repo, unreadable
+ * `.git`), which disables caching for that call rather than guessing. */
+async function indexEvidenceSignature(cwd: string): Promise<string | null> {
+  try {
+    const gitEntry = path.join(cwd, ".git");
+    const entryStat = await lstat(gitEntry);
+    let gitDir: string;
+    if (entryStat.isDirectory()) {
+      gitDir = gitEntry;
+    } else if (entryStat.isFile()) {
+      const contents = await readFile(gitEntry, "utf8");
+      const match = /^gitdir:\s*(.+)\s*$/m.exec(contents);
+      if (!match?.[1]) return null;
+      gitDir = path.resolve(cwd, match[1]);
+    } else {
+      return null;
+    }
+    const indexPath = path.join(gitDir, "index");
+    try {
+      const indexStat = await lstat(indexPath);
+      if (!indexStat.isFile()) return null;
+      return `${gitDir}\0${indexStat.ino}:${indexStat.size}:${indexStat.mtimeMs}:${indexStat.ctimeMs}`;
+    } catch {
+      // A repository with no index yet still has a stable "absent" identity.
+      return `${gitDir}\0absent`;
+    }
+  } catch {
+    return null;
+  }
+}
+
+function markerDirectories(listing: string): readonly string[] {
+  const found = new Set<string>();
+  for (const file of listing.split("\0")) {
+    if (!file || !file.endsWith("/.zeros-canvas.json")) continue;
+    const sanitized = sanitizeDesignDirectoryName(path.posix.dirname(file));
+    if (sanitized) found.add(sanitized);
+  }
+  return [...found];
+}
+
+/** Test-only cache introspection/reset. Production code never calls these. */
+export function resetDesignDiscoveryCacheForTests(): void {
+  indexMarkerCache.clear();
+  headTreeMarkerCache.clear();
+  discoveryCacheHits = 0;
+  discoveryCacheMisses = 0;
+}
+
+export function designDiscoveryCacheStatsForTests(): {
+  hits: number;
+  misses: number;
+} {
+  return { hits: discoveryCacheHits, misses: discoveryCacheMisses };
+}
+
 /** Every design directory evidenced by either HEAD or the current index,
  *  repo-relative and sorted. Taking the union is intentional: a staged rename
  *  must retain both the committed source and staged destination until the
@@ -305,50 +404,81 @@ async function isEmptyProspectiveDesignDirectory(
 export async function discoverDesignDirectories(
   cwd: string,
 ): Promise<string[]> {
-  const listings: string[] = [];
-  try {
-    const { stdout } = await runGit(cwd, [
-      "ls-files",
-      "-z",
-      "--",
-      "*/.zeros-canvas.json",
-    ]);
-    listings.push(stdout);
-  } catch {
-    // An unborn/non-Git checkout has no index recognition. Keep trying HEAD so
-    // one transient command failure cannot erase otherwise committed evidence.
+  const found = new Set<string>();
+
+  const indexSignature = await indexEvidenceSignature(cwd);
+  const cachedIndex = indexSignature
+    ? recallBounded(indexMarkerCache, cwd)
+    : undefined;
+  if (cachedIndex && cachedIndex.signature === indexSignature) {
+    discoveryCacheHits += 1;
+    for (const dir of cachedIndex.directories) found.add(dir);
+  } else {
+    try {
+      const { stdout } = await runGit(cwd, [
+        "ls-files",
+        "-z",
+        "--",
+        "*/.zeros-canvas.json",
+      ]);
+      const directories = markerDirectories(stdout);
+      for (const dir of directories) found.add(dir);
+      // Stat-read-stat: cache this listing only if the index is byte-for-byte
+      // the same identity it was before ls-files ran. If a concurrent Git write
+      // replaced the index mid-read (atomic rename → new inode), skip caching
+      // so the (possibly torn) listing is never stored under a stale key.
+      if (indexSignature) {
+        const afterSignature = await indexEvidenceSignature(cwd);
+        if (afterSignature === indexSignature) {
+          discoveryCacheMisses += 1;
+          rememberBounded(indexMarkerCache, cwd, {
+            signature: indexSignature,
+            directories,
+          });
+        }
+      }
+    } catch {
+      // An unborn/non-Git checkout has no index recognition. Keep trying HEAD
+      // so one transient command failure cannot erase otherwise committed
+      // evidence. Failures are never cached.
+    }
   }
+
   let hasHead = false;
+  let headOid: string | null = null;
   try {
-    await runGit(cwd, ["rev-parse", "--verify", "HEAD"]);
+    const { stdout } = await runGit(cwd, ["rev-parse", "--verify", "HEAD"]);
     hasHead = true;
+    const oid = stdout.trim();
+    // A non-hex verify result cannot key the immutable-tree cache; the scan
+    // below still runs uncached against HEAD so committed evidence survives.
+    if (/^[0-9a-f]{40,64}$/i.test(oid)) headOid = oid;
   } catch {
     // No HEAD is normal during first initialization. Index evidence above is
     // still usable.
   }
   if (hasHead) {
-    // `ls-tree` does not implement the same recursive wildcard pathspec as
-    // `ls-files`; enumerate names and filter in-process. If this bounded read
-    // fails, propagate the error rather than erase committed Design evidence.
-    const { stdout } = await runGit(
-      cwd,
-      ["ls-tree", "-r", "-z", "--name-only", "HEAD"],
-      { maxBufferBytes: 64 * 1024 * 1024 },
-    );
-    listings.push(
-      stdout
-        .split("\0")
-        .filter((file) => file.endsWith("/.zeros-canvas.json"))
-        .join("\0"),
-    );
-  }
-  const found = new Set<string>();
-  for (const stdout of listings) {
-    for (const file of stdout.split("\0")) {
-      if (!file) continue;
-      const dir = path.posix.dirname(file);
-      const sanitized = sanitizeDesignDirectoryName(dir);
-      if (sanitized) found.add(sanitized);
+    const cachedHead = headOid
+      ? recallBounded(headTreeMarkerCache, headOid)
+      : undefined;
+    if (cachedHead) {
+      discoveryCacheHits += 1;
+      for (const dir of cachedHead) found.add(dir);
+    } else {
+      // `ls-tree` does not implement the same recursive wildcard pathspec as
+      // `ls-files`; enumerate names and filter in-process. If this bounded read
+      // fails, propagate the error rather than erase committed Design evidence.
+      const { stdout } = await runGit(
+        cwd,
+        ["ls-tree", "-r", "-z", "--name-only", headOid ?? "HEAD"],
+        { maxBufferBytes: 64 * 1024 * 1024 },
+      );
+      const directories = markerDirectories(stdout);
+      for (const dir of directories) found.add(dir);
+      if (headOid) {
+        discoveryCacheMisses += 1;
+        rememberBounded(headTreeMarkerCache, headOid, directories);
+      }
     }
   }
   return [...found].sort((a, b) => a.localeCompare(b));

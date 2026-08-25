@@ -268,6 +268,10 @@ export interface RunGitOptions {
   identity?: { uid: number; gid: number };
   /** Revoke an in-flight integration operation with its boundary. */
   signal?: AbortSignal;
+  /** This invocation only observes repository state. Git status normally writes
+   * refreshed stat data back to the index; background UI reads opt out so they
+   * cannot contend with agent/terminal writes or wake Git metadata watchers. */
+  readOnly?: boolean;
 }
 
 const SAFE_CALLER_GIT_ENV = new Set([
@@ -677,9 +681,7 @@ function assertSafeCallerConfig(value: string): void {
   );
 }
 
-export function parseEngineGitCommand(
-  args: string[],
-): ParsedEngineGitCommand {
+export function parseEngineGitCommand(args: string[]): ParsedEngineGitCommand {
   const commandIndex = subcommandIndex(args);
   if (commandIndex < 0) {
     throw unsafeGitInvocation(
@@ -1042,8 +1044,8 @@ function resolveIncludePaths(
   } else if (path.isAbsolute(value)) {
     candidates = [value];
   } else {
-    candidates = configOriginPaths(origin, cwd, territory).map(
-      (originPath) => path.resolve(path.dirname(originPath), value),
+    candidates = configOriginPaths(origin, cwd, territory).map((originPath) =>
+      path.resolve(path.dirname(originPath), value),
     );
   }
   return [...new Set(candidates.flatMap(pathSpellings))];
@@ -1719,6 +1721,7 @@ export async function runGit(
     ...safeDiffArgs(parsedCommand.command, parsedCommand.commandArgs),
   ];
   const controlledEnv: Record<string, string | undefined> = {
+    ...(opts.readOnly ? { GIT_OPTIONAL_LOCKS: "0" } : {}),
     ...(networkTarget.network ? { GIT_TERMINAL_PROMPT: "0" } : {}),
     ...(networkTarget.transport === "ssh" &&
     process.env.SSH_AUTH_SOCK &&
@@ -1825,6 +1828,16 @@ export async function runGit(
   } finally {
     credentialInvocation?.release?.();
   }
+}
+
+/** Engine-owned Git observation with optional index writes disabled. Keep this
+ * explicit at read call sites: mutations retain runGit's lock/retry semantics. */
+export function runGitRead(
+  cwd: string,
+  args: string[],
+  opts: Omit<RunGitOptions, "readOnly"> = {},
+): Promise<RunGitResult> {
+  return runGit(cwd, args, { ...opts, readOnly: true });
 }
 
 /** Best-effort classification of git's stderr into structured outcomes.

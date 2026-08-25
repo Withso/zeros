@@ -727,6 +727,24 @@ export interface CursorHostSpawnOptions {
   env: Record<string, string>;
 }
 
+/** Turn one raw stderr chunk from the host into engine log lines.
+ *
+ *  The host already tags its own diagnostics `[cursor-host] …`, while lines
+ *  from inside @cursor/sdk arrive bare, so a chunk carries a mix. Prefixing
+ *  the whole chunk (what this used to do) produced `[cursor-host]
+ *  [cursor-host] ready in 132ms` on the first line of every multi-line report
+ *  and left the rest of the chunk's SDK lines untagged. Split per line and
+ *  normalize to exactly one prefix. */
+export function formatHostStderrLines(chunk: string): string[] {
+  return chunk
+    .split("\n")
+    .map((line) => line.replace(/\s+$/, ""))
+    .filter((line) => line.length > 0)
+    .map(
+      (line) => `[cursor-host] ${line.replace(/^(?:\[cursor-host\]\s?)+/, "")}`,
+    );
+}
+
 export function spawnSubprocessTransport(
   options?: CursorHostSpawnOptions,
 ): HostTransport | null {
@@ -798,8 +816,8 @@ export function spawnSubprocessTransport(
   child.stdout?.setEncoding("utf8");
   child.stderr?.setEncoding("utf8");
   child.stderr?.on("data", (chunk: string) => {
-    const s = String(chunk).replace(/\s+$/, "");
-    if (s) console.error(`[cursor-host] ${s}`);
+    for (const line of formatHostStderrLines(String(chunk)))
+      console.error(line);
   });
 
   return {

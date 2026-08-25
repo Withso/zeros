@@ -69,6 +69,7 @@ import {
 } from "./engine-health";
 import { createSharedBackpressureGate } from "./stream-backpressure";
 import { createBoundedLineForwarder } from "./bounded-line-forwarder";
+import { classifyEngineStderrLine } from "./engine-stderr-level";
 
 // Resolve lazily: main.ts imports this module before its body seeds the release
 // channel baked into a packaged build. Every actual sidecar operation runs after
@@ -1635,7 +1636,11 @@ async function doSpawnEngine(
     console.log(`[engine] ${stripAnsi(line)}`);
   });
   forwardLines(child.stderr, (line) => {
-    console.error(`[engine] ${stripAnsi(line)}`);
+    const text = stripAnsi(line);
+    const level = classifyEngineStderrLine(text);
+    if (level === "log") console.log(`[engine] ${text}`);
+    else if (level === "warn") console.warn(`[engine] ${text}`);
+    else console.error(`[engine] ${text}`);
   });
   // fd 3 — the engine→host control pipe. It carries the child-minted loopback
   // bearer plus MCP vault persistence. Deliberately never routed to logs.

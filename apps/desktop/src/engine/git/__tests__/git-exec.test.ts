@@ -14,6 +14,7 @@ import {
   rm,
   stat,
   symlink,
+  utimes,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -430,6 +431,21 @@ describe("runGit — transient lock retry", () => {
     await writeFile(path.join(repo, "c.txt"), "c\n");
     const res = await runGit(repo, ["add", "c.txt"]);
     expect(res.stdout).toBe("");
+  });
+
+  it("keeps background read-only status from rewriting the shared index", async () => {
+    const indexPath = path.join(repo, ".git", "index");
+    const before = await readFile(indexPath);
+    const future = new Date(Date.now() + 10_000);
+    await utimes(path.join(repo, "a.txt"), future, future);
+
+    await runGit(repo, ["status", "--short"], { readOnly: true });
+
+    expect(await readFile(indexPath)).toEqual(before);
+    // Prove this fixture really would refresh the stat cache without the
+    // read-only option; otherwise the equality above would be vacuous.
+    await runGit(repo, ["status", "--short"]);
+    expect(await readFile(indexPath)).not.toEqual(before);
   });
 
   it("never executes a repository hook with engine authority", async () => {

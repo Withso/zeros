@@ -660,9 +660,7 @@ function makeDesignPathRecognizer(
   const containsMarker = (relativeDir: string): boolean => {
     const cached = descendantProbes.get(relativeDir);
     if (cached !== undefined) return cached;
-    const pending = [
-      nodePath.join(workspacePath, ...relativeDir.split("/")),
-    ];
+    const pending = [nodePath.join(workspacePath, ...relativeDir.split("/"))];
     let visited = 0;
     while (pending.length > 0) {
       const directory = pending.pop()!;
@@ -718,7 +716,9 @@ function makeDesignPathRecognizer(
     ) {
       return true;
     }
-    const segments = normalized.split("/").filter((segment) => segment.length > 0);
+    const segments = normalized
+      .split("/")
+      .filter((segment) => segment.length > 0);
     // A marker at depth >= 1 establishes the folder containing it as Design
     // territory. Treat the marker itself as protected before it exists, too,
     // so the generic code editor cannot manufacture a new Design document and
@@ -766,10 +766,7 @@ function assertLiteralGitMutationPaths(
 ): void {
   for (const candidate of paths) {
     const normalized = normalizeRepoMutationPath(candidate);
-    if (
-      !normalized ||
-      candidate.includes("\0")
-    ) {
+    if (!normalized || candidate.includes("\0")) {
       throw new GitError({
         code: "VALIDATION_FAILED",
         message: `${action} requires exact repository-relative paths.`,
@@ -837,7 +834,10 @@ async function designPathsInCodeMutation(
   const workspacePath = workspace?.path ?? resolvedWorkspacePath;
   if (!workspacePath) return [];
   const activeDesignRoot = designDirectoryNameFor(workspacePath);
-  const isDesignPath = makeDesignPathRecognizer(workspacePath, activeDesignRoot);
+  const isDesignPath = makeDesignPathRecognizer(
+    workspacePath,
+    activeDesignRoot,
+  );
   const immediate = paths.filter(
     (candidate) =>
       isDesignPath(candidate) ||
@@ -1411,6 +1411,12 @@ interface DesignTerritoryTransitionTarget {
   designDirectory: string;
 }
 
+interface DesignTerritoryTransitionOptions {
+  /** First publication may skip retirement only when every live immutable
+   * contribution already contains this prospective Design subtraction. */
+  firstDesignCreation?: boolean;
+}
+
 export class WorkspaceService {
   /** Engine-owned authority transition around a mutation that changes the
    * active Design territory. The service owns the settings/document operation;
@@ -1420,6 +1426,7 @@ export class WorkspaceService {
     | ((
         targets: readonly DesignTerritoryTransitionTarget[],
         mutation: () => Promise<unknown>,
+        options?: DesignTerritoryTransitionOptions,
       ) => Promise<unknown>)
     | null = null;
 
@@ -1451,9 +1458,7 @@ export class WorkspaceService {
    * mutation generations remain authoritative for every later request. */
   private readonly designSnapshotFlights = new Map<
     string,
-    Promise<
-      DesignWorkspaceSnapshot & { protocolCapability: string | null }
-    >
+    Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>
   >();
   setDesignProtocolCapabilityProvider(
     fn: (workspaceId: string) => string,
@@ -1529,21 +1534,27 @@ export class WorkspaceService {
     fn: (
       targets: readonly DesignTerritoryTransitionTarget[],
       mutation: () => Promise<unknown>,
+      options?: DesignTerritoryTransitionOptions,
     ) => Promise<unknown>,
   ): void {
     this.designTerritoryTransitioner = fn;
   }
 
-  /** A Design territory may only be created or repointed after every code
-   * process admitted under the prior authority map is gone. Unit-level service
-   * users that never spawn agents may leave the hook unwired; the engine path
-   * is fail-closed and always supplies it. */
+  /** A Design territory may be published only after the engine proves every
+   * live process already carries the same subtraction or retires the obsolete
+   * ones. Unit-level service users that never spawn processes may leave the
+   * hook unwired; the engine path is fail-closed and always supplies it. */
   private async withDesignTerritoryTransition<T>(
     targets: readonly DesignTerritoryTransitionTarget[],
     mutation: () => Promise<T>,
+    options?: DesignTerritoryTransitionOptions,
   ): Promise<T> {
     if (!this.designTerritoryTransitioner) return mutation();
-    return (await this.designTerritoryTransitioner(targets, mutation)) as T;
+    return (await this.designTerritoryTransitioner(
+      targets,
+      mutation,
+      options,
+    )) as T;
   }
   /** Retires the engine's exact recursive filesystem subscription before a
    * managed checkout is moved for archive/delete. The returned release lets a
@@ -1644,7 +1655,8 @@ export class WorkspaceService {
           : lifecycle.operation != null
             ? `This workspace is currently in a ${lifecycle.operation} operation.`
             : "This workspace's checkout is not available.",
-      remediation: "Wait for the workspace operation to finish, then try again.",
+      remediation:
+        "Wait for the workspace operation to finish, then try again.",
       context: { workspaceId: ws.id },
     });
   }
@@ -5345,17 +5357,17 @@ export class WorkspaceService {
         const current: WorkspaceMode =
           workspace.kind === "design" ? "design" : "code";
         if (current === mode) return { ok: true, mode };
-        // Concurrent duality: switching views over an EXISTING territory does
-        // not restart a correctly-contained code agent. On first Design use,
-        // however, the directory is about to appear after that agent's
-        // creation-time authority map was fixed. The engine transition hook
-        // retires those sessions and blocks new starts around that one mutation.
+        // Concurrent duality: switching views does not restart a correctly
+        // contained code agent. Managed admission reserves the default Design
+        // vnode in advance; the hook proves every live contribution already
+        // subtracts it and retires only a legacy/stale boundary that does not.
         if (mode === "design") {
           await enterDesignMode(workspace, {
             withFirstTerritoryCreation: (designDirectory, mutation) =>
               this.withDesignTerritoryTransition(
                 [{ workspaceId, designDirectory }],
                 mutation,
+                { firstDesignCreation: true },
               ),
           });
           // Hand the renderer the aggregate generated by this same lifecycle

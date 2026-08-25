@@ -899,6 +899,23 @@ const MIGRATION_33_CHAT_IDENTITY_SCHEMA_REPAIR = `
 SELECT 1;
 `;
 
+/** v34 — durable cursors for the boot janitors. A repair that walks an
+ *  IMMUTABLE history (today: turn file attribution, turn-recovery.ts) has no
+ *  way to record that it already looked at a row: the rows it decides to leave
+ *  alone are exactly the rows it cannot write to. Without somewhere to keep
+ *  "how far I got", every launch re-reads the same backlog forever — and that
+ *  backlog only grows, because a turn that runs concurrently with another agent
+ *  legitimately lands in it. One tiny engine-local key/value table fixes that
+ *  for this janitor and any later one. Deliberately NOT rev-stamped and NOT in
+ *  the delta-sync set: a cursor describes one machine's progress through its
+ *  own copy of the history, never shared state. */
+const MIGRATION_34_JANITOR_STATE = `
+CREATE TABLE janitor_state (
+  key   TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+`;
+
 /** The ordered migration list. Append only — NEVER edit or reorder a shipped
  *  entry; add a new one. */
 export const MIGRATIONS: Migration[] = [
@@ -1062,6 +1079,11 @@ export const MIGRATIONS: Migration[] = [
     version: 33,
     name: "chat identity schema invariant repair",
     up: MIGRATION_33_CHAT_IDENTITY_SCHEMA_REPAIR,
+  },
+  {
+    version: 34,
+    name: "boot janitor cursors",
+    up: MIGRATION_34_JANITOR_STATE,
   },
 ];
 

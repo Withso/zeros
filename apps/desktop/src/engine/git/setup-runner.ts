@@ -30,6 +30,7 @@ import type { SetupState } from "./types";
 import { buildSetupCommandEnv } from "./setup-hooks";
 import type {
   BoundaryAuthoritySnapshot,
+  BoundaryTerritoryContributionSnapshot,
   PreparedBoundary,
   RepoTaskBoundaryFactory,
 } from "../agents/containment/types";
@@ -100,6 +101,10 @@ interface SetupEntry {
 
 interface BoundaryTeardownRecord {
   readonly promise: Promise<void>;
+  readonly workspaceId: string;
+  readonly territoryContributions:
+    | readonly BoundaryTerritoryContributionSnapshot[]
+    | undefined;
 }
 
 const missingRepoTaskBoundary: RepoTaskBoundaryFactory = async () => {
@@ -165,7 +170,11 @@ export class SetupManager {
     const records =
       this.boundaryTeardowns.get(workspaceId) ??
       new Set<BoundaryTeardownRecord>();
-    const record = { promise } satisfies BoundaryTeardownRecord;
+    const record = {
+      promise,
+      workspaceId,
+      territoryContributions: boundary.territoryContributions,
+    } satisfies BoundaryTeardownRecord;
     records.add(record);
     this.boundaryTeardowns.set(workspaceId, records);
     void promise.then(
@@ -229,6 +238,66 @@ export class SetupManager {
       throw new AggregateError(
         failures,
         "repository setup boundaries were not globally retired. Restart Zeros before changing registered Design territory.",
+      );
+    }
+  }
+
+  /** Retire only setup boundaries whose immutable authority includes one
+   * managed workspace. A sibling workspace's Design pointer is not part of
+   * this boundary unless the setup owns that workspace or explicitly carries
+   * its contribution. The engine calls this before and after draining matching
+   * admissions, so both already-published and late-published boundaries are
+   * stopped without touching unrelated starts. */
+  async stopForWorkspaceTerritoryAndProve(
+    workspaceId: string,
+    workspaceRoot: string,
+  ): Promise<void> {
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    const includesWorkspace = (
+      owner: string,
+      contributions:
+        | readonly BoundaryTerritoryContributionSnapshot[]
+        | undefined,
+    ): boolean =>
+      owner === workspaceId ||
+      contributions?.some(
+        (contribution) =>
+          path.resolve(contribution.workspaceRoot) === normalizedWorkspace,
+      ) === true;
+
+    const workspaceIds = new Set<string>();
+    for (const [owner, flight] of this.starting) {
+      if (includesWorkspace(owner, flight.authority?.territoryContributions)) {
+        workspaceIds.add(owner);
+      }
+    }
+    for (const entry of this.entries.values()) {
+      if (
+        includesWorkspace(
+          entry.workspaceId,
+          entry.boundary.territoryContributions,
+        )
+      ) {
+        workspaceIds.add(entry.workspaceId);
+      }
+    }
+    for (const owner of workspaceIds) this.stop(owner);
+
+    const records = [...this.boundaryTeardowns.values()]
+      .flatMap((entries) => [...entries])
+      .filter((record) =>
+        includesWorkspace(record.workspaceId, record.territoryContributions),
+      );
+    const results = await Promise.allSettled(
+      records.map((record) => record.promise),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "repository setup boundaries for this Design territory were not proven stopped. Restart Zeros before changing it.",
       );
     }
   }

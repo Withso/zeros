@@ -45,6 +45,23 @@ async function designRepo(): Promise<string> {
   return root;
 }
 
+async function codeRepo(): Promise<string> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "zeros-repo-code-"));
+  temporaryDirectories.push(root);
+  await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: root });
+  await execFileAsync("git", ["config", "user.email", "test@test"], {
+    cwd: root,
+  });
+  await execFileAsync("git", ["config", "user.name", "test"], { cwd: root });
+  await mkdir(path.join(root, ".zeros"), { recursive: true });
+  await writeFile(path.join(root, ".zeros", "settings.toml"), "");
+  await execFileAsync("git", ["add", "-A"], { cwd: root });
+  await execFileAsync("git", ["commit", "-q", "-m", "code"], {
+    cwd: root,
+  });
+  return root;
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories
@@ -173,7 +190,7 @@ describe("repository task boundary factory", () => {
     temporaryDirectories.push(container);
     const managed = path.join(container, "workspaces");
     process.env.ZEROS_WORKSPACES_DIR = managed;
-    const workspaceSource = await designRepo();
+    const workspaceSource = await codeRepo();
     const siblingSource = await designRepo();
     const registeredMain = await designRepo();
     const workspace = path.join(managed, "zeros", "Shocking");
@@ -221,6 +238,9 @@ describe("repository task boundary factory", () => {
 
       expect(request?.protectedWorkspaceDirectories).toContain(managed);
       expect(request?.territory?.protectedDesignDirectories).toContain(
+        path.join(workspace, "Zeros Design"),
+      );
+      expect(await realpath(path.join(workspace, "Zeros Design"))).toBe(
         path.join(workspace, "Zeros Design"),
       );
       expect(request?.territory?.protectedDesignDirectories).toContain(
