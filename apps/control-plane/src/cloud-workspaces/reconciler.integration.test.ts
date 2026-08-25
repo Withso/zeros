@@ -140,7 +140,7 @@ d("cloud workspace reconciliation", () => {
     const sub = randomUUID();
     const owner = await ensureUser(pool, {
       provider: "auth0",
-      providerSub: sub,
+      providerSubject: sub,
       email: `owner-${sub}@example.com`,
       displayName: "Owner",
     });

@@ -40,9 +40,13 @@ const githubConfig: GithubBackendConfig = {
 function config(github: GithubBackendConfig | null): Config {
   return {
     databaseUrl: "postgres://unused",
-    authIssuers: ["https://tenant.example.test/"],
-    authJwksUrl: "https://tenant.example.test/.well-known/jwks.json",
-    authAudience: "https://api.example.test",
+    auth: {
+      provider: "auth0",
+      issuers: ["https://tenant.example.test/"],
+      jwksUrl: "https://tenant.example.test/.well-known/jwks.json",
+      audience: "https://api.example.test",
+    },
+    workos: null,
     port: 8080,
     isProduction: true,
     github,
@@ -50,6 +54,44 @@ function config(github: GithubBackendConfig | null): Config {
     cloudWorkspaces: null,
   };
 }
+
+function workosConfig(): Config {
+  return {
+    ...config(null),
+    auth: {
+      provider: "workos",
+      issuer: "https://identity.example.test/user_management/client_web",
+      jwksUrl: "https://identity.example.test/sso/jwks/client_web",
+      audience: "https://api.example.test",
+      webClientId: "client_web",
+      desktopClientId: "client_desktop",
+    },
+    workos: {
+      appOrigin: "https://app.example.test",
+      apiKey: "workos-api-key-for-tests",
+      cookiePassword: "cookie-password-for-tests".repeat(2),
+      webhookSecret: "webhook-secret-for-tests",
+    },
+  };
+}
+
+describe("app assembly — Railway WorkOS boundary", () => {
+  const app = createApp(workosConfig(), pool, emailConfig as never);
+
+  it("mounts browser, webhook, and desktop routes before /v1 bearer auth", async () => {
+    const cases = [
+      ["GET", "/auth/start?provider=unknown", 400],
+      ["GET", "/auth/browser/session", 401],
+      ["POST", "/auth/desktop-revoke", 400],
+      ["POST", "/auth/workos-webhook", 401],
+    ] as const;
+    for (const [method, path, status] of cases) {
+      const response = await app.request(path, { method });
+      expect({ path, status: response.status }).toEqual({ path, status });
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    }
+  });
+});
 
 describe("app assembly — no GitHub App registered", () => {
   const app = createApp(config(null), pool, emailConfig as never);

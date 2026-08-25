@@ -869,11 +869,8 @@ function GeneralPanel() {
 
 // ── Account — Zeros account, sign-in methods, sign out ──
 //
-// Reads the live Auth0 session via useAuth() (main-process-owned; the
-// renderer only sees decoded identity claims, never a token). GitHub/Google
-// show a "Connect" affordance that lands in a later update (Auth0 account
-// linking, not implemented yet). Sign out clears the session — the AuthGate
-// then flips back to the login screen.
+// Reads the live main-process-owned session via useAuth(). The renderer sees
+// bounded identity metadata and a short-lived bearer, never refresh material.
 
 function providerLabel(provider: string): string {
   if (provider === "github") return "GitHub";
@@ -881,9 +878,6 @@ function providerLabel(provider: string): string {
   return provider;
 }
 
-/** Auth0's `sub` is prefixed by the connection that authenticated the user
- *  (e.g. "google-oauth2|000000000" or "github|000000000") — since this app only
- *  offers Google + GitHub social connections, that prefix IS the provider. */
 function providerFromSub(
   sub: string | null | undefined,
 ): "github" | "google" | null {
@@ -891,6 +885,15 @@ function providerFromSub(
   if (sub.startsWith("github|")) return "github";
   if (sub.startsWith("google-oauth2|")) return "google";
   return null;
+}
+
+function providerFromAuthentication(
+  authenticationMethod: string | null | undefined,
+  legacySub: string | null | undefined,
+): "github" | "google" | null {
+  if (authenticationMethod === "GitHubOAuth") return "github";
+  if (authenticationMethod === "GoogleOAuth") return "google";
+  return providerFromSub(legacySub);
 }
 
 function SignInMethodRow({
@@ -925,7 +928,10 @@ function AccountPanel() {
   const [signingOutAll, setSigningOutAll] = useState(false);
 
   const authed = status === "authenticated" && !!email;
-  const primaryProvider = providerFromSub(session?.user.sub);
+  const primaryProvider = providerFromAuthentication(
+    session?.user.authenticationMethod,
+    session?.user.sub,
+  );
   const linked = new Set(primaryProvider ? [primaryProvider] : []);
   const displayName = session?.user.name ?? null;
   const initial = (email?.[0] ?? "?").toUpperCase();

@@ -48,15 +48,48 @@ export function deploymentEnvironmentErrors(env) {
     return errors;
   }
 
-  for (const name of [
-    "AUTH0_DOMAIN",
-    "AUTH0_CLIENT_ID",
-    "AUTH0_CLIENT_SECRET",
-    "AUTH0_AUDIENCE",
-    "APP_ORIGIN",
-    "CONTROL_PLANE_URL",
-  ]) {
+  const authProvider = (env.AUTH_PROVIDER || "").trim().toLowerCase();
+  if (authProvider !== "auth0" && authProvider !== "workos") {
+    errors.push("AUTH_PROVIDER must be auth0 or workos");
+  }
+
+  for (const name of ["APP_ORIGIN", "CONTROL_PLANE_URL"]) {
     if (!(env[name] || "").trim()) errors.push(`${name} is required`);
+  }
+
+  if (authProvider === "auth0") {
+    for (const name of [
+      "AUTH0_DOMAIN",
+      "AUTH0_CLIENT_ID",
+      "AUTH0_CLIENT_SECRET",
+      "AUTH0_AUDIENCE",
+    ]) {
+      if (!(env[name] || "").trim()) errors.push(`${name} is required`);
+    }
+  }
+
+  if (authProvider === "workos") {
+    // Pages is only a same-origin facade. All provider configuration and
+    // durable session authority belong to the matching Railway environment.
+    for (const railwayOnly of [
+      "WORKOS_API_KEY",
+      "WORKOS_COOKIE_PASSWORD",
+      "WORKOS_WEB_CLIENT_ID",
+      "WORKOS_WEBHOOK_SECRET",
+      "AUTH_BROKER_SECRET",
+      "AUTH_DESKTOP_CLIENT_ID",
+      "AUTH_ISSUER",
+      "AUTH_JWKS_URL",
+      "AUTH_AUDIENCE",
+      "WORKOS_SESSION_WORKER",
+    ]) {
+      if ((env[railwayOnly] || "").trim()) {
+        errors.push(`${railwayOnly} belongs only on Railway in WorkOS mode`);
+      }
+    }
+    if (env.AUTH_SESSIONS) {
+      errors.push("AUTH_SESSIONS Durable Object binding must be removed");
+    }
   }
 
   if (normalizedHttpsOrigin(env.APP_ORIGIN || "") !== expected.appOrigin) {
@@ -70,7 +103,10 @@ export function deploymentEnvironmentErrors(env) {
       `CONTROL_PLANE_URL must be ${expected.controlPlaneOrigin} for ${channel}`,
     );
   }
-  if ((env.AUTH0_AUDIENCE || "").trim() !== expected.controlPlaneOrigin) {
+  if (
+    authProvider === "auth0" &&
+    (env.AUTH0_AUDIENCE || "").trim() !== expected.controlPlaneOrigin
+  ) {
     errors.push(
       `AUTH0_AUDIENCE must be ${expected.controlPlaneOrigin} for ${channel}`,
     );

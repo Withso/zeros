@@ -1,8 +1,9 @@
 // ──────────────────────────────────────────────────────────
 // Config — every knob comes from the environment, validated at boot.
 //
-// Auth0 is the identity issuer only. We derive its JWKS and issuer URLs from
-// AUTH0_DOMAIN and verify tokens locally; authorization remains in Postgres.
+// Authentication is selected explicitly. Legacy Auth0 deployments may still
+// derive their verification URLs from AUTH0_DOMAIN during the staged cutover;
+// WorkOS and future providers must supply the exact issuer/JWKS contract.
 // ──────────────────────────────────────────────────────────
 
 import { z } from "zod";
@@ -13,8 +14,9 @@ import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 const EnvSchema = z.object({
   /** Postgres connection string (Railway: the service's DATABASE_URL). */
   DATABASE_URL: z.string().min(1),
+  AUTH_PROVIDER: z.enum(["auth0", "workos"]).default("auth0"),
   /** The Auth0 tenant domain, e.g. your-tenant.us.auth0.com (no scheme). */
-  AUTH0_DOMAIN: z.string().min(1),
+  AUTH0_DOMAIN: z.string().trim().min(1).optional(),
   /**
    * Accepted `iss` claims, comma-separated; defaults to
    * `https://${AUTH0_DOMAIN}/`. A custom Auth0 domain deployment lists BOTH
@@ -24,8 +26,19 @@ const EnvSchema = z.object({
   AUTH_ISSUER: z.string().optional(),
   /** Override the JWKS URL; defaults to `https://${AUTH0_DOMAIN}/.well-known/jwks.json`. */
   AUTH_JWKS_URL: z.string().url().optional(),
-  /** Expected `aud` claim — the Auth0 API identifier registered for this backend. */
+  /** Expected `aud` claim for this resource server. */
   AUTH_AUDIENCE: z.string().min(1),
+  /** Allowed WorkOS Applications. Required only in WorkOS mode. */
+  AUTH_WEB_CLIENT_ID: z.string().trim().min(1).optional(),
+  AUTH_DESKTOP_CLIENT_ID: z.string().trim().min(1).optional(),
+  /** Canonical browser application origin used for callbacks and cookies. */
+  APP_ORIGIN: z.string().trim().min(1).optional(),
+  /** Railway-only WorkOS browser-session credentials. */
+  WORKOS_API_KEY: z.string().trim().min(1).optional(),
+  WORKOS_COOKIE_PASSWORD: z.string().trim().min(32).optional(),
+  WORKOS_WEBHOOK_SECRET: z.string().trim().min(16).optional(),
+  /** Explicit escape from Zeros-hosted channel/domain assertions for templates. */
+  ZEROS_SELF_HOSTED: z.enum(["true", "false"]).default("false"),
   PORT: z.coerce.number().int().positive().default(8080),
   /** "production" tightens error bodies; anything else is dev-friendly. */
   NODE_ENV: z.string().default("development"),
@@ -139,11 +152,34 @@ export type CloudWorkspaceBackendConfig = {
   reconcileIntervalMs: number;
 };
 
+export type AuthBackendConfig =
+  | {
+      provider: "auth0";
+      issuers: string[];
+      jwksUrl: string;
+      audience: string;
+    }
+  | {
+      provider: "workos";
+      issuer: string;
+      jwksUrl: string;
+      audience: string;
+      webClientId: string;
+      desktopClientId: string;
+    };
+
+export type WorkOSBackendConfig = {
+  appOrigin: string;
+  apiKey: string;
+  cookiePassword: string;
+  webhookSecret: string;
+};
+
 export type Config = {
   databaseUrl: string;
-  authIssuers: string[];
-  authJwksUrl: string;
-  authAudience: string;
+  auth: AuthBackendConfig;
+  /** Null in legacy Auth0 mode. WorkOS secrets live only on Railway. */
+  workos: WorkOSBackendConfig | null;
   port: number;
   isProduction: boolean;
   /** Null when no GitHub App is registered for this environment. */
@@ -261,6 +297,182 @@ function validatedBrowserUrl(
     );
   }
   return url.toString();
+}
+
+function validatedAuthUrl(
+  raw: string,
+  name: string,
+  nodeEnv: string,
+): string {
+  const value = raw.trim();
+  const url = new URL(value);
+  const devLoopback =
+    nodeEnv !== "production" &&
+    url.protocol === "http:" &&
+    (url.hostname === "127.0.0.1" ||
+      url.hostname === "[::1]" ||
+      url.hostname === "localhost");
+  if (
+    (url.protocol !== "https:" && !devLoopback) ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      `Invalid environment: ${name} must use HTTPS (or dev loopback HTTP) and contain no credentials, query, or fragment`,
+    );
+  }
+  // The issuer is an exact JWT string contract, including trailing slashes.
+  // Preserve the operator-provided spelling after URL validation.
+  return value;
+}
+
+function requiredAuthValue(
+  value: string | undefined,
+  name: string,
+): string {
+  const normalized = value?.trim();
+  if (!normalized) {
+    throw new Error(`Invalid environment: ${name} is required`);
+  }
+  return normalized;
+}
+
+function validatedAppOrigin(value: string, nodeEnv: string): string {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Invalid environment: APP_ORIGIN must be an exact origin");
+  }
+  const devLoopback =
+    nodeEnv !== "production" &&
+    url.protocol === "http:" &&
+    (url.hostname === "127.0.0.1" ||
+      url.hostname === "[::1]" ||
+      url.hostname === "localhost");
+  if (
+    (url.protocol !== "https:" && !devLoopback) ||
+    url.username ||
+    url.password ||
+    url.pathname !== "/" ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      "Invalid environment: APP_ORIGIN must be an HTTPS origin (or dev loopback HTTP) with no path, credentials, query, or fragment",
+    );
+  }
+  return url.origin;
+}
+
+function loadWorkOSBackendConfig(
+  env: z.infer<typeof EnvSchema>,
+): WorkOSBackendConfig | null {
+  if (env.AUTH_PROVIDER !== "workos") return null;
+  return {
+    appOrigin: validatedAppOrigin(
+      requiredAuthValue(env.APP_ORIGIN, "APP_ORIGIN"),
+      env.NODE_ENV,
+    ),
+    apiKey: requiredAuthValue(env.WORKOS_API_KEY, "WORKOS_API_KEY"),
+    cookiePassword: requiredAuthValue(
+      env.WORKOS_COOKIE_PASSWORD,
+      "WORKOS_COOKIE_PASSWORD",
+    ),
+    webhookSecret: requiredAuthValue(
+      env.WORKOS_WEBHOOK_SECRET,
+      "WORKOS_WEBHOOK_SECRET",
+    ),
+  };
+}
+
+function validateWorkOSOriginSeparation(
+  auth: Extract<AuthBackendConfig, { provider: "workos" }>,
+  backend: WorkOSBackendConfig,
+): void {
+  let audienceOrigin: string | null = null;
+  try {
+    audienceOrigin = new URL(auth.audience).origin;
+  } catch {
+    // OAuth audiences may be non-URL identifiers. Hosted Zeros environments
+    // apply their stricter exact-audience matrix below.
+  }
+  if (audienceOrigin === backend.appOrigin) {
+    throw new Error(
+      "Invalid environment: APP_ORIGIN and the WorkOS API audience must use separate origins",
+    );
+  }
+}
+
+function loadAuthConfig(env: z.infer<typeof EnvSchema>): AuthBackendConfig {
+  if (env.AUTH_PROVIDER === "workos") {
+    const issuerValues = requiredAuthValue(env.AUTH_ISSUER, "AUTH_ISSUER")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean);
+    if (issuerValues.length !== 1) {
+      throw new Error(
+        "Invalid environment: AUTH_ISSUER must contain exactly one issuer in WorkOS mode",
+      );
+    }
+    const webClientId = requiredAuthValue(
+      env.AUTH_WEB_CLIENT_ID,
+      "AUTH_WEB_CLIENT_ID",
+    );
+    const desktopClientId = requiredAuthValue(
+      env.AUTH_DESKTOP_CLIENT_ID,
+      "AUTH_DESKTOP_CLIENT_ID",
+    );
+    if (webClientId === desktopClientId) {
+      throw new Error(
+        "Invalid environment: AUTH_WEB_CLIENT_ID and AUTH_DESKTOP_CLIENT_ID must be different",
+      );
+    }
+    return {
+      provider: "workos",
+      issuer: validatedAuthUrl(
+        issuerValues[0]!,
+        "AUTH_ISSUER",
+        env.NODE_ENV,
+      ),
+      jwksUrl: validatedAuthUrl(
+        requiredAuthValue(env.AUTH_JWKS_URL, "AUTH_JWKS_URL"),
+        "AUTH_JWKS_URL",
+        env.NODE_ENV,
+      ),
+      audience: env.AUTH_AUDIENCE,
+      webClientId,
+      desktopClientId,
+    };
+  }
+
+  const domain = env.AUTH0_DOMAIN?.replace(/\/+$/, "") || null;
+  if (!domain && (!env.AUTH_ISSUER?.trim() || !env.AUTH_JWKS_URL?.trim())) {
+    throw new Error(
+      "Invalid environment: AUTH0_DOMAIN is required unless both AUTH_ISSUER and AUTH_JWKS_URL are configured",
+    );
+  }
+  const base = domain ? `https://${domain}` : null;
+  const issuers = (env.AUTH_ISSUER ?? `${base}/`)
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .map((value) => validatedAuthUrl(value, "AUTH_ISSUER", env.NODE_ENV));
+  if (issuers.length === 0) {
+    throw new Error("Invalid environment: AUTH_ISSUER is required");
+  }
+  return {
+    provider: "auth0",
+    issuers,
+    jwksUrl: validatedAuthUrl(
+      env.AUTH_JWKS_URL ?? `${base}/.well-known/jwks.json`,
+      "AUTH_JWKS_URL",
+      env.NODE_ENV,
+    ),
+    audience: env.AUTH_AUDIENCE,
+  };
 }
 
 /** Resolve the optional GitHub App block. Throws only so `loadConfig` can turn
@@ -502,14 +714,17 @@ function loadCloudWorkspaceConfig(
 const HOSTED_ENVIRONMENTS = {
   alpha: {
     audience: "https://api-alpha.zeros.build",
+    appOrigin: "https://app-alpha.zeros.build",
     branch: "main",
   },
   beta: {
     audience: "https://api-beta.zeros.build",
+    appOrigin: "https://app-beta.zeros.build",
     branch: "release/",
   },
   production: {
     audience: "https://api.zeros.build",
+    appOrigin: "https://app.zeros.build",
     branch: "release/",
   },
 } as const;
@@ -517,10 +732,16 @@ const HOSTED_ENVIRONMENTS = {
 function validateRailwayEnvironment(
   env: NodeJS.ProcessEnv,
   audience: string,
+  appOrigin: string | null,
+  selfHosted: boolean,
 ): void {
   // Railway injects these values. Local processes and non-Railway hosts have no
   // project id and intentionally skip this deployment-topology assertion.
   if (!env.RAILWAY_PROJECT_ID) return;
+  // Public templates use installer-owned WorkOS credentials and Railway
+  // domains, so the Zeros-hosted channel matrix does not apply. This opt-out
+  // is explicit; official deployments keep the fail-closed assertions below.
+  if (selfHosted) return;
   const name = (env.RAILWAY_ENVIRONMENT_NAME ?? "").trim().toLowerCase();
   const expected =
     HOSTED_ENVIRONMENTS[name as keyof typeof HOSTED_ENVIRONMENTS];
@@ -532,6 +753,11 @@ function validateRailwayEnvironment(
   if (audience !== expected.audience) {
     throw new Error(
       `Invalid environment: AUTH_AUDIENCE must be ${expected.audience} in Railway ${name}`,
+    );
+  }
+  if (appOrigin !== null && appOrigin !== expected.appOrigin) {
+    throw new Error(
+      `Invalid environment: APP_ORIGIN must be ${expected.appOrigin} in Railway ${name}`,
     );
   }
   const branch = (env.RAILWAY_GIT_BRANCH ?? "").trim();
@@ -559,12 +785,17 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     throw new Error(`Invalid environment: ${missing}`);
   }
   const e = parsed.data;
-  validateRailwayEnvironment(env, e.AUTH_AUDIENCE);
-  const base = `https://${e.AUTH0_DOMAIN.replace(/\/+$/, "")}`;
-  const issuers = (e.AUTH_ISSUER ?? `${base}/`)
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  const auth = loadAuthConfig(e);
+  const workos = loadWorkOSBackendConfig(e);
+  if (auth.provider === "workos" && workos) {
+    validateWorkOSOriginSeparation(auth, workos);
+  }
+  validateRailwayEnvironment(
+    env,
+    e.AUTH_AUDIENCE,
+    workos?.appOrigin ?? null,
+    e.ZEROS_SELF_HOSTED === "true",
+  );
 
   // An operator who supplied NONE of the GitHub variables has simply not
   // registered an App yet — that is a normal state and stays quiet. Anything
@@ -590,9 +821,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 
   return {
     databaseUrl: e.DATABASE_URL,
-    authIssuers: issuers,
-    authJwksUrl: e.AUTH_JWKS_URL ?? `${base}/.well-known/jwks.json`,
-    authAudience: e.AUTH_AUDIENCE,
+    auth,
+    workos,
     port: e.PORT,
     isProduction: e.NODE_ENV === "production",
     github,

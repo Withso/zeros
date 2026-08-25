@@ -48,6 +48,21 @@ export default defineConfig({
     __ZEROS_APP_BASE_URL_BAKED__: JSON.stringify(
       process.env.VITE_APP_BASE_URL || "",
     ),
+    // Desktop WorkOS is a public PKCE client. Bake only public verification
+    // values; no WorkOS API key has a define or runtime input in Electron.
+    __ZEROS_AUTH_PROVIDER_BAKED__: JSON.stringify(
+      process.env.AUTH_PROVIDER || "",
+    ),
+    __ZEROS_AUTH_DESKTOP_CLIENT_ID_BAKED__: JSON.stringify(
+      process.env.AUTH_DESKTOP_CLIENT_ID || "",
+    ),
+    __ZEROS_AUTH_ISSUER_BAKED__: JSON.stringify(process.env.AUTH_ISSUER || ""),
+    __ZEROS_AUTH_JWKS_URL_BAKED__: JSON.stringify(
+      process.env.AUTH_JWKS_URL || "",
+    ),
+    __ZEROS_AUTH_AUDIENCE_BAKED__: JSON.stringify(
+      process.env.AUTH_AUDIENCE || "",
+    ),
   },
   external: [
     "electron",
@@ -78,6 +93,9 @@ export default defineConfig({
   // masks this via type stripping — Electron's does not). Force-bundle them.
   noExternal: [
     "@decimalturn/toml-patch",
+    // jose is ESM-only while Electron main is bundled as CommonJS. It is pure
+    // JavaScript, so bundling keeps JWT verification boot-safe.
+    "jose",
     /^@zeros\/(?:design-core|design-web|protocol)/,
   ],
   // Banner runs BEFORE any import resolution — lets us log and

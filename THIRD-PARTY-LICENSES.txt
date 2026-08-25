@@ -9,10 +9,9 @@ Scope
 -----
 This inventory covers production packages resolved by the root pnpm
 workspace (desktop, shared packages, and the development marketing graph),
-the independently locked control plane, the standalone
-marketing graph deployed by Cloudflare, and the Electron runtime embedded
-in the desktop application. The independently locked web app currently has
-no production dependencies; generation fails if that changes. Optional
+the independently locked control plane, the standalone marketing graph
+deployed by Cloudflare, the independently locked web Pages functions,
+and the Electron runtime embedded in the desktop application. Optional
 JavaScript dependencies are included. Host-native optional packages are
 normalized to the macOS arm64
 release contents: the staged Claude runtime, the staged Codex runtime, the
@@ -30,7 +29,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.238: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.28: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (599 resolved package/version records)
+PACKAGE INVENTORY (600 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.238
@@ -1381,6 +1380,13 @@ PACKAGE INVENTORY (599 resolved package/version records)
   Author: Rob Lourens
   Source: https://github.com/microsoft/vscode-ripgrep
   License documents: ccf06b707607
+
+@workos-inc/node@10.10.0
+  License: MIT
+  Surfaces: control plane
+  Author: WorkOS
+  Source: https://github.com/workos/workos-node
+  License documents: 440126930e01
 
 @xterm/addon-fit@0.11.0
   License: MIT
@@ -4055,7 +4061,7 @@ zwitch@2.0.4
   Source: https://github.com/wooorm/zwitch
   License documents: ca4662cb5d1b
 
-LICENSE AND NOTICE TEXTS (270 unique documents)
+LICENSE AND NOTICE TEXTS (271 unique documents)
 ------------------------
 
 ================================================================================
@@ -7627,6 +7633,35 @@ FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR
 COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER
 IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+================================================================================
+DOCUMENT 440126930e01
+SHA-256: 440126930e01613ce003165bcf3c3f0c3525a4f820d36bbeffdaad11f70038ec
+Applies to: @workos-inc/node@10.10.0
+Source labels: @workos-inc/node@10.10.0 — LICENSE
+================================================================================
+
+MIT License
+
+Copyright (c) 2021 WorkOS
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 
 ================================================================================
 DOCUMENT 4495d9f249dc

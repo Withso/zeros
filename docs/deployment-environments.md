@@ -15,11 +15,11 @@ that Beta validated.
 
 ## Deployment topology
 
-| Channel | Source | Railway | Cloudflare Pages | Public origins |
-| --- | --- | --- | --- | --- |
-| Alpha | `main` | `alpha` environment: control plane + its own Postgres | `zeros-web-alpha` | `api-alpha.zeros.build`, `app-alpha.zeros.build` |
-| Beta | current `release/X.Y.Z` | `beta` environment: control plane + its own Postgres | `zeros-web-beta` | `api-beta.zeros.build`, `app-beta.zeros.build` |
-| Production | the same release commit Beta validated | `production` environment: control plane + its own Postgres | `zeros-web` | `api.zeros.build`, `app.zeros.build`, marketing domains |
+| Channel    | Source                                 | Railway                                                    | Cloudflare web          | Public origins                                          |
+| ---------- | -------------------------------------- | ---------------------------------------------------------- | ----------------------- | ------------------------------------------------------- |
+| Alpha      | `main`                                 | `alpha` environment: control plane + its own Postgres      | Pages `zeros-web-alpha` | `api-alpha.zeros.build`, `app-alpha.zeros.build`        |
+| Beta       | current `release/X.Y.Z`                | `beta` environment: control plane + its own Postgres       | Pages `zeros-web-beta`  | `api-beta.zeros.build`, `app-beta.zeros.build`          |
+| Production | the same release commit Beta validated | `production` environment: control plane + its own Postgres | Pages `zeros-web`       | `api.zeros.build`, `app.zeros.build`, marketing domains |
 
 This remains one backend codebase and one frontend codebase. Each channel is an
 isolated deployment instance with independent data, credentials, sessions, and
@@ -86,11 +86,11 @@ For the control-plane service in every environment:
 
 Configure sources and deploy controls as follows:
 
-| Railway environment | Git source | Autodeploy | Wait for CI |
-| --- | --- | --- | --- |
-| `alpha` | `main` | on | on |
-| `beta` | current `release/X.Y.Z` | on after the release cut | on |
-| `production` | current validated `release/X.Y.Z` | **off** | required before manual deploy |
+| Railway environment | Git source                        | Autodeploy               | Wait for CI                   |
+| ------------------- | --------------------------------- | ------------------------ | ----------------------------- |
+| `alpha`             | `main`                            | on                       | on                            |
+| `beta`              | current `release/X.Y.Z`           | on after the release cut | on                            |
+| `production`        | current validated `release/X.Y.Z` | **off**                  | required before manual deploy |
 
 Attach each custom API domain to the matching service instance. Confirm all
 three `/healthz` endpoints before configuring a desktop build.
@@ -105,30 +105,52 @@ frontend.
 
 Set these independently in every environment:
 
-| Variable | Alpha | Beta | Production |
-| --- | --- | --- | --- |
-| `DATABASE_URL` | Alpha Postgres private reference | Beta Postgres private reference | Production Postgres private reference |
-| `AUTH_AUDIENCE` | `https://api-alpha.zeros.build` | `https://api-beta.zeros.build` | `https://api.zeros.build` |
-| `AUTH0_DOMAIN` | selected Auth0 tenant/domain | selected Auth0 tenant/domain | selected Auth0 tenant/domain |
-| `NODE_ENV` | `production` | `production` | `production` |
-| `INVITE_LINK_BASE` | `https://app-alpha.zeros.build/invite` | `https://app-beta.zeros.build/invite` | `https://app.zeros.build/invite` |
-| `GITHUB_OAUTH_CALLBACK_URL` | matching Alpha API callback | matching Beta API callback | matching Production API callback |
-| `GITHUB_COMPLETION_PAGE_URL` | matching Alpha app page | matching Beta app page | matching Production app page |
+| Variable                     | Alpha                                                    | Beta                                                    | Production                                                    |
+| ---------------------------- | -------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------- |
+| `DATABASE_URL`               | Alpha Postgres private reference                         | Beta Postgres private reference                         | Production Postgres private reference                         |
+| `AUTH_PROVIDER`              | `auth0` until cutover, then `workos`                     | `auth0` until cutover, then `workos`                    | `auth0` until cutover, then `workos`                          |
+| `AUTH_AUDIENCE`              | `https://api-alpha.zeros.build`                          | `https://api-beta.zeros.build`                          | `https://api.zeros.build`                                     |
+| `AUTH_ISSUER`                | exact Alpha WorkOS issuer; optional override for Auth0   | exact Beta WorkOS issuer; optional override for Auth0   | exact Production WorkOS issuer; optional override for Auth0   |
+| `AUTH_JWKS_URL`              | exact Alpha WorkOS JWKS URL; optional override for Auth0 | exact Beta WorkOS JWKS URL; optional override for Auth0 | exact Production WorkOS JWKS URL; optional override for Auth0 |
+| `AUTH_WEB_CLIENT_ID`         | Alpha Web Application in WorkOS mode                     | Beta Web Application in WorkOS mode                     | Production Web Application in WorkOS mode                     |
+| `AUTH_DESKTOP_CLIENT_ID`     | Alpha Desktop Application in WorkOS mode                 | Beta Desktop Application in WorkOS mode                 | Production Desktop Application in WorkOS mode                 |
+| `APP_ORIGIN`                 | `https://app-alpha.zeros.build` in WorkOS mode            | `https://app-beta.zeros.build` in WorkOS mode            | `https://app.zeros.build` in WorkOS mode                       |
+| `WORKOS_API_KEY`             | Alpha server key in WorkOS mode                          | Beta server key in WorkOS mode                          | Production server key in WorkOS mode                          |
+| `WORKOS_COOKIE_PASSWORD`     | unique random Alpha 32+ character secret                 | unique random Beta 32+ character secret                 | unique random Production 32+ character secret                 |
+| `WORKOS_WEBHOOK_SECRET`      | Alpha endpoint signing secret                            | Beta endpoint signing secret                            | Production endpoint signing secret                            |
+| `AUTH0_DOMAIN`               | legacy fallback until Alpha cutover                      | legacy fallback until Beta cutover                      | legacy fallback until Production cutover                      |
+| `NODE_ENV`                   | `production`                                             | `production`                                            | `production`                                                  |
+| `INVITE_LINK_BASE`           | `https://app-alpha.zeros.build/invite`                   | `https://app-beta.zeros.build/invite`                   | `https://app.zeros.build/invite`                              |
+| `GITHUB_OAUTH_CALLBACK_URL`  | matching Alpha API callback                              | matching Beta API callback                              | matching Production API callback                              |
+| `GITHUB_COMPLETION_PAGE_URL` | matching Alpha app page                                  | matching Beta app page                                  | matching Production app page                                  |
 
 Use separate GitHub App registrations per environment. Keep OAuth secrets,
 refresh-binding secrets, database credentials, Intercom credentials, and Linear
 credentials in Railway only.
 
-## Auth0 setup
+The issuer, JWKS URL, audience, and client IDs are public verification values;
+they still remain environment-local configuration so channels cannot drift or
+accept one another's tokens. The WorkOS API key, cookie password, and endpoint
+signing secret are Railway-only. Never put them in Pages, a desktop build,
+GitHub variables, command arguments, logs, or repository files.
+
+For the clean-slate identity cutover, prefer provisioning a fresh database and
+running all migrations. An Alpha/Beta in-place reset must use the guarded
+`pnpm --dir apps/control-plane reset:database` procedure in the control-plane
+README. It is dry-run by default, requires a backup confirmation plus an exact
+target fingerprint, and refuses Production; Production always receives a fresh
+database service.
+
+## Legacy Auth0 setup during migration
 
 Use three Regular Web Applications and three API identifiers. A shared Auth0
 tenant is acceptable, but clients and audiences stay isolated:
 
-| Channel | Callback | Logout URL | API identifier |
-| --- | --- | --- | --- |
-| Alpha | `https://app-alpha.zeros.build/auth/callback` | `https://app-alpha.zeros.build/` | `https://api-alpha.zeros.build` |
-| Beta | `https://app-beta.zeros.build/auth/callback` | `https://app-beta.zeros.build/` | `https://api-beta.zeros.build` |
-| Production | `https://app.zeros.build/auth/callback` | `https://app.zeros.build/` | `https://api.zeros.build` |
+| Channel    | Callback                                      | Logout URL                       | API identifier                  |
+| ---------- | --------------------------------------------- | -------------------------------- | ------------------------------- |
+| Alpha      | `https://app-alpha.zeros.build/auth/callback` | `https://app-alpha.zeros.build/` | `https://api-alpha.zeros.build` |
+| Beta       | `https://app-beta.zeros.build/auth/callback`  | `https://app-beta.zeros.build/`  | `https://api-beta.zeros.build`  |
+| Production | `https://app.zeros.build/auth/callback`       | `https://app.zeros.build/`       | `https://api.zeros.build`       |
 
 Keep the Post-Login Action that stamps the namespaced email, email verification,
 name, and picture claims consistent across the three clients. Do not let an
@@ -139,20 +161,20 @@ Alpha or Beta web project use the Production client secret or audience.
 Create `zeros-web-alpha` and `zeros-web-beta` beside the existing `zeros-web`.
 All three use:
 
-| Build setting | Value |
-| --- | --- |
-| Framework | None |
-| Root directory | `apps/web` |
-| Build command | `npm run build` |
-| Output directory | `dist` |
+| Build setting    | Value           |
+| ---------------- | --------------- |
+| Framework        | None            |
+| Root directory   | `apps/web`      |
+| Build command    | `npm run build` |
+| Output directory | `dist`          |
 
 Configure each project:
 
-| Project | Production branch | Automatic Production deploys | Custom app domain |
-| --- | --- | --- | --- |
-| `zeros-web-alpha` | `main` | on | `app-alpha.zeros.build` |
-| `zeros-web-beta` | current `release/X.Y.Z` | on while stabilizing that release | `app-beta.zeros.build` |
-| `zeros-web` | current validated `release/X.Y.Z` | **off** | `app.zeros.build` plus Production marketing domains |
+| Project           | Production branch                 | Automatic Production deploys      | Custom app domain                                   |
+| ----------------- | --------------------------------- | --------------------------------- | --------------------------------------------------- |
+| `zeros-web-alpha` | `main`                            | on                                | `app-alpha.zeros.build`                             |
+| `zeros-web-beta`  | current `release/X.Y.Z`           | on while stabilizing that release | `app-beta.zeros.build`                              |
+| `zeros-web`       | current validated `release/X.Y.Z` | **off**                           | `app.zeros.build` plus Production marketing domains |
 
 Disable Preview deployments for these release projects. If PR previews are
 needed later, create a fourth preview-only project with preview-only credentials
@@ -166,18 +188,52 @@ unauthenticated secret: keep it in a protected password manager or GitHub
 Environment, rotate/recreate it when the release branch changes, and never put
 it in the repository. Do not temporarily turn Production autodeploy back on.
 
-Each project needs its own `SESSIONS` KV namespace. Set the following in the
-project's Production variable/binding configuration:
+Each project retains its own `SESSIONS` KV namespace for Auth0 rollback and
+legacy abuse controls. Set these common values in the project's Production
+variable/binding configuration:
 
-| Variable | Alpha | Beta | Production |
-| --- | --- | --- | --- |
-| `ZEROS_DEPLOY_ENV` | `alpha` | `beta` | `production` |
-| `APP_ORIGIN` | `https://app-alpha.zeros.build` | `https://app-beta.zeros.build` | `https://app.zeros.build` |
-| `CONTROL_PLANE_URL` | `https://api-alpha.zeros.build` | `https://api-beta.zeros.build` | `https://api.zeros.build` |
-| `AUTH0_AUDIENCE` | `https://api-alpha.zeros.build` | `https://api-beta.zeros.build` | `https://api.zeros.build` |
-| `AUTH0_DOMAIN` | configured domain | configured domain | configured domain |
-| `AUTH0_CLIENT_ID` | Alpha client | Beta client | Production client |
-| `AUTH0_CLIENT_SECRET` | Alpha secret | Beta secret | Production secret |
+| Variable            | Alpha                                            | Beta                                             | Production                                       |
+| ------------------- | ------------------------------------------------ | ------------------------------------------------ | ------------------------------------------------ |
+| `ZEROS_DEPLOY_ENV`  | `alpha`                                          | `beta`                                           | `production`                                     |
+| `AUTH_PROVIDER`     | `auth0` until coordinated cutover, then `workos` | `auth0` until coordinated cutover, then `workos` | `auth0` until coordinated cutover, then `workos` |
+| `APP_ORIGIN`        | `https://app-alpha.zeros.build`                  | `https://app-beta.zeros.build`                   | `https://app.zeros.build`                        |
+| `CONTROL_PLANE_URL` | `https://api-alpha.zeros.build`                  | `https://api-beta.zeros.build`                   | `https://api.zeros.build`                        |
+
+Auth0 compatibility mode additionally requires:
+
+| Variable              | Alpha                           | Beta                           | Production                |
+| --------------------- | ------------------------------- | ------------------------------ | ------------------------- |
+| `AUTH0_AUDIENCE`      | `https://api-alpha.zeros.build` | `https://api-beta.zeros.build` | `https://api.zeros.build` |
+| `AUTH0_DOMAIN`        | configured domain               | configured domain              | configured domain         |
+| `AUTH0_CLIENT_ID`     | Alpha client                    | Beta client                    | Production client         |
+| `AUTH0_CLIENT_SECRET` | Alpha secret                    | Beta secret                    | Production secret         |
+
+WorkOS mode adds no provider-specific Pages secret or binding. Pages remains a
+same-origin facade using only the common `APP_ORIGIN` and
+`CONTROL_PLANE_URL`. Remove any retired `AUTH_SESSIONS` binding,
+`WORKOS_SESSION_WORKER`, `WORKOS_WEBHOOK_SECRET`, or `AUTH_BROKER_SECRET` from
+the Pages projects. Browser credentials are host-only random cookies; their
+digests, PKCE verifier, encrypted sealed session, and serialized refresh state
+live in the channel's Railway Postgres.
+
+For each WorkOS environment, register the exact channel URL
+`https://<api-host>/auth/workos-webhook` and subscribe only to `user.updated`
+and `user.deleted`. The WorkOS-hosted AuthKit domain is sufficient. A paid
+custom WorkOS authentication domain is optional and not part of this rollout.
+A self-hosted template can use platform-provided HTTPS domains instead of
+buying domains. Keep the frontend `APP_ORIGIN` separate from the API origin so
+server-only session responses are never same-origin browser endpoints; two
+services in one Railway project can each use their generated domain. Such a
+template sets `ZEROS_SELF_HOSTED=true`; official Alpha/Beta/Production services
+must leave it unset so the repository's exact channel and branch checks remain
+active.
+
+Phases 2 and 3 prepare this topology but do not activate it. Railway accepts one
+issuer at a time, while released builds remain on Auth0 until the coordinated
+cutover. At the Phase 4 Alpha cutover, switch the clean Alpha database, Railway
+`AUTH_PROVIDER`, Pages `AUTH_PROVIDER`, WorkOS webhook, and matching desktop
+build as one coordinated operation. Never switch only the browser or only the
+control plane.
 
 Only `zeros-web` owns `zeros.build`, `www.zeros.build`, and `zeros.design`.
 Those marketing domains must never be attached to Alpha or Beta.
@@ -188,15 +244,30 @@ The repository already has `alpha`, `beta`, and `production` GitHub
 Environments. Add environment-scoped Actions **variables** (secrets remain a
 backward-compatible fallback):
 
-| GitHub environment | `VITE_APP_BASE_URL` | `VITE_CONTROL_PLANE_URL` |
-| --- | --- | --- |
-| `alpha` | `https://app-alpha.zeros.build` | `https://api-alpha.zeros.build` |
-| `beta` | `https://app-beta.zeros.build` | `https://api-beta.zeros.build` |
-| `production` | `https://app.zeros.build` | `https://api.zeros.build` |
+| GitHub environment | `VITE_APP_BASE_URL`             | `VITE_CONTROL_PLANE_URL`        |
+| ------------------ | ------------------------------- | ------------------------------- |
+| `alpha`            | `https://app-alpha.zeros.build` | `https://api-alpha.zeros.build` |
+| `beta`             | `https://app-beta.zeros.build`  | `https://api-beta.zeros.build`  |
+| `production`       | `https://app.zeros.build`       | `https://api.zeros.build`       |
 
 The workflows validate these exact pairs. Both values are baked into the
 renderer, and both are now also available to Electron main for Auth0 and GitHub
 handoffs. A missing Alpha/Beta value cannot silently fall back to Production.
+
+Desktop releases additionally require these environment-scoped Actions
+variables:
+
+| Variable                 | Auth0 rollback build | WorkOS build                   |
+| ------------------------ | -------------------- | ------------------------------ |
+| `AUTH_PROVIDER`          | `auth0`              | `workos`                       |
+| `AUTH_DESKTOP_CLIENT_ID` | unused               | channel Desktop Application ID |
+| `AUTH_ISSUER`            | unused               | exact qualified issuer         |
+| `AUTH_JWKS_URL`          | unused               | exact qualified JWKS URL       |
+| `AUTH_AUDIENCE`          | unused               | matching channel API origin    |
+
+These are public verification values baked only into Electron main. Never add a
+WorkOS API key—generic, web, desktop, or channel-prefixed—to a desktop release
+environment. The release gate rejects any `WORKOS_*_API_KEY` shape.
 
 Set GitHub Environment deployment-branch protection too: `alpha` permits only
 `main`; `beta` permits only `release/*`; `production` permits only `release/*`
@@ -217,7 +288,7 @@ Configure at least one destination in each shipped Railway environment:
 - optional: `POSTHOG_PROJECT_URL`
 
 The endpoint applies a Railway `X-Real-IP` limit before authentication, then
-uses the verified Auth0 user identity and a tighter per-user limit. It sends
+uses the verified Zeros account identity and a tighter per-user limit. It sends
 independently to Intercom and Linear and returns success if either destination
 accepts the report. Intercom and Linear secrets never enter Cloudflare Pages or
 a desktop build.

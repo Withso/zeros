@@ -242,6 +242,80 @@ describe("verifyAccountJwt — asymmetric", () => {
       ).sub,
     ).toBe("user-123");
   });
+
+  it("enforces the complete Zeros access-token contract when selected", () => {
+    const { publicKey, privateKey } = generateKeyPairSync("rsa", {
+      modulusLength: 2048,
+    });
+    const pem = publicKey.export({ type: "spki", format: "pem" }).toString();
+    const issuer = "https://issuer.example/exact/";
+    const clientId = "client_desktop_example";
+    const claims = {
+      ...base,
+      iss: issuer,
+      iat: sec,
+      sid: "session-123",
+      jti: "token-123",
+      client_id: clientId,
+      "https://zeros.build/email": "verified@example.com",
+      "https://zeros.build/email_verified": true,
+    };
+    const config = {
+      publicKey: pem,
+      audience: "authenticated",
+      issuer,
+      algorithm: "RS256" as const,
+      contract: "zeros-access-v1" as const,
+      clientId,
+    };
+
+    expect(
+      verifyAccountJwt(signAsym(claims, "RS256", privateKey), config, NOW).sub,
+    ).toBe("user-123");
+    expect(() =>
+      verifyAccountJwt(
+        signAsym(
+          { ...claims, client_id: "client_web_example" },
+          "RS256",
+          privateKey,
+        ),
+        config,
+        NOW,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "BAD_CLIENT" }));
+    expect(() =>
+      verifyAccountJwt(
+        signAsym(
+          { ...claims, "https://zeros.build/email_verified": false },
+          "RS256",
+          privateKey,
+        ),
+        config,
+        NOW,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "CLAIM_REJECTED" }));
+    const { sid: _sid, ...withoutSession } = claims;
+    expect(() =>
+      verifyAccountJwt(
+        signAsym(withoutSession, "RS256", privateKey),
+        config,
+        NOW,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "MISSING_CLAIM" }));
+    expect(() =>
+      verifyAccountJwt(
+        signAsym(
+          claims,
+          "ES256",
+          generateKeyPairSync("ec", {
+            namedCurve: "P-256",
+          }).privateKey,
+        ),
+        config,
+        NOW,
+      ),
+    ).toThrowError(expect.objectContaining({ code: "UNSUPPORTED_ALG" }));
+  });
 });
 
 describe("verifyAccountJwt — multi-issuer", () => {
@@ -815,6 +889,40 @@ describe("buildAccountAuthFromEnv", () => {
         "https://tenant.example.com/,https://api.zeros.build/",
     });
     expect(a?.config.issuer).toContain("tenant.example.com");
+  });
+
+  it("builds the exact Zeros desktop access-token contract", () => {
+    const a = buildAccountAuthFromEnv({
+      ZEROS_ACCOUNT_JWT_JWKS_URL: "https://issuer.example/jwks/",
+      ZEROS_ACCOUNT_JWT_ISS: "https://issuer.example/exact/",
+      ZEROS_ACCOUNT_JWT_AUD: "https://api-alpha.zeros.build",
+      ZEROS_ACCOUNT_JWT_CONTRACT: "zeros-access-v1",
+      ZEROS_ACCOUNT_JWT_CLIENT_ID: "client_desktop_example",
+      ZEROS_REQUIRE_ACCOUNT: "1",
+    });
+    expect(a).toMatchObject({
+      required: true,
+      config: {
+        algorithm: "RS256",
+        contract: "zeros-access-v1",
+        clientId: "client_desktop_example",
+      },
+    });
+  });
+
+  it("rejects a partial or unknown exact token contract", () => {
+    expect(() =>
+      buildAccountAuthFromEnv({
+        ZEROS_ACCOUNT_JWT_JWKS_URL: "https://issuer.example/jwks",
+        ZEROS_ACCOUNT_JWT_CONTRACT: "zeros-access-v1",
+      }),
+    ).toThrow(/client id/i);
+    expect(() =>
+      buildAccountAuthFromEnv({
+        ZEROS_ACCOUNT_JWT_JWKS_URL: "https://issuer.example/jwks",
+        ZEROS_ACCOUNT_JWT_CONTRACT: "unknown",
+      }),
+    ).toThrow(/contract/i);
   });
 
   it.each(["-1", "1.5", "301", "NaN", "Infinity"])(

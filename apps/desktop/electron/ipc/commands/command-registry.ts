@@ -45,6 +45,7 @@ import {
   authGetSessionUser,
   authSignOutEverywhere,
 } from "./auth-session";
+import { authCancelSignIn, authStartSignIn } from "./workos-auth";
 import { agentContextFiles } from "./agent-context";
 import { agentMemoryFiles } from "./agent-memory";
 import { pickCssFile, readCssFile, writeCssFile } from "./css-files";
@@ -152,6 +153,11 @@ export function registerAllCommands(): void {
   setCommand("auth_get_session_user", authGetSessionUser);
   setCommand("auth_clear_session", authClearSession);
   setCommand("auth_sign_out_everywhere", authSignOutEverywhere);
+  // Provider-neutral start/cancel. In WorkOS mode Electron main binds the
+  // loopback listener and owns PKCE; Auth0 mode tells the renderer to continue
+  // through the compatibility web-ticket path below.
+  setCommand("auth_start_signin", authStartSignIn);
+  setCommand("auth_cancel_signin", authCancelSignIn);
 
   // Web sign-in handoff: begin (mint verifier → return its S256 challenge) +
   // redeem (opaque ticket → independent Auth0 token pair + identity claims). The

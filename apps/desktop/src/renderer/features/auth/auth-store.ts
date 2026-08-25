@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────────────────
-// Renderer-side Auth0 session store (Electron only)
+// Renderer-side authentication session mirror (Electron only)
 // ──────────────────────────────────────────────────────────
 //
 // The main process owns the full token pair
@@ -11,7 +11,16 @@
 
 import { nativeInvoke } from "../../platform/runtime";
 
-export type AuthUser = { sub: string; email: string; name: string | null };
+export type AuthUser = {
+  sub: string;
+  email: string;
+  name: string | null;
+  provider: "auth0" | "workos";
+  accountId?: string;
+  sessionId?: string;
+  clientKind?: "desktop";
+  authenticationMethod?: string | null;
+};
 export type AuthSessionInfo = { access_token: string; user: AuthUser };
 
 type Listener = (session: AuthSessionInfo | null) => void;
@@ -26,10 +35,13 @@ function notify(next: AuthSessionInfo | null): void {
  *  it's near expiry) + decoded identity. Null on either call failing/absent —
  *  treated as signed-out, same as a getSession() cache-miss used to be. */
 export async function getSession(): Promise<AuthSessionInfo | null> {
-  const [tokenRes, user] = await Promise.all([
-    nativeInvoke<{ access_token: string | null }>("auth_get_access_token"),
-    nativeInvoke<AuthUser | null>("auth_get_session_user"),
-  ]);
+  // Token refresh can atomically update identity metadata. Read the user only
+  // after main settles that refresh so both values describe one stored record.
+  const tokenRes = await nativeInvoke<{ access_token: string | null }>(
+    "auth_get_access_token",
+  );
+  if (!tokenRes?.access_token) return null;
+  const user = await nativeInvoke<AuthUser | null>("auth_get_session_user");
   return tokenRes?.access_token && user
     ? { access_token: tokenRes.access_token, user }
     : null;
@@ -54,7 +66,12 @@ export function markSignedIn(info: {
 }): void {
   notify({
     access_token: info.access_token,
-    user: { sub: info.sub, email: info.email, name: info.name },
+    user: {
+      sub: info.sub,
+      email: info.email,
+      name: info.name,
+      provider: "auth0",
+    },
   });
 }
 

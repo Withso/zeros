@@ -18,6 +18,9 @@ import type { Config } from "./config.js";
 
 const AUDIENCE = "https://api.zeros.build";
 const ISSUER = "https://test-tenant.auth0.local/";
+const WORKOS_ISSUER = "https://identity.test/user_management/client_web";
+const WORKOS_WEB_CLIENT_ID = "client_web";
+const WORKOS_DESKTOP_CLIENT_ID = "client_desktop";
 const NS = "https://zeros.build/";
 
 let privateKey: CryptoKey;
@@ -25,6 +28,7 @@ let wrongKey: CryptoKey;
 let jwksServer: http.Server;
 let config: Config;
 let app: Hono;
+let workosApp: Hono;
 
 /** A pool stub whose first touch throws a sentinel — reaching it proves the
  *  token cleared every auth check. */
@@ -73,6 +77,31 @@ async function request(token?: string): Promise<Response> {
   });
 }
 
+async function signWorkos(
+  overrides: Record<string, unknown> = {},
+): Promise<string> {
+  return new SignJWT({
+    sid: "session_example",
+    client_id: WORKOS_WEB_CLIENT_ID,
+    ...validClaims(),
+    ...overrides,
+  })
+    .setProtectedHeader({ alg: "RS256", kid: "test-key" })
+    .setIssuer(WORKOS_ISSUER)
+    .setAudience(AUDIENCE)
+    .setSubject("user_example")
+    .setJti("token_example")
+    .setIssuedAt()
+    .setExpirationTime("1h")
+    .sign(privateKey);
+}
+
+async function workosRequest(token: string): Promise<Response> {
+  return workosApp.request("/v1/me", {
+    headers: { authorization: `Bearer ${token}` },
+  });
+}
+
 beforeAll(async () => {
   const real = await generateKeyPair("RS256");
   const imposter = await generateKeyPair("RS256");
@@ -90,9 +119,13 @@ beforeAll(async () => {
 
   config = {
     databaseUrl: "postgres://unused",
-    authIssuers: [ISSUER],
-    authJwksUrl: `http://127.0.0.1:${port}/jwks.json`,
-    authAudience: AUDIENCE,
+    auth: {
+      provider: "auth0",
+      issuers: [ISSUER],
+      jwksUrl: `http://127.0.0.1:${port}/jwks.json`,
+      audience: AUDIENCE,
+    },
+    workos: null,
     port: 0,
     isProduction: false,
     feedback: null,
@@ -119,6 +152,29 @@ beforeAll(async () => {
   app.get("/v1/me", (c) => c.json({ ok: true }));
   // Surface the sentinel so the "valid token reaches the DB" case is assertable.
   app.onError((err, c) => c.json({ error: { message: err.message } }, 500));
+
+  workosApp = new Hono();
+  workosApp.use(
+    "/v1/*",
+    createAuthMiddleware(
+      {
+        ...config,
+        auth: {
+          provider: "workos",
+          issuer: WORKOS_ISSUER,
+          jwksUrl: config.auth.jwksUrl,
+          audience: AUDIENCE,
+          webClientId: WORKOS_WEB_CLIENT_ID,
+          desktopClientId: WORKOS_DESKTOP_CLIENT_ID,
+        },
+      },
+      poolStub,
+    ),
+  );
+  workosApp.get("/v1/me", (c) => c.json({ ok: true }));
+  workosApp.onError((err, c) =>
+    c.json({ error: { message: err.message } }, 500),
+  );
 });
 
 afterAll(async () => {
@@ -223,5 +279,39 @@ describe("createAuthMiddleware — accepts", () => {
       await sign({ email: "user@example.com", email_verified: true, name: "Test User" }),
     );
     expect(res.status).toBe(500); // sentinel again — token accepted
+  });
+});
+
+describe("createAuthMiddleware — WorkOS contract", () => {
+  it("accepts a fully verified token from an allowed Application", async () => {
+    const res = await workosRequest(await signWorkos());
+    expect(res.status).toBe(500);
+    const body = (await res.json()) as { error: { message: string } };
+    expect(body.error.message).toContain(REACHED_DB);
+  });
+
+  it("rejects a correctly signed token from another Application", async () => {
+    const res = await workosRequest(
+      await signWorkos({ client_id: "client_untrusted" }),
+    );
+    expect(res.status).toBe(401);
+  });
+
+  it("requires the WorkOS session and token identifiers", async () => {
+    const res = await workosRequest(await signWorkos({ sid: undefined }));
+    expect(res.status).toBe(401);
+  });
+
+  it("does not accept top-level profile claims in place of the saved JWT template", async () => {
+    const res = await workosRequest(
+      await signWorkos({
+        [`${NS}email`]: undefined,
+        [`${NS}email_verified`]: undefined,
+        [`${NS}name`]: undefined,
+        email: "user@example.com",
+        email_verified: true,
+      }),
+    );
+    expect(res.status).toBe(401);
   });
 });

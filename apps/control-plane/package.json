@@ -10,6 +10,8 @@
     "node": ">=22"
   },
   "scripts": {
+    "auth:probe": "tsx src/auth-contract-probe.ts",
+    "reset:database": "tsx src/reset-database.ts",
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
@@ -22,6 +24,7 @@
   "dependencies": {
     "@daytona/api-client": "0.190.1",
     "@hono/node-server": "^2.1.0",
+    "@workos-inc/node": "10.10.0",
     "hono": "^4.13.0",
     "jose": "^6.0.0",
     "pg": "^8.16.0",

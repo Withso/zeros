@@ -55,7 +55,10 @@ export type JwtErrorCode =
   | "NOT_YET_VALID"
   | "BAD_AUDIENCE"
   | "BAD_ISSUER"
-  | "NO_SUBJECT";
+  | "NO_SUBJECT"
+  | "BAD_CLIENT"
+  | "MISSING_CLAIM"
+  | "CLAIM_REJECTED";
 
 export class JwtError extends Error {
   readonly code: JwtErrorCode;
@@ -85,6 +88,13 @@ export interface JwtVerifyConfig {
    *  that may emit its canonical hostname even behind a custom domain.
    *  Optional. */
   issuer?: string;
+  /** Optional exact signing algorithm. The Zeros access-token contract always
+   *  pins RS256; legacy provider-neutral configurations may leave this unset. */
+  algorithm?: "HS256" | "ES256" | "RS256";
+  /** Optional application-token profile layered on the registered JWT checks. */
+  contract?: "zeros-access-v1";
+  /** Exact application client id required by the selected contract. */
+  clientId?: string;
   /** Allowed clock skew in seconds (default 30). */
   clockSkewSec?: number;
 }
@@ -160,6 +170,14 @@ export function verifyAccountJwt(
   }
 
   const alg = String(header.alg ?? "");
+  const expectedAlgorithm =
+    config.contract === "zeros-access-v1" ? "RS256" : config.algorithm;
+  if (expectedAlgorithm && alg !== expectedAlgorithm) {
+    throw new JwtError(
+      "UNSUPPORTED_ALG",
+      `JWT alg must be ${expectedAlgorithm}`,
+    );
+  }
   const signingInput = Buffer.from(`${h}.${p}`, "utf-8");
   const sigBuf = b64urlToBuf(sig);
 
@@ -250,6 +268,58 @@ export function verifyAccountJwt(
   }
   if (!claims.sub || typeof claims.sub !== "string") {
     throw new JwtError("NO_SUBJECT", "token has no subject (sub) claim");
+  }
+  if (config.contract === "zeros-access-v1") {
+    const exactIssuer = config.issuer?.trim();
+    const exactAudience = config.audience?.trim();
+    const exactClientId = config.clientId?.trim();
+    if (
+      !exactIssuer ||
+      exactIssuer.includes(",") ||
+      !exactAudience ||
+      !exactClientId
+    ) {
+      throw new JwtError(
+        "MALFORMED",
+        "Zeros access-token verifier configuration is incomplete",
+      );
+    }
+    for (const key of [
+      "sub",
+      "sid",
+      "jti",
+      "client_id",
+      "https://zeros.build/email",
+    ]) {
+      const value = claims[key];
+      if (typeof value !== "string" || !value.trim()) {
+        throw new JwtError(
+          "MISSING_CLAIM",
+          `token is missing required string claim ${key}`,
+        );
+      }
+    }
+    if (claims.client_id !== exactClientId) {
+      throw new JwtError("BAD_CLIENT", "token client id is not allowed");
+    }
+    if (claims["https://zeros.build/email_verified"] !== true) {
+      throw new JwtError(
+        "CLAIM_REJECTED",
+        "token does not assert a verified email",
+      );
+    }
+    if (
+      typeof claims.iat !== "number" ||
+      !Number.isFinite(claims.iat) ||
+      claims.iat <= 0 ||
+      !Number.isFinite(claims.exp) ||
+      claims.exp <= claims.iat
+    ) {
+      throw new JwtError(
+        "CLAIM_REJECTED",
+        "token issue and expiry timestamps are invalid",
+      );
+    }
   }
   return claims;
 }
@@ -696,6 +766,22 @@ export function buildAccountAuthFromEnv(
       ? `${env.ZEROS_ACCOUNT_JWT_ISSUER.replace(/\/+$/, "")}/.well-known/jwks.json`
       : undefined);
   if (!hs256Secret && !publicKey && !jwksUrl) return null;
+  const contractValue = env.ZEROS_ACCOUNT_JWT_CONTRACT?.trim();
+  if (contractValue && contractValue !== "zeros-access-v1") {
+    throw new Error("account JWT contract is not supported");
+  }
+  const contract: JwtVerifyConfig["contract"] =
+    contractValue === "zeros-access-v1" ? contractValue : undefined;
+  const clientId = env.ZEROS_ACCOUNT_JWT_CLIENT_ID?.trim() || undefined;
+  if (contract === "zeros-access-v1") {
+    if (!clientId) throw new Error("account JWT client id must be configured");
+    if (!env.ZEROS_ACCOUNT_JWT_ISS?.trim()) {
+      throw new Error("account JWT exact issuer must be configured");
+    }
+    if (!env.ZEROS_ACCOUNT_JWT_AUD?.trim()) {
+      throw new Error("account JWT audience must be configured");
+    }
+  }
   const skewSource = env.ZEROS_ACCOUNT_JWT_SKEW?.trim();
   let clockSkewSec: number | undefined;
   if (skewSource) {
@@ -724,6 +810,9 @@ export function buildAccountAuthFromEnv(
       // direction. Replace the sentinel only together with making aud required.
       audience: env.ZEROS_ACCOUNT_JWT_AUD || "authenticated",
       issuer: env.ZEROS_ACCOUNT_JWT_ISS || undefined,
+      algorithm: contract === "zeros-access-v1" ? "RS256" : undefined,
+      contract,
+      clientId,
       clockSkewSec,
     },
     required:

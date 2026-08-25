@@ -15,8 +15,15 @@
 
 import { clearSessionCookies, cookieJar, safeReturnFor } from "../../lib/oauth";
 import { parseCookieHeader, SESSION_COOKIE, type Env } from "../../lib/session";
+import {
+  configuredAuthProvider,
+  logoutWorkOSBrowserSession,
+} from "../../lib/workos-browser.mjs";
 
 export const onRequestGet: PagesFunction<Env> = async ({ request, env }) => {
+  if (configuredAuthProvider(env) === "workos") {
+    return logoutWorkOSBrowserSession(request, env);
+  }
   const url = new URL(request.url);
   const returnTo = safeReturnFor(env, url.searchParams.get("return"));
 

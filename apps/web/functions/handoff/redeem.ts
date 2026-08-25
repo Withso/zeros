@@ -21,6 +21,7 @@ import {
   TOKENISH,
 } from "../../lib/handoff-security";
 import { clientIp, rateLimit } from "../../lib/ratelimit";
+import { legacyDesktopHandoffEnabled } from "../../lib/workos-browser.mjs";
 
 type StoredTicket = {
   challenge: string;
@@ -33,6 +34,11 @@ type StoredTicket = {
 };
 
 export const onRequestPost: PagesFunction<Env> = async ({ request, env }) => {
+  if (!legacyDesktopHandoffEnabled(env)) {
+    return json({ error: "desktop_auth_migration_pending" }, 409, {
+      "cache-control": "no-store",
+    });
+  }
   // Cap brute-force probing of the ticket space (256-bit, so infeasible anyway —
   // this is just an abuse ceiling). Fails open if KV is unavailable.
   if (env.SESSIONS) {
