@@ -23,7 +23,10 @@ const workspaceSource = readFileSync(
 function flushBody(): string {
   const start = editorSource.indexOf("const flushValidDraft = useCallback(");
   expect(start).toBeGreaterThan(-1);
-  const end = editorSource.indexOf("flushRef.current = flushValidDraft;", start);
+  const end = editorSource.indexOf(
+    "flushRef.current = flushValidDraft;",
+    start,
+  );
   expect(end).toBeGreaterThan(start);
   return editorSource.slice(start, end);
 }
@@ -67,7 +70,9 @@ describe("computed CSS autosave lifecycle", () => {
   });
 
   it("resolves the commit target from the live selection, which is why the guards matter", () => {
-    const start = workspaceSource.indexOf("const commitSelectedStyles = useCallback(");
+    const start = workspaceSource.indexOf(
+      "const commitSelectedStyles = useCallback(",
+    );
     expect(start).toBeGreaterThan(-1);
     const body = workspaceSource.slice(start, start + 600);
 
