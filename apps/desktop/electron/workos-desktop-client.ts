@@ -4,7 +4,6 @@ export const AUTH_CLAIM_NAMESPACE = "https://zeros.build/";
 
 const WORKOS_API_ORIGIN = "https://api.workos.com";
 const AUTHENTICATE_PATH = "/user_management/authenticate";
-const AUTHORIZE_PATH = "/user_management/authorize";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_REFRESH_ATTEMPTS = 3;
 const REFRESH_RETRY_BASE_DELAY_MS = 250;
@@ -12,6 +11,8 @@ const MAX_REFRESH_RETRY_DELAY_MS = 2_000;
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_TOKEN_BYTES = 64 * 1024;
 
+// Authorization starts on the hosted Zeros app; this client exchanges and
+// refreshes only.
 const RETRYABLE_REFRESH_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 const AUTHENTICATION_METHODS = new Set([
@@ -305,22 +306,6 @@ export class WorkOSDesktopClient {
       });
       return validateWorkOSDesktopTokenClaims(payload, config);
     };
-  }
-
-  authorizationUrl(input: {
-    state: string;
-    codeChallenge: string;
-    redirectUri: string;
-  }): string {
-    const url = new URL(AUTHORIZE_PATH, this.apiOrigin);
-    url.searchParams.set("provider", "authkit");
-    url.searchParams.set("client_id", this.options.config.clientId);
-    url.searchParams.set("redirect_uri", input.redirectUri);
-    url.searchParams.set("response_type", "code");
-    url.searchParams.set("state", input.state);
-    url.searchParams.set("code_challenge", input.codeChallenge);
-    url.searchParams.set("code_challenge_method", "S256");
-    return url.toString();
   }
 
   private async authenticate(

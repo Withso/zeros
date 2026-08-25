@@ -69,6 +69,15 @@ export interface WorkOSDesktopProvider {
   revokeSession(sessionId: string): Promise<void>;
 }
 
+export interface WorkOSDesktopAuthorizationProvider {
+  desktopAuthorizationUrl(options: {
+    provider: string;
+    state: string;
+    codeChallenge: string;
+    redirectUri: string;
+  }): string;
+}
+
 type WorkOSAuthConfig = Extract<AuthBackendConfig, { provider: "workos" }>;
 
 function accessTokenExpiresAt(accessToken: string): number {
@@ -80,7 +89,10 @@ function accessTokenExpiresAt(accessToken: string): number {
 }
 
 export class RailwayWorkOSProvider
-  implements WorkOSBrowserProvider, WorkOSDesktopProvider
+  implements
+    WorkOSBrowserProvider,
+    WorkOSDesktopProvider,
+    WorkOSDesktopAuthorizationProvider
 {
   private readonly client: WorkOS;
   private readonly desktopJwks: ReturnType<typeof createRemoteJWKSet>;
@@ -110,6 +122,25 @@ export class RailwayWorkOSProvider
       throw new Error("Unsupported WorkOS provider");
     }
     return this.client.userManagement.getAuthorizationUrl({
+      provider: options.provider,
+      state: options.state,
+      codeChallenge: options.codeChallenge,
+      codeChallengeMethod: "S256",
+      redirectUri: options.redirectUri,
+    });
+  }
+
+  desktopAuthorizationUrl(options: {
+    provider: string;
+    state: string;
+    codeChallenge: string;
+    redirectUri: string;
+  }): string {
+    if (!SOCIAL_PROVIDERS.has(options.provider)) {
+      throw new Error("Unsupported WorkOS provider");
+    }
+    return this.client.userManagement.getAuthorizationUrl({
+      clientId: this.auth.desktopClientId,
       provider: options.provider,
       state: options.state,
       codeChallenge: options.codeChallenge,

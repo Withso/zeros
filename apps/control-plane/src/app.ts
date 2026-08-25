@@ -36,6 +36,7 @@ import {
   createWorkOSBrowserSessionRoutes,
 } from "./workos-browser-sessions.js";
 import { createWorkOSDesktopRevocationRoutes } from "./workos-desktop-revocation.js";
+import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 
 export function createApp(
@@ -71,6 +72,13 @@ export function createApp(
     app.route(
       "/",
       createWorkOSBrowserSessionRoutes(sessions, config.workos.appOrigin),
+    );
+    app.route(
+      "/",
+      createWorkOSDesktopAuthorizationRoutes(
+        provider,
+        config.workos.appOrigin,
+      ),
     );
     app.route("/", createWorkOSDesktopRevocationRoutes(provider));
     app.route(

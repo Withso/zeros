@@ -18,7 +18,7 @@
 //   engine-crash       { ... } (watchdog could not respawn)
 //   gh:device-code     { ... } (GitHub device-flow verification code)
 //   auth-error / auth-handoff   (legacy deep-link OAuth handoff)
-//   auth-signin-complete / auth-signin-error (main-owned WorkOS loopback flow)
+//   auth-signin-complete / auth-signin-error (main-owned WorkOS hosted flow)
 //   updater-status     { ... } (auto-updater progress)
 //   main-process-error { ... }
 //   browser-confirmation-request { ... } (trusted consequence prompt)

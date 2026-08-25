@@ -14,8 +14,9 @@ schema and is deployed independently from the desktop application.
   against JWKS. WorkOS mode additionally enforces the Web/Desktop Application
   allowlist and session/token identifiers.
 - In WorkOS mode Railway also owns browser PKCE exchange, encrypted sealed
-  sessions, PostgreSQL-serialized refresh, webhook verification, and desktop
-  current/all-session revocation. Cloudflare Pages holds none of those secrets.
+  sessions, PostgreSQL-serialized refresh, direct-provider Desktop Application
+  authorization, webhook verification, and desktop current/all-session
+  revocation. Cloudflare Pages holds none of those secrets.
 - PostgreSQL owns application authorization and tenant data. Request
   transactions use the restricted `zeros_app` role with row-level security.
 - `GET /healthz` is public so Railway can evaluate service health.
@@ -178,7 +179,7 @@ backward compatible until deployed desktop versions no longer use the previous
 contract. Add new fields or routes first; remove old ones only after observed
 client migration.
 
-### WorkOS browser sessions and account lifecycle
+### WorkOS browser/desktop authorization and account lifecycle
 
 In WorkOS mode, `GET /auth/start`, `GET /auth/callback`,
 `GET /auth/browser/session`, `POST /auth/browser/refresh`, and
@@ -187,6 +188,14 @@ digests of random browser credentials and OAuth state. PKCE verifiers are
 single-use, access tokens are not stored as table columns, and encrypted sealed
 sessions are refreshed under a PostgreSQL advisory/row lock so multiple
 Railway replicas cannot race rotation.
+
+`GET /auth/desktop/start` is a public, stateless authorization endpoint for the
+branded Pages desktop chooser. It accepts only Google/GitHub plus bounded
+exact-channel state and an S256 challenge, uses `AUTH_DESKTOP_CLIENT_ID`, and
+fixes the WorkOS redirect to `${APP_ORIGIN}/auth/desktop/callback`. It never
+accepts a caller-selected client, callback, or arbitrary provider. Electron
+main retains the matching verifier and exchanges the returned code directly as
+the public Desktop Application.
 
 `POST /auth/workos-webhook` verifies WorkOS's signature over the exact raw body
 on Railway, then accepts only bounded `user.updated` and `user.deleted` events.

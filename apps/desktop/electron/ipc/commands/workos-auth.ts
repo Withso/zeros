@@ -1,5 +1,7 @@
 import { shell } from "electron";
 
+import { channel, schemeForChannel } from "../../../src/engine/runtime";
+import { appBaseUrl } from "../../app-base-url";
 import { desktopAuthConfig } from "../../workos-desktop-config";
 import { resolveWorkOSDesktopAccountId } from "../../workos-desktop-account";
 import { WorkOSDesktopAuthorizationFlow } from "../../workos-desktop-flow";
@@ -15,6 +17,8 @@ let flow: WorkOSDesktopAuthorizationFlow | null = null;
 function workOSFlow(): WorkOSDesktopAuthorizationFlow {
   flow ??= new WorkOSDesktopAuthorizationFlow({
     client: workOSDesktopClientForMain(),
+    appOrigin: appBaseUrl(),
+    deepLinkScheme: schemeForChannel(channel()),
     openExternal: (url) => shell.openExternal(url),
     resolveAccountId: resolveWorkOSDesktopAccountId,
     persistSession: persistWorkOSSession,
@@ -27,6 +31,14 @@ function workOSFlow(): WorkOSDesktopAuthorizationFlow {
     onError: (reason) => emitEvent("auth-signin-error", { reason }),
   });
   return flow;
+}
+
+export function acceptWorkOSDesktopCallback(input: {
+  state: string;
+  code?: string | null;
+  error?: string | null;
+}): boolean {
+  return flow?.acceptCallback(input) ?? false;
 }
 
 /** Unified entry point: WorkOS stays entirely in Electron main; Auth0 tells the

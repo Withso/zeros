@@ -51,34 +51,6 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("WorkOS desktop public client", () => {
-  it("builds an AuthKit authorization URL with exact PKCE and callback values", () => {
-    const client = new WorkOSDesktopClient({
-      config,
-      verifyAccessToken: async () => claims,
-    });
-    const url = new URL(
-      client.authorizationUrl({
-        state: "state-example",
-        codeChallenge: "challenge-example",
-        redirectUri: "http://127.0.0.1:43123/auth/callback",
-      }),
-    );
-
-    expect(`${url.origin}${url.pathname}`).toBe(
-      "https://api.workos.com/user_management/authorize",
-    );
-    expect(Object.fromEntries(url.searchParams)).toMatchObject({
-      provider: "authkit",
-      client_id: config.clientId,
-      redirect_uri: "http://127.0.0.1:43123/auth/callback",
-      response_type: "code",
-      state: "state-example",
-      code_challenge: "challenge-example",
-      code_challenge_method: "S256",
-    });
-    expect(url.searchParams.has("client_secret")).toBe(false);
-  });
-
   it("exchanges a code as a public client and verifies identity before returning", async () => {
     const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
       const headers = new Headers(init?.headers);

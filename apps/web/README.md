@@ -27,6 +27,9 @@ for project/domain/branch mappings and the promotion runbook.
 GET  /                         → signed-in management dashboard; signed-out hub
 GET  /launch                   → session-aware desktop handoff
 GET  /auth/start|callback|logout → WorkOS mode forwards to Railway unchanged
+GET  /auth/desktop             → branded desktop Google/GitHub chooser
+GET  /auth/desktop/start       → bounded, stateless desktop PKCE proxy to Railway
+GET  /auth/desktop/callback    → no-store exact-channel app handoff
 POST /auth/workos-webhook      → compatibility pass-through to Railway
 POST /auth/desktop-revoke      → compatibility pass-through for older desktops
 GET  /github/connected         → GitHub App completion + Open Zeros handoff
@@ -151,8 +154,19 @@ Register `https://<channel-api-host>/auth/workos-webhook` for only
 byte-preserving compatibility pass-through during cutover, but holds no signing
 secret.
 
-WorkOS-hosted AuthKit domains are the Phase 2 choice. A paid custom WorkOS
-domain is optional and is not a release requirement.
+Desktop WorkOS login also starts and returns on the channel's own app host. The
+desktop keeps the PKCE verifier in Electron main, opens `/auth/desktop`, and the
+branded Pages route offers direct Google/GitHub choices. Pages forwards only
+bounded provider/state/challenge values; Railway creates the Desktop
+Application authorization URL with the fixed
+`${APP_ORIGIN}/auth/desktop/callback`. The callback never server-renders the
+authorization code, strips it from browser history, and opens only the
+allow-listed exact-channel scheme. Its no-store/no-referrer/nonce CSP is
+preserved by the global host middleware.
+
+Because the provider is named directly, WorkOS renders no AuthKit chooser. Its
+standard authorization endpoint is only a redirect hop before Google or GitHub.
+A paid custom WorkOS domain is optional and is not a release requirement.
 
 Do not switch `AUTH_PROVIDER=workos` yet. The control plane intentionally
 accepts one issuer at a time. The provider switch, clean database, web
@@ -201,6 +215,7 @@ apps/web/
   functions/invite.ts          → /invite
   functions/github/connected.ts → /github/connected
   functions/auth/*             → selectable Auth0/WorkOS browser auth + webhook
+  functions/auth/desktop/*     → hosted desktop chooser/start/callback
   functions/auth/desktop-revoke.ts → older-desktop Railway pass-through
   functions/handoff/*          → Auth0 desktop ticket compatibility APIs
   lib/hosts.ts                 → host classification + CSP
@@ -210,6 +225,7 @@ apps/web/
   lib/oauth.ts                 → legacy Auth0 + cookies (APP_ORIGIN-aware)
   lib/session.ts               → provider-neutral browser-session facade
   lib/workos-browser.mjs       → stateless Railway auth/session facade
+  lib/workos-desktop-authorization.mjs → branded desktop PKCE handoff
   lib/workos-railway.mjs       → exact control-plane origin boundary
   lib/workos-webhook.mjs       → byte-preserving Railway pass-through
   public/_headers              → app CSP defaults (source; copied into dist/)

@@ -30,7 +30,7 @@ WorkOS Organizations, WorkOS authorization, or a cloud-workspace dependency.
 | Cloudflare Pages (`apps/web`)                | Starts Auth0 code+PKCE, exchanges codes, stores browser access/refresh tokens in Workers KV, proxies bearer requests, and brokers the desktop ticket.       | Becomes a stateless same-origin WorkOS facade. Railway performs exchange and session operations; Pages stops minting desktop credentials.        |
 | Railway control plane (`apps/control-plane`) | Derives Auth0 issuer/JWKS settings, verifies access-token signature/issuer/audience, JIT-provisions the database user, and performs Postgres authorization. | Accepts explicit provider-neutral verification settings and owns WorkOS PKCE, sealed sessions, webhook verification, and management operations. |
 | Railway Postgres                             | Owns `users.id`, `user_identities`, Personal/organization/team membership, invitations, GitHub state, feedback identity, and optional cloud rows.           | Also owns hashed browser credentials/state and serialized sealed-session refresh; migrations/schema remain the product authority.               |
-| Electron main                                | Redeems the web ticket, keeps refresh material in `safeStorage`, refreshes through the web broker, and exposes only bounded session data to the renderer.   | Authenticates the Desktop Application directly with loopback PKCE; continues to keep tokens/verifier out of renderer IPC.                       |
+| Electron main                                | Redeems the web ticket, keeps refresh material in `safeStorage`, refreshes through the web broker, and exposes only bounded session data to the renderer.   | Starts PKCE on the branded app host, receives the hosted callback through an exact-channel deep link, and keeps tokens/verifier out of renderer IPC. |
 | Zeros engine                                 | Independently verifies Auth0 JWTs and uses the provider subject for owner/client comparisons and deferred cloud credential binding.                         | Pins the same WorkOS token contract; product/cloud ownership moves to internal account UUIDs or control-plane grants.                           |
 | GitHub App flow                              | Separately authorizes repository access and binds its credential to the Auth0 subject.                                                                      | Remains separate from WorkOS social login and rebinds credential ownership to the internal account UUID.                                        |
 
@@ -145,14 +145,22 @@ boundary between channels.
 Phase 0 uses the existing Alpha origins and preserves the current Google/GitHub
 sign-in surface:
 
-| Setting                | `Zeros Web Alpha` (default)                                                             | `Zeros Desktop Alpha`                                                |
-| ---------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| Redirect URI           | `https://app-alpha.zeros.build/auth/callback` and `http://127.0.0.1:8788/auth/callback` | `zeros-alpha://auth/callback` and `http://127.0.0.1:*/auth/callback` |
-| Default sign-out URI   | `https://app-alpha.zeros.build/`                                                        | `https://app-alpha.zeros.build/`                                     |
-| Access-token duration  | 5 minutes                                                                               | 5 minutes                                                            |
-| Maximum session length | 30 days                                                                                 | 90 days                                                              |
-| Inactivity timeout     | 7 days                                                                                  | 30 days                                                              |
-| Sign-in methods        | Google and GitHub only                                                                  | Google and GitHub only                                               |
+| Setting                | `Zeros Web Alpha` (default)                                                             | `Zeros Desktop Alpha`                                           |
+| ---------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------- |
+| Redirect URI           | `https://app-alpha.zeros.build/auth/callback` and `http://127.0.0.1:8788/auth/callback` | `https://app-alpha.zeros.build/auth/desktop/callback`            |
+| Default sign-out URI   | `https://app-alpha.zeros.build/`                                                        | `https://app-alpha.zeros.build/`                                |
+| Access-token duration  | 5 minutes                                                                               | 5 minutes                                                       |
+| Maximum session length | 30 days                                                                                 | 90 days                                                        |
+| Inactivity timeout     | 7 days                                                                                  | 30 days                                                        |
+| Sign-in methods        | Google and GitHub only                                                                  | Google and GitHub only                                         |
+
+The Desktop redirect is the HTTPS page users see on the Zeros app host. That
+page immediately hands the short-lived, PKCE-bound authorization code to the
+exact installed channel (`zeros-alpha://`, `zeros-beta://`, or `zeros://`). The
+custom scheme is therefore an app handoff, not the redirect registered for new
+WorkOS builds. Keep the legacy custom-scheme and wildcard loopback redirects
+registered only until every older or qualification build that uses them has
+been retired; do not select either for a new release.
 
 The durations are the initial security/UX policy, not hidden code defaults.
 Record the final dashboard values in the channel configuration inventory. Keep
@@ -174,10 +182,13 @@ token, or cookie password is committed to Git or pasted into an issue/chat.
 
 ### Production domain decision
 
-Zeros will use WorkOS-hosted domains for the initial migration. The operator
-has explicitly declined the optional paid custom-domain service; this is not a
-release blocker in staging or production. WorkOS exposes two separate custom
-choices if that decision changes later:
+Zeros hosts every user-readable Zeros provider chooser and callback page on its
+own `app*.zeros.build` origins. Railway names Google or GitHub directly, so the
+browser only passes through WorkOS's standard authorization endpoint before
+the selected provider; it does not render the WorkOS AuthKit chooser. The
+operator has explicitly declined the optional paid custom-domain service; this
+is not a release blocker in staging or production. WorkOS exposes two separate
+custom choices if that decision changes later:
 
 - an **AuthKit domain**, such as `auth.zeros.build`, changes the hosted sign-in
   UI hostname; and
@@ -190,8 +201,8 @@ If custom domains are adopted later, use new hosts instead of immediately
 reusing Auth0's `login.zeros.build`. Retaining the old DNS route keeps rollback
 independent during the acceptance window. WorkOS requires these CNAME records
 to be DNS-only, not proxied through Cloudflare. Repeat both token probes after
-changing the Authentication API domain. WorkOS-hosted production domains are
-valid and do not change the rest of this architecture.
+changing the Authentication API domain. WorkOS's standard production API
+domains are valid and do not change the rest of this architecture.
 
 References:
 
@@ -365,23 +376,27 @@ same-origin/CSRF defenses; `SameSite` is defense in depth, not the only check.
 ### Desktop
 
 Replace the browser-session mint with WorkOS's public-client authorization code
-plus PKCE flow. Electron main binds an ephemeral loopback listener before
-opening the browser, generates and retains state plus the PKCE verifier, and
-uses an exact registered callback such as
-`http://127.0.0.1:*/auth/callback`. WorkOS explicitly allows wildcard loopback
-ports for native clients, including in production. The callback is accepted
-once, only from loopback, only with matching state, and only while the flow is
-pending; Electron then exchanges the code using the desktop Application's
-public client ID and verifier. It stores the new refresh token in safe storage
-without exposing the code, verifier, access token, or refresh token to the
-renderer.
+plus PKCE flow. Electron main generates and retains exact state plus the PKCE
+verifier, then opens `${APP_ORIGIN}/auth/desktop`. That no-store Zeros page lets
+the user choose Google or GitHub. Pages forwards only the allow-listed provider,
+state, and S256 challenge to Railway; Railway creates a direct provider
+authorization for the Desktop Application with the fixed registered HTTPS
+redirect `${APP_ORIGIN}/auth/desktop/callback`.
 
-This direct flow creates an independent WorkOS desktop session and removes the
-Cloudflare ticket/KV consistency boundary entirely. If live Alpha validation
-finds an SDK or dashboard constraint that prevents it, the fallback is a fresh
-desktop-Application authorization through the HTTPS broker and an atomic,
-strongly consistent one-time ticket. Refreshing or copying the browser session
-is never the fallback.
+After provider sign-in, the hosted callback strips its query from browser
+history and opens the exact channel scheme with only the short-lived code and
+state in the fragment. Electron main accepts it once, only for a pending exact
+state, and exchanges the code with the Desktop Application's public client ID
+and the verifier that never left main memory. It stores the new refresh token
+in safe storage without exposing the code, verifier, access token, or refresh
+token to renderer IPC. The callback is no-store, no-referrer, frame-denied, and
+uses a per-response nonce CSP.
+
+This flow creates an independent WorkOS desktop session, keeps every page a
+user reads on the Zeros app host, and removes both the Cloudflare ticket/KV
+consistency boundary and native loopback listener. Pages remains stateless and
+holds no WorkOS key. Refreshing or copying the browser session is never a
+fallback.
 
 The stored desktop record evolves additively with internal account ID, WorkOS
 session ID, and client kind. Existing persisted key names are not renamed merely
@@ -443,10 +458,11 @@ the template may generate the cookie password. Public inputs are:
 `WORKOS_COOKIE_PASSWORD` is a unique generated 32-byte-or-longer Railway
 secret. Template variables require descriptions; secrets are sealed or
 generated; service-to-database traffic uses private references. A custom WorkOS
-domain is optional—the WorkOS-hosted AuthKit domain is sufficient. A template
-may use platform-provided HTTPS domains for both frontend and API, so buying a
-custom domain is not a prerequisite. Those must remain separate origins; two
-services in one Railway project can each use a generated Railway domain.
+domain is optional—the standard WorkOS authorization endpoint is sufficient. A
+template may use platform-provided HTTPS domains for both frontend and API, so
+buying a custom domain is not a prerequisite. Those must remain separate
+origins; two services in one Railway project can each use a generated Railway
+domain.
 The template sets `ZEROS_SELF_HOSTED=true`; official Zeros deployments leave
 that variable unset so their exact channel, branch, audience, and app-origin
 assertions remain fail-closed.
@@ -496,7 +512,7 @@ does not remove the work needed to make web and desktop sessions correct.
 | Phase 0 contract/account qualification                        | 1–2 days; repository portion complete | Real token shape, cross-Application session management, Alpha dashboard access |
 | Provider-neutral control plane and identity ownership         | 2–4 days                              | Replacing provider-subject ownership without breaking GitHub/feedback paths    |
 | Railway web login and sealed Postgres session                 | 3–5 days                              | SDK compatibility and multi-replica refresh race tests                         |
-| Electron public-client loopback login                         | 4–7 days                              | App lifecycle, port/state races, secure persistence, logout/revocation         |
+| Electron public-client hosted-callback login                  | 4–7 days                              | App lifecycle, deep-link/state races, secure persistence, logout/revocation    |
 | Alpha reset, deployment, synthetic checks, and failure drills | 2–4 days plus 3–7 elapsed soak days   | External OAuth-provider configuration and real failure behavior                |
 | Beta/Production promotion and Auth0 removal                   | 2–4 days plus channel soak            | Environment drift, production credentials, rollback rehearsal                  |
 
@@ -564,15 +580,22 @@ Dashboard milestones reported complete by the Alpha operator:
   disabled.
 - The Alpha JWT Template validated and was saved with the exact Alpha audience.
 - The hosted and local Web callbacks are registered.
-- The desktop custom-scheme redirect `zeros-alpha://auth/callback` and wildcard
-  loopback redirect `http://127.0.0.1:*/auth/callback` are registered.
+- The legacy desktop custom-scheme redirect `zeros-alpha://auth/callback` and
+  wildcard loopback redirect `http://127.0.0.1:*/auth/callback` were registered
+  for the original qualification build.
 - The Web Application session policy is 30 days maximum, 5 minutes per access
   token, and 7 days of inactivity.
 - The Desktop Application session policy is 90 days maximum, 5 minutes per
   access token, and 30 days of inactivity.
 - Both Applications use the Alpha application origin as their default sign-out
   URI.
-- WorkOS-hosted domains were selected; a paid custom domain is not required.
+- WorkOS standard API domains were selected; a paid custom domain is not
+  required.
+
+Phase 4 operator action: add
+`https://app-alpha.zeros.build/auth/desktop/callback` to `Zeros Desktop Alpha`
+before enabling the hosted-callback desktop build. Retain the two legacy
+redirects only through the rollback window.
 
 Completed live against Alpha staging:
 
@@ -682,8 +705,8 @@ Implemented in the repository:
   while preserving organizations, memberships, audit history, and product data.
 - Migration `0012` provides the RLS-protected browser flow/session table. The
   deployment runbook defines per-channel Railway, Postgres, Pages, and webhook
-  boundaries. WorkOS-hosted AuthKit domains remain the selected path; a paid
-  custom WorkOS domain is not required.
+  boundaries. The standard WorkOS authorization endpoint remains selected; a
+  paid custom WorkOS domain is not required and no AuthKit chooser is rendered.
 
 The Phase 2 code is verified locally but not deployed or activated. The exposed
 Alpha qualification API key must be rotated before it enters Railway. Because
@@ -694,12 +717,18 @@ the coordinated Phase 4 Alpha reset.
 
 Implemented in the repository:
 
-- Electron main binds an ephemeral `127.0.0.1` callback before opening the
-  browser, generates 256-bit authorization state and a PKCE S256 verifier, and
-  accepts the exact callback path and host once. State mismatch, replay,
-  timeout, cancellation, provider error, and invalid callback inputs fail
-  closed. No authorization code, state, verifier, or refresh token crosses
-  renderer IPC.
+- Electron main generates 256-bit authorization state and a PKCE S256 verifier,
+  keeps the verifier in main memory, and opens the channel's own app host. The
+  hosted page offers direct Google/GitHub choices, then its fixed WorkOS
+  callback hands only the short-lived code and state to the exact-channel deep
+  link. State mismatch, cross-channel callback, replay, timeout, cancellation,
+  provider error, and invalid callback inputs fail closed. No authorization
+  code, state, verifier, or refresh token crosses renderer IPC.
+- Cloudflare Pages validates and forwards only bounded provider/state/challenge
+  inputs to Railway. It holds no WorkOS secret. The callback never server-renders
+  the code, removes it from browser history before launching the app, disables
+  storage/referrers/framing, and keeps a route-specific nonce CSP through global
+  host middleware.
 - The Desktop Application authenticates directly against WorkOS as a public
   client using only its public client ID. It never receives or embeds a WorkOS
   API key and never copies the browser Application's session. The returned
@@ -751,9 +780,9 @@ server API key must still be rotated before Railway WorkOS mode is activated.
 2. WorkOS browser login, sealed/strong session state, proxy refresh, logout,
    and authenticated account-lifecycle ingestion. **Repository complete; not
    activated.**
-3. Independent desktop public-client/loopback flow, safe-storage refresh, and
-   session revocation; use an atomic ticket only if the documented fallback is
-   proven necessary. **Repository complete; not activated.**
+3. Independent desktop public-client/hosted-callback flow, safe-storage refresh,
+   and session revocation; use an atomic ticket only if the documented fallback
+   is proven necessary. **Repository complete; not activated.**
 4. Alpha reset and qualification, then exact-SHA Beta and Production promotion.
 5. Remove Auth0 code, variables, callbacks, docs, privacy references, tests, and
    credentials; run every release, license, security, and platform gate.

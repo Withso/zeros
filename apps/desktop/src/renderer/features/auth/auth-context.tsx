@@ -316,9 +316,9 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
     // Clear any stale handoff error from a prior attempt before starting fresh.
     setOAuthError(null);
     try {
-      // In WorkOS mode this command binds an ephemeral loopback listener BEFORE
-      // main opens the browser and retains state + verifier outside renderer JS.
-      // Auth0 mode returns a compatibility marker and continues below.
+      // In WorkOS mode this command opens the hosted Zeros provider page and
+      // retains state + verifier in Electron main, outside renderer JS. Auth0
+      // mode returns a compatibility marker and continues below.
       const selected = await nativeInvoke<{ mode?: "auth0" | "workos" }>(
         "auth_start_signin",
       );
