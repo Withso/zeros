@@ -25,10 +25,15 @@
 // Keep this module dependency-light: it is imported by main.tsx on the
 // critical boot path, so it must not drag the chat tree in behind it.
 
-import { CONVERSATION_RATIO_VAR, readPersistedConversationRatio } from "./conversation/pane-sizing";
 import {
-  DESIGN_WORKSPACE_SIDEBAR_RATIO_VAR,
-  readPersistedDesignWorkspaceSidebarRatio,
+  CONVERSATION_RATIO_VAR,
+  readPersistedConversationRatio,
+} from "./conversation/pane-sizing";
+import {
+  DESIGN_WORKSPACE_LAYERS_WIDTH_VAR,
+  DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
+  readPersistedDesignWorkspaceLayersWidth,
+  readPersistedDesignWorkspaceStyleWidth,
 } from "../features/design-workspace/design-workspace-width";
 import {
   TERMINAL_PANEL_HEIGHT_VAR,
@@ -53,8 +58,12 @@ export function applyBootLayoutVars(): void {
       String(readPersistedConversationRatio()),
     );
     root.style.setProperty(
-      DESIGN_WORKSPACE_SIDEBAR_RATIO_VAR,
-      String(readPersistedDesignWorkspaceSidebarRatio()),
+      DESIGN_WORKSPACE_LAYERS_WIDTH_VAR,
+      `${readPersistedDesignWorkspaceLayersWidth()}px`,
+    );
+    root.style.setProperty(
+      DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
+      `${readPersistedDesignWorkspaceStyleWidth()}px`,
     );
     root.style.setProperty(
       TERMINAL_PANEL_HEIGHT_VAR,

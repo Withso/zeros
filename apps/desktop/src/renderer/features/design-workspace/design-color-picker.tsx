@@ -28,6 +28,7 @@ import {
 interface DesignColorPickerProps {
   value: string;
   label: string;
+  trigger?: React.ReactNode;
   disabled?: boolean;
   side?: "top" | "right" | "bottom" | "left";
   align?: "start" | "center" | "end";
@@ -145,6 +146,7 @@ export function DesignColorSwatch({
 export function DesignColorPicker({
   value,
   label,
+  trigger,
   disabled = false,
   side = "left",
   align = "start",
@@ -278,7 +280,7 @@ export function DesignColorPicker({
           )}
           aria-label={`Edit ${label.toLocaleLowerCase()}`}
         >
-          <DesignColorSwatch value={value} className="size-5" />
+          {trigger ?? <DesignColorSwatch value={value} className="size-5" />}
         </button>
       </PopoverTrigger>
       <PopoverContent

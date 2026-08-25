@@ -8,6 +8,7 @@
 
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import { create } from "zustand";
+import { normalizeDesignCanvasBackground } from "../design-canvas-background";
 
 const STORAGE_KEY = "zeros:design-workspace-ui-v1";
 const MAX_WORKSPACES = 32;
@@ -30,6 +31,9 @@ export interface DesignWorkspaceViewState {
   panel: DesignBottomPanel;
   codeView: boolean;
   activeTheme: string | null;
+  /** Null follows the active theme's --bg2; a concrete color is an explicit
+   * workspace-owned override, including its alpha channel. */
+  canvasBackground: string | null;
   zoom: number;
   panX: number;
   panY: number;
@@ -45,6 +49,7 @@ export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
     panel: "layers",
     codeView: false,
     activeTheme: null,
+    canvasBackground: null,
     zoom: 0.25,
     panX: 64,
     panY: 64,
@@ -115,6 +120,7 @@ export function normalizeDesignWorkspaceView(
       /^[a-z][a-z0-9_-]{0,63}$/.test(record.activeTheme)
         ? record.activeTheme
         : null,
+    canvasBackground: normalizeDesignCanvasBackground(record.canvasBackground),
     zoom: clampDesignZoom(
       typeof record.zoom === "number"
         ? record.zoom
@@ -226,6 +232,7 @@ interface DesignWorkspaceUiStore {
   setPanel(workspaceId: string, panel: DesignBottomPanel): void;
   setCodeView(workspaceId: string, codeView: boolean): void;
   setActiveTheme(workspaceId: string, activeTheme: string | null): void;
+  setCanvasBackground(workspaceId: string, canvasBackground: string): void;
   setViewport(
     workspaceId: string,
     viewport: Pick<DesignWorkspaceViewState, "zoom" | "panX" | "panY">,
@@ -319,6 +326,16 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           activeTheme,
+        }),
+      }));
+    },
+
+    setCanvasBackground(workspaceId, canvasBackground) {
+      const normalized = normalizeDesignCanvasBackground(canvasBackground);
+      if (!normalized) return;
+      set((state) => ({
+        byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
+          canvasBackground: normalized,
         }),
       }));
     },
