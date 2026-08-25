@@ -76,15 +76,24 @@ await copyFile(containerWorkerEntry, containerWorkerOutput);
 await chmod(containerWorkerOutput, 0o755);
 await copyFile(orbStackHostEntry, orbStackHostOutput);
 await chmod(orbStackHostOutput, 0o755);
+// Everything staged here is packaged into the .app via extraResources with
+// modes preserved, and every packaged file MUST keep owner-write (0o7xx/0o6xx):
+// Squirrel.Mac's ShipIt strips the quarantine xattr from each file of a
+// downloaded update, removexattr() needs write permission, and one read-only
+// file makes EVERY in-place update fail with EPERM after staging — the app
+// relaunches on the old version forever with no error in its own log (field
+// incident 2026-08-25, zsr-git-dispatch at 0o555). Read-only hardening for the
+// fence happens on the runtime COPIES (zsr-boundary chmods them 0o500), never
+// on the packaged originals. release workflows assert this on the built .app.
 const ripgrepTemporaryOutput = `${ripgrepOutput}.tmp-${process.pid}`;
 await rm(ripgrepTemporaryOutput, { force: true });
 await copyFile(rgPath, ripgrepTemporaryOutput);
-await chmod(ripgrepTemporaryOutput, 0o555);
+await chmod(ripgrepTemporaryOutput, 0o755);
 await rename(ripgrepTemporaryOutput, ripgrepOutput);
 const cloudInitTemporaryOutput = `${orbStackCloudInitOutput}.tmp-${process.pid}`;
 await rm(cloudInitTemporaryOutput, { force: true });
 await copyFile(orbStackCloudInitEntry, cloudInitTemporaryOutput);
-await chmod(cloudInitTemporaryOutput, 0o444);
+await chmod(cloudInitTemporaryOutput, 0o644);
 await rename(cloudInitTemporaryOutput, orbStackCloudInitOutput);
 if (process.platform === "darwin") {
   const architecture =
@@ -126,7 +135,7 @@ if (process.platform === "darwin") {
       ).trim()}`,
     );
   }
-  await chmod(temporaryOutput, 0o555);
+  await chmod(temporaryOutput, 0o755);
   await rename(temporaryOutput, macosProcessDomainOutput);
   // The narrow Git integration dispatcher is built with the same flags and
   // -Werror posture as every other helper that runs inside the fence.
@@ -160,7 +169,7 @@ if (process.platform === "darwin") {
       ).trim()}`,
     );
   }
-  await chmod(gitDispatchTemporaryOutput, 0o555);
+  await chmod(gitDispatchTemporaryOutput, 0o755);
   await rename(gitDispatchTemporaryOutput, gitDispatchOutput);
 }
 console.log(
