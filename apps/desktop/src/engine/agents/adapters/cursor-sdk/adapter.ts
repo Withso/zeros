@@ -13,6 +13,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import type { AdvertisedModel } from "@zeros/protocol/agent-events";
 import { isDevRuntime } from "../../../runtime";
@@ -774,14 +775,28 @@ export interface CursorSdkModule {
   };
 }
 
-/** The SDK's file-ignore / codebase-search service needs a ripgrep binary
- *  and reads its path from CURSOR_RIPGREP_PATH (it does NOT bundle one — the
- *  Phase-3 probe showed "Ripgrep path not configured" without this). We
- *  resolve it from the optional `@vscode/ripgrep` dep via a variable
- *  specifier so tsc doesn't hard-require the package; if it's absent the
- *  ignore-mapping degrades but the agent still runs (non-fatal). */
+/** Select the SDK's ripgrep executable from already-qualified deployment
+ * configuration. Packaged Zeros stages one binary for ZSR and Cursor; the
+ * compiled engine cannot resolve the source package, so ignoring that staged
+ * path produced a burst of "Ripgrep path not configured" errors per session. */
+export function cursorRipgrepPathFromEnvironment(
+  env: Readonly<Record<string, string | undefined>>,
+): string | null {
+  const explicit = env.CURSOR_RIPGREP_PATH?.trim();
+  if (explicit) return explicit;
+  const staged = env.ZEROS_ZSR_RIPGREP_PATH?.trim();
+  return staged && isAbsolute(staged) ? staged : null;
+}
+
+/** The SDK's file-ignore / codebase-search service needs a ripgrep binary and
+ * reads its path from CURSOR_RIPGREP_PATH. Prefer the product-owned packaged
+ * helper, then resolve the optional source dependency for development. */
 async function ensureRipgrep(): Promise<void> {
-  if (process.env.CURSOR_RIPGREP_PATH) return;
+  const configured = cursorRipgrepPathFromEnvironment(process.env);
+  if (configured) {
+    process.env.CURSOR_RIPGREP_PATH = configured;
+    return;
+  }
   try {
     const spec = "@vscode/ripgrep";
     // @vscode/ripgrep is CJS — dynamic import may surface rgPath on the
@@ -868,6 +883,12 @@ interface Session {
    *  A mode change flips the DESIRED value (autoReviewFor(modeId)); when it
    *  diverges, the next prompt rebuilds the agent to reconcile. */
   appliedAutoReview: boolean;
+  /** autoReview shapes this session has already asked the host to build an
+   *  executor for. @cursor/sdk keys its workspace executor on autoReview (with
+   *  cwd, apiKey, settingSources, sandbox and MCP), so the two possible values
+   *  are two SEPARATE executors — and rebuilding one costs the full workspace
+   *  resolution. At most two entries, so this cannot grow with toggling. */
+  prewarmedAutoReview: Set<boolean>;
 }
 
 interface CursorModelState {
@@ -1159,7 +1180,11 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  the same cwd / apiKey / local / mcpServers the agent is about to be created
    *  with. `model` and `mode` are deliberately omitted — they are not part of
    *  that key, and requiring the model here would put model discovery back in
-   *  front of the prewarm, which is the wait we are trying to overlap. */
+   *  front of the prewarm, which is the wait we are trying to overlap.
+   *
+   *  `autoReview` IS part of that key, so it is a parameter rather than a
+   *  constant: the two values name two different executors (see
+   *  prewarmForDesiredMode). */
   private prewarmWorkspace(
     sdk: CursorSdkModule,
     apiKey: string,
@@ -1168,6 +1193,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env?: Record<string, string>;
       mcpServers?: McpServerRegistration[];
     },
+    autoReview: boolean = autoReviewFor(CURSOR_DEFAULT_MODE),
   ): void {
     if (!sdk.platform?.prewarm) return;
     const sessionMcp = this.mcpServers(opts.mcpServers);
@@ -1175,11 +1201,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       .prewarm({
         apiKey,
         cwd: opts.cwd,
-        local: this.buildLocalOpts(
-          opts.cwd,
-          opts.env,
-          autoReviewFor(CURSOR_DEFAULT_MODE),
-        ),
+        local: this.buildLocalOpts(opts.cwd, opts.env, autoReview),
         ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
       })
       .catch((error: unknown) => {
@@ -1190,6 +1212,43 @@ export class CursorSdkAdapter implements AgentAdapter {
           }`,
         );
       });
+  }
+
+  /** Build the executor a mode change is going to need, at the moment the mode
+   *  changes, instead of inside the send that discovers it is missing.
+   *
+   *  `autoReview` is a create-time @cursor/sdk option AND part of its workspace
+   *  executor cache key, so "Auto" and "not Auto" are two separate executors.
+   *  ensureAutoReview() reconciles the agent lazily at prompt time — correct,
+   *  and deliberately so (see its doc) — but the `Agent.resume` it issues has
+   *  to resolve a workspace that was never built: the full rules / skills /
+   *  ignore / MCP walk, measured at 8-12s on this repo, landing squarely on the
+   *  user's first message. The session-start prewarm does not cover it, because
+   *  that one warmed the OTHER shape.
+   *
+   *  Fire-and-forget, exactly like the session-start prewarm: a mode toggle must
+   *  stay instant, and every failure here is recoverable by the send. The lazy
+   *  reconcile is untouched — A→B→A still settles to one agent rebuild — this
+   *  only makes sure the executor it lands on is already warm.
+   *
+   *  Guarded on the shapes already requested, so holding a toggle down cannot
+   *  queue redundant builds. There are only two shapes, so the set is bounded. */
+  private prewarmForDesiredMode(session: Session): void {
+    const want = autoReviewFor(session.modeId);
+    // Already baked into the live agent — nothing to rebuild, so nothing to warm.
+    if (want === session.appliedAutoReview) return;
+    if (session.prewarmedAutoReview.has(want)) return;
+    session.prewarmedAutoReview.add(want);
+    this.prewarmWorkspace(
+      session.sdk,
+      session.apiKey,
+      {
+        cwd: session.cwd,
+        ...(session.env ? { env: session.env } : {}),
+        ...(session.mcpServers ? { mcpServers: session.mcpServers } : {}),
+      },
+      want,
+    );
   }
 
   /** Stop a dedicated Cursor host. State is already durable under host parity;
@@ -1408,6 +1467,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: opts.mcpServers,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
+      prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
     };
     this.sessions.set(executionId, session);
 
@@ -1563,6 +1623,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       env: opts.env,
       mcpServers: opts.mcpServers,
       appliedAutoReview: autoReviewFor(CURSOR_DEFAULT_MODE),
+      prewarmedAutoReview: new Set([autoReviewFor(CURSOR_DEFAULT_MODE)]),
     });
     return {
       executionId,
@@ -2002,6 +2063,9 @@ export class CursorSdkAdapter implements AgentAdapter {
       opts.modeId === "auto"
     ) {
       session.modeId = opts.modeId;
+      // Still cheap — fire-and-forget — but it starts the workspace build that
+      // reconcile will otherwise do inside the user's next send.
+      this.prewarmForDesiredMode(session);
     }
   }
 

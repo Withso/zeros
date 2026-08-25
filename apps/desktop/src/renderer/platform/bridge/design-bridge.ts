@@ -268,6 +268,12 @@ function validDesignKeyframes(
 export interface DesignApiMutationReplyWire {
   result: DesignApiApplyResult | null;
   snapshot?: DesignWorkspaceSnapshotWire;
+  /** Structural history can restore/delete a frame independently of the frame
+   * that happened to own keyboard focus when the shortcut was pressed. */
+  historySelection?: string | null;
+  /** Exact document whose DesignApi history moved. Structural history omits
+   * this because it invalidates the aggregate frame set instead. */
+  historyFrame?: string;
 }
 
 function designFoundationOpenReply(value: unknown): DesignFoundationOpenWire {
@@ -314,6 +320,11 @@ function designApiMutationReply(
       (typeof reply.result !== "object" ||
         typeof reply.result.revision !== "string" ||
         typeof reply.result.receipt?.status !== "string")) ||
+    (reply.historySelection !== undefined &&
+      reply.historySelection !== null &&
+      typeof reply.historySelection !== "string") ||
+    (reply.historyFrame !== undefined &&
+      typeof reply.historyFrame !== "string") ||
     (requireSnapshot &&
       (!reply.snapshot ||
         !validProtocolCapability(reply.snapshot) ||
@@ -388,13 +399,13 @@ export async function bridgeDesignApplyTransaction(
 export async function bridgeDesignHistory(
   bridge: RuntimeClient,
   workspaceId: string,
-  frame: string,
+  frame: string | null,
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
   return designApiMutationReply(
     await workspaceOp(bridge, `design.history.${direction}`, {
       workspaceId,
-      frame,
+      ...(frame ? { frame } : {}),
     }),
     `design.history.${direction}`,
     true,
@@ -805,6 +816,15 @@ export async function bridgeDesignInsertAsset(
     }),
     "design.asset.insert",
   );
+}
+
+export async function bridgeDesignStage(
+  bridge: RuntimeClient,
+  workspaceId: string,
+): Promise<{ ok: true }> {
+  return (await workspaceOp(bridge, "design.stage", {
+    workspaceId,
+  })) as { ok: true };
 }
 
 export async function bridgeDesignSave(

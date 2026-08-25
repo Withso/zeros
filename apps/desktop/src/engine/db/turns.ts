@@ -212,6 +212,69 @@ export function listRunningTurns(): TurnRow[] {
   return rows.map(toTurnRow);
 }
 
+/** One unattributed finished turn plus the `rev` that ordered it in the page —
+ * the walk's resume cursor. */
+export interface UnattributedTurn {
+  turn: TurnRow;
+  rev: number;
+}
+
+/** One page of finished turns that retained both snapshots but recorded no
+ * authored files. finishTurn deliberately keeps those refs when the trees
+ * differ: they are the recovery net for a provider/tool shape that escaped
+ * attribution. A boot repair can safely revisit this set and compare-and-set
+ * its file list without disturbing a concurrently corrected row.
+ *
+ * Paged and cursored rather than returned whole, because the repair cannot mark
+ * the rows it leaves alone (see db/janitor-state.ts) and this set is NOT small:
+ * a turn that merely ran while another agent wrote to the same worktree lands
+ * in it legitimately, up to the per-chat snapshot retention cap.
+ *
+ * `afterRev` walks by `rev`, not by `started_at`: `rev` comes from the global
+ * monotonic sequence at FINISH time, so a turn that settles after a pass always
+ * sorts after that pass's cursor. Ordering by start time instead would let a
+ * long-running turn — or a crash orphan settled at the next boot, which keeps
+ * its original `started_at` — land behind the cursor and never be seen. */
+export function listUnattributedFinishedTurns(
+  options: { afterRev?: number; limit?: number } = {},
+): UnattributedTurn[] {
+  const afterRev = Math.max(0, options.afterRev ?? 0);
+  const limit = Math.max(1, Math.trunc(options.limit ?? 500));
+  const rows = openZerosDb()
+    .prepare(
+      `SELECT ${SELECT_COLS} FROM turns
+       WHERE status <> 'running'
+         AND pre_snapshot IS NOT NULL
+         AND post_snapshot IS NOT NULL
+         AND (files IS NULL OR files = '[]')
+         AND rev > ?
+       ORDER BY rev ASC
+       LIMIT ?`,
+    )
+    .all(afterRev, limit) as TurnDbRow[];
+  // `rev` rides alongside the row rather than on TurnRow itself: turns.list
+  // hands TurnRow straight to clients, and the internal sync counter is not
+  // part of that wire shape.
+  return rows.map((row) => ({ turn: toTurnRow(row), rev: row.rev }));
+}
+
+/** Fill an empty finished turn's authored files exactly once. */
+export function repairTurnFiles(
+  chatId: string,
+  turnId: string,
+  files: TurnFile[],
+): boolean {
+  if (!chatId || !turnId || files.length === 0) return false;
+  const result = openZerosDb()
+    .prepare(
+      `UPDATE turns SET files = ?, rev = ?
+       WHERE chat_id = ? AND turn_id = ? AND status <> 'running'
+         AND (files IS NULL OR files = '[]')`,
+    )
+    .run(JSON.stringify(files), nextRev(), chatId, turnId);
+  return result.changes > 0;
+}
+
 /** Finalize a turn when the agent's `prompt()` resolves (or fails). Sets the end
  *  time, stop reason, status, post-snapshot, and the authored file set. A no-op
  *  if the start row never landed (defensive). */

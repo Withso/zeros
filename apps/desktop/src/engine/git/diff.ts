@@ -10,7 +10,7 @@ import * as git from "isomorphic-git";
 import nodeFs from "node:fs";
 import path from "node:path";
 import { resolveRepoForGitOp } from "./worktree";
-import { runGit, assertSafeGitRef } from "./git-exec";
+import { runGit, runGitRead, assertSafeGitRef } from "./git-exec";
 import { resolveRepoGit } from "../settings/repo-git";
 import { isConflictEntry, parsePorcelainZ } from "./porcelain";
 import { getInProgressState } from "./repo";
@@ -209,7 +209,7 @@ export async function status(
       ...options.paths.map((candidate) => `:(literal)${candidate}`),
     );
   }
-  const { stdout } = await runGit(ws.path, args);
+  const { stdout } = await runGitRead(ws.path, args);
   const parsed = parsePorcelain(stdout);
   // Conflict state (merge/rebase/cherry-pick/revert mid-flight) so the UI
   // can show a banner; never let the probe fail the status read.
@@ -265,7 +265,7 @@ async function diffNameStatus(
   worktreePath: string,
   rangeArgs: readonly string[],
 ): Promise<FileChange[]> {
-  const { stdout } = await runGit(worktreePath, [
+  const { stdout } = await runGitRead(worktreePath, [
     "-c",
     "core.quotePath=false",
     "diff",
@@ -292,7 +292,7 @@ export async function changeCounts(
   const ws = await resolveRepoForGitOp(workspaceId);
   const { remote } = resolveRepoGit(ws.repoRoot);
   const [{ stdout }, resolvedFloor] = await Promise.all([
-    runGit(ws.path, ["status", "--porcelain=v1", "-z", "-uall"]),
+    runGitRead(ws.path, ["status", "--porcelain=v1", "-z", "-uall"]),
     forkPoint(ws.path, ws.baseBranch, remote),
   ]);
   const parsed = parsePorcelain(stdout);
@@ -443,7 +443,7 @@ async function numstatTotals(
   includePath: ChangePathFilter,
   skipPaths: ReadonlySet<string>,
 ): Promise<ChangeLineCounts> {
-  const { stdout } = await runGit(worktreePath, [
+  const { stdout } = await runGitRead(worktreePath, [
     "-c",
     "core.quotePath=false",
     "diff",
@@ -493,7 +493,7 @@ export async function changeLineCounts(
   const ws = await resolveRepoForGitOp(workspaceId);
   const { remote } = resolveRepoGit(ws.repoRoot);
   const [{ stdout }, resolvedFloor] = await Promise.all([
-    runGit(ws.path, ["status", "--porcelain=v1", "-z", "-uall"]),
+    runGitRead(ws.path, ["status", "--porcelain=v1", "-z", "-uall"]),
     forkPoint(ws.path, ws.baseBranch, remote),
   ]);
   const parsed = parsePorcelain(stdout);
@@ -558,7 +558,7 @@ async function upstreamAheadBehind(worktreePath: string): Promise<{
 }> {
   let upstream: string | null = null;
   try {
-    const { stdout } = await runGit(worktreePath, [
+    const { stdout } = await runGitRead(worktreePath, [
       "rev-parse",
       "--abbrev-ref",
       "--symbolic-full-name",
@@ -570,7 +570,7 @@ async function upstreamAheadBehind(worktreePath: string): Promise<{
   }
   if (!upstream) return { ahead: null, behind: null, upstream: null };
   try {
-    const { stdout } = await runGit(worktreePath, [
+    const { stdout } = await runGitRead(worktreePath, [
       "rev-list",
       "--left-right",
       "--count",
@@ -755,7 +755,7 @@ async function diffFileSummary(
 ): Promise<DiffFileSummary[]> {
   const suffix = filePath ? ["--", filePath] : [];
   const [{ stdout: numstat }, { stdout: names }] = await Promise.all([
-    runGit(
+    runGitRead(
       worktreePath,
       [
         "-c",
@@ -769,7 +769,7 @@ async function diffFileSummary(
       ],
       { maxBufferBytes: DIFF_MAX_BUFFER_BYTES },
     ),
-    runGit(
+    runGitRead(
       worktreePath,
       [
         "-c",
@@ -842,7 +842,7 @@ async function resolveBaseRef(
     if (!ref || seen.has(ref)) continue;
     seen.add(ref);
     try {
-      await runGit(worktreePath, [
+      await runGitRead(worktreePath, [
         "rev-parse",
         "--verify",
         "--quiet",
@@ -862,7 +862,7 @@ async function gitTry(
   args: string[],
 ): Promise<string | null> {
   try {
-    const { stdout } = await runGit(worktreePath, args);
+    const { stdout } = await runGitRead(worktreePath, args);
     return stdout.trim() || null;
   } catch {
     return null;
@@ -876,7 +876,7 @@ async function isAncestor(
   descendant: string,
 ): Promise<boolean> {
   try {
-    await runGit(worktreePath, [
+    await runGitRead(worktreePath, [
       "merge-base",
       "--is-ancestor",
       ancestor,
@@ -1114,7 +1114,7 @@ export async function diff(opts: DiffOptions): Promise<DiffResult> {
   if (opts.filePath) args.push("--", opts.filePath);
   let stdout: string;
   try {
-    ({ stdout } = await runGit(ws.path, args, {
+    ({ stdout } = await runGitRead(ws.path, args, {
       maxBufferBytes: DIFF_MAX_BUFFER_BYTES,
     }));
   } catch (err) {
@@ -1189,7 +1189,7 @@ async function commitObjectExists(
   sha: string,
 ): Promise<boolean> {
   try {
-    await runGit(worktreePath, ["cat-file", "-e", `${sha}^{commit}`]);
+    await runGitRead(worktreePath, ["cat-file", "-e", `${sha}^{commit}`]);
     return true;
   } catch {
     return false;
@@ -1249,7 +1249,7 @@ export async function showCommit(
   // core.quotePath=false so a non-ASCII path appears UNQUOTED in the
   // `diff --git` header → the remote secret filter's a/…b/ parser matches it
   // (a quoted header fails closed = the file is dropped, never rendered).
-  const { stdout: patch } = await runGit(ws.path, [
+  const { stdout: patch } = await runGitRead(ws.path, [
     "-c",
     "core.quotePath=false",
     "diff-tree",
@@ -1260,7 +1260,7 @@ export async function showCommit(
     "-r",
     sha,
   ]);
-  const { stdout: ns } = await runGit(ws.path, [
+  const { stdout: ns } = await runGitRead(ws.path, [
     "-c",
     "core.quotePath=false",
     "diff-tree",
@@ -1360,7 +1360,7 @@ async function logRange(
   args.push(`${floor}..HEAD`);
   let stdout: string;
   try {
-    ({ stdout } = await runGit(worktreePath, args));
+    ({ stdout } = await runGitRead(worktreePath, args));
   } catch {
     return [];
   }

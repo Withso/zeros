@@ -142,8 +142,17 @@ import {
   type ExecutionBoundary,
   type PreparedBoundary,
 } from "./containment/types";
-import { ZsrExecutionBoundary } from "./containment/zsr-boundary";
+import {
+  ZsrExecutionBoundary,
+  resumeSharedContainerWorkerIdling,
+  stopIdleSharedContainerWorkers,
+  suspendSharedContainerWorkerIdling,
+} from "./containment/zsr-boundary";
 import { UtilityBoundaryPool } from "./containment/utility-boundary-pool";
+import {
+  WarmSessionBoundaryPool,
+  warmSessionBoundariesEnabled,
+} from "./containment/warm-session-boundary-pool";
 import { completeAgentSpawnEnv } from "./adapters/shared/config-isolation";
 import { findOrbStackCli } from "./containment/macos-orbstack-container-worker";
 import {
@@ -1097,8 +1106,34 @@ export async function resolveCodeAgentTerritory(opts: {
   cwd: string;
   workspaceRoot?: string;
   repoRoot?: string;
+  /** Managed workspaces reserve the conventional default before a provider
+   * exists. This makes later first Design publication an identity-preserving
+   * operation without creating folders for arbitrary/plain-folder probes. */
+  reserveDefaultDesignDirectory?: boolean;
 }): Promise<AgentFilesystemTerritory | undefined> {
   let territory = await buildCodeAgentTerritory(opts);
+  if (!territory && opts.reserveDefaultDesignDirectory) {
+    const workspaceRoot = await canonicalTerritoryWorkspaceRoot(opts);
+    const pointer = await resolveDesignDirectoryPointerState({
+      repoRoot: path.resolve(opts.repoRoot ?? workspaceRoot),
+      workspacePath: workspaceRoot,
+    });
+    if (!pointer.valid) {
+      throw new Error(
+        "The configured Design directory is not a safe repo-relative path.",
+      );
+    }
+    // buildCodeAgentTerritory returns undefined only for an unconfigured,
+    // absent, unrecognized destination. Explicit destinations already take
+    // the ordinary prospective-reservation path below.
+    await reserveProspectiveDesignDirectory(workspaceRoot, pointer.directory);
+    territory = await buildCodeAgentTerritory(opts);
+    if (!territory) {
+      throw new Error(
+        "The default Design territory disappeared while its isolation lease was established.",
+      );
+    }
+  }
   if (!territory) return undefined;
   const absentProtectedDirectories =
     territory.protectedDesignDirectories.filter(
@@ -1267,9 +1302,17 @@ export class AgentGateway {
    * startup and revoked before any adapter teardown can run user code. */
   private readonly executionBoundaries = new Map<string, PreparedBoundary>();
   /** A rejected teardown proof is a runtime-wide admission hold. Keeping both
-   * the boundary and failure makes lifecycle retries fail closed; a restart is
-   * required so durable process-domain recovery can prove the orphan empty. */
+   * the boundary and failure makes lifecycle retries fail closed. The recovery
+   * loop below retries the proof automatically (teardown stages are
+   * idempotent); until one succeeds — or a restart runs durable process-domain
+   * recovery — admissions stay refused. */
   private readonly failedBoundaryRetirements = new Map<string, unknown>();
+  /** One in-flight recovery schedule per unproven boundary. */
+  private readonly boundaryRetirementRecoveryTimers = new Map<
+    string,
+    NodeJS.Timeout
+  >();
+  private disposed = false;
   /** Detach diagnostic observers before a session boundary is retired. */
   private readonly boundaryPortSubscriptions = new Map<string, () => void>();
   /** Capability-authenticated browser façades, keyed by execution then the
@@ -1493,7 +1536,11 @@ export class AgentGateway {
     workspaceRoot: string | undefined,
     mainRepoRoot: string | undefined,
     stage: "newSession" | "loadSession" | "forkSession",
-    opts?: { cliBinary?: string; persistRecognition?: boolean },
+    opts?: {
+      cliBinary?: string;
+      persistRecognition?: boolean;
+      reserveDefaultDesignDirectory?: boolean;
+    },
   ): Promise<AgentFilesystemTerritory | undefined> {
     let territory: AgentFilesystemTerritory | undefined;
     try {
@@ -1501,10 +1548,29 @@ export class AgentGateway {
         opts?.persistRecognition === false
           ? previewCodeAgentTerritory
           : resolveCodeAgentTerritory;
+      let reserveDefaultDesignDirectory =
+        opts?.reserveDefaultDesignDirectory === true;
+      if (
+        opts?.persistRecognition !== false &&
+        !reserveDefaultDesignDirectory &&
+        workspaceRoot !== undefined
+      ) {
+        const canonicalWorkspace = await canonicalTerritoryWorkspaceRoot({
+          cwd,
+          workspaceRoot,
+        });
+        reserveDefaultDesignDirectory =
+          registeredCodeTerritorySnapshot().workspaces.some(
+            (managed) => managed.path === canonicalWorkspace,
+          );
+      }
       territory = await resolveTerritory({
         cwd,
         workspaceRoot,
         repoRoot: mainRepoRoot,
+        ...(opts?.persistRecognition !== false && reserveDefaultDesignDirectory
+          ? { reserveDefaultDesignDirectory: true }
+          : {}),
       });
     } catch (error) {
       throw new AgentFailureError({
@@ -1579,6 +1645,9 @@ export class AgentGateway {
 
     const registered = registeredCodeTerritorySnapshot();
     const registeredWorkspaces = registered.workspaces;
+    const managedWorkspacePaths = new Set(
+      registeredWorkspaces.map((workspace) => workspace.path),
+    );
     const protectedWorkspaceDirectories =
       protectedManagedWorkspaceDirectories();
     const exactRegisteredOwners = registered.owners.filter(
@@ -1691,6 +1760,11 @@ export class AgentGateway {
           cwd: owner,
           workspaceRoot: owner,
           repoRoot: ownerGrant.repoRoot,
+          ...(options.persistRecognition !== false &&
+          ownerGrant.attached &&
+          managedWorkspacePaths.has(owner)
+            ? { reserveDefaultDesignDirectory: true }
+            : {}),
         });
         const contribution = ownerGrant.full
           ? ownerTerritory
@@ -1997,6 +2071,14 @@ export class AgentGateway {
       actor?: ExecutionBoundaryActor;
       /** Cancels at the next safe preparation checkpoint. */
       admissionSignal?: AbortSignal;
+      /** Enables warm-boundary adoption/replenish for this admission. The
+       * caller supplies the freshly resolved authority snapshot; adoption
+       * requires the complete request (minus executionId) plus this snapshot
+       * to hash identically to a pre-admitted spare. */
+      warmSession?: {
+        contributions: readonly BoundaryTerritoryContributionSnapshot[];
+        registeredDesignAuthorityIdentity: string | null;
+      };
     } = {},
   ): Promise<PreparedBoundary> {
     try {
@@ -2015,11 +2097,44 @@ export class AgentGateway {
         options.providerResumeId,
         options.actor,
       );
-      const prepared = options.admissionSignal
+      const warmSession =
+        stage === "newSession" && warmSessionBoundariesEnabled()
+          ? options.warmSession
+          : undefined;
+      let prepared: PreparedBoundary | null = null;
+      if (warmSession) {
+        if (options.admissionSignal?.aborted) {
+          throw new AdmissionCancelledError();
+        }
+        const adopted = this.warmSessionBoundaries.adopt(
+          request,
+          warmSession.contributions,
+        );
+        if (adopted) {
+          prepared = adopted.boundary;
+          console.log(
+            `[agents] ${adapter.agentId} adopted warm boundary ` +
+              `${adopted.warmExecutionId} for ${executionId}`,
+          );
+        }
+      }
+      prepared ??= options.admissionSignal
         ? await this.executionBoundary.prepare(request, {
             signal: options.admissionSignal,
           })
         : await this.executionBoundary.prepare(request);
+      if (warmSession) {
+        // Replenishment is deferred until the session is fully live (see
+        // replenishWarmSessionBoundary): pooling before the caller's post-
+        // prepare territory recheck could pool a boundary the recheck is about
+        // to prove stale.
+        this.warmReplenishPlans.set(prepared, {
+          request,
+          contributions: warmSession.contributions,
+          registeredDesignAuthorityIdentity:
+            warmSession.registeredDesignAuthorityIdentity,
+        });
+      }
       try {
         if (stage !== "forkSession") {
           this.observeBoundaryPorts(executionId, adapter.agentId, prepared);
@@ -2101,6 +2216,48 @@ export class AgentGateway {
     return this.utilityBoundariesInstance;
   }
 
+  /** Pre-admitted boundaries for the NEXT chat session of an identical shape.
+   * See containment/warm-session-boundary-pool.ts for the adoption contract.
+   * Created lazily so a gateway that never starts a session never holds one. */
+  private warmSessionBoundariesInstance: WarmSessionBoundaryPool | null = null;
+
+  /** Replenish inputs captured at admission, fired only once the owning
+   * session is fully live (post territory-recheck, post adapter startup). */
+  private readonly warmReplenishPlans = new WeakMap<
+    PreparedBoundary,
+    {
+      request: BoundaryRequest;
+      contributions: readonly BoundaryTerritoryContributionSnapshot[];
+      registeredDesignAuthorityIdentity: string | null;
+    }
+  >();
+
+  /** Fire-and-forget the background pre-admission for this session's shape.
+   * Called by newSession once the adapter reports the session live; a failed
+   * or superseded admission never replenishes. */
+  private replenishWarmSessionBoundary(prepared: PreparedBoundary): void {
+    const plan = this.warmReplenishPlans.get(prepared);
+    if (!plan) return;
+    this.warmReplenishPlans.delete(prepared);
+    void this.warmSessionBoundaries.replenish(
+      plan.request,
+      plan.contributions,
+      plan.registeredDesignAuthorityIdentity,
+    );
+  }
+
+  private get warmSessionBoundaries(): WarmSessionBoundaryPool {
+    if (!this.warmSessionBoundariesInstance) {
+      this.warmSessionBoundariesInstance = new WarmSessionBoundaryPool({
+        prepare: (request) => this.executionBoundary.prepare(request),
+        retire: (executionId, boundary) =>
+          this.retirePreparedBoundary(executionId, boundary),
+        assertHealthy: () => this.assertBoundaryRetirementHealthy(),
+      });
+    }
+    return this.warmSessionBoundariesInstance;
+  }
+
   /** Run an engine-owned background one-shot inside a reusable boundary.
    *
    * The boundary is shared with any other one-shot whose BoundaryRequest is
@@ -2126,7 +2283,10 @@ export class AgentGateway {
   ): Promise<T> {
     let lease;
     try {
-      lease = await this.utilityBoundaries.acquire(request);
+      lease = await this.utilityBoundaries.acquire(
+        request,
+        territoryContributions,
+      );
     } catch (error) {
       throw this.boundaryAdmissionFailure(providerId, stage, error);
     }
@@ -2194,14 +2354,33 @@ export class AgentGateway {
   /** Prove every pooled utility boundary stopped. A global Design-owner
    * transaction passes `reopen:false` and owns the later reopen, keeping title,
    * probe, validation, and listing admissions closed through the mutation. */
+  /** True while this gateway holds the app-wide "no container idling" gate.
+   * Queued global transitions each call retire({reopen:false}) but reopen only
+   * once at the tail, so the hold must be a toggle, not a counter. */
+  private globalContainerIdleHold = false;
+
   async retirePooledUtilityBoundaries(
     options: { reopen?: boolean } = {},
   ): Promise<void> {
-    if (!this.utilityBoundariesInstance) return;
+    // A global Design-owner transaction is also the moment every idle shared
+    // container machine must die: an idle machine carries the mount
+    // protections of the map being replaced. Suspend idling first so session
+    // drains that follow inside the same gate stop their machines inline.
+    if (options.reopen === false && !this.globalContainerIdleHold) {
+      this.globalContainerIdleHold = true;
+      suspendSharedContainerWorkerIdling();
+      this.warmSessionBoundariesInstance?.suspendGlobal();
+    }
     try {
-      await this.utilityBoundariesInstance.disposeAll();
+      await stopIdleSharedContainerWorkers();
+      await this.warmSessionBoundariesInstance?.disposeAll();
+      if (this.utilityBoundariesInstance) {
+        await this.utilityBoundariesInstance.disposeAll();
+      }
     } finally {
-      if (options.reopen !== false) this.utilityBoundariesInstance.reopen();
+      if (options.reopen !== false) {
+        this.utilityBoundariesInstance?.reopen();
+      }
     }
   }
 
@@ -2209,7 +2388,41 @@ export class AgentGateway {
    * published the new registered-owner map. No-op when the pool was never
    * instantiated. */
   reopenPooledUtilityBoundaries(): void {
+    if (this.globalContainerIdleHold) {
+      this.globalContainerIdleHold = false;
+      resumeSharedContainerWorkerIdling();
+      this.warmSessionBoundariesInstance?.resumeGlobal();
+    }
     this.utilityBoundariesInstance?.reopen();
+  }
+
+  /** Close/reopen only the pooled utility authority that names one managed
+   * workspace. Instantiating the empty pool here is intentional: a utility
+   * admission that begins later in the same transition must observe the
+   * synchronous suspension too. */
+  suspendPooledUtilityWorkspaceTerritory(workspaceRoot: string): void {
+    suspendSharedContainerWorkerIdling(workspaceRoot);
+    this.warmSessionBoundaries.suspendWorkspaceTerritory(workspaceRoot);
+    this.utilityBoundaries.suspendWorkspaceTerritory(workspaceRoot);
+  }
+
+  async retirePooledUtilityWorkspaceTerritory(
+    workspaceRoot: string,
+  ): Promise<void> {
+    await stopIdleSharedContainerWorkers(workspaceRoot);
+    await this.warmSessionBoundariesInstance?.disposeWorkspaceTerritory(
+      workspaceRoot,
+    );
+    if (!this.utilityBoundariesInstance) return;
+    await this.utilityBoundariesInstance.disposeWorkspaceTerritory(
+      workspaceRoot,
+    );
+  }
+
+  resumePooledUtilityWorkspaceTerritory(workspaceRoot: string): void {
+    resumeSharedContainerWorkerIdling(workspaceRoot);
+    this.warmSessionBoundariesInstance?.resumeWorkspaceTerritory(workspaceRoot);
+    this.utilityBoundariesInstance?.resumeWorkspaceTerritory(workspaceRoot);
   }
 
   /** Whether a prepared title/probe/validation/listing boundary still carries
@@ -2217,16 +2430,24 @@ export class AgentGateway {
    * their post-prepare territory recheck prevents provider bytes from crossing
    * an external owner change. */
   hasPooledUtilityCodeAuthority(): boolean {
-    return (this.utilityBoundariesInstance?.size() ?? 0) > 0;
+    return (
+      (this.utilityBoundariesInstance?.size() ?? 0) > 0 ||
+      (this.warmSessionBoundariesInstance?.size() ?? 0) > 0
+    );
   }
 
   pooledUtilityRegisteredDesignAuthorityChanged(
     identity: string | null,
   ): boolean {
     return (
-      this.utilityBoundariesInstance?.registeredDesignAuthorityChanged(
+      (this.utilityBoundariesInstance?.registeredDesignAuthorityChanged(
         identity,
-      ) ?? false
+      ) ??
+        false) ||
+      (this.warmSessionBoundariesInstance?.registeredDesignAuthorityChanged(
+        identity,
+      ) ??
+        false)
     );
   }
 
@@ -2235,8 +2456,12 @@ export class AgentGateway {
     territory: AgentFilesystemTerritory | undefined,
   ): boolean {
     const normalizedWorkspace = path.resolve(workspaceRoot);
-    for (const contributions of this.utilityBoundariesInstance?.territoryContributionSnapshots() ??
-      []) {
+    for (const contributions of [
+      ...(this.utilityBoundariesInstance?.territoryContributionSnapshots() ??
+        []),
+      ...(this.warmSessionBoundariesInstance?.territoryContributionSnapshots() ??
+        []),
+    ]) {
       if (!contributions) return true;
       const contribution = contributions.find(
         (candidate) =>
@@ -2259,7 +2484,66 @@ export class AgentGateway {
   private assertBoundaryRetirementHealthy(): void {
     if (this.failedBoundaryRetirements.size === 0) return;
     throw new Error(
-      "a prior execution boundary could not be proven stopped; restart Zeros to run stale process-domain recovery",
+      "a prior execution boundary could not be proven stopped; Zeros is retrying cleanup automatically — retry shortly, or restart Zeros to run stale process-domain recovery",
+    );
+  }
+
+  /** Latch an unproven teardown and start retrying it. The latch (and its
+   * fail-closed admission hold) is exactly as before; what changed is that the
+   * user no longer has to restart the app for the common transient case — a
+   * child stuck in uninterruptible IO that dies moments later. */
+  private recordFailedBoundaryRetirement(
+    executionId: string,
+    error: unknown,
+  ): void {
+    this.failedBoundaryRetirements.set(executionId, error);
+    this.scheduleBoundaryRetirementRecovery(executionId, 0);
+  }
+
+  private scheduleBoundaryRetirementRecovery(
+    executionId: string,
+    attempt: number,
+  ): void {
+    if (this.disposed) return;
+    if (this.boundaryRetirementRecoveryTimers.has(executionId)) return;
+    const delays = [5_000, 15_000, 60_000] as const;
+    const delay = delays[attempt] ?? 300_000;
+    const timer = setTimeout(() => {
+      this.boundaryRetirementRecoveryTimers.delete(executionId);
+      void this.attemptBoundaryRetirementRecovery(executionId, attempt);
+    }, delay);
+    timer.unref?.();
+    this.boundaryRetirementRecoveryTimers.set(executionId, timer);
+  }
+
+  private async attemptBoundaryRetirementRecovery(
+    executionId: string,
+    attempt: number,
+  ): Promise<void> {
+    if (this.disposed) return;
+    if (!this.failedBoundaryRetirements.has(executionId)) return;
+    const boundary = this.executionBoundaries.get(executionId);
+    if (!boundary) {
+      // Nothing left to retry in-process (a preparation-time failure). The
+      // hold stands until durable recovery runs in a fresh engine.
+      return;
+    }
+    try {
+      await boundary.stopAndProve();
+    } catch (error) {
+      console.warn(
+        `[agents] boundary retirement retry ${attempt + 1} for ${executionId} failed: ` +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      this.scheduleBoundaryRetirementRecovery(executionId, attempt + 1);
+      return;
+    }
+    this.executionBoundaries.delete(executionId);
+    this.failedBoundaryRetirements.delete(executionId);
+    this.executionBoundary.clearRetirementFailure?.(boundary.generation);
+    await this.removeRetiredSessionDir(executionId);
+    console.log(
+      `[agents] boundary retirement for ${executionId} recovered on retry ${attempt + 1}; admissions resume`,
     );
   }
 
@@ -2271,7 +2555,7 @@ export class AgentGateway {
       await boundary.stopAndProve();
     } catch (error) {
       this.executionBoundaries.set(executionId, boundary);
-      this.failedBoundaryRetirements.set(executionId, error);
+      this.recordFailedBoundaryRetirement(executionId, error);
       throw error;
     }
     if (this.executionBoundaries.get(executionId) === boundary) {
@@ -3496,12 +3780,11 @@ export class AgentGateway {
     // worktree workspace-local. mainRepoRoot is the workspace's primary checkout;
     // absent (a plain-folder chat) → repo-local resolves from cwd, no
     // workspace-local — the prior behavior.
-    const mainRepoRoot = opts.workspaceId
-      ? getWorkspaceById(opts.workspaceId)?.repoRoot
-      : undefined;
-    const canonicalWorkspaceRoot = opts.workspaceId
-      ? getWorkspaceById(opts.workspaceId)?.path
-      : undefined;
+    const managedWorkspace = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)
+      : null;
+    const mainRepoRoot = managedWorkspace?.repoRoot;
+    const canonicalWorkspaceRoot = managedWorkspace?.path;
     const merged = await withTargetBranchEnv(
       withWorktreeEnv(
         mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env), mainRepoRoot),
@@ -3524,7 +3807,13 @@ export class AgentGateway {
       canonicalWorkspaceRoot,
       mainRepoRoot,
       "newSession",
-      { cliBinary: spawn.cliBinary },
+      {
+        cliBinary: spawn.cliBinary,
+        ...(managedWorkspace?.placement === "local" &&
+        canonicalWorkspaceRoot !== undefined
+          ? { reserveDefaultDesignDirectory: true }
+          : {}),
+      },
     );
     // ZSR wraps the complete provider runtime before any provider wrapper,
     // MCP server, hook, plugin or `/add-dir` child starts. Preserve the same
@@ -3573,9 +3862,16 @@ export class AgentGateway {
             "newSession",
             territorySet.additionalRoots,
             territorySet.additionalGitWorkspaceRoots,
-            opts.admissionSignal
-              ? { admissionSignal: opts.admissionSignal }
-              : {},
+            {
+              ...(opts.admissionSignal
+                ? { admissionSignal: opts.admissionSignal }
+                : {}),
+              warmSession: {
+                contributions: territorySet.contributions,
+                registeredDesignAuthorityIdentity:
+                  territorySet.registeredDesignAuthorityIdentity,
+              },
+            },
           );
           try {
             await this.assertAdditionalTerritorySetStillCurrent(
@@ -3671,6 +3967,8 @@ export class AgentGateway {
         (opts.workspaceId ? ` workspaceId=${opts.workspaceId}` : "") +
         (systemInstruction ? " sysInstr=native" : ""),
     );
+    // The session is fully live: pre-admit the next spare of this shape.
+    this.replenishWarmSessionBoundary(preparedBoundary);
     this.executionToAgent.set(session.executionId, agentId);
     this.settleAdapterStartup(session.executionId);
     this.executionToCwd.set(session.executionId, cwd);
@@ -3744,12 +4042,11 @@ export class AgentGateway {
     // ZEROS_WORKTREE_PATH, and the user `[providers]` base_url/executable_path
     // fallback (couriered values win). The workspace-local layering applies here
     // too (see newSession).
-    const mainRepoRoot = opts.workspaceId
-      ? getWorkspaceById(opts.workspaceId)?.repoRoot
-      : undefined;
-    const canonicalWorkspaceRoot = opts.workspaceId
-      ? getWorkspaceById(opts.workspaceId)?.path
-      : undefined;
+    const managedWorkspace = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)
+      : null;
+    const mainRepoRoot = managedWorkspace?.repoRoot;
+    const canonicalWorkspaceRoot = managedWorkspace?.path;
     const merged = await withTargetBranchEnv(
       withWorktreeEnv(
         mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env), mainRepoRoot),
@@ -3772,7 +4069,13 @@ export class AgentGateway {
       canonicalWorkspaceRoot,
       mainRepoRoot,
       "loadSession",
-      { cliBinary: spawn.cliBinary },
+      {
+        cliBinary: spawn.cliBinary,
+        ...(managedWorkspace?.placement === "local" &&
+        canonicalWorkspaceRoot !== undefined
+          ? { reserveDefaultDesignDirectory: true }
+          : {}),
+      },
     );
     const sessionEnv = spawn.env;
     const territorySet = await this.resolveTerritorySet(
@@ -4004,12 +4307,11 @@ export class AgentGateway {
       });
     }
     const cwd = resolveAgentCwd(opts.cwd, "forkSession", opts.workspaceId);
-    const mainRepoRoot = opts.workspaceId
-      ? getWorkspaceById(opts.workspaceId)?.repoRoot
-      : undefined;
-    const canonicalWorkspaceRoot = opts.workspaceId
-      ? getWorkspaceById(opts.workspaceId)?.path
-      : undefined;
+    const managedWorkspace = opts.workspaceId
+      ? getWorkspaceById(opts.workspaceId)
+      : null;
+    const mainRepoRoot = managedWorkspace?.repoRoot;
+    const canonicalWorkspaceRoot = managedWorkspace?.path;
     const merged = await withTargetBranchEnv(
       withWorktreeEnv(
         mergeSpawnEnv(cwd, completeAgentSpawnEnv(opts.env), mainRepoRoot),
@@ -4032,7 +4334,13 @@ export class AgentGateway {
       canonicalWorkspaceRoot,
       mainRepoRoot,
       "forkSession",
-      { cliBinary: spawn.cliBinary },
+      {
+        cliBinary: spawn.cliBinary,
+        ...(managedWorkspace?.placement === "local" &&
+        canonicalWorkspaceRoot !== undefined
+          ? { reserveDefaultDesignDirectory: true }
+          : {}),
+      },
     );
     const sessionEnv = spawn.env;
     const territorySet = await this.resolveTerritorySet(
@@ -4192,7 +4500,7 @@ export class AgentGateway {
         boundaryStopped = true;
       } catch (error) {
         failures.push(error);
-        this.failedBoundaryRetirements.set(executionId, error);
+        this.recordFailedBoundaryRetirement(executionId, error);
       }
       if (boundaryStopped) {
         this.executionBoundaries.delete(executionId);
@@ -4274,7 +4582,7 @@ export class AgentGateway {
       boundaryStopped = true;
     } catch (err) {
       failure ??= err;
-      this.failedBoundaryRetirements.set(sessionId, err);
+      this.recordFailedBoundaryRetirement(sessionId, err);
       console.warn(
         `[agents] ${resolvedAgentId} boundary teardown(${sessionId}) failed: ` +
           (err instanceof Error ? err.message : String(err)),
@@ -4729,7 +5037,8 @@ export class AgentGateway {
         cliBinary,
         executionBoundary,
       }) => {
-        const readQuota = resolveAgentCapabilityPorts(adapter).account?.readQuota;
+        const readQuota =
+          resolveAgentCapabilityPorts(adapter).account?.readQuota;
         if (!readQuota) return null;
         return await readQuota({ cwd, env, cliBinary, executionBoundary });
       },
@@ -4879,6 +5188,14 @@ export class AgentGateway {
   }
 
   async dispose(): Promise<void> {
+    this.disposed = true;
+    for (const timer of this.boundaryRetirementRecoveryTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.boundaryRetirementRecoveryTimers.clear();
+    // Engine shutdown must not leave warm container machines behind: refuse
+    // idling for every release below, then stop the already-idle ones.
+    suspendSharedContainerWorkerIdling();
     const boundaryEntries = [...this.executionBoundaries.entries()];
     const boundaries = boundaryEntries.map(([, boundary]) => boundary);
     const failures: unknown[] = [];
@@ -4890,6 +5207,7 @@ export class AgentGateway {
         if (result.status === "rejected") failures.push(result.reason);
       }
     };
+    await settle([() => stopIdleSharedContainerWorkers()]);
     for (const executionId of this.boundaryPortSubscriptions.keys()) {
       this.stopObservingBoundaryPorts(executionId);
     }
@@ -4897,6 +5215,9 @@ export class AgentGateway {
     // them by execution id), so shutdown has to prove them stopped explicitly.
     // Their neutral probe roots are removed AFTER, since a pooled boundary names
     // one as its workspace root until it is retired.
+    await settle([
+      () => this.warmSessionBoundariesInstance?.dispose() ?? Promise.resolve(),
+    ]);
     await settle([() => this.retirePooledUtilityBoundaries()]);
     const probeRoots = [...this.providerProbeRoots.values()];
     this.providerProbeRoots.clear();

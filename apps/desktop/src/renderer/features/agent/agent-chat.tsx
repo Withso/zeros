@@ -43,6 +43,7 @@ import {
   useBrowserPickerSelection,
   usePendingChatSubmission,
   usePendingAutoSend,
+  usePendingAutoSendAt,
   usePendingComposerAppend,
   type ChatThread,
 } from "../../state/store";
@@ -186,7 +187,12 @@ import {
   permissionModeShowsFrame,
   staticModesForAgent,
 } from "./model-catalog";
-import { sendSessionRecoveryMode } from "./session-reload-lifecycle";
+import {
+  QUEUED_FIRST_TURN_MAX_WAIT_MS,
+  queuedFirstTurnAction,
+  sendSessionRecoveryMode,
+  unreadableTranscriptSendAction,
+} from "./session-reload-lifecycle";
 import { requestAiChatTitle, settledFirstPromptForTitle } from "./chat-title";
 import {
   newChatBornDefaults,
@@ -350,6 +356,9 @@ export function AgentChat({
   const browserPickerSelection = useBrowserPickerSelection();
   const pendingChatSubmission = usePendingChatSubmission();
   const pendingAutoSend = usePendingAutoSend(chatId);
+  // The stamp, not just the flag: the park's release site bounds its own wait
+  // (see queuedFirstTurnAction).
+  const pendingAutoSendAt = usePendingAutoSendAt(chatId);
   const pendingComposerAppend = usePendingComposerAppend();
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
@@ -3220,6 +3229,61 @@ export function AgentChat({
       agentId: session.agentId ?? chatThread?.agentId ?? null,
     });
 
+  /** The chat whose send is already parked on an unreadable transcript. One
+   *  automatic retry: the drain re-enters runSend, which re-hydrates, and if
+   *  the read fails AGAIN there is no point cycling park → drain → park at
+   *  hydrate-RPC speed. Cleared whenever the transcript reads normally, so a
+   *  later disconnect gets its own retry. */
+  const transcriptParkedChatRef = useRef<string | null>(null);
+
+  /** Park a send that arrived while this chat's transcript could not be read
+   *  (engine respawning, transport dropped, a cold read that failed). Same
+   *  mechanism as the provisioning park: keep the exact TipTap document as the
+   *  chat's draft, arm its one-shot auto-send, and let the readiness drain
+   *  dispatch it. Says so either way — the one thing this must never do again
+   *  is nothing. */
+  const parkUnreadableTranscriptSend = (
+    parkChatId: string,
+    override?: string,
+  ): void => {
+    const snapshot = override === undefined ? serializeComposerState() : null;
+    const action = unreadableTranscriptSendAction({
+      hasPayload: snapshot
+        ? !snapshot.isEmpty
+        : (override ?? "").trim().length > 0,
+      payloadInComposer: snapshot !== null,
+      alreadyRetried: transcriptParkedChatRef.current === parkChatId,
+      status: session.status,
+    });
+    if (action === "ignore") return;
+    const alreadyArmed =
+      useWorkspaceStore.getState().pendingAutoSend[parkChatId] !== undefined;
+    if (action === "report" || !snapshot) {
+      if (!alreadyArmed) {
+        toast.warning("Couldn’t send yet", {
+          description:
+            "This chat is still reconnecting. Your message is in the composer — send it again in a moment.",
+          id: `chat-send-transcript-unavailable-${parkChatId}`,
+        });
+      }
+      return;
+    }
+    transcriptParkedChatRef.current = parkChatId;
+    const draft = {
+      text: snapshot.displayText,
+      attachments: snapshot.attachments,
+      json: snapshot.json,
+    };
+    composerLiveRef.current = draft;
+    dispatch({ type: "SET_CHAT_DRAFT", chatId: parkChatId, draft });
+    if (alreadyArmed) return;
+    dispatch({ type: "REQUEST_AUTO_SEND", chatId: parkChatId });
+    toast.info("Message queued", {
+      description: "It will send as soon as this chat reconnects.",
+      id: `workspace-message-queued-${parkChatId}`,
+    });
+  };
+
   const runSend = async (
     override?: string,
     extras?: {
@@ -3290,7 +3354,15 @@ export function AgentChat({
     // hydrateChat), so bailing here would silently swallow the send BEFORE the
     // provisioning branch below could queue it and say so. Let that one case
     // fall through — the provisioning branch keeps the draft and queues an
-    // auto-send; every other missing/partial state still returns untouched.
+    // auto-send.
+    //
+    // Every OTHER unreadable state used to `return` here and say NOTHING: the
+    // composer kept the text, no bubble appeared, no toast, and pressing Enter
+    // again did the same nothing. That is the second half of the reported
+    // "I sent it before the workspace was ready and it never went" — an engine
+    // respawn or a dropped transport is exactly when the hydrate above fails,
+    // and it is the same pre-ready window the provisioning park already
+    // covers. So park it the same way and let the reconnect drain it.
     {
       const storeTranscriptState = chatId
         ? useSessionsStore.getState().sessions[chatId]?.transcriptState
@@ -3300,8 +3372,11 @@ export function AgentChat({
         storeTranscriptState !== "resident" &&
         !(storeTranscriptState === undefined && workspaceProvisioning)
       ) {
+        parkUnreadableTranscriptSend(chatId, override);
         return;
       }
+      // Readable again — re-arm the single automatic retry above.
+      transcriptParkedChatRef.current = null;
     }
     // Normal send → snapshot the editor (text + inline pills); the hand-off
     // path (override) supplies the text + pre-built blocks directly.
@@ -3370,7 +3445,7 @@ export function AgentChat({
       composerLiveRef.current = draft;
       dispatch({ type: "SET_CHAT_DRAFT", chatId, draft });
       const alreadyQueued =
-        useWorkspaceStore.getState().pendingAutoSend[chatId] === true;
+        useWorkspaceStore.getState().pendingAutoSend[chatId] !== undefined;
       if (!alreadyQueued) {
         dispatch({ type: "REQUEST_AUTO_SEND", chatId });
         toast.info("Message queued", {
@@ -3944,22 +4019,72 @@ export function AgentChat({
   // its own rich editor document. This is intentionally independent of current
   // route/surface: rapid create→create navigation still drains every queued
   // chat, while the exact id prevents another mounted pane from consuming it.
+  //
+  // It is also the park's RELEASE site (queuedFirstTurnAction): a spawn that
+  // ends terminally, or a wait that outlasts the bound, hands the message back
+  // and says so instead of holding it silently — the reported "I sent it
+  // before the workspace was ready and it just sat there".
   useEffect(() => {
-    if (!chatId || !pendingAutoSend || workspaceProvisioning) return;
-    if (session.status !== "ready" || session.pendingPermission) return;
-    if (composerEmpty) return;
-    // Don't retire the intent into a send that handleSend would drop because
-    // another one is mid-preparation; this effect re-runs when that clears.
-    if (sendInFlightRef.current) return;
-    // Consume first so React Strict effects and unrelated store notifications
-    // cannot dispatch the same first turn twice while handleSend is awaiting.
-    dispatch({ type: "CONSUME_AUTO_SEND", chatId });
-    // The original click was already recorded when this exact send was queued
-    // during provisioning. Its later automatic drain is not a new action.
-    submitRef.current(false);
+    if (!chatId || pendingAutoSendAt === null) return;
+    const decide = (): "wait" | "send" | "release" =>
+      queuedFirstTurnAction({
+        status: session.status,
+        provisioning: workspaceProvisioning,
+        hasPermissionGate: !!session.pendingPermission,
+        composerEmpty,
+        // Don't retire the intent into a send that handleSend would drop
+        // because another one is mid-preparation; this effect re-runs when
+        // that clears.
+        sendInFlight: sendInFlightRef.current,
+        armedForMs: Date.now() - pendingAutoSendAt,
+      });
+    const apply = (action: "wait" | "send" | "release"): void => {
+      if (action === "wait") return;
+      // Consume first so React Strict effects and unrelated store
+      // notifications cannot dispatch the same first turn twice while
+      // handleSend is awaiting.
+      dispatch({ type: "CONSUME_AUTO_SEND", chatId });
+      if (action === "release") {
+        toast.warning("A queued message wasn’t sent", {
+          description:
+            "This chat couldn’t start, so your message is still in the composer — send it again once the chat is ready.",
+          id: `workspace-message-queued-released-${chatId}`,
+        });
+        return;
+      }
+      // The original click was already recorded when this exact send was
+      // queued during provisioning. Its later automatic drain is not a new
+      // action.
+      submitRef.current(false);
+    };
+    const action = decide();
+    if (action !== "wait") {
+      apply(action);
+      return;
+    }
+    // A session that never settles produces no further status transition, so
+    // re-running on state alone can't notice it. Re-check once the bound
+    // elapses — the only way the wait becomes reportable at all.
+    const remaining =
+      QUEUED_FIRST_TURN_MAX_WAIT_MS - (Date.now() - pendingAutoSendAt) + 250;
+    const timer = window.setTimeout(
+      () => {
+        // Re-read live state: this fires minutes later, and only the store
+        // knows whether the park is still armed by then.
+        if (
+          useWorkspaceStore.getState().pendingAutoSend[chatId] !==
+          pendingAutoSendAt
+        ) {
+          return;
+        }
+        apply(decide());
+      },
+      Math.max(remaining, 0),
+    );
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    pendingAutoSend,
+    pendingAutoSendAt,
     workspaceProvisioning,
     session.status,
     session.pendingPermission,

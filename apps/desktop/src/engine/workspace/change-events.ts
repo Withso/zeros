@@ -61,6 +61,7 @@ const WORKSPACE_MUTATIONS = new Set([
   "design.node.html",
   "design.asset.insert",
   "design.token.update",
+  "design.stage",
   "design.save",
   "git.initInPlace",
   "detach.start",
@@ -183,6 +184,10 @@ export function dbChangedIncludesOriginator(op: string): boolean {
   return (
     LONG_LIFECYCLE_OPS.has(op) ||
     SETTINGS_MUTATIONS.has(op) ||
+    // The Design surface does not own a Git-status cache to update
+    // optimistically. Echo its index checkpoint so a retained Code/Changes
+    // surface immediately re-reads staged state.
+    op === "design.stage" ||
     // This maintenance op has no optimistic renderer mutation; the desktop
     // that requested it must refresh its workspace collections too.
     op === "workspace.reassignLocalOrganization"

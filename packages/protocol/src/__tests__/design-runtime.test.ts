@@ -403,7 +403,7 @@ describe("design runtime protocol", () => {
             payload: Record<string, unknown>;
           }>((resolve, reject) => {
             document.body.innerHTML =
-              '<section data-oid="hero"><h1 data-oid="heading">Hello</h1></section>';
+              '<section data-oid="hero" style="display:flex;flex-direction:column"><h1 data-oid="heading">Hello</h1></section>';
             document.body.style.cssText =
               "display:grid;grid-auto-columns:37px;outline:2px solid;font-style:italic;text-indent:7px;overflow-wrap:anywhere;perspective-origin:25% 75%";
             let nested = document.querySelector('[data-oid="hero"]')!;
@@ -513,7 +513,14 @@ describe("design runtime protocol", () => {
           typedErrors: true,
         },
         snapshot: {
-          tree: [{ oid: "hero", tag: "section" }],
+          tree: [
+            {
+              oid: "hero",
+              tag: "section",
+              display: "flex",
+              flexDirection: "column",
+            },
+          ],
           frame: {
             oid: "",
             tag: "body",
@@ -1215,6 +1222,7 @@ describe("design runtime protocol", () => {
             deepestDescend: string;
             nestedPeer: string;
             authoredStyleProperties: string[];
+            authoredCustomProperty: string;
             peerAuthoredStyleProperties: string[];
             repeatedAuthoredScanStable: boolean;
             parentTextEditable: boolean;
@@ -1235,7 +1243,7 @@ describe("design runtime protocol", () => {
             </style>`;
             document.body.dataset.oid = "frame-body";
             document.body.innerHTML =
-              '<main data-oid="parent"><button data-oid="child" style="margin-right: 50px; padding: 10px 32px 32px; inset-inline-start: 4px">Child</button><button data-oid="peer">Peer</button></main>';
+              '<main data-oid="parent"><button data-oid="child" style="--child-accent: rgb(12, 34, 56); margin-right: 50px; padding: 10px 32px 32px; inset-inline-start: 4px">Child</button><button data-oid="peer">Peer</button></main>';
             (
               window as Window & { __zerosDesignSourceVersion?: string }
             ).__zerosDesignSourceVersion = "f".repeat(24);
@@ -1246,6 +1254,7 @@ describe("design runtime protocol", () => {
               deepestDescend: "",
               nestedPeer: "",
               authoredStyleProperties: [] as string[],
+              authoredCustomProperty: "",
               peerAuthoredStyleProperties: [] as string[],
               repeatedAuthoredScanStable: false,
               parentTextEditable: false,
@@ -1290,6 +1299,7 @@ describe("design runtime protocol", () => {
                       revision?: number;
                       textEditable?: boolean;
                       authoredStyleProperties?: string[];
+                      styles?: Record<string, string>;
                     }
                   | Array<{ oid?: string }>;
                 error?: { message?: string };
@@ -1347,6 +1357,8 @@ describe("design runtime protocol", () => {
               } else if (message.requestId === "child-details") {
                 values.authoredStyleProperties =
                   objectResult?.authoredStyleProperties ?? [];
+                values.authoredCustomProperty =
+                  objectResult?.styles?.["--child-accent"] ?? "";
                 request("marquee", "getElementsInRect", {
                   x: 0,
                   y: 0,
@@ -1407,11 +1419,13 @@ describe("design runtime protocol", () => {
         deepestDescend: "child",
         nestedPeer: "peer",
         authoredStyleProperties: expect.arrayContaining([
+          "--child-accent",
           "background",
           "inset-inline-start",
           "margin-right",
           "padding",
         ]),
+        authoredCustomProperty: "rgb(12, 34, 56)",
         peerAuthoredStyleProperties: expect.arrayContaining([
           "background-color",
         ]),

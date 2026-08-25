@@ -306,6 +306,9 @@ export interface ExecutionBoundary {
     request: BoundaryRequest,
     control?: AdmissionControl,
   ): Promise<PreparedBoundary>;
+  /** Lift the admission hold for one generation after a retried teardown
+   * proved it stopped. Backends without a process-lifetime latch may omit it. */
+  clearRetirementFailure?(generation: TerritoryGeneration): void;
 }
 
 /** Out-of-band scheduling control for one admission. Deliberately NOT part of

@@ -45,6 +45,7 @@ import {
 } from "../git/state";
 import type {
   BoundaryAuthoritySnapshot,
+  BoundaryTerritoryContributionSnapshot,
   PreparedBoundary,
   RepoTaskBoundaryFactory,
 } from "../agents/containment/types";
@@ -136,6 +137,10 @@ interface RunEntry {
 
 interface BoundaryTeardownRecord {
   readonly promise: Promise<void>;
+  readonly workspaceId: string | null;
+  readonly territoryContributions:
+    | readonly BoundaryTerritoryContributionSnapshot[]
+    | undefined;
 }
 
 const missingRepoTaskBoundary: RepoTaskBoundaryFactory = async () => {
@@ -232,7 +237,11 @@ export class RunManager {
     workspaceId: string | null,
   ): Promise<void> {
     const promise = Promise.resolve().then(() => boundary.stopAndProve());
-    const record = { promise } satisfies BoundaryTeardownRecord;
+    const record = {
+      promise,
+      workspaceId,
+      territoryContributions: boundary.territoryContributions,
+    } satisfies BoundaryTeardownRecord;
     this.allBoundaryTeardowns.add(record);
     void promise.then(
       () => this.allBoundaryTeardowns.delete(record),
@@ -311,6 +320,69 @@ export class RunManager {
       throw new AggregateError(
         failures,
         "repository run boundaries were not globally retired. Restart Zeros before changing registered Design territory.",
+      );
+    }
+  }
+
+  /** Retire only run boundaries whose immutable authority includes one
+   * managed workspace. Rowless and sibling runs stay live unless their exact
+   * contribution list says they attached the workspace being changed. */
+  async stopForWorkspaceTerritoryAndProve(
+    workspaceId: string,
+    workspaceRoot: string,
+  ): Promise<void> {
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    const includesWorkspace = (
+      owner: string | null,
+      contributions:
+        | readonly BoundaryTerritoryContributionSnapshot[]
+        | undefined,
+    ): boolean =>
+      owner === workspaceId ||
+      contributions?.some(
+        (contribution) =>
+          path.resolve(contribution.workspaceRoot) === normalizedWorkspace,
+      ) === true;
+
+    const sessionIds = new Set<string>();
+    for (const [sessionId, flight] of this.starting) {
+      if (
+        includesWorkspace(
+          flight.workspaceId,
+          flight.authority?.territoryContributions,
+        )
+      ) {
+        sessionIds.add(sessionId);
+      }
+    }
+    const entries: RunEntry[] = [];
+    for (const entry of this.entries.values()) {
+      if (
+        includesWorkspace(
+          entry.workspaceId,
+          entry.boundary?.territoryContributions,
+        )
+      ) {
+        sessionIds.add(entry.sessionId);
+        entries.push(entry);
+      }
+    }
+    for (const sessionId of sessionIds) this.stop(sessionId);
+    for (const entry of entries) void this.finalizeBoundary(entry);
+
+    const records = [...this.allBoundaryTeardowns].filter((record) =>
+      includesWorkspace(record.workspaceId, record.territoryContributions),
+    );
+    const results = await Promise.allSettled(
+      records.map((record) => record.promise),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "repository run boundaries for this Design territory were not proven stopped. Restart Zeros before changing it.",
       );
     }
   }

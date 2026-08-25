@@ -446,16 +446,28 @@ async function main() {
   let textTransactionCounter = 0;
   let looseTextFrameCounter = 0;
   let appendedTextCounter = 0;
+  const frameDeletionUndo: Array<
+    (typeof currentWorkspaceSnapshot.frames)[number]
+  > = [];
+  const frameDeletionRedo: Array<
+    (typeof currentWorkspaceSnapshot.frames)[number]
+  > = [];
   const nextStyleSourceVersion = () => {
     styleGenerationCounter += 1;
     return styleGenerationCounter.toString(16).padStart(24, "c");
   };
   const styleMutationSources: string[] = [];
+  const designShortcutOperations: string[] = [];
   (
     window as Window & {
       __zerosHarnessStyleMutationSources?: string[];
     }
   ).__zerosHarnessStyleMutationSources = styleMutationSources;
+  (
+    window as Window & {
+      __zerosHarnessDesignShortcutOperations?: string[];
+    }
+  ).__zerosHarnessDesignShortcutOperations = designShortcutOperations;
   setActiveBridge({
     status: "connected",
     on: () => () => {},
@@ -477,6 +489,7 @@ async function main() {
             `Design frame changed before the mutation: expected ${currentSourceVersion}, received ${requestedSourceVersion}.`,
           );
         }
+        designShortcutOperations.push("style:start");
         styleMutationSources.push(requestedSourceVersion);
         const nextSourceVersion = nextStyleSourceVersion();
         const nextWorkspaceSnapshot = {
@@ -528,6 +541,7 @@ async function main() {
         // reply reaches updateDesignNodeStylesCached.
         applyDesignWorkspaceRefreshVersion(workspaceId, 1);
         await new Promise((resolve) => window.setTimeout(resolve, 50));
+        designShortcutOperations.push("style:end");
         return {
           type: "WORKSPACE_RESPONSE",
           result: {
@@ -925,10 +939,107 @@ async function main() {
           result: { frame, snapshot: currentWorkspaceSnapshot },
         };
       }
+      if (message.op === "design.foundation.open") {
+        const frameFile = String(message.params?.frame ?? "");
+        const sourceVersion = currentWorkspaceSnapshot.frames.find(
+          (frame) => frame.file === frameFile,
+        )?.sourceVersion;
+        const foundation = sourceVersion
+          ? designFoundationCache.getSnapshot(
+              designFoundationKey(workspaceId, frameFile, sourceVersion),
+            ).data
+          : null;
+        if (!foundation) {
+          throw new Error("The harness foundation is unavailable.");
+        }
+        return { type: "WORKSPACE_RESPONSE", result: foundation };
+      }
       if (message.op === "design.snapshot") {
         return {
           type: "WORKSPACE_RESPONSE",
           result: { snapshot: currentWorkspaceSnapshot },
+        };
+      }
+      if (message.op === "design.frame.delete") {
+        const frameFile = String(message.params?.frame ?? "");
+        const deleted = currentWorkspaceSnapshot.frames.find(
+          (frame) => frame.file === frameFile,
+        );
+        if (!deleted) throw new Error(`Frame not found: ${frameFile}`);
+        currentWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          frames: currentWorkspaceSnapshot.frames.filter(
+            (frame) => frame.file !== frameFile,
+          ),
+        };
+        frameDeletionUndo.push(deleted);
+        frameDeletionRedo.length = 0;
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: {
+            deleted: { file: frameFile },
+            snapshot: currentWorkspaceSnapshot,
+          },
+        };
+      }
+      if (
+        message.op === "design.history.undo" ||
+        message.op === "design.history.redo"
+      ) {
+        const direction = message.op.endsWith("undo") ? "undo" : "redo";
+        designShortcutOperations.push(`${direction}:start`);
+        const source =
+          direction === "undo" ? frameDeletionUndo : frameDeletionRedo;
+        const destination =
+          direction === "undo" ? frameDeletionRedo : frameDeletionUndo;
+        const deletedFrame = source.pop();
+        let historySelection: string | null | undefined;
+        if (deletedFrame) {
+          if (direction === "undo") {
+            currentWorkspaceSnapshot = {
+              ...currentWorkspaceSnapshot,
+              frames: [...currentWorkspaceSnapshot.frames, deletedFrame].sort(
+                (left, right) => left.z - right.z,
+              ),
+            };
+            historySelection = deletedFrame.file;
+          } else {
+            currentWorkspaceSnapshot = {
+              ...currentWorkspaceSnapshot,
+              frames: currentWorkspaceSnapshot.frames.filter(
+                (frame) => frame.file !== deletedFrame.file,
+              ),
+            };
+            historySelection = currentWorkspaceSnapshot.frames[0]?.file ?? null;
+          }
+          destination.push(deletedFrame);
+        } else {
+          await new Promise((resolve) => window.setTimeout(resolve, 50));
+        }
+        designShortcutOperations.push(`${direction}:end`);
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: {
+            result: null,
+            snapshot: currentWorkspaceSnapshot,
+            ...(historySelection !== undefined ? { historySelection } : {}),
+          },
+        };
+      }
+      if (message.op === "design.stage") {
+        designShortcutOperations.push("stage:start");
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        designShortcutOperations.push("stage:end");
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: { ok: true },
+        };
+      }
+      if (message.op === "design.save") {
+        designShortcutOperations.push("commit");
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: { sha: "a".repeat(40), branch: workspace.branch },
         };
       }
       if (message.op === "design.runtime.audit") {
@@ -1066,7 +1177,6 @@ async function main() {
             workspace={workspace}
             folder={workspacePath}
             surfaceActive
-            onToggleWorkbench={() => {}}
           />
         </main>
       </TooltipProvider>

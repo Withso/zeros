@@ -201,11 +201,11 @@ async function normalizeLegacyCone(workspacePath: string): Promise<void> {
 
 /** Enter design mode on a live code-mode workspace.
  *
- *  An existing Design subtree is already carved out of every code-agent
- *  sandbox, so switching the visible surface does not disturb those agents.
- *  First use is different: the subtree does not exist in their creation-time
- *  authority map yet. `withFirstTerritoryCreation` lets the engine retire those
- *  sessions and block new starts before initialization creates the directory.
+ *  An existing or admission-reserved Design subtree is already carved out of
+ *  every code-agent sandbox, so switching the visible surface does not disturb
+ *  those agents. `withFirstTerritoryCreation` asks the engine to prove that
+ *  identity; only a legacy/stale boundary admitted before reservation is
+ *  retired before initialization creates/publishes the document.
  *  Order: preview identity → optional authority transition → publish identity
  *  → marker → ensure/commit doc → flip row → clear marker. */
 export async function enterDesignMode(

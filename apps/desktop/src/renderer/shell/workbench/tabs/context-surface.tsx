@@ -60,7 +60,7 @@ export const ContextSurface = React.memo(function ContextSurface({
     : null;
   // Agent turn-end / git writes / engine broadcasts → re-list. (Attachment
   // staging has its own immediate signal — the subscription effect below.)
-  const refreshKey = useGitRefreshKey(cwd, workspaceId);
+  const refreshKey = useGitRefreshKey(cwd, workspaceId, active);
 
   // --- STATE ---
   // Attachment ids with an in-flight share toggle (checkbox disabled until

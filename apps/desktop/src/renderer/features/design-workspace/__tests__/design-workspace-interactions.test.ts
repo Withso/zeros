@@ -156,11 +156,37 @@ describe("design workspace interaction wiring", () => {
       source.indexOf("if (!viewport.contains(document.activeElement)) return;"),
     );
     expect(guard).toBeLessThan(
-      source.indexOf("if (!viewport || isEditableHotkeyTarget(event.target))"),
+      source.indexOf(
+        "const editableTarget = isEditableHotkeyTarget(event.target);",
+      ),
     );
     // One owner, not one listener per gesture: the three that had wired their
     // own window keydown are covered by the same guard.
     expect(source).not.toContain('if (keyboardEvent.key !== "Escape") return;');
+  });
+
+  it("routes copy, duplicate, and delete through the active semantic selection", () => {
+    expect(source).toContain("resolveDesignSelectionShortcut(");
+    expect(source).toContain(
+      'activeElement.closest("[data-design-workspace-surface]")',
+    );
+    expect(source).toContain("void duplicateSelectedFrame(duplicateMode)");
+    expect(source).toContain("void duplicateSelectedNode(duplicateMode)");
+    expect(source).toContain(
+      "if (selectedNodeIsTarget) void deleteSelectedNode()",
+    );
+    // Layers leaves structural shortcuts to the canvas's one selection owner,
+    // so multi-selection and frame selection behave identically everywhere.
+    expect(layersSource).not.toContain('mutateLayer("duplicate"');
+    expect(layersSource).not.toContain('mutateLayer("delete"');
+  });
+
+  it("presents frame, text, image, and vector names without leaking HTML labels", () => {
+    expect(layersSource).toContain("designFrameLayerLabel(frame.kind)");
+    expect(layersSource).toContain("designRuntimeLayerLabel(layer.node)");
+    expect(layersSource).not.toContain("frame.title}");
+    expect(layersSource).not.toContain("layer.node.name.trim()");
+    expect(layersSource).not.toContain("${layer.node.tag}");
   });
 
   /** A trackpad pinch repaints the camera up to 80ms before the store learns
@@ -322,6 +348,22 @@ describe("design workspace interaction wiring", () => {
     );
   });
 
+  it("keeps the persisted code-column collapse out of design workspaces", () => {
+    const sidebarWiring = appShellSource.match(
+      /<DesignWorkspaceSidebar[\s\S]*?\/>/,
+    )?.[0];
+    const columnWiring = appShellSource.match(
+      /<DesignWorkspaceColumn[\s\S]*?\/>/,
+    )?.[0];
+
+    expect(sidebarWiring).toBeDefined();
+    expect(columnWiring).toBeDefined();
+    expect(sidebarWiring).not.toContain("workbenchCollapsed");
+    expect(columnWiring).not.toContain("workbenchCollapsed");
+    expect(source).not.toContain("WorkbenchToggleButton");
+    expect(source).not.toContain("onToggleWorkbench");
+  });
+
   it("keeps inverse-scaled motion-path strokes stable at low canvas zoom", () => {
     expect(source).toContain("strokeWidth: designCanvasScreenPixels(2)");
     expect(source).not.toContain('vectorEffect="non-scaling-stroke"');
@@ -425,7 +467,8 @@ describe("design workspace interaction wiring", () => {
     expect(source).not.toContain("aria-label={`Duplicate ${details.name}`}");
     expect(source).not.toContain("aria-label={`Delete ${details.name}`}");
     expect(source).not.toContain("aria-label={`Edit text in ${details.name}`}");
-    expect(source).toContain('event.key.toLowerCase() === "d" &&');
+    expect(source).toContain('selectionShortcut === "copy"');
+    expect(source).toContain('selectionShortcut === "delete"');
     expect(source).toContain("void deleteSelectedNode();");
     expect(source).toContain("finishInlineTextTool(frame, details)");
   });
@@ -604,6 +647,14 @@ describe("design workspace interaction wiring", () => {
     expect(layersSource).not.toContain("Search layers");
     expect(layersSource).not.toContain("InputGroup");
     expect(layersSource).not.toContain("totalLayerCount");
+    // The panel has one 12px type scale for headings, layer names, status
+    // messages, and selection metadata.
+    expect(layersSource).toContain(
+      'className="bg-bg1 text-3xxs flex min-h-0 flex-1 flex-col overflow-hidden"',
+    );
+    expect(layersSource).not.toMatch(
+      /\btext-(?:xxs|2xxs|xs|sm|base|lg|xl)\b|\btext-\[\d+px\]/,
+    );
     // Rows indent from the frame row that owns them, and a row with nothing to
     // disclose reserves the chevron's footprint instead of drawing one.
     expect(layersSource).toContain("Math.min(depth + 1, 16)");
@@ -665,8 +716,12 @@ describe("design workspace interaction wiring", () => {
     expect(layersSource).toContain('return "rounded-t-md rounded-b-none"');
     expect(layersSource).toContain('return "rounded-t-none rounded-b-md"');
     expect(layersSource).not.toContain("gap-px");
-    // Structural edits belong to the row's own frame, not to the selection.
-    expect(layersSource).toContain("readFrameFoundation");
+    // Structural shortcuts are declared by every row but execute through the
+    // canvas's one semantic selection owner.
+    expect(layersSource).toContain(
+      'aria-keyshortcuts="Meta+C Control+C Meta+D Control+D Delete Backspace"',
+    );
+    expect(layersSource).not.toContain("readFrameFoundation");
     expect(layersSource).toContain(
       "const parentRowIndex = (index: number): number =>",
     );
@@ -704,11 +759,36 @@ describe("design workspace interaction wiring", () => {
     expect(styleEditorSource).toContain("showAdvancedTypography");
   });
 
+  it("exposes style keyframe actions only while Motion mode is active", () => {
+    // Ordinary inspector fields and compound controls (fill, shadow, and
+    // transform) have separate action renderers. Neither may leave an
+    // Animate/keyframe button in the hover or keyboard path outside Motion.
+    expect(source).toMatch(/motion=\{\s*motionModeActive\s*\?\s*\{/);
+    expect(styleEditorSource).toMatch(
+      /function MotionPropertyAction[\s\S]*?if \(!timelineOpen\) return null;/,
+    );
+  });
+
   it("keeps the style inspector hierarchy compact without overriding every child", () => {
     expect(uiSource.match(/font-size:\s*13px/g)).toHaveLength(1);
     expect(uiSource).toContain(".zd-design-field-actions");
     expect(source).toContain("aria-label={`Unit for ${label}`}");
     expect(styleEditorSource).toContain('label="Box sizing"');
+  });
+
+  it("keeps one Style inspector with PNG export and no Data or PR surface", () => {
+    const inspector = source.match(
+      /<aside[\s\S]*?data-design-inspector=""[\s\S]*?<\/aside>/,
+    )?.[0];
+
+    expect(inspector).toBeDefined();
+    expect(source).toContain('aria-label="Export PNG"');
+    expect(inspector).not.toContain('aria-label="Inspector modes"');
+    expect(inspector).not.toContain('value="foundation"');
+    expect(inspector).not.toContain("Tweaks");
+    expect(inspector).not.toContain("Components");
+    expect(inspector).not.toContain("CreatePrButton");
+    expect(inspector).not.toMatch(/Open PR #|Create PR/);
   });
 
   it("programmatically names style selects and segmented control groups", () => {
@@ -755,7 +835,7 @@ describe("design workspace interaction wiring", () => {
   it("separates text selection, text editing, empty-canvas insertion, and deletion intent", () => {
     expect(source).toContain("editingThisElement");
     expect(source).toContain("startCanvasTextInsertion");
-    expect(source).toContain("onRequestDeleteFrame");
+    expect(source).toContain("onDeleteFrame");
     expect(source).toContain("designResizeStyleAxes");
   });
 

@@ -153,9 +153,10 @@ export const TurnEventList = memo(function TurnEventList({
         <MessageView key={event.id} message={event} ctx={ctx} />
       ))}
       {workflowRow ? <WorkflowActivity {...workflowRow} /> : null}
-      {/* Shimmer + live timer at the tail of the active turn while streaming
-          (pickStartedAt anchors the timer to the most recent in-flight tool —
-          for a running subagent that's the subagent's own start time). */}
+      {/* Shimmer + live timer at the tail of the active turn while streaming.
+          pickStartedAt anchors it to the turn's own start, so it counts
+          monotonically for the whole turn; per-tool elapsed belongs to each
+          tool row's own DurationChip, not to this one. */}
       {showShimmer && (
         <ActivityShimmer
           startedAt={pickStartedAt(activityEvents ?? events, activityStartedAt)}

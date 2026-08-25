@@ -99,11 +99,11 @@ export const ChangesWorkbenchSurface = React.memo(
     const { workspace, isLocalMain, changesTarget } = useSourceTarget();
     // The same live refresh bus as the File tabs: agent turn-end / git
     // writes / editor saves re-pull the list, the PR row, and the open diff.
-    const gitRefresh = useGitRefreshKey(cwd, changesTarget);
+    const gitRefresh = useGitRefreshKey(cwd, changesTarget, active);
     // The Local main folder might not be a git repo yet — offer Initialize /
     // Publish instead of a raw git error.
     const trunkRoot = isLocalMain ? workspace?.repoRoot || null : null;
-    const { nonGit, checked } = useTrunkGitState(trunkRoot, gitRefresh);
+    const { nonGit, checked } = useTrunkGitState(trunkRoot, gitRefresh, active);
 
     // Writes that bypass the engine bridge (discard, git init) nudge the exact
     // cwd's refresh consumers — including this tab's own gitRefresh key.
@@ -267,6 +267,7 @@ function ChangesSurface({
   // dimming stays in sync with the viewer's checkbox.
   const viewedVersion = useViewedVersion();
   const model = useChangesModel({
+    active,
     workspaceId,
     baseBranch,
     folder,
@@ -376,7 +377,7 @@ function ChangesSurface({
   // outside the initial window. Aggregate patches are already primed by the
   // model, so these are cheap local file reads only.
   useEffect(() => {
-    if (model.loading) return;
+    if (!active || model.loading) return;
     const paths = model.effectiveSections
       .flatMap((section) => section.files)
       .slice(0, 10)
@@ -391,7 +392,7 @@ function ChangesSurface({
     }
     const id = window.setTimeout(run, 0);
     return () => window.clearTimeout(id);
-  }, [folder, model.loading, model.effectiveSections]);
+  }, [active, folder, model.loading, model.effectiveSections]);
 
   // Write a selection + viewer intent onto THIS tab (the Changes tab is its
   // own viewer target — a click never spawns a File tab).
@@ -429,7 +430,7 @@ function ChangesSurface({
   // terminal/IDE advances in list order without briefly painting a stale
   // missing-file pane. Never replace an unsaved draft automatically.
   useLayoutEffect(() => {
-    if (model.loading) return;
+    if (!active || model.loading) return;
     const nextSelected = reconcileChangesSelection(
       previousOrderedPaths.current,
       orderedPaths,
@@ -468,6 +469,7 @@ function ChangesSurface({
       },
     });
   }, [
+    active,
     model.loading,
     model.effectiveSections,
     model.scope,
@@ -567,7 +569,7 @@ function ChangesSurface({
   // the turn intent is applied at click time and `sections` describe the
   // scope, not the turn.
   useEffect(() => {
-    if (!selected || model.turnFilter) return;
+    if (!active || !selected || model.turnFilter) return;
     const file = model.sections
       .flatMap((s) => s.files)
       .find((f) => f.path === selected);
@@ -611,6 +613,7 @@ function ChangesSurface({
       },
     });
   }, [
+    active,
     model.scope,
     model.turnFilter,
     model.sections,

@@ -65,7 +65,7 @@ export async function listWorkspaceFiles(
   cwd: string,
   limit: number = DEFAULT_LIMIT,
 ): Promise<string[]> {
-  if (!cwd) return [];
+  if (!cwd || limit <= 0) return [];
   try {
     const [{ stdout }, { stdout: deletedStdout }, sparse] = await Promise.all([
       runGit(cwd, ["ls-files", "-co", "--exclude-standard", "-z"]),
@@ -91,9 +91,25 @@ export async function listWorkspaceFiles(
       if (!p || seen.has(p) || deleted.has(p) || skipped.has(p)) continue;
       seen.add(p);
       out.push(p);
-      if (out.length >= limit) break;
     }
-    return out;
+    if (out.length <= limit) return out;
+    // `git ls-files -co` groups/sorts untracked paths such that one enormous
+    // directory can consume the entire prefix. Zinc's pnpm store landed
+    // between `new-york.md` and `paris.md`, so the 20k cap made three shallow
+    // files disappear even though all five existed. At the cap, prefer the
+    // broadest useful tree: shallow paths before deep descendants, retaining
+    // byte order within a depth for deterministic cache identity.
+    return out
+      .map((file) => ({
+        file,
+        depth: file.split("/").length - 1,
+      }))
+      .sort(
+        (a, b) =>
+          a.depth - b.depth || (a.file < b.file ? -1 : a.file > b.file ? 1 : 0),
+      )
+      .slice(0, limit)
+      .map(({ file }) => file);
   } catch {
     // Not a git repo (or git unavailable) — bounded recursive walk.
     return walkDir(cwd, limit);

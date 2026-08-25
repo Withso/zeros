@@ -459,7 +459,14 @@ export class MacosProcessDomain {
   }
 
   async retireMetadata(): Promise<void> {
-    await rename(this.metadataPath, `${this.metadataPath}.reaped`);
+    // Idempotent: a retried teardown (or a preparation-cleanup path that
+    // already renamed the descriptor) must not throw ENOENT on the second
+    // call. The rename to `.reaped` is the durable record either way.
+    try {
+      await rename(this.metadataPath, `${this.metadataPath}.reaped`);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
 }
 

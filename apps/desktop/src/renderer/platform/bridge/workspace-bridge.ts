@@ -1850,7 +1850,8 @@ export async function bridgeWorkspaceSetMode(
 }> {
   // Entering Design ensures + commits its foundation; exit may materialize a
   // legacy sparse cone. Either can take seconds, so use the lifecycle budget
-  // rather than the 10s default.
+  // rather than the 10s default. The engine bounds its own admission drain, so
+  // this budget sits above that and lets the real error surface first.
   return (await workspaceOp(
     bridge,
     "workspace.setMode",

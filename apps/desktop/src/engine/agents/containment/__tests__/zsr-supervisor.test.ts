@@ -74,6 +74,11 @@ describe("ZSR host-parity supervisor", () => {
     expect(source).toContain("hostParity: true");
     expect(source).toContain("linuxPrivilegedWorker");
     expect(source).toContain("allowAppleEvents: false");
+    // The observational violation monitor is gated on SRT_DEBUG: enforcement
+    // is the generated profile, not the monitor, and the supervisor never
+    // reads the violation store — so production spawns must not pay for it.
+    expect(source).toContain("const enableViolationMonitor =");
+    expect(source).not.toContain("SandboxManager.initialize(parsedConfig.data, undefined, true)");
     expect(source).toContain("ZEROS_ZSR_RIPGREP_PATH");
     expect(source).toContain("ripgrep:");
     expect(source).not.toContain("allowAppleEvents: true");

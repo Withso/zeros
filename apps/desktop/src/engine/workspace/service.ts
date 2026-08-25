@@ -187,6 +187,7 @@ import {
   getWorkspaceDesignApi,
 } from "../design/design-api";
 import {
+  captureDesignFrameRestorePoint,
   createDesignFrame,
   deleteDesignFrame,
   designDirectoryNameFor,
@@ -205,6 +206,9 @@ import {
   readDesignTokensDocument,
   prepareDesignAssetInsertion,
   renameDesignFrame,
+  replaceDesignFrameFromHistory,
+  restoreDesignFrame,
+  type DesignFrameRestorePoint,
   type DesignLintViolation,
   type DesignWorkspaceSnapshot,
 } from "../design/document";
@@ -548,6 +552,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.history.redo",
   "design.asset.insert",
   "design.token.update",
+  "design.stage",
   "design.save",
   // Create/move files under `.context-graph/` — archive's snapshot force-adds
   // that tree, so a mid-flight scaffold or share-toggle must drain first.
@@ -660,9 +665,7 @@ function makeDesignPathRecognizer(
   const containsMarker = (relativeDir: string): boolean => {
     const cached = descendantProbes.get(relativeDir);
     if (cached !== undefined) return cached;
-    const pending = [
-      nodePath.join(workspacePath, ...relativeDir.split("/")),
-    ];
+    const pending = [nodePath.join(workspacePath, ...relativeDir.split("/"))];
     let visited = 0;
     while (pending.length > 0) {
       const directory = pending.pop()!;
@@ -718,7 +721,9 @@ function makeDesignPathRecognizer(
     ) {
       return true;
     }
-    const segments = normalized.split("/").filter((segment) => segment.length > 0);
+    const segments = normalized
+      .split("/")
+      .filter((segment) => segment.length > 0);
     // A marker at depth >= 1 establishes the folder containing it as Design
     // territory. Treat the marker itself as protected before it exists, too,
     // so the generic code editor cannot manufacture a new Design document and
@@ -766,10 +771,7 @@ function assertLiteralGitMutationPaths(
 ): void {
   for (const candidate of paths) {
     const normalized = normalizeRepoMutationPath(candidate);
-    if (
-      !normalized ||
-      candidate.includes("\0")
-    ) {
+    if (!normalized || candidate.includes("\0")) {
       throw new GitError({
         code: "VALIDATION_FAILED",
         message: `${action} requires exact repository-relative paths.`,
@@ -837,7 +839,10 @@ async function designPathsInCodeMutation(
   const workspacePath = workspace?.path ?? resolvedWorkspacePath;
   if (!workspacePath) return [];
   const activeDesignRoot = designDirectoryNameFor(workspacePath);
-  const isDesignPath = makeDesignPathRecognizer(workspacePath, activeDesignRoot);
+  const isDesignPath = makeDesignPathRecognizer(
+    workspacePath,
+    activeDesignRoot,
+  );
   const immediate = paths.filter(
     (candidate) =>
       isDesignPath(candidate) ||
@@ -1380,6 +1385,65 @@ async function applyDesktopDesignOperation(
   });
 }
 
+type WorkspaceDesignHistoryEntry =
+  | {
+      kind: "document";
+      frame: string;
+      coalesceKey?: string;
+      createdAt: number;
+      bytes: number;
+    }
+  | {
+      kind: "frame";
+      before: DesignFrameRestorePoint | null;
+      after: DesignFrameRestorePoint | null;
+      bytes: number;
+    };
+
+interface WorkspaceDesignHistoryState {
+  undo: WorkspaceDesignHistoryEntry[];
+  redo: WorkspaceDesignHistoryEntry[];
+  bytes: number;
+}
+
+const MAX_DESIGN_HISTORY_WORKSPACES = 16;
+const MAX_DESIGN_HISTORY_ENTRIES = 100;
+const MAX_DESIGN_HISTORY_BYTES = 16 * 1024 * 1024;
+
+function documentDesignHistoryEntry(
+  frame: string,
+  coalesceKey?: string,
+  createdAt = Date.now(),
+): WorkspaceDesignHistoryEntry {
+  return {
+    kind: "document",
+    frame,
+    ...(coalesceKey ? { coalesceKey } : {}),
+    createdAt,
+    bytes: (frame.length + (coalesceKey?.length ?? 0) + 32) * 2,
+  };
+}
+
+function frameDesignHistoryEntry(
+  before: DesignFrameRestorePoint | null,
+  after: DesignFrameRestorePoint | null,
+): WorkspaceDesignHistoryEntry {
+  const file = before?.file ?? after?.file;
+  if (!file || (before && after && before.file !== after.file)) {
+    throw new Error("Design frame history requires one stable file identity.");
+  }
+  return {
+    kind: "frame",
+    before,
+    after,
+    bytes:
+      (before ? Buffer.byteLength(before.source, "utf8") : 0) +
+      (after ? Buffer.byteLength(after.source, "utf8") : 0) +
+      file.length * 2 +
+      128,
+  };
+}
+
 const workspaceKind = (
   p: Params,
   key = "kind",
@@ -1411,6 +1475,12 @@ interface DesignTerritoryTransitionTarget {
   designDirectory: string;
 }
 
+interface DesignTerritoryTransitionOptions {
+  /** First publication may skip retirement only when every live immutable
+   * contribution already contains this prospective Design subtraction. */
+  firstDesignCreation?: boolean;
+}
+
 export class WorkspaceService {
   /** Engine-owned authority transition around a mutation that changes the
    * active Design territory. The service owns the settings/document operation;
@@ -1420,6 +1490,7 @@ export class WorkspaceService {
     | ((
         targets: readonly DesignTerritoryTransitionTarget[],
         mutation: () => Promise<unknown>,
+        options?: DesignTerritoryTransitionOptions,
       ) => Promise<unknown>)
     | null = null;
 
@@ -1451,10 +1522,75 @@ export class WorkspaceService {
    * mutation generations remain authoritative for every later request. */
   private readonly designSnapshotFlights = new Map<
     string,
-    Promise<
-      DesignWorkspaceSnapshot & { protocolCapability: string | null }
-    >
+    Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>
   >();
+  /** One bounded workspace-wide ordering layer sits above DesignApi's
+   * per-frame stacks. It lets Command-Z restore a deleted frame even when the
+   * selected frame changed—or when deletion left the canvas empty. */
+  private readonly designHistoryByWorkspace = new Map<
+    string,
+    WorkspaceDesignHistoryState
+  >();
+
+  private designHistoryState(
+    workspacePath: string,
+    create = false,
+  ): WorkspaceDesignHistoryState | undefined {
+    const key = nodePath.resolve(workspacePath);
+    let state = this.designHistoryByWorkspace.get(key);
+    if (!state && create) {
+      state = { undo: [], redo: [], bytes: 0 };
+      this.designHistoryByWorkspace.set(key, state);
+    } else if (state) {
+      this.designHistoryByWorkspace.delete(key);
+      this.designHistoryByWorkspace.set(key, state);
+    }
+    while (this.designHistoryByWorkspace.size > MAX_DESIGN_HISTORY_WORKSPACES) {
+      const oldest = this.designHistoryByWorkspace.keys().next().value as
+        | string
+        | undefined;
+      if (!oldest || oldest === key) break;
+      this.designHistoryByWorkspace.delete(oldest);
+    }
+    return state;
+  }
+
+  private recordDesignHistory(
+    workspacePath: string,
+    entry: WorkspaceDesignHistoryEntry,
+  ): void {
+    const state = this.designHistoryState(workspacePath, true)!;
+    for (const redo of state.redo) state.bytes -= redo.bytes;
+    state.redo = [];
+    const previous = state.undo.at(-1);
+    if (
+      entry.kind === "document" &&
+      entry.coalesceKey &&
+      previous?.kind === "document" &&
+      previous.frame === entry.frame &&
+      previous.coalesceKey === entry.coalesceKey &&
+      entry.createdAt >= previous.createdAt &&
+      entry.createdAt - previous.createdAt <= 750
+    ) {
+      previous.createdAt = entry.createdAt;
+      return;
+    }
+    state.undo.push(entry);
+    state.bytes += entry.bytes;
+    while (
+      state.undo.length > MAX_DESIGN_HISTORY_ENTRIES ||
+      state.bytes > MAX_DESIGN_HISTORY_BYTES
+    ) {
+      const removed = state.undo.shift();
+      if (!removed) break;
+      state.bytes -= removed.bytes;
+    }
+    state.bytes = Math.max(0, state.bytes);
+  }
+
+  private forgetDesignHistory(workspacePath: string): void {
+    this.designHistoryByWorkspace.delete(nodePath.resolve(workspacePath));
+  }
   setDesignProtocolCapabilityProvider(
     fn: (workspaceId: string) => string,
   ): void {
@@ -1477,16 +1613,24 @@ export class WorkspaceService {
   ): void {
     this.gatewayHeaderSecretSetter = fn;
   }
-  /** Starts (or restarts) a background setup PTY. Wired by the engine (which
-   *  owns the PtyService + SetupManager); driven by the LOCAL-ONLY
-   *  workspace.rerunSetup op. `target` carries the cwd/repo for a ROWLESS run
-   *  (the trunk / "main" synthetic workspace); a real workspace omits it and
-   *  the SetupManager resolves everything from the row. */
+  /** Starts (or restarts) a contained background setup PTY. Wired by the
+   *  engine (which owns the PtyService + SetupManager); managed workspaces are
+   *  available to qualified local/cloud clients. `target` carries the cwd/repo
+   *  for a LOCAL-ONLY ROWLESS run (the trunk / "main" synthetic workspace); a
+   *  real workspace omits it and SetupManager resolves everything from the row. */
   private setupRunner:
-    | ((workspaceId: string, command: string, target?: SetupTarget) => void)
+    | ((
+        workspaceId: string,
+        command: string,
+        target?: SetupTarget,
+      ) => void | Promise<void>)
     | null = null;
   setSetupRunner(
-    fn: (workspaceId: string, command: string, target?: SetupTarget) => void,
+    fn: (
+      workspaceId: string,
+      command: string,
+      target?: SetupTarget,
+    ) => void | Promise<void>,
   ): void {
     this.setupRunner = fn;
   }
@@ -1521,21 +1665,27 @@ export class WorkspaceService {
     fn: (
       targets: readonly DesignTerritoryTransitionTarget[],
       mutation: () => Promise<unknown>,
+      options?: DesignTerritoryTransitionOptions,
     ) => Promise<unknown>,
   ): void {
     this.designTerritoryTransitioner = fn;
   }
 
-  /** A Design territory may only be created or repointed after every code
-   * process admitted under the prior authority map is gone. Unit-level service
-   * users that never spawn agents may leave the hook unwired; the engine path
-   * is fail-closed and always supplies it. */
+  /** A Design territory may be published only after the engine proves every
+   * live process already carries the same subtraction or retires the obsolete
+   * ones. Unit-level service users that never spawn processes may leave the
+   * hook unwired; the engine path is fail-closed and always supplies it. */
   private async withDesignTerritoryTransition<T>(
     targets: readonly DesignTerritoryTransitionTarget[],
     mutation: () => Promise<T>,
+    options?: DesignTerritoryTransitionOptions,
   ): Promise<T> {
     if (!this.designTerritoryTransitioner) return mutation();
-    return (await this.designTerritoryTransitioner(targets, mutation)) as T;
+    return (await this.designTerritoryTransitioner(
+      targets,
+      mutation,
+      options,
+    )) as T;
   }
   /** Retires the engine's exact recursive filesystem subscription before a
    * managed checkout is moved for archive/delete. The returned release lets a
@@ -1610,14 +1760,16 @@ export class WorkspaceService {
   ): void {
     this.runLogGetter = fn;
   }
-  /** Resolve + kick off a workspace's background setup PTY (host shell — LOCAL
-   *  ONLY). Used by workspace.rerunSetup and create-from-branch so dependency
-   *  setup is explicit for an existing workspace and automatic only for a newly
-   *  created checkout.
+  /** Resolve + kick off a workspace's contained background setup PTY. Used by
+   *  workspace.rerunSetup and create-from-branch so dependency setup is
+   *  explicit for an existing workspace and automatic only for a newly created
+   *  checkout.
    *  Returns whether a setup command was found + started; no-op (false) when the
    *  repo has no setup configured or the runner isn't wired (e.g. unit tests).
-   *  Fire-and-forget — the PTY runs in the background (Setup tab), so callers
-   *  don't await completion. */
+   *  Waits only for admission + PTY spawn; the setup command itself continues
+   *  in the background. This keeps the rerun acknowledgement aligned with the
+   *  first observable `running` snapshot without holding the RPC until setup
+   *  completes. */
   private assertWorkspaceProcessStartAllowed(ws: Workspace): void {
     const lifecycle = getWorkspaceLifecycleStatus(ws.id);
     const unavailable =
@@ -1634,7 +1786,8 @@ export class WorkspaceService {
           : lifecycle.operation != null
             ? `This workspace is currently in a ${lifecycle.operation} operation.`
             : "This workspace's checkout is not available.",
-      remediation: "Wait for the workspace operation to finish, then try again.",
+      remediation:
+        "Wait for the workspace operation to finish, then try again.",
       context: { workspaceId: ws.id },
     });
   }
@@ -1651,7 +1804,7 @@ export class WorkspaceService {
     // Re-check after that await, immediately before the engine registers the
     // tracked SetupManager start.
     this.assertWorkspaceProcessStartAllowed(ws);
-    this.setupRunner?.(ws.id, command);
+    await this.setupRunner?.(ws.id, command);
     return true;
   }
   /** Same, for the trunk / "main" — the renderer's synthetic `local:<repoSlug>`
@@ -1668,7 +1821,7 @@ export class WorkspaceService {
       allowAutoSetup: true,
     });
     if (!command) return false;
-    this.setupRunner?.(workspaceId, command, {
+    await this.setupRunner?.(workspaceId, command, {
       cwd: repoRoot,
       repoRoot,
       baseBranch: "",
@@ -2349,6 +2502,16 @@ export class WorkspaceService {
         }
 
         const result = await api.apply(transaction);
+        if (result.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(
+              reqStr(params, "frame"),
+              transaction.coalesceKey,
+              transaction.createdAt,
+            ),
+          );
+        }
         return {
           result,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2360,10 +2523,84 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
-        const documentId = designDocumentIdForFrame(reqStr(params, "frame"));
+        const direction = op === "design.history.undo" ? "undo" : "redo";
+        const history = this.designHistoryState(workspace.path);
+        const source = history?.[direction];
+        const entry = source?.pop();
+        if (history && source && entry) {
+          const destination =
+            direction === "undo" ? history.redo : history.undo;
+          if (entry.kind === "frame") {
+            const expected = direction === "undo" ? entry.after : entry.before;
+            const replacement =
+              direction === "undo" ? entry.before : entry.after;
+            try {
+              if (expected && replacement) {
+                await replaceDesignFrameFromHistory(
+                  workspace.path,
+                  expected,
+                  replacement,
+                );
+              } else if (expected) {
+                await deleteDesignFrame(
+                  workspace.path,
+                  expected.file,
+                  expected,
+                );
+              } else if (replacement) {
+                await restoreDesignFrame(workspace.path, replacement);
+              } else {
+                throw new Error("Design frame history entry is empty.");
+              }
+            } catch (error) {
+              source.push(entry);
+              throw error;
+            }
+            destination.push(entry);
+            const snapshot = await this.readDesignSnapshot(workspace, remote);
+            return {
+              result: null,
+              snapshot,
+              historySelection:
+                replacement?.file ?? snapshot.frames[0]?.file ?? null,
+            };
+          }
+
+          const api = getWorkspaceDesignApi(workspace.path);
+          const documentId = designDocumentIdForFrame(entry.frame);
+          let result;
+          try {
+            result =
+              direction === "undo"
+                ? await api.undo(documentId)
+                : await api.redo(documentId);
+          } catch (error) {
+            source.push(entry);
+            throw error;
+          }
+          if (result) destination.push(entry);
+          else history.bytes = Math.max(0, history.bytes - entry.bytes);
+          return {
+            result,
+            snapshot: await this.readDesignSnapshot(workspace, remote),
+            ...(result ? { historyFrame: entry.frame } : {}),
+          };
+        }
+
+        // Compatibility fallback for a history session created before this
+        // service began tracking workspace-wide ordering. An empty canvas has
+        // no fallback document, but a structural deletion above still works.
+        const frame = optStr(params, "frame");
+        if (!frame) {
+          return {
+            result: null,
+            snapshot: await this.readDesignSnapshot(workspace, remote),
+          };
+        }
+        const documentId = designDocumentIdForFrame(frame);
         const api = getWorkspaceDesignApi(workspace.path);
         const result =
-          op === "design.history.undo"
+          direction === "undo"
             ? await api.undo(documentId)
             : await api.redo(documentId);
         return {
@@ -2476,6 +2713,15 @@ export class WorkspaceService {
           changed: applied.receipt.status === "applied",
           document: await readDesignTokensDocument(workspace.path),
         };
+        if (mutation.changed) {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(
+              frame,
+              `token:${theme ?? "base"}:${name}`,
+            ),
+          );
+        }
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2791,6 +3037,13 @@ export class WorkspaceService {
               }
             : {}),
         });
+        this.recordDesignHistory(
+          workspace.path,
+          frameDesignHistoryEntry(
+            null,
+            await captureDesignFrameRestorePoint(workspace.path, frame.file),
+          ),
+        );
         return {
           frame,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2801,11 +3054,26 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
+        const file = reqStr(params, "frame");
+        const before = await captureDesignFrameRestorePoint(
+          workspace.path,
+          file,
+        );
         const frame = await renameDesignFrame(
           workspace.path,
-          reqStr(params, "frame"),
+          file,
           reqStr(params, "title"),
         );
+        const after = await captureDesignFrameRestorePoint(
+          workspace.path,
+          file,
+        );
+        if (before.source !== after.source) {
+          this.recordDesignHistory(
+            workspace.path,
+            frameDesignHistoryEntry(before, after),
+          );
+        }
         return {
           frame,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2820,6 +3088,13 @@ export class WorkspaceService {
           workspace.path,
           reqStr(params, "frame"),
         );
+        this.recordDesignHistory(
+          workspace.path,
+          frameDesignHistoryEntry(
+            null,
+            await captureDesignFrameRestorePoint(workspace.path, frame.file),
+          ),
+        );
         return {
           frame,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2830,12 +3105,16 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
-        const deleted = await deleteDesignFrame(
+        const restorePoint = await deleteDesignFrame(
           workspace.path,
           reqStr(params, "frame"),
         );
+        this.recordDesignHistory(
+          workspace.path,
+          frameDesignHistoryEntry(restorePoint, null),
+        );
         return {
-          deleted,
+          deleted: { file: restorePoint.file },
           snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
@@ -2871,6 +3150,12 @@ export class WorkspaceService {
           },
           `frame-geometry:${frame}`,
         );
+        if (applied.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(frame, `frame-geometry:${frame}`),
+          );
+        }
         return {
           geometry,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2927,6 +3212,12 @@ export class WorkspaceService {
           frame,
           applied.receipt.status === "applied",
         );
+        if (applied.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(frame),
+          );
+        }
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2986,6 +3277,12 @@ export class WorkspaceService {
           frame,
           applied.receipt.status === "applied",
         );
+        if (applied.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(frame),
+          );
+        }
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -3051,6 +3348,12 @@ export class WorkspaceService {
           frame,
           applied.receipt.status === "applied",
         );
+        if (applied.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(frame),
+          );
+        }
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -3107,6 +3410,12 @@ export class WorkspaceService {
           frame,
           applied.receipt.status === "applied",
         );
+        if (applied.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(frame),
+          );
+        }
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -3115,6 +3424,20 @@ export class WorkspaceService {
             after: applied.receipt.afterRevision,
           },
         };
+      }
+      case "design.stage": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const workspace = this.resolveDesignWorkspace(workspaceId, remote);
+        // Command-S is a lightweight Git-index checkpoint, so it deliberately
+        // does not lint or create a commit. Stage exactly the ACTIVE Design
+        // directory; generic git.stage remains forbidden from this territory.
+        const designDir = designDirectoryNameFor(workspace.path);
+        await stagePaths({
+          workspaceId,
+          paths: [designDir],
+          force: true,
+        });
+        return { ok: true };
       }
       case "design.save": {
         const workspaceId = reqStr(params, "workspaceId");
@@ -5335,17 +5658,17 @@ export class WorkspaceService {
         const current: WorkspaceMode =
           workspace.kind === "design" ? "design" : "code";
         if (current === mode) return { ok: true, mode };
-        // Concurrent duality: switching views over an EXISTING territory does
-        // not restart a correctly-contained code agent. On first Design use,
-        // however, the directory is about to appear after that agent's
-        // creation-time authority map was fixed. The engine transition hook
-        // retires those sessions and blocks new starts around that one mutation.
+        // Concurrent duality: switching views does not restart a correctly
+        // contained code agent. Managed admission reserves the default Design
+        // vnode in advance; the hook proves every live contribution already
+        // subtracts it and retires only a legacy/stale boundary that does not.
         if (mode === "design") {
           await enterDesignMode(workspace, {
             withFirstTerritoryCreation: (designDirectory, mutation) =>
               this.withDesignTerritoryTransition(
                 [{ workspaceId, designDirectory }],
                 mutation,
+                { firstDesignCreation: true },
               ),
           });
           // Hand the renderer the aggregate generated by this same lifecycle
@@ -5383,6 +5706,7 @@ export class WorkspaceService {
           this.repoTaskBoundaryFactory ?? undefined,
         );
         forgetWorkspaceDesignApi(result.workspace.path);
+        this.forgetDesignHistory(result.workspace.path);
         forgetDesignDirectoryName(result.workspace.path);
         forgetDesignSelection(workspaceId);
         forgetDesignScreenshots(workspaceId);
@@ -5420,6 +5744,7 @@ export class WorkspaceService {
         );
         if (workspacePath) {
           forgetWorkspaceDesignApi(workspacePath);
+          this.forgetDesignHistory(workspacePath);
           forgetDesignDirectoryName(workspacePath);
         }
         forgetDesignSelection(workspaceId);

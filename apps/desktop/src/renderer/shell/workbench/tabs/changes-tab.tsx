@@ -83,6 +83,7 @@ import {
   Tooltip,
 } from "@/renderer/shared/ui/primitives";
 import { cn } from "@/renderer/shared/ui/cn";
+import { LatestGenerationFlight } from "@/renderer/shared/lib/latest-generation-flight";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { useAddProject } from "../../add-project-provider";
 import {
@@ -211,14 +212,10 @@ function pathBaseName(path: string): string {
   return slash === -1 ? path : path.slice(slash + 1);
 }
 
-// Coalesce the active Changes list and PR status row onto the SAME `git status`
-// result for one refresh generation. The entry is removed as soon as it
-// settles: this is in-flight deduplication, never a stale status cache.
-const statusRequests = new Map<string, Promise<StatusResult>>();
-
-function statusRequestKey(workspaceId: string, refreshKey: number): string {
-  return JSON.stringify([workspaceId, refreshKey]);
-}
+// Refreshes can arrive faster than a pathological repository answers. Keep
+// each exact owner to one running request and one latest queued successor; an
+// old generation must not compete with every intermediate invalidation.
+const statusRequests = new LatestGenerationFlight<StatusResult>();
 
 /** Exported so the PR-status island joins the same coalesced generation
  *  instead of issuing a second `git status` for the same refresh key. */
@@ -226,14 +223,9 @@ export function statusForGeneration(
   workspaceId: string,
   refreshKey: number,
 ): Promise<StatusResult> {
-  const key = statusRequestKey(workspaceId, refreshKey);
-  const pending = statusRequests.get(key);
-  if (pending) return pending;
-  const request = gitStatus(workspaceId).finally(() => {
-    if (statusRequests.get(key) === request) statusRequests.delete(key);
-  });
-  statusRequests.set(key, request);
-  return request;
+  return statusRequests.run(workspaceId, refreshKey, () =>
+    gitStatus(workspaceId),
+  );
 }
 
 // Coalesce the (up to two) mounted Changes surfaces' turns fetches onto ONE
@@ -241,20 +233,29 @@ export function statusForGeneration(
 // Besides halving the IPC, a shared snapshot means the deleted-turn cleanup in
 // useChangesModel can't judge a turn picked from one surface's fresher list
 // against the other's stale one.
-const turnsRequests = new Map<string, Promise<TurnInfo[]>>();
+const turnsRequests = new LatestGenerationFlight<TurnInfo[]>();
 
 function turnsForGeneration(
   workspaceId: string,
   refreshKey: number,
 ): Promise<TurnInfo[]> {
-  const key = JSON.stringify([workspaceId, refreshKey]);
-  const pending = turnsRequests.get(key);
-  if (pending) return pending;
-  const request = turnsList(workspaceId).finally(() => {
-    if (turnsRequests.get(key) === request) turnsRequests.delete(key);
-  });
-  turnsRequests.set(key, request);
-  return request;
+  return turnsRequests.run(workspaceId, refreshKey, () =>
+    turnsList(workspaceId),
+  );
+}
+
+const commitRequests = new LatestGenerationFlight<Commit[]>();
+
+function commitsForGeneration(
+  workspaceId: string,
+  baseBranch: string,
+  refreshKey: number,
+): Promise<Commit[]> {
+  return commitRequests.run(
+    commitsCacheKey(workspaceId, baseBranch),
+    refreshKey,
+    () => gitLog({ workspaceId, limit: 50, base: baseBranch }),
+  );
 }
 
 // ── source target + change count ─────────────────────────────
@@ -294,7 +295,7 @@ const ZERO_CHANGE_COUNTS: ChangeCounts = Object.freeze({
   staged: 0,
   unstaged: 0,
 });
-const changeCountRequests = new Map<string, Promise<ChangeCounts>>();
+const changeCountRequests = new LatestGenerationFlight<ChangeCounts>();
 
 /** Shared by the Changes badge/menu, Create-PR state, and PR status row so one
  * refresh generation cannot briefly disagree about the net working-tree diff. */
@@ -302,27 +303,22 @@ export function changeCountsForGeneration(
   workspaceId: string,
   refreshKey: number,
 ): Promise<ChangeCounts> {
-  const key = JSON.stringify([workspaceId, refreshKey]);
-  const pending = changeCountRequests.get(key);
-  if (pending) return pending;
-  const request = gitChangeCounts(workspaceId).finally(() => {
-    if (changeCountRequests.get(key) === request) {
-      changeCountRequests.delete(key);
-    }
-  });
-  changeCountRequests.set(key, request);
-  return request;
+  return changeCountRequests.run(workspaceId, refreshKey, () =>
+    gitChangeCounts(workspaceId),
+  );
 }
 
 export function useChangeCounts(
   workspaceId: string | null,
   refreshKey: number,
+  active = true,
 ): ChangeCounts {
   const [snapshot, setSnapshot] = useState<{
     workspaceId: string;
     counts: ChangeCounts;
   }>({ workspaceId: "", counts: ZERO_CHANGE_COUNTS });
   useEffect(() => {
+    if (!active) return;
     if (!workspaceId) {
       setSnapshot({ workspaceId: "", counts: ZERO_CHANGE_COUNTS });
       return;
@@ -354,7 +350,7 @@ export function useChangeCounts(
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, refreshKey]);
+  }, [active, workspaceId, refreshKey]);
 
   return useMemo(() => {
     if (!workspaceId) return ZERO_CHANGE_COUNTS;
@@ -386,6 +382,7 @@ export function useChangeCount(
 export function useTrunkGitState(
   root: string | null,
   refreshKey: number,
+  active = true,
 ): { nonGit: boolean; checked: boolean } {
   const [state, setState] = useState<{
     root: string;
@@ -400,6 +397,7 @@ export function useTrunkGitState(
     };
   });
   useEffect(() => {
+    if (!active) return;
     if (!root || !isNativeRuntime()) {
       setState({ root: root ?? "", nonGit: false, checked: true });
       return;
@@ -425,7 +423,7 @@ export function useTrunkGitState(
     return () => {
       cancelled = true;
     };
-  }, [root, refreshKey]);
+  }, [active, root, refreshKey]);
   if (!root || !isNativeRuntime()) return { nonGit: false, checked: true };
   if (state.root === root) {
     if (state.checked) return state;
@@ -612,13 +610,23 @@ export interface ChangesModel {
   changeCounts: ChangeCounts;
 }
 
+interface LoadedChangesSection {
+  files: ChangedFile[];
+  kind: SectionKind;
+}
+
+const changesSectionRequests =
+  new LatestGenerationFlight<LoadedChangesSection>();
+
 export function useChangesModel({
+  active,
   workspaceId,
   baseBranch,
   folder,
   refreshKey,
   onChanged,
 }: {
+  active: boolean;
   workspaceId: string;
   baseBranch: string;
   folder: string;
@@ -784,8 +792,9 @@ export function useChangesModel({
   // first) — NOT the base branch's whole history. Reloaded per workspace /
   // base / refresh.
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
-    void gitLog({ workspaceId, limit: 50, base: baseBranch })
+    void commitsForGeneration(workspaceId, baseBranch, refreshKey)
       .then((c) => {
         if (!cancelled) {
           writeBoundedCache(changesCommitsCache, commitKey, c);
@@ -798,7 +807,7 @@ export function useChangesModel({
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, baseBranch, commitKey, refreshKey]);
+  }, [active, workspaceId, baseBranch, commitKey, refreshKey]);
 
   // Turns for this workspace (newest first) — powers the turn-filter dropdown.
   // The selected turn resolves against this fresh list (see `turnFilter`
@@ -806,6 +815,7 @@ export function useChangesModel({
   // here — only once the FRESH list confirms it's gone, never preemptively
   // while the list is still loading.
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
     void turnsForGeneration(workspaceId, refreshKey)
       .then((t) => {
@@ -826,7 +836,7 @@ export function useChangesModel({
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, refreshKey]);
+  }, [active, workspaceId, refreshKey]);
 
   // Build the file list, per scope:
   //  • Uncommitted / Staged / Unstaged: the full patch for that exact Git
@@ -844,100 +854,112 @@ export function useChangesModel({
     setLoading(true);
     setError(null);
     try {
-      let files: ChangedFile[] = [];
-      let kind: SectionKind = "changes";
-      if (
-        scope.kind === "uncommitted" ||
-        scope.kind === "staged" ||
-        scope.kind === "unstaged"
-      ) {
-        const mode =
-          scope.kind === "staged"
-            ? "index-vs-head"
-            : scope.kind === "unstaged"
-              ? "worktree-vs-index"
-              : "worktree-vs-head";
-        const [status, scopeDiff] = await Promise.all([
-          statusForGeneration(workspaceId, refreshKey),
-          gitDiff({
-            workspaceId,
-            mode,
-            rawPatch: true,
-            summaryLimit: LARGE_CHANGE_FILE_LIMIT,
-          }),
-        ]);
-        const tracked = trackedFilesForScope(
-          changedFilesFromDiffResult(scopeDiff),
-          status,
-        );
-        const includeUntracked =
-          scope.kind === "uncommitted" || scope.kind === "unstaged";
-        const untracked = includeUntracked
-          ? await buildUntrackedFiles(folder, status.untracked)
-          : [];
-        const conflicted = buildConflictedFiles(status.conflicted);
-        const flat = [...tracked, ...untracked].sort((a, b) =>
-          a.path.localeCompare(b.path),
-        );
-        // One flat, header-less list — conflicts first, then the exact scope.
-        files = [...conflicted, ...flat];
-        kind = "changes";
-      } else if (scope.kind === "all") {
-        // The whole branch vs its fork point — committed AND uncommitted — in one
-        // flat list. `worktree-vs-base` diffs the fork point against the WORKING
-        // TREE, so a file changed by a commit AND edited since shows ONCE with its
-        // net diff. `gitStatus` adds the untracked files (in no diff) and tells us
-        // which tracked paths still have uncommitted work, so those read grey
-        // (in-progress) while fully-committed changes colour by type.
-        const [diffRes, status] = await Promise.all([
-          gitDiff({
-            workspaceId,
-            mode: "worktree-vs-base",
-            rawPatch: true,
-            summaryLimit: LARGE_CHANGE_FILE_LIMIT,
-          }),
-          statusForGeneration(workspaceId, refreshKey),
-        ]);
-        const conflictedPaths = new Set(status.conflicted.map((f) => f.path));
-        const dirty = new Set<string>([
-          ...status.staged.map((f) => f.path),
-          ...status.unstaged.map((f) => f.path),
-          ...status.untracked,
-        ]);
-        const newPaths = new Set(
-          [...status.staged, ...status.unstaged]
-            .filter((f) => f.status === "added")
-            .map((f) => f.path),
-        );
-        const tracked = changedFilesFromDiffResult(diffRes)
-          // Conflicts render separately (red, first) — drop them here so a
-          // mid-merge file isn't listed twice.
-          .filter((f) => !conflictedPaths.has(f.path))
-          .map((f) => ({
-            ...f,
-            committed: !dirty.has(f.path),
-            // worktree-vs-base patch hash → the Viewed auto-unmark key (matches
-            // the workbench viewer, which also diffs vs base).
-            hash: hashString(f.patch),
-            isNewFile: newPaths.has(f.path),
-          }));
-        const untracked = await buildUntrackedFiles(folder, status.untracked);
-        const conflicted = buildConflictedFiles(status.conflicted);
-        const flat = [...tracked, ...untracked].sort((a, b) =>
-          a.path.localeCompare(b.path),
-        );
-        files = [...conflicted, ...flat];
-        kind = "committed";
-      } else {
-        // A single commit — its own diff.
-        const patch = (await gitShowCommit({ workspaceId, sha: scope.sha }))
-          .patch;
-        files = parseUnifiedDiffFiles(patch ?? "").map((f) => ({
-          ...f,
-          hash: hashString(f.patch),
-        }));
-        kind = "committed";
-      }
+      const { files, kind } = await changesSectionRequests.run(
+        sectionKey,
+        refreshKey,
+        async () => {
+          let files: ChangedFile[] = [];
+          let kind: SectionKind = "changes";
+          if (
+            scope.kind === "uncommitted" ||
+            scope.kind === "staged" ||
+            scope.kind === "unstaged"
+          ) {
+            const mode =
+              scope.kind === "staged"
+                ? "index-vs-head"
+                : scope.kind === "unstaged"
+                  ? "worktree-vs-index"
+                  : "worktree-vs-head";
+            const [status, scopeDiff] = await Promise.all([
+              statusForGeneration(workspaceId, refreshKey),
+              gitDiff({
+                workspaceId,
+                mode,
+                rawPatch: true,
+                summaryLimit: LARGE_CHANGE_FILE_LIMIT,
+              }),
+            ]);
+            const tracked = trackedFilesForScope(
+              changedFilesFromDiffResult(scopeDiff),
+              status,
+            );
+            const includeUntracked =
+              scope.kind === "uncommitted" || scope.kind === "unstaged";
+            const untracked = includeUntracked
+              ? await buildUntrackedFiles(folder, status.untracked)
+              : [];
+            const conflicted = buildConflictedFiles(status.conflicted);
+            const flat = [...tracked, ...untracked].sort((a, b) =>
+              a.path.localeCompare(b.path),
+            );
+            // One flat, header-less list — conflicts first, then the exact scope.
+            files = [...conflicted, ...flat];
+            kind = "changes";
+          } else if (scope.kind === "all") {
+            // The whole branch vs its fork point — committed AND uncommitted — in one
+            // flat list. `worktree-vs-base` diffs the fork point against the WORKING
+            // TREE, so a file changed by a commit AND edited since shows ONCE with its
+            // net diff. `gitStatus` adds the untracked files (in no diff) and tells us
+            // which tracked paths still have uncommitted work, so those read grey
+            // (in-progress) while fully-committed changes colour by type.
+            const [diffRes, status] = await Promise.all([
+              gitDiff({
+                workspaceId,
+                mode: "worktree-vs-base",
+                rawPatch: true,
+                summaryLimit: LARGE_CHANGE_FILE_LIMIT,
+              }),
+              statusForGeneration(workspaceId, refreshKey),
+            ]);
+            const conflictedPaths = new Set(
+              status.conflicted.map((f) => f.path),
+            );
+            const dirty = new Set<string>([
+              ...status.staged.map((f) => f.path),
+              ...status.unstaged.map((f) => f.path),
+              ...status.untracked,
+            ]);
+            const newPaths = new Set(
+              [...status.staged, ...status.unstaged]
+                .filter((f) => f.status === "added")
+                .map((f) => f.path),
+            );
+            const tracked = changedFilesFromDiffResult(diffRes)
+              // Conflicts render separately (red, first) — drop them here so a
+              // mid-merge file isn't listed twice.
+              .filter((f) => !conflictedPaths.has(f.path))
+              .map((f) => ({
+                ...f,
+                committed: !dirty.has(f.path),
+                // worktree-vs-base patch hash → the Viewed auto-unmark key (matches
+                // the workbench viewer, which also diffs vs base).
+                hash: hashString(f.patch),
+                isNewFile: newPaths.has(f.path),
+              }));
+            const untracked = await buildUntrackedFiles(
+              folder,
+              status.untracked,
+            );
+            const conflicted = buildConflictedFiles(status.conflicted);
+            const flat = [...tracked, ...untracked].sort((a, b) =>
+              a.path.localeCompare(b.path),
+            );
+            files = [...conflicted, ...flat];
+            kind = "committed";
+          } else {
+            // A single commit — its own diff.
+            const patch = (await gitShowCommit({ workspaceId, sha: scope.sha }))
+              .patch;
+            files = parseUnifiedDiffFiles(patch ?? "").map((f) => ({
+              ...f,
+              hash: hashString(f.patch),
+            }));
+            kind = "committed";
+          }
+          return { files, kind };
+        },
+      );
       if (
         requestId !== reloadRequest.current ||
         !isCurrentChangesSectionsRequest(sectionKey, publicationToken)
@@ -1004,19 +1026,21 @@ export function useChangesModel({
   ]);
 
   useEffect(() => {
+    if (!active) return;
     void reload();
     return () => {
       // Invalidates an in-flight request on scope/target/refresh changes and on
       // unmount. The next effect's reload claims the following request id.
       reloadRequest.current += 1;
     };
-  }, [reload]);
+  }, [active, reload]);
 
   // A confirmation can stay open while an agent/terminal refresh lands. If
   // that path disappeared, became fully committed, or the user left the only
   // discardable scope, dismiss the stale dialog instead of letting Confirm run
   // a pathspec operation against an obsolete row.
   useEffect(() => {
+    if (!active) return;
     if (!discardTarget || loading) return;
     const live = sections
       .flatMap((section) => section.files)
@@ -1024,12 +1048,12 @@ export function useChangesModel({
     if (scope.kind !== "all" || live?.committed !== false) {
       setDiscardTarget(null);
     }
-  }, [discardTarget, loading, scope.kind, sections]);
+  }, [active, discardTarget, loading, scope.kind, sections]);
 
   // Scope totals refresh independently of the selected historical/turn filter.
   // The headline badge consumes `.all`; each menu row consumes its own exact
   // comparison, so an AD path reads 0 / 0 / 1 / 1 as Git actually represents it.
-  const changeCounts = useChangeCounts(workspaceId, refreshKey);
+  const changeCounts = useChangeCounts(workspaceId, refreshKey, active);
 
   // ── discard ──
   // The ONLY write control here. Stage / unstage / commit / push are

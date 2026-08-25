@@ -39,6 +39,7 @@ import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { cn } from "@/renderer/shared/ui/cn";
 import { renderMarkdown } from "@/renderer/features/agent/markdown";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { LatestGenerationFlight } from "@/renderer/shared/lib/latest-generation-flight";
 
 import { parseUnifiedDiffFiles, type ChangedFile } from "./changes-parse";
 import { useScrollMemoryRef } from "../../scroll-memory";
@@ -76,6 +77,7 @@ const MAX_REVIEW_FILE_SNAPSHOTS = 32;
  *  The explicit Retry path deletes the entry to force a pull. */
 const reviewFilesMeta = new Map<string, { refreshKey: number; at: number }>();
 const REVIEW_FILES_FRESH_MS = 60_000;
+const reviewFileRequests = new LatestGenerationFlight<ChangedFile[]>();
 
 function reviewFilesKey(workspaceId: string, baseBranch: string): string {
   return JSON.stringify([workspaceId, baseBranch]);
@@ -228,6 +230,7 @@ export function ReviewView({
     filesSnapshot.key === filesKey ? filesSnapshot.error : null;
   const [filesReloadNonce, setFilesReloadNonce] = useState(0);
   useEffect(() => {
+    if (!active) return;
     let cancelled = false;
     const retainedFiles = reviewFilesCache.get(filesKey);
     setFilesSnapshot({
@@ -249,10 +252,17 @@ export function ReviewView({
     ) {
       return;
     }
-    void gitDiff({ workspaceId, mode: "base", rawPatch: true })
-      .then((d) => {
+    void reviewFileRequests
+      .run(filesKey, refreshKey, async () => {
+        const diff = await gitDiff({
+          workspaceId,
+          mode: "base",
+          rawPatch: true,
+        });
+        return parseUnifiedDiffFiles(diff.patch ?? "");
+      })
+      .then((nextFiles) => {
         if (cancelled) return;
-        const nextFiles = parseUnifiedDiffFiles(d.patch ?? "");
         cacheReviewFiles(filesKey, nextFiles, refreshKey);
         setFilesSnapshot({
           key: filesKey,
@@ -272,7 +282,7 @@ export function ReviewView({
     return () => {
       cancelled = true;
     };
-  }, [workspaceId, baseBranch, filesKey, refreshKey, filesReloadNonce]);
+  }, [active, workspaceId, baseBranch, filesKey, refreshKey, filesReloadNonce]);
 
   const pr = snap.pr;
   const checksSummary = summarizeChecks(snap.checks);

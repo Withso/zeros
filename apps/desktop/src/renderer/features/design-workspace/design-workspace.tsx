@@ -19,22 +19,14 @@ import { useShallow } from "zustand/react/shallow";
 import "./design-workspace-ui.css";
 import {
   AlertTriangle,
-  Boxes,
   Code2,
-  Copy,
   Diamond,
+  Download,
   FileCode2,
   Frame,
-  Minus,
   MousePointer2,
   Palette,
-  Plus,
-  Redo2,
-  Save,
-  SlidersHorizontal,
-  Trash2,
   Type,
-  Undo2,
   X,
 } from "lucide-react";
 
@@ -44,24 +36,14 @@ import type {
   DesignRuntimeTreeNode,
 } from "@zeros/protocol/design-runtime";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
-import {
-  designParameterDocumentId,
-  type DesignComponentDefinition,
-  type DesignOperation,
-  type DesignParameter,
-  type DesignParameterValue,
-  type DesignTransaction,
-} from "@zeros/design-core";
+import { type DesignOperation } from "@zeros/design-core";
 import type {
   DesignAuthoredKeyframes,
   DesignStyleProvenance,
 } from "@zeros/design-web";
 
 import { exportDesignPng } from "../../platform/design";
-import { shellOpenUrl } from "../../platform/app";
 import { designFrameRuntime } from "../../platform/bridge/design-frame-runtime";
-import { CreatePrButton } from "../../shell/pr/create-pr-button";
-import { WorkbenchToggleButton } from "../../shell/workbench/toggle-button";
 import {
   type DesignCanvasFrameWire,
   type DesignFrameGeometryWire,
@@ -84,7 +66,7 @@ import {
   applyDesignHistoryCached,
   applyDesignTransactionCached,
   renameDesignFrameAndRefresh,
-  saveDesigns,
+  stageDesigns,
   updateDesignFrameGeometryCached,
   updateDesignNodeStylesCached,
   warmDesignFrameDocument,
@@ -123,6 +105,9 @@ import {
 } from "./state/design-live-preview";
 import { useDesignWorkspaceDisclosure } from "./state/design-layer-disclosure";
 import {
+  DEFAULT_DESIGN_WORKSPACE_VIEW,
+  DESIGN_MAX_ZOOM,
+  DESIGN_MIN_ZOOM,
   designWorkspaceView,
   useDesignWorkspaceUiStore,
   useDesignWorkspaceView,
@@ -133,20 +118,18 @@ import { useDesignFoundation } from "./state/use-design-foundation";
 import { useDesignFrameDocument } from "./state/use-design-frame-document";
 import { clearWorkspaceSettling } from "../../state/pending-workspaces";
 import { cn } from "../../shared/ui/cn";
+import { useThemeId } from "../../shared/theme/use-theme-variant";
 import {
   Alert,
   AlertDescription,
   AlertTitle,
   Button,
   CodeBlock,
-  Dialog,
-  DialogClose,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-  DialogTrigger,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuShortcut,
+  DropdownMenuTrigger,
   Input,
   Label,
   ScrollArea,
@@ -155,10 +138,6 @@ import {
   SelectItem,
   SelectTrigger,
   SelectValue,
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
   Toolbar,
   Tooltip,
   toast,
@@ -227,7 +206,24 @@ import {
 import { DesignFrameRuntimeIframe } from "./design-frame-runtime-iframe";
 import { hasDesignAssetDrag, readDesignAssetDrag } from "./design-assets";
 import { DesignThemeEditor } from "./design-theme-editor";
+import { DesignComputedCssEditor } from "./design-computed-css-editor";
 import { DesignStyleEditor } from "./design-style-editor";
+import { DesignCanvasBackgroundEditor } from "./design-canvas-background-editor";
+import {
+  normalizeDesignCanvasBackground,
+  resolveDesignCanvasDefaultBackground,
+} from "./design-canvas-background";
+import { DesignPanelResizeHandle } from "./design-panel-resize-handle";
+import {
+  DESIGN_WORKSPACE_STYLE_WIDTH_DEFAULT,
+  DESIGN_WORKSPACE_STYLE_WIDTH_MAX,
+  DESIGN_WORKSPACE_STYLE_WIDTH_MIN,
+  DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
+  clampDesignWorkspaceStyleWidth,
+  persistDesignWorkspaceStyleWidth,
+  readPersistedDesignWorkspaceStyleWidth,
+} from "./design-workspace-width";
+import { dispatchDesignWorkspaceShortcut } from "./design-workspace-shortcuts";
 import {
   DesignMotionTimeline,
   designMotionPreviewInput,
@@ -279,6 +275,11 @@ import {
   resolveDesignFrameBodyTarget,
   type DesignFrameBodyIntent,
 } from "./design-layer-tree";
+import {
+  designFrameLayerLabel,
+  designRuntimeLayerLabel,
+} from "./design-layer-label";
+import { resolveDesignSelectionShortcut } from "./design-selection-shortcuts";
 
 // --- TYPES ---
 
@@ -289,10 +290,6 @@ interface DesignWorkspaceColumnProps {
   folder: string | null;
   /** Hidden retained shells must not read, poll, focus, or attach shortcuts. */
   surfaceActive: boolean;
-  /** Mirrors Workbench collapse without destroying canvas DOM. */
-  collapsed?: boolean;
-  /** Open-state panel collapse action shared with the code workspace. */
-  onToggleWorkbench: () => void;
 }
 
 interface DesignCanvasProps {
@@ -310,17 +307,18 @@ interface DesignCanvasProps {
   refresh: () => void;
   /** Whether keyboard, wheel, and pointer interactions are currently allowed. */
   active: boolean;
+  /** Concrete workspace-owned color, or the resolved --bg2 default. */
+  canvasBackground: string;
   motionTimelineOpen: boolean;
   motionPropertyRequest: DesignMotionPropertyRequest | null;
   onMotionTimelineOpenChange: (open: boolean) => void;
   onMotionPropertyRequestHandled: (id: number) => void;
   onMotionPropertiesChange: (properties: readonly string[]) => void;
-  onRequestDeleteFrame: (frame: DesignCanvasFrameWire) => void;
+  onDeleteFrame: (frame: DesignCanvasFrameWire) => Promise<void>;
+  zoomActionsRef: React.MutableRefObject<DesignCanvasZoomActions | null>;
 }
 
 interface DesignInspectorProps {
-  /** Full workspace metadata supplies the existing shared PR workflow. */
-  workspace: Workspace | null;
   workspaceId: string | null;
   folder: string | null;
   /** Selected frame document, or null for an empty canvas selection. */
@@ -336,12 +334,17 @@ interface DesignInspectorProps {
   /** Deterministic document lint result from the aggregate snapshot. */
   lint: DesignLintReportWire | null;
   active: boolean;
+  canvasBackground: string;
+  onCanvasBackgroundChange: (value: string) => void;
   motionTimelineOpen: boolean;
   motionProperties: readonly string[];
-  onToggleWorkbench: () => void;
   onOpenMotionTimeline: (property?: string, value?: string) => void;
-  deleteFrameRequest: { id: number; file: string } | null;
-  onDeleteFrameRequestHandled: (id: number) => void;
+  zoomActionsRef: React.MutableRefObject<DesignCanvasZoomActions | null>;
+}
+
+interface DesignCanvasZoomActions {
+  zoomIn(): void;
+  zoomOut(): void;
 }
 
 type FrameGestureMode = "move" | DesignResizeHandle;
@@ -759,35 +762,10 @@ interface InspectorProvenanceState {
   error: string | null;
 }
 
-function designParameterText(value: DesignParameterValue): string {
-  if (value === null) return "";
-  return String(value);
-}
-
-function parseDesignParameterDraft(
-  parameter: DesignParameter,
-  draft: string,
-): DesignParameterValue {
-  if (parameter.type === "number") {
-    const value = Number(draft);
-    if (!Number.isFinite(value)) throw new Error("Enter a finite number.");
-    return value;
-  }
-  if (
-    (parameter.type === "length" || parameter.type === "angle") &&
-    typeof parameter.value === "number"
-  ) {
-    const value = Number(draft);
-    if (!Number.isFinite(value)) throw new Error("Enter a finite number.");
-    return value;
-  }
-  return draft;
-}
-
 // --- CONSTANTS ---
 
 const DESIGN_COLUMN_CLS =
-  "border-border1 relative flex min-h-0 min-w-[min(456px,66%)] overflow-hidden border-l bg-bg1 [flex:calc((1_-_var(--zeros-design-column-2-ratio,0.2))*100)_1_0px]";
+  "border-border1 relative flex min-h-0 min-w-[min(456px,66%)] flex-1 overflow-hidden border-l bg-bg1";
 const MIN_FRAME_WIDTH = 1;
 const MIN_FRAME_HEIGHT = 1;
 const COLD_BUSY_DELAY_MS = 180;
@@ -2574,25 +2552,20 @@ export function DesignWorkspaceColumn({
   workspace,
   folder,
   surfaceActive,
-  collapsed = false,
-  onToggleWorkbench,
 }: DesignWorkspaceColumnProps) {
   const [motionTimelineOpen, setMotionTimelineOpen] = useState(false);
   const [motionPropertyRequest, setMotionPropertyRequest] =
     useState<DesignMotionPropertyRequest | null>(null);
   const [motionProperties, setMotionProperties] =
     useState<readonly string[]>(EMPTY_NODE_IDS);
-  const [deleteFrameRequest, setDeleteFrameRequest] = useState<{
-    id: number;
-    file: string;
-  } | null>(null);
-  const deleteFrameRequestIdRef = useRef(0);
+  const deletingFrameFilesRef = useRef(new Set<string>());
   const motionPropertyRequestIdRef = useRef(0);
+  const zoomActionsRef = useRef<DesignCanvasZoomActions | null>(null);
   const workspaceId = workspace?.kind === "design" ? workspace.id : null;
   const snapshot = useDesignWorkspaceSnapshot(
     workspaceId,
     folder,
-    surfaceActive && !collapsed,
+    surfaceActive,
   );
   const selectedFrameFile = useDesignWorkspaceUiStore((state) =>
     workspaceId
@@ -2613,6 +2586,51 @@ export function DesignWorkspaceColumn({
     workspaceId
       ? (state.byWorkspace[workspaceId]?.frameSelected ?? false)
       : false,
+  );
+  const storedCanvasBackground = useDesignWorkspaceUiStore((state) =>
+    workspaceId
+      ? (state.byWorkspace[workspaceId]?.canvasBackground ?? null)
+      : null,
+  );
+  const setCanvasBackground = useDesignWorkspaceUiStore(
+    (state) => state.setCanvasBackground,
+  );
+  const themeId = useThemeId();
+  const canvasBackground = useMemo(() => {
+    // Reading the theme id invalidates the computed-token snapshot whenever
+    // the active theme changes, while authored workspace colors remain exact.
+    void themeId;
+    return storedCanvasBackground ?? resolveDesignCanvasDefaultBackground();
+  }, [storedCanvasBackground, themeId]);
+  const commitCanvasBackground = useCallback(
+    (value: string) => {
+      if (!workspaceId) return;
+      setCanvasBackground(workspaceId, value);
+    },
+    [setCanvasBackground, workspaceId],
+  );
+  const deleteFrame = useCallback(
+    async (candidate: DesignCanvasFrameWire) => {
+      if (!workspaceId || deletingFrameFilesRef.current.has(candidate.file)) {
+        return;
+      }
+      deletingFrameFilesRef.current.add(candidate.file);
+      try {
+        const next = await deleteDesignFrameCached(workspaceId, candidate.file);
+        // Selection publishes locally before its durable bridge write. Do not
+        // make that bookkeeping delay—or misreport—a completed deletion.
+        void selectDesignFrame(workspaceId, next.frames[0] ?? null).catch(
+          () => {},
+        );
+      } catch (deleteError) {
+        toast.error("Couldn't delete the design frame", {
+          description: errorMessage(deleteError),
+        });
+      } finally {
+        deletingFrameFilesRef.current.delete(candidate.file);
+      }
+    },
+    [workspaceId],
   );
 
   const frameFiles = useMemo(
@@ -2685,12 +2703,10 @@ export function DesignWorkspaceColumn({
 
   return (
     <section
-      {...(collapsed || !surfaceActive ? { inert: "" } : {})}
+      {...(!surfaceActive ? { inert: "" } : {})}
       data-design-workspace-surface=""
       data-design-workspace-id={workspaceId ?? undefined}
       className={DESIGN_COLUMN_CLS}
-      style={collapsed ? { display: "none" } : undefined}
-      aria-hidden={collapsed}
       aria-label="Design workspace"
     >
       <DesignCanvas
@@ -2700,7 +2716,8 @@ export function DesignWorkspaceColumn({
         loading={snapshot.loading}
         error={snapshot.error}
         refresh={snapshot.refresh}
-        active={surfaceActive && !collapsed}
+        active={surfaceActive}
+        canvasBackground={canvasBackground}
         motionTimelineOpen={motionTimelineOpen}
         motionPropertyRequest={motionPropertyRequest}
         onMotionTimelineOpenChange={setMotionTimelineOpen}
@@ -2710,15 +2727,10 @@ export function DesignWorkspaceColumn({
           )
         }
         onMotionPropertiesChange={publishMotionProperties}
-        onRequestDeleteFrame={(frame) =>
-          setDeleteFrameRequest({
-            id: ++deleteFrameRequestIdRef.current,
-            file: frame.file,
-          })
-        }
+        onDeleteFrame={deleteFrame}
+        zoomActionsRef={zoomActionsRef}
       />
       <DesignInspector
-        workspace={workspace}
         workspaceId={workspaceId}
         folder={folder}
         frame={selectedFrame}
@@ -2727,17 +2739,13 @@ export function DesignWorkspaceColumn({
         selectedNodeId={selectedNodeId}
         selectedNodeIds={selectedNodeIds}
         lint={snapshot.data?.lint ?? null}
-        active={surfaceActive && !collapsed}
+        active={surfaceActive}
+        canvasBackground={canvasBackground}
+        onCanvasBackgroundChange={commitCanvasBackground}
         motionTimelineOpen={motionTimelineOpen}
         motionProperties={motionProperties}
-        onToggleWorkbench={onToggleWorkbench}
         onOpenMotionTimeline={openMotionTimeline}
-        deleteFrameRequest={deleteFrameRequest}
-        onDeleteFrameRequestHandled={(id) =>
-          setDeleteFrameRequest((current) =>
-            current?.id === id ? null : current,
-          )
-        }
+        zoomActionsRef={zoomActionsRef}
       />
     </section>
   );
@@ -2757,12 +2765,14 @@ function DesignCanvas({
   error,
   refresh,
   active,
+  canvasBackground,
   motionTimelineOpen,
   motionPropertyRequest,
   onMotionTimelineOpenChange,
   onMotionPropertyRequestHandled,
   onMotionPropertiesChange,
-  onRequestDeleteFrame,
+  onDeleteFrame,
+  zoomActionsRef,
 }: DesignCanvasProps) {
   const view = useDesignWorkspaceView(workspaceId);
   const setCodeView = useDesignWorkspaceUiStore((state) => state.setCodeView);
@@ -3491,6 +3501,18 @@ function DesignCanvas({
     [cancelPendingWheelGesture, setViewport, view, workspaceId],
   );
 
+  useLayoutEffect(() => {
+    if (!active) return;
+    const actions: DesignCanvasZoomActions = {
+      zoomIn: () => zoomAt((currentZoom) => currentZoom * 1.2),
+      zoomOut: () => zoomAt((currentZoom) => currentZoom / 1.2),
+    };
+    zoomActionsRef.current = actions;
+    return () => {
+      if (zoomActionsRef.current === actions) zoomActionsRef.current = null;
+    };
+  }, [active, zoomActionsRef, zoomAt]);
+
   /** Frame creation returns the aggregate snapshot, avoiding a follow-up read.
    * Drawn geometry is authored in that same mutation, so no default-size frame
    * can flash before a second resize write. */
@@ -4013,6 +4035,7 @@ function DesignCanvas({
       action: "duplicate" | "delete",
       nodeIds: readonly string[],
       duplicateNodeIds: readonly string[] = [],
+      duplicateMode: "copy" | "duplicate" = "duplicate",
     ) => {
       if (
         !workspaceId ||
@@ -4074,7 +4097,7 @@ function DesignCanvas({
             actor: { kind: "human", id: "desktop" },
             intent:
               action === "duplicate"
-                ? `Duplicate ${nodeIds.length} selected ${nodeIds.length === 1 ? "layer" : "layers"}`
+                ? `${duplicateMode === "copy" ? "Copy" : "Duplicate"} ${nodeIds.length} selected ${nodeIds.length === 1 ? "layer" : "layers"}`
                 : `Delete ${nodeIds.length} selected ${nodeIds.length === 1 ? "layer" : "layers"}`,
             createdAt: Date.now(),
             operations,
@@ -4097,17 +4120,23 @@ function DesignCanvas({
             // selection after it owns the duplicate source generation.
           });
           toast.success(
-            nodeIds.length === 1 ? "Element duplicated" : "Elements duplicated",
+            nodeIds.length === 1
+              ? duplicateMode === "copy"
+                ? "Element copied"
+                : "Element duplicated"
+              : duplicateMode === "copy"
+                ? "Elements copied"
+                : "Elements duplicated",
           );
         } else {
           const currentFrame =
             result.snapshot?.frames.find(
               (candidate) => candidate.file === selectedFrame.file,
             ) ?? selectedFrame;
-          await selectDesignFrame(workspaceId, currentFrame);
-          toast.success(
-            nodeIds.length === 1 ? "Element deleted" : "Elements deleted",
-          );
+          // The deletion is already durable. Keep selection persistence off
+          // its critical path so a transient selection write cannot turn a
+          // successful delete into an error toast.
+          void selectDesignFrame(workspaceId, currentFrame).catch(() => {});
         }
       } finally {
         nodeActionRef.current = false;
@@ -4116,28 +4145,71 @@ function DesignCanvas({
     [canvasFoundation.data, folder, selectedFrame, workspaceId],
   );
 
-  const duplicateSelectedNode = useCallback(async () => {
-    const nodeIds = designLayerTopLevelSelectionIds(
-      selectedRuntimeTree,
-      view.selectedNodeIds,
-    );
-    if (nodeIds.length === 0) return;
-    const duplicateNodeIds = nodeIds.map((nodeId) => {
-      const suffix = crypto.randomUUID().slice(0, 8);
-      return `${nodeId.slice(0, Math.max(1, 242 - suffix.length))}-copy-${suffix}`;
-    });
-    try {
-      await applyCanvasNodeOperation("duplicate", nodeIds, duplicateNodeIds);
-    } catch (error) {
-      toast.error("Couldn't duplicate the element", {
-        description: errorMessage(error),
+  const duplicateSelectedNode = useCallback(
+    async (duplicateMode: "copy" | "duplicate" = "duplicate") => {
+      const nodeIds = designLayerTopLevelSelectionIds(
+        selectedRuntimeTree,
+        view.selectedNodeIds,
+      );
+      if (nodeIds.length === 0) return;
+      const duplicateNodeIds = nodeIds.map((nodeId) => {
+        const suffix = crypto.randomUUID().slice(0, 8);
+        return `${nodeId.slice(0, Math.max(1, 242 - suffix.length))}-copy-${suffix}`;
       });
-    }
-  }, [applyCanvasNodeOperation, selectedRuntimeTree, view.selectedNodeIds]);
+      try {
+        await applyCanvasNodeOperation(
+          "duplicate",
+          nodeIds,
+          duplicateNodeIds,
+          duplicateMode,
+        );
+      } catch (error) {
+        toast.error(
+          duplicateMode === "copy"
+            ? "Couldn't copy the element"
+            : "Couldn't duplicate the element",
+          { description: errorMessage(error) },
+        );
+      }
+    },
+    [applyCanvasNodeOperation, selectedRuntimeTree, view.selectedNodeIds],
+  );
+
+  const duplicateSelectedFrame = useCallback(
+    async (duplicateMode: "copy" | "duplicate" = "duplicate") => {
+      if (!workspaceId || !selectedFrame || nodeActionRef.current) return;
+      nodeActionRef.current = true;
+      try {
+        const result = await duplicateDesignFrameCached(
+          workspaceId,
+          selectedFrame.file,
+        );
+        const duplicate = result.snapshot.frames.find(
+          (candidate) => candidate.file === result.frame.file,
+        );
+        if (duplicate) {
+          await selectDesignFrame(workspaceId, duplicate, { selected: true });
+        }
+        toast.success(
+          duplicateMode === "copy" ? "Frame copied" : "Frame duplicated",
+        );
+      } catch (error) {
+        toast.error(
+          duplicateMode === "copy"
+            ? "Couldn't copy the frame"
+            : "Couldn't duplicate the frame",
+          { description: errorMessage(error) },
+        );
+      } finally {
+        nodeActionRef.current = false;
+      }
+    },
+    [selectedFrame, workspaceId],
+  );
 
   const deleteSelectedNode = useCallback(async () => {
     if (selectedFrame?.kind === "text") {
-      onRequestDeleteFrame(selectedFrame);
+      await onDeleteFrame(selectedFrame);
       return;
     }
     const nodeIds = designLayerTopLevelSelectionIds(
@@ -4154,7 +4226,7 @@ function DesignCanvas({
     }
   }, [
     applyCanvasNodeOperation,
-    onRequestDeleteFrame,
+    onDeleteFrame,
     selectedFrame,
     selectedRuntimeTree,
     view.selectedNodeIds,
@@ -6629,11 +6701,46 @@ function DesignCanvas({
         return;
       }
       const viewport = viewportRef.current;
-      if (!viewport || isEditableHotkeyTarget(event.target)) return;
+      if (!viewport) return;
+      const editableTarget = isEditableHotkeyTarget(event.target);
       // Option measures; it never types, moves, or deletes anything. Reading it
       // outside the canvas's own focus scope is what makes the overlay appear
       // right after a Layers row click, where focus lives in the sidebar.
-      syncMeasureModifier(event.altKey);
+      if (!editableTarget) syncMeasureModifier(event.altKey);
+      const activeElement = document.activeElement;
+      const designSurfaceFocused =
+        activeElement instanceof Element &&
+        Boolean(activeElement.closest("[data-design-workspace-surface]"));
+      const selectedNodeIsTarget = Boolean(
+        selectedFrame && view.selectedNodeId,
+      );
+      const selectedFrameIsTarget = Boolean(
+        selectedFrame &&
+        view.frameSelected &&
+        view.selectedFrame === selectedFrame.file,
+      );
+      const selectionShortcut = resolveDesignSelectionShortcut(
+        event,
+        editableTarget,
+        designSurfaceFocused && (selectedNodeIsTarget || selectedFrameIsTarget),
+      );
+      if (selectionShortcut) {
+        event.preventDefault();
+        if (selectionShortcut === "delete") {
+          if (selectedNodeIsTarget) void deleteSelectedNode();
+          else if (selectedFrame) void onDeleteFrame(selectedFrame);
+        } else {
+          const duplicateMode =
+            selectionShortcut === "copy" ? "copy" : "duplicate";
+          if (selectedFrame?.kind === "text" || !selectedNodeIsTarget) {
+            void duplicateSelectedFrame(duplicateMode);
+          } else {
+            void duplicateSelectedNode(duplicateMode);
+          }
+        }
+        return;
+      }
+      if (editableTarget) return;
       if (!viewport.contains(document.activeElement)) return;
       if (event.key === "Escape" && hitStackMenu) {
         event.preventDefault();
@@ -6673,16 +6780,6 @@ function DesignCanvas({
       if (
         (event.metaKey || event.ctrlKey) &&
         !event.altKey &&
-        event.key.toLowerCase() === "d" &&
-        view.selectedNodeId
-      ) {
-        event.preventDefault();
-        if (!event.repeat) void duplicateSelectedNode();
-        return;
-      }
-      if (
-        (event.metaKey || event.ctrlKey) &&
-        !event.altKey &&
         ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)
       ) {
         const step = event.shiftKey ? 10 : 1;
@@ -6699,30 +6796,6 @@ function DesignCanvas({
               : 0,
         );
         if (handled) event.preventDefault();
-        return;
-      }
-      if (
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.altKey &&
-        (event.key === "Backspace" || event.key === "Delete") &&
-        view.selectedNodeId
-      ) {
-        event.preventDefault();
-        if (!event.repeat) void deleteSelectedNode();
-        return;
-      }
-      if (
-        !event.metaKey &&
-        !event.ctrlKey &&
-        !event.altKey &&
-        (event.key === "Backspace" || event.key === "Delete") &&
-        !view.selectedNodeId &&
-        selectedFrame &&
-        view.selectedFrame === selectedFrame.file
-      ) {
-        event.preventDefault();
-        if (!event.repeat) onRequestDeleteFrame(selectedFrame);
         return;
       }
       if (event.key === "Escape" && view.selectedNodeId && selectedFrame) {
@@ -6901,6 +6974,7 @@ function DesignCanvas({
     activeTool,
     activateTool,
     deleteSelectedNode,
+    duplicateSelectedFrame,
     duplicateSelectedNode,
     finishInlineTextTool,
     finishNodeNudge,
@@ -6910,7 +6984,7 @@ function DesignCanvas({
     motionTimelineOpen,
     navigateToNode,
     onMotionTimelineOpenChange,
-    onRequestDeleteFrame,
+    onDeleteFrame,
     resizeSelectedNode,
     selectedFrame,
     selectedNodeDetails,
@@ -8027,9 +8101,10 @@ function DesignCanvas({
   // --- RENDER ---
 
   return (
-    <div className="relative min-h-0 min-w-0 flex-1 overflow-hidden">
+    <div className="relative min-h-0 min-w-[min(320px,50%)] flex-1 overflow-hidden">
       <div
         ref={viewportRef}
+        data-design-canvas-viewport=""
         data-design-active-tool={activeTool}
         tabIndex={0}
         className={cn(
@@ -8040,11 +8115,9 @@ function DesignCanvas({
               ? "cursor-crosshair"
               : "cursor-default",
         )}
-        // FLAG: 16px is canvas-grid geometry, not component spacing.
         style={{
-          backgroundImage:
-            "radial-gradient(circle, var(--border2) 1px, transparent 1px)",
-          backgroundSize: "16px 16px",
+          // Runtime user color is an intentional canvas boundary.
+          backgroundColor: canvasBackground,
         }}
         onPointerDown={handleViewportPointerDown}
         // Pointer movement carries the authoritative modifier state, so a
@@ -9042,43 +9115,6 @@ function DesignCanvas({
           </Tooltip>
         </Toolbar>
 
-        <Toolbar
-          data-design-controls
-          role="toolbar"
-          aria-label="Canvas zoom"
-          className={cn(
-            "zd-design-floating-toolbar absolute right-4 transition-[bottom]",
-            motionTimelineOpen ? "bottom-[336px]" : "bottom-4",
-          )}
-        >
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label="Zoom out"
-            onClick={() => zoomAt((currentZoom) => currentZoom / 1.2)}
-          >
-            <Minus />
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            aria-label="Fit all frames"
-            onClick={() => fitFrames(snapshot?.frames ?? [])}
-          >
-            {Math.round(view.zoom * 100)}%
-          </Button>
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            aria-label="Zoom in"
-            onClick={() => zoomAt((currentZoom) => currentZoom * 1.2)}
-          >
-            <Plus />
-          </Button>
-        </Toolbar>
         <DesignThemeEditor
           workspaceId={workspaceId}
           frame={selectedFrame}
@@ -9621,12 +9657,16 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
       styleProperty={property}
       applied={applied}
       hint={hint}
-      motion={{
-        modeActive: motionModeActive,
-        trackActive: motionTrackActive,
-        onAddKeyframe: () =>
-          onAddMotionKeyframe(property, displayedValue || computedValue),
-      }}
+      motion={
+        motionModeActive
+          ? {
+              modeActive: true,
+              trackActive: motionTrackActive,
+              onAddKeyframe: () =>
+                onAddMotionKeyframe(property, displayedValue || computedValue),
+            }
+          : undefined
+      }
       onInspect={() =>
         onInspect(
           property,
@@ -9641,7 +9681,6 @@ const InspectorStyleField = React.memo(function InspectorStyleField({
 });
 
 function DesignInspector({
-  workspace,
   workspaceId,
   folder,
   frame,
@@ -9651,14 +9690,18 @@ function DesignInspector({
   selectedNodeIds,
   lint,
   active,
+  canvasBackground,
+  onCanvasBackgroundChange,
   motionTimelineOpen,
   motionProperties,
-  onToggleWorkbench,
   onOpenMotionTimeline,
-  deleteFrameRequest,
-  onDeleteFrameRequestHandled,
+  zoomActionsRef,
 }: DesignInspectorProps) {
-  const elementDetails = selectedNodeId ? details : null;
+  const styleTargetNodeId =
+    selectedNodeId ?? (frameSelected && details?.oid ? details.oid : null);
+  const frameStyleTarget =
+    frameSelected && !selectedNodeId && styleTargetNodeId !== null;
+  const elementDetails = styleTargetNodeId ? details : null;
   const errors =
     lint?.violations.filter((violation) => violation.severity === "error") ??
     [];
@@ -9669,22 +9712,73 @@ function DesignInspector({
   const firstBlockingReason = errors[0]
     ? blockingDesignLintReason(errors[0])
     : null;
-  const [deleteOpen, setDeleteOpen] = useState(false);
-  const [frameAction, setFrameAction] = useState<
-    "duplicate" | "delete" | "save" | "export" | null
-  >(null);
-  const [foundationAction, setFoundationAction] = useState<string | null>(null);
-  const foundationActionRef = useRef(false);
+  const zoom = useDesignWorkspaceUiStore((state) =>
+    workspaceId
+      ? (state.byWorkspace[workspaceId]?.zoom ??
+        DEFAULT_DESIGN_WORKSPACE_VIEW.zoom)
+      : DEFAULT_DESIGN_WORKSPACE_VIEW.zoom,
+  );
+  const zoomPercentage = Math.round(zoom * 100);
+  const [frameAction, setFrameAction] = useState<"export" | null>(null);
+  const [pendingHistoryActions, setPendingHistoryActions] = useState(0);
+  const [cssMode, setCssMode] = useState(false);
   const [provenance, setProvenance] = useState<InspectorProvenanceState | null>(
     null,
   );
   const provenanceAbortRef = useRef<AbortController | null>(null);
-  const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
-  useEffect(() => {
-    if (!deleteFrameRequest || deleteFrameRequest.file !== frame?.file) return;
-    setDeleteOpen(true);
-    onDeleteFrameRequestHandled(deleteFrameRequest.id);
-  }, [deleteFrameRequest, frame?.file, onDeleteFrameRequestHandled]);
+  const inspectorRef = useRef<HTMLElement | null>(null);
+  const [stylePanelWidth, setStylePanelWidth] = useState(
+    readPersistedDesignWorkspaceStyleWidth,
+  );
+  const inspectorId = workspaceId
+    ? `design-style-panel-${workspaceId}`
+    : "design-style-panel";
+
+  useLayoutEffect(() => {
+    inspectorRef.current?.parentElement?.style.setProperty(
+      DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
+      `${stylePanelWidth}px`,
+    );
+  }, [stylePanelWidth]);
+
+  const persistStylePanelWidth = useCallback((next: number) => {
+    const committed = persistDesignWorkspaceStyleWidth(next);
+    setStylePanelWidth(committed);
+    inspectorRef.current?.parentElement?.style.setProperty(
+      DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
+      `${committed}px`,
+    );
+    document.documentElement.style.setProperty(
+      DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
+      `${committed}px`,
+    );
+  }, []);
+
+  const paintCanvasBackground = useCallback((value: string) => {
+    const normalized = normalizeDesignCanvasBackground(value);
+    if (!normalized) return;
+    inspectorRef.current?.parentElement
+      ?.querySelector<HTMLElement>("[data-design-canvas-viewport]")
+      ?.style.setProperty("background-color", normalized);
+  }, []);
+  const previewCanvasBackground = useCallback(
+    (value: string) => paintCanvasBackground(value),
+    [paintCanvasBackground],
+  );
+  const cancelCanvasBackgroundPreview = useCallback(
+    () => paintCanvasBackground(canvasBackground),
+    [canvasBackground, paintCanvasBackground],
+  );
+  const commitCanvasBackground = useCallback(
+    (value: string) => {
+      const normalized = normalizeDesignCanvasBackground(value);
+      if (!normalized) return;
+      paintCanvasBackground(normalized);
+      onCanvasBackgroundChange(normalized);
+    },
+    [onCanvasBackgroundChange, paintCanvasBackground],
+  );
+
   const foundation = useDesignFoundation(
     workspaceId,
     frame?.file,
@@ -9692,29 +9786,7 @@ function DesignInspector({
     active,
   );
   const foundationData = foundation.data;
-  const visibleParameters = useMemo(() => {
-    const documentId = foundationData?.summary.documentId;
-    const parameters = (
-      foundationData?.foundation.manifest.parameters ?? []
-    ).filter((parameter) => {
-      const owner = designParameterDocumentId(parameter);
-      return owner === null || owner === documentId;
-    });
-    const byId = new Map(
-      parameters.map((parameter) => [parameter.id, parameter]),
-    );
-    return parameters.filter((parameter) => {
-      if (!parameter.visibleWhen) return true;
-      return Object.is(
-        byId.get(parameter.visibleWhen.parameterId)?.value,
-        parameter.visibleWhen.equals,
-      );
-    });
-  }, [
-    foundationData?.foundation.manifest.parameters,
-    foundationData?.summary.documentId,
-  ]);
-  const provenanceOwnerKey = `${workspaceId ?? ""}\u0000${frame?.file ?? ""}\u0000${frame?.sourceVersion ?? ""}\u0000${foundationData?.summary.revision ?? ""}\u0000${selectedNodeId ?? ""}`;
+  const provenanceOwnerKey = `${workspaceId ?? ""}\u0000${frame?.file ?? ""}\u0000${frame?.sourceVersion ?? ""}\u0000${foundationData?.summary.revision ?? ""}\u0000${styleTargetNodeId ?? ""}`;
 
   useEffect(() => {
     provenanceAbortRef.current?.abort();
@@ -9732,7 +9804,7 @@ function DesignInspector({
         !active ||
         !workspaceId ||
         !frame ||
-        !selectedNodeId ||
+        !styleTargetNodeId ||
         !foundationData
       ) {
         return;
@@ -9753,7 +9825,7 @@ function DesignInspector({
         frame: frame.file,
         sourceVersion: frame.sourceVersion,
         expectedRevision: foundationData.summary.revision,
-        nodeId: selectedNodeId,
+        nodeId: styleTargetNodeId,
         property,
         computedValue,
         signal: controller.signal,
@@ -9785,219 +9857,89 @@ function DesignInspector({
       foundationData,
       frame,
       provenanceOwnerKey,
-      selectedNodeId,
+      styleTargetNodeId,
       workspaceId,
     ],
   );
 
-  const applyFoundationOperations = useCallback(
-    async (
-      action: string,
-      intent: string,
-      operations: DesignOperation[],
-      coalesceKey?: string,
-    ) => {
-      if (
-        !workspaceId ||
-        !frame ||
-        !foundationData ||
-        foundationActionRef.current
-      ) {
-        return;
-      }
-      foundationActionRef.current = true;
-      setFoundationAction(action);
-      try {
-        const transactionId = `desktop:${crypto.randomUUID()}`;
-        const transaction: DesignTransaction = {
-          schemaVersion: 1,
-          transactionId,
-          documentId: foundationData.summary.documentId,
-          baseRevision: foundationData.summary.revision,
-          actor: { kind: "human", id: "desktop" },
-          intent,
-          createdAt: Date.now(),
-          ...(coalesceKey ? { coalesceKey } : {}),
-          operations,
-        };
-        await applyDesignTransactionCached(
-          workspaceId,
-          frame.file,
-          transaction,
-        );
-      } finally {
-        foundationActionRef.current = false;
-        setFoundationAction(null);
-      }
-    },
-    [foundationData, frame, workspaceId],
-  );
-
-  const setParameterValue = useCallback(
-    async (parameter: DesignParameter, value: DesignParameterValue) => {
-      await applyFoundationOperations(
-        `parameter:${parameter.id}`,
-        `Set ${parameter.name}`,
-        [
-          {
-            operationId: `parameter:${crypto.randomUUID()}`,
-            type: "parameter.set",
-            parameterId: parameter.id,
-            value,
-          },
-        ],
-        `parameter:${parameter.id}`,
-      );
-    },
-    [applyFoundationOperations],
-  );
-
-  const chooseParameterValue = useCallback(
-    async (parameter: DesignParameter, value: DesignParameterValue) => {
-      try {
-        await setParameterValue(parameter, value);
-      } catch (parameterError) {
-        toast.error(`Couldn't update ${parameter.name}`, {
-          description: errorMessage(parameterError),
-        });
-      }
-    },
-    [setParameterValue],
-  );
-
-  const insertComponent = useCallback(
-    async (component: DesignComponentDefinition) => {
-      if (!selectedNodeId) return;
-      const props = Object.fromEntries(
-        component.props
-          .filter(
-            (prop) => prop.type !== "slot" && prop.defaultValue !== undefined,
-          )
-          .map((prop) => [prop.name, prop.defaultValue!]),
-      );
-      await applyFoundationOperations(
-        `component:${component.id}`,
-        `Insert ${component.name}`,
-        [
-          {
-            operationId: `instance:${crypto.randomUUID()}`,
-            type: "instance.create",
-            componentId: component.id,
-            parentNodeId: selectedNodeId,
-            instanceNodeId: `instance-${crypto.randomUUID()}`,
-            props,
-            slotHtml: "",
-          },
-        ],
-      );
-    },
-    [applyFoundationOperations, selectedNodeId],
-  );
-
   const runHistory = useCallback(
-    async (direction: "undo" | "redo") => {
-      if (!workspaceId || !frame || foundationActionRef.current) return;
-      foundationActionRef.current = true;
-      setFoundationAction(direction);
-      try {
-        const result = await applyDesignHistoryCached(
-          workspaceId,
-          frame.file,
-          direction,
-        );
-        if (!result.result) {
-          toast.info(`Nothing to ${direction}`);
-        }
-      } catch (historyError) {
-        toast.error(`Couldn't ${direction} the design edit`, {
-          description: errorMessage(historyError),
+    (direction: "undo" | "redo") => {
+      if (!workspaceId) return;
+      // Start every request immediately. applyDesignHistoryCached registers it
+      // with the workspace mutation lane before returning its promise, so two
+      // fast keypresses become two ordered history steps rather than one being
+      // discarded while the first bridge round trip is in flight.
+      setPendingHistoryActions((current) => current + 1);
+      void applyDesignHistoryCached(workspaceId, frame?.file ?? null, direction)
+        .then((result) => {
+          if (result.historySelection === undefined) return;
+          const selected = result.historySelection
+            ? (result.snapshot?.frames.find(
+                (candidate) => candidate.file === result.historySelection,
+              ) ?? null)
+            : null;
+          void selectDesignFrame(workspaceId, selected, {
+            selected: direction === "undo" && selected !== null,
+          }).catch((selectionError: unknown) => {
+            toast.error("Couldn't save the restored frame selection", {
+              description: errorMessage(selectionError),
+            });
+          });
+        })
+        .catch((historyError: unknown) => {
+          toast.error(`Couldn't ${direction} the design edit`, {
+            description: errorMessage(historyError),
+          });
+        })
+        .finally(() => {
+          setPendingHistoryActions((current) => Math.max(0, current - 1));
         });
-      } finally {
-        foundationActionRef.current = false;
-        setFoundationAction(null);
-      }
     },
     [frame, workspaceId],
   );
 
+  const stageDesignChanges = useCallback(() => {
+    if (!workspaceId) return;
+    // Do not suppress a repeated Command-S while an earlier stage is running.
+    // Each request enters the same workspace mutation lane as focused-draft
+    // publication, so the newest edit always receives a later index checkpoint.
+    void stageDesigns(workspaceId)
+      .then(() => {
+        toast.success("Design changes staged", {
+          description: "No Git commit was created.",
+          id: `design-stage:${workspaceId}`,
+        });
+      })
+      .catch((stageError: unknown) => {
+        toast.error("Couldn't stage design changes", {
+          description: errorMessage(stageError),
+          id: `design-stage:${workspaceId}`,
+        });
+      });
+  }, [workspaceId]);
+
   useEffect(() => {
-    if (!active || !frame) return;
+    if (!active) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (
-        event.key.toLowerCase() !== "z" ||
-        (!event.metaKey && !event.ctrlKey) ||
-        event.altKey ||
-        isEditableHotkeyTarget(event.target)
-      ) {
-        return;
-      }
-      const direction = event.shiftKey ? "redo" : "undo";
-      const allowed =
-        direction === "undo"
-          ? foundationData?.summary.history.canUndo
-          : foundationData?.summary.history.canRedo;
-      if (!allowed) return;
-      event.preventDefault();
-      void runHistory(direction);
+      const editableTarget = isEditableHotkeyTarget(event.target);
+      dispatchDesignWorkspaceShortcut(event, editableTarget, {
+        stage: () => {
+          // Inspector and inline-text fields publish drafts on blur. React
+          // dispatches that blur synchronously, registering its mutation before
+          // stageDesigns joins the same ordered workspace lane.
+          if (editableTarget && event.target instanceof HTMLElement) {
+            event.target.blur();
+          }
+          stageDesignChanges();
+        },
+        undo: () => runHistory("undo"),
+        redo: () => runHistory("redo"),
+      });
     };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [active, foundationData?.summary.history, frame, runHistory]);
-
-  const duplicateFrame = async () => {
-    if (!workspaceId || !frame || frameAction) return;
-    setFrameAction("duplicate");
-    try {
-      const result = await duplicateDesignFrameCached(workspaceId, frame.file);
-      const duplicate = result.snapshot.frames.find(
-        (candidate) => candidate.file === result.frame.file,
-      );
-      if (duplicate) {
-        await selectDesignFrame(workspaceId, duplicate, { selected: true });
-      }
-      toast.success("Design frame duplicated");
-    } catch (duplicateError) {
-      toast.error("Couldn't duplicate the design frame", {
-        description: errorMessage(duplicateError),
-      });
-    } finally {
-      setFrameAction(null);
-    }
-  };
-
-  const deleteFrame = async () => {
-    if (!workspaceId || !frame || frameAction) return;
-    setFrameAction("delete");
-    try {
-      const snapshot = await deleteDesignFrameCached(workspaceId, frame.file);
-      await selectDesignFrame(workspaceId, snapshot.frames[0] ?? null);
-      setDeleteOpen(false);
-      toast.success("Design frame deleted");
-    } catch (deleteError) {
-      toast.error("Couldn't delete the design frame", {
-        description: errorMessage(deleteError),
-      });
-    } finally {
-      setFrameAction(null);
-    }
-  };
-
-  const save = async () => {
-    if (!workspaceId || frameAction) return;
-    setFrameAction("save");
-    try {
-      const result = await saveDesigns(workspaceId);
-      toast.success("Designs saved", {
-        description: `Commit ${result.sha.slice(0, 8)} on ${result.branch}`,
-      });
-    } catch (saveError) {
-      toast.error("Couldn't save designs", {
-        description: errorMessage(saveError),
-      });
-    } finally {
-      setFrameAction(null);
-    }
-  };
+    window.addEventListener("keydown", onKeyDown, { capture: true });
+    return () =>
+      window.removeEventListener("keydown", onKeyDown, { capture: true });
+  }, [active, runHistory, stageDesignChanges]);
 
   const exportPng = async () => {
     if (!workspaceId || !folder || !frame || frameAction) return;
@@ -10031,20 +9973,22 @@ function DesignInspector({
 
   const styleNodeIds = useMemo(
     () =>
-      selectedNodeId
+      styleTargetNodeId
         ? [
-            selectedNodeId,
-            ...selectedNodeIds.filter((nodeId) => nodeId !== selectedNodeId),
+            styleTargetNodeId,
+            ...(selectedNodeId
+              ? selectedNodeIds.filter((nodeId) => nodeId !== styleTargetNodeId)
+              : []),
           ].slice(0, DESIGN_SELECTION_NODE_LIMIT)
         : [],
-    [selectedNodeId, selectedNodeIds],
+    [selectedNodeId, selectedNodeIds, styleTargetNodeId],
   );
   const styleEditContextRef = useRef({
     workspaceId,
     folder,
     frame,
     styleNodeIds,
-    selectedNodeId,
+    selectedNodeId: styleTargetNodeId,
     elementDetails,
     foundationData,
   });
@@ -10054,7 +9998,7 @@ function DesignInspector({
     folder,
     frame,
     styleNodeIds,
-    selectedNodeId,
+    selectedNodeId: styleTargetNodeId,
     elementDetails,
     foundationData,
   };
@@ -10248,11 +10192,68 @@ function DesignInspector({
   );
 
   const styleContext =
-    workspaceId && folder && frame && selectedNodeId && elementDetails
-      ? { workspaceId, folder, frame, nodeId: selectedNodeId }
+    workspaceId && folder && frame && styleTargetNodeId && elementDetails
+      ? { workspaceId, folder, frame, nodeId: styleTargetNodeId }
       : null;
   const styleField = (label: string, property: string, value: string) => {
     if (!styleContext) return null;
+    const frameGeometryProperty = frameStyleTarget
+      ? (
+          {
+            left: ["x", styleContext.frame.x],
+            top: ["y", styleContext.frame.y],
+            width: ["w", styleContext.frame.width],
+            height: ["h", styleContext.frame.height],
+          } as const
+        )[property as "left" | "top" | "width" | "height"]
+      : undefined;
+    if (frameGeometryProperty) {
+      const [geometryKey, geometryValue] = frameGeometryProperty;
+      return (
+        <InspectorEditField
+          key={`${styleContext.workspaceId}:${styleContext.frame.file}:frame:${geometryKey}`}
+          label={label}
+          value={geometryValue}
+          applied
+          onPreview={(next) => {
+            const number = Number(next);
+            if (!Number.isFinite(number)) return;
+            const geometry = paintedDesignFrameGeometry(
+              styleContext.workspaceId,
+              styleContext.frame.file,
+              frameGeometry(styleContext.frame),
+            );
+            paintDesignFrameGeometryPreview(
+              styleContext.workspaceId,
+              styleContext.frame.file,
+              { ...geometry, [geometryKey]: number },
+            );
+          }}
+          onCancelPreview={() =>
+            paintDesignFrameGeometryPreview(
+              styleContext.workspaceId,
+              styleContext.frame.file,
+              frameGeometry(styleContext.frame),
+            )
+          }
+          onCommit={async (next) => {
+            const number = Number(next);
+            if (!Number.isFinite(number)) {
+              throw new Error("Enter a finite number.");
+            }
+            await updateDesignFrameGeometryCached(
+              styleContext.workspaceId,
+              styleContext.frame.file,
+              {
+                ...frameGeometry(styleContext.frame),
+                [geometryKey]: number,
+              },
+              [geometryKey],
+            );
+          }}
+        />
+      );
+    }
     const authoredProperties = elementDetails?.authoredStyleProperties;
     const applied = isDesignRuntimeStylePropertyAuthored(
       authoredProperties,
@@ -10291,599 +10292,258 @@ function DesignInspector({
     );
   };
 
-  return (
-    <Dialog open={deleteOpen} onOpenChange={setDeleteOpen}>
-      <aside
-        data-design-inspector=""
-        className="border-border1 bg-bg1 flex w-80 shrink-0 flex-col overflow-hidden border-l"
+  const inspectorSelectionHeader = (
+    <section className="border-border1 shrink-0 border-b">
+      <div
+        data-design-inspector-header=""
+        className="flex h-10 min-w-0 items-center gap-1 px-3"
       >
-        <Tabs
-          defaultValue="style"
-          className="flex min-h-0 flex-1 flex-col overflow-hidden"
-        >
-          <div className="flex h-10 shrink-0 items-center gap-1 px-1">
-            <TabsList
-              variant="chrome"
-              className="min-w-0 flex-1"
-              aria-label="Inspector modes"
-            >
-              <TabsTrigger value="style" variant="chrome">
-                Style
-              </TabsTrigger>
-              <TabsTrigger value="foundation" variant="chrome">
-                Data
-              </TabsTrigger>
-            </TabsList>
-            <WorkbenchToggleButton
-              workbenchCollapsed={false}
-              onToggle={onToggleWorkbench}
-            />
-          </div>
-
-          <TabsContent
-            value="style"
-            className="mt-0 min-h-0 flex-1 overflow-hidden"
-          >
-            <ScrollArea className="h-full">
-              <div className="flex flex-col">
-                <section className="border-border1 flex flex-col border-b pb-1">
-                  <div className="flex h-10 min-w-0 items-center gap-1 px-3">
-                    <span className="bg-bg1-hover text-muted-fg shrink-0 rounded-sm px-1.5 py-0.5 font-mono text-[9px] uppercase">
-                      {styleNodeIds.length > 1
-                        ? "multi"
-                        : (elementDetails?.tag ?? (frame ? "frame" : "—"))}
-                    </span>
-                    <span className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">
-                      {styleNodeIds.length > 1
-                        ? `${styleNodeIds.length} layers`
-                        : (elementDetails?.name ??
-                          frame?.title ??
-                          "Nothing selected")}
-                    </span>
-                    <Tooltip label="Save designs">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        disabled={!workspaceId || frameAction !== null}
-                        aria-label="Save designs"
-                        onClick={() => void save()}
-                      >
-                        <Save />
-                      </Button>
-                    </Tooltip>
-                    <Tooltip label="Undo" shortcut="⌘Z">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="Undo design edit"
-                        aria-keyshortcuts="Meta+Z Control+Z"
-                        disabled={
-                          !foundationData?.summary.history.canUndo ||
-                          foundationAction !== null
-                        }
-                        onClick={() => void runHistory("undo")}
-                      >
-                        <Undo2 />
-                      </Button>
-                    </Tooltip>
-                    <Tooltip label="Redo" shortcut="⇧⌘Z">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        aria-label="Redo design edit"
-                        aria-keyshortcuts="Shift+Meta+Z Shift+Control+Z"
-                        disabled={
-                          !foundationData?.summary.history.canRedo ||
-                          foundationAction !== null
-                        }
-                        onClick={() => void runHistory("redo")}
-                      >
-                        <Redo2 />
-                      </Button>
-                    </Tooltip>
-                  </div>
-                  <div className="flex h-6 min-w-0 items-center gap-1 px-3">
-                    <span
-                      className="text-muted-fg min-w-0 flex-1 truncate text-[10px]"
-                      title={
-                        styleNodeIds.length > 1
-                          ? styleNodeIds.join(", ")
-                          : (elementDetails?.breadcrumb.join(" / ") ??
-                            frame?.file)
-                      }
-                    >
-                      {styleNodeIds.length > 1
-                        ? "Multiple selection · Shift-click to toggle"
-                        : (elementDetails?.breadcrumb.join(" / ") ??
-                          frame?.file ??
-                          "Select a frame on canvas")}
-                    </span>
-                    {!elementDetails ? (
-                      <>
-                        <Tooltip label="Duplicate frame">
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-sm"
-                            disabled={!frame || frameAction !== null}
-                            aria-label="Duplicate frame"
-                            onClick={() => void duplicateFrame()}
-                          >
-                            <Copy />
-                          </Button>
-                        </Tooltip>
-                        <DialogTrigger asChild>
-                          <Button
-                            type="button"
-                            variant="ghost"
-                            size="icon-sm"
-                            disabled={!frame || frameAction !== null}
-                            aria-label="Delete frame"
-                            title="Delete frame"
-                          >
-                            <Trash2 />
-                          </Button>
-                        </DialogTrigger>
-                      </>
-                    ) : null}
-                  </div>
-                </section>
-
-                {errors.length > 0 ? (
-                  <section className="text-red-primary flex min-h-8 items-center gap-2 px-3 py-1.5">
-                    <AlertTriangle className="size-3.5 shrink-0" />
-                    <span
-                      className="min-w-0 flex-1 truncate text-[10px]"
-                      title={`${firstBlockingReason}: ${errors[0]?.message}`}
-                    >
-                      {errors.length} blocking · {firstBlockingReason}
-                    </span>
-                  </section>
-                ) : null}
-
-                {warnings.length > 0 ? (
-                  <section
-                    data-design-lint-review=""
-                    className="text-muted-fg flex min-h-8 items-center gap-2 px-3 py-1.5"
-                  >
-                    <AlertTriangle className="size-3.5 shrink-0" />
-                    <span
-                      className="min-w-0 flex-1 truncate text-[10px]"
-                      title={warningGroups
-                        .map(
-                          (group) => `${group.label}: ${group.first.message}`,
-                        )
-                        .join("\n")}
-                    >
-                      {lintReviewBadgeLabel(warningGroups)} · non-blocking
-                    </span>
-                  </section>
-                ) : null}
-
-                {styleContext && elementDetails ? (
-                  <DesignStyleEditor
-                    key={`${frame!.file}:${styleNodeIds.join(":")}`}
-                    details={elementDetails}
-                    livePreviewOwner={
-                      styleContext
-                        ? {
-                            workspaceId: styleContext.workspaceId,
-                            frame: styleContext.frame.file,
-                            nodeId: styleContext.nodeId,
-                          }
-                        : undefined
-                    }
-                    renderField={styleField}
-                    disabled={foundationAction !== null}
-                    onPreviewStyles={previewSelectedStyles}
-                    onCancelStylePreview={clearSelectedStylePreview}
-                    onCommitStyles={commitSelectedStyles}
-                    motionTimelineOpen={motionTimelineOpen}
-                    motionProperties={motionProperties}
-                    onOpenMotionTimeline={onOpenMotionTimeline}
-                  />
-                ) : frame && workspaceId && !frameSelected ? (
-                  <section className="text-muted-fg flex flex-col gap-1 p-3 text-xs">
-                    <span>Nothing selected.</span>
-                    <span>
-                      Click a frame label or a layer to inspect and edit it.
-                    </span>
-                  </section>
-                ) : frame && workspaceId ? (
-                  <section className="border-border1 flex flex-col gap-3 border-b p-3">
-                    <span className="text-fg2 text-xs font-medium">
-                      Frame position &amp; size
-                    </span>
-                    <div className="grid grid-cols-2 gap-2">
-                      {(
-                        [
-                          ["X", "x", frame.x],
-                          ["Y", "y", frame.y],
-                          ["W", "w", frame.width],
-                          ["H", "h", frame.height],
-                        ] as const
-                      ).map(([label, key, value]) => (
-                        <InspectorEditField
-                          key={key}
-                          label={label}
-                          value={value}
-                          onPreview={(next) => {
-                            const number = Number(next);
-                            if (!Number.isFinite(number)) return;
-                            const geometry = paintedDesignFrameGeometry(
-                              workspaceId,
-                              frame.file,
-                              frameGeometry(frame),
-                            );
-                            paintDesignFrameGeometryPreview(
-                              workspaceId,
-                              frame.file,
-                              { ...geometry, [key]: number },
-                            );
-                          }}
-                          onCancelPreview={() =>
-                            paintDesignFrameGeometryPreview(
-                              workspaceId,
-                              frame.file,
-                              frameGeometry(frame),
-                            )
-                          }
-                          onCommit={async (next) => {
-                            const number = Number(next);
-                            if (!Number.isFinite(number)) {
-                              throw new Error("Enter a finite number.");
-                            }
-                            await updateDesignFrameGeometryCached(
-                              workspaceId,
-                              frame.file,
-                              { ...frameGeometry(frame), [key]: number },
-                              [key],
-                            );
-                          }}
-                        />
-                      ))}
-                    </div>
-                  </section>
-                ) : null}
-              </div>
-            </ScrollArea>
-          </TabsContent>
-
-          <TabsContent
-            value="foundation"
-            className="mt-0 min-h-0 flex-1 overflow-hidden"
-          >
-            <ScrollArea className="h-full">
-              <div className="flex flex-col">
-                <section className="border-border1 flex flex-col gap-3 border-b p-3">
-                  <div className="flex items-start gap-2">
-                    <SlidersHorizontal className="text-muted-fg mt-0.5 size-3.5 shrink-0" />
-                    <div className="flex min-w-0 flex-1 flex-col gap-1">
-                      <span className="text-fg2 text-xs font-medium">
-                        Tweaks
-                      </span>
-                      <span className="text-muted-fg text-xs">
-                        Typed parameters update every binding in this document
-                        in one transaction.
-                      </span>
-                    </div>
-                    {foundationData ? (
-                      <span className="text-muted-fg shrink-0 text-[10px]">
-                        {foundationData.foundation.manifest.variants.length}{" "}
-                        variants
-                      </span>
-                    ) : null}
-                  </div>
-                  {foundation.loading && !foundationData ? (
-                    <span className="text-muted-fg text-xs">
-                      Loading authored parameters…
-                    </span>
-                  ) : foundation.error && !foundationData ? (
-                    <span className="text-red-primary text-xs">
-                      {foundation.error.message}
-                    </span>
-                  ) : visibleParameters.length > 0 ? (
-                    <div className="flex max-h-80 flex-col gap-3 overflow-auto">
-                      {visibleParameters.map((parameter) => {
-                        const constraints = [
-                          parameter.min !== undefined
-                            ? `min ${parameter.min}`
-                            : null,
-                          parameter.max !== undefined
-                            ? `max ${parameter.max}`
-                            : null,
-                          parameter.step !== undefined
-                            ? `step ${parameter.step}`
-                            : null,
-                          parameter.unit ?? null,
-                        ]
-                          .filter(Boolean)
-                          .join(" · ");
-                        return (
-                          <div
-                            key={parameter.id}
-                            className="border-border1 flex min-w-0 flex-col gap-2 border-b pb-3 last:border-b-0 last:pb-0"
-                          >
-                            <div className="flex min-w-0 items-start justify-between gap-2">
-                              <div className="flex min-w-0 flex-col">
-                                <span className="text-fg1 truncate text-xs font-medium">
-                                  {parameter.name}
-                                </span>
-                                <span
-                                  className="text-muted-fg truncate text-[10px]"
-                                  title={parameter.description}
-                                >
-                                  {parameter.type} · {parameter.bindings.length}{" "}
-                                  {parameter.bindings.length === 1
-                                    ? "binding"
-                                    : "bindings"}
-                                </span>
-                              </div>
-                              <Button
-                                type="button"
-                                variant="ghost"
-                                size="sm"
-                                disabled={
-                                  Object.is(
-                                    parameter.value,
-                                    parameter.defaultValue,
-                                  ) || foundationAction !== null
-                                }
-                                onClick={() =>
-                                  void chooseParameterValue(
-                                    parameter,
-                                    parameter.defaultValue,
-                                  )
-                                }
-                              >
-                                Reset
-                              </Button>
-                            </div>
-                            {parameter.type === "boolean" ? (
-                              <Button
-                                type="button"
-                                variant={
-                                  parameter.value === true
-                                    ? "secondary-on"
-                                    : "secondary"
-                                }
-                                size="sm"
-                                className="w-full"
-                                aria-pressed={parameter.value === true}
-                                disabled={foundationAction !== null}
-                                onClick={() =>
-                                  void chooseParameterValue(
-                                    parameter,
-                                    parameter.value !== true,
-                                  )
-                                }
-                              >
-                                {parameter.value === true
-                                  ? "Enabled"
-                                  : "Disabled"}
-                              </Button>
-                            ) : parameter.type === "enum" &&
-                              parameter.options ? (
-                              <Select
-                                value={String(
-                                  parameter.options.findIndex((option) =>
-                                    Object.is(option.value, parameter.value),
-                                  ),
-                                )}
-                                disabled={foundationAction !== null}
-                                onValueChange={(index) => {
-                                  const option =
-                                    parameter.options?.[Number(index)];
-                                  if (option) {
-                                    void chooseParameterValue(
-                                      parameter,
-                                      option.value,
-                                    );
-                                  }
-                                }}
-                              >
-                                <SelectTrigger
-                                  size="sm"
-                                  className="h-7 w-full text-xs"
-                                >
-                                  <SelectValue />
-                                </SelectTrigger>
-                                <SelectContent>
-                                  {parameter.options.map((option, index) => (
-                                    <SelectItem
-                                      key={`${parameter.id}:${index}`}
-                                      value={String(index)}
-                                    >
-                                      {option.label}
-                                    </SelectItem>
-                                  ))}
-                                </SelectContent>
-                              </Select>
-                            ) : (
-                              <InspectorEditField
-                                label={constraints || parameter.type}
-                                value={designParameterText(parameter.value)}
-                                disabled={foundationAction !== null}
-                                onCommit={async (draft) => {
-                                  await setParameterValue(
-                                    parameter,
-                                    parseDesignParameterDraft(parameter, draft),
-                                  );
-                                }}
-                              />
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  ) : foundationData ? (
-                    <span className="text-muted-fg text-xs">
-                      No parameters are exposed in .zeros-foundation.json yet.
-                    </span>
-                  ) : (
-                    <span className="text-muted-fg text-xs">
-                      Select a frame to inspect its design parameters.
-                    </span>
-                  )}
-                  {foundation.error && foundationData ? (
-                    <span className="text-red-primary text-xs">
-                      Refresh failed: {foundation.error.message}
-                    </span>
-                  ) : foundation.refreshing ? (
-                    <span className="text-muted-fg text-[10px]">
-                      Reconciling external source changes…
-                    </span>
-                  ) : null}
-                </section>
-
-                <section className="border-border1 flex flex-col gap-3 border-b p-3">
-                  <div className="flex items-start gap-2">
-                    <Boxes className="text-muted-fg mt-0.5 size-3.5 shrink-0" />
-                    <div className="flex min-w-0 flex-col gap-1">
-                      <span className="text-fg2 text-xs font-medium">
-                        Components
-                      </span>
-                      <span className="text-muted-fg text-xs">
-                        Instances keep component identity while rendering native
-                        HTML and CSS.
-                      </span>
-                    </div>
-                  </div>
-                  {foundationData?.foundation.manifest.components.length ? (
-                    <div className="flex max-h-72 flex-col gap-2 overflow-auto">
-                      {foundationData.foundation.manifest.components.map(
-                        (component) => (
-                          <div
-                            key={component.id}
-                            className="border-border1 flex min-w-0 items-center gap-2 border-b pb-2 last:border-b-0 last:pb-0"
-                          >
-                            <div className="flex min-w-0 flex-1 flex-col">
-                              <span className="text-fg1 truncate text-xs font-medium">
-                                {component.name}
-                              </span>
-                              <span className="text-muted-fg truncate text-[10px]">
-                                {component.props.length} props ·{" "}
-                                {component.slots.length} slots ·{" "}
-                                {component.file}
-                              </span>
-                            </div>
-                            <Button
-                              type="button"
-                              size="sm"
-                              disabled={
-                                !selectedNodeId || foundationAction !== null
-                              }
-                              onClick={() => {
-                                void insertComponent(component).catch(
-                                  (componentError) => {
-                                    toast.error(
-                                      `Couldn't insert ${component.name}`,
-                                      {
-                                        description:
-                                          errorMessage(componentError),
-                                      },
-                                    );
-                                  },
-                                );
-                              }}
-                            >
-                              {foundationAction === `component:${component.id}`
-                                ? "Inserting…"
-                                : "Insert"}
-                            </Button>
-                          </div>
-                        ),
-                      )}
-                    </div>
-                  ) : foundationData ? (
-                    <span className="text-muted-fg text-xs">
-                      Add a components/*.html definition to expose reusable
-                      components here.
-                    </span>
-                  ) : null}
-                  {foundationData?.foundation.manifest.components.length &&
-                  !selectedNodeId ? (
-                    <span className="text-muted-fg text-xs">
-                      Select an element to use as the instance parent.
-                    </span>
-                  ) : null}
-                </section>
-
-                <section className="flex flex-col gap-2 p-3">
-                  <span className="text-fg2 text-xs font-medium">
-                    Export &amp; publish
-                  </span>
-                  <Button
-                    type="button"
-                    size="sm"
-                    disabled={!frame || !folder || frameAction !== null}
-                    onClick={() => void exportPng()}
-                  >
-                    {frameAction === "export" ? "Exporting…" : "Export PNG"}
-                  </Button>
-                  {workspace && workspace.prNumber == null ? (
-                    <CreatePrButton
-                      workspace={workspace}
-                      originUrl={null}
-                      disabled={errors.length > 0 || frameAction !== null}
-                      disabledReason={
-                        firstBlockingReason
-                          ? `Fix ${firstBlockingReason} before creating a pull request`
-                          : undefined
-                      }
-                    />
-                  ) : workspace?.prUrl ? (
-                    <Button
-                      type="button"
-                      size="sm"
-                      onClick={() => void shellOpenUrl(workspace.prUrl!)}
-                    >
-                      Open PR #{workspace.prNumber}
-                    </Button>
-                  ) : null}
-                </section>
-              </div>
-            </ScrollArea>
-          </TabsContent>
-        </Tabs>
-      </aside>
-
-      <DialogContent
-        onOpenAutoFocus={(event) => {
-          event.preventDefault();
-          deleteCancelRef.current?.focus();
-        }}
-      >
-        <DialogHeader>
-          <DialogTitle>Delete {frame?.title ?? "this frame"}?</DialogTitle>
-          <DialogDescription>
-            This removes {frame?.file ?? "the HTML frame"} and its canvas
-            placement. Git can recover it until the design is saved.
-          </DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <DialogClose asChild>
+        <span className="text-fg1 min-w-0 flex-1 truncate text-xs font-medium">
+          {styleNodeIds.length > 1
+            ? `${styleNodeIds.length} layers`
+            : elementDetails
+              ? designRuntimeLayerLabel(elementDetails)
+              : frameSelected && frame
+                ? designFrameLayerLabel(frame.kind)
+                : selectedNodeId
+                  ? "Nothing selected"
+                  : "Page"}
+        </span>
+        {frameSelected || selectedNodeId ? (
+          <Tooltip label="Export PNG">
             <Button
-              ref={deleteCancelRef}
               type="button"
-              disabled={frameAction === "delete"}
+              variant="ghost"
+              size="icon-sm"
+              disabled={!frame || !folder || frameAction !== null}
+              aria-label="Export PNG"
+              onClick={() => void exportPng()}
             >
-              Cancel
+              <Download />
             </Button>
-          </DialogClose>
-          <Button
-            type="button"
-            variant="destructive"
-            disabled={!frame || frameAction !== null}
-            onClick={() => void deleteFrame()}
-          >
-            {frameAction === "delete" ? "Deleting…" : "Delete frame"}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+          </Tooltip>
+        ) : null}
+      </div>
+    </section>
+  );
+
+  return (
+    <aside
+      ref={inspectorRef}
+      id={inspectorId}
+      data-design-inspector=""
+      className="border-border1 bg-bg1 relative flex w-[var(--zeros-design-style-width,280px)] max-w-[min(640px,50%)] min-w-[min(220px,45%)] [flex:0_1_var(--zeros-design-style-width,280px)] flex-col overflow-hidden border-l"
+    >
+      <DesignPanelResizeHandle
+        panelRef={inspectorRef}
+        edge="left"
+        value={stylePanelWidth}
+        defaultValue={DESIGN_WORKSPACE_STYLE_WIDTH_DEFAULT}
+        minimum={DESIGN_WORKSPACE_STYLE_WIDTH_MIN}
+        maximum={DESIGN_WORKSPACE_STYLE_WIDTH_MAX}
+        clampValue={clampDesignWorkspaceStyleWidth}
+        onCommit={persistStylePanelWidth}
+        ariaLabel="Resize Style panel"
+        controlsId={inspectorId}
+      />
+      <div
+        data-design-style-panel-header=""
+        className="border-border1 bg-bg1 flex h-10 shrink-0 items-center justify-between border-b px-2"
+      >
+        <span className="bg-bg2 text-fg1 flex h-7 items-center rounded-md px-2.5 text-xs font-medium">
+          Style
+        </span>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-7 min-w-14 px-2 font-mono text-xs tabular-nums"
+              disabled={!active || !workspaceId}
+              aria-label={`Canvas zoom ${zoomPercentage}%`}
+            >
+              {zoomPercentage}%
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="w-48">
+            <DropdownMenuItem
+              disabled={zoom >= DESIGN_MAX_ZOOM}
+              aria-label="Zoom in"
+              onSelect={() => zoomActionsRef.current?.zoomIn()}
+            >
+              <span>Zoom in</span>
+              <DropdownMenuShortcut className="tracking-normal">
+                +
+              </DropdownMenuShortcut>
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              disabled={zoom <= DESIGN_MIN_ZOOM}
+              aria-label="Zoom out"
+              onSelect={() => zoomActionsRef.current?.zoomOut()}
+            >
+              <span>Zoom out</span>
+              <DropdownMenuShortcut className="tracking-normal">
+                −
+              </DropdownMenuShortcut>
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+      {cssMode && styleContext && elementDetails ? (
+        <div
+          data-design-style-panel-css-mode=""
+          className="flex min-h-0 flex-1 flex-col"
+        >
+          {inspectorSelectionHeader}
+          <DesignComputedCssEditor
+            key={`${frame!.file}:${styleNodeIds.join(":")}:css`}
+            details={elementDetails}
+            disabled={pendingHistoryActions > 0}
+            onPreviewStyles={previewSelectedStyles}
+            onCancelStylePreview={clearSelectedStylePreview}
+            onCommitStyles={commitSelectedStyles}
+          />
+        </div>
+      ) : (
+        <ScrollArea className="min-h-0 flex-1">
+          <div className="flex flex-col">
+            {inspectorSelectionHeader}
+
+            {styleTargetNodeId && errors.length > 0 ? (
+              <section className="text-red-primary flex min-h-8 items-center gap-2 px-3 py-1.5">
+                <AlertTriangle className="size-3.5 shrink-0" />
+                <span
+                  className="min-w-0 flex-1 truncate text-[10px]"
+                  title={`${firstBlockingReason}: ${errors[0]?.message}`}
+                >
+                  {errors.length} blocking · {firstBlockingReason}
+                </span>
+              </section>
+            ) : null}
+
+            {styleTargetNodeId && warnings.length > 0 ? (
+              <section
+                data-design-lint-review=""
+                className="text-muted-fg flex min-h-8 items-center gap-2 px-3 py-1.5"
+              >
+                <AlertTriangle className="size-3.5 shrink-0" />
+                <span
+                  className="min-w-0 flex-1 truncate text-[10px]"
+                  title={warningGroups
+                    .map((group) => `${group.label}: ${group.first.message}`)
+                    .join("\n")}
+                >
+                  {lintReviewBadgeLabel(warningGroups)} · non-blocking
+                </span>
+              </section>
+            ) : null}
+
+            {styleContext && elementDetails ? (
+              <DesignStyleEditor
+                key={`${frame!.file}:${styleNodeIds.join(":")}`}
+                details={elementDetails}
+                livePreviewOwner={
+                  styleContext
+                    ? {
+                        workspaceId: styleContext.workspaceId,
+                        frame: styleContext.frame.file,
+                        nodeId: styleContext.nodeId,
+                      }
+                    : undefined
+                }
+                renderField={styleField}
+                disabled={pendingHistoryActions > 0}
+                onPreviewStyles={previewSelectedStyles}
+                onCancelStylePreview={clearSelectedStylePreview}
+                onCommitStyles={commitSelectedStyles}
+                motionTimelineOpen={motionTimelineOpen}
+                motionProperties={motionProperties}
+                onOpenMotionTimeline={onOpenMotionTimeline}
+              />
+            ) : workspaceId && !frameSelected && !selectedNodeId ? (
+              <DesignCanvasBackgroundEditor
+                value={canvasBackground}
+                disabled={!active}
+                onPreview={previewCanvasBackground}
+                onCancelPreview={cancelCanvasBackgroundPreview}
+                onCommit={commitCanvasBackground}
+              />
+            ) : frame && workspaceId ? (
+              <section className="border-border1 flex flex-col gap-3 border-b p-3">
+                <span className="text-fg2 text-xs font-medium">
+                  Frame position &amp; size
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  {(
+                    [
+                      ["X", "x", frame.x],
+                      ["Y", "y", frame.y],
+                      ["W", "w", frame.width],
+                      ["H", "h", frame.height],
+                    ] as const
+                  ).map(([label, key, value]) => (
+                    <InspectorEditField
+                      key={key}
+                      label={label}
+                      value={value}
+                      onPreview={(next) => {
+                        const number = Number(next);
+                        if (!Number.isFinite(number)) return;
+                        const geometry = paintedDesignFrameGeometry(
+                          workspaceId,
+                          frame.file,
+                          frameGeometry(frame),
+                        );
+                        paintDesignFrameGeometryPreview(
+                          workspaceId,
+                          frame.file,
+                          { ...geometry, [key]: number },
+                        );
+                      }}
+                      onCancelPreview={() =>
+                        paintDesignFrameGeometryPreview(
+                          workspaceId,
+                          frame.file,
+                          frameGeometry(frame),
+                        )
+                      }
+                      onCommit={async (next) => {
+                        const number = Number(next);
+                        if (!Number.isFinite(number)) {
+                          throw new Error("Enter a finite number.");
+                        }
+                        await updateDesignFrameGeometryCached(
+                          workspaceId,
+                          frame.file,
+                          { ...frameGeometry(frame), [key]: number },
+                          [key],
+                        );
+                      }}
+                    />
+                  ))}
+                </div>
+              </section>
+            ) : null}
+          </div>
+        </ScrollArea>
+      )}
+      <div
+        data-design-style-panel-footer=""
+        className="border-border1 bg-bg1 flex h-12 shrink-0 items-center justify-end border-t px-2"
+      >
+        <Button
+          type="button"
+          variant={cssMode ? "default" : "ghost"}
+          size="sm"
+          disabled={!styleContext && !cssMode}
+          aria-label="CSS"
+          aria-pressed={cssMode}
+          onClick={() => setCssMode((current) => !current)}
+        >
+          CSS
+        </Button>
+      </div>
+    </aside>
   );
 }
