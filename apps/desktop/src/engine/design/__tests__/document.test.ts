@@ -12,6 +12,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  captureDesignFrameRestorePoint,
   createDesignFrame,
   deleteDesignFrame,
   DESIGN_DIRECTORY_NAME,
@@ -1194,6 +1195,25 @@ describe("design document", () => {
       height: original.height,
       z: original.z,
     });
+  });
+
+  it("refuses to restore a frame back over a file that already exists", async () => {
+    await initializeDesignDocument(root);
+    const frame = await createDesignFrame(root, { title: "Occupied" });
+    const restorePoint = await captureDesignFrameRestorePoint(root, frame.file);
+
+    // The frame is still on disk, so the atomic `wx` create must lose rather
+    // than overwrite it — the same refusal the removed pre-check produced,
+    // now without a stat-then-write window in between.
+    await expect(restoreDesignFrame(root, restorePoint)).rejects.toThrow(
+      `Design frame already exists: ${frame.file}`,
+    );
+    expect(
+      await readFile(
+        path.join(root, DESIGN_DIRECTORY_NAME, frame.file),
+        "utf8",
+      ),
+    ).toBe(restorePoint.source);
   });
 
   it("discovers safe local image assets, inlines them for rendering, and inserts them by oid", async () => {

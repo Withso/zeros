@@ -2742,9 +2742,6 @@ export async function restoreDesignFrame(
     const directory = designDirectory(workspacePath);
     const target = path.join(directory, file);
     await assertSafeDesignWriteTarget(workspacePath, target);
-    if (existsSync(target)) {
-      throw new Error(`Design frame already exists: ${file}`);
-    }
     const document = parse(restorePoint.source, {
       sourceCodeLocationInfo: true,
     });
@@ -2763,10 +2760,20 @@ export async function restoreDesignFrame(
       h: meta.height,
       z: Object.keys(canvas.frames).length,
     });
-    await writeFile(target, restorePoint.source, {
-      encoding: "utf8",
-      flag: "wx",
-    });
+    // `wx` IS the existence check: the create either wins or fails EEXIST in
+    // one syscall. A separate stat first would leave a window for a concurrent
+    // writer to land a file between the check and this write.
+    try {
+      await writeFile(target, restorePoint.source, {
+        encoding: "utf8",
+        flag: "wx",
+      });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "EEXIST") {
+        throw new Error(`Design frame already exists: ${file}`);
+      }
+      throw error;
+    }
     canvas.frames[file] = geometry;
     try {
       await writeCanvas(workspacePath, canvas);
