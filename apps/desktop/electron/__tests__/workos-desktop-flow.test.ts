@@ -30,29 +30,17 @@ function deferred<T>() {
 
 function setup(overrides: Partial<WorkOSDesktopAuthorizationFlowDeps> = {}) {
   const completed = deferred<void>();
-  let authorizationOptions:
-    | { state: string; codeChallenge: string; redirectUri: string }
-    | undefined;
+  let openedUrl: string | null = null;
   const exchangeCode = vi.fn(async () => session);
   const persistSession = vi.fn();
   const revokeSession = vi.fn(async () => {});
   const deps: WorkOSDesktopAuthorizationFlowDeps = {
-    client: {
-      authorizationUrl(options) {
-        authorizationOptions = options;
-        const url = new URL("https://api.workos.com/user_management/authorize");
-        for (const [key, value] of Object.entries({
-          state: options.state,
-          redirect_uri: options.redirectUri,
-          code_challenge: options.codeChallenge,
-        })) {
-          url.searchParams.set(key, value);
-        }
-        return url.toString();
-      },
-      exchangeCode,
+    client: { exchangeCode },
+    appOrigin: "https://app-alpha.zeros.build",
+    deepLinkScheme: "zeros-alpha",
+    openExternal: async (url) => {
+      openedUrl = url;
     },
-    openExternal: async () => {},
     resolveAccountId: async () => "00000000-0000-4000-8000-000000000001",
     persistSession,
     revokeSession,
@@ -70,39 +58,54 @@ function setup(overrides: Partial<WorkOSDesktopAuthorizationFlowDeps> = {}) {
     exchangeCode,
     persistSession,
     revokeSession,
-    get authorizationOptions() {
-      return authorizationOptions;
+    get openedUrl() {
+      return openedUrl;
     },
   };
+}
+
+function callbackState(openedUrl: string): string {
+  return new URL(openedUrl).searchParams.get("state")!;
 }
 
 afterEach(() => {
   for (const flow of controllers.splice(0)) flow.cancel();
 });
 
-describe("WorkOS desktop loopback authorization", () => {
-  it("binds the loopback callback before opening the browser and consumes it once", async () => {
-    const completed = deferred<void>();
-    let callbackStatus = 0;
-    const harness = setup({
-      async openExternal(url) {
-        const authorize = new URL(url);
-        const callback = new URL(authorize.searchParams.get("redirect_uri")!);
-        callback.searchParams.set(
-          "state",
-          authorize.searchParams.get("state")!,
-        );
-        callback.searchParams.set("code", "authorization-code");
-        const response = await fetch(callback);
-        callbackStatus = response.status;
-      },
-      onComplete: () => completed.resolve(),
-    });
+describe("WorkOS desktop hosted authorization", () => {
+  it("rejects an invalid app origin without leaving a pending flow", async () => {
+    const harness = setup({ appOrigin: "http://untrusted.example" });
 
+    await expect(harness.flow.start()).rejects.toThrow(
+      "Desktop sign-in app origin is invalid",
+    );
+    expect(harness.openedUrl).toBeNull();
+    expect(harness.flow.cancel()).toBe(false);
+  });
+
+  it("opens the branded app-host page and consumes a matching deep-link callback once", async () => {
+    const harness = setup();
     await harness.flow.start();
-    await completed.promise;
 
-    expect(callbackStatus).toBe(200);
+    const opened = new URL(harness.openedUrl!);
+    expect(opened.origin).toBe("https://app-alpha.zeros.build");
+    expect(opened.pathname).toBe("/auth/desktop");
+    expect(opened.searchParams.get("state")).toMatch(
+      /^zeros-alpha\.[A-Za-z0-9_-]{43}$/,
+    );
+    expect(opened.searchParams.get("code_challenge")).toMatch(
+      /^[A-Za-z0-9_-]{43}$/,
+    );
+    expect(opened.toString()).not.toContain("api.workos.com");
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "authorization-code",
+      }),
+    ).toBe(true);
+    await harness.completed.promise;
+
     expect(harness.exchangeCode).toHaveBeenCalledWith({
       code: "authorization-code",
       codeVerifier: expect.any(String),
@@ -111,35 +114,33 @@ describe("WorkOS desktop loopback authorization", () => {
       ...session,
       accountId: "00000000-0000-4000-8000-000000000001",
     });
-    await expect(
-      fetch(harness.authorizationOptions!.redirectUri),
-    ).rejects.toThrow();
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "replayed-code",
+      }),
+    ).toBe(false);
   });
 
-  it("rejects a mismatched state without consuming the legitimate callback", async () => {
-    const completed = deferred<void>();
-    const statuses: number[] = [];
-    const harness = setup({
-      async openExternal(url) {
-        const authorize = new URL(url);
-        const redirect = authorize.searchParams.get("redirect_uri")!;
-        const bad = new URL(redirect);
-        bad.searchParams.set("state", "attacker-state");
-        bad.searchParams.set("code", "attacker-code");
-        statuses.push((await fetch(bad)).status);
-
-        const good = new URL(redirect);
-        good.searchParams.set("state", authorize.searchParams.get("state")!);
-        good.searchParams.set("code", "real-code");
-        statuses.push((await fetch(good)).status);
-      },
-      onComplete: () => completed.resolve(),
-    });
-
+  it("ignores a mismatched state without consuming the legitimate callback", async () => {
+    const harness = setup();
     await harness.flow.start();
-    await completed.promise;
 
-    expect(statuses).toEqual([400, 200]);
+    expect(
+      harness.flow.acceptCallback({
+        state: `zeros-alpha.${"x".repeat(43)}`,
+        code: "attacker-code",
+      }),
+    ).toBe(false);
+    expect(harness.exchangeCode).not.toHaveBeenCalled();
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "real-code",
+      }),
+    ).toBe(true);
+    await harness.completed.promise;
+
     expect(harness.exchangeCode).toHaveBeenCalledTimes(1);
     expect(harness.exchangeCode).toHaveBeenCalledWith({
       code: "real-code",
@@ -147,13 +148,33 @@ describe("WorkOS desktop loopback authorization", () => {
     });
   });
 
-  it("cancellation closes the listener and prevents a late session install", async () => {
+  it("turns a matching provider error into a bounded desktop failure", async () => {
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const harness = setup({ onError });
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        error: "provider_error",
+      }),
+    ).toBe(true);
+    await error.promise;
+
+    expect(onError).toHaveBeenCalledWith("provider_error");
+    expect(harness.exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("cancellation prevents a late callback from installing a session", async () => {
     const harness = setup();
     await harness.flow.start();
-    const redirectUri = harness.authorizationOptions!.redirectUri;
+    const state = callbackState(harness.openedUrl!);
 
     expect(harness.flow.cancel()).toBe(true);
-    await expect(fetch(redirectUri)).rejects.toThrow();
+    expect(
+      harness.flow.acceptCallback({ state, code: "authorization-code" }),
+    ).toBe(false);
     expect(harness.exchangeCode).not.toHaveBeenCalled();
     expect(harness.persistSession).not.toHaveBeenCalled();
   });
@@ -161,31 +182,13 @@ describe("WorkOS desktop loopback authorization", () => {
   it("revokes a provider session abandoned after code exchange", async () => {
     const exchanged = deferred<WorkOSDesktopSession>();
     const harness = setup({
-      client: {
-        authorizationUrl(options) {
-          const url = new URL(
-            "https://api.workos.com/user_management/authorize",
-          );
-          url.searchParams.set("state", options.state);
-          url.searchParams.set("redirect_uri", options.redirectUri);
-          url.searchParams.set("code_challenge", options.codeChallenge);
-          return url.toString();
-        },
-        exchangeCode: () => exchanged.promise,
-      },
-      async openExternal(url) {
-        const authorize = new URL(url);
-        const callback = new URL(authorize.searchParams.get("redirect_uri")!);
-        callback.searchParams.set(
-          "state",
-          authorize.searchParams.get("state")!,
-        );
-        callback.searchParams.set("code", "authorization-code");
-        await fetch(callback);
-      },
+      client: { exchangeCode: () => exchanged.promise },
     });
-
     await harness.flow.start();
+    harness.flow.acceptCallback({
+      state: callbackState(harness.openedUrl!),
+      code: "authorization-code",
+    });
     harness.flow.cancel();
     exchanged.resolve(session);
 
@@ -201,20 +204,13 @@ describe("WorkOS desktop loopback authorization", () => {
       resolveAccountId: async () => {
         throw new Error("control plane unavailable");
       },
-      async openExternal(url) {
-        const authorize = new URL(url);
-        const callback = new URL(authorize.searchParams.get("redirect_uri")!);
-        callback.searchParams.set(
-          "state",
-          authorize.searchParams.get("state")!,
-        );
-        callback.searchParams.set("code", "authorization-code");
-        await fetch(callback);
-      },
       onError: () => error.resolve(),
     });
-
     await harness.flow.start();
+    harness.flow.acceptCallback({
+      state: callbackState(harness.openedUrl!),
+      code: "authorization-code",
+    });
     await error.promise;
 
     expect(harness.revokeSession).toHaveBeenCalledWith(session.accessToken);

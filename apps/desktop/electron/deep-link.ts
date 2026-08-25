@@ -151,12 +151,46 @@ export async function handleUrl(rawUrl: string): Promise<void> {
     const ticket =
       fragParams.get("ticket") ?? parsed.searchParams.get("ticket");
     const nonce = fragParams.get("nonce") ?? parsed.searchParams.get("nonce");
-    if (!ticket) {
-      console.warn("[Zeros] deep-link auth/callback: missing ticket");
-      emitEvent("auth-error", { reason: "missing_ticket" });
+    if (ticket) {
+      emitEvent("auth-handoff", { ticket, nonce });
       return;
     }
-    emitEvent("auth-handoff", { ticket, nonce });
+
+    // WorkOS's Desktop Application returns to the hosted Zeros callback first.
+    // That no-store page then hands only the short-lived, PKCE-bound code and
+    // state to Electron through this channel-specific deep link. The verifier
+    // remains in main memory and neither token ever travels through the URL.
+    const code = fragParams.get("code") ?? parsed.searchParams.get("code");
+    const state = fragParams.get("state") ?? parsed.searchParams.get("state");
+    const rawProviderError =
+      fragParams.get("error") ?? parsed.searchParams.get("error");
+    if (rawProviderError && rawProviderError !== "provider_error") {
+      console.warn(
+        "[Zeros] deep-link auth/callback: invalid WorkOS provider error",
+      );
+      return;
+    }
+    const providerError = rawProviderError;
+    if (state && (code || providerError)) {
+      const { acceptWorkOSDesktopCallback } = await import(
+        "./ipc/commands/workos-auth"
+      );
+      if (
+        !acceptWorkOSDesktopCallback({
+          state,
+          code,
+          error: providerError,
+        })
+      ) {
+        console.warn(
+          "[Zeros] deep-link auth/callback: no matching WorkOS sign-in",
+        );
+      }
+      return;
+    }
+
+    console.warn("[Zeros] deep-link auth/callback: missing ticket");
+    emitEvent("auth-error", { reason: "missing_ticket" });
     return;
   }
 

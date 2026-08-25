@@ -82,6 +82,7 @@ describe("app assembly — Railway WorkOS boundary", () => {
     const cases = [
       ["GET", "/auth/start?provider=unknown", 400],
       ["GET", "/auth/browser/session", 401],
+      ["GET", "/auth/desktop/start?provider=unknown", 400],
       ["POST", "/auth/desktop-revoke", 400],
       ["POST", "/auth/workos-webhook", 401],
     ] as const;
