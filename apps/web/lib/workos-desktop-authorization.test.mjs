@@ -29,7 +29,7 @@ test("desktop sign-in starts on the branded app host with direct providers", asy
   assert.match(body, /Continue with Google/);
   assert.match(body, /Continue with GitHub/);
   assert.match(body, /\/auth\/desktop\/start\?provider=google/);
-  assert.equal(body.includes("api.workos.com"), false);
+  assert.equal(body.toLowerCase().includes("workos"), false);
   assert.equal(response.headers.get("cache-control"), "no-store");
 });
 
