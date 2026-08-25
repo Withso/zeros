@@ -17,6 +17,7 @@ import {
   isCursorModelGatedError,
   cursorAgentUsageDelta,
   cursorModelStateFingerprint,
+  cursorRipgrepPathFromEnvironment,
 } from "../adapter";
 import type { AgentAdapterContext, ContentBlock } from "../../../types";
 
@@ -135,6 +136,28 @@ describe("cursorModelStateFingerprint (pure)", () => {
     expect(fingerprint).not.toBe(
       cursorModelStateFingerprint("key_account_b", firstProcessKey),
     );
+  });
+});
+
+describe("cursorRipgrepPathFromEnvironment (packaged host)", () => {
+  it("reuses the staged ZSR binary when Cursor has no separate path", () => {
+    expect(
+      cursorRipgrepPathFromEnvironment({
+        ZEROS_ZSR_RIPGREP_PATH: "/Applications/Zeros.app/Resources/zsr-rg",
+      }),
+    ).toBe("/Applications/Zeros.app/Resources/zsr-rg");
+  });
+
+  it("keeps an explicit Cursor path and rejects a relative staged path", () => {
+    expect(
+      cursorRipgrepPathFromEnvironment({
+        CURSOR_RIPGREP_PATH: "/custom/rg",
+        ZEROS_ZSR_RIPGREP_PATH: "/staged/rg",
+      }),
+    ).toBe("/custom/rg");
+    expect(
+      cursorRipgrepPathFromEnvironment({ ZEROS_ZSR_RIPGREP_PATH: "zsr-rg" }),
+    ).toBeNull();
   });
 });
 

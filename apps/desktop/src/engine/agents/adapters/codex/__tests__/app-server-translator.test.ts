@@ -750,7 +750,7 @@ describe("CodexAppServerTranslator", () => {
       });
     });
 
-    it("fileChange emits tool_call(edit) with mergeKey when path is present", () => {
+    it("fileChange describes every path in a batched edit without merging it as one file", () => {
       env.t.handle("item/started", {
         item: {
           type: "fileChange",
@@ -771,10 +771,29 @@ describe("CodexAppServerTranslator", () => {
         title: string;
       };
       expect(u.kind).toBe("edit");
-      // mergeKey uses the first changed path so consecutive edits to
-      // the same file collapse into one card.
-      expect(u.mergeKey).toBe("edit:src/app.ts");
-      expect(u.title).toMatch(/src\/app\.ts/);
+      expect(u.mergeKey).toBeUndefined();
+      expect(u.title).toBe("Editing 2 files");
+    });
+
+    it("keeps the path and merge key for a single-file edit", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "fileChange",
+          id: "fc-single",
+          changes: [{ path: "src/app.ts" }],
+        },
+        threadId: "t1",
+        turnId: "u1",
+        startedAtMs: 0,
+      });
+      const call = env.out.emitted.find(
+        (n) => n.update.sessionUpdate === "tool_call",
+      );
+      expect(call?.update).toMatchObject({
+        kind: "edit",
+        mergeKey: "edit:src/app.ts",
+        title: "Editing src/app.ts",
+      });
     });
 
     it("mcpToolCall with error completes as failed", () => {

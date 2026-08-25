@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ancestorDirPrefixes,
+  reconcileTreePathList,
   treeSelectionMirrorIntent,
   treeSelectionMirrorTarget,
   treeSelectionOpenTarget,
@@ -12,14 +13,14 @@ import {
 
 describe("ancestorDirPrefixes", () => {
   it("returns every ancestor, shortest first", () => {
-    expect(ancestorDirPrefixes("src/shell/workbench/tabs/files-tab.tsx")).toEqual(
-      [
-        "src",
-        "src/shell",
-        "src/shell/workbench",
-        "src/shell/workbench/tabs",
-      ],
-    );
+    expect(
+      ancestorDirPrefixes("src/shell/workbench/tabs/files-tab.tsx"),
+    ).toEqual([
+      "src",
+      "src/shell",
+      "src/shell/workbench",
+      "src/shell/workbench/tabs",
+    ]);
   });
 
   it("returns nothing for a root-level file", () => {
@@ -30,6 +31,40 @@ describe("ancestorDirPrefixes", () => {
     expect(ancestorDirPrefixes("a//b/c.ts")).toEqual(["a", "a/b"]);
     expect(ancestorDirPrefixes("/a/b.ts")).toEqual(["a"]);
     expect(ancestorDirPrefixes("")).toEqual([]);
+  });
+});
+
+describe("reconcileTreePathList", () => {
+  it("preserves an already-valid listing's identity so the initial tree is not reset", () => {
+    const paths = [
+      "artifacts/api-server/src/index.ts",
+      "artifacts/api-server/src/util.ts",
+      "package.json",
+    ];
+
+    expect(reconcileTreePathList(paths)).toBe(paths);
+  });
+
+  it("keeps descendants when Git reports a replaced tracked symlink as their file ancestor", () => {
+    // A dependency install can replace tracked `node_modules/vite` with a real
+    // directory. `git ls-files -co` then returns the indexed symlink path AND
+    // the untracked directory's children in one listing. @pierre/trees throws
+    // while trying to create the directory unless the stale file row yields to
+    // the descendants that prove the worktree path is now a directory.
+    const paths = reconcileTreePathList([
+      "README.md",
+      "node_modules/vite",
+      "node_modules/vite/LICENSE.md",
+      "node_modules/vite/dist/index.js",
+      "node_modules/.bin/vite",
+    ]);
+
+    expect(paths).toEqual([
+      "README.md",
+      "node_modules/vite/LICENSE.md",
+      "node_modules/vite/dist/index.js",
+      "node_modules/.bin/vite",
+    ]);
   });
 });
 

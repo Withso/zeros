@@ -110,7 +110,7 @@ export function ChatDeck() {
         // persisted TipTap document can still start and drain. Never use this
         // fallback for ordinary retained views.
         if (!slot?.host) {
-          if (!pendingAutoSend[chat.id]) return null;
+          if (pendingAutoSend[chat.id] === undefined) return null;
           return (
             <div key={chat.id} hidden {...{ inert: "" }} aria-hidden="true">
               <ChatView chatId={chat.id} surfaceActive={false} />

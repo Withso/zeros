@@ -406,6 +406,110 @@ export function queueReleaseAction(input: {
   return input.status === "ready" ? "drain" : "drop";
 }
 
+/** What to do with a send that arrived while this chat's transcript could not
+ * be read — a failed cold read, an engine mid-respawn, a dropped transport.
+ *
+ * Appending a user bubble to a partial transcript is not an option (it would
+ * be written into a history Zeros has not finished reading), so this send
+ * cannot go out now. What it MUST NOT do is what it used to: return, in
+ * silence, with the text still in the composer and nothing anywhere saying the
+ * send did not happen — indistinguishable, to the user, from a broken Enter
+ * key. Reported as the other half of "I sent it before the workspace was ready
+ * and it never went".
+ *
+ * `park` — the composer still holds the payload, so keep it as the chat's
+ *   draft and arm the one-shot auto-send: the readiness drain dispatches it
+ *   when the read succeeds. Exactly one automatic retry per disconnect
+ *   (`alreadyRetried`), because the drain re-enters the same send path and a
+ *   second failure would otherwise cycle park → drain → park at hydrate-RPC
+ *   speed.
+ * `report` — cannot be parked usefully: a hand-off payload lives outside the
+ *   composer, the one retry is spent, or the session ended terminally so no
+ *   drain will ever come. Say so instead of promising a delivery.
+ * `ignore` — nothing to send; Enter on an empty composer has nothing to
+ *   report. */
+export function unreadableTranscriptSendAction(input: {
+  /** There is something to send at all. */
+  hasPayload: boolean;
+  /** That payload is the composer's own document (not a hand-off override). */
+  payloadInComposer: boolean;
+  /** This chat already parked one send on an unreadable transcript. */
+  alreadyRetried: boolean;
+  status: SessionStatus;
+}): "park" | "report" | "ignore" {
+  if (!input.hasPayload) return "ignore";
+  if (!input.payloadInComposer || input.alreadyRetried) return "report";
+  // A terminal session has no path to `ready`, so parking would promise a
+  // delivery that queuedFirstTurnAction is about to hand straight back — two
+  // contradictory toasts for one keystroke.
+  return input.status === "failed" || input.status === "auth-required"
+    ? "report"
+    : "park";
+}
+
+/** The longest a parked FIRST turn may wait before Zeros reports that it did
+ * not go out. See queuedFirstTurnAction — deliberately the same span as
+ * PENDING_AUTO_SEND_RECOVERY_MAX_AGE_MS (state/persist-composer-drafts), which
+ * decides whether a park survives a restart at all.
+ *
+ * Sized against what a legitimate pre-ready wait actually costs — a worktree
+ * checkout, a ZSR admission, a cold provider host, an engine respawn — with
+ * room to spare. Anything past it is not slow, it is stuck. */
+export const QUEUED_FIRST_TURN_MAX_WAIT_MS = 10 * 60_000;
+
+/** What to do with a first turn parked BEFORE its chat could run it (the
+ * "Message queued: it will send as soon as this workspace finishes setting up"
+ * park — REQUEST_AUTO_SEND, kept as the chat's own composer draft).
+ *
+ * This is the same doctrine as queueReleaseAction one function up, applied to
+ * the earlier park: every park site needs a release site. It had none. The
+ * only drain condition was `status === "ready"`, so a park whose spawn ended
+ * `failed` / `auth-required` — or whose session never settled at all — stayed
+ * armed with the user's text in the composer, no bubble in the transcript, and
+ * nothing anywhere saying the promise had not been kept.
+ *
+ * `send` — the session is ready and the composer still holds the payload.
+ * `release` — hand it back: retire the intent, keep the text where it is, and
+ *   say so. Terminal statuses qualify immediately; anything else qualifies once
+ *   it has out-waited the bound, which is the only signal a session that never
+ *   settles will ever produce.
+ * `wait` — a real pre-ready state (`idle`, `warming`, `reconnecting`, an
+ *   unfinished checkout). Waiting is what the user was promised.
+ *
+ * Provisioning suppresses `release` for a failed status on purpose: chat-view
+ * refuses to spawn into an announced-but-unchecked-out path, so such a failure
+ * belongs to an earlier attempt and the create is still on its way. The bound
+ * still applies — it has to, or an abandoned create would strand the park. */
+export function queuedFirstTurnAction(input: {
+  status: SessionStatus;
+  /** The chat's workspace is still being created (optimistic create window). */
+  provisioning: boolean;
+  hasPermissionGate: boolean;
+  composerEmpty: boolean;
+  /** A send is already being prepared for this chat. */
+  sendInFlight: boolean;
+  armedForMs: number;
+}): "wait" | "send" | "release" {
+  // Nothing to send and nothing to report: the user cleared the composer, and
+  // the cancel effect retires that intent silently.
+  if (input.composerEmpty) return "wait";
+  if (
+    input.status === "ready" &&
+    !input.provisioning &&
+    !input.hasPermissionGate &&
+    !input.sendInFlight
+  ) {
+    // A slow-but-successful admission delivers. The bound reports a park that
+    // cannot be dispatched; it never cancels one that finally can.
+    return "send";
+  }
+  if (input.armedForMs > QUEUED_FIRST_TURN_MAX_WAIT_MS) return "release";
+  if (input.provisioning) return "wait";
+  return input.status === "failed" || input.status === "auth-required"
+    ? "release"
+    : "wait";
+}
+
 /** Stop is a promise, and a send is not atomic: sendPrompt may await a session
  * rebuild, a settings-drift respawn, or a resume-and-retry before its
  * AGENT_PROMPT ever reaches the engine — all while the chat already reads

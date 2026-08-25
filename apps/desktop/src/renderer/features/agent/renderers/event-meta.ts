@@ -131,10 +131,17 @@ export function metaForEvent(message: AgentMessage): EventMeta {
         : undefined,
       // Char count intentionally omitted from the right edge. The thought text
       // is still inspectable via expand.
+      //
+      // The duration only earns the right edge when it says something. Only
+      // Cursor reports one at all (`thinking_duration_ms`), and it is almost
+      // always sub-second, so every Thinking row wore a meaningless "0s" —
+      // formatElapsed floors anything under a second to exactly that. Match
+      // DurationChip's settled-card behaviour and drop the chip instead of
+      // printing a zero; a genuinely long thought still shows its time.
       trailing:
         typeof durationMs === "number" &&
         Number.isFinite(durationMs) &&
-        durationMs >= 0
+        durationMs >= 1000
           ? formatElapsed(durationMs)
           : undefined,
       expandable: chars > 0,

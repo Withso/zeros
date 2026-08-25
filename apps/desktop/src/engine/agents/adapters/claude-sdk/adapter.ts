@@ -98,6 +98,7 @@ import {
 } from "../../types";
 import { advertiseAgentCapabilities } from "../../capabilities";
 import { SESSION_EXPIRED_KEYWORDS } from "../shared/session-expiry";
+import { FirstTokenLatency } from "../shared/first-token-latency";
 import { configurationProvenanceFor } from "../../provider-diagnostics";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
 import {
@@ -1045,6 +1046,14 @@ interface SdkSession {
   /** Per-session translator (SDKMessage → SessionNotification). Resets its
    *  per-turn state on each `result`, so it's safe to reuse across turns. */
   translator: ClaudeStreamTranslator;
+  /** Time-to-first-token for this session's turns. The persistent query hides
+   *  a lot behind one `result`: a cold turn pays CLI spawn, MCP/hook wiring
+   *  and a full prompt-cache WRITE before the model says anything, and none of
+   *  that was distinguishable from generation in the log. */
+  firstToken: FirstTokenLatency;
+  /** No turn has produced output on this query yet — the once-per-query costs
+   *  land on it, so "cold" is the qualifier that makes the number readable. */
+  sawFirstTurnOutput: boolean;
   /** The in-flight turn's deferred, settled when the consumer sees `result`
    *  (or the query errors). Null when idle. */
   turn: Deferred<{ stopReason: StopReason; usage?: TurnUsage }> | null;
@@ -1674,6 +1683,8 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           /* benign — the SDK emits many message subtypes we don't render */
         },
       }),
+      firstToken: new FirstTokenLatency("claude-sdk"),
+      sawFirstTurnOutput: false,
       turn: null,
       turnIdle: null,
       scheduledWakeupStop: null,
@@ -1906,6 +1917,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
       state.turnIdle = turnIdle;
       try {
         state.translator.beginTurn();
+        // Clock starts where the prompt leaves us, so the number that lands in
+        // the log is the provider's wait and not our queueing above it.
+        state.firstToken.beginTurn();
         state.input.push({
           type: "user",
           message: { role: "user", content: this.buildContent(opts.prompt) },
@@ -1936,6 +1950,9 @@ export class ClaudeSdkAdapter implements AgentAdapter {
           } as PromptResponse,
         };
       } finally {
+        // A turn that produced nothing (error, cancel) must not hand its
+        // pending measurement to whichever turn runs next.
+        state.firstToken.endTurn();
         if (state.turn === turn) state.turn = null;
         if (state.turnIdle === turnIdle) state.turnIdle = null;
         turnIdle.resolve();
@@ -1995,6 +2012,11 @@ export class ClaudeSdkAdapter implements AgentAdapter {
     state.pendingRestart = false;
     state.turnlessRunsPending = 0;
     state.providerRunActive = false;
+    // A fresh query re-pays every once-per-process cost (CLI spawn, MCP and
+    // hook wiring, prompt-cache write), so the first turn on it is cold again
+    // — an idle teardown mid-conversation is exactly the case where that
+    // qualifier stops a normal number from reading as a regression.
+    state.sawFirstTurnOutput = false;
     state.input = new InputQueue<SDKUserMessage>();
     state.abort = new AbortController();
     try {
@@ -2251,6 +2273,25 @@ export class ClaudeSdkAdapter implements AgentAdapter {
         ) {
           state.providerRunActive = true;
           this.markSessionBusy(state);
+        }
+
+        // First model output of the turn. `system/init` and the SDK's own
+        // control frames land within milliseconds of the prompt even when the
+        // model takes twelve seconds to say anything, so the measurement has
+        // to key on content — assistant text/thinking, a tool call, or the
+        // partial-message stream that precedes both.
+        if (
+          state.firstToken.awaitingFirstOutput &&
+          (m.type === "assistant" || m.type === "stream_event")
+        ) {
+          const line = state.firstToken.firstOutput({
+            cold: !state.sawFirstTurnOutput,
+            model: state.model,
+          });
+          state.sawFirstTurnOutput = true;
+          // Same channel as the Cursor host's equivalent line, so the engine
+          // log a user pastes shows all three providers side by side.
+          if (line) console.info(line);
         }
 
         // Translate → emit. The SDK shapes match the raw stream-json the

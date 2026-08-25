@@ -1399,12 +1399,11 @@ function describeItem(item: ThreadItemUnion): string {
     case "commandExecution":
       return `Running ${truncate(item.command ?? "", 60) || "shell command"}`;
     case "fileChange": {
-      const first = Array.isArray(item.changes)
-        ? item.changes.find(
-            (c): c is { path: string } => typeof c?.path === "string",
-          )
-        : undefined;
-      return first ? `Editing ${first.path}` : "Editing files";
+      const paths = fileChangePaths(item);
+      if (paths.length === 1) return `Editing ${paths[0]}`;
+      return paths.length > 1
+        ? `Editing ${paths.length} files`
+        : "Editing files";
     }
     case "mcpToolCall":
       return nativeNodeReplTitle(item) ?? `${item.server}:${item.tool}`;
@@ -1531,12 +1530,20 @@ function isRecoveringTransportAdvisory(text: string): boolean {
 
 function computeMergeKey(item: ThreadItemUnion): string | null {
   if (item.type !== "fileChange") return null;
-  const first = Array.isArray(item.changes)
-    ? item.changes.find(
-        (c): c is { path: string } => typeof c?.path === "string",
-      )
-    : undefined;
-  return first ? `edit:${first.path}` : null;
+  const paths = fileChangePaths(item);
+  // A batch is one atomic provider tool call spanning several independent
+  // files. Giving it the first file's merge key makes the whole batch look
+  // like (and historically collapse with) a single-file edit.
+  return paths.length === 1 ? `edit:${paths[0]}` : null;
+}
+
+function fileChangePaths(
+  item: Extract<ThreadItemUnion, { type: "fileChange" }>,
+): string[] {
+  if (!Array.isArray(item.changes)) return [];
+  return item.changes.flatMap((change) =>
+    typeof change?.path === "string" ? [change.path] : [],
+  );
 }
 
 function computeStatus(item: ThreadItemUnion): "completed" | "failed" {

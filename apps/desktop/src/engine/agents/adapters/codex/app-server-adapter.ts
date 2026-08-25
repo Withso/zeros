@@ -68,6 +68,7 @@ import type {
 import { AgentFailureError } from "../../types";
 import { advertiseAgentCapabilities } from "../../capabilities";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
+import { FirstTokenLatency } from "../shared/first-token-latency";
 import {
   answerMcpElicitation,
   buildMcpElicitationQuestion,
@@ -392,6 +393,12 @@ export interface CodexSession {
    *  recoverable retry) from an idle crash (broadcast so the chat shows
    *  reconnecting). */
   turnActive: boolean;
+  /** Time-to-first-token for this thread's turns. `turn/started` acknowledges
+   *  within milliseconds of `turn/start`, so the settled duration alone could
+   *  never say whether a slow turn was slow to BEGIN or slow to finish. */
+  firstToken: FirstTokenLatency;
+  /** No turn on this app-server child has produced output yet. */
+  sawFirstTurnOutput: boolean;
   /** Flips false the moment the `codex app-server` child exits. Checked at
    *  `prompt()` entry so a send that lands after the child died self-heals
    *  (throw recoverable transport-closed → the renderer rebuilds) instead
@@ -1181,6 +1188,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // reconnecting flip. `childExitedMidTurn` is reset per turn.
     session.turnActive = true;
     session.childExitedMidTurn = false;
+    // Clock starts at the handoff to the app-server, so the number reported
+    // is the provider's wait rather than our own dispatch above it.
+    session.firstToken.beginTurn();
     try {
       // Collaboration mode (EXPERIMENTAL): codex only allows the
       // request_user_input tool in PLAN mode, or in DEFAULT mode with our
@@ -1369,6 +1379,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // The turn has settled (completed, failed, or threw) — a subsequent
       // child exit is now an idle crash, not a mid-turn one.
       session.turnActive = false;
+      // A turn that produced nothing must not hand its pending measurement to
+      // whichever turn runs next.
+      session.firstToken.endTurn();
       session.cancelRequested = false;
       // A completed/failed turn cannot still service one of its approval
       // or question resolvers. Fail closed and receipt every straggler before
@@ -2371,6 +2384,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       latestRateLimits: null,
       quotaUpdatesSuppressed: false,
       turnActive: false,
+      firstToken: new FirstTokenLatency("codex"),
+      sawFirstTurnOutput: false,
       runtimeAlive: true,
       childExitedMidTurn: false,
       backgroundThreadIds: new Set([threadId]),
@@ -3379,6 +3394,21 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
   }
 
+  /** One line per slow turn, on the same stderr channel and in the same shape
+   *  as the Claude adapter and the Cursor host, so the three providers can be
+   *  compared without translating between three formats. No-op once the turn
+   *  has reported, and for any turn that started talking promptly. */
+  private reportFirstOutput(zerosSessionId: string): void {
+    const session = this.sessions.get(zerosSessionId);
+    if (!session?.firstToken.awaitingFirstOutput) return;
+    const line = session.firstToken.firstOutput({
+      cold: !session.sawFirstTurnOutput,
+      model: session.env?.OPENAI_MODEL?.trim() || session.threadModel || undefined,
+    });
+    session.sawFirstTurnOutput = true;
+    if (line) console.info(line);
+  }
+
   private wireRuntimeToTranslator(
     runtime: CodexAppServerHandle,
     translator: CodexAppServerTranslator,
@@ -3416,8 +3446,24 @@ export class CodexAppServerAdapter implements AgentAdapter {
       "account/rateLimits/updated",
       "account/login/completed",
     ];
+    // First model output of the turn. `turn/started` and the thread-status
+    // frames acknowledge within milliseconds of `turn/start` even when the
+    // model takes seconds to say anything, so the measurement keys on the
+    // notifications that carry actual model output: a reasoning or message
+    // delta, or the first item (a tool call) starting.
+    const FIRST_OUTPUT_METHODS = new Set([
+      "item/started",
+      "item/agentMessage/delta",
+      "item/reasoning/textDelta",
+      "item/reasoning/summaryTextDelta",
+    ]);
     for (const m of methods) {
-      runtime.onNotification(m, (params) => translator.handle(m, params));
+      runtime.onNotification(m, (params) => {
+        if (FIRST_OUTPUT_METHODS.has(m)) {
+          this.reportFirstOutput(owner.zerosSessionId);
+        }
+        translator.handle(m, params);
+      });
     }
     for (const method of [
       "item/mcpToolCall/progress",

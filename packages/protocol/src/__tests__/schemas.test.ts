@@ -14,11 +14,12 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
       ...base,
       source: "engine",
       type: "DB_CHANGED",
-      kinds: ["workspaces"],
+      kinds: ["workspaces", "setup"],
       workspaceIds: ["workspace-a", "workspace-b"],
     });
     expect(m.type).toBe("DB_CHANGED");
     if (m.type === "DB_CHANGED") {
+      expect(m.kinds).toEqual(["workspaces", "setup"]);
       expect(m.workspaceIds).toEqual(["workspace-a", "workspace-b"]);
     }
   });

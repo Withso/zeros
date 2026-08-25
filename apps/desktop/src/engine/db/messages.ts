@@ -376,24 +376,42 @@ export interface PersistedMessageRow extends PersistedMessage {
 
 /** The rows truncateChatMessagesFrom WOULD delete (ord ≥ the cut), oldest-first,
  *  plus the cut ord — captured just before a reset so undo can re-insert them.
- *  null when the cut message id isn't present. */
+ *  null when the cut message id isn't present.
+ *
+ *  `untilMsgId` stops the read BEFORE that message (exclusive). Reset capture
+ *  wants everything to the end and omits it; a per-TURN read passes the next
+ *  turn's opening message so one turn's transcript does not cost the whole
+ *  remaining chat in memory. Ignored when that id isn't present, so a caller
+ *  that names a boundary the chat no longer has still gets the full tail rather
+ *  than nothing. */
 export function getChatMessagesFrom(
   chatId: string,
   fromMsgId: string,
+  untilMsgId?: string | null,
 ): { cutOrd: number; rows: PersistedMessageRow[] } | null {
   if (!chatId || !fromMsgId) return null;
   const db = openZerosDb();
-  const cursor = db
-    .prepare(
-      "SELECT ord FROM chat_messages WHERE chat_id = ? AND msg_id = ? LIMIT 1",
-    )
-    .get(chatId, fromMsgId) as { ord: number } | undefined;
+  const ordOf = db.prepare(
+    "SELECT ord FROM chat_messages WHERE chat_id = ? AND msg_id = ? LIMIT 1",
+  );
+  const cursor = ordOf.get(chatId, fromMsgId) as { ord: number } | undefined;
   if (!cursor) return null;
-  const rows = db
-    .prepare(
-      "SELECT msg_id, ord, kind, payload, created_at FROM chat_messages WHERE chat_id = ? AND ord >= ? ORDER BY ord ASC",
-    )
-    .all(chatId, cursor.ord) as (MsgDbRow & { ord: number })[];
+  const until = untilMsgId
+    ? (ordOf.get(chatId, untilMsgId) as { ord: number } | undefined)
+    : undefined;
+  const rows = (
+    until
+      ? db
+          .prepare(
+            "SELECT msg_id, ord, kind, payload, created_at FROM chat_messages WHERE chat_id = ? AND ord >= ? AND ord < ? ORDER BY ord ASC",
+          )
+          .all(chatId, cursor.ord, until.ord)
+      : db
+          .prepare(
+            "SELECT msg_id, ord, kind, payload, created_at FROM chat_messages WHERE chat_id = ? AND ord >= ? ORDER BY ord ASC",
+          )
+          .all(chatId, cursor.ord)
+  ) as (MsgDbRow & { ord: number })[];
   return {
     cutOrd: cursor.ord,
     rows: rows.map((r) => ({

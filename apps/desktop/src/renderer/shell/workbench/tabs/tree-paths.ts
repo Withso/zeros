@@ -17,6 +17,41 @@ export function ancestorDirPrefixes(path: string): string[] {
   return out;
 }
 
+/** Make a flat path listing safe for @pierre/trees without changing its
+ * relative order. Git can legitimately report an indexed symlink/file and
+ * untracked descendants beneath its worktree replacement in the same
+ * `ls-files -co` result. Descendants prove that the worktree shape is a
+ * directory, so the stale file row yields; exact duplicates yield after their
+ * first occurrence for the same reason. */
+export function reconcileTreePathList(paths: readonly string[]): string[] {
+  const directoryKeys = new Set<string>();
+  for (const path of paths) {
+    if (path.endsWith("/")) directoryKeys.add(path.slice(0, -1));
+    for (const dir of ancestorDirPrefixes(path)) directoryKeys.add(dir);
+  }
+
+  const seen = new Set<string>();
+  const reconciled: string[] = [];
+  let changed = false;
+  for (const path of paths) {
+    if (seen.has(path)) {
+      changed = true;
+      continue;
+    }
+    seen.add(path);
+    if (!path.endsWith("/") && directoryKeys.has(path)) {
+      changed = true;
+      continue;
+    }
+    reconciled.push(path);
+  }
+  // This identity is load-bearing for WorkspaceFileTree's first render. Its
+  // model and tracked snapshot share the warm cache array; replacing a valid
+  // list with an equal clone makes the layout effect reset the model and
+  // collapse the initial selected file's ancestor chain.
+  return changed ? reconciled : (paths as string[]);
+}
+
 export type TreeSelectionMirrorIntent =
   | { kind: "suspend" }
   | { kind: "clear" }

@@ -193,6 +193,170 @@ interface Candidate {
   kind: ShellAuthoredKind;
 }
 
+/** Recover paths from the patch helper's structured begin/end grammar. */
+function applyPatchBodyCandidates(source: string, base: string): Candidate[] {
+  const begin = source.indexOf("*** Begin Patch");
+  const end = source.indexOf("*** End Patch", begin + 1);
+  if (begin < 0 || end < 0) return [];
+
+  const candidates: Candidate[] = [];
+  let lastUpdate: Candidate | null = null;
+  const body = source.slice(begin, end);
+  for (const line of body.split(/\r?\n/)) {
+    const header = /^\*\*\* (Add|Update|Delete) File: (.+)$/.exec(line);
+    if (header) {
+      const operation = header[1];
+      const raw = header[2].trim();
+      if (!usablePathArg(raw)) {
+        lastUpdate = null;
+        continue;
+      }
+      const candidate: Candidate = {
+        raw,
+        base,
+        kind: operation === "Delete" ? "delete" : "edit",
+      };
+      candidates.push(candidate);
+      lastUpdate = operation === "Update" ? candidate : null;
+      continue;
+    }
+    const move = /^\*\*\* Move to: (.+)$/.exec(line);
+    if (move && lastUpdate) {
+      lastUpdate.kind = "renamed";
+      const raw = move[1].trim();
+      if (usablePathArg(raw)) {
+        candidates.push({ raw, base, kind: "renamed" });
+      }
+    }
+  }
+  return candidates;
+}
+
+/** Agents use this fallback when their native edit tool is unavailable, so the
+ * outer tool is a shell execution even though the operation is file-native.
+ * Require both a heredoc invocation and the begin/end sentinels: merely
+ * printing or discussing a patch must not claim another turn's file. */
+function inlineApplyPatchCandidates(
+  command: string,
+  base: string,
+): Candidate[] {
+  const begin = command.indexOf("*** Begin Patch");
+  if (begin < 0) return [];
+  const invocation = command.slice(0, begin);
+  if (!/\bapply_patch\s*<<-?/.test(invocation)) return [];
+  return applyPatchBodyCandidates(command, base);
+}
+
+function invokesApplyPatchOnStdin(command: string): boolean {
+  const tokens = shellTokens(command).filter((token) => token !== ";");
+  if (tokens.length === 1) return commandName(tokens[0]) === "apply_patch";
+  return (
+    tokens.length === 3 &&
+    ["sh", "bash", "zsh"].includes(commandName(tokens[0])) &&
+    ["-c", "-lc"].includes(tokens[1]) &&
+    commandName(tokens[2]) === "apply_patch"
+  );
+}
+
+function shellOutputText(rawOutput: unknown): string | null {
+  if (typeof rawOutput === "string") return rawOutput;
+  if (!rawOutput || typeof rawOutput !== "object") return null;
+  const output = (rawOutput as Record<string, unknown>).output;
+  return typeof output === "string" ? output : null;
+}
+
+interface GitPatchSection {
+  oldPath: string | null;
+  newPath: string | null;
+  newIsNull: boolean;
+  renamed: boolean;
+}
+
+function gitHeaderPath(raw: string, prefix = ""): string | null {
+  const trimmed = raw.trim();
+  const quoted = trimmed.startsWith('"') || trimmed.startsWith("'");
+  const tokens = quoted
+    ? shellTokens(trimmed).filter((token) => token !== ";")
+    : [trimmed];
+  if (tokens.length !== 1 || tokens[0] === "/dev/null") return null;
+  const value = tokens[0];
+  if (prefix && !value.startsWith(prefix)) return null;
+  return prefix ? value.slice(prefix.length) : value;
+}
+
+/** Recover paths from an inline unified diff passed to `git apply`. Codex can
+ * choose this route instead of its native fileChange/apply_patch tools. The
+ * heredoc requirement keeps prose, echoed examples, and ordinary `git diff`
+ * output from claiming files; finishTurn still intersects every candidate with
+ * the real pre/post tree delta. */
+function inlineGitApplyCandidates(command: string, base: string): Candidate[] {
+  const firstDiff = command.search(/^diff --git /m);
+  if (firstDiff < 0) return [];
+  const invocation = command.slice(0, firstDiff).trimEnd();
+  if (
+    !/\bgit\s+apply\b[^\n]*<<-?\s*['"]?[A-Za-z0-9_]+['"]?\s*$/.test(invocation)
+  ) {
+    return [];
+  }
+
+  const candidates: Candidate[] = [];
+  let section: GitPatchSection | null = null;
+  const finish = () => {
+    if (!section) return;
+    if (section.newIsNull) {
+      if (section.oldPath) {
+        candidates.push({ raw: section.oldPath, base, kind: "delete" });
+      }
+    } else if (section.renamed) {
+      if (section.oldPath) {
+        candidates.push({ raw: section.oldPath, base, kind: "renamed" });
+      }
+      if (section.newPath) {
+        candidates.push({ raw: section.newPath, base, kind: "renamed" });
+      }
+    } else if (section.newPath) {
+      candidates.push({ raw: section.newPath, base, kind: "edit" });
+    }
+    section = null;
+  };
+
+  for (const line of command.slice(firstDiff).split(/\r?\n/)) {
+    if (line.startsWith("diff --git ")) {
+      finish();
+      const paths = shellTokens(line.slice("diff --git ".length));
+      if (paths.length !== 2) continue;
+      section = {
+        oldPath: gitHeaderPath(paths[0], "a/"),
+        newPath: gitHeaderPath(paths[1], "b/"),
+        newIsNull: false,
+        renamed: false,
+      };
+      continue;
+    }
+    if (!section) continue;
+    if (line.startsWith("--- ")) {
+      const path = gitHeaderPath(line.slice(4), "a/");
+      if (path) section.oldPath = path;
+    } else if (line.startsWith("+++ ")) {
+      section.newIsNull = line.slice(4).trim() === "/dev/null";
+      const path = gitHeaderPath(line.slice(4), "b/");
+      if (path) section.newPath = path;
+    } else if (line.startsWith("rename from ")) {
+      section.renamed = true;
+      section.oldPath = gitHeaderPath(line.slice("rename from ".length));
+    } else if (line.startsWith("rename to ")) {
+      section.renamed = true;
+      section.newPath = gitHeaderPath(line.slice("rename to ".length));
+    } else if (line.startsWith("copy from ")) {
+      section.oldPath = gitHeaderPath(line.slice("copy from ".length));
+    } else if (line.startsWith("copy to ")) {
+      section.newPath = gitHeaderPath(line.slice("copy to ".length));
+    }
+  }
+  finish();
+  return candidates;
+}
+
 /** Paths explicitly targeted by one simple shell command. */
 function commandCandidates(
   tokens: string[],
@@ -326,10 +490,26 @@ export function authoredPathsFromShellCommand(
   fromDir: string,
   root: string,
   requestedCwd?: unknown,
+  rawOutput?: unknown,
 ): ShellAuthoredPath[] {
   if (!command.trim()) return [];
   let base = resolveBase(fromDir, requestedCwd);
   const byPath = new Map<string, ShellAuthoredKind>();
+  for (const candidate of inlineApplyPatchCandidates(command, base)) {
+    const path = relativeToRoot(candidate.base, root, candidate.raw);
+    if (path) byPath.set(path, candidate.kind);
+  }
+  for (const candidate of inlineGitApplyCandidates(command, base)) {
+    const path = relativeToRoot(candidate.base, root, candidate.raw);
+    if (path) byPath.set(path, candidate.kind);
+  }
+  const output = shellOutputText(rawOutput);
+  if (output && invokesApplyPatchOnStdin(command)) {
+    for (const candidate of applyPatchBodyCandidates(output, base)) {
+      const path = relativeToRoot(candidate.base, root, candidate.raw);
+      if (path) byPath.set(path, candidate.kind);
+    }
+  }
   let segment: string[] = [];
   const flush = () => {
     if (segment.length === 0) return;

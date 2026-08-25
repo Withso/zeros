@@ -89,6 +89,49 @@ describe("listWorkspaceFiles", () => {
       expect(files.length).toBe(3);
     });
 
+    it("does not let one deep dependency subtree hide shallow sibling files at the cap", async () => {
+      const repo = path.join(workdir, "repo-wide-tree");
+      await mkdir(path.join(repo, "node_modules", "package", "dist"), {
+        recursive: true,
+      });
+      await initRepo(repo);
+      for (let i = 0; i < 12; i++) {
+        await writeFile(
+          path.join(repo, "node_modules", "package", "dist", `file-${i}.js`),
+          String(i),
+        );
+      }
+      // Reproduce Zinc: its initial commit force-tracked node_modules even
+      // though the user's global ignore excludes it from ordinary `git add`.
+      await execFileAsync("git", ["-C", repo, "add", "-f", "node_modules"]);
+      await commitAll(repo);
+      // pnpm then replaces that tracked npm tree with a large untracked store.
+      // Those paths sort between `new-york.md` and `paris.md` in the `-o`
+      // section of `git ls-files`, which is what exhausted Zinc's 20k prefix.
+      await mkdir(path.join(repo, "node_modules", ".pnpm", "new-store"), {
+        recursive: true,
+      });
+      for (let i = 0; i < 12; i++) {
+        await writeFile(
+          path.join(repo, "node_modules", ".pnpm", "new-store", `new-${i}`),
+          String(i),
+        );
+      }
+      for (const city of ["london", "new-york", "paris", "rome", "tokyo"]) {
+        await writeFile(path.join(repo, `${city}.md`), `# ${city}\n`);
+      }
+
+      const files = await listWorkspaceFiles(repo, 5);
+
+      expect(files).toEqual([
+        "london.md",
+        "new-york.md",
+        "paris.md",
+        "rome.md",
+        "tokyo.md",
+      ]);
+    });
+
     it("excludes tracked paths deleted from disk", async () => {
       const repo = path.join(workdir, "repo-deleted");
       await mkdir(repo);
