@@ -29,6 +29,7 @@ import {
   readDesignTokens,
   readDesignTokensDocument,
   renameDesignFrame,
+  restoreDesignFrame,
   setDesignNodeText,
   updateDesignFrameGeometry,
   updateDesignNodeStyles,
@@ -88,6 +89,7 @@ describe("design document", () => {
       width: 640,
       height: 360,
       z: 7,
+      nodeCount: 1,
     });
     const source = await readFile(
       path.join(root, DESIGN_DIRECTORY_NAME, created.file),
@@ -97,7 +99,9 @@ describe("design document", () => {
     expect(source).toContain("width=640,height=360");
     expect(source).toContain('href="./tokens.css"');
     expect(source).not.toContain("<script");
-    expect(source).toContain("Shape this frame with the canvas and inspector.");
+    expect(source).toMatch(/<main\b[^>]*>\s*<\/main>/);
+    expect(source).not.toContain("<h1");
+    expect(source).not.toContain("<p");
     expect(source).not.toMatch(/\bchat\b/i);
     expect(source).not.toMatch(
       /<(?:html|head|meta|link|title|style|body)\b[^>]*\bdata-oid=/i,
@@ -1085,12 +1089,19 @@ describe("design document", () => {
     const beforeSummary = (await readDesignWorkspaceSnapshot(root)).frames[0]!;
     const before = await readDesignFrame(root, beforeSummary.file);
     const main = before.tree[0];
-    const heading = main?.children[0];
+    const seededHeading = await writeDesignNodeHtml(root, {
+      frame: created.file,
+      nodeId: main!.oid!,
+      sourceVersion: before.sourceVersion,
+      mode: "append",
+      html: "<h1>Checkout</h1>",
+    });
+    const heading = seededHeading.frame.tree[0]?.children[0];
 
     const textMutation = await setDesignNodeText(root, {
       frame: created.file,
       nodeId: heading!.oid!,
-      sourceVersion: before.sourceVersion,
+      sourceVersion: seededHeading.frame.sourceVersion,
       text: "Pay < securely & quickly",
     });
     expect(textMutation.frame.source).toContain(
@@ -1107,7 +1118,9 @@ describe("design document", () => {
     expect(htmlMutation.frame.source).toMatch(
       /<button data-oid="o-[^"]+">Pay now<\/button><\/main>/,
     );
-    expect(htmlMutation.frame.nodeCount).toBe(before.nodeCount + 1);
+    expect(htmlMutation.frame.nodeCount).toBe(
+      seededHeading.frame.nodeCount + 1,
+    );
 
     await expect(
       writeDesignNodeHtml(root, {
@@ -1140,13 +1153,47 @@ describe("design document", () => {
       copy.file,
     ]);
 
-    await deleteDesignFrame(root, original.file);
+    const source = await readFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, original.file),
+      "utf8",
+    );
+    const deleted = await deleteDesignFrame(root, original.file);
+    expect(deleted).toMatchObject({
+      file: original.file,
+      source,
+      geometry: {
+        x: original.x,
+        y: original.y,
+        w: original.width,
+        h: original.height,
+        z: original.z,
+      },
+    });
     expect((await listDesignFrames(root)).map((frame) => frame.file)).toEqual([
       copy.file,
     ]);
     await expect(
       readDesignElementOffsetMap(root, original.file),
     ).rejects.toThrow("Design frame not found");
+
+    await restoreDesignFrame(root, deleted);
+    expect(
+      await readFile(
+        path.join(root, DESIGN_DIRECTORY_NAME, original.file),
+        "utf8",
+      ),
+    ).toBe(source);
+    expect(
+      (await listDesignFrames(root)).find(
+        (frame) => frame.file === original.file,
+      ),
+    ).toMatchObject({
+      x: original.x,
+      y: original.y,
+      width: original.width,
+      height: original.height,
+      z: original.z,
+    });
   });
 
   it("discovers safe local image assets, inlines them for rendering, and inserts them by oid", async () => {

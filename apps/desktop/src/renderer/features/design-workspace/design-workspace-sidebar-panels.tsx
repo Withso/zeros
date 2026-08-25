@@ -14,19 +14,21 @@ import React, {
   useState,
 } from "react";
 import {
-  Box,
   ChevronDown,
   ChevronRight,
   Eye,
   EyeClosed,
   Frame,
+  Grid2X2,
   Image,
   ListCollapse,
+  Spline,
+  StretchHorizontal,
+  StretchVertical,
   Type,
 } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
 import type { DesignRuntimeTreeNode } from "@zeros/protocol/design-runtime";
-import type { DesignOperation, DesignTransaction } from "@zeros/design-core";
 import type { Workspace } from "../../platform/git";
 import type { DesignCanvasFrameWire } from "../../platform/bridge/design-bridge";
 
@@ -40,13 +42,6 @@ import {
 import { useDesignRuntimeStore } from "./state/design-runtime-store";
 import { useActiveWorkspace } from "../../state/use-active-workspace";
 import { useDesignWorkspaceSnapshot } from "./state/use-design-workspace";
-import { useDesignFoundation } from "./state/use-design-foundation";
-import {
-  applyDesignTransactionCached,
-  designFoundationCache,
-  designFoundationKey,
-  fetchDesignFoundation,
-} from "./state/design-workspace-cache";
 import { useDesignWorkspaceUiStore } from "./state/design-workspace-ui";
 import {
   usePendingWorkspaceKind,
@@ -66,6 +61,15 @@ import {
   type DesignLayerBlockEdge,
   type FlatDesignLayer,
 } from "./design-layer-tree";
+import {
+  designFrameLayerLabel,
+  designRuntimeLayerLabel,
+  type DesignLayerLabel,
+} from "./design-layer-label";
+import {
+  designFrameLayoutIconKind,
+  type DesignFrameLayoutIconKind,
+} from "./design-layer-layout";
 import {
   collapseAllDesignLayers,
   designWorkspaceHasExpandedLayers,
@@ -150,34 +154,46 @@ function layerRowKey(file: string, nodeId: string): string {
   return `layer:${file}:${nodeId}`;
 }
 
-function LayerTypeIcon({ tag }: { tag: string }) {
-  const normalized = tag.toLocaleLowerCase();
-  if (["img", "picture", "video", "canvas"].includes(normalized)) {
-    return <Image aria-hidden="true" />;
+function FrameLayoutIcon({ kind }: { kind: DesignFrameLayoutIconKind }) {
+  if (kind === "flex-vertical") {
+    return (
+      <StretchVertical
+        data-design-layout-icon="flex-vertical"
+        aria-hidden="true"
+      />
+    );
   }
-  if (
-    [
-      "p",
-      "span",
-      "label",
-      "h1",
-      "h2",
-      "h3",
-      "h4",
-      "h5",
-      "h6",
-      "strong",
-      "em",
-    ].includes(normalized)
-  ) {
-    return <Type aria-hidden="true" />;
+  if (kind === "flex-horizontal") {
+    return (
+      <StretchHorizontal
+        data-design-layout-icon="flex-horizontal"
+        aria-hidden="true"
+      />
+    );
   }
-  return <Box aria-hidden="true" />;
+  if (kind === "grid") {
+    return <Grid2X2 data-design-layout-icon="grid" aria-hidden="true" />;
+  }
+  return <Frame data-design-layout-icon="frame" aria-hidden="true" />;
 }
 
-function layerDisplayName(layer: FlatDesignLayer): string {
-  const name = layer.node.name.trim();
-  return name || layer.node.tag;
+function LayerTypeIcon({
+  label,
+  display,
+  flexDirection,
+}: {
+  label: DesignLayerLabel;
+  display?: string;
+  flexDirection?: string;
+}) {
+  if (label === "Image") return <Image aria-hidden="true" />;
+  if (label === "Text") return <Type aria-hidden="true" />;
+  if (label === "Vector Path") return <Spline aria-hidden="true" />;
+  return (
+    <FrameLayoutIcon
+      kind={designFrameLayoutIconKind({ display, flexDirection })}
+    />
+  );
 }
 
 /** A selection and the rows it owns form one rounded container: the run's first
@@ -308,6 +324,24 @@ function OwnedDesignWorkspaceSidebarPanels({
       return trees;
     }),
   );
+  const frameLayoutIconsByFile = useDesignRuntimeStore(
+    useShallow((state) => {
+      const runtimeFrames = workspaceId
+        ? state.byWorkspace[workspaceId]?.frames
+        : undefined;
+      const icons: Record<string, DesignFrameLayoutIconKind> = {};
+      if (!runtimeFrames) return icons;
+      for (const [file, runtimeFrame] of Object.entries(runtimeFrames)) {
+        const styles = runtimeFrame.snapshot?.frame.styles;
+        if (!styles) continue;
+        icons[file] = designFrameLayoutIconKind({
+          display: styles.display,
+          flexDirection: styles.flexDirection,
+        });
+      }
+      return icons;
+    }),
+  );
   const hoveredFrameFile = useDesignRuntimeStore((state) =>
     workspaceId ? (state.byWorkspace[workspaceId]?.hoveredFrame ?? null) : null,
   );
@@ -316,15 +350,7 @@ function OwnedDesignWorkspaceSidebarPanels({
       ? (state.byWorkspace[workspaceId]?.hoveredNodeId ?? null)
       : null,
   );
-  const foundation = useDesignFoundation(
-    workspaceId,
-    selectedFrame?.file,
-    selectedFrame?.sourceVersion,
-    surfaceActive && isDesign && Boolean(selectedFrame),
-  );
   const disclosures = useDesignWorkspaceDisclosure(workspaceId);
-  const [layerAction, setLayerAction] = useState<string | null>(null);
-  const layerActionRef = useRef(false);
   const revealedSelectionRef = useRef<string | null>(null);
   const selectedTree = selectedFrame
     ? (treesByFile[selectedFrame.file] ?? EMPTY_LAYER_TREE)
@@ -636,101 +662,6 @@ function OwnedDesignWorkspaceSidebarPanels({
     });
   };
 
-  /** Structural edits need the authored generation of the row's own frame, not
-   * of whichever frame happens to be selected. The warm read covers the common
-   * case; a row in another open frame resolves through the shared cache. */
-  const readFrameFoundation = async (frame: DesignCanvasFrameWire) => {
-    if (!workspaceId) return null;
-    if (
-      foundation.data &&
-      selectedFrame?.file === frame.file &&
-      selectedFrame.sourceVersion === frame.sourceVersion
-    ) {
-      return foundation.data;
-    }
-    const key = designFoundationKey(
-      workspaceId,
-      frame.file,
-      frame.sourceVersion,
-    );
-    return await designFoundationCache.load(
-      key,
-      () => fetchDesignFoundation(key),
-      { maxAgeMs: Number.POSITIVE_INFINITY },
-    );
-  };
-
-  const mutateLayer = async (
-    action: "duplicate" | "delete",
-    frame: DesignCanvasFrameWire,
-    layer: FlatDesignLayer,
-  ) => {
-    if (!workspaceId || !folder || layerActionRef.current) return;
-    layerActionRef.current = true;
-    setLayerAction(`${action}:${layer.node.oid}`);
-    const suffix = crypto.randomUUID().slice(0, 8);
-    const duplicateNodeId = `${layer.node.oid.slice(0, Math.max(1, 242 - suffix.length))}-copy-${suffix}`;
-    try {
-      const data = await readFrameFoundation(frame);
-      if (!data) return;
-      const operation: DesignOperation =
-        action === "duplicate"
-          ? {
-              operationId: `duplicate:${crypto.randomUUID()}`,
-              type: "node.duplicate",
-              nodeId: layer.node.oid,
-              duplicateNodeId,
-            }
-          : {
-              operationId: `delete:${crypto.randomUUID()}`,
-              type: "node.delete",
-              nodeId: layer.node.oid,
-            };
-      const transaction: DesignTransaction = {
-        schemaVersion: 1,
-        transactionId: `desktop:${crypto.randomUUID()}`,
-        documentId: data.summary.documentId,
-        baseRevision: data.summary.revision,
-        actor: { kind: "human", id: "desktop" },
-        intent: `${action === "duplicate" ? "Duplicate" : "Delete"} ${layerDisplayName(layer)}`,
-        createdAt: Date.now(),
-        operations: [operation],
-      };
-      const result = await applyDesignTransactionCached(
-        workspaceId,
-        frame.file,
-        transaction,
-      );
-      const currentFrame =
-        result.snapshot?.frames.find(
-          (candidate) => candidate.file === frame.file,
-        ) ?? frame;
-      if (action === "duplicate") {
-        await selectDesignFrame(workspaceId, currentFrame);
-        void selectDesignNode({
-          workspaceId,
-          folder,
-          frame: currentFrame,
-          nodeId: duplicateNodeId,
-        }).catch(() => {
-          // The ready snapshot retries this semantic selection once the
-          // replacement iframe owns the duplicate's new source generation.
-        });
-        toast.success("Layer duplicated");
-      } else {
-        await selectDesignFrame(workspaceId, currentFrame);
-        toast.success("Layer deleted");
-      }
-    } catch (error) {
-      toast.error(`Couldn't ${action} the layer`, {
-        description: errorMessage(error),
-      });
-    } finally {
-      layerActionRef.current = false;
-      setLayerAction(null);
-    }
-  };
-
   /** The row above a layer at depth 0 is its frame row, so ArrowLeft climbs out
    * of a frame's contents the same way it climbs out of a container. */
   const parentRowIndex = (index: number): number => {
@@ -810,25 +741,6 @@ function OwnedDesignWorkspaceSidebarPanels({
       toggleVisibility(frame, layer);
       return;
     }
-    if (
-      (event.metaKey || event.ctrlKey) &&
-      !event.altKey &&
-      event.key.toLocaleLowerCase() === "d"
-    ) {
-      event.preventDefault();
-      if (!event.repeat) void mutateLayer("duplicate", frame, layer);
-      return;
-    }
-    if (
-      !event.metaKey &&
-      !event.ctrlKey &&
-      !event.altKey &&
-      (event.key === "Backspace" || event.key === "Delete")
-    ) {
-      event.preventDefault();
-      if (!event.repeat) void mutateLayer("delete", frame, layer);
-      return;
-    }
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
       chooseLayer(frame, layer);
@@ -847,15 +759,15 @@ function OwnedDesignWorkspaceSidebarPanels({
     <section
       id={panelId}
       data-design-sidebar-panel=""
-      className="bg-bg1 flex min-h-0 flex-1 flex-col overflow-hidden"
+      className="bg-bg1 text-3xxs flex min-h-0 flex-1 flex-col overflow-hidden"
       aria-labelledby={headingId}
     >
       <div className="flex h-10 shrink-0 items-center gap-2 px-3">
-        <h2 id={headingId} className="text-fg1 text-xs font-medium">
+        <h2 id={headingId} className="text-fg1 text-3xxs font-medium">
           Layers
         </h2>
         {selectedNodeIds.length > 1 ? (
-          <span className="zd-design-layer-selection-count rounded px-1.5 py-0.5 text-[9px] font-medium">
+          <span className="zd-design-layer-selection-count text-3xxs rounded px-1.5 py-0.5 font-medium">
             {selectedNodeIds.length} selected
           </span>
         ) : null}
@@ -918,6 +830,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                   blockEdges[rowIndex] ?? null,
                 );
                 if (row.kind === "pending") {
+                  const frameLabel = designFrameLayerLabel(row.frame.kind);
                   return (
                     <div
                       key={row.key}
@@ -925,14 +838,15 @@ function OwnedDesignWorkspaceSidebarPanels({
                       className="flex h-7 min-w-0 items-center"
                       style={{ paddingLeft: layerRowPadding(0) }}
                     >
-                      <span className="text-muted-fg truncate text-[11px]">
-                        Connecting to {row.frame.title}…
+                      <span className="text-muted-fg text-3xxs truncate">
+                        Connecting to {frameLabel}…
                       </span>
                     </div>
                   );
                 }
                 if (row.kind === "frame") {
                   const { frame } = row;
+                  const frameLabel = designFrameLayerLabel(frame.kind);
                   const activeFrame = selectedFrame?.file === frame.file;
                   // The frame row is "selected" only when the frame itself is
                   // the canvas selection target — merely showing its tree is
@@ -942,7 +856,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                   return (
                     <Tooltip
                       key={row.key}
-                      label={`${frame.title} · ${frame.file}`}
+                      label={frameLabel}
                       side="right"
                       align="start"
                     >
@@ -954,7 +868,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                         data-design-frame-row={frame.file}
                         data-design-panel-row={row.key}
                         className={cn(
-                          "zd-design-layer-row h-7 w-full min-w-0 shrink-0 justify-start px-1 text-[11px] [&_svg]:size-3",
+                          "zd-design-layer-row text-3xxs h-7 w-full min-w-0 shrink-0 justify-start px-1 [&_svg]:size-3",
                           blockRadius,
                           frameRowSelected && "zd-design-layer-selected",
                         )}
@@ -962,6 +876,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                         aria-level={1}
                         aria-selected={frameRowSelected}
                         aria-expanded={row.discloses ? row.expanded : undefined}
+                        aria-keyshortcuts="Meta+C Control+C Meta+D Control+D Delete Backspace"
                         onClick={(event) => {
                           if (
                             row.discloses &&
@@ -987,9 +902,15 @@ function OwnedDesignWorkspaceSidebarPanels({
                         ) : (
                           <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
                         )}
-                        <Frame />
+                        {frame.kind === "text" ? (
+                          <Type />
+                        ) : (
+                          <FrameLayoutIcon
+                            kind={frameLayoutIconsByFile[frame.file] ?? "frame"}
+                          />
+                        )}
                         <span className="min-w-0 flex-1 truncate text-left">
-                          {frame.title}
+                          {frameLabel}
                         </span>
                       </Button>
                     </Tooltip>
@@ -1010,7 +931,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                 const hoveredLayer =
                   hoveredFrameFile === frame.file &&
                   hoveredNodeId === layer.node.oid;
-                const displayName = layerDisplayName(layer);
+                const displayName = designRuntimeLayerLabel(layer.node);
                 const dimmed = !layer.node.visible || layer.hiddenByAncestor;
                 return (
                   <div
@@ -1039,11 +960,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                       });
                     }}
                   >
-                    <Tooltip
-                      label={`${displayName} · ${layer.node.tag}`}
-                      side="right"
-                      align="start"
-                    >
+                    <Tooltip label={displayName} side="right" align="start">
                       <Button
                         data-design-layer-select=""
                         data-design-layer-id={layer.node.oid}
@@ -1053,7 +970,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                         variant="ghost"
                         size="sm"
                         className={cn(
-                          "zd-design-layer-row relative z-[1] h-7 min-w-0 flex-1 justify-start px-1 pr-6 text-[11px] [&_svg]:size-3",
+                          "zd-design-layer-row text-3xxs relative z-[1] h-7 min-w-0 flex-1 justify-start px-1 pr-6 [&_svg]:size-3",
                           blockRadius,
                           selectedLayer && "zd-design-layer-selected",
                           inSelectionSubtree && "zd-design-layer-in-selection",
@@ -1074,7 +991,7 @@ function OwnedDesignWorkspaceSidebarPanels({
                         aria-expanded={
                           layer.hasChildren ? row.expanded : undefined
                         }
-                        aria-keyshortcuts="Shift+H Meta+D Control+D Delete Backspace"
+                        aria-keyshortcuts="Shift+H Meta+C Control+C Meta+D Control+D Delete Backspace"
                         onClick={(event) => {
                           if (
                             layer.hasChildren &&
@@ -1100,7 +1017,11 @@ function OwnedDesignWorkspaceSidebarPanels({
                         ) : (
                           <span className={DESIGN_LAYER_DISCLOSURE_SPACER} />
                         )}
-                        <LayerTypeIcon tag={layer.node.tag} />
+                        <LayerTypeIcon
+                          label={displayName}
+                          display={layer.node.display}
+                          flexDirection={layer.node.flexDirection}
+                        />
                         <span className="min-w-0 flex-1 truncate text-left">
                           {displayName}
                         </span>
@@ -1117,7 +1038,6 @@ function OwnedDesignWorkspaceSidebarPanels({
                         type="button"
                         variant="ghost"
                         size="icon-sm"
-                        disabled={layerAction !== null}
                         className={cn(
                           "absolute top-1/2 right-0.5 z-[2] size-6 -translate-y-1/2",
                           layer.node.visible
@@ -1137,19 +1057,20 @@ function OwnedDesignWorkspaceSidebarPanels({
             </div>
           </div>
           {!snapshot.data && snapshot.loading ? (
-            <span className="text-muted-fg px-2 py-2 text-xs">
+            <span className="text-muted-fg text-3xxs px-2 py-2">
               Loading layers…
             </span>
           ) : null}
           {!snapshot.data && snapshot.error ? (
             <div className="flex flex-col items-start gap-2 px-2 py-2">
-              <span className="text-muted-fg text-xs">
+              <span className="text-muted-fg text-3xxs">
                 Couldn’t load layers.
               </span>
               <Button
                 type="button"
                 variant="secondary"
                 size="sm"
+                className="text-3xxs"
                 onClick={snapshot.refresh}
               >
                 Retry
@@ -1157,7 +1078,7 @@ function OwnedDesignWorkspaceSidebarPanels({
             </div>
           ) : null}
           {snapshot.data?.frames.length === 0 ? (
-            <span className="text-muted-fg px-2 py-2 text-xs">
+            <span className="text-muted-fg text-3xxs px-2 py-2">
               Create a frame from the canvas toolbar to start designing.
             </span>
           ) : null}

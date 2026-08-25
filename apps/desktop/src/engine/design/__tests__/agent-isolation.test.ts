@@ -178,9 +178,13 @@ describe("design workspace agent isolation", () => {
     const contextMenu = read(
       "apps/desktop/src/renderer/shared/ui/workspace-context-menu.tsx",
     );
+    const modeHeader = read(
+      "apps/desktop/src/renderer/shared/ui/workspace-mode-header.tsx",
+    );
     expect(contextMenu).not.toContain("designModeSwitchAvailable");
-    expect(contextMenu).toContain(
-      "const showModeSwitch = !isLocalMainWorkspace(workspace)",
+    expect(contextMenu).toContain("useWorkspaceModeSwitch(workspace)");
+    expect(modeHeader).toContain(
+      "const canSwitch = !isLocalMainWorkspace(workspace)",
     );
     const repositories = read(
       "apps/desktop/src/renderer/features/repositories/repositories-panel.tsx",
@@ -202,6 +206,7 @@ describe("design workspace agent isolation", () => {
       "apps/desktop/src/renderer/state/archive-actions.ts",
       "apps/desktop/src/renderer/state/use-open-workspace.ts",
       "apps/desktop/src/renderer/shared/ui/workspace-context-menu.tsx",
+      "apps/desktop/src/renderer/shared/ui/workspace-mode-header.tsx",
     ]
       .map(read)
       .join("\n");

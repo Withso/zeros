@@ -481,6 +481,14 @@ describe("WorkspaceService", () => {
     ).toBe(LOCAL_MAIN_WORKSPACE_ID);
   });
 
+  it("registers Design staging with the workspace lifecycle barrier", () => {
+    expect(
+      svc.lifecycleMutationWorkspaceId("design.stage", {
+        workspaceId: "design-workspace",
+      }),
+    ).toBe("design-workspace");
+  });
+
   it("file.write writes a registered repo ROOT file for LOCAL; remote raw-path + non-strings rejected", async () => {
     const { upsertRepoByRoot } = await import("../../db/projects");
     const repoC = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-write-op-"));
@@ -661,6 +669,201 @@ describe("WorkspaceService", () => {
       // Sharing the exact result object pins that only one filesystem parse /
       // lint / render-identity pass owned this concurrent cold generation.
       expect(first.snapshot).toBe(second.snapshot);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("undoes and redoes a frame deletion through the shared Design history", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-frame-delete-history",
+      kind: "design",
+    });
+    try {
+      const first = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "First frame",
+        x: 35,
+        y: 45,
+        w: 640,
+        h: 360,
+        z: 2,
+      })) as { frame: { file: string } };
+      const second = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "Second frame",
+      })) as { frame: { file: string } };
+
+      const deleted = (await svc.handle("design.frame.delete", {
+        workspaceId: design.workspaceId,
+        frame: first.frame.file,
+      })) as { snapshot: { frames: Array<{ file: string }> } };
+      expect(deleted.snapshot.frames.map((frame) => frame.file)).not.toContain(
+        first.frame.file,
+      );
+
+      const undone = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+        frame: second.frame.file,
+      })) as {
+        historySelection?: string | null;
+        snapshot: {
+          frames: Array<{
+            file: string;
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+            z: number;
+          }>;
+        };
+      };
+      expect(undone.historySelection).toBe(first.frame.file);
+      expect(
+        undone.snapshot.frames.find((frame) => frame.file === first.frame.file),
+      ).toMatchObject({ x: 35, y: 45, width: 640, height: 360, z: 2 });
+
+      const redone = (await svc.handle("design.history.redo", {
+        workspaceId: design.workspaceId,
+        frame: first.frame.file,
+      })) as {
+        historySelection?: string | null;
+        snapshot: { frames: Array<{ file: string }> };
+      };
+      expect(redone.historySelection).toBe(second.frame.file);
+      expect(redone.snapshot.frames.map((frame) => frame.file)).not.toContain(
+        first.frame.file,
+      );
+
+      const emptied = (await svc.handle("design.frame.delete", {
+        workspaceId: design.workspaceId,
+        frame: second.frame.file,
+      })) as { snapshot: { frames: Array<{ file: string }> } };
+      expect(emptied.snapshot.frames).toEqual([]);
+      const restoredFromEmptyCanvas = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+      })) as {
+        historySelection?: string | null;
+        snapshot: { frames: Array<{ file: string }> };
+      };
+      expect(restoredFromEmptyCanvas.historySelection).toBe(second.frame.file);
+      expect(
+        restoredFromEmptyCanvas.snapshot.frames.map((frame) => frame.file),
+      ).toEqual([second.frame.file]);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("orders frame creation, renaming, and duplication in shared Design history", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-frame-lifecycle-history",
+      kind: "design",
+    });
+    try {
+      const created = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "Original frame",
+        x: 18,
+        y: 28,
+        w: 720,
+        h: 480,
+        z: 3,
+      })) as { frame: { file: string } };
+
+      const undoneCreation = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+      })) as {
+        historySelection?: string | null;
+        snapshot: { frames: Array<{ file: string }> };
+      };
+      expect(undoneCreation.snapshot.frames).toEqual([]);
+      expect(undoneCreation.historySelection).toBeNull();
+
+      const redoneCreation = (await svc.handle("design.history.redo", {
+        workspaceId: design.workspaceId,
+      })) as {
+        historySelection?: string | null;
+        snapshot: {
+          frames: Array<{
+            file: string;
+            title: string;
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+            z: number;
+          }>;
+        };
+      };
+      expect(redoneCreation.historySelection).toBe(created.frame.file);
+      expect(redoneCreation.snapshot.frames).toEqual([
+        expect.objectContaining({
+          file: created.frame.file,
+          title: "Original frame",
+          x: 18,
+          y: 28,
+          width: 720,
+          height: 480,
+          z: 3,
+        }),
+      ]);
+
+      await svc.handle("design.frame.rename", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+        title: "Renamed frame",
+      });
+      const undoneRename = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+      })) as { snapshot: { frames: Array<{ title: string }> } };
+      expect(undoneRename.snapshot.frames[0]?.title).toBe("Original frame");
+      const redoneRename = (await svc.handle("design.history.redo", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+      })) as { snapshot: { frames: Array<{ title: string }> } };
+      expect(redoneRename.snapshot.frames[0]?.title).toBe("Renamed frame");
+
+      const duplicated = (await svc.handle("design.frame.duplicate", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+      })) as { frame: { file: string } };
+      const undoneDuplicate = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+        frame: duplicated.frame.file,
+      })) as { snapshot: { frames: Array<{ file: string }> } };
+      expect(
+        undoneDuplicate.snapshot.frames.map((frame) => frame.file),
+      ).toEqual([created.frame.file]);
+      const redoneDuplicate = (await svc.handle("design.history.redo", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+      })) as {
+        historySelection?: string | null;
+        snapshot: { frames: Array<{ file: string }> };
+      };
+      expect(redoneDuplicate.historySelection).toBe(duplicated.frame.file);
+      expect(
+        redoneDuplicate.snapshot.frames.map((frame) => frame.file),
+      ).toContain(duplicated.frame.file);
     } finally {
       await svc.handle("workspace.delete", {
         workspaceId: design.workspaceId,
@@ -2414,6 +2617,7 @@ describe("WorkspaceService", () => {
         width: number;
         height: number;
         z: number;
+        nodeCount: number;
       };
       snapshot: {
         protocolCapability: string | null;
@@ -2430,7 +2634,14 @@ describe("WorkspaceService", () => {
       width: 720,
       height: 480,
       z: 4,
+      nodeCount: 1,
     });
+    expect(
+      fs.readFileSync(
+        path.join(workspace.path, "Zeros Design", createdReply.frame.file),
+        "utf8",
+      ),
+    ).toMatch(/<main\b[^>]*>\s*<\/main>/);
     const textReply = (await svc.handle("design.frame.create", {
       workspaceId: workspace.workspaceId,
       title: "Loose text",
@@ -2849,6 +3060,27 @@ describe("WorkspaceService", () => {
     ).toEqual([main!.oid!]);
 
     fs.writeFileSync(path.join(workspace.path, "outside.txt"), "leave me\n");
+    const headBeforeStage = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: workspace.path,
+      encoding: "utf8",
+    }).trim();
+    await expect(
+      svc.handle("design.stage", { workspaceId: workspace.workspaceId }),
+    ).resolves.toEqual({ ok: true });
+    expect(
+      execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: workspace.path,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(headBeforeStage);
+    const staged = execFileSync(
+      "git",
+      ["diff", "--cached", "--name-only", "--no-renames"],
+      { cwd: workspace.path, encoding: "utf8" },
+    );
+    expect(staged).toContain("Zeros Design/checkout.html");
+    expect(staged).not.toContain("outside.txt");
+
     const saved = (await svc.handle("design.save", {
       workspaceId: workspace.workspaceId,
     })) as { sha: string; branch: string };
@@ -3044,14 +3276,9 @@ describe("WorkspaceService", () => {
       servers: [{ name: "docs", state: "needs-auth" }],
     });
     await expect(
-      svc.handle(
-        "mcp.gateway.beginAuth",
-        { server: "docs" },
-        { remote: true },
-      ),
+      svc.handle("mcp.gateway.beginAuth", { server: "docs" }, { remote: true }),
     ).resolves.toEqual({
-      authorizationUrl:
-        "https://identity.example.test/authorize?state=opaque",
+      authorizationUrl: "https://identity.example.test/authorize?state=opaque",
     });
     await expect(
       svc.handle(
@@ -3595,9 +3822,7 @@ describe("WorkspaceService", () => {
       patch: {
         scripts: {
           setup: "echo deps",
-          run_actions: [
-            { id: "dev", name: "Dev", command: "echo running" },
-          ],
+          run_actions: [{ id: "dev", name: "Dev", command: "echo running" }],
         },
       },
     });

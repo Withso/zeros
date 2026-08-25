@@ -25,6 +25,7 @@ import {
   bridgeWorkspaceDelete,
   bridgeWorkspaceLifecycleStatus,
   bridgeWorkspaceRestore,
+  bridgeWorkspaceSetMode,
   bridgeAttachmentWrite,
   bridgeContextGraphScaffold,
   bridgeContextGraphSetShared,
@@ -156,6 +157,31 @@ describe("context-graph transition queue budgets", () => {
 
     expect(seen.op).toBe(op);
     expect(seen.timeoutMs).toBe(60_000);
+  });
+});
+
+describe("workspace mode transition budget", () => {
+  it("keeps the request open while admitted workspace activity drains", async () => {
+    const seen: { op?: string; timeoutMs?: number } = {};
+    const bridge = {
+      request: async (msg: { op?: string }, timeoutMs?: number) => {
+        seen.op = msg.op;
+        seen.timeoutMs = timeoutMs;
+        return {
+          type: "WORKSPACE_RESPONSE",
+          op: "workspace.setMode",
+          result: { ok: true, mode: "design" },
+        };
+      },
+    } as unknown as RuntimeClient;
+
+    await bridgeWorkspaceSetMode(bridge, {
+      workspaceId: "ws1",
+      mode: "design",
+    });
+
+    expect(seen.op).toBe("workspace.setMode");
+    expect(seen.timeoutMs).toBe(0);
   });
 });
 

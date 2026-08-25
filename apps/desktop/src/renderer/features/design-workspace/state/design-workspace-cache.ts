@@ -18,6 +18,7 @@ import {
   designHistory,
   designRenameFrame,
   designSave,
+  designStage,
   designSetText,
   designSnapshot,
   designUpdateToken,
@@ -1278,6 +1279,10 @@ export async function saveDesigns(
   });
 }
 
+export async function stageDesigns(workspaceId: string): Promise<{ ok: true }> {
+  return runLocalDesignMutation(workspaceId, () => designStage(workspaceId));
+}
+
 export async function updateDesignTokenCached(
   workspaceId: string,
   input: {
@@ -1652,36 +1657,50 @@ async function adoptDesignStyleGeneration(
 
 export async function applyDesignHistoryCached(
   workspaceId: string,
-  frame: string,
+  frame: string | null,
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
   return runLocalDesignMutation(workspaceId, async () => {
-    const previousSourceVersion = currentFrameSourceVersion(workspaceId, frame);
-    const result = await designHistory(workspaceId, frame, direction);
-    const revisionKey = frameMutationKey(workspaceId, frame);
-    const previousRevision =
-      localFoundationRevisionByFrame.get(revisionKey)?.current;
-    recordLocalGeneration(
-      localFoundationRevisionByFrame,
-      revisionKey,
-      previousRevision,
-      result.result?.revision,
+    const previousSourceVersions = new Map(
+      (
+        designWorkspaceSnapshotCache.peekSnapshot(workspaceId).data?.frames ??
+        []
+      ).map((candidate) => [candidate.file, candidate.sourceVersion]),
     );
-    if (result.snapshot) {
-      recordLocalFrameGeneration(
-        workspaceId,
-        frame,
-        previousSourceVersion,
-        result.snapshot.frames.find((candidate) => candidate.file === frame)
-          ?.sourceVersion,
+    const result = await designHistory(workspaceId, frame, direction);
+    const historyFrame = result.result ? (result.historyFrame ?? frame) : null;
+    const revisionKey = historyFrame
+      ? frameMutationKey(workspaceId, historyFrame)
+      : null;
+    const previousRevision = revisionKey
+      ? localFoundationRevisionByFrame.get(revisionKey)?.current
+      : undefined;
+    if (revisionKey) {
+      recordLocalGeneration(
+        localFoundationRevisionByFrame,
+        revisionKey,
+        previousRevision,
+        result.result?.revision,
       );
+    }
+    if (result.snapshot) {
+      if (historyFrame) {
+        recordLocalFrameGeneration(
+          workspaceId,
+          historyFrame,
+          previousSourceVersions.get(historyFrame),
+          result.snapshot.frames.find(
+            (candidate) => candidate.file === historyFrame,
+          )?.sourceVersion,
+        );
+      }
       const snapshot = publishDesignWorkspaceSnapshot(
         workspaceId,
         result.snapshot,
       );
       settleFoundationMutation(
         workspaceId,
-        frame,
+        historyFrame,
         snapshot,
         result.result
           ? {

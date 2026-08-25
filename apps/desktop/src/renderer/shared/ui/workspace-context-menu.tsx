@@ -1,31 +1,17 @@
-import React, {
-  useRef,
-  type MouseEvent,
-  type ReactNode,
-} from "react";
+import React, { useRef, type MouseEvent, type ReactNode } from "react";
 import { Archive, Check, Code2, PenTool } from "lucide-react";
 
 import {
-  workspaceSetMode,
   workspaceSetStatus,
   type Workspace,
   type WorkspaceStatus,
 } from "@/renderer/platform/git";
-import {
-  commitWorkspaceMode,
-  notifyWorkspacesChanged,
-} from "@/renderer/state/use-projects";
-import {
-  beginWorkspaceModeSwitch,
-  finishWorkspaceModeSwitch,
-  usePendingWorkspaceMode,
-  useWorkspaceArchiving,
-} from "@/renderer/state/pending-workspaces";
-import { isLocalMainWorkspace } from "@/renderer/state/local-main-workspace";
+import { notifyWorkspacesChanged } from "@/renderer/state/use-projects";
 import { LIFECYCLE_STATUSES } from "@/renderer/shared/lib/workspace-status";
 import { getLastInputModality } from "@/renderer/shared/ui/overlay-focus";
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import { StatusIcon } from "@/renderer/shared/ui/primitives/status-icon";
+import { useWorkspaceModeSwitch } from "@/renderer/shared/ui/workspace-mode-header";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -72,9 +58,13 @@ export function WorkspaceContextMenu({
   children,
   placement = "pointer",
 }: WorkspaceContextMenuProps) {
-  const archiving = useWorkspaceArchiving(workspace.id);
-  const pendingMode = usePendingWorkspaceMode(workspace.id);
-  const switchingMode = pendingMode !== null;
+  const {
+    archiving,
+    canSwitch: showModeSwitch,
+    mode,
+    setMode,
+    switching: switchingMode,
+  } = useWorkspaceModeSwitch(workspace);
   const archiveInert = archiveDisabled || archiving || switchingMode;
   const setStatus = (status: WorkspaceStatus) => {
     if (status === workspace.status) return;
@@ -90,33 +80,7 @@ export function WorkspaceContextMenu({
   // Mode switch — one workspace, two modes. Hidden for the synthetic
   // local-main trunk (no managed row to flip) and while a lifecycle operation
   // owns the row (archive shares that signal).
-  const inDesignMode = (pendingMode ?? workspace.kind) === "design";
-  const showModeSwitch = !isLocalMainWorkspace(workspace);
-  const setMode = (mode: "code" | "design") => {
-    if (switchingMode || mode === workspace.kind) return;
-    const token = beginWorkspaceModeSwitch(workspace.id, mode);
-    void workspaceSetMode({ workspaceId: workspace.id, mode })
-      .then((result) => {
-        // Commit first, then remove the presentation overlay: every render
-        // observes either the requested kind or the confirmed identical kind.
-        commitWorkspaceMode({
-          workspaceId: workspace.id,
-          repoSlug: workspace.repoSlug,
-          mode: result.mode,
-          ...(result.snapshot ? { snapshot: result.snapshot } : {}),
-        });
-        finishWorkspaceModeSwitch(workspace.id, token);
-        notifyWorkspacesChanged(workspace.repoSlug);
-      })
-      .catch((err: unknown) => {
-        finishWorkspaceModeSwitch(workspace.id, token);
-        toast.error(
-          err instanceof Error
-            ? err.message
-            : `Couldn't switch to ${mode} mode`,
-        );
-      });
-  };
+  const inDesignMode = mode === "design";
 
   // Timestamp of the most recent menu close, used to eat the phantom click above.
   const menuClosedAtRef = useRef(0);

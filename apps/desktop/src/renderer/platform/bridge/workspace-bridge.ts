@@ -1833,13 +1833,17 @@ export async function bridgeWorkspaceSetMode(
   snapshot?: unknown;
 }> {
   // Entering Design ensures + commits its foundation; exit may materialize a
-  // legacy sparse cone. Either can take seconds, so use the lifecycle budget
-  // rather than the 10s default.
+  // legacy sparse cone. First entry also queues behind code-authority work
+  // admitted before the Design territory transition closed admission. Those
+  // operations own their own bounded lifecycle, so do not layer a response
+  // timer that clears the renderer's optimistic mode while the engine is still
+  // completing the requested transition. A transport disconnect still rejects
+  // the in-flight request through RuntimeClient's normal recovery path.
   return (await workspaceOp(
     bridge,
     "workspace.setMode",
     { ...args },
-    60_000,
+    0,
   )) as {
     ok: true;
     mode: "code" | "design";

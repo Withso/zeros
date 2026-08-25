@@ -50,6 +50,7 @@ describe("dbChangedKinds", () => {
     "design.node.html",
     "design.asset.insert",
     "design.token.update",
+    "design.stage",
     "design.save",
     "git.fetch",
     "git.reset",
@@ -88,6 +89,12 @@ describe("dbChangedKinds", () => {
     expect(
       dbChangedIncludesOriginator("workspace.reassignLocalOrganization"),
     ).toBe(true);
+  });
+
+  it("echoes Design staging to its originator so retained Code views refresh", () => {
+    expect(dbChangedKinds("design.stage")).toEqual(["workspaces"]);
+    expect(dbChangedIncludesOriginator("design.stage")).toBe(true);
+    expect(LONG_LIFECYCLE_OPS.has("design.stage")).toBe(false);
   });
 
   it.each([

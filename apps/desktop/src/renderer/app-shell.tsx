@@ -1221,20 +1221,18 @@ function MainShellBody({
                           : "pointer-events-none invisible",
                       ].join(" ")}
                     >
+                      {/* Design owns an always-present canvas/inspector pair;
+                          the persisted code Workbench collapse applies only to
+                          ordinary coding workspaces. */}
                       <DesignWorkspaceSidebar
                         workspace={entry.workspace}
                         folder={entry.folder}
                         surfaceActive={entryActive && !isHome}
-                        canvasCollapsed={workbenchCollapsed}
                       />
                       <DesignWorkspaceColumn
                         workspace={entry.workspace}
                         folder={entry.folder}
-                        surfaceActive={
-                          entryActive && !isHome && !workbenchCollapsed
-                        }
-                        collapsed={workbenchCollapsed}
-                        onToggleWorkbench={toggleWorkbench}
+                        surfaceActive={entryActive && !isHome}
                       />
                     </div>
                   );
@@ -1244,6 +1242,7 @@ function MainShellBody({
                     <ConversationPane
                       workbenchCollapsed={workbenchCollapsed}
                       onToggleWorkbench={toggleWorkbench}
+                      workspace={activeWorkspace}
                     />
                     <WorkbenchPane
                       onToggleWorkbench={toggleWorkbench}

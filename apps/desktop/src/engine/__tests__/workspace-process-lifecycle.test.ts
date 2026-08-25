@@ -472,6 +472,91 @@ describe("Design territory agent retirement", () => {
     }
   });
 
+  it("keeps first Design entry queued while an admitted agent startup settles", async () => {
+    vi.useFakeTimers();
+    const state = internals(
+      new ZerosEngine({
+        root: "/tmp/zeros-territory-agent-start",
+        port: 29_938,
+      }),
+    );
+    const workspace = {
+      id: "ws_agent_start",
+      path: "/tmp/zeros-territory-agent-start/worktree",
+      repoRoot: "/tmp/zeros-territory-agent-start/main",
+      archivedAt: null,
+    };
+    const getWorkspace = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockReturnValue(
+        workspace as ReturnType<typeof gitState.getWorkspaceById>,
+      );
+    vi.spyOn(state.workspace, "isWriteOp").mockReturnValue(false);
+    vi.spyOn(state.workspace, "lifecycleMutationWorkspaceId").mockReturnValue(
+      workspace.id,
+    );
+    vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
+    vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
+    vi.spyOn(
+      state,
+      "retireAllCodeAgentSessionsForTerritoryChange",
+    ).mockResolvedValue();
+    const admittedAgentStart = new Promise<void>((resolve) => {
+      setTimeout(resolve, 6_000);
+    });
+    state.workspaceProcessStarts.set(
+      workspace.id,
+      new Set([admittedAgentStart]),
+    );
+    state.globalDesignAuthorityStarts.add(admittedAgentStart);
+    vi.spyOn(state.workspace, "handle").mockImplementation(async () =>
+      state.withDesignTerritoryTransition(
+        [
+          {
+            workspaceId: workspace.id,
+            designDirectory: `${workspace.path}/Zeros Design`,
+          },
+        ],
+        async () => ({ ok: true, mode: "design" as const }),
+        { initiatedByDesignTransitionCaller: true },
+      ),
+    );
+    const local = client("local");
+
+    try {
+      const request = state.handleWorkspaceMessage(
+        {
+          type: "WORKSPACE_REQUEST",
+          id: "design-entry-during-agent-start",
+          source: "browser",
+          timestamp: 1,
+          op: "workspace.setMode",
+          params: { workspaceId: workspace.id, mode: "design" },
+        } as Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>,
+        local,
+      );
+      await vi.advanceTimersByTimeAsync(6_000);
+      await request;
+
+      expect(local.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "WORKSPACE_RESPONSE",
+          op: "workspace.setMode",
+          result: { ok: true, mode: "design" },
+        }),
+      );
+      expect(local.send).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "WORKSPACE_ERROR",
+          message: "A workspace operation is still settling.",
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+      getWorkspace.mockRestore();
+    }
+  });
+
   it("keeps a concurrent owner-registry transition behind first Design entry", async () => {
     const state = internals(
       new ZerosEngine({

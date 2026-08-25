@@ -109,6 +109,7 @@ import {
   bridgeDesignRenameFrame,
   bridgeDesignProvenance,
   bridgeDesignSave,
+  bridgeDesignStage,
   bridgeDesignSetText,
   bridgeDesignSetScreenshot,
   bridgeDesignSetRuntimeAudit,
@@ -485,7 +486,7 @@ export async function designApplyTransaction(
 
 export async function designHistory(
   workspaceId: string,
-  frame: string,
+  frame: string | null,
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
   return bridgeDesignHistory(
@@ -734,6 +735,10 @@ export async function designInsertAsset(
     workspaceId,
     input,
   );
+}
+
+export async function designStage(workspaceId: string): Promise<{ ok: true }> {
+  return bridgeDesignStage(requireBridge("stage designs"), workspaceId);
 }
 
 export async function designSave(

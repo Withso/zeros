@@ -29,6 +29,7 @@ describe("design workspace UI memory", () => {
         selectedNodeIds: ["valid", "valid", "\u0000invalid"],
         panel: "unknown",
         activeTheme: "Not valid!",
+        canvasBackground: "not a color",
         codeView: "yes",
         zoom: Number.POSITIVE_INFINITY,
         panX: Number.NaN,
@@ -42,6 +43,7 @@ describe("design workspace UI memory", () => {
       selectedNodeIds: [],
       panel: "layers",
       activeTheme: null,
+      canvasBackground: null,
       codeView: false,
       zoom: 0.25,
       panX: 64,
@@ -93,6 +95,8 @@ describe("design workspace UI memory", () => {
     const store = useDesignWorkspaceUiStore.getState();
     store.setSelection("workspace-a", "home.html", "hero-heading");
     store.setViewport("workspace-a", { zoom: 0.8, panX: 12, panY: 24 });
+    // check:ui ignore-next -- authored workspace canvas-color fixture.
+    store.setCanvasBackground("workspace-a", "rgb(51 102 153 / 0.5)");
     store.setPanel("workspace-b", "assets");
     store.setActiveTheme("workspace-b", "dark");
     store.setSelectedFrame("workspace-b", "pricing.html");
@@ -104,11 +108,13 @@ describe("design workspace UI memory", () => {
       zoom: 0.8,
       panX: 12,
       panY: 24,
+      canvasBackground: "#33669980", // check:ui ignore-line -- canonical authored canvas color.
     });
     expect(designWorkspaceView("workspace-b")).toMatchObject({
       selectedFrame: "pricing.html",
       panel: "assets",
       activeTheme: "dark",
+      canvasBackground: null,
     });
   });
 

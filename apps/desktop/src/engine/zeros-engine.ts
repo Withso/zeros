@@ -2708,7 +2708,6 @@ export class ZerosEngine {
     if (!options.initiatedByDesignTransitionCaller) {
       while (this.designTerritoryTransitionCallers.size > 0) {
         await this.waitForWorkspaceProcessStartSnapshot(
-          "design-mode-transition",
           [...this.designTerritoryTransitionCallers],
         );
       }
@@ -2753,7 +2752,6 @@ export class ZerosEngine {
         );
       }
       await this.waitForWorkspaceProcessStartSnapshot(
-        "registered-design-territory",
         admittedStarts,
       );
       await this.setup.stopAllAndProve();
@@ -3471,28 +3469,15 @@ export class ZerosEngine {
 
   /** Drain exactly the work admitted before a Design authority transition
    * acquired its process-start block. A live-set loop would include the
-   * transition's own promise once the outer workspace handler registers it. */
+   * transition's own promise once the outer workspace handler registers it.
+   * Each admitted operation owns its own bounded lifecycle; adding a shorter
+   * timeout here turned an ordinary queued handoff into a user-facing mode
+   * switch failure while the original operation was still completing. */
   private async waitForWorkspaceProcessStartSnapshot(
-    workspaceId: string,
     starts: readonly Promise<unknown>[],
   ): Promise<void> {
     if (starts.length === 0) return;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    const settled = await Promise.race([
-      Promise.allSettled(starts).then(() => true),
-      new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), 5_000);
-      }),
-    ]);
-    if (timer) clearTimeout(timer);
-    if (settled) return;
-    throw new GitError({
-      code: "GIT_COMMAND_FAILED",
-      message: "A workspace operation is still settling.",
-      remediation:
-        "The workspace remains live. Wait for Git, setup, runs, or agents to settle, then retry.",
-      context: { workspaceId, processCount: starts.length },
-    });
+    await Promise.allSettled(starts);
   }
 
   /** Start every `run_on_create` run action for a freshly-created workspace

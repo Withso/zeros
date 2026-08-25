@@ -174,6 +174,15 @@ export interface DesignFrameGeometry {
   z: number;
 }
 
+/** Exact engine-owned restore point for one deleted frame. Undo history keeps
+ * this bounded source record in memory; it is never accepted from a renderer
+ * or written outside the active Design directory. */
+export interface DesignFrameRestorePoint {
+  file: string;
+  source: string;
+  geometry: DesignFrameGeometry;
+}
+
 export interface DesignFrameSummary {
   file: string;
   title: string;
@@ -440,6 +449,8 @@ const TOKENS_SEED = `@layer reset {
 }
 `;
 
+/** New canvas frames keep one editable root for styles and future children,
+ * but never seed visible content the designer did not create. */
 const FRAME_SEED = (
   title: string,
   oid: string,
@@ -455,10 +466,7 @@ const FRAME_SEED = (
     <title>${escapeText(title)}</title>
   </head>
   <body>
-    <main data-oid="${oid}-main" style="min-height:100%; padding:var(--space-8); gap:var(--space-4);">
-      <h1 data-oid="${oid}-heading">${escapeText(title)}</h1>
-      <p data-oid="${oid}-copy" style="color:var(--fg2);">Shape this frame with the canvas and inspector.</p>
-    </main>
+    <main data-oid="${oid}-main" style="min-height:100%; padding:var(--space-8); gap:var(--space-4);"></main>
   </body>
 </html>
 `;
@@ -849,7 +857,7 @@ export async function createDesignFrame(
       x: geometry.x,
       y: geometry.y,
       z: geometry.z,
-      nodeCount: textSeed ? 1 : 3,
+      nodeCount: 1,
       modifiedAt: info.mtimeMs,
     };
   });
@@ -2630,18 +2638,211 @@ export async function duplicateDesignFrame(
   });
 }
 
+async function designFrameRestorePointUnlocked(
+  workspacePath: string,
+  frame: string,
+): Promise<{ target: string; restorePoint: DesignFrameRestorePoint }> {
+  const file = assertFrameFile(frame);
+  const { target } = await designFrameTarget(workspacePath, file);
+  const source = await readBoundedDesignFrameSource(workspacePath, file);
+  const meta = readFrameMeta(
+    parse(source, { sourceCodeLocationInfo: true }),
+    file,
+  );
+  const canvas = await readCanvas(workspacePath);
+  const geometry = canvas.frames[file] ?? {
+    x: 0,
+    y: 0,
+    w: meta.width,
+    h: meta.height,
+    z: Object.keys(canvas.frames).length,
+  };
+  return {
+    target,
+    restorePoint: { file, source, geometry: { ...geometry } },
+  };
+}
+
+function sameDesignFrameRestorePoint(
+  left: DesignFrameRestorePoint,
+  right: DesignFrameRestorePoint,
+): boolean {
+  return (
+    left.file === right.file &&
+    left.source === right.source &&
+    left.geometry.x === right.geometry.x &&
+    left.geometry.y === right.geometry.y &&
+    left.geometry.w === right.geometry.w &&
+    left.geometry.h === right.geometry.h &&
+    left.geometry.z === right.geometry.z
+  );
+}
+
+/** Capture the byte-exact source and canvas geometry needed by structural
+ * history. This intentionally avoids render composition and OID healing. */
+export async function captureDesignFrameRestorePoint(
+  workspacePath: string,
+  frame: string,
+): Promise<DesignFrameRestorePoint> {
+  return withDocumentWrite(
+    workspacePath,
+    async () =>
+      (await designFrameRestorePointUnlocked(workspacePath, frame))
+        .restorePoint,
+  );
+}
+
 export async function deleteDesignFrame(
   workspacePath: string,
   frame: string,
-): Promise<{ file: string }> {
+  expected?: DesignFrameRestorePoint,
+): Promise<DesignFrameRestorePoint> {
   const file = assertFrameFile(frame);
   return withDocumentWrite(workspacePath, async () => {
-    const { target } = await designFrameTarget(workspacePath, file);
+    const { target, restorePoint } = await designFrameRestorePointUnlocked(
+      workspacePath,
+      file,
+    );
+    if (expected && !sameDesignFrameRestorePoint(restorePoint, expected)) {
+      throw new Error(`Design frame changed after this history entry: ${file}`);
+    }
     const canvas = await readCanvas(workspacePath);
     await unlink(target);
     delete canvas.frames[file];
-    await writeCanvas(workspacePath, canvas);
-    return { file };
+    try {
+      await writeCanvas(workspacePath, canvas);
+    } catch (error) {
+      // Keep deletion atomic from the designer's perspective. The source was
+      // already validated as a safe regular frame before unlinking it.
+      await writeFile(target, restorePoint.source, {
+        encoding: "utf8",
+        flag: "wx",
+      }).catch(() => undefined);
+      throw error;
+    }
+    return restorePoint;
+  });
+}
+
+/** Restore an exact frame deletion without generating new identities or
+ * changing its source formatting. This is the inverse used by Command-Z. */
+export async function restoreDesignFrame(
+  workspacePath: string,
+  restorePoint: DesignFrameRestorePoint,
+): Promise<DesignFrameSummary> {
+  const file = assertFrameFile(restorePoint.file);
+  if (
+    typeof restorePoint.source !== "string" ||
+    utf8Bytes(restorePoint.source) > MAX_DESIGN_TEXT_BYTES
+  ) {
+    throw new Error(`Design frame restore source is invalid: ${file}`);
+  }
+  return withDocumentWrite(workspacePath, async () => {
+    await initializeDesignDocumentUnlocked(workspacePath);
+    const directory = designDirectory(workspacePath);
+    const target = path.join(directory, file);
+    await assertSafeDesignWriteTarget(workspacePath, target);
+    if (existsSync(target)) {
+      throw new Error(`Design frame already exists: ${file}`);
+    }
+    const document = parse(restorePoint.source, {
+      sourceCodeLocationInfo: true,
+    });
+    const meta = readFrameMeta(document, file);
+    const canvas = await readCanvas(workspacePath);
+    if (
+      !Object.prototype.hasOwnProperty.call(canvas.frames, file) &&
+      Object.keys(canvas.frames).length >= MAX_FRAME_COUNT
+    ) {
+      throw new Error(`Design document exceeds ${MAX_FRAME_COUNT} frames.`);
+    }
+    const geometry = normalizeGeometry(restorePoint.geometry, {
+      x: 0,
+      y: 0,
+      w: meta.width,
+      h: meta.height,
+      z: Object.keys(canvas.frames).length,
+    });
+    await writeFile(target, restorePoint.source, {
+      encoding: "utf8",
+      flag: "wx",
+    });
+    canvas.frames[file] = geometry;
+    try {
+      await writeCanvas(workspacePath, canvas);
+    } catch (error) {
+      await unlink(target).catch(() => undefined);
+      throw error;
+    }
+    const info = await stat(target);
+    return {
+      file,
+      title: meta.title,
+      kind: meta.kind,
+      width: geometry.w,
+      height: geometry.h,
+      x: geometry.x,
+      y: geometry.y,
+      z: geometry.z,
+      nodeCount: designNodeRecords(document).length,
+      modifiedAt: info.mtimeMs,
+    };
+  });
+}
+
+/** Replace one present frame with an exact prior/later history state. The
+ * expected state makes stale undo/redo fail closed instead of overwriting an
+ * out-of-band source change. */
+export async function replaceDesignFrameFromHistory(
+  workspacePath: string,
+  expected: DesignFrameRestorePoint,
+  replacement: DesignFrameRestorePoint,
+): Promise<DesignFrameSummary> {
+  const file = assertFrameFile(expected.file);
+  if (assertFrameFile(replacement.file) !== file) {
+    throw new Error("Design frame history cannot change file identity.");
+  }
+  if (
+    typeof replacement.source !== "string" ||
+    utf8Bytes(replacement.source) > MAX_DESIGN_TEXT_BYTES
+  ) {
+    throw new Error(`Design frame restore source is invalid: ${file}`);
+  }
+  return withDocumentWrite(workspacePath, async () => {
+    const { target, restorePoint: current } =
+      await designFrameRestorePointUnlocked(workspacePath, file);
+    if (!sameDesignFrameRestorePoint(current, expected)) {
+      throw new Error(`Design frame changed after this history entry: ${file}`);
+    }
+    const document = parse(replacement.source, {
+      sourceCodeLocationInfo: true,
+    });
+    const meta = readFrameMeta(document, file);
+    const geometry = normalizeGeometry(replacement.geometry, current.geometry);
+    const canvas = await readCanvas(workspacePath);
+    await atomicWriteDesignSource(target, replacement.source);
+    canvas.frames[file] = geometry;
+    try {
+      await writeCanvas(workspacePath, canvas);
+    } catch (error) {
+      await atomicWriteDesignSource(target, current.source).catch(
+        () => undefined,
+      );
+      throw error;
+    }
+    const info = await stat(target);
+    return {
+      file,
+      title: meta.title,
+      kind: meta.kind,
+      width: geometry.w,
+      height: geometry.h,
+      x: geometry.x,
+      y: geometry.y,
+      z: geometry.z,
+      nodeCount: designNodeRecords(document).length,
+      modifiedAt: info.mtimeMs,
+    };
   });
 }
 
