@@ -12,7 +12,34 @@ const verification = {
   email: "person@example.com",
   expiresAt: "2099-01-15T09:00:00.000Z",
   code: "123456",
+  createdAt: "2027-01-15T07:59:59.900Z",
 };
+
+const eventEvidence = [
+  {
+    id: "event_oauth_succeeded",
+    event: "authentication.oauth_succeeded",
+    createdAt: "2027-01-15T07:59:59.910Z",
+    context: { client_id: "client_desktop_example" },
+    data: {
+      email: verification.email,
+      status: "succeeded",
+      type: "oauth",
+      userId: verification.userId,
+    },
+  },
+  {
+    id: "event_verification_created",
+    event: "email_verification.created",
+    createdAt: "2027-01-15T07:59:59.920Z",
+    context: { client_id: "client_desktop_example" },
+    data: {
+      id: verification.id,
+      email: verification.email,
+      userId: verification.userId,
+    },
+  },
+];
 
 const authentication = {
   accessToken: "signed-desktop-access-token",
@@ -34,6 +61,7 @@ function setup(
   const getEmailVerification = vi.fn(async () => verification);
   const getUserIdentities = vi.fn(async () => identities);
   const authenticateWithEmailVerification = vi.fn(async () => authentication);
+  const listEvents = vi.fn(async () => ({ data: eventEvidence }));
   const verifyDesktopBearer = vi.fn(async () => ({
     subject: verification.userId,
     sessionId: "session_01EXAMPLE",
@@ -46,14 +74,17 @@ function setup(
         getUserIdentities,
         authenticateWithEmailVerification,
       },
+      events: { listEvents },
       verifyDesktopBearer,
       revokeSession,
       now: () => Date.parse("2027-01-15T08:00:00.000Z"),
+      wait: vi.fn(async () => {}),
       desktopClientId: "client_desktop_example",
     },
     getEmailVerification,
     getUserIdentities,
     authenticateWithEmailVerification,
+    listEvents,
     verifyDesktopBearer,
     revokeSession,
   };
@@ -65,13 +96,36 @@ const challenge = {
 };
 
 describe("WorkOS GitHub verification completion", () => {
-  it("checks the challenged user's GitHub identity before using the confidential grant", async () => {
+  it("allows WorkOS to link the GitHub identity while completing verification", async () => {
+    const harness = setup([]);
+    harness.getUserIdentities
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([{ type: "OAuth", provider: "GitHubOAuth" }]);
+
+    await expect(
+      completeWorkOSGitHubVerification(challenge, harness.deps),
+    ).resolves.toEqual(authentication);
+    expect(
+      harness.authenticateWithEmailVerification.mock.invocationCallOrder[0],
+    ).toBeLessThan(harness.getUserIdentities.mock.invocationCallOrder[0] ?? 0);
+    expect(harness.getUserIdentities).toHaveBeenCalledTimes(2);
+    expect(harness.deps.wait).toHaveBeenCalledOnce();
+  });
+
+  it("proves the OAuth challenge before the grant and checks the linked GitHub identity after it", async () => {
     const harness = setup();
 
     await expect(
       completeWorkOSGitHubVerification(challenge, harness.deps),
     ).resolves.toEqual(authentication);
     expect(harness.getEmailVerification).toHaveBeenCalledWith(verification.id);
+    expect(harness.listEvents).toHaveBeenCalledWith({
+      events: ["authentication.oauth_succeeded", "email_verification.created"],
+      rangeStart: "2027-01-15T07:59:49.900Z",
+      rangeEnd: "2027-01-15T08:00:09.900Z",
+      limit: 100,
+      order: "desc",
+    });
     expect(harness.getUserIdentities).toHaveBeenCalledWith(verification.userId);
     expect(harness.authenticateWithEmailVerification).toHaveBeenCalledWith({
       clientId: "client_desktop_example",
@@ -83,8 +137,64 @@ describe("WorkOS GitHub verification completion", () => {
     );
   });
 
-  it("rejects a challenge whose user has no GitHub identity before authentication", async () => {
+  it("revokes a completed session when WorkOS did not link a GitHub identity", async () => {
     const harness = setup([{ type: "OAuth", provider: "GoogleOAuth" }]);
+
+    await expect(
+      completeWorkOSGitHubVerification(challenge, harness.deps),
+    ).rejects.toThrowError(
+      expect.objectContaining<Partial<WorkOSDesktopVerificationError>>({
+        code: "identity_rejected",
+      }),
+    );
+    expect(harness.authenticateWithEmailVerification).toHaveBeenCalledOnce();
+    expect(harness.revokeSession).toHaveBeenCalledWith("session_01EXAMPLE");
+  });
+
+  it("rejects a challenge without matching OAuth event evidence before authentication", async () => {
+    const harness = setup();
+    harness.listEvents.mockResolvedValue({ data: [] });
+
+    await expect(
+      completeWorkOSGitHubVerification(challenge, harness.deps),
+    ).rejects.toThrowError(
+      expect.objectContaining<Partial<WorkOSDesktopVerificationError>>({
+        code: "identity_rejected",
+      }),
+    );
+    expect(harness.listEvents).toHaveBeenCalledTimes(3);
+    expect(harness.deps.wait).toHaveBeenCalledTimes(2);
+    expect(harness.authenticateWithEmailVerification).not.toHaveBeenCalled();
+  });
+
+  it("rejects OAuth evidence issued for another WorkOS application", async () => {
+    const harness = setup();
+    harness.listEvents.mockResolvedValue({
+      data: eventEvidence.map((event) => ({
+        ...event,
+        context: { client_id: "client_other_application" },
+      })),
+    });
+
+    await expect(
+      completeWorkOSGitHubVerification(challenge, harness.deps),
+    ).rejects.toThrowError(
+      expect.objectContaining<Partial<WorkOSDesktopVerificationError>>({
+        code: "identity_rejected",
+      }),
+    );
+    expect(harness.authenticateWithEmailVerification).not.toHaveBeenCalled();
+  });
+
+  it("rejects unrelated OAuth evidence outside the challenge event pair", async () => {
+    const harness = setup();
+    harness.listEvents.mockResolvedValue({
+      data: eventEvidence.map((event) =>
+        event.event === "authentication.oauth_succeeded"
+          ? { ...event, createdAt: "2027-01-15T08:00:08.900Z" }
+          : event,
+      ),
+    });
 
     await expect(
       completeWorkOSGitHubVerification(challenge, harness.deps),
@@ -111,6 +221,7 @@ describe("WorkOS GitHub verification completion", () => {
       }),
     );
     expect(harness.getUserIdentities).not.toHaveBeenCalled();
+    expect(harness.listEvents).not.toHaveBeenCalled();
     expect(harness.authenticateWithEmailVerification).not.toHaveBeenCalled();
   });
 
@@ -147,6 +258,21 @@ describe("WorkOS GitHub verification completion", () => {
     );
     expect(harness.revokeSession).toHaveBeenCalledWith("session_01EXAMPLE");
   });
+
+  it("accepts a verified GitHub result when WorkOS omits the optional authentication method", async () => {
+    const harness = setup();
+    harness.authenticateWithEmailVerification.mockResolvedValue({
+      ...authentication,
+      authenticationMethod: undefined,
+    });
+
+    await expect(
+      completeWorkOSGitHubVerification(challenge, harness.deps),
+    ).resolves.toEqual({
+      ...authentication,
+      authenticationMethod: null,
+    });
+  });
 });
 
 describe("RailwayWorkOSProvider browser exchange", () => {
@@ -172,6 +298,7 @@ describe("RailwayWorkOSProvider browser exchange", () => {
     });
     const authenticateWithEmailVerification = vi.fn(async () => ({
       ...authentication,
+      authenticationMethod: undefined,
       accessToken,
       sealedSession: "sealed-browser-session",
     }));
@@ -190,6 +317,14 @@ describe("RailwayWorkOSProvider browser exchange", () => {
       ]),
       loadSealedSession: vi.fn(() => ({ authenticate })),
     };
+    const events = {
+      listEvents: vi.fn(async () => ({
+        data: eventEvidence.map((event) => ({
+          ...event,
+          context: { client_id: "client_web_example" },
+        })),
+      })),
+    };
     const provider = new RailwayWorkOSProvider(
       {
         provider: "workos",
@@ -206,7 +341,7 @@ describe("RailwayWorkOSProvider browser exchange", () => {
         webhookSecret: "whsec_test_example",
       },
     );
-    Reflect.set(provider, "client", { userManagement });
+    Reflect.set(provider, "client", { userManagement, events });
 
     await expect(
       provider.exchange({
