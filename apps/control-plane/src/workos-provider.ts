@@ -69,15 +69,34 @@ export interface WorkOSDesktopProvider {
   revokeSession(sessionId: string): Promise<void>;
 }
 
-/** Adopt a provider's own email verification as WorkOS verification.
- *
- *  WorkOS auto-verifies Google, Apple, Magic Auth and SSO, but NOT GitHub, so a
- *  GitHub user is created unverified and cannot authenticate until it proves
- *  ownership by one-time code. GitHub does verify addresses before reporting
- *  them, so Zeros elects to trust that assertion exactly as WorkOS already
- *  trusts Google's — see docs/workos-authentication-migration.md. */
-export interface WorkOSEmailAdoptionProvider {
-  adoptProviderVerifiedEmail(userId: string): Promise<void>;
+export interface WorkOSDesktopVerificationChallenge {
+  pendingAuthenticationToken: string;
+  emailVerificationId: string;
+}
+
+export interface WorkOSDesktopVerificationSession {
+  accessToken: string;
+  refreshToken: string;
+  authenticationMethod: string | null;
+  user: WorkOSUser;
+}
+
+export interface WorkOSDesktopVerificationProvider {
+  completeGitHubVerification(
+    challenge: WorkOSDesktopVerificationChallenge,
+  ): Promise<WorkOSDesktopVerificationSession>;
+}
+
+export class WorkOSDesktopVerificationError extends Error {
+  constructor(
+    public readonly code:
+      | "challenge_rejected"
+      | "identity_rejected"
+      | "contract_rejected",
+  ) {
+    super(code);
+    this.name = "WorkOSDesktopVerificationError";
+  }
 }
 
 export interface WorkOSDesktopAuthorizationProvider {
@@ -90,6 +109,239 @@ export interface WorkOSDesktopAuthorizationProvider {
 }
 
 type WorkOSAuthConfig = Extract<AuthBackendConfig, { provider: "workos" }>;
+
+interface GitHubIdentityUserManagement {
+  getEmailVerification(emailVerificationId: string): Promise<{
+    id: string;
+    userId: string;
+    email: string;
+    expiresAt: string;
+    code: string;
+  }>;
+  getUserIdentities(
+    userId: string,
+  ): Promise<Array<{ type: string; provider: string }>>;
+}
+
+interface GitHubVerificationUserManagement extends GitHubIdentityUserManagement {
+  authenticateWithEmailVerification(options: {
+    clientId: string;
+    code: string;
+    pendingAuthenticationToken: string;
+    session?: {
+      sealSession: true;
+      cookiePassword: string;
+    };
+  }): Promise<{
+    accessToken: string;
+    refreshToken: string;
+    authenticationMethod?: string;
+    sealedSession?: string;
+    user: {
+      id: string;
+      email: string;
+      emailVerified: boolean;
+      name: string | null;
+    };
+  }>;
+}
+
+interface GitHubVerificationDependencies {
+  userManagement: GitHubVerificationUserManagement;
+  desktopClientId: string;
+  verifyDesktopBearer(accessToken: string): Promise<{
+    subject: string;
+    sessionId: string;
+  }>;
+  revokeSession(sessionId: string): Promise<void>;
+  now?: () => number;
+}
+
+type GitHubVerification = Awaited<
+  ReturnType<GitHubIdentityUserManagement["getEmailVerification"]>
+>;
+
+function bounded(value: unknown, max: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= max;
+}
+
+function normalizedEmail(value: string): string {
+  return value.trim().toLocaleLowerCase("en-US");
+}
+
+function isProviderRefusal(error: unknown): boolean {
+  const status = (error as { status?: unknown })?.status;
+  return (
+    typeof status === "number" &&
+    status >= 400 &&
+    status < 500 &&
+    status !== 429
+  );
+}
+
+function emailVerificationChallengeFromError(
+  error: unknown,
+): WorkOSDesktopVerificationChallenge | null {
+  const candidate = error as {
+    status?: unknown;
+    code?: unknown;
+    pendingAuthenticationToken?: unknown;
+    rawData?: unknown;
+  };
+  if (
+    candidate.status !== 400 ||
+    !candidate.rawData ||
+    typeof candidate.rawData !== "object"
+  ) {
+    return null;
+  }
+  const raw = candidate.rawData as Record<string, unknown>;
+  if (
+    candidate.code !== "email_verification_required" ||
+    raw.code !== "email_verification_required" ||
+    !bounded(raw.pending_authentication_token, 8_192) ||
+    !bounded(raw.email_verification_id, 512) ||
+    (candidate.pendingAuthenticationToken !== undefined &&
+      candidate.pendingAuthenticationToken !== raw.pending_authentication_token)
+  ) {
+    return null;
+  }
+  return {
+    pendingAuthenticationToken: raw.pending_authentication_token,
+    emailVerificationId: raw.email_verification_id,
+  };
+}
+
+async function resolveWorkOSGitHubVerification(
+  challenge: WorkOSDesktopVerificationChallenge,
+  deps: {
+    userManagement: GitHubIdentityUserManagement;
+    now?: () => number;
+  },
+): Promise<GitHubVerification> {
+  if (
+    !bounded(challenge.pendingAuthenticationToken, 8_192) ||
+    !bounded(challenge.emailVerificationId, 512)
+  ) {
+    throw new WorkOSDesktopVerificationError("challenge_rejected");
+  }
+
+  let verification: GitHubVerification;
+  try {
+    verification = await deps.userManagement.getEmailVerification(
+      challenge.emailVerificationId,
+    );
+  } catch (error) {
+    if (isProviderRefusal(error)) {
+      throw new WorkOSDesktopVerificationError("challenge_rejected");
+    }
+    throw error;
+  }
+  const expiresAt = Date.parse(verification.expiresAt);
+  if (
+    verification.id !== challenge.emailVerificationId ||
+    !bounded(verification.userId, 512) ||
+    !bounded(verification.email, 1_024) ||
+    !bounded(verification.code, 128) ||
+    !Number.isFinite(expiresAt) ||
+    expiresAt <= (deps.now ?? Date.now)()
+  ) {
+    throw new WorkOSDesktopVerificationError("challenge_rejected");
+  }
+
+  let identities: Array<{ type: string; provider: string }>;
+  try {
+    identities = await deps.userManagement.getUserIdentities(
+      verification.userId,
+    );
+  } catch (error) {
+    if (isProviderRefusal(error)) {
+      throw new WorkOSDesktopVerificationError("identity_rejected");
+    }
+    throw error;
+  }
+  if (
+    !identities.some(
+      (identity) =>
+        identity.type === "OAuth" && identity.provider === "GitHubOAuth",
+    )
+  ) {
+    throw new WorkOSDesktopVerificationError("identity_rejected");
+  }
+  return verification;
+}
+
+/** Complete the challenge WorkOS returned only after proving that the exact
+ * challenged user owns a GitHub OAuth identity. The pending token and code are
+ * still checked together by WorkOS; no client can ask this boundary to mark an
+ * arbitrary user or email verified. */
+export async function completeWorkOSGitHubVerification(
+  challenge: WorkOSDesktopVerificationChallenge,
+  deps: GitHubVerificationDependencies,
+): Promise<WorkOSDesktopVerificationSession> {
+  const verification = await resolveWorkOSGitHubVerification(challenge, deps);
+
+  let authentication: Awaited<
+    ReturnType<
+      GitHubVerificationUserManagement["authenticateWithEmailVerification"]
+    >
+  >;
+  try {
+    authentication =
+      await deps.userManagement.authenticateWithEmailVerification({
+        clientId: deps.desktopClientId,
+        code: verification.code,
+        pendingAuthenticationToken: challenge.pendingAuthenticationToken,
+      });
+  } catch (error) {
+    if (isProviderRefusal(error)) {
+      throw new WorkOSDesktopVerificationError("challenge_rejected");
+    }
+    throw error;
+  }
+
+  const responseContractValid =
+    bounded(authentication.accessToken, 64 * 1_024) &&
+    bounded(authentication.refreshToken, 64 * 1_024) &&
+    authentication.user?.id === verification.userId &&
+    authentication.user.emailVerified === true &&
+    bounded(authentication.user.email, 1_024) &&
+    normalizedEmail(authentication.user.email) ===
+      normalizedEmail(verification.email) &&
+    (authentication.user.name === null ||
+      bounded(authentication.user.name, 1_024));
+  let bearer: { subject: string; sessionId: string } | null = null;
+  if (responseContractValid) {
+    try {
+      bearer = await deps.verifyDesktopBearer(authentication.accessToken);
+    } catch {
+      bearer = null;
+    }
+  }
+  if (
+    !responseContractValid ||
+    !bearer ||
+    bearer.subject !== verification.userId ||
+    authentication.authenticationMethod !== "GitHubOAuth"
+  ) {
+    if (bearer?.sessionId) {
+      await deps.revokeSession(bearer.sessionId).catch(() => undefined);
+    }
+    throw new WorkOSDesktopVerificationError("contract_rejected");
+  }
+
+  return {
+    accessToken: authentication.accessToken,
+    refreshToken: authentication.refreshToken,
+    authenticationMethod: authentication.authenticationMethod,
+    user: {
+      id: authentication.user.id,
+      email: authentication.user.email,
+      emailVerified: true,
+      name: authentication.user.name,
+    },
+  };
+}
 
 function accessTokenExpiresAt(accessToken: string): number {
   const claims = decodeJwt(accessToken);
@@ -104,7 +356,7 @@ export class RailwayWorkOSProvider
     WorkOSBrowserProvider,
     WorkOSDesktopProvider,
     WorkOSDesktopAuthorizationProvider,
-    WorkOSEmailAdoptionProvider
+    WorkOSDesktopVerificationProvider
 {
   private readonly client: WorkOS;
   private readonly desktopJwks: ReturnType<typeof createRemoteJWKSet>;
@@ -192,18 +444,100 @@ export class RailwayWorkOSProvider
     };
   }
 
+  private async completeBrowserGitHubVerification(
+    challenge: WorkOSDesktopVerificationChallenge,
+  ): Promise<WorkOSExchange> {
+    const verification = await resolveWorkOSGitHubVerification(challenge, {
+      userManagement: {
+        getEmailVerification: (id) =>
+          this.client.userManagement.getEmailVerification(id),
+        getUserIdentities: (userId) =>
+          this.client.userManagement.getUserIdentities(userId),
+      },
+    });
+
+    let response: Awaited<
+      ReturnType<
+        typeof this.client.userManagement.authenticateWithEmailVerification
+      >
+    >;
+    try {
+      response =
+        await this.client.userManagement.authenticateWithEmailVerification({
+          clientId: this.auth.webClientId,
+          code: verification.code,
+          pendingAuthenticationToken: challenge.pendingAuthenticationToken,
+          session: {
+            sealSession: true,
+            cookiePassword: this.backend.cookiePassword,
+          },
+        });
+    } catch (error) {
+      if (isProviderRefusal(error)) {
+        throw new WorkOSDesktopVerificationError("challenge_rejected");
+      }
+      throw error;
+    }
+
+    const responseContractValid =
+      bounded(response.accessToken, 64 * 1_024) &&
+      bounded(response.refreshToken, 64 * 1_024) &&
+      bounded(response.sealedSession, 64 * 1_024) &&
+      response.user?.id === verification.userId &&
+      response.user.emailVerified === true &&
+      bounded(response.user.email, 1_024) &&
+      normalizedEmail(response.user.email) ===
+        normalizedEmail(verification.email) &&
+      (response.user.name === null || bounded(response.user.name, 1_024));
+    let exchange: WorkOSExchange | null = null;
+    if (responseContractValid && response.sealedSession) {
+      try {
+        exchange = await this.verifiedExchange(
+          response.sealedSession,
+          response.user,
+        );
+      } catch {
+        exchange = null;
+      }
+    }
+    if (
+      !responseContractValid ||
+      !exchange ||
+      exchange.user.id !== verification.userId ||
+      exchange.user.emailVerified !== true ||
+      normalizedEmail(exchange.user.email) !==
+        normalizedEmail(verification.email) ||
+      response.authenticationMethod !== "GitHubOAuth"
+    ) {
+      if (exchange?.sessionId) {
+        await this.revokeSession(exchange.sessionId).catch(() => undefined);
+      }
+      throw new WorkOSDesktopVerificationError("contract_rejected");
+    }
+    return exchange;
+  }
+
   async exchange(options: {
     code: string;
     codeVerifier: string;
   }): Promise<WorkOSExchange> {
-    const response = await this.client.userManagement.authenticateWithCode({
-      code: options.code,
-      codeVerifier: options.codeVerifier,
-      session: {
-        sealSession: true,
-        cookiePassword: this.backend.cookiePassword,
-      },
-    });
+    let response: Awaited<
+      ReturnType<typeof this.client.userManagement.authenticateWithCode>
+    >;
+    try {
+      response = await this.client.userManagement.authenticateWithCode({
+        code: options.code,
+        codeVerifier: options.codeVerifier,
+        session: {
+          sealSession: true,
+          cookiePassword: this.backend.cookiePassword,
+        },
+      });
+    } catch (error) {
+      const challenge = emailVerificationChallengeFromError(error);
+      if (!challenge) throw error;
+      return this.completeBrowserGitHubVerification(challenge);
+    }
     if (!response.sealedSession) {
       throw new Error("WorkOS did not return a sealed session");
     }
@@ -324,12 +658,22 @@ export class RailwayWorkOSProvider
     await this.client.userManagement.revokeSession({ sessionId });
   }
 
-  /** Idempotent by construction: the field is only ever set to `true`, so a
-   *  replayed webhook is a redundant write rather than a state change. */
-  async adoptProviderVerifiedEmail(userId: string): Promise<void> {
-    await this.client.userManagement.updateUser({
-      userId,
-      emailVerified: true,
+  async completeGitHubVerification(
+    challenge: WorkOSDesktopVerificationChallenge,
+  ): Promise<WorkOSDesktopVerificationSession> {
+    return completeWorkOSGitHubVerification(challenge, {
+      desktopClientId: this.auth.desktopClientId,
+      userManagement: {
+        getEmailVerification: (id) =>
+          this.client.userManagement.getEmailVerification(id),
+        getUserIdentities: (userId) =>
+          this.client.userManagement.getUserIdentities(userId),
+        authenticateWithEmailVerification: (options) =>
+          this.client.userManagement.authenticateWithEmailVerification(options),
+      },
+      verifyDesktopBearer: (accessToken) =>
+        this.verifyDesktopBearer(accessToken),
+      revokeSession: (sessionId) => this.revokeSession(sessionId),
     });
   }
 }

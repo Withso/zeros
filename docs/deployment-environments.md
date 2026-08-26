@@ -246,7 +246,9 @@ For each WorkOS environment, register the exact channel URL
 and `user.deleted`. Zeros renders its own provider and callback pages and names
 Google or GitHub directly; WorkOS's standard authorization endpoint is
 sufficient. A paid custom WorkOS authentication domain is optional and not part
-of this rollout.
+of this rollout. Do not subscribe to `user.created`: first-time GitHub email
+verification is continued synchronously by the bounded Railway auth route, and
+the webhook handler deliberately ignores creation events.
 A self-hosted template can use platform-provided HTTPS domains instead of
 buying domains. Keep the frontend `APP_ORIGIN` separate from the API origin so
 server-only session responses are never same-origin browser endpoints; two

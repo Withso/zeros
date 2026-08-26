@@ -164,6 +164,11 @@ authorization code, strips it from browser history, and opens only the
 allow-listed exact-channel scheme. Its no-store/no-referrer/nonce CSP is
 preserved by the global host middleware.
 
+If WorkOS returns a first-time GitHub email-verification challenge during the
+code exchange, Electron continues it directly against the channel Railway API.
+Pages never receives the pending authentication token, verification ID, code,
+API key, or completed session.
+
 Because the provider is named directly, WorkOS renders no AuthKit chooser. Its
 standard authorization endpoint is only a redirect hop before Google or GitHub.
 A paid custom WorkOS domain is optional and is not a release requirement.

@@ -4,6 +4,7 @@ export const AUTH_CLAIM_NAMESPACE = "https://zeros.build/";
 
 const WORKOS_API_ORIGIN = "https://api.workos.com";
 const AUTHENTICATE_PATH = "/user_management/authenticate";
+const GITHUB_VERIFICATION_PATH = "/auth/desktop/complete-github-verification";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_REFRESH_ATTEMPTS = 3;
 const REFRESH_RETRY_BASE_DELAY_MS = 250;
@@ -78,6 +79,11 @@ export interface WorkOSDesktopSession {
   authenticationMethod: WorkOSAuthenticationMethod;
 }
 
+export interface WorkOSEmailVerificationChallenge {
+  pendingAuthenticationToken: string;
+  emailVerificationId: string;
+}
+
 export type WorkOSDesktopRefreshOutcome =
   | { status: "active"; session: WorkOSDesktopSession }
   | { status: "terminal"; reason: "invalid_grant" }
@@ -101,6 +107,9 @@ export class WorkOSDesktopClientError extends Error {
      *  API named one. Kept separate from `code` so callers still branch on our
      *  stable taxonomy while reporting the provider's actual reason. */
     public readonly providerCode: string | null = null,
+    /** Continuation values returned by WorkOS after it has consumed the
+     * authorization code and moved this sign-in into email verification. */
+    public readonly emailVerification: WorkOSEmailVerificationChallenge | null = null,
   ) {
     super(message);
     this.name = "WorkOSDesktopClientError";
@@ -244,6 +253,8 @@ export interface WorkOSDesktopClientOptions {
     accessToken: string,
   ) => Promise<WorkOSDesktopTokenClaims>;
   apiOrigin?: string;
+  /** Railway origin used only for the confidential GitHub verification grant. */
+  controlPlaneOrigin?: string;
   timeoutMs?: number;
   sleep?: (delayMs: number) => Promise<void>;
 }
@@ -266,6 +277,7 @@ function retryAfterMs(response: Response): number | null {
 export class WorkOSDesktopClient {
   private readonly fetchImpl: typeof fetch;
   private readonly apiOrigin: string;
+  private readonly controlPlaneOrigin: string | null;
   private readonly timeoutMs: number;
   private readonly sleepImpl: (delayMs: number) => Promise<void>;
   private readonly verifyToken: (
@@ -277,6 +289,9 @@ export class WorkOSDesktopClient {
     this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.sleepImpl = options.sleep ?? sleep;
     this.apiOrigin = new URL(options.apiOrigin ?? WORKOS_API_ORIGIN).origin;
+    this.controlPlaneOrigin = options.controlPlaneOrigin
+      ? new URL(options.controlPlaneOrigin).origin
+      : null;
     this.verifyToken =
       options.verifyAccessToken ?? this.createRemoteVerifier(options.config);
   }
@@ -426,14 +441,79 @@ export class WorkOSDesktopClient {
       // one opaque reason is what makes a nameable provider state look like an
       // unexplained sign-in failure, so carry the code through.
       const refusal = boundedString(result.body?.code, 128);
+      const pendingAuthenticationToken = boundedString(
+        result.body?.pending_authentication_token,
+      );
+      const emailVerificationId = boundedString(
+        result.body?.email_verification_id,
+        512,
+      );
+      const emailVerification =
+        refusal === "email_verification_required" &&
+        pendingAuthenticationToken &&
+        emailVerificationId
+          ? { pendingAuthenticationToken, emailVerificationId }
+          : null;
       throw new WorkOSDesktopClientError(
         "exchange_rejected",
         "WorkOS did not complete authentication",
         result.response.status,
         refusal,
+        emailVerification,
       );
     }
     return this.verifiedSession(result.body);
+  }
+
+  /** Continue the exact WorkOS challenge through Railway, which owns the
+   * confidential credential. The signed access token is still verified here
+   * before any returned session can reach storage. */
+  async completeGitHubVerification(
+    input: WorkOSEmailVerificationChallenge,
+  ): Promise<WorkOSDesktopSession> {
+    if (
+      !this.controlPlaneOrigin ||
+      !boundedString(input.pendingAuthenticationToken) ||
+      !boundedString(input.emailVerificationId, 512)
+    ) {
+      throw new WorkOSDesktopClientError(
+        "verification_input_invalid",
+        "WorkOS verification continuation data is invalid",
+      );
+    }
+    let response: Response;
+    let body: Record<string, unknown> | null;
+    try {
+      response = await this.fetchImpl(
+        new URL(GITHUB_VERIFICATION_PATH, this.controlPlaneOrigin),
+        {
+          method: "POST",
+          headers: {
+            accept: "application/json",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            pending_authentication_token: input.pendingAuthenticationToken,
+            email_verification_id: input.emailVerificationId,
+          }),
+          signal: AbortSignal.timeout(this.timeoutMs),
+        },
+      );
+      body = await responseJson(response);
+    } catch {
+      throw new WorkOSDesktopClientError(
+        "verification_unavailable",
+        "Zeros could not continue WorkOS email verification",
+      );
+    }
+    if (!response.ok || !body) {
+      throw new WorkOSDesktopClientError(
+        "verification_rejected",
+        "Zeros did not complete WorkOS email verification",
+        response.status,
+      );
+    }
+    return this.verifiedSession(body);
   }
 
   async refresh(input: {

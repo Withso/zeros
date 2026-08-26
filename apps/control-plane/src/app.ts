@@ -37,6 +37,7 @@ import {
 } from "./workos-browser-sessions.js";
 import { createWorkOSDesktopRevocationRoutes } from "./workos-desktop-revocation.js";
 import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
+import { createWorkOSDesktopVerificationRoutes } from "./workos-desktop-verification.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 
 export function createApp(
@@ -77,15 +78,32 @@ export function createApp(
       "/",
       createWorkOSDesktopAuthorizationRoutes(provider, config.workos.appOrigin),
     );
+    const verificationPreAuthLimit = rateLimit(
+      "workos-verification-preauth",
+      10,
+      60_000,
+      (c) => {
+        const clientIp = c.req.header("X-Real-IP")?.trim() ?? "";
+        return isIP(clientIp) ? clientIp : "unknown";
+      },
+    );
+    app.use(
+      "/auth/desktop/complete-github-verification",
+      async (c, next) => {
+        c.header("Cache-Control", "no-store");
+        c.header("Pragma", "no-cache");
+        await next();
+      },
+    );
+    app.use(
+      "/auth/desktop/complete-github-verification",
+      verificationPreAuthLimit,
+    );
+    app.route("/", createWorkOSDesktopVerificationRoutes(provider));
     app.route("/", createWorkOSDesktopRevocationRoutes(provider));
     app.route(
       "/",
-      createWorkOSIdentityEventRoutes(pool, config.workos.webhookSecret, {
-        // GitHub is the one enabled provider WorkOS does not auto-verify, so
-        // without this a GitHub user is created unable to authenticate.
-        adoptVerifiedEmail: (userId) =>
-          provider.adoptProviderVerifiedEmail(userId),
-      }),
+      createWorkOSIdentityEventRoutes(pool, config.workos.webhookSecret),
     );
   }
 

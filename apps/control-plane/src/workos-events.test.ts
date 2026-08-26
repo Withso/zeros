@@ -122,98 +122,11 @@ describe("Railway WorkOS identity-event boundary", () => {
     expect(response.status).toBe(413);
   });
 
-  it("adopts provider verification for a user created unverified", async () => {
-    const adoptVerifiedEmail = vi.fn(async () => {});
+  it("acknowledges user.created without mutating WorkOS or Postgres", async () => {
     const apply = vi.fn();
     const app = createWorkOSIdentityEventRoutes(pool, SECRET, {
       now: () => NOW,
       apply,
-      adoptVerifiedEmail,
-    });
-    const response = await app.request(
-      signedRequest(
-        event({
-          event: "user.created",
-          data: {
-            id: "user_01CREATED",
-            email: "person@example.com",
-            email_verified: false,
-            name: null,
-            profile_picture_url: null,
-          },
-        }),
-      ),
-    );
-    expect(response.status).toBe(202);
-    expect(await response.json()).toEqual({
-      accepted: true,
-      status: "verified",
-    });
-    expect(adoptVerifiedEmail).toHaveBeenCalledWith("user_01CREATED");
-    // Creation predates the Zeros account, so the linked-profile sync must not run.
-    expect(apply).not.toHaveBeenCalled();
-  });
-
-  it("leaves an already-verified new user untouched", async () => {
-    const adoptVerifiedEmail = vi.fn(async () => {});
-    const app = createWorkOSIdentityEventRoutes(pool, SECRET, {
-      now: () => NOW,
-      apply: vi.fn(),
-      adoptVerifiedEmail,
-    });
-    const response = await app.request(
-      signedRequest(
-        event({
-          event: "user.created",
-          data: {
-            id: "user_01GOOGLE",
-            email: "person@example.com",
-            email_verified: true,
-            name: null,
-            profile_picture_url: null,
-          },
-        }),
-      ),
-    );
-    expect(response.status).toBe(202);
-    expect(await response.json()).toEqual({
-      accepted: true,
-      status: "already_verified",
-    });
-    expect(adoptVerifiedEmail).not.toHaveBeenCalled();
-  });
-
-  it("asks WorkOS to redeliver when adoption fails", async () => {
-    const adoptVerifiedEmail = vi.fn(async () => {
-      throw new Error("WorkOS unavailable");
-    });
-    const app = createWorkOSIdentityEventRoutes(pool, SECRET, {
-      now: () => NOW,
-      apply: vi.fn(),
-      adoptVerifiedEmail,
-    });
-    const response = await app.request(
-      signedRequest(
-        event({
-          event: "user.created",
-          data: {
-            id: "user_01CREATED",
-            email: "person@example.com",
-            email_verified: false,
-            name: null,
-            profile_picture_url: null,
-          },
-        }),
-      ),
-    );
-    // Non-2xx on purpose: a dropped adoption leaves the user unable to sign in.
-    expect(response.status).toBe(503);
-  });
-
-  it("ignores creation when the deployment has not opted into adoption", async () => {
-    const app = createWorkOSIdentityEventRoutes(pool, SECRET, {
-      now: () => NOW,
-      apply: vi.fn(),
     });
     const response = await app.request(
       signedRequest(
@@ -231,24 +144,6 @@ describe("Railway WorkOS identity-event boundary", () => {
     );
     expect(response.status).toBe(202);
     expect(await response.json()).toEqual({ accepted: true, ignored: true });
-  });
-
-  it("rejects a malformed creation event without calling WorkOS", async () => {
-    const adoptVerifiedEmail = vi.fn(async () => {});
-    const app = createWorkOSIdentityEventRoutes(pool, SECRET, {
-      now: () => NOW,
-      apply: vi.fn(),
-      adoptVerifiedEmail,
-    });
-    const response = await app.request(
-      signedRequest(
-        event({
-          event: "user.created",
-          data: { id: "user_01CREATED", email_verified: "no" },
-        }),
-      ),
-    );
-    expect(response.status).toBe(400);
-    expect(adoptVerifiedEmail).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
   });
 });

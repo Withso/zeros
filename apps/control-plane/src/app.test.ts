@@ -83,6 +83,7 @@ describe("app assembly — Railway WorkOS boundary", () => {
       ["GET", "/auth/start?provider=unknown", 400],
       ["GET", "/auth/browser/session", 401],
       ["GET", "/auth/desktop/start?provider=unknown", 400],
+      ["POST", "/auth/desktop/complete-github-verification", 400],
       ["POST", "/auth/desktop-revoke", 400],
       ["POST", "/auth/workos-webhook", 401],
     ] as const;
@@ -91,6 +92,30 @@ describe("app assembly — Railway WorkOS boundary", () => {
       expect({ path, status: response.status }).toEqual({ path, status });
       expect(response.headers.get("cache-control")).toBe("no-store");
     }
+  });
+
+  it("rate-limits anonymous verification continuations before WorkOS", async () => {
+    const statuses: number[] = [];
+    let lastResponse: Response | null = null;
+    for (let attempt = 0; attempt < 11; attempt += 1) {
+      const response = await app.request(
+        "/auth/desktop/complete-github-verification",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "x-real-ip": "192.0.2.44",
+          },
+          body: "{}",
+        },
+      );
+      lastResponse = response;
+      statuses.push(response.status);
+    }
+    expect(statuses).toEqual([
+      400, 400, 400, 400, 400, 400, 400, 400, 400, 400, 429,
+    ]);
+    expect(lastResponse?.headers.get("cache-control")).toBe("no-store");
   });
 });
 
@@ -155,9 +180,13 @@ describe("app assembly — GitHub App registered", () => {
 
 describe("app assembly — healthz", () => {
   it("needs no bearer token so Railway's healthcheck can pass", async () => {
-    const healthy = createApp(config(null), {
-      query: async () => ({ rows: [] }),
-    } as unknown as pg.Pool, emailConfig as never);
+    const healthy = createApp(
+      config(null),
+      {
+        query: async () => ({ rows: [] }),
+      } as unknown as pg.Pool,
+      emailConfig as never,
+    );
     const response = await healthy.request("/healthz");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });
