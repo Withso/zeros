@@ -96,6 +96,9 @@ export function createWorkOSDesktopVerificationRoutes(
       });
     } catch (error) {
       if (error instanceof WorkOSDesktopVerificationError) {
+        console.warn(
+          `[workos-desktop-verification] 403 verification rejected: ${error.code}`,
+        );
         return json({ error: "verification_rejected" }, 403);
       }
       console.warn(

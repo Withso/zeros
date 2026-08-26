@@ -281,14 +281,21 @@ bounded, rate-limited Railway route
 
 1. Electron forwards only the pending token and verification ID from WorkOS's
    refusal. It never receives the WorkOS API key or the verification code.
-2. Railway retrieves the exact unexpired verification object and checks that
-   its WorkOS User has an OAuth identity whose provider is exactly
-   `GitHubOAuth`.
+2. Railway retrieves the exact unexpired verification object. WorkOS does not
+   link a first-time GitHub identity until email control is established, so a
+   pre-grant identity lookup would create a circular rejection. Railway instead
+   requires matching `authentication.oauth_succeeded` and
+   `email_verification.created` events for the exact verification ID, user,
+   normalized email, application client, and narrow creation window. These
+   events are read with the Railway-only WorkOS API key.
 3. Railway supplies that object's code and the pending token to WorkOS's
    confidential email-verification grant for the Desktop Application.
-4. Railway requires the completed authentication method to be
-   `GitHubOAuth`, verifies the signed desktop bearer, and requires its subject
-   to equal the challenged user. A mismatched minted session is revoked.
+4. Railway verifies the signed desktop bearer, requires its subject to equal
+   the challenged user, and checks that WorkOS has now linked the exact
+   `GitHubOAuth` identity. WorkOS documents `authentication_method` as optional,
+   so omission is accepted only alongside those independent proofs; an
+   explicit non-GitHub method is rejected. A mismatched minted session is
+   revoked.
 5. Electron independently verifies the returned token's signature, issuer,
    audience, desktop client, subject/email match, and verified-email claim
    before persisting anything.
@@ -298,14 +305,18 @@ Railway, then asks WorkOS to seal the completed Web Application session. The
 pending token, verification record, and completed session never pass through
 Pages or browser JavaScript.
 
-This deliberately treats control of the linked GitHub OAuth identity as enough
-to complete WorkOS's email challenge, so the user does not enter WorkOS's OTP.
-It is a product trust decision, not a relaxation of the token or invitation
-contracts. The anonymous endpoint cannot name a user or email, cannot call
-`updateUser`, and cannot return a non-GitHub authentication method; WorkOS
-still binds the pending token and verification code. Request bodies and
-responses are bounded, never cached, never logged with challenge material, and
-pre-auth attempts are rate-limited by Railway's client IP.
+This deliberately treats the exact successful OAuth event that created the
+challenge, followed by WorkOS's linked GitHub identity, as enough to complete
+WorkOS's email challenge, so the user does not enter WorkOS's OTP. It is a
+product trust decision, not a relaxation of the token or invitation contracts.
+Zeros authorization routes admit only Google and GitHub, and WorkOS
+auto-verifies Google; enabling another non-auto-verifying OAuth provider would
+require extending this proof before rollout. The anonymous endpoint cannot
+name a user or email, cannot call `updateUser`, and cannot select a provider,
+verification code, or application client; WorkOS still binds the pending token
+and verification code. Request bodies and responses are bounded and never
+cached or logged with challenge material. Rejections log only a bounded reason
+code, and pre-auth attempts are rate-limited by Railway's client IP.
 
 The former `user.created` webhook mutation and delayed same-code retry were
 removed. Webhook delivery is asynchronous, and WorkOS authorization codes are

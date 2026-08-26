@@ -200,17 +200,22 @@ the public Desktop Application.
 When WorkOS moves a first-time GitHub exchange into email verification,
 Electron posts the returned pending token and verification ID directly to
 `POST /auth/desktop/complete-github-verification`. This rate-limited Railway
-boundary retrieves the exact unexpired challenge, requires the challenged user
-to have a `GitHubOAuth` identity, completes the confidential grant with
-`WORKOS_API_KEY`, and verifies that the minted Desktop Application token and
-authentication method belong to that same user before returning it. It never
-accepts a caller-selected user, email, provider, verification code, or client
-ID. Electron verifies the signed token again before storage.
+boundary retrieves the exact unexpired challenge and requires matching WorkOS
+`authentication.oauth_succeeded` and `email_verification.created` events for
+the same user, email, application client, and narrow creation window. It then
+completes the confidential grant with `WORKOS_API_KEY`, requires WorkOS to have
+linked a `GitHubOAuth` identity, and verifies that the minted Desktop
+Application token belongs to that same user before returning it. WorkOS may
+omit the optional authentication-method response field; an explicit non-GitHub
+method is still rejected. The route never accepts a caller-selected user,
+email, provider, verification code, or client ID. Electron verifies the signed
+token again before storage.
 
 The hosted browser callback handles the same WorkOS transition entirely inside
-Railway. It proves the challenged GitHub identity, completes the grant for the
-Web Application, and verifies the sealed session before promoting the browser
-flow; no pending challenge or session is exposed to Pages.
+Railway. It proves the OAuth event sequence, completes the grant for the Web
+Application, then verifies the linked GitHub identity and sealed session before
+promoting the browser flow; no pending challenge or session is exposed to
+Pages.
 
 `POST /auth/workos-webhook` verifies WorkOS's signature over the exact raw body
 on Railway, then accepts only bounded `user.updated` and `user.deleted` events.

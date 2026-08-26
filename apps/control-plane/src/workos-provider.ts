@@ -5,6 +5,10 @@ import type { AuthBackendConfig, WorkOSBackendConfig } from "./config.js";
 
 const SOCIAL_PROVIDERS = new Set(["GoogleOAuth", "GitHubOAuth"]);
 const AUTH_CLAIM_NAMESPACE = "https://zeros.build/";
+const GITHUB_VERIFICATION_EVENT_WINDOW_MS = 10_000;
+const GITHUB_VERIFICATION_EVENT_PAIR_MS = 5_000;
+const GITHUB_VERIFICATION_PROOF_ATTEMPTS = 3;
+const GITHUB_VERIFICATION_PROOF_RETRY_MS = 150;
 
 export type WorkOSUser = {
   id: string;
@@ -117,10 +121,30 @@ interface GitHubIdentityUserManagement {
     email: string;
     expiresAt: string;
     code: string;
+    createdAt: string;
   }>;
   getUserIdentities(
     userId: string,
   ): Promise<Array<{ type: string; provider: string }>>;
+}
+
+type GitHubVerificationEvent = {
+  event: string;
+  createdAt: string;
+  context: Record<string, unknown> | undefined;
+  data: unknown;
+};
+
+interface GitHubVerificationEvents {
+  listEvents(options: {
+    events: Array<
+      "authentication.oauth_succeeded" | "email_verification.created"
+    >;
+    rangeStart: string;
+    rangeEnd: string;
+    limit: number;
+    order: "asc" | "desc";
+  }): Promise<{ data: GitHubVerificationEvent[] }>;
 }
 
 interface GitHubVerificationUserManagement extends GitHubIdentityUserManagement {
@@ -148,6 +172,7 @@ interface GitHubVerificationUserManagement extends GitHubIdentityUserManagement 
 
 interface GitHubVerificationDependencies {
   userManagement: GitHubVerificationUserManagement;
+  events: GitHubVerificationEvents;
   desktopClientId: string;
   verifyDesktopBearer(accessToken: string): Promise<{
     subject: string;
@@ -155,6 +180,7 @@ interface GitHubVerificationDependencies {
   }>;
   revokeSession(sessionId: string): Promise<void>;
   now?: () => number;
+  wait?: (milliseconds: number) => Promise<void>;
 }
 
 type GitHubVerification = Awaited<
@@ -167,6 +193,111 @@ function bounded(value: unknown, max: number): value is string {
 
 function normalizedEmail(value: string): string {
   return value.trim().toLocaleLowerCase("en-US");
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function eventUsesClient(
+  event: GitHubVerificationEvent,
+  clientId: string,
+): boolean {
+  return event.context?.client_id === clientId;
+}
+
+function nearEventTimestamp(
+  createdAt: string,
+  expectedAt: number,
+): number | null {
+  const eventAt = Date.parse(createdAt);
+  return Number.isFinite(eventAt) &&
+    Math.abs(eventAt - expectedAt) <= GITHUB_VERIFICATION_EVENT_WINDOW_MS
+    ? eventAt
+    : null;
+}
+
+function hasGitHubVerificationEventEvidence(
+  events: GitHubVerificationEvent[],
+  verification: GitHubVerification,
+  clientId: string,
+): boolean {
+  const verificationCreatedAt = Date.parse(verification.createdAt);
+  const exactVerificationCreatedAt: number[] = [];
+  const oauthSucceededAt: number[] = [];
+  for (const event of events) {
+    if (!eventUsesClient(event, clientId)) continue;
+    const eventAt = nearEventTimestamp(event.createdAt, verificationCreatedAt);
+    if (eventAt === null) continue;
+    const data = record(event.data);
+    if (!data) continue;
+    if (
+      event.event === "email_verification.created" &&
+      data.id === verification.id &&
+      data.userId === verification.userId &&
+      typeof data.email === "string" &&
+      normalizedEmail(data.email) === normalizedEmail(verification.email)
+    ) {
+      exactVerificationCreatedAt.push(eventAt);
+    }
+    if (
+      event.event === "authentication.oauth_succeeded" &&
+      data.userId === verification.userId &&
+      typeof data.email === "string" &&
+      normalizedEmail(data.email) === normalizedEmail(verification.email) &&
+      data.type === "oauth" &&
+      data.status === "succeeded"
+    ) {
+      oauthSucceededAt.push(eventAt);
+    }
+  }
+  return exactVerificationCreatedAt.some((verificationEventAt) =>
+    oauthSucceededAt.some(
+      (oauthEventAt) =>
+        Math.abs(verificationEventAt - oauthEventAt) <=
+        GITHUB_VERIFICATION_EVENT_PAIR_MS,
+    ),
+  );
+}
+
+async function wait(milliseconds: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function hasLinkedGitHubIdentity(
+  userManagement: Pick<GitHubIdentityUserManagement, "getUserIdentities">,
+  userId: string,
+  waitForRetry: (milliseconds: number) => Promise<void> = wait,
+): Promise<boolean> {
+  for (
+    let attempt = 0;
+    attempt < GITHUB_VERIFICATION_PROOF_ATTEMPTS;
+    attempt++
+  ) {
+    let identities: Array<{ type: string; provider: string }>;
+    try {
+      identities = await userManagement.getUserIdentities(userId);
+    } catch (error) {
+      if (isProviderRefusal(error)) {
+        throw new WorkOSDesktopVerificationError("identity_rejected");
+      }
+      throw error;
+    }
+    if (
+      identities.some(
+        (identity) =>
+          identity.type === "OAuth" && identity.provider === "GitHubOAuth",
+      )
+    ) {
+      return true;
+    }
+    if (attempt + 1 < GITHUB_VERIFICATION_PROOF_ATTEMPTS) {
+      await waitForRetry(GITHUB_VERIFICATION_PROOF_RETRY_MS * (attempt + 1));
+    }
+  }
+  return false;
 }
 
 function isProviderRefusal(error: unknown): boolean {
@@ -216,7 +347,10 @@ async function resolveWorkOSGitHubVerification(
   challenge: WorkOSDesktopVerificationChallenge,
   deps: {
     userManagement: GitHubIdentityUserManagement;
+    events: GitHubVerificationEvents;
+    clientId: string;
     now?: () => number;
+    wait?: (milliseconds: number) => Promise<void>;
   },
 ): Promise<GitHubVerification> {
   if (
@@ -238,48 +372,78 @@ async function resolveWorkOSGitHubVerification(
     throw error;
   }
   const expiresAt = Date.parse(verification.expiresAt);
+  const createdAt = Date.parse(verification.createdAt);
   if (
     verification.id !== challenge.emailVerificationId ||
     !bounded(verification.userId, 512) ||
     !bounded(verification.email, 1_024) ||
     !bounded(verification.code, 128) ||
+    !Number.isFinite(createdAt) ||
     !Number.isFinite(expiresAt) ||
     expiresAt <= (deps.now ?? Date.now)()
   ) {
     throw new WorkOSDesktopVerificationError("challenge_rejected");
   }
 
-  let identities: Array<{ type: string; provider: string }>;
-  try {
-    identities = await deps.userManagement.getUserIdentities(
-      verification.userId,
-    );
-  } catch (error) {
-    if (isProviderRefusal(error)) {
-      throw new WorkOSDesktopVerificationError("identity_rejected");
-    }
-    throw error;
-  }
-  if (
-    !identities.some(
-      (identity) =>
-        identity.type === "OAuth" && identity.provider === "GitHubOAuth",
-    )
+  const rangeStart = new Date(
+    createdAt - GITHUB_VERIFICATION_EVENT_WINDOW_MS,
+  ).toISOString();
+  const rangeEnd = new Date(
+    createdAt + GITHUB_VERIFICATION_EVENT_WINDOW_MS,
+  ).toISOString();
+  for (
+    let attempt = 0;
+    attempt < GITHUB_VERIFICATION_PROOF_ATTEMPTS;
+    attempt++
   ) {
-    throw new WorkOSDesktopVerificationError("identity_rejected");
+    let events: GitHubVerificationEvent[];
+    try {
+      ({ data: events } = await deps.events.listEvents({
+        events: [
+          "authentication.oauth_succeeded",
+          "email_verification.created",
+        ],
+        rangeStart,
+        rangeEnd,
+        limit: 100,
+        order: "desc",
+      }));
+    } catch (error) {
+      if (isProviderRefusal(error)) {
+        throw new WorkOSDesktopVerificationError("identity_rejected");
+      }
+      throw error;
+    }
+    if (
+      hasGitHubVerificationEventEvidence(events, verification, deps.clientId)
+    ) {
+      return verification;
+    }
+    if (attempt + 1 < GITHUB_VERIFICATION_PROOF_ATTEMPTS) {
+      await (deps.wait ?? wait)(
+        GITHUB_VERIFICATION_PROOF_RETRY_MS * (attempt + 1),
+      );
+    }
   }
-  return verification;
+  throw new WorkOSDesktopVerificationError("identity_rejected");
 }
 
-/** Complete the challenge WorkOS returned only after proving that the exact
- * challenged user owns a GitHub OAuth identity. The pending token and code are
- * still checked together by WorkOS; no client can ask this boundary to mark an
- * arbitrary user or email verified. */
+/** Complete a WorkOS challenge only when its exact creation event immediately
+ * followed a successful OAuth event for the same user, email, and application.
+ * WorkOS links a first-time GitHub identity only after this grant, so that
+ * provider identity is checked again on the completed user before returning a
+ * session. */
 export async function completeWorkOSGitHubVerification(
   challenge: WorkOSDesktopVerificationChallenge,
   deps: GitHubVerificationDependencies,
 ): Promise<WorkOSDesktopVerificationSession> {
-  const verification = await resolveWorkOSGitHubVerification(challenge, deps);
+  const verification = await resolveWorkOSGitHubVerification(challenge, {
+    userManagement: deps.userManagement,
+    events: deps.events,
+    clientId: deps.desktopClientId,
+    ...(deps.now ? { now: deps.now } : {}),
+    ...(deps.wait ? { wait: deps.wait } : {}),
+  });
 
   let authentication: Awaited<
     ReturnType<
@@ -322,7 +486,8 @@ export async function completeWorkOSGitHubVerification(
     !responseContractValid ||
     !bearer ||
     bearer.subject !== verification.userId ||
-    authentication.authenticationMethod !== "GitHubOAuth"
+    (authentication.authenticationMethod !== undefined &&
+      authentication.authenticationMethod !== "GitHubOAuth")
   ) {
     if (bearer?.sessionId) {
       await deps.revokeSession(bearer.sessionId).catch(() => undefined);
@@ -330,10 +495,25 @@ export async function completeWorkOSGitHubVerification(
     throw new WorkOSDesktopVerificationError("contract_rejected");
   }
 
+  try {
+    if (
+      !(await hasLinkedGitHubIdentity(
+        deps.userManagement,
+        verification.userId,
+        deps.wait,
+      ))
+    ) {
+      throw new WorkOSDesktopVerificationError("identity_rejected");
+    }
+  } catch (error) {
+    await deps.revokeSession(bearer.sessionId).catch(() => undefined);
+    throw error;
+  }
+
   return {
     accessToken: authentication.accessToken,
     refreshToken: authentication.refreshToken,
-    authenticationMethod: authentication.authenticationMethod,
+    authenticationMethod: authentication.authenticationMethod ?? null,
     user: {
       id: authentication.user.id,
       email: authentication.user.email,
@@ -454,6 +634,10 @@ export class RailwayWorkOSProvider
         getUserIdentities: (userId) =>
           this.client.userManagement.getUserIdentities(userId),
       },
+      events: {
+        listEvents: (options) => this.client.events.listEvents(options),
+      },
+      clientId: this.auth.webClientId,
     });
 
     let response: Awaited<
@@ -507,12 +691,26 @@ export class RailwayWorkOSProvider
       exchange.user.emailVerified !== true ||
       normalizedEmail(exchange.user.email) !==
         normalizedEmail(verification.email) ||
-      response.authenticationMethod !== "GitHubOAuth"
+      (response.authenticationMethod !== undefined &&
+        response.authenticationMethod !== "GitHubOAuth")
     ) {
       if (exchange?.sessionId) {
         await this.revokeSession(exchange.sessionId).catch(() => undefined);
       }
       throw new WorkOSDesktopVerificationError("contract_rejected");
+    }
+    try {
+      if (
+        !(await hasLinkedGitHubIdentity(
+          this.client.userManagement,
+          verification.userId,
+        ))
+      ) {
+        throw new WorkOSDesktopVerificationError("identity_rejected");
+      }
+    } catch (error) {
+      await this.revokeSession(exchange.sessionId).catch(() => undefined);
+      throw error;
     }
     return exchange;
   }
@@ -663,6 +861,9 @@ export class RailwayWorkOSProvider
   ): Promise<WorkOSDesktopVerificationSession> {
     return completeWorkOSGitHubVerification(challenge, {
       desktopClientId: this.auth.desktopClientId,
+      events: {
+        listEvents: (options) => this.client.events.listEvents(options),
+      },
       userManagement: {
         getEmailVerification: (id) =>
           this.client.userManagement.getEmailVerification(id),

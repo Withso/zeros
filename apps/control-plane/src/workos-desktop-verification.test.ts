@@ -90,6 +90,7 @@ describe("Railway WorkOS desktop GitHub verification", () => {
   });
 
   it("does not turn a non-GitHub or mismatched challenge into a session", async () => {
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
     const { app } = setup(async () => {
       throw new WorkOSDesktopVerificationError("identity_rejected");
     });
@@ -102,6 +103,10 @@ describe("Railway WorkOS desktop GitHub verification", () => {
 
     expect(response.status).toBe(403);
     expect(await response.json()).toEqual({ error: "verification_rejected" });
+    expect(warning).toHaveBeenCalledWith(
+      "[workos-desktop-verification] 403 verification rejected: identity_rejected",
+    );
+    warning.mockRestore();
   });
 
   it("fails closed when WorkOS is unavailable", async () => {
