@@ -80,6 +80,30 @@ export interface AuthContextValue {
   signOutEverywhere: () => Promise<void>;
 }
 
+const GENERIC_SIGN_IN_ERROR =
+  "We couldn't finish signing you in from the browser. Please try again.";
+
+/** Per-reason guidance for a failed WorkOS sign-in.
+ *
+ *  The browser channel has told users which step failed since Phase 2
+ *  (`failureResponse` in the control plane); desktop collapsed every distinct
+ *  reason into one dead-end string, so the same policy produced opposite
+ *  usability. Wording is kept in step with the web table on purpose. */
+const SIGN_IN_ERROR_MESSAGES: Record<string, string> = {
+  expired:
+    "That browser sign-in expired before it finished. Click Sign in to try again.",
+  verification_required:
+    "Check your inbox — your provider requires you to confirm this email address before its first sign-in. Verify it, then click Sign in again.",
+  email_unverified:
+    "Verify your email address with your provider, then click Sign in again.",
+  provider_error:
+    "Your identity provider didn't complete the sign-in. Click Sign in to try again.",
+  account_failed:
+    "We signed you in, but couldn't reach your Zeros account. Check your connection and click Sign in again.",
+  storage_failed:
+    "We signed you in, but couldn't save the session to your keychain. Click Sign in to try again.",
+};
+
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -225,9 +249,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
           console.warn(
             `[auth] sign-in handoff redeem failed: ${redeemed?.error ?? "unknown"}`,
           );
-          setOAuthError(
-            "We couldn't finish signing you in from the browser. Please try again.",
-          );
+          setOAuthError(GENERIC_SIGN_IN_ERROR);
           return;
         }
         // Main already wrote the session; just mirror it into renderer state.
@@ -278,9 +300,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
         if (!next) throw new Error("session unavailable");
         setOAuthError(null);
       } catch {
-        setOAuthError(
-          "We couldn't finish signing you in from the browser. Please try again.",
-        );
+        setOAuthError(GENERIC_SIGN_IN_ERROR);
       }
     }).then((off) => {
       if (active) offWorkOSComplete = off;
@@ -291,10 +311,9 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
       "auth-signin-error",
       ({ reason }) => {
         if (!active) return;
+        console.warn("[auth] WorkOS sign-in failed:", reason ?? "unknown");
         setOAuthError(
-          reason === "expired"
-            ? "That browser sign-in expired before it finished. Click Sign in to try again."
-            : "We couldn't finish signing you in from the browser. Please try again.",
+          SIGN_IN_ERROR_MESSAGES[reason ?? ""] ?? GENERIC_SIGN_IN_ERROR,
         );
       },
     ).then((off) => {

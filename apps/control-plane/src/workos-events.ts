@@ -9,6 +9,7 @@ const EventIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,512}$/);
 const MAX_WEBHOOK_BYTES = 64 * 1024;
 const SIGNATURE_TOLERANCE_MS = 3 * 60 * 1_000;
 const LIFECYCLE_EVENTS = new Set(["user.updated", "user.deleted"]);
+const CREATED_EVENT = "user.created";
 const AvatarSchema = z
   .string()
   .max(2_048)
@@ -31,6 +32,14 @@ const WorkOSIdentityEventSchema = z.object({
     profilePictureUrl: AvatarSchema,
   }),
 });
+
+const WorkOSUserCreatedSchema = z.object({
+  eventId: EventIdSchema,
+  userId: EventIdSchema,
+  emailVerified: z.boolean(),
+});
+
+export type WorkOSUserCreated = z.infer<typeof WorkOSUserCreatedSchema>;
 
 export type WorkOSIdentityEvent = z.infer<typeof WorkOSIdentityEventSchema>;
 export type WorkOSIdentityEventStatus =
@@ -268,6 +277,28 @@ function lifecycleEvent(value: unknown): WorkOSIdentityEvent | null {
   return parsed.success ? parsed.data : null;
 }
 
+/** `user.created` carries only what the adoption decision needs. It is handled
+ *  outside `applyInTransaction` on purpose: at creation time the WorkOS user has
+ *  no Zeros account yet, so the linked-profile sync has nothing to apply. */
+function userCreatedEvent(value: unknown): WorkOSUserCreated | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  if (
+    raw.event !== CREATED_EVENT ||
+    !raw.data ||
+    typeof raw.data !== "object"
+  ) {
+    return null;
+  }
+  const user = raw.data as Record<string, unknown>;
+  const parsed = WorkOSUserCreatedSchema.safeParse({
+    eventId: raw.id,
+    userId: user.id,
+    emailVerified: user.email_verified,
+  });
+  return parsed.success ? parsed.data : null;
+}
+
 function json(value: unknown, status: number): Response {
   return Response.json(value, {
     status,
@@ -283,6 +314,9 @@ export function createWorkOSIdentityEventRoutes(
     apply?: (
       event: WorkOSIdentityEvent,
     ) => Promise<{ status: WorkOSIdentityEventStatus }>;
+    /** Absent when the deployment has not opted into adopting provider
+     *  verification; `user.created` is then acknowledged and ignored. */
+    adoptVerifiedEmail?: (userId: string) => Promise<void>;
   } = {},
 ): Hono {
   const app = new Hono();
@@ -309,6 +343,31 @@ export function createWorkOSIdentityEventRoutes(
       raw && typeof raw === "object" && "event" in raw
         ? (raw as { event?: unknown }).event
         : null;
+    if (eventName === CREATED_EVENT) {
+      const created = userCreatedEvent(raw);
+      if (!created) return json({ error: "invalid_event" }, 400);
+      // Google, Apple, Magic Auth and SSO users arrive already verified. With
+      // sign-in restricted to Google and GitHub, "unverified at creation" means
+      // GitHub — whose address GitHub itself already confirmed — so adopt that
+      // verification rather than stopping the user for a second one-time code.
+      if (created.emailVerified) {
+        return json({ accepted: true, status: "already_verified" }, 202);
+      }
+      if (!options.adoptVerifiedEmail) {
+        return json({ accepted: true, ignored: true }, 202);
+      }
+      try {
+        await options.adoptVerifiedEmail(created.userId);
+      } catch {
+        // Answer non-2xx so WorkOS redelivers: until this lands the user cannot
+        // authenticate at all, which makes a silent drop the worst outcome.
+        console.warn(
+          "[workos-events] 503 email verification adoption failed; awaiting provider retry",
+        );
+        return json({ error: "adoption_failed" }, 503);
+      }
+      return json({ accepted: true, status: "verified" }, 202);
+    }
     if (typeof eventName === "string" && !LIFECYCLE_EVENTS.has(eventName)) {
       return json({ accepted: true, ignored: true }, 202);
     }

@@ -254,6 +254,53 @@ Profile strings are trimmed before use. The optional picture claim is retained
 only when it is a bounded HTTPS URL without embedded credentials; an invalid
 avatar is presentation loss, not an authentication failure.
 
+### Why verified email is required, and where GitHub is adopted
+
+The verified-email requirement is inherited from the Auth0 era and exists for
+one reason: invitation acceptance binds an invite to the authenticated email as
+its anti-takeover control (`apps/control-plane/src/routes.ts`). Because invite
+links are deliberately shareable and acceptance runs in a system transaction
+that bypasses row-level security, that email comparison is the only tenancy gate
+on the accept path. A forgeable email would make it forgeable. A second, less
+obvious reason: `users.email` is globally `UNIQUE`, so an unverified signup can
+consume another person's address and lock them out of signup permanently.
+
+WorkOS auto-verifies Magic Auth, Google OAuth, Apple OAuth and SSO, but **not
+GitHub OAuth**. A GitHub user is therefore created with `email_verified: false`,
+WorkOS refuses the first token exchange with `email_verification_required`, and
+it emails a one-time code. Because Zeros drives WorkOS through its own UI rather
+than AuthKit's hosted screens, no screen exists to collect that code, and the
+verification grant (`urn:workos:oauth:grant-type:email-verification:code`) is
+confidential-client only — the desktop public PKCE client cannot complete it.
+
+Zeros resolves this by **adopting the provider's own verification**: the signed
+`user.created` webhook marks a user created unverified as verified
+(`adoptProviderVerifiedEmail`). This is a deliberate trust decision, not a
+loophole:
+
+- GitHub marks an address `Verified` only after the owner confirms it, so the
+  assertion is equivalent in kind to the one WorkOS already trusts from Google.
+- The predicate is safe *because* sign-in is restricted to Google and GitHub.
+  Google users arrive already verified, so "unverified at creation" means
+  GitHub. **Enabling password or Magic Auth sign-in would invalidate this and
+  must be paired with a provider check**, otherwise a caller could self-assert
+  an arbitrary address.
+- Adoption happens through WorkOS's API on a signature-verified webhook. It is
+  never driven by client input; an endpoint that marked caller-supplied
+  addresses verified would be privilege escalation.
+- Nothing downstream is relaxed. Every token still has to satisfy the full
+  claim contract above, so the desktop retry can only succeed once WorkOS
+  itself reports the address as verified.
+
+The desktop retries the same authorization code once after a short delay
+(`ADOPTION_RETRY_DELAY_MS`) to absorb the race between webhook delivery and the
+code exchange. Losing that race costs one retry and then surfaces
+`verification_required`; it never bypasses a check.
+
+Prefer removing this adoption if WorkOS adds GitHub to its auto-verified
+providers — GitHub already exposes `verified` through the granted `user:email`
+scope.
+
 The proposed WorkOS JWT Template is intentionally small:
 
 ```json
