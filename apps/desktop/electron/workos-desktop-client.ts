@@ -97,6 +97,10 @@ export class WorkOSDesktopClientError extends Error {
     public readonly code: string,
     message: string,
     public readonly status = 0,
+    /** WorkOS's own refusal code (e.g. `email_verification_required`) when the
+     *  API named one. Kept separate from `code` so callers still branch on our
+     *  stable taxonomy while reporting the provider's actual reason. */
+    public readonly providerCode: string | null = null,
   ) {
     super(message);
     this.name = "WorkOSDesktopClientError";
@@ -341,19 +345,27 @@ export class WorkOSDesktopClient {
     const userId = boundedString(user.id, 512);
     const email = boundedString(user.email, 1_024);
     const nameValue = user.name;
-    const name =
-      nameValue === null || nameValue === undefined
-        ? null
-        : boundedString(nameValue, 1_024);
-    if (
-      !userId ||
-      !email ||
-      user.email_verified !== true ||
-      (nameValue !== null && nameValue !== undefined && name === null)
-    ) {
+    // An EMPTY display name is absent, not malformed. GitHub accounts commonly
+    // carry none, and `boundedString` rejects "" — so the old check turned a
+    // presentation gap into a failed sign-in, contradicting this contract's own
+    // rule that profile loss must never be an authentication failure. A wrong
+    // TYPE still fails, which is the case that check was really for.
+    const nameAbsent =
+      nameValue === null || nameValue === undefined || nameValue === "";
+    const name = nameAbsent ? null : boundedString(nameValue, 1_024);
+    if (!userId || !email || (!nameAbsent && name === null)) {
       throw new WorkOSDesktopClientError(
         "identity_response_invalid",
         "WorkOS returned invalid verified-user data",
+      );
+    }
+    // Split out of the guard above: an unverified address is a specific,
+    // actionable provider state, not malformed data, and only its own code lets
+    // the sign-in screen say what the user must actually do about it.
+    if (user.email_verified !== true) {
+      throw new WorkOSDesktopClientError(
+        "user_email_unverified",
+        "WorkOS has not verified this account's email address",
       );
     }
 
@@ -408,10 +420,17 @@ export class WorkOSDesktopClient {
       );
     }
     if (!result.response.ok || !result.body) {
+      // WorkOS names the refusal in the body — `email_verification_required`
+      // when an address must prove ownership before its first session, and it
+      // emails a one-time code at the same time. Collapsing every non-2xx into
+      // one opaque reason is what makes a nameable provider state look like an
+      // unexplained sign-in failure, so carry the code through.
+      const refusal = boundedString(result.body?.code, 128);
       throw new WorkOSDesktopClientError(
         "exchange_rejected",
         "WorkOS did not complete authentication",
         result.response.status,
+        refusal,
       );
     }
     return this.verifiedSession(result.body);

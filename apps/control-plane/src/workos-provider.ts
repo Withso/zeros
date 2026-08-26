@@ -69,6 +69,17 @@ export interface WorkOSDesktopProvider {
   revokeSession(sessionId: string): Promise<void>;
 }
 
+/** Adopt a provider's own email verification as WorkOS verification.
+ *
+ *  WorkOS auto-verifies Google, Apple, Magic Auth and SSO, but NOT GitHub, so a
+ *  GitHub user is created unverified and cannot authenticate until it proves
+ *  ownership by one-time code. GitHub does verify addresses before reporting
+ *  them, so Zeros elects to trust that assertion exactly as WorkOS already
+ *  trusts Google's — see docs/workos-authentication-migration.md. */
+export interface WorkOSEmailAdoptionProvider {
+  adoptProviderVerifiedEmail(userId: string): Promise<void>;
+}
+
 export interface WorkOSDesktopAuthorizationProvider {
   desktopAuthorizationUrl(options: {
     provider: string;
@@ -92,7 +103,8 @@ export class RailwayWorkOSProvider
   implements
     WorkOSBrowserProvider,
     WorkOSDesktopProvider,
-    WorkOSDesktopAuthorizationProvider
+    WorkOSDesktopAuthorizationProvider,
+    WorkOSEmailAdoptionProvider
 {
   private readonly client: WorkOS;
   private readonly desktopJwks: ReturnType<typeof createRemoteJWKSet>;
@@ -310,5 +322,14 @@ export class RailwayWorkOSProvider
 
   async revokeSession(sessionId: string): Promise<void> {
     await this.client.userManagement.revokeSession({ sessionId });
+  }
+
+  /** Idempotent by construction: the field is only ever set to `true`, so a
+   *  replayed webhook is a redundant write rather than a state change. */
+  async adoptProviderVerifiedEmail(userId: string): Promise<void> {
+    await this.client.userManagement.updateUser({
+      userId,
+      emailVerified: true,
+    });
   }
 }

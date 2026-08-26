@@ -75,15 +75,17 @@ export function createApp(
     );
     app.route(
       "/",
-      createWorkOSDesktopAuthorizationRoutes(
-        provider,
-        config.workos.appOrigin,
-      ),
+      createWorkOSDesktopAuthorizationRoutes(provider, config.workos.appOrigin),
     );
     app.route("/", createWorkOSDesktopRevocationRoutes(provider));
     app.route(
       "/",
-      createWorkOSIdentityEventRoutes(pool, config.workos.webhookSecret),
+      createWorkOSIdentityEventRoutes(pool, config.workos.webhookSecret, {
+        // GitHub is the one enabled provider WorkOS does not auto-verify, so
+        // without this a GitHub user is created unable to authenticate.
+        adoptVerifiedEmail: (userId) =>
+          provider.adoptProviderVerifiedEmail(userId),
+      }),
     );
   }
 

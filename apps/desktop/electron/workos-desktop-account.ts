@@ -7,6 +7,53 @@ const REQUEST_TIMEOUT_MS = 10_000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_ERROR_CODE_LENGTH = 128;
+
+/** A refusal from `/v1/me` that keeps the control plane's own error code.
+ *
+ *  The control plane deliberately distinguishes actionable states —
+ *  `email_unverified`, `account_exists`, `signup_throttled`, `account_deleted` —
+ *  and each one needs a different action from the user. Replacing all of them
+ *  with one message stripped exactly the information the sign-in screen needs. */
+export class WorkOSDesktopAccountError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string | null,
+  ) {
+    super(
+      code
+        ? `The Zeros account could not be resolved [${code}]`
+        : "The Zeros account could not be resolved",
+    );
+    this.name = "WorkOSDesktopAccountError";
+  }
+}
+
+/** Read `{error:{code}}` without trusting length, shape, or content type. */
+async function controlPlaneErrorCode(
+  response: Response,
+): Promise<string | null> {
+  try {
+    const text = await response.text();
+    if (!text || text.length > MAX_RESPONSE_BYTES) return null;
+    const body: unknown = JSON.parse(text);
+    const error =
+      body && typeof body === "object" && "error" in body
+        ? (body as { error: unknown }).error
+        : null;
+    const code =
+      error && typeof error === "object" && "code" in error
+        ? (error as { code: unknown }).code
+        : null;
+    return typeof code === "string" &&
+      code.length > 0 &&
+      code.length <= MAX_ERROR_CODE_LENGTH
+      ? code
+      : null;
+  } catch {
+    return null;
+  }
+}
 
 export function controlPlaneBaseUrl(): string {
   const baked =
@@ -49,7 +96,10 @@ export async function resolveWorkOSDesktopAccountId(
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
-    throw new Error("The Zeros account could not be resolved");
+    throw new WorkOSDesktopAccountError(
+      response.status,
+      await controlPlaneErrorCode(response),
+    );
   }
   const text = await response.text();
   if (!text || text.length > MAX_RESPONSE_BYTES) {

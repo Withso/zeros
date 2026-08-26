@@ -166,6 +166,121 @@ describe("WorkOS desktop hosted authorization", () => {
     expect(harness.exchangeCode).not.toHaveBeenCalled();
   });
 
+  it("retries the same code once so adopted verification signs the user in", async () => {
+    const verificationRequired = Object.assign(new Error("rejected"), {
+      code: "exchange_rejected",
+      status: 403,
+      providerCode: "email_verification_required",
+    });
+    const exchangeCode = vi
+      .fn<() => Promise<WorkOSDesktopSession>>()
+      .mockRejectedValueOnce(verificationRequired)
+      .mockResolvedValueOnce(session);
+    const onError = vi.fn();
+    const harness = setup({
+      onError,
+      wait: async () => {},
+      client: { exchangeCode },
+    });
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "real-code",
+      }),
+    ).toBe(true);
+    await harness.completed.promise;
+
+    // Same code, same verifier — no second browser round-trip, no code entry.
+    expect(exchangeCode).toHaveBeenCalledTimes(2);
+    expect(exchangeCode).toHaveBeenLastCalledWith({
+      code: "real-code",
+      codeVerifier: expect.any(String),
+    });
+    expect(onError).not.toHaveBeenCalled();
+    expect(harness.persistSession).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports the verification refusal when even the retry is refused", async () => {
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const exchangeCode = vi.fn(async () => {
+      throw Object.assign(new Error("rejected"), {
+        code: "exchange_rejected",
+        status: 403,
+        providerCode: "email_verification_required",
+      });
+    });
+    const harness = setup({
+      onError,
+      wait: async () => {},
+      client: { exchangeCode },
+    });
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "real-code",
+      }),
+    ).toBe(true);
+    await error.promise;
+
+    expect(exchangeCode).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenCalledWith("verification_required");
+  });
+
+  it("reports an unverified email distinctly from a generic exchange failure", async () => {
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const harness = setup({
+      onError,
+      client: {
+        exchangeCode: vi.fn(async () => {
+          throw Object.assign(new Error("unverified"), {
+            code: "user_email_unverified",
+          });
+        }),
+      },
+    });
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "real-code",
+      }),
+    ).toBe(true);
+    await error.promise;
+
+    expect(onError).toHaveBeenCalledWith("email_unverified");
+  });
+
+  it("still reports an unnamed exchange failure as the generic reason", async () => {
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const harness = setup({
+      onError,
+      client: {
+        exchangeCode: vi.fn(async () => {
+          throw new Error("network down");
+        }),
+      },
+    });
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "real-code",
+      }),
+    ).toBe(true);
+    await error.promise;
+
+    expect(onError).toHaveBeenCalledWith("exchange_failed");
+  });
+
   it("cancellation prevents a late callback from installing a session", async () => {
     const harness = setup();
     await harness.flow.start();

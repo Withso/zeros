@@ -85,6 +85,88 @@ describe("WorkOS desktop public client", () => {
     });
   });
 
+  it("names the WorkOS refusal so an unverified email is not an opaque failure", async () => {
+    const client = new WorkOSDesktopClient({
+      config,
+      fetch: (async () =>
+        jsonResponse(
+          {
+            code: "email_verification_required",
+            message: "Email ownership must be verified before authentication.",
+          },
+          403,
+        )) as unknown as typeof fetch,
+      verifyAccessToken: async () => claims,
+    });
+
+    await expect(
+      client.exchangeCode({
+        code: "authorization-code",
+        codeVerifier: "pkce-verifier",
+      }),
+    ).rejects.toThrowError(
+      expect.objectContaining({
+        code: "exchange_rejected",
+        status: 403,
+        providerCode: "email_verification_required",
+      }),
+    );
+  });
+
+  it("rejects an unverified WorkOS user with its own actionable code", async () => {
+    const client = new WorkOSDesktopClient({
+      config,
+      fetch: (async () =>
+        jsonResponse(
+          responseBody({
+            user: {
+              object: "user",
+              id: claims.providerSubject,
+              email: claims.email,
+              email_verified: false,
+              name: claims.displayName,
+            },
+          }),
+        )) as unknown as typeof fetch,
+      verifyAccessToken: async () => claims,
+    });
+
+    await expect(
+      client.exchangeCode({
+        code: "authorization-code",
+        codeVerifier: "pkce-verifier",
+      }),
+    ).rejects.toThrowError(
+      expect.objectContaining({ code: "user_email_unverified" }),
+    );
+  });
+
+  it("treats an empty display name as absent rather than invalid identity data", async () => {
+    const client = new WorkOSDesktopClient({
+      config,
+      fetch: (async () =>
+        jsonResponse(
+          responseBody({
+            user: {
+              object: "user",
+              id: claims.providerSubject,
+              email: claims.email,
+              email_verified: true,
+              name: "",
+            },
+          }),
+        )) as unknown as typeof fetch,
+      verifyAccessToken: async () => ({ ...claims, displayName: null }),
+    });
+
+    await expect(
+      client.exchangeCode({
+        code: "authorization-code",
+        codeVerifier: "pkce-verifier",
+      }),
+    ).resolves.toMatchObject({ providerSubject: claims.providerSubject });
+  });
+
   it("refreshes without a client secret and persists even an unchanged token value", async () => {
     const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
       const body = JSON.parse(String(init?.body));
