@@ -254,7 +254,7 @@ Profile strings are trimmed before use. The optional picture claim is retained
 only when it is a bounded HTTPS URL without embedded credentials; an invalid
 avatar is presentation loss, not an authentication failure.
 
-### Why verified email is required, and where GitHub is adopted
+### Why verified email is required, and how GitHub continuation is brokered
 
 The verified-email requirement is inherited from the Auth0 era and exists for
 one reason: invitation acceptance binds an invite to the authenticated email as
@@ -267,39 +267,62 @@ consume another person's address and lock them out of signup permanently.
 
 WorkOS auto-verifies Magic Auth, Google OAuth, Apple OAuth and SSO, but **not
 GitHub OAuth**. A GitHub user is therefore created with `email_verified: false`,
-WorkOS refuses the first token exchange with `email_verification_required`, and
-it emails a one-time code. Because Zeros drives WorkOS through its own UI rather
-than AuthKit's hosted screens, no screen exists to collect that code, and the
-verification grant (`urn:workos:oauth:grant-type:email-verification:code`) is
-confidential-client only — the desktop public PKCE client cannot complete it.
+and the first token exchange returns `email_verification_required` together
+with a short-lived `pending_authentication_token` and
+`email_verification_id`. That response is a transition to a new authentication
+grant: the authorization code has already been consumed and must not be
+replayed.
 
-Zeros resolves this by **adopting the provider's own verification**: the signed
-`user.created` webhook marks a user created unverified as verified
-(`adoptProviderVerifiedEmail`). This is a deliberate trust decision, not a
-loophole:
+The desktop is a public PKCE client, while WorkOS's email-verification grant
+(`urn:workos:oauth:grant-type:email-verification:code`) requires the server-side
+WorkOS credential. Zeros therefore continues this exact challenge through the
+bounded, rate-limited Railway route
+`POST /auth/desktop/complete-github-verification`:
 
-- GitHub marks an address `Verified` only after the owner confirms it, so the
-  assertion is equivalent in kind to the one WorkOS already trusts from Google.
-- The predicate is safe *because* sign-in is restricted to Google and GitHub.
-  Google users arrive already verified, so "unverified at creation" means
-  GitHub. **Enabling password or Magic Auth sign-in would invalidate this and
-  must be paired with a provider check**, otherwise a caller could self-assert
-  an arbitrary address.
-- Adoption happens through WorkOS's API on a signature-verified webhook. It is
-  never driven by client input; an endpoint that marked caller-supplied
-  addresses verified would be privilege escalation.
-- Nothing downstream is relaxed. Every token still has to satisfy the full
-  claim contract above, so the desktop retry can only succeed once WorkOS
-  itself reports the address as verified.
+1. Electron forwards only the pending token and verification ID from WorkOS's
+   refusal. It never receives the WorkOS API key or the verification code.
+2. Railway retrieves the exact unexpired verification object and checks that
+   its WorkOS User has an OAuth identity whose provider is exactly
+   `GitHubOAuth`.
+3. Railway supplies that object's code and the pending token to WorkOS's
+   confidential email-verification grant for the Desktop Application.
+4. Railway requires the completed authentication method to be
+   `GitHubOAuth`, verifies the signed desktop bearer, and requires its subject
+   to equal the challenged user. A mismatched minted session is revoked.
+5. Electron independently verifies the returned token's signature, issuer,
+   audience, desktop client, subject/email match, and verified-email claim
+   before persisting anything.
 
-The desktop retries the same authorization code once after a short delay
-(`ADOPTION_RETRY_DELAY_MS`) to absorb the race between webhook delivery and the
-code exchange. Losing that race costs one retry and then surfaces
-`verification_required`; it never bypasses a check.
+The browser callback performs the same identity and challenge checks inside
+Railway, then asks WorkOS to seal the completed Web Application session. The
+pending token, verification record, and completed session never pass through
+Pages or browser JavaScript.
 
-Prefer removing this adoption if WorkOS adds GitHub to its auto-verified
-providers — GitHub already exposes `verified` through the granted `user:email`
-scope.
+This deliberately treats control of the linked GitHub OAuth identity as enough
+to complete WorkOS's email challenge, so the user does not enter WorkOS's OTP.
+It is a product trust decision, not a relaxation of the token or invitation
+contracts. The anonymous endpoint cannot name a user or email, cannot call
+`updateUser`, and cannot return a non-GitHub authentication method; WorkOS
+still binds the pending token and verification code. Request bodies and
+responses are bounded, never cached, never logged with challenge material, and
+pre-auth attempts are rate-limited by Railway's client IP.
+
+The former `user.created` webhook mutation and delayed same-code retry were
+removed. Webhook delivery is asynchronous, and WorkOS authorization codes are
+one-time credentials, so that design could mark the user verified yet still
+fail the current sign-in with `invalid_grant`. `user.created` is now
+acknowledged and ignored; channel webhook subscriptions need only
+`user.updated` and `user.deleted`.
+
+Re-review this trust decision before enabling another sign-in method. Prefer
+removing the broker entirely if WorkOS begins auto-verifying GitHub OAuth.
+
+References:
+
+- <https://workos.com/docs/reference/authkit/authentication-errors>
+- <https://workos.com/docs/reference/authkit/authentication>
+- <https://workos.com/docs/reference/authkit/email-verification>
+- <https://workos.com/docs/reference/authkit/identity>
 
 The proposed WorkOS JWT Template is intentionally small:
 
@@ -782,6 +805,12 @@ Implemented in the repository:
   bearer is verified against RS256, exact issuer, JWKS, channel audience,
   desktop `client_id`, session/token/time claims, and the namespaced verified
   email contract before installation.
+- A first-time GitHub refusal is continued through Railway's confidential
+  email-verification grant, never by replaying the one-time authorization code.
+  Railway proves the challenged user's exact GitHub identity and completed
+  authentication method, verifies the minted desktop bearer and subject, and
+  returns it to Electron for an independent second verification. The
+  `user.created` lifecycle event performs no authentication mutation.
 - The independently authenticated bearer resolves `/v1/me` once, and the
   durable desktop record additively stores the internal Zeros account UUID,
   WorkOS session ID, desktop client kind, and authentication method. GitHub

@@ -93,6 +93,8 @@ describe("WorkOS desktop public client", () => {
           {
             code: "email_verification_required",
             message: "Email ownership must be verified before authentication.",
+            pending_authentication_token: "pending-authentication-token",
+            email_verification_id: "email_verification_01EXAMPLE",
           },
           403,
         )) as unknown as typeof fetch,
@@ -109,8 +111,43 @@ describe("WorkOS desktop public client", () => {
         code: "exchange_rejected",
         status: 403,
         providerCode: "email_verification_required",
+        emailVerification: {
+          pendingAuthenticationToken: "pending-authentication-token",
+          emailVerificationId: "email_verification_01EXAMPLE",
+        },
       }),
     );
+  });
+
+  it("continues GitHub verification through Railway and verifies the returned session", async () => {
+    const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
+      expect(String(url)).toBe(
+        "https://api-alpha.zeros.build/auth/desktop/complete-github-verification",
+      );
+      expect(JSON.parse(String(init?.body))).toEqual({
+        pending_authentication_token: "pending-authentication-token",
+        email_verification_id: "email_verification_01EXAMPLE",
+      });
+      return jsonResponse(responseBody());
+    });
+    const client = new WorkOSDesktopClient({
+      config,
+      fetch: fetchMock as typeof fetch,
+      controlPlaneOrigin: "https://api-alpha.zeros.build",
+      verifyAccessToken: async () => claims,
+    });
+
+    await expect(
+      client.completeGitHubVerification({
+        pendingAuthenticationToken: "pending-authentication-token",
+        emailVerificationId: "email_verification_01EXAMPLE",
+      }),
+    ).resolves.toMatchObject({
+      accessToken: "access-token",
+      providerSubject: claims.providerSubject,
+      authenticationMethod: "GitHubOAuth",
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it("rejects an unverified WorkOS user with its own actionable code", async () => {

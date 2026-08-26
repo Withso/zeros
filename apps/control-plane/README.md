@@ -197,6 +197,21 @@ accepts a caller-selected client, callback, or arbitrary provider. Electron
 main retains the matching verifier and exchanges the returned code directly as
 the public Desktop Application.
 
+When WorkOS moves a first-time GitHub exchange into email verification,
+Electron posts the returned pending token and verification ID directly to
+`POST /auth/desktop/complete-github-verification`. This rate-limited Railway
+boundary retrieves the exact unexpired challenge, requires the challenged user
+to have a `GitHubOAuth` identity, completes the confidential grant with
+`WORKOS_API_KEY`, and verifies that the minted Desktop Application token and
+authentication method belong to that same user before returning it. It never
+accepts a caller-selected user, email, provider, verification code, or client
+ID. Electron verifies the signed token again before storage.
+
+The hosted browser callback handles the same WorkOS transition entirely inside
+Railway. It proves the challenged GitHub identity, completes the grant for the
+Web Application, and verifies the sealed session before promoting the browser
+flow; no pending challenge or session is exposed to Pages.
+
 `POST /auth/workos-webhook` verifies WorkOS's signature over the exact raw body
 on Railway, then accepts only bounded `user.updated` and `user.deleted` events.
 The existing app-host endpoint is a stateless pass-through during rollout; new

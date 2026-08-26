@@ -2,13 +2,11 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import type {
   WorkOSDesktopClient,
+  WorkOSEmailVerificationChallenge,
   WorkOSDesktopSession,
 } from "./workos-desktop-client";
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
-/** Long enough for Railway to receive `user.created` and adopt the provider's
- *  own email verification, short enough that sign-in still feels immediate. */
-const ADOPTION_RETRY_DELAY_MS = 2_000;
 const MAX_CALLBACK_VALUE_LENGTH = 8_192;
 const MAX_STATE_LENGTH = 256;
 const DESKTOP_SCHEME = /^zeros(?:-(?:alpha|beta|dev))?$/;
@@ -164,7 +162,10 @@ function createHostedCallback(
   };
 }
 
-type FlowClient = Pick<WorkOSDesktopClient, "exchangeCode">;
+type FlowClient = Pick<
+  WorkOSDesktopClient,
+  "exchangeCode" | "completeGitHubVerification"
+>;
 
 export interface WorkOSDesktopAuthorizationFlowDeps {
   client: FlowClient;
@@ -180,13 +181,30 @@ export interface WorkOSDesktopAuthorizationFlowDeps {
   onComplete: () => void;
   onError: (reason: Exclude<WorkOSDesktopFlowErrorReason, "cancelled">) => void;
   timeoutMs?: number;
-  /** Injected so the adoption retry is deterministic under test. */
-  wait?: (ms: number) => Promise<void>;
 }
 
 interface PendingFlow {
   callback: HostedCallback;
   verifier: string;
+}
+
+function emailVerificationChallenge(
+  error: unknown,
+): WorkOSEmailVerificationChallenge | null {
+  const challenge = (error as { emailVerification?: unknown })
+    ?.emailVerification;
+  if (!challenge || typeof challenge !== "object") return null;
+  const pendingAuthenticationToken = (
+    challenge as { pendingAuthenticationToken?: unknown }
+  ).pendingAuthenticationToken;
+  const emailVerificationId = (challenge as { emailVerificationId?: unknown })
+    .emailVerificationId;
+  return typeof pendingAuthenticationToken === "string" &&
+    pendingAuthenticationToken.length > 0 &&
+    typeof emailVerificationId === "string" &&
+    emailVerificationId.length > 0
+    ? { pendingAuthenticationToken, emailVerificationId }
+    : null;
 }
 
 function authorizationPageUrl(
@@ -277,17 +295,23 @@ export class WorkOSDesktopAuthorizationFlow {
       } catch (error) {
         logSignInFailure("code exchange", error);
         const reason = exchangeReason(error);
-        // WorkOS refuses the first exchange for any provider it does not
-        // auto-verify — of the two enabled here, that is GitHub — and emails a
-        // one-time code. Railway adopts GitHub's own verification from the
-        // `user.created` webhook, so the refusal is TRANSIENT: retry once
-        // rather than stopping the user for a code GitHub already collected.
-        // Losing the race only costs the retry; it never loosens the contract,
-        // because the token still has to satisfy every claim check below.
-        if (reason !== "verification_required") {
+        const challenge = emailVerificationChallenge(error);
+        if (reason !== "verification_required" || !challenge) {
           throw new WorkOSDesktopFlowError(reason);
         }
-        session = await this.retryAfterAdoption(pending, code);
+        if (this.pending !== pending) {
+          throw new WorkOSDesktopFlowError("cancelled");
+        }
+        try {
+          // WorkOS has already consumed `code` by the time it returns this
+          // challenge. Continue the pending grant; replaying the code can only
+          // produce invalid_grant.
+          session =
+            await this.deps.client.completeGitHubVerification(challenge);
+        } catch (completionError) {
+          logSignInFailure("GitHub verification continuation", completionError);
+          throw new WorkOSDesktopFlowError("verification_required");
+        }
       }
       if (this.pending !== pending) {
         await this.revokeAbandoned(session);
@@ -330,33 +354,6 @@ export class WorkOSDesktopAuthorizationFlow {
         reason = "exchange_failed";
       }
       if (reason !== "cancelled") this.deps.onError(reason);
-    }
-  }
-
-  /** Re-present the SAME authorization code after giving adoption time to land.
-   *  Nothing user-visible happens: no second browser window, no code entry. */
-  private async retryAfterAdoption(
-    pending: PendingFlow,
-    code: string,
-  ): Promise<WorkOSDesktopSession> {
-    const wait =
-      this.deps.wait ??
-      ((ms: number) =>
-        new Promise<void>((resolve) => {
-          setTimeout(resolve, ms).unref?.();
-        }));
-    await wait(ADOPTION_RETRY_DELAY_MS);
-    if (this.pending !== pending) {
-      throw new WorkOSDesktopFlowError("cancelled");
-    }
-    try {
-      return await this.deps.client.exchangeCode({
-        code,
-        codeVerifier: pending.verifier,
-      });
-    } catch (error) {
-      logSignInFailure("code exchange retry", error);
-      throw new WorkOSDesktopFlowError(exchangeReason(error));
     }
   }
 
