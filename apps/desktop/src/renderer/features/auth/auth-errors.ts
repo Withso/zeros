@@ -31,6 +31,13 @@ export function friendlyAuthError(message: string): string {
     return "Something went wrong. Please try again.";
   }
   // Unmapped server message — don't surface raw backend text to the user.
-  console.debug("[auth] unmapped auth error:", message);
+  console.debug("[auth] unmapped auth error");
   return "Something went wrong. Please try again.";
+}
+
+/** Native errors may include the URL that failed to open, including its
+ * short-lived state and PKCE challenge. Keep both diagnostics and UI fixed. */
+export function safeBrowserSignInStartError(_error: unknown): string {
+  console.debug("[auth] browser sign-in start failed");
+  return "Couldn't start sign-in. Please try again.";
 }

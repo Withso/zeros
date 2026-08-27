@@ -214,7 +214,7 @@ export class WorkOSDesktopAuthorizationFlow {
 
   constructor(private readonly deps: WorkOSDesktopAuthorizationFlowDeps) {}
 
-  async start(): Promise<void> {
+  async start(): Promise<{ expiresAt: number }> {
     this.cancel();
     if (!DESKTOP_SCHEME.test(this.deps.deepLinkScheme)) {
       throw new Error("Desktop sign-in scheme is invalid");
@@ -229,10 +229,9 @@ export class WorkOSDesktopAuthorizationFlow {
       state,
       challenge,
     );
-    const callback = createHostedCallback(
-      state,
-      this.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    );
+    const timeoutMs = this.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const expiresAt = Date.now() + timeoutMs;
+    const callback = createHostedCallback(state, timeoutMs);
     const pending = { callback, verifier };
     this.pending = pending;
     void this.complete(pending);
@@ -245,6 +244,7 @@ export class WorkOSDesktopAuthorizationFlow {
       }
       throw error;
     }
+    return { expiresAt };
   }
 
   acceptCallback(input: WorkOSDesktopAuthorizationCallback): boolean {

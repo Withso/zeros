@@ -47,8 +47,8 @@ export const authStartSignIn: CommandHandler = async () => {
   const config = desktopAuthConfig();
   if (config.provider === "auth0") return { mode: "auth0" };
   cancelLegacyAuthHandoff();
-  await workOSFlow().start();
-  return { mode: "workos" };
+  const attempt = await workOSFlow().start();
+  return { mode: "workos", expiresAt: attempt.expiresAt };
 };
 
 export const authCancelSignIn: CommandHandler = () => {

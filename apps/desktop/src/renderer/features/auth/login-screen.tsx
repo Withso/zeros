@@ -21,6 +21,10 @@ import { ArrowRight } from "lucide-react";
 import { Button } from "@/renderer/shared/ui";
 import { useAuth } from "./use-auth";
 import { isElectron, nativeInvoke } from "../../platform/runtime";
+import {
+  desktopSignInExpiryLabel,
+  desktopSignInSecondsRemaining,
+} from "./desktop-sign-in-expiry";
 
 const PRIVACY_URL = "https://zeros.build/privacy";
 const TERMS_URL = "https://zeros.build/terms";
@@ -43,16 +47,36 @@ export function LoginScreen() {
   // Desktop sign-in in flight: the system browser is open and we're waiting for
   // either the main-owned loopback callback or legacy deep link to flip the gate.
   const [waiting, setWaiting] = useState(false);
+  const [signInExpiresAt, setSignInExpiresAt] = useState<number | null>(null);
+  const [countdownNow, setCountdownNow] = useState(() => Date.now());
 
-  // "Opening browser…" covers both the brief startBrowserSignIn call (busy) and
-  // the subsequent wait for the deep-link handoff (waiting).
+  // The primary control remains disabled across both the brief browser-open
+  // call and the subsequent wait for the deep-link handoff.
   const pending = busy || waiting;
 
   // A failed handoff (nonce expired / redeem failed) arrives asynchronously as
   // oauthError — leave the waiting state so the error + a retry are shown.
   useEffect(() => {
-    if (oauthError && waiting) setWaiting(false);
+    if (oauthError && waiting) {
+      setWaiting(false);
+      setSignInExpiresAt(null);
+    }
   }, [oauthError, waiting]);
+
+  useEffect(() => {
+    if (!waiting || signInExpiresAt === null) return;
+    const update = () => setCountdownNow(Date.now());
+    update();
+    const timer = globalThis.setInterval(update, 1_000);
+    return () => globalThis.clearInterval(timer);
+  }, [signInExpiresAt, waiting]);
+
+  const expiryLabel =
+    waiting && signInExpiresAt !== null
+      ? desktopSignInExpiryLabel(
+          desktopSignInSecondsRemaining(signInExpiresAt, countdownNow),
+        )
+      : null;
 
   async function onSignIn() {
     if (pending) return;
@@ -62,18 +86,24 @@ export function LoginScreen() {
     const res = await startBrowserSignIn();
     setBusy(false);
     if (!res.ok) {
+      setSignInExpiresAt(null);
       setError(res.error ?? "Couldn't start sign-in.");
       return;
     }
-    // Desktop: the system browser opened — stay "Opening browser…" until the
-    // deep-link handoff flips the gate (or the user cancels / it times out).
+    // Desktop: the system browser opened — show the bounded waiting state until
+    // the deep-link handoff flips the gate (or the user cancels / it times out).
     // Web: a full-page navigation is already in flight; this screen unmounts.
-    if (isElectron()) setWaiting(true);
+    if (isElectron()) {
+      setCountdownNow(Date.now());
+      setSignInExpiresAt(res.expiresAt ?? null);
+      setWaiting(true);
+    }
   }
 
   function cancelWaiting() {
     cancelPendingOAuth();
     setWaiting(false);
+    setSignInExpiresAt(null);
   }
 
   return (
@@ -91,10 +121,18 @@ export function LoginScreen() {
               onClick={onSignIn}
               loading={pending}
             >
-              {pending ? (
+              {busy ? (
                 <>
                   <span>
                     Opening browser
+                    <OpeningDots />
+                  </span>
+                  <ArrowRight className="size-4" />
+                </>
+              ) : waiting ? (
+                <>
+                  <span>
+                    Waiting for browser
                     <OpeningDots />
                   </span>
                   <ArrowRight className="size-4" />
@@ -109,7 +147,12 @@ export function LoginScreen() {
             {/* A start failure (couldn't open the browser) or a FAILED browser
                 handoff (oauthError, async after the round-trip) shows here. */}
             {(error || oauthError) && (
-              <p className="text-red-primary text-sm">{error ?? oauthError}</p>
+              <p role="alert" className="text-red-primary text-sm">
+                {error ?? oauthError}
+              </p>
+            )}
+            {expiryLabel && (
+              <p className="text-muted-fg text-xs">{expiryLabel}</p>
             )}
             {/* While the browser is open: a Cancel affordance. */}
             {waiting && (

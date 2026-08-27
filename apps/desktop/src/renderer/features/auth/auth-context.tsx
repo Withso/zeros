@@ -38,6 +38,7 @@ import { isElectron, nativeInvoke, nativeListen } from "../../platform/runtime";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { CHANNEL } from "../../config/release-channel";
 import { useDismissStartupLoader } from "../../shared/ui/startup-loader";
+import { safeBrowserSignInStartError } from "./auth-errors";
 import {
   schemeForChannel,
   type Channel,
@@ -50,6 +51,9 @@ export interface AuthResult {
   ok: boolean;
   /** User-facing message when `ok` is false. */
   error?: string;
+  /** Main-owned deadline for the pending browser ceremony. Presentation only;
+   *  Electron main remains the authority that rejects an expired callback. */
+  expiresAt?: number;
 }
 
 export interface AuthContextValue {
@@ -338,10 +342,20 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
       // In WorkOS mode this command opens the hosted Zeros provider page and
       // retains state + verifier in Electron main, outside renderer JS. Auth0
       // mode returns a compatibility marker and continues below.
-      const selected = await nativeInvoke<{ mode?: "auth0" | "workos" }>(
-        "auth_start_signin",
-      );
-      if (selected?.mode === "workos") return { ok: true };
+      const selected = await nativeInvoke<{
+        mode?: "auth0" | "workos";
+        expiresAt?: number;
+      }>("auth_start_signin");
+      if (selected?.mode === "workos") {
+        return {
+          ok: true,
+          expiresAt:
+            typeof selected.expiresAt === "number" &&
+            Number.isFinite(selected.expiresAt)
+              ? selected.expiresAt
+              : undefined,
+        };
+      }
       if (selected?.mode !== "auth0") {
         return { ok: false, error: "Couldn't start sign-in." };
       }
@@ -390,11 +404,11 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
         `&nonce=${encodeURIComponent(nonce)}` +
         `&challenge=${encodeURIComponent(begin.challenge)}`;
       await nativeInvoke("shell_open_url", { url });
-      return { ok: true };
+      return { ok: true, expiresAt };
     } catch (err) {
       return {
         ok: false,
-        error: (err as Error)?.message ?? "Couldn't start sign-in.",
+        error: safeBrowserSignInStartError(err),
       };
     }
   }, []);
