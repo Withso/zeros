@@ -15,21 +15,36 @@ const ENV = {
   ZEROS_DEPLOY_ENV: "alpha",
 };
 
-test("desktop sign-in starts on the branded app host with direct providers", async () => {
-  const response = renderWorkOSDesktopAuthorizationPage(
+test("desktop sign-in redirects straight from the branded app host to Hosted AuthKit", async () => {
+  const calls = [];
+  const response = await renderWorkOSDesktopAuthorizationPage(
     new Request(
       `https://app-alpha.zeros.build/auth/desktop?state=${STATE}&code_challenge=${CHALLENGE}`,
     ),
     ENV,
+    {
+      fetch: async (url, init) => {
+        calls.push({ url, init });
+        return new Response(null, {
+          status: 303,
+          headers: {
+            location:
+              "https://api.workos.com/user_management/authorize?provider=authkit",
+          },
+        });
+      },
+    },
   );
-  const body = await response.text();
 
-  assert.equal(response.status, 200);
-  assert.match(body, /Sign in to Zeros/);
-  assert.match(body, /Continue with Google/);
-  assert.match(body, /Continue with GitHub/);
-  assert.match(body, /\/auth\/desktop\/start\?provider=google/);
-  assert.equal(body.toLowerCase().includes("workos"), false);
+  assert.equal(response.status, 303);
+  assert.equal(
+    response.headers.get("location"),
+    "https://api.workos.com/user_management/authorize?provider=authkit",
+  );
+  assert.equal(
+    calls[0].url,
+    `https://api-alpha.zeros.build/auth/desktop/start?state=${STATE}&code_challenge=${CHALLENGE}`,
+  );
   assert.equal(response.headers.get("cache-control"), "no-store");
 });
 
@@ -68,11 +83,11 @@ test("hosted desktop callback reduces provider errors to one fixed app value", a
   assert.doesNotMatch(body, /access_denied|private-provider-detail/);
 });
 
-test("provider choice forwards only bounded PKCE inputs to Railway", async () => {
+test("legacy provider selectors are dropped before bounded PKCE inputs reach Railway", async () => {
   const fetchMock = async (url, init) => {
     assert.equal(
       url,
-      `https://api-alpha.zeros.build/auth/desktop/start?provider=github&state=${STATE}&code_challenge=${CHALLENGE}`,
+      `https://api-alpha.zeros.build/auth/desktop/start?state=${STATE}&code_challenge=${CHALLENGE}`,
     );
     assert.equal(init.method, "GET");
     assert.equal(init.redirect, "manual");
@@ -92,8 +107,8 @@ test("provider choice forwards only bounded PKCE inputs to Railway", async () =>
   assert.equal(response.status, 303);
 });
 
-test("hosted desktop routes reject a callback intended for another release channel", () => {
-  const response = renderWorkOSDesktopAuthorizationPage(
+test("hosted desktop routes reject a callback intended for another release channel", async () => {
+  const response = await renderWorkOSDesktopAuthorizationPage(
     new Request(
       `https://app-alpha.zeros.build/auth/desktop?state=zeros.${"s".repeat(43)}&code_challenge=${CHALLENGE}`,
     ),

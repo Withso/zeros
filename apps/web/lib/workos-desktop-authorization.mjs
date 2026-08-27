@@ -64,19 +64,12 @@ function invalidPage(
   );
 }
 
-export function renderWorkOSDesktopAuthorizationPage(request, env) {
-  if (!configuredForWorkOS(env)) return invalidPage();
-  const url = new URL(request.url);
-  const state = desktopState(url.searchParams.get("state"), env);
-  const codeChallenge = challenge(url.searchParams.get("code_challenge"));
-  if (!state || !codeChallenge) return invalidPage();
-
-  const common = `state=${encodeURIComponent(state.value)}&amp;code_challenge=${encodeURIComponent(codeChallenge)}`;
-  const inner = `<div class="title">Sign in to Zeros</div>
-          <div class="sub">Choose a provider. New here? Signing in creates your account.</div>
-          <a class="btn" href="/auth/desktop/start?provider=google&amp;${common}">Continue with Google</a>
-          <a class="btn" href="/auth/desktop/start?provider=github&amp;${common}">Continue with GitHub</a>`;
-  return noStorePage(shell("Sign in to Zeros", inner), 200);
+export function renderWorkOSDesktopAuthorizationPage(
+  request,
+  env,
+  options = {},
+) {
+  return beginWorkOSDesktopAuthorization(request, env, options);
 }
 
 export async function beginWorkOSDesktopAuthorization(
@@ -86,28 +79,31 @@ export async function beginWorkOSDesktopAuthorization(
 ) {
   if (!configuredForWorkOS(env)) return invalidPage();
   const url = new URL(request.url);
-  const provider = url.searchParams.get("provider");
   const state = desktopState(url.searchParams.get("state"), env);
   const codeChallenge = challenge(url.searchParams.get("code_challenge"));
-  if (
-    !state ||
-    !codeChallenge ||
-    (provider !== "google" && provider !== "github")
-  ) {
+  if (!state || !codeChallenge) {
     return invalidPage();
   }
   const query = new URLSearchParams({
-    provider,
     state: state.value,
     code_challenge: codeChallenge,
   });
   try {
-    return await fetchWorkOSRailway(
+    const response = await fetchWorkOSRailway(
       env,
       `/auth/desktop/start?${query.toString()}`,
       { method: "GET" },
       options.fetch || fetch,
     );
+    const headers = new Headers(response.headers);
+    headers.set("cache-control", "no-store");
+    headers.set("pragma", "no-cache");
+    headers.set("referrer-policy", "no-referrer");
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
   } catch {
     return invalidPage(
       "The sign-in service is temporarily unavailable. Please try again.",

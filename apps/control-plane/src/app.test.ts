@@ -83,7 +83,6 @@ describe("app assembly — Railway WorkOS boundary", () => {
       ["GET", "/auth/start?provider=unknown", 400],
       ["GET", "/auth/browser/session", 401],
       ["GET", "/auth/desktop/start?provider=unknown", 400],
-      ["POST", "/auth/desktop/complete-github-verification", 400],
       ["POST", "/auth/desktop-revoke", 400],
       ["POST", "/auth/workos-webhook", 401],
     ] as const;
@@ -94,28 +93,12 @@ describe("app assembly — Railway WorkOS boundary", () => {
     }
   });
 
-  it("rate-limits anonymous verification continuations before WorkOS", async () => {
-    const statuses: number[] = [];
-    let lastResponse: Response | null = null;
-    for (let attempt = 0; attempt < 11; attempt += 1) {
-      const response = await app.request(
-        "/auth/desktop/complete-github-verification",
-        {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            "x-real-ip": "192.0.2.44",
-          },
-          body: "{}",
-        },
-      );
-      lastResponse = response;
-      statuses.push(response.status);
-    }
-    expect(statuses).toEqual([
-      400, 400, 400, 400, 400, 400, 400, 400, 400, 400, 429,
-    ]);
-    expect(lastResponse?.headers.get("cache-control")).toBe("no-store");
+  it("does not expose an anonymous verification-continuation endpoint", async () => {
+    const response = await app.request(
+      "/auth/desktop/complete-github-verification",
+      { method: "POST" },
+    );
+    expect(response.status).toBe(404);
   });
 });
 

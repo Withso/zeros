@@ -83,6 +83,26 @@ export function configuredAuthProvider(env) {
   throw new Error("AUTH_PROVIDER must be auth0 or workos");
 }
 
+/** Keep the legacy provider-pinned links only while Auth0 is the selected
+ * rollback path. WorkOS has exactly one application-owned entry point because
+ * Hosted AuthKit owns every authentication-method choice. */
+export function browserAuthStartOptions(env, returnTo) {
+  const returnQuery = `return=${encodeURIComponent(returnTo)}`;
+  if (configuredAuthProvider(env) === "workos") {
+    return [{ label: "Continue", href: `/auth/start?${returnQuery}` }];
+  }
+  return [
+    {
+      label: "Continue with Google",
+      href: `/auth/start?provider=google&${returnQuery}`,
+    },
+    {
+      label: "Continue with GitHub",
+      href: `/auth/start?provider=github&${returnQuery}`,
+    },
+  ];
+}
+
 export function legacyDesktopHandoffEnabled(env) {
   return configuredAuthProvider(env) === "auth0";
 }
@@ -90,7 +110,16 @@ export function legacyDesktopHandoffEnabled(env) {
 /** Cloudflare Pages is a stateless same-origin facade. Railway creates PKCE
  * state and cookies and returns the redirect response unchanged. */
 export function beginWorkOSBrowserAuth(request, env, options = {}) {
-  return proxyBrowserGet(request, env, "/auth/start", options);
+  const source = new URL(request.url);
+  const sanitized = new URL("/auth/start", source.origin);
+  const returnTo = source.searchParams.get("return");
+  if (returnTo !== null) sanitized.searchParams.set("return", returnTo);
+  return proxyBrowserGet(
+    new Request(sanitized, { headers: request.headers }),
+    env,
+    "/auth/start",
+    options,
+  );
 }
 
 export function finishWorkOSBrowserAuth(request, env, options = {}) {

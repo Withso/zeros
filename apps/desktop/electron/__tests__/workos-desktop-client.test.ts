@@ -85,7 +85,7 @@ describe("WorkOS desktop public client", () => {
     });
   });
 
-  it("names the WorkOS refusal so an unverified email is not an opaque failure", async () => {
+  it("names a WorkOS refusal without retaining continuation credentials", async () => {
     const client = new WorkOSDesktopClient({
       config,
       fetch: (async () =>
@@ -111,43 +111,16 @@ describe("WorkOS desktop public client", () => {
         code: "exchange_rejected",
         status: 403,
         providerCode: "email_verification_required",
-        emailVerification: {
-          pendingAuthenticationToken: "pending-authentication-token",
-          emailVerificationId: "email_verification_01EXAMPLE",
-        },
       }),
     );
-  });
-
-  it("continues GitHub verification through Railway and verifies the returned session", async () => {
-    const fetchMock = vi.fn(async (url: string | URL, init?: RequestInit) => {
-      expect(String(url)).toBe(
-        "https://api-alpha.zeros.build/auth/desktop/complete-github-verification",
-      );
-      expect(JSON.parse(String(init?.body))).toEqual({
-        pending_authentication_token: "pending-authentication-token",
-        email_verification_id: "email_verification_01EXAMPLE",
+    try {
+      await client.exchangeCode({
+        code: "authorization-code",
+        codeVerifier: "pkce-verifier",
       });
-      return jsonResponse(responseBody());
-    });
-    const client = new WorkOSDesktopClient({
-      config,
-      fetch: fetchMock as typeof fetch,
-      controlPlaneOrigin: "https://api-alpha.zeros.build",
-      verifyAccessToken: async () => claims,
-    });
-
-    await expect(
-      client.completeGitHubVerification({
-        pendingAuthenticationToken: "pending-authentication-token",
-        emailVerificationId: "email_verification_01EXAMPLE",
-      }),
-    ).resolves.toMatchObject({
-      accessToken: "access-token",
-      providerSubject: claims.providerSubject,
-      authenticationMethod: "GitHubOAuth",
-    });
-    expect(fetchMock).toHaveBeenCalledOnce();
+    } catch (error) {
+      expect(error).not.toHaveProperty("emailVerification");
+    }
   });
 
   it("rejects an unverified WorkOS user with its own actionable code", async () => {

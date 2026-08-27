@@ -10,13 +10,12 @@ const CHALLENGE = "c".repeat(43);
 function setup() {
   const desktopAuthorizationUrl = vi.fn(
     (options: {
-      provider: string;
       state: string;
       codeChallenge: string;
       redirectUri: string;
     }) => {
       const url = new URL("https://api.workos.com/user_management/authorize");
-      url.searchParams.set("provider", options.provider);
+      url.searchParams.set("provider", "authkit");
       url.searchParams.set("client_id", "client_desktop_example");
       url.searchParams.set("redirect_uri", options.redirectUri);
       url.searchParams.set("state", options.state);
@@ -54,7 +53,6 @@ describe("WorkOS hosted desktop authorization", () => {
     );
     const url = new URL(
       provider.desktopAuthorizationUrl({
-        provider: "GitHubOAuth",
         state: STATE,
         codeChallenge: CHALLENGE,
         redirectUri: `${APP_ORIGIN}/auth/desktop/callback`,
@@ -63,24 +61,23 @@ describe("WorkOS hosted desktop authorization", () => {
 
     expect(url.searchParams.get("client_id")).toBe("client_desktop_example");
     expect(url.searchParams.get("client_id")).not.toBe("client_web_example");
-    expect(url.searchParams.get("provider")).toBe("GitHubOAuth");
+    expect(url.searchParams.get("provider")).toBe("authkit");
   });
 
-  it("uses the Desktop Application with a fixed app-host callback and direct provider", async () => {
+  it("uses Hosted AuthKit with the Desktop Application and fixed app-host callback", async () => {
     const { app, desktopAuthorizationUrl } = setup();
     const response = await app.request(
-      `/auth/desktop/start?provider=google&state=${STATE}&code_challenge=${CHALLENGE}`,
+      `/auth/desktop/start?state=${STATE}&code_challenge=${CHALLENGE}`,
     );
 
     expect(response.status).toBe(303);
     expect(desktopAuthorizationUrl).toHaveBeenCalledWith({
-      provider: "GoogleOAuth",
       state: STATE,
       codeChallenge: CHALLENGE,
       redirectUri: `${APP_ORIGIN}/auth/desktop/callback`,
     });
     const location = new URL(response.headers.get("location")!);
-    expect(location.searchParams.get("provider")).toBe("GoogleOAuth");
+    expect(location.searchParams.get("provider")).toBe("authkit");
     expect(location.searchParams.get("client_id")).toBe(
       "client_desktop_example",
     );
@@ -90,12 +87,28 @@ describe("WorkOS hosted desktop authorization", () => {
     expect(location.searchParams.has("client_secret")).toBe(false);
   });
 
-  it("rejects AuthKit, foreign schemes, and malformed PKCE before calling WorkOS", async () => {
+  it("makes legacy and hostile provider selectors inert", async () => {
+    const { app, desktopAuthorizationUrl } = setup();
+    for (const selector of ["google", "github", "authkit", "GitHubOAuth"]) {
+      const response = await app.request(
+        `/auth/desktop/start?provider=${selector}&state=${STATE}&code_challenge=${CHALLENGE}`,
+      );
+      expect(response.status).toBe(303);
+      expect(
+        new URL(response.headers.get("location")!).searchParams.get("provider"),
+      ).toBe("authkit");
+    }
+    expect(desktopAuthorizationUrl).toHaveBeenCalledTimes(4);
+    for (const [options] of desktopAuthorizationUrl.mock.calls) {
+      expect(options).not.toHaveProperty("provider");
+    }
+  });
+
+  it("rejects foreign schemes and malformed PKCE before calling WorkOS", async () => {
     const { app, desktopAuthorizationUrl } = setup();
     for (const query of [
-      `provider=authkit&state=${STATE}&code_challenge=${CHALLENGE}`,
-      `provider=google&state=foreign.${"s".repeat(43)}&code_challenge=${CHALLENGE}`,
-      `provider=github&state=${STATE}&code_challenge=short`,
+      `state=foreign.${"s".repeat(43)}&code_challenge=${CHALLENGE}`,
+      `state=${STATE}&code_challenge=short`,
     ]) {
       expect((await app.request(`/auth/desktop/start?${query}`)).status).toBe(
         400,

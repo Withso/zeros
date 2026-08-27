@@ -5,6 +5,7 @@ import {
   WORKOS_FLOW_COOKIE,
   WORKOS_SESSION_COOKIE,
   beginWorkOSBrowserAuth,
+  browserAuthStartOptions,
   finishWorkOSBrowserAuth,
   legacyDesktopHandoffEnabled,
   logoutWorkOSBrowserSession,
@@ -26,11 +27,37 @@ test("the Auth0-era desktop ticket broker is disabled in WorkOS mode", () => {
   );
 });
 
+test("the signed-out hub preserves Auth0 rollback links but gives WorkOS one Hosted AuthKit entry", () => {
+  const returnTo = `${APP_ORIGIN}/after`;
+  assert.deepEqual(
+    browserAuthStartOptions({ AUTH_PROVIDER: "workos" }, returnTo),
+    [
+      {
+        label: "Continue",
+        href: `/auth/start?return=${encodeURIComponent(returnTo)}`,
+      },
+    ],
+  );
+  assert.deepEqual(
+    browserAuthStartOptions({ AUTH_PROVIDER: "auth0" }, returnTo),
+    [
+      {
+        label: "Continue with Google",
+        href: `/auth/start?provider=google&return=${encodeURIComponent(returnTo)}`,
+      },
+      {
+        label: "Continue with GitHub",
+        href: `/auth/start?provider=github&return=${encodeURIComponent(returnTo)}`,
+      },
+    ],
+  );
+});
+
 test("auth start is a stateless facade for the matching Railway service", async () => {
   const calls = [];
   const response = await beginWorkOSBrowserAuth(
     new Request(
-      `${APP_ORIGIN}/auth/start?provider=google&return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
+      `${APP_ORIGIN}/auth/start?provider=github&connection=conn_attacker&return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
       { headers: { cookie: "unrelated=value" } },
     ),
     ENV,
@@ -51,7 +78,7 @@ test("auth start is a stateless facade for the matching Railway service", async 
   assert.equal(response.status, 303);
   assert.equal(
     calls[0].url,
-    `${CONTROL_PLANE_URL}/auth/start?provider=google&return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
+    `${CONTROL_PLANE_URL}/auth/start?return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
   );
   assert.equal(calls[0].init.headers.get("cookie"), null);
   assert.equal(calls[0].init.redirect, "manual");

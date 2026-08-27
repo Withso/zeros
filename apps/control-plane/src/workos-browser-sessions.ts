@@ -15,11 +15,6 @@ export const WORKOS_SESSION_TTL_S = 30 * 24 * 60 * 60;
 
 const REFRESH_SKEW_MS = 30_000;
 const OPAQUE_ID = /^[A-Za-z0-9_-]{43}$/;
-const WORKOS_PROVIDERS = new Map([
-  ["google", "GoogleOAuth"],
-  ["github", "GitHubOAuth"],
-]);
-
 export type WorkOSFlowRecord = {
   codeVerifier: string;
   returnPath: string;
@@ -405,7 +400,6 @@ export class WorkOSBrowserSessions {
   ) {}
 
   async start(options: {
-    provider: string;
     returnPath: string;
   }): Promise<{ credential: string; authorizationUrl: string }> {
     const credential = this.token();
@@ -420,7 +414,6 @@ export class WorkOSBrowserSessions {
     }
     const redirectUri = `${this.appOrigin}/auth/callback`;
     const authorizationUrl = this.provider.authorizationUrl({
-      provider: options.provider,
       state,
       codeChallenge: pkceChallenge(codeVerifier),
       redirectUri,
@@ -802,18 +795,8 @@ export function createWorkOSBrowserSessionRoutes(
 
   app.get("/auth/start", async (c) => {
     const requestUrl = new URL(c.req.url);
-    const provider = WORKOS_PROVIDERS.get(
-      requestUrl.searchParams.get("provider") ?? "",
-    );
-    if (!provider) {
-      return new Response("Unknown provider", {
-        status: 400,
-        headers: { "cache-control": "no-store" },
-      });
-    }
     try {
       const started = await sessions.start({
-        provider,
         returnPath: safeWorkOSReturnPath(
           requestUrl.searchParams.get("return"),
           appOrigin,

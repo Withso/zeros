@@ -2,7 +2,6 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 
 import type {
   WorkOSDesktopClient,
-  WorkOSEmailVerificationChallenge,
   WorkOSDesktopSession,
 } from "./workos-desktop-client";
 
@@ -162,10 +161,7 @@ function createHostedCallback(
   };
 }
 
-type FlowClient = Pick<
-  WorkOSDesktopClient,
-  "exchangeCode" | "completeGitHubVerification"
->;
+type FlowClient = Pick<WorkOSDesktopClient, "exchangeCode">;
 
 export interface WorkOSDesktopAuthorizationFlowDeps {
   client: FlowClient;
@@ -186,25 +182,6 @@ export interface WorkOSDesktopAuthorizationFlowDeps {
 interface PendingFlow {
   callback: HostedCallback;
   verifier: string;
-}
-
-function emailVerificationChallenge(
-  error: unknown,
-): WorkOSEmailVerificationChallenge | null {
-  const challenge = (error as { emailVerification?: unknown })
-    ?.emailVerification;
-  if (!challenge || typeof challenge !== "object") return null;
-  const pendingAuthenticationToken = (
-    challenge as { pendingAuthenticationToken?: unknown }
-  ).pendingAuthenticationToken;
-  const emailVerificationId = (challenge as { emailVerificationId?: unknown })
-    .emailVerificationId;
-  return typeof pendingAuthenticationToken === "string" &&
-    pendingAuthenticationToken.length > 0 &&
-    typeof emailVerificationId === "string" &&
-    emailVerificationId.length > 0
-    ? { pendingAuthenticationToken, emailVerificationId }
-    : null;
 }
 
 function authorizationPageUrl(
@@ -294,24 +271,7 @@ export class WorkOSDesktopAuthorizationFlow {
         });
       } catch (error) {
         logSignInFailure("code exchange", error);
-        const reason = exchangeReason(error);
-        const challenge = emailVerificationChallenge(error);
-        if (reason !== "verification_required" || !challenge) {
-          throw new WorkOSDesktopFlowError(reason);
-        }
-        if (this.pending !== pending) {
-          throw new WorkOSDesktopFlowError("cancelled");
-        }
-        try {
-          // WorkOS has already consumed `code` by the time it returns this
-          // challenge. Continue the pending grant; replaying the code can only
-          // produce invalid_grant.
-          session =
-            await this.deps.client.completeGitHubVerification(challenge);
-        } catch (completionError) {
-          logSignInFailure("GitHub verification continuation", completionError);
-          throw new WorkOSDesktopFlowError("verification_required");
-        }
+        throw new WorkOSDesktopFlowError(exchangeReason(error));
       }
       if (this.pending !== pending) {
         await this.revokeAbandoned(session);

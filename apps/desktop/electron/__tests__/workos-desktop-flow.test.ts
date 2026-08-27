@@ -18,11 +18,6 @@ const session: WorkOSDesktopSession = {
   authenticationMethod: "GoogleOAuth",
 };
 
-const emailVerification = {
-  pendingAuthenticationToken: "pending-authentication-token",
-  emailVerificationId: "email_verification_01EXAMPLE",
-};
-
 const controllers: WorkOSDesktopAuthorizationFlow[] = [];
 
 function deferred<T>() {
@@ -37,11 +32,10 @@ function setup(overrides: Partial<WorkOSDesktopAuthorizationFlowDeps> = {}) {
   const completed = deferred<void>();
   let openedUrl: string | null = null;
   const exchangeCode = vi.fn(async () => session);
-  const completeGitHubVerification = vi.fn(async () => session);
   const persistSession = vi.fn();
   const revokeSession = vi.fn(async () => {});
   const deps: WorkOSDesktopAuthorizationFlowDeps = {
-    client: { exchangeCode, completeGitHubVerification },
+    client: { exchangeCode },
     appOrigin: "https://app-alpha.zeros.build",
     deepLinkScheme: "zeros-alpha",
     openExternal: async (url) => {
@@ -62,7 +56,6 @@ function setup(overrides: Partial<WorkOSDesktopAuthorizationFlowDeps> = {}) {
     deps,
     completed,
     exchangeCode,
-    completeGitHubVerification,
     persistSession,
     revokeSession,
     get openedUrl() {
@@ -173,21 +166,25 @@ describe("WorkOS desktop hosted authorization", () => {
     expect(harness.exchangeCode).not.toHaveBeenCalled();
   });
 
-  it("continues the WorkOS challenge instead of replaying its spent authorization code", async () => {
+  it("fails closed instead of performing an out-of-band verification grant", async () => {
     const verificationRequired = Object.assign(new Error("rejected"), {
       code: "exchange_rejected",
       status: 403,
       providerCode: "email_verification_required",
-      emailVerification,
     });
     const exchangeCode = vi.fn(async () => {
       throw verificationRequired;
     });
-    const completeGitHubVerification = vi.fn(async () => session);
-    const onError = vi.fn();
+    const outOfBandContinuation = vi.fn(async () => session);
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const legacyClient = {
+      exchangeCode,
+      completeGitHubVerification: outOfBandContinuation,
+    };
     const harness = setup({
       onError,
-      client: { exchangeCode, completeGitHubVerification },
+      client: legacyClient,
     });
     await harness.flow.start();
 
@@ -197,81 +194,16 @@ describe("WorkOS desktop hosted authorization", () => {
         code: "real-code",
       }),
     ).toBe(true);
-    await harness.completed.promise;
+    await error.promise;
 
-    // WorkOS consumes the authorization code before returning the challenge.
-    // A replay would be invalid_grant, so the code must be presented once.
     expect(exchangeCode).toHaveBeenCalledOnce();
     expect(exchangeCode).toHaveBeenCalledWith({
       code: "real-code",
       codeVerifier: expect.any(String),
     });
-    expect(completeGitHubVerification).toHaveBeenCalledWith(emailVerification);
-    expect(onError).not.toHaveBeenCalled();
-    expect(harness.persistSession).toHaveBeenCalledTimes(1);
-  });
-
-  it("reports the verification refusal when challenge continuation is refused", async () => {
-    const error = deferred<void>();
-    const onError = vi.fn(() => error.resolve());
-    const exchangeCode = vi.fn(async () => {
-      throw Object.assign(new Error("rejected"), {
-        code: "exchange_rejected",
-        status: 403,
-        providerCode: "email_verification_required",
-        emailVerification,
-      });
-    });
-    const completeGitHubVerification = vi.fn(async () => {
-      throw new Error("challenge rejected");
-    });
-    const harness = setup({
-      onError,
-      client: { exchangeCode, completeGitHubVerification },
-    });
-    await harness.flow.start();
-
-    expect(
-      harness.flow.acceptCallback({
-        state: callbackState(harness.openedUrl!),
-        code: "real-code",
-      }),
-    ).toBe(true);
-    await error.promise;
-
-    expect(exchangeCode).toHaveBeenCalledOnce();
-    expect(completeGitHubVerification).toHaveBeenCalledWith(emailVerification);
     expect(onError).toHaveBeenCalledWith("verification_required");
-  });
-
-  it("fails closed when WorkOS omits either continuation credential", async () => {
-    const error = deferred<void>();
-    const onError = vi.fn(() => error.resolve());
-    const completeGitHubVerification = vi.fn(async () => session);
-    const harness = setup({
-      onError,
-      client: {
-        exchangeCode: vi.fn(async () => {
-          throw Object.assign(new Error("rejected"), {
-            code: "exchange_rejected",
-            status: 403,
-            providerCode: "email_verification_required",
-            emailVerification: null,
-          });
-        }),
-        completeGitHubVerification,
-      },
-    });
-    await harness.flow.start();
-
-    harness.flow.acceptCallback({
-      state: callbackState(harness.openedUrl!),
-      code: "real-code",
-    });
-    await error.promise;
-
-    expect(completeGitHubVerification).not.toHaveBeenCalled();
-    expect(onError).toHaveBeenCalledWith("verification_required");
+    expect(outOfBandContinuation).not.toHaveBeenCalled();
+    expect(harness.persistSession).not.toHaveBeenCalled();
   });
 
   it("reports an unverified email distinctly from a generic exchange failure", async () => {
@@ -285,7 +217,6 @@ describe("WorkOS desktop hosted authorization", () => {
             code: "user_email_unverified",
           });
         }),
-        completeGitHubVerification: vi.fn(async () => session),
       },
     });
     await harness.flow.start();
@@ -310,7 +241,6 @@ describe("WorkOS desktop hosted authorization", () => {
         exchangeCode: vi.fn(async () => {
           throw new Error("network down");
         }),
-        completeGitHubVerification: vi.fn(async () => session),
       },
     });
     await harness.flow.start();
@@ -344,7 +274,6 @@ describe("WorkOS desktop hosted authorization", () => {
     const harness = setup({
       client: {
         exchangeCode: () => exchanged.promise,
-        completeGitHubVerification: async () => session,
       },
     });
     await harness.flow.start();

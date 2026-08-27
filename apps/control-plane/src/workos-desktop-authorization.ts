@@ -2,10 +2,6 @@ import { Hono } from "hono";
 
 import type { WorkOSDesktopAuthorizationProvider } from "./workos-provider.js";
 
-const WORKOS_PROVIDERS = new Map([
-  ["google", "GoogleOAuth"],
-  ["github", "GitHubOAuth"],
-]);
 const DESKTOP_SCHEMES = new Set([
   "zeros",
   "zeros-alpha",
@@ -39,21 +35,13 @@ export function createWorkOSDesktopAuthorizationRoutes(
   const app = new Hono();
   app.get("/auth/desktop/start", (c) => {
     const url = new URL(c.req.url);
-    const workosProvider = WORKOS_PROVIDERS.get(
-      url.searchParams.get("provider") ?? "",
-    );
     const state = url.searchParams.get("state") ?? "";
     const codeChallenge = url.searchParams.get("code_challenge") ?? "";
-    if (
-      !workosProvider ||
-      !validDesktopState(state) ||
-      !PKCE_CHALLENGE.test(codeChallenge)
-    ) {
+    if (!validDesktopState(state) || !PKCE_CHALLENGE.test(codeChallenge)) {
       return invalidRequest();
     }
     try {
       const authorizationUrl = provider.desktopAuthorizationUrl({
-        provider: workosProvider,
         state,
         codeChallenge,
         redirectUri: `${appOrigin}/auth/desktop/callback`,

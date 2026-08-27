@@ -14,7 +14,7 @@ schema and is deployed independently from the desktop application.
   against JWKS. WorkOS mode additionally enforces the Web/Desktop Application
   allowlist and session/token identifiers.
 - In WorkOS mode Railway also owns browser PKCE exchange, encrypted sealed
-  sessions, PostgreSQL-serialized refresh, direct-provider Desktop Application
+  sessions, PostgreSQL-serialized refresh, Hosted AuthKit Desktop Application
   authorization, webhook verification, and desktop current/all-session
   revocation. Cloudflare Pages holds none of those secrets.
 - PostgreSQL owns application authorization and tenant data. Request
@@ -52,23 +52,23 @@ The default port is `8080`; the health endpoint is
 
 Core environment variables:
 
-| Variable | Purpose |
-| --- | --- |
-| `DATABASE_URL` | PostgreSQL connection string; use Railway's private-network URL in production |
-| `AUTH_PROVIDER` | `auth0` during compatibility rollout, or `workos` after client cutover |
-| `AUTH_AUDIENCE` | Expected access-token audience |
-| `AUTH_ISSUER` | Exact issuer; required in WorkOS mode, optionally comma-separated only for legacy Auth0 |
-| `AUTH_JWKS_URL` | Exact public JWKS endpoint; required in WorkOS mode |
-| `AUTH_WEB_CLIENT_ID` | Allowed WorkOS Web Application client ID |
-| `AUTH_DESKTOP_CLIENT_ID` | Allowed WorkOS Desktop Application client ID |
-| `APP_ORIGIN` | Exact channel app origin used for the browser callback and safe returns in WorkOS mode |
-| `WORKOS_API_KEY` | WorkOS server API key; Railway-only |
-| `WORKOS_COOKIE_PASSWORD` | Unique 32+ character key for WorkOS sealed sessions; Railway-only |
-| `WORKOS_WEBHOOK_SECRET` | Exact WorkOS endpoint signing secret; Railway-only |
-| `ZEROS_SELF_HOSTED` | Public templates only: `true` allows installer-owned platform domains; frontend and API origins must differ; official deployments leave it unset |
-| `AUTH0_DOMAIN` | Legacy Auth0 fallback used only when explicit issuer/JWKS values are absent |
-| `PORT` | HTTP port, default `8080` |
-| `NODE_ENV` | Use `production` for production-safe error responses |
+| Variable                 | Purpose                                                                                                                                          |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `DATABASE_URL`           | PostgreSQL connection string; use Railway's private-network URL in production                                                                    |
+| `AUTH_PROVIDER`          | `auth0` during compatibility rollout, or `workos` after client cutover                                                                           |
+| `AUTH_AUDIENCE`          | Expected access-token audience                                                                                                                   |
+| `AUTH_ISSUER`            | Exact issuer; required in WorkOS mode, optionally comma-separated only for legacy Auth0                                                          |
+| `AUTH_JWKS_URL`          | Exact public JWKS endpoint; required in WorkOS mode                                                                                              |
+| `AUTH_WEB_CLIENT_ID`     | Allowed WorkOS Web Application client ID                                                                                                         |
+| `AUTH_DESKTOP_CLIENT_ID` | Allowed WorkOS Desktop Application client ID                                                                                                     |
+| `APP_ORIGIN`             | Exact channel app origin used for the browser callback and safe returns in WorkOS mode                                                           |
+| `WORKOS_API_KEY`         | WorkOS server API key; Railway-only                                                                                                              |
+| `WORKOS_COOKIE_PASSWORD` | Unique 32+ character key for WorkOS sealed sessions; Railway-only                                                                                |
+| `WORKOS_WEBHOOK_SECRET`  | Exact WorkOS endpoint signing secret; Railway-only                                                                                               |
+| `ZEROS_SELF_HOSTED`      | Public templates only: `true` allows installer-owned platform domains; frontend and API origins must differ; official deployments leave it unset |
+| `AUTH0_DOMAIN`           | Legacy Auth0 fallback used only when explicit issuer/JWKS values are absent                                                                      |
+| `PORT`                   | HTTP port, default `8080`                                                                                                                        |
+| `NODE_ENV`               | Use `production` for production-safe error responses                                                                                             |
 
 The optional GitHub App, invitation-email, and feedback variables are documented in
 [`.env.example`](.env.example). Secrets belong in Railway's secret store and
@@ -189,33 +189,24 @@ single-use, access tokens are not stored as table columns, and encrypted sealed
 sessions are refreshed under a PostgreSQL advisory/row lock so multiple
 Railway replicas cannot race rotation.
 
-`GET /auth/desktop/start` is a public, stateless authorization endpoint for the
-branded Pages desktop chooser. It accepts only Google/GitHub plus bounded
-exact-channel state and an S256 challenge, uses `AUTH_DESKTOP_CLIENT_ID`, and
-fixes the WorkOS redirect to `${APP_ORIGIN}/auth/desktop/callback`. It never
-accepts a caller-selected client, callback, or arbitrary provider. Electron
-main retains the matching verifier and exchanges the returned code directly as
-the public Desktop Application.
+Both Web and Desktop authorization URLs always select `provider=authkit`.
+Hosted AuthKit owns provider choice, credentials, verification, MFA, recovery,
+and identity linking. Caller-supplied provider, connection, or organization
+selectors are ignored and never reach the WorkOS SDK.
 
-When WorkOS moves a first-time GitHub exchange into email verification,
-Electron posts the returned pending token and verification ID directly to
-`POST /auth/desktop/complete-github-verification`. This rate-limited Railway
-boundary retrieves the exact unexpired challenge and requires matching WorkOS
-`authentication.oauth_succeeded` and `email_verification.created` events for
-the same user, email, application client, and narrow creation window. It then
-completes the confidential grant with `WORKOS_API_KEY`, requires WorkOS to have
-linked a `GitHubOAuth` identity, and verifies that the minted Desktop
-Application token belongs to that same user before returning it. WorkOS may
-omit the optional authentication-method response field; an explicit non-GitHub
-method is still rejected. The route never accepts a caller-selected user,
-email, provider, verification code, or client ID. Electron verifies the signed
-token again before storage.
+`GET /auth/desktop/start` is a public, stateless compatibility entry point for
+Pages and older releases. It accepts only bounded exact-channel state and an
+S256 challenge, uses `AUTH_DESKTOP_CLIENT_ID`, and fixes the WorkOS redirect to
+`${APP_ORIGIN}/auth/desktop/callback`. It never accepts a caller-selected
+client, callback, connection, organization, or provider. Electron main retains
+the matching verifier and exchanges the returned code directly as the public
+Desktop Application.
 
-The hosted browser callback handles the same WorkOS transition entirely inside
-Railway. It proves the OAuth event sequence, completes the grant for the Web
-Application, then verifies the linked GitHub identity and sealed session before
-promoting the browser flow; no pending challenge or session is exposed to
-Pages.
+There is no application-owned email-verification continuation and no endpoint
+that accepts pending WorkOS credentials. Hosted AuthKit must finish
+verification before returning a usable code. Browser exchange then requires a
+verified user and authenticates the sealed session before promotion; Electron
+verifies the signed Desktop Application token again before storage.
 
 `POST /auth/workos-webhook` verifies WorkOS's signature over the exact raw body
 on Railway, then accepts only bounded `user.updated` and `user.deleted` events.
@@ -237,16 +228,16 @@ ownership-transfer mechanism.
 
 The authenticated surface is organization-first:
 
-| Route | Purpose |
-| --- | --- |
-| `GET /v1/me` | Account plus Personal-first organization summaries and capability metadata |
-| `POST /v1/organizations` | Create an organization, owner membership, and default team atomically |
-| `GET/PATCH/DELETE /v1/organizations/:id` | Read or manage an organization; Personal mutation is rejected |
-| `/v1/organizations/:id/members` | Membership, role, leave, and last-owner-safe removal operations |
-| `/v1/organizations/:id/invitations` | Exact-email, expiring organization invitations |
-| `GET/POST /v1/organizations/:id/teams` | List the default team; additional creation returns a capability error for now |
-| `GET /v1/organizations/:id/billing` | Organization-scoped plan/seat metadata; payment management remains disabled |
-| `/v1/organizations/:id/settings` | Remote organization settings; Personal reads empty/local-only and rejects writes |
+| Route                                    | Purpose                                                                          |
+| ---------------------------------------- | -------------------------------------------------------------------------------- |
+| `GET /v1/me`                             | Account plus Personal-first organization summaries and capability metadata       |
+| `POST /v1/organizations`                 | Create an organization, owner membership, and default team atomically            |
+| `GET/PATCH/DELETE /v1/organizations/:id` | Read or manage an organization; Personal mutation is rejected                    |
+| `/v1/organizations/:id/members`          | Membership, role, leave, and last-owner-safe removal operations                  |
+| `/v1/organizations/:id/invitations`      | Exact-email, expiring organization invitations                                   |
+| `GET/POST /v1/organizations/:id/teams`   | List the default team; additional creation returns a capability error for now    |
+| `GET /v1/organizations/:id/billing`      | Organization-scoped plan/seat metadata; payment management remains disabled      |
+| `/v1/organizations/:id/settings`         | Remote organization settings; Personal reads empty/local-only and rejects writes |
 
 `/v1/teams` mirrors the tenant-root operations for mixed-version desktop
 clients. Its IDs are organization IDs, not child-team IDs.
@@ -283,14 +274,14 @@ created under system authority; there is deliberately no permissive default.
 
 The authenticated Organization surface is:
 
-| Route | Purpose |
-| --- | --- |
-| `GET/POST /v1/organizations/:id/cloud-workspaces` | List authorized workspaces or request an idempotent create |
-| `GET /v1/organizations/:id/cloud-workspaces/:workspace` | Read one team-authorized workspace |
-| `POST .../:workspace/stop` | Request a durable stop intent |
-| `POST .../:workspace/wake` | Request wake after rechecking current eligibility and quota |
-| `POST .../:workspace/archive` | Request stop-plus-archive reconciliation |
-| `DELETE .../:workspace` | Revoke endpoint grants, then request verified deletion |
+| Route                                                   | Purpose                                                     |
+| ------------------------------------------------------- | ----------------------------------------------------------- |
+| `GET/POST /v1/organizations/:id/cloud-workspaces`       | List authorized workspaces or request an idempotent create  |
+| `GET /v1/organizations/:id/cloud-workspaces/:workspace` | Read one team-authorized workspace                          |
+| `POST .../:workspace/stop`                              | Request a durable stop intent                               |
+| `POST .../:workspace/wake`                              | Request wake after rechecking current eligibility and quota |
+| `POST .../:workspace/archive`                           | Request stop-plus-archive reconciliation                    |
+| `DELETE .../:workspace`                                 | Revoke endpoint grants, then request verified deletion      |
 
 Mutating requests require an `Idempotency-Key`; replaying the same key and
 semantic request returns the original workspace/intent, while reusing it for
