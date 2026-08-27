@@ -82,7 +82,6 @@ d("Postgres WorkOS browser sessions", () => {
     );
 
     const started = await sessions.start({
-      provider: "GoogleOAuth",
       returnPath: "/after",
     });
     const state = new URL(started.authorizationUrl).searchParams.get("state")!;

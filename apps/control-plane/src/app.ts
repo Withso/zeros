@@ -37,7 +37,6 @@ import {
 } from "./workos-browser-sessions.js";
 import { createWorkOSDesktopRevocationRoutes } from "./workos-desktop-revocation.js";
 import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
-import { createWorkOSDesktopVerificationRoutes } from "./workos-desktop-verification.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 
 export function createApp(
@@ -58,8 +57,9 @@ export function createApp(
   });
 
   // Railway owns the complete WorkOS browser/desktop authentication boundary:
-  // authorization-code exchange, encrypted session state, serialized refresh,
-  // provider-signed lifecycle events, and desktop session revocation. These
+  // Hosted AuthKit authorization, authorization-code exchange, encrypted
+  // session state, serialized refresh, provider-signed lifecycle events, and
+  // desktop session revocation. These
   // endpoints are intentionally mounted before /v1 bearer authentication;
   // each carries its own stronger credential (PKCE state, opaque HttpOnly
   // cookie, webhook signature, or a verified Desktop Application bearer).
@@ -78,28 +78,6 @@ export function createApp(
       "/",
       createWorkOSDesktopAuthorizationRoutes(provider, config.workos.appOrigin),
     );
-    const verificationPreAuthLimit = rateLimit(
-      "workos-verification-preauth",
-      10,
-      60_000,
-      (c) => {
-        const clientIp = c.req.header("X-Real-IP")?.trim() ?? "";
-        return isIP(clientIp) ? clientIp : "unknown";
-      },
-    );
-    app.use(
-      "/auth/desktop/complete-github-verification",
-      async (c, next) => {
-        c.header("Cache-Control", "no-store");
-        c.header("Pragma", "no-cache");
-        await next();
-      },
-    );
-    app.use(
-      "/auth/desktop/complete-github-verification",
-      verificationPreAuthLimit,
-    );
-    app.route("/", createWorkOSDesktopVerificationRoutes(provider));
     app.route("/", createWorkOSDesktopRevocationRoutes(provider));
     app.route(
       "/",

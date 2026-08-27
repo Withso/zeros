@@ -11,7 +11,7 @@
 // `/launch` entry remains on `/launch` and shows desktop guidance.
 //
 // Three outcomes:
-//   • signed out                  → "Continue with Google / GitHub" right here
+//   • signed out                  → one entry point into Hosted AuthKit
 //                                    (→ /auth/start on THIS host — the separate
 //                                    auth.zeros.build sign-in page is retired)
 //   • signed in + handoff context → "Launch Zeros" (mint a ticket, deep-link it,
@@ -35,7 +35,10 @@ import {
   type DashboardMe,
 } from "./dashboard.mjs";
 import { proxyControlPlane } from "./control-plane-proxy";
-import { legacyDesktopHandoffEnabled } from "./workos-browser.mjs";
+import {
+  browserAuthStartOptions,
+  legacyDesktopHandoffEnabled,
+} from "./workos-browser.mjs";
 
 const HANDOFF_COOKIE = "zeros_handoff";
 const HANDOFF_TTL_S = 600; // 10 min — matches the desktop's pending-nonce window.
@@ -87,15 +90,19 @@ function setHandoffCookie(headers: Headers, h: Handoff): void {
   );
 }
 
-// Sign-in happens right here: the OAuth dance (/auth/start → Auth0 → the
-// provider → /auth/callback) lives on this same host, so the signed-out state
-// offers the providers directly — no interstitial page, one less redirect.
-function signedOut(returnTo: string): string {
-  const r = encodeURIComponent(returnTo);
+// Sign-in starts on this host and then hands the complete ceremony to the
+// hosted provider UI. Authentication-method selection, verification, MFA,
+// recovery, and bot defenses stay outside application code.
+function signedOut(env: Env, returnTo: string): string {
+  const links = browserAuthStartOptions(env, returnTo)
+    .map(
+      ({ label, href }) =>
+        `<a class="btn" href="${href.replaceAll("&", "&amp;")}">${label}</a>`,
+    )
+    .join("\n          ");
   return `<div class="title">Sign in to Zeros</div>
-          <div class="sub">Choose a provider. New here? Signing in creates your account.</div>
-          <a class="btn" href="/auth/start?provider=google&amp;return=${r}">Continue with Google</a>
-          <a class="btn" href="/auth/start?provider=github&amp;return=${r}">Continue with GitHub</a>`;
+          <div class="sub">Sign in or create an account securely.</div>
+          ${links}`;
 }
 
 // Sign-out is local too (functions/auth/logout.ts): deletes the KV session,
@@ -112,9 +119,7 @@ function signOutLink(env: Env): string {
 async function dashboard(
   request: Request,
   env: Env,
-  verified: NonNullable<
-    Awaited<ReturnType<typeof getVerifiedSessionWithId>>
-  >,
+  verified: NonNullable<Awaited<ReturnType<typeof getVerifiedSessionWithId>>>,
 ): Promise<string> {
   const user = verified.data;
   let me: DashboardMe | null = null;
@@ -134,7 +139,8 @@ async function dashboard(
     if (!response.ok) throw new Error(`status ${response.status}`);
     me = (await response.json()) as DashboardMe;
   } catch {
-    loadError = "Couldn't reach the organization service. Your account is still signed in.";
+    loadError =
+      "Couldn't reach the organization service. Your account is still signed in.";
   }
   return dashboardPage({
     session: user,
@@ -220,7 +226,7 @@ export async function renderHub(request: Request, env: Env): Promise<Response> {
     const self = hasHandoff
       ? `${appOrigin(env)}/?scheme=${encodeURIComponent(ctx.scheme)}&nonce=${encodeURIComponent(ctx.nonce)}&challenge=${encodeURIComponent(ctx.challenge)}`
       : dashboardReturnUrl(appOrigin(env), request.url);
-    return finish(shell("Sign in to Zeros", signedOut(self)));
+    return finish(shell("Sign in to Zeros", signedOut(env, self)));
   }
   if (!hasHandoff) {
     if (url.pathname === "/launch") {

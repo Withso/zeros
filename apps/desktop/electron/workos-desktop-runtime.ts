@@ -1,6 +1,5 @@
 import { desktopAuthConfig } from "./workos-desktop-config";
 import { WorkOSDesktopClient } from "./workos-desktop-client";
-import { controlPlaneBaseUrl } from "./workos-desktop-account";
 
 let cached: { fingerprint: string; client: WorkOSDesktopClient } | undefined;
 
@@ -9,8 +8,7 @@ export function workOSDesktopClientForMain(): WorkOSDesktopClient {
   if (auth.provider !== "workos") {
     throw new Error("WorkOS desktop authentication is not active");
   }
-  const controlPlaneOrigin = controlPlaneBaseUrl();
-  const fingerprint = JSON.stringify({ auth, controlPlaneOrigin });
+  const fingerprint = JSON.stringify(auth);
   if (cached?.fingerprint === fingerprint) return cached.client;
   const client = new WorkOSDesktopClient({
     config: {
@@ -19,7 +17,6 @@ export function workOSDesktopClientForMain(): WorkOSDesktopClient {
       jwksUrl: auth.jwksUrl,
       audience: auth.audience,
     },
-    controlPlaneOrigin,
   });
   cached = { fingerprint, client };
   return client;

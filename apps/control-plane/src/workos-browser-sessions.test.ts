@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   WORKOS_FLOW_COOKIE,
@@ -188,7 +188,6 @@ async function beginAndComplete(
   value: ReturnType<typeof subject>,
 ): Promise<void> {
   const started = await value.sessions.start({
-    provider: "GoogleOAuth",
     returnPath: "/after",
   });
   const state = new URL(started.authorizationUrl).searchParams.get("state")!;
@@ -206,7 +205,7 @@ describe("Railway WorkOS browser-session coordinator", () => {
     const value = subject();
     const app = createWorkOSBrowserSessionRoutes(value.sessions, APP_ORIGIN);
     const started = await app.request(
-      `/auth/start?provider=google&return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
+      `/auth/start?return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
     );
     expect(started.status).toBe(303);
     expect(started.headers.get("location")).toMatch(
@@ -238,10 +237,32 @@ describe("Railway WorkOS browser-session coordinator", () => {
     expect(cookies).not.toContain(state);
   });
 
+  it("does not forward provider, connection, or organization selectors", async () => {
+    const authorizationUrl = vi.fn(
+      ({ state, codeChallenge }: { state: string; codeChallenge: string }) =>
+        `https://api.workos.test/authorize?state=${state}&code_challenge=${codeChallenge}`,
+    );
+    const value = subject({ provider: provider({ authorizationUrl }) });
+    const app = createWorkOSBrowserSessionRoutes(value.sessions, APP_ORIGIN);
+
+    const response = await app.request(
+      "/auth/start?provider=github&connection=conn_attacker&organization=org_attacker",
+    );
+
+    expect(response.status).toBe(303);
+    expect(authorizationUrl).toHaveBeenCalledOnce();
+    expect(authorizationUrl.mock.calls[0]?.[0]).not.toHaveProperty("provider");
+    expect(authorizationUrl.mock.calls[0]?.[0]).not.toHaveProperty(
+      "connection",
+    );
+    expect(authorizationUrl.mock.calls[0]?.[0]).not.toHaveProperty(
+      "organization",
+    );
+  });
+
   it("stores only hashes of the opaque browser credential and OAuth state", async () => {
     const value = subject();
     const started = await value.sessions.start({
-      provider: "GoogleOAuth",
       returnPath: `${APP_ORIGIN}/invite?token=safe`,
     });
     const state = new URL(started.authorizationUrl).searchParams.get("state")!;
@@ -277,7 +298,6 @@ describe("Railway WorkOS browser-session coordinator", () => {
       }),
     });
     const started = await value.sessions.start({
-      provider: "GitHubOAuth",
       returnPath: "/after",
     });
     const state = new URL(started.authorizationUrl).searchParams.get("state")!;
@@ -322,7 +342,6 @@ describe("Railway WorkOS browser-session coordinator", () => {
       }),
     });
     const started = await value.sessions.start({
-      provider: "GoogleOAuth",
       returnPath: "/",
     });
     const state = new URL(started.authorizationUrl).searchParams.get("state")!;

@@ -532,7 +532,7 @@ function clearPendingNonce(): void {
 
 // The desktop deep-link scheme (zeros:// stable, zeros-beta:// beta, zeros-dev://
 // dev) is constant for the life of the process, so resolve it once and reuse it —
-// avoids an app_info IPC round-trip on every "Continue with Google/GitHub" click.
+// avoids an app_info IPC round-trip on every Hosted AuthKit sign-in click.
 let cachedScheme: DeepLinkScheme | null = null;
 
 async function resolveDesktopScheme(): Promise<DeepLinkScheme> {
