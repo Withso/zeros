@@ -136,6 +136,10 @@ import {
 import { isAnalyticsOptedOut } from "../../platform/observability/analytics/consent";
 import { setAnalyticsEnabled } from "../../platform/observability/analytics/posthog";
 import { useAuth } from "../auth";
+import {
+  accountAuthenticationProvider,
+  accountAuthenticationProviderLabel,
+} from "./account-authentication-provider";
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { ensureSettingsTomlMigrated } from "./migrate-legacy";
 import { subscribeUserSettingsSection } from "./settings-navigation";
@@ -872,30 +876,6 @@ function GeneralPanel() {
 // Reads the live main-process-owned session via useAuth(). The renderer sees
 // bounded identity metadata and a short-lived bearer, never refresh material.
 
-function providerLabel(provider: string): string {
-  if (provider === "github") return "GitHub";
-  if (provider === "google") return "Google";
-  return provider;
-}
-
-function providerFromSub(
-  sub: string | null | undefined,
-): "github" | "google" | null {
-  if (!sub) return null;
-  if (sub.startsWith("github|")) return "github";
-  if (sub.startsWith("google-oauth2|")) return "google";
-  return null;
-}
-
-function providerFromAuthentication(
-  authenticationMethod: string | null | undefined,
-  legacySub: string | null | undefined,
-): "github" | "google" | null {
-  if (authenticationMethod === "GitHubOAuth") return "github";
-  if (authenticationMethod === "GoogleOAuth") return "google";
-  return providerFromSub(legacySub);
-}
-
 function SignInMethodRow({
   label,
   desc,
@@ -928,10 +908,12 @@ function AccountPanel() {
   const [signingOutAll, setSigningOutAll] = useState(false);
 
   const authed = status === "authenticated" && !!email;
-  const primaryProvider = providerFromAuthentication(
+  const primaryProvider = accountAuthenticationProvider(
     session?.user.authenticationMethod,
     session?.user.sub,
   );
+  const primaryProviderLabel =
+    accountAuthenticationProviderLabel(primaryProvider);
   const linked = new Set(primaryProvider ? [primaryProvider] : []);
   const displayName = session?.user.name ?? null;
   const initial = (email?.[0] ?? "?").toUpperCase();
@@ -968,9 +950,9 @@ function AccountPanel() {
                 </div>
               )}
               <div className="text-fg2 truncate text-sm">{email}</div>
-              {primaryProvider && (
+              {primaryProviderLabel && (
                 <div className="text-muted-fg text-xs">
-                  Signed in with {providerLabel(primaryProvider)}
+                  Signed in with {primaryProviderLabel}
                 </div>
               )}
             </div>

@@ -85,7 +85,12 @@ describe("WorkOS desktop hosted authorization", () => {
 
   it("opens the branded app-host page and consumes a matching deep-link callback once", async () => {
     const harness = setup();
-    await harness.flow.start();
+    const startedAt = Date.now();
+    const attempt = await harness.flow.start();
+    const returnedAt = Date.now();
+
+    expect(attempt.expiresAt).toBeGreaterThanOrEqual(startedAt + 5_000);
+    expect(attempt.expiresAt).toBeLessThanOrEqual(returnedAt + 5_000);
 
     const opened = new URL(harness.openedUrl!);
     expect(opened.origin).toBe("https://app-alpha.zeros.build");
@@ -267,6 +272,61 @@ describe("WorkOS desktop hosted authorization", () => {
     ).toBe(false);
     expect(harness.exchangeCode).not.toHaveBeenCalled();
     expect(harness.persistSession).not.toHaveBeenCalled();
+  });
+
+  it("expires the callback window and rejects a callback that arrives later", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_800_000_000_000);
+    try {
+      const error = deferred<void>();
+      const onError = vi.fn(() => error.resolve());
+      const harness = setup({ onError, timeoutMs: 10 * 60_000 });
+      const attempt = await harness.flow.start();
+      const state = callbackState(harness.openedUrl!);
+
+      expect(attempt.expiresAt).toBe(1_800_000_600_000);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await error.promise;
+
+      expect(onError).toHaveBeenCalledOnce();
+      expect(onError).toHaveBeenCalledWith("expired");
+      expect(
+        harness.flow.acceptCallback({ state, code: "late-code" }),
+      ).toBe(false);
+      expect(harness.exchangeCode).not.toHaveBeenCalled();
+      expect(harness.persistSession).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a replacement attempt valid when the old browser returns late", async () => {
+    const harness = setup();
+    await harness.flow.start();
+    const replacedState = callbackState(harness.openedUrl!);
+
+    await harness.flow.start();
+    const currentState = callbackState(harness.openedUrl!);
+    expect(currentState).not.toBe(replacedState);
+    expect(
+      harness.flow.acceptCallback({
+        state: replacedState,
+        code: "replaced-attempt-code",
+      }),
+    ).toBe(false);
+    expect(
+      harness.flow.acceptCallback({
+        state: currentState,
+        code: "current-attempt-code",
+      }),
+    ).toBe(true);
+    await harness.completed.promise;
+
+    expect(harness.exchangeCode).toHaveBeenCalledOnce();
+    expect(harness.exchangeCode).toHaveBeenCalledWith({
+      code: "current-attempt-code",
+      codeVerifier: expect.any(String),
+    });
   });
 
   it("revokes a provider session abandoned after code exchange", async () => {
