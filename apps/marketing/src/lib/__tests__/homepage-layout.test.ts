@@ -8,6 +8,7 @@ const HOME_PAGE = join(ROOT, "apps/marketing/src/pages/HomePage.tsx");
 const NAV = join(ROOT, "apps/marketing/src/components/Nav.tsx");
 const BRAND = join(ROOT, "apps/marketing/src/components/BrandLockup.tsx");
 const PREVIEW = join(ROOT, "apps/marketing/src/components/ProductPreview.tsx");
+const WORDMARK = join(ROOT, "apps/marketing/public/zeros-wordmark.svg");
 
 function sliceFunction(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`);
@@ -59,15 +60,18 @@ describe("marketing homepage layout", () => {
     expect(nav).not.toMatch(/backdrop-blur/);
   });
 
-  it("uses a bottom-aligned mark plus a larger spaced Zeros name", () => {
+  it("pairs the blob mark with a custom SVG zeros wordmark", () => {
+    const wordmark = readFileSync(WORDMARK, "utf8");
     expect(nav).toMatch(/BrandLockup size="lg"/);
     expect(nav).toMatch(/h-16/);
     expect(brand).toMatch(/zeros-logo\.svg/);
+    expect(brand).toMatch(/zeros-wordmark\.svg/);
     expect(brand).not.toMatch(/ZEROS-logo-name\.svg/);
-    expect(brand).toMatch(/items-end/);
-    expect(brand).toMatch(/text-\[24px\]/);
-    expect(brand).toMatch(/font-medium tracking-\[0\.04em\]/);
-    expect(brand).toMatch(/>Zeros</);
+    expect(brand).toMatch(/items-center/);
+    expect(brand).not.toMatch(/font-medium tracking-\[0\.04em\]/);
+    expect(brand).not.toMatch(/>Zeros</);
+    expect(wordmark).toMatch(/stroke-linecap="round"/);
+    expect(wordmark).not.toMatch(/<text/i);
   });
 
   it("leaves empty space instead of the agents strip and final CTA", () => {
