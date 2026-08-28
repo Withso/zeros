@@ -267,6 +267,40 @@ export function createRoutes(
     const hash = hashInviteToken(raw);
 
     const joined = await withSystemTx(pool, async (tx) => {
+      // Discover the owning organization without taking a row lock, then lock
+      // the organization before revalidating and locking the invitation. Every
+      // organization mutation uses this same parent-before-child order.
+      const candidate = await tx.query<{ org_id: string }>(
+        `SELECT i.org_id
+         FROM invitations i
+         JOIN organizations o
+           ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
+         WHERE i.token_hash = $1
+           AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+           AND i.expires_at > now()`,
+        [hash],
+      );
+      const candidateOrganizationId = candidate.rows[0]?.org_id;
+      if (!candidateOrganizationId) {
+        throw new HttpError(
+          404,
+          "invalid_invite",
+          "This invite link is no longer valid",
+        );
+      }
+      const organization = await tx.query(
+        `SELECT 1 FROM organizations
+         WHERE id = $1 AND deleted_at IS NULL AND NOT is_personal
+         FOR UPDATE`,
+        [candidateOrganizationId],
+      );
+      if (!organization.rows[0]) {
+        throw new HttpError(
+          404,
+          "invalid_invite",
+          "This invite link is no longer valid",
+        );
+      }
       const invitationResult = await tx.query<{
         id: string;
         org_id: string;
@@ -275,13 +309,12 @@ export function createRoutes(
       }>(
         `SELECT i.id, i.org_id, i.email, i.role
          FROM invitations i
-         JOIN organizations o
-           ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
          WHERE i.token_hash = $1
+           AND i.org_id = $2
            AND i.accepted_at IS NULL AND i.revoked_at IS NULL
            AND i.expires_at > now()
-         FOR UPDATE OF i, o`,
-        [hash],
+         FOR UPDATE OF i`,
+        [hash, candidateOrganizationId],
       );
       const invitation = invitationResult.rows[0];
       if (!invitation) {

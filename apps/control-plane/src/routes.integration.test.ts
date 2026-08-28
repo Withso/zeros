@@ -471,6 +471,78 @@ d("organization routes", () => {
     ]);
   });
 
+  it("waits for the organization lock before locking an invitation", async () => {
+    actor = owner;
+    const created = await request("/v1/organizations", {
+      method: "POST",
+      body: { name: `Invitation lock order ${randomUUID()}` },
+    });
+    expect(created.status).toBe(201);
+    const organization = (await created.json()) as {
+      organization: { id: string };
+    };
+    const orgId = organization.organization.id;
+    const invited = await request(`/v1/organizations/${orgId}/invitations`, {
+      method: "POST",
+      body: { email: member.email, role: "member" },
+    });
+    expect(invited.status).toBe(201);
+    const invitation = (await invited.json()) as {
+      invitation: { id: string; token: string };
+    };
+
+    const blocker = await pool.connect();
+    let accepting: Promise<Response> | null = null;
+    let invitationLockError: unknown = null;
+    let acceptWasWaiting = false;
+    try {
+      await blocker.query("BEGIN");
+      await blocker.query(
+        `SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE`,
+        [orgId],
+      );
+      actor = member;
+      accepting = request("/v1/invitations/accept", {
+        method: "POST",
+        body: { token: invitation.invitation.token },
+      });
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const activity = await pool.query<{ waiting: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND pid <> pg_backend_pid()
+               AND state = 'active'
+               AND wait_event_type = 'Lock'
+           ) AS waiting`,
+        );
+        if (activity.rows[0]?.waiting) {
+          acceptWasWaiting = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await blocker.query(`SET LOCAL lock_timeout = '500ms'`);
+      try {
+        await blocker.query(
+          `SELECT 1 FROM invitations WHERE id = $1 FOR UPDATE`,
+          [invitation.invitation.id],
+        );
+      } catch (error) {
+        invitationLockError = error;
+      }
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => {});
+      blocker.release();
+    }
+    const accepted = await accepting;
+    actor = owner;
+
+    expect(acceptWasWaiting).toBe(true);
+    expect(invitationLockError).toBeNull();
+    expect(accepted?.status).toBe(200);
+  });
+
   it("revokes a pending local rejoin token when removing a member during Auth0 rollback", async () => {
     actor = owner;
     const created = await request("/v1/organizations", {
