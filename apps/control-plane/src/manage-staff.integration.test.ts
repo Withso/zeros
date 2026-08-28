@@ -246,21 +246,6 @@ d("owner-managed staff roles", () => {
     await pool.query(
       `CREATE ROLE ${migrationOwner} LOGIN PASSWORD '${migrationPassword}'`,
     );
-    await pool.query(`ALTER TABLE users OWNER TO ${migrationOwner}`);
-    await pool.query(
-      `ALTER TABLE staff_role_changes OWNER TO ${migrationOwner}`,
-    );
-    await pool.query(`GRANT USAGE ON SCHEMA public TO ${migrationOwner}`);
-    // The users RLS policy references this table even when its system branch
-    // is true; PostgreSQL still performs relation privilege checks at plan time.
-    await pool.query(
-      `GRANT SELECT ON organization_members TO ${migrationOwner}`,
-    );
-    await pool.query(`GRANT INSERT ON security_events TO ${migrationOwner}`);
-    await pool.query(
-      `GRANT USAGE, SELECT ON SEQUENCE security_events_sequence_seq TO ${migrationOwner}`,
-    );
-
     const ownerUrl = new URL(url!);
     ownerUrl.username = migrationOwner;
     ownerUrl.password = migrationPassword;
@@ -282,6 +267,21 @@ d("owner-managed staff roles", () => {
       reason: "Verify the non-superuser migration-owner RLS path.",
     } as const;
     try {
+      await pool.query(`ALTER TABLE users OWNER TO ${migrationOwner}`);
+      await pool.query(
+        `ALTER TABLE staff_role_changes OWNER TO ${migrationOwner}`,
+      );
+      await pool.query(`GRANT USAGE ON SCHEMA public TO ${migrationOwner}`);
+      // The users RLS policy references this table even when its system branch
+      // is true; PostgreSQL still performs relation privilege checks at plan time.
+      await pool.query(
+        `GRANT SELECT ON organization_members TO ${migrationOwner}`,
+      );
+      await pool.query(`GRANT INSERT ON security_events TO ${migrationOwner}`);
+      await pool.query(
+        `GRANT USAGE, SELECT ON SEQUENCE security_events_sequence_seq TO ${migrationOwner}`,
+      );
+
       const plan = await manageStaffRole(
         ownerPool,
         validateStaffRoleRequest(base),
