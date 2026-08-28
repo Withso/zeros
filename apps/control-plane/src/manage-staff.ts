@@ -200,6 +200,12 @@ export async function manageStaffRole(
     await client.query("BEGIN");
     await client.query("SET LOCAL lock_timeout = '10s'");
     await client.query("SET LOCAL statement_timeout = '30s'");
+    // Railway's migration owner is intentionally not a superuser. The users
+    // and security_events tables FORCE RLS even for their owner, so this
+    // transaction must explicitly enter the same bounded system context used
+    // by server-side lifecycle work. Relation privileges and the exact table-
+    // ownership checks below remain independently enforced.
+    await client.query("SELECT set_config('app.system', 'on', true)");
 
     const privilege = await client.query<{
       principal: string;

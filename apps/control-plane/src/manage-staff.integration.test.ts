@@ -216,4 +216,109 @@ d("owner-managed staff roles", () => {
     );
     expect(after.rows[0]).toEqual({ staff_role: null, change_count: "2" });
   });
+
+  it("binds the system RLS context for a non-superuser migration owner", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const actor = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_staff_rls_actor_${suffix}`,
+      email: `staff-rls-actor-${suffix}@example.test`,
+      displayName: "Staff RLS actor",
+    });
+    const subjectEmail = `support-rls-${suffix}@example.test`;
+    const subject = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_support_rls_${suffix}`,
+      email: subjectEmail,
+      displayName: "Support RLS operator",
+    });
+    const current = await pool.query<{ principal: string }>(
+      `SELECT current_user AS principal`,
+    );
+    const originalOwner = current.rows[0]!.principal;
+    if (!/^[a-z_][a-z0-9_]*$/i.test(originalOwner)) {
+      throw new Error("Test database owner is not a safe SQL identifier");
+    }
+    const migrationOwner = `staff_owner_${suffix.slice(0, 16)}`;
+    const migrationPassword = `owner_${suffix.slice(16, 40)}`;
+    // Both identifiers and the test-only password are bounded to randomUUID()
+    // hex (plus fixed ASCII prefixes); no external input reaches this SQL.
+    await pool.query(
+      `CREATE ROLE ${migrationOwner} LOGIN PASSWORD '${migrationPassword}'`,
+    );
+    await pool.query(`ALTER TABLE users OWNER TO ${migrationOwner}`);
+    await pool.query(
+      `ALTER TABLE staff_role_changes OWNER TO ${migrationOwner}`,
+    );
+    await pool.query(`GRANT USAGE ON SCHEMA public TO ${migrationOwner}`);
+    // The users RLS policy references this table even when its system branch
+    // is true; PostgreSQL still performs relation privilege checks at plan time.
+    await pool.query(
+      `GRANT SELECT ON organization_members TO ${migrationOwner}`,
+    );
+    await pool.query(`GRANT INSERT ON security_events TO ${migrationOwner}`);
+    await pool.query(
+      `GRANT USAGE, SELECT ON SEQUENCE security_events_sequence_seq TO ${migrationOwner}`,
+    );
+
+    const ownerUrl = new URL(url!);
+    ownerUrl.username = migrationOwner;
+    ownerUrl.password = migrationPassword;
+    const ownerPool = new pg.Pool({
+      connectionString: ownerUrl.toString(),
+      max: 1,
+    });
+    const base = {
+      databaseUrl: url!,
+      channel: "alpha",
+      railwayEnvironmentName: "alpha",
+      execute: false,
+      productionConfirmed: undefined,
+      approval: undefined,
+      subjectUserId: subject.id,
+      expectedEmail: subjectEmail,
+      actorUserId: actor.id,
+      nextRole: "support_admin",
+      reason: "Verify the non-superuser migration-owner RLS path.",
+    } as const;
+    try {
+      const plan = await manageStaffRole(
+        ownerPool,
+        validateStaffRoleRequest(base),
+      );
+      expect(plan.state).toBe("planned");
+      await manageStaffRole(
+        ownerPool,
+        validateStaffRoleRequest({
+          ...base,
+          execute: true,
+          approval: plan.approval,
+        }),
+      );
+
+      const result = await pool.query<{
+        staff_role: string | null;
+        event_count: string;
+      }>(
+        `SELECT u.staff_role,
+                (SELECT count(*) FROM security_events e
+                 WHERE e.user_id = u.id
+                   AND e.kind = 'account.authorization_changed') AS event_count
+         FROM users u WHERE u.id = $1`,
+        [subject.id],
+      );
+      expect(result.rows[0]).toEqual({
+        staff_role: "support_admin",
+        event_count: "1",
+      });
+    } finally {
+      await ownerPool.end();
+      await pool.query(`ALTER TABLE users OWNER TO ${originalOwner}`);
+      await pool.query(
+        `ALTER TABLE staff_role_changes OWNER TO ${originalOwner}`,
+      );
+      await pool.query(`DROP OWNED BY ${migrationOwner}`);
+      await pool.query(`DROP ROLE ${migrationOwner}`);
+    }
+  });
 });
