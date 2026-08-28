@@ -234,7 +234,9 @@ the membership, and WorkOS requires a pending membership to be deleted before
 an active membership can be created. The command worker therefore observes the
 provider after a failed create, recovers an already-active membership, or
 deletes non-directory-managed pending memberships and creates the active
-replacement. A delayed deletion event for the replaced pending object is keyed
+replacement. WorkOS lists only active memberships by default, so every
+reconciliation listing explicitly requests `active`, `inactive`, and `pending`
+statuses. A delayed deletion event for the replaced pending object is keyed
 to that exact WorkOS membership ID and cannot remove the newer active object.
 
 Directory-managed (`directory_managed=true`) memberships materialize with
