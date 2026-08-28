@@ -6,6 +6,7 @@ import type {
 } from "./workos-desktop-client";
 
 const DEFAULT_TIMEOUT_MS = 10 * 60_000;
+const DEFAULT_OPEN_EXTERNAL_TIMEOUT_MS = 5_000;
 const MAX_CALLBACK_VALUE_LENGTH = 8_192;
 const MAX_STATE_LENGTH = 256;
 const DESKTOP_SCHEME = /^zeros(?:-(?:alpha|beta|dev))?$/;
@@ -24,6 +25,7 @@ export type WorkOSDesktopFlowErrorReason =
   | "account_exists"
   | "account_inactive"
   | "account_failed"
+  | "browser_open_failed"
   | "storage_failed";
 
 class WorkOSDesktopFlowError extends Error {
@@ -222,6 +224,8 @@ export interface WorkOSDesktopAuthorizationFlowDeps {
     context?: { recoveryCode: string },
   ) => void;
   timeoutMs?: number;
+  /** Test seam for the bounded OS browser-launch acknowledgement. */
+  openExternalTimeoutMs?: number;
 }
 
 interface PendingFlow {
@@ -280,14 +284,42 @@ export class WorkOSDesktopAuthorizationFlow {
     const pending = { callback, verifier };
     this.pending = pending;
     void this.complete(pending);
-    try {
-      await this.deps.openExternal(startUrl);
-    } catch (error) {
+    const opening = Promise.resolve()
+      .then(() => this.deps.openExternal(startUrl))
+      .then(
+        () => ({ ok: true as const }),
+        (error: unknown) => ({ ok: false as const, error }),
+      );
+    let launchTimer: ReturnType<typeof setTimeout> | null = null;
+    const launchTimeout = new Promise<null>((resolve) => {
+      launchTimer = setTimeout(
+        () => resolve(null),
+        this.deps.openExternalTimeoutMs ??
+          DEFAULT_OPEN_EXTERNAL_TIMEOUT_MS,
+      );
+    });
+    const launch = await Promise.race([opening, launchTimeout]);
+    if (launchTimer !== null) clearTimeout(launchTimer);
+    if (launch === null) {
+      // Some OS/browser combinations open the URL successfully but never
+      // acknowledge Electron's shell.openExternal promise. The PKCE callback
+      // remains authoritative; return the main-owned deadline so the renderer
+      // can show Waiting + Cancel instead of becoming permanently inert.
+      void opening.then((late) => {
+        if (late.ok || this.pending !== pending) return;
+        this.pending = null;
+        pending.callback.close();
+        logSignInFailure("browser open", late.error);
+        this.deps.onError("browser_open_failed");
+      });
+      return { expiresAt };
+    }
+    if (!launch.ok) {
       if (this.pending === pending) {
         this.pending = null;
         callback.close();
       }
-      throw error;
+      throw launch.error;
     }
     return { expiresAt };
   }

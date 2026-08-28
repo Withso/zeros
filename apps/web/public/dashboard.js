@@ -84,6 +84,68 @@ export function securitySnapshotChanged(previous, next) {
   return securitySnapshotSignature(previous) !== securitySnapshotSignature(next);
 }
 
+/** Drop only retained server state owned by the organization named by an
+ * event. Account-wide/lifecycle changes have no exact owner and clear all
+ * section snapshots. The confirmed organization shell stays visible while
+ * render() revalidates the affected exact keys. */
+export function invalidateExactSnapshot(snapshots, key, options = {}) {
+  snapshots.delete(key);
+  options.inflight?.delete(key);
+  if (options.generations) {
+    options.generations.set(key, (options.generations.get(key) || 0) + 1);
+  }
+}
+
+export function invalidateOrganizationSnapshots(
+  snapshots,
+  organizationId,
+  options = {},
+) {
+  const keys = new Set(snapshots.keys());
+  for (const key of options.inflight?.keys() || []) keys.add(key);
+  for (const key of options.generations?.keys() || []) keys.add(key);
+  const prefix = organizationId ? `${organizationId}:` : null;
+  for (const key of keys) {
+    if (prefix === null || String(key).startsWith(prefix)) {
+      invalidateExactSnapshot(snapshots, key, options);
+    }
+  }
+}
+
+/** Share one exact-key request while it is current. If a security event
+ * invalidates that key before the response arrives, every waiter follows the
+ * replacement request and the stale response can neither publish nor render. */
+export function loadExactSnapshot(cache, key, loader) {
+  const existing = cache.inflight.get(key);
+  if (existing) return existing;
+  const generation = cache.generations.get(key) || 0;
+  let task;
+  task = Promise.resolve()
+    .then(loader)
+    .then(
+      (value) => {
+        if ((cache.generations.get(key) || 0) !== generation) {
+          if (cache.inflight.get(key) === task) cache.inflight.delete(key);
+          return loadExactSnapshot(cache, key, loader);
+        }
+        cache.snapshots.set(key, value);
+        return value;
+      },
+      (error) => {
+        if ((cache.generations.get(key) || 0) !== generation) {
+          if (cache.inflight.get(key) === task) cache.inflight.delete(key);
+          return loadExactSnapshot(cache, key, loader);
+        }
+        throw error;
+      },
+    )
+    .finally(() => {
+      if (cache.inflight.get(key) === task) cache.inflight.delete(key);
+    });
+  cache.inflight.set(key, task);
+  return task;
+}
+
 export function shouldRevalidateSecurityLifecycle(lastContactAt, now) {
   return now - lastContactAt >= SECURITY_REVALIDATE_SILENCE_MS;
 }
@@ -163,6 +225,12 @@ function bootDashboard() {
   };
   const snapshots = new Map();
   const inflight = new Map();
+  const snapshotGenerations = new Map();
+  const snapshotCache = {
+    snapshots,
+    inflight,
+    generations: snapshotGenerations,
+  };
   const submissions = createSubmissionGate();
   let securitySnapshot = null;
   let securityEventSource = null;
@@ -442,15 +510,7 @@ function bootDashboard() {
   }
 
   async function loadExact(key, loader) {
-    if (inflight.has(key)) return inflight.get(key);
-    const task = loader()
-      .then((value) => {
-        snapshots.set(key, value);
-        return value;
-      })
-      .finally(() => inflight.delete(key));
-    inflight.set(key, task);
-    return task;
+    return loadExactSnapshot(snapshotCache, key, loader);
   }
 
   async function render() {
@@ -640,7 +700,16 @@ function bootDashboard() {
     }
     const action = securityEventAction(kind);
     if (action.signOut) signOutForSecurityEvent();
-    else if (action.refreshOrganizations) queueSecurityRefresh();
+    else if (action.refreshOrganizations) {
+      invalidateOrganizationSnapshots(
+        snapshots,
+        typeof data?.organizationId === "string"
+          ? data.organizationId
+          : null,
+        { inflight, generations: snapshotGenerations },
+      );
+      queueSecurityRefresh();
+    }
   }
 
   function connectSecurityEvents(cursor) {
@@ -689,7 +758,16 @@ function bootDashboard() {
           securitySnapshot !== null &&
           securitySnapshotChanged(securitySnapshot, next);
         securitySnapshot = next;
-        if (changed) queueSecurityRefresh();
+        if (changed) {
+          // A lifecycle snapshot tells us that something changed but not which
+          // retained section owns it. This is a rare silence/reconnect backstop,
+          // so clear the bounded section cache once and refetch on render.
+          invalidateOrganizationSnapshots(snapshots, null, {
+            inflight,
+            generations: snapshotGenerations,
+          });
+          queueSecurityRefresh();
+        }
         if (
           !securityEventSource ||
           securityEventSource.readyState === EventSource.CLOSED
@@ -750,7 +828,13 @@ function bootDashboard() {
       await reloadMe();
     } else if (action === "retry-section") {
       const organization = activeOrganization();
-      if (organization) snapshots.delete(`${organization.id}:${state.section}`);
+      if (organization) {
+        invalidateExactSnapshot(
+          snapshots,
+          `${organization.id}:${state.section}`,
+          { inflight, generations: snapshotGenerations },
+        );
+      }
       await render();
     } else if (action === "remove-organization-logo") {
       const organization = activeOrganization();
@@ -785,6 +869,10 @@ function bootDashboard() {
       if (!window.confirm(`Delete ${organization.name}? This cannot be undone.`)) return;
       try {
         await api(`/v1/organizations/${organization.id}`, { method: "DELETE", body: {} });
+        invalidateOrganizationSnapshots(snapshots, organization.id, {
+          inflight,
+          generations: snapshotGenerations,
+        });
         state.organizations = state.organizations.filter((item) => item.id !== organization.id);
         state.activeOrganizationId = state.organizations.find((item) => item.isPersonal)?.id || null;
         state.section = "profile";
@@ -801,7 +889,10 @@ function bootDashboard() {
       if (!window.confirm(self ? "Leave this organization?" : "Remove this member?")) return;
       try {
         await api(`/v1/organizations/${organization.id}/members/${memberId}`, { method: "DELETE", body: {} });
-        snapshots.delete(`${organization.id}:members`);
+        invalidateOrganizationSnapshots(snapshots, organization.id, {
+          inflight,
+          generations: snapshotGenerations,
+        });
         if (self) await reloadMe();
         else await render();
       } catch (error) {
@@ -812,7 +903,10 @@ function bootDashboard() {
       if (!organization) return;
       try {
         await api(`/v1/organizations/${organization.id}/invitations/${target.dataset.revokeInvite}`, { method: "DELETE", body: {} });
-        snapshots.delete(`${organization.id}:members`);
+        invalidateExactSnapshot(snapshots, `${organization.id}:members`, {
+          inflight,
+          generations: snapshotGenerations,
+        });
         await render();
       } catch (error) {
         toast(error.message, true);
@@ -868,13 +962,19 @@ function bootDashboard() {
         method: "PATCH",
         body: { role: select.value },
       });
-      snapshots.delete(`${organization.id}:members`);
+      invalidateOrganizationSnapshots(snapshots, organization.id, {
+        inflight,
+        generations: snapshotGenerations,
+      });
       toast("Member role updated");
       if (select.dataset.memberRole === state.user.id) await reloadMe();
       else await render();
     } catch (error) {
       toast(error.message, true);
-      snapshots.delete(`${organization.id}:members`);
+      invalidateExactSnapshot(snapshots, `${organization.id}:members`, {
+        inflight,
+        generations: snapshotGenerations,
+      });
       await render();
     }
   });
@@ -924,7 +1024,10 @@ function bootDashboard() {
           method: "POST",
           body: { email: data.get("email"), role: data.get("role") },
         });
-        snapshots.delete(`${organization.id}:members`);
+        invalidateExactSnapshot(snapshots, `${organization.id}:members`, {
+          inflight,
+          generations: snapshotGenerations,
+        });
         form.reset();
         const link = result.invitation?.acceptUrl;
         if (link && await tryWriteClipboard(navigator.clipboard, link)) {

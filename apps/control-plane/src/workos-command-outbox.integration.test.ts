@@ -26,6 +26,7 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
   failAfterNextMembershipCreate = false;
   readonly memberships: WorkOSMembershipRecord[] = [];
   readonly invitations: WorkOSInvitationRecord[] = [];
+  acceptBeforeNextInvitationRevoke = false;
   onInvitationCreated:
     | ((invitation: WorkOSInvitationRecord) => Promise<void>)
     | null = null;
@@ -208,6 +209,16 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
       const missing = new Error("invitation missing") as Error & { status: number };
       missing.status = 404;
       throw missing;
+    }
+    if (this.acceptBeforeNextInvitationRevoke) {
+      this.acceptBeforeNextInvitationRevoke = false;
+      invitation.state = "accepted";
+      invitation.updatedAt = new Date().toISOString();
+      const accepted = new Error("invitation was accepted") as Error & {
+        status: number;
+      };
+      accepted.status = 409;
+      throw accepted;
     }
     invitation.state = "revoked";
     invitation.updatedAt = new Date().toISOString();
@@ -694,5 +705,211 @@ d("WorkOS command outbox", () => {
       [seeded.organizationId, seeded.userId],
     );
     expect(membership.rowCount).toBe(0);
+  });
+
+  it("deletes every provider membership discovered after a stale ID was captured", async () => {
+    const seeded = await seedOrganization(
+      pool,
+      randomUUID().replaceAll("-", ""),
+    );
+    const workosOrganizationId = `org_${randomUUID().replaceAll("-", "")}`;
+    const capturedMembershipId = `om_${randomUUID().replaceAll("-", "")}`;
+    const replacementMembershipId = `om_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(
+      `UPDATE workos_organization_links
+       SET state = 'active', workos_organization_id = $2
+       WHERE organization_id = $1`,
+      [seeded.organizationId, workosOrganizationId],
+    );
+    await withSystemTx(pool, (tx) =>
+      enqueueWorkOSCommand(tx, {
+        operation: "membership.delete",
+        idempotencyKey: `membership.${seeded.organizationId}.${seeded.userId}.2`,
+        aggregateKey: `membership:${seeded.organizationId}:${seeded.userId}`,
+        aggregateRevision: 2,
+        organizationId: seeded.organizationId,
+        userId: seeded.userId,
+        providerObjectId: capturedMembershipId,
+        payload: { workosUserId: seeded.workosUserId, role: "owner" },
+      }),
+    );
+    const provider = new FakeWorkOSProvider();
+    for (const id of [capturedMembershipId, replacementMembershipId]) {
+      provider.memberships.push({
+        id,
+        organizationId: workosOrganizationId,
+        userId: seeded.workosUserId,
+        status: "active",
+        directoryManaged: false,
+        roleSlug: "owner",
+        updatedAt: new Date().toISOString(),
+      });
+    }
+
+    expect(await new WorkOSCommandProcessor(pool, provider).tick()).toBe(1);
+    expect(provider.calls).toContain(
+      `membership.list:${workosOrganizationId}`,
+    );
+    expect(
+      provider.calls.filter((call) => call.startsWith("membership.delete:")),
+    ).toEqual([
+      `membership.delete:${capturedMembershipId}`,
+      `membership.delete:${replacementMembershipId}`,
+    ]);
+    expect(provider.memberships).toHaveLength(0);
+  });
+
+  it("revokes every pending provider invitation even when one exact ID was captured", async () => {
+    const seeded = await seedOrganization(
+      pool,
+      randomUUID().replaceAll("-", ""),
+    );
+    const workosOrganizationId = `org_${randomUUID().replaceAll("-", "")}`;
+    const localInvitationId = randomUUID();
+    const email = "duplicate-pending@example.com";
+    await pool.query(
+      `UPDATE workos_organization_links
+       SET state = 'active', workos_organization_id = $2
+       WHERE organization_id = $1`,
+      [seeded.organizationId, workosOrganizationId],
+    );
+    await pool.query(
+      `INSERT INTO invitations (
+         id, org_id, email, role, token_hash, invited_by, revoked_at
+       ) VALUES ($1, $2, $3, 'member', $4, $5, now())`,
+      [
+        localInvitationId,
+        seeded.organizationId,
+        email,
+        `hash-${localInvitationId}`,
+        seeded.userId,
+      ],
+    );
+    const provider = new FakeWorkOSProvider();
+    const providerInvitationIds = [
+      `inv_${randomUUID().replaceAll("-", "")}`,
+      `inv_${randomUUID().replaceAll("-", "")}`,
+    ];
+    for (const id of providerInvitationIds) {
+      provider.invitations.push({
+        id,
+        organizationId: workosOrganizationId,
+        email,
+        state: "pending",
+        roleSlug: "member",
+        updatedAt: new Date().toISOString(),
+      });
+    }
+    await withSystemTx(pool, (tx) =>
+      enqueueWorkOSCommand(tx, {
+        operation: "invitation.revoke",
+        idempotencyKey: `invitation.${localInvitationId}.2`,
+        aggregateKey: `invitation:${localInvitationId}`,
+        aggregateRevision: 2,
+        organizationId: seeded.organizationId,
+        providerObjectId: providerInvitationIds[0],
+        payload: { localInvitationId, email, role: "member" },
+      }),
+    );
+
+    expect(await new WorkOSCommandProcessor(pool, provider).tick()).toBe(1);
+    expect(provider.calls).toContain(`invitation.list:${email}`);
+    expect(
+      provider.calls.filter((call) => call.startsWith("invitation.revoke:")),
+    ).toEqual(providerInvitationIds.map((id) => `invitation.revoke:${id}`));
+    expect(
+      provider.invitations.filter((invitation) => invitation.state === "pending"),
+    ).toHaveLength(0);
+  });
+
+  it("converges when an invitation is accepted between listing and revocation", async () => {
+    const seeded = await seedOrganization(
+      pool,
+      randomUUID().replaceAll("-", ""),
+    );
+    const workosOrganizationId = `org_${randomUUID().replaceAll("-", "")}`;
+    const localInvitationId = randomUUID();
+    const providerInvitationId = `inv_${randomUUID().replaceAll("-", "")}`;
+    const providerMembershipId = `om_${randomUUID().replaceAll("-", "")}`;
+    const email = "accept-race@example.com";
+    const orderingKey = `invitation-email:${seeded.organizationId}:race`;
+    await pool.query(
+      `UPDATE workos_organization_links
+       SET state = 'active', workos_organization_id = $2
+       WHERE organization_id = $1`,
+      [seeded.organizationId, workosOrganizationId],
+    );
+    await pool.query(
+      `INSERT INTO invitations (
+         id, org_id, email, role, token_hash, invited_by, revoked_at,
+         workos_invitation_id, workos_sync_revision
+       ) VALUES ($1, $2, $3, 'member', $4, $5, now(), $6, 2)`,
+      [
+        localInvitationId,
+        seeded.organizationId,
+        email,
+        `hash-${localInvitationId}`,
+        seeded.userId,
+        providerInvitationId,
+      ],
+    );
+    await withSystemTx(pool, async (tx) => {
+      await enqueueWorkOSCommand(tx, {
+        operation: "invitation.revoke",
+        idempotencyKey: `invitation.${localInvitationId}.2`,
+        aggregateKey: `invitation:${localInvitationId}`,
+        orderingKey,
+        aggregateRevision: 2,
+        organizationId: seeded.organizationId,
+        providerObjectId: providerInvitationId,
+        payload: { localInvitationId, email, role: "member" },
+      });
+      await enqueueWorkOSCommand(tx, {
+        operation: "membership.delete",
+        idempotencyKey: `membership.${seeded.organizationId}.${seeded.userId}.2`,
+        aggregateKey: `membership:${seeded.organizationId}:${seeded.userId}`,
+        orderingKey,
+        aggregateRevision: 2,
+        organizationId: seeded.organizationId,
+        userId: seeded.userId,
+        providerObjectId: providerMembershipId,
+        payload: { workosUserId: seeded.workosUserId, role: "owner" },
+      });
+    });
+    const provider = new FakeWorkOSProvider();
+    provider.invitations.push({
+      id: providerInvitationId,
+      organizationId: workosOrganizationId,
+      email,
+      state: "pending",
+      roleSlug: "member",
+      updatedAt: new Date().toISOString(),
+    });
+    provider.memberships.push({
+      id: providerMembershipId,
+      organizationId: workosOrganizationId,
+      userId: seeded.workosUserId,
+      status: "active",
+      directoryManaged: false,
+      roleSlug: "owner",
+      updatedAt: new Date().toISOString(),
+    });
+    provider.acceptBeforeNextInvitationRevoke = true;
+    const processor = new WorkOSCommandProcessor(pool, provider, {
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    expect(await processor.tick()).toBe(2);
+    const states = await pool.query<{ operation: string; state: string }>(
+      `SELECT operation, state FROM workos_command_outbox
+       WHERE ordering_key = $1 ORDER BY sequence`,
+      [orderingKey],
+    );
+    expect(states.rows).toEqual([
+      { operation: "invitation.revoke", state: "succeeded" },
+      { operation: "membership.delete", state: "succeeded" },
+    ]);
+    expect(provider.invitations[0]?.state).toBe("accepted");
+    expect(provider.memberships).toHaveLength(0);
   });
 });

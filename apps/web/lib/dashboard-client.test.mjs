@@ -4,6 +4,8 @@ import {
   collaborationSectionDisabled,
   createSubmissionGate,
   dashboardOrganizationDataUnavailable,
+  invalidateOrganizationSnapshots,
+  loadExactSnapshot,
   memberPermissions,
   organizationDisplayName,
   safeOrganizationLogo,
@@ -181,6 +183,77 @@ test("security events distinguish terminal session loss from scoped data refresh
     signOut: false,
     refreshOrganizations: false,
   });
+});
+
+test("organization events invalidate only that organization's retained sections", () => {
+  const snapshots = new Map([
+    ["org-a:members", { members: ["stale"] }],
+    ["org-a:billing", { memberCount: 1 }],
+    ["org-b:members", { members: ["retained"] }],
+  ]);
+  invalidateOrganizationSnapshots(snapshots, "org-a");
+  assert.deepEqual([...snapshots.keys()], ["org-b:members"]);
+
+  invalidateOrganizationSnapshots(snapshots, null);
+  assert.equal(snapshots.size, 0);
+});
+
+test("an invalidated in-flight section cannot republish its stale snapshot", async () => {
+  const snapshots = new Map();
+  const inflight = new Map();
+  const generations = new Map();
+  const resolutions = [];
+  const loader = () =>
+    new Promise((resolve) => {
+      resolutions.push(resolve);
+    });
+  const cache = { snapshots, inflight, generations };
+
+  const staleRequest = loadExactSnapshot(cache, "org-a:members", loader);
+  await Promise.resolve();
+  assert.equal(resolutions.length, 1);
+  invalidateOrganizationSnapshots(snapshots, "org-a", {
+    inflight,
+    generations,
+  });
+  const freshRequest = loadExactSnapshot(cache, "org-a:members", loader);
+  await Promise.resolve();
+  assert.equal(resolutions.length, 2);
+
+  resolutions[0]({ members: ["removed"] });
+  resolutions[1]({ members: ["current"] });
+  assert.deepEqual(await staleRequest, { members: ["current"] });
+  assert.deepEqual(await freshRequest, { members: ["current"] });
+  assert.deepEqual(snapshots.get("org-a:members"), {
+    members: ["current"],
+  });
+  assert.equal(inflight.size, 0);
+});
+
+test("an invalidated in-flight failure follows the replacement request", async () => {
+  const snapshots = new Map();
+  const inflight = new Map();
+  const generations = new Map();
+  const settlements = [];
+  const loader = () =>
+    new Promise((resolve, reject) => {
+      settlements.push({ resolve, reject });
+    });
+  const cache = { snapshots, inflight, generations };
+
+  const staleRequest = loadExactSnapshot(cache, "org-a:members", loader);
+  await Promise.resolve();
+  invalidateOrganizationSnapshots(snapshots, "org-a", {
+    inflight,
+    generations,
+  });
+  const freshRequest = loadExactSnapshot(cache, "org-a:members", loader);
+  await Promise.resolve();
+
+  settlements[0].reject(new Error("superseded outage"));
+  settlements[1].resolve({ members: ["current"] });
+  assert.deepEqual(await staleRequest, { members: ["current"] });
+  assert.deepEqual(await freshRequest, { members: ["current"] });
 });
 
 test("security snapshots compare authorization/data revisions by exact organization", () => {

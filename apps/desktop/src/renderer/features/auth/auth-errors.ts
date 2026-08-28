@@ -68,6 +68,8 @@ export function workOSSignInFailureMessage(
       "Verify your email address with your provider, then click Sign in again.",
     provider_error:
       "Your identity provider didn't complete the sign-in. Click Sign in to try again.",
+    browser_open_failed:
+      "Couldn't open your browser. Click Sign in to try again.",
     reauthentication_required:
       "For your security, sign out in the browser and complete a fresh sign-in before retrying.",
     account_exists:

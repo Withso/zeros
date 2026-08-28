@@ -70,6 +70,31 @@ describe("provider-neutral authentication configuration", () => {
       cookiePassword: "cookie-password-for-testscookie-password-for-tests",
       webhookSecret: "webhook-secret-for-tests",
     });
+    expect(config.inviteLinkBase).toBe("https://app.zeros.build/invite");
+  });
+
+  it("refuses to send WorkOS invitations through another app origin", () => {
+    expect(() =>
+      loadConfig({
+        ...workosEnv(),
+        INVITE_LINK_BASE: "https://app-alpha.zeros.build/invite",
+      }),
+    ).toThrow(/INVITE_LINK_BASE.*APP_ORIGIN/);
+  });
+
+  it.each([
+    "http://app.zeros.build/invite",
+    "https://user:secret@app.zeros.build/invite",
+    "https://app.zeros.build/invite/redirect",
+    "https://app.zeros.build/invite?next=elsewhere",
+    "https://app.zeros.build/invite#fragment",
+  ])("rejects a non-canonical invitation endpoint: %s", (inviteLinkBase) => {
+    expect(() =>
+      loadConfig({
+        ...workosEnv(),
+        INVITE_LINK_BASE: inviteLinkBase,
+      }),
+    ).toThrow(/INVITE_LINK_BASE/);
   });
 
   it("fails closed when WorkOS client IDs are missing or shared", () => {
@@ -499,6 +524,12 @@ describe("Railway deployment environment isolation", () => {
         loadConfig({
           ...baseEnv(),
           AUTH_AUDIENCE: audience,
+          INVITE_LINK_BASE:
+            name === "alpha"
+              ? "https://app-alpha.zeros.build/invite"
+              : name === "beta"
+                ? "https://app-beta.zeros.build/invite"
+                : "https://app.zeros.build/invite",
           RAILWAY_PROJECT_ID: "project-1",
           RAILWAY_ENVIRONMENT_NAME: name,
           RAILWAY_GIT_BRANCH: branch,
@@ -536,6 +567,21 @@ describe("Railway deployment environment isolation", () => {
         RAILWAY_GIT_BRANCH: "main",
       }),
     ).toThrow(/APP_ORIGIN must be https:\/\/app-alpha\.zeros\.build/);
+  });
+
+  it("rejects a cross-channel invitation page during an Auth0 rollback", () => {
+    expect(() =>
+      loadConfig({
+        ...baseEnv(),
+        AUTH_AUDIENCE: "https://api-alpha.zeros.build",
+        INVITE_LINK_BASE: "https://app.zeros.build/invite",
+        RAILWAY_PROJECT_ID: "project-1",
+        RAILWAY_ENVIRONMENT_NAME: "alpha",
+        RAILWAY_GIT_BRANCH: "main",
+      }),
+    ).toThrow(
+      /INVITE_LINK_BASE must be https:\/\/app-alpha\.zeros\.build\/invite/,
+    );
   });
 
   it("refuses a Git-connected production deployment directly from main", () => {

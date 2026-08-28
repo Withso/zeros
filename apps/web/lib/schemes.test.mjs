@@ -18,7 +18,12 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { SCHEMES, DEFAULT_SCHEME, schemeOrDefault } from "./schemes.mjs";
+import {
+  SCHEMES,
+  DEFAULT_SCHEME,
+  schemeForDeploymentEnvironment,
+  schemeOrDefault,
+} from "./schemes.mjs";
 
 const TOKENISH = /^[A-Za-z0-9_-]{1,512}$/; // lib/handoff-security.ts
 
@@ -105,6 +110,39 @@ describe("hub handoff scheme allow-list", () => {
 });
 
 describe("invite page scheme selection", () => {
+  it("binds hosted invite pages to their deployment channel", () => {
+    assert.equal(
+      schemeForDeploymentEnvironment("alpha", "zeros"),
+      "zeros-alpha",
+    );
+    assert.equal(
+      schemeForDeploymentEnvironment("beta", "zeros-alpha"),
+      "zeros-beta",
+    );
+    assert.equal(
+      schemeForDeploymentEnvironment("production", "zeros-dev"),
+      "zeros",
+    );
+  });
+
+  it("uses the allow-listed request only outside a hosted deployment", () => {
+    assert.equal(
+      schemeForDeploymentEnvironment(undefined, "zeros-dev"),
+      "zeros-dev",
+    );
+    assert.equal(
+      schemeForDeploymentEnvironment(undefined, "javascript"),
+      "zeros",
+    );
+  });
+
+  it("fails closed for an unknown hosted deployment environment", () => {
+    assert.throws(
+      () => schemeForDeploymentEnvironment("staging", "zeros-alpha"),
+      /ZEROS_DEPLOY_ENV/,
+    );
+  });
+
   it("passes through every per-channel scheme", () => {
     for (const scheme of CHANNEL_SCHEMES) {
       assert.equal(schemeOrDefault(scheme), scheme);

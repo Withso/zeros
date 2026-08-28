@@ -25,7 +25,31 @@ export const SCHEMES = new Set([
 /** The packaged app's scheme — the fallback when `?scheme=` is absent/unlisted. */
 export const DEFAULT_SCHEME = "zeros";
 
+const DEPLOYMENT_SCHEMES = Object.freeze({
+  alpha: "zeros-alpha",
+  beta: "zeros-beta",
+  production: "zeros",
+});
+
 /** Allow-listed scheme, or DEFAULT_SCHEME. Never returns caller-controlled input. */
 export function schemeOrDefault(scheme) {
   return SCHEMES.has(scheme) ? scheme : DEFAULT_SCHEME;
+}
+
+/**
+ * Choose the invite target for this hosted deployment. A query-string scheme
+ * remains useful for local/preview pages, but it must not be able to redirect a
+ * deployed Alpha or Beta invitation into a sibling app. Cloudflare validates
+ * ZEROS_DEPLOY_ENV against APP_ORIGIN at build time; this is the runtime half of
+ * that channel binding.
+ */
+export function schemeForDeploymentEnvironment(environment, requestedScheme) {
+  if (environment === undefined || environment === null || environment === "") {
+    return schemeOrDefault(requestedScheme);
+  }
+  const scheme = DEPLOYMENT_SCHEMES[environment];
+  if (!scheme) {
+    throw new Error("Invalid ZEROS_DEPLOY_ENV for hosted invitation");
+  }
+  return scheme;
 }

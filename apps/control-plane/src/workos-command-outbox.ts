@@ -344,15 +344,21 @@ export class WorkOSCommandProcessor {
     }
     if (command.operation === "membership.delete") {
       const payload = MembershipPayload.parse(command.payload);
-      let ids = command.providerObjectId ? [command.providerObjectId] : [];
-      if (ids.length === 0) {
-        ids = (
-          await this.provider.listMemberships({
-            organizationId: await this.workosOrganizationId(command),
-            userId: payload.workosUserId,
-          })
-        ).map((membership) => membership.id);
-      }
+      const organizationId = await this.workosOrganizationId(command);
+      // Always reconcile the captured ID with current provider state. An
+      // invitation may have become a new membership after the local removal
+      // transaction read the old ID but before this command executes.
+      const ids = Array.from(
+        new Set([
+          ...(command.providerObjectId ? [command.providerObjectId] : []),
+          ...(
+            await this.provider.listMemberships({
+              organizationId,
+              userId: payload.workosUserId,
+            })
+          ).map((membership) => membership.id),
+        ]),
+      );
       for (const id of ids) {
         try {
           await this.provider.deleteMembership(id);
@@ -397,22 +403,58 @@ export class WorkOSCommandProcessor {
     if (command.operation === "invitation.revoke") {
       const payload = InvitationPayload.parse(command.payload);
       const organizationId = await this.workosOrganizationId(command);
-      let ids = command.providerObjectId ? [command.providerObjectId] : [];
-      if (ids.length === 0) {
-        ids = (
-          await this.provider.listInvitations({
-            organizationId,
-            email: payload.email,
-          })
-        )
-          .filter((invitation) => invitation.state === "pending")
-          .map((invitation) => invitation.id);
-      }
+      // WorkOS can contain a captured invitation plus a newer pending copy
+      // (lost response, resend, or an accept/recreate race). Retire every
+      // pending object for this exact organization/email pair. Do not attempt
+      // to revoke an exact object already known to be accepted or expired.
+      const listed = await this.provider.listInvitations({
+        organizationId,
+        email: payload.email,
+      });
+      const exact = command.providerObjectId
+        ? listed.find((invitation) => invitation.id === command.providerObjectId)
+        : null;
+      const ids = Array.from(
+        new Set([
+          ...(command.providerObjectId && (!exact || exact.state === "pending")
+            ? [command.providerObjectId]
+            : []),
+          ...listed
+            .filter((invitation) => invitation.state === "pending")
+            .map((invitation) => invitation.id),
+        ]),
+      );
       for (const id of ids) {
         try {
           await this.provider.revokeInvitation(id);
         } catch (error) {
-          if (safeError(error).status !== 404) throw error;
+          const failure = safeError(error);
+          if (failure.status === 404) continue;
+          if (
+            failure.status !== null &&
+            failure.status >= 400 &&
+            failure.status < 500 &&
+            failure.status !== 408 &&
+            failure.status !== 429
+          ) {
+            // Acceptance can win after the list above but before revoke. A
+            // non-pending object is already converged; the membership command
+            // serialized behind this one will create or remove coarse access
+            // according to Zeros' current desired state.
+            const current = await this.provider.listInvitations({
+              organizationId,
+              email: payload.email,
+            });
+            if (
+              !current.some(
+                (invitation) =>
+                  invitation.id === id && invitation.state === "pending",
+              )
+            ) {
+              continue;
+            }
+          }
+          throw error;
         }
       }
       return { kind: "void" };
