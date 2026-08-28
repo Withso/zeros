@@ -34,6 +34,7 @@ import type {
   PreparedBoundary,
   RepoTaskBoundaryFactory,
 } from "../agents/containment/types";
+import { RetriableBoundaryRetirement } from "../agents/containment/boundary-retirement";
 
 const SETUP_PREFIX = "setup:";
 /** Keep at most the last 512 KB of setup output in memory (the tail is what a
@@ -100,7 +101,7 @@ interface SetupEntry {
 }
 
 interface BoundaryTeardownRecord {
-  readonly promise: Promise<void>;
+  readonly retirement: RetriableBoundaryRetirement;
   readonly workspaceId: string;
   readonly territoryContributions:
     | readonly BoundaryTerritoryContributionSnapshot[]
@@ -125,8 +126,8 @@ export class SetupManager {
   >();
   /** Monotonic run counter → a unique session id per run (rerun-race guard). */
   private gen = 0;
-  /** Failed teardown proof survives reruns for this engine lifetime so a later
-   * archive/delete cannot mistake a superseded setup entry for safe removal. */
+  /** Failed teardown proof survives reruns until a background retry proves it,
+   * so archive/delete cannot mistake a superseded entry for safe removal. */
   private readonly boundaryTeardowns = new Map<
     string,
     Set<BoundaryTeardownRecord>
@@ -166,32 +167,32 @@ export class SetupManager {
     boundary: PreparedBoundary,
     workspaceId: string,
   ): Promise<void> {
-    const promise = Promise.resolve().then(() => boundary.stopAndProve());
     const records =
       this.boundaryTeardowns.get(workspaceId) ??
       new Set<BoundaryTeardownRecord>();
+    const retirement = new RetriableBoundaryRetirement(boundary, {
+      onFailure: (error, attempt) => {
+        console.error(
+          `[setup] repo-task boundary teardown attempt ${attempt} failed; retrying automatically:`,
+          error,
+        );
+      },
+      onProven: (recovered) => {
+        records.delete(record);
+        if (records.size === 0) this.boundaryTeardowns.delete(workspaceId);
+        if (recovered) {
+          console.log("[setup] repo-task boundary teardown proof recovered");
+        }
+      },
+    });
     const record = {
-      promise,
+      retirement,
       workspaceId,
       territoryContributions: boundary.territoryContributions,
     } satisfies BoundaryTeardownRecord;
     records.add(record);
     this.boundaryTeardowns.set(workspaceId, records);
-    void promise.then(
-      () => {
-        records.delete(record);
-        if (records.size === 0) {
-          this.boundaryTeardowns.delete(workspaceId);
-        }
-      },
-      () => {
-        // Retain failed proof until restart recovery reaps the durable domain.
-      },
-    );
-    void promise.catch((error) => {
-      console.error("[setup] repo-task boundary teardown failed:", error);
-    });
-    return promise;
+    return retirement.start();
   }
 
   /** Lifecycle barrier used after PTY exit and before checkout removal. */
@@ -200,7 +201,7 @@ export class SetupManager {
     if (entry) void this.finalizeBoundary(entry);
     const records = [...(this.boundaryTeardowns.get(workspaceId) ?? [])];
     const results = await Promise.allSettled(
-      records.map((record) => record.promise),
+      records.map((record) => record.retirement.promise),
     );
     const failures = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],
@@ -208,7 +209,7 @@ export class SetupManager {
     if (failures.length > 0) {
       throw new AggregateError(
         failures,
-        "repository setup containment teardown was not proven. Restart Zeros before removing the workspace or changing Design territory.",
+        "repository setup containment teardown was not proven. Automatic recovery is still retrying; removing the workspace or changing its Design territory remains blocked until proof succeeds.",
       );
     }
   }
@@ -237,7 +238,7 @@ export class SetupManager {
     if (failures.length > 0) {
       throw new AggregateError(
         failures,
-        "repository setup boundaries were not globally retired. Restart Zeros before changing registered Design territory.",
+        "repository setup boundaries were not all proven stopped. Automatic recovery is still retrying; registered Design territory changes remain blocked until proof succeeds.",
       );
     }
   }
@@ -289,7 +290,7 @@ export class SetupManager {
         includesWorkspace(record.workspaceId, record.territoryContributions),
       );
     const results = await Promise.allSettled(
-      records.map((record) => record.promise),
+      records.map((record) => record.retirement.promise),
     );
     const failures = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],
@@ -297,7 +298,7 @@ export class SetupManager {
     if (failures.length > 0) {
       throw new AggregateError(
         failures,
-        "repository setup boundaries for this Design territory were not proven stopped. Restart Zeros before changing it.",
+        "repository setup boundaries for this Design territory were not proven stopped. Automatic recovery is still retrying; this territory change remains blocked until proof succeeds.",
       );
     }
   }
@@ -504,8 +505,8 @@ export class SetupManager {
             }
             return { ...launch, stdio: "inherit" as const };
           },
-          onSpawned: (pid) => {
-            boundary.trackProcessGroup(pid);
+          onSpawned: (pid, leaderExited) => {
+            boundary.trackProcessGroup(pid, { leaderExited });
           },
         });
       } catch (error) {

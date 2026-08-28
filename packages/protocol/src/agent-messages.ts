@@ -12,6 +12,7 @@
 // ──────────────────────────────────────────────────────────
 
 import type {
+  AgentMessagePhase,
   ModeSwitchUpdate,
   SessionNotification,
   ToolCall,
@@ -32,6 +33,10 @@ export interface AgentTextMessage {
    *  one growing bubble (the symptom that surfaced after we fixed the
    *  Codex stdin hang and turns started actually completing). */
   messageId?: string;
+  /** Provider-declared assistant prose phase. Commentary belongs to working
+   * history; final_answer is the concluded response. Undefined is the legacy
+   * provider-neutral shape and remains final-output compatible. */
+  phase?: AgentMessagePhase;
   /** True for `role: "thought"` messages whose
    *  content the model encrypted (Anthropic `redacted_thinking`
    *  blocks). Renderer shows a distinct "redacted" badge with no
@@ -82,6 +87,10 @@ export interface AgentTextMessage {
    *  it is NEVER persisted (it becomes a normal message once it flushes).
    *  See sendQueueRef in sessions-provider. */
   queued?: boolean;
+  /** The first prompt waiting only for session admission is logically active,
+   * even though it remains transient until dispatch. It renders as the live
+   * transcript turn (with timer) instead of in the follow-up queue card. */
+  queuedPresentation?: "active-turn";
   /** Only meaningful on a `queued` bubble: whether inline edit is offered.
    *  False when the queued send's WIRE text diverges from its display text
    *  (an @-mention/import expansion happened) — editing in place would
@@ -487,6 +496,8 @@ export function applyUpdate(
         upd.messageId ?? undefined,
         undefined,
         upd.parentToolId ?? undefined,
+        undefined,
+        upd.phase ?? undefined,
       );
     case "agent_thought_chunk":
       return appendText(
@@ -605,11 +616,44 @@ function appendText(
   redacted?: boolean,
   parentToolId?: string,
   durationMs?: number,
+  phase?: AgentMessagePhase,
 ): AgentMessage[] {
   if (!content || content.type !== "text" || typeof content.text !== "string") {
     return messages;
   }
   const chunkText = content.text;
+
+  // Completion notifications can carry metadata without text (thinking
+  // duration, or a Codex phase disclosed only by item/completed). They may
+  // arrive after a tool row, so the target is not necessarily the trailing
+  // message. Update the exact durable message in place and never materialize
+  // an empty assistant bubble.
+  if (chunkText.length === 0) {
+    let targetIndex = -1;
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]!;
+      if (
+        message.kind === "text" &&
+        message.role === role &&
+        sameMessageId(message.messageId, messageId)
+      ) {
+        targetIndex = index;
+        break;
+      }
+    }
+    if (targetIndex < 0) return messages;
+    const target = messages[targetIndex] as AgentTextMessage;
+    const next = [...messages];
+    next[targetIndex] = {
+      ...target,
+      ...(redacted ? { redacted: true } : {}),
+      ...(typeof durationMs === "number" && Number.isFinite(durationMs)
+        ? { durationMs: Math.max(0, durationMs) }
+        : {}),
+      ...(phase ? { phase } : {}),
+    };
+    return next;
+  }
 
   // Coalesce into the trailing text message ONLY if it's from the same
   // role AND carries the same engine-side messageId. Without the id
@@ -641,6 +685,7 @@ function appendText(
         ...(typeof durationMs === "number" && Number.isFinite(durationMs)
           ? { durationMs: Math.max(0, durationMs) }
           : {}),
+        ...(phase ? { phase } : {}),
       },
     ];
   }
@@ -659,6 +704,7 @@ function appendText(
       ...(typeof durationMs === "number" && Number.isFinite(durationMs)
         ? { durationMs: Math.max(0, durationMs) }
         : {}),
+      ...(phase ? { phase } : {}),
     },
   ];
 }

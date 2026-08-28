@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, type Stats } from "node:fs";
 import {
   lstat,
   open,
@@ -263,7 +263,9 @@ function parseDescriptor(
   return descriptor as MacosProcessDomainDescriptor;
 }
 
-async function assertTrustedHelper(helperPath: string): Promise<string> {
+async function assertTrustedHelper(
+  helperPath: string,
+): Promise<{ canonical: string; metadata: Stats }> {
   if (!path.isAbsolute(helperPath)) {
     throw new Error("macOS process-domain helper path is not absolute");
   }
@@ -279,14 +281,28 @@ async function assertTrustedHelper(helperPath: string): Promise<string> {
   ) {
     throw new Error("macOS process-domain helper is not immutable");
   }
-  return canonical;
+  return { canonical, metadata };
 }
+
+/** Successful self-tests per (runner, exact helper identity). The protocol
+ * answer is a property of the binary bytes, so re-proving it every admission
+ * only re-pays a process spawn: the trust checks in assertTrustedHelper
+ * (canonical path, immutability) still run per call, and a replaced binary
+ * changes identity and re-tests. Failures are never cached. */
+const selfTestedHelpers = new WeakMap<
+  MacosProcessDomainCommandRunner,
+  Set<string>
+>();
 
 export async function probeMacosProcessDomainHelper(
   helperPath: string,
   runner: MacosProcessDomainCommandRunner = macosProcessDomainCommandRunner,
 ): Promise<void> {
-  const canonical = await assertTrustedHelper(helperPath);
+  const { canonical, metadata } = await assertTrustedHelper(helperPath);
+  const identity =
+    `${canonical}\0${metadata.dev}:${metadata.ino}:` +
+    `${metadata.mtimeMs}:${metadata.ctimeMs}:${metadata.size}`;
+  if (selfTestedHelpers.get(runner)?.has(identity)) return;
   const selfTest = parseObject(
     (await invoke(canonical, ["self-test"], runner)).stdout,
   );
@@ -299,6 +315,9 @@ export async function probeMacosProcessDomainHelper(
   ) {
     throw new Error("macOS process-domain helper self-test failed");
   }
+  const proven = selfTestedHelpers.get(runner) ?? new Set<string>();
+  proven.add(identity);
+  selfTestedHelpers.set(runner, proven);
 }
 
 async function invoke(
@@ -341,7 +360,9 @@ export class MacosProcessDomain {
   static async create(
     options: MacosProcessDomainOptions,
   ): Promise<MacosProcessDomain> {
-    const helperPath = await assertTrustedHelper(options.helperPath);
+    const { canonical: helperPath } = await assertTrustedHelper(
+      options.helperPath,
+    );
     const runner = options.runner ?? macosProcessDomainCommandRunner;
     await probeMacosProcessDomainHelper(helperPath, runner);
     const enginePid = options.enginePid ?? process.pid;
@@ -534,7 +555,9 @@ export async function recoverMacosProcessDomains(
   if (descriptors.length === 0) {
     return { discovered: 0, recovered: 0, active: 0, preserved: 0 };
   }
-  const helperPath = await assertTrustedHelper(options.helperPath);
+  const { canonical: helperPath } = await assertTrustedHelper(
+    options.helperPath,
+  );
   await probeMacosProcessDomainHelper(helperPath, runner);
   let recovered = 0;
   let active = 0;

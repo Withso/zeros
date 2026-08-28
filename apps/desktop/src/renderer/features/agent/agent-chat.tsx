@@ -153,7 +153,6 @@ import {
 } from "./composer-pills";
 import { ContextGauge } from "./context-gauge";
 import { BoundaryPortsPill } from "./boundary-ports";
-import { BoundaryStatusPill } from "./boundary-status";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
 import { createBrowserTab } from "@/renderer/shell/workbench/tab-model";
 import {
@@ -228,7 +227,7 @@ import { TurnEventList } from "./turn-event-list";
 import { tailTurnInFlight } from "./tail-indicators";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
-import { TurnFooter } from "./turn-footer";
+import { TurnFooter, turnFooterFailureLabel } from "./turn-footer";
 import { JumpToLatestButton, JumpToPromptPill } from "./jump-pills";
 import {
   CheckpointRail,
@@ -274,6 +273,8 @@ function labelForFailure(
         return "Disconnected";
       case "rate-limited":
         return "Rate limited";
+      case "design-protection-failed":
+        return "Design protection failed";
       case "subprocess-exited":
         return "Agent exited";
       case "protocol-error":
@@ -287,34 +288,6 @@ function labelForFailure(
   }
   if (status === "auth-required") return "Sign in required";
   return "Agent error";
-}
-
-function footerLabelForFailure(failure: AgentFailure | null): string | null {
-  if (!failure || failure.stage !== "prompt") return null;
-  if (
-    failure.kind === "protocol-error" &&
-    /agent response failure/i.test(failure.message)
-  ) {
-    return "AGENT RESPONSE FAILURE";
-  }
-  switch (failure.kind) {
-    case "auth-required":
-      return "SIGN IN REQUIRED";
-    case "subprocess-exited":
-      return "AGENT EXITED";
-    case "session-expired":
-      return "SESSION EXPIRED";
-    case "timeout":
-      return "AGENT RESPONSE TIMEOUT";
-    case "transport-closed":
-      return "CONNECTION LOST";
-    case "rate-limited":
-      return "RATE LIMITED";
-    case "protocol-error":
-      return "AGENT RESPONSE FAILURE";
-    default:
-      return null;
-  }
 }
 
 interface AgentChatProps {
@@ -451,10 +424,10 @@ export function AgentChat({
         string,
         import("./use-agent-session").AgentMessage[]
       >();
-      // Still-pending queued sends render in the QueuedMessagesCard docked
-      // above the composer (2026-07-06 queue redesign), NOT as transcript
-      // bubbles — shadow them out of the visible turn stream. Array order is
-      // enqueue order, which is the FIFO send order the card shows.
+      // Follow-ups render in the QueuedMessagesCard, not as transcript
+      // bubbles. The first send waiting only for session admission is the one
+      // exception: it is already the active turn, so it stays in the timeline
+      // with the live timer while the provider session becomes ready.
       const queuedMessages: AgentTextMessage[] = [];
       // Tool calls present in THIS window. A child is only shadowed when its
       // parent SubagentCard is here to render it — the hydrate window (or a
@@ -469,7 +442,11 @@ export function AgentChat({
         }
       }
       for (const m of session.messages) {
-        if (m.kind === "text" && m.queued) {
+        if (
+          m.kind === "text" &&
+          m.queued &&
+          m.queuedPresentation !== "active-turn"
+        ) {
           queuedMessages.push(m);
           shadowed.add(m.id);
           continue;
@@ -2893,17 +2870,12 @@ export function AgentChat({
           : advice,
       });
     }
-    // Auth probe is a heuristic (file-existence on ~/.codex/auth.json
-    // and friends). When the actual CLI rejects on spawn the engine
-    // throws auth-required and gateway.markAuthFailed flips its
-    // runtimeAuthFailed map — but the renderer's agents-cache won't
-    // see that change until something triggers a re-fetch. Force one
-    // here on any prompt failure: the gateway's gate is also widened
-    // to mark auth-failed on prompt-stage protocol errors (most often
-    // "no events" because the CLI isn't signed in), and we want both
-    // sides to converge on the same authoritative state without
-    // requiring the user to alt-tab away and back.
-    if (session.status === "auth-required" || session.status === "failed") {
+    // Auth probe is a heuristic (file-existence on ~/.codex/auth.json and
+    // friends). When the actual CLI explicitly rejects authentication, refresh
+    // the cached provider state so its connection indicator converges. A
+    // protocol, transport, or Design-protection failure is not authentication
+    // evidence and must not fan out utility probes across every provider.
+    if (isAuth) {
       invalidateAgentsCache();
       void refreshAgents((force) => agentSessions.listAgents(force)).catch(
         () => {
@@ -3527,16 +3499,16 @@ export function AgentChat({
     // `warming` is deliberately NOT one of them (see sendNeedsSessionRecovery):
     // a spawn is already in flight, so awaiting it here only held the composer
     // hostage — text intact, no bubble, nothing to read as progress — for the
-    // whole spawn. The provider parks the send instead (visible immediately in
-    // the queued card) and dispatches it when the session lands.
+    // whole spawn. The provider presents the first send immediately as the
+    // active transcript turn and dispatches it when the session lands.
     //
     // 2026-08-17 (§5.0 "a send is always accepted instantly"): only a chat that
     // ENDED BADLY still blocks here. A chat that merely has no session yet
     // (`idle` — first send, engine respawn — or `reconnecting`) starts its
     // session in the BACKGROUND and falls straight through to sendPrompt, which
-    // sees the synchronous `warming` flip and parks the message in the queued
-    // card. Same queue UX the user already knows, but the composer clears at
-    // once and no send ever watches a spinner, whatever admission costs.
+    // sees the synchronous `warming` flip and parks the message as the active
+    // turn. The composer clears and the elapsed timer starts at once; only a
+    // real follow-up uses the queued card.
     const recoveryMode = sendSessionRecoveryMode(session.status);
     if (recoveryMode === "park") {
       const targetAgentId = session.agentId ?? chatThread?.agentId;
@@ -3552,7 +3524,7 @@ export function AgentChat({
             : undefined,
         })
         .catch(() => {
-          /* surfaces via session.error / the queued-card release */
+          /* surfaces via session.error / the parked-turn release */
         });
     } else if (recoveryMode === "await") {
       const targetAgentId = session.agentId ?? chatThread?.agentId;
@@ -4338,10 +4310,9 @@ export function AgentChat({
               return (
                 <React.Fragment key={turnKey(turn)}>
                   <TurnContainer turn={turn} isActive={isVisualTail}>
-                    {/* Still-pending queued sends do NOT render here — they
-                        live in the QueuedMessagesCard docked above the
-                        composer (2026-07-06 queue redesign), so every
-                        userPrompt reaching this point is a dispatched turn. */}
+                    {/* Follow-up queue rows do not render here. A first prompt
+                        awaiting only provider admission does: it is already
+                        presented as this active turn, before wire dispatch. */}
                     {turn.userPrompt && (
                       // Every turn's user prompt is sticky: as the
                       // user scrolls up through history each turn's prompt
@@ -4373,7 +4344,9 @@ export function AgentChat({
                         // copy-only: their reset boundary is the opening
                         // provider prompt, not the steer message id.
                         onEdit={
-                          turn.userPrompt.autoAction || turn.isSteer
+                          turn.userPrompt.autoAction ||
+                          turn.userPrompt.queued ||
+                          turn.isSteer
                             ? undefined
                             : (editedText, attachments, segments) => {
                                 editAndResubmit(
@@ -4463,7 +4436,7 @@ export function AgentChat({
                             }
                             fallbackStatusLabel={
                               isVisualTail && session.status !== "streaming"
-                                ? footerLabelForFailure(session.failure)
+                                ? turnFooterFailureLabel(session.failure)
                                 : null
                             }
                             // "An auto-rebuild is re-running THIS turn" — which
@@ -4500,7 +4473,7 @@ export function AgentChat({
                               nativeReady &&
                               session.status !== "streaming" &&
                               supportsBackgroundSignIn(signInAgentId) &&
-                              footerLabelForFailure(session.failure) ===
+                              turnFooterFailureLabel(session.failure) ===
                                 "SIGN IN REQUIRED"
                                 ? signInState.phase
                                 : null
@@ -4872,7 +4845,6 @@ export function AgentChat({
                       (also used in the edit composer). Effort/Fast are part of
                       the model label and edited in its popover. */}
                       {editToolbarPills}
-                      <BoundaryStatusPill status={session.boundary} />
                       <BoundaryPortsPill
                         snapshot={session.boundaryPorts}
                         onOpenPort={openBoundaryPreview}
@@ -4908,11 +4880,9 @@ export function AgentChat({
                         label={
                           composerStreaming
                             ? "Stop agent"
-                            : sendPreparing
-                              ? "Starting the agent…"
-                              : editingQueuedId
-                                ? "Save message"
-                                : "Send"
+                            : editingQueuedId
+                              ? "Save message"
+                              : "Send"
                         }
                         shortcut={
                           composerStreaming || sendPreparing ? undefined : "↵"

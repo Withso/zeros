@@ -29,7 +29,7 @@ export function boundaryPortProblemCopy(
       return {
         title: "Preview detection is unavailable",
         description:
-          "The sandbox could not inspect this session's listeners. Restart the session to retry.",
+          "Preview detection could not inspect this session's listeners. Restart the session to retry.",
       };
     case "listener-capacity-exceeded":
       return {
@@ -46,8 +46,7 @@ export function boundaryPortProblemCopy(
     case "policy-update-failed":
       return {
         title: "Preview access could not be refreshed",
-        description:
-          "Restart the session to rebuild its sandbox network access.",
+        description: "Restart the session to rebuild preview access.",
       };
   }
 }

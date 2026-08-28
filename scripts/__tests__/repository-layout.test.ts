@@ -304,6 +304,8 @@ describe("repository layout contracts", () => {
     const vite = read("vite.config.ts");
     expect(vite).not.toContain('"**/apps/**"');
     expect(vite).not.toContain('"**/website/**"');
+    expect(vite).toContain('"**/Zeros Design"');
+    expect(vite).toContain('"**/Zeros Design/**"');
     for (const app of ["control-plane", "web", "marketing"]) {
       expect(vite).toContain(`"**/apps/${app}/**"`);
     }

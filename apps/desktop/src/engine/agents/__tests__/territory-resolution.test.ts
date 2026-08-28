@@ -748,15 +748,20 @@ describe("code-agent territory resolution", () => {
       adapter,
     );
 
-    await expect(
-      gw.newSession("contained", { cwd: path.join(root, "src") }),
-    ).rejects.toMatchObject({
+    const refusal = (await gw
+      .newSession("contained", { cwd: path.join(root, "src") })
+      .catch((error: unknown) => error)) as {
+      failure: { message: string; advice?: string };
+    };
+    expect(refusal).toMatchObject({
       failure: {
-        kind: "protocol-error",
-        stage: "newSession",
+        kind: "design-protection-failed",
+        stage: "prompt",
         agentId: "contained",
       },
     });
+    expect(refusal.failure).not.toHaveProperty("advice");
+    expect(refusal.failure.message).not.toMatch(/sandbox|ZSR/i);
     expect(onPrepare).toHaveBeenCalledOnce();
     expect(onPrepare).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -771,6 +776,7 @@ describe("code-agent territory resolution", () => {
           ],
         }),
       }),
+      { attestation: "background" },
     );
     expect(adapter.newSession).not.toHaveBeenCalled();
   });
@@ -1330,7 +1336,6 @@ describe("code-agent territory resolution", () => {
         resolvedAdditionalRoots: readonly string[],
         additionalGitWorkspaceRoots: readonly string[],
         includeSessionCapabilities: boolean,
-        providerResumeId: undefined,
         actor: "design-agent",
       ): Promise<BoundaryRequest>;
     };
@@ -1352,7 +1357,6 @@ describe("code-agent territory resolution", () => {
         [],
         [],
         false,
-        undefined,
         "design-agent",
       );
 

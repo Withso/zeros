@@ -29,16 +29,15 @@ const {
   modelsListSpy,
   storeGetSpy,
   usageSpy,
-} =
-  vi.hoisted(() => ({
-    createSpy: vi.fn(),
-    resumeSpy: vi.fn(),
-    sendSpy: vi.fn(),
-    listSpy: vi.fn(),
-    modelsListSpy: vi.fn(),
-    storeGetSpy: vi.fn(),
-    usageSpy: vi.fn(),
-  }));
+} = vi.hoisted(() => ({
+  createSpy: vi.fn(),
+  resumeSpy: vi.fn(),
+  sendSpy: vi.fn(),
+  listSpy: vi.fn(),
+  modelsListSpy: vi.fn(),
+  storeGetSpy: vi.fn(),
+  usageSpy: vi.fn(),
+}));
 
 vi.mock("@cursor/sdk", () => ({
   Agent: { create: createSpy, resume: resumeSpy, list: listSpy },
@@ -625,20 +624,18 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
   });
 
   it("merges provider-billed cost from getUsage into the common turn usage", async () => {
-    usageSpy
-      .mockResolvedValueOnce(EMPTY_AGENT_USAGE)
-      .mockResolvedValueOnce({
-        usage: {
-          inputTokens: 120,
-          outputTokens: 30,
-          cacheReadTokens: 80,
-          cacheWriteTokens: 4,
-          totalTokens: 150,
-          reasoningTokens: 7,
-        },
-        cost: { rawCostCents: 19, chargedCents: 12.5 },
-        runs: [],
-      });
+    usageSpy.mockResolvedValueOnce(EMPTY_AGENT_USAGE).mockResolvedValueOnce({
+      usage: {
+        inputTokens: 120,
+        outputTokens: 30,
+        cacheReadTokens: 80,
+        cacheWriteTokens: 4,
+        totalTokens: 150,
+        reasoningTokens: 7,
+      },
+      cost: { rawCostCents: 19, chargedCents: 12.5 },
+      runs: [],
+    });
     const adapter = new CursorSdkAdapter(makeCtx());
     const { session } = await adapter.newSession({
       cwd: "/tmp/proj",
@@ -760,27 +757,27 @@ describe("CursorSdkAdapter — model is always passed AND validated", () => {
       aliases: ["auto"],
       selectable: false,
     });
-    expect(models.find((model) => model.value === "composer-2.5")).toMatchObject(
-      {
-        aliases: ["composer"],
-        selectable: true,
-        parameters: [
-          {
-            id: "speed",
-            label: "Speed",
-            values: [{ value: "fast", label: "Fast" }],
-          },
-        ],
-        variants: [
-          {
-            label: "Balanced",
-            description: "Balanced defaults",
-            parameters: [{ id: "speed", value: "balanced" }],
-            isDefault: true,
-          },
-        ],
-      },
-    );
+    expect(
+      models.find((model) => model.value === "composer-2.5"),
+    ).toMatchObject({
+      aliases: ["composer"],
+      selectable: true,
+      parameters: [
+        {
+          id: "speed",
+          label: "Speed",
+          values: [{ value: "fast", label: "Fast" }],
+        },
+      ],
+      variants: [
+        {
+          label: "Balanced",
+          description: "Balanced defaults",
+          parameters: [{ id: "speed", value: "balanced" }],
+          isDefault: true,
+        },
+      ],
+    });
     expect(createSpy.mock.calls[0][0].model).toEqual({
       id: "composer-2.5",
       params: [{ id: "speed", value: "balanced" }],
@@ -1220,8 +1217,8 @@ describe("CursorSdkAdapter — multi-root workspaces (@cursor/sdk 1.0.28 local.d
   });
 });
 
-describe("CursorSdkAdapter — model discovery is bounded at session start", () => {
-  it("creates the agent without waiting out a hung catalog request", async () => {
+describe("CursorSdkAdapter — model discovery never blocks session start", () => {
+  it("creates the agent immediately while a hung catalog request continues", async () => {
     let releaseCatalog = () => {};
     modelsListSpy.mockImplementation(
       () =>
@@ -1229,24 +1226,25 @@ describe("CursorSdkAdapter — model discovery is bounded at session start", () 
           releaseCatalog = () => resolve([{ id: "composer-2.5" }]);
         }),
     );
-    vi.useFakeTimers();
     try {
       const adapter = new CursorSdkAdapter(makeCtx());
       const flight = adapter.newSession({
         cwd: "/tmp/proj",
         env: { CURSOR_API_KEY: "key_test", CURSOR_MODEL: "composer-2.5" },
       });
-      // Nothing created yet: the catalog request is still outstanding.
-      await vi.advanceTimersByTimeAsync(100);
-      expect(createSpy).not.toHaveBeenCalled();
-      // Past the start budget, the session goes ahead without the catalog.
-      await vi.advanceTimersByTimeAsync(2_500);
-      await flight;
+      await Promise.race([
+        flight,
+        new Promise<never>((_resolve, reject) => {
+          setTimeout(
+            () => reject(new Error("session start waited for model catalog")),
+            250,
+          );
+        }),
+      ]);
       expect(createSpy).toHaveBeenCalledTimes(1);
       expect(createSpy.mock.calls[0][0].model).toEqual({ id: "composer-2.5" });
     } finally {
       releaseCatalog();
-      vi.useRealTimers();
     }
   });
 });

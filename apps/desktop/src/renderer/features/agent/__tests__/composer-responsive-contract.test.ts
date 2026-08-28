@@ -40,6 +40,17 @@ describe("chat composer responsive contract", () => {
     );
   });
 
+  it("does not expose ZSR or sandbox diagnostics in the composer", () => {
+    expect(agentChat).not.toContain("BoundaryStatusPill");
+    expect(agentChat).not.toContain('from "./boundary-status"');
+  });
+
+  it("does not revalidate every provider after a non-auth execution failure", () => {
+    expect(agentChat).toMatch(
+      /if \(isAuth\) \{\s*invalidateAgentsCache\(\);\s*void refreshAgents/,
+    );
+  });
+
   it("shows metadata without the model name below 450px and only the logo below 400px", () => {
     expect(pills).toContain("data-model-pill-name");
     expect(pills).toContain("data-model-pill-metadata");

@@ -9,6 +9,7 @@
 //
 // Definition: an agent is runnable when ANY of:
 //   - it reports `authenticated === true` (CLI probe succeeded), OR
+//   - it is installed and its auth probe is temporarily unavailable, OR
 //   - the user has selected API-key mode for it AND the install probe
 //     found it (apiKey agents don't need CLI sign-in; the env-injected
 //     key carries auth at spawn time), OR
@@ -44,6 +45,13 @@ import {
 
 export function isRunnableAgent(a: BridgeRegistryAgent): boolean {
   if (a.authenticated === true) return true;
+  // An unavailable auth probe is infrastructure uncertainty, not a negative
+  // credential verdict. Keep an installed provider sendable so the real
+  // admission failure (for example a temporarily unavailable ZSR boundary)
+  // reaches the composer instead of replacing it with the false and
+  // unactionable "Sign in required" flow. This must precede Cursor's
+  // API-key-only branch: its key probe can be unavailable for the same reason.
+  if (a.installed === true && a.authenticationUnavailableReason) return true;
   // API-key-only agents (Cursor/@cursor/sdk): the engine's auth probe reads
   // the actual key store (secret-account), so `authenticated` already means
   // "key saved". Don't fall through to the installed+apiKey shortcut below —

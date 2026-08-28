@@ -36,7 +36,10 @@ async function fixture(): Promise<string> {
   });
   await execFileAsync("git", ["config", "user.name", "test"], { cwd: root });
   await mkdir(path.join(root, "Zeros Design"), { recursive: true });
-  await writeFile(path.join(root, "Zeros Design", ".zeros-canvas.json"), "{}\n");
+  await writeFile(
+    path.join(root, "Zeros Design", ".zeros-canvas.json"),
+    "{}\n",
+  );
   await writeFile(path.join(root, "code.ts"), "export {};\n");
   await execFileAsync("git", ["add", "."], { cwd: root });
   await execFileAsync("git", ["commit", "-q", "-m", "fixture"], { cwd: root });
@@ -52,6 +55,10 @@ function fakeAdapter(): AgentAdapter {
         sessionId: opts.executionId!,
       },
       initialize: {},
+    })),
+    loadSession: vi.fn(async (opts: { executionId?: string }) => ({
+      executionId: opts.executionId!,
+      resumedFresh: false,
     })),
     disposeSession: vi.fn(async () => {}),
     dispose: vi.fn(async () => {}),
@@ -110,6 +117,53 @@ describe("gateway warm session boundaries", () => {
     await gw.dispose();
   });
 
+  it("lets a resumed session adopt a spare and replenish the next one", async () => {
+    const root = await fixture();
+    const preparedIds: string[] = [];
+    const gw = new AgentGateway({
+      projectRoot: "/tmp/zeros-warm-test",
+      executionBoundary: testExecutionBoundary({
+        onPrepare: (request: BoundaryRequest) => {
+          preparedIds.push(request.executionId);
+        },
+      }),
+      events: {
+        onSessionUpdate: () => {},
+        onPermissionRequest: () => {},
+        onQuestionRequest: () => {},
+        onAgentStderr: () => {},
+        onAgentExit: () => {},
+      },
+    });
+    const internals = gw as unknown as {
+      adapters: Map<string, AgentAdapter>;
+      warmSessionBoundariesInstance: { size(): number } | null;
+    };
+    internals.adapters.set("contained", fakeAdapter());
+
+    const first = await gw.newSession("contained", { cwd: root });
+    expect(preparedIds[0]).toBe(first.executionId);
+    await vi.waitFor(() => {
+      expect(internals.warmSessionBoundariesInstance?.size() ?? 0).toBe(1);
+    });
+
+    // Resume and new-session requests hash identically (the boundary is
+    // resume-agnostic), so the resume adopts the spare: its executionId never
+    // reaches the boundary factory.
+    const resumed = await gw.loadSession("contained", "resume-thread-1", {
+      cwd: root,
+    });
+    expect(resumed.executionId).toBeDefined();
+    expect(preparedIds).not.toContain(resumed.executionId);
+
+    // A live resume replenishes exactly like newSession.
+    await vi.waitFor(() => {
+      expect(internals.warmSessionBoundariesInstance?.size() ?? 0).toBe(1);
+    });
+    expect(preparedIds.filter((id) => id.startsWith("warm-"))).toHaveLength(2);
+    await gw.dispose();
+  });
+
   it("admits cold when the pool is disabled by configuration", async () => {
     const root = await fixture();
     process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES = "0";
@@ -137,10 +191,7 @@ describe("gateway warm session boundaries", () => {
       internals.adapters.set("contained", fakeAdapter());
       const first = await gw.newSession("contained", { cwd: root });
       const second = await gw.newSession("contained", { cwd: root });
-      expect(preparedIds).toEqual([
-        first.executionId,
-        second.executionId,
-      ]);
+      expect(preparedIds).toEqual([first.executionId, second.executionId]);
       expect(internals.warmSessionBoundariesInstance).toBeNull();
       await gw.dispose();
     } finally {

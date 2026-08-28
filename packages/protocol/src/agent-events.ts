@@ -549,10 +549,16 @@ export interface UserMessageChunkUpdate {
   messageId?: string | null;
 }
 
+export type AgentMessagePhase = "commentary" | "final_answer";
+
 export interface AgentMessageChunkUpdate {
   sessionUpdate: "agent_message_chunk";
   content: ContentBlock;
   messageId?: string | null;
+  /** Provider-declared role for assistant prose. Codex emits commentary while
+   * working and a final_answer when the turn concludes. Absent preserves the
+   * legacy behavior for providers that do not classify message phases. */
+  phase?: AgentMessagePhase | null;
   /** When a subagent emits text through this stream,
    *  the parent Task's toolCallId. Renderer hides the message from
    *  the top-level timeline and routes it into the SubagentCard. */

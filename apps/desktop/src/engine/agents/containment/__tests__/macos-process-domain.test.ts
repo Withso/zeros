@@ -182,6 +182,55 @@ describe("macOS ZSR process domain", () => {
     );
   });
 
+  it("re-proves the helper self-test only when the binary identity changes", async () => {
+    const runner = vi.fn<MacosProcessDomainCommandRunner>(
+      async (_helper, args) => {
+        if (args[0] === "self-test") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              version: 1,
+              platform: "darwin",
+              processIdentity: true,
+              sandboxInspection: true,
+              callerSandboxed: false,
+            }),
+            stderr: "",
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: identity(Number(args[1])),
+          stderr: "",
+        };
+      },
+    );
+    const selfTests = () =>
+      runner.mock.calls.filter((call) => call[1][0] === "self-test").length;
+    const create = (metadata: string) =>
+      MacosProcessDomain.create({
+        helperPath,
+        markerPath,
+        policyPath,
+        metadataPath: metadata,
+        generation: newTerritoryGeneration(),
+        enginePid: 4321,
+        runner,
+      });
+
+    await create(metadataPath);
+    expect(selfTests()).toBe(1);
+    // Same runner, byte-identical helper: the per-admission self-test spawn
+    // is skipped; the trust checks (canonical path, immutability) still ran.
+    await create(path.join(root, "commands", "process-domain-2.json"));
+    expect(selfTests()).toBe(1);
+    // A replaced helper binary changes identity and must re-prove.
+    await rm(helperPath);
+    await writeFile(helperPath, "helper-updated", { mode: 0o500 });
+    await create(path.join(root, "commands", "process-domain-3.json"));
+    expect(selfTests()).toBe(2);
+  });
+
   it("fails closed on malformed or unproved helper output", async () => {
     const badRunner: MacosProcessDomainCommandRunner = async (
       _helper,
@@ -413,9 +462,7 @@ describe("macOS ZSR process domain", () => {
     // First retire renames the descriptor to `.reaped`.
     await expect(domain.retireMetadata()).resolves.toBeUndefined();
     await expect(stat(metadataPath)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      stat(`${metadataPath}.reaped`),
-    ).resolves.toBeDefined();
+    await expect(stat(`${metadataPath}.reaped`)).resolves.toBeDefined();
     // A retried teardown (or preparation-cleanup double-call) must not throw
     // ENOENT — this is what lets the gateway's recovery loop resume a wedged
     // teardown instead of churning forever. Finding A regression guard.

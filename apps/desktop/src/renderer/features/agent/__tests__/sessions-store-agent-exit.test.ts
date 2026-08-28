@@ -213,4 +213,43 @@ describe("territory-revoked execution routing", () => {
       );
     },
   );
+
+  it("fails only the exact execution when background Design protection fails", () => {
+    seed("chatA", "codex", "failed-execution", "streaming");
+    seed("chatB", "codex", "healthy-execution", "ready");
+    const failed = {
+      version: 1,
+      actor: "agent-code",
+      state: "unavailable",
+      backend: "zeros-srt",
+      designProtection: {
+        required: true,
+        enforced: false,
+        protectedDirectoryCount: 1,
+      },
+      parity: { level: "full", restrictions: [] },
+      checkedAt: Date.now(),
+      failure: "design-protection-failed",
+    } as ExecutionBoundaryStatus & {
+      failure: "design-protection-failed";
+    };
+
+    useSessionsStore
+      .getState()
+      .applyBridgeBoundaryStatus("codex", "failed-execution", failed);
+
+    expect(useSessionsStore.getState().sessions["chatA"]).toMatchObject({
+      status: "failed",
+      activeTurnStartedAt: null,
+      failure: {
+        kind: "design-protection-failed",
+        stage: "prompt",
+      },
+    });
+    expect(useSessionsStore.getState().sessions["chatB"]).toMatchObject({
+      status: "ready",
+      sessionId: "healthy-execution",
+      failure: null,
+    });
+  });
 });

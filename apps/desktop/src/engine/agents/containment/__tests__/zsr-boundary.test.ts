@@ -1,4 +1,6 @@
 import { spawn } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import {
   access,
   chmod,
@@ -19,12 +21,19 @@ import { createServer } from "node:net";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { runFile } from "../../../git/git-exec";
+import {
+  DESIGN_WATCH_IGNORE_FILENAME,
+  DESIGN_WATCH_ROOTS_FILENAME,
+  NODE_DESIGN_WATCH_GUARD_FILENAME,
+} from "../design-watch-isolation";
 import type { MacosProcessDomainCommandRunner } from "../macos-process-domain";
 import {
   cleanupZsrPreparationProcessDomain,
   resumeSharedContainerWorkerIdling,
   stopIdleSharedContainerWorkers,
   suspendSharedContainerWorkerIdling,
+  TrackedBoundaryProcess,
+  TrackedBoundaryProcessGroup,
   ZsrExecutionBoundary as RuntimeZsrExecutionBoundary,
   type ZsrBoundaryOptions,
 } from "../zsr-boundary";
@@ -174,6 +183,90 @@ describe("ZSR execution boundary", () => {
     await rm(root, { recursive: true, force: true });
   });
 
+  it("does not signal a recycled PTY group outside the macOS process domain", async () => {
+    const signal = vi.fn();
+    const tracked = new TrackedBoundaryProcessGroup(41_001, async () => false, {
+      exists: () => true,
+      signal,
+    });
+
+    await expect(tracked.stopAndProve()).resolves.toBeUndefined();
+    expect(signal).not.toHaveBeenCalled();
+  });
+
+  it("still signals a newly spawned PTY group before its domain fingerprint appears", async () => {
+    const signal = vi.fn();
+    const tracked = new TrackedBoundaryProcessGroup(
+      41_005,
+      async () => false,
+      {
+        exists: () => signal.mock.calls.length === 0,
+        signal,
+      },
+      () => false,
+    );
+
+    await expect(tracked.stopAndProve()).resolves.toBeUndefined();
+    expect(signal).toHaveBeenCalledWith(41_005, "SIGTERM");
+  });
+
+  it("does not signal a recycled direct-spawn group outside the macOS process domain", async () => {
+    const signal = vi.fn();
+    const childKill = vi.fn(() => true);
+    const child = Object.assign(new EventEmitter(), {
+      pid: 41_004,
+      stdin: null,
+      stdout: null,
+      stderr: null,
+      exitCode: 0,
+      signalCode: null,
+      kill: childKill,
+    }) as unknown as ChildProcess;
+    const tracked = new TrackedBoundaryProcess(child, async () => false, {
+      exists: () => true,
+      signal,
+    });
+
+    await expect(tracked.stopAndProve()).resolves.toBeUndefined();
+    expect(signal).not.toHaveBeenCalled();
+    expect(childKill).not.toHaveBeenCalled();
+  });
+
+  it("rechecks macOS ownership when signaling a PTY group returns EPERM", async () => {
+    const ownership = vi
+      .fn<(pid: number) => Promise<boolean>>()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    const denied = Object.assign(new Error("Operation not permitted"), {
+      code: "EPERM",
+    });
+    const tracked = new TrackedBoundaryProcessGroup(41_002, ownership, {
+      exists: () => true,
+      signal: () => {
+        throw denied;
+      },
+    });
+
+    await expect(tracked.stopAndProve()).resolves.toBeUndefined();
+    expect(ownership).toHaveBeenCalledTimes(2);
+  });
+
+  it("fails closed on EPERM while the PTY group still matches its domain", async () => {
+    const denied = Object.assign(new Error("Operation not permitted"), {
+      code: "EPERM",
+    });
+    const tracked = new TrackedBoundaryProcessGroup(41_003, async () => true, {
+      exists: () => true,
+      signal: () => {
+        throw denied;
+      },
+    });
+
+    await expect(tracked.stopAndProve()).rejects.toMatchObject({
+      code: "EPERM",
+    });
+  });
+
   it("preserves process-domain recovery evidence when preparation reap fails", async () => {
     const policyRoot = path.join(root, "failed-preparation-policy");
     await mkdir(policyRoot);
@@ -229,6 +322,241 @@ describe("ZSR execution boundary", () => {
       if (!stopped) await prepared.stopAndProve();
       logged.mockRestore();
       errored.mockRestore();
+    }
+  });
+
+  it("keeps a failed retirement scoped to its exact boundary", async () => {
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+    });
+    const request = {
+      executionId: "execution-retirement-recovery",
+      actor: "agent-code" as const,
+      cwd: workspace,
+      workspaceRoot: workspace,
+    };
+    const prepared = await boundary.prepare(request);
+    const internals = boundary as unknown as {
+      retirementFailures: Map<typeof prepared.generation, unknown>;
+    };
+    internals.retirementFailures.set(
+      prepared.generation,
+      new Error("first teardown proof failed"),
+    );
+
+    // A stuck old process remains fenced by its own immutable policy and is
+    // retried independently. It must not poison unrelated agent, Run, Setup,
+    // auth, or utility admissions in the same engine.
+    expect((await boundary.probe(request)).available).toBe(true);
+    await prepared.stopAndProve();
+    expect((await boundary.probe(request)).available).toBe(true);
+  });
+
+  it("retries a backend-owned failed proof that no caller could adopt", async () => {
+    vi.useFakeTimers();
+    try {
+      const boundary = new ZsrExecutionBoundary({
+        projectRoot: root,
+        supervisorScript: supervisor,
+        supervisorRuntime: process.execPath,
+      });
+      const generation = "unreturned-blocking-boundary" as never;
+      const stopAndProve = vi.fn<() => Promise<void>>().mockResolvedValue();
+      const internals = boundary as unknown as {
+        recordBoundaryRetirementFailure(
+          failedGeneration: typeof generation,
+          failedBoundary: { stopAndProve(): Promise<void> },
+          error: unknown,
+        ): void;
+        retirementFailures: Map<typeof generation, unknown>;
+      };
+
+      internals.recordBoundaryRetirementFailure(
+        generation,
+        { stopAndProve },
+        new Error("initial proof failed"),
+      );
+      expect(internals.retirementFailures.has(generation)).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(stopAndProve).toHaveBeenCalledOnce();
+      expect(internals.retirementFailures.has(generation)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries exact preparation cleanup without poisoning later admissions", async () => {
+    vi.useFakeTimers();
+    try {
+      const boundary = new ZsrExecutionBoundary({
+        projectRoot: root,
+        supervisorScript: supervisor,
+        supervisorRuntime: process.execPath,
+      });
+      const generation = "failed-preparation-cleanup" as never;
+      const cleanup = vi
+        .fn<() => Promise<void>>()
+        .mockRejectedValueOnce(new Error("temporary cleanup failure"))
+        .mockResolvedValue();
+      const internals = boundary as unknown as {
+        throwAfterPreparationCleanup(
+          failedGeneration: typeof generation,
+          primaryError: unknown,
+          cleanups: readonly (() => Promise<unknown>)[],
+        ): Promise<never>;
+        retirementFailures: Map<typeof generation, unknown>;
+      };
+
+      await expect(
+        internals.throwAfterPreparationCleanup(
+          generation,
+          new Error("preparation failed"),
+          [cleanup],
+        ),
+      ).rejects.toThrow(/cleanup could not be proven/i);
+      expect(internals.retirementFailures.has(generation)).toBe(true);
+
+      // This retained proof belongs only to the failed preparation. New
+      // boundaries continue to use their own immutable policy while recovery
+      // retries the exact cleanup in the background.
+      expect(
+        (
+          await boundary.probe({
+            executionId: "unrelated-after-preparation-failure",
+            actor: "agent-code",
+            cwd: workspace,
+            workspaceRoot: workspace,
+          })
+        ).available,
+      ).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(cleanup).toHaveBeenCalledTimes(2);
+      expect(internals.retirementFailures.has(generation)).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("returns a kernel-ready boundary while its behavioral canary continues", async () => {
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+    });
+    let finishCanary!: (reasons: string[]) => void;
+    const canary = new Promise<string[]>((resolve) => {
+      finishCanary = resolve;
+    });
+    const canarySpy = vi
+      .spyOn(
+        boundary as unknown as {
+          runHostParityAdmissionCanary(): Promise<string[]>;
+        },
+        "runHostParityAdmissionCanary",
+      )
+      .mockImplementation(() => canary);
+    let prepared:
+      | Awaited<ReturnType<ZsrExecutionBoundary["prepare"]>>
+      | undefined;
+    const preparing = boundary
+      .prepare(
+        {
+          executionId: "execution-background-attestation",
+          actor: "agent-code",
+          cwd: workspace,
+          workspaceRoot: workspace,
+        },
+        { attestation: "background" } as never,
+      )
+      .then((value) => {
+        prepared = value;
+        return value;
+      });
+
+    try {
+      await vi.waitFor(() => expect(canarySpy).toHaveBeenCalledOnce());
+      await vi.waitFor(() => expect(prepared).toBeDefined());
+      expect(prepared?.attestation).toBeInstanceOf(Promise);
+    } finally {
+      finishCanary([]);
+      const admitted = await preparing;
+      await admitted.attestation;
+      await admitted.stopAndProve();
+    }
+  });
+
+  it("revokes the exact background boundary before a failed attestation is reported", async () => {
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+    });
+    let finishCanary!: (reasons: string[]) => void;
+    const canary = new Promise<string[]>((resolve) => {
+      finishCanary = resolve;
+    });
+    vi.spyOn(
+      boundary as unknown as {
+        runHostParityAdmissionCanary(): Promise<string[]>;
+      },
+      "runHostParityAdmissionCanary",
+    ).mockImplementation(() => canary);
+    const prepared = await boundary.prepare(
+      {
+        executionId: "execution-background-attestation-failure",
+        actor: "agent-code",
+        cwd: workspace,
+        workspaceRoot: workspace,
+      },
+      { attestation: "background" },
+    );
+
+    finishCanary(["host-parity Design write split is not enforced"]);
+    await expect(prepared.attestation).rejects.toThrow(
+      /Design write split is not enforced/,
+    );
+    expect(() =>
+      prepared.wrapSpawn({
+        command: process.execPath,
+        args: ["--version"],
+        cwd: workspace,
+        env: {},
+      }),
+    ).toThrow(/revoked/);
+  });
+
+  it("does not arm port discovery for the admission canary", async () => {
+    const boundary = new ZsrExecutionBoundary({
+      projectRoot: root,
+      supervisorScript: supervisor,
+      supervisorRuntime: process.execPath,
+    });
+    const prepared = (await boundary.prepare({
+      executionId: "execution-port-discovery-idle",
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+    })) as unknown as {
+      portDiscoveryStatus(): { state: string };
+      trackProcess(child: ReturnType<typeof spawn>): unknown;
+      stopAndProve(): Promise<void>;
+    };
+    try {
+      // The canary spawned and exited inside admission without arming the
+      // discovery poll; the first real tracked process arms it as before.
+      expect(prepared.portDiscoveryStatus().state).toBe("idle");
+      prepared.trackProcess(
+        spawn(process.execPath, ["-e", "setTimeout(() => {}, 20)"]),
+      );
+      expect(prepared.portDiscoveryStatus().state).not.toBe("idle");
+    } finally {
+      await prepared.stopAndProve();
     }
   });
 
@@ -486,6 +814,7 @@ describe("ZSR execution boundary", () => {
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "user.name",
       GIT_CONFIG_VALUE_0: "Host User",
+      NODE_OPTIONS: "--trace-warnings",
     };
     const launch = prepared.wrapSpawn({
       command: process.execPath,
@@ -506,8 +835,34 @@ describe("ZSR execution boundary", () => {
       runtime: { localHostParity?: boolean };
     };
 
-    expect({ ...descriptor.env, PATH: childEnv.PATH }).toMatchObject(childEnv);
+    expect({
+      ...descriptor.env,
+      PATH: childEnv.PATH,
+      NODE_OPTIONS: childEnv.NODE_OPTIONS,
+    }).toMatchObject(childEnv);
     expect(descriptor.env.PATH.endsWith(`:${childEnv.PATH}`)).toBe(true);
+    expect(descriptor.env.NODE_OPTIONS).toMatch(/^--trace-warnings --require /);
+    const watchGuardPath =
+      descriptor.env.NODE_OPTIONS.match(/--require "([^"]+)"/)?.[1];
+    expect(path.basename(watchGuardPath ?? "")).toBe(
+      NODE_DESIGN_WATCH_GUARD_FILENAME,
+    );
+    await expect(access(watchGuardPath!)).resolves.toBeUndefined();
+    const watchIgnorePath = descriptor.env.ZEROS_DESIGN_WATCH_IGNORE_FILE;
+    const watchRootsPath = descriptor.env.ZEROS_DESIGN_WATCH_ROOTS_FILE;
+    expect(path.basename(watchIgnorePath)).toBe(DESIGN_WATCH_IGNORE_FILENAME);
+    expect(path.basename(watchRootsPath)).toBe(DESIGN_WATCH_ROOTS_FILENAME);
+    expect(
+      descriptor.env.WATCHEXEC_IGNORE_FILES.split(path.delimiter),
+    ).toContain(watchIgnorePath);
+    await expect(access(watchIgnorePath)).resolves.toBeUndefined();
+    await expect(access(watchRootsPath)).resolves.toBeUndefined();
+    expect(JSON.parse(await readFile(watchRootsPath, "utf8"))).toEqual({
+      version: 1,
+      protectedRoots: [design, secondDesign].sort((left, right) =>
+        left.localeCompare(right),
+      ),
+    });
     expect(descriptor.env.ZEROS_ZSR_GIT_DISPATCH_CONFIG).toMatch(
       /git-dispatch\.conf$/,
     );
@@ -1727,6 +2082,42 @@ process.stdout.write(JSON.stringify({
     await expect(
       access(sessionDir("host-parity-canary-failure")),
     ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("attributes a failed admission to its completed stages", async () => {
+    await writeFile(
+      supervisor,
+      PASSING_SUPERVISOR.replace(
+        "codeWrite: !designWritable,",
+        "codeWrite: false,",
+      ),
+      { mode: 0o700 },
+    );
+    const errored = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const boundary = new ZsrExecutionBoundary({
+        projectRoot: root,
+        supervisorScript: supervisor,
+        supervisorRuntime: process.execPath,
+      });
+      await expect(
+        boundary.prepare({
+          executionId: "host-parity-failure-breakdown",
+          actor: "agent-code",
+          cwd: workspace,
+          workspaceRoot: workspace,
+        }),
+      ).rejects.toThrow(/code actor cannot write code territory/);
+      const failureLines = errored.mock.calls
+        .map((call) => String(call[0]))
+        .filter((line) => line.startsWith("[zsr] admission failed"));
+      expect(failureLines).toHaveLength(1);
+      expect(failureLines[0]).toMatch(
+        /^\[zsr\] admission failed for agent-code after \d+ms \(.*canary=\d+ms pending=\d+ms\): .*code actor cannot write code territory/,
+      );
+    } finally {
+      errored.mockRestore();
+    }
   });
 
   it("fails admission when the host-parity canary can create a future managed sibling", async () => {

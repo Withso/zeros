@@ -29,13 +29,16 @@
 //     Design map across a transition.
 //  4. TEARDOWN IS STILL PROVEN. Idle expiry, eviction, disposal, and adoption
 //     failure all route through the same proven-teardown callback sessions
-//     use; an unprovable teardown latches admissions exactly as before.
+//     use; an unprovable teardown remains scoped to that exact spare.
 // ──────────────────────────────────────────────────────────
 
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { pooledBoundaryRequestKey } from "./utility-boundary-pool";
+import {
+  attachBoundaryTerritoryContributions,
+  pooledBoundaryRequestKey,
+} from "./utility-boundary-pool";
 import type {
   BoundaryRequest,
   BoundaryTerritoryContributionSnapshot,
@@ -92,8 +95,6 @@ export interface WarmSessionBoundaryPoolOptions {
     executionId: string,
     boundary: PreparedBoundary,
   ) => Promise<void>;
-  /** Refuse to pre-admit while boundary retirement is unhealthy. */
-  readonly assertHealthy?: () => void;
   readonly idleMs?: number;
 }
 
@@ -143,11 +144,6 @@ export class WarmSessionBoundaryPool {
     if (this.entries.has(key) || this.pendingKeys.has(key)) return;
     const cooldownUntil = this.failureCooldowns.get(key) ?? 0;
     if (Date.now() < cooldownUntil) return;
-    try {
-      this.options.assertHealthy?.();
-    } catch {
-      return;
-    }
     const requestedEpoch = this.lifecycleEpoch;
     // The warm boundary's on-disk artifacts (policy tree, session dir) are
     // named by THIS id. After adoption the gateway tracks the boundary under
@@ -157,13 +153,30 @@ export class WarmSessionBoundaryPool {
     // orphan every adopted boundary's `warm-…` directory.
     const executionId = `warm-${randomUUID()}`;
     this.pendingKeys.add(key);
+    let unownedBoundary: PreparedBoundary | null = null;
     try {
       const boundary = await this.options.prepare({ ...request, executionId });
+      unownedBoundary = boundary;
+      attachBoundaryTerritoryContributions(boundary, territoryContributions);
+      if (boundary.registeredDesignAuthorityIdentity === undefined) {
+        Object.defineProperty(boundary, "registeredDesignAuthorityIdentity", {
+          configurable: false,
+          enumerable: false,
+          writable: false,
+          value: registeredDesignAuthorityIdentity,
+        });
+      } else if (
+        boundary.registeredDesignAuthorityIdentity !==
+        registeredDesignAuthorityIdentity
+      ) {
+        throw new Error("prepared boundary registered authority is stale");
+      }
       if (
         this.disposed ||
         requestedEpoch !== this.lifecycleEpoch ||
         this.workspaceTerritorySuspended(territoryContributions)
       ) {
+        unownedBoundary = null;
         await this.options.retire(executionId, boundary);
         return;
       }
@@ -175,6 +188,7 @@ export class WarmSessionBoundaryPool {
         registeredDesignAuthorityIdentity,
       };
       this.entries.set(key, entry);
+      unownedBoundary = null;
       this.armIdle(entry);
       this.failureCooldowns.delete(key);
       while (this.entries.size > MAX_WARM_SESSION_BOUNDARIES) {
@@ -185,10 +199,26 @@ export class WarmSessionBoundaryPool {
         if (oldest) await this.retireEntry(oldest);
       }
     } catch (error) {
-      this.failureCooldowns.set(key, Date.now() + REPLENISH_FAILURE_COOLDOWN_MS);
+      let failure = error;
+      if (unownedBoundary) {
+        const rejectedBoundary = unownedBoundary;
+        unownedBoundary = null;
+        try {
+          await this.options.retire(executionId, rejectedBoundary);
+        } catch (teardownError) {
+          failure = new AggregateError(
+            [error, teardownError],
+            "warm session boundary admission failed and teardown could not be proven",
+          );
+        }
+      }
+      this.failureCooldowns.set(
+        key,
+        Date.now() + REPLENISH_FAILURE_COOLDOWN_MS,
+      );
       console.warn(
         `[agents] warm session boundary admission failed (next session admits cold): ` +
-          (error instanceof Error ? error.message : String(error)),
+          (failure instanceof Error ? failure.message : String(failure)),
       );
     } finally {
       this.pendingKeys.delete(key);
@@ -213,9 +243,9 @@ export class WarmSessionBoundaryPool {
       // Swallow rather than rethrow, deliberately: disposeAll runs BEFORE the
       // utility pool's disposal in the gateway, and one warm teardown failure
       // must not skip that. Fail-closed is preserved by the retire callback,
-      // which latches the failure in the gateway's failedBoundaryRetirements —
-      // so the NEXT admission is refused and the recovery loop retries the
-      // proof. A warm boundary hosts no provider process (only its exited
+      // which records the exact entry in the gateway's
+      // failedBoundaryRetirements while its recovery loop retries the proof.
+      // A warm boundary hosts no provider process (only its exited
       // admission canary), so a failed proof here is an fs-cleanup failure, not
       // a live escape.
     }

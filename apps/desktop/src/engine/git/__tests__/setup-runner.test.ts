@@ -396,6 +396,49 @@ describe("SetupManager", () => {
     );
   });
 
+  it("retries a transient teardown failure and releases the workspace authority hold", async () => {
+    vi.useFakeTimers();
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const wsId = "ws_retry-proof-umber";
+      insertWorkspace(sampleWorkspace(wsId));
+      const { svc } = fakePty();
+      const stopAndProve = vi
+        .fn<PreparedBoundary["stopAndProve"]>()
+        .mockRejectedValueOnce(new Error("temporary process-group race"))
+        .mockResolvedValue(undefined);
+      const boundary = {
+        ...preparedTestBoundary(),
+        stopAndProve,
+      } as PreparedBoundary;
+      const mgr = new SetupManager(
+        svc,
+        () => {},
+        undefined,
+        async () => boundary,
+      );
+      await mgr.start({ workspaceId: wsId, command: "pnpm install" });
+      mgr.handleExit(setupSessionId(wsId, 1), 0);
+
+      await expect(mgr.proveWorkspaceBoundaryStopped(wsId)).rejects.toThrow(
+        /repository setup containment teardown was not proven/i,
+      );
+      expect(stopAndProve).toHaveBeenCalledOnce();
+      expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(stopAndProve).toHaveBeenCalledTimes(2);
+      await expect(
+        mgr.proveWorkspaceBoundaryStopped(wsId),
+      ).resolves.toBeUndefined();
+      expect(mgr.hasRepositoryCodeAuthority()).toBe(false);
+    } finally {
+      diagnostic.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("globally revokes and proves every setup boundary before an owner-map change", async () => {
     const wsId = "ws_global1-cypress";
     insertWorkspace(sampleWorkspace(wsId));
@@ -539,7 +582,7 @@ describe("SetupManager", () => {
       expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
       expect(mgr.registeredDesignAuthorityChanged(null)).toBe(true);
       await expect(mgr.stopAllAndProve()).rejects.toThrow(
-        /setup boundaries were not globally retired/i,
+        /setup boundaries were not all proven stopped/i,
       );
     } finally {
       diagnostic.mockRestore();
@@ -641,7 +684,9 @@ describe("SetupManager", () => {
     releaseBoundary();
 
     await expect(starting).rejects.toThrow(/cancelled setup domain/i);
-    await expect(mgr.stopAllAndProve()).rejects.toThrow(/restart Zeros/i);
+    await expect(mgr.stopAllAndProve()).rejects.toThrow(
+      /automatic recovery is still retrying/i,
+    );
     expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
   });
 

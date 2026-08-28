@@ -6,6 +6,7 @@ import {
   groupMessagesIntoTurns,
   isProviderTurnTail,
   isTailProviderTurnSegment,
+  turnKey,
 } from "../turn-grouping";
 
 function user(
@@ -37,6 +38,20 @@ function event(id: string): AgentMessage {
 }
 
 describe("groupMessagesIntoTurns — mid-turn steering", () => {
+  it("coalesces duplicate durable ids before producing React turn keys", () => {
+    const turns = groupMessagesIntoTurns([
+      user("u1", "initial request"),
+      event("answer"),
+      // A renderer/engine reconcile may replay the same durable user row after
+      // its answer. It is one logical message, not a second visual turn.
+      user("u1", "initial request"),
+    ]);
+
+    expect(turns).toHaveLength(1);
+    expect(turns[0].events.map((message) => message.id)).toEqual(["answer"]);
+    expect(new Set(turns.map(turnKey)).size).toBe(turns.length);
+  });
+
   it("keeps steer bubbles as UI segments owned by the opening provider turn", () => {
     const turns = groupMessagesIntoTurns([
       user("u1", "initial request"),

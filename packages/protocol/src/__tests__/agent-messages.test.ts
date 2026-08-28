@@ -11,13 +11,18 @@ import type { SessionNotification } from "../agent-events";
 // streaming chunks into AgentMessages.
 // These guard the streaming contract so the two can never drift.
 
-function agentChunk(text: string, messageId?: string): SessionNotification {
+function agentChunk(
+  text: string,
+  messageId?: string,
+  phase?: "commentary" | "final_answer",
+): SessionNotification {
   return {
     sessionId: "s",
     update: {
       sessionUpdate: "agent_message_chunk",
       content: { type: "text", text },
       messageId,
+      phase,
     },
   } as unknown as SessionNotification;
 }
@@ -40,6 +45,40 @@ describe("applyUpdate — shared agent-message coalescer", () => {
     msgs = applyUpdate(msgs, agentChunk("lo", "m1"));
     expect(msgs).toHaveLength(1);
     expect((msgs[0] as AgentTextMessage).text).toBe("Hello");
+  });
+
+  it("retains the Codex message phase while coalescing streamed chunks", () => {
+    let msgs: AgentMessage[] = [];
+    msgs = applyUpdate(msgs, agentChunk("Inspect", "m1", "commentary"));
+    msgs = applyUpdate(msgs, agentChunk("ing", "m1", "commentary"));
+    expect(msgs).toHaveLength(1);
+    expect((msgs[0] as AgentTextMessage).text).toBe("Inspecting");
+    expect((msgs[0] as AgentTextMessage).phase).toBe("commentary");
+  });
+
+  it("reclassifies a non-trailing Codex message without creating an empty duplicate", () => {
+    let msgs: AgentMessage[] = [];
+    msgs = applyUpdate(msgs, agentChunk("Checking the repository", "m1"));
+    msgs = applyUpdate(msgs, {
+      sessionId: "s",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "t1",
+        title: "Read",
+        status: "in_progress",
+      },
+    } as unknown as SessionNotification);
+    msgs = applyUpdate(msgs, agentChunk("", "m1", "commentary"));
+
+    expect(msgs).toHaveLength(2);
+    expect(msgs[0]).toMatchObject({
+      kind: "text",
+      role: "agent",
+      text: "Checking the repository",
+      messageId: "m1",
+      phase: "commentary",
+    });
+    expect(msgs.filter((message) => message.kind === "text")).toHaveLength(1);
   });
 
   it("starts a new message when the messageId differs (next turn)", () => {

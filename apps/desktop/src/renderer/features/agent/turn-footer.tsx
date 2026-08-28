@@ -68,6 +68,7 @@ import { useSessionsStore } from "./sessions-store";
 import { useAgentSessions } from "./sessions-hooks";
 import { formatTokens } from "./context-gauge";
 import { displayNameForModelValue } from "./model-catalog";
+import type { AgentFailure } from "../../platform/bridge/failure";
 import type { AgentMessage } from "./use-agent-session";
 import {
   DiffHoverCard,
@@ -107,6 +108,40 @@ const STOP_REASON_LABELS: Record<string, string> = {
   blocking_limit: "BLOCKED BY USAGE LIMIT",
   prompt_too_long: "PROMPT TOO LONG",
 };
+
+/** The one compact in-transcript label for a classified prompt failure. Raw
+ * containment/provider diagnostics never belong in this surface. */
+export function turnFooterFailureLabel(
+  failure: AgentFailure | null,
+): string | null {
+  if (!failure || failure.stage !== "prompt") return null;
+  if (
+    failure.kind === "protocol-error" &&
+    /agent response failure/i.test(failure.message)
+  ) {
+    return "AGENT RESPONSE FAILURE";
+  }
+  switch (failure.kind) {
+    case "design-protection-failed":
+      return "AGENT STOPPED - DESIGN PROTECTION FAILED";
+    case "auth-required":
+      return "SIGN IN REQUIRED";
+    case "subprocess-exited":
+      return "AGENT EXITED";
+    case "session-expired":
+      return "SESSION EXPIRED";
+    case "timeout":
+      return "AGENT RESPONSE TIMEOUT";
+    case "transport-closed":
+      return "CONNECTION LOST";
+    case "rate-limited":
+      return "RATE LIMITED";
+    case "protocol-error":
+      return "AGENT RESPONSE FAILURE";
+    default:
+      return null;
+  }
+}
 
 /** Recoverable endings that get a one-click Continue on
  *  their own row below the footer. Returns the resolved stop reason when it

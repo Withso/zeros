@@ -1,7 +1,7 @@
 # Design mode — one workspace, separate authority
 
 **Status:** Public desktop feature, enabled by default. Current engineering and
-product contract (2026-08-23).
+product contract (2026-08-28).
 
 A Zeros workspace has one semantic identity and one full checkout. `viewMode`
 only selects the visible Code or Design surface; it never grants filesystem
@@ -116,8 +116,19 @@ on a qualified OS. An already-running unsandboxed same-user service acts with
 its own authority when asked to perform work; known container workflows are
 therefore routed to an actor-scoped private worker rather than an ambient daemon.
 Future automation/deputy integrations must preserve the same actor policy. If
-the profile, tree validation, exact canary, or process teardown cannot be
-proved, the agent does not start or the authority transition does not complete.
+profile/tree validation or kernel-policy installation fails, the agent does not
+start. For an interactive cold create/resume, the exact behavioral canary may
+finish after the provider starts inside that already-installed policy. A failed
+canary stops and proves only that execution's process tree, and reports the
+stable Design-protection failure; it never falls back to an unprotected launch.
+An authority transition does not complete until every boundary affected by that
+specific transition is proven stopped.
+
+ZSR preparation and health are not composer concepts. Create/resume starts the
+normal turn timer with no sandbox-ready/preparing message or status control. A
+failed asynchronous proof renders only `AGENT STOPPED - DESIGN PROTECTION
+FAILED` on the affected turn. A utility-probe failure retains the last confirmed
+provider-auth verdict instead of making a signed-in agent appear signed out.
 
 ### When a Design territory begins
 
@@ -172,6 +183,102 @@ The isolation guarantee applies to a **Zeros-launched code agent** and to
 Zeros-owned file/Git mutation routes. An external editor or coding platform
 opened on the same checkout remains ordinary same-user software and may edit
 the Design directory.
+
+Code and Design are separate authority surfaces, not separate filesystem
+copies. A dev server that recursively watches the repository can therefore see
+trusted Design API writes even though the Run process cannot author those
+files. A Code/Design view switch and first publication of an already-reserved
+Design destination must keep the Run process alive.
+
+Every ZSR code execution boundary (agents and their children, Run, and Setup)
+receives silent watcher-isolation artifacts. Managed human terminals receive the
+same notification-only environment from a content-addressed Zeros-owned cache,
+but remain outside ZSR and retain their normal human write authority. In a
+qualified cloud workspace that cache is root-owned and worker-readable so it
+remains available after the terminal drops to the human worker uid. The
+environment does not print a banner, status line, or sandbox message.
+
+The automatic integrations are deliberately source-side rather than terminal
+output redaction:
+
+- `NODE_OPTIONS` preloads a read-only guard for `fs.watch`, `fs.watchFile`, and
+  `fs.promises.watch`. On macOS it also wraps the native `fsevents` package used
+  by Vite 6 and Chokidar 3. This covers Vite, Chokidar, watchpack, and other Node
+  watcher stacks.
+- `WATCHEXEC_IGNORE_FILES` points Watchexec at an exact, workspace-origin
+  ignore file without changing the repository's own ignore files.
+- `ZEROS_DESIGN_WATCH_ROOTS_FILE` names a JSON manifest containing canonical
+  absolute protected roots; `ZEROS_DESIGN_WATCH_IGNORE_FILE` names the
+  gitignore-style file. Custom watcher launchers can consume either contract.
+
+Missing rename/delete leaves are canonicalized through their nearest existing
+ancestor so `/var`/`/private/var`, symlink, and case aliases cannot leak an
+event. A long-lived Node/FSEvents watcher also follows a protected directory
+rename by its filesystem identity. Reads are not filtered and the write fence
+remains the security boundary; notification isolation only prevents irrelevant
+rebuilds, browser reloads, and the resulting dev-server log lines. Boundary
+artifacts are generation-local; terminal artifacts are content-addressed by
+their exact protected-root set. Neither is installed into the desktop process
+or external software.
+
+When a project uses Vite, its checked-in configuration should exclude the
+active `[design] directory` (the default is `Zeros Design`) from the server
+watcher:
+
+```ts
+export default defineConfig({
+  server: {
+    watch: {
+      ignored: ["**/Zeros Design", "**/Zeros Design/**"],
+    },
+  },
+});
+```
+
+Use the configured relative directory when it differs from the default. Keeping
+the checked-in exclusion makes the project behave the same outside Zeros.
+Zeros' code-agent territory notice tells agents that create or edit a dev-server
+or watcher configuration to preserve it.
+
+Go and Rust application servers do not inherently watch a repository, but
+supervisors such as Air, Cargo Watch, and programs built directly on `fsnotify`
+or `notify` may do so. There is no runtime-independent environment variable that
+all native binaries honor, and the read-only ZSR fence intentionally does not
+make Design content stale or unreadable. Projects using those supervisors must
+merge the Design directory into their own watcher exclusions, for example:
+
+```toml
+# .air.toml
+[build]
+exclude_dir = ["Zeros Design"]
+```
+
+```sh
+cargo watch --ignore "Zeros Design" -x run
+```
+
+Use the configured Design path and preserve existing exclusions/options. Do not
+have Zeros automatically append it to `.ignore`: Cargo Watch would honor that,
+but so would tools such as ripgrep, violating the contract that code agents may
+read Design files. A custom Go/Rust watcher should instead load
+`ZEROS_DESIGN_WATCH_ROOTS_FILE`, canonicalize each event path, and discard only
+events at or below an exact listed root.
+
+Bun's native `--watch`/`--hot` mode follows the imported dependency graph, so an
+unimported Design file does not normally trigger it. Zeros deliberately does not
+inject a global `BUN_OPTIONS`: Bun prepends that value to every invocation, and
+current releases can mis-dispatch package-manager commands and `bunx` children
+when any global option is present. A Bun application that explicitly calls
+`fs.watch` should consume the exact-root manifest just like a native Go/Rust
+watcher. If it deliberately imports a Design artifact, its watch configuration
+must exclude that input explicitly because suppressing a real dependency change
+would alter application semantics.
+
+An upstream native watcher can still report an unattributed platform overflow or
+root-level event. Such an event must never make Zeros retire the managed Run
+boundary. Zeros also never hides the text after the fact in the PTY: doing that
+would conceal a reload that already happened and mix the UI's truth with the
+application's own logs.
 
 Zeros does not install persistent filesystem ACLs for normal operation. Such an
 ACL would attach policy to shared files instead of to the actor and would block

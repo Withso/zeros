@@ -291,6 +291,52 @@ export function shouldQueuePrompt(input: {
   );
 }
 
+/** Choose how a parked prompt is presented. The first send waiting only for
+ * session admission is already the user's active turn: it belongs in the
+ * transcript with the live timer, not in the follow-up queue card. Anything
+ * behind another send/turn remains a real queued message. */
+export function queuedPromptPresentation(input: {
+  reason: "admission" | "busy-turn";
+  hasLocalSend: boolean;
+  hasQueuedSends: boolean;
+  queueHeld: boolean;
+  flushing: boolean;
+}): "active-turn" | "queued-card" {
+  if (
+    input.reason === "admission" &&
+    !input.hasLocalSend &&
+    !input.hasQueuedSends &&
+    !input.queueHeld &&
+    !input.flushing
+  ) {
+    return "active-turn";
+  }
+  return "queued-card";
+}
+
+/** A protection failure is the one admission failure that owns a durable turn
+ * footer requested by product: keep its active prompt so the exact stopped
+ * label has an anchor. Ordinary provider/startup failures restore the text to
+ * the composer, and true follow-ups remain disposable queue rows. */
+export function shouldPreserveAdmissionPromptOnFailure(
+  failureKind: string | null | undefined,
+  presentation: "active-turn" | "queued-card" | undefined,
+): boolean {
+  return (
+    failureKind === "design-protection-failed" && presentation === "active-turn"
+  );
+}
+
+/** A first prompt waiting only for admission already owns the visible turn.
+ * Stop must settle that prompt in place so the transcript and STOPPED BY USER
+ * footer agree with what the user saw. True follow-ups are still discarded:
+ * they were queued behind work the user explicitly cancelled. */
+export function cancelledQueuedMessageAction(
+  presentation: "active-turn" | "queued-card" | undefined,
+): "preserve-as-turn" | "drop" {
+  return presentation === "active-turn" ? "preserve-as-turn" : "drop";
+}
+
 /** Route an explicit "Send now" for a queued row from authoritative session
  * lifecycle, not from the renderer-local prompt promise. A reloaded renderer
  * has no local send lock for the engine turn it adopted, but status remains

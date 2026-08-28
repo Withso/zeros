@@ -205,6 +205,53 @@ afterEach(() => {
   }
 });
 
+describe("prompt start time continuity", () => {
+  it("publishes the original renderer send time after delayed admission", async () => {
+    const { state } = testEngine(29_940);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-1", "cursor");
+    vi.spyOn(state.agents, "prompt").mockResolvedValue({
+      stopReason: "end_turn",
+    });
+    const sentAt = Date.now() - 4_000;
+
+    await state.handleMessage(
+      {
+        ...promptMessage(),
+        startedAt: sentAt,
+      } as EngineMessage,
+      client,
+    );
+
+    const running = messages.find((message) => {
+      if (message.type !== "AGENT_SESSION_UPDATE") return false;
+      const update = (
+        message as {
+          notification?: {
+            update?: { sessionUpdate?: string; state?: string };
+          };
+        }
+      ).notification?.update;
+      return (
+        update?.sessionUpdate === "turn_state" && update.state === "running"
+      );
+    }) as
+      | {
+          notification?: {
+            update?: {
+              sessionUpdate?: string;
+              state?: string;
+              startedAt?: number;
+            };
+          };
+        }
+      | undefined;
+
+    expect(running?.notification?.update?.startedAt).toBe(sentAt);
+  });
+});
+
 describe("a Stop during the pre-dispatch window", () => {
   it("never hands the prompt to the adapter and settles the turn cancelled", async () => {
     const { state } = testEngine(29_891);

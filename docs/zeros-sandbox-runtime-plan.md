@@ -1,6 +1,6 @@
 # Zeros Sandbox Runtime — host parity and Design authority
 
-**Status:** current implementation contract, 2026-08-23.
+**Status:** current implementation contract, 2026-08-28.
 
 Zeros Sandbox Runtime (ZSR) is an actor-scoped filesystem boundary. It preserves
 the behavior of the deployment in which the agent runs and subtracts only the
@@ -14,12 +14,12 @@ that protected document remain separate maintainer-approved work.
 
 ## Runtime contract
 
-| Actor / deployment            | Writable filesystem                                                                                                                                                               | Host-parity behavior                                                                                                                                                                                                                              |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Local code or repository task | Current and explicitly attached roots are writable except recognized Design; unrelated Zeros-managed workspace collections and engine authority/control descriptors are read-only | Real HOME/XDG state, provider credentials, Git configuration, hooks, network, ordinary Unix sockets/local services, processes, devices, ports, and readable filesystem; macOS app-launch authority and ambient container endpoints are subtracted |
-| Local Design actor substrate  | Managed workspace collections and every external registered code owner are read-only; recognized Design directories and the current repository's minimal Git metadata islands are writable             | Same local host behavior and subtractions; no production feature selects this actor yet                                                                                                                                                           |
-| Cloud code or repository task | Same code/Design subtraction inside the tenant VM; engine state is also unreadable/unwritable                                                                                     | The VM is the tenant boundary. The agent runs as the configured non-root worker UID with the VM's real HOME, provider credentials, network, services, and device/process behavior                                                                 |
-| Cloud Design actor substrate  | App-wide inverse code/Design write map inside the tenant VM                                                                                                                       | Same cloud host parity; not product-wired                                                                                                                                                                                                         |
+| Actor / deployment            | Writable filesystem                                                                                                                                                                        | Host-parity behavior                                                                                                                                                                                                                              |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local code or repository task | Current and explicitly attached roots are writable except recognized Design; unrelated Zeros-managed workspace collections and engine authority/control descriptors are read-only          | Real HOME/XDG state, provider credentials, Git configuration, hooks, network, ordinary Unix sockets/local services, processes, devices, ports, and readable filesystem; macOS app-launch authority and ambient container endpoints are subtracted |
+| Local Design actor substrate  | Managed workspace collections and every external registered code owner are read-only; recognized Design directories and the current repository's minimal Git metadata islands are writable | Same local host behavior and subtractions; no production feature selects this actor yet                                                                                                                                                           |
+| Cloud code or repository task | Same code/Design subtraction inside the tenant VM; engine state is also unreadable/unwritable                                                                                              | The VM is the tenant boundary. The agent runs as the configured non-root worker UID with the VM's real HOME, provider credentials, network, services, and device/process behavior                                                                 |
+| Cloud Design actor substrate  | App-wide inverse code/Design write map inside the tenant VM                                                                                                                                | Same cloud host parity; not product-wired                                                                                                                                                                                                         |
 
 Host parity is explicit in the patched Sandbox Runtime configuration. On macOS
 the generated Seatbelt profile begins with ordinary host authority and appends
@@ -162,15 +162,40 @@ implementation details, not per-agent ZSR cgroups or egress policy.
 ## Lifecycle and recovery
 
 Every provider runtime, MCP child, hook, repository task, PTY process group, and
-subprocess must be registered in the same boundary generation. Admission writes
-root-owned/read-only policy and command descriptors, launches a live canary, and
-publishes status only after the exact fence is proven.
+subprocess must be registered in the same boundary generation. There is one
+secure product mode and no unprotected fallback.
+
+Interactive agent create/resume has a two-part admission contract:
+
+1. Resolve and validate the authority inputs, create the immutable process
+   domain, and install the kernel-enforced policy. No provider byte runs before
+   this part completes.
+2. Start the provider and the exact live behavioral canary concurrently. A warm
+   spare has already completed this proof. On a cold boundary, a failed proof
+   revokes and proves that exact process tree stopped, and the turn ends with the
+   stable `design-protection-failed` classification.
+
+The second part is deliberately off the create/resume critical path; it does not
+mean the provider runs uncontained. Utilities, warm-spare preparation, Setup,
+and Run retain blocking attestation because their work is not an interactive
+message-latency path.
 
 Revocation closes the Git broker and container capability, retires all observed
 processes, handles processes adopted after retirement began, waits for the
 process domain to become empty, and only then removes generation state. Failed
-proof is retained as recovery evidence and blocks later admissions. Boot
-recovery runs before workspace authority is published.
+proof is retained as exact-generation recovery evidence and retried in the
+background. It does not block unrelated agent, utility, auth, Setup, or Run
+admissions. An authority transition still waits for every affected old boundary
+whose immutable policy would not cover the proposed territory; that is an
+exact security dependency, not a global runtime latch. Boot recovery runs before
+workspace authority is published.
+
+Boundary health is engine diagnostic state, not composer chrome. The composer
+shows no ZSR/sandbox readiness control or preparation copy. If asynchronous
+Design protection fails, the latest turn uses only
+`AGENT STOPPED - DESIGN PROTECTION FAILED`; the timer and ordinary send flow
+start immediately. Provider-auth revalidation likewise retains the last
+confirmed provider verdict when an isolated utility boundary is unavailable.
 
 Legacy serialized names and recovery holds may remain where older installations
 can contain them. They are compatibility contracts, not evidence that the old
