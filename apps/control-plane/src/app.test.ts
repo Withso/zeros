@@ -47,6 +47,7 @@ function config(github: GithubBackendConfig | null): Config {
       audience: "https://api.example.test",
     },
     workos: null,
+    inviteLinkBase: "https://app.example.test/invite",
     port: 8080,
     isProduction: true,
     github,

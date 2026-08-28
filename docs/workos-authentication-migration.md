@@ -215,6 +215,19 @@ event arrives after WorkOS accepts a command but before the exact provider ID
 is committed locally, it is retained as ignored and replayed immediately after
 that exact ID is correlated; replay never falls back to email matching.
 
+Consuming a Zeros invitation retires every pending WorkOS invitation for the
+exact organization/email pair before creating or updating the coarse WorkOS
+membership. Removing a member uses the same ordering key: pending invitations
+are revoked before the membership is deleted. Revoke and delete commands always
+reconcile their captured provider ID with the current provider listing, so a
+duplicate invitation, a lost-response replacement, or a membership created
+after the local transaction cannot escape cleanup. If invitation acceptance
+wins between listing and revocation, the worker treats the revoke as converged
+only after a re-list proves that exact invitation is no longer pending; the
+serialized membership command then enforces Zeros' current desired state. This
+closes the race where an old provider invitation could otherwise re-add a user
+after an administrator removed them.
+
 Directory-managed (`directory_managed=true`) memberships materialize with
 `membership_source='scim'`. Zeros refuses local role changes and removals for
 them because directory group assignment takes precedence and would otherwise
@@ -247,6 +260,10 @@ every session for that account; a session revocation is replayed only to the
 client whose verified `sid` exactly matches the event. This keeps ordinary
 device logout device-scoped, while explicit all-device logout revokes each
 provider session. Organization authorization/data events refresh scoped state.
+Browser section snapshots and in-flight loads are generation-bound by exact
+organization/section key; an invalidation detaches an older request, and every
+waiter follows the replacement request instead of publishing stale member or
+invitation data.
 Launch performs a snapshot. Focus, visibility, macOS wake/unlock, and reconnect
 request another snapshot only when the stream is absent or has been silent for
 at least 60 seconds. A provider/network timeout preserves the last confirmed
@@ -308,6 +325,11 @@ bounded retry; a terminal provider result deletes the local session.
 1. Electron main creates a 256-bit state suffix and PKCE verifier, retains the
    verifier only in the pending in-memory flow, and opens
    `${APP_ORIGIN}/auth/desktop` in the system browser.
+   The OS browser-launch acknowledgement is bounded to five seconds because
+   some shell/browser combinations open successfully without settling the
+   promise. The main-owned ten-minute PKCE deadline remains authoritative;
+   a late launch failure closes that exact attempt and surfaces a retryable
+   signed-out state.
 2. Pages immediately forwards the bounded state and S256 challenge to
    Railway. `/auth/desktop/start` remains as a compatibility entry point for
    older pages/releases, but no longer honors a provider selector.
@@ -554,7 +576,7 @@ Manual Alpha acceptance must verify:
 - macOS smoke checks plus separately recorded Windows/Linux packaging checks
   before claiming those platforms are qualified.
 
-### Alpha evidence record — 2026-08-28
+### Alpha evidence record — 2026-08-28–29
 
 This record distinguishes real-provider evidence from deterministic automated
 coverage. It is not a Production approval.
@@ -574,6 +596,17 @@ Verified against the deployed Alpha Web and signed macOS Alpha application:
 - Web and Desktop registered different WorkOS session IDs. Device logout revoked
   only the initiating session; global logout revoked both, and an already-open
   browser consumed the security stream and signed out without reload.
+- A real Alpha organization invitation opened the installed macOS application,
+  prefilled the bounded join credential, accepted successfully, and appeared in
+  the owner's member list. Promoting that member to Admin and then removing the
+  member updated the open desktop client in about four seconds: the collaborative
+  organization disappeared, Personal remained usable, and the authenticated
+  account session was preserved.
+- That live invitation exposed a channel-drift defect in the deployed page: the
+  old Alpha build needed an explicit Alpha scheme selector. The corrective code
+  now binds `INVITE_LINK_BASE` to the exact deployment origin, derives the app
+  scheme from `ZEROS_DEPLOY_ENV`, and rejects lookalike desktop/HTTPS invite
+  routes. The merged-SHA no-selector retest remains a promotion gate.
 - The deployed control-plane health endpoint, exact release version, Personal
   bootstrap, secure browser cookie relay, strict same-site completion, and
   session-revocation persistence were inspected after promotion.
@@ -598,9 +631,10 @@ Still required before Alpha can be called fully qualified:
 - A clean first-time and returning Google/GitHub identity-linking exercise for
   the same person; existing preserved identities currently exercise the safer
   recovery path instead.
-- Live organization membership removal/role change with both clients open and
-  a live WorkOS/stream interruption drill. Automated coverage is not relabeled
-  as live evidence.
+- The merged-SHA invitation handoff without a `scheme` query, provider-side
+  invitation retirement after acceptance/removal, and a live WorkOS/security-
+  stream interruption drill. Automated race/outage coverage is not relabeled as
+  live evidence.
 - Windows and Linux release qualification on those operating systems. macOS
   evidence and CI packaging do not qualify another platform.
 

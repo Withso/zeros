@@ -28,6 +28,14 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function rejectedLater() {
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((_resolve, fail) => {
+    reject = fail;
+  });
+  return { promise, reject };
+}
+
 function setup(overrides: Partial<WorkOSDesktopAuthorizationFlowDeps> = {}) {
   const completed = deferred<void>();
   let openedUrl: string | null = null;
@@ -125,6 +133,52 @@ describe("WorkOS desktop hosted authorization", () => {
         code: "replayed-code",
       }),
     ).toBe(false);
+  });
+
+  it("does not strand the renderer when the OS browser launch never settles", async () => {
+    const harness = setup({
+      openExternal: () => new Promise<void>(() => {}),
+      openExternalTimeoutMs: 10,
+    });
+
+    const outcome = await Promise.race([
+      harness.flow.start().then(() => "started" as const),
+      new Promise<"stuck">((resolve) =>
+        setTimeout(() => resolve("stuck"), 50),
+      ),
+    ]);
+
+    expect(outcome).toBe("started");
+    expect(harness.flow.cancel()).toBe(true);
+  });
+
+  it("cleans up when the OS browser launcher throws synchronously", async () => {
+    const harness = setup({
+      openExternal: () => {
+        throw new Error("browser unavailable");
+      },
+    });
+
+    await expect(harness.flow.start()).rejects.toThrow("browser unavailable");
+    expect(harness.flow.cancel()).toBe(false);
+  });
+
+  it("surfaces a browser launch that rejects after its acknowledgement timeout", async () => {
+    const opening = rejectedLater();
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const harness = setup({
+      openExternal: () => opening.promise,
+      openExternalTimeoutMs: 10,
+      onError,
+    });
+
+    await harness.flow.start();
+    opening.reject(new Error("browser unavailable"));
+    await error.promise;
+
+    expect(onError).toHaveBeenCalledWith("browser_open_failed");
+    expect(harness.flow.cancel()).toBe(false);
   });
 
   it("ignores a mismatched state without consuming the legitimate callback", async () => {

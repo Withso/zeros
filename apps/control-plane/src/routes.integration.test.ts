@@ -50,7 +50,12 @@ d("organization routes", () => {
       c.set("user", actor);
       await next();
     });
-    app.route("/", createRoutes(pool));
+    app.route(
+      "/",
+      createRoutes(pool, undefined, null, {
+        inviteLinkBase: "https://app-alpha.zeros.build/invite",
+      }),
+    );
     app.onError((error, c) => {
       if (error instanceof HttpError) {
         return c.json(
@@ -192,14 +197,44 @@ d("organization routes", () => {
       organizations: Array<{ id: string; isPersonal: boolean }>;
     };
     const org = me.organizations.find((item) => !item.isPersonal)!;
+    const revisionBefore = await pool.query<{
+      authorization_revision: string | number;
+      data_revision: string | number;
+    }>(
+      `SELECT authorization_revision, data_revision
+       FROM organizations WHERE id = $1`,
+      [org.id],
+    );
     const invite = await request(`/v1/organizations/${org.id}/invitations`, {
       method: "POST",
       body: { email: member.email, role: "member" },
     });
     expect(invite.status).toBe(201);
     const invitation = (await invite.json()) as {
-      invitation: { token: string };
+      invitation: { token: string; acceptUrl: string };
     };
+    expect(invitation.invitation.acceptUrl).toBe(
+      `https://app-alpha.zeros.build/invite?token=${encodeURIComponent(invitation.invitation.token)}`,
+    );
+    const revisionAfterInvite = await pool.query<{
+      data_revision: string | number;
+    }>(`SELECT data_revision FROM organizations WHERE id = $1`, [org.id]);
+    expect(Number(revisionAfterInvite.rows[0]?.data_revision)).toBe(
+      Number(revisionBefore.rows[0]?.data_revision) + 1,
+    );
+    const inviteEvent = await pool.query<{
+      data_revision: string | number | null;
+      payload: Record<string, unknown>;
+    }>(
+      `SELECT data_revision, payload FROM security_events
+       WHERE org_id = $1 AND kind = 'organization.data_changed'
+       ORDER BY sequence DESC LIMIT 1`,
+      [org.id],
+    );
+    expect(inviteEvent.rows[0]).toMatchObject({
+      data_revision: revisionAfterInvite.rows[0]!.data_revision,
+      payload: { reason: "zeros_invitation_created" },
+    });
 
     actor = member;
     const accepted = await request("/v1/invitations/accept", {
@@ -219,7 +254,336 @@ d("organization routes", () => {
       [org.id, member.id],
     );
     expect(membership.rows).toEqual([{ role: "member" }]);
+    const revisionAfter = await pool.query<{
+      authorization_revision: string | number;
+    }>(
+      `SELECT authorization_revision FROM organizations WHERE id = $1`,
+      [org.id],
+    );
+    expect(Number(revisionAfter.rows[0]?.authorization_revision)).toBe(
+      Number(revisionBefore.rows[0]?.authorization_revision) + 1,
+    );
+    const event = await pool.query<{
+      kind: string;
+      user_id: string | null;
+      authorization_revision: string | number | null;
+      payload: Record<string, unknown>;
+    }>(
+      `SELECT kind, user_id, authorization_revision, payload
+       FROM security_events
+       WHERE org_id = $1 AND kind = 'organization.authorization_changed'
+       ORDER BY sequence DESC LIMIT 1`,
+      [org.id],
+    );
+    expect(event.rows[0]).toMatchObject({
+      kind: "organization.authorization_changed",
+      user_id: member.id,
+      authorization_revision:
+        revisionAfter.rows[0]!.authorization_revision,
+      payload: { reason: "zeros_member_joined" },
+    });
     actor = owner;
+  });
+
+  it("serializes provider invitation cleanup before membership creation and removal", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const workosOwner = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_owner_${suffix}`,
+      email: `workos-owner-${suffix}@example.com`,
+      displayName: "WorkOS Owner",
+    });
+    const workosMember = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_member_${suffix}`,
+      email: `workos-member-${suffix}@example.com`,
+      displayName: "WorkOS Member",
+    });
+    let workosActor = workosOwner;
+    const workosApp = new Hono();
+    workosApp.use("*", async (c, next) => {
+      c.set("user", workosActor);
+      await next();
+    });
+    workosApp.route(
+      "/",
+      createRoutes(pool, undefined, null, {
+        workosEnabled: true,
+        inviteLinkBase: "https://app-alpha.zeros.build/invite",
+      }),
+    );
+    workosApp.onError((error, c) => {
+      if (error instanceof HttpError) {
+        return c.json(
+          { error: { code: error.code, message: error.message } },
+          error.status,
+        );
+      }
+      throw error;
+    });
+    const workosRequest = (
+      path: string,
+      init?: { method?: string; body?: Record<string, unknown> },
+    ) =>
+      workosApp.request(path, {
+        method: init?.method ?? "GET",
+        headers: init?.body
+          ? { "content-type": "application/json" }
+          : undefined,
+        body: init?.body ? JSON.stringify(init.body) : undefined,
+      });
+
+    const created = await workosRequest("/v1/organizations", {
+      method: "POST",
+      body: { name: `Provider ordering ${suffix}` },
+    });
+    expect(created.status).toBe(201);
+    const organization = (await created.json()) as {
+      organization: { id: string };
+    };
+    const orgId = organization.organization.id;
+    const invited = await workosRequest(
+      `/v1/organizations/${orgId}/invitations`,
+      {
+        method: "POST",
+        body: { email: workosMember.email, role: "member" },
+      },
+    );
+    expect(invited.status).toBe(201);
+    const invitation = (await invited.json()) as {
+      invitation: { id: string; token: string };
+    };
+
+    workosActor = workosMember;
+    const accepted = await workosRequest("/v1/invitations/accept", {
+      method: "POST",
+      body: { token: invitation.invitation.token },
+    });
+    expect(accepted.status).toBe(200);
+    const acceptedCommands = await pool.query<{
+      operation: string;
+      aggregate_revision: string | number;
+      ordering_key: string;
+    }>(
+      `SELECT operation, aggregate_revision, ordering_key
+       FROM workos_command_outbox
+       WHERE aggregate_key IN ($1, $2)
+       ORDER BY sequence`,
+      [
+        `invitation:${invitation.invitation.id}`,
+        `membership:${orgId}:${workosMember.id}`,
+      ],
+    );
+    expect(acceptedCommands.rows.map((row) => row.operation)).toEqual([
+      "invitation.create",
+      "invitation.revoke",
+      "membership.create",
+    ]);
+    expect(
+      new Set(acceptedCommands.rows.map((row) => row.ordering_key)).size,
+    ).toBe(1);
+    const localAccepted = await pool.query<{
+      accepted_at: Date | null;
+      workos_sync_revision: string | number;
+    }>(
+      `SELECT accepted_at, workos_sync_revision
+       FROM invitations WHERE id = $1`,
+      [invitation.invitation.id],
+    );
+    expect(localAccepted.rows[0]?.accepted_at).not.toBeNull();
+    expect(Number(localAccepted.rows[0]?.workos_sync_revision)).toBe(2);
+
+    workosActor = workosOwner;
+    const removed = await workosRequest(
+      `/v1/organizations/${orgId}/members/${workosMember.id}`,
+      { method: "DELETE" },
+    );
+    expect(removed.status).toBe(200);
+    const allCommands = await pool.query<{
+      operation: string;
+      aggregate_revision: string | number;
+      ordering_key: string;
+    }>(
+      `SELECT operation, aggregate_revision, ordering_key
+       FROM workos_command_outbox
+       WHERE aggregate_key IN ($1, $2)
+       ORDER BY sequence`,
+      [
+        `invitation:${invitation.invitation.id}`,
+        `membership:${orgId}:${workosMember.id}`,
+      ],
+    );
+    expect(allCommands.rows.map((row) => row.operation)).toEqual([
+      "invitation.create",
+      "invitation.revoke",
+      "membership.create",
+      "invitation.revoke",
+      "membership.delete",
+    ]);
+    expect(new Set(allCommands.rows.map((row) => row.ordering_key)).size).toBe(
+      1,
+    );
+    const localRemoved = await pool.query<{
+      accepted_at: Date | null;
+      revoked_at: Date | null;
+      workos_sync_revision: string | number;
+    }>(
+      `SELECT accepted_at, revoked_at, workos_sync_revision
+       FROM invitations WHERE id = $1`,
+      [invitation.invitation.id],
+    );
+    expect(localRemoved.rows[0]?.accepted_at).not.toBeNull();
+    expect(localRemoved.rows[0]?.revoked_at).toBeNull();
+    expect(Number(localRemoved.rows[0]?.workos_sync_revision)).toBe(3);
+
+    const reinvited = await workosRequest(
+      `/v1/organizations/${orgId}/invitations`,
+      {
+        method: "POST",
+        body: { email: workosMember.email, role: "member" },
+      },
+    );
+    expect(reinvited.status).toBe(201);
+    const rejoinInvitation = (await reinvited.json()) as {
+      invitation: { id: string; token: string };
+    };
+    workosActor = workosMember;
+    const rejoined = await workosRequest("/v1/invitations/accept", {
+      method: "POST",
+      body: { token: rejoinInvitation.invitation.token },
+    });
+    expect(rejoined.status).toBe(200);
+
+    const membershipGenerations = await pool.query<{
+      operation: string;
+      aggregate_revision: string | number;
+    }>(
+      `SELECT operation, aggregate_revision
+       FROM workos_command_outbox
+       WHERE aggregate_key = $1
+       ORDER BY sequence`,
+      [`membership:${orgId}:${workosMember.id}`],
+    );
+    expect(membershipGenerations.rows).toEqual([
+      { operation: "membership.create", aggregate_revision: "1" },
+      { operation: "membership.delete", aggregate_revision: "2" },
+      { operation: "membership.create", aggregate_revision: "3" },
+    ]);
+  });
+
+  it("waits for the organization lock before locking an invitation", async () => {
+    actor = owner;
+    const created = await request("/v1/organizations", {
+      method: "POST",
+      body: { name: `Invitation lock order ${randomUUID()}` },
+    });
+    expect(created.status).toBe(201);
+    const organization = (await created.json()) as {
+      organization: { id: string };
+    };
+    const orgId = organization.organization.id;
+    const invited = await request(`/v1/organizations/${orgId}/invitations`, {
+      method: "POST",
+      body: { email: member.email, role: "member" },
+    });
+    expect(invited.status).toBe(201);
+    const invitation = (await invited.json()) as {
+      invitation: { id: string; token: string };
+    };
+
+    const blocker = await pool.connect();
+    let accepting: Promise<Response> | null = null;
+    let invitationLockError: unknown = null;
+    let acceptWasWaiting = false;
+    try {
+      await blocker.query("BEGIN");
+      const blockerPid = (
+        await blocker.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`)
+      ).rows[0]!.pid;
+      await blocker.query(
+        `SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE`,
+        [orgId],
+      );
+      actor = member;
+      accepting = request("/v1/invitations/accept", {
+        method: "POST",
+        body: { token: invitation.invitation.token },
+      });
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const activity = await pool.query<{ waiting: boolean }>(
+          `SELECT EXISTS (
+             SELECT 1 FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND pid <> pg_backend_pid()
+               AND state = 'active'
+               AND wait_event_type = 'Lock'
+               AND $1 = ANY(pg_blocking_pids(pid))
+           ) AS waiting`,
+          [blockerPid],
+        );
+        if (activity.rows[0]?.waiting) {
+          acceptWasWaiting = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      await blocker.query(`SET LOCAL lock_timeout = '500ms'`);
+      try {
+        await blocker.query(
+          `SELECT 1 FROM invitations WHERE id = $1 FOR UPDATE`,
+          [invitation.invitation.id],
+        );
+      } catch (error) {
+        invitationLockError = error;
+      }
+    } finally {
+      await blocker.query("ROLLBACK").catch(() => {});
+      blocker.release();
+    }
+    const accepted = await accepting;
+    actor = owner;
+
+    expect(acceptWasWaiting).toBe(true);
+    expect(invitationLockError).toBeNull();
+    expect(accepted?.status).toBe(200);
+  });
+
+  it("revokes a pending local rejoin token when removing a member during Auth0 rollback", async () => {
+    actor = owner;
+    const created = await request("/v1/organizations", {
+      method: "POST",
+      body: { name: `Rollback removal ${randomUUID()}` },
+    });
+    expect(created.status).toBe(201);
+    const organization = (await created.json()) as {
+      organization: { id: string };
+    };
+    const orgId = organization.organization.id;
+    await pool.query(
+      `INSERT INTO organization_members (org_id, user_id, role)
+       VALUES ($1, $2, 'member')`,
+      [orgId, member.id],
+    );
+
+    const invited = await request(`/v1/organizations/${orgId}/invitations`, {
+      method: "POST",
+      body: { email: member.email, role: "member" },
+    });
+    expect(invited.status).toBe(201);
+    const invitation = (await invited.json()) as {
+      invitation: { id: string };
+    };
+
+    const removed = await request(
+      `/v1/organizations/${orgId}/members/${member.id}`,
+      { method: "DELETE" },
+    );
+    expect(removed.status).toBe(200);
+    const local = await pool.query<{ revoked_at: Date | null }>(
+      `SELECT revoked_at FROM invitations WHERE id = $1`,
+      [invitation.invitation.id],
+    );
+    expect(local.rows[0]?.revoked_at).not.toBeNull();
   });
 
   it("refuses local role and removal changes for directory-managed members", async () => {

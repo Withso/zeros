@@ -4,14 +4,18 @@ import { parseInviteToken } from "../invite-link";
 const TOKEN = "A".repeat(43); // 32-byte base64url shape
 
 describe("parseInviteToken", () => {
-  it("accepts the zeros:// and zeros-dev:// deep links", () => {
+  it("accepts every official channel deep link", () => {
     expect(parseInviteToken(`zeros://invite?token=${TOKEN}`)).toBe(TOKEN);
+    expect(parseInviteToken(`zeros-alpha://invite?token=${TOKEN}`)).toBe(TOKEN);
+    expect(parseInviteToken(`zeros-beta://invite?token=${TOKEN}`)).toBe(TOKEN);
     expect(parseInviteToken(`zeros-dev://invite?token=${TOKEN}`)).toBe(TOKEN);
   });
 
-  it("accepts the app.zeros.build https link", () => {
+  it("accepts every official hosted-app invite link", () => {
     expect(parseInviteToken(`https://app.zeros.build/invite?token=${TOKEN}`)).toBe(TOKEN);
     expect(parseInviteToken(`https://app.zeros.build/invite/?token=${TOKEN}`)).toBe(TOKEN);
+    expect(parseInviteToken(`https://app-alpha.zeros.build/invite?token=${TOKEN}`)).toBe(TOKEN);
+    expect(parseInviteToken(`https://app-beta.zeros.build/invite?token=${TOKEN}`)).toBe(TOKEN);
   });
 
   it("accepts a bare 43-char token", () => {
@@ -22,6 +26,11 @@ describe("parseInviteToken", () => {
   it("rejects invite links from foreign https hosts (L3 host pinning)", () => {
     expect(parseInviteToken(`https://evil.example/invite?token=${TOKEN}`)).toBeNull();
     expect(parseInviteToken(`https://app.zeros.build.evil.com/invite?token=${TOKEN}`)).toBeNull();
+    expect(parseInviteToken(`https://app-alpha.zeros.build/redirect/invite?token=${TOKEN}`)).toBeNull();
+    expect(parseInviteToken(`https://user:secret@app-alpha.zeros.build/invite?token=${TOKEN}`)).toBeNull();
+    expect(parseInviteToken(`zeros-alpha://user:secret@invite?token=${TOKEN}`)).toBeNull();
+    expect(parseInviteToken(`zeros-alpha://invite/redirect?token=${TOKEN}`)).toBeNull();
+    expect(parseInviteToken(`zeros-evil://invite?token=${TOKEN}`)).toBeNull();
   });
 
   it("rejects non-invite routes, missing tokens, and junk", () => {

@@ -201,6 +201,7 @@ export function createApp(
     "/",
     createRoutes(pool, emailConfig, config.cloudWorkspaces, {
       workosEnabled: config.auth.provider === "workos",
+      inviteLinkBase: config.inviteLinkBase,
     }),
   );
   if (config.github) app.route("/", createGithubRoutes(pool, config.github));

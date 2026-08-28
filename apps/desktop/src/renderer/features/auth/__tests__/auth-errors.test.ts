@@ -79,5 +79,8 @@ describe("friendlyAuthError", () => {
     expect(workOSSignInFailureMessage("account_exists", null)).toMatch(
       /original sign-in method/i,
     );
+    expect(workOSSignInFailureMessage("browser_open_failed", null)).toBe(
+      "Couldn't open your browser. Click Sign in to try again.",
+    );
   });
 });

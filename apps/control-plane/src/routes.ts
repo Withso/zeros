@@ -31,12 +31,13 @@ import {
   workOSInvitationOrderingKey,
 } from "./workos-command-outbox.js";
 
-const INVITE_LINK_BASE =
-  process.env.INVITE_LINK_BASE?.trim().replace(/\/+$/, "") ||
-  "https://app.zeros.build/invite";
+const DEFAULT_INVITE_LINK_BASE = "https://app.zeros.build/invite";
 
-export function inviteLink(rawToken: string): string {
-  return `${INVITE_LINK_BASE}?token=${encodeURIComponent(rawToken)}`;
+export function inviteLink(
+  rawToken: string,
+  inviteLinkBase = DEFAULT_INVITE_LINK_BASE,
+): string {
+  return `${inviteLinkBase}?token=${encodeURIComponent(rawToken)}`;
 }
 
 const OrganizationRoleSchema = z.enum(["owner", "admin", "member"]);
@@ -76,6 +77,58 @@ function uuidParam(value: string | undefined): string {
   const result = UuidSchema.safeParse(value);
   if (!result.success) throw new HttpError(404, "not_found", "Not found");
   return result.data;
+}
+
+async function recordOrganizationDataChange(
+  tx: Tx,
+  organizationId: string,
+  reason: string,
+): Promise<number> {
+  const revision = await tx.query<{ data_revision: string | number }>(
+    `UPDATE organizations
+     SET data_revision = data_revision + 1
+     WHERE id = $1 AND deleted_at IS NULL
+     RETURNING data_revision`,
+    [organizationId],
+  );
+  const value = Number(revision.rows[0]?.data_revision ?? 1);
+  await tx.query(
+    `INSERT INTO security_events (kind, org_id, data_revision, payload)
+     VALUES (
+       'organization.data_changed', $1, $2,
+       jsonb_build_object('reason', $3::text)
+     )`,
+    [organizationId, value, reason],
+  );
+  return value;
+}
+
+async function recordOrganizationAuthorizationChange(
+  tx: Tx,
+  organizationId: string,
+  userId: string,
+  reason: string,
+): Promise<number> {
+  const revision = await tx.query<{
+    authorization_revision: string | number;
+  }>(
+    `UPDATE organizations
+     SET authorization_revision = authorization_revision + 1
+     WHERE id = $1 AND deleted_at IS NULL
+     RETURNING authorization_revision`,
+    [organizationId],
+  );
+  const value = Number(revision.rows[0]?.authorization_revision ?? 1);
+  await tx.query(
+    `INSERT INTO security_events (
+       kind, user_id, org_id, authorization_revision, payload
+     ) VALUES (
+       'organization.authorization_changed', $1, $2, $3,
+       jsonb_build_object('reason', $4::text)
+     )`,
+    [userId, organizationId, value, reason],
+  );
+  return value;
 }
 
 type OrganizationRow = {
@@ -143,7 +196,7 @@ export function createRoutes(
   pool: pg.Pool,
   email?: EmailConfig,
   cloudWorkspaces: CloudWorkspaceBackendConfig | null = null,
-  options: { workosEnabled?: boolean } = {},
+  options: { workosEnabled?: boolean; inviteLinkBase?: string } = {},
 ): Hono {
   const app = new Hono();
 
@@ -177,11 +230,18 @@ export function createRoutes(
       email,
       false,
       options.workosEnabled === true,
+      options.inviteLinkBase ?? DEFAULT_INVITE_LINK_BASE,
     ),
   );
   app.route(
     "/v1/teams",
-    createOrganizationRouter(pool, email, true, options.workosEnabled === true),
+    createOrganizationRouter(
+      pool,
+      email,
+      true,
+      options.workosEnabled === true,
+      options.inviteLinkBase ?? DEFAULT_INVITE_LINK_BASE,
+    ),
   );
   app.route(
     "/",
@@ -207,6 +267,40 @@ export function createRoutes(
     const hash = hashInviteToken(raw);
 
     const joined = await withSystemTx(pool, async (tx) => {
+      // Discover the owning organization without taking a row lock, then lock
+      // the organization before revalidating and locking the invitation. Every
+      // organization mutation uses this same parent-before-child order.
+      const candidate = await tx.query<{ org_id: string }>(
+        `SELECT i.org_id
+         FROM invitations i
+         JOIN organizations o
+           ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
+         WHERE i.token_hash = $1
+           AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+           AND i.expires_at > now()`,
+        [hash],
+      );
+      const candidateOrganizationId = candidate.rows[0]?.org_id;
+      if (!candidateOrganizationId) {
+        throw new HttpError(
+          404,
+          "invalid_invite",
+          "This invite link is no longer valid",
+        );
+      }
+      const organization = await tx.query(
+        `SELECT 1 FROM organizations
+         WHERE id = $1 AND deleted_at IS NULL AND NOT is_personal
+         FOR UPDATE`,
+        [candidateOrganizationId],
+      );
+      if (!organization.rows[0]) {
+        throw new HttpError(
+          404,
+          "invalid_invite",
+          "This invite link is no longer valid",
+        );
+      }
       const invitationResult = await tx.query<{
         id: string;
         org_id: string;
@@ -215,13 +309,12 @@ export function createRoutes(
       }>(
         `SELECT i.id, i.org_id, i.email, i.role
          FROM invitations i
-         JOIN organizations o
-           ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
          WHERE i.token_hash = $1
+           AND i.org_id = $2
            AND i.accepted_at IS NULL AND i.revoked_at IS NULL
            AND i.expires_at > now()
-         FOR UPDATE OF i, o`,
-        [hash],
+         FOR UPDATE OF i`,
+        [hash, candidateOrganizationId],
       );
       const invitation = invitationResult.rows[0];
       if (!invitation) {
@@ -239,11 +332,30 @@ export function createRoutes(
         );
       }
 
-      await tx.query(
-        `INSERT INTO organization_members (org_id, user_id, role)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (org_id, user_id) DO NOTHING`,
-        [invitation.org_id, user.id, invitation.role],
+      const membershipAggregateKey = `membership:${invitation.org_id}:${user.id}`;
+      const insertedMembership = await tx.query(
+        `INSERT INTO organization_members (
+           org_id, user_id, role, workos_sync_revision
+         )
+         VALUES (
+           $1, $2, $3,
+           COALESCE(
+             (
+               SELECT MAX(aggregate_revision) + 1
+               FROM workos_command_outbox
+               WHERE aggregate_key = $4
+             ),
+             1
+           )
+         )
+         ON CONFLICT (org_id, user_id) DO NOTHING
+         RETURNING user_id`,
+        [
+          invitation.org_id,
+          user.id,
+          invitation.role,
+          membershipAggregateKey,
+        ],
       );
       const effectiveRole = await tx.query<{
         role: OrganizationRole;
@@ -267,31 +379,78 @@ export function createRoutes(
          ON CONFLICT (team_id, user_id) DO NOTHING`,
         [invitation.org_id, user.id, effectiveRole.rows[0]!.role],
       );
-      await tx.query(
-        `UPDATE invitations SET accepted_at = now() WHERE id = $1`,
+      const acceptedInvitation = await tx.query<{
+        workos_invitation_id: string | null;
+        workos_sync_revision: string | number;
+      }>(
+        `UPDATE invitations
+         SET accepted_at = now(),
+             workos_sync_revision = workos_sync_revision + 1
+         WHERE id = $1
+         RETURNING workos_invitation_id, workos_sync_revision`,
         [invitation.id],
       );
-      if (
-        options.workosEnabled &&
-        user.identity.provider === "workos" &&
-        effectiveRole.rows[0]!.membership_source !== "scim"
-      ) {
-        const member = effectiveRole.rows[0]!;
+      if (insertedMembership.rowCount) {
+        await recordOrganizationAuthorizationChange(
+          tx,
+          invitation.org_id,
+          user.id,
+          "zeros_member_joined",
+        );
+      } else {
+        // The user was already a member, but consuming the invitation still
+        // changes the pending-invitation view for organization administrators.
+        await recordOrganizationDataChange(
+          tx,
+          invitation.org_id,
+          "zeros_invitation_accepted",
+        );
+      }
+      if (options.workosEnabled) {
+        const invitationState = acceptedInvitation.rows[0]!;
+        const orderingKey = workOSInvitationOrderingKey(
+          invitation.org_id,
+          invitation.email,
+        );
+        // A Zeros invite is the capability the user actually consumed. Retire
+        // every provider-side copy before creating the coarse WorkOS
+        // membership so a delayed provider invite cannot later re-add access.
         await enqueueWorkOSCommand(tx, {
-          operation: member.workos_membership_id
-            ? "membership.update"
-            : "membership.create",
-          idempotencyKey: `membership.${invitation.org_id}.${user.id}.${member.workos_sync_revision}`,
-          aggregateKey: `membership:${invitation.org_id}:${user.id}`,
-          aggregateRevision: Number(member.workos_sync_revision),
+          operation: "invitation.revoke",
+          idempotencyKey: `invitation.${invitation.id}.${invitationState.workos_sync_revision}`,
+          aggregateKey: `invitation:${invitation.id}`,
+          orderingKey,
+          aggregateRevision: Number(invitationState.workos_sync_revision),
           organizationId: invitation.org_id,
-          userId: user.id,
-          providerObjectId: member.workos_membership_id,
+          providerObjectId: invitationState.workos_invitation_id,
           payload: {
-            workosUserId: user.identity.subject,
-            role: member.role,
+            localInvitationId: invitation.id,
+            email: invitation.email,
+            role: invitation.role,
           },
         });
+        if (
+          user.identity.provider === "workos" &&
+          effectiveRole.rows[0]!.membership_source !== "scim"
+        ) {
+          const member = effectiveRole.rows[0]!;
+          await enqueueWorkOSCommand(tx, {
+            operation: member.workos_membership_id
+              ? "membership.update"
+              : "membership.create",
+            idempotencyKey: `membership.${invitation.org_id}.${user.id}.${member.workos_sync_revision}`,
+            aggregateKey: membershipAggregateKey,
+            orderingKey,
+            aggregateRevision: Number(member.workos_sync_revision),
+            organizationId: invitation.org_id,
+            userId: user.id,
+            providerObjectId: member.workos_membership_id,
+            payload: {
+              workosUserId: user.identity.subject,
+              role: member.role,
+            },
+          });
+        }
       }
       await audit(tx, invitation.org_id, user.id, "member.joined", {
         invitation: invitation.id,
@@ -314,6 +473,7 @@ function createOrganizationRouter(
   email: EmailConfig | undefined,
   legacy: boolean,
   workosEnabled: boolean,
+  inviteLinkBase: string,
 ): Hono {
   const app = new Hono();
   const param = (c: { req: { param(name: string): string } }): string =>
@@ -389,6 +549,7 @@ function createOrganizationRouter(
           operation: "membership.create",
           idempotencyKey: `membership.${root.id}.${user.id}.1`,
           aggregateKey: `membership:${root.id}:${user.id}`,
+          orderingKey: workOSInvitationOrderingKey(root.id, user.email),
           aggregateRevision: 1,
           organizationId: root.id,
           userId: user.id,
@@ -649,11 +810,13 @@ function createOrganizationRouter(
         workos_membership_id: string | null;
         workos_sync_revision: string | number;
         workos_user_id: string | null;
+        user_email: string;
       }>(
         `SELECT om.role, om.membership_source, om.workos_membership_id,
                 om.workos_sync_revision,
-                ui.provider_sub AS workos_user_id
+                ui.provider_sub AS workos_user_id, u.email AS user_email
          FROM organization_members om
+         JOIN users u ON u.id = om.user_id
          LEFT JOIN user_identities ui
            ON ui.user_id = om.user_id AND ui.provider = 'workos'
           AND ui.status = 'active'
@@ -740,6 +903,10 @@ function createOrganizationRouter(
             : "membership.create",
           idempotencyKey: `membership.${orgId}.${targetId}.${memberRevision.workos_sync_revision}`,
           aggregateKey: `membership:${orgId}:${targetId}`,
+          orderingKey: workOSInvitationOrderingKey(
+            orgId,
+            targetRow.user_email,
+          ),
           aggregateRevision: Number(memberRevision.workos_sync_revision),
           organizationId: orgId,
           userId: targetId,
@@ -767,11 +934,13 @@ function createOrganizationRouter(
         workos_membership_id: string | null;
         workos_sync_revision: string | number;
         workos_user_id: string | null;
+        user_email: string;
       }>(
         `SELECT om.role, om.membership_source, om.workos_membership_id,
                 om.workos_sync_revision,
-                ui.provider_sub AS workos_user_id
+                ui.provider_sub AS workos_user_id, u.email AS user_email
          FROM organization_members om
+         JOIN users u ON u.id = om.user_id
          LEFT JOIN user_identities ui
            ON ui.user_id = om.user_id AND ui.provider = 'workos'
           AND ui.status = 'active'
@@ -806,21 +975,64 @@ function createOrganizationRouter(
         { user: targetId },
       );
       const targetRow = target.rows[0]!;
-      if (workosEnabled && targetRow.workos_user_id) {
-        const syncRevision = Number(targetRow.workos_sync_revision) + 1;
-        await enqueueWorkOSCommand(tx, {
-          operation: "membership.delete",
-          idempotencyKey: `membership.${orgId}.${targetId}.${syncRevision}`,
-          aggregateKey: `membership:${orgId}:${targetId}`,
-          aggregateRevision: syncRevision,
-          organizationId: orgId,
-          userId: targetId,
-          providerObjectId: targetRow.workos_membership_id,
-          payload: {
-            workosUserId: targetRow.workos_user_id,
-            role: targetRow.role,
-          },
-        });
+      const relatedInvitations = await tx.query<{
+        id: string;
+        email: string;
+        role: OrganizationRole;
+        workos_invitation_id: string | null;
+        workos_sync_revision: string | number;
+      }>(
+        `UPDATE invitations
+         SET revoked_at = CASE
+                            WHEN accepted_at IS NULL THEN now()
+                            ELSE revoked_at
+                          END,
+             workos_sync_revision = workos_sync_revision +
+               CASE WHEN $3::boolean THEN 1 ELSE 0 END
+         WHERE org_id = $1 AND email = $2 AND revoked_at IS NULL
+           AND ($3::boolean OR accepted_at IS NULL)
+         RETURNING id, email, role, workos_invitation_id,
+                   workos_sync_revision`,
+        [orgId, targetRow.user_email, workosEnabled],
+      );
+      if (workosEnabled) {
+        const orderingKey = workOSInvitationOrderingKey(
+          orgId,
+          targetRow.user_email,
+        );
+        for (const invitation of relatedInvitations.rows) {
+          await enqueueWorkOSCommand(tx, {
+            operation: "invitation.revoke",
+            idempotencyKey: `invitation.${invitation.id}.${invitation.workos_sync_revision}`,
+            aggregateKey: `invitation:${invitation.id}`,
+            orderingKey,
+            aggregateRevision: Number(invitation.workos_sync_revision),
+            organizationId: orgId,
+            providerObjectId: invitation.workos_invitation_id,
+            payload: {
+              localInvitationId: invitation.id,
+              email: invitation.email,
+              role: invitation.role,
+            },
+          });
+        }
+        if (targetRow.workos_user_id) {
+          const syncRevision = Number(targetRow.workos_sync_revision) + 1;
+          await enqueueWorkOSCommand(tx, {
+            operation: "membership.delete",
+            idempotencyKey: `membership.${orgId}.${targetId}.${syncRevision}`,
+            aggregateKey: `membership:${orgId}:${targetId}`,
+            orderingKey,
+            aggregateRevision: syncRevision,
+            organizationId: orgId,
+            userId: targetId,
+            providerObjectId: targetRow.workos_membership_id,
+            payload: {
+              workosUserId: targetRow.workos_user_id,
+              role: targetRow.role,
+            },
+          });
+        }
       }
       await tx.query(
         `DELETE FROM organization_members
@@ -928,6 +1140,11 @@ function createOrganizationRouter(
         email: emailAddress,
         role,
       });
+      await recordOrganizationDataChange(
+        tx,
+        orgId,
+        "zeros_invitation_created",
+      );
       const invitation = created.rows[0]!;
       if (workosEnabled) {
         await enqueueWorkOSCommand(tx, {
@@ -956,7 +1173,7 @@ function createOrganizationRouter(
       const message = inviteEmailHtml({
         organizationName: result.organizationName,
         inviterName: user.displayName ?? user.email,
-        acceptUrl: inviteLink(result.token),
+        acceptUrl: inviteLink(result.token, inviteLinkBase),
         expiresDays: 7,
       });
       void sendEmail(
@@ -972,7 +1189,7 @@ function createOrganizationRouter(
           id: result.id,
           expiresAt: result.expiresAt,
           token: result.token,
-          acceptUrl: inviteLink(result.token),
+          acceptUrl: inviteLink(result.token, inviteLinkBase),
         },
       },
       201,
@@ -1025,6 +1242,11 @@ function createOrganizationRouter(
       await audit(tx, orgId, user.id, "invitation.revoked", {
         invitation: inviteId,
       });
+      await recordOrganizationDataChange(
+        tx,
+        orgId,
+        "zeros_invitation_revoked",
+      );
       const invitation = result.rows[0]!;
       if (workosEnabled) {
         await enqueueWorkOSCommand(tx, {

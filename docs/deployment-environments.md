@@ -134,6 +134,16 @@ accept one another's tokens. The WorkOS API key, cookie password, and endpoint
 signing secret are Railway-only. Never put them in Pages, a desktop build,
 GitHub variables, command arguments, logs, or repository files.
 
+`INVITE_LINK_BASE` is an exact channel contract, not a free-form redirect. In an
+official Railway environment it must equal `${APP_ORIGIN}/invite`, use HTTPS,
+and contain no credentials, query, or fragment; startup rejects a wrong-channel
+or malformed value. The Pages invitation route derives its installed-app scheme
+from the validated `ZEROS_DEPLOY_ENV` (`zeros-alpha`, `zeros-beta`, or `zeros`),
+so a query parameter cannot cross channels. Query-selected schemes remain a
+local-preview convenience only. Desktop accepts pasted invitations only from
+the exact official app hosts or official channel schemes and the exact
+`/invite` action, never a lookalike hostname or nested path.
+
 For the clean-slate identity cutover, prefer provisioning a fresh database and
 running all migrations. An Alpha/Beta in-place reset must use the guarded
 `pnpm --dir apps/control-plane reset:database` procedure in the control-plane
