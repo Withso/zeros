@@ -237,8 +237,12 @@ they do not call WorkOS and do not need its API key.
    exchanges the code, requires a verified WorkOS user, authenticates the
    sealed session, and promotes the same row to a browser session.
 6. Railway rotates to the `Secure`, `HttpOnly`, host-only, `SameSite=Strict`
-   `__Host-zeros_session` cookie and redirects only to the previously bounded
-   relative return path.
+   `__Host-zeros_session` cookie on a no-store, no-referrer `200` completion
+   document. That document immediately performs a same-site navigation to the
+   previously bounded relative return path, with a manual-link fallback. A
+   `3xx` is intentionally not used here: browsers retain the cross-site AuthKit
+   context across redirect hops and withhold Strict cookies until a same-site
+   document initiates the next navigation.
 7. Pages obtains a short-lived access token from Railway only while proxying
    an authenticated request. It never persists provider tokens.
 
