@@ -497,6 +497,9 @@ d("organization routes", () => {
     let acceptWasWaiting = false;
     try {
       await blocker.query("BEGIN");
+      const blockerPid = (
+        await blocker.query<{ pid: number }>(`SELECT pg_backend_pid() AS pid`)
+      ).rows[0]!.pid;
       await blocker.query(
         `SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE`,
         [orgId],
@@ -514,7 +517,9 @@ d("organization routes", () => {
                AND pid <> pg_backend_pid()
                AND state = 'active'
                AND wait_event_type = 'Lock'
+               AND $1 = ANY(pg_blocking_pids(pid))
            ) AS waiting`,
+          [blockerPid],
         );
         if (activity.rows[0]?.waiting) {
           acceptWasWaiting = true;
