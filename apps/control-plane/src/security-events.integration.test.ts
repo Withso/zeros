@@ -94,4 +94,59 @@ d("security snapshot and durable targeted replay", () => {
       payload: { reason: "role_changed" },
     });
   });
+
+  it("replays a session revocation only to the exact session, not sibling devices", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const now = Math.floor(Date.now() / 1_000);
+    const currentSessionId = `session_current_${suffix}`;
+    const siblingSessionId = `session_sibling_${suffix}`;
+    const user = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_sessions_${suffix}`,
+      email: `session-events-${suffix}@example.com`,
+      displayName: "Session Event User",
+      session: {
+        id: currentSessionId,
+        clientKind: "desktop",
+        authTime: now,
+        tokenExpiresAt: now + 300,
+      },
+    });
+    await pool.query(
+      `INSERT INTO auth_sessions (
+         provider_session_id, provider_sub, user_id, client_kind,
+         last_token_expires_at
+       ) VALUES
+         ($1, $3, $4, 'desktop', now() + interval '5 minutes'),
+         ($2, $3, $4, 'web', now() + interval '5 minutes')`,
+      [currentSessionId, siblingSessionId, user.identity.subject, user.id],
+    );
+    const revoked = await pool.query<{ sequence: string | number }>(
+      `INSERT INTO security_events (
+         kind, user_id, provider_session_id, payload
+       ) VALUES (
+         'session.revoked', $1, $2,
+         '{"reason":"workos_session_revoked"}'::jsonb
+       ) RETURNING sequence`,
+      [user.id, siblingSessionId],
+    );
+
+    expect(await listSecurityEvents(pool, user, 0)).toEqual([]);
+
+    const siblingUser = {
+      ...user,
+      authentication: {
+        ...user.authentication,
+        sessionId: siblingSessionId,
+        clientKind: "web" as const,
+      },
+    };
+    const siblingEvents = await listSecurityEvents(pool, siblingUser, 0);
+    expect(siblingEvents).toHaveLength(1);
+    expect(siblingEvents[0]).toMatchObject({
+      sequence: Number(revoked.rows[0]!.sequence),
+      kind: "session.revoked",
+      payload: { reason: "workos_session_revoked" },
+    });
+  });
 });

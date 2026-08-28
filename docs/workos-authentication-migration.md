@@ -193,14 +193,17 @@ Security-relevant transactions increment monotonic revisions, append a durable
 `LISTEN/NOTIFY` (the notification is only a wake-up; rows are replayable).
 
 The browser maintains one authenticated EventSource and the desktop main
-process maintains one bounded SSE connection. Account/session events sign out;
-organization authorization/data events refresh scoped state. Launch performs a
-snapshot. Focus, visibility, macOS wake/unlock, and reconnect request another
-snapshot only when the stream is absent or has been silent for at least 60
-seconds. A provider/network timeout preserves the last confirmed state; a
-terminal 401/403 clears only the exact expected session using compare-and-set.
-Every protected API request remains the final enforcement boundary, so a
-disconnected client cannot use stale UI to regain access.
+process maintains one bounded SSE connection. Account revocation broadcasts to
+every session for that account; a session revocation is replayed only to the
+client whose verified `sid` exactly matches the event. This keeps ordinary
+device logout device-scoped, while explicit all-device logout revokes each
+provider session. Organization authorization/data events refresh scoped state.
+Launch performs a snapshot. Focus, visibility, macOS wake/unlock, and reconnect
+request another snapshot only when the stream is absent or has been silent for
+at least 60 seconds. A provider/network timeout preserves the last confirmed
+state; a terminal 401/403 clears only the exact expected session using
+compare-and-set. Every protected API request remains the final enforcement
+boundary, so a disconnected client cannot use stale UI to regain access.
 
 ## Trust boundaries
 
