@@ -299,6 +299,21 @@ export class WorkOSCommandProcessor {
     ) {
       const payload = MembershipPayload.parse(command.payload);
       const organizationId = await this.workosOrganizationId(command);
+      const withDesiredRole = async (
+        membership: WorkOSMembershipRecord,
+      ): Promise<WorkOSMembershipRecord> =>
+        membership.roleSlug === payload.role
+          ? membership
+          : this.provider.updateMembership({
+              membershipId: membership.id,
+              roleSlug: payload.role,
+            });
+      const createMembership = (): Promise<WorkOSMembershipRecord> =>
+        this.provider.createMembership({
+          organizationId,
+          userId: payload.workosUserId,
+          roleSlug: payload.role,
+        });
       if (command.operation === "membership.update" && command.providerObjectId) {
         try {
           return {
@@ -315,32 +330,65 @@ export class WorkOSCommandProcessor {
       try {
         return {
           kind: "membership",
-          value: await this.provider.createMembership({
-            organizationId,
-            userId: payload.workosUserId,
-            roleSlug: payload.role,
-          }),
+          value: await createMembership(),
         };
       } catch (error) {
-        if (safeError(error).status !== 409) throw error;
-      }
-      const existing = (
-        await this.provider.listMemberships({
+        const failure = safeError(error);
+        const observed = await this.provider.listMemberships({
           organizationId,
           userId: payload.workosUserId,
-        })
-      ).find((membership) => membership.status === "active");
-      if (!existing) throw new Error("WorkOS membership conflict was not recoverable");
-      return {
-        kind: "membership",
-        value:
-          existing.roleSlug === payload.role
-            ? existing
-            : await this.provider.updateMembership({
-                membershipId: existing.id,
-                roleSlug: payload.role,
-              }),
-      };
+        });
+        const active = observed.find(
+          (membership) => membership.status === "active",
+        );
+        if (active) {
+          return { kind: "membership", value: await withDesiredRole(active) };
+        }
+
+        // Sending a WorkOS invitation creates a pending membership for an
+        // existing user. Zeros' own invite is the capability consumed by the
+        // desktop app, so provider invitation revocation cannot activate that
+        // pending object. WorkOS requires pending memberships to be deleted;
+        // a fresh create then produces the desired active membership.
+        const pending = observed.filter(
+          (membership) => membership.status === "pending",
+        );
+        const canReplacePending =
+          failure.status === 409 || failure.code === "GenericServerException";
+        if (pending.length === 0 || !canReplacePending) {
+          if (failure.status === 409) {
+            throw new Error("WorkOS membership conflict was not recoverable");
+          }
+          throw error;
+        }
+        if (pending.some((membership) => membership.directoryManaged)) {
+          throw error;
+        }
+        for (const membership of pending) {
+          try {
+            await this.provider.deleteMembership(membership.id);
+          } catch (deleteError) {
+            if (safeError(deleteError).status !== 404) throw deleteError;
+          }
+        }
+        try {
+          return { kind: "membership", value: await createMembership() };
+        } catch (retryError) {
+          // The second response can also be lost after WorkOS commits. Observe
+          // the provider before retrying so the command remains idempotent.
+          const recovered = (
+            await this.provider.listMemberships({
+              organizationId,
+              userId: payload.workosUserId,
+            })
+          ).find((membership) => membership.status === "active");
+          if (!recovered) throw retryError;
+          return {
+            kind: "membership",
+            value: await withDesiredRole(recovered),
+          };
+        }
+      }
     }
     if (command.operation === "membership.delete") {
       const payload = MembershipPayload.parse(command.payload);
