@@ -585,7 +585,7 @@ Manual Alpha acceptance must verify:
 - macOS smoke checks plus separately recorded Windows/Linux packaging checks
   before claiming those platforms are qualified.
 
-### Alpha evidence record — 2026-08-28–29
+### Alpha evidence record — 2026-08-28–29 (Asia/Kolkata)
 
 This record distinguishes real-provider evidence from deterministic automated
 coverage. It is not a Production approval.
