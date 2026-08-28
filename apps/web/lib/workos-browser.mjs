@@ -1,9 +1,11 @@
 import { fetchWorkOSRailway } from "./workos-railway.mjs";
+import { readBoundedResponseBody } from "./control-plane-policy.mjs";
 
 export const WORKOS_FLOW_COOKIE = "__Host-zeros_auth_flow";
 export const WORKOS_SESSION_COOKIE = "__Host-zeros_session";
 
 const OPAQUE_ID = /^[A-Za-z0-9_-]{43}$/;
+const MAX_RAILWAY_SESSION_BYTES = 256 * 1024;
 
 function cookies(request) {
   const parsed = new Map();
@@ -19,8 +21,17 @@ function cookies(request) {
   return parsed;
 }
 
-function safeJson(response) {
-  return response.json().catch(() => null);
+async function safeJson(response) {
+  const bounded = await readBoundedResponseBody(
+    response,
+    MAX_RAILWAY_SESSION_BYTES,
+  );
+  if (!bounded.ok) return null;
+  try {
+    return JSON.parse(new TextDecoder().decode(bounded.body));
+  } catch {
+    return null;
+  }
 }
 
 function validSessionData(value, { allowEmptyBearer = false } = {}) {

@@ -18,6 +18,13 @@ An organization is the tenant, billing, invitation, policy, and workspace
 ownership boundary. A team is a child grouping inside one organization. Team
 IDs must never be accepted where an organization ID is required.
 
+Personal is a Zeros-only product root and never creates a WorkOS Organization.
+Every collaborative Zeros Organization creates exactly one WorkOS
+Organization, correlated by the Zeros UUID in WorkOS `external_id`. WorkOS
+organization membership provides the coarse identity lifecycle; Zeros child
+teams, billing, entitlements, repository grants, and workspace authorization
+remain Zeros-owned.
+
 The initial UI exposes one default team and rejects creation of additional
 teams with `multiple_teams_not_available`. The schema already supports more
 teams so that enabling them later is a capability change, not another tenant
@@ -43,6 +50,39 @@ Personal has these invariants:
 The child default team keeps the relational model uniform, but Personal is not
 a collaborative organization and does not expose Members, Teams, or Billing UI.
 Personal workspace configuration stays on the device.
+
+## Plans and billing ownership
+
+Plan and billing state belongs in Zeros/Stripe, never in WorkOS and never in an
+AuthKit token. Authentication establishes identity; every billable operation
+loads current entitlements transactionally from the control plane.
+
+| Plan       | Tenant model | Seat purchaser | Teams | Cloud workspace rule |
+| ---------- | ------------ | -------------- | ----- | -------------------- |
+| Free       | Personal only | none | none in product UI | local only |
+| Pro        | Personal plus an optional Pro organization | each collaborating account holds its own active Pro entitlement | one default team initially | cloud workspaces belong to that Pro organization; initial collaboration cap is five independently entitled Pro accounts |
+| Business   | Business organization | organization buys centralized active-member seats | multiple child teams | cloud workspaces are organization-owned and team-scoped |
+| Enterprise | Business model plus enterprise policy | organization contract/central billing | multiple child teams | Business behavior plus SSO/SAML, SCIM/Directory Sync, policy, audit, and contractual controls |
+
+Business seat billing is organization-level, not team-level. One person with
+membership in three teams consumes one active seat in that organization, not
+three. Teams allocate work and access; they are not separate billing accounts.
+If a customer needs separate purchasing, legal ownership, SSO policy, or data
+retention, create a separate organization instead of overloading a team.
+
+A Pro organization is still a real collaborative organization and therefore a
+separate WorkOS Organization. Its owner does not buy a shared seat pack: every
+active collaborator must independently qualify for Pro. The membership cap is
+a product entitlement enforced by Zeros before sending a WorkOS invitation or
+membership command. Upgrading that same tenant to Business changes billing and
+team capabilities; it does not change the organization ID or move workspace
+data.
+
+Recommended durable billing records are an organization subscription, account
+entitlements, organization seat assignments, and metered compute grants. Keep
+seat entitlement separate from compute quota: a paid seat answers “may this
+person collaborate?”, while cloud hours/CPU/storage answer “how much can this
+tenant run?”.
 
 ## Organizations and roles
 
@@ -72,6 +112,19 @@ Organization owners and admins are maintainers of the default team; organization
 members are team members. Composite foreign keys enforce that a team belongs
 to the stated organization and that every team member is already an
 organization member.
+
+WorkOS roles mirror only the coarse organization roles (`owner`, `admin`,
+`member`). Zeros must not encode child-team membership or billing entitlement
+into those roles. WorkOS-originated membership/role/deletion events update the
+local projection and authorization revisions. Zeros-originated admin changes
+commit locally with a durable provider command. A directory-managed membership
+is marked `scim` and can be changed only through the enterprise identity
+provider; Zeros local controls return `directory_managed_membership`.
+
+Deletion has two scopes: deleting/removing one organization membership revokes
+only that organization's grants and retains Personal/other organizations;
+deleting the WorkOS User disables the whole Zeros authentication principal and
+all sessions while preserving product data for reviewed recovery.
 
 ## Workspace placement
 
@@ -104,6 +157,64 @@ later database rebuild cannot resurrect the departed organization identity.
 Cloud provisioning is not implemented by this hierarchy change. When it ships,
 the create path must reject Personal before dispatch and re-authorize the
 organization, membership, capability, plan, and quota on the server.
+
+### Local and cloud are execution modes, not movable containers
+
+Do not implement a destructive “move workspace between local and cloud”
+operation. Local and cloud workspaces have different trust, persistence, and
+collaboration semantics:
+
+- a local workspace is a device-owned checkout. Its path, conversations,
+  uncommitted files, and existence are not uploaded merely because the user is
+  viewing it under a Pro/Business organization context;
+- a cloud workspace is a server record with an immutable Zeros ID,
+  `organization_id`, `team_id`, creator, repository binding, generation,
+  policy, and provider resource. Authorized team members can discover it; and
+- switching the UI organization never retargets either kind of workspace.
+
+Use explicit copy-like workflows instead:
+
+1. **Create cloud from local.** Reauthorize the destination organization/team,
+   plan, seat, repository, quota, and actor role. Create a new cloud workspace
+   from a durable remote repository plus exact commit/branch. Keep the local
+   workspace. Transferring uncommitted changes requires a separate reviewed,
+   encrypted snapshot/patch feature; it is never implicit.
+2. **Open cloud locally.** Clone/check out the cloud workspace's repository and
+   exact revision into a new local workspace. Record an optional
+   `source_cloud_workspace_id` for navigation, but do not change or hide the
+   shared cloud workspace. Subsequent local edits stay private until the user
+   explicitly pushes or shares them.
+3. **Fork cloud.** Creating an independent cloud copy produces a new workspace
+   ID and generation with explicit destination ownership. It is not a move and
+   does not steal collaborators from the source.
+
+In a Pro organization, the initial single default team means every active org
+member can discover its cloud workspaces. In Business/Enterprise, each cloud
+workspace belongs to one child team; team members can discover it and
+organization owners/admins receive only the explicitly defined administrative
+visibility. Cross-team sharing must be an explicit grant, not a side effect of
+being in the same organization.
+
+When organization access is removed, server credentials and endpoint grants
+are revoked immediately and cloud APIs deny the member. A checkout already on
+their device cannot be remotely erased; it becomes a private local workspace
+under Personal and no longer receives organization secrets or cloud access.
+This limitation must be clear to enterprise customers and complemented by
+repository/provider revocation and, where required, managed-device controls.
+
+### Cloud ownership invariants
+
+- Every cloud workspace has exactly one non-Personal `organization_id` and one
+  live `team_id` belonging to that organization.
+- Repository authorization, chat/data rows, artifacts, endpoint grants,
+  usage, and billing dimensions carry the same organization/workspace scope.
+- All reads and mutations reauthorize current account, organization, team,
+  plan, and resource generation on the server; client switcher state is never
+  authority.
+- Organization/team deletion first blocks creation/wake and revokes grants,
+  then reconciles/archive-deletes provider resources according to retention.
+- A WorkOS outage may pause create/wake, invite, or membership convergence but
+  never grants access and never prevents safe stop/archive/delete cleanup.
 
 ## Client and management boundaries
 

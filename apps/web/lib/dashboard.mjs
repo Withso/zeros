@@ -5,6 +5,7 @@ const ORGANIZATION_LOGO_RE =
   /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+=*$/;
 const ORGANIZATION_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 
 /** Preserve only dashboard navigation intent through a browser OAuth round
  * trip. Desktop handoff credentials and arbitrary query parameters must not be
@@ -72,6 +73,154 @@ function initials(value) {
   return `${parts[0]?.[0] ?? "P"}${parts[1]?.[0] ?? ""}`.toUpperCase();
 }
 
+/** Accept only the control plane's fixed machine code and public locator. The
+ * provider/backend message is intentionally discarded so it cannot become UI. */
+export function parseAccountRecoveryError(status, body) {
+  const parsed = parseAccountResolutionError(status, body);
+  return parsed?.kind === "recovery_required"
+    ? { recoveryCode: parsed.recoveryCode }
+    : null;
+}
+
+/** Map only fixed server machine codes into UI states. Provider/backend
+ * messages are discarded and can never become trusted markup. */
+export function parseAccountResolutionError(status, body) {
+  if (
+    !body ||
+    typeof body !== "object" ||
+    !body.error ||
+    typeof body.error !== "object"
+  ) {
+    return null;
+  }
+  const code = body.error.code;
+  if (status === 409 && code === "account_exists") {
+    return { kind: "account_exists" };
+  }
+  if (status === 401 && code === "reauthentication_required") {
+    return { kind: "reauthentication_required" };
+  }
+  if (
+    status === 401 &&
+    ["account_deleted", "account_suspended", "identity_superseded"].includes(
+      code,
+    )
+  ) {
+    return { kind: "account_unavailable" };
+  }
+  if (status !== 409 || code !== "account_recovery_required") return null;
+  const candidate = body.error.details?.recoveryCode;
+  return {
+    kind: "recovery_required",
+    recoveryCode:
+      typeof candidate === "string" && RECOVERY_CODE_RE.test(candidate)
+        ? candidate
+        : null,
+  };
+}
+
+export function accountAccessPage({ session, kind, signOutHref }) {
+  const identity = session.name || session.email || "Zeros user";
+  const content = {
+    account_exists: {
+      title: "Use your existing sign-in",
+      summary:
+        "A Zeros account already uses this verified email with a different sign-in identity.",
+      detail:
+        "For your security, Zeros never links identities by matching email alone. Sign out and use the sign-in method you originally used, or contact Zeros support for reviewed help.",
+    },
+    reauthentication_required: {
+      title: "Sign in again",
+      summary:
+        "A recent authentication is required before this identity can continue.",
+      detail:
+        "Sign out, then complete Hosted AuthKit again. This fresh proof protects account recovery and other sensitive changes.",
+    },
+    account_unavailable: {
+      title: "Account access unavailable",
+      summary: "This Zeros account is no longer active.",
+      detail:
+        "Sign out before trying another account. If you believe this is unexpected, contact Zeros support.",
+    },
+  }[kind] ?? {
+    title: "Account access unavailable",
+    summary: "Zeros could not authorize this account.",
+    detail: "Sign out and contact Zeros support if the problem continues.",
+  };
+  return `<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <title>Zeros · ${esc(content.title)}</title>
+  <link rel="stylesheet" href="/dashboard.css" />
+</head>
+<body class="dashboard-page">
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Zeros account">
+      <a class="brand" href="/" aria-label="Zeros home"><span class="brand-mark">Z</span><span>Zeros</span></a>
+      <div class="sidebar-account"><span class="avatar">${esc(initials(identity))}</span><span><strong>${esc(identity)}</strong><small>${esc(session.email || "")}</small></span><a href="${esc(signOutHref)}">Sign out</a></div>
+    </aside>
+    <main class="main-content">
+      <div class="content-column">
+        <section class="section-stack">
+          <div class="section-heading"><div><h1>${esc(content.title)}</h1><p>${esc(content.summary)}</p></div></div>
+          <div class="notice notice-error"><strong>Access was stopped safely</strong><p>${esc(content.detail)}</p></div>
+          <div><a class="button secondary" href="${esc(signOutHref)}">Sign out</a> <a class="button secondary" href="mailto:hello@zeros.build">Contact support</a></div>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`;
+}
+
+/** A valid WorkOS ceremony can still require deliberate identity recovery.
+ * Keep this out of the ordinary dashboard so it is never mislabeled as an
+ * organization/network outage, and never serialize browser credentials. */
+export function accountRecoveryPage({ session, recoveryCode, signOutHref }) {
+  const safeRecoveryCode =
+    typeof recoveryCode === "string" && RECOVERY_CODE_RE.test(recoveryCode)
+      ? recoveryCode
+      : null;
+  const identity = session.name || session.email || "Zeros user";
+  return `<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex" />
+  <title>Zeros · Account recovery</title>
+  <link rel="stylesheet" href="/dashboard.css" />
+</head>
+<body class="dashboard-page">
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Zeros account">
+      <a class="brand" href="/" aria-label="Zeros home"><span class="brand-mark">Z</span><span>Zeros</span></a>
+      <div class="sidebar-account"><span class="avatar">${esc(initials(identity))}</span><span><strong>${esc(identity)}</strong><small>${esc(session.email || "")}</small></span><a href="${esc(signOutHref)}">Sign out</a></div>
+    </aside>
+    <main class="main-content">
+      <div class="content-column">
+        <section class="section-stack">
+          <div class="section-heading"><div><h1>Account recovery required</h1><p>Your sign-in completed securely, but it cannot be linked automatically.</p></div></div>
+          <div class="notice notice-error">
+            <strong>We protected your existing Zeros account</strong>
+            <p>A previous WorkOS identity for this verified email was removed. Zeros never links a new identity by email alone, because that could let the wrong person take over the account.</p>
+          </div>
+          <div class="card">
+            <div class="card-title"><div><strong>What to do</strong><p>Email <a href="mailto:hello@zeros.build">hello@zeros.build</a>${safeRecoveryCode ? " and include the recovery code below" : " for a reviewed recovery"}. The code is a support locator, not a password, and expires after 24 hours.</p></div></div>
+            ${safeRecoveryCode ? `<div class="settings-row"><span class="settings-copy"><strong>Recovery code</strong><p>Share this only with Zeros support.</p></span><span class="settings-value"><code class="id-code">${esc(safeRecoveryCode)}</code></span></div>` : ""}
+          </div>
+          <div><a class="button secondary" href="${esc(signOutHref)}">Sign out</a></div>
+        </section>
+      </div>
+    </main>
+  </div>
+</body>
+</html>`;
+}
+
 function organizationLabel(org) {
   return org?.name?.trim() || "Personal";
 }
@@ -122,7 +271,7 @@ function generalSection(org) {
       <div class="settings-row"><span class="settings-copy"><strong>Your role</strong><p>What you can do in this organization.</p></span><span class="settings-value"><span class="badge">${esc(org.role)}</span></span></div>
     </div>
     <div class="card"><div class="card-title"><div><strong>Workspace access</strong><p>Capability metadata; cloud provisioning will still enforce plan and quota.</p></div></div><div class="capability-grid"><div class="capability"><span class="status-dot success"></span><div><strong>Local workspaces</strong><p>Available on your Mac</p></div></div><div class="capability ${org.workspaceCapabilities?.cloud ? "" : "disabled"}"><span class="status-dot ${org.workspaceCapabilities?.cloud ? "success" : ""}"></span><div><strong>Cloud workspaces</strong><p>${org.workspaceCapabilities?.cloud ? "Organization eligible" : "Not available in Personal"}</p></div></div></div></div>
-    ${org.isPersonal ? '<div class="notice"><strong>Personal is permanent</strong><p>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</p></div>' : org.role === "owner" ? `<div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete organization</strong><p>Revokes pending invitations and removes the organization from Zeros. Cloud-resource cleanup will be coordinated here before cloud workspaces ship.</p></div><button class="button danger" type="button" data-action="delete-organization">Delete organization</button></div></div>` : ""}
+    ${org.isPersonal ? '<div class="notice"><strong>Personal is permanent</strong><p>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</p></div>' : org.role === "owner" ? `<div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete organization</strong><p>Revokes pending invitations and removes the organization from Zeros. Every cloud workspace must be deleted and provider cleanup verified first.</p></div><button class="button danger" type="button" data-action="delete-organization">Delete organization</button></div></div>` : ""}
   </section>`;
 }
 

@@ -237,6 +237,36 @@ describe("WorkOS desktop hosted authorization", () => {
     expect(onError).toHaveBeenCalledWith("email_unverified");
   });
 
+  it("surfaces reviewed account recovery with its non-secret support locator", async () => {
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const harness = setup({
+      onError,
+      resolveAccountId: async () => {
+        throw Object.assign(new Error("recovery required"), {
+          code: "account_recovery_required",
+          status: 409,
+          recoveryCode: "ZR-ABCD-2345",
+        });
+      },
+    });
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "real-code",
+      }),
+    ).toBe(true);
+    await error.promise;
+
+    expect(onError).toHaveBeenCalledWith("account_recovery_required", {
+      recoveryCode: "ZR-ABCD-2345",
+    });
+    expect(harness.persistSession).not.toHaveBeenCalled();
+    expect(harness.revokeSession).toHaveBeenCalledWith(session.accessToken);
+  });
+
   it("still reports an unnamed exchange failure as the generic reason", async () => {
     const error = deferred<void>();
     const onError = vi.fn(() => error.resolve());

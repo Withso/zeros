@@ -360,6 +360,29 @@ export function getProductAccountIdForMain(): string | null {
   return user?.accountId ?? user?.sub ?? null;
 }
 
+/**
+ * Remove a server-revoked WorkOS session without making another provider
+ * request. Both stable identities must still match the captured monitor
+ * binding, so a delayed SSE/401 from Session A cannot erase a replacement
+ * Session B installed while the request was in flight.
+ */
+export function clearWorkOSSessionAfterServerRevocation(expected: {
+  accountId: string;
+  sessionId: string;
+}): boolean {
+  const snapshot = readTokenSnapshot();
+  if (
+    snapshot?.tokens.provider !== "workos" ||
+    snapshot.tokens.accountId !== expected.accountId ||
+    snapshot.tokens.sessionId !== expected.sessionId
+  ) {
+    return false;
+  }
+  const removed = replaceSecretIfUnchanged(TOKENS_KEY, snapshot.raw, null);
+  if (removed) notifySessionChanged();
+  return removed;
+}
+
 export const authGetAccessToken: CommandHandler = async () => ({
   access_token: await getValidAccessTokenForMain(),
 });

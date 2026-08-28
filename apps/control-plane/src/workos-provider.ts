@@ -1,4 +1,4 @@
-import { WorkOS, type User } from "@workos-inc/node";
+import { WorkOS, type Event, type EventName, type User } from "@workos-inc/node";
 import { createRemoteJWKSet, decodeJwt, jwtVerify } from "jose";
 
 import type { AuthBackendConfig, WorkOSBackendConfig } from "./config.js";
@@ -77,6 +77,91 @@ export interface WorkOSDesktopAuthorizationProvider {
   }): string;
 }
 
+export type WorkOSOrganizationRecord = {
+  id: string;
+  name: string;
+  externalId: string | null;
+  updatedAt: string;
+};
+
+export type WorkOSMembershipRecord = {
+  id: string;
+  organizationId: string;
+  userId: string;
+  status: "active" | "inactive" | "pending";
+  directoryManaged: boolean;
+  roleSlug: string;
+  updatedAt: string;
+};
+
+export type WorkOSInvitationRecord = {
+  id: string;
+  organizationId: string | null;
+  email: string;
+  state: "pending" | "accepted" | "expired" | "revoked";
+  roleSlug: string | null;
+  updatedAt: string;
+};
+
+export type WorkOSManagementEvent = {
+  id: string;
+  event: string;
+  createdAt: string;
+  data: Record<string, unknown>;
+};
+
+export interface WorkOSManagementProvider {
+  constructWebhookEvent(
+    payload: string,
+    signature: string,
+    secret: string,
+  ): Promise<WorkOSManagementEvent>;
+  listEvents(options: {
+    events: string[];
+    after?: string;
+    limit: number;
+  }): Promise<{ data: WorkOSManagementEvent[]; after: string | null }>;
+  createOrganization(options: {
+    name: string;
+    externalId: string;
+    idempotencyKey: string;
+  }): Promise<WorkOSOrganizationRecord>;
+  getOrganizationByExternalId(
+    externalId: string,
+  ): Promise<WorkOSOrganizationRecord>;
+  updateOrganization(options: {
+    organizationId: string;
+    name: string;
+    externalId: string;
+  }): Promise<WorkOSOrganizationRecord>;
+  deleteOrganization(organizationId: string): Promise<void>;
+  createMembership(options: {
+    organizationId: string;
+    userId: string;
+    roleSlug: string;
+  }): Promise<WorkOSMembershipRecord>;
+  updateMembership(options: {
+    membershipId: string;
+    roleSlug: string;
+  }): Promise<WorkOSMembershipRecord>;
+  deleteMembership(membershipId: string): Promise<void>;
+  listMemberships(options: {
+    organizationId: string;
+    userId: string;
+  }): Promise<WorkOSMembershipRecord[]>;
+  sendInvitation(options: {
+    organizationId: string;
+    email: string;
+    roleSlug: string;
+  }): Promise<WorkOSInvitationRecord>;
+  listInvitations(options: {
+    organizationId: string;
+    email: string;
+  }): Promise<WorkOSInvitationRecord[]>;
+  revokeInvitation(invitationId: string): Promise<WorkOSInvitationRecord>;
+  revokeSession(sessionId: string): Promise<void>;
+}
+
 type WorkOSAuthConfig = Extract<AuthBackendConfig, { provider: "workos" }>;
 
 function accessTokenExpiresAt(accessToken: string): number {
@@ -91,7 +176,8 @@ export class RailwayWorkOSProvider
   implements
     WorkOSBrowserProvider,
     WorkOSDesktopProvider,
-    WorkOSDesktopAuthorizationProvider
+    WorkOSDesktopAuthorizationProvider,
+    WorkOSManagementProvider
 {
   private readonly client: WorkOS;
   private readonly desktopJwks: ReturnType<typeof createRemoteJWKSet>;
@@ -304,5 +390,212 @@ export class RailwayWorkOSProvider
 
   async revokeSession(sessionId: string): Promise<void> {
     await this.client.userManagement.revokeSession({ sessionId });
+  }
+
+  private managementEvent(event: Event): WorkOSManagementEvent {
+    return {
+      id: event.id,
+      event: event.event,
+      createdAt: event.createdAt,
+      data: event.data as unknown as Record<string, unknown>,
+    };
+  }
+
+  async constructWebhookEvent(
+    payload: string,
+    signature: string,
+    secret: string,
+  ): Promise<WorkOSManagementEvent> {
+    return this.managementEvent(
+      await this.client.webhooks.constructEvent({
+        payload,
+        sigHeader: signature,
+        secret,
+      }),
+    );
+  }
+
+  async listEvents(options: {
+    events: string[];
+    after?: string;
+    limit: number;
+  }): Promise<{ data: WorkOSManagementEvent[]; after: string | null }> {
+    const page = await this.client.events.listEvents({
+      events: options.events as EventName[],
+      limit: options.limit,
+      order: "asc",
+      ...(options.after ? { after: options.after } : {}),
+    });
+    return {
+      data: page.data.map((event) => this.managementEvent(event)),
+      after: page.listMetadata.after ?? null,
+    };
+  }
+
+  private organizationRecord(organization: {
+    id: string;
+    name: string;
+    externalId: string | null;
+    updatedAt: string;
+  }): WorkOSOrganizationRecord {
+    return {
+      id: organization.id,
+      name: organization.name,
+      externalId: organization.externalId,
+      updatedAt: organization.updatedAt,
+    };
+  }
+
+  async createOrganization(options: {
+    name: string;
+    externalId: string;
+    idempotencyKey: string;
+  }): Promise<WorkOSOrganizationRecord> {
+    return this.organizationRecord(
+      await this.client.organizations.createOrganization(
+        { name: options.name, externalId: options.externalId },
+        { idempotencyKey: options.idempotencyKey },
+      ),
+    );
+  }
+
+  async getOrganizationByExternalId(
+    externalId: string,
+  ): Promise<WorkOSOrganizationRecord> {
+    return this.organizationRecord(
+      await this.client.organizations.getOrganizationByExternalId(externalId),
+    );
+  }
+
+  async updateOrganization(options: {
+    organizationId: string;
+    name: string;
+    externalId: string;
+  }): Promise<WorkOSOrganizationRecord> {
+    return this.organizationRecord(
+      await this.client.organizations.updateOrganization({
+        organization: options.organizationId,
+        name: options.name,
+        externalId: options.externalId,
+      }),
+    );
+  }
+
+  async deleteOrganization(organizationId: string): Promise<void> {
+    await this.client.organizations.deleteOrganization(organizationId);
+  }
+
+  private membershipRecord(membership: {
+    id: string;
+    organizationId: string;
+    userId: string;
+    status: "active" | "inactive" | "pending";
+    directoryManaged: boolean;
+    role: { slug: string };
+    updatedAt: string;
+  }): WorkOSMembershipRecord {
+    return {
+      id: membership.id,
+      organizationId: membership.organizationId,
+      userId: membership.userId,
+      status: membership.status,
+      directoryManaged: membership.directoryManaged,
+      roleSlug: membership.role.slug,
+      updatedAt: membership.updatedAt,
+    };
+  }
+
+  async createMembership(options: {
+    organizationId: string;
+    userId: string;
+    roleSlug: string;
+  }): Promise<WorkOSMembershipRecord> {
+    return this.membershipRecord(
+      await this.client.userManagement.createOrganizationMembership({
+        organizationId: options.organizationId,
+        userId: options.userId,
+        roleSlug: options.roleSlug,
+      }),
+    );
+  }
+
+  async updateMembership(options: {
+    membershipId: string;
+    roleSlug: string;
+  }): Promise<WorkOSMembershipRecord> {
+    return this.membershipRecord(
+      await this.client.userManagement.updateOrganizationMembership(
+        options.membershipId,
+        { roleSlug: options.roleSlug },
+      ),
+    );
+  }
+
+  async deleteMembership(membershipId: string): Promise<void> {
+    await this.client.userManagement.deleteOrganizationMembership(membershipId);
+  }
+
+  async listMemberships(options: {
+    organizationId: string;
+    userId: string;
+  }): Promise<WorkOSMembershipRecord[]> {
+    const page = await this.client.userManagement.listOrganizationMemberships({
+      organizationId: options.organizationId,
+      userId: options.userId,
+      limit: 100,
+    });
+    return page.data.map((membership) => this.membershipRecord(membership));
+  }
+
+  private invitationRecord(invitation: {
+    id: string;
+    organizationId: string | null;
+    email: string;
+    state: "pending" | "accepted" | "expired" | "revoked";
+    roleSlug: string | null;
+    updatedAt: string;
+  }): WorkOSInvitationRecord {
+    return {
+      id: invitation.id,
+      organizationId: invitation.organizationId,
+      email: invitation.email,
+      state: invitation.state,
+      roleSlug: invitation.roleSlug,
+      updatedAt: invitation.updatedAt,
+    };
+  }
+
+  async sendInvitation(options: {
+    organizationId: string;
+    email: string;
+    roleSlug: string;
+  }): Promise<WorkOSInvitationRecord> {
+    return this.invitationRecord(
+      await this.client.userManagement.sendInvitation({
+        organizationId: options.organizationId,
+        email: options.email,
+        roleSlug: options.roleSlug,
+      }),
+    );
+  }
+
+  async listInvitations(options: {
+    organizationId: string;
+    email: string;
+  }): Promise<WorkOSInvitationRecord[]> {
+    const page = await this.client.userManagement.listInvitations({
+      organizationId: options.organizationId,
+      email: options.email,
+      limit: 100,
+    });
+    return page.data.map((invitation) => this.invitationRecord(invitation));
+  }
+
+  async revokeInvitation(
+    invitationId: string,
+  ): Promise<WorkOSInvitationRecord> {
+    return this.invitationRecord(
+      await this.client.userManagement.revokeInvitation(invitationId),
+    );
   }
 }

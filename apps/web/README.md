@@ -126,7 +126,7 @@ Provider-specific Pages configuration:
 same-origin requests through `functions/api/[[path]].ts`; that proxy reads the
 verified server-side session, keeps bearer and refresh material out of browser
 JavaScript, permits only the organization-management route set, bounds request
-bodies, and returns JSON with `no-store` caching. Mutations require a
+and upstream JSON bodies, and returns JSON with `no-store` caching. Mutations require a
 same-origin `Origin`, JSON content type, and `X-Zeros-Request: dashboard`.
 
 ### Authentication modes
@@ -150,10 +150,11 @@ WorkOS client/verification values, and `APP_ORIGIN` only on the matching
 Railway service. Remove any retired `AUTH_SESSIONS` binding,
 `WORKOS_SESSION_WORKER`, or `AUTH_BROKER_SECRET` from Pages.
 
-Register `https://<channel-api-host>/auth/workos-webhook` for only
-`user.updated` and `user.deleted`. The old app-host webhook URL remains a
-byte-preserving compatibility pass-through during cutover, but holds no signing
-secret.
+Register `https://<channel-api-host>/auth/workos-webhook` for the user,
+session, organization, organization-membership, and invitation event set in
+[`docs/workos-authentication-migration.md`](../../docs/workos-authentication-migration.md).
+The old app-host webhook URL remains a byte-preserving compatibility
+pass-through during cutover, but holds no signing secret.
 
 Desktop WorkOS login also starts and returns on the channel's own app host. The
 desktop keeps the PKCE verifier in Electron main and opens `/auth/desktop`.
@@ -169,6 +170,20 @@ token or verification ID. The callback never server-renders the authorization
 code, strips it from browser history, and opens only the allow-listed
 exact-channel scheme. Its no-store/no-referrer/nonce CSP is preserved by the
 global host middleware.
+
+The signed-in dashboard opens one authenticated EventSource through
+`/api/v1/auth/events`; account/session revocation signs out, while organization
+authorization/data changes revalidate scoped state. Focus, visibility,
+`pageshow`, and reconnect use `/api/v1/auth/snapshot` only when the stream has
+been silent for at least 60 seconds. There is no 30-second auth poll. A
+transient outage retains the last confirmed dashboard snapshot, but every API
+request still reauthorizes on Railway.
+
+A successful Hosted AuthKit ceremony can still be refused by Zeros account
+resolution. Reviewed recovery, a conflicting active identity, a fresh-auth
+requirement, and an inactive account render separate fixed pages with sign-out
+and support actions; none is labeled as an organization/network outage and raw
+upstream messages never enter HTML.
 
 A custom AuthKit domain is optional for the initial cutover and should be
 evaluated independently for Production branding and anti-phishing. The
@@ -258,7 +273,9 @@ apps/web/
 | Session cookies            | Still host-only on app; never widened for marketing                                                                                                               |
 | Dashboard credentials      | Auth0 grants stay in compatibility KV; WorkOS sealed/refresh state stays in Railway/Postgres; browser boot data contains identity and organization summaries only |
 | WorkOS refresh outage      | Pre-rotation transient failures preserve the exact record; a post-rotation verification outage persists the replacement seal but withholds the bearer             |
-| WorkOS lifecycle event     | Pages preserves exact bytes; Railway verifies the signature before reducing `user.updated`/`user.deleted`; retries are idempotent                                 |
+| WorkOS lifecycle event     | Pages preserves exact bytes; Railway verifies the signature before reducing the complete management event set; webhooks are idempotent and Events API repairs misses |
+| Account resolution         | Recovery/conflict/fresh-auth/inactive states have dedicated fixed UI; provider text and bearer/refresh material never render                                  |
+| Authorization freshness    | One SSE connection plus durable revisions; lifecycle snapshots are silence/reconnect backstops, not periodic polling                                            |
 | Dashboard mutations        | Same-origin JSON plus custom-header gate; route and body allowlists reject ambient-cookie form attacks                                                            |
 | Personal                   | Name follows provider identity, local-only, permanent, and collaboration/billing sections are disabled                                                            |
 | Schema URLs                | Still served at `zeros.build/schemas/*` after cutover                                                                                                             |

@@ -1,7 +1,8 @@
 # WorkOS Hosted AuthKit architecture and rollout
 
-Status: repository implementation complete; dashboard configuration, channel
-deployment, and real Alpha acceptance remain pending.
+Status: one-PR foundation and Alpha qualification. Repository implementation,
+dashboard configuration, deployment, and real Alpha acceptance are all release
+gates; this document never treats a local test pass as a production approval.
 
 Retention: keep this document while Auth0 compatibility exists. After every
 supported release uses WorkOS, move the durable contracts into the permanent
@@ -13,8 +14,21 @@ separate rollout, then delete this migration document.
 Zeros uses [WorkOS Hosted AuthKit](https://workos.com/docs/authkit/hosted-ui) as
 the only interactive authentication surface. Zeros does not render password,
 one-time-code, email-verification, MFA, social-provider, or account-linking
-forms. Hosted AuthKit owns those ceremonies, including verification, Radar/bot
-protection, localization, and recovery.
+forms. Hosted AuthKit owns those ceremonies, including verification,
+localization, and recovery; provider-side bot controls remain subject to the
+explicit policy below.
+
+The intended Alpha methods are Google, GitHub, and WorkOS Magic Auth (the
+hosted six-digit, single-use email code). Email + Password is not part of the
+Zeros launch contract and should remain disabled unless a later product and
+threat-model decision adds it. WorkOS sends the authentication emails; Zeros
+does not retrieve, store, log, proxy, or deliver Magic Auth codes.
+
+Radar is explicitly deferred because it is a paid feature. Leave it disabled;
+the foundation must remain secure without it. If it is purchased later, begin
+in observation/log mode, inspect detections and false positives, and approve a
+separate enforcement change. No Zeros authorization decision may depend on
+Radar being present.
 
 Every authorization URL uses `provider=authkit`. Browser, Pages, desktop, and
 deep-link callers cannot select a WorkOS connection, organization, or social
@@ -29,10 +43,59 @@ If Hosted AuthKit has not completed verification, Zeros receives no usable
 session. A defensive desktop error mapping remains so an unexpected
 `email_verification_required` response fails closed.
 
-WorkOS authenticates people. Zeros Postgres remains authoritative for product
-accounts, Personal workspaces, organizations, teams, roles, invitations,
-billing metadata, GitHub repository authorization, audit history, and future
-cloud resources.
+WorkOS authenticates people and is authoritative for WorkOS identities,
+credentials, provider sessions, collaborative-organization objects, and the
+provider-side coarse membership lifecycle. Zeros Postgres remains
+authoritative for durable product account IDs, Personal, billing and
+entitlements, child teams, team membership, workspace/repository access,
+product permissions, audit history, and all cloud resources. Zeros also keeps
+the locally enforced projection and desired state for WorkOS organizations,
+memberships, and invitations. Provider objects are never queried on every API
+request; signed events and a durable repair stream converge the projection.
+
+This split is intentional: WorkOS can revoke authentication or enterprise
+membership, while a WorkOS outage cannot make Zeros forget who owns product
+data. Authorization still fails closed when the local account/session or
+organization membership is inactive.
+
+## Single-PR implementation phases
+
+The work lands as one reviewed PR so schema, server, web, desktop, tests, and
+runbooks cannot be promoted in incompatible combinations. The phases are
+logical gates inside that PR, not independently shippable partial designs:
+
+1. **Contracts and schema.** Preserve stable Zeros UUID ownership; add identity
+   and session lifecycle, WorkOS organization/membership projections, durable
+   command/event outboxes, authorization/data revisions, reviewed recovery,
+   and security-notification outboxes with forward-only migrations.
+2. **Hosted authentication.** Make Hosted AuthKit the one Web/Desktop entry;
+   implement browser server-side code+PKCE and opaque host-only cookies;
+   implement Electron public-client code+PKCE, exact-channel deep links,
+   pinned JWT verification, and OS-protected persistence.
+3. **Account safety.** Register every WorkOS session, reject email-based
+   ownership transfer, disable a deleted provider identity without deleting
+   product data, and expose a fresh-auth, staff-reviewed recovery flow with
+   immutable audit/security notifications.
+4. **Collaborative identity.** Mirror every non-Personal Zeros organization to
+   one WorkOS organization; serialize organization, membership, invitation,
+   and revocation commands; consume signed WorkOS events; and repair missed
+   webhooks through the cursor-based Events API.
+5. **Immediate authorization changes.** Publish durable security revisions to
+   one authenticated SSE stream per active client. Use launch/reconnect/focus/
+   wake snapshots only after stream silence; never add a universal 30-second
+   authentication poll.
+6. **Product enforcement and UX.** Gate cloud create/wake on an active WorkOS
+   organization link, preserve cleanup during provider incidents, refuse local
+   edits to directory-managed memberships, and give recovery/conflict/outage
+   states distinct bounded UI on web and desktop.
+7. **Qualification and promotion.** Run the complete repository, migration,
+   database, Electron, packaging, security, license, and build suites; deploy
+   the same SHA to Alpha Railway and Pages; configure WorkOS; execute the real
+   web/macOS matrix; observe; then promote unchanged to Beta/Production.
+
+Every phase retains its regression tests in the same PR. A failure in any gate
+blocks merge; rollback changes provider/configuration atomically and never
+reinterprets product ownership.
 
 ## Durable identity boundary
 
@@ -48,11 +111,96 @@ cloud resources.
   WorkOS identity linking. Zeros does not implement parallel email-based
   linking. WorkOS documents why unverified identities must never be linked:
   [Identity linking](https://workos.com/docs/authkit/identity-linking).
-- `user.updated` refreshes bounded profile data. `user.deleted` soft-deletes
-  the authentication row only. Neither event cascades into product data.
+- `user.updated` refreshes bounded profile data. `user.deleted` disables the
+  identity and Zeros account, revokes all known browser/desktop sessions and
+  cloud endpoint grants, and removes collaborative access. Personal and all
+  product data remain preserved for reviewed recovery or retention policy.
 - The independent Zeros GitHub App remains the sole owner of repository
   authorization. WorkOS login must not request extra GitHub scopes or return
   provider access/refresh tokens.
+
+## Account deletion, replacement, and recovery
+
+Deleting a WorkOS User is an authentication revocation, not a product-data
+deletion. The signed `user.deleted` event moves the subject mapping to
+`provider_deleted`, moves the Zeros account to `identity_disabled`, tombstones
+its provider memberships, revokes sessions/grants, emits durable security
+events, and queues a bounded notification email. Product rows continue to use
+the unchanged Zeros UUID.
+
+If someone later signs in with a newly created WorkOS User that has the same
+email, Zeros does **not** relink it. A recent provider authentication creates a
+24-hour recovery request and displays only its public `ZR-…` locator. A staff
+operator must reauthenticate within five minutes, verify the evidence out of
+band, and approve the exact request. Approval supersedes the deleted identity,
+binds the new subject to the original UUID, increments the account revision,
+audits the operation, and sends a notification. It does not silently restore
+collaborative memberships; those must be re-provisioned by the organization or
+enterprise directory.
+
+An active account reached through a different WorkOS subject returns
+`account_exists`; email alone is never enough to merge it. Browser and desktop
+render fixed guidance for `account_exists`, `reauthentication_required`,
+inactive accounts, and reviewed recovery. Raw provider/database messages are
+discarded.
+
+## Organization management synchronization
+
+Every collaborative Zeros organization owns exactly one WorkOS Organization,
+correlated by `external_id=<zeros organization UUID>`. Personal deliberately
+has no WorkOS Organization. Zeros-originated changes commit product state and a
+command in the same PostgreSQL transaction; a leased worker then converges the
+provider operation. Commands are at-least-once, aggregate-ordered, retry with
+bounded backoff, recover from provider-accepted/lost responses by listing the
+provider object, and dead-letter rather than guessing after a terminal error.
+
+Signed webhooks are the low-latency path. The WorkOS Events API is the durable
+repair path and advances a stored cursor only after an event is applied,
+ignored by policy, or safely quarantined for forward-incompatible payloads.
+Projection timestamps reject stale updates. Successful local removal writes a
+terminal membership tombstone, and an event arriving while a membership
+command is queued/processing may update the provider projection but cannot
+overwrite the locally enforced desired state. Invitation replacement is
+serialized by organization plus a hash of normalized email. If an invitation
+event arrives after WorkOS accepts a command but before the exact provider ID
+is committed locally, it is retained as ignored and replayed immediately after
+that exact ID is correlated; replay never falls back to email matching.
+
+Directory-managed (`directory_managed=true`) memberships materialize with
+`membership_source='scim'`. Zeros refuses local role changes and removals for
+them because directory group assignment takes precedence and would otherwise
+create split-brain access. Enterprise administrators must make those changes
+in their identity provider.
+
+The subscribed management event set is:
+
+- `user.created`, `user.updated`, `user.deleted`;
+- `session.created`, `session.revoked`;
+- `organization.created`, `organization.updated`, `organization.deleted`;
+- `organization_membership.created`, `.updated`, `.deleted`; and
+- `invitation.created`, `.accepted`, `.revoked`, `.resent`.
+
+`user.created` is recorded/ignored for JIT product provisioning: only a
+verified Zeros API request creates the durable product account. Events are
+idempotent by WorkOS event ID.
+
+## Revocation without polling
+
+Zeros does not call WorkOS every 30 seconds. Railway verifies ordinary access
+tokens locally and checks the Postgres account/session/membership projection.
+Security-relevant transactions increment monotonic revisions, append a durable
+`security_events` row, and wake connected clients through PostgreSQL
+`LISTEN/NOTIFY` (the notification is only a wake-up; rows are replayable).
+
+The browser maintains one authenticated EventSource and the desktop main
+process maintains one bounded SSE connection. Account/session events sign out;
+organization authorization/data events refresh scoped state. Launch performs a
+snapshot. Focus, visibility, macOS wake/unlock, and reconnect request another
+snapshot only when the stream is absent or has been silent for at least 60
+seconds. A provider/network timeout preserves the last confirmed state; a
+terminal 401/403 clears only the exact expected session using compare-and-set.
+Every protected API request remains the final enforcement boundary, so a
+disconnected client cannot use stale UI to regain access.
 
 ## Trust boundaries
 
@@ -78,15 +226,17 @@ they do not call WorkOS and do not need its API key.
    verifier values. Only SHA-256 digests of the browser credential and state
    are indexed in Postgres. The verifier is retained in the expiring flow row
    because it is required for code exchange.
-3. Railway sets a `Secure`, `HttpOnly`, host-only `__Host-zeros_auth_flow`
-   cookie and redirects to Hosted AuthKit with `provider=authkit`, S256 PKCE,
-   the Web Application client ID, and the exact HTTPS callback.
+3. Railway sets a `Secure`, `HttpOnly`, host-only, `SameSite=Lax`
+   `__Host-zeros_auth_flow` cookie and redirects to Hosted AuthKit with
+   `provider=authkit`, S256 PKCE, the Web Application client ID, and the exact
+   HTTPS callback. `Lax` is limited to this short-lived cross-site callback
+   ceremony.
 4. Hosted AuthKit completes the entire login, verification, MFA, recovery, and
    linking ceremony before returning a code.
 5. Railway atomically claims the ten-minute flow using both cookie and state,
    exchanges the code, requires a verified WorkOS user, authenticates the
    sealed session, and promotes the same row to a browser session.
-6. Railway rotates to the `Secure`, `HttpOnly`, host-only
+6. Railway rotates to the `Secure`, `HttpOnly`, host-only, `SameSite=Strict`
    `__Host-zeros_session` cookie and redirects only to the previously bounded
    relative return path.
 7. Pages obtains a short-lived access token from Railway only while proxying
@@ -214,9 +364,10 @@ result without copying secrets into tickets or repository files.
 2. Create/verify separate Web and Desktop Applications and record their public
    client IDs.
 3. Register only the channel's exact redirects and default sign-out URI.
-4. Enable Hosted AuthKit and the intended authentication methods. Keep email
-   verification enabled; configure MFA/recovery policy in Hosted AuthKit, not
-   in Zeros code.
+4. Enable Hosted AuthKit, Google, GitHub, and Magic Auth. Keep email
+   verification and WorkOS-managed transactional email enabled. Disable Email
+   + Password unless a later product decision adds it. Configure MFA/recovery
+   policy in Hosted AuthKit, not in Zeros code.
 5. Configure Zeros-owned Google/GitHub OAuth credentials before Production.
    Provider tokens and extra provider scopes must remain disabled. Follow the
    WorkOS [GitHub OAuth setup](https://workos.com/docs/integrations/github-oauth)
@@ -227,11 +378,14 @@ result without copying secrets into tickets or repository files.
    [Sessions](https://workos.com/docs/authkit/sessions) and
    [session resilience](https://workos.com/docs/authkit/session-resilience).
 8. Create a webhook endpoint on the channel API origin at
-   `/auth/workos-webhook`, subscribed only to `user.updated` and
-   `user.deleted`. Store its signing secret only in Railway.
+   `/auth/workos-webhook`, subscribed to the complete management event set in
+   this document. Store its signing secret only in Railway. Confirm the Events
+   API repair worker uses the same event set and environment.
 9. Apply branding, support/contact, legal, and localization settings. Keep the
    Zeros signed-out page a launch surface, not a second login UI.
-10. For Production, evaluate an AuthKit custom domain as a branding and
+10. Confirm Radar remains disabled and record that state. Do not change its
+    enforcement behavior as part of this rollout.
+11. For Production, evaluate an AuthKit custom domain as a branding and
     anti-phishing improvement. A separate Auth API custom domain is not needed
     by this design; keep API/JWKS configuration pinned to the qualified WorkOS
     endpoints unless a reviewed migration changes it. See
@@ -259,6 +413,12 @@ WORKOS_WEBHOOK_SECRET=<channel endpoint signing secret>
 Railway-only secrets. Rotate each independently per channel. A cookie-password
 rotation invalidates outstanding browser sealed sessions, so schedule and
 communicate it as a forced browser sign-in.
+
+Production also configures `ZEPTOMAIL_TOKEN`, `EMAIL_FROM`, and the correct
+regional `ZEPTOMAIL_API_URL` so recovery and account-lifecycle security
+notifications leave the durable outbox. Delivery is at-least-once with a
+stable client reference; operators must monitor dead rows rather than assuming
+that an HTTP timeout means an email was not accepted.
 
 Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
 `CONTROL_PLANE_URL`. Electron compiles only public verification/configuration
@@ -319,7 +479,20 @@ Manual Alpha acceptance must verify:
 - browser refresh under concurrent requests and provider outage behavior;
 - desktop sign-in, restart restore, refresh, logout, all-session revocation,
   cancellation, timeout, and malformed/wrong-channel deep links;
-- user profile update and deletion webhook idempotency/conflict handling;
+- invalid Magic Auth code rejection, correct code, expiration, replay
+  rejection, persistence, and logout on both browser and desktop;
+- Google and GitHub first/returning login plus WorkOS identity-linking behavior;
+- user profile update/deletion, session revocation, organization/member/invite
+  webhook idempotency, reordering, lost-response recovery, and Events API
+  repair;
+- WorkOS User deletion while browser and desktop are open, proving both clients
+  terminate and that a recreated same-email identity enters reviewed recovery;
+- organization member removal/role change while both clients are open, proving
+  only organization-scoped access changes and Personal remains usable;
+- directory-managed membership refusal, last-owner safety, and cloud
+  create/wake denial after access or provider-link loss;
+- stream interruption/provider outage, proving last confirmed UI is retained
+  but protected APIs still deny stale access;
 - Pages contains no WorkOS secrets and response headers prevent auth callback
   caching/referrer leakage; and
 - macOS smoke checks plus separately recorded Windows/Linux packaging checks
@@ -335,6 +508,11 @@ Manual Alpha acceptance must verify:
 - [Applications](https://workos.com/docs/authkit/applications)
 - [Sessions](https://workos.com/docs/authkit/sessions)
 - [Session resilience](https://workos.com/docs/authkit/session-resilience)
+- [Events](https://workos.com/docs/events)
+- [Organization memberships](https://workos.com/docs/reference/authkit/organization-membership)
+- [Directory Sync](https://workos.com/docs/directory-sync)
+- [Magic Auth](https://workos.com/docs/authkit/magic-auth)
+- [Radar](https://workos.com/docs/authkit/radar)
 - [Testing AuthKit](https://workos.com/docs/authkit/testing)
 - [WorkOS Node SDK](https://github.com/workos/workos-node)
 - [WorkOS changelog](https://workos.com/changelog)

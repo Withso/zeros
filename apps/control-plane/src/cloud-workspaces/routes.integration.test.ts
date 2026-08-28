@@ -40,6 +40,27 @@ d("cloud workspace API contracts", () => {
   let installationId: string;
   let app: Hono;
 
+  const configureApp = (workosEnabled = false) => {
+    app = new Hono();
+    app.use("*", async (c, next) => {
+      c.set("user", actor);
+      await next();
+    });
+    app.route(
+      "/",
+      createCloudWorkspaceRoutes(pool, cloudConfig, { workosEnabled }),
+    );
+    app.onError((error, c) => {
+      if (error instanceof HttpError) {
+        return c.json(
+          { error: { code: error.code, message: error.message } },
+          error.status,
+        );
+      }
+      throw error;
+    });
+  };
+
   const signup = (name: string) => {
     const sub = randomUUID();
     return ensureUser(pool, {
@@ -162,21 +183,7 @@ d("cloud workspace API contracts", () => {
     teamId = seeded.defaultTeamId;
     installationId = seeded.installationId;
 
-    app = new Hono();
-    app.use("*", async (c, next) => {
-      c.set("user", actor);
-      await next();
-    });
-    app.route("/", createCloudWorkspaceRoutes(pool, cloudConfig));
-    app.onError((error, c) => {
-      if (error instanceof HttpError) {
-        return c.json(
-          { error: { code: error.code, message: error.message } },
-          error.status,
-        );
-      }
-      throw error;
-    });
+    configureApp();
   });
 
   it("creates one stable workspace + generation + intent and never exposes the provider id", async () => {
@@ -343,10 +350,14 @@ d("cloud workspace API contracts", () => {
     const created = await createWorkspace();
     const workspaceId = created.body.workspace.id;
     await pool.query(
-      `INSERT INTO cloud_workspace_endpoint_grants (
+       `INSERT INTO cloud_workspace_endpoint_grants (
          workspace_id, generation, org_id, account_user_id, purpose,
-         audience, token_hash, expires_at
-       ) VALUES ($1, 1, $2, $3, 'engine-connect', 'engine', $4, now() + interval '5 minutes')`,
+         audience, token_hash, account_revision, authorization_revision,
+         expires_at
+       ) VALUES (
+         $1, 1, $2, $3, 'engine-connect', 'engine', $4, 1, 1,
+         now() + interval '5 minutes'
+       )`,
       [
         workspaceId,
         orgId,
@@ -421,10 +432,11 @@ d("cloud workspace API contracts", () => {
       [created.body.workspace.id, orgId],
     );
     await pool.query(
-      `INSERT INTO cloud_workspace_endpoint_grants (
+       `INSERT INTO cloud_workspace_endpoint_grants (
          workspace_id, generation, org_id, account_user_id, purpose,
-         audience, token_hash, expires_at
-       ) VALUES ($1, 1, $2, $3, 'engine-connect', 'engine', $4,
+         audience, token_hash, account_revision, authorization_revision,
+         expires_at
+       ) VALUES ($1, 1, $2, $3, 'engine-connect', 'engine', $4, 1, 1,
                  now() + interval '5 minutes')`,
       [
         created.body.workspace.id,
@@ -527,6 +539,57 @@ d("cloud workspace API contracts", () => {
     expect(wake.status).toBe(403);
     await expect(wake.json()).resolves.toMatchObject({
       error: { code: "cloud_workspaces_not_allowed" },
+    });
+    const deleted = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}`,
+      { method: "DELETE", key: randomUUID() },
+    );
+    expect(deleted.status).toBe(202);
+  });
+
+  it("requires an active WorkOS organization link for create/wake while preserving cleanup", async () => {
+    await pool.query(
+      `INSERT INTO workos_organization_links (
+         organization_id, external_id, state
+       ) VALUES ($1::uuid, $1::uuid::text, 'provisioning')`,
+      [orgId],
+    );
+    configureApp(true);
+
+    const pendingCreate = await createWorkspace();
+    expect(pendingCreate.response.status).toBe(409);
+    expect(pendingCreate.body).toMatchObject({
+      error: { code: "organization_identity_not_ready" },
+    });
+
+    await pool.query(
+      `UPDATE workos_organization_links
+       SET state = 'active', workos_organization_id = 'org_workos_example'
+       WHERE organization_id = $1`,
+      [orgId],
+    );
+    const created = await createWorkspace();
+    expect(created.response.status).toBe(202);
+    const workspaceId = created.body.workspace.id;
+
+    const stopped = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/stop`,
+      { method: "POST", key: randomUUID() },
+    );
+    expect(stopped.status).toBe(202);
+    await pool.query(
+      `UPDATE workos_organization_links SET state = 'conflict'
+       WHERE organization_id = $1`,
+      [orgId],
+    );
+
+    const wake = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/wake`,
+      { method: "POST", key: randomUUID() },
+    );
+    expect(wake.status).toBe(409);
+    await expect(wake.json()).resolves.toMatchObject({
+      error: { code: "organization_identity_not_ready" },
     });
     const deleted = await request(
       `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}`,

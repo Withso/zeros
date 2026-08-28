@@ -274,15 +274,25 @@ function assertIdempotencyMatch(
 async function lockCloudOrganization(
   tx: Tx,
   orgId: string,
-): Promise<{ is_personal: boolean; cloud_workspaces_allowed: boolean }> {
+): Promise<{
+  is_personal: boolean;
+  cloud_workspaces_allowed: boolean;
+  workos_sync_state: string | null;
+  workos_organization_id: string | null;
+}> {
   const result = await tx.query<{
     is_personal: boolean;
     cloud_workspaces_allowed: boolean;
+    workos_sync_state: string | null;
+    workos_organization_id: string | null;
   }>(
-    `SELECT is_personal, cloud_workspaces_allowed
-     FROM organizations
-     WHERE id = $1 AND deleted_at IS NULL
-     FOR UPDATE`,
+    `SELECT o.is_personal, o.cloud_workspaces_allowed,
+            wol.state::text AS workos_sync_state,
+            wol.workos_organization_id
+     FROM organizations o
+     LEFT JOIN workos_organization_links wol ON wol.organization_id = o.id
+     WHERE o.id = $1 AND o.deleted_at IS NULL
+     FOR UPDATE OF o`,
     [orgId],
   );
   const organization = result.rows[0];
@@ -295,7 +305,9 @@ async function lockCloudOrganization(
 function assertCloudPlacementAllowed(organization: {
   is_personal: boolean;
   cloud_workspaces_allowed: boolean;
-}): void {
+  workos_sync_state: string | null;
+  workos_organization_id: string | null;
+}, workosEnabled = false): void {
   if (organization.is_personal) {
     throw new HttpError(
       409,
@@ -308,6 +320,17 @@ function assertCloudPlacementAllowed(organization: {
       403,
       "cloud_workspaces_not_allowed",
       "Cloud workspaces are not allowed for this organization",
+    );
+  }
+  if (
+    workosEnabled &&
+    (organization.workos_sync_state !== "active" ||
+      !organization.workos_organization_id)
+  ) {
+    throw new HttpError(
+      409,
+      "organization_identity_not_ready",
+      "Organization identity provisioning is not complete",
     );
   }
 }
@@ -435,6 +458,7 @@ function decodeCursor(raw: string | undefined): { createdAt: string; id: string 
 export function createCloudWorkspaceRoutes(
   pool: pg.Pool,
   config: CloudWorkspaceBackendConfig | null,
+  options: { workosEnabled?: boolean } = {},
 ): Hono {
   const app = new Hono();
   const base = "/v1/organizations/:organization/cloud-workspaces";
@@ -542,7 +566,10 @@ export function createCloudWorkspaceRoutes(
         );
         return { workspace, intent: existing, replayed: true };
       }
-      assertCloudPlacementAllowed(organization);
+      assertCloudPlacementAllowed(
+        organization,
+        options.workosEnabled === true,
+      );
 
       const team = await tx.query<{ id: string }>(
         `SELECT t.id
@@ -708,7 +735,10 @@ export function createCloudWorkspaceRoutes(
         );
       }
       if (operation === "wake") {
-        assertCloudPlacementAllowed(organization);
+        assertCloudPlacementAllowed(
+          organization,
+          options.workosEnabled === true,
+        );
         await assertWakeQuota(tx, orgId, workspace);
       }
 

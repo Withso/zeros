@@ -15,8 +15,10 @@ schema and is deployed independently from the desktop application.
   allowlist and session/token identifiers.
 - In WorkOS mode Railway also owns browser PKCE exchange, encrypted sealed
   sessions, PostgreSQL-serialized refresh, Hosted AuthKit Desktop Application
-  authorization, webhook verification, and desktop current/all-session
-  revocation. Cloudflare Pages holds none of those secrets.
+  authorization, webhook verification, desktop current/all-session revocation,
+  WorkOS management-command reconciliation, Events API repair, security-event
+  streaming, and durable lifecycle notifications. Cloudflare Pages holds none
+  of those secrets.
 - PostgreSQL owns application authorization and tenant data. Request
   transactions use the restricted `zeros_app` role with row-level security.
 - `GET /healthz` is public so Railway can evaluate service health.
@@ -96,6 +98,15 @@ The current tenant hierarchy is Account → Personal/Organization → Team →
 Member. Personal is permanent and local-only; every tenant currently receives
 one default child team. The compatibility and rollout contract is documented in
 [`docs/organizations-and-teams.md`](../../docs/organizations-and-teams.md).
+
+Authentication foundation migrations after the original Hosted AuthKit slice:
+
+| Migration | Durable contract |
+| --------- | ---------------- |
+| `0013_auth_lifecycle.sql` | stable account/identity/session lifecycle, provider tombstones, auth revisions |
+| `0014_workos_organization_sync.sql` | collaborative organization/member/invitation projections plus ordered command/event outboxes |
+| `0015_security_events.sql` | organization/account/data revisions, replayable security events, endpoint-grant revocation hooks |
+| `0016_account_recovery.sql` | fresh-auth reviewed recovery and at-least-once security-notification outbox |
 
 Two checks protect the migration ladder:
 
@@ -208,21 +219,42 @@ verification before returning a usable code. Browser exchange then requires a
 verified user and authenticates the sealed session before promotion; Electron
 verifies the signed Desktop Application token again before storage.
 
-`POST /auth/workos-webhook` verifies WorkOS's signature over the exact raw body
-on Railway, then accepts only bounded `user.updated` and `user.deleted` events.
-The existing app-host endpoint is a stateless pass-through during rollout; new
-WorkOS endpoint configuration should target the channel API origin directly.
+`POST /auth/workos-webhook` verifies WorkOS's official signature over the exact
+bounded raw body on Railway. It consumes user, session, organization,
+organization-membership, and invitation events. The existing app-host endpoint
+is a byte-preserving pass-through during rollout; new WorkOS endpoint
+configuration targets the channel API origin directly.
 
-Migration `0011_workos_identity_events.sql` records event IDs idempotently.
-Verified updates refresh a subject-linked profile; an occupied email records
-`email_conflict` without transferring ownership. A deletion soft-deletes only
-the Zeros account authentication row, so organizations, memberships, audit
-history, and other product data remain intact. Unlinked subjects are recorded
-for operator review and never auto-provision or auto-link by email. Recovery
-operators inspect only rows with `status IN ('unlinked', 'email_conflict')`,
-verify control of both identities out of band, and make any identity-link change
-as a separately reviewed database operation; replaying the webhook is never an
-ownership-transfer mechanism.
+The webhook is the low-latency path; a leased Events API reconciler with a
+durable cursor is the missed-delivery repair path. Event IDs are idempotent,
+provider object timestamps reject stale updates, unsupported signed payloads
+are quarantined without logging their body, and cursors do not skip an event
+that failed transactionally. Zeros mutations use an ordered transactional
+command outbox. Provider conflicts/lost responses converge by listing the
+existing object, and terminal failures dead-letter for operator action.
+
+Verified profile updates remain subject-linked. An occupied email never
+transfers ownership. `user.deleted` disables the identity/account, revokes
+known sessions and endpoint grants, removes collaborative memberships, emits
+security revisions, and queues notification email while preserving Personal
+and product data. A same-email replacement subject enters a 24-hour recovery
+request. Only a freshly authenticated staff operator may approve it; approval
+is audited, notifies the owner, and does not restore collaborative access.
+
+`GET /v1/auth/snapshot` and `GET /v1/auth/events` provide current revision state
+and a replayable authenticated SSE stream. They replace periodic WorkOS polls:
+clients snapshot at launch and after a silent/disconnected lifecycle hint,
+while every protected API request continues to enforce the local projection.
+Directory-managed memberships are marked `scim` and cannot be role-edited or
+removed through Zeros local administration.
+
+Operators must alert on `[workos-sync] ... dead-lettered`, a non-advancing
+`workos_event_cursors.updated_at`, webhook delivery failures in WorkOS, and
+`security_notification_outbox.state='dead'`. Do not manually mark a row
+succeeded. Inspect the bounded error code and current provider/local object,
+repair the root cause, then use a reviewed replay/requeue procedure. A public
+`/healthz` success proves HTTP/database availability only; it is not proof that
+provider synchronization or email delivery is current.
 
 ## Organization API
 

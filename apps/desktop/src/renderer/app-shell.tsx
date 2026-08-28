@@ -100,9 +100,13 @@ import {
   useInviteDeepLink,
   clearPendingInviteToken,
 } from "./features/team/invite-link";
-import { useTeamEngineSync } from "./features/team/team-sync";
-import { clearTeamStore } from "./features/team/team-store";
+import {
+  requestTeamResync,
+  useTeamEngineSync,
+} from "./features/team/team-sync";
+import { clearTeamStore, refreshTeams } from "./features/team/team-store";
 import { useAuth } from "./features/auth";
+import { nativeListen } from "./platform/runtime";
 import { rememberProject } from "./platform/recent-projects";
 import {
   dbChatSnapshot,
@@ -1428,6 +1432,29 @@ function InviteDeepLinkHandler() {
   return null;
 }
 
+/** WorkOS/organization events invalidate the shared exact `/v1/me` snapshot;
+ * the store retains its last confirmed value while the refresh is in flight. */
+function AuthSecurityEventHandler() {
+  const { status } = useAuth();
+  React.useEffect(() => {
+    if (status !== "authenticated") return;
+    let active = true;
+    let off: (() => void) | undefined;
+    void nativeListen("auth-security-event", () => {
+      if (!active) return;
+      void refreshTeams().finally(() => requestTeamResync());
+    }).then((unsubscribe) => {
+      if (active) off = unsubscribe;
+      else unsubscribe();
+    });
+    return () => {
+      active = false;
+      off?.();
+    };
+  }, [status]);
+  return null;
+}
+
 export function AppShell() {
   return (
     <AppearanceProvider>
@@ -1449,6 +1476,7 @@ export function AppShell() {
             provider below the gate is required. */}
         <UpdateNotifications />
         <InviteDeepLinkHandler />
+        <AuthSecurityEventHandler />
         <AuthGate>
           <AppShellBody />
         </AuthGate>

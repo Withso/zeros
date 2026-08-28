@@ -148,8 +148,11 @@ export async function issueCloudWorkspaceGrant(
   const authorized = await tx.query<{
     status: string;
     desired_state: string;
+    account_revision: string | number;
+    authorization_revision: string | number;
   }>(
-    `SELECT cw.status, cw.desired_state
+    `SELECT cw.status, cw.desired_state, u.auth_revision AS account_revision,
+            om.authorization_revision
      FROM cloud_workspaces cw
      JOIN cloud_workspace_generations g
        ON g.workspace_id = cw.id
@@ -157,6 +160,9 @@ export async function issueCloudWorkspaceGrant(
       AND g.generation = $2
      JOIN organization_members om
        ON om.org_id = cw.org_id AND om.user_id = $4
+     JOIN users u
+       ON u.id = om.user_id AND u.deleted_at IS NULL
+      AND u.auth_status = 'active'
      JOIN team_members tm
        ON tm.team_id = cw.team_id
       AND tm.org_id = cw.org_id
@@ -208,10 +214,11 @@ export async function issueCloudWorkspaceGrant(
   }>(
     `INSERT INTO cloud_workspace_endpoint_grants (
        workspace_id, generation, org_id, account_user_id, purpose,
-       audience, token_hash, expires_at
+       audience, token_hash, account_revision, authorization_revision,
+       expires_at
      ) VALUES (
-       $1, $2, $3, $4, $5, $6, $7,
-       now() + ($8::integer * interval '1 second')
+       $1, $2, $3, $4, $5, $6, $7, $8, $9,
+       now() + ($10::integer * interval '1 second')
      ) RETURNING id, expires_at`,
     [
       input.workspaceId,
@@ -221,6 +228,8 @@ export async function issueCloudWorkspaceGrant(
       input.purpose,
       audience,
       tokenHash(token),
+      Number(workspace.account_revision),
+      Number(workspace.authorization_revision),
       input.ttlSeconds,
     ],
   );
@@ -286,6 +295,11 @@ export async function consumeCloudWorkspaceGrant(
          ON cw.id = eg.workspace_id AND cw.org_id = eg.org_id
        JOIN organization_members om
          ON om.org_id = cw.org_id AND om.user_id = eg.account_user_id
+        AND om.authorization_revision = eg.authorization_revision
+       JOIN users u
+         ON u.id = eg.account_user_id AND u.deleted_at IS NULL
+        AND u.auth_status = 'active'
+        AND u.auth_revision = eg.account_revision
        JOIN team_members tm
          ON tm.team_id = cw.team_id
         AND tm.org_id = cw.org_id

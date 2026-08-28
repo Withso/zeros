@@ -15,8 +15,8 @@ importers:
         specifier: ^2.1.0
         version: 2.1.0(hono@4.13.0)
       '@workos-inc/node':
-        specifier: 10.10.0
-        version: 10.10.0
+        specifier: 10.12.0
+        version: 10.12.0
       hono:
         specifier: ^4.13.0
         version: 4.13.0
@@ -394,8 +394,8 @@ packages:
   '@vitest/utils@3.2.6':
     resolution: {integrity: sha512-lI23nIs4bnT3T8NIoh+vFaz5s2/DdP0Jgt2jxwgWljvwn82cLJtyi/If+fjFyoLMGIOz0U/fKvWE0d4jsNQEfg==}
 
-  '@workos-inc/node@10.10.0':
-    resolution: {integrity: sha512-qAf00a0DaIFD2yX4D11jCnMsk8w5FpE4Oif8EDBxGnPR1WNelqPeQqRrwX4/9xUpQV0asI6SFkdaffEj6IO33Q==}
+  '@workos-inc/node@10.12.0':
+    resolution: {integrity: sha512-ApDXB6gqQBehjobenm4t2bz/yP05l3Rs/N/qkb1lNVHI2Kikk5ec6h9ZY1JiKowesWR+2hliWfQTW/uQUOX6EQ==}
     engines: {node: '>=22.11.0'}
 
   '@workos/emulate@0.9.0':
@@ -1047,7 +1047,7 @@ snapshots:
       loupe: 3.2.1
       tinyrainbow: 2.0.0
 
-  '@workos-inc/node@10.10.0': {}
+  '@workos-inc/node@10.12.0': {}
 
   '@workos/emulate@0.9.0':
     dependencies:

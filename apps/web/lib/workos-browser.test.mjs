@@ -167,6 +167,35 @@ test("session lookup forwards only the opaque cookie and validates Railway data"
   assert.equal(result.data.accessToken, "signed-access-token");
 });
 
+test("session lookup rejects an oversized Railway response", async () => {
+  let cancelled = false;
+  await assert.rejects(
+    readWorkOSBrowserSession(
+      ENV,
+      new Request(`${APP_ORIGIN}/`, {
+        headers: { cookie: `${WORKOS_SESSION_COOKIE}=${SESSION_ID}` },
+      }),
+      {
+        fetch: async () =>
+          new Response(
+            new ReadableStream({
+              start(controller) {
+                controller.enqueue(new Uint8Array(200 * 1024));
+                controller.enqueue(new Uint8Array(100 * 1024));
+              },
+              cancel() {
+                cancelled = true;
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          ),
+      },
+    ),
+    /invalid response/,
+  );
+  assert.equal(cancelled, true);
+});
+
 test("forced refresh carries the revision observed with the rejected bearer", async () => {
   let forwarded;
   const result = await refreshWorkOSBrowserSession(ENV, SESSION_ID, 7, {
