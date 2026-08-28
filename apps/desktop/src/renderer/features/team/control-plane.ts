@@ -48,7 +48,7 @@ export type TeamSummary = OrganizationSummary;
  *  null ⇒ ordinary user.
  *  Backed by `users.staff_role` and re-read from Postgres on every request;
  *  see apps/control-plane/migrations/0007_staff_role.sql. */
-export type StaffRole = "developer";
+export type StaffRole = "developer" | "support_admin";
 
 export type Me = {
   user: {

@@ -298,7 +298,7 @@ const SECTIONS: SectionDef[] = [
     icon: FlaskConical,
     Panel: ExperimentalPanel,
   },
-  // Gated to staff accounts (`users.staff_role`, served by GET /v1/me — see
+  // Gated to developer accounts (`users.staff_role`, served by GET /v1/me — see
   // settings/internal-features.ts) — hidden from the sidebar AND not
   // resolvable as an active section for everyone else. See
   // `availableSections`.

@@ -95,9 +95,10 @@ d("reviewed WorkOS account recovery", () => {
       email: `staff-${suffix}@example.com`,
       displayName: "Staff",
     });
-    await pool.query(`UPDATE users SET staff_role = 'developer' WHERE id = $1`, [
-      staff.id,
-    ]);
+    await pool.query(
+      `UPDATE users SET staff_role = 'developer' WHERE id = $1`,
+      [staff.id],
+    );
     const operator: AuthedUser = {
       ...staff,
       staffRole: "developer",
@@ -111,10 +112,26 @@ d("reviewed WorkOS account recovery", () => {
 
     await expect(
       approveAccountRecovery(pool, {
+        operator,
+        publicCode: recoveryCode,
+      }),
+    ).rejects.toMatchObject({ status: 404, code: "not_found" });
+
+    await pool.query(
+      `UPDATE users SET staff_role = 'support_admin' WHERE id = $1`,
+      [staff.id],
+    );
+    const supportOperator: AuthedUser = {
+      ...operator,
+      staffRole: "support_admin",
+    };
+
+    await expect(
+      approveAccountRecovery(pool, {
         operator: {
-          ...operator,
+          ...supportOperator,
           authentication: {
-            ...operator.authentication,
+            ...supportOperator.authentication,
             authTime: now - 301,
           },
         },
@@ -127,7 +144,7 @@ d("reviewed WorkOS account recovery", () => {
 
     expect(
       await approveAccountRecovery(pool, {
-        operator,
+        operator: supportOperator,
         publicCode: recoveryCode,
       }),
     ).toEqual({ accountId: original.id, state: "consumed" });
