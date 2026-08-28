@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { generateKeyPairSync } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 
 import { loadConfig } from "./config.js";
 
@@ -75,9 +75,7 @@ describe("provider-neutral authentication configuration", () => {
   it("fails closed when WorkOS client IDs are missing or shared", () => {
     const missingDesktop = workosEnv();
     delete missingDesktop.AUTH_DESKTOP_CLIENT_ID;
-    expect(() => loadConfig(missingDesktop)).toThrow(
-      /AUTH_DESKTOP_CLIENT_ID/,
-    );
+    expect(() => loadConfig(missingDesktop)).toThrow(/AUTH_DESKTOP_CLIENT_ID/);
 
     expect(() =>
       loadConfig({
@@ -451,7 +449,111 @@ describe("cloud workspace backend configuration", () => {
       operationTimeoutSeconds: 180,
       autoArchiveMinutes: 10_080,
       reconcileIntervalMs: 5_000,
+      access: {
+        allowedSshHosts: ["ssh.app.daytona.io"],
+        allowedPreviewHostSuffixes: ["proxy.daytona.work"],
+        previewBaseDomain: null,
+      },
+      setupExecution: null,
     });
+  });
+
+  it("pins provider access hosts and an isolated wildcard preview domain", () => {
+    expect(
+      loadConfig({
+        ...cloudEnv(),
+        DAYTONA_SSH_HOSTS:
+          "ssh.provider.example,ssh-secondary.provider.example",
+        DAYTONA_PREVIEW_HOST_SUFFIXES:
+          "preview.provider.example,preview-alt.provider.example",
+        CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN: "cloud-preview.example.test",
+      }).cloudWorkspaces?.access,
+    ).toEqual({
+      allowedSshHosts: [
+        "ssh.provider.example",
+        "ssh-secondary.provider.example",
+      ],
+      allowedPreviewHostSuffixes: [
+        "preview.provider.example",
+        "preview-alt.provider.example",
+      ],
+      previewBaseDomain: "cloud-preview.example.test",
+    });
+  });
+
+  it("rejects wildcard, URL, and IP-shaped provider access hosts", () => {
+    for (const override of [
+      { DAYTONA_SSH_HOSTS: "*.example.test" },
+      { DAYTONA_PREVIEW_HOST_SUFFIXES: "https://preview.example.test" },
+      { CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN: "127.0.0.1" },
+    ]) {
+      expect(() => loadConfig({ ...cloudEnv(), ...override })).toThrow(
+        /cloud workspace environment/i,
+      );
+    }
+  });
+
+  it("keeps setup behind an independent complete image-qualification gate", () => {
+    const setupKey = randomBytes(32).toString("base64url");
+    expect(
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
+        CLOUD_WORKSPACE_CONTROL_PLANE_URL: "https://api.example.test",
+        DAYTONA_TOOLBOX_ORIGINS:
+          "https://proxy-a.example.test,https://proxy-b.example.test",
+        CLOUD_WORKSPACE_SECRET_KEY_V1: setupKey,
+        CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: "11",
+      }).cloudWorkspaces?.setupExecution,
+    ).toEqual({
+      controlPlaneOrigin: "https://api.example.test",
+      allowedToolboxOrigins: [
+        "https://proxy-a.example.test",
+        "https://proxy-b.example.test",
+      ],
+      setupSecretKeyV1: setupKey,
+      engineProtocolVersion: 11,
+      enginePort: 39_393,
+      intervalMs: 1_000,
+      timeoutSeconds: 1_800,
+      leaseMs: 60_000,
+      admissionTtlSeconds: 120,
+    });
+  });
+
+  it("rejects partial or unsafe setup execution configuration", () => {
+    expect(() =>
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
+      }),
+    ).toThrow(/CLOUD_WORKSPACE_CONTROL_PLANE_URL/);
+    expect(() =>
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
+        CLOUD_WORKSPACE_CONTROL_PLANE_URL: "https://api.example.test",
+        DAYTONA_TOOLBOX_ORIGINS: "https://proxy.example.test/path",
+        CLOUD_WORKSPACE_SECRET_KEY_V1: randomBytes(32).toString("base64url"),
+        CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: "11",
+      }),
+    ).toThrow(/DAYTONA_TOOLBOX_ORIGINS/);
+    expect(() =>
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
+        CLOUD_WORKSPACE_CONTROL_PLANE_URL: "https://api.example.test",
+        DAYTONA_TOOLBOX_ORIGINS: "https://proxy.example.test",
+        CLOUD_WORKSPACE_SECRET_KEY_V1: "not-a-32-byte-key",
+        CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: "11",
+      }),
+    ).toThrow(/exactly 32 bytes/);
+    expect(() =>
+      loadConfig({
+        ...validEnv(),
+        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
+      }),
+    ).toThrow(/requires CLOUD_WORKSPACES_ENABLED=true/);
   });
 
   it("fails boot when the explicit gate lacks provider or GitHub mint authority", () => {
@@ -485,6 +587,12 @@ describe("cloud workspace backend configuration", () => {
     expect(() =>
       loadConfig({ ...validEnv(), CLOUD_WORKSPACES_ENABLED: "yes" }),
     ).toThrow(/must be true or false/);
+    expect(() =>
+      loadConfig({
+        ...cloudEnv(),
+        ZEROS_CLOUD_SOURCE_COMMIT: "a".repeat(41),
+      }),
+    ).toThrow(/ZEROS_CLOUD_SOURCE_COMMIT/);
   });
 });
 

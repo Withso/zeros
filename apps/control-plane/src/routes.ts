@@ -26,6 +26,7 @@ import { inviteEmailHtml, sendEmail, type EmailConfig } from "./email.js";
 import { rateLimit } from "./ratelimit.js";
 import type { CloudWorkspaceBackendConfig } from "./config.js";
 import { createCloudWorkspaceRoutes } from "./cloud-workspaces/routes.js";
+import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
 
 const INVITE_LINK_BASE =
   process.env.INVITE_LINK_BASE?.trim().replace(/\/+$/, "") ||
@@ -138,6 +139,7 @@ export function createRoutes(
   pool: pg.Pool,
   email?: EmailConfig,
   cloudWorkspaces: CloudWorkspaceBackendConfig | null = null,
+  cloudWorkspaceAccessService: CloudWorkspaceAccessService | null = null,
 ): Hono {
   const app = new Hono();
 
@@ -164,12 +166,16 @@ export function createRoutes(
     return c.json({ user: publicUser, organizations, teams: organizations });
   });
 
-  app.route(
-    "/v1/organizations",
-    createOrganizationRouter(pool, email, false),
-  );
+  app.route("/v1/organizations", createOrganizationRouter(pool, email, false));
   app.route("/v1/teams", createOrganizationRouter(pool, email, true));
-  app.route("/", createCloudWorkspaceRoutes(pool, cloudWorkspaces));
+  app.route(
+    "/",
+    createCloudWorkspaceRoutes(
+      pool,
+      cloudWorkspaces,
+      cloudWorkspaceAccessService,
+    ),
+  );
 
   app.post(
     "/v1/invitations/accept",
@@ -344,9 +350,7 @@ function createOrganizationRouter(
       );
       return requiredOrganizationSummary(result.rows[0]);
     });
-    return legacy
-      ? c.json({ team: organization })
-      : c.json({ organization });
+    return legacy ? c.json({ team: organization }) : c.json({ organization });
   });
 
   app.patch("/:organization", async (c) => {
@@ -392,9 +396,7 @@ function createOrganizationRouter(
       );
       return requiredOrganizationSummary(result.rows[0]);
     });
-    return legacy
-      ? c.json({ team: organization })
-      : c.json({ organization });
+    return legacy ? c.json({ team: organization }) : c.json({ organization });
   });
 
   app.delete("/:organization", async (c) => {
@@ -585,8 +587,7 @@ function createOrganizationRouter(
         id: created.rows[0]!.id,
         expiresAt: created.rows[0]!.expires_at,
         token: raw,
-        organizationName:
-          organization.rows[0]?.name ?? "your organization",
+        organizationName: organization.rows[0]?.name ?? "your organization",
       };
     });
     if (email) {
@@ -596,12 +597,9 @@ function createOrganizationRouter(
         acceptUrl: inviteLink(result.token),
         expiresDays: 7,
       });
-      void sendEmail(
-        email,
-        emailAddress,
-        message.subject,
-        message.html,
-      ).catch(() => {});
+      void sendEmail(email, emailAddress, message.subject, message.html).catch(
+        () => {},
+      );
     }
     return c.json(
       {
@@ -675,7 +673,10 @@ function createOrganizationRouter(
       );
       return result.rows;
     });
-    return c.json({ teams, capabilities: { multiple: false, canCreate: false } });
+    return c.json({
+      teams,
+      capabilities: { multiple: false, canCreate: false },
+    });
   });
 
   app.post("/:organization/teams", async (c) => {
@@ -703,7 +704,10 @@ function createOrganizationRouter(
         [orgId],
       );
       if (org.rows[0]!.is_personal) {
-        return { applicable: false as const, managementAvailable: false as const };
+        return {
+          applicable: false as const,
+          managementAvailable: false as const,
+        };
       }
       const subscription = await tx.query(
         `SELECT status, plan, seats, current_period_end, updated_at

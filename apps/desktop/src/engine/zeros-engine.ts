@@ -109,10 +109,15 @@ import {
   type GithubCredentialChange,
 } from "./git/engine-token-store";
 import {
+  installCloudGithubCredentialProjection,
   watchCloudGithubCredentialProjection,
   type CloudGithubCredentialProjectionWatcher,
 } from "./git/cloud-credential-projection";
-import { requestCloudGithubCredentialRefresh } from "./git/cloud-credential-refresh-request";
+import {
+  acknowledgeCloudGithubCredentialRefreshRequest,
+  readCloudGithubCredentialRefreshRequest,
+  requestCloudGithubCredentialRefresh,
+} from "./git/cloud-credential-refresh-request";
 import {
   AgentGateway,
   agentTerritoryIdentity,
@@ -163,6 +168,11 @@ import {
   MIN_SUPPORTED_PROTOCOL,
   isCompatible,
 } from "@zeros/protocol/version";
+import {
+  CloudRuntimeRegistration,
+  consumeCloudRuntimeEnvironment,
+  type CloudRuntimeConfig,
+} from "./cloud-runtime-registration";
 import type {
   SessionNotification,
   RequestPermissionRequest,
@@ -893,6 +903,9 @@ export class ZerosEngine {
    *  DIFFERENT account is rejected. Null until the signed-in desktop renderer
    *  connects (then relay clients are fail-closed as owner-unknown). */
   private ownerAccountSub: string | null = null;
+  private readonly cloudRuntimeConfig: CloudRuntimeConfig | null;
+  private readonly cloudRuntimeRegistration: CloudRuntimeRegistration | null;
+  private cloudRuntimeAuthorityStopping = false;
   // Native per-CLI adapter runtime — multiplexes the per-agent
   // adapter implementations behind a single gateway surface.
   private agents: AgentGateway;
@@ -906,6 +919,7 @@ export class ZerosEngine {
   private running = false;
 
   constructor(options?: EngineOptions) {
+    this.cloudRuntimeConfig = consumeCloudRuntimeEnvironment();
     this.root = options?.root
       ? path.resolve(options.root)
       : findProjectRoot(process.cwd());
@@ -1075,7 +1089,10 @@ export class ZerosEngine {
           createMessage({
             type: "DB_CHANGED",
             source: "engine",
-            kinds: ["workspaces"],
+            // `setup` lets the visible full-log surface refresh only for setup
+            // transitions; generic workspace writes keep using the lightweight
+            // status-only watcher instead of retransmitting up to 512 KB.
+            kinds: ["workspaces", "setup"],
             ...(workspaceId ? { workspaceIds: [workspaceId] } : {}),
           }),
         ),
@@ -1163,31 +1180,19 @@ export class ZerosEngine {
     // Setup tab ops (workspace.setupInfo / workspace.rerunSetup /
     // workspace.stopSetup) reach the SetupManager — which owns this.pty/
     // this.setup — through injected accessors, mirroring the gateway-accessor
-    // pattern above. All are local-only (not on any remote allowlist), so a
-    // relay client never reaches them.
-    this.workspace.setSetupRunner((workspaceId, command, target) => {
-      const startWhenAllowed = () => {
-        if (this.globalDesignTerritoryTransitionCount > 0) {
-          // Creation-from-branch can request Setup from inside the registry
-          // mutation that first publishes its owner. Dropping that request
-          // skips dependency installation; starting it now would compile the
-          // old app-wide deny union. Wait for the complete queued transition
-          // tail, then re-check in case another transition joined it.
-          const transition = this.globalDesignTerritoryTransitionTail;
-          void transition.then(startWhenAllowed);
-          return;
-        }
-        // Archive/delete or a missing checkout is terminal for this request;
-        // only the transient global registration gate is deferred.
-        if (!this.workspaceAllowsProcessStart(workspaceId)) return;
-        void this.trackRepositoryCodeAuthorityStart(
-          workspaceId,
-          this.setup.start({ workspaceId, command, target }),
-        ).catch((err) =>
-          console.error(`[setup] start failed for ${workspaceId}:`, err),
-        );
-      };
-      startWhenAllowed();
+    // pattern above. Managed-workspace controls are available to qualified
+    // cloud clients; a raw-path rowless trunk remains desktop-only.
+    this.workspace.setSetupRunner(async (workspaceId, command, target) => {
+      // Creation-from-branch can request Setup from inside the registry
+      // mutation that first publishes its owner. Wait behind the complete
+      // queued transition (including any turn that joins while parked), then
+      // revalidate every non-transient lifecycle/containment gate.
+      await this.waitForGlobalDesignTerritoryTransition();
+      this.assertWorkspaceProcessStartAllowed(workspaceId);
+      await this.trackRepositoryCodeAuthorityStart(
+        workspaceId,
+        this.setup.start({ workspaceId, command, target }),
+      );
     });
     this.workspace.setSetupStopper((workspaceId) =>
       this.setup.stop(workspaceId),
@@ -1532,10 +1537,44 @@ export class ZerosEngine {
     // bridge token is mandatory; account binding adds a second gate when it is
     // configured.
     const cloudPort = parseCloudTransportPort(process.env.ZEROS_CLOUD_PORT);
+    if (
+      this.cloudRuntimeConfig &&
+      (!this.cloudWorker ||
+        cloudPort === null ||
+        this.cloudRuntimeConfig.engine.protocolVersion !== PROTOCOL_VERSION)
+    ) {
+      throw new Error("cloud engine runtime binding is incompatible");
+    }
+    this.cloudRuntimeRegistration = this.cloudRuntimeConfig
+      ? new CloudRuntimeRegistration(this.cloudRuntimeConfig, {
+          onAuthorityLost: () => this.handleCloudRuntimeAuthorityLoss(),
+          readRepositoryCredentialRefresh: () =>
+            readCloudGithubCredentialRefreshRequest(),
+          installRepositoryCredential: (document) => {
+            if (!this.ownerAccountSub) {
+              throw new Error("cloud workspace owner binding is unavailable");
+            }
+            installCloudGithubCredentialProjection({
+              document,
+              ownerSubject: this.ownerAccountSub,
+            });
+          },
+          acknowledgeRepositoryCredentialRefresh: (generation) =>
+            acknowledgeCloudGithubCredentialRefreshRequest({ generation }),
+        })
+      : null;
     if (cloudPort !== null) {
       this.cloud = new CloudTransport({
         port: cloudPort,
         token: process.env.ZEROS_CLOUD_TOKEN?.trim() || "",
+        ...(this.cloudRuntimeRegistration && this.cloudRuntimeConfig
+          ? {
+              internalReadiness: {
+                token: this.cloudRuntimeConfig.engine.readinessProbeToken,
+                read: () => this.cloudRuntimeRegistration!.readiness(),
+              },
+            }
+          : {}),
       });
       this.transports.push(this.cloud);
     }
@@ -2220,6 +2259,12 @@ export class ZerosEngine {
           seedGithubCredential(credential, method);
           if (credential) this.primeGithubLogin();
         },
+        onRefreshNeeded: (method) => {
+          this.publishGithubCredentialChange({
+            method,
+            reason: "credential-invalid",
+          });
+        },
         onRejected: () => {
           console.warn(
             "[Zeros] rejected the cloud GitHub credential projection",
@@ -2578,6 +2623,12 @@ export class ZerosEngine {
     }
 
     this.running = true;
+    try {
+      await this.cloudRuntimeRegistration?.start();
+    } catch {
+      await this.stop().catch(() => undefined);
+      throw new Error("cloud engine durable registration failed");
+    }
     const elapsed = Date.now() - startTime;
     console.log(
       `[Zeros] Engine ready on port ${this.actualPort} (${elapsed}ms)`,
@@ -2598,6 +2649,10 @@ export class ZerosEngine {
         failures.push(error);
       }
     };
+
+    if (this.cloudRuntimeRegistration) {
+      await settle(() => this.cloudRuntimeRegistration!.stop());
+    }
 
     if (this.bindingSweep) {
       clearInterval(this.bindingSweep);
@@ -2648,6 +2703,17 @@ export class ZerosEngine {
     if (failures.length > 0) {
       throw new AggregateError(failures, "Zeros engine teardown failed");
     }
+  }
+
+  private handleCloudRuntimeAuthorityLoss(): void {
+    if (this.cloudRuntimeAuthorityStopping) return;
+    this.cloudRuntimeAuthorityStopping = true;
+    console.error("[Zeros cloud] durable engine authority was retired");
+    void this.stop()
+      .catch(() => undefined)
+      .finally(() => {
+        process.exitCode = 1;
+      });
   }
 
   /** Fan a message out to every connected client (across all transports). */
@@ -5057,11 +5123,10 @@ export class ZerosEngine {
               "Provider configuration sources are available only on the local desktop.",
             );
           }
-          const provenance =
-            await this.agents.readConfigurationProvenance(
-              msg.agentId,
-              msg.cwd,
-            );
+          const provenance = await this.agents.readConfigurationProvenance(
+            msg.agentId,
+            msg.cwd,
+          );
           client.send(
             createMessage({
               type: "AGENT_CONFIGURATION_PROVENANCE",
@@ -6911,8 +6976,7 @@ export class ZerosEngine {
         designInitTarget && !designDirExistedBefore ? designInitTarget : null;
       const stableManagedWorkspaceCreate = (() => {
         if (
-          (op !== "workspace.create" &&
-            op !== "workspace.createFromBranch") ||
+          (op !== "workspace.create" && op !== "workspace.createFromBranch") ||
           typeof params.repoRoot !== "string"
         ) {
           return false;

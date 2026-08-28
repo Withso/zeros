@@ -1477,16 +1477,24 @@ export class WorkspaceService {
   ): void {
     this.gatewayHeaderSecretSetter = fn;
   }
-  /** Starts (or restarts) a background setup PTY. Wired by the engine (which
-   *  owns the PtyService + SetupManager); driven by the LOCAL-ONLY
-   *  workspace.rerunSetup op. `target` carries the cwd/repo for a ROWLESS run
-   *  (the trunk / "main" synthetic workspace); a real workspace omits it and
-   *  the SetupManager resolves everything from the row. */
+  /** Starts (or restarts) a contained background setup PTY. Wired by the
+   *  engine (which owns the PtyService + SetupManager); managed workspaces are
+   *  available to qualified local/cloud clients. `target` carries the cwd/repo
+   *  for a LOCAL-ONLY ROWLESS run (the trunk / "main" synthetic workspace); a
+   *  real workspace omits it and SetupManager resolves everything from the row. */
   private setupRunner:
-    | ((workspaceId: string, command: string, target?: SetupTarget) => void)
+    | ((
+        workspaceId: string,
+        command: string,
+        target?: SetupTarget,
+      ) => void | Promise<void>)
     | null = null;
   setSetupRunner(
-    fn: (workspaceId: string, command: string, target?: SetupTarget) => void,
+    fn: (
+      workspaceId: string,
+      command: string,
+      target?: SetupTarget,
+    ) => void | Promise<void>,
   ): void {
     this.setupRunner = fn;
   }
@@ -1610,14 +1618,16 @@ export class WorkspaceService {
   ): void {
     this.runLogGetter = fn;
   }
-  /** Resolve + kick off a workspace's background setup PTY (host shell — LOCAL
-   *  ONLY). Used by workspace.rerunSetup and create-from-branch so dependency
-   *  setup is explicit for an existing workspace and automatic only for a newly
-   *  created checkout.
+  /** Resolve + kick off a workspace's contained background setup PTY. Used by
+   *  workspace.rerunSetup and create-from-branch so dependency setup is
+   *  explicit for an existing workspace and automatic only for a newly created
+   *  checkout.
    *  Returns whether a setup command was found + started; no-op (false) when the
    *  repo has no setup configured or the runner isn't wired (e.g. unit tests).
-   *  Fire-and-forget — the PTY runs in the background (Setup tab), so callers
-   *  don't await completion. */
+   *  Waits only for admission + PTY spawn; the setup command itself continues
+   *  in the background. This keeps the rerun acknowledgement aligned with the
+   *  first observable `running` snapshot without holding the RPC until setup
+   *  completes. */
   private assertWorkspaceProcessStartAllowed(ws: Workspace): void {
     const lifecycle = getWorkspaceLifecycleStatus(ws.id);
     const unavailable =
@@ -1651,7 +1661,7 @@ export class WorkspaceService {
     // Re-check after that await, immediately before the engine registers the
     // tracked SetupManager start.
     this.assertWorkspaceProcessStartAllowed(ws);
-    this.setupRunner?.(ws.id, command);
+    await this.setupRunner?.(ws.id, command);
     return true;
   }
   /** Same, for the trunk / "main" — the renderer's synthetic `local:<repoSlug>`
@@ -1668,7 +1678,7 @@ export class WorkspaceService {
       allowAutoSetup: true,
     });
     if (!command) return false;
-    this.setupRunner?.(workspaceId, command, {
+    await this.setupRunner?.(workspaceId, command, {
       cwd: repoRoot,
       repoRoot,
       baseBranch: "",

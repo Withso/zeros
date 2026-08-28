@@ -20,7 +20,7 @@
 //   TEST_DATABASE_URL=postgres://postgres:t@localhost:5433/postgres pnpm test
 // ──────────────────────────────────────────────────────────
 
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,7 +71,9 @@ d("migration ladder", () => {
       const sql = readFileSync(path.join(MIGRATIONS_DIR, file), "utf8");
       await pool.query("BEGIN");
       await pool.query(sql);
-      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [file]);
+      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
+        file,
+      ]);
       await pool.query("COMMIT");
     }
   };
@@ -110,25 +112,353 @@ d("migration ladder", () => {
     expect(ran).toEqual([LADDER[LADDER.length - 1]]);
   });
 
-  it(
-    "replays from every intermediate revision",
-    async () => {
-      // A deployment can be at ANY prior revision (a long-lived staging box, a
-      // restored backup, a rollback). Every suffix of the ladder must apply to
-      // the state its prefix leaves. This deliberately runs the full ladder once
-      // per starting revision, which can exceed Vitest's default on hosted
-      // Postgres even while every migration is making healthy progress.
-      for (let k = 0; k < LADDER.length; k++) {
-        await reset();
-        await applyThrough(k);
-        const ran = await runMigrations(pool);
-        expect(ran, `applying from revision ${k}`).toEqual(LADDER.slice(k));
-      }
-    },
-    // This matrix executes O(n²) real DDL as the ladder grows. Keep a scoped
-    // ceiling for a genuine hang while allowing for shared-runner I/O variance.
-    30_000,
-  );
+  it("replays from every intermediate revision", async () => {
+    // A deployment can be at ANY prior revision (a long-lived staging box, a
+    // restored backup, a rollback). Every suffix of the ladder must apply to
+    // the state its prefix leaves. This deliberately runs the full ladder once
+    // per starting revision, which can exceed Vitest's default on hosted
+    // Postgres even while every migration is making healthy progress.
+    for (let k = 0; k < LADDER.length; k++) {
+      await reset();
+      await applyThrough(k);
+      const ran = await runMigrations(pool);
+      expect(ran, `applying from revision ${k}`).toEqual(LADDER.slice(k));
+    }
+  }, 30_000); // ceiling for a genuine hang while allowing for shared-runner I/O variance. // This matrix executes O(n²) real DDL as the ladder grows. Keep a scoped
+
+  it("backfills immutable setup inputs and safely requeues pre-lease running work", async () => {
+    const setupMigrationIndex = LADDER.findIndex((file) =>
+      file.endsWith("_cloud_workspace_setup_worker.sql"),
+    );
+    expect(setupMigrationIndex).toBeGreaterThan(0);
+    await applyThrough(setupMigrationIndex);
+
+    const userId = "11111111-1111-4111-8111-111111111111";
+    const orgId = "22222222-2222-4222-8222-222222222222";
+    const teamId = "33333333-3333-4333-8333-333333333333";
+    const workspaceId = "44444444-4444-4444-8444-444444444444";
+    await pool.query("BEGIN");
+    try {
+      await pool.query(
+        `INSERT INTO users (id, email) VALUES ($1, 'setup-owner@example.test')`,
+        [userId],
+      );
+      await pool.query(
+        `INSERT INTO organizations (
+           id, slug, name, created_by, is_personal, cloud_workspaces_allowed
+         ) VALUES ($1, 'setup-upgrade', 'Setup Upgrade', $2, false, true)`,
+        [orgId, userId],
+      );
+      await pool.query(
+        `INSERT INTO teams (
+           id, org_id, slug, name, is_default, created_by
+         ) VALUES ($1, $2, 'default', 'Default', true, $3)`,
+        [teamId, orgId, userId],
+      );
+      await pool.query(
+        `INSERT INTO cloud_workspaces (
+           id, org_id, team_id, created_by, display_name,
+           repository_forge, repository_owner, repository_name,
+           repository_revision, status, desired_state
+         ) VALUES ($1, $2, $3, $4, 'Upgrade', 'github.com', 'withso',
+                   'zeros', 'release/test', 'setting_up', 'running')`,
+        [workspaceId, orgId, teamId, userId],
+      );
+      await pool.query(
+        `INSERT INTO cloud_workspace_generations (
+           workspace_id, generation, org_id, provider, image_ref,
+           architecture, cpu_millicores, memory_mib, storage_mib, created_by
+         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+                   2000, 4096, 20480, $3)`,
+        [workspaceId, orgId, userId],
+      );
+      await pool.query(
+        `INSERT INTO cloud_workspace_setup_runs (
+           workspace_id, generation, org_id, attempt, state, started_at
+         ) VALUES ($1, 1, $2, 1, 'running', now())`,
+        [workspaceId, orgId],
+      );
+      await pool.query("COMMIT");
+    } catch (error) {
+      await pool.query("ROLLBACK");
+      throw error;
+    }
+
+    await runMigrations(pool);
+    const result = await pool.query(
+      `SELECT ss.repository_forge, ss.repository_owner, ss.repository_name,
+              ss.repository_revision, ss.settings_snapshot,
+              ss.settings_snapshot_sha256 =
+                digest(ss.settings_snapshot::text, 'sha256') AS valid_hash,
+              sr.state, sr.error_code, sr.started_at, sr.claim_count,
+              sr.execution_fence, sr.lease_owner, sr.lease_expires_at
+       FROM cloud_workspace_setup_specs ss
+       JOIN cloud_workspace_setup_runs sr
+         ON sr.workspace_id = ss.workspace_id
+        AND sr.generation = ss.generation
+       WHERE ss.workspace_id = $1`,
+      [workspaceId],
+    );
+    expect(result.rows[0]).toEqual({
+      repository_forge: "github.com",
+      repository_owner: "withso",
+      repository_name: "zeros",
+      repository_revision: "release/test",
+      settings_snapshot: { schemaVersion: 1, values: {} },
+      valid_hash: true,
+      state: "queued",
+      error_code: "setup_lease_upgrade_requeued",
+      started_at: null,
+      claim_count: 0,
+      execution_fence: "0",
+      lease_owner: null,
+      lease_expires_at: null,
+    });
+  });
+
+  it("retires setup grants that predate execution-fence authority", async () => {
+    const authorityMigrationIndex = LADDER.findIndex((file) =>
+      file.endsWith("_cloud_workspace_setup_authority.sql"),
+    );
+    expect(authorityMigrationIndex).toBeGreaterThan(0);
+    await applyThrough(authorityMigrationIndex);
+
+    const userId = "11111111-1111-4111-8111-111111111112";
+    const orgId = "22222222-2222-4222-8222-222222222223";
+    const teamId = "33333333-3333-4333-8333-333333333334";
+    const workspaceId = "44444444-4444-4444-8444-444444444445";
+    const grantId = "55555555-5555-4555-8555-555555555556";
+    await pool.query("BEGIN");
+    try {
+      await pool.query(
+        `INSERT INTO users (id, email)
+         VALUES ($1, 'setup-authority-upgrade@example.test')`,
+        [userId],
+      );
+      await pool.query(
+        `INSERT INTO organizations (
+           id, slug, name, created_by, is_personal, cloud_workspaces_allowed
+         ) VALUES ($1, 'setup-authority-upgrade', 'Setup Authority Upgrade',
+                   $2, false, true)`,
+        [orgId, userId],
+      );
+      await pool.query(
+        `INSERT INTO teams (
+           id, org_id, slug, name, is_default, created_by
+         ) VALUES ($1, $2, 'default', 'Default', true, $3)`,
+        [teamId, orgId, userId],
+      );
+      await pool.query(
+        `INSERT INTO cloud_workspaces (
+           id, org_id, team_id, created_by, display_name,
+           repository_forge, repository_owner, repository_name,
+           repository_revision, status, desired_state
+         ) VALUES ($1, $2, $3, $4, 'Authority Upgrade', 'github.com',
+                   'withso', 'zeros', 'main', 'setting_up', 'running')`,
+        [workspaceId, orgId, teamId, userId],
+      );
+      await pool.query(
+        `INSERT INTO cloud_workspace_generations (
+           workspace_id, generation, org_id, provider, image_ref,
+           architecture, cpu_millicores, memory_mib, storage_mib,
+           source_commit, created_by
+         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+                   2000, 4096, 20480,
+                   '0123456789abcdef0123456789abcdef01234567', $3)`,
+        [workspaceId, orgId, userId],
+      );
+      await pool.query(
+        `INSERT INTO cloud_workspace_setup_specs (
+           workspace_id, generation, org_id, repository_forge,
+           repository_owner, repository_name, repository_revision,
+           settings_snapshot, settings_snapshot_sha256
+         ) VALUES ($1, 1, $2, 'github.com', 'withso', 'zeros', 'main',
+                   '{"schemaVersion":1,"values":{}}'::jsonb,
+                   digest('{"values": {}, "schemaVersion": 1}'::jsonb::text,
+                          'sha256'))`,
+        [workspaceId, orgId],
+      );
+      await pool.query(
+        `INSERT INTO cloud_workspace_setup_runs (
+           workspace_id, generation, org_id, attempt
+         ) VALUES ($1, 1, $2, 1)`,
+        [workspaceId, orgId],
+      );
+      await pool.query(
+        `INSERT INTO cloud_workspace_endpoint_grants (
+           id, workspace_id, generation, org_id, account_user_id, purpose,
+           audience, token_hash, expires_at
+         ) VALUES ($1, $2, 1, $3, $4, 'setup',
+                   'https://control.example.test/', digest('legacy-token', 'sha256'),
+                   now() + interval '5 minutes')`,
+        [grantId, workspaceId, orgId, userId],
+      );
+      await pool.query("COMMIT");
+    } catch (error) {
+      await pool.query("ROLLBACK");
+      throw error;
+    }
+
+    expect(await runMigrations(pool)).toEqual(
+      LADDER.slice(authorityMigrationIndex),
+    );
+    const retired = await pool.query(
+      `SELECT revoked_at IS NOT NULL AS revoked,
+              setup_run_id, setup_execution_fence
+       FROM cloud_workspace_endpoint_grants
+       WHERE id = $1`,
+      [grantId],
+    );
+    expect(retired.rows[0]).toEqual({
+      revoked: true,
+      setup_run_id: null,
+      setup_execution_fence: null,
+    });
+    await expect(
+      pool.query(
+        `UPDATE cloud_workspace_endpoint_grants
+         SET revoked_at = NULL WHERE id = $1`,
+        [grantId],
+      ),
+    ).rejects.toThrow(/setup_binding_check|check constraint/i);
+  });
+
+  it("backfills deleted-account authority in workspace-before-grant lock order", async () => {
+    const engineAuthorityIndex = LADDER.findIndex((file) =>
+      file.endsWith("_cloud_workspace_engine_authority.sql"),
+    );
+    expect(engineAuthorityIndex).toBeGreaterThan(0);
+    await applyThrough(engineAuthorityIndex);
+
+    const userId = "11111111-1111-4111-8111-111111111118";
+    const orgId = "22222222-2222-4222-8222-222222222228";
+    const teamId = "33333333-3333-4333-8333-333333333338";
+    const workspaceId = "44444444-4444-4444-8444-444444444448";
+    const grantId = "55555555-5555-4555-8555-555555555558";
+    await pool.query(
+      `INSERT INTO users (id, email)
+       VALUES ($1, 'deleted-owner-upgrade@example.test')`,
+      [userId],
+    );
+    await pool.query(
+      `INSERT INTO organizations (
+         id, slug, name, created_by, is_personal, cloud_workspaces_allowed
+       ) VALUES ($1, 'deleted-owner-upgrade', 'Deleted Owner Upgrade',
+                 $2, false, true)`,
+      [orgId, userId],
+    );
+    await pool.query(
+      `INSERT INTO teams (
+         id, org_id, slug, name, is_default, created_by
+       ) VALUES ($1, $2, 'default', 'Default', true, $3)`,
+      [teamId, orgId, userId],
+    );
+    const seed = await pool.connect();
+    try {
+      await seed.query("BEGIN");
+      await seed.query(
+        `INSERT INTO cloud_workspaces (
+           id, org_id, team_id, created_by, display_name,
+           repository_forge, repository_owner, repository_name,
+           repository_revision, status, desired_state
+         ) VALUES ($1, $2, $3, $4, 'Deleted Owner Upgrade', 'github.com',
+                   'withso', 'zeros', 'main', 'ready', 'running')`,
+        [workspaceId, orgId, teamId, userId],
+      );
+      await seed.query(
+        `INSERT INTO cloud_workspace_generations (
+           workspace_id, generation, org_id, provider, image_ref,
+           architecture, cpu_millicores, memory_mib, storage_mib, created_by
+         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+                   2000, 4096, 20480, $3)`,
+        [workspaceId, orgId, userId],
+      );
+      await seed.query(
+        `INSERT INTO cloud_workspace_client_access_grants (
+           id, workspace_id, generation, org_id, account_user_id, kind,
+           provider_resource_id, provider_access_id, token_hash,
+           idempotency_key, request_sha256, state, requested_expires_at,
+           expires_at, issued_at
+         ) VALUES ($1, $2, 1, $3, $4, 'ssh', 'sandbox-upgrade',
+                   'provider-access-upgrade', digest('access-token', 'sha256'),
+                   'upgrade-lock-order', digest('request', 'sha256'), 'active',
+                   now() + interval '15 minutes',
+                   now() + interval '15 minutes', now())`,
+        [grantId, workspaceId, orgId, userId],
+      );
+      await seed.query("COMMIT");
+    } catch (error) {
+      await seed.query("ROLLBACK").catch(() => undefined);
+      throw error;
+    } finally {
+      seed.release();
+    }
+    await pool.query(`UPDATE users SET deleted_at = now() WHERE id = $1`, [
+      userId,
+    ]);
+
+    const workspaceOwner = await pool.connect();
+    let migration: ReturnType<typeof runMigrations> | null = null;
+    try {
+      await workspaceOwner.query("BEGIN");
+      await workspaceOwner.query("SET LOCAL statement_timeout = '750ms'");
+      await workspaceOwner.query(
+        `SELECT 1 FROM cloud_workspaces WHERE id = $1 FOR UPDATE`,
+        [workspaceId],
+      );
+
+      migration = runMigrations(pool);
+      await vi.waitFor(
+        async () => {
+          const waiting = await pool.query<{ count: number }>(
+            `SELECT count(*)::int AS count
+             FROM pg_stat_activity
+             WHERE datname = current_database()
+               AND pid <> pg_backend_pid()
+               AND wait_event_type = 'Lock'
+               AND query LIKE '%0018 — Engine membership retirement%'`,
+          );
+          expect(waiting.rows[0]!.count).toBeGreaterThan(0);
+        },
+        { timeout: 2_000, interval: 20 },
+      );
+
+      // The migration must wait for workspace authority before taking schema or
+      // row locks on child tables. Otherwise its engine ALTER and/or credential
+      // backfill forms the inverse edge and these ordinary workspace-first
+      // mutations time out or deadlock.
+      await expect(
+        workspaceOwner.query(
+          `UPDATE cloud_workspace_engine_instances
+           SET updated_at = now() WHERE workspace_id = $1`,
+          [workspaceId],
+        ),
+      ).resolves.toMatchObject({ rowCount: 0 });
+      await expect(
+        workspaceOwner.query(
+          `UPDATE cloud_workspace_client_access_grants
+           SET updated_at = now() WHERE id = $1`,
+          [grantId],
+        ),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await workspaceOwner.query("COMMIT");
+      await expect(migration).resolves.toEqual([LADDER[engineAuthorityIndex]]);
+    } finally {
+      await workspaceOwner.query("ROLLBACK").catch(() => undefined);
+      if (migration) await migration.catch(() => undefined);
+      workspaceOwner.release();
+    }
+
+    const retired = await pool.query(
+      `SELECT desired_state, status
+       FROM cloud_workspaces WHERE id = $1`,
+      [workspaceId],
+    );
+    expect(retired.rows[0]).toEqual({
+      desired_state: "deleted",
+      status: "deleting",
+    });
+  });
 });
 
 // ── Per-migration data-preservation ──────────────────────
@@ -155,7 +485,9 @@ d("0006 org→team preserves existing data", () => {
     for (const file of LADDER.filter((f) => f < "0006")) {
       await pool.query("BEGIN");
       await pool.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
-      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [file]);
+      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
+        file,
+      ]);
       await pool.query("COMMIT");
     }
     // Seed the org-era shape: a real org, two members, a NESTED sub-team, an
@@ -207,7 +539,9 @@ d("0006 org→team preserves existing data", () => {
     const file = LADDER.find((name) => name.startsWith("0006_"))!;
     await pool.query("BEGIN");
     await pool.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
-    await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [file]);
+    await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
+      file,
+    ]);
     await pool.query("COMMIT");
   });
   afterAll(async () => {
@@ -219,7 +553,12 @@ d("0006 org→team preserves existing data", () => {
       `SELECT id, slug, name, logo, created_by FROM teams`,
     );
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ id: TEAM, slug: "acme", name: "Acme", created_by: OWNER });
+    expect(rows[0]).toMatchObject({
+      id: TEAM,
+      slug: "acme",
+      name: "Acme",
+      created_by: OWNER,
+    });
     expect(rows[0].logo).toContain("data:image/png");
   });
 
@@ -305,10 +644,18 @@ d("0006 org→team preserves existing data", () => {
     };
     const STRANGER = "99999999-9999-9999-9999-999999999999";
 
-    expect(await asUser(OWNER, "SELECT count(*)::int n FROM teams")).toEqual({ n: 1 });
-    expect(await asUser(STRANGER, "SELECT count(*)::int n FROM teams")).toEqual({ n: 0 });
-    expect(await asUser(STRANGER, "SELECT count(*)::int n FROM team_settings")).toEqual({ n: 0 });
-    expect(await asUser(STRANGER, "SELECT count(*)::int n FROM audit_log")).toEqual({ n: 0 });
+    expect(await asUser(OWNER, "SELECT count(*)::int n FROM teams")).toEqual({
+      n: 1,
+    });
+    expect(await asUser(STRANGER, "SELECT count(*)::int n FROM teams")).toEqual(
+      { n: 0 },
+    );
+    expect(
+      await asUser(STRANGER, "SELECT count(*)::int n FROM team_settings"),
+    ).toEqual({ n: 0 });
+    expect(
+      await asUser(STRANGER, "SELECT count(*)::int n FROM audit_log"),
+    ).toEqual({ n: 0 });
   });
 });
 
@@ -331,7 +678,9 @@ d("0009 organization→team hierarchy preserves flat-Team data", () => {
     for (const file of LADDER.filter((name) => name < "0009")) {
       await pool.query("BEGIN");
       await pool.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
-      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [file]);
+      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
+        file,
+      ]);
       await pool.query("COMMIT");
     }
 
@@ -499,17 +848,18 @@ d("0009 organization→team hierarchy preserves flat-Team data", () => {
       { org_id: ORG },
     ]);
     expect(
-      (await pool.query(`SELECT org_id, doc FROM organization_settings`)).rows[0],
+      (await pool.query(`SELECT org_id, doc FROM organization_settings`))
+        .rows[0],
     ).toMatchObject({ org_id: ORG, doc: { git: { base_branch: "main" } } });
-    expect((await pool.query(`SELECT org_id FROM billing_customers`)).rows).toEqual([
-      { org_id: ORG },
-    ]);
-    expect((await pool.query(`SELECT org_id FROM billing_subscriptions`)).rows).toEqual([
-      { org_id: ORG },
-    ]);
-    expect((await pool.query(`SELECT org_id FROM github_installations`)).rows).toEqual([
-      { org_id: ORG },
-    ]);
+    expect(
+      (await pool.query(`SELECT org_id FROM billing_customers`)).rows,
+    ).toEqual([{ org_id: ORG }]);
+    expect(
+      (await pool.query(`SELECT org_id FROM billing_subscriptions`)).rows,
+    ).toEqual([{ org_id: ORG }]);
+    expect(
+      (await pool.query(`SELECT org_id FROM github_installations`)).rows,
+    ).toEqual([{ org_id: ORG }]);
   });
 
   it("restores organization and team audit namespaces without merging them", async () => {
@@ -543,7 +893,9 @@ d("0009 organization→team hierarchy preserves flat-Team data", () => {
       try {
         await client.query("BEGIN");
         await client.query("SET LOCAL ROLE zeros_app");
-        await client.query("SELECT set_config('app.user_id', $1, true)", [userId]);
+        await client.query("SELECT set_config('app.user_id', $1, true)", [
+          userId,
+        ]);
         const result = await client.query<{ id: string; is_personal: boolean }>(
           `SELECT id, is_personal FROM organizations ORDER BY id`,
         );

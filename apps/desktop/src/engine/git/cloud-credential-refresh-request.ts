@@ -4,6 +4,7 @@ import {
   closeSync,
   constants as fsConstants,
   fsyncSync,
+  linkSync,
   lstatSync,
   openSync,
   readFileSync,
@@ -227,4 +228,63 @@ export function requestCloudGithubCredentialRefresh(options: {
   if (operationError !== null) throw operationError;
   if (cleanupError !== null) throw cleanupError;
   return request;
+}
+
+/** Acknowledge only the marker whose credential was actually installed. A
+ * concurrent newer request wins: link(2) restores a stale quarantined marker
+ * only when the canonical path is still absent. */
+export function acknowledgeCloudGithubCredentialRefreshRequest(options: {
+  readonly generation: string;
+  readonly file?: string;
+  readonly expectedUid?: number;
+}): boolean {
+  const file = options.file ?? CLOUD_GITHUB_REFRESH_REQUEST_FILE;
+  const expectedUid = options.expectedUid ?? 0;
+  if (
+    !path.isAbsolute(file) ||
+    !Number.isInteger(expectedUid) ||
+    expectedUid < 0 ||
+    !/^[A-Za-z0-9_-]{20,64}$/.test(options.generation)
+  ) {
+    throw new Error("cloud GitHub refresh acknowledgement is invalid");
+  }
+  validateDirectory(file, expectedUid);
+  const quarantine = path.join(
+    path.dirname(file),
+    `.github-credential-refresh.ack.${randomBytes(12).toString("hex")}`,
+  );
+  try {
+    renameSync(file, quarantine);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
+  let acknowledged = false;
+  const removeQuarantine = () => {
+    try {
+      unlinkSync(quarantine);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  };
+  try {
+    chmodSync(quarantine, 0o600);
+    const current = readCloudGithubCredentialRefreshRequest({
+      file: quarantine,
+      expectedUid,
+    });
+    acknowledged = current?.generation === options.generation;
+    if (!acknowledged) {
+      try {
+        linkSync(quarantine, file);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      }
+    }
+  } catch (error) {
+    removeQuarantine();
+    throw error;
+  }
+  removeQuarantine();
+  return acknowledged;
 }

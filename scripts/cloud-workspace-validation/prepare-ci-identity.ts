@@ -57,8 +57,11 @@ function main(): void {
       ZEROS_CLOUD_OWNER_SUB: identity.ownerSubject,
       ZEROS_ACCOUNT_ACCESS_TOKEN: identity.accessToken,
       ZEROS_ACCOUNT_JWT_PUBLIC_KEY: identity.publicKey,
+      ZEROS_ACCOUNT_JWT_KID: identity.keyId,
       ZEROS_ACCOUNT_JWT_AUD: identity.audience,
       ZEROS_ACCOUNT_JWT_ISS: identity.issuer,
+      ZEROS_ACCOUNT_JWT_CONTRACT: "zeros-access-v1",
+      ZEROS_ACCOUNT_JWT_CLIENT_ID: identity.clientId,
     };
     for (const [name, value] of Object.entries(values)) {
       const delimiter = `ZEROS_${randomUUID().replaceAll("-", "")}`;

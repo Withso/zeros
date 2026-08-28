@@ -29,7 +29,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.238: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.28: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (600 resolved package/version records)
+PACKAGE INVENTORY (601 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.238
@@ -321,6 +321,13 @@ PACKAGE INVENTORY (600 resolved package/version records)
   License documents: 8d17330e28e3
 
 @daytona/api-client@0.190.1
+  License: Apache-2.0
+  Surfaces: control plane
+  Author: OpenAPI-Generator Contributors
+  Source: https://github.com/daytonaio/daytona
+  License documents: d17f227e4df5
+
+@daytona/toolbox-api-client@0.190.1
   License: Apache-2.0
   Surfaces: control plane
   Author: OpenAPI-Generator Contributors
@@ -12685,8 +12692,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT d17f227e4df5
 SHA-256: d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc
-Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @daytona/api-client@0.190.1, @openai/codex@0.149.0, @openai/codex@0.149.0-darwin-arm64, @pierre/theming@0.0.1, clean-git-ref@2.0.1
-Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/api-client@0.190.1 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.149.0 generated protocol — LICENSE; @openai/codex@0.149.0-darwin-arm64 staged native runtime — LICENSE; @pierre/theming@0.0.1 — declared Apache-2.0 terms (archive omitted a standalone file); clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
+Applies to: @bufbuild/protobuf@1.10.0, @connectrpc/connect-node@1.7.0, @connectrpc/connect-web@1.7.0, @connectrpc/connect@1.7.0, @daytona/api-client@0.190.1, @daytona/toolbox-api-client@0.190.1, @openai/codex@0.149.0, @openai/codex@0.149.0-darwin-arm64, @pierre/theming@0.0.1, clean-git-ref@2.0.1
+Source labels: @bufbuild/protobuf@1.10.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-node@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect-web@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @connectrpc/connect@1.7.0 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/api-client@0.190.1 — declared Apache-2.0 terms (archive omitted a standalone file); @daytona/toolbox-api-client@0.190.1 — declared Apache-2.0 terms (archive omitted a standalone file); @openai/codex@0.149.0 generated protocol — LICENSE; @openai/codex@0.149.0-darwin-arm64 staged native runtime — LICENSE; @pierre/theming@0.0.1 — declared Apache-2.0 terms (archive omitted a standalone file); clean-git-ref@2.0.1 — declared Apache-2.0 terms (archive omitted a standalone file)
 ================================================================================
 
                                  Apache License

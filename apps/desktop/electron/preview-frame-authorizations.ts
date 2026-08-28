@@ -7,14 +7,24 @@ interface PreviewFrameAuthorizationInput {
   readonly expiresAt?: unknown;
 }
 
+interface CloudPreviewFrameAuthorizationInput extends PreviewFrameAuthorizationInput {
+  readonly capability?: unknown;
+}
+
+interface PreviewFrameAuthorization {
+  readonly origin: string;
+  readonly expiresAt: number;
+  readonly frameTreeNodeId: number | null;
+  readonly capability: string | null;
+}
+
+const CLOUD_PREVIEW_CAPABILITY_PATTERN = /^zwp_[A-Za-z0-9_-]{43}$/;
+
 /** Volatile main-process allowlist for injecting picker code into a signed
  * cloud preview. Grants are exact to one Browser frame and one HTTPS origin;
  * neither the provider hostname nor its bearer survives an app restart. */
 export class PreviewFrameAuthorizations {
-  private readonly grants = new Map<
-    string,
-    { readonly origin: string; readonly expiresAt: number }
-  >();
+  private readonly grants = new Map<string, PreviewFrameAuthorization>();
 
   private purge(now: number): void {
     for (const [frameName, grant] of this.grants) {
@@ -26,6 +36,7 @@ export class PreviewFrameAuthorizations {
   authorize(
     input: PreviewFrameAuthorizationInput,
     now = Date.now(),
+    frameTreeNodeId: number | null = null,
   ): boolean {
     if (
       typeof input.frameName !== "string" ||
@@ -38,7 +49,9 @@ export class PreviewFrameAuthorizations {
       (input.expiresAt !== undefined &&
         (!Number.isSafeInteger(input.expiresAt) ||
           Number(input.expiresAt) <= now ||
-          Number(input.expiresAt) > now + AUTHORIZATION_TTL_MS + 60_000))
+          Number(input.expiresAt) > now + AUTHORIZATION_TTL_MS + 60_000)) ||
+      (frameTreeNodeId !== null &&
+        (!Number.isSafeInteger(frameTreeNodeId) || frameTreeNodeId < 1))
     ) {
       return false;
     }
@@ -53,6 +66,12 @@ export class PreviewFrameAuthorizations {
         return false;
       }
       this.purge(now);
+      if (
+        !this.grants.has(input.frameName) &&
+        this.grants.size >= MAX_AUTHORIZED_PREVIEW_FRAMES
+      ) {
+        return false;
+      }
       this.grants.delete(input.frameName);
       this.grants.set(input.frameName, {
         origin: url.origin,
@@ -60,16 +79,40 @@ export class PreviewFrameAuthorizations {
           input.expiresAt === undefined
             ? now + AUTHORIZATION_TTL_MS
             : Number(input.expiresAt),
+        frameTreeNodeId,
+        capability: null,
       });
-      while (this.grants.size > MAX_AUTHORIZED_PREVIEW_FRAMES) {
-        const oldest = this.grants.keys().next().value as string | undefined;
-        if (!oldest) break;
-        this.grants.delete(oldest);
-      }
       return true;
     } catch {
       return false;
     }
+  }
+
+  /** Install a control-plane preview bearer without ever sending it back to
+   * renderer code. The capability is usable only by requests whose frame ancestry
+   * contains the exact Browser iframe that requested this grant. */
+  authorizeCloudPreview(
+    input: CloudPreviewFrameAuthorizationInput,
+    frameTreeNodeId: number,
+    now = Date.now(),
+  ): boolean {
+    if (
+      typeof input.capability !== "string" ||
+      !CLOUD_PREVIEW_CAPABILITY_PATTERN.test(input.capability) ||
+      !this.authorize(input, now, frameTreeNodeId)
+    ) {
+      return false;
+    }
+    const grant =
+      typeof input.frameName === "string"
+        ? this.grants.get(input.frameName)
+        : null;
+    if (!grant) return false;
+    this.grants.set(input.frameName as string, {
+      ...grant,
+      capability: input.capability,
+    });
+    return true;
   }
 
   allows(frameName: string, candidateUrl: string, now = Date.now()): boolean {
@@ -93,7 +136,43 @@ export class PreviewFrameAuthorizations {
     }
   }
 
-  revoke(frameName: string): void {
+  /** Headers for an exact preview request. `frameTreeNodeIds` starts with the
+   * requesting frame and includes its ancestors; an ordinary renderer fetch has
+   * no authorized Browser frame in that chain and therefore receives nothing. */
+  requestHeaders(
+    candidateUrl: string,
+    frameTreeNodeIds: readonly number[],
+    now = Date.now(),
+  ): Record<string, string> | null {
+    this.purge(now);
+    let origin: string;
+    try {
+      origin = new URL(candidateUrl).origin;
+    } catch {
+      return null;
+    }
+    const grant = [...this.grants.values()].find(
+      (candidate) =>
+        candidate.origin === origin &&
+        candidate.frameTreeNodeId !== null &&
+        frameTreeNodeIds.includes(candidate.frameTreeNodeId),
+    );
+    if (!grant) return null;
+    return {
+      "X-Daytona-Skip-Preview-Warning": "true",
+      ...(grant.capability
+        ? { "x-zeros-preview-capability": grant.capability }
+        : {}),
+    };
+  }
+
+  revoke(frameName: string, capability?: string): void {
+    if (
+      capability !== undefined &&
+      this.grants.get(frameName)?.capability !== capability
+    ) {
+      return;
+    }
     this.grants.delete(frameName);
   }
 

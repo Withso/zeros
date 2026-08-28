@@ -154,12 +154,218 @@ describe("app assembly — GitHub App registered", () => {
 
 describe("app assembly — healthz", () => {
   it("needs no bearer token so Railway's healthcheck can pass", async () => {
-    const healthy = createApp(config(null), {
-      query: async () => ({ rows: [] }),
-    } as unknown as pg.Pool, emailConfig as never);
+    const healthy = createApp(
+      config(null),
+      {
+        query: async () => ({ rows: [] }),
+      } as unknown as pg.Pool,
+      emailConfig as never,
+    );
     const response = await healthy.request("/healthz");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });
+  });
+});
+
+describe("app assembly — cloud workspace internal capabilities", () => {
+  it("mounts capability auth outside interactive bearer middleware only when supplied", async () => {
+    const service = {
+      redeem: async () => ({ version: 1, material: "bounded" }),
+      registerEngine: async () => ({ version: 1 }),
+      heartbeat: async () => ({ version: 1 }),
+    };
+    const app = createApp(config(null), pool, emailConfig as never, {
+      cloudWorkspaceInternalSetupService: service,
+    });
+    const response = await app.request(
+      "/internal/v1/cloud-workspaces/setup/admission",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer zws_${"A".repeat(43)}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          workspaceId: "11111111-1111-4111-8111-111111111111",
+          organizationId: "22222222-2222-4222-8222-222222222222",
+          generation: 1,
+          setupRunId: "33333333-3333-4333-8333-333333333333",
+          executionFence: 1,
+          expected: {
+            imageRef: "snapshot-pinned",
+            imageSourceCommit: "a".repeat(40),
+            repositoryRevision: "refs/heads/main",
+            settingsVersion: 1,
+            settingsSha256: "b".repeat(64),
+          },
+        }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ version: 1, material: "bounded" });
+
+    const disabled = createApp(config(null), pool, emailConfig as never);
+    expect(
+      (
+        await disabled.request(
+          "/internal/v1/cloud-workspaces/setup/admission",
+          { method: "POST" },
+        )
+      ).status,
+    ).toBe(404);
+  });
+
+  it("throttles capability guesses by trusted edge IP before service work", async () => {
+    let serviceCalls = 0;
+    const service = {
+      redeem: async () => {
+        serviceCalls += 1;
+        return { version: 1 };
+      },
+      registerEngine: async () => {
+        serviceCalls += 1;
+        return { version: 1 };
+      },
+      heartbeat: async () => {
+        serviceCalls += 1;
+        return { version: 1 };
+      },
+    };
+    const app = createApp(config(null), pool, emailConfig as never, {
+      cloudWorkspaceInternalSetupService: service,
+    });
+    let response: Response | null = null;
+    for (let attempt = 0; attempt < 601; attempt += 1) {
+      response = await app.request(
+        "/internal/v1/cloud-workspaces/setup/admission",
+        {
+          method: "POST",
+          headers: {
+            authorization: "Bearer invalid",
+            "cf-connecting-ip": "203.0.113.91",
+          },
+        },
+      );
+    }
+
+    expect(response?.status).toBe(429);
+    expect(serviceCalls).toBe(0);
+  });
+});
+
+describe("app assembly — isolated cloud preview proxy", () => {
+  it("serves a capability-authorized preview before interactive auth", async () => {
+    const access = {
+      issue: async () => {
+        throw new Error("not used");
+      },
+      revoke: async () => {
+        throw new Error("not used");
+      },
+      recognizesPreviewRequest: (request: Request) =>
+        new URL(request.url).hostname.endsWith(".cloud-preview.example.test"),
+      handlePreviewRequest: async (request: Request) =>
+        new URL(request.url).hostname.endsWith(".cloud-preview.example.test")
+          ? new Response("proxied", {
+              headers: { "cache-control": "no-store" },
+            })
+          : null,
+    };
+    const app = createApp(config(null), pool, emailConfig as never, {
+      cloudWorkspaceAccessService: access,
+    });
+    const response = await app.request(
+      "https://0123456789abcdef0123456789abcdef.cloud-preview.example.test/app",
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("proxied");
+
+    const api = await app.request("https://api.example.test/v1/me");
+    expect(api.status).toBe(401);
+  });
+
+  it("throttles preview hosts by trusted client IP before capability or database work", async () => {
+    let handled = 0;
+    const access = {
+      issue: async () => {
+        throw new Error("not used");
+      },
+      revoke: async () => {
+        throw new Error("not used");
+      },
+      recognizesPreviewRequest: (request: Request) =>
+        new URL(request.url).hostname.endsWith(".cloud-preview.example.test"),
+      handlePreviewRequest: async () => {
+        handled += 1;
+        return new Response("denied", { status: 401 });
+      },
+    };
+    const app = createApp(config(null), pool, emailConfig as never, {
+      cloudWorkspaceAccessService: access,
+    });
+    let response: Response | null = null;
+    for (let attempt = 0; attempt < 601; attempt += 1) {
+      response = await app.request(
+        "https://0123456789abcdef0123456789abcdef.cloud-preview.example.test/app",
+        { headers: { "x-real-ip": "198.51.100.77" } },
+      );
+    }
+    expect(response?.status).toBe(429);
+    expect(handled).toBe(600);
+  });
+
+  it("keeps Cloudflare preview clients in independent pre-auth buckets", async () => {
+    let handled = 0;
+    const access = {
+      issue: async () => {
+        throw new Error("not used");
+      },
+      revoke: async () => {
+        throw new Error("not used");
+      },
+      recognizesPreviewRequest: (request: Request) =>
+        new URL(request.url).hostname.endsWith(".cloud-preview.example.test"),
+      handlePreviewRequest: async () => {
+        handled += 1;
+        return new Response("denied", { status: 401 });
+      },
+    };
+    const app = createApp(config(null), pool, emailConfig as never, {
+      cloudWorkspaceAccessService: access,
+    });
+    const url =
+      "https://fedcba9876543210fedcba9876543210.cloud-preview.example.test/app";
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      await app.request(url, {
+        headers: { "cf-connecting-ip": "198.51.100.81" },
+      });
+    }
+    const otherClient = await app.request(url, {
+      headers: { "cf-connecting-ip": "198.51.100.82" },
+    });
+
+    expect(otherClient.status).toBe(401);
+    expect(handled).toBe(601);
+  });
+
+  it("allows the dedicated revocation header through CORS preflight", async () => {
+    const app = createApp(config(null), pool, emailConfig as never);
+    const response = await app.request(
+      "/v1/organizations/11111111-1111-4111-8111-111111111111/cloud-workspaces/22222222-2222-4222-8222-222222222222/access/33333333-3333-4333-8333-333333333333",
+      {
+        method: "OPTIONS",
+        headers: {
+          origin: "app://zeros",
+          "access-control-request-method": "DELETE",
+          "access-control-request-headers":
+            "authorization,x-zeros-access-credential",
+        },
+      },
+    );
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-headers")).toContain(
+      "x-zeros-access-credential",
+    );
   });
 });
 

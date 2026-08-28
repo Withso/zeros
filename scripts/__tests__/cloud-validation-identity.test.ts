@@ -12,18 +12,37 @@ describe("cloud qualification identity", () => {
     });
     expect(identity).not.toHaveProperty("privateKey");
     expect(identity.publicKey).toMatch(/BEGIN PUBLIC KEY/);
+    expect(identity.keyId).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(identity.accessToken.length).toBeLessThan(16_384);
+    expect(
+      JSON.parse(
+        Buffer.from(identity.accessToken.split(".")[0]!, "base64url").toString(
+          "utf8",
+        ),
+      ),
+    ).toMatchObject({ alg: "RS256", typ: "JWT", kid: identity.keyId });
     const claims = verifyAccountJwt(
       identity.accessToken,
       {
         publicKey: identity.publicKey,
         audience: identity.audience,
         issuer: identity.issuer,
+        contract: "zeros-access-v1",
+        clientId: identity.clientId,
       },
       now,
     );
     expect(claims.sub).toBe("zsr-ci:123:1");
-    expect(claims.exp! * 1000).toBe(now + 8 * 60 * 60_000);
+    expect(claims.sid).toMatch(/^zsr_session_[0-9a-f-]{36}$/);
+    expect(claims.jti).toMatch(/^zsr_token_[0-9a-f-]{36}$/);
+    expect(claims.client_id).toBe(identity.clientId);
+    expect(claims["https://zeros.build/email"]).toBe(
+      "zsr-cloud-qualification@zeros.invalid",
+    );
+    expect(claims["https://zeros.build/email_verified"]).toBe(true);
+    expect(claims.exp! * 1000).toBe(
+      Math.floor(now / 1_000) * 1_000 + 8 * 60 * 60_000,
+    );
   });
 
   it("rejects unsafe subjects and out-of-policy lifetimes", () => {

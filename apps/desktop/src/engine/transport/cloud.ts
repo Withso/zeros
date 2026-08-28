@@ -38,6 +38,7 @@ import {
 } from "@zeros/protocol/schemas";
 import type { EngineMessage } from "../types";
 import type { Transport, TransportClient } from "./types";
+import type { CloudRuntimeReadiness } from "../cloud-runtime-registration";
 
 /** Constant-time string compare for equal-length candidates. Length mismatches
  *  are rejected before the constant-time byte comparison.
@@ -139,6 +140,10 @@ const MAX_CONTROL_HANDLER_PEER_QUEUED_FRAMES = 8;
 const MAX_CONTROL_HANDLER_PEER_QUEUED_BYTES = 4 * 1024 * 1024;
 const MAX_HANDLER_RETAINED_BYTES = 64 * 1024 * 1024;
 const FORCE_CLOSE_TIMEOUT_MS = 1_000;
+const INTERNAL_READINESS_PATH = "/internal/readiness";
+const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const CONTROL_HANDLER_MESSAGE_TYPES = new Set<string>([
   "OWNER_SIGNED_OUT",
@@ -186,9 +191,9 @@ export function parseCloudTransportPort(
 export interface CloudTransportOptions {
   /** TCP port the in-sandbox engine binds (on 0.0.0.0) behind the preview proxy. */
   port: number;
-  /** Worker-minted connection token presented on the /ws upgrade. New clients
-   *  use the safe WebSocket subprotocol carrier; trusted non-browser probes
-   *  may use `x-zeros-cloud-token`, and `?token=` remains a compatibility path.
+  /** Worker-minted connection token presented on the /ws upgrade. Browser
+   *  clients use the WebSocket subprotocol carrier; trusted non-browser probes
+   *  may use `x-zeros-cloud-token`. Credentials are never accepted in URLs.
    *  This outer bearer is mandatory even when account binding adds a second gate. */
   token: string;
   /** Bounded test/operator tuning. Production uses the conservative defaults;
@@ -197,6 +202,12 @@ export interface CloudTransportOptions {
   handshakeTimeoutMs?: number;
   maxBufferedBytes?: number;
   maxTotalBufferedBytes?: number;
+  /** Root-owned image helper probe. The endpoint is reachable only over a
+   * loopback TCP connection with a loopback Host and this distinct token. */
+  internalReadiness?: {
+    token: string;
+    read: () => CloudRuntimeReadiness | null;
+  };
 }
 
 interface QueuedHandlerMessage {
@@ -295,6 +306,9 @@ export class CloudTransport implements Transport {
   private readonly handshakeTimeoutMs: number;
   private readonly maxBufferedBytes: number;
   private readonly maxTotalBufferedBytes: number;
+  private readonly internalReadiness:
+    | { token: string; read: () => CloudRuntimeReadiness | null }
+    | undefined;
   private handlerInFlight = 0;
   private controlHandlerInFlight = 0;
   private handlerInFlightBytes = 0;
@@ -366,6 +380,14 @@ export class CloudTransport implements Transport {
       MAX_TOTAL_BUFFERED_BYTES,
       "cloud maxTotalBufferedBytes",
     );
+    if (
+      opts.internalReadiness &&
+      (!READINESS_TOKEN_PATTERN.test(opts.internalReadiness.token) ||
+        typeof opts.internalReadiness.read !== "function")
+    ) {
+      throw new Error("cloud internal readiness configuration is invalid");
+    }
+    this.internalReadiness = opts.internalReadiness;
     this.httpServer = createServer((req, res) => this.handleHTTP(req, res));
     // Authenticated WebSocket peers consume `maxConnections`; reserve a small
     // bounded lane for health probes and in-progress HTTP upgrades without
@@ -858,12 +880,10 @@ export class CloudTransport implements Transport {
     });
   }
 
-  /** The token gate. Prefer the header or browser WebSocket subprotocol so
-   *  credentials do not enter URLs or request-target logs; accept the query
-   *  form for existing clients. */
+  /** The token gate. Credentials use a header or browser WebSocket subprotocol
+   *  so they cannot enter URLs, request-target logs, history, or referrers. */
   private isTokenValid(url: URL, headers: IncomingMessage["headers"]): boolean {
-    const queryTokens = url.searchParams.getAll("token");
-    if (queryTokens.length > 1) return false;
+    if (url.searchParams.has("token")) return false;
     const header = headers["x-zeros-cloud-token"];
     if (Array.isArray(header) && header.length !== 1) return false;
     const fromHeader = Array.isArray(header)
@@ -871,19 +891,18 @@ export class CloudTransport implements Transport {
       : (header ?? "");
     const fromProtocol = tokenFromWebSocketProtocols(headers);
     const carrierCount =
-      Number(queryTokens.length === 1) +
-      Number(header !== undefined) +
-      Number(fromProtocol.present);
+      Number(header !== undefined) + Number(fromProtocol.present);
     if (carrierCount !== 1) return false;
-    if (queryTokens.length === 1) {
-      return tokensMatch(this.token, queryTokens[0]);
-    }
     if (header !== undefined) return tokensMatch(this.token, fromHeader);
     return tokensMatch(this.token, fromProtocol.token);
   }
 
   private handleHTTP(req: IncomingMessage, res: ServerResponse): void {
     const url = new URL(req.url ?? "", "http://sandbox");
+    if (url.pathname === INTERNAL_READINESS_PATH) {
+      this.handleInternalReadiness(url, req, res);
+      return;
+    }
     if (url.pathname === "/health" && req.method === "GET") {
       const info = this.getInfo?.() ?? {
         version: "unknown",
@@ -901,6 +920,85 @@ export class CloudTransport implements Transport {
         transport: "cloud",
         health: "/health",
         ws: "/ws",
+      }),
+    );
+  }
+
+  private handleInternalReadiness(
+    url: URL,
+    req: IncomingMessage,
+    res: ServerResponse,
+  ): void {
+    const reject = () => {
+      res.writeHead(404, {
+        "Cache-Control": "no-store",
+        "Content-Type": "text/plain; charset=utf-8",
+        "X-Content-Type-Options": "nosniff",
+      });
+      res.end("not found");
+    };
+    const remote = req.socket.remoteAddress ?? "";
+    const remoteIsLoopback =
+      remote === "127.0.0.1" ||
+      remote === "::1" ||
+      remote === "::ffff:127.0.0.1";
+    let hostIsLoopback = false;
+    try {
+      const host = new URL(`http://${req.headers.host ?? ""}`).hostname;
+      hostIsLoopback =
+        host === "127.0.0.1" || host === "[::1]" || host === "localhost";
+    } catch {
+      hostIsLoopback = false;
+    }
+    const rawToken = req.headers["x-zeros-readiness-token"];
+    const token = Array.isArray(rawToken) ? "" : (rawToken ?? "");
+    if (
+      !this.internalReadiness ||
+      req.method !== "GET" ||
+      url.search !== "" ||
+      !remoteIsLoopback ||
+      !hostIsLoopback ||
+      !tokensMatch(this.internalReadiness.token, token)
+    ) {
+      reject();
+      return;
+    }
+    let readiness: CloudRuntimeReadiness | null = null;
+    try {
+      readiness = this.internalReadiness.read();
+    } catch {
+      readiness = null;
+    }
+    if (
+      !readiness ||
+      readiness.version !== 1 ||
+      !UUID_PATTERN.test(readiness.instanceId) ||
+      !Number.isSafeInteger(readiness.protocolVersion) ||
+      readiness.protocolVersion < 1 ||
+      readiness.protocolVersion > 65_535 ||
+      readiness.health !== "ready" ||
+      readiness.durableRecordConnected !== true
+    ) {
+      res.writeHead(503, {
+        "Cache-Control": "no-store",
+        "Content-Type": "text/plain; charset=utf-8",
+        "Retry-After": "1",
+        "X-Content-Type-Options": "nosniff",
+      });
+      res.end("unavailable");
+      return;
+    }
+    res.writeHead(200, {
+      "Cache-Control": "no-store",
+      "Content-Type": "application/json; charset=utf-8",
+      "X-Content-Type-Options": "nosniff",
+    });
+    res.end(
+      JSON.stringify({
+        version: 1,
+        audience: "zeros-cloud-engine-readiness-v1",
+        ready: true,
+        engine: readiness,
       }),
     );
   }

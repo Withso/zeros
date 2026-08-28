@@ -8,6 +8,7 @@
 
 import { z } from "zod";
 import { createPrivateKey } from "node:crypto";
+import { isIP } from "node:net";
 
 import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 
@@ -67,7 +68,11 @@ const GithubEnvSchema = z.object({
   /** Backend-only RSA private key used to mint one-hour installation tokens
    * for cloud workspaces. Optional so desktop OAuth remains independently
    * available when cloud Git has not been configured yet. */
-  GITHUB_APP_PRIVATE_KEY: z.string().min(1).max(64 * 1024).optional(),
+  GITHUB_APP_PRIVATE_KEY: z
+    .string()
+    .min(1)
+    .max(64 * 1024)
+    .optional(),
   /** Public app slug used to build the installation URL. */
   GITHUB_APP_SLUG: z
     .string()
@@ -150,6 +155,25 @@ export type CloudWorkspaceBackendConfig = {
   operationTimeoutSeconds: number;
   autoArchiveMinutes: number;
   reconcileIntervalMs: number;
+  access: {
+    allowedSshHosts: readonly string[];
+    allowedPreviewHostSuffixes: readonly string[];
+    /** Wildcard DNS/TLS boundary; each preview gets a unique subdomain. */
+    previewBaseDomain: string | null;
+  };
+  /** A second operator gate. Provisioning may be enabled while production
+   * setup remains paused at `setting_up` until the image is qualified. */
+  setupExecution: {
+    controlPlaneOrigin: string;
+    allowedToolboxOrigins: readonly string[];
+    setupSecretKeyV1: string;
+    engineProtocolVersion: number;
+    enginePort: number;
+    intervalMs: number;
+    timeoutSeconds: number;
+    leaseMs: number;
+    admissionTtlSeconds: number;
+  } | null;
 };
 
 export type AuthBackendConfig =
@@ -195,10 +219,7 @@ const CloudWorkspaceEnvSchema = z.object({
   CLOUD_WORKSPACES_ENABLED: z.literal("true"),
   CLOUD_WORKSPACE_PROVIDER: z.literal("daytona").default("daytona"),
   DAYTONA_API_KEY: z.string().trim().min(16).max(4096),
-  DAYTONA_API_URL: z
-    .string()
-    .url()
-    .default("https://app.daytona.io/api"),
+  DAYTONA_API_URL: z.string().url().default("https://app.daytona.io/api"),
   DAYTONA_TARGET: z
     .string()
     .trim()
@@ -210,8 +231,7 @@ const CloudWorkspaceEnvSchema = z.object({
     .default("linux/amd64"),
   ZEROS_CLOUD_SOURCE_COMMIT: z
     .string()
-    .regex(/^[a-f0-9]{40,64}$/)
-    .min(40),
+    .regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/),
   CLOUD_WORKSPACE_CPU_MILLICORES: z.coerce
     .number()
     .int()
@@ -248,6 +268,70 @@ const CloudWorkspaceEnvSchema = z.object({
     .min(1_000)
     .max(300_000)
     .default(5_000),
+  DAYTONA_SSH_HOSTS: z
+    .string()
+    .trim()
+    .min(1)
+    .max(8 * 254)
+    .default("ssh.app.daytona.io"),
+  DAYTONA_PREVIEW_HOST_SUFFIXES: z
+    .string()
+    .trim()
+    .min(1)
+    .max(8 * 254)
+    .default("proxy.daytona.work"),
+  CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN: z
+    .string()
+    .trim()
+    .min(1)
+    .max(253)
+    .optional(),
+});
+
+const CloudWorkspaceSetupEnvSchema = z.object({
+  CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: z.literal("true"),
+  CLOUD_WORKSPACE_CONTROL_PLANE_URL: z.string().url(),
+  DAYTONA_TOOLBOX_ORIGINS: z
+    .string()
+    .trim()
+    .min(1)
+    .max(8 * 4_096),
+  CLOUD_WORKSPACE_SECRET_KEY_V1: z.string().trim().min(1).max(256),
+  CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(65_535),
+  CLOUD_WORKSPACE_ENGINE_PORT: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(65_535)
+    .default(39_393),
+  CLOUD_WORKSPACE_SETUP_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(100)
+    .max(60_000)
+    .default(1_000),
+  CLOUD_WORKSPACE_SETUP_TIMEOUT_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(30)
+    .max(3_600)
+    .default(1_800),
+  CLOUD_WORKSPACE_SETUP_LEASE_MS: z.coerce
+    .number()
+    .int()
+    .min(3_000)
+    .max(3_600_000)
+    .default(60_000),
+  CLOUD_WORKSPACE_SETUP_ADMISSION_TTL_SECONDS: z.coerce
+    .number()
+    .int()
+    .min(15)
+    .max(900)
+    .default(120),
 });
 
 function validatedServiceUrl(
@@ -299,11 +383,7 @@ function validatedBrowserUrl(
   return url.toString();
 }
 
-function validatedAuthUrl(
-  raw: string,
-  name: string,
-  nodeEnv: string,
-): string {
+function validatedAuthUrl(raw: string, name: string, nodeEnv: string): string {
   const value = raw.trim();
   const url = new URL(value);
   const devLoopback =
@@ -328,10 +408,7 @@ function validatedAuthUrl(
   return value;
 }
 
-function requiredAuthValue(
-  value: string | undefined,
-  name: string,
-): string {
+function requiredAuthValue(value: string | undefined, name: string): string {
   const normalized = value?.trim();
   if (!normalized) {
     throw new Error(`Invalid environment: ${name} is required`);
@@ -432,11 +509,7 @@ function loadAuthConfig(env: z.infer<typeof EnvSchema>): AuthBackendConfig {
     }
     return {
       provider: "workos",
-      issuer: validatedAuthUrl(
-        issuerValues[0]!,
-        "AUTH_ISSUER",
-        env.NODE_ENV,
-      ),
+      issuer: validatedAuthUrl(issuerValues[0]!, "AUTH_ISSUER", env.NODE_ENV),
       jwksUrl: validatedAuthUrl(
         requiredAuthValue(env.AUTH_JWKS_URL, "AUTH_JWKS_URL"),
         "AUTH_JWKS_URL",
@@ -649,15 +722,58 @@ function loadFeedbackConfig(
   return intercom || linear ? { intercom, linear, posthogProjectUrl } : null;
 }
 
+function validatedDnsName(value: string, name: string): string {
+  const normalized = value.trim().toLowerCase();
+  const labels = normalized.split(".");
+  if (
+    normalized.length < 1 ||
+    normalized.length > 253 ||
+    isIP(normalized) !== 0 ||
+    labels.length < 2 ||
+    labels.some(
+      (label) => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label),
+    )
+  ) {
+    throw new Error(
+      `Invalid cloud workspace environment: ${name} must contain exact DNS names without schemes, wildcards, ports, or IP addresses`,
+    );
+  }
+  return normalized;
+}
+
+function validatedDnsList(value: string, name: string): string[] {
+  const entries = [
+    ...new Set(value.split(",").map((entry) => validatedDnsName(entry, name))),
+  ];
+  if (entries.length < 1 || entries.length > 8) {
+    throw new Error(
+      `Invalid cloud workspace environment: ${name} must contain 1-8 DNS names`,
+    );
+  }
+  return entries;
+}
+
 function loadCloudWorkspaceConfig(
   env: NodeJS.ProcessEnv,
   github: GithubBackendConfig | null,
 ): CloudWorkspaceBackendConfig | null {
   const enabled = env.CLOUD_WORKSPACES_ENABLED?.trim().toLowerCase();
+  const setupEnabled =
+    env.CLOUD_WORKSPACE_SETUP_WORKER_ENABLED?.trim().toLowerCase();
+  if (setupEnabled && setupEnabled !== "true" && setupEnabled !== "false") {
+    throw new Error(
+      "Invalid environment: CLOUD_WORKSPACE_SETUP_WORKER_ENABLED must be true or false",
+    );
+  }
   if (enabled !== "true") {
     if (enabled && enabled !== "false") {
       throw new Error(
         "Invalid environment: CLOUD_WORKSPACES_ENABLED must be true or false",
+      );
+    }
+    if (setupEnabled === "true") {
+      throw new Error(
+        "Invalid cloud workspace environment: setup execution requires CLOUD_WORKSPACES_ENABLED=true",
       );
     }
     return null;
@@ -690,6 +806,88 @@ function loadCloudWorkspaceConfig(
     );
   }
   const value = parsed.data;
+  const allowedSshHosts = validatedDnsList(
+    value.DAYTONA_SSH_HOSTS,
+    "DAYTONA_SSH_HOSTS",
+  );
+  const allowedPreviewHostSuffixes = validatedDnsList(
+    value.DAYTONA_PREVIEW_HOST_SUFFIXES,
+    "DAYTONA_PREVIEW_HOST_SUFFIXES",
+  );
+  const previewBaseDomain = value.CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN
+    ? validatedDnsName(
+        value.CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN,
+        "CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN",
+      )
+    : null;
+  let setupExecution: CloudWorkspaceBackendConfig["setupExecution"] = null;
+  if (setupEnabled === "true") {
+    const setup = CloudWorkspaceSetupEnvSchema.safeParse({
+      ...env,
+      CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: setupEnabled,
+    });
+    if (!setup.success) {
+      throw new Error(
+        "Invalid cloud workspace setup environment: " +
+          setup.error.issues
+            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+            .join("; "),
+      );
+    }
+    const controlPlaneOrigin = validatedServiceUrl(
+      setup.data.CLOUD_WORKSPACE_CONTROL_PLANE_URL,
+      "CLOUD_WORKSPACE_CONTROL_PLANE_URL",
+      { allowPath: false },
+    );
+    const allowedToolboxOrigins = [
+      ...new Set(
+        setup.data.DAYTONA_TOOLBOX_ORIGINS.split(",").map((origin) =>
+          validatedServiceUrl(origin.trim(), "DAYTONA_TOOLBOX_ORIGINS", {
+            allowPath: false,
+          }),
+        ),
+      ),
+    ];
+    if (
+      allowedToolboxOrigins.length < 1 ||
+      allowedToolboxOrigins.length > 8 ||
+      setup.data.CLOUD_WORKSPACE_ENGINE_PORT === 22_222
+    ) {
+      throw new Error(
+        "Invalid cloud workspace setup environment: toolbox origins or engine port are invalid",
+      );
+    }
+    const key = Buffer.from(
+      setup.data.CLOUD_WORKSPACE_SECRET_KEY_V1,
+      "base64url",
+    );
+    try {
+      if (
+        key.length !== 32 ||
+        key.toString("base64url") !== setup.data.CLOUD_WORKSPACE_SECRET_KEY_V1
+      ) {
+        throw new Error("invalid key");
+      }
+    } catch {
+      throw new Error(
+        "Invalid cloud workspace setup environment: CLOUD_WORKSPACE_SECRET_KEY_V1 must be canonical base64url for exactly 32 bytes",
+      );
+    } finally {
+      key.fill(0);
+    }
+    setupExecution = {
+      controlPlaneOrigin,
+      allowedToolboxOrigins,
+      setupSecretKeyV1: setup.data.CLOUD_WORKSPACE_SECRET_KEY_V1,
+      engineProtocolVersion: setup.data.CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+      enginePort: setup.data.CLOUD_WORKSPACE_ENGINE_PORT,
+      intervalMs: setup.data.CLOUD_WORKSPACE_SETUP_INTERVAL_MS,
+      timeoutSeconds: setup.data.CLOUD_WORKSPACE_SETUP_TIMEOUT_SECONDS,
+      leaseMs: setup.data.CLOUD_WORKSPACE_SETUP_LEASE_MS,
+      admissionTtlSeconds:
+        setup.data.CLOUD_WORKSPACE_SETUP_ADMISSION_TTL_SECONDS,
+    };
+  }
   return {
     provider: value.CLOUD_WORKSPACE_PROVIDER,
     apiKey: value.DAYTONA_API_KEY,
@@ -704,10 +902,15 @@ function loadCloudWorkspaceConfig(
     memoryMiB: value.CLOUD_WORKSPACE_MEMORY_MIB,
     storageMiB: value.CLOUD_WORKSPACE_STORAGE_MIB,
     sourceCommit: value.ZEROS_CLOUD_SOURCE_COMMIT,
-    operationTimeoutSeconds:
-      value.CLOUD_WORKSPACE_OPERATION_TIMEOUT_SECONDS,
+    operationTimeoutSeconds: value.CLOUD_WORKSPACE_OPERATION_TIMEOUT_SECONDS,
     autoArchiveMinutes: value.CLOUD_WORKSPACE_AUTO_ARCHIVE_MINUTES,
     reconcileIntervalMs: value.CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS,
+    access: {
+      allowedSshHosts,
+      allowedPreviewHostSuffixes,
+      previewBaseDomain,
+    },
+    setupExecution,
   };
 }
 

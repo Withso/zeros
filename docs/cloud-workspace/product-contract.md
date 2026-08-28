@@ -7,10 +7,19 @@ copy run in an isolated remote execution environment. The client controls it
 through the same versioned bridge concepts used locally. Remote placement must
 not create a second, incompatible workspace model.
 
+Tenant ownership, authoritative execution placement, and an optional local
+replica are independent. Personal and Organization workspaces may run locally
+or in cloud. A local Organization workspace remains Organization-governed but
+its live source, chat, paths, and processes remain private to its device. See
+[data, placement, migration, and local sync](data-and-sync.md).
+
 ## User-visible guarantees
 
 - A workspace has one stable identity independent of its current machine,
   lifecycle state, client device, or sandbox provider.
+- A workspace has exactly one authoritative execution at a time. Syncing a
+  cloud workspace to a Mac creates a replica; it does not create a competing
+  writable engine or change tenant ownership.
 - Opening an existing workspace reconnects or wakes that workspace; it does not
   silently create a replacement.
 - Stop, wake, archive, delete, reconnect, and retry are explicit states with
@@ -27,13 +36,22 @@ not create a second, incompatible workspace model.
 - Local and cloud target selection changes routing metadata only. Moving work,
   rebasing, publishing, or deleting a checkout remains a separate explicit
   action.
+- Moving between local and cloud is a checkpointed, idempotent authority
+  handoff. A copy/fork receives a new workspace identity and is never presented
+  as a move.
 
 ## Initial product scope
 
-Cloud workspaces are organization-owned. Personal is permanently local-only;
-see [organizations, teams, and workspace ownership](../organizations-and-teams.md).
-Organization capability metadata is necessary but never replaces server-side
-membership, plan, quota, and repository authorization.
+The target product permits both Personal and Organization cloud workspaces.
+Personal is single-member and cannot enable multiplayer. Organization
+capability metadata is necessary but never replaces server-side membership,
+role, plan, quota, repository, provider-connection, and policy authorization.
+
+The current migration `0009_organization_team_hierarchy.sql` deliberately marks
+Personal as local-only, and the current cloud create route enforces that
+constraint. Enabling Personal cloud therefore requires a reviewed forward
+migration, route/RLS changes, quota ownership, and mixed-version tests; this
+document does not claim it already works.
 
 The first supported release should provide:
 
@@ -42,12 +60,17 @@ The first supported release should provide:
 3. remote engine connection, file operations, PTY, Git, and supported agents;
 4. stop, wake, reconnect, archive, and delete lifecycle controls;
 5. durable workspace metadata and transcript/session restoration;
-6. desktop status and recovery UI; and
-7. quotas, audit records, and owner-visible cost/lifecycle information.
+6. desktop status, recovery, SSH, authenticated preview/forwarding, and Design
+   parity;
+7. explicit local-to-cloud and eligible cloud-to-local authority handoff;
+8. an optional per-user/per-device receive-only local replica; and
+9. quotas, audit records, and owner-visible cost/lifecycle information.
 
-Expanded team collaboration, mobile control, provider choice, enterprise deployment, and
-cross-device local-workspace synchronization build on these contracts but do not
-need to block the first single-owner release.
+Phase 5 is the seamless single-member release for Personal and Organization
+ownership. Phase 6A adds Organization multiplayer, presence, shared live chats,
+per-member replicas, assignment, and ownership transfer. Native iOS/Android,
+automatic bidirectional file sync, and collaborative source/Design editing are
+deferred and do not block either release.
 
 ## Compatibility
 
@@ -65,3 +88,8 @@ guess around a version mismatch.
 - Provider-specific resource identifiers are not public workspace identities.
 - The first release does not promise real-time collaborative editing or
   transparent migration between providers.
+- A cloud-to-Mac replica is not an automatic bidirectional merge and is not a
+  second place to commit Git history.
+- Moving a shared cloud workspace onto one member's Mac does not preserve live
+  multiplayer; the UI offers a policy-checked copy when an authority handoff is
+  unsafe.

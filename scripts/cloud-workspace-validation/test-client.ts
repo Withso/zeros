@@ -31,6 +31,7 @@ import { relaunchQualifiedCloudEngine } from "./runtime";
 import { selectCloudPrimaryWorkspaceId } from "./lib/workspace-target";
 
 const MARKER = `zeros-cloud-validation-${randomUUID().slice(0, 8)}`;
+const PRIVATE_REMOTE = "zeros-private-qualification";
 
 function accountToken(): string {
   const token = process.env.ZEROS_ACCOUNT_ACCESS_TOKEN;
@@ -56,6 +57,87 @@ function fail(label: string, err: unknown): never {
   process.exit(1);
 }
 
+function privateRepository(): string | null {
+  const value = process.env.ZEROS_CLOUD_GITHUB_REPOSITORY?.trim();
+  if (!value) return null;
+  const parts = value.split("/");
+  if (
+    parts.length !== 2 ||
+    parts.some(
+      (part) =>
+        part.length < 1 ||
+        part.length > 100 ||
+        !/^[A-Za-z0-9_.-]+$/.test(part),
+    )
+  ) {
+    throw new Error("private qualification repository is invalid");
+  }
+  return parts.join("/");
+}
+
+async function runPtyCommand(
+  client: BridgeClient,
+  workspaceId: string,
+  command: string,
+): Promise<void> {
+  const sessionId = `validation-command-${randomUUID().slice(0, 8)}`;
+  const success = `ZEROS_COMMAND_OK_${randomUUID().replaceAll("-", "")}`;
+  const failed = `ZEROS_COMMAND_FAILED_${randomUUID().replaceAll("-", "")}`;
+  await client.ptyCreate({ sessionId, cwd: workspaceId, ephemeral: true });
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new Error("PTY qualification command timed out")),
+      20_000,
+    );
+    let output = "";
+    client.onPtyData((candidate, data) => {
+      if (candidate !== sessionId) return;
+      output = `${output}${data}`.slice(-8_192);
+      if (output.includes(success)) {
+        clearTimeout(timer);
+        resolve();
+      } else if (output.includes(failed)) {
+        clearTimeout(timer);
+        reject(new Error("PTY qualification command failed"));
+      }
+    });
+    client.ptyWrite(
+      sessionId,
+      `${command} && printf '\\n${success}\\n' || printf '\\n${failed}\\n'\n`,
+    );
+  });
+}
+
+async function verifyPrivateRepositoryCredential(
+  client: BridgeClient,
+  workspaceId: string,
+): Promise<void> {
+  const repository = privateRepository();
+  if (!repository) return;
+  const remoteUrl = `https://github.com/${repository}.git`;
+  await runPtyCommand(
+    client,
+    workspaceId,
+    `git remote remove ${PRIVATE_REMOTE} >/dev/null 2>&1 || true; git remote add ${PRIVATE_REMOTE} ${remoteUrl}`,
+  );
+  try {
+    await client.request("git.fetch", {
+      workspaceId,
+      remote: PRIVATE_REMOTE,
+      prune: true,
+    });
+  } finally {
+    await runPtyCommand(
+      client,
+      workspaceId,
+      `git remote remove ${PRIVATE_REMOTE}`,
+    ).catch(() => undefined);
+  }
+  ok(
+    `[private-repository] exact-scope GitHub App credential completed an engine-brokered fetch`,
+  );
+}
+
 /** handshake + file.tree + PTY round-trip against the current preview coords. */
 async function runBridgeChecks(
   state: CloudValidationState,
@@ -69,6 +151,7 @@ async function runBridgeChecks(
     previewToken: state.engineIngress ? undefined : state.previewToken,
     cloudToken: state.cloudToken,
     accountToken: accountToken(),
+    requestTimeoutMs: 90_000,
   });
 
   // 1. Handshake
@@ -104,6 +187,12 @@ async function runBridgeChecks(
     );
   } catch (err) {
     fail(`[${phase}] file.tree`, err);
+  }
+
+  try {
+    await verifyPrivateRepositoryCredential(client, workspaceId);
+  } catch (err) {
+    fail(`[${phase}] private repository credential`, err);
   }
 
   // 3. PTY round-trip — spawn a shell, echo a unique marker, read it back.

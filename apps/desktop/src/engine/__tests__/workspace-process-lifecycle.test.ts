@@ -54,7 +54,11 @@ interface ReaperInternals {
         }) => Promise<unknown>)
       | null;
     setupRunner:
-      | ((workspaceId: string, command: string, target?: unknown) => void)
+      | ((
+          workspaceId: string,
+          command: string,
+          target?: unknown,
+        ) => void | Promise<void>)
       | null;
   };
   pty: {
@@ -982,17 +986,27 @@ describe("Design territory agent retirement", () => {
       "retireAllCodeAgentSessionsForTerritoryChange",
     ).mockResolvedValue();
     const start = vi.spyOn(state.setup, "start").mockResolvedValue();
+    let setupAdmission: Promise<void> | null = null;
+    let admissionSettled = false;
 
     await state.withGlobalDesignTerritoryTransition(async () => {
-      state.workspace.setupRunner?.("local:created", "pnpm install", {
-        cwd: "/tmp/zeros-territory-setup",
-        repoRoot: "/tmp/zeros-territory-setup",
-        baseBranch: "main",
+      setupAdmission = Promise.resolve(
+        state.workspace.setupRunner?.("local:created", "pnpm install", {
+          cwd: "/tmp/zeros-territory-setup",
+          repoRoot: "/tmp/zeros-territory-setup",
+          baseBranch: "main",
+        }),
+      ).then(() => {
+        admissionSettled = true;
       });
+      await Promise.resolve();
       expect(start).not.toHaveBeenCalled();
+      expect(admissionSettled).toBe(false);
     });
 
-    await vi.waitFor(() => expect(start).toHaveBeenCalledOnce());
+    await setupAdmission;
+    expect(admissionSettled).toBe(true);
+    expect(start).toHaveBeenCalledOnce();
     expect(start).toHaveBeenCalledWith({
       workspaceId: "local:created",
       command: "pnpm install",

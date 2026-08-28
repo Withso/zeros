@@ -37,13 +37,59 @@ import {
 } from "./workos-browser-sessions.js";
 import { createWorkOSDesktopRevocationRoutes } from "./workos-desktop-revocation.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
+import {
+  createCloudWorkspaceInternalRoutes,
+  type CloudWorkspaceInternalSetupService,
+} from "./cloud-workspaces/internal-routes.js";
+import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
+
+export type CreateAppDependencies = {
+  cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
+  cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
+};
 
 export function createApp(
   config: Config,
   pool: pg.Pool,
   emailConfig: EmailConfig,
+  dependencies: CreateAppDependencies = {},
 ): Hono {
   const app = new Hono();
+
+  // Preview capabilities use an isolated wildcard origin and a dedicated
+  // header, not an interactive account JWT. Let the access service recognize
+  // only its exact host before ordinary API middleware runs; every non-preview
+  // request falls through unchanged.
+  if (dependencies.cloudWorkspaceAccessService) {
+    const previewPreAuthLimit = rateLimit(
+      "cloud-preview-preauth",
+      600,
+      60_000,
+      (c) => {
+        // Railway supplies X-Real-IP. A direct Cloudflare Tunnel strips that
+        // header and supplies CF-Connecting-IP instead, so do not collapse all
+        // protected preview clients into the shared anonymous bucket.
+        const clientIp =
+          c.req.header("X-Real-IP")?.trim() ??
+          c.req.header("CF-Connecting-IP")?.trim() ??
+          "";
+        return isIP(clientIp) ? clientIp : "unknown";
+      },
+    );
+    app.use("*", async (c, next) => {
+      const access = dependencies.cloudWorkspaceAccessService!;
+      if (!access.recognizesPreviewRequest(c.req.raw)) {
+        await next();
+        return;
+      }
+      // Run a no-op continuation through the shared limiter before capability
+      // parsing, PostgreSQL, provider lookup, or upstream body buffering.
+      await previewPreAuthLimit(c, async () => undefined);
+      const proxied = await access.handlePreviewRequest(c.req.raw);
+      if (proxied) return proxied;
+      await next();
+    });
+  }
 
   // Health: no auth (Railway healthcheck), proves DB reachability.
   app.get("/healthz", async (c) => {
@@ -79,6 +125,37 @@ export function createApp(
     );
   }
 
+  // The sandbox helper and cloud engine authenticate with narrow one-use or
+  // heartbeat capabilities, not an interactive account JWT. Mount this
+  // non-browser surface before `/v1/*` middleware and only when the guarded
+  // setup worker has been configured at boot.
+  if (dependencies.cloudWorkspaceInternalSetupService) {
+    // Reject anonymous capability guessing before JSON buffering, token
+    // parsing, or PostgreSQL work. Railway supplies X-Real-IP; the protected
+    // qualification tunnel supplies CF-Connecting-IP. Prefer Railway's header
+    // when both are present, validate either value, and collapse missing or
+    // attacker-controlled garbage into one bounded bucket.
+    const internalPreAuthLimit = rateLimit(
+      "cloud-workspace-internal-preauth",
+      600,
+      60_000,
+      (c) => {
+        const clientIp =
+          c.req.header("X-Real-IP")?.trim() ??
+          c.req.header("CF-Connecting-IP")?.trim() ??
+          "";
+        return isIP(clientIp) ? clientIp : "unknown";
+      },
+    );
+    app.use("/internal/v1/cloud-workspaces/*", internalPreAuthLimit);
+    app.route(
+      "/",
+      createCloudWorkspaceInternalRoutes(
+        dependencies.cloudWorkspaceInternalSetupService,
+      ),
+    );
+  }
+
   // CORS: the callers are the Electron renderer (localhost dev origin /
   // packaged origin) and later app.zeros.build. Auth is a bearer token —
   // no cookies, nothing ambient — so a wildcard origin with credentials
@@ -88,7 +165,12 @@ export function createApp(
     cors({
       origin: "*",
       allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-      allowHeaders: ["authorization", "content-type", "idempotency-key"],
+      allowHeaders: [
+        "authorization",
+        "content-type",
+        "idempotency-key",
+        "x-zeros-access-credential",
+      ],
       maxAge: 86400,
     }),
   );
@@ -168,7 +250,15 @@ export function createApp(
   app.use("/v1/feedback", feedbackBodyLimit);
 
   app.route("/", createFeedbackRoutes(config.feedback));
-  app.route("/", createRoutes(pool, emailConfig, config.cloudWorkspaces));
+  app.route(
+    "/",
+    createRoutes(
+      pool,
+      emailConfig,
+      config.cloudWorkspaces,
+      dependencies.cloudWorkspaceAccessService ?? null,
+    ),
+  );
   if (config.github) app.route("/", createGithubRoutes(pool, config.github));
 
   app.onError((err, c) => {

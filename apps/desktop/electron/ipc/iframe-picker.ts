@@ -39,6 +39,11 @@ import {
   controlBrowserIframe,
   parseBrowserIframeControl,
 } from "../iframe-frame-control";
+import {
+  disposeCloudWorkspaceAccessBroker,
+  getCloudWorkspaceAccessBroker,
+  revokeCloudWorkspacePreviewFrame,
+} from "../cloud-workspace-access-runtime";
 
 let mainWindowRef: BrowserWindow | null = null;
 // `window.name` is page-mutable. Pin the DOM iframe's original React-assigned
@@ -570,9 +575,70 @@ export function registerIframePickerCommands(opts: {
     const ok = await reinjectBrowserPicker(opts.mainWindow, frameName);
     return { ok };
   });
-  setCommand("browser:authorize-preview-origin", async (args) => ({
-    ok: previewFrameAuthorizations.authorize(args),
-  }));
+  setCommand("browser:authorize-preview-origin", async (args) => {
+    const frameName =
+      typeof args.frameName === "string" &&
+      args.frameName.startsWith("zeros-browser-") &&
+      args.frameName.length <= 320
+        ? args.frameName
+        : null;
+    const frame = frameName
+      ? currentBrowserFrame(opts.mainWindow, frameName)
+      : null;
+    return {
+      ok:
+        frame !== null &&
+        previewFrameAuthorizations.authorize(
+          args,
+          Date.now(),
+          frame.frameTreeNodeId,
+        ),
+    };
+  });
+  setCommand("browser:open-cloud-preview", async (args) => {
+    const frameName =
+      typeof args.frameName === "string" &&
+      args.frameName.startsWith("zeros-browser-") &&
+      args.frameName.length <= 320
+        ? args.frameName
+        : null;
+    const organizationId =
+      typeof args.organizationId === "string" ? args.organizationId : "";
+    const workspaceId =
+      typeof args.workspaceId === "string" ? args.workspaceId : "";
+    const port =
+      typeof args.port === "number" && Number.isSafeInteger(args.port)
+        ? args.port
+        : 0;
+    if (!frameName || !organizationId || !workspaceId || !port) {
+      throw new Error("cloud preview request is invalid");
+    }
+    if (!currentBrowserFrame(opts.mainWindow, frameName)) {
+      throw new Error("cloud preview Browser frame is unavailable");
+    }
+    return getCloudWorkspaceAccessBroker().openPreview(
+      { frameName, organizationId, workspaceId, port },
+      (authorization) => {
+        // Re-resolve after the network round trip. A closed/replaced iframe may
+        // reuse no stale frame authority even when it kept the same tab id.
+        const current = currentBrowserFrame(opts.mainWindow, frameName);
+        if (
+          current === null ||
+          !previewFrameAuthorizations.authorizeCloudPreview(
+            authorization,
+            current.frameTreeNodeId,
+          )
+        ) {
+          return false;
+        }
+        return () =>
+          previewFrameAuthorizations.revoke(
+            frameName,
+            authorization.capability,
+          );
+      },
+    );
+  });
   setCommand("browser:revoke-preview-origin", async (args) => {
     const frameName =
       typeof args.frameName === "string" &&
@@ -582,7 +648,10 @@ export function registerIframePickerCommands(opts: {
         : null;
     if (!frameName) return { ok: false };
     previewFrameAuthorizations.revoke(frameName);
-    return { ok: true };
+    const remoteRevoked = await revokeCloudWorkspacePreviewFrame(
+      frameName,
+    ).catch(() => false);
+    return { ok: true, remoteRevoked };
   });
   setCommand("browser:control-iframe", async (args) => {
     const request = parseBrowserIframeControl(args);
@@ -605,6 +674,7 @@ export function registerIframePickerCommands(opts: {
       browserFrameNames.clear();
       pendingBrowserNavigations.clear();
       previewFrameAuthorizations.clear();
+      void disposeCloudWorkspaceAccessBroker();
       iframeFaviconGenerationByName.clear();
       iframeFaviconUrlByName.clear();
     }

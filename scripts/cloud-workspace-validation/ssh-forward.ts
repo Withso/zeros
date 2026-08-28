@@ -19,7 +19,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { loadState, makeDaytona, ENGINE_CLOUD_PORT } from "./config";
+import { loadState, ENGINE_CLOUD_PORT } from "./config";
+import { makeQualifiedControlPlaneProvider } from "./control-plane-provider";
 import { requireHttpRoundTrip } from "./lib/qualification-gates";
 
 async function reserveLocalPort(): Promise<number> {
@@ -102,20 +103,19 @@ function curlHealth(port: number): Promise<{ code: number; body: string }> {
 
 async function main() {
   const state = loadState();
-  const daytona = makeDaytona();
-  const sandbox = await daytona.get(state.sandboxId);
+  const provider = makeQualifiedControlPlaneProvider();
 
   console.log(
     `\n  Requesting SSH access (60 min) for sandbox ${state.sandboxId}…`,
   );
-  const ssh = await sandbox.createSshAccess(60);
+  const ssh = await provider.createSshAccess(state.sandboxId, 60);
   let sshProc: ChildProcess | null = null;
   const knownHostsDir = mkdtempSync(path.join(tmpdir(), "zeros-ssh-host-"));
   let failure: unknown = null;
   try {
     // Use the provider-returned command only as structured data; never execute
     // it through a shell. No token fragment or provider stderr reaches logs.
-    const target = validatedSshTarget(ssh.sshCommand, ssh.token);
+    const target = validatedSshTarget(ssh.command, ssh.credential);
     const localPort = await reserveLocalPort();
     console.log(
       `  Opening a token-authenticated ssh -L tunnel to engine port ${ENGINE_CLOUD_PORT} …`,
@@ -171,7 +171,7 @@ async function main() {
       }
     }
     try {
-      await sandbox.revokeSshAccess(ssh.token);
+      await provider.revokeSshAccess(state.sandboxId);
     } catch (error) {
       cleanupFailures.push(error);
     }

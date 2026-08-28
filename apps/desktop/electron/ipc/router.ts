@@ -70,6 +70,11 @@ const commandTable: Record<string, CommandHandler> = {
   open_install_terminal: notImpl("open_install_terminal", 3),
   detect_open_apps: notImpl("detect_open_apps", 3),
   open_in_app: notImpl("open_in_app", 3),
+  cloud_workspace_ssh_copy: notImpl("cloud_workspace_ssh_copy", 3),
+  cloud_workspace_ssh_terminal: notImpl("cloud_workspace_ssh_terminal", 3),
+  cloud_workspace_ssh_ide: notImpl("cloud_workspace_ssh_ide", 3),
+  cloud_workspace_tunnel_start: notImpl("cloud_workspace_tunnel_start", 3),
+  cloud_workspace_access_revoke: notImpl("cloud_workspace_access_revoke", 3),
 
   // ── Auth0 session @ rest — main owns the full token pair; the renderer only
   // ever gets a live access token or decoded identity claims. The pair is written
@@ -144,11 +149,9 @@ const commandTable: Record<string, CommandHandler> = {
     "browser:authorize-preview-origin",
     0,
   ),
-  "browser:revoke-preview-origin": notImpl(
-    "browser:revoke-preview-origin",
-    0,
-  ),
+  "browser:revoke-preview-origin": notImpl("browser:revoke-preview-origin", 0),
   "browser:control-iframe": notImpl("browser:control-iframe", 0),
+  "browser:open-cloud-preview": notImpl("browser:open-cloud-preview", 0),
   browser_confirmation_respond: notImpl("browser_confirmation_respond", 0),
   browser_confirmation_requests: notImpl("browser_confirmation_requests", 0),
   browser_session_attach: notImpl("browser_session_attach", 0),

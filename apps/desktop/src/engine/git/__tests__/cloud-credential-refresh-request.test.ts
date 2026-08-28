@@ -5,6 +5,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
+  acknowledgeCloudGithubCredentialRefreshRequest,
   requestCloudGithubCredentialRefresh,
   readCloudGithubCredentialRefreshRequest,
 } from "../cloud-credential-refresh-request";
@@ -89,5 +90,25 @@ describe("cloud GitHub credential refresh request", () => {
     expect(
       readCloudGithubCredentialRefreshRequest({ file, expectedUid: uid }),
     ).toMatchObject({ generation: "c".repeat(32), method: "pat" });
+    expect(
+      acknowledgeCloudGithubCredentialRefreshRequest({
+        file,
+        expectedUid: uid,
+        generation: "b".repeat(32),
+      }),
+    ).toBe(false);
+    expect(
+      readCloudGithubCredentialRefreshRequest({ file, expectedUid: uid }),
+    ).toMatchObject({ generation: "c".repeat(32) });
+    expect(
+      acknowledgeCloudGithubCredentialRefreshRequest({
+        file,
+        expectedUid: uid,
+        generation: "c".repeat(32),
+      }),
+    ).toBe(true);
+    expect(
+      readCloudGithubCredentialRefreshRequest({ file, expectedUid: uid }),
+    ).toBeNull();
   });
 });

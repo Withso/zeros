@@ -235,9 +235,9 @@ export interface EngineReadyMessage extends BaseMessage {
 
 /** Engine → clients broadcast: a list-changing write hit the engine DB. Clients
  *  refetch the named lists so a change on one device shows up live on the others
- *  through cross-device synchronization. `kinds` names which lists changed (e.g. "chats",
- *  "projects"); optional opaque ids scope the pull, but row data is never sent
- *  in the event itself. */
+ *  through cross-device synchronization. `kinds` names which lists or keyed
+ *  surfaces changed (e.g. "chats", "projects", "setup"); optional opaque ids
+ *  scope the pull, but row data is never sent in the event itself. */
 export interface DbChangedMessage extends BaseMessage {
   type: "DB_CHANGED";
   kinds: string[];

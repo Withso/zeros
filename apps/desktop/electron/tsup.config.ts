@@ -42,6 +42,20 @@ export default defineConfig({
     __ZEROS_CONTROL_PLANE_URL_BAKED__: JSON.stringify(
       process.env.VITE_CONTROL_PLANE_URL || "",
     ),
+    // Preview capabilities may be injected only into the deployment's exact
+    // wildcard suffix. Bake the same public DNS boundary that fronts the
+    // control-plane preview proxy; comma separation supports staged domains.
+    __ZEROS_CLOUD_PREVIEW_HOST_SUFFIXES_BAKED__: JSON.stringify(
+      process.env.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES ||
+        process.env.CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN ||
+        "",
+    ),
+    // SSH gateway host keys are public verification material, not credentials.
+    // Bake the release-approved known_hosts document so packaged clients never
+    // have to trust an unauthenticated key observed on their first connection.
+    __ZEROS_CLOUD_SSH_KNOWN_HOSTS_B64_BAKED__: JSON.stringify(
+      process.env.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 || "",
+    ),
     // Auth redemption/refresh happens in Electron main, not the renderer. Bake
     // the same channel-specific web origin there or Alpha/Beta silently fall
     // back to Production after the browser handoff.

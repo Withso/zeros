@@ -55,6 +55,48 @@ export const DAYTONA_API_URL = optEnv(
   "DAYTONA_API_URL",
   "https://app.daytona.io/api",
 );
+const DAYTONA_PREVIEW_SUFFIX_PATTERN =
+  /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
+
+export function parseDaytonaPreviewHostSuffixes(
+  raw: string | undefined,
+): readonly string[] {
+  const values = (raw?.trim() || "proxy.daytona.work")
+    .split(",")
+    .map((value) => value.trim());
+  if (
+    values.length < 1 ||
+    values.length > 8 ||
+    values.some(
+      (value) =>
+        value.length === 0 ||
+        value !== value.toLowerCase() ||
+        value.includes("..") ||
+        !DAYTONA_PREVIEW_SUFFIX_PATTERN.test(value),
+    )
+  ) {
+    throw new Error("DAYTONA_PREVIEW_HOST_SUFFIXES is invalid");
+  }
+  return Object.freeze([...new Set(values)]);
+}
+
+export const DAYTONA_PREVIEW_HOST_SUFFIXES =
+  parseDaytonaPreviewHostSuffixes(
+    process.env.DAYTONA_PREVIEW_HOST_SUFFIXES,
+  );
+
+export function isAllowedDaytonaPreviewHost(
+  hostname: string,
+  expectedPrefix?: string,
+  suffixes: readonly string[] = DAYTONA_PREVIEW_HOST_SUFFIXES,
+): boolean {
+  const normalized = hostname.toLowerCase();
+  return suffixes.some((suffix) =>
+    expectedPrefix
+      ? normalized === `${expectedPrefix.toLowerCase()}.${suffix}`
+      : normalized.endsWith(`.${suffix}`),
+  );
+}
 
 export function makeDaytona(): Daytona {
   return new Daytona({
@@ -244,6 +286,31 @@ export function collectCloudAccountBindingEnv(
   }
   const audience = boundedEnvValue(env, "ZEROS_ACCOUNT_JWT_AUD", 512);
   const acceptedIssuers = boundedEnvValue(env, "ZEROS_ACCOUNT_JWT_ISS", 4_096);
+  const contract = boundedEnvValue(env, "ZEROS_ACCOUNT_JWT_CONTRACT", 64);
+  const clientId = boundedEnvValue(env, "ZEROS_ACCOUNT_JWT_CLIENT_ID", 512);
+  if (contract !== undefined && contract !== "zeros-access-v1") {
+    throw new Error("ZEROS_ACCOUNT_JWT_CONTRACT is not supported");
+  }
+  if ((contract === undefined) !== (clientId === undefined)) {
+    throw new Error(
+      "qualified cloud token contract and client id must be configured together",
+    );
+  }
+  let exactContractIssuer: string | undefined;
+  if (contract === "zeros-access-v1") {
+    if (!audience) {
+      throw new Error("qualified cloud token contract requires an audience");
+    }
+    if (!acceptedIssuers || acceptedIssuers.includes(",")) {
+      throw new Error(
+        "qualified cloud token contract requires one exact issuer",
+      );
+    }
+    exactContractIssuer = secureIdentityUrl(
+      acceptedIssuers,
+      "ZEROS_ACCOUNT_JWT_ISS",
+    );
+  }
   const skew = boundedEnvValue(env, "ZEROS_ACCOUNT_JWT_SKEW", 16);
   if (skew !== undefined) {
     const parsed = Number(skew);
@@ -271,7 +338,15 @@ export function collectCloudAccountBindingEnv(
       : {}),
     ...(publicKey ? { ZEROS_ACCOUNT_JWT_PUBLIC_KEY: publicKey } : {}),
     ...(audience ? { ZEROS_ACCOUNT_JWT_AUD: audience } : {}),
-    ...(acceptedIssuers ? { ZEROS_ACCOUNT_JWT_ISS: acceptedIssuers } : {}),
+    ...(acceptedIssuers
+      ? { ZEROS_ACCOUNT_JWT_ISS: exactContractIssuer ?? acceptedIssuers }
+      : {}),
+    ...(contract
+      ? {
+          ZEROS_ACCOUNT_JWT_CONTRACT: contract,
+          ZEROS_ACCOUNT_JWT_CLIENT_ID: clientId!,
+        }
+      : {}),
     ...(skew ? { ZEROS_ACCOUNT_JWT_SKEW: skew } : {}),
     ZEROS_REQUIRE_ACCOUNT: "1",
   };
@@ -551,8 +626,7 @@ function parseEngineIngressCurrent(
     url.pathname !== "/" ||
     url.search ||
     url.hash ||
-    (url.hostname !== expectedHostPrefix &&
-      !url.hostname.startsWith(`${expectedHostPrefix}.`))
+    !isAllowedDaytonaPreviewHost(url.hostname, expectedHostPrefix)
   ) {
     throw new Error("cloud validation state has an invalid engine ingress");
   }
@@ -596,6 +670,7 @@ export function parseCloudValidationState(raw: unknown): CloudValidationState {
     previewUrl.protocol !== "https:" ||
     previewUrl.username ||
     previewUrl.password ||
+    !isAllowedDaytonaPreviewHost(previewUrl.hostname) ||
     !boundedString(value.previewToken, 4_096) ||
     !boundedString(value.cloudToken, 4_096) ||
     !boundedString(value.region, 64) ||
@@ -919,6 +994,9 @@ export function imageContractSha256(): string {
     "sandbox/install-cloud-preview-links.mjs",
     "sandbox/install-cloud-github-credential.mjs",
     "sandbox/cloud-github-refresh-request.mjs",
+    "sandbox/cloud-git-askpass.mjs",
+    "sandbox/cloud-worker-supervisor.mjs",
+    "sandbox/setup-cloud-workspace.mjs",
   ];
   return sha256(
     files
