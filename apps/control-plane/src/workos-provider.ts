@@ -542,6 +542,8 @@ export class RailwayWorkOSProvider
     const page = await this.client.userManagement.listOrganizationMemberships({
       organizationId: options.organizationId,
       userId: options.userId,
+      // WorkOS otherwise returns active memberships only.
+      statuses: ["active", "inactive", "pending"],
       limit: 100,
     });
     return page.data.map((membership) => this.membershipRecord(membership));
