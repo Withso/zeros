@@ -6,20 +6,20 @@ type BrandLockupProps = {
 
 const SIZE_CLASS = {
   sm: { mark: 'h-5 w-5', wordmark: 'h-[15px]' },
-  md: { mark: 'h-[22px] w-[22px]', wordmark: 'h-[18px]' },
-  lg: { mark: 'h-8 w-8', wordmark: 'h-[26px]' },
+  md: { mark: 'h-[22px] w-[22px]', wordmark: 'h-[17px]' },
+  lg: { mark: 'h-8 w-8', wordmark: 'h-[25px]' },
 } as const
 
 /**
- * Mark + custom SVG "zeros" wordmark. The name is drawn, not set in
- * type, so its round terminals and circular o match the four-blob
- * mark. Optically centered like a Linear lockup; the wordmark sits at
- * ~80% of the mark height.
+ * Mark + SVG "Zeros" wordmark. The name is Outfit Medium outlines
+ * (SIL OFL), converted to paths with Linear-like tight tracking
+ * and a slightly enlarged o so it rhymes with the blob circles.
+ * Cap height is ~75% of the mark; the pair is optically centered.
  */
 export function BrandLockup({ size = 'md', className = '' }: BrandLockupProps) {
   const { mark, wordmark } = SIZE_CLASS[size]
   return (
-    <span className={`inline-flex items-center gap-[6px] ${className}`}>
+    <span className={`inline-flex items-center gap-[7px] ${className}`}>
       <img
         src="/zeros-logo.svg"
         alt=""

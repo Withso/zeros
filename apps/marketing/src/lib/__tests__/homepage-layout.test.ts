@@ -70,7 +70,9 @@ describe("marketing homepage layout", () => {
     expect(brand).toMatch(/items-center/);
     expect(brand).not.toMatch(/font-medium tracking-\[0\.04em\]/);
     expect(brand).not.toMatch(/>Zeros</);
-    expect(wordmark).toMatch(/stroke-linecap="round"/);
+    expect(wordmark).toMatch(/fill="#ffffff"/);
+    expect(wordmark).toMatch(/<path /);
+    expect(wordmark).not.toMatch(/stroke-linecap/);
     expect(wordmark).not.toMatch(/<text/i);
   });
 
