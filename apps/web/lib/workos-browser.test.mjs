@@ -129,6 +129,49 @@ test("callback and logout forward only their required opaque cookie", async () =
   );
 });
 
+test("callback rehomes Railway redirects and preserves every Set-Cookie header", async () => {
+  const upstreamHeaders = new Headers({
+    location: `${APP_ORIGIN}/`,
+    "cache-control": "no-store",
+  });
+  const expectedCookies = [
+    `${WORKOS_SESSION_COOKIE}=${SESSION_ID}; Path=/; Secure; HttpOnly; SameSite=Strict`,
+    `${WORKOS_FLOW_COOKIE}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax`,
+    "zeros_session=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax",
+  ];
+  for (const cookie of expectedCookies) {
+    upstreamHeaders.append("set-cookie", cookie);
+  }
+  const upstream = new Response(null, {
+    status: 303,
+    headers: upstreamHeaders,
+  });
+  // Exercise the Cloudflare Workers branch rather than Node's getSetCookie()
+  // compatibility branch.
+  Object.defineProperty(upstream.headers, "getAll", {
+    value(name) {
+      assert.equal(name, "Set-Cookie");
+      return expectedCookies;
+    },
+  });
+
+  const response = await finishWorkOSBrowserAuth(
+    new Request(`${APP_ORIGIN}/auth/callback?code=code&state=state`, {
+      headers: { cookie: `${WORKOS_FLOW_COOKIE}=${SESSION_ID}` },
+    }),
+    ENV,
+    { fetch: async () => upstream },
+  );
+
+  // A cross-origin fetch response is not the browser-facing response. Pages
+  // must construct a fresh response and re-append Set-Cookie values one by one;
+  // otherwise the multi-cookie callback can be folded or dropped at the facade.
+  assert.notEqual(response, upstream);
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get("location"), `${APP_ORIGIN}/`);
+  assert.deepEqual(response.headers.getSetCookie(), expectedCookies);
+});
+
 test("session lookup forwards only the opaque cookie and validates Railway data", async () => {
   let forwarded;
   const result = await readWorkOSBrowserSession(

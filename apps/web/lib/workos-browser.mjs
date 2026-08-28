@@ -63,6 +63,40 @@ function failureResponse() {
   );
 }
 
+function setCookieValues(headers) {
+  // Cloudflare Workers retains getAll() specifically for Set-Cookie, while
+  // Node's standards implementation exposes getSetCookie(). Never split the
+  // ordinary get() value on commas: Expires attributes may contain commas.
+  if (typeof headers.getAll === "function") {
+    return headers.getAll("Set-Cookie");
+  }
+  if (typeof headers.getSetCookie === "function") {
+    return headers.getSetCookie();
+  }
+  const single = headers.get("set-cookie");
+  return single ? [single] : [];
+}
+
+function browserFacingResponse(upstream) {
+  // A fetch() response carries an immutable, origin-facing header guard. Pages
+  // must re-home it before returning it to the browser, and Set-Cookie must be
+  // appended as distinct fields (RFC 6265 forbids folding them). This matters
+  // most on the callback, which sets the session cookie and expires several
+  // one-time/compatibility cookies in the same redirect.
+  const headers = new Headers();
+  for (const [name, value] of upstream.headers) {
+    if (name.toLowerCase() !== "set-cookie") headers.append(name, value);
+  }
+  for (const cookie of setCookieValues(upstream.headers)) {
+    headers.append("set-cookie", cookie);
+  }
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers,
+  });
+}
+
 async function proxyBrowserGet(request, env, pathname, options = {}) {
   const url = new URL(request.url);
   const headers = new Headers();
@@ -77,12 +111,13 @@ async function proxyBrowserGet(request, env, pathname, options = {}) {
     headers.set("cookie", `${cookieName}=${cookie}`);
   }
   try {
-    return await fetchWorkOSRailway(
+    const upstream = await fetchWorkOSRailway(
       env,
       `${pathname}${url.search}`,
       { method: "GET", headers },
       options.fetch || fetch,
     );
+    return browserFacingResponse(upstream);
   } catch {
     return failureResponse();
   }
