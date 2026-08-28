@@ -1,8 +1,9 @@
 # WorkOS Hosted AuthKit architecture and rollout
 
-Status: one-PR foundation and Alpha qualification. Repository implementation,
-dashboard configuration, deployment, and real Alpha acceptance are all release
-gates; this document never treats a local test pass as a production approval.
+Status: foundation implemented; Alpha qualification in progress. Repository
+implementation, dashboard configuration, deployment, and real Alpha acceptance
+are separate release gates; this document never treats a local test pass as a
+production approval.
 
 Retention: keep this document while Auth0 compatibility exists. After every
 supported release uses WorkOS, move the durable contracts into the permanent
@@ -58,11 +59,14 @@ membership, while a WorkOS outage cannot make Zeros forget who owns product
 data. Authorization still fails closed when the local account/session or
 organization membership is inactive.
 
-## Single-PR implementation phases
+## Reviewed implementation phases
 
-The work lands as one reviewed PR so schema, server, web, desktop, tests, and
-runbooks cannot be promoted in incompatible combinations. The phases are
-logical gates inside that PR, not independently shippable partial designs:
+The foundation landed as one reviewed PR so schema, server, web, desktop,
+tests, and runbooks could not be promoted in incompatible combinations. Live
+Alpha qualification then found three integration defects that could only be
+fixed after that merge; each corrective patch received its own green review
+and was promoted in order. The phases below remain logical gates, not
+independently supported partial designs:
 
 1. **Contracts and schema.** Preserve stable Zeros UUID ownership; add identity
    and session lifecycle, WorkOS organization/membership projections, durable
@@ -130,9 +134,11 @@ the unchanged Zeros UUID.
 
 If someone later signs in with a newly created WorkOS User that has the same
 email, Zeros does **not** relink it. A recent provider authentication creates a
-24-hour recovery request and displays only its public `ZR-…` locator. A staff
-operator must reauthenticate within five minutes, verify the evidence out of
-band, and approve the exact request. Approval supersedes the deleted identity,
+24-hour recovery request and displays only its public `ZR-…` locator. An exact
+`support_admin` operator must reauthenticate within five minutes, verify the
+evidence out of band, and approve the exact request. A `developer` is not a
+recovery operator, and a `support_admin` does not receive developer-only app
+surfaces. Approval supersedes the deleted identity,
 binds the new subject to the original UUID, increments the account revision,
 audits the operation, and sends a notification. It does not silently restore
 collaborative memberships; those must be re-provisioned by the organization or
@@ -143,6 +149,49 @@ An active account reached through a different WorkOS subject returns
 render fixed guidance for `account_exists`, `reauthentication_required`,
 inactive accounts, and reviewed recovery. Raw provider/database messages are
 discarded.
+
+### Recovery-operator bootstrap and revocation
+
+`users.staff_role` is deliberately not writable by `zeros_app`; neither an API
+route nor compromised application code can grant staff authority. Use the
+database-owner command from a controlled Railway shell or an equivalent
+operator workstation. Never persist these one-shot variables on the service.
+
+Set `DATABASE_URL` plus these target-bound inputs:
+
+- `CONTROL_PLANE_STAFF_CHANNEL` — `development`, `alpha`, `beta`, or
+  `production`; it must match `RAILWAY_ENVIRONMENT_NAME` when Railway supplies
+  one.
+- `CONTROL_PLANE_STAFF_SUBJECT_USER_ID` and
+  `CONTROL_PLANE_STAFF_EXPECTED_EMAIL` — both must resolve to the same exact
+  Zeros account.
+- `CONTROL_PLANE_STAFF_ACTOR_USER_ID` — the accountable human operator's Zeros
+  UUID. A second person is preferred for Production bootstrap.
+- `CONTROL_PLANE_STAFF_ROLE` — `support_admin`, `developer`, or `none` for
+  revocation.
+- `CONTROL_PLANE_STAFF_REASON` — a 16–512 character audit reason.
+
+Run the read-only plan first:
+
+```sh
+pnpm --dir apps/control-plane staff:manage
+```
+
+The plan prints no database URL or email. It returns an approval string bound
+to the database fingerprint, deployment channel, actor, subject, current role,
+next role, and a hash of the reason. Copy that exact value into
+`CONTROL_PLANE_STAFF_APPROVAL`, then execute:
+
+```sh
+pnpm --dir apps/control-plane staff:manage --execute
+```
+
+Production additionally requires
+`CONTROL_PLANE_STAFF_PRODUCTION_CONFIRMED=true`. Execution re-locks and
+revalidates the target, rejects a stale plan, increments `auth_revision`, emits
+`account.authorization_changed`, and appends the owner-only
+`staff_role_changes` record in the same transaction. The ordinary application
+role can neither mutate the staff column nor forge that evidence.
 
 ## Organization management synchronization
 
@@ -372,9 +421,9 @@ result without copying secrets into tickets or repository files.
    client IDs.
 3. Register only the channel's exact redirects and default sign-out URI.
 4. Enable Hosted AuthKit, Google, GitHub, and Magic Auth. Keep email
-   verification and WorkOS-managed transactional email enabled. Disable Email
-   + Password unless a later product decision adds it. Configure MFA/recovery
-   policy in Hosted AuthKit, not in Zeros code.
+   verification and WorkOS-managed transactional email enabled. Keep
+   email-and-password authentication disabled unless a later product decision
+   adds it. Configure MFA/recovery policy in Hosted AuthKit, not in Zeros code.
 5. Configure Zeros-owned Google/GitHub OAuth credentials before Production.
    Provider tokens and extra provider scopes must remain disabled. Follow the
    WorkOS [GitHub OAuth setup](https://workos.com/docs/integrations/github-oauth)
@@ -504,6 +553,60 @@ Manual Alpha acceptance must verify:
   caching/referrer leakage; and
 - macOS smoke checks plus separately recorded Windows/Linux packaging checks
   before claiming those platforms are qualified.
+
+### Alpha evidence record — 2026-08-28
+
+This record distinguishes real-provider evidence from deterministic automated
+coverage. It is not a Production approval.
+
+Verified against the deployed Alpha Web and signed macOS Alpha application:
+
+- Hosted AuthKit launched from both clients with distinct Web/Desktop
+  applications and exact callbacks.
+- Magic Auth rejected an invalid/stale code, accepted the current Zoho-delivered
+  code, restored the resulting Personal organization, persisted across browser
+  reload and a full desktop quit/relaunch, and logged out correctly.
+- Desktop browser-sign-in cancellation and the ten-minute Zeros handoff expiry
+  returned to a retryable signed-out state; late callbacks were refused.
+- Google and GitHub completed provider authentication. Where a newly created
+  WorkOS identity collided with preserved Zeros ownership, the client entered
+  reviewed recovery instead of silently relinking by email.
+- Web and Desktop registered different WorkOS session IDs. Device logout revoked
+  only the initiating session; global logout revoked both, and an already-open
+  browser consumed the security stream and signed out without reload.
+- The deployed control-plane health endpoint, exact release version, Personal
+  bootstrap, secure browser cookie relay, strict same-site completion, and
+  session-revocation persistence were inspected after promotion.
+
+Deterministic repository/emulator coverage additionally verifies JWT and client
+binding, PKCE and wrong-verifier refusal, callback/deep-link validation,
+concurrent refresh serialization, provider failures, WorkOS event
+idempotency/reordering/repair, account-deletion projection, reviewed recovery,
+organization/member/invite convergence, directory and last-owner safeguards,
+tenant RLS, cloud create/wake denial, SSE replay, and stream-outage behavior.
+The database-backed control-plane suite passes every forward migration path,
+including the owner-only support-operator bootstrap and revocation path.
+
+Still required before Alpha can be called fully qualified:
+
+- Explicitly approved deletion of the disposable WorkOS test user while Web and
+  Desktop are open, followed by recreated-identity recovery. The destructive
+  provider deletion is intentionally not inferred from general test approval.
+- Selection and owner-mediated bootstrap of a dedicated `support_admin`, then a
+  live two-person recovery approval and immediate revocation of that temporary
+  authority.
+- A clean first-time and returning Google/GitHub identity-linking exercise for
+  the same person; existing preserved identities currently exercise the safer
+  recovery path instead.
+- Live organization membership removal/role change with both clients open and
+  a live WorkOS/stream interruption drill. Automated coverage is not relabeled
+  as live evidence.
+- Windows and Linux release qualification on those operating systems. macOS
+  evidence and CI packaging do not qualify another platform.
+
+MFA is currently disabled in the Alpha Hosted UI, so the conditional MFA item
+is not applicable to this Alpha configuration. Radar remains disabled by the
+explicit product decision above.
 
 ## Primary references
 

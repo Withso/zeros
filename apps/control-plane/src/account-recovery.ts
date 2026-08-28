@@ -3,7 +3,7 @@ import type pg from "pg";
 import { z } from "zod";
 
 import type { AuthedUser } from "./auth.js";
-import { HttpError, requireStaff } from "./authz.js";
+import { HttpError, requireStaffRole } from "./authz.js";
 import { audit } from "./audit.js";
 import { withSystemTx } from "./db.js";
 
@@ -15,7 +15,7 @@ const RecoveryCodeSchema = z
 const OPERATOR_REAUTH_SECONDS = 5 * 60;
 
 function requireFreshOperator(operator: AuthedUser): void {
-  requireStaff(operator.staffRole);
+  requireStaffRole(operator.staffRole, "support_admin");
   const authTime = operator.authentication.authTime;
   const now = Date.now() / 1_000;
   if (

@@ -22,6 +22,7 @@ const COUNT_TABLES = [
   "invitations",
   "organization_settings",
   "audit_log",
+  "staff_role_changes",
   "billing_customers",
   "billing_subscriptions",
   "github_oauth_states",
@@ -118,9 +119,7 @@ export function validateResetRequest(
       "Invalid reset configuration: CONTROL_PLANE_RESET_CHANNEL must be alpha, beta, or development",
     );
   }
-  const railwayEnvironment = input.railwayEnvironmentName
-    ?.trim()
-    .toLowerCase();
+  const railwayEnvironment = input.railwayEnvironmentName?.trim().toLowerCase();
   if (railwayEnvironment && railwayEnvironment !== channel) {
     throw new DatabaseResetError(
       "Reset channel does not match RAILWAY_ENVIRONMENT_NAME",
@@ -164,7 +163,9 @@ export async function resetPublicSchema(
     await client.query("COMMIT");
   } catch {
     await client.query("ROLLBACK").catch(() => {});
-    throw new DatabaseResetError("Database reset failed; no migrations were run");
+    throw new DatabaseResetError(
+      "Database reset failed; no migrations were run",
+    );
   } finally {
     client.release();
   }
