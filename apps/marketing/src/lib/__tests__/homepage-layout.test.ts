@@ -51,16 +51,27 @@ describe("marketing homepage layout", () => {
     expect(home).not.toMatch(/ModeToggle/);
     expect(home).not.toMatch(/Workspace mode/);
     expect(home).not.toMatch(/\bSoon\b/);
-    expect(home).toMatch(/DownloadButton/);
   });
 
-  it("uses a larger Linear-weight header lockup", () => {
+  it("merges the header into the page background", () => {
+    expect(nav).toMatch(/bg-bg1/);
+    expect(nav).not.toMatch(/border-b/);
+    expect(nav).not.toMatch(/backdrop-blur/);
+  });
+
+  it("uses the SVG lockup in the header", () => {
     expect(nav).toMatch(/BrandLockup size="lg"/);
     expect(nav).toMatch(/h-16/);
-    expect(brand).toMatch(/size\?: 'sm' \| 'md' \| 'lg'/);
-    expect(brand).toMatch(/lg: \{ text: 'text-\[20px\]'/);
-    expect(brand).toMatch(/mark: 'h-8 w-8'/);
-    expect(brand).toMatch(/font-medium tracking-\[-0\.02em\]/);
+    expect(brand).toMatch(/ZEROS-logo-name\.svg/);
+    expect(brand).not.toMatch(/>Zeros</);
+  });
+
+  it("leaves empty space instead of the agents strip and final CTA", () => {
+    expect(home).not.toMatch(/AgentsStrip/);
+    expect(home).not.toMatch(/FinalCTA/);
+    expect(home).not.toMatch(/Bring your own agents/);
+    expect(home).not.toMatch(/Start shipping in parallel/);
+    expect(home).toMatch(/aria-hidden/);
   });
 
   it("shows Zeros chat streaming and a right floating inspector", () => {

@@ -3,13 +3,13 @@ import { BrandLockup } from './BrandLockup'
 import { DownloadButton } from './DownloadButton'
 
 /**
- * Sticky, translucent top nav — Linear-style: larger lockup on the left,
- * text links, then a divider and the Download pill on the right.
+ * Sticky top nav that shares the page canvas — no border, no frost —
+ * so the lockup sits on bg1. Logo left, links + Download on the right.
  * Text links collapse on small screens, leaving logo + Download.
  */
 export function Nav() {
   return (
-    <header className="sticky top-0 z-50 border-b border-border1 bg-bg1/80 backdrop-blur-xl">
+    <header className="sticky top-0 z-50 bg-bg1">
       <div className="mx-auto flex h-16 w-full max-w-[1240px] items-center justify-between px-5 sm:px-8 lg:px-10">
         <a href="/" className="select-none" aria-label="Zeros home">
           <BrandLockup size="lg" />
