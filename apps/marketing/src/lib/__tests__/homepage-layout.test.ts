@@ -59,11 +59,13 @@ describe("marketing homepage layout", () => {
     expect(nav).not.toMatch(/backdrop-blur/);
   });
 
-  it("uses the SVG lockup in the header", () => {
+  it("uses a Linear-style mark plus medium-weight Zeros name", () => {
     expect(nav).toMatch(/BrandLockup size="lg"/);
     expect(nav).toMatch(/h-16/);
-    expect(brand).toMatch(/ZEROS-logo-name\.svg/);
-    expect(brand).not.toMatch(/>Zeros</);
+    expect(brand).toMatch(/zeros-logo\.svg/);
+    expect(brand).not.toMatch(/ZEROS-logo-name\.svg/);
+    expect(brand).toMatch(/font-medium tracking-\[-0\.03em\]/);
+    expect(brand).toMatch(/>Zeros</);
   });
 
   it("leaves empty space instead of the agents strip and final CTA", () => {

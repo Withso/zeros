@@ -1,30 +1,33 @@
 type BrandLockupProps = {
-  /** Logo scale; sizes the combined mark + wordmark SVG. */
+  /** Logo scale; sizes the icon mark and "Zeros" wordmark together. */
   size?: 'sm' | 'md' | 'lg'
   className?: string
 }
 
-// Combined lockup SVG is 356×59. Height is the only free variable — width
-// follows so the designed icon-to-wordmark spacing stays intact.
+// Mark sits a touch taller than cap height — Linear's lockup proportion.
 const SIZE_CLASS = {
-  sm: 'h-[18px]',
-  md: 'h-[22px]',
-  lg: 'h-7',
+  sm: { text: 'text-[16px]', mark: 'h-5 w-5' },
+  md: { text: 'text-[16px]', mark: 'h-[22px] w-[22px]' },
+  lg: { text: 'text-[18px]', mark: 'h-7 w-7' },
 } as const
 
 /**
- * Official Zeros lockup (mark + lowercase wordmark) from ZEROS-logo-name.svg.
+ * Mark + "Zeros" wordmark. The name is Geist medium at the same weight as
+ * the homepage tagline, title case, vertically centered on the mark.
  */
 export function BrandLockup({ size = 'md', className = '' }: BrandLockupProps) {
-  const height = SIZE_CLASS[size]
+  const { text, mark } = SIZE_CLASS[size]
   return (
-    <span className={`inline-flex items-center leading-none ${className}`}>
+    <span
+      className={`inline-flex items-center gap-[0.4em] font-sans leading-none text-fg1 ${text} ${className}`}
+    >
       <img
-        src="/ZEROS-logo-name.svg"
-        alt="Zeros"
-        className={`${height} w-auto object-contain invert dark:invert-0`}
+        src="/zeros-logo.svg"
+        alt=""
+        className={`${mark} shrink-0 object-contain invert dark:invert-0`}
         draggable={false}
       />
+      <span className="font-medium tracking-[-0.03em]">Zeros</span>
     </span>
   )
 }
