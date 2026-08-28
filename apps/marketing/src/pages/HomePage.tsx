@@ -13,7 +13,6 @@ export function HomePage() {
 
       <main className="flex-1">
         <Hero />
-        <ProductSection />
         <AgentsStrip />
         <FinalCTA />
       </main>
@@ -27,61 +26,19 @@ export function HomePage() {
 
 function Hero() {
   return (
-    <section className="mx-auto w-full max-w-[1240px] px-5 pt-20 pb-4 text-center sm:px-8 sm:pt-28 lg:px-10 lg:pt-32">
-      <h1 className="mx-auto max-w-[16ch] text-[40px] leading-[1.05] font-medium tracking-[-0.03em] text-balance text-fg1 sm:text-[56px] lg:text-[68px]">
-        Design and code, <span className="text-fg3">in parallel.</span>
+    <section className="mx-auto w-full max-w-[1240px] px-5 pt-16 sm:px-8 sm:pt-20 lg:px-10 lg:pt-24">
+      <h1 className="max-w-[18ch] text-left text-[40px] leading-[1.05] font-medium tracking-[-0.03em] text-fg1 sm:text-[56px] lg:text-[68px]">
+        Human-agent interaction
+        <br />
+        for builders
       </h1>
-
-      <div className="mt-9 flex flex-col items-center gap-4">
-        <DownloadButton size="lg" />
-        <span className="text-[12px] tracking-tight text-fg3">{DOWNLOAD_META}</span>
+      <p className="mt-5 max-w-[42ch] text-left text-[15px] leading-relaxed text-fg2 sm:text-[17px]">
+        Run a team of coding & design agents
+      </p>
+      <div className="mt-10 sm:mt-14">
+        <ProductPreview />
       </div>
     </section>
-  )
-}
-
-function ProductSection() {
-  return (
-    <section className="mx-auto mt-10 w-full max-w-[1240px] px-5 sm:mt-14 sm:px-8 lg:px-10">
-      <div className="mb-5 flex justify-center sm:mb-6">
-        <ModeToggle />
-      </div>
-      <ProductPreview />
-    </section>
-  )
-}
-
-/**
- * Dev / Design segmented toggle shown above the product window.
- * Dev is the active surface; Design is disabled until design mode ships.
- */
-function ModeToggle() {
-  return (
-    <div
-      role="tablist"
-      aria-label="Workspace mode"
-      className="inline-flex items-center gap-1 rounded-full border border-border3 bg-bg1 p-1"
-    >
-      <span
-        role="tab"
-        aria-selected="true"
-        className="rounded-full bg-bg2 px-4 py-1.5 text-[13px] font-medium text-fg1"
-      >
-        Dev
-      </span>
-      <span
-        role="tab"
-        aria-selected="false"
-        aria-disabled="true"
-        title="Design mode — coming soon"
-        className="flex cursor-not-allowed items-center gap-1.5 rounded-full px-4 py-1.5 text-[13px] text-fg3"
-      >
-        Design
-        <span className="rounded-full border border-border3 px-1.5 py-px text-[9px] font-medium tracking-wide text-fg3 uppercase">
-          Soon
-        </span>
-      </span>
-    </div>
   )
 }
 
