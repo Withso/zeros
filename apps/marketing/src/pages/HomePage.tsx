@@ -27,10 +27,9 @@ export function HomePage() {
 function Hero() {
   return (
     <section className="mx-auto w-full max-w-[1240px] px-5 pt-16 sm:px-8 sm:pt-20 lg:px-10 lg:pt-24">
-      <h1 className="max-w-[18ch] text-left text-[40px] leading-[1.05] font-medium tracking-[-0.03em] text-fg1 sm:text-[56px] lg:text-[68px]">
-        Human-agent interaction
-        <br />
-        for builders
+      <h1 className="text-left text-[40px] leading-[1.08] font-medium tracking-[-0.03em] text-fg1 sm:text-[56px] lg:text-[68px]">
+        <span className="block">Human-agent interaction</span>
+        <span className="block">for builders</span>
       </h1>
       <p className="mt-5 max-w-[42ch] text-left text-[15px] leading-relaxed text-fg2 sm:text-[17px]">
         Run a team of coding & design agents

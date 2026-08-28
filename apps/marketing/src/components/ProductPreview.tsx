@@ -4,8 +4,6 @@ import {
   ChevronDown,
   ChevronRight,
   Circle,
-  CircleDollarSign,
-  Copy,
   Ellipsis,
   FileCode,
   FileEdit,
@@ -18,7 +16,6 @@ import {
   Home,
   MessageSquare,
   Monitor,
-  MoreHorizontal,
   Plus,
   Search,
   Shield,
@@ -160,19 +157,8 @@ function ChatTabStrip() {
 
 function StreamingTranscript() {
   return (
-    <div className="mx-auto flex w-full max-w-[1152px] min-h-0 min-w-0 flex-1 flex-col gap-5 overflow-hidden pt-3 pr-[300px] pb-3 pl-7">
+    <div className="mx-auto flex w-full max-w-[1152px] min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-hidden pt-3 pr-[300px] pb-3 pl-7">
       <SettledSummaryChip />
-
-      <div className="flex max-w-[768px] flex-col gap-2.5 self-start text-sm leading-relaxed text-fg1">
-        <p>
-          Ready in{' '}
-          <code className="rounded-sm bg-bg2 px-1 py-0.5 font-mono text-xs text-fg1">
-            0docs
-          </code>
-          . What should we ship?
-        </p>
-        <TurnFooter duration="5s" />
-      </div>
 
       <UserBubble>
         Restyle the homepage after Linear — left tagline, chat plus inspector.
@@ -293,23 +279,6 @@ function UserBubble({ children }: { children: ReactNode }) {
       <div className="w-fit max-w-[768px] rounded-sm border border-border1 bg-highlighted-bg px-3 py-2 text-sm leading-relaxed text-fg1">
         {children}
       </div>
-    </div>
-  )
-}
-
-function TurnFooter({ duration }: { duration: string }) {
-  return (
-    <div className="mt-1 flex items-center gap-1.5 text-xs text-fg2">
-      <span className="tabular-nums">{duration}</span>
-      <span className="inline-flex size-5 items-center justify-center rounded-sm text-fg2">
-        <CircleDollarSign className="size-3.5" strokeWidth={1.5} />
-      </span>
-      <span className="inline-flex size-5 items-center justify-center rounded-sm text-fg2">
-        <Copy className="size-3.5" strokeWidth={1.5} />
-      </span>
-      <span className="inline-flex size-5 items-center justify-center rounded-sm text-fg2">
-        <MoreHorizontal className="size-3.5" strokeWidth={1.5} />
-      </span>
     </div>
   )
 }

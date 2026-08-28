@@ -58,8 +58,8 @@ describe("marketing homepage layout", () => {
     expect(nav).toMatch(/BrandLockup size="lg"/);
     expect(nav).toMatch(/h-16/);
     expect(brand).toMatch(/size\?: 'sm' \| 'md' \| 'lg'/);
-    expect(brand).toMatch(/lg: \{ text: 'text-\[18px\]'/);
-    expect(brand).toMatch(/mark: 'h-7 w-7'/);
+    expect(brand).toMatch(/lg: \{ text: 'text-\[20px\]'/);
+    expect(brand).toMatch(/mark: 'h-8 w-8'/);
     expect(brand).toMatch(/font-medium tracking-\[-0\.02em\]/);
   });
 

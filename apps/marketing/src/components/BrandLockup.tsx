@@ -9,7 +9,7 @@ type BrandLockupProps = {
 const SIZE_CLASS = {
   sm: { text: 'text-[16px]', mark: 'h-[18px] w-[18px]' },
   md: { text: 'text-[16px]', mark: 'h-[20px] w-[20px]' },
-  lg: { text: 'text-[18px]', mark: 'h-7 w-7' },
+  lg: { text: 'text-[20px]', mark: 'h-8 w-8' },
 } as const
 
 /**
