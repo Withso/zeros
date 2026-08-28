@@ -201,11 +201,11 @@ async function beginAndComplete(
 }
 
 describe("Railway WorkOS browser-session coordinator", () => {
-  it("keeps PKCE material server-side and returns only host-only opaque cookies", async () => {
+  it("keeps PKCE material server-side and completes on a same-site document", async () => {
     const value = subject();
     const app = createWorkOSBrowserSessionRoutes(value.sessions, APP_ORIGIN);
     const started = await app.request(
-      `/auth/start?return=${encodeURIComponent(`${APP_ORIGIN}/after`)}`,
+      `/auth/start?return=${encodeURIComponent(`${APP_ORIGIN}/after?one=1&two=2`)}`,
     );
     expect(started.status).toBe(303);
     expect(started.headers.get("location")).toMatch(
@@ -229,8 +229,17 @@ describe("Railway WorkOS browser-session coordinator", () => {
       `/auth/callback?code=one-time-code&state=${encodeURIComponent(state)}`,
       { headers: { cookie: `${WORKOS_FLOW_COOKIE}=${TOKENS[0]}` } },
     );
-    expect(completed.status).toBe(303);
-    expect(completed.headers.get("location")).toBe(`${APP_ORIGIN}/after`);
+    expect(completed.status).toBe(200);
+    expect(completed.headers.get("location")).toBeNull();
+    expect(completed.headers.get("referrer-policy")).toBe("no-referrer");
+    const completionDocument = await completed.text();
+    expect(completionDocument).toContain(
+      `<meta http-equiv="refresh" content="0;url=${APP_ORIGIN}/after?one=1&amp;two=2" />`,
+    );
+    expect(completionDocument).toContain(
+      `href="${APP_ORIGIN}/after?one=1&amp;two=2"`,
+    );
+    expect(completionDocument).not.toContain("?one=1&two=2");
     const setCookies = completed.headers.getSetCookie();
     const sessionCookie = setCookies.find((cookie) =>
       cookie.startsWith(`${WORKOS_SESSION_COOKIE}=`),

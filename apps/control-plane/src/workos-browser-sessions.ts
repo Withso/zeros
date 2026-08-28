@@ -792,6 +792,63 @@ function failureResponse(reason: string): Response {
   );
 }
 
+function htmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+/**
+ * SameSite=Strict deliberately withholds the newly issued session throughout
+ * the cross-site AuthKit redirect chain. Finish that chain on a non-redirect
+ * document, then let this same-site document navigate to the validated return
+ * URL. This keeps the stronger cookie policy without making a successful sign
+ * in look signed out until the user opens a new tab.
+ */
+function completionResponse(returnTo: string): Response {
+  const target = htmlAttribute(returnTo);
+  const headers = new Headers({
+    "cache-control": "no-store",
+    pragma: "no-cache",
+    "content-type": "text/html; charset=utf-8",
+    "content-security-policy":
+      "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    "cross-origin-opener-policy": "same-origin",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+  });
+  return new Response(
+    `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="refresh" content="0;url=${target}" />
+    <title>Completing sign in to Zeros</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0c0c0d; color: #e6e6e6; font: 14px -apple-system, system-ui, sans-serif; }
+      main { max-width: 28rem; padding: 2rem; text-align: center; }
+      p { color: #a1a1aa; }
+      a { color: #f4f4f5; }
+    </style>
+  </head>
+  <body>
+    <main aria-live="polite">
+      <h1>Completing sign in</h1>
+      <p>Your secure Zeros session is ready.</p>
+      <a href="${target}">Continue to Zeros</a>
+    </main>
+  </body>
+</html>`,
+    { status: 200, headers },
+  );
+}
+
 function json(value: unknown, status = 200): Response {
   return Response.json(value, {
     status,
@@ -861,11 +918,10 @@ export function createWorkOSBrowserSessionRoutes(
       return failed;
     }
     const returnPath = safeWorkOSReturnPath(result.returnPath, appOrigin);
-    const headers = new Headers({
-      location: new URL(returnPath, `${appOrigin}/`).toString(),
-      "cache-control": "no-store",
-    });
-    headers.append(
+    const completed = completionResponse(
+      new URL(returnPath, `${appOrigin}/`).toString(),
+    );
+    completed.headers.append(
       "set-cookie",
       hostCookie(
         WORKOS_SESSION_COOKIE,
@@ -874,10 +930,13 @@ export function createWorkOSBrowserSessionRoutes(
         "Strict",
       ),
     );
-    appendFlowCleanup(headers);
-    headers.append("set-cookie", expireCookie("zeros_session"));
-    headers.append("set-cookie", expireCookie("zeros_session", true));
-    return new Response(null, { status: 303, headers });
+    appendFlowCleanup(completed.headers);
+    completed.headers.append("set-cookie", expireCookie("zeros_session"));
+    completed.headers.append(
+      "set-cookie",
+      expireCookie("zeros_session", true),
+    );
+    return completed;
   });
 
   app.get("/auth/browser/session", async (c) => {

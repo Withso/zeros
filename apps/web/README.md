@@ -150,6 +150,14 @@ WorkOS client/verification values, and `APP_ORIGIN` only on the matching
 Railway service. Remove any retired `AUTH_SESSIONS` binding,
 `WORKOS_SESSION_WORKER`, or `AUTH_BROKER_SECRET` from Pages.
 
+The successful callback is a no-store, no-referrer `200` completion document,
+not another cross-site HTTP redirect. It sets the host-only
+`SameSite=Strict` session cookie and immediately performs a same-site navigation
+to the already validated return URL, with a visible link as a no-script
+fallback. This document boundary is required because browsers correctly
+withhold Strict cookies throughout the original AuthKit redirect chain. Pages
+must preserve its body and append every `Set-Cookie` field separately.
+
 Register `https://<channel-api-host>/auth/workos-webhook` for the user,
 session, organization, organization-membership, and invitation event set in
 [`docs/workos-authentication-migration.md`](../../docs/workos-authentication-migration.md).

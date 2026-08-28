@@ -200,6 +200,13 @@ single-use, access tokens are not stored as table columns, and encrypted sealed
 sessions are refreshed under a PostgreSQL advisory/row lock so multiple
 Railway replicas cannot race rotation.
 
+After a successful callback, Railway sets the host-only `SameSite=Strict`
+session cookie on a no-store, no-referrer `200` completion document. That
+document immediately navigates to the previously validated same-origin return
+URL. Do not replace it with a `3xx`: browsers retain the cross-site AuthKit
+navigation context across redirect hops and will correctly withhold the Strict
+cookie, making the first signed-in page appear signed out.
+
 Both Web and Desktop authorization URLs always select `provider=authkit`.
 Hosted AuthKit owns provider choice, credentials, verification, MFA, recovery,
 and identity linking. Caller-supplied provider, connection, or organization

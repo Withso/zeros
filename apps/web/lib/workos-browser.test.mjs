@@ -129,11 +129,13 @@ test("callback and logout forward only their required opaque cookie", async () =
   );
 });
 
-test("callback rehomes Railway redirects and preserves every Set-Cookie header", async () => {
+test("callback rehomes the completion document and every Set-Cookie header", async () => {
   const upstreamHeaders = new Headers({
-    location: `${APP_ORIGIN}/`,
     "cache-control": "no-store",
+    "content-type": "text/html; charset=utf-8",
   });
+  const completionDocument =
+    '<!doctype html><meta http-equiv="refresh" content="0;url=https://app-alpha.zeros.build/">';
   const expectedCookies = [
     `${WORKOS_SESSION_COOKIE}=${SESSION_ID}; Path=/; Secure; HttpOnly; SameSite=Strict`,
     `${WORKOS_FLOW_COOKIE}=; Path=/; Max-Age=0; Secure; HttpOnly; SameSite=Lax`,
@@ -142,8 +144,8 @@ test("callback rehomes Railway redirects and preserves every Set-Cookie header",
   for (const cookie of expectedCookies) {
     upstreamHeaders.append("set-cookie", cookie);
   }
-  const upstream = new Response(null, {
-    status: 303,
+  const upstream = new Response(completionDocument, {
+    status: 200,
     headers: upstreamHeaders,
   });
   // Exercise the Cloudflare Workers branch rather than Node's getSetCookie()
@@ -167,9 +169,10 @@ test("callback rehomes Railway redirects and preserves every Set-Cookie header",
   // must construct a fresh response and re-append Set-Cookie values one by one;
   // otherwise the multi-cookie callback can be folded or dropped at the facade.
   assert.notEqual(response, upstream);
-  assert.equal(response.status, 303);
-  assert.equal(response.headers.get("location"), `${APP_ORIGIN}/`);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("location"), null);
   assert.deepEqual(response.headers.getSetCookie(), expectedCookies);
+  assert.equal(await response.text(), completionDocument);
 });
 
 test("session lookup forwards only the opaque cookie and validates Railway data", async () => {
