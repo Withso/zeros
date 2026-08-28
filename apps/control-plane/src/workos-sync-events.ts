@@ -429,13 +429,29 @@ async function applyOrganizationEvent(
 
 async function removeLocalMembership(
   tx: Tx,
-  input: { organizationId: string; userId: string; reason: string },
+  input: {
+    organizationId: string;
+    userId: string;
+    reason: string;
+    workosMembershipId?: string | null;
+  },
 ): Promise<void> {
+  // A pending membership can be replaced by a new active WorkOS membership.
+  // Do not let a delayed event for the old object revoke that replacement.
+  // Rows without a provider ID remain fail-closed for compatibility.
   const removed = await tx.query(
     `DELETE FROM organization_members
      WHERE org_id = $1 AND user_id = $2
+       AND (
+         $3::text IS NULL OR workos_membership_id IS NULL
+         OR workos_membership_id = $3
+       )
      RETURNING user_id`,
-    [input.organizationId, input.userId],
+    [
+      input.organizationId,
+      input.userId,
+      input.workosMembershipId ?? null,
+    ],
   );
   if (!removed.rows[0]) return;
   const revision = await tx.query<{ authorization_revision: string | number }>(
@@ -553,6 +569,7 @@ async function applyMembershipEvent(
     await removeLocalMembership(tx, {
       organizationId,
       userId,
+      workosMembershipId: membership.id,
       reason:
         status === "inactive"
           ? "workos_membership_inactive"

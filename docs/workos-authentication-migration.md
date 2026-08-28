@@ -228,6 +228,15 @@ serialized membership command then enforces Zeros' current desired state. This
 closes the race where an old provider invitation could otherwise re-add a user
 after an administrator removed them.
 
+For an existing WorkOS user, sending a provider invitation also creates a
+`pending` organization membership. Revoking that invitation does not activate
+the membership, and WorkOS requires a pending membership to be deleted before
+an active membership can be created. The command worker therefore observes the
+provider after a failed create, recovers an already-active membership, or
+deletes non-directory-managed pending memberships and creates the active
+replacement. A delayed deletion event for the replaced pending object is keyed
+to that exact WorkOS membership ID and cannot remove the newer active object.
+
 Directory-managed (`directory_managed=true`) memberships materialize with
 `membership_source='scim'`. Zeros refuses local role changes and removals for
 them because directory group assignment takes precedence and would otherwise
@@ -598,15 +607,15 @@ Verified against the deployed Alpha Web and signed macOS Alpha application:
   browser consumed the security stream and signed out without reload.
 - A real Alpha organization invitation opened the installed macOS application,
   prefilled the bounded join credential, accepted successfully, and appeared in
-  the owner's member list. Promoting that member to Admin and then removing the
-  member updated the open desktop client in about four seconds: the collaborative
-  organization disappeared, Personal remained usable, and the authenticated
-  account session was preserved.
-- That live invitation exposed a channel-drift defect in the deployed page: the
-  old Alpha build needed an explicit Alpha scheme selector. The corrective code
-  now binds `INVITE_LINK_BASE` to the exact deployment origin, derives the app
-  scheme from `ZEROS_DEPLOY_ENV`, and rejects lookalike desktop/HTTPS invite
-  routes. The merged-SHA no-selector retest remains a promotion gate.
+  the owner's member list. The exact merged-SHA link contained no scheme query;
+  the page selected the Alpha application from its deployment origin. Removing
+  the member updated the owner's open browser through SSE and the desktop kept
+  its authenticated Personal account.
+- The exact merged-SHA retest exposed a provider-lifecycle defect: WorkOS left
+  the existing user's invitation-created membership `pending`, and the active
+  membership command dead-lettered. The corrective convergence and cross-object
+  event-ordering regressions are implemented; a live post-deployment retest is
+  still a promotion gate.
 - The deployed control-plane health endpoint, exact release version, Personal
   bootstrap, secure browser cookie relay, strict same-site completion, and
   session-revocation persistence were inspected after promotion.
@@ -631,10 +640,11 @@ Still required before Alpha can be called fully qualified:
 - A clean first-time and returning Google/GitHub identity-linking exercise for
   the same person; existing preserved identities currently exercise the safer
   recovery path instead.
-- The merged-SHA invitation handoff without a `scheme` query, provider-side
-  invitation retirement after acceptance/removal, and a live WorkOS/security-
-  stream interruption drill. Automated race/outage coverage is not relabeled as
-  live evidence.
+- The corrective merged-SHA invitation retest proving WorkOS reports the member
+  `active`, provider invitation/pending-membership artifacts are retired after
+  acceptance and removal, and no command dead-letters. A live WorkOS/security-
+  stream interruption drill also remains; automated race/outage coverage is not
+  relabeled as live evidence.
 - Windows and Linux release qualification on those operating systems. macOS
   evidence and CI packaging do not qualify another platform.
 

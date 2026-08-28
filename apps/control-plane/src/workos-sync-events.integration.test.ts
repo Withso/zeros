@@ -213,6 +213,92 @@ d("WorkOS normalized event synchronization", () => {
     expect(afterNoOp.rows[0]?.count).toBe(beforeNoOp.rows[0]?.count);
   });
 
+  it("does not let deletion of a replaced pending membership remove the active replacement", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const owner = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_replacement_owner_${suffix}`,
+      email: `replacement-owner-${suffix}@example.com`,
+      displayName: "Replacement Owner",
+    });
+    const memberSubject = `user_replacement_member_${suffix}`;
+    const member = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: memberSubject,
+      email: `replacement-member-${suffix}@example.com`,
+      displayName: "Replacement Member",
+    });
+    const organization = await pool.query<{ id: string }>(
+      `INSERT INTO organizations (slug, name, created_by, is_personal)
+       VALUES ($1, 'Replacement Organization', $2, false)
+       RETURNING id`,
+      [`replacement-${suffix}`, owner.id],
+    );
+    const orgId = organization.rows[0]!.id;
+    await pool.query(
+      `INSERT INTO organization_members (org_id, user_id, role)
+       VALUES ($1, $2, 'owner')`,
+      [orgId, owner.id],
+    );
+    const workosOrgId = `org_replacement_${suffix}`;
+    await pool.query(
+      `INSERT INTO workos_organization_links (
+         organization_id, workos_organization_id, external_id, state
+       ) VALUES ($1::uuid, $2, $1::text, 'active')`,
+      [orgId, workosOrgId],
+    );
+    const activeMembershipId = `om_active_${suffix}`;
+    const activeAt = new Date(Date.now() + 1_000).toISOString();
+    expect(
+      await ingestWorkOSManagementEvent(
+        pool,
+        managementEvent(
+          "organization_membership.created",
+          {
+            id: activeMembershipId,
+            organizationId: workosOrgId,
+            userId: memberSubject,
+            status: "active",
+            directoryManaged: false,
+            role: { slug: "member" },
+            updatedAt: activeAt,
+          },
+          activeAt,
+        ),
+        "webhook",
+      ),
+    ).toEqual({ status: "applied" });
+
+    const replacedPendingId = `om_pending_${suffix}`;
+    const deletedAt = new Date(Date.now() + 2_000).toISOString();
+    expect(
+      await ingestWorkOSManagementEvent(
+        pool,
+        managementEvent(
+          "organization_membership.deleted",
+          {
+            id: replacedPendingId,
+            organizationId: workosOrgId,
+            userId: memberSubject,
+            status: "pending",
+            directoryManaged: false,
+            role: { slug: "member" },
+            updatedAt: deletedAt,
+          },
+          deletedAt,
+        ),
+        "webhook",
+      ),
+    ).toEqual({ status: "applied" });
+
+    const current = await pool.query<{ workos_membership_id: string | null }>(
+      `SELECT workos_membership_id FROM organization_members
+       WHERE org_id = $1 AND user_id = $2`,
+      [orgId, member.id],
+    );
+    expect(current.rows[0]?.workos_membership_id).toBe(activeMembershipId);
+  });
+
   it("persists a session tombstone before the client can present that sid", async () => {
     const suffix = randomUUID().replaceAll("-", "");
     const subject = `user_session_${suffix}`;

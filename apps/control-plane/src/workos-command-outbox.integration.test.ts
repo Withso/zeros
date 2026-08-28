@@ -24,6 +24,7 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
   readonly calls: string[] = [];
   failNextOrganizationCreate = false;
   failAfterNextMembershipCreate = false;
+  nextMembershipCreateFailure: { name: string; status: number } | null = null;
   readonly memberships: WorkOSMembershipRecord[] = [];
   readonly invitations: WorkOSInvitationRecord[] = [];
   acceptBeforeNextInvitationRevoke = false;
@@ -97,6 +98,30 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
     roleSlug: string;
   }): Promise<WorkOSMembershipRecord> {
     this.calls.push(`membership.create:${options.organizationId}`);
+    if (this.nextMembershipCreateFailure) {
+      const { name, status } = this.nextMembershipCreateFailure;
+      this.nextMembershipCreateFailure = null;
+      const failure = new Error("membership create failed") as Error & {
+        status: number;
+      };
+      failure.name = name;
+      failure.status = status;
+      throw failure;
+    }
+    const pending = this.memberships.find(
+      (membership) =>
+        membership.organizationId === options.organizationId &&
+        membership.userId === options.userId &&
+        membership.status === "pending",
+    );
+    if (pending) {
+      const conflict = new Error(
+        "a pending invitation membership already exists",
+      ) as Error & { status: number };
+      conflict.name = "GenericServerException";
+      conflict.status = 500;
+      throw conflict;
+    }
     const existing = this.memberships.find(
       (membership) =>
         membership.organizationId === options.organizationId &&
@@ -163,8 +188,7 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
     return this.memberships.filter(
       (membership) =>
         membership.organizationId === options.organizationId &&
-        membership.userId === options.userId &&
-        membership.status === "active",
+        membership.userId === options.userId,
     );
   }
 
@@ -404,12 +428,6 @@ d("WorkOS command outbox", () => {
     });
 
     expect(await processor.tick()).toBe(1);
-    await pool.query(
-      `UPDATE workos_command_outbox SET next_attempt_at = now()
-       WHERE organization_id = $1 AND state = 'queued'`,
-      [seeded.organizationId],
-    );
-    expect(await processor.tick()).toBe(1);
 
     const member = await pool.query<{ workos_membership_id: string | null }>(
       `SELECT workos_membership_id FROM organization_members
@@ -419,6 +437,114 @@ d("WorkOS command outbox", () => {
     expect(member.rows[0]?.workos_membership_id).toBe(provider.memberships[0]?.id);
     expect(provider.memberships).toHaveLength(1);
     expect(provider.calls.filter((call) => call.startsWith("membership.list:"))).toHaveLength(1);
+  });
+
+  it("replaces an invitation-created pending membership with an active membership", async () => {
+    const seeded = await seedOrganization(
+      pool,
+      randomUUID().replaceAll("-", ""),
+    );
+    const workosOrganizationId = `org_${randomUUID().replaceAll("-", "")}`;
+    const pendingMembershipId = `om_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(
+      `UPDATE workos_organization_links
+       SET state = 'active', workos_organization_id = $2
+       WHERE organization_id = $1`,
+      [seeded.organizationId, workosOrganizationId],
+    );
+    await withSystemTx(pool, (tx) =>
+      enqueueWorkOSCommand(tx, {
+        operation: "membership.create",
+        idempotencyKey: `membership.${seeded.organizationId}.${seeded.userId}.1`,
+        aggregateKey: `membership:${seeded.organizationId}:${seeded.userId}`,
+        aggregateRevision: 1,
+        organizationId: seeded.organizationId,
+        userId: seeded.userId,
+        payload: { workosUserId: seeded.workosUserId, role: "owner" },
+      }),
+    );
+    const provider = new FakeWorkOSProvider();
+    provider.memberships.push({
+      id: pendingMembershipId,
+      organizationId: workosOrganizationId,
+      userId: seeded.workosUserId,
+      status: "pending",
+      directoryManaged: false,
+      roleSlug: "owner",
+      updatedAt: new Date().toISOString(),
+    });
+
+    expect(await new WorkOSCommandProcessor(pool, provider).tick()).toBe(1);
+
+    const command = await pool.query<{ state: string }>(
+      `SELECT state FROM workos_command_outbox
+       WHERE aggregate_key = $1 AND aggregate_revision = 1`,
+      [`membership:${seeded.organizationId}:${seeded.userId}`],
+    );
+    expect(command.rows[0]?.state).toBe("succeeded");
+    expect(provider.calls).toContain(`membership.delete:${pendingMembershipId}`);
+    expect(provider.memberships).toHaveLength(1);
+    expect(provider.memberships[0]).toMatchObject({
+      status: "active",
+      organizationId: workosOrganizationId,
+      userId: seeded.workosUserId,
+    });
+  });
+
+  it("does not delete a pending membership after a terminal create error", async () => {
+    const seeded = await seedOrganization(
+      pool,
+      randomUUID().replaceAll("-", ""),
+    );
+    const workosOrganizationId = `org_${randomUUID().replaceAll("-", "")}`;
+    const pendingMembershipId = `om_${randomUUID().replaceAll("-", "")}`;
+    await pool.query(
+      `UPDATE workos_organization_links
+       SET state = 'active', workos_organization_id = $2
+       WHERE organization_id = $1`,
+      [seeded.organizationId, workosOrganizationId],
+    );
+    await withSystemTx(pool, (tx) =>
+      enqueueWorkOSCommand(tx, {
+        operation: "membership.create",
+        idempotencyKey: `membership.${seeded.organizationId}.${seeded.userId}.1`,
+        aggregateKey: `membership:${seeded.organizationId}:${seeded.userId}`,
+        aggregateRevision: 1,
+        organizationId: seeded.organizationId,
+        userId: seeded.userId,
+        payload: { workosUserId: seeded.workosUserId, role: "owner" },
+      }),
+    );
+    const provider = new FakeWorkOSProvider();
+    provider.memberships.push({
+      id: pendingMembershipId,
+      organizationId: workosOrganizationId,
+      userId: seeded.workosUserId,
+      status: "pending",
+      directoryManaged: false,
+      roleSlug: "owner",
+      updatedAt: new Date().toISOString(),
+    });
+    provider.nextMembershipCreateFailure = {
+      name: "UnauthorizedException",
+      status: 401,
+    };
+
+    expect(
+      await new WorkOSCommandProcessor(pool, provider, {
+        logger: { info() {}, warn() {}, error() {} },
+      }).tick(),
+    ).toBe(1);
+
+    const command = await pool.query<{ state: string }>(
+      `SELECT state FROM workos_command_outbox
+       WHERE aggregate_key = $1 AND aggregate_revision = 1`,
+      [`membership:${seeded.organizationId}:${seeded.userId}`],
+    );
+    expect(command.rows[0]?.state).toBe("dead");
+    expect(provider.memberships).toHaveLength(1);
+    expect(provider.memberships[0]?.id).toBe(pendingMembershipId);
+    expect(provider.calls).not.toContain(`membership.delete:${pendingMembershipId}`);
   });
 
   it("serializes replacement invitations and revokes one whose provider ID was not persisted", async () => {
@@ -735,12 +861,15 @@ d("WorkOS command outbox", () => {
       }),
     );
     const provider = new FakeWorkOSProvider();
-    for (const id of [capturedMembershipId, replacementMembershipId]) {
+    for (const [id, status] of [
+      [capturedMembershipId, "active"],
+      [replacementMembershipId, "pending"],
+    ] as const) {
       provider.memberships.push({
         id,
         organizationId: workosOrganizationId,
         userId: seeded.workosUserId,
-        status: "active",
+        status,
         directoryManaged: false,
         roleSlug: "owner",
         updatedAt: new Date().toISOString(),
