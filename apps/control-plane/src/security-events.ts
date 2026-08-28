@@ -152,12 +152,22 @@ export async function listSecurityEvents(
        FROM security_events e
        WHERE e.sequence > $1 AND e.expires_at > now()
          AND (
-           e.user_id = $2
-           OR ($3::text IS NOT NULL AND e.provider_session_id = $3)
+           (
+             e.kind = 'session.revoked'
+             AND $3::text IS NOT NULL
+             AND e.provider_session_id = $3
+           )
            OR (
-             e.org_id IS NOT NULL AND EXISTS (
-               SELECT 1 FROM organization_members om
-               WHERE om.org_id = e.org_id AND om.user_id = $2
+             e.kind <> 'session.revoked'
+             AND (
+               e.user_id = $2
+               OR ($3::text IS NOT NULL AND e.provider_session_id = $3)
+               OR (
+                 e.org_id IS NOT NULL AND EXISTS (
+                   SELECT 1 FROM organization_members om
+                   WHERE om.org_id = e.org_id AND om.user_id = $2
+                 )
+               )
              )
            )
          )
