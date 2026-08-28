@@ -1,51 +1,75 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { resolveWorkOSDesktopAccountId } from "../workos-desktop-account";
+import {
+  WorkOSDesktopAccountError,
+  resolveWorkOSDesktopAccountId,
+} from "../workos-desktop-account";
 
-const originalControlPlaneUrl = process.env.ZEROS_CONTROL_PLANE_URL;
+const priorControlPlaneUrl = process.env.ZEROS_CONTROL_PLANE_URL;
 
 afterEach(() => {
-  if (originalControlPlaneUrl === undefined) {
+  vi.unstubAllGlobals();
+  if (priorControlPlaneUrl === undefined) {
     delete process.env.ZEROS_CONTROL_PLANE_URL;
   } else {
-    process.env.ZEROS_CONTROL_PLANE_URL = originalControlPlaneUrl;
+    process.env.ZEROS_CONTROL_PLANE_URL = priorControlPlaneUrl;
   }
-  vi.unstubAllGlobals();
 });
 
 describe("WorkOS desktop account resolution", () => {
-  it("resolves the canonical internal account UUID through authenticated /v1/me", async () => {
+  it("preserves only a bounded public recovery locator from the control plane", async () => {
     process.env.ZEROS_CONTROL_PLANE_URL = "https://api-alpha.zeros.build";
-    const fetchMock = vi.fn(async () =>
-      Response.json({
-        user: { id: "00000000-0000-4000-8000-000000000001" },
-      }),
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json(
+          {
+            error: {
+              code: "account_recovery_required",
+              message: "operator-only wording must not be trusted by the UI",
+              details: {
+                recoveryCode: "ZR-ABCD-2345",
+                expiresInSeconds: 86_400,
+                unexpected: "discard me",
+              },
+            },
+          },
+          { status: 409 },
+        ),
+      ),
     );
-    vi.stubGlobal("fetch", fetchMock);
 
-    await expect(
-      resolveWorkOSDesktopAccountId("signed-access-token"),
-    ).resolves.toBe("00000000-0000-4000-8000-000000000001");
-    expect(fetchMock).toHaveBeenCalledWith(
-      "https://api-alpha.zeros.build/v1/me",
-      expect.objectContaining({
-        headers: expect.objectContaining({
-          authorization: "Bearer signed-access-token",
-        }),
-        signal: expect.any(AbortSignal),
+    await expect(resolveWorkOSDesktopAccountId("access-token")).rejects.toEqual(
+      expect.objectContaining<Partial<WorkOSDesktopAccountError>>({
+        status: 409,
+        code: "account_recovery_required",
+        recoveryCode: "ZR-ABCD-2345",
       }),
     );
   });
 
-  it("rejects a missing or non-UUID product owner", async () => {
+  it("drops a malformed recovery locator", async () => {
     process.env.ZEROS_CONTROL_PLANE_URL = "https://api-alpha.zeros.build";
     vi.stubGlobal(
       "fetch",
-      vi.fn(async () => Response.json({ user: { id: "user_example" } })),
+      vi.fn(async () =>
+        Response.json(
+          {
+            error: {
+              code: "account_recovery_required",
+              details: { recoveryCode: "<script>alert(1)</script>" },
+            },
+          },
+          { status: 409 },
+        ),
+      ),
     );
 
-    await expect(
-      resolveWorkOSDesktopAccountId("signed-access-token"),
-    ).rejects.toThrow(/identifier/i);
+    await expect(resolveWorkOSDesktopAccountId("access-token")).rejects.toEqual(
+      expect.objectContaining<Partial<WorkOSDesktopAccountError>>({
+        code: "account_recovery_required",
+        recoveryCode: null,
+      }),
+    );
   });
 });

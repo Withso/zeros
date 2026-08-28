@@ -2,6 +2,7 @@ import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   friendlyAuthError,
   safeBrowserSignInStartError,
+  workOSSignInFailureMessage,
 } from "../auth-errors";
 
 afterEach(() => vi.restoreAllMocks());
@@ -60,5 +61,23 @@ describe("friendlyAuthError", () => {
     );
     expect(debug).toHaveBeenCalledWith("[auth] browser sign-in start failed");
     expect(JSON.stringify(debug.mock.calls)).not.toContain("private-state");
+  });
+
+  it("explains reviewed recovery without trusting an arbitrary locator", () => {
+    expect(
+      workOSSignInFailureMessage(
+        "account_recovery_required",
+        "ZR-ABCD-2345",
+      ),
+    ).toMatch(/ZR-ABCD-2345/);
+    expect(
+      workOSSignInFailureMessage(
+        "account_recovery_required",
+        "<script>alert(1)</script>",
+      ),
+    ).not.toContain("script");
+    expect(workOSSignInFailureMessage("account_exists", null)).toMatch(
+      /original sign-in method/i,
+    );
   });
 });

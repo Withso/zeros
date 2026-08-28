@@ -731,12 +731,21 @@ function cookies(request: Request): Map<string, string> {
   return parsed;
 }
 
-function hostCookie(name: string, value: string, maxAge: number): string {
-  return `${name}=${value}; Path=/; Max-Age=${maxAge}; SameSite=Lax; Secure; HttpOnly`;
+function hostCookie(
+  name: string,
+  value: string,
+  maxAge: number,
+  sameSite: "Lax" | "Strict",
+): string {
+  return `${name}=${value}; Path=/; Max-Age=${maxAge}; SameSite=${sameSite}; Secure; HttpOnly`;
 }
 
-function expireCookie(name: string, domainWide = false): string {
-  return `${name}=; ${domainWide ? "Domain=.zeros.build; " : ""}Path=/; Max-Age=0; SameSite=Lax; Secure; HttpOnly`;
+function expireCookie(
+  name: string,
+  domainWide = false,
+  sameSite: "Lax" | "Strict" = "Lax",
+): string {
+  return `${name}=; ${domainWide ? "Domain=.zeros.build; " : ""}Path=/; Max-Age=0; SameSite=${sameSite}; Secure; HttpOnly`;
 }
 
 function appendFlowCleanup(headers: Headers): void {
@@ -751,7 +760,10 @@ function appendFlowCleanup(headers: Headers): void {
 }
 
 function appendSessionCleanup(headers: Headers): void {
-  headers.append("set-cookie", expireCookie(WORKOS_SESSION_COOKIE));
+  headers.append(
+    "set-cookie",
+    expireCookie(WORKOS_SESSION_COOKIE, false, "Strict"),
+  );
   headers.append("set-cookie", expireCookie("zeros_session"));
   headers.append("set-cookie", expireCookie("zeros_session", true));
 }
@@ -808,7 +820,12 @@ export function createWorkOSBrowserSessionRoutes(
       });
       headers.append(
         "set-cookie",
-        hostCookie(WORKOS_FLOW_COOKIE, started.credential, WORKOS_FLOW_TTL_S),
+        hostCookie(
+          WORKOS_FLOW_COOKIE,
+          started.credential,
+          WORKOS_FLOW_TTL_S,
+          "Lax",
+        ),
       );
       return new Response(null, { status: 303, headers });
     } catch {
@@ -850,7 +867,12 @@ export function createWorkOSBrowserSessionRoutes(
     });
     headers.append(
       "set-cookie",
-      hostCookie(WORKOS_SESSION_COOKIE, credential, WORKOS_SESSION_TTL_S),
+      hostCookie(
+        WORKOS_SESSION_COOKIE,
+        credential,
+        WORKOS_SESSION_TTL_S,
+        "Strict",
+      ),
     );
     appendFlowCleanup(headers);
     headers.append("set-cookie", expireCookie("zeros_session"));

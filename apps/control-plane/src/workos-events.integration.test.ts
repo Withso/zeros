@@ -155,6 +155,47 @@ d("WorkOS user lifecycle events", () => {
     expect(browserSessions.rows[0]?.count).toBe(0);
   });
 
+  it("requires reviewed recovery when WorkOS recreates a deleted user with the same verified email", async () => {
+    const originalSubject = `user_${randomUUID().replaceAll("-", "")}`;
+    const replacementSubject = `user_${randomUUID().replaceAll("-", "")}`;
+    const email = `recreated-${randomUUID()}@example.com`;
+    const original = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: originalSubject,
+      email,
+      displayName: "Recreated User",
+    });
+
+    await applyWorkOSIdentityEvent(
+      pool,
+      event("user.deleted", originalSubject, email),
+    );
+
+    await expect(
+      ensureUser(pool, {
+        provider: "workos",
+        providerSubject: replacementSubject,
+        email,
+        displayName: "Recreated User",
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "account_recovery_required",
+    });
+
+    const preserved = await pool.query(
+      `SELECT id, email FROM users WHERE id = $1`,
+      [original.id],
+    );
+    expect(preserved.rows).toEqual([{ id: original.id, email }]);
+    const replacementBinding = await pool.query(
+      `SELECT 1 FROM user_identities
+       WHERE provider = 'workos' AND provider_sub = $1`,
+      [replacementSubject],
+    );
+    expect(replacementBinding.rowCount).toBe(0);
+  });
+
   it("records an unlinked event without provisioning an account", async () => {
     const subject = `user_${randomUUID().replaceAll("-", "")}`;
     const before = await pool.query(`SELECT count(*)::int AS count FROM users`);

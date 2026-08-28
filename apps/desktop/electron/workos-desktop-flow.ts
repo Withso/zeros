@@ -9,6 +9,7 @@ const DEFAULT_TIMEOUT_MS = 10 * 60_000;
 const MAX_CALLBACK_VALUE_LENGTH = 8_192;
 const MAX_STATE_LENGTH = 256;
 const DESKTOP_SCHEME = /^zeros(?:-(?:alpha|beta|dev))?$/;
+const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 
 export type WorkOSDesktopFlowErrorReason =
   | "cancelled"
@@ -18,11 +19,18 @@ export type WorkOSDesktopFlowErrorReason =
   | "exchange_failed"
   | "verification_required"
   | "email_unverified"
+  | "account_recovery_required"
+  | "reauthentication_required"
+  | "account_exists"
+  | "account_inactive"
   | "account_failed"
   | "storage_failed";
 
 class WorkOSDesktopFlowError extends Error {
-  constructor(public readonly reason: WorkOSDesktopFlowErrorReason) {
+  constructor(
+    public readonly reason: WorkOSDesktopFlowErrorReason,
+    public readonly recoveryCode: string | null = null,
+  ) {
     super(reason);
     this.name = "WorkOSDesktopFlowError";
   }
@@ -92,15 +100,49 @@ function exchangeReason(
   return "exchange_failed";
 }
 
-function accountReason(
+function accountFailure(
   error: unknown,
-): Extract<
-  WorkOSDesktopFlowErrorReason,
-  "account_failed" | "email_unverified"
-> {
-  return (error as { code?: unknown })?.code === "email_unverified"
-    ? "email_unverified"
-    : "account_failed";
+): {
+  reason: Extract<
+    WorkOSDesktopFlowErrorReason,
+    | "account_failed"
+    | "email_unverified"
+    | "account_recovery_required"
+    | "reauthentication_required"
+    | "account_exists"
+    | "account_inactive"
+  >;
+  recoveryCode: string | null;
+} {
+  const detail = error as { code?: unknown; recoveryCode?: unknown };
+  const code = typeof detail?.code === "string" ? detail.code : "";
+  if (code === "email_unverified") {
+    return { reason: "email_unverified", recoveryCode: null };
+  }
+  if (code === "account_recovery_required") {
+    return {
+      reason: "account_recovery_required",
+      recoveryCode:
+        typeof detail.recoveryCode === "string" &&
+        RECOVERY_CODE_RE.test(detail.recoveryCode)
+          ? detail.recoveryCode
+          : null,
+    };
+  }
+  if (code === "reauthentication_required") {
+    return { reason: "reauthentication_required", recoveryCode: null };
+  }
+  if (code === "account_exists") {
+    return { reason: "account_exists", recoveryCode: null };
+  }
+  if (
+    code === "account_deleted" ||
+    code === "account_suspended" ||
+    code === "identity_superseded"
+  ) {
+    return { reason: "account_inactive", recoveryCode: null };
+  }
+  return { reason: "account_failed", recoveryCode: null };
 }
 
 function sameState(left: string, right: string): boolean {
@@ -175,7 +217,10 @@ export interface WorkOSDesktopAuthorizationFlowDeps {
   /** Revoke a provider session that was minted but could not be installed. */
   revokeSession: (accessToken: string) => Promise<void>;
   onComplete: () => void;
-  onError: (reason: Exclude<WorkOSDesktopFlowErrorReason, "cancelled">) => void;
+  onError: (
+    reason: Exclude<WorkOSDesktopFlowErrorReason, "cancelled">,
+    context?: { recoveryCode: string },
+  ) => void;
   timeoutMs?: number;
 }
 
@@ -282,7 +327,11 @@ export class WorkOSDesktopAuthorizationFlow {
         accountId = await this.deps.resolveAccountId(session.accessToken);
       } catch (error) {
         logSignInFailure("account lookup", error);
-        throw new WorkOSDesktopFlowError(accountReason(error));
+        const failure = accountFailure(error);
+        throw new WorkOSDesktopFlowError(
+          failure.reason,
+          failure.recoveryCode,
+        );
       }
       if (this.pending !== pending) {
         await this.revokeAbandoned(session);
@@ -313,7 +362,16 @@ export class WorkOSDesktopAuthorizationFlow {
         logSignInFailure("sign-in", error);
         reason = "exchange_failed";
       }
-      if (reason !== "cancelled") this.deps.onError(reason);
+      if (reason !== "cancelled") {
+        if (
+          error instanceof WorkOSDesktopFlowError &&
+          error.recoveryCode !== null
+        ) {
+          this.deps.onError(reason, { recoveryCode: error.recoveryCode });
+        } else {
+          this.deps.onError(reason);
+        }
+      }
     }
   }
 

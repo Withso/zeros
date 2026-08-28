@@ -46,6 +46,7 @@ import { parseStoredTokenSnapshot } from "../auth-session-record";
 import {
   authClearSession,
   authSignOutEverywhere,
+  clearWorkOSSessionAfterServerRevocation,
   getValidSessionForMain,
   persistWorkOSSession,
 } from "../ipc/commands/auth-session";
@@ -159,6 +160,25 @@ describe("WorkOS desktop safe-storage session lifecycle", () => {
     install();
     await expect(authSignOutEverywhere({}, {} as never)).resolves.toBe(true);
     expect(mocks.revoke).toHaveBeenLastCalledWith("all", "access-current");
+    expect(mocks.raw).toBeNull();
+  });
+
+  it("a delayed remote revocation cannot clear a replacement session", () => {
+    install();
+    expect(
+      clearWorkOSSessionAfterServerRevocation({
+        accountId: "00000000-0000-4000-8000-000000000001",
+        sessionId: "session_other",
+      }),
+    ).toBe(false);
+    expect(mocks.raw).not.toBeNull();
+
+    expect(
+      clearWorkOSSessionAfterServerRevocation({
+        accountId: "00000000-0000-4000-8000-000000000001",
+        sessionId: "session_example",
+      }),
+    ).toBe(true);
     expect(mocks.raw).toBeNull();
   });
 });

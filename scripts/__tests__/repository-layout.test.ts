@@ -390,7 +390,7 @@ describe("repository layout contracts", () => {
       "@tiptap/extension-bubble-menu@3.26.0",
       "@tiptap/extension-floating-menu@3.26.0",
       "@types/trusted-types@2.0.7",
-      "@workos-inc/node@10.10.0",
+      "@workos-inc/node@10.12.0",
     ]) {
       expect(licenses).toContain(packageName);
     }

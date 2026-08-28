@@ -57,7 +57,7 @@ async function finishEvent(
   return { status };
 }
 
-async function applyInTransaction(
+export async function applyWorkOSIdentityEventInTransaction(
   tx: Tx,
   event: WorkOSIdentityEvent,
 ): Promise<{ status: WorkOSIdentityEventStatus }> {
@@ -87,34 +87,150 @@ async function applyInTransaction(
     `workos-event:${event.user.id}`,
   ]);
   const linked = await tx.query<{
+    identity_id: string;
     user_id: string;
     deleted_at: Date | null;
+    auth_status:
+      | "active"
+      | "identity_disabled"
+      | "suspended"
+      | "deletion_pending"
+      | "deleted";
+    auth_revision: string | number;
+    identity_status: "active" | "provider_deleted" | "superseded" | "revoked";
   }>(
-    `SELECT ui.user_id, u.deleted_at
+    `SELECT ui.id AS identity_id, ui.user_id, ui.status AS identity_status,
+            u.deleted_at, u.auth_status, u.auth_revision
      FROM user_identities ui
      JOIN users u ON u.id = ui.user_id
      WHERE ui.provider = 'workos' AND ui.provider_sub = $1
-     FOR UPDATE OF u`,
+     FOR UPDATE OF ui, u`,
     [event.user.id],
   );
   const account = linked.rows[0];
   if (!account) return finishEvent(tx, event.eventId, "unlinked", null);
 
   if (event.eventType === "user.deleted") {
+    const transitioned = await tx.query<{ auth_revision: string | number }>(
+      `UPDATE users
+       SET auth_status = 'identity_disabled',
+           auth_disabled_at = COALESCE(auth_disabled_at, $2::timestamptz),
+           auth_revoked_at = now(),
+           auth_status_changed_at = now(),
+           auth_revision = auth_revision + 1
+       WHERE id = $1 AND deleted_at IS NULL AND auth_status = 'active'
+       RETURNING auth_revision`,
+      [account.user_id, event.createdAt],
+    );
     await tx.query(
-      `UPDATE users SET deleted_at = COALESCE(deleted_at, now()) WHERE id = $1`,
+      `UPDATE user_identities
+       SET status = 'provider_deleted',
+           disabled_at = COALESCE(disabled_at, $3::timestamptz),
+           last_provider_event_at = GREATEST(
+             COALESCE(last_provider_event_at, '-infinity'::timestamptz),
+             $3::timestamptz
+           )
+       WHERE id = $1 AND user_id = $2 AND status = 'active'`,
+      [account.identity_id, account.user_id, event.createdAt],
+    );
+    await tx.query(
+      `UPDATE auth_sessions
+       SET status = 'revoked', revoked_at = now(),
+           revocation_reason = 'workos_user_deleted',
+           last_provider_event_at = $2::timestamptz
+       WHERE (provider_sub = $1 OR user_id = $3) AND status = 'active'`,
+      [event.user.id, event.createdAt, account.user_id],
+    );
+    await tx.query(
+      `DELETE FROM workos_browser_sessions
+       WHERE provider_sub = $1 OR account_user_id = $2`,
+      [event.user.id, account.user_id],
+    );
+    await tx.query(
+      `UPDATE cloud_workspace_endpoint_grants
+       SET revoked_at = COALESCE(revoked_at, now())
+       WHERE account_user_id = $1 AND revoked_at IS NULL`,
       [account.user_id],
     );
-    // The provider deletion already ends the account. Remove every local
-    // opaque browser credential for this subject in the same transaction so a
-    // cached sealed session cannot keep the web shell looking signed in.
-    await tx.query(
-      `DELETE FROM workos_browser_sessions WHERE provider_sub = $1`,
-      [event.user.id],
+
+    // A recovered identity starts without collaborative access. Removing the
+    // tenant membership here also cascades child-team memberships, so an
+    // out-of-order membership webhook cannot leave an authorization remnant.
+    const removed = await tx.query<{
+      org_id: string;
+      authorization_revision: string | number;
+    }>(
+      `WITH removed AS (
+         DELETE FROM organization_members om
+         USING organizations o
+         WHERE om.org_id = o.id AND om.user_id = $1 AND NOT o.is_personal
+         RETURNING om.org_id
+       ), bumped AS (
+         UPDATE organizations o
+         SET authorization_revision = authorization_revision + 1
+         WHERE o.id IN (SELECT org_id FROM removed)
+         RETURNING o.id AS org_id, o.authorization_revision
+       )
+       SELECT org_id, authorization_revision FROM bumped`,
+      [account.user_id],
     );
+    await tx.query(
+      `UPDATE workos_membership_projections
+       SET status = 'deleted', updated_at = now(),
+           last_provider_event_at = GREATEST(
+             last_provider_event_at, $2::timestamptz
+           )
+       WHERE workos_user_id = $1 AND status <> 'deleted'`,
+      [event.user.id, event.createdAt],
+    );
+
+    const revision = Number(
+      transitioned.rows[0]?.auth_revision ?? account.auth_revision,
+    );
+    if (transitioned.rows[0]) {
+      await tx.query(
+        `INSERT INTO security_events (
+           kind, user_id, account_revision, payload
+         ) VALUES (
+           'account.revoked', $1, $2,
+           jsonb_build_object('reason', 'workos_user_deleted')
+         )`,
+        [account.user_id, revision],
+      );
+      await tx.query(
+        `INSERT INTO security_notification_outbox (
+           user_id, destination_email, template, payload
+         ) VALUES (
+           $1, $2, 'account_identity_disabled',
+           jsonb_build_object('reason', 'workos_user_deleted')
+         )`,
+        [account.user_id, event.user.email],
+      );
+    }
+    for (const membership of removed.rows) {
+      await tx.query(
+        `INSERT INTO security_events (
+           kind, user_id, org_id, account_revision,
+           authorization_revision, payload
+         ) VALUES (
+           'organization.access_revoked', $1, $2, $3, $4,
+           jsonb_build_object('reason', 'workos_user_deleted')
+         )`,
+        [
+          account.user_id,
+          membership.org_id,
+          revision,
+          Number(membership.authorization_revision),
+        ],
+      );
+    }
     return finishEvent(tx, event.eventId, "applied", account.user_id);
   }
-  if (account.deleted_at) {
+  if (
+    account.deleted_at ||
+    account.auth_status !== "active" ||
+    account.identity_status !== "active"
+  ) {
     return finishEvent(tx, event.eventId, "ignored_deleted", account.user_id);
   }
   if (!event.user.emailVerified) {
@@ -149,8 +265,17 @@ async function applyInTransaction(
     // Profile presentation can still move forward; ownership/email cannot.
     await tx.query(
       `UPDATE users SET display_name = $2, avatar_url = $3
-       WHERE id = $1 AND deleted_at IS NULL`,
+       WHERE id = $1 AND deleted_at IS NULL AND auth_status = 'active'`,
       [account.user_id, event.user.name, event.user.profilePictureUrl],
+    );
+    await tx.query(
+      `UPDATE user_identities
+       SET last_provider_event_at = GREATEST(
+         COALESCE(last_provider_event_at, '-infinity'::timestamptz),
+         $2::timestamptz
+       )
+       WHERE id = $1 AND status = 'active'`,
+      [account.identity_id, event.createdAt],
     );
     return finishEvent(tx, event.eventId, "email_conflict", account.user_id);
   }
@@ -158,13 +283,22 @@ async function applyInTransaction(
   await tx.query(
     `UPDATE users
      SET email = $2, display_name = $3, avatar_url = $4
-     WHERE id = $1 AND deleted_at IS NULL`,
+     WHERE id = $1 AND deleted_at IS NULL AND auth_status = 'active'`,
     [
       account.user_id,
       event.user.email,
       event.user.name,
       event.user.profilePictureUrl,
     ],
+  );
+  await tx.query(
+    `UPDATE user_identities
+     SET last_provider_event_at = GREATEST(
+       COALESCE(last_provider_event_at, '-infinity'::timestamptz),
+       $2::timestamptz
+     )
+     WHERE id = $1 AND status = 'active'`,
+    [account.identity_id, event.createdAt],
   );
   return finishEvent(tx, event.eventId, "applied", account.user_id);
 }
@@ -174,7 +308,9 @@ export async function applyWorkOSIdentityEvent(
   input: WorkOSIdentityEvent,
 ): Promise<{ status: WorkOSIdentityEventStatus }> {
   const event = WorkOSIdentityEventSchema.parse(input);
-  return withSystemTx(pool, (tx) => applyInTransaction(tx, event));
+  return withSystemTx(pool, (tx) =>
+    applyWorkOSIdentityEventInTransaction(tx, event),
+  );
 }
 
 function signatureValid(

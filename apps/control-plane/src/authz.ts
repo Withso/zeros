@@ -34,6 +34,8 @@ export class HttpError extends Error {
     public status: 400 | 401 | 403 | 404 | 409 | 422 | 429 | 502 | 503,
     public code: string,
     message: string,
+    /** Bounded, deliberately non-secret machine-readable recovery context. */
+    public details?: Record<string, unknown>,
   ) {
     super(message);
   }

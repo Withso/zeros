@@ -10,6 +10,8 @@ const REFRESH_RETRY_BASE_DELAY_MS = 250;
 const MAX_REFRESH_RETRY_DELAY_MS = 2_000;
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_TOKEN_BYTES = 64 * 1024;
+const WORKOS_IDENTIFIER_RE = /^[A-Za-z0-9_-]{1,512}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 // Authorization starts on the hosted Zeros app; this client exchanges and
 // refreshes only.
@@ -62,6 +64,7 @@ export interface WorkOSDesktopTokenClaims {
   email: string;
   emailVerified: true;
   displayName: string | null;
+  authTime: number | null;
   issuedAt: number;
   expiresAt: number;
 }
@@ -122,6 +125,33 @@ function requiredString(
   return value.trim();
 }
 
+function requiredIdentifier(
+  payload: Record<string, unknown>,
+  key: string,
+  code: string,
+): string {
+  const value = requiredString(payload, key, code);
+  if (!WORKOS_IDENTIFIER_RE.test(value)) {
+    throw new WorkOSDesktopClientError(code, `Required claim ${key} is invalid`);
+  }
+  return value;
+}
+
+function requiredEmailClaim(
+  payload: Record<string, unknown>,
+  key: string,
+): string {
+  const email = requiredString(payload, key, "token_email_invalid")
+    .toLowerCase();
+  if (email.length > 254 || !EMAIL_RE.test(email)) {
+    throw new WorkOSDesktopClientError(
+      "token_email_invalid",
+      "Access token email is invalid",
+    );
+  }
+  return email;
+}
+
 function requiredTimestamp(
   payload: Record<string, unknown>,
   key: "iat" | "exp",
@@ -131,6 +161,21 @@ function requiredTimestamp(
     throw new WorkOSDesktopClientError(
       "token_time_invalid",
       `Required claim ${key} is missing`,
+    );
+  }
+  return value;
+}
+
+function optionalTimestamp(
+  payload: Record<string, unknown>,
+  key: "auth_time",
+): number | null {
+  const value = payload[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new WorkOSDesktopClientError(
+      "token_time_invalid",
+      `Optional claim ${key} is invalid`,
     );
   }
   return value;
@@ -148,7 +193,14 @@ function optionalString(
       `Optional claim ${key} must be a string`,
     );
   }
-  return value.trim() || null;
+  const normalized = value.trim();
+  if (normalized.length > 500) {
+    throw new WorkOSDesktopClientError(
+      "token_profile_invalid",
+      `Optional claim ${key} is too large`,
+    );
+  }
+  return normalized || null;
 }
 
 export function validateWorkOSDesktopTokenClaims(
@@ -171,25 +223,40 @@ export function validateWorkOSDesktopTokenClaims(
   }
   const issuedAt = requiredTimestamp(payload, "iat");
   const expiresAt = requiredTimestamp(payload, "exp");
+  const authTime = optionalTimestamp(payload, "auth_time");
   if (issuedAt <= 0 || expiresAt <= issuedAt) {
     throw new WorkOSDesktopClientError(
       "token_time_invalid",
       "Access token timestamps are invalid",
     );
   }
+  if (authTime !== null && authTime > issuedAt + 60) {
+    throw new WorkOSDesktopClientError(
+      "token_time_invalid",
+      "Access token authentication time is invalid",
+    );
+  }
   return {
-    providerSubject: requiredString(payload, "sub", "token_subject_missing"),
-    sessionId: requiredString(payload, "sid", "token_session_missing"),
-    tokenId: requiredString(payload, "jti", "token_id_missing"),
+    providerSubject: requiredIdentifier(
+      payload,
+      "sub",
+      "token_subject_invalid",
+    ),
+    sessionId: requiredIdentifier(
+      payload,
+      "sid",
+      "token_session_invalid",
+    ),
+    tokenId: requiredIdentifier(payload, "jti", "token_id_invalid"),
     clientId,
     clientKind: "desktop",
-    email: requiredString(
+    email: requiredEmailClaim(
       payload,
       `${AUTH_CLAIM_NAMESPACE}email`,
-      "token_email_missing",
     ),
     emailVerified: true,
     displayName: optionalString(payload, `${AUTH_CLAIM_NAMESPACE}name`),
+    authTime,
     issuedAt,
     expiresAt,
   };
@@ -210,15 +277,40 @@ function record(value: unknown): Record<string, unknown> | null {
 async function responseJson(
   response: Response,
 ): Promise<Record<string, unknown> | null> {
-  let text: string;
-  try {
-    text = await response.text();
-  } catch {
+  const declaredLength = Number(response.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    await response.body?.cancel("response too large").catch(() => undefined);
     return null;
   }
-  if (!text || text.length > MAX_RESPONSE_BYTES) return null;
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
   try {
-    return record(JSON.parse(text));
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > MAX_RESPONSE_BYTES) {
+        await reader.cancel("response too large").catch(() => undefined);
+        return null;
+      }
+      chunks.push(part.value.slice());
+    }
+  } catch {
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
+  if (size === 0) return null;
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return record(JSON.parse(new TextDecoder().decode(bytes)));
   } catch {
     return null;
   }

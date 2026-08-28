@@ -217,6 +217,7 @@ describe("Railway WorkOS browser-session coordinator", () => {
     expect(flowCookie).toContain(`${WORKOS_FLOW_COOKIE}=${TOKENS[0]}`);
     expect(flowCookie).toContain("Secure");
     expect(flowCookie).toContain("HttpOnly");
+    expect(flowCookie).toContain("SameSite=Lax");
     expect(flowCookie).not.toContain("Domain=");
     expect(flowCookie).not.toContain(TOKENS[1]);
     expect(flowCookie).not.toContain(TOKENS[2]);
@@ -230,7 +231,12 @@ describe("Railway WorkOS browser-session coordinator", () => {
     );
     expect(completed.status).toBe(303);
     expect(completed.headers.get("location")).toBe(`${APP_ORIGIN}/after`);
-    const cookies = completed.headers.getSetCookie().join("\n");
+    const setCookies = completed.headers.getSetCookie();
+    const sessionCookie = setCookies.find((cookie) =>
+      cookie.startsWith(`${WORKOS_SESSION_COOKIE}=`),
+    );
+    expect(sessionCookie).toContain("SameSite=Strict");
+    const cookies = setCookies.join("\n");
     expect(cookies).toContain(`${WORKOS_SESSION_COOKIE}=${TOKENS[0]}`);
     expect(cookies).toContain(`${WORKOS_FLOW_COOKIE}=;`);
     expect(cookies).not.toContain("one-time-code");

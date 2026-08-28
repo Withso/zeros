@@ -277,9 +277,11 @@ d("schema + signup transaction", () => {
       [userId, email],
     );
     await pool.query(
-      `INSERT INTO user_identities (user_id, provider, provider_sub)
-       VALUES ($1, 'auth0', $2)`,
-      [userId, sub],
+      `INSERT INTO user_identities (
+         user_id, provider, provider_sub, email_at_link, email_verified_at,
+         linked_via
+       ) VALUES ($1, 'auth0', $2, $3, now(), 'migration')`,
+      [userId, sub, email],
     );
     await pool.query(
       `INSERT INTO organizations (slug, name, created_by)

@@ -8,6 +8,7 @@ const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const MAX_ERROR_CODE_LENGTH = 128;
+const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 
 /** A refusal from `/v1/me` that keeps the control plane's own error code.
  *
@@ -19,6 +20,7 @@ export class WorkOSDesktopAccountError extends Error {
   constructor(
     readonly status: number,
     readonly code: string | null,
+    readonly recoveryCode: string | null = null,
   ) {
     super(
       code
@@ -29,13 +31,42 @@ export class WorkOSDesktopAccountError extends Error {
   }
 }
 
-/** Read `{error:{code}}` without trusting length, shape, or content type. */
-async function controlPlaneErrorCode(
-  response: Response,
-): Promise<string | null> {
+async function boundedResponseText(response: Response): Promise<string | null> {
+  const declared = Number(response.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+    await response.body?.cancel().catch(() => undefined);
+    return null;
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
   try {
-    const text = await response.text();
-    if (!text || text.length > MAX_RESPONSE_BYTES) return null;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_RESPONSE_BYTES) {
+        await reader.cancel("response too large").catch(() => undefined);
+        return null;
+      }
+      text += decoder.decode(value, { stream: true });
+    }
+    return text + decoder.decode();
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/** Read a deliberately tiny subset of `{error:{code,details}}` without
+ * trusting response length, shape, content type, provider wording, or HTML. */
+async function controlPlaneError(
+  response: Response,
+): Promise<{ code: string | null; recoveryCode: string | null }> {
+  try {
+    const text = await boundedResponseText(response);
+    if (!text) return { code: null, recoveryCode: null };
     const body: unknown = JSON.parse(text);
     const error =
       body && typeof body === "object" && "error" in body
@@ -45,13 +76,29 @@ async function controlPlaneErrorCode(
       error && typeof error === "object" && "code" in error
         ? (error as { code: unknown }).code
         : null;
-    return typeof code === "string" &&
+    const safeCode = typeof code === "string" &&
       code.length > 0 &&
       code.length <= MAX_ERROR_CODE_LENGTH
       ? code
       : null;
+    const details =
+      error && typeof error === "object" && "details" in error
+        ? (error as { details: unknown }).details
+        : null;
+    const recoveryCode =
+      safeCode === "account_recovery_required" &&
+      details &&
+      typeof details === "object" &&
+      "recoveryCode" in details &&
+      typeof (details as { recoveryCode: unknown }).recoveryCode === "string" &&
+      RECOVERY_CODE_RE.test(
+        (details as { recoveryCode: string }).recoveryCode,
+      )
+        ? (details as { recoveryCode: string }).recoveryCode
+        : null;
+    return { code: safeCode, recoveryCode };
   } catch {
-    return null;
+    return { code: null, recoveryCode: null };
   }
 }
 
@@ -96,13 +143,15 @@ export async function resolveWorkOSDesktopAccountId(
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
   });
   if (!response.ok) {
+    const error = await controlPlaneError(response);
     throw new WorkOSDesktopAccountError(
       response.status,
-      await controlPlaneErrorCode(response),
+      error.code,
+      error.recoveryCode,
     );
   }
-  const text = await response.text();
-  if (!text || text.length > MAX_RESPONSE_BYTES) {
+  const text = await boundedResponseText(response);
+  if (!text) {
     throw new Error("The Zeros account response was invalid");
   }
   let body: unknown;

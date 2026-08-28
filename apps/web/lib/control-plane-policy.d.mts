@@ -2,6 +2,10 @@ export declare function allowedControlPlaneRoute(
   method: string,
   pathname: string,
 ): boolean;
+export declare function acceptedControlPlaneResponseType(
+  pathname: string,
+  contentType: string,
+): "json" | "sse" | null;
 export declare function validMutationOrigin(request: Request): boolean;
 export declare function cancelUnusedResponseBody(
   response: Response,
@@ -11,5 +15,9 @@ export declare function jsonContentTypeOrCancel(
 ): Promise<string | null>;
 export declare function readBoundedBody(
   request: Request,
+  maxBytes: number,
+): Promise<{ ok: true; body: ArrayBuffer } | { ok: false }>;
+export declare function readBoundedResponseBody(
+  response: Response,
   maxBytes: number,
 ): Promise<{ ok: true; body: ArrayBuffer } | { ok: false }>;

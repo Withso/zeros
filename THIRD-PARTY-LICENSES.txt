@@ -1381,7 +1381,7 @@ PACKAGE INVENTORY (600 resolved package/version records)
   Source: https://github.com/microsoft/vscode-ripgrep
   License documents: ccf06b707607
 
-@workos-inc/node@10.10.0
+@workos-inc/node@10.12.0
   License: MIT
   Surfaces: control plane
   Author: WorkOS
@@ -7637,8 +7637,8 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ================================================================================
 DOCUMENT 440126930e01
 SHA-256: 440126930e01613ce003165bcf3c3f0c3525a4f820d36bbeffdaad11f70038ec
-Applies to: @workos-inc/node@10.10.0
-Source labels: @workos-inc/node@10.10.0 — LICENSE
+Applies to: @workos-inc/node@10.12.0
+Source labels: @workos-inc/node@10.12.0 — LICENSE
 ================================================================================
 
 MIT License

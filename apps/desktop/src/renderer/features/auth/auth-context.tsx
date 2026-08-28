@@ -38,7 +38,10 @@ import { isElectron, nativeInvoke, nativeListen } from "../../platform/runtime";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { CHANNEL } from "../../config/release-channel";
 import { useDismissStartupLoader } from "../../shared/ui/startup-loader";
-import { safeBrowserSignInStartError } from "./auth-errors";
+import {
+  safeBrowserSignInStartError,
+  workOSSignInFailureMessage,
+} from "./auth-errors";
 import {
   schemeForChannel,
   type Channel,
@@ -84,30 +87,6 @@ export interface AuthContextValue {
   signOutEverywhere: () => Promise<void>;
 }
 
-const GENERIC_SIGN_IN_ERROR =
-  "We couldn't finish signing you in from the browser. Please try again.";
-
-/** Per-reason guidance for a failed WorkOS sign-in.
- *
- *  The browser channel has told users which step failed since Phase 2
- *  (`failureResponse` in the control plane); desktop collapsed every distinct
- *  reason into one dead-end string, so the same policy produced opposite
- *  usability. Wording is kept in step with the web table on purpose. */
-const SIGN_IN_ERROR_MESSAGES: Record<string, string> = {
-  expired:
-    "That browser sign-in expired before it finished. Click Sign in to try again.",
-  verification_required:
-    "Check your inbox — your provider requires you to confirm this email address before its first sign-in. Verify it, then click Sign in again.",
-  email_unverified:
-    "Verify your email address with your provider, then click Sign in again.",
-  provider_error:
-    "Your identity provider didn't complete the sign-in. Click Sign in to try again.",
-  account_failed:
-    "We signed you in, but couldn't reach your Zeros account. Check your connection and click Sign in again.",
-  storage_failed:
-    "We signed you in, but couldn't save the session to your keychain. Click Sign in to try again.",
-};
-
 const AuthContext = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: React.ReactNode }) {
@@ -138,6 +117,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
     let offStoreChanged: (() => void) | undefined;
     let offWorkOSComplete: (() => void) | undefined;
     let offWorkOSError: (() => void) | undefined;
+    let offSecurityRevoked: (() => void) | undefined;
 
     const apply = (next: AuthSessionInfo | null) => {
       if (!active) return;
@@ -253,7 +233,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
           console.warn(
             `[auth] sign-in handoff redeem failed: ${redeemed?.error ?? "unknown"}`,
           );
-          setOAuthError(GENERIC_SIGN_IN_ERROR);
+          setOAuthError(workOSSignInFailureMessage("exchange_failed", null));
           return;
         }
         // Main already wrote the session; just mirror it into renderer state.
@@ -304,26 +284,51 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
         if (!next) throw new Error("session unavailable");
         setOAuthError(null);
       } catch {
-        setOAuthError(GENERIC_SIGN_IN_ERROR);
+        setOAuthError(workOSSignInFailureMessage("exchange_failed", null));
       }
     }).then((off) => {
       if (active) offWorkOSComplete = off;
       else off();
     });
 
-    void nativeListen<{ reason?: string }>(
+    void nativeListen<{ reason?: string; recoveryCode?: string }>(
       "auth-signin-error",
-      ({ reason }) => {
+      ({ reason, recoveryCode }) => {
         if (!active) return;
         console.warn("[auth] WorkOS sign-in failed:", reason ?? "unknown");
-        setOAuthError(
-          SIGN_IN_ERROR_MESSAGES[reason ?? ""] ?? GENERIC_SIGN_IN_ERROR,
-        );
+        setOAuthError(workOSSignInFailureMessage(reason ?? "", recoveryCode));
       },
     ).then((off) => {
       if (active) offWorkOSError = off;
       else off();
     });
+
+    void nativeListen<{ reason?: string }>(
+      "auth-security-revoked",
+      async ({ reason }) => {
+        if (!active) return;
+        try {
+          getActiveBridge()?.signalOwnerSignedOut();
+        } catch {
+          /* bridge already unavailable */
+        }
+        await resync().catch(() => null);
+        if (!active) return;
+        setOAuthError(
+          reason === "account.revoked" || reason === "account_deleted"
+            ? "Your Zeros account is no longer active. Sign in again only if access has been restored."
+            : "This session is no longer active. Sign in again to continue.",
+        );
+      },
+    ).then((off) => {
+      if (active) offSecurityRevoked = off;
+      else off();
+    });
+
+    const onOnline = () => {
+      void nativeInvoke("auth_security_revalidate").catch(() => undefined);
+    };
+    window.addEventListener("online", onOnline);
 
     return () => {
       active = false;
@@ -332,6 +337,8 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
       offStoreChanged?.();
       offWorkOSComplete?.();
       offWorkOSError?.();
+      offSecurityRevoked?.();
+      window.removeEventListener("online", onOnline);
     };
   }, []);
 

@@ -30,8 +30,11 @@ import { appOrigin } from "./hosts";
 // re-declared: a local copy here is what dropped Alpha's sign-in handoff.
 import { SCHEMES } from "./schemes.mjs";
 import {
+  accountAccessPage,
+  accountRecoveryPage,
   dashboardPage,
   dashboardReturnUrl,
+  parseAccountResolutionError,
   type DashboardMe,
 } from "./dashboard.mjs";
 import { proxyControlPlane } from "./control-plane-proxy";
@@ -136,8 +139,26 @@ async function dashboard(
       env,
       verified,
     );
-    if (!response.ok) throw new Error(`status ${response.status}`);
-    me = (await response.json()) as DashboardMe;
+    const body: unknown = await response.json();
+    if (!response.ok) {
+      const resolution = parseAccountResolutionError(response.status, body);
+      if (resolution?.kind === "recovery_required") {
+        return accountRecoveryPage({
+          session: user,
+          recoveryCode: resolution.recoveryCode,
+          signOutHref: signOutUrl(env),
+        });
+      }
+      if (resolution) {
+        return accountAccessPage({
+          session: user,
+          kind: resolution.kind,
+          signOutHref: signOutUrl(env),
+        });
+      }
+      throw new Error(`status ${response.status}`);
+    }
+    me = body as DashboardMe;
   } catch {
     loadError =
       "Couldn't reach the organization service. Your account is still signed in.";

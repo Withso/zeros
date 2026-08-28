@@ -28,7 +28,8 @@ function workOSFlow(): WorkOSDesktopAuthorizationFlow {
       }
     },
     onComplete: () => emitEvent("auth-signin-complete", {}),
-    onError: (reason) => emitEvent("auth-signin-error", { reason }),
+    onError: (reason, context) =>
+      emitEvent("auth-signin-error", { reason, ...context }),
   });
   return flow;
 }

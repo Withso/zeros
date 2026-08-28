@@ -1,4 +1,5 @@
 import type { JWTPayload, JWTVerifyOptions } from "jose";
+import { z } from "zod";
 
 export const AUTH_CLAIM_NAMESPACE = "https://zeros.build/";
 
@@ -21,6 +22,9 @@ export interface AuthTokenClaims {
   emailVerified: true;
   displayName: string | null;
   avatarUrl: string | null;
+  /** WorkOS active-authentication time. Refresh does not advance this claim;
+   * sensitive operations use it to require a recent AuthKit ceremony. */
+  authTime: number | null;
   issuedAt: number;
   expiresAt: number;
 }
@@ -34,6 +38,9 @@ export class AuthTokenContractError extends Error {
     this.name = "AuthTokenContractError";
   }
 }
+
+const WorkOSIdentifier = /^[A-Za-z0-9_-]{1,512}$/;
+const EmailClaim = z.string().trim().toLowerCase().email().max(254);
 
 function requireConfigured(value: string, name: string): string {
   const normalized = value.trim();
@@ -79,7 +86,23 @@ function requiredString(
   return value.trim();
 }
 
-function optionalString(payload: JWTPayload, key: string): string | null {
+function requiredIdentifier(
+  payload: JWTPayload,
+  key: string,
+  code: string,
+): string {
+  const value = requiredString(payload, key, code);
+  if (!WorkOSIdentifier.test(value)) {
+    throw new AuthTokenContractError(code, `required claim ${key} is invalid`);
+  }
+  return value;
+}
+
+function optionalString(
+  payload: JWTPayload,
+  key: string,
+  maxLength = 500,
+): string | null {
   const value = payload[key];
   if (value === undefined || value === null) return null;
   if (typeof value !== "string") {
@@ -89,11 +112,28 @@ function optionalString(payload: JWTPayload, key: string): string | null {
     );
   }
   const normalized = value.trim();
+  if (normalized.length > maxLength) {
+    throw new AuthTokenContractError(
+      "AUTH_PROFILE_CLAIM_INVALID",
+      `optional claim ${key} is too large`,
+    );
+  }
   return normalized || null;
 }
 
+function requiredEmail(payload: JWTPayload, key: string): string {
+  const parsed = EmailClaim.safeParse(payload[key]);
+  if (!parsed.success) {
+    throw new AuthTokenContractError(
+      "AUTH_EMAIL_INVALID",
+      `required claim ${key} is invalid`,
+    );
+  }
+  return parsed.data;
+}
+
 function optionalHttpsUrl(payload: JWTPayload, key: string): string | null {
-  const value = optionalString(payload, key);
+  const value = optionalString(payload, key, 2_048);
   if (!value || value.length > 2_048) return null;
   try {
     const parsed = new URL(value);
@@ -112,6 +152,18 @@ function requiredTimestamp(payload: JWTPayload, key: "iat" | "exp"): number {
     throw new AuthTokenContractError(
       "AUTH_TIME_CLAIM_INVALID",
       `required claim ${key} is missing`,
+    );
+  }
+  return value;
+}
+
+function optionalTimestamp(payload: JWTPayload, key: "auth_time"): number | null {
+  const value = payload[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new AuthTokenContractError(
+      "AUTH_TIME_CLAIM_INVALID",
+      `optional claim ${key} must be a positive timestamp`,
     );
   }
   return value;
@@ -173,23 +225,39 @@ export function validateAuthTokenClaims(
 
   const issuedAt = requiredTimestamp(payload, "iat");
   const expiresAt = requiredTimestamp(payload, "exp");
+  const authTime = optionalTimestamp(payload, "auth_time");
   if (expiresAt <= issuedAt) {
     throw new AuthTokenContractError(
       "AUTH_TIME_CLAIM_INVALID",
       "access token expiry must follow its issue time",
     );
   }
+  if (authTime !== null && authTime > issuedAt + 60) {
+    throw new AuthTokenContractError(
+      "AUTH_TIME_CLAIM_INVALID",
+      "active authentication time cannot follow token issue time",
+    );
+  }
 
   return {
-    providerSubject: requiredString(payload, "sub", "AUTH_SUBJECT_MISSING"),
-    sessionId: requiredString(payload, "sid", "AUTH_SESSION_ID_MISSING"),
-    tokenId: requiredString(payload, "jti", "AUTH_TOKEN_ID_MISSING"),
+    providerSubject: requiredIdentifier(
+      payload,
+      "sub",
+      "AUTH_SUBJECT_INVALID",
+    ),
+    sessionId: requiredIdentifier(
+      payload,
+      "sid",
+      "AUTH_SESSION_ID_INVALID",
+    ),
+    tokenId: requiredIdentifier(payload, "jti", "AUTH_TOKEN_ID_INVALID"),
     clientId,
     clientKind,
-    email: requiredString(payload, emailKey, "AUTH_EMAIL_MISSING"),
+    email: requiredEmail(payload, emailKey),
     emailVerified: true,
     displayName: optionalString(payload, `${AUTH_CLAIM_NAMESPACE}name`),
     avatarUrl: optionalHttpsUrl(payload, `${AUTH_CLAIM_NAMESPACE}picture`),
+    authTime,
     issuedAt,
     expiresAt,
   };

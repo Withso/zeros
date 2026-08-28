@@ -48,6 +48,13 @@ If local engines later write to the same durable record, users must receive a
 clear privacy control and the record must preserve the same workspace-scoped
 ordering and deletion rules.
 
+The initial product does not make local and cloud records bidirectionally
+syncable. “Create cloud from local” creates a new organization/team-owned cloud
+workspace from a durable Git revision; “open cloud locally” creates a separate
+device-private checkout with an optional source reference. Neither operation
+deletes, re-owns, or silently uploads the source. Uncommitted work requires a
+separate encrypted checkpoint/patch transfer with explicit confirmation.
+
 Multiple clients may observe one running engine. The engine remains the live
 sequencer; clients do not merge agent turns independently. Collaborative source
 editing is a separate feature and requires its own conflict/ownership model.

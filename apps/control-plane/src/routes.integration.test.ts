@@ -222,6 +222,51 @@ d("organization routes", () => {
     actor = owner;
   });
 
+  it("refuses local role and removal changes for directory-managed members", async () => {
+    const created = await request("/v1/organizations", {
+      method: "POST",
+      body: { name: "Directory Managed" },
+    });
+    const body = (await created.json()) as { organization: { id: string } };
+    const orgId = body.organization.id;
+    await pool.query(
+      `INSERT INTO organization_members (
+         org_id, user_id, role, membership_source, workos_membership_id
+       ) VALUES ($1, $2, 'member', 'scim', $3)`,
+      [orgId, member.id, `om_${randomUUID().replaceAll("-", "")}`],
+    );
+
+    for (const [method, body] of [
+      ["PATCH", { role: "admin" }],
+      ["DELETE", undefined],
+    ] as const) {
+      const response = await request(
+        `/v1/organizations/${orgId}/members/${member.id}`,
+        { method, body },
+      );
+      expect(response.status).toBe(409);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "directory_managed_membership" },
+      });
+    }
+
+    const membership = await pool.query(
+      `SELECT role, membership_source FROM organization_members
+       WHERE org_id = $1 AND user_id = $2`,
+      [orgId, member.id],
+    );
+    expect(membership.rows).toEqual([
+      { role: "member", membership_source: "scim" },
+    ]);
+    const listed = await request(`/v1/organizations/${orgId}/members`);
+    const listedBody = (await listed.json()) as {
+      members: Array<{ id: string; directory_managed: boolean }>;
+    };
+    expect(listedBody.members.find((item) => item.id === member.id)).toMatchObject({
+      directory_managed: true,
+    });
+  });
+
   it("keeps a damaged organization visible when its default team is missing", async () => {
     const created = await request("/v1/organizations", {
       method: "POST",
@@ -287,6 +332,55 @@ d("organization routes", () => {
     await expect(response.json()).resolves.toMatchObject({
       team: { id: org.id },
     });
+  });
+
+  it("refuses organization deletion until every cloud workspace is deleted", async () => {
+    const created = await request("/v1/organizations", {
+      method: "POST",
+      body: { name: "Cloud Retention" },
+    });
+    const body = (await created.json()) as {
+      organization: { id: string; defaultTeamId: string };
+    };
+    const workspaceId = randomUUID();
+    await pool.query(
+      `WITH workspace AS (
+         INSERT INTO cloud_workspaces (
+           id, org_id, team_id, created_by, display_name,
+           repository_forge, repository_owner, repository_name,
+           repository_revision
+         ) VALUES ($1, $2, $3, $4, 'Retained workspace',
+                   'github', 'withso', 'zeros', 'main')
+         RETURNING id, org_id
+       )
+       INSERT INTO cloud_workspace_generations (
+         workspace_id, generation, org_id, provider, image_ref,
+         architecture, cpu_millicores, memory_mib, storage_mib, created_by
+       )
+       SELECT id, 1, org_id, 'daytona', 'zeros:test', 'linux/amd64',
+              1000, 2048, 10240, $4
+       FROM workspace`,
+      [
+        workspaceId,
+        body.organization.id,
+        body.organization.defaultTeamId,
+        owner.id,
+      ],
+    );
+
+    const deleted = await request(
+      `/v1/organizations/${body.organization.id}`,
+      { method: "DELETE" },
+    );
+    expect(deleted.status).toBe(409);
+    await expect(deleted.json()).resolves.toMatchObject({
+      error: { code: "organization_has_cloud_workspaces" },
+    });
+    const organization = await pool.query(
+      `SELECT deleted_at FROM organizations WHERE id = $1`,
+      [body.organization.id],
+    );
+    expect(organization.rows[0]?.deleted_at).toBeNull();
   });
 
   it("soft-deletes a collaborative organization atomically without exposing it through RLS", async () => {

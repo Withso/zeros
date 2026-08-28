@@ -41,3 +41,43 @@ export function safeBrowserSignInStartError(_error: unknown): string {
   console.debug("[auth] browser sign-in start failed");
   return "Couldn't start sign-in. Please try again.";
 }
+
+const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
+const GENERIC_WORKOS_SIGN_IN_ERROR =
+  "We couldn't finish signing you in from the browser. Please try again.";
+
+/** Fixed, non-provider-authored guidance for the bounded WorkOS failure event
+ * emitted by Electron main. Only the public recovery locator may be reflected. */
+export function workOSSignInFailureMessage(
+  reason: string,
+  recoveryCode: string | null | undefined,
+): string {
+  if (reason === "account_recovery_required") {
+    const locator =
+      typeof recoveryCode === "string" && RECOVERY_CODE_RE.test(recoveryCode)
+        ? ` Recovery code: ${recoveryCode}.`
+        : "";
+    return `For your security, this sign-in must be reviewed before it can be linked to your existing Zeros account. Contact hello@zeros.build.${locator}`;
+  }
+  const messages: Record<string, string> = {
+    expired:
+      "That browser sign-in expired before it finished. Click Sign in to try again.",
+    verification_required:
+      "Check your inbox — your provider requires you to confirm this email address before its first sign-in. Verify it, then click Sign in again.",
+    email_unverified:
+      "Verify your email address with your provider, then click Sign in again.",
+    provider_error:
+      "Your identity provider didn't complete the sign-in. Click Sign in to try again.",
+    reauthentication_required:
+      "For your security, sign out in the browser and complete a fresh sign-in before retrying.",
+    account_exists:
+      "A Zeros account already uses this email. Sign in with your original sign-in method; accounts are never linked by email automatically.",
+    account_inactive:
+      "Your Zeros account is not active. Contact hello@zeros.build if you believe this is a mistake.",
+    account_failed:
+      "We signed you in, but couldn't reach your Zeros account. Check your connection and click Sign in again.",
+    storage_failed:
+      "We signed you in, but couldn't save the session to your keychain. Click Sign in to try again.",
+  };
+  return messages[reason] ?? GENERIC_WORKOS_SIGN_IN_ERROR;
+}

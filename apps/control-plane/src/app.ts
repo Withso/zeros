@@ -29,7 +29,6 @@ import {
   createGithubUnconfiguredRoutes,
 } from "./github.js";
 import { createFeedbackRoutes } from "./feedback.js";
-import { createWorkOSIdentityEventRoutes } from "./workos-events.js";
 import {
   PostgresWorkOSBrowserSessionRepository,
   WorkOSBrowserSessions,
@@ -38,11 +37,21 @@ import {
 import { createWorkOSDesktopRevocationRoutes } from "./workos-desktop-revocation.js";
 import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
+import { createAccountRecoveryRoutes } from "./account-recovery.js";
+import {
+  PostgresSecurityEventBroker,
+  createSecurityEventRoutes,
+} from "./security-events.js";
+import { createWorkOSManagementEventRoutes } from "./workos-sync-events.js";
 
 export function createApp(
   config: Config,
   pool: pg.Pool,
   emailConfig: EmailConfig,
+  runtime: {
+    securityEventBroker?: PostgresSecurityEventBroker;
+    workosProvider?: RailwayWorkOSProvider;
+  } = {},
 ): Hono {
   const app = new Hono();
 
@@ -64,7 +73,9 @@ export function createApp(
   // each carries its own stronger credential (PKCE state, opaque HttpOnly
   // cookie, webhook signature, or a verified Desktop Application bearer).
   if (config.auth.provider === "workos" && config.workos) {
-    const provider = new RailwayWorkOSProvider(config.auth, config.workos);
+    const provider =
+      runtime.workosProvider ??
+      new RailwayWorkOSProvider(config.auth, config.workos);
     const sessions = new WorkOSBrowserSessions(
       new PostgresWorkOSBrowserSessionRepository(pool),
       provider,
@@ -81,7 +92,11 @@ export function createApp(
     app.route("/", createWorkOSDesktopRevocationRoutes(provider));
     app.route(
       "/",
-      createWorkOSIdentityEventRoutes(pool, config.workos.webhookSecret),
+      createWorkOSManagementEventRoutes(
+        pool,
+        provider,
+        config.workos.webhookSecret,
+      ),
     );
   }
 
@@ -174,7 +189,20 @@ export function createApp(
   app.use("/v1/feedback", feedbackBodyLimit);
 
   app.route("/", createFeedbackRoutes(config.feedback));
-  app.route("/", createRoutes(pool, emailConfig, config.cloudWorkspaces));
+  app.route("/", createAccountRecoveryRoutes(pool));
+  app.route(
+    "/",
+    createSecurityEventRoutes(
+      pool,
+      runtime.securityEventBroker ?? new PostgresSecurityEventBroker(pool),
+    ),
+  );
+  app.route(
+    "/",
+    createRoutes(pool, emailConfig, config.cloudWorkspaces, {
+      workosEnabled: config.auth.provider === "workos",
+    }),
+  );
   if (config.github) app.route("/", createGithubRoutes(pool, config.github));
 
   app.onError((err, c) => {
@@ -184,7 +212,13 @@ export function createApp(
     if (err instanceof HTTPException) return err.getResponse();
     if (err instanceof HttpError) {
       return c.json(
-        { error: { code: err.code, message: err.message } },
+        {
+          error: {
+            code: err.code,
+            message: err.message,
+            ...(err.details ? { details: err.details } : {}),
+          },
+        },
         err.status,
       );
     }
