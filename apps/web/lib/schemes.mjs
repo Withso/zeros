@@ -47,9 +47,8 @@ export function schemeForDeploymentEnvironment(environment, requestedScheme) {
   if (environment === undefined || environment === null || environment === "") {
     return schemeOrDefault(requestedScheme);
   }
-  const scheme = DEPLOYMENT_SCHEMES[environment];
-  if (!scheme) {
+  if (!Object.hasOwn(DEPLOYMENT_SCHEMES, environment)) {
     throw new Error("Invalid ZEROS_DEPLOY_ENV for hosted invitation");
   }
-  return scheme;
+  return DEPLOYMENT_SCHEMES[environment];
 }

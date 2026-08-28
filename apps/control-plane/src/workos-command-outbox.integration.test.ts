@@ -27,6 +27,7 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
   readonly memberships: WorkOSMembershipRecord[] = [];
   readonly invitations: WorkOSInvitationRecord[] = [];
   acceptBeforeNextInvitationRevoke = false;
+  missingInvitationStatus = 404;
   onInvitationCreated:
     | ((invitation: WorkOSInvitationRecord) => Promise<void>)
     | null = null;
@@ -207,7 +208,7 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
     const invitation = this.invitations.find((item) => item.id === invitationId);
     if (!invitation) {
       const missing = new Error("invitation missing") as Error & { status: number };
-      missing.status = 404;
+      missing.status = this.missingInvitationStatus;
       throw missing;
     }
     if (this.acceptBeforeNextInvitationRevoke) {
@@ -759,6 +760,44 @@ d("WorkOS command outbox", () => {
     expect(provider.memberships).toHaveLength(0);
   });
 
+  it("deletes a captured membership while its organization link is not ready", async () => {
+    const seeded = await seedOrganization(
+      pool,
+      randomUUID().replaceAll("-", ""),
+    );
+    const capturedMembershipId = `om_${randomUUID().replaceAll("-", "")}`;
+    await withSystemTx(pool, (tx) =>
+      enqueueWorkOSCommand(tx, {
+        operation: "membership.delete",
+        idempotencyKey: `membership.${seeded.organizationId}.${seeded.userId}.2`,
+        aggregateKey: `membership:${seeded.organizationId}:${seeded.userId}`,
+        aggregateRevision: 2,
+        organizationId: seeded.organizationId,
+        userId: seeded.userId,
+        providerObjectId: capturedMembershipId,
+        payload: { workosUserId: seeded.workosUserId, role: "owner" },
+      }),
+    );
+    const provider = new FakeWorkOSProvider();
+    const processor = new WorkOSCommandProcessor(pool, provider, {
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    expect(await processor.tick()).toBe(1);
+    expect(provider.calls).toContain(
+      `membership.delete:${capturedMembershipId}`,
+    );
+    expect(
+      provider.calls.some((call) => call.startsWith("membership.list:")),
+    ).toBe(false);
+    const command = await pool.query<{ state: string }>(
+      `SELECT state FROM workos_command_outbox
+       WHERE aggregate_key = $1 AND aggregate_revision = 2`,
+      [`membership:${seeded.organizationId}:${seeded.userId}`],
+    );
+    expect(command.rows[0]?.state).toBe("succeeded");
+  });
+
   it("revokes every pending provider invitation even when one exact ID was captured", async () => {
     const seeded = await seedOrganization(
       pool,
@@ -911,5 +950,46 @@ d("WorkOS command outbox", () => {
     ]);
     expect(provider.invitations[0]?.state).toBe("accepted");
     expect(provider.memberships).toHaveLength(0);
+  });
+
+  it("does not treat an absent invitation after a forbidden revoke as converged", async () => {
+    const seeded = await seedOrganization(
+      pool,
+      randomUUID().replaceAll("-", ""),
+    );
+    const workosOrganizationId = `org_${randomUUID().replaceAll("-", "")}`;
+    const localInvitationId = randomUUID();
+    const providerInvitationId = `inv_${randomUUID().replaceAll("-", "")}`;
+    const email = "forbidden-revoke@example.com";
+    await pool.query(
+      `UPDATE workos_organization_links
+       SET state = 'active', workos_organization_id = $2
+       WHERE organization_id = $1`,
+      [seeded.organizationId, workosOrganizationId],
+    );
+    await withSystemTx(pool, (tx) =>
+      enqueueWorkOSCommand(tx, {
+        operation: "invitation.revoke",
+        idempotencyKey: `invitation.${localInvitationId}.2`,
+        aggregateKey: `invitation:${localInvitationId}`,
+        aggregateRevision: 2,
+        organizationId: seeded.organizationId,
+        providerObjectId: providerInvitationId,
+        payload: { localInvitationId, email, role: "member" },
+      }),
+    );
+    const provider = new FakeWorkOSProvider();
+    provider.missingInvitationStatus = 403;
+    const processor = new WorkOSCommandProcessor(pool, provider, {
+      logger: { info() {}, warn() {}, error() {} },
+    });
+
+    expect(await processor.tick()).toBe(1);
+    const command = await pool.query<{ state: string }>(
+      `SELECT state FROM workos_command_outbox
+       WHERE aggregate_key = $1 AND aggregate_revision = 2`,
+      [`invitation:${localInvitationId}`],
+    );
+    expect(command.rows[0]?.state).toBe("dead");
   });
 });

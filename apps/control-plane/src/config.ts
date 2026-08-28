@@ -413,13 +413,14 @@ function loadInviteLinkBase(
 
 function loadWorkOSBackendConfig(
   env: z.infer<typeof EnvSchema>,
+  appOrigin: string | null,
 ): WorkOSBackendConfig | null {
   if (env.AUTH_PROVIDER !== "workos") return null;
+  if (appOrigin === null) {
+    throw new Error("Invalid environment: APP_ORIGIN is required");
+  }
   return {
-    appOrigin: validatedAppOrigin(
-      requiredAuthValue(env.APP_ORIGIN, "APP_ORIGIN"),
-      env.NODE_ENV,
-    ),
+    appOrigin,
     apiKey: requiredAuthValue(env.WORKOS_API_KEY, "WORKOS_API_KEY"),
     cookiePassword: requiredAuthValue(
       env.WORKOS_COOKIE_PASSWORD,
@@ -837,10 +838,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   const e = parsed.data;
   const auth = loadAuthConfig(e);
-  const workos = loadWorkOSBackendConfig(e);
+  const appOrigin = e.APP_ORIGIN
+    ? validatedAppOrigin(e.APP_ORIGIN, e.NODE_ENV)
+    : null;
+  const workos = loadWorkOSBackendConfig(e, appOrigin);
   const inviteLinkBase = loadInviteLinkBase(
     e.INVITE_LINK_BASE,
-    workos?.appOrigin ?? null,
+    appOrigin,
     e.NODE_ENV,
   );
   if (auth.provider === "workos" && workos) {
@@ -849,7 +853,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   validateRailwayEnvironment(
     env,
     e.AUTH_AUDIENCE,
-    workos?.appOrigin ?? null,
+    appOrigin,
     inviteLinkBase,
     e.ZEROS_SELF_HOSTED === "true",
   );

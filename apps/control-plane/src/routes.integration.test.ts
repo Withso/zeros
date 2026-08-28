@@ -435,6 +435,40 @@ d("organization routes", () => {
     expect(localRemoved.rows[0]?.accepted_at).not.toBeNull();
     expect(localRemoved.rows[0]?.revoked_at).toBeNull();
     expect(Number(localRemoved.rows[0]?.workos_sync_revision)).toBe(3);
+
+    const reinvited = await workosRequest(
+      `/v1/organizations/${orgId}/invitations`,
+      {
+        method: "POST",
+        body: { email: workosMember.email, role: "member" },
+      },
+    );
+    expect(reinvited.status).toBe(201);
+    const rejoinInvitation = (await reinvited.json()) as {
+      invitation: { id: string; token: string };
+    };
+    workosActor = workosMember;
+    const rejoined = await workosRequest("/v1/invitations/accept", {
+      method: "POST",
+      body: { token: rejoinInvitation.invitation.token },
+    });
+    expect(rejoined.status).toBe(200);
+
+    const membershipGenerations = await pool.query<{
+      operation: string;
+      aggregate_revision: string | number;
+    }>(
+      `SELECT operation, aggregate_revision
+       FROM workos_command_outbox
+       WHERE aggregate_key = $1
+       ORDER BY sequence`,
+      [`membership:${orgId}:${workosMember.id}`],
+    );
+    expect(membershipGenerations.rows).toEqual([
+      { operation: "membership.create", aggregate_revision: "1" },
+      { operation: "membership.delete", aggregate_revision: "2" },
+      { operation: "membership.create", aggregate_revision: "3" },
+    ]);
   });
 
   it("revokes a pending local rejoin token when removing a member during Auth0 rollback", async () => {

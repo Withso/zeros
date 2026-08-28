@@ -299,12 +299,30 @@ export function createRoutes(
         );
       }
 
+      const membershipAggregateKey = `membership:${invitation.org_id}:${user.id}`;
       const insertedMembership = await tx.query(
-        `INSERT INTO organization_members (org_id, user_id, role)
-         VALUES ($1, $2, $3)
+        `INSERT INTO organization_members (
+           org_id, user_id, role, workos_sync_revision
+         )
+         VALUES (
+           $1, $2, $3,
+           COALESCE(
+             (
+               SELECT MAX(aggregate_revision) + 1
+               FROM workos_command_outbox
+               WHERE aggregate_key = $4
+             ),
+             1
+           )
+         )
          ON CONFLICT (org_id, user_id) DO NOTHING
          RETURNING user_id`,
-        [invitation.org_id, user.id, invitation.role],
+        [
+          invitation.org_id,
+          user.id,
+          invitation.role,
+          membershipAggregateKey,
+        ],
       );
       const effectiveRole = await tx.query<{
         role: OrganizationRole;
@@ -388,7 +406,7 @@ export function createRoutes(
               ? "membership.update"
               : "membership.create",
             idempotencyKey: `membership.${invitation.org_id}.${user.id}.${member.workos_sync_revision}`,
-            aggregateKey: `membership:${invitation.org_id}:${user.id}`,
+            aggregateKey: membershipAggregateKey,
             orderingKey,
             aggregateRevision: Number(member.workos_sync_revision),
             organizationId: invitation.org_id,

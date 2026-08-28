@@ -137,10 +137,12 @@ describe("invite page scheme selection", () => {
   });
 
   it("fails closed for an unknown hosted deployment environment", () => {
-    assert.throws(
-      () => schemeForDeploymentEnvironment("staging", "zeros-alpha"),
-      /ZEROS_DEPLOY_ENV/,
-    );
+    for (const environment of ["staging", "constructor", "toString"]) {
+      assert.throws(
+        () => schemeForDeploymentEnvironment(environment, "zeros-alpha"),
+        /ZEROS_DEPLOY_ENV/,
+      );
+    }
   });
 
   it("passes through every per-channel scheme", () => {

@@ -344,21 +344,32 @@ export class WorkOSCommandProcessor {
     }
     if (command.operation === "membership.delete") {
       const payload = MembershipPayload.parse(command.payload);
-      const organizationId = await this.workosOrganizationId(command);
       // Always reconcile the captured ID with current provider state. An
       // invitation may have become a new membership after the local removal
       // transaction read the old ID but before this command executes.
-      const ids = Array.from(
-        new Set([
-          ...(command.providerObjectId ? [command.providerObjectId] : []),
-          ...(
-            await this.provider.listMemberships({
-              organizationId,
-              userId: payload.workosUserId,
-            })
-          ).map((membership) => membership.id),
-        ]),
+      const ids = new Set(
+        command.providerObjectId ? [command.providerObjectId] : [],
       );
+      let organizationId: string | null = null;
+      try {
+        organizationId = await this.workosOrganizationId(command);
+      } catch (error) {
+        // A captured provider ID is independently actionable even if local
+        // organization provisioning or deletion has made listing unavailable.
+        // Keep provider-list errors outside this catch: those are not evidence
+        // that reconciliation is unnecessary.
+        if (!command.providerObjectId || safeError(error).status !== 503) {
+          throw error;
+        }
+      }
+      if (organizationId) {
+        for (const membership of await this.provider.listMemberships({
+          organizationId,
+          userId: payload.workosUserId,
+        })) {
+          ids.add(membership.id);
+        }
+      }
       for (const id of ids) {
         try {
           await this.provider.deleteMembership(id);
@@ -366,7 +377,7 @@ export class WorkOSCommandProcessor {
           if (safeError(error).status !== 404) throw error;
         }
       }
-      return { kind: "void", deletedMembershipIds: ids };
+      return { kind: "void", deletedMembershipIds: Array.from(ids) };
     }
     if (command.operation === "invitation.create") {
       const payload = InvitationPayload.parse(command.payload);
@@ -445,12 +456,10 @@ export class WorkOSCommandProcessor {
               organizationId,
               email: payload.email,
             });
-            if (
-              !current.some(
-                (invitation) =>
-                  invitation.id === id && invitation.state === "pending",
-              )
-            ) {
+            const observed = current.find(
+              (invitation) => invitation.id === id,
+            );
+            if (observed && observed.state !== "pending") {
               continue;
             }
           }

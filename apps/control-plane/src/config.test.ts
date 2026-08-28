@@ -163,6 +163,16 @@ describe("provider-neutral authentication configuration", () => {
     });
   });
 
+  it("uses an explicitly configured Auth0 app origin for invitation links", () => {
+    expect(
+      loadConfig({
+        ...baseEnv(),
+        AUTH_PROVIDER: "auth0",
+        APP_ORIGIN: "https://app-alpha.zeros.build",
+      }).inviteLinkBase,
+    ).toBe("https://app-alpha.zeros.build/invite");
+  });
+
   it("accepts explicit provider-neutral Auth0 verification URLs", () => {
     expect(
       loadConfig({
