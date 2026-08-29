@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   CODE_SCRAMBLE,
   DESIGN_ICONS,
+  DESIGN_MARKS,
   DESIGN_SCRAMBLE,
   escapeHtml,
   fillScrambleCells,
   MATRIX_SCRAMBLE,
   renderGlyphRun,
+  rotateScrambleIcons,
   scrambleFill,
   scrambleGlyphKind,
   scrambleTail,
@@ -23,6 +25,10 @@ function visibleText(html: string): string {
 
 function svgCount(html: string): number {
   return html.match(/<svg/g)?.length ?? 0;
+}
+
+function iconName(html: string): string {
+  return html.match(/data-hero-scramble-icon="([^"]+)"/)?.[1] ?? "";
 }
 
 describe("hero scramble fill", () => {
@@ -58,9 +64,16 @@ describe("hero scramble fill", () => {
   });
 
   it("varies the designers scramble across distinct design-tool marks", () => {
-    expect(DESIGN_ICONS.length).toBeGreaterThanOrEqual(5);
-    expect(DESIGN_ICONS.length).toBeLessThanOrEqual(6);
-    expect(new Set(DESIGN_ICONS).size).toBe(DESIGN_ICONS.length);
+    expect([...DESIGN_MARKS]).toEqual([
+      "frame",
+      "component",
+      "align",
+      "rect",
+      "circle",
+      "triangle",
+    ]);
+    expect(DESIGN_ICONS.length).toBe(6);
+    expect(new Set(DESIGN_ICONS).size).toBe(6);
     expect(DESIGN_SCRAMBLE.icons).toBe(DESIGN_ICONS);
     expect(DESIGN_SCRAMBLE.chars).toMatch(/^[\#|+]+$/);
     expect(DESIGN_SCRAMBLE.chars).not.toMatch(ROLE_WORDS);
@@ -68,7 +81,12 @@ describe("hero scramble fill", () => {
 
     const catalog = DESIGN_ICONS.join("");
     expect(catalog).toMatch(/hero-scramble-icon/);
-    expect(catalog).toMatch(/<(ellipse|circle) /);
+    expect(catalog).toMatch(/<circle /);
+    expect(catalog).toMatch(/<rect /);
+    expect(catalog).not.toMatch(/<ellipse /);
+    for (const name of DESIGN_MARKS) {
+      expect(catalog).toMatch(`data-hero-scramble-icon="${name}"`);
+    }
     expect(catalog.split("<svg ").length - 1).toBe(DESIGN_ICONS.length);
 
     const seen = new Set<string>();
@@ -79,12 +97,18 @@ describe("hero scramble fill", () => {
       const chars = cells.filter((cell) => cell.kind === "char");
       expect(icons.length).toBeGreaterThan(chars.length);
       expect(icons.length).toBeGreaterThanOrEqual(6);
-      expect(new Set(icons.map((cell) => cell.html)).size).toBeGreaterThanOrEqual(5);
+      expect(new Set(icons.map((cell) => cell.html)).size).toBeGreaterThanOrEqual(
+        5,
+      );
+      expect(
+        new Set(icons.map((cell) => iconName(cell.html))).size,
+      ).toBeGreaterThanOrEqual(5);
       for (let j = 1; j < cells.length; j += 1) {
         const prev = cells[j - 1]!;
         const next = cells[j]!;
         if (prev.kind === "icon" && next.kind === "icon") {
           expect(prev.html).not.toBe(next.html);
+          expect(iconName(prev.html)).not.toBe(iconName(next.html));
         }
       }
       for (const cell of icons) seen.add(cell.html);
@@ -95,6 +119,24 @@ describe("hero scramble fill", () => {
       expect(visibleText(html)).not.toMatch(CJK_OR_KATAKANA);
     }
     expect(seen.size).toBe(DESIGN_ICONS.length);
+  });
+
+  it("slides design marks instead of reprinting the same set in place", () => {
+    const cells = fillScrambleCells(10, DESIGN_SCRAMBLE);
+    const rotated = rotateScrambleIcons(cells, 1);
+    const names = (row: typeof cells) =>
+      row
+        .filter((cell) => cell.kind === "icon")
+        .map((cell) => iconName(cell.html));
+    const from = names(cells);
+    const to = names(rotated);
+    expect(from.length).toBeGreaterThanOrEqual(6);
+    expect(to).toHaveLength(from.length);
+    expect([...to].sort()).toEqual([...from].sort());
+    expect(to).not.toEqual(from);
+    for (let i = 1; i < to.length; i += 1) {
+      expect(to[i]).not.toBe(to[i - 1]);
+    }
   });
 
   it("does not plant full role words into code or matrix scrambles", () => {

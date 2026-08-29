@@ -50,12 +50,26 @@
 
 .hero-scramble-icon {
   display: inline-block;
-  width: 0.5em;
-  height: 0.68em;
-  margin: 0;
+  width: 0.58em;
+  height: 0.74em;
+  margin: 0 0.015em;
   overflow: visible;
-  vertical-align: -0.08em;
-  color: color-mix(in srgb, var(--violet-fg) 40%, var(--fg1));
+  vertical-align: -0.1em;
+  color: color-mix(in srgb, var(--violet-fg) 42%, var(--fg1));
+}
+
+.hero-scramble-icon[data-hero-scramble-icon="component"] {
+  color: color-mix(in srgb, var(--violet-fg) 68%, var(--fg1));
+}
+
+.hero-scramble-icon[data-hero-scramble-icon="align"] {
+  color: color-mix(in srgb, var(--blue-fg) 30%, var(--fg1));
+}
+
+.hero-scramble-icon[data-hero-scramble-icon="rect"],
+.hero-scramble-icon[data-hero-scramble-icon="circle"],
+.hero-scramble-icon[data-hero-scramble-icon="triangle"] {
+  color: color-mix(in srgb, var(--violet-fg) 28%, var(--fg1));
 }
 
 .hero-role-word.is-scrambling.scramble-developers .hero-scramble-symbol {

@@ -92,6 +92,9 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/DESIGN_SCRAMBLE/);
     expect(scramble).toMatch(/MATRIX_SCRAMBLE/);
     expect(scramble).toMatch(/DESIGN_ICONS/);
+    expect(scramble).toMatch(/DESIGN_MARKS/);
+    expect(scramble).toMatch(/data-hero-scramble-icon/);
+    expect(css).toMatch(/width: 0\.58em/);
     expect(scramble).not.toMatch(/DESIGN_ICON_MAX/);
     expect(scramble).not.toMatch(/DESIGN_TOKENS/);
     expect(scramble).not.toMatch(/components/);

@@ -2,26 +2,46 @@ import gsap from 'gsap'
 
 export const SCRAMBLE_MS = 1500
 
-const svg = (inner: string) =>
-  `<svg class="hero-scramble-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">${inner}</svg>`
+export const DESIGN_MARKS = [
+  'frame',
+  'component',
+  'align',
+  'rect',
+  'circle',
+  'triangle',
+] as const
 
-const stroke = (d: string) =>
-  `<path d="${d}" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/>`
+export type DesignMark = (typeof DESIGN_MARKS)[number]
 
-const oval = (rx: number, ry: number) =>
-  `<ellipse cx="8" cy="8" rx="${rx}" ry="${ry}" fill="none" stroke="currentColor" stroke-width="1.55"/>`
+const mark = (name: DesignMark, inner: string) =>
+  `<svg class="hero-scramble-icon" data-hero-scramble-icon="${name}" viewBox="0 0 16 16" aria-hidden="true" focusable="false">${inner}</svg>`
+
+const path = (d: string) =>
+  `<path d="${d}" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>`
 
 /**
- * Frame, instance, align, rectangle, oval, and triangle.
- * Cycled across scramble cells so one mark does not dominate.
+ * Six Figma-like marks: frame, component diamond, align-left, rectangle,
+ * circle, triangle. Named so the scramble can cycle them instead of
+ * reprinting one stroke.
  */
 export const DESIGN_ICONS = [
-  svg(stroke('M2.3 5.4V2.3h3.1 M10.6 2.3h3.1v3.1 M13.7 10.6v3.1h-3.1 M5.4 13.7H2.3v-3.1')),
-  svg(stroke('M8 1.6l2 2-2 2-2-2z M12.4 6l2 2-2 2-2-2z M8 10.4l2 2-2 2-2-2z M3.6 6l2 2-2 2-2-2z')),
-  svg(stroke('M2.4 2.4v11.2 M5.4 4.2h8.4 M5.4 8h5.4 M5.4 11.8h8.4')),
-  svg(stroke('M3 4.2h10v7.6H3z')),
-  svg(oval(6.2, 4.1)),
-  svg(stroke('M8 2.5L13.8 13.4H2.2z')),
+  mark('frame', path('M2.2 5.5V2.2h3.3M10.5 2.2h3.3v3.3M13.8 10.5v3.3h-3.3M5.5 13.8H2.2v-3.3')),
+  mark(
+    'component',
+    path(
+      'M8 1.5l1.85 5.15L8 8 6.15 6.65zM14.5 8l-5.15 1.85L8 8l1.35-1.85zM8 14.5l-1.85-5.15L8 8l1.85 1.35zM1.5 8l5.15-1.85L8 8 6.65 9.85z',
+    ),
+  ),
+  mark('align', path('M2.3 2.2v11.6M5.1 3.5h8.6M5.1 7.4h5.5M5.1 11.3h8.6')),
+  mark(
+    'rect',
+    '<rect x="2.5" y="3.4" width="10.9" height="9.2" rx="1.55" fill="none" stroke="currentColor" stroke-width="1.5"/>',
+  ),
+  mark(
+    'circle',
+    '<circle cx="8" cy="8" r="5.35" fill="none" stroke="currentColor" stroke-width="1.5"/>',
+  ),
+  mark('triangle', path('M8 2.35L13.75 13.55H2.25z')),
 ] as const
 
 export type ScrambleSet = {
@@ -130,6 +150,38 @@ function pickScrambleCell(set: ScrambleSet): ScrambleCell {
   return { kind: 'char', ch: pickChar(set.chars) }
 }
 
+/** Deal `count` icons from shuffled decks so neighbors never match. */
+function dealDistinct(icons: readonly string[], count: number): string[] {
+  const out: string[] = []
+  let deck: string[] = []
+  while (out.length < count) {
+    if (deck.length === 0) {
+      deck = shuffle(icons)
+      const prev = out[out.length - 1]
+      if (prev !== undefined && deck[0] === prev && deck.length > 1) {
+        const swap = deck.findIndex((html) => html !== prev)
+        if (swap > 0) {
+          const a = deck[0]!
+          deck[0] = deck[swap]!
+          deck[swap] = a
+        }
+      }
+    }
+    const next = deck.shift()!
+    const prev = out[out.length - 1]
+    if (prev === next && icons.length > 1) {
+      const alt = deck.find((html) => html !== prev) ?? icons.find((html) => html !== prev)
+      if (alt && alt !== prev) {
+        out.push(alt)
+        deck.push(next)
+        continue
+      }
+    }
+    out.push(next)
+  }
+  return out
+}
+
 export function fillScrambleCells(length: number, set: ScrambleSet): ScrambleCell[] {
   if (length <= 0) return []
   const icons = set.icons
@@ -137,31 +189,52 @@ export function fillScrambleCells(length: number, set: ScrambleSet): ScrambleCel
     return Array.from({ length }, () => pickScrambleCell(set))
   }
 
-  const punctCount = set.chars.length === 0 ? 0 : Math.max(0, Math.round(length / 6))
+  const punctCount =
+    set.chars.length === 0 ? 0 : Math.min(Math.floor(length / 5), Math.round(length / 8))
   const punctAt = new Set(
     shuffle(Array.from({ length }, (_, i) => i)).slice(0, Math.min(punctCount, length)),
   )
-  const cycle = shuffle(icons)
+  const sequence = dealDistinct(icons, length - punctAt.size)
   const cells: ScrambleCell[] = []
   let k = 0
-  let prevIcon: string | undefined
-
   for (let i = 0; i < length; i += 1) {
     if (punctAt.has(i)) {
       cells.push(pickScrambleCell(set))
-      prevIcon = undefined
       continue
     }
-    let html = cycle[k % cycle.length]!
+    cells.push({ kind: 'icon', html: sequence[k]! })
     k += 1
-    if (prevIcon !== undefined && html === prevIcon && cycle.length > 1) {
-      html = cycle[k % cycle.length]!
-      k += 1
-    }
-    cells.push({ kind: 'icon', html })
-    prevIcon = html
   }
   return cells
+}
+
+/** Rotate only icon cells so the tool set slides instead of reprinting. */
+export function rotateScrambleIcons(cells: ScrambleCell[], by = 1): ScrambleCell[] {
+  const indexes: number[] = []
+  for (let i = 0; i < cells.length; i += 1) {
+    if (cells[i]!.kind === 'icon') indexes.push(i)
+  }
+  if (indexes.length < 2) return cells
+  const htmls = indexes.map((i) => (cells[i] as { html: string }).html)
+  const n = htmls.length
+  const shift = ((by % n) + n) % n
+  const rotated = htmls.map((_, i) => htmls[(i + shift) % n]!)
+  for (let i = 1; i < rotated.length; i += 1) {
+    if (rotated[i] !== rotated[i - 1]) continue
+    for (let j = i + 1; j < rotated.length; j += 1) {
+      if (rotated[j] !== rotated[i - 1]) {
+        const swap = rotated[i]!
+        rotated[i] = rotated[j]!
+        rotated[j] = swap
+        break
+      }
+    }
+  }
+  return cells.map((cell, i) => {
+    const k = indexes.indexOf(i)
+    if (k < 0) return cell
+    return { kind: 'icon', html: rotated[k]! }
+  })
 }
 
 function cellToGlyph(cell: ScrambleCell): Glyph {
@@ -208,6 +281,7 @@ export function playScramble(
   let slots = fillScrambleCells(maxLen, set)
   let lastRefresh = -Infinity
   let lastHtml = ''
+  let tick = 0
   const state = { t: 0 }
 
   return gsap.to(state, {
@@ -220,7 +294,11 @@ export function playScramble(
       const now = performance.now()
       if (now - lastRefresh >= refreshMs) {
         lastRefresh = now
-        const next = fillScrambleCells(len, set)
+        tick += 1
+        const next =
+          set.icons && slots.length >= len && tick % 3 !== 0
+            ? rotateScrambleIcons(slots.slice(0, len), 1)
+            : fillScrambleCells(len, set)
         for (let i = 0; i < len; i += 1) {
           if (scrambleGlyphKind(i, visualT, maxLen) === 'scramble') {
             slots[i] = next[i] ?? pickScrambleCell(set)
