@@ -67,6 +67,9 @@ Core environment variables:
 | `WORKOS_API_KEY`         | WorkOS server API key; Railway-only                                                                                                              |
 | `WORKOS_COOKIE_PASSWORD` | Unique 32+ character key for WorkOS sealed sessions; Railway-only                                                                                |
 | `WORKOS_WEBHOOK_SECRET`  | Exact WorkOS endpoint signing secret; Railway-only                                                                                               |
+| `ZEPTOMAIL_TOKEN`        | Send Mail Token for Zeros-owned organization invitation and security-notification email                                                         |
+| `EMAIL_FROM`             | Verified invitation/security sender, for example `Zeros <hello@zeros.build>`                                                                     |
+| `ZEPTOMAIL_API_URL`      | Optional regional ZeptoMail API URL; defaults to the deployment's India endpoint                                                                 |
 | `ZEROS_SELF_HOSTED`      | Public templates only: `true` allows installer-owned platform domains; frontend and API origins must differ; official deployments leave it unset |
 | `AUTH0_DOMAIN`           | Legacy Auth0 fallback used only when explicit issuer/JWKS values are absent                                                                      |
 | `PORT`                   | HTTP port, default `8080`                                                                                                                        |
@@ -75,6 +78,12 @@ Core environment variables:
 The optional GitHub App, invitation-email, and feedback variables are documented in
 [`.env.example`](.env.example). Secrets belong in Railway's secret store and
 must never be exposed through renderer `VITE_*` variables.
+
+When WorkOS synchronization is enabled, keep WorkOS's default **user
+invitation** email disabled while leaving its authentication emails enabled.
+Zeros sends the single capability email above; WorkOS retains the correlated
+pending invitation and coarse membership projection. Organization invitations
+must be created through Zeros rather than manually in the WorkOS Dashboard.
 
 ## Database migrations
 
