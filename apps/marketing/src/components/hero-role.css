@@ -1,0 +1,416 @@
+/* Hero role cycle: smash / type / paint. Durations stay in sync with
+   HOLD_MS / ACT_MS in HeroRoleCycle.tsx. */
+
+.hero-role {
+  --hero-act: 1.15s;
+  position: relative;
+  display: inline-grid;
+  align-items: baseline;
+  vertical-align: baseline;
+}
+
+.hero-role-sizer,
+.hero-role-slot {
+  grid-area: 1 / 1;
+}
+
+.hero-role-sizer {
+  visibility: hidden;
+  pointer-events: none;
+  user-select: none;
+}
+
+.hero-role-slot {
+  position: relative;
+  display: block;
+}
+
+.hero-role-word {
+  display: inline-flex;
+  white-space: nowrap;
+}
+
+.hero-role-word.is-in,
+.hero-role-word.is-out {
+  position: absolute;
+  inset: 0 auto auto 0;
+}
+
+.hero-role-letter {
+  display: inline-block;
+  transform-origin: 50% 80%;
+}
+
+.hero-role-tool {
+  position: absolute;
+  z-index: 1;
+  pointer-events: none;
+  color: var(--fg1);
+  opacity: 0;
+}
+
+.hero-role-svg {
+  display: block;
+  overflow: visible;
+}
+
+.hero-role-glow {
+  fill: color-mix(in srgb, var(--violet-primary) 55%, var(--blue-primary));
+  opacity: 0.42;
+  filter: blur(5px);
+}
+
+.hero-role-glass {
+  fill: color-mix(in srgb, var(--fg1) 22%, transparent);
+  stroke: color-mix(in srgb, var(--fg1) 72%, transparent);
+}
+
+.hero-role-spark {
+  position: absolute;
+  width: 3px;
+  height: 3px;
+  border-radius: 999px;
+  background: var(--fg1);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--violet-primary) 80%, transparent);
+  opacity: 0;
+}
+
+/* ── idle ── */
+
+.hero-role[data-phase='idle'] .hero-role-tool,
+.hero-role[data-phase='idle'] .hero-role-spark {
+  opacity: 0;
+}
+
+/* ── smash: hammer hits "builders" ── */
+
+.hero-role-tool[data-kind='hammer'] {
+  top: -0.42em;
+  right: -0.08em;
+  width: 0.58em;
+  height: 0.58em;
+  transform-origin: 32% 86%;
+}
+
+.hero-role[data-act='smash'] .hero-role-tool[data-kind='hammer'] {
+  animation: hero-hammer var(--hero-act) cubic-bezier(0.22, 0.8, 0.28, 1) both;
+}
+
+.hero-role[data-act='smash'] .is-out .hero-role-letter {
+  animation: hero-smash-out 0.55s cubic-bezier(0.4, 0, 0.7, 0.2) both;
+  animation-delay: calc(0.38s + var(--i) * 16ms);
+}
+
+.hero-role[data-act='smash'] .is-in .hero-role-letter {
+  animation: hero-smash-in 0.48s cubic-bezier(0.16, 1, 0.3, 1) both;
+  animation-delay: calc(0.62s + var(--i) * 22ms);
+}
+
+.hero-role[data-act='smash'] .hero-role-spark:nth-child(1) {
+  top: 0.18em;
+  right: 0.4em;
+  animation: hero-spark 0.55s ease-out 0.4s both;
+}
+
+.hero-role[data-act='smash'] .hero-role-spark:nth-child(2) {
+  top: 0.05em;
+  right: 0.15em;
+  animation: hero-spark 0.5s ease-out 0.42s both;
+  animation-name: hero-spark-b;
+}
+
+.hero-role[data-act='smash'] .hero-role-spark:nth-child(3) {
+  top: 0.35em;
+  right: 0.22em;
+  animation: hero-spark 0.52s ease-out 0.44s both;
+  animation-name: hero-spark-c;
+}
+
+@keyframes hero-hammer {
+  0% {
+    opacity: 0;
+    transform: rotate(-48deg) translate(0.12em, -0.18em);
+  }
+  18% {
+    opacity: 1;
+    transform: rotate(-38deg) translate(0, -0.12em);
+  }
+  42% {
+    transform: rotate(-40deg) translate(0.02em, -0.14em);
+  }
+  54% {
+    transform: rotate(16deg) translate(0.02em, 0.08em);
+  }
+  68% {
+    transform: rotate(8deg) translate(0, 0.04em);
+  }
+  100% {
+    opacity: 0;
+    transform: rotate(10deg) translate(0.08em, 0.1em);
+  }
+}
+
+@keyframes hero-smash-out {
+  0% {
+    transform: none;
+    opacity: 1;
+  }
+  35% {
+    transform: scale(1.08, 0.62) translateY(0.08em);
+  }
+  100% {
+    transform: scale(0.35, 0.2) translateY(0.42em);
+    opacity: 0;
+  }
+}
+
+@keyframes hero-smash-in {
+  0% {
+    transform: scale(0.55) translateY(0.18em);
+    opacity: 0;
+  }
+  100% {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@keyframes hero-spark {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.4);
+  }
+  30% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-0.35em, -0.28em) scale(0.2);
+  }
+}
+
+@keyframes hero-spark-b {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.4);
+  }
+  30% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(0.28em, -0.32em) scale(0.2);
+  }
+}
+
+@keyframes hero-spark-c {
+  0% {
+    opacity: 0;
+    transform: translate(0, 0) scale(0.4);
+  }
+  30% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(0.12em, 0.3em) scale(0.2);
+  }
+}
+
+/* ── type: laptop + tapping ── */
+
+.hero-role-tool[data-kind='laptop'] {
+  right: -0.72em;
+  bottom: 0.04em;
+  width: 0.62em;
+  height: 0.5em;
+}
+
+.hero-role[data-act='type'] .hero-role-tool[data-kind='laptop'] {
+  animation: hero-laptop var(--hero-act) ease both;
+}
+
+.hero-role[data-act='type'] .hero-key {
+  transform-origin: 50% 100%;
+  animation: hero-key 0.18s ease-in-out infinite;
+}
+
+.hero-role[data-act='type'] .hero-finger {
+  animation: hero-finger 0.18s ease-in-out infinite;
+}
+
+.hero-role[data-act='type'] .is-out .hero-role-letter {
+  animation: hero-type-out 0.28s ease both;
+  animation-delay: calc((var(--n) - var(--i)) * 32ms);
+}
+
+.hero-role[data-act='type'] .is-in .hero-role-letter {
+  animation: hero-type-in 0.28s ease both;
+  animation-delay: calc(0.42s + var(--i) * 36ms);
+}
+
+@keyframes hero-laptop {
+  0% {
+    opacity: 0;
+    transform: translate(0.12em, 0.08em) scale(0.86);
+  }
+  12% {
+    opacity: 1;
+    transform: none;
+  }
+  20%,
+  36%,
+  52%,
+  68% {
+    transform: translateY(0.035em);
+  }
+  28%,
+  44%,
+  60%,
+  84% {
+    transform: none;
+  }
+  100% {
+    opacity: 0;
+    transform: translate(0.1em, 0.06em);
+  }
+}
+
+@keyframes hero-key {
+  50% {
+    transform: scaleY(0.55);
+    opacity: 0.45;
+  }
+}
+
+@keyframes hero-finger {
+  50% {
+    transform: translateY(1.6px);
+  }
+}
+
+@keyframes hero-type-out {
+  to {
+    opacity: 0;
+    transform: translateY(0.12em) scale(0.7);
+  }
+}
+
+@keyframes hero-type-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.18em);
+  }
+}
+
+/* ── paint: brush draws the next word ── */
+
+.hero-role-tool[data-kind='brush'] {
+  top: 0.02em;
+  left: 0;
+  width: 0.5em;
+  height: 0.5em;
+}
+
+.hero-role-trail {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0.02em;
+  height: 0.38em;
+  width: 100%;
+  overflow: visible;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.hero-role[data-act='paint'] .hero-role-tool[data-kind='brush'] {
+  animation: hero-brush var(--hero-act) cubic-bezier(0.4, 0.1, 0.2, 1) both;
+}
+
+.hero-role[data-act='paint'] .hero-role-trail {
+  opacity: 1;
+}
+
+.hero-role[data-act='paint'] .hero-stroke {
+  stroke-dasharray: 160;
+  stroke-dashoffset: 160;
+  animation: hero-stroke 0.7s ease 0.12s both;
+}
+
+.hero-role[data-act='paint'] .is-out {
+  animation: hero-paint-out 0.7s ease 0.08s both;
+}
+
+.hero-role[data-act='paint'] .is-in {
+  clip-path: inset(0 100% 0 0);
+  animation: hero-paint-in 0.72s cubic-bezier(0.4, 0.1, 0.2, 1) 0.18s both;
+}
+
+@keyframes hero-brush {
+  0% {
+    opacity: 0;
+    left: -0.2em;
+    transform: rotate(-18deg);
+  }
+  14% {
+    opacity: 1;
+    left: 0;
+  }
+  78% {
+    opacity: 1;
+    left: calc(100% - 0.15em);
+    transform: rotate(12deg);
+  }
+  100% {
+    opacity: 0;
+    left: 100%;
+    transform: rotate(16deg);
+  }
+}
+
+@keyframes hero-stroke {
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes hero-paint-out {
+  to {
+    opacity: 0;
+    filter: blur(2px);
+  }
+}
+
+@keyframes hero-paint-in {
+  from {
+    clip-path: inset(0 100% 0 0);
+  }
+  to {
+    clip-path: inset(0 0 0 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-role-tool,
+  .hero-role-spark {
+    display: none;
+  }
+
+  .hero-role-word,
+  .hero-role-letter,
+  .hero-role-stroke,
+  .hero-role .is-in,
+  .hero-role .is-out {
+    animation: none !important;
+    clip-path: none !important;
+    filter: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  .hero-role-word.is-in,
+  .hero-role-word.is-out {
+    position: static;
+  }
+}

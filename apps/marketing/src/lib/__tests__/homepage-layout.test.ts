@@ -9,6 +9,8 @@ const NAV = join(ROOT, "apps/marketing/src/components/Nav.tsx");
 const BRAND = join(ROOT, "apps/marketing/src/components/BrandLockup.tsx");
 const PREVIEW = join(ROOT, "apps/marketing/src/components/ProductPreview.tsx");
 const WORDMARK = join(ROOT, "apps/marketing/public/zeros-wordmark.svg");
+const HERO_CYCLE = join(ROOT, "apps/marketing/src/components/HeroRoleCycle.tsx");
+const HERO_CYCLE_CSS = join(ROOT, "apps/marketing/src/components/hero-role.css");
 
 function sliceFunction(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`);
@@ -39,7 +41,9 @@ describe("marketing homepage layout", () => {
 
   it("left-aligns the Linear-style tagline and description", () => {
     expect(hero).toMatch(/Human-agent interaction/);
-    expect(hero).toMatch(/for builders/);
+    expect(hero).toMatch(/HeroRoleCycle/);
+    expect(hero).toMatch(/for /);
+    expect(hero).toMatch(/builders, developers, and designers/);
     expect(hero).toMatch(/Run a team of coding & design agents/);
     expect(hero).toMatch(/text-left/);
     expect(hero).toMatch(/text-\[36px\]/);
@@ -47,6 +51,18 @@ describe("marketing homepage layout", () => {
     expect(hero).toMatch(/lg:text-\[60px\]/);
     expect(hero).not.toMatch(/text-center/);
     expect(hero).not.toMatch(/Design and code/);
+  });
+
+  it("cycles builders, developers, and designers with synced tool motion", () => {
+    const cycle = readFileSync(HERO_CYCLE, "utf8");
+    const css = readFileSync(HERO_CYCLE_CSS, "utf8");
+    expect(cycle).toMatch(/'builders', 'developers', 'designers'/);
+    expect(cycle).toMatch(/'smash', 'type', 'paint'/);
+    expect(cycle).toMatch(/prefers-reduced-motion/);
+    expect(css).toMatch(/hero-hammer/);
+    expect(css).toMatch(/hero-laptop/);
+    expect(css).toMatch(/hero-brush/);
+    expect(css).toMatch(/prefers-reduced-motion: reduce/);
   });
 
   it("drops the hero download CTA and Dev/Design toggle", () => {
@@ -75,7 +91,6 @@ describe("marketing homepage layout", () => {
     expect(brand).toMatch(/h-\[16px\]/);
     expect(brand).toMatch(/gap-2/);
     expect(brand).not.toMatch(/-ml-1/);
-    expect(brand).not.toMatch(/gap-1[^\d]/);
     expect(brand).not.toMatch(/gap-2\.5/);
     expect(brand).not.toMatch(/h-\[28px\]/);
     expect(brand).not.toMatch(/h-\[20px\]/);

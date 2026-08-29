@@ -1,6 +1,7 @@
 import { Nav } from '../components/Nav'
 import { Footer } from '../components/Footer'
 import { ProductPreview } from '../components/ProductPreview'
+import { HeroRoleCycle } from '../components/HeroRoleCycle'
 
 export function HomePage() {
   return (
@@ -24,9 +25,16 @@ export function HomePage() {
 function Hero() {
   return (
     <section className="mx-auto w-full max-w-[1240px] px-5 pt-16 sm:px-8 sm:pt-20 lg:px-10 lg:pt-24">
-      <h1 className="text-left text-[36px] leading-[1.08] font-medium tracking-[-0.03em] text-fg1 sm:text-[52px] lg:text-[60px]">
-        <span className="block">Human-agent interaction</span>
-        <span className="block">for builders</span>
+      <h1
+        className="text-left text-[36px] leading-[1.08] font-medium tracking-[-0.03em] text-fg1 sm:text-[52px] lg:text-[60px]"
+        aria-label="Human-agent interaction for builders, developers, and designers"
+      >
+        <span className="block" aria-hidden>
+          Human-agent interaction
+        </span>
+        <span className="block" aria-hidden>
+          for <HeroRoleCycle />
+        </span>
       </h1>
       <p className="mt-5 max-w-[42ch] text-left text-[15px] leading-relaxed text-fg2 sm:text-[17px]">
         Run a team of coding & design agents
