@@ -27,6 +27,12 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
   nextMembershipCreateFailure: { name: string; status: number } | null = null;
   readonly memberships: WorkOSMembershipRecord[] = [];
   readonly invitations: WorkOSInvitationRecord[] = [];
+  lastInvitationOptions: {
+    organizationId: string;
+    email: string;
+    roleSlug: string;
+    inviterUserId?: string;
+  } | null = null;
   acceptBeforeNextInvitationRevoke = false;
   missingInvitationStatus = 404;
   onInvitationCreated:
@@ -196,7 +202,9 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
     organizationId: string;
     email: string;
     roleSlug: string;
+    inviterUserId?: string;
   }): Promise<WorkOSInvitationRecord> {
+    this.lastInvitationOptions = { ...options };
     this.calls.push(`invitation.create:${options.email}`);
     const created: WorkOSInvitationRecord = {
       id: `inv_${randomUUID().replaceAll("-", "")}`,
@@ -213,6 +221,16 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
     const response = { ...created };
     await this.onInvitationCreated?.(created);
     return response;
+  }
+
+  async findInvitationByToken(token: string): Promise<WorkOSInvitationRecord> {
+    const invitation = this.invitations.find((item) => item.id === token);
+    if (invitation) return invitation;
+    const missing = new Error("invitation missing") as Error & {
+      status: number;
+    };
+    missing.status = 404;
+    throw missing;
   }
 
   async listInvitations(options: {
@@ -604,7 +622,12 @@ d("WorkOS command outbox", () => {
         orderingKey,
         aggregateRevision: 1,
         organizationId: seeded.organizationId,
-        payload: { localInvitationId: newInvitationId, email, role: "admin" },
+        payload: {
+          localInvitationId: newInvitationId,
+          email,
+          role: "admin",
+          inviterWorkosUserId: seeded.workosUserId,
+        },
       });
     });
 
@@ -636,11 +659,21 @@ d("WorkOS command outbox", () => {
     );
     expect(providerActions[0]).toMatch(/^invitation\.revoke:/);
     expect(providerActions[1]).toBe(`invitation.create:${email}`);
-    expect(provider.invitations.filter((item) => item.state === "pending")).toHaveLength(1);
-    expect(provider.invitations.find((item) => item.state === "pending")?.roleSlug).toBe("admin");
+    expect(provider.lastInvitationOptions).toEqual({
+      organizationId: workosOrganizationId,
+      email,
+      roleSlug: "admin",
+      inviterUserId: seeded.workosUserId,
+    });
+    expect(
+      provider.invitations.filter((item) => item.state === "pending"),
+    ).toHaveLength(1);
+    expect(
+      provider.invitations.find((item) => item.state === "pending")?.roleSlug,
+    ).toBe("admin");
   });
 
-  it("replays an exact-ID invitation event that arrived before provider correlation committed", async () => {
+  it("replays an early exact-ID acceptance without granting local access", async () => {
     const seeded = await seedOrganization(
       pool,
       randomUUID().replaceAll("-", ""),
@@ -708,15 +741,17 @@ d("WorkOS command outbox", () => {
     const local = await pool.query<{
       workos_invitation_id: string | null;
       accepted_at: Date | null;
+      revoked_at: Date | null;
     }>(
-      `SELECT workos_invitation_id, accepted_at
+      `SELECT workos_invitation_id, accepted_at, revoked_at
        FROM invitations WHERE id = $1`,
       [localInvitationId],
     );
     expect(local.rows[0]?.workos_invitation_id).toBe(
       provider.invitations[0]?.id,
     );
-    expect(local.rows[0]?.accepted_at?.toISOString()).toBe(
+    expect(local.rows[0]?.accepted_at).toBeNull();
+    expect(local.rows[0]?.revoked_at?.toISOString()).toBe(
       provider.invitations[0]?.updatedAt,
     );
   });

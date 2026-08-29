@@ -18,6 +18,25 @@ describe("parseInviteToken", () => {
     expect(parseInviteToken(`https://app-beta.zeros.build/invite?token=${TOKEN}`)).toBe(TOKEN);
   });
 
+  it("accepts WorkOS custom invitation URLs on web and desktop", () => {
+    expect(
+      parseInviteToken(
+        `https://app-alpha.zeros.build/invite?invitation_token=${TOKEN}`,
+      ),
+    ).toBe(TOKEN);
+    expect(
+      parseInviteToken(`zeros-alpha://invite?invitation_token=${TOKEN}`),
+    ).toBe(TOKEN);
+  });
+
+  it("rejects ambiguous links carrying both invitation capabilities", () => {
+    expect(
+      parseInviteToken(
+        `https://app-alpha.zeros.build/invite?token=${TOKEN}&invitation_token=${TOKEN}`,
+      ),
+    ).toBeNull();
+  });
+
   it("accepts a bare 43-char token", () => {
     expect(parseInviteToken(TOKEN)).toBe(TOKEN);
     expect(parseInviteToken(`  ${TOKEN}  `)).toBe(TOKEN);

@@ -1,4 +1,4 @@
-// app.zeros.build/invite?token=… — the Zeros-owned invitation entry point.
+// app.zeros.build/invite?... — the bounded Zeros invitation entry point.
 //
 // The control plane stores only the token digest. This page keeps the opaque
 // capability inside a no-store, no-referrer, CSP-bounded response and offers
@@ -8,24 +8,31 @@
 // - same-origin browser acceptance. An unauthenticated browser is routed
 //   through Railway's one-time WorkOS state + PKCE ceremony and returns here.
 //
-// WorkOS mirrors the pending organization invitation but its default
-// invitation email is disabled. Otherwise its direct AuthKit link would skip
-// this application-owned capability and the Zeros state/PKCE entry boundary.
+// In WorkOS mode its native branded email uses the configured custom
+// invitation URL and appends `invitation_token`. Railway resolves that token
+// against the exact Zeros invitation before product access changes. The legacy
+// `token` parameter remains for Auth0 rollback and copyable-link compatibility.
 
 import { marketingOrigin } from "../lib/hosts";
-import { renderInvitationPage } from "../lib/invite-page.mjs";
+import {
+  invitationTokenFromSearchParams,
+  renderInvitationPage,
+} from "../lib/invite-page.mjs";
 import { schemeForDeploymentEnvironment } from "../lib/schemes.mjs";
 import type { Env } from "../lib/session";
 
 export const onRequestGet: PagesFunction<Env> = ({ request, env }) => {
   const url = new URL(request.url);
-  const token = url.searchParams.get("token") ?? "";
+  const { token, tokenParameter } = invitationTokenFromSearchParams(
+    url.searchParams,
+  );
   const scheme = schemeForDeploymentEnvironment(
     env.ZEROS_DEPLOY_ENV,
     url.searchParams.get("scheme") ?? "",
   );
   const page = renderInvitationPage({
     token,
+    tokenParameter,
     scheme,
     marketingOrigin: marketingOrigin(env),
     mode:

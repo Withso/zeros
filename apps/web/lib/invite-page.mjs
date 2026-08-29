@@ -1,6 +1,17 @@
 const INVITE_TOKEN = /^[A-Za-z0-9_-]{20,200}$/;
 const NONCE = /^[A-Za-z0-9_-]{8,128}$/;
 
+export function invitationTokenFromSearchParams(searchParams) {
+  const zerosTokens = searchParams.getAll("token");
+  const workosTokens = searchParams.getAll("invitation_token");
+  if (zerosTokens.length + workosTokens.length !== 1) {
+    return { token: "", tokenParameter: "token" };
+  }
+  return workosTokens.length === 1
+    ? { token: workosTokens[0] ?? "", tokenParameter: "invitation_token" }
+    : { token: zerosTokens[0] ?? "", tokenParameter: "token" };
+}
+
 function escapeHtml(value) {
   return String(value)
     .replaceAll("&", "&amp;")
@@ -81,9 +92,10 @@ function invalidInner(marketingOrigin) {
           <a class="btn" href="${escapeHtml(marketingOrigin)}">Get Zeros</a>`;
 }
 
-function landingInner(token, scheme, marketingOrigin, nonce) {
-  const desktopUrl = `${scheme}://invite?token=${encodeURIComponent(token)}`;
-  const webPath = `/invite?token=${encodeURIComponent(token)}&mode=web`;
+function landingInner(token, tokenParameter, scheme, marketingOrigin, nonce) {
+  const encodedToken = encodeURIComponent(token);
+  const desktopUrl = `${scheme}://invite?${tokenParameter}=${encodedToken}`;
+  const webPath = `/invite?${tokenParameter}=${encodedToken}&mode=web`;
   const script = `
     const copy = document.getElementById("copy");
     const message = document.getElementById("message");
@@ -213,6 +225,9 @@ function webInner(token, nonce) {
       } else if (code === "invalid_invite") {
         forget();
         message.textContent = "This invitation is expired, revoked, or already used. Ask an organization admin for a fresh invitation.";
+      } else if (code === "invite_preparing") {
+        message.textContent = "Your invitation email arrived just before setup finished. Nothing was changed; try again.";
+        retry.classList.remove("hidden");
       } else if (code === "auth_unavailable" || response.status >= 500) {
         message.textContent = "Zeros could not verify the invitation right now. Nothing was changed; try again.";
         retry.classList.remove("hidden");
@@ -236,6 +251,7 @@ function webInner(token, nonce) {
 
 export function renderInvitationPage({
   token,
+  tokenParameter = "token",
   scheme,
   marketingOrigin,
   mode,
@@ -243,6 +259,9 @@ export function renderInvitationPage({
 }) {
   if (!NONCE.test(nonce)) {
     throw new TypeError("Invitation page nonce has an invalid shape");
+  }
+  if (tokenParameter !== "token" && tokenParameter !== "invitation_token") {
+    throw new TypeError("Invitation token parameter is not supported");
   }
   const headers = responseHeaders(nonce);
   if (!INVITE_TOKEN.test(token) && mode !== "resume") {
@@ -260,7 +279,7 @@ export function renderInvitationPage({
       "Zeros — you're invited",
       mode === "web" || mode === "resume"
         ? webInner(token, nonce)
-        : landingInner(token, scheme, marketingOrigin, nonce),
+        : landingInner(token, tokenParameter, scheme, marketingOrigin, nonce),
       nonce,
     ),
     headers,

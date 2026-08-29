@@ -2,9 +2,31 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import vm from "node:vm";
 
-import { renderInvitationPage } from "./invite-page.mjs";
+import {
+  invitationTokenFromSearchParams,
+  renderInvitationPage,
+} from "./invite-page.mjs";
 
 const TOKEN = "A".repeat(43);
+
+test("the invitation query accepts exactly one capability parameter", () => {
+  assert.deepEqual(
+    invitationTokenFromSearchParams(
+      new URLSearchParams(`invitation_token=${TOKEN}`),
+    ),
+    { token: TOKEN, tokenParameter: "invitation_token" },
+  );
+  for (const query of [
+    `token=${TOKEN}&invitation_token=${TOKEN}`,
+    `invitation_token=${TOKEN}&invitation_token=${TOKEN}`,
+    `token=${TOKEN}&token=${TOKEN}`,
+  ]) {
+    assert.deepEqual(
+      invitationTokenFromSearchParams(new URLSearchParams(query)),
+      { token: "", tokenParameter: "token" },
+    );
+  }
+});
 
 function webScript(page) {
   const match = page.html.match(
@@ -75,6 +97,28 @@ test("the invitation landing page offers exact-channel desktop and explicit web 
   );
 });
 
+test("a WorkOS custom invitation keeps its parameter through the bounded landing only", () => {
+  const page = renderInvitationPage({
+    token: TOKEN,
+    tokenParameter: "invitation_token",
+    scheme: "zeros-alpha",
+    marketingOrigin: "https://zeros.build",
+    mode: "landing",
+    nonce: "testnonce",
+  });
+
+  assert.match(
+    page.html,
+    new RegExp(`zeros-alpha://invite\\?invitation_token=${TOKEN}`),
+  );
+  assert.match(
+    page.html,
+    new RegExp(`/invite\\?invitation_token=${TOKEN}&amp;mode=web`),
+  );
+  assert.doesNotMatch(page.html, /[?&]token=/);
+  assert.equal(page.headers.get("referrer-policy"), "no-referrer");
+});
+
 test("web mode accepts only through the authenticated same-origin JSON facade", () => {
   const page = renderInvitationPage({
     token: TOKEN,
@@ -98,6 +142,7 @@ test("web mode accepts only through the authenticated same-origin JSON facade", 
   );
   assert.match(page.html, /response\.status === 401/);
   assert.match(page.html, /wrong_account/);
+  assert.match(page.html, /invite_preparing/);
   assert.doesNotMatch(page.html, /error\.message|response\.text/);
 });
 

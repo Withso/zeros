@@ -2,8 +2,8 @@
 // Invite-link plumbing for the team-accept flow.
 //
 // Three entry paths converge on one pending-token slot:
-//   1. zeros://invite?token=…       (deep link; main forwards verbatim)
-//   2. https://app[-alpha|-beta].zeros.build/invite?token=…  (email link, pasted)
+//   1. zeros://invite?token=… or ?invitation_token=… (deep link)
+//   2. https://app[-alpha|-beta].zeros.build/invite?... (email link, pasted)
 //   3. a bare token, pasted
 // The token is held in-memory only (never persisted — it's a join
 // credential) until SettingsPage consumes it into the Join-team
@@ -50,7 +50,10 @@ export function parseInviteToken(raw: string): string | null {
       OFFICIAL_APP_HOSTS.has(url.host) &&
       url.pathname.replace(/\/+$/, "") === "/invite");
   if (!isInviteRoute) return null;
-  const token = url.searchParams.get("token");
+  const zerosTokens = url.searchParams.getAll("token");
+  const workosTokens = url.searchParams.getAll("invitation_token");
+  if (zerosTokens.length + workosTokens.length !== 1) return null;
+  const token = zerosTokens[0] ?? workosTokens[0] ?? null;
   return token && /^[A-Za-z0-9_-]{20,200}$/.test(token) ? token : null;
 }
 

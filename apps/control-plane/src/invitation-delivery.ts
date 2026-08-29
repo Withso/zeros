@@ -8,7 +8,7 @@ type InvitationEmailSender = typeof sendEmail;
 
 export type InvitationEmailInput = {
   email: EmailConfig | undefined;
-  /** Provider synchronization does not own the product capability email. */
+  /** WorkOS owns delivery when its native invitation command is enabled. */
   workosEnabled: boolean;
   destination: string;
   organizationName: string;
@@ -17,23 +17,19 @@ export type InvitationEmailInput = {
 };
 
 /**
- * Deliver the single Zeros-owned invitation capability email.
+ * Deliver exactly one invitation email.
  *
- * WorkOS may mirror a pending provider invitation, but its default invitation
- * email must remain disabled: that link enters Hosted AuthKit without Zeros'
- * state/PKCE flow or the exact local capability. Keeping this policy in one
- * provider-aware function prevents a future auth-provider branch from
- * suppressing the application-owned email again.
+ * WorkOS sends the branded native invitation in the normal AuthKit path. The
+ * custom WorkOS invitation URL enters Zeros' bounded landing page, whose
+ * server-side acceptance still enforces exact local correlation and recipient
+ * identity. ZeptoMail remains only for the Auth0 rollback path here.
  */
 export async function deliverInvitationEmail(
   input: InvitationEmailInput,
   sender: InvitationEmailSender = sendEmail,
-): Promise<"attempted" | "unconfigured"> {
+): Promise<"provider_owned" | "attempted" | "unconfigured"> {
+  if (input.workosEnabled) return "provider_owned";
   if (!input.email) return "unconfigured";
-
-  // Deliberately read the flag even though both provider modes share the same
-  // sender. The invariant is that enabling WorkOS never changes email owner.
-  void input.workosEnabled;
   const message = inviteEmailHtml({
     organizationName: input.organizationName,
     inviterName: input.inviterName,

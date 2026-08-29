@@ -153,7 +153,9 @@ export interface WorkOSManagementProvider {
     organizationId: string;
     email: string;
     roleSlug: string;
+    inviterUserId?: string;
   }): Promise<WorkOSInvitationRecord>;
+  findInvitationByToken(token: string): Promise<WorkOSInvitationRecord>;
   listInvitations(options: {
     organizationId: string;
     email: string;
@@ -571,13 +573,24 @@ export class RailwayWorkOSProvider
     organizationId: string;
     email: string;
     roleSlug: string;
+    inviterUserId?: string;
   }): Promise<WorkOSInvitationRecord> {
     return this.invitationRecord(
       await this.client.userManagement.sendInvitation({
         organizationId: options.organizationId,
         email: options.email,
         roleSlug: options.roleSlug,
+        expiresInDays: 7,
+        ...(options.inviterUserId
+          ? { inviterUserId: options.inviterUserId }
+          : {}),
       }),
+    );
+  }
+
+  async findInvitationByToken(token: string): Promise<WorkOSInvitationRecord> {
+    return this.invitationRecord(
+      await this.client.userManagement.findInvitationByToken(token),
     );
   }
 

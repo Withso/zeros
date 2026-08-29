@@ -1,14 +1,14 @@
 // ──────────────────────────────────────────────────────────
 // Outbound email — ZeptoMail (Zoho) HTTP API.
 //
-// Zeros already uses ZeptoMail for transactional auth email; the
-// control plane reuses the same account via its REST API for invitation
-// mail. Config:
+// Hosted AuthKit owns authentication and native organization-invitation
+// emails in WorkOS mode. This independent sender remains for Zeros-specific
+// security/account-lifecycle notifications and the Auth0 invitation rollback
+// path. Config:
 //   ZEPTOMAIL_TOKEN  — "Send Mail Token" from the ZeptoMail Mail Agent
 //   EMAIL_FROM       — verified sender, e.g. "Zeros <hello@zeros.build>"
 // Unset → dev fallback: the message is logged, never sent, and the API
-// still succeeds (the invite link is returned to the inviting admin, so
-// manual sharing keeps working before credentials land).
+// still succeeds; callers decide whether an unsent message is acceptable.
 // ──────────────────────────────────────────────────────────
 
 // ZeptoMail Send Mail Tokens are bound to the data centre the account was

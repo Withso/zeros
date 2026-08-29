@@ -31,6 +31,7 @@ import {
   enqueueWorkOSCommand,
   workOSInvitationOrderingKey,
 } from "./workos-command-outbox.js";
+import type { WorkOSManagementProvider } from "./workos-provider.js";
 
 const DEFAULT_INVITE_LINK_BASE = "https://app.zeros.build/invite";
 
@@ -58,6 +59,136 @@ const ScopeSchema = z
   .regex(/^(\*|[\w.-]+(\/[\w.-]+)?)$/, "Scope must be * or a repo slug")
   .default("*");
 const SettingsDocSchema = z.record(z.string(), z.unknown());
+const InvitationCapabilitySchema = z.string().regex(/^[A-Za-z0-9_-]{20,200}$/);
+
+type WorkOSInvitationResolver = Pick<
+  WorkOSManagementProvider,
+  "findInvitationByToken"
+>;
+
+function providerHttpStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object" || !("status" in error)) {
+    return null;
+  }
+  const status = Number((error as { status: unknown }).status);
+  return Number.isInteger(status) ? status : null;
+}
+
+function invalidInvitation(): HttpError {
+  return new HttpError(
+    404,
+    "invalid_invite",
+    "This invite link is no longer valid",
+  );
+}
+
+async function resolveInvitationId(
+  pool: pg.Pool,
+  rawToken: string,
+  workosProvider?: WorkOSInvitationResolver,
+): Promise<string> {
+  const local = await withSystemTx(pool, (tx) =>
+    tx.query<{ id: string }>(
+      `SELECT i.id
+       FROM invitations i
+       JOIN organizations o
+         ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
+       WHERE i.token_hash = $1
+         AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+         AND i.expires_at > now()
+       LIMIT 1`,
+      [hashInviteToken(rawToken)],
+    ),
+  );
+  if (local.rows[0]) return local.rows[0].id;
+  if (!workosProvider) throw invalidInvitation();
+
+  let providerInvitation;
+  try {
+    providerInvitation = await workosProvider.findInvitationByToken(rawToken);
+  } catch (error) {
+    const status = providerHttpStatus(error);
+    if (status === 400 || status === 404 || status === 422) {
+      throw invalidInvitation();
+    }
+    throw new HttpError(
+      503,
+      "auth_unavailable",
+      "Invitation verification is temporarily unavailable",
+    );
+  }
+  const role = OrganizationRoleSchema.exclude(["owner"]).safeParse(
+    providerInvitation.roleSlug,
+  );
+  if (
+    providerInvitation.state !== "pending" ||
+    !providerInvitation.organizationId ||
+    !role.success
+  ) {
+    throw invalidInvitation();
+  }
+
+  const correlation = await withSystemTx(pool, async (tx) => {
+    const exact = await tx.query<{ id: string }>(
+      `SELECT i.id
+       FROM invitations i
+       JOIN workos_organization_links wol
+         ON wol.organization_id = i.org_id
+        AND wol.workos_organization_id = $2
+        AND wol.state = 'active'
+       JOIN organizations o
+         ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
+       WHERE i.workos_invitation_id = $1
+         AND i.email = $3 AND i.role = $4
+         AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+         AND i.expires_at > now()
+       LIMIT 1`,
+      [
+        providerInvitation.id,
+        providerInvitation.organizationId,
+        providerInvitation.email,
+        role.data,
+      ],
+    );
+    if (exact.rows[0]) return { kind: "exact" as const, id: exact.rows[0].id };
+
+    // WorkOS can deliver the email immediately after accepting the outbox
+    // command, just before the same worker transaction persists its returned
+    // provider ID. Treat only that exact in-flight local command as retryable;
+    // a Dashboard-created WorkOS invitation has no Zeros authorization record
+    // and therefore fails closed instead of being correlated by email.
+    const preparing = await tx.query(
+      `SELECT 1
+       FROM invitations i
+       JOIN workos_organization_links wol
+         ON wol.organization_id = i.org_id
+        AND wol.workos_organization_id = $1
+        AND wol.state = 'active'
+       JOIN workos_command_outbox command
+         ON command.aggregate_key = 'invitation:' || i.id::text
+        AND command.operation = 'invitation.create'
+        AND command.state IN ('queued', 'processing')
+       WHERE i.workos_invitation_id IS NULL
+         AND i.email = $2 AND i.role = $3
+         AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+         AND i.expires_at > now()
+       LIMIT 1`,
+      [providerInvitation.organizationId, providerInvitation.email, role.data],
+    );
+    return preparing.rows[0]
+      ? { kind: "preparing" as const }
+      : { kind: "missing" as const };
+  });
+  if (correlation.kind === "exact") return correlation.id;
+  if (correlation.kind === "preparing") {
+    throw new HttpError(
+      503,
+      "invite_preparing",
+      "The invitation is still being prepared; try again",
+    );
+  }
+  throw invalidInvitation();
+}
 
 function parse<T>(
   schema: z.ZodType<T, z.ZodTypeDef, unknown>,
@@ -197,7 +328,11 @@ export function createRoutes(
   pool: pg.Pool,
   email?: EmailConfig,
   cloudWorkspaces: CloudWorkspaceBackendConfig | null = null,
-  options: { workosEnabled?: boolean; inviteLinkBase?: string } = {},
+  options: {
+    workosEnabled?: boolean;
+    workosProvider?: WorkOSInvitationResolver;
+    inviteLinkBase?: string;
+  } = {},
 ): Hono {
   const app = new Hono();
 
@@ -262,10 +397,14 @@ export function createRoutes(
       unknown
     >;
     const raw = typeof body.token === "string" ? body.token : "";
-    if (!raw || raw.length > 200) {
+    if (!InvitationCapabilitySchema.safeParse(raw).success) {
       throw new HttpError(422, "invalid_input", "Missing invitation token");
     }
-    const hash = hashInviteToken(raw);
+    const invitationId = await resolveInvitationId(
+      pool,
+      raw,
+      options.workosProvider,
+    );
 
     const joined = await withSystemTx(pool, async (tx) => {
       // Discover the owning organization without taking a row lock, then lock
@@ -276,10 +415,10 @@ export function createRoutes(
          FROM invitations i
          JOIN organizations o
            ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
-         WHERE i.token_hash = $1
+         WHERE i.id = $1
            AND i.accepted_at IS NULL AND i.revoked_at IS NULL
            AND i.expires_at > now()`,
-        [hash],
+        [invitationId],
       );
       const candidateOrganizationId = candidate.rows[0]?.org_id;
       if (!candidateOrganizationId) {
@@ -310,12 +449,12 @@ export function createRoutes(
       }>(
         `SELECT i.id, i.org_id, i.email, i.role
          FROM invitations i
-         WHERE i.token_hash = $1
+         WHERE i.id = $1
            AND i.org_id = $2
            AND i.accepted_at IS NULL AND i.revoked_at IS NULL
            AND i.expires_at > now()
          FOR UPDATE OF i`,
-        [hash, candidateOrganizationId],
+        [invitationId, candidateOrganizationId],
       );
       const invitation = invitationResult.rows[0];
       if (!invitation) {
@@ -413,9 +552,10 @@ export function createRoutes(
           invitation.org_id,
           invitation.email,
         );
-        // A Zeros invite is the capability the user actually consumed. Retire
-        // every provider-side copy before creating the coarse WorkOS
-        // membership so a delayed provider invite cannot later re-add access.
+        // The user consumed a capability through Zeros' exact-recipient
+        // authorization boundary. Retire every provider-side copy before
+        // creating the coarse WorkOS membership so a delayed provider invite
+        // cannot later re-add access.
         await enqueueWorkOSCommand(tx, {
           operation: "invitation.revoke",
           idempotencyKey: `invitation.${invitation.id}.${invitationState.workos_sync_revision}`,
@@ -1159,6 +1299,9 @@ function createOrganizationRouter(
             localInvitationId: invitation.id,
             email: emailAddress,
             role,
+            ...(user.identity.provider === "workos"
+              ? { inviterWorkosUserId: user.identity.subject }
+              : {}),
           },
         });
       }
