@@ -112,6 +112,32 @@ export function pickScrambleToken(tokens: string[], length: number): string | nu
   return pick(pool.filter((token) => token.length === longest))
 }
 
+type ScrambleSlot =
+  | { kind: 'icon'; html: string }
+  | { kind: 'symbol'; ch: string }
+  | { kind: 'text'; ch: string }
+
+export function renderScrambleSlots(slots: readonly ScrambleSlot[]): string {
+  let html = ''
+  let i = 0
+  while (i < slots.length) {
+    const slot = slots[i]
+    if (slot.kind === 'icon') {
+      html += slot.html
+      i += 1
+      continue
+    }
+    const { kind } = slot
+    let run = ''
+    while (i < slots.length && slots[i].kind === kind) {
+      run += escapeHtml((slots[i] as { ch: string }).ch)
+      i += 1
+    }
+    html += `<span class="hero-scramble-${kind}">${run}</span>`
+  }
+  return html
+}
+
 /** HTML tail: icon glyphs mixed with chars/tokens. Each slot is one unit. */
 export function scrambleTail(
   length: number,
@@ -123,9 +149,11 @@ export function scrambleTail(
   }: { allowTokens?: boolean; token?: string | null; tokenStart?: number } = {},
 ): string {
   if (length <= 0) return ''
-  const slots: string[] = Array.from({ length }, () => {
-    if (set.icons.length > 0 && Math.random() < 0.48) return pick(set.icons)
-    return escapeHtml(pickChar(set.chars))
+  const slots: ScrambleSlot[] = Array.from({ length }, () => {
+    if (set.icons.length > 0 && Math.random() < 0.48) {
+      return { kind: 'icon', html: pick(set.icons) }
+    }
+    return { kind: 'symbol', ch: pickChar(set.chars) }
   })
   if (allowTokens) {
     const chosen =
@@ -136,10 +164,12 @@ export function scrambleTail(
         tokenStart === undefined
           ? Math.floor(Math.random() * (maxStart + 1))
           : Math.min(maxStart, Math.max(0, tokenStart))
-      for (let i = 0; i < chosen.length; i += 1) slots[start + i] = escapeHtml(chosen[i])
+      for (let i = 0; i < chosen.length; i += 1) {
+        slots[start + i] = { kind: 'text', ch: chosen[i] }
+      }
     }
   }
-  return slots.join('')
+  return renderScrambleSlots(slots)
 }
 
 /**
@@ -200,7 +230,7 @@ export function playScramble(
       const revealedText = escapeHtml(text.slice(0, revealed))
       el.innerHTML =
         revealed > 0
-          ? `<span class="hero-role-revealed">${revealedText}</span>${tail}`
+          ? `<span class="hero-scramble-text hero-role-revealed">${revealedText}</span>${tail}`
           : tail
     },
     onComplete: () => {

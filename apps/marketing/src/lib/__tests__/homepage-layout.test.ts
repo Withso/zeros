@@ -70,6 +70,13 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/hero-laptop/);
     expect(css).not.toMatch(/hero-brush/);
     expect(css).toMatch(/prefers-reduced-motion: reduce/);
+    expect(css).toMatch(/font-size: 0\.88em/);
+    expect(css).toMatch(/hero-scramble-text/);
+    expect(css).toMatch(/hero-scramble-symbol/);
+    expect(css).toMatch(/hero-scramble-icon/);
+    expect(css).toMatch(/--fg2/);
+    expect(css).toMatch(/--blue-fg/);
+    expect(css).toMatch(/--violet-fg/);
     expect(scramble).toMatch(/CODE_SCRAMBLE/);
     expect(scramble).toMatch(/DESIGN_SCRAMBLE/);
     expect(scramble).toMatch(/MATRIX_SCRAMBLE/);

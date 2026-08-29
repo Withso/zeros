@@ -5,6 +5,7 @@ import {
   escapeHtml,
   MATRIX_SCRAMBLE,
   pickScrambleToken,
+  renderScrambleSlots,
   scrambleFill,
   scrambleTail,
 } from "../../components/scramble-text";
@@ -50,5 +51,19 @@ describe("hero scramble fill", () => {
     });
     const visible = html.replace(/<svg[\s\S]*?<\/svg>/g, "");
     expect(visible).toContain("components");
+    expect(html).toMatch(/hero-scramble-text/);
+    expect(html).toMatch(/hero-scramble-symbol|hero-scramble-icon/);
+  });
+
+  it("wraps text, symbols, and icons in fixed color roles", () => {
+    const html = renderScrambleSlots([
+      { kind: "text", ch: "c" },
+      { kind: "text", ch: "o" },
+      { kind: "symbol", ch: "#" },
+      { kind: "icon", html: '<svg class="hero-scramble-icon"></svg>' },
+    ]);
+    expect(html).toBe(
+      '<span class="hero-scramble-text">co</span><span class="hero-scramble-symbol">#</span><svg class="hero-scramble-icon"></svg>',
+    );
   });
 });

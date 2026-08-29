@@ -24,12 +24,19 @@
   white-space: nowrap;
 }
 
+/* Slightly smaller than the h1 while glyphs are decoding. */
 .hero-role-word.is-scrambling {
+  font-size: 0.88em;
+  line-height: 1;
+}
+
+/* Fixed roles: words, symbols, icons. No per-glyph randomization. */
+.hero-scramble-text {
   color: var(--fg2);
 }
 
-.hero-role-revealed {
-  color: var(--fg1);
+.hero-scramble-symbol {
+  color: color-mix(in srgb, var(--blue-fg) 28%, var(--fg3));
 }
 
 .hero-scramble-icon {
@@ -38,6 +45,11 @@
   height: 0.62em;
   margin: 0 0.04em;
   vertical-align: -0.08em;
+  color: color-mix(in srgb, var(--violet-fg) 30%, var(--fg3));
+}
+
+.hero-role-revealed {
+  color: var(--fg2);
 }
 
 .hero-role-word.is-scrambling.scramble-builders,
@@ -48,5 +60,6 @@
 @media (prefers-reduced-motion: reduce) {
   .hero-role-word {
     color: inherit !important;
+    font-size: inherit !important;
   }
 }
