@@ -1052,6 +1052,8 @@ peer.once("error",()=>process.exit(125));`,
     internal = createServer({ allowHalfOpen: true }, (peer) => {
       internalPeers.add(peer);
       peer.once("close", () => internalPeers.delete(peer));
+      peer.on("error", () => undefined);
+      peer.resume();
       peer.end("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
     });
     await new Promise<void>((resolve, reject) => {

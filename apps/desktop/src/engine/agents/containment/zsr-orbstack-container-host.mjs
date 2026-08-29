@@ -393,7 +393,7 @@ async function relay(rawPort) {
       // half-close here so the relay exits and the Mac proxy can deliver EOF
       // instead of leaving both endpoints waiting on one another forever.
       process.stdin.unpipe(upstream);
-      process.stdin.pause();
+      process.stdin.destroy();
       upstream.end();
     });
     upstream.once("close", (hadError) => {
