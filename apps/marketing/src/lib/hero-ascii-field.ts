@@ -133,9 +133,9 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
  */
 export function headlineWell(nx: number, ny: number, aspect: number): number {
   const landscape = aspect >= 1.05;
-  const right = landscape ? 0.64 : 0.94;
-  const bottom = landscape ? 0.4 : 0.3;
-  const feather = landscape ? 0.11 : 0.09;
+  const right = landscape ? 0.64 : 0.78;
+  const bottom = landscape ? 0.4 : 0.22;
+  const feather = landscape ? 0.11 : 0.08;
   const dx = nx > right ? nx - right : nx < 0 ? -nx : 0;
   const dy = ny > bottom ? ny - bottom : ny < 0 ? -ny : 0;
   const dist = Math.hypot(dx, dy);
@@ -149,7 +149,7 @@ function moundField(nx: number, ny: number, aspect: number): number {
       1.18 * gauss(nx, ny, 0.0, 0.98, 0.3, 0.36) +
       1.12 * gauss(nx, ny, 1.02, 0.96, 0.32, 0.38) +
       0.72 * gauss(nx, ny, -0.04, 0.52, 0.22, 0.34) +
-      0.78 * gauss(nx, ny, 1.05, 0.48, 0.24, 0.32) +
+      0.55 * gauss(nx, ny, 1.06, 0.52, 0.22, 0.28) +
       0.38 * gauss(nx, ny, 0.04, -0.02, 0.18, 0.12) +
       0.62 * gauss(nx, ny, 0.98, 0.0, 0.2, 0.14) +
       0.7 * gauss(nx, ny, 0.5, 1.14, 0.6, 0.3) +
@@ -161,10 +161,10 @@ function moundField(nx: number, ny: number, aspect: number): number {
     1.28 * gauss(nx, ny, 0.04, 1.02, 0.44, 0.34) +
     1.22 * gauss(nx, ny, 0.96, 1.02, 0.44, 0.34) +
     0.95 * gauss(nx, ny, 0.5, 1.1, 0.55, 0.28) +
-    0.48 * gauss(nx, ny, -0.04, 0.58, 0.2, 0.28) +
-    0.5 * gauss(nx, ny, 1.04, 0.55, 0.2, 0.28) +
-    0.28 * gauss(nx, ny, 0.06, 0.06, 0.16, 0.1) +
-    0.34 * gauss(nx, ny, 0.94, 0.08, 0.16, 0.1)
+    0.7 * gauss(nx, ny, -0.06, 0.38, 0.2, 0.32) +
+    0.78 * gauss(nx, ny, 1.06, 0.36, 0.2, 0.32) +
+    0.42 * gauss(nx, ny, 0.04, 0.08, 0.14, 0.12) +
+    0.52 * gauss(nx, ny, 0.96, 0.1, 0.16, 0.14)
   );
 }
 
@@ -178,10 +178,10 @@ function edgeBias(nx: number, ny: number, aspect: number): number {
     );
   }
   return Math.max(
-    clamp01((0.14 - nx) / 0.14) * 0.7,
-    clamp01((nx - 0.86) / 0.14) * 0.7,
+    clamp01((0.2 - nx) / 0.2) * 1.05,
+    clamp01((nx - 0.8) / 0.2) * 1.05,
     clamp01((ny - 0.46) / 0.54) * 1.08,
-    clamp01((0.08 - ny) / 0.08) * 0.32,
+    clamp01((0.08 - ny) / 0.08) * 0.4,
   );
 }
 
@@ -236,7 +236,7 @@ export function glyphAt(
 }
 
 export function cellSizeForWidth(cssWidth: number): number {
-  return cssWidth < 640 ? 7 : 8;
+  return cssWidth < 360 ? 7 : 8;
 }
 
 type PaintContext = Pick<

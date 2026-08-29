@@ -55,7 +55,7 @@ describe("hero ASCII cloud field", () => {
     ]);
     expect(ASCII_STAR_GLYPHS).toContain("+");
     expect(HERO_ASCII_VOID).toBe("#000000");
-    expect(cellSizeForWidth(390)).toBe(7);
+    expect(cellSizeForWidth(390)).toBe(8);
     expect(cellSizeForWidth(1440)).toBe(8);
   });
 
@@ -85,6 +85,8 @@ describe("hero ASCII cloud field", () => {
     const mobile = sampleGrid(48, 96);
     expect(mobile.glyphs).toBeGreaterThan(200);
     expect(cloudDensity(0.5, 0.14, 390 / 844)).toBeLessThan(0.1);
+    expect(cloudDensity(0.02, 0.36, 390 / 844)).toBeGreaterThan(0.08);
+    expect(cloudDensity(0.98, 0.34, 390 / 844)).toBeGreaterThan(0.08);
     expect(cloudDensity(0.5, 0.92, 390 / 844)).toBeGreaterThan(0.12);
   });
 
