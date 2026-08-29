@@ -10,7 +10,7 @@ type Role = (typeof ROLES)[number]
 
 /**
  * Cycles the hero audience word with a scramble decode: code glyphs,
- * a couple of Figma marks, then matrix digits. Glyphs stay at the hero type size.
+ * design-tool marks, then matrix digits. Glyphs stay at the hero type size.
  */
 export function HeroRoleCycle() {
   const textRef = useRef<HTMLSpanElement>(null)

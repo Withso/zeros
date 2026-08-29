@@ -8,18 +8,21 @@ const svg = (inner: string) =>
 const stroke = (d: string) =>
   `<path d="${d}" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/>`
 
+const oval = (rx: number, ry: number) =>
+  `<ellipse cx="8" cy="8" rx="${rx}" ry="${ry}" fill="none" stroke="currentColor" stroke-width="1.55"/>`
+
 /**
- * A few Figma marks, one each: align, center, frame, diamond.
- * Placed sparsely so the scramble stays as short as the code pass.
+ * Frame, instance, align, rectangle, oval, and triangle.
+ * Cycled across scramble cells so one mark does not dominate.
  */
 export const DESIGN_ICONS = [
+  svg(stroke('M2.3 5.4V2.3h3.1 M10.6 2.3h3.1v3.1 M13.7 10.6v3.1h-3.1 M5.4 13.7H2.3v-3.1')),
+  svg(stroke('M8 1.6l2 2-2 2-2-2z M12.4 6l2 2-2 2-2-2z M8 10.4l2 2-2 2-2-2z M3.6 6l2 2-2 2-2-2z')),
   svg(stroke('M2.4 2.4v11.2 M5.4 4.2h8.4 M5.4 8h5.4 M5.4 11.8h8.4')),
-  svg(stroke('M8 2.2v11.6 M3.4 5h9.2 M5 8h6 M3.4 11h9.2')),
-  svg(stroke('M3.3 3.3h9.4v9.4H3.3z')),
-  svg(stroke('M8 2.4l5.4 5.6L8 13.6 2.6 8z')),
+  svg(stroke('M3 4.2h10v7.6H3z')),
+  svg(oval(6.2, 4.1)),
+  svg(stroke('M8 2.5L13.8 13.4H2.2z')),
 ] as const
-
-export const DESIGN_ICON_MAX = 2
 
 export type ScrambleSet = {
   chars: string
@@ -31,7 +34,7 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers — same slot count as the word, two marks at most. */
+/** developers → designers — letter-sized marks, sparse #|+. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
   chars: '#|+',
   icons: DESIGN_ICONS,
@@ -129,21 +132,34 @@ function pickScrambleCell(set: ScrambleSet): ScrambleCell {
 
 export function fillScrambleCells(length: number, set: ScrambleSet): ScrambleCell[] {
   if (length <= 0) return []
-  const cells: ScrambleCell[] = Array.from({ length }, () => pickScrambleCell(set))
   const icons = set.icons
-  if (!icons || icons.length === 0) return cells
-  const count = Math.min(DESIGN_ICON_MAX, icons.length, Math.max(1, Math.floor(length / 4)))
-  const chosen = shuffle(icons).slice(0, count)
-  const used = new Set<number>()
-  for (const html of chosen) {
-    let idx = Math.floor(Math.random() * length)
-    let tries = 0
-    while ((used.has(idx) || used.has(idx - 1) || used.has(idx + 1)) && tries < 16) {
-      idx = Math.floor(Math.random() * length)
-      tries += 1
+  if (!icons || icons.length === 0) {
+    return Array.from({ length }, () => pickScrambleCell(set))
+  }
+
+  const punctCount = set.chars.length === 0 ? 0 : Math.max(0, Math.round(length / 6))
+  const punctAt = new Set(
+    shuffle(Array.from({ length }, (_, i) => i)).slice(0, Math.min(punctCount, length)),
+  )
+  const cycle = shuffle(icons)
+  const cells: ScrambleCell[] = []
+  let k = 0
+  let prevIcon: string | undefined
+
+  for (let i = 0; i < length; i += 1) {
+    if (punctAt.has(i)) {
+      cells.push(pickScrambleCell(set))
+      prevIcon = undefined
+      continue
     }
-    used.add(idx)
-    cells[idx] = { kind: 'icon', html }
+    let html = cycle[k % cycle.length]!
+    k += 1
+    if (prevIcon !== undefined && html === prevIcon && cycle.length > 1) {
+      html = cycle[k % cycle.length]!
+      k += 1
+    }
+    cells.push({ kind: 'icon', html })
+    prevIcon = html
   }
   return cells
 }

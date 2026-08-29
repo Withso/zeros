@@ -83,6 +83,7 @@ describe("marketing homepage layout", () => {
     expect(css).toMatch(/hero-scramble-icon/);
     expect(css).not.toMatch(/hero-scramble-token/);
     expect(css).not.toMatch(/width: 0\.86em/);
+    expect(css).not.toMatch(/width: 0\.62em/);
     expect(css).toMatch(/--fg1/);
     expect(css).toMatch(/--blue-fg/);
     expect(css).toMatch(/--green-fg/);
@@ -91,7 +92,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/DESIGN_SCRAMBLE/);
     expect(scramble).toMatch(/MATRIX_SCRAMBLE/);
     expect(scramble).toMatch(/DESIGN_ICONS/);
-    expect(scramble).toMatch(/DESIGN_ICON_MAX/);
+    expect(scramble).not.toMatch(/DESIGN_ICON_MAX/);
     expect(scramble).not.toMatch(/DESIGN_TOKENS/);
     expect(scramble).not.toMatch(/components/);
     expect(scramble).not.toMatch(/CODE_ICONS/);

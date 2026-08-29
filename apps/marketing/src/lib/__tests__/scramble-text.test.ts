@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   CODE_SCRAMBLE,
-  DESIGN_ICON_MAX,
   DESIGN_ICONS,
   DESIGN_SCRAMBLE,
   escapeHtml,
@@ -51,27 +50,51 @@ describe("hero scramble fill", () => {
     expect(MATRIX_SCRAMBLE.chars).not.toMatch(/ﾊ/);
   });
 
-  it("keeps the designers scramble as short as a character run", () => {
-    expect(DESIGN_ICONS).toHaveLength(4);
+  it("keeps the code and matrix charsets unchanged", () => {
+    expect(CODE_SCRAMBLE.chars).toBe("{}[]</>;:=()*&|#$@!?\\^~`01");
+    expect(CODE_SCRAMBLE.icons).toBeUndefined();
+    expect(MATRIX_SCRAMBLE.chars).toBe("01");
+    expect(MATRIX_SCRAMBLE.icons).toBeUndefined();
+  });
+
+  it("varies the designers scramble across distinct design-tool marks", () => {
+    expect(DESIGN_ICONS.length).toBeGreaterThanOrEqual(5);
+    expect(DESIGN_ICONS.length).toBeLessThanOrEqual(6);
+    expect(new Set(DESIGN_ICONS).size).toBe(DESIGN_ICONS.length);
     expect(DESIGN_SCRAMBLE.icons).toBe(DESIGN_ICONS);
+    expect(DESIGN_SCRAMBLE.chars).toMatch(/^[\#|+]+$/);
     expect(DESIGN_SCRAMBLE.chars).not.toMatch(ROLE_WORDS);
     expect(DESIGN_SCRAMBLE.chars).not.toMatch(LONG_DESIGN_WORDS);
 
+    const catalog = DESIGN_ICONS.join("");
+    expect(catalog).toMatch(/hero-scramble-icon/);
+    expect(catalog).toMatch(/<(ellipse|circle) /);
+    expect(catalog.split("<svg ").length - 1).toBe(DESIGN_ICONS.length);
+
+    const seen = new Set<string>();
     for (let i = 0; i < 40; i += 1) {
-      const cells = fillScrambleCells(9, DESIGN_SCRAMBLE);
-      expect(cells).toHaveLength(9);
+      const cells = fillScrambleCells(10, DESIGN_SCRAMBLE);
+      expect(cells).toHaveLength(10);
       const icons = cells.filter((cell) => cell.kind === "icon");
-      expect(icons.length).toBeLessThanOrEqual(DESIGN_ICON_MAX);
-      const htmls = icons.map((cell) => cell.html);
-      expect(new Set(htmls).size).toBe(htmls.length);
-      const html = scrambleTail(9, DESIGN_SCRAMBLE);
-      expect(svgCount(html)).toBeLessThanOrEqual(DESIGN_ICON_MAX);
+      const chars = cells.filter((cell) => cell.kind === "char");
+      expect(icons.length).toBeGreaterThan(chars.length);
+      expect(icons.length).toBeGreaterThanOrEqual(6);
+      expect(new Set(icons.map((cell) => cell.html)).size).toBeGreaterThanOrEqual(5);
+      for (let j = 1; j < cells.length; j += 1) {
+        const prev = cells[j - 1]!;
+        const next = cells[j]!;
+        if (prev.kind === "icon" && next.kind === "icon") {
+          expect(prev.html).not.toBe(next.html);
+        }
+      }
+      for (const cell of icons) seen.add(cell.html);
+      const html = scrambleTail(10, DESIGN_SCRAMBLE);
+      expect(svgCount(html)).toBeGreaterThanOrEqual(6);
       expect(visibleText(html)).not.toMatch(ROLE_WORDS);
       expect(visibleText(html)).not.toMatch(LONG_DESIGN_WORDS);
       expect(visibleText(html)).not.toMatch(CJK_OR_KATAKANA);
     }
-    const samples = Array.from({ length: 40 }, () => scrambleTail(9, DESIGN_SCRAMBLE));
-    expect(samples.some((html) => html.includes("hero-scramble-icon"))).toBe(true);
+    expect(seen.size).toBe(DESIGN_ICONS.length);
   });
 
   it("does not plant full role words into code or matrix scrambles", () => {
