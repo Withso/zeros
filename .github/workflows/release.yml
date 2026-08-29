@@ -343,6 +343,24 @@ jobs:
         # native resource + shipped PTY host and require real shell output.
         run: pnpm smoke:packaged-pty
 
+      - name: Verify installer + updater signatures
+        # Notarization submits the DMG, while electron-updater installs the ZIP.
+        # Verify both signed containers before either leaves this build job and
+        # require the exact public Zeros Developer ID identity, hardened runtime,
+        # secure timestamp, matching code directory, and ShipIt-safe modes.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          DMG="release/Zeros-${VERSION}-arm64.dmg"
+          ZIP="release/Zeros-${VERSION}-arm64-mac.zip"
+          node scripts/verify-macos-release-artifacts.mjs \
+            --dmg "$DMG" \
+            --zip "$ZIP" \
+            --app-name "Zeros.app" \
+            --bundle-id com.zeros \
+            --team-id H8MS56JU2Z
+
       - name: Submit to Apple notary (--no-wait, no poll)
         # Submit the DMG and STOP — do NOT block this job on Apple's analysis. The
         # `--no-wait` submit returns immediately with a submission id, which we
