@@ -48,25 +48,18 @@
   vertical-align: baseline;
 }
 
-.hero-scramble-token {
-  font-size: 1em;
-  font-weight: inherit;
-  font-family: inherit;
-  letter-spacing: inherit;
-  color: color-mix(in srgb, var(--violet-fg) 42%, var(--fg1));
-}
-
 .hero-scramble-icon {
   display: inline-block;
-  width: 0.86em;
-  height: 0.86em;
-  margin: 0 0.03em;
-  vertical-align: -0.12em;
-  color: color-mix(in srgb, var(--violet-fg) 48%, var(--fg1));
+  width: 0.58em;
+  height: 0.72em;
+  margin: 0;
+  overflow: visible;
+  vertical-align: -0.08em;
+  color: color-mix(in srgb, var(--violet-fg) 40%, var(--fg1));
 }
 
 .hero-role-word.is-scrambling.scramble-developers .hero-scramble-symbol {
-  color: color-mix(in srgb, var(--violet-fg) 26%, var(--fg1));
+  color: color-mix(in srgb, var(--violet-fg) 22%, var(--fg1));
 }
 
 .hero-role-word.is-scrambling.scramble-designers .hero-scramble-symbol {

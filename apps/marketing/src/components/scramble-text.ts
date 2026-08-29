@@ -6,31 +6,23 @@ const svg = (inner: string) =>
   `<svg class="hero-scramble-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">${inner}</svg>`
 
 const stroke = (d: string) =>
-  `<path d="${d}" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"/>`
+  `<path d="${d}" fill="none" stroke="currentColor" stroke-width="1.55" stroke-linecap="round" stroke-linejoin="round"/>`
 
 /**
- * Figma-adjacent marks for developers → designers.
- * Sized in CSS at the hero em so they sit with the type, not as tiny chips.
+ * A few Figma marks, one each: align, center, frame, diamond.
+ * Placed sparsely so the scramble stays as short as the code pass.
  */
 export const DESIGN_ICONS = [
-  svg(stroke('M2 2.5v11 M5.2 4h9 M5.2 8h6.2 M5.2 12h9')),
-  svg(stroke('M8 2v12 M3.2 5h9.6 M5 8h6 M3.2 11h9.6')),
-  svg(stroke('M3 2.5h10 M3 13.5h10 M5.2 6h5.6v4H5.2z')),
-  svg(stroke('M3.4 3.4h9.2v9.2H3.4z')),
-  svg(
-    `${stroke('M8 1.7l1.8 1.8L8 5.3 6.2 3.5z')}${stroke('M12.5 6.2l1.8 1.8-1.8 1.8-1.8-1.8z')}${stroke('M8 10.7l1.8 1.8L8 14.3 6.2 12.5z')}${stroke('M3.5 6.2L5.3 8 3.5 9.8 1.7 8z')}`,
-  ),
-  svg(stroke('M2.2 4.2h5v7.6h-5z M8.8 4.2h5v7.6h-5z')),
-  svg(stroke('M3.4 13.1l2.1-.7 7-7.1-1.5-1.5-7.1 7z M11.2 3.6l1.6 1.6')),
-  svg(stroke('M2.6 13.4V6.4A3.8 3.8 0 0 1 6.4 2.6h7')),
+  svg(stroke('M2.4 2.4v11.2 M5.4 4.2h8.4 M5.4 8h5.4 M5.4 11.8h8.4')),
+  svg(stroke('M8 2.2v11.6 M3.4 5h9.2 M5 8h6 M3.4 11h9.2')),
+  svg(stroke('M3.3 3.3h9.4v9.4H3.3z')),
+  svg(stroke('M8 2.4l5.4 5.6L8 13.6 2.6 8z')),
 ] as const
 
-/** Short Figma vocabulary. Flickers in the decode; never a locked long layer name. */
-export const DESIGN_TOKENS = ['auto', 'hug', 'fill', 'gap', 'var', 'align', '8px'] as const
+export const DESIGN_ICON_MAX = 2
 
 export type ScrambleSet = {
   chars: string
-  tokens?: readonly string[]
   icons?: readonly string[]
 }
 
@@ -39,10 +31,9 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers */
+/** developers → designers — same slot count as the word, two marks at most. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
-  chars: '#[]|=+*·',
-  tokens: DESIGN_TOKENS,
+  chars: '#[]|=+',
   icons: DESIGN_ICONS,
 }
 
@@ -57,23 +48,29 @@ export const SCRAMBLE_FROM: Record<string, ScrambleSet> = {
   designers: MATRIX_SCRAMBLE,
 }
 
-export type GlyphKind = 'from' | 'scramble' | 'to' | 'token' | 'icon'
+export type GlyphKind = 'from' | 'scramble' | 'to' | 'icon'
 
 export type Glyph =
-  | { kind: 'from' | 'to' | 'scramble' | 'token'; ch: string }
+  | { kind: 'from' | 'to' | 'scramble'; ch: string }
   | { kind: 'icon'; html: string }
 
-type ScrambleCell =
+export type ScrambleCell =
   | { kind: 'char'; ch: string }
-  | { kind: 'token'; ch: string }
   | { kind: 'icon'; html: string }
 
 function pickChar(chars: string): string {
   return chars[Math.floor(Math.random() * chars.length)] ?? '0'
 }
 
-function pick<T>(items: readonly T[]): T {
-  return items[Math.floor(Math.random() * items.length)] as T
+function shuffle<T>(items: readonly T[]): T[] {
+  const out = [...items]
+  for (let i = out.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1))
+    const a = out[i]!
+    out[i] = out[j]!
+    out[j] = a
+  }
+  return out
 }
 
 export function escapeHtml(value: string): string {
@@ -109,12 +106,8 @@ export function renderGlyphRun(glyphs: readonly Glyph[]): string {
   while (i < glyphs.length) {
     const glyph = glyphs[i]!
     if (glyph.kind === 'icon') {
-      let run = ''
-      while (i < glyphs.length && glyphs[i]!.kind === 'icon') {
-        run += (glyphs[i] as { html: string }).html
-        i += 1
-      }
-      html += run
+      html += glyph.html
+      i += 1
       continue
     }
     const { kind } = glyph
@@ -124,39 +117,39 @@ export function renderGlyphRun(glyphs: readonly Glyph[]): string {
       i += 1
     }
     const cls =
-      kind === 'scramble'
-        ? 'hero-scramble-symbol'
-        : kind === 'token'
-          ? 'hero-scramble-token'
-          : 'hero-scramble-text hero-role-revealed'
+      kind === 'scramble' ? 'hero-scramble-symbol' : 'hero-scramble-text hero-role-revealed'
     html += `<span class="${cls}">${run}</span>`
   }
   return html
 }
 
 function pickScrambleCell(set: ScrambleSet): ScrambleCell {
-  if (set.icons && set.icons.length > 0 && Math.random() < 0.56) {
-    return { kind: 'icon', html: pick(set.icons) }
-  }
   return { kind: 'char', ch: pickChar(set.chars) }
 }
 
 export function fillScrambleCells(length: number, set: ScrambleSet): ScrambleCell[] {
   if (length <= 0) return []
-  const cells = Array.from({ length }, () => pickScrambleCell(set))
-  const tokens = (set.tokens ?? []).filter((token) => token.length <= length)
-  if (tokens.length === 0 || Math.random() > 0.62) return cells
-  const token = pick(tokens)
-  const start = Math.floor(Math.random() * (length - token.length + 1))
-  for (let i = 0; i < token.length; i += 1) {
-    cells[start + i] = { kind: 'token', ch: token[i]! }
+  const cells: ScrambleCell[] = Array.from({ length }, () => pickScrambleCell(set))
+  const icons = set.icons
+  if (!icons || icons.length === 0) return cells
+  const count = Math.min(DESIGN_ICON_MAX, icons.length, Math.max(1, Math.floor(length / 4)))
+  const chosen = shuffle(icons).slice(0, count)
+  const used = new Set<number>()
+  for (const html of chosen) {
+    let idx = Math.floor(Math.random() * length)
+    let tries = 0
+    while ((used.has(idx) || used.has(idx - 1) || used.has(idx + 1)) && tries < 16) {
+      idx = Math.floor(Math.random() * length)
+      tries += 1
+    }
+    used.add(idx)
+    cells[idx] = { kind: 'icon', html }
   }
   return cells
 }
 
 function cellToGlyph(cell: ScrambleCell): Glyph {
   if (cell.kind === 'icon') return { kind: 'icon', html: cell.html }
-  if (cell.kind === 'token') return { kind: 'token', ch: cell.ch }
   return { kind: 'scramble', ch: cell.ch }
 }
 
@@ -213,7 +206,7 @@ export function playScramble(
         lastRefresh = now
         const next = fillScrambleCells(len, set)
         for (let i = 0; i < len; i += 1) {
-          if (scrambleGlyphKind(i, visualT, maxLen) === 'scramble' && Math.random() < 0.42) {
+          if (scrambleGlyphKind(i, visualT, maxLen) === 'scramble') {
             slots[i] = next[i] ?? pickScrambleCell(set)
           }
         }
