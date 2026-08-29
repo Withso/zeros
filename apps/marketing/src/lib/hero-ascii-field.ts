@@ -133,10 +133,11 @@ function smoothstep(edge0: number, edge1: number, x: number): number {
  */
 export function headlineWell(nx: number, ny: number, aspect: number): number {
   const landscape = aspect >= 1.05;
-  const right = landscape ? 0.64 : 0.78;
+  const left = landscape ? 0 : 0.07;
+  const right = landscape ? 0.64 : 0.8;
   const bottom = landscape ? 0.4 : 0.22;
   const feather = landscape ? 0.11 : 0.08;
-  const dx = nx > right ? nx - right : nx < 0 ? -nx : 0;
+  const dx = nx < left ? left - nx : nx > right ? nx - right : 0;
   const dy = ny > bottom ? ny - bottom : ny < 0 ? -ny : 0;
   const dist = Math.hypot(dx, dy);
   if (dist === 0) return 1;
