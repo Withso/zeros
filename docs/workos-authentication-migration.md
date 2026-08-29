@@ -236,7 +236,11 @@ would require a separately reviewed design that preserves this exact check.
 A command/email race is retryable only while the matching local outbox command
 is queued or leased. A Dashboard-created invitation with no Zeros record fails
 closed. The locally generated token remains a compatibility/copyable-link
-capability and follows the same recipient check.
+capability: it cannot be consumed until the exact provider ID is correlated,
+and every attempt re-fetches that WorkOS invitation by ID and requires it to
+remain pending with the exact organization, recipient, and role before applying
+the same exact-recipient check. A direct WorkOS revoke therefore fails closed
+even if its webhook or Events API repair has not reached Railway yet.
 
 Consuming either supported invitation capability retires every pending WorkOS invitation for the
 exact organization/email pair before creating or updating the coarse WorkOS

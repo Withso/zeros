@@ -312,7 +312,29 @@ d("organization routes", () => {
     const unavailableToken = `outage_${"C".repeat(36)}`;
     const raceToken = `race_${"D".repeat(38)}`;
     const records = new Map<string, WorkOSInvitationRecord>();
+    let getInvitationUnavailable = false;
+    const invitationNotFound = () => {
+      const missing = new Error("Invitation not found") as Error & {
+        status: number;
+      };
+      missing.status = 404;
+      return missing;
+    };
     const provider = {
+      getInvitation: vi.fn(async (invitationId: string) => {
+        if (getInvitationUnavailable) {
+          const unavailable = new Error("WorkOS unavailable") as Error & {
+            status: number;
+          };
+          unavailable.status = 503;
+          throw unavailable;
+        }
+        const record = [...records.values()].find(
+          (candidate) => candidate.id === invitationId,
+        );
+        if (record) return record;
+        throw invitationNotFound();
+      }),
       findInvitationByToken: vi.fn(async (token: string) => {
         if (token === unavailableToken) {
           const unavailable = new Error("WorkOS unavailable") as Error & {
@@ -323,11 +345,7 @@ d("organization routes", () => {
         }
         const record = records.get(token);
         if (record) return record;
-        const missing = new Error("Invitation not found") as Error & {
-          status: number;
-        };
-        missing.status = 404;
-        throw missing;
+        throw invitationNotFound();
       }),
     };
     let nativeActor = nativeOwner;
@@ -388,9 +406,15 @@ d("organization routes", () => {
       },
     );
     expect(invited.status).toBe(201);
-    const localInvitationId = (
-      (await invited.json()) as { invitation: { id: string } }
-    ).invitation.id;
+    const localInvitation = (
+      (await invited.json()) as {
+        invitation: { id: string; acceptUrl: string };
+      }
+    ).invitation;
+    const localInvitationId = localInvitation.id;
+    const localToken = new URL(localInvitation.acceptUrl).searchParams.get(
+      "token",
+    )!;
     const providerInvitationId = `inv_native_${suffix}`;
     await pool.query(
       `UPDATE invitations
@@ -417,10 +441,32 @@ d("organization routes", () => {
     });
 
     nativeActor = nativeMember;
+    getInvitationUnavailable = true;
+    const copiedLinkProviderUnavailable = await nativeRequest(
+      "/v1/invitations/accept",
+      {
+        method: "POST",
+        body: { token: localToken },
+      },
+    );
+    expect(copiedLinkProviderUnavailable.status).toBe(503);
+    await expect(copiedLinkProviderUnavailable.json()).resolves.toMatchObject({
+      error: { code: "auth_unavailable" },
+    });
+    getInvitationUnavailable = false;
     records.set(providerToken, {
       ...records.get(providerToken)!,
       state: "revoked",
     });
+    const copiedLinkProviderRevoked = await nativeRequest(
+      "/v1/invitations/accept",
+      {
+        method: "POST",
+        body: { token: localToken },
+      },
+    );
+    expect(copiedLinkProviderRevoked.status).toBe(404);
+    expect(provider.getInvitation).toHaveBeenCalledWith(providerInvitationId);
     const providerRevoked = await nativeRequest("/v1/invitations/accept", {
       method: "POST",
       body: { token: providerToken },
@@ -461,9 +507,27 @@ d("organization routes", () => {
       },
     );
     expect(racingInvite.status).toBe(201);
-    const racingInvitationId = (
-      (await racingInvite.json()) as { invitation: { id: string } }
-    ).invitation.id;
+    const racingInvitation = (
+      (await racingInvite.json()) as {
+        invitation: { id: string; acceptUrl: string };
+      }
+    ).invitation;
+    const racingInvitationId = racingInvitation.id;
+    const racingLocalToken = new URL(
+      racingInvitation.acceptUrl,
+    ).searchParams.get("token")!;
+    nativeActor = raceMember;
+    const copiedLinkPreparing = await nativeRequest(
+      "/v1/invitations/accept",
+      {
+        method: "POST",
+        body: { token: racingLocalToken },
+      },
+    );
+    expect(copiedLinkPreparing.status).toBe(503);
+    await expect(copiedLinkPreparing.json()).resolves.toMatchObject({
+      error: { code: "invite_preparing" },
+    });
     records.set(raceToken, {
       id: `inv_race_${suffix}`,
       organizationId: workosOrganizationId,
@@ -472,7 +536,6 @@ d("organization routes", () => {
       roleSlug: "member",
       updatedAt: new Date().toISOString(),
     });
-    nativeActor = raceMember;
     const preparing = await nativeRequest("/v1/invitations/accept", {
       method: "POST",
       body: { token: raceToken },
