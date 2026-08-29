@@ -1,6 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
-import gsap from 'gsap'
-import { BUILDERS_EXIT_MS, playBuildersExit } from './play-builders-exit'
+import { useEffect, useState, type CSSProperties } from 'react'
 import './hero-role.css'
 
 const ROLES = ['builders', 'developers', 'designers'] as const
@@ -13,11 +11,10 @@ type Role = (typeof ROLES)[number]
 type Act = (typeof ACTS)[number]
 
 /**
- * Cycles the hero audience word. Each exit is a tiny glass tool that
- * plays with the letters: hammer smash, laptop typing, then a paint stroke.
+ * Cycles the hero audience word. Developers type, designers paint.
+ * Builders is a quiet swap until it has a strengthen story.
  */
 export function HeroRoleCycle() {
-  const rootRef = useRef<HTMLSpanElement>(null)
   const [index, setIndex] = useState(0)
   const [phase, setPhase] = useState<'idle' | 'act'>('idle')
   const [reduce, setReduce] = useState(() =>
@@ -36,22 +33,19 @@ export function HeroRoleCycle() {
     if (reduce) return
     const ids: number[] = []
     let cancelled = false
-    let i = 0
 
     const loop = () => {
       ids.push(
         window.setTimeout(() => {
           if (cancelled) return
           setPhase('act')
-          const actMs = ACTS[i] === 'smash' ? BUILDERS_EXIT_MS : ACT_MS
           ids.push(
             window.setTimeout(() => {
               if (cancelled) return
-              i = (i + 1) % ROLES.length
-              setIndex(i)
+              setIndex((i) => (i + 1) % ROLES.length)
               setPhase('idle')
               loop()
-            }, actMs),
+            }, ACT_MS),
           )
         }, HOLD_MS),
       )
@@ -67,21 +61,8 @@ export function HeroRoleCycle() {
   const next = ROLES[(index + 1) % ROLES.length]
   const act: Act | '' = phase === 'act' ? ACTS[index] : ''
 
-  useLayoutEffect(() => {
-    if (reduce || act !== 'smash') return
-    const root = rootRef.current
-    if (!root) return
-    const tl = playBuildersExit(root)
-    return () => {
-      tl?.kill()
-      const hammer = root.querySelector<HTMLElement>('[data-kind="hammer"]')
-      if (hammer) gsap.set(hammer, { clearProps: 'all' })
-    }
-  }, [reduce, act])
-
   return (
     <span
-      ref={rootRef}
       className="hero-role"
       data-phase={reduce ? 'idle' : phase}
       data-act={reduce ? '' : act}
@@ -109,60 +90,20 @@ function Word({
   text: Role
   mode: 'idle' | 'in' | 'out'
 }) {
-  const smashOut = mode === 'out' && text === 'builders'
-
   return (
     <span
       className={`hero-role-word${mode === 'idle' ? '' : ` is-${mode}`}`}
-      data-word={mode}
       style={{ '--n': text.length } as CSSProperties}
     >
       {text.split('').map((ch, i) => (
-        <Letter
+        <span
           key={`${text}-${mode}-${i}`}
-          ch={ch}
-          index={i}
-          smashOut={smashOut}
-        />
+          className="hero-role-letter"
+          style={{ '--i': i } as CSSProperties}
+        >
+          {ch}
+        </span>
       ))}
-    </span>
-  )
-}
-
-function Letter({
-  ch,
-  smashOut,
-  index,
-}: {
-  ch: string
-  smashOut: boolean
-  index: number
-}) {
-  const crack = smashOut && (ch === 'l' || ch === 'e')
-
-  return (
-    <span
-      className="hero-role-letter"
-      data-letter={ch}
-      style={{ '--i': index } as CSSProperties}
-    >
-      {smashOut ? <span className="hero-letter-face">{ch}</span> : ch}
-      {crack ? (
-        <>
-          <span className="hero-letter-chip" aria-hidden>
-            {ch}
-          </span>
-          <svg className="hero-crack" viewBox="0 0 24 10" fill="none" aria-hidden>
-            <path
-              d="M1 8.5 L6 8.5 L8.2 3.5 L11 8.5 L15.5 8.5 L17.2 5 L23 8.5"
-              stroke="currentColor"
-              strokeWidth="1.2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </>
-      ) : null}
     </span>
   )
 }
