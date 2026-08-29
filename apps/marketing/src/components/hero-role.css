@@ -26,7 +26,7 @@
 
 /* Slightly smaller than the h1 while glyphs are decoding. */
 .hero-role-word.is-scrambling {
-  font-size: 0.88em;
+  font-size: 0.86em;
   line-height: 1;
 }
 
@@ -36,7 +36,7 @@
 }
 
 .hero-scramble-symbol {
-  color: color-mix(in srgb, var(--blue-fg) 28%, var(--fg3));
+  color: color-mix(in srgb, var(--blue-fg) 42%, var(--fg3));
 }
 
 .hero-scramble-icon {
@@ -45,7 +45,7 @@
   height: 0.62em;
   margin: 0 0.04em;
   vertical-align: -0.08em;
-  color: color-mix(in srgb, var(--violet-fg) 30%, var(--fg3));
+  color: color-mix(in srgb, var(--violet-fg) 44%, var(--fg3));
 }
 
 .hero-role-revealed {
