@@ -420,6 +420,16 @@ schema. Restore the database backup or roll forward with corrected new code.
 
 ## Normal promotion after the one-time migration
 
+Every macOS channel verifies the two independently consumed release containers
+before promotion: users install from the DMG, while the in-place updater installs
+the ZIP. `scripts/verify-macos-release-artifacts.mjs` mounts/extracts both, runs a
+deep strict signature check, constrains the root to bundle ID `com.zeros*` and
+Apple team `H8MS56JU2Z`, requires hardened runtime plus a secure timestamp,
+checks ShipIt-safe owner-write modes, and requires matching root code-directory
+hashes. Alpha/Beta run this immediately before publication; Production runs it
+before notary submission and separately rechecks notarization/Gatekeeper after
+stapling.
+
 1. Merge a green PR to `main`; Railway Alpha, `zeros-web-alpha`, and the Alpha
    desktop channel update.
 2. Test Alpha.

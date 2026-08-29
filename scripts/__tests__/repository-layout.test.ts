@@ -670,4 +670,45 @@ describe("repository layout contracts", () => {
     );
     expect(stable).not.toContain("refs/heads/main|refs/heads/release/*");
   });
+
+  it("verifies every shipped macOS updater archive before publication", () => {
+    const verifier = "scripts/verify-macos-release-artifacts.mjs";
+    const expectedTeamId = "H8MS56JU2Z";
+    const channels = [
+      {
+        workflow: ".github/workflows/release-alpha.yml",
+        appName: "Zeros Alpha.app",
+        bundleId: "com.zeros.alpha",
+        publishStep: 'name: Publish rolling "alpha" prerelease',
+      },
+      {
+        workflow: ".github/workflows/release-beta.yml",
+        appName: "Zeros Beta.app",
+        bundleId: "com.zeros.beta",
+        publishStep: 'name: Publish rolling "beta" prerelease',
+      },
+      {
+        workflow: ".github/workflows/release.yml",
+        appName: "Zeros.app",
+        bundleId: "com.zeros",
+        publishStep: "name: Submit to Apple notary",
+      },
+    ];
+
+    expect(existsSync(verifier)).toBe(true);
+    for (const channel of channels) {
+      const workflow = read(channel.workflow);
+      const verifierIndex = workflow.indexOf(`node ${verifier}`);
+      const publishIndex = workflow.indexOf(channel.publishStep);
+
+      expect(verifierIndex).toBeGreaterThan(-1);
+      expect(verifierIndex).toBeLessThan(publishIndex);
+      expect(workflow).toContain(`--app-name "${channel.appName}"`);
+      expect(workflow).toContain(`--bundle-id ${channel.bundleId}`);
+      expect(workflow).toContain(`--team-id ${expectedTeamId}`);
+      expect(workflow).toMatch(
+        /node scripts\/verify-macos-release-artifacts\.mjs[\s\S]*?--dmg "\$DMG"[\s\S]*?--zip "\$ZIP"/,
+      );
+    }
+  });
 });
