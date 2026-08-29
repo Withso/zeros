@@ -1,5 +1,5 @@
-/* Hero role cycle: smash / type / paint. Durations stay in sync with
-   HOLD_MS / ACT_MS in HeroRoleCycle.tsx. */
+/* Hero role cycle: smash / type / paint.
+   Smash duration is BUILDERS_EXIT_MS; type/paint use --hero-act / ACT_MS. */
 
 .hero-role {
   --hero-act: 1.15s;
@@ -8,6 +8,7 @@
   justify-items: start;
   align-items: end;
   vertical-align: baseline;
+  overflow: visible;
 }
 
 .hero-role-sizer,
@@ -30,11 +31,13 @@
   align-self: stretch;
   width: 100%;
   height: 100%;
+  overflow: visible;
   pointer-events: none;
 }
 
 .hero-role-word {
   display: inline-flex;
+  overflow: visible;
   white-space: nowrap;
 }
 
@@ -47,8 +50,49 @@
 }
 
 .hero-role-letter {
+  position: relative;
   display: inline-block;
+  overflow: visible;
   transform-origin: 50% 80%;
+}
+
+.hero-letter-face {
+  display: inline-block;
+  transform-origin: 50% 100%;
+}
+
+.hero-letter-chip {
+  position: absolute;
+  inset: 0;
+  display: inline-block;
+  color: inherit;
+  pointer-events: none;
+  transform-origin: 50% 100%;
+}
+
+.hero-letter-chip.is-left {
+  clip-path: inset(78% 42% 0 0);
+}
+
+.hero-letter-chip.is-right {
+  clip-path: inset(78% 0 0 42%);
+}
+
+.hero-crack {
+  position: absolute;
+  left: 6%;
+  right: 6%;
+  bottom: 0.14em;
+  width: 88%;
+  height: 0.32em;
+  overflow: visible;
+  pointer-events: none;
+  color: var(--fg3);
+}
+
+.hero-crack path {
+  stroke-dasharray: 40;
+  stroke-dashoffset: 40;
 }
 
 .hero-role-tool {
@@ -80,6 +124,8 @@
 
 .hero-role-spark {
   position: absolute;
+  left: 0;
+  top: 0;
   width: 3px;
   height: 3px;
   border-radius: 999px;
@@ -95,139 +141,18 @@
   opacity: 0;
 }
 
-/* ── smash: hammer hits "builders" ── */
+/* ── smash: GSAP aims the hammer at "d"; CSS must not fight it ── */
 
 .hero-role-tool[data-kind='hammer'] {
-  top: -0.5em;
-  right: -0.12em;
-  width: 0.78em;
-  height: 0.78em;
-  transform-origin: 32% 86%;
+  left: 0;
+  top: 0;
+  width: 0.74em;
+  height: 0.74em;
+  transform-origin: 28% 90%;
 }
 
-.hero-role[data-act='smash'] .hero-role-tool[data-kind='hammer'] {
-  animation: hero-hammer var(--hero-act) cubic-bezier(0.22, 0.8, 0.28, 1) both;
-}
-
-.hero-role[data-act='smash'] .is-out .hero-role-letter {
-  animation: hero-smash-out 0.55s cubic-bezier(0.4, 0, 0.7, 0.2) both;
-  animation-delay: calc(0.38s + var(--i) * 16ms);
-}
-
-.hero-role[data-act='smash'] .is-in .hero-role-letter {
-  animation: hero-smash-in 0.48s cubic-bezier(0.16, 1, 0.3, 1) both;
-  animation-delay: calc(0.62s + var(--i) * 22ms);
-}
-
-.hero-role[data-act='smash'] .hero-role-spark:nth-child(1) {
-  top: 0.18em;
-  right: 0.4em;
-  animation: hero-spark 0.55s ease-out 0.4s both;
-}
-
-.hero-role[data-act='smash'] .hero-role-spark:nth-child(2) {
-  top: 0.05em;
-  right: 0.15em;
-  animation: hero-spark 0.5s ease-out 0.42s both;
-  animation-name: hero-spark-b;
-}
-
-.hero-role[data-act='smash'] .hero-role-spark:nth-child(3) {
-  top: 0.35em;
-  right: 0.22em;
-  animation: hero-spark 0.52s ease-out 0.44s both;
-  animation-name: hero-spark-c;
-}
-
-@keyframes hero-hammer {
-  0% {
-    opacity: 0;
-    transform: rotate(-48deg) translate(0.12em, -0.18em);
-  }
-  18% {
-    opacity: 1;
-    transform: rotate(-38deg) translate(0, -0.12em);
-  }
-  42% {
-    transform: rotate(-40deg) translate(0.02em, -0.14em);
-  }
-  54% {
-    transform: rotate(16deg) translate(0.02em, 0.08em);
-  }
-  68% {
-    transform: rotate(8deg) translate(0, 0.04em);
-  }
-  100% {
-    opacity: 0;
-    transform: rotate(10deg) translate(0.08em, 0.1em);
-  }
-}
-
-@keyframes hero-smash-out {
-  0% {
-    transform: none;
-    opacity: 1;
-  }
-  35% {
-    transform: scale(1.08, 0.62) translateY(0.08em);
-  }
-  100% {
-    transform: scale(0.35, 0.2) translateY(0.42em);
-    opacity: 0;
-  }
-}
-
-@keyframes hero-smash-in {
-  0% {
-    transform: scale(0.55) translateY(0.18em);
-    opacity: 0;
-  }
-  100% {
-    transform: none;
-    opacity: 1;
-  }
-}
-
-@keyframes hero-spark {
-  0% {
-    opacity: 0;
-    transform: translate(0, 0) scale(0.4);
-  }
-  30% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: translate(-0.35em, -0.28em) scale(0.2);
-  }
-}
-
-@keyframes hero-spark-b {
-  0% {
-    opacity: 0;
-    transform: translate(0, 0) scale(0.4);
-  }
-  30% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: translate(0.28em, -0.32em) scale(0.2);
-  }
-}
-
-@keyframes hero-spark-c {
-  0% {
-    opacity: 0;
-    transform: translate(0, 0) scale(0.4);
-  }
-  30% {
-    opacity: 1;
-  }
-  100% {
-    opacity: 0;
-    transform: translate(0.12em, 0.3em) scale(0.2);
-  }
+.hero-role[data-act='smash'] .hero-role-word.is-in {
+  opacity: 0;
 }
 
 /* ── type: laptop + tapping ── */
@@ -408,12 +333,15 @@
   .hero-role-tool,
   .hero-role-spark,
   .hero-role-trail,
-  .hero-role-tools {
+  .hero-role-tools,
+  .hero-letter-chip,
+  .hero-crack {
     display: none;
   }
 
   .hero-role-word,
   .hero-role-letter,
+  .hero-letter-face,
   .hero-role-stroke,
   .hero-role .is-in,
   .hero-role .is-out {

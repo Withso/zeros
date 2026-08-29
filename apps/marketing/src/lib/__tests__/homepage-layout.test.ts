@@ -11,6 +11,10 @@ const PREVIEW = join(ROOT, "apps/marketing/src/components/ProductPreview.tsx");
 const WORDMARK = join(ROOT, "apps/marketing/public/zeros-wordmark.svg");
 const HERO_CYCLE = join(ROOT, "apps/marketing/src/components/HeroRoleCycle.tsx");
 const HERO_CYCLE_CSS = join(ROOT, "apps/marketing/src/components/hero-role.css");
+const BUILDERS_EXIT = join(
+  ROOT,
+  "apps/marketing/src/components/play-builders-exit.ts",
+);
 
 function sliceFunction(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`);
@@ -59,10 +63,31 @@ describe("marketing homepage layout", () => {
     expect(cycle).toMatch(/'builders', 'developers', 'designers'/);
     expect(cycle).toMatch(/'smash', 'type', 'paint'/);
     expect(cycle).toMatch(/prefers-reduced-motion/);
-    expect(css).toMatch(/hero-hammer/);
+    expect(cycle).toMatch(/playBuildersExit/);
+    expect(cycle).toMatch(/BUILDERS_EXIT_MS/);
     expect(css).toMatch(/hero-laptop/);
     expect(css).toMatch(/hero-brush/);
     expect(css).toMatch(/prefers-reduced-motion: reduce/);
+  });
+
+  it("hammers the d in builders, cracks l and e, then squeezes the word away", () => {
+    const cycle = readFileSync(HERO_CYCLE, "utf8");
+    const css = readFileSync(HERO_CYCLE_CSS, "utf8");
+    const exit = readFileSync(BUILDERS_EXIT, "utf8");
+    expect(cycle).toMatch(/data-letter=\{ch\}/);
+    expect(cycle).toMatch(/ch === 'l' \|\| ch === 'e'/);
+    expect(cycle).toMatch(/hero-letter-chip/);
+    expect(cycle).toMatch(/hero-crack/);
+    expect(cycle).toMatch(/ACTS\[i\] === 'smash' \? BUILDERS_EXIT_MS : ACT_MS/);
+    expect(css).toMatch(/hero-letter-chip/);
+    expect(css).toMatch(/hero-crack/);
+    expect(css).not.toMatch(/@keyframes hero-smash-out/);
+    expect(exit).toMatch(/\[data-letter="d"\]/);
+    expect(exit).toMatch(/scaleY: 0\.62/);
+    expect(exit).toMatch(/scaleY: 0\.46/);
+    expect(exit).toMatch(/clipPath: 'inset\(0 0 20% 0\)'/);
+    expect(exit).toMatch(/scaleY: 0/);
+    expect(exit).toMatch(/tl\.set\(word, \{ autoAlpha: 0 \}\)/);
   });
 
   it("drops the hero download CTA and Dev/Design toggle", () => {

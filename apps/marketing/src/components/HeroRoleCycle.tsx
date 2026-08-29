@@ -1,4 +1,5 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import { BUILDERS_EXIT_MS, playBuildersExit } from './play-builders-exit'
 import './hero-role.css'
 
 const ROLES = ['builders', 'developers', 'designers'] as const
@@ -15,6 +16,7 @@ type Act = (typeof ACTS)[number]
  * plays with the letters: hammer smash, laptop typing, then a paint stroke.
  */
 export function HeroRoleCycle() {
+  const rootRef = useRef<HTMLSpanElement>(null)
   const [index, setIndex] = useState(0)
   const [phase, setPhase] = useState<'idle' | 'act'>('idle')
   const [reduce, setReduce] = useState(() =>
@@ -33,19 +35,22 @@ export function HeroRoleCycle() {
     if (reduce) return
     const ids: number[] = []
     let cancelled = false
+    let i = 0
 
     const loop = () => {
       ids.push(
         window.setTimeout(() => {
           if (cancelled) return
           setPhase('act')
+          const actMs = ACTS[i] === 'smash' ? BUILDERS_EXIT_MS : ACT_MS
           ids.push(
             window.setTimeout(() => {
               if (cancelled) return
-              setIndex((i) => (i + 1) % ROLES.length)
+              i = (i + 1) % ROLES.length
+              setIndex(i)
               setPhase('idle')
               loop()
-            }, ACT_MS),
+            }, actMs),
           )
         }, HOLD_MS),
       )
@@ -61,8 +66,19 @@ export function HeroRoleCycle() {
   const next = ROLES[(index + 1) % ROLES.length]
   const act: Act | '' = phase === 'act' ? ACTS[index] : ''
 
+  useLayoutEffect(() => {
+    if (reduce || act !== 'smash') return
+    const root = rootRef.current
+    if (!root) return
+    const tl = playBuildersExit(root)
+    return () => {
+      tl?.kill()
+    }
+  }, [reduce, act])
+
   return (
     <span
+      ref={rootRef}
       className="hero-role"
       data-phase={reduce ? 'idle' : phase}
       data-act={reduce ? '' : act}
@@ -90,20 +106,63 @@ function Word({
   text: Role
   mode: 'idle' | 'in' | 'out'
 }) {
+  const smashOut = mode === 'out' && text === 'builders'
+
   return (
     <span
       className={`hero-role-word${mode === 'idle' ? '' : ` is-${mode}`}`}
+      data-word={mode}
       style={{ '--n': text.length } as CSSProperties}
     >
       {text.split('').map((ch, i) => (
-        <span
+        <Letter
           key={`${text}-${mode}-${i}`}
-          className="hero-role-letter"
-          style={{ '--i': i } as CSSProperties}
-        >
-          {ch}
-        </span>
+          ch={ch}
+          index={i}
+          smashOut={smashOut}
+        />
       ))}
+    </span>
+  )
+}
+
+function Letter({
+  ch,
+  smashOut,
+  index,
+}: {
+  ch: string
+  smashOut: boolean
+  index: number
+}) {
+  const crack = smashOut && (ch === 'l' || ch === 'e')
+
+  return (
+    <span
+      className="hero-role-letter"
+      data-letter={ch}
+      style={{ '--i': index } as CSSProperties}
+    >
+      {smashOut ? <span className="hero-letter-face">{ch}</span> : ch}
+      {crack ? (
+        <>
+          <span className="hero-letter-chip is-left" aria-hidden>
+            {ch}
+          </span>
+          <span className="hero-letter-chip is-right" aria-hidden>
+            {ch}
+          </span>
+          <svg className="hero-crack" viewBox="0 0 24 10" fill="none" aria-hidden>
+            <path
+              d="M1 8.5 L6 8.5 L8.2 3.5 L11 8.5 L15.5 8.5 L17.2 5 L23 8.5"
+              stroke="currentColor"
+              strokeWidth="1.05"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        </>
+      ) : null}
     </span>
   )
 }
