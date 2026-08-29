@@ -208,6 +208,40 @@ export function fillScrambleCells(length: number, set: ScrambleSet): ScrambleCel
   return cells
 }
 
+function hasAdjacentRepeat(htmls: readonly string[]): boolean {
+  for (let i = 1; i < htmls.length; i += 1) {
+    if (htmls[i] === htmls[i - 1]) return true
+  }
+  return false
+}
+
+function shiftHtmls(htmls: readonly string[], by: number): string[] {
+  const n = htmls.length
+  const shift = ((by % n) + n) % n
+  return htmls.map((_, i) => htmls[(i + shift) % n]!)
+}
+
+function repairAdjacentRepeats(htmls: readonly string[]): string[] {
+  const out = [...htmls]
+  for (let pass = 0; pass < out.length; pass += 1) {
+    let dirty = false
+    for (let i = 1; i < out.length; i += 1) {
+      if (out[i] !== out[i - 1]) continue
+      dirty = true
+      for (let j = 0; j < out.length; j += 1) {
+        if (j === i) continue
+        if (out[j] === out[i - 1]) continue
+        const tmp = out[i]!
+        out[i] = out[j]!
+        out[j] = tmp
+        break
+      }
+    }
+    if (!dirty) break
+  }
+  return out
+}
+
 /** Rotate only icon cells so the tool set slides instead of reprinting. */
 export function rotateScrambleIcons(cells: ScrambleCell[], by = 1): ScrambleCell[] {
   const indexes: number[] = []
@@ -217,15 +251,12 @@ export function rotateScrambleIcons(cells: ScrambleCell[], by = 1): ScrambleCell
   if (indexes.length < 2) return cells
   const htmls = indexes.map((i) => (cells[i] as { html: string }).html)
   const n = htmls.length
-  const shift = ((by % n) + n) % n
-  const rotated = htmls.map((_, i) => htmls[(i + shift) % n]!)
-  for (let i = 1; i < rotated.length; i += 1) {
-    if (rotated[i] !== rotated[i - 1]) continue
-    for (let j = i + 1; j < rotated.length; j += 1) {
-      if (rotated[j] !== rotated[i - 1]) {
-        const swap = rotated[i]!
-        rotated[i] = rotated[j]!
-        rotated[j] = swap
+  let chosen = repairAdjacentRepeats(shiftHtmls(htmls, by))
+  if (hasAdjacentRepeat(chosen)) {
+    for (let k = 1; k < n; k += 1) {
+      const candidate = repairAdjacentRepeats(shiftHtmls(htmls, by + k))
+      if (!hasAdjacentRepeat(candidate)) {
+        chosen = candidate
         break
       }
     }
@@ -233,7 +264,7 @@ export function rotateScrambleIcons(cells: ScrambleCell[], by = 1): ScrambleCell
   return cells.map((cell, i) => {
     const k = indexes.indexOf(i)
     if (k < 0) return cell
-    return { kind: 'icon', html: rotated[k]! }
+    return { kind: 'icon', html: chosen[k]! }
   })
 }
 

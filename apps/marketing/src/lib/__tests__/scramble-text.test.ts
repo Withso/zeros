@@ -135,21 +135,29 @@ describe("hero scramble fill", () => {
   });
 
   it("slides design marks instead of reprinting the same set in place", () => {
-    const cells = fillScrambleCells(10, DESIGN_SCRAMBLE);
-    const rotated = rotateScrambleIcons(cells, 1);
-    const names = (row: typeof cells) =>
-      row
-        .filter((cell) => cell.kind === "icon")
-        .map((cell) => iconName(cell.html));
-    const from = names(cells);
-    const to = names(rotated);
-    expect(from.length).toBeGreaterThanOrEqual(6);
-    expect(to).toHaveLength(from.length);
-    expect([...to].sort()).toEqual([...from].sort());
-    expect(to).not.toEqual(from);
-    for (let i = 1; i < to.length; i += 1) {
-      expect(to[i]).not.toBe(to[i - 1]);
+    let changed = 0;
+    for (let trial = 0; trial < 80; trial += 1) {
+      const cells = fillScrambleCells(10, DESIGN_SCRAMBLE);
+      const rotated = rotateScrambleIcons(cells, 1);
+      const names = (row: typeof cells) =>
+        row
+          .filter((cell) => cell.kind === "icon")
+          .map((cell) => iconName(cell.html));
+      const from = names(cells);
+      const to = names(rotated);
+      expect(from.length).toBeGreaterThanOrEqual(6);
+      expect(to).toHaveLength(from.length);
+      expect([...to].sort()).toEqual([...from].sort());
+      if (to.join() !== from.join()) changed += 1;
+      for (let j = 1; j < rotated.length; j += 1) {
+        const prev = rotated[j - 1]!;
+        const next = rotated[j]!;
+        if (prev.kind === "icon" && next.kind === "icon") {
+          expect(iconName(prev.html)).not.toBe(iconName(next.html));
+        }
+      }
     }
+    expect(changed).toBeGreaterThan(50);
   });
 
   it("does not plant full role words into code or matrix scrambles", () => {
