@@ -33,7 +33,7 @@ export const CODE_SCRAMBLE: ScrambleSet = {
 
 /** developers → designers — same slot count as the word, two marks at most. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
-  chars: '#[]|=+',
+  chars: '#|+',
   icons: DESIGN_ICONS,
 }
 
