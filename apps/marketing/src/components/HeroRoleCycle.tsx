@@ -149,10 +149,7 @@ function Letter({
       {smashOut ? <span className="hero-letter-face">{ch}</span> : ch}
       {crack ? (
         <>
-          <span className="hero-letter-chip is-left" aria-hidden>
-            {ch}
-          </span>
-          <span className="hero-letter-chip is-right" aria-hidden>
+          <span className="hero-letter-chip" aria-hidden>
             {ch}
           </span>
           <svg className="hero-crack" viewBox="0 0 24 10" fill="none" aria-hidden>

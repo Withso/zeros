@@ -78,6 +78,7 @@ describe("marketing homepage layout", () => {
     expect(cycle).toMatch(/ch === 'l' \|\| ch === 'e'/);
     expect(cycle).toMatch(/hero-letter-chip/);
     expect(cycle).toMatch(/hero-crack/);
+    expect(cycle).not.toMatch(/hero-letter-chip is-left/);
     expect(cycle).toMatch(/ACTS\[i\] === 'smash' \? BUILDERS_EXIT_MS : ACT_MS/);
     expect(css).toMatch(/hero-letter-chip/);
     expect(css).toMatch(/hero-crack/);

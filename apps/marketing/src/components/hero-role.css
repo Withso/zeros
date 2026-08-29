@@ -78,26 +78,19 @@
   color: inherit;
   pointer-events: none;
   transform-origin: 50% 100%;
-}
-
-.hero-letter-chip.is-left {
-  clip-path: inset(58% 44% 0 0);
-}
-
-.hero-letter-chip.is-right {
-  clip-path: inset(58% 0 0 44%);
+  clip-path: inset(68% 16% 0 16%);
 }
 
 .hero-crack {
   position: absolute;
-  left: 4%;
-  right: 4%;
-  bottom: 0.28em;
-  width: 92%;
-  height: 0.36em;
+  left: 8%;
+  right: 8%;
+  bottom: 0.3em;
+  width: 84%;
+  height: 0.32em;
   overflow: visible;
   pointer-events: none;
-  color: color-mix(in srgb, var(--fg1) 62%, transparent);
+  color: color-mix(in srgb, var(--fg1) 70%, transparent);
 }
 
 .hero-crack path {
@@ -156,8 +149,8 @@
 .hero-role-tool[data-kind='hammer'] {
   left: 0;
   top: 0;
-  width: 0.74em;
-  height: 0.74em;
+  width: 0.68em;
+  height: 0.68em;
   transform-origin: 28% 90%;
 }
 
