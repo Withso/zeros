@@ -92,11 +92,33 @@ function placeToken(out: string[], tokens: string[]): void {
   for (let i = 0; i < token.length; i += 1) out[start + i] = token[i]
 }
 
+const FEATURED_TOKENS = new Set([
+  'align',
+  'frame',
+  'design',
+  'components',
+  'const',
+  'async',
+  'await',
+  'git',
+])
+
+function pickToken(tokens: string[], length: number): string | null {
+  const usable = tokens.filter((token) => token.length <= length)
+  if (usable.length === 0) return null
+  const featured = usable.filter((token) => FEATURED_TOKENS.has(token))
+  return pick(featured.length > 0 ? featured : usable)
+}
+
 /** HTML tail: icon glyphs mixed with chars/tokens. Each slot is one unit. */
 export function scrambleTail(
   length: number,
   set: ScrambleSet,
-  { allowTokens = true }: { allowTokens?: boolean } = {},
+  {
+    allowTokens = true,
+    token = null,
+    tokenStart,
+  }: { allowTokens?: boolean; token?: string | null; tokenStart?: number } = {},
 ): string {
   if (length <= 0) return ''
   const slots: string[] = Array.from({ length }, () => {
@@ -104,11 +126,15 @@ export function scrambleTail(
     return escapeHtml(pickChar(set.chars))
   })
   if (allowTokens) {
-    const usable = set.tokens.filter((token) => token.length <= length)
-    if (usable.length > 0) {
-      const token = pick(usable)
-      const start = Math.floor(Math.random() * (length - token.length + 1))
-      for (let i = 0; i < token.length; i += 1) slots[start + i] = escapeHtml(token[i])
+    const chosen =
+      token && token.length <= length ? token : pickToken(set.tokens, length)
+    if (chosen) {
+      const maxStart = length - chosen.length
+      const start =
+        tokenStart === undefined
+          ? Math.floor(Math.random() * (maxStart + 1))
+          : Math.min(maxStart, Math.max(0, tokenStart))
+      for (let i = 0; i < chosen.length; i += 1) slots[start + i] = escapeHtml(chosen[i])
     }
   }
   return slots.join('')
@@ -126,8 +152,8 @@ export function playScramble(
     text,
     set,
     duration = SCRAMBLE_MS / 1000,
-    revealDelay = 0.45,
-    speed = 1.2,
+    revealDelay = 0.52,
+    speed = 0.55,
   }: {
     text: string
     set: ScrambleSet
@@ -143,6 +169,10 @@ export function playScramble(
   let lastRefresh = -Infinity
   let lastRevealed = -1
   let tail = ''
+  const lockedToken = pickToken(set.tokens, Math.max(startLen, endLen))
+  const tokenStart = lockedToken
+    ? Math.max(0, Math.floor((Math.max(startLen, endLen) - lockedToken.length) / 2))
+    : 0
   const state = { t: 0 }
 
   return gsap.to(state, {
@@ -161,6 +191,8 @@ export function playScramble(
         lastRevealed = revealed
         tail = scrambleTail(Math.max(0, len - revealed), set, {
           allowTokens: revealed === 0,
+          token: lockedToken,
+          tokenStart,
         })
       }
       const revealedText = escapeHtml(text.slice(0, revealed))
