@@ -454,27 +454,38 @@ result without copying secrets into tickets or repository files.
    client IDs.
 3. Register only the channel's exact redirects and default sign-out URI.
 4. Enable Hosted AuthKit, Google, GitHub, and Magic Auth. Keep email
-   verification and WorkOS-managed transactional email enabled. Keep
+   verification and WorkOS-managed authentication email enabled. Keep
    email-and-password authentication disabled unless a later product decision
    adds it. Configure MFA/recovery policy in Hosted AuthKit, not in Zeros code.
-5. Configure Zeros-owned Google/GitHub OAuth credentials before Production.
+5. Under **Emails → Configuration**, disable only WorkOS's default **user
+   invitation** email. Zeros sends the one product invitation email through
+   ZeptoMail; its link carries the Zeros capability and enters either the exact
+   desktop channel or the Railway-owned browser state/PKCE flow. The browser
+   path holds the capability in tab-scoped `sessionStorage`, strips it from the
+   address bar, and gives AuthKit only `/invite?mode=resume` as its return path.
+   A WorkOS default invitation link enters AuthKit directly and is therefore
+   not a supported Zeros entry point. Keep Magic Auth, verification, recovery,
+   and other WorkOS authentication emails enabled. Create organization
+   invitations through Zeros, not manually in the WorkOS Dashboard. See WorkOS
+   [Custom Emails](https://workos.com/docs/authkit/custom-emails).
+6. Configure Zeros-owned Google/GitHub OAuth credentials before Production.
    Provider tokens and extra provider scopes must remain disabled. Follow the
    WorkOS [GitHub OAuth setup](https://workos.com/docs/integrations/github-oauth)
    and equivalent provider guidance.
-6. Install the exact JWT template required above. Reject any template that
+7. Install the exact JWT template required above. Reject any template that
    drops the boolean verified-email claim or changes audience.
-7. Set and record Web/Desktop access-token and session durations. Review
+8. Set and record Web/Desktop access-token and session durations. Review
    [Sessions](https://workos.com/docs/authkit/sessions) and
    [session resilience](https://workos.com/docs/authkit/session-resilience).
-8. Create a webhook endpoint on the channel API origin at
+9. Create a webhook endpoint on the channel API origin at
    `/auth/workos-webhook`, subscribed to the complete management event set in
    this document. Store its signing secret only in Railway. Confirm the Events
    API repair worker uses the same event set and environment.
-9. Apply branding, support/contact, legal, and localization settings. Keep the
+10. Apply branding, support/contact, legal, and localization settings. Keep the
    Zeros signed-out page a launch surface, not a second login UI.
-10. Confirm Radar remains disabled and record that state. Do not change its
+11. Confirm Radar remains disabled and record that state. Do not change its
     enforcement behavior as part of this rollout.
-11. For Production, evaluate an AuthKit custom domain as a branding and
+12. For Production, evaluate an AuthKit custom domain as a branding and
     anti-phishing improvement. A separate Auth API custom domain is not needed
     by this design; keep API/JWKS configuration pinned to the qualified WorkOS
     endpoints unless a reviewed migration changes it. See
@@ -503,11 +514,14 @@ Railway-only secrets. Rotate each independently per channel. A cookie-password
 rotation invalidates outstanding browser sealed sessions, so schedule and
 communicate it as a forced browser sign-in.
 
-Production also configures `ZEPTOMAIL_TOKEN`, `EMAIL_FROM`, and the correct
-regional `ZEPTOMAIL_API_URL` so recovery and account-lifecycle security
-notifications leave the durable outbox. Delivery is at-least-once with a
-stable client reference; operators must monitor dead rows rather than assuming
-that an HTTP timeout means an email was not accepted.
+Every hosted channel configures `ZEPTOMAIL_TOKEN`, `EMAIL_FROM`, and the correct
+regional `ZEPTOMAIL_API_URL`. Zeros uses them for the application-owned
+invitation capability email and for recovery/account-lifecycle security
+notifications. Invitation creation waits for the bounded delivery attempt and
+still returns the exact copyable link to the administrator; security
+notifications use the durable outbox with a stable client reference. Operators
+must monitor delivery failures rather than assuming that an HTTP timeout means
+an email was not accepted.
 
 Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
 `CONTROL_PLANE_URL`. Electron compiles only public verification/configuration
@@ -574,6 +588,9 @@ Manual Alpha acceptance must verify:
 - user profile update/deletion, session revocation, organization/member/invite
   webhook idempotency, reordering, lost-response recovery, and Events API
   repair;
+- one and only one invitation email, proving WorkOS default invitation email is
+  disabled and the Zeros link accepts through strict state/PKCE on web and the
+  exact release-channel deep link on desktop;
 - WorkOS User deletion while browser and desktop are open, proving both clients
   terminate and that a recreated same-email identity enters reviewed recovery;
 - organization member removal/role change while both clients are open, proving
@@ -618,6 +635,12 @@ Verified against the deployed Alpha Web and signed macOS Alpha application:
   membership command dead-lettered. The corrective convergence and cross-object
   event-ordering regressions are implemented; a live post-deployment retest is
   still a promotion gate.
+- A later live email retest exposed a separate entry defect: WorkOS's default
+  invitation email authenticated successfully but returned to the callback
+  without Zeros-created state. The callback correctly failed closed. Zeros now
+  owns the sole invitation email and browser/desktop landing flow; disabling
+  only the WorkOS default invitation email and repeating both acceptance paths
+  remain release gates.
 - The deployed control-plane health endpoint, exact release version, Personal
   bootstrap, secure browser cookie relay, strict same-site completion, and
   session-revocation persistence were inspected after promotion.

@@ -22,7 +22,8 @@ import {
 import { audit } from "./audit.js";
 import { generateInviteToken, hashInviteToken } from "./invites.js";
 import { randomSuffix, slugify } from "./auth.js";
-import { inviteEmailHtml, sendEmail, type EmailConfig } from "./email.js";
+import type { EmailConfig } from "./email.js";
+import { deliverInvitationEmail } from "./invitation-delivery.js";
 import { rateLimit } from "./ratelimit.js";
 import type { CloudWorkspaceBackendConfig } from "./config.js";
 import { createCloudWorkspaceRoutes } from "./cloud-workspaces/routes.js";
@@ -1169,20 +1170,14 @@ function createOrganizationRouter(
           organization.rows[0]?.name ?? "your organization",
       };
     });
-    if (email && !workosEnabled) {
-      const message = inviteEmailHtml({
-        organizationName: result.organizationName,
-        inviterName: user.displayName ?? user.email,
-        acceptUrl: inviteLink(result.token, inviteLinkBase),
-        expiresDays: 7,
-      });
-      void sendEmail(
-        email,
-        emailAddress,
-        message.subject,
-        message.html,
-      ).catch(() => {});
-    }
+    await deliverInvitationEmail({
+      email,
+      workosEnabled,
+      destination: emailAddress,
+      organizationName: result.organizationName,
+      inviterName: user.displayName ?? user.email,
+      acceptUrl: inviteLink(result.token, inviteLinkBase),
+    });
     return c.json(
       {
         invitation: {

@@ -33,7 +33,7 @@ GET  /auth/desktop/callback    → no-store exact-channel app handoff
 POST /auth/workos-webhook      → compatibility pass-through to Railway
 POST /auth/desktop-revoke      → compatibility pass-through for older desktops
 GET  /github/connected         → GitHub App completion + Open Zeros handoff
-GET  /invite?token=
+GET  /invite?token=[&mode=web|resume] → landing, web acceptance, or post-auth resume
 POST /handoff/{mint,redeem,refresh,revoke} → Auth0 compatibility only
 GET|POST|PATCH|DELETE /api/v1/* → allowlisted same-origin control-plane proxy
 ```
@@ -157,6 +157,20 @@ to the already validated return URL, with a visible link as a no-script
 fallback. This document boundary is required because browsers correctly
 withhold Strict cookies throughout the original AuthKit redirect chain. Pages
 must preserve its body and append every `Set-Cookie` field separately.
+
+The Zeros-owned invitation email lands on `/invite?token=…`. The response is
+no-store/no-referrer and nonce-CSP bounded. It offers the exact channel's
+desktop deep link or an explicit browser continuation. Browser acceptance
+stores the opaque token only in that tab's `sessionStorage`, immediately strips
+it from the address bar, and posts it only to the same-origin allowlisted JSON
+facade. A 401 starts Railway's ordinary one-time state/PKCE flow with the
+tokenless `/invite?mode=resume` path as the bounded return target, then retries
+from the tab-scoped value. A tab permits one AuthKit attempt per freshly opened
+invitation; a second 401 terminates with a fixed error instead of redirecting
+again. Link scanners cannot accept an invitation because
+the landing GET has no mutation and web mode still requires an authenticated
+same-origin POST. WorkOS's default user-invitation email must remain disabled;
+other WorkOS authentication emails remain enabled.
 
 Register `https://<channel-api-host>/auth/workos-webhook` for the user,
 session, organization, organization-membership, and invitation event set in
