@@ -119,8 +119,13 @@ describe("marketing homepage layout", () => {
     expect(css).toMatch(/hero-ascii-drift/);
     expect(css).toMatch(/prefers-color-scheme: light/);
     expect(css).toMatch(/--bg0: hsl\(0 0% 5%\)/);
+    expect(css).toMatch(/transparent 82%/);
+    expect(css).toMatch(/min\(58vh, 540px\)/);
+    expect(css).not.toMatch(/min\(120vh, 1100px\)/);
     expect(field).toMatch(/ASCII_CLOUD_RAMP/);
     expect(field).toMatch(/headlineWell/);
+    expect(field).toMatch(/skyGate/);
+    expect(field).toMatch(/productSkyline/);
     expect(field).toMatch(/#000000/);
     expect(field).toMatch(/"\."/);
     expect(field).toMatch(/"@"/);
