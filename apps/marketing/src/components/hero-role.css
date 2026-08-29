@@ -37,6 +37,7 @@
 
 .hero-role-word {
   display: inline-flex;
+  align-items: baseline;
   overflow: visible;
   white-space: nowrap;
 }
@@ -56,38 +57,47 @@
   transform-origin: 50% 80%;
 }
 
+.hero-role-letter:has(.hero-letter-face) {
+  height: 1em;
+  line-height: 1;
+}
+
 .hero-letter-face {
-  display: inline-block;
+  display: block;
+  height: 1em;
+  line-height: 1;
   transform-origin: 50% 100%;
 }
 
 .hero-letter-chip {
   position: absolute;
   inset: 0;
-  display: inline-block;
+  display: block;
+  overflow: hidden;
+  line-height: 1;
   color: inherit;
   pointer-events: none;
   transform-origin: 50% 100%;
 }
 
 .hero-letter-chip.is-left {
-  clip-path: inset(78% 42% 0 0);
+  clip-path: inset(58% 44% 0 0);
 }
 
 .hero-letter-chip.is-right {
-  clip-path: inset(78% 0 0 42%);
+  clip-path: inset(58% 0 0 44%);
 }
 
 .hero-crack {
   position: absolute;
-  left: 6%;
-  right: 6%;
-  bottom: 0.14em;
-  width: 88%;
-  height: 0.32em;
+  left: 4%;
+  right: 4%;
+  bottom: 0.28em;
+  width: 92%;
+  height: 0.36em;
   overflow: visible;
   pointer-events: none;
-  color: var(--fg3);
+  color: color-mix(in srgb, var(--fg1) 62%, transparent);
 }
 
 .hero-crack path {

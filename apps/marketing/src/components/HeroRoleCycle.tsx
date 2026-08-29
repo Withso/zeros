@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react'
+import gsap from 'gsap'
 import { BUILDERS_EXIT_MS, playBuildersExit } from './play-builders-exit'
 import './hero-role.css'
 
@@ -73,6 +74,8 @@ export function HeroRoleCycle() {
     const tl = playBuildersExit(root)
     return () => {
       tl?.kill()
+      const hammer = root.querySelector<HTMLElement>('[data-kind="hammer"]')
+      if (hammer) gsap.set(hammer, { clearProps: 'all' })
     }
   }, [reduce, act])
 
@@ -156,7 +159,7 @@ function Letter({
             <path
               d="M1 8.5 L6 8.5 L8.2 3.5 L11 8.5 L15.5 8.5 L17.2 5 L23 8.5"
               stroke="currentColor"
-              strokeWidth="1.05"
+              strokeWidth="1.2"
               strokeLinecap="round"
               strokeLinejoin="round"
             />

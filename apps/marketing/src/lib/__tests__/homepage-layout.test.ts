@@ -85,7 +85,7 @@ describe("marketing homepage layout", () => {
     expect(exit).toMatch(/\[data-letter="d"\]/);
     expect(exit).toMatch(/scaleY: 0\.62/);
     expect(exit).toMatch(/scaleY: 0\.46/);
-    expect(exit).toMatch(/clipPath: 'inset\(0 0 20% 0\)'/);
+    expect(exit).toMatch(/clipPath: 'inset\(0 0 38% 0\)'/);
     expect(exit).toMatch(/scaleY: 0/);
     expect(exit).toMatch(/tl\.set\(word, \{ autoAlpha: 0 \}\)/);
   });

@@ -1,7 +1,7 @@
 import gsap from 'gsap'
 
 /** Keep the role-cycle timeout at or above this. */
-export const BUILDERS_EXIT_MS = 1700
+export const BUILDERS_EXIT_MS = 1900
 
 /**
  * Hammer beats the "d" in builders twice. Only that letter compresses.
@@ -65,7 +65,16 @@ export function playBuildersExit(root: HTMLElement): gsap.core.Timeline | undefi
     gsap.set(path, { strokeDasharray: len, strokeDashoffset: len })
   })
 
-  const tl = gsap.timeline({ defaults: { ease: 'power2.out' } })
+  const clearHammer = () => {
+    gsap.set(hammer, {
+      clearProps: 'left,top,x,y,rotate,opacity,transform,transformOrigin',
+    })
+  }
+
+  const tl = gsap.timeline({
+    defaults: { ease: 'power2.out' },
+    onComplete: clearHammer,
+  })
 
   tl.to(hammer, { opacity: 1, y: -10, duration: 0.24, ease: 'power2.out' }, 0)
 
@@ -81,26 +90,26 @@ export function playBuildersExit(root: HTMLElement): gsap.core.Timeline | undefi
   tl.to(dFace, { scaleY: 0.46, duration: 0.07, ease: 'power2.out' }, 0.78)
   flashSparks(tl, sparks, 0.78)
   tl.to(cracks, { strokeDashoffset: 0, duration: 0.16, ease: 'power1.out' }, 0.78)
-  tl.to([lFace, eFace], { clipPath: 'inset(0 0 20% 0)', duration: 0.08, ease: 'none' }, 0.78)
+  tl.to([lFace, eFace], { clipPath: 'inset(0 0 38% 0)', duration: 0.08, ease: 'none' }, 0.78)
   tl.to(chips, { autoAlpha: 1, duration: 0.04 }, 0.78)
   tl.to(
     lEl.querySelector('.hero-letter-chip.is-left'),
-    { x: -2.2, y: 3.4, rotate: -7, duration: 0.28, ease: 'power2.in' },
+    { x: -3.2, y: 6, rotate: -10, duration: 0.32, ease: 'power2.in' },
     0.78,
   )
   tl.to(
     lEl.querySelector('.hero-letter-chip.is-right'),
-    { x: 2.4, y: 3.8, rotate: 8, duration: 0.3, ease: 'power2.in' },
+    { x: 3.4, y: 6.5, rotate: 11, duration: 0.34, ease: 'power2.in' },
     0.78,
   )
   tl.to(
     eEl.querySelector('.hero-letter-chip.is-left'),
-    { x: -2, y: 3.2, rotate: -6, duration: 0.26, ease: 'power2.in' },
+    { x: -2.8, y: 5.6, rotate: -8, duration: 0.3, ease: 'power2.in' },
     0.78,
   )
   tl.to(
     eEl.querySelector('.hero-letter-chip.is-right'),
-    { x: 2.6, y: 4, rotate: 9, duration: 0.32, ease: 'power2.in' },
+    { x: 3.6, y: 7, rotate: 12, duration: 0.36, ease: 'power2.in' },
     0.78,
   )
   tl.to(
@@ -114,14 +123,14 @@ export function playBuildersExit(root: HTMLElement): gsap.core.Timeline | undefi
     word,
     {
       scaleY: 0,
-      scaleX: 1.03,
-      duration: 0.15,
+      scaleX: 1.04,
+      duration: 0.2,
       ease: 'power4.in',
     },
-    1.14,
+    1.18,
   )
   tl.set(word, { autoAlpha: 0 })
-  tl.to(next, { autoAlpha: 1, duration: 0.18, ease: 'power1.out' })
+  tl.to(next, { autoAlpha: 1, duration: 0.16, ease: 'power1.out' })
 
   return tl
 }
