@@ -22,11 +22,6 @@ export const GITHUB_URL = 'https://github.com/withso/zeros'
 /** Docs move to Mintlify later; keep the path stable so the link survives. */
 export const DOCS_URL = '/docs'
 
-/** Current public-beta version — surfaced in the hero "what's new" pill.
- *  Update this by hand when a new stable version ships; nothing derives it, so
- *  it silently goes stale otherwise (it sat at 0.0.1 through the whole 0.0.x line). */
-export const CURRENT_VERSION = '0.1.0'
-
 export const DOWNLOAD_META = 'Public beta · Apple Silicon · Free'
 
 /** Primary top-nav links (right side, before the Download button). */

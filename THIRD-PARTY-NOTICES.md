@@ -112,6 +112,12 @@ available.
   the generated bundle.
 - **`@pierre/trees`:** Apache-2.0 and an upstream NOTICE file. Both are included
   in the generated bundle.
+- **gsap (marketing site):** Standard "No Charge" GSAP License. The npm archive
+  omits a standalone license file; a reviewed copy of
+  [the published terms](https://gsap.com/standard-license) is stored at
+  [`third_party/gsap/LICENSE`](third_party/gsap/LICENSE) and reproduced in the
+  generated bundle. Marketing uses the public `gsap` package only (no Club
+  plugins).
 
 ## Maintenance policy
 

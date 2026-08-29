@@ -1,0 +1,65 @@
+/* Hero role cycle: scramble decode. HOLD_MS / SCRAMBLE_MS live in TS. */
+
+.hero-role {
+  position: relative;
+  display: inline-grid;
+  justify-items: start;
+  align-items: end;
+  vertical-align: baseline;
+}
+
+.hero-role-sizer,
+.hero-role-word {
+  grid-area: 1 / 1;
+}
+
+.hero-role-sizer {
+  visibility: hidden;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.hero-role-word {
+  white-space: nowrap;
+}
+
+/* Slightly smaller than the h1 while glyphs are decoding. */
+.hero-role-word.is-scrambling {
+  font-size: 0.86em;
+  line-height: 1;
+}
+
+/* Fixed roles: words, symbols, icons. No per-glyph randomization. */
+.hero-scramble-text {
+  color: var(--fg2);
+}
+
+.hero-scramble-symbol {
+  color: color-mix(in srgb, var(--blue-fg) 42%, var(--fg3));
+}
+
+.hero-scramble-icon {
+  display: inline-block;
+  width: 0.62em;
+  height: 0.62em;
+  margin: 0 0.04em;
+  vertical-align: -0.08em;
+  color: color-mix(in srgb, var(--violet-fg) 44%, var(--fg3));
+}
+
+.hero-role-revealed {
+  color: var(--fg2);
+}
+
+.hero-role-word.is-scrambling.scramble-builders,
+.hero-role-word.is-scrambling.scramble-designers {
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hero-role-word {
+    color: inherit !important;
+    font-size: inherit !important;
+  }
+}

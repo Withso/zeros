@@ -1,12 +1,14 @@
 <!doctype html>
-<!-- Marketing site is dark-by-default. Palette is Zeros Shade from
-     styles/zeros-tokens.css (see src/index.css). No theme switching. -->
-<html lang="en" data-theme="dark">
+<!-- Appearance follows prefers-color-scheme (no in-page toggle).
+     Palettes are cloned from styles/zeros-tokens.css — Neutral Dark
+     and Light — in src/index.css. -->
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/zeros-logo.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <meta name="theme-color" content="#0E0C0C" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#121212" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#FFFFFF" />
     <meta
       name="description"
       content="Zeros is a Mac workspace where parallel AI agents design, build, and ship across isolated git worktrees. Watch them work, review every change, then merge."
@@ -22,7 +24,7 @@
 
     <!-- Open Graph / social -->
     <meta property="og:type" content="website" />
-    <meta property="og:title" content="Zeros — design and code, in parallel" />
+    <meta property="og:title" content="Zeros — Human-agent interaction for builders" />
     <meta
       property="og:description"
       content="A Mac workspace where parallel AI agents design, build, and ship across isolated git worktrees."
@@ -30,7 +32,7 @@
     <meta property="og:image" content="/zeros-logo.png" />
     <meta name="twitter:card" content="summary_large_image" />
 
-    <title>Zeros — design and code, in parallel</title>
+    <title>Zeros — Human-agent interaction for builders</title>
   </head>
   <body>
     <div id="root"></div>

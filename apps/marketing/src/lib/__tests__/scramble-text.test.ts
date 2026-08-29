@@ -1,0 +1,69 @@
+import { describe, expect, it } from "vitest";
+import {
+  CODE_SCRAMBLE,
+  DESIGN_SCRAMBLE,
+  escapeHtml,
+  MATRIX_SCRAMBLE,
+  pickScrambleToken,
+  renderScrambleSlots,
+  scrambleFill,
+  scrambleTail,
+} from "../../components/scramble-text";
+
+describe("hero scramble fill", () => {
+  it("returns an empty string for non-positive length", () => {
+    expect(scrambleFill(0, "abc", ["fn"])).toBe("");
+    expect(scrambleTail(0, CODE_SCRAMBLE)).toBe("");
+  });
+
+  it("stays within the requested length", () => {
+    for (let i = 0; i < 40; i += 1) {
+      const out = scrambleFill(8, "{}[]", ["fn", "git"]);
+      expect(out.length).toBe(8);
+    }
+  });
+
+  it("escapes markup in revealed text", () => {
+    expect(escapeHtml("</>")).toBe("&lt;/&gt;");
+  });
+
+  it("mixes design tokens and icon markup into the designers scramble", () => {
+    expect(DESIGN_SCRAMBLE.tokens).toEqual(
+      expect.arrayContaining(["align", "frame", "design", "components"]),
+    );
+    expect(DESIGN_SCRAMBLE.icons.length).toBeGreaterThan(0);
+    expect(CODE_SCRAMBLE.tokens).toEqual(expect.arrayContaining(["const", "async"]));
+    expect(MATRIX_SCRAMBLE.chars).toMatch(/[01]/);
+    expect(MATRIX_SCRAMBLE.chars).toMatch(/ﾊ/);
+
+    const samples = Array.from({ length: 40 }, () => scrambleTail(11, DESIGN_SCRAMBLE));
+    expect(samples.some((html) => html.includes("hero-scramble-icon"))).toBe(true);
+    const joined = samples.join("");
+    expect(joined).toMatch(/align|frame|design|components|auto|layer|stack|grid|layout/);
+  });
+
+  it("locks the longest featured design word that fits", () => {
+    expect(pickScrambleToken(DESIGN_SCRAMBLE.tokens, 11)).toBe("components");
+    expect(pickScrambleToken(DESIGN_SCRAMBLE.tokens, 6)).toBe("design");
+    const html = scrambleTail(11, DESIGN_SCRAMBLE, {
+      token: "components",
+      tokenStart: 0,
+    });
+    const visible = html.replace(/<svg[\s\S]*?<\/svg>/g, "");
+    expect(visible).toContain("components");
+    expect(html).toMatch(/hero-scramble-text/);
+    expect(html).toMatch(/hero-scramble-symbol|hero-scramble-icon/);
+  });
+
+  it("wraps text, symbols, and icons in fixed color roles", () => {
+    const html = renderScrambleSlots([
+      { kind: "text", ch: "c" },
+      { kind: "text", ch: "o" },
+      { kind: "symbol", ch: "#" },
+      { kind: "icon", html: '<svg class="hero-scramble-icon"></svg>' },
+    ]);
+    expect(html).toBe(
+      '<span class="hero-scramble-text">co</span><span class="hero-scramble-symbol">#</span><svg class="hero-scramble-icon"></svg>',
+    );
+  });
+});

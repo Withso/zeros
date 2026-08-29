@@ -451,17 +451,24 @@ const [designFile, codeFile] = process.argv.slice(1);
 const seen = [];
 const onDesign = () => seen.push("design");
 const onCode = () => seen.push("code");
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 fs.watchFile(designFile, { interval: 20 }, onDesign);
 fs.watchFile(codeFile, { interval: 20 }, onCode);
-setTimeout(() => {
+(async () => {
+  // StatWatcher needs a baseline poll before mtime changes are visible.
+  // A fixed 250ms window missed that poll on loaded Linux arm64 runners.
+  await wait(120);
   fs.writeFileSync(designFile, "after");
   fs.writeFileSync(codeFile, "after");
-}, 40);
-setTimeout(() => {
+  const deadline = Date.now() + 2000;
+  while (!seen.includes("code") && Date.now() < deadline) {
+    await wait(20);
+  }
+  await wait(80);
   fs.unwatchFile(designFile, onDesign);
   fs.unwatchFile(codeFile, onCode);
   process.stdout.write(JSON.stringify(seen));
-}, 250);
+})();
 `;
     const { stdout } = await execFileAsync(
       process.execPath,

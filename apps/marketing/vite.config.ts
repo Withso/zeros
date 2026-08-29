@@ -17,6 +17,9 @@ export default defineConfig({
   server: {
     port: 3000,
     strictPort: true,
+    // Dual-stack. `--host 0.0.0.0` is IPv4-only; Cursor port-forward
+    // often connects to ::1 and gets ERR_CONNECTION_REFUSED otherwise.
+    host: true,
     // Cloud-agent / tunnel previews hit this via *.trycloudflare.com etc.
     allowedHosts: true,
   },

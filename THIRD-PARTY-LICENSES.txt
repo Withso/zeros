@@ -29,7 +29,7 @@ TERMS-GOVERNED COMPONENTS — RELEASE REVIEW REQUIRED
 - @anthropic-ai/claude-agent-sdk@0.3.238: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 - @cursor/sdk@1.0.28: Proprietary/terms-governed; redistribution and authentication flows require an explicit vendor/legal review.
 
-PACKAGE INVENTORY (600 resolved package/version records)
+PACKAGE INVENTORY (601 resolved package/version records)
 -----------------
 
 @anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.238
@@ -2153,6 +2153,12 @@ graceful-fs@4.2.11
   Source: https://github.com/isaacs/node-graceful-fs
   License documents: f65c5d9f22a3
 
+gsap@3.15.0
+  License: Standard 'no charge' license: https://gsap.com/standard-license.
+  Surfaces: marketing standalone deployment, root pnpm workspace
+  Source: https://github.com/greensock/GSAP
+  License documents: 5801093a68ca
+
 has-property-descriptors@1.0.2
   License: MIT
   Surfaces: root pnpm workspace
@@ -4061,7 +4067,7 @@ zwitch@2.0.4
   Source: https://github.com/wooorm/zwitch
   License documents: ca4662cb5d1b
 
-LICENSE AND NOTICE TEXTS (271 unique documents)
+LICENSE AND NOTICE TEXTS (272 unique documents)
 ------------------------
 
 ================================================================================
@@ -8338,6 +8344,92 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+================================================================================
+DOCUMENT 5801093a68ca
+SHA-256: 5801093a68caf1ff12b45bc7ff922002f4896f52a0182d2e4f6755bf1828e3dc
+Applies to: gsap@3.15.0
+Source labels: gsap@3.15.0 — GSAP Standard "No Charge" License (reviewed copy)
+================================================================================
+
+Standard "No Charge" GSAP License
+
+I. DEFINITIONS
+
+- “GSAP License” means the terms and conditions of this GSAP Software License
+  Agreement.
+- "GSAP Products" means any Software made available at gsap.com or any successor
+  sites, including but not limited to the GSAP animation library and related
+  plugins, tools, or extensions.
+- "Permitted Uses" means the implementation and/or use of GSAP Products on any
+  website, web application, or digital interface by any person or entity (which
+  may include, for clarity, those of companies that compete with Webflow in other
+  areas of business).
+- "Prohibited Uses" means any implementation and/or use of GSAP Products in tools
+  that allow users to build visual animations without code that encourages,
+  induces, or materially assists in creating a solution that competes with
+  Webflow’s visual animation building capabilities.
+- "Competitive Products" means any software, tool, or service that enables users
+  to create, edit, or manage animations through a visual interface or builder
+  similar to Webflow.
+
+II. GRANT OF LICENSE
+
+Subject to the terms and conditions of this GSAP License, Webflow grants you a
+non-exclusive, worldwide license to use, reproduce, display, and implement GSAP
+Products solely for Permitted Uses.
+
+III. RESTRICTIONS
+
+You may not:
+
+1. Use any GSAP Products for any Prohibited Uses without prior written consent;
+2. Reverse engineer any GSAP Products for the purpose of creating Competitive
+   Products;
+3. Remove or alter any proprietary notices or branding from GSAP Products.
+
+IV. OWNERSHIP AND INTELLECTUAL PROPERTY
+
+All intellectual property rights in GSAP Products, including but not limited to
+copyright, patents, trademarks, and trade secrets, remain the exclusive property
+of Webflow. This GSAP License does not transfer any ownership rights in GSAP
+Products to you.
+
+V. TERMINATION
+
+Webflow may terminate this GSAP License and revoke your access in its
+discretion if you fail to comply with any of these terms and conditions. Upon
+termination, you must cease all use of GSAP Products and destroy all copies in
+your possession.
+
+VI. MISCELLANEOUS PROVISIONS
+
+1. General: This GSAP License is incorporated into and subject to Webflow’s
+   Terms of Service. In the event of any conflict or inconsistency between this
+   GSAP License and the Terms of Service, the terms of this GSAP License shall
+   govern in relation to your use of any GSAP Products.
+2. Amendments: Webflow reserves the right to update or modify this GSAP License
+   at any time by posting the revised terms on this website, provided that any
+   such updates or modifications shall not result in any material degradation
+   to the security, integrity, or functionality of any GSAP Products. You
+   understand and agree that your continued use of any GSAP Products after such
+   revisions to this GSAP License constitutes your acceptance of this GSAP
+   License as revised. If you do not accept the revised GSAP License, you are
+   prohibited from using versions of the GSAP Products released after the
+   effective date of the revised GSAP License (as well as any updates made to
+   previous versions). Notwithstanding, you may continue using previous versions
+   of GSAP Products under the applicable terms licensed to you prior to the
+   effective date of the revised GSAP License (for clarity, excluding any
+   updates made thereto).
+3. No Waiver: Failure of Webflow to enforce any provision of this GSAP License
+   shall not constitute a waiver of future enforcement of that or any other
+   provision.
+
+Effective date: April 30, 2025
+Last modified date: May 30, 2025
+Copyright (©) 2025, Webflow
+
+Source: https://gsap.com/standard-license
 
 ================================================================================
 DOCUMENT 598935964591
