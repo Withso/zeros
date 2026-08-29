@@ -73,8 +73,9 @@ describe("marketing homepage layout", () => {
     expect(brand).toMatch(/items-center/);
     expect(brand).toMatch(/h-6 w-6/);
     expect(brand).toMatch(/h-\[16px\]/);
-    expect(brand).toMatch(/gap-1/);
-    expect(brand).toMatch(/-ml-1/);
+    expect(brand).toMatch(/gap-2/);
+    expect(brand).not.toMatch(/-ml-1/);
+    expect(brand).not.toMatch(/gap-1[^\d]/);
     expect(brand).not.toMatch(/gap-2\.5/);
     expect(brand).not.toMatch(/h-\[28px\]/);
     expect(brand).not.toMatch(/h-\[20px\]/);

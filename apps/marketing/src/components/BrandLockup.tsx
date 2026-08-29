@@ -14,12 +14,12 @@ const SIZE_CLASS = {
  * Mark + SVG "Zeros" wordmark. Outfit Medium outlines (SIL OFL) with
  * a 110/120 size ratio on Z vs "eros", −2% tracking, shared baseline.
  * Header scale matches Linear: 24px mark, ~16px name so cap-height
- * sits inside the blobs; 4px gap like Linear’s mark-to-name space.
+ * sits inside the blobs; 8px gap between mark and name.
  */
 export function BrandLockup({ size = 'md', className = '' }: BrandLockupProps) {
   const { mark, wordmark } = SIZE_CLASS[size]
   return (
-    <span className={`inline-flex items-center gap-1 ${className}`}>
+    <span className={`inline-flex items-center gap-2 ${className}`}>
       <img
         src="/zeros-logo.svg"
         alt=""
@@ -29,7 +29,7 @@ export function BrandLockup({ size = 'md', className = '' }: BrandLockupProps) {
       <img
         src="/zeros-wordmark.svg"
         alt=""
-        className={`${wordmark} -ml-1 w-auto invert dark:invert-0`}
+        className={`${wordmark} w-auto invert dark:invert-0`}
         draggable={false}
       />
     </span>
