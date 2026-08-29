@@ -117,6 +117,7 @@ import { ActionsCtx, type SessionsActions } from "./sessions-context";
 import { questionRequestIsBrowserApproval } from "./pending-question-tools";
 import { nativeInvoke } from "../../platform/runtime";
 import {
+  admissionRouteWithoutFlight,
   admissionCancellationAction,
   agentUpdateFlushMode,
   bindFailureWasSuperseded,
@@ -1519,24 +1520,36 @@ export function AgentSessionsProvider({
           ) {
             return;
           }
-          // A send that arrived behind a lazy probe must resume the durable
-          // provider conversation for real before falling back to a fresh
-          // session. The probe's miss intentionally kept that binding intact.
-          if (existing?.providerBinding && loadIntoChatRef.current) {
-            const adopted = await loadIntoChatRef.current(
-              chatId,
-              agentId,
-              existing.providerBinding,
-              {
-                agentName: options?.agentName ?? existing.agentName ?? agentId,
-                cwd: options?.cwd ?? existing.cwd ?? undefined,
-                env: options?.env,
-              },
-            );
-            if (adopted) return;
-            existing = getStore().sessions[chatId];
-          }
         }
+      }
+
+      // A send behind a lazy probe, or the first send after Stop detached a
+      // cancelled resume, must adopt the durable provider conversation before
+      // falling back to a fresh session. Cancellation keeps that binding on
+      // purpose even though no admission flight remains.
+      const providerBinding = existing?.providerBinding;
+      const loadIntoChat = loadIntoChatRef.current;
+      if (
+        admissionRouteWithoutFlight({
+          force: options?.force === true,
+          hasProviderBinding: Boolean(providerBinding),
+          canLoad: Boolean(loadIntoChat),
+        }) === "resume" &&
+        providerBinding &&
+        loadIntoChat
+      ) {
+        const adopted = await loadIntoChat(
+          chatId,
+          agentId,
+          providerBinding,
+          {
+            agentName: options?.agentName ?? existing?.agentName ?? agentId,
+            cwd: options?.cwd ?? existing?.cwd ?? undefined,
+            env: options?.env,
+          },
+        );
+        if (adopted) return;
+        existing = getStore().sessions[chatId];
       }
 
       // Resolve cwd ONCE so the slot and the bridge call agree. Earlier

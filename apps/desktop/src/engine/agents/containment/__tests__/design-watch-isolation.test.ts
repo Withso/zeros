@@ -229,7 +229,7 @@ setTimeout(() => {
     expect(seen.some((event) => event.startsWith("design:"))).toBe(false);
   });
 
-  it("filters the native macOS fsevents backend used by Vite and chokidar", async () => {
+  it("filters the three-argument native macOS fsevents backend used by Vite and chokidar", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "zeros-fsevents-guard-"));
     roots.push(root);
     const workspace = path.join(root, "workspace");
@@ -245,7 +245,7 @@ setTimeout(() => {
       path.join(fakeFsevents, "index.js"),
       `let listener;
 module.exports = {
-  watch(_root, callback) { listener = callback; return () => {}; },
+  watch(_root, _since, callback) { listener = callback; return () => {}; },
   emit(file) { listener(file, 0); },
   getInfo(file) { return { path: file, event: "modified", type: "file", changes: {} }; },
 };
@@ -259,7 +259,7 @@ module.exports = {
 const fsevents = require("fsevents");
 const [designFile, codeFile] = process.argv.slice(1);
 const seen = [];
-fsevents.watch(process.cwd(), (file) => seen.push(file));
+fsevents.watch(process.cwd(), 0, (file) => seen.push(file));
 fsevents.emit(designFile);
 fsevents.emit(codeFile);
 process.stdout.write(JSON.stringify(seen));

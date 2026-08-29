@@ -187,6 +187,20 @@ export function sharedAdmissionFlightAction(input: {
     : "reuse";
 }
 
+/** Choose the provider admission route after no shared flight remains.
+ * Cancellation deliberately detaches a load flight without discarding its
+ * durable provider binding. The next ordinary admission must therefore resume
+ * that binding before it is allowed to create a new provider conversation. */
+export function admissionRouteWithoutFlight(input: {
+  force: boolean;
+  hasProviderBinding: boolean;
+  canLoad: boolean;
+}): "resume" | "create" {
+  return !input.force && input.hasProviderBinding && input.canLoad
+    ? "resume"
+    : "create";
+}
+
 /** Map a failure classification to the UI session status. The single
  * definition, shared by the RPC paths in <AgentSessionsProvider> and by the
  * store's turn-state settle — those two must not be able to disagree about

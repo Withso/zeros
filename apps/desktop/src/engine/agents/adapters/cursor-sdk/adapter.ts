@@ -12,7 +12,7 @@
 // if the package / its native sqlite3 binding is missing.
 // ──────────────────────────────────────────────────────────
 
-import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scrypt } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import type { AdvertisedModel } from "@zeros/protocol/agent-events";
@@ -89,22 +89,26 @@ const FALLBACK_MODEL_PREFERENCE = [
  *  Ordered most-capable-confirmed-good first. */
 const LOCAL_RETRY_MODELS = ["composer-2", "composer-1.5"];
 
-/** Process-local key for account cache partitions. The corresponding model
- * state is memory-only, so a fresh key on every engine start preserves all
+/** Process-local salt for account cache partitions. The corresponding model
+ * state is memory-only, so a fresh salt on every engine start preserves all
  * required behavior while preventing a leaked fingerprint from becoming an
  * offline API-key guessing oracle. */
-const CURSOR_MODEL_STATE_FINGERPRINT_KEY = randomBytes(32);
+const CURSOR_MODEL_STATE_FINGERPRINT_SALT = randomBytes(32);
 
-/** Return a keyed pseudonym for an API key without retaining the credential in
- * model discovery state. Exported to lock the security property in tests. */
-export function cursorModelStateFingerprint(
+/** Return a memory-hard pseudonym for an API key without retaining the
+ * credential in model discovery state. Exported to lock the security property
+ * in tests. */
+export async function cursorModelStateFingerprint(
   apiKey: string,
-  processKey: Uint8Array,
-): string {
-  // Cursor API keys are provider-generated tokens, and this value is an
-  // ephemeral keyed cache pseudonym—not a persisted password verifier.
-  // codeql[js/insufficient-password-hash]
-  return createHmac("sha256", processKey).update(apiKey).digest("hex");
+  processSalt: Uint8Array,
+): Promise<string> {
+  const derivedKey = await new Promise<Buffer>((resolve, reject) => {
+    scrypt(apiKey, processSalt, 32, (error, value) => {
+      if (error) reject(error);
+      else resolve(value);
+    });
+  });
+  return derivedKey.toString("hex");
 }
 
 // Billing is supplementary telemetry. The SDK may consult a provider/local
@@ -978,10 +982,10 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  picks (resolveValidModelId) and feeds the picker via
    *  cachedInitialize._meta.models. Best-effort — failures leave the bundled
    *  catalog in place. */
-  private activateModelState(apiKey: string): CursorModelState {
-    const fingerprint = cursorModelStateFingerprint(
+  private async activateModelState(apiKey: string): Promise<CursorModelState> {
+    const fingerprint = await cursorModelStateFingerprint(
       apiKey,
-      CURSOR_MODEL_STATE_FINGERPRINT_KEY,
+      CURSOR_MODEL_STATE_FINGERPRINT_SALT,
     );
     if (this.modelState.fingerprint === fingerprint) return this.modelState;
     this.modelState = createCursorModelState(fingerprint);
@@ -995,9 +999,9 @@ export class CursorSdkAdapter implements AgentAdapter {
 
   private async discoverModels(
     apiKey: string,
+    state: CursorModelState,
     sessionSdk?: CursorSdkModule,
   ): Promise<void> {
-    const state = this.activateModelState(apiKey);
     if (state.discovery) return state.discovery;
     state.discovery = (async () => {
       try {
@@ -1092,8 +1096,8 @@ export class CursorSdkAdapter implements AgentAdapter {
     apiKey: string,
     sessionSdk: CursorSdkModule,
   ): Promise<CursorModelState> {
-    const state = this.activateModelState(apiKey);
-    const discovery = this.discoverModels(apiKey, sessionSdk);
+    const state = await this.activateModelState(apiKey);
+    const discovery = this.discoverModels(apiKey, state, sessionSdk);
     // discoverModels classifies and reports failures itself. Keep a terminal
     // sink anyway so future refactors cannot turn this deliberately detached
     // optimization into an unhandled rejection.

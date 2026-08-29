@@ -119,21 +119,24 @@ beforeEach(() => {
 const TEXT: ContentBlock[] = [{ type: "text", text: "hi" } as ContentBlock];
 
 describe("cursorModelStateFingerprint (pure)", () => {
-  it("uses the process key when pseudonymizing account credentials", () => {
-    const firstProcessKey = new Uint8Array(32).fill(0x11);
-    const secondProcessKey = new Uint8Array(32).fill(0x22);
+  it("uses the process salt when pseudonymizing account credentials", async () => {
+    const firstProcessSalt = new Uint8Array(32).fill(0x11);
+    const secondProcessSalt = new Uint8Array(32).fill(0x22);
     const apiKey = "key_account_a";
 
-    const fingerprint = cursorModelStateFingerprint(apiKey, firstProcessKey);
+    const fingerprint = await cursorModelStateFingerprint(
+      apiKey,
+      firstProcessSalt,
+    );
 
     expect(fingerprint).toBe(
-      cursorModelStateFingerprint(apiKey, firstProcessKey),
+      await cursorModelStateFingerprint(apiKey, firstProcessSalt),
     );
     expect(fingerprint).not.toBe(
-      cursorModelStateFingerprint(apiKey, secondProcessKey),
+      await cursorModelStateFingerprint(apiKey, secondProcessSalt),
     );
     expect(fingerprint).not.toBe(
-      cursorModelStateFingerprint("key_account_b", firstProcessKey),
+      await cursorModelStateFingerprint("key_account_b", firstProcessSalt),
     );
   });
 });

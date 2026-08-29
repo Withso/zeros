@@ -864,8 +864,8 @@ describe("ZSR execution boundary", () => {
       descriptor.env.WATCHEXEC_IGNORE_FILES.split(path.delimiter),
     ).toContain(watchIgnorePath);
     await expect(access(watchIgnorePath)).resolves.toBeUndefined();
-    await expect(access(watchRootsPath)).resolves.toBeUndefined();
-    expect(JSON.parse(await readFile(watchRootsPath, "utf8"))).toEqual({
+    const watchRoots = await readFile(watchRootsPath, "utf8");
+    expect(JSON.parse(watchRoots)).toEqual({
       version: 1,
       protectedRoots: [design, secondDesign].sort((left, right) =>
         left.localeCompare(right),

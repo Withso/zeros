@@ -5,6 +5,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  admissionRouteWithoutFlight,
   bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
   agentUpdateFlushMode,
@@ -827,6 +828,13 @@ describe("stopping a send that has not gone out yet", () => {
     expect(flights.has("chat-1")).toBe(false);
     expect(keys.has("chat-1")).toBe(false);
     expect(adoptOnly.has("chat-1")).toBe(false);
+    expect(
+      admissionRouteWithoutFlight({
+        force: false,
+        hasProviderBinding: true,
+        canLoad: true,
+      }),
+    ).toBe("resume");
 
     flights.set("chat-1", nextFlight);
     // The old flight's identity-checked finalizer cannot erase the retry.

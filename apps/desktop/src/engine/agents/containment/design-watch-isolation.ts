@@ -1,6 +1,14 @@
 import { realpathSync } from "node:fs";
-import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, realpath, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  chmod,
+  link,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
@@ -360,15 +368,26 @@ if (!state.installed) {
       configurable: false,
       enumerable: watchDescriptor ? watchDescriptor.enumerable : true,
       writable: false,
-      value(watched, listener, ...args) {
-        if (typeof listener !== "function") {
-          return Reflect.apply(loaded.watch, loaded, [watched, listener, ...args]);
+      value(...watchArgs) {
+        let listenerIndex = -1;
+        for (let index = watchArgs.length - 1; index >= 0; index -= 1) {
+          if (typeof watchArgs[index] === "function") {
+            listenerIndex = index;
+            break;
+          }
         }
+        if (listenerIndex < 0) {
+          return Reflect.apply(loaded.watch, loaded, watchArgs);
+        }
+        const listener = watchArgs[listenerIndex];
+        const watched = watchArgs[0];
         const guardedListener = function guardedFsevent(eventPath, ...eventArgs) {
           if (suppress(watched, eventPath)) return;
           return Reflect.apply(listener, this, [eventPath, ...eventArgs]);
         };
-        return Reflect.apply(loaded.watch, loaded, [watched, guardedListener, ...args]);
+        const guardedArgs = watchArgs.slice();
+        guardedArgs[listenerIndex] = guardedListener;
+        return Reflect.apply(loaded.watch, loaded, guardedArgs);
       },
     });
     fseventsWrappers.set(loaded, wrapped);
@@ -420,22 +439,36 @@ async function writeImmutableArtifact(
   source: string,
   adoptExisting: boolean,
 ): Promise<void> {
+  // A successful exclusive write publishes the destination inode before its
+  // contents are complete. Stage the full immutable inode beside the target,
+  // then use an exclusive hard link as the atomic publication point. A
+  // concurrent loser can therefore observe only a complete artifact.
+  const staged = `${target}.${process.pid}.${randomUUID()}.tmp`;
   try {
-    await writeFile(target, source, {
+    await writeFile(staged, source, {
       encoding: "utf8",
       mode: 0o444,
       flag: "wx",
     });
-  } catch (error) {
-    if (!adoptExisting || (error as NodeJS.ErrnoException).code !== "EEXIST") {
-      throw error;
+    await chmod(staged, 0o444);
+    try {
+      await link(staged, target);
+    } catch (error) {
+      if (
+        !adoptExisting ||
+        (error as NodeJS.ErrnoException).code !== "EEXIST"
+      ) {
+        throw error;
+      }
+      const existing = await readFile(target, "utf8");
+      if (existing !== source) {
+        throw new Error(
+          "Design watcher isolation artifact failed integrity check",
+        );
+      }
     }
-    const existing = await readFile(target, "utf8");
-    if (existing !== source) {
-      throw new Error(
-        "Design watcher isolation artifact failed integrity check",
-      );
-    }
+  } finally {
+    await rm(staged, { force: true });
   }
   await chmod(target, 0o444);
 }

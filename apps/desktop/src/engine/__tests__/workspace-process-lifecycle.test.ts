@@ -2,7 +2,16 @@
 // boundary where setup, run actions, terminals, and agent sessions are brought
 // to rest before a managed checkout can be moved or removed.
 
-import { access, mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import {
+  access,
+  chown,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -278,6 +287,24 @@ function qualifiedCloudWorker(): CloudWorkerConfiguration {
       setpriv: "/usr/bin/setpriv",
     },
   };
+}
+
+async function canAssignCloudWorkerOwnership(
+  root: string,
+  worker: CloudWorkerConfiguration,
+): Promise<boolean> {
+  const probe = path.join(root, "cloud-worker-ownership-probe");
+  await writeFile(probe, "", { flag: "wx" });
+  try {
+    await chown(probe, worker.uid, worker.gid);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EPERM") return false;
+    throw error;
+  } finally {
+    await rm(probe, { force: true });
+  }
 }
 
 describe("workspace process reaper", () => {
@@ -3118,8 +3145,16 @@ describe("workspace terminal start barrier", () => {
     }
   });
 
-  it("makes the watcher preload readable after a cloud terminal drops to the human worker", async () => {
+  it("makes the watcher preload readable after a cloud terminal drops to the human worker", async ({
+    skip,
+  }) => {
     const base = await mkdtemp(path.join(tmpdir(), "zeros-cloud-watch-"));
+    const cloudWorker = qualifiedCloudWorker();
+    if (!(await canAssignCloudWorkerOwnership(base, cloudWorker))) {
+      await rm(base, { recursive: true, force: true });
+      skip("runner cannot assign the qualified cloud worker ownership");
+      return;
+    }
     const workspace = {
       id: "ws_cloud_terminal_watch",
       path: path.join(base, "worktree"),
@@ -3134,7 +3169,7 @@ describe("workspace terminal start barrier", () => {
     const state = internals(
       new ZerosEngine({ root: workspace.repoRoot, port: 29_929 }),
     );
-    state.cloudWorker = qualifiedCloudWorker();
+    state.cloudWorker = cloudWorker;
     const getWorkspace = vi
       .spyOn(gitState, "getWorkspaceById")
       .mockReturnValue(
