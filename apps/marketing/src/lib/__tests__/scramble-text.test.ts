@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   CODE_SCRAMBLE,
+  DESIGN_ICONS,
   DESIGN_SCRAMBLE,
+  DESIGN_TOKENS,
   escapeHtml,
   MATRIX_SCRAMBLE,
   renderGlyphRun,
@@ -43,13 +45,28 @@ describe("hero scramble fill", () => {
     expect(MATRIX_SCRAMBLE.chars).not.toMatch(/ﾊ/);
   });
 
-  it("does not plant full role or design words into the scramble", () => {
+  it("mixes alignment and Figma marks into the designers scramble", () => {
+    expect(DESIGN_ICONS.length).toBeGreaterThanOrEqual(6);
+    expect(DESIGN_SCRAMBLE.icons).toBe(DESIGN_ICONS);
+    expect(DESIGN_TOKENS).toEqual(
+      expect.arrayContaining(["auto", "hug", "fill", "gap", "align"]),
+    );
+    expect(DESIGN_TOKENS.join(" ")).not.toMatch(/components/);
     expect(DESIGN_SCRAMBLE.chars).not.toMatch(ROLE_WORDS);
-    expect(CODE_SCRAMBLE.chars).not.toMatch(ROLE_WORDS);
-    expect(MATRIX_SCRAMBLE.chars).not.toMatch(ROLE_WORDS);
 
+    const samples = Array.from({ length: 50 }, () => scrambleTail(11, DESIGN_SCRAMBLE));
+    expect(samples.some((html) => html.includes("hero-scramble-icon"))).toBe(true);
+    expect(samples.some((html) => html.includes("<svg"))).toBe(true);
+    const joined = samples.map(visibleText).join("");
+    expect(joined).toMatch(/auto|hug|fill|gap|align|var|8px/);
+    for (const html of samples) {
+      expect(visibleText(html)).not.toMatch(ROLE_WORDS);
+      expect(visibleText(html)).not.toMatch(CJK_OR_KATAKANA);
+    }
+  });
+
+  it("does not plant full role words into code or matrix scrambles", () => {
     const samples = [
-      ...Array.from({ length: 40 }, () => scrambleTail(11, DESIGN_SCRAMBLE)),
       ...Array.from({ length: 40 }, () => scrambleTail(11, CODE_SCRAMBLE)),
       ...Array.from({ length: 40 }, () => scrambleTail(11, MATRIX_SCRAMBLE)),
     ];
@@ -80,15 +97,17 @@ describe("hero scramble fill", () => {
     }
   });
 
-  it("wraps settled letters and scramble digits in fixed color roles", () => {
+  it("wraps settled letters, scramble digits, tokens, and icons", () => {
     const html = renderGlyphRun([
       { kind: "to", ch: "d" },
       { kind: "to", ch: "e" },
-      { kind: "scramble", ch: "0" },
-      { kind: "scramble", ch: "1" },
+      { kind: "token", ch: "a" },
+      { kind: "token", ch: "u" },
+      { kind: "scramble", ch: "#" },
+      { kind: "icon", html: '<svg class="hero-scramble-icon"></svg>' },
     ]);
     expect(html).toBe(
-      '<span class="hero-scramble-text hero-role-revealed">de</span><span class="hero-scramble-symbol">01</span>',
+      '<span class="hero-scramble-text hero-role-revealed">de</span><span class="hero-scramble-token">au</span><span class="hero-scramble-symbol">#</span><svg class="hero-scramble-icon"></svg>',
     );
   });
 });
