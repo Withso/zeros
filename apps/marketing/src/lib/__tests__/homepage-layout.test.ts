@@ -42,6 +42,9 @@ describe("marketing homepage layout", () => {
     expect(hero).toMatch(/for builders/);
     expect(hero).toMatch(/Run a team of coding & design agents/);
     expect(hero).toMatch(/text-left/);
+    expect(hero).toMatch(/text-\[36px\]/);
+    expect(hero).toMatch(/sm:text-\[52px\]/);
+    expect(hero).toMatch(/lg:text-\[60px\]/);
     expect(hero).not.toMatch(/text-center/);
     expect(hero).not.toMatch(/Design and code/);
   });

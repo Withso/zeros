@@ -24,7 +24,7 @@ export function HomePage() {
 function Hero() {
   return (
     <section className="mx-auto w-full max-w-[1240px] px-5 pt-16 sm:px-8 sm:pt-20 lg:px-10 lg:pt-24">
-      <h1 className="text-left text-[40px] leading-[1.08] font-medium tracking-[-0.03em] text-fg1 sm:text-[56px] lg:text-[68px]">
+      <h1 className="text-left text-[36px] leading-[1.08] font-medium tracking-[-0.03em] text-fg1 sm:text-[52px] lg:text-[60px]">
         <span className="block">Human-agent interaction</span>
         <span className="block">for builders</span>
       </h1>
