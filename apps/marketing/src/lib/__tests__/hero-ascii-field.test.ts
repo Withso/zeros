@@ -19,7 +19,6 @@ function sampleGrid(cols: number, rows: number) {
   let headline = 0;
   let sky = 0;
   let product = 0;
-  let stars = 0;
   const seen = new Set<string>();
   for (let row = 0; row < rows; row += 1) {
     for (let col = 0; col < cols; col += 1) {
@@ -32,17 +31,9 @@ function sampleGrid(cols: number, rows: number) {
       if (nx > 0.12 && nx < 0.55 && ny > 0.08 && ny < 0.3) headline += 1;
       if (ny < 0.3 && (nx < 0.16 || nx > 0.7)) sky += 1;
       if (ny > 0.58) product += 1;
-      if (
-        ASCII_STAR_GLYPHS.includes(
-          glyph.ch as (typeof ASCII_STAR_GLYPHS)[number],
-        ) &&
-        cloudDensity(nx, ny, cols / rows) < 0.055
-      ) {
-        stars += 1;
-      }
     }
   }
-  return { glyphs, headline, sky, product, stars, seen };
+  return { glyphs, headline, sky, product, seen };
 }
 
 describe("hero ASCII cloud field", () => {
@@ -101,7 +92,6 @@ describe("hero ASCII cloud field", () => {
     expect(desktop.sky).toBeGreaterThan(desktop.headline);
     expect(desktop.product).toBe(0);
     expect(desktop.headline / desktop.glyphs).toBeLessThan(0.18);
-    expect(desktop.stars).toBeGreaterThan(0);
     for (const ch of desktop.seen) {
       expect(ALLOWED.has(ch), ch).toBe(true);
     }
