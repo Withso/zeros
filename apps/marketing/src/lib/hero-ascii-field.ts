@@ -26,7 +26,7 @@ export const ASCII_CLOUD_RAMP = [
 export const ASCII_STAR_GLYPHS = [".", "+", "x"] as const;
 
 export const HERO_ASCII_VOID = "#000000";
-export const HERO_ASCII_GLYPH_RGB = [208, 208, 208] as const;
+export const HERO_ASCII_GLYPH_RGB = [220, 220, 220] as const;
 
 const DENSITY_FLOOR = 0.055;
 const STAR_CHANCE = 0.02;
@@ -166,19 +166,19 @@ export function productSkyline(ny: number, aspect = 1.6): number {
 function moundField(nx: number, ny: number, aspect: number): number {
   if (aspect >= 1.05) {
     return (
-      1.35 * gauss(nx, ny, 0.98, 0.04, 0.3, 0.2) +
-      1.12 * gauss(nx, ny, 1.04, 0.2, 0.26, 0.22) +
-      0.82 * gauss(nx, ny, 0.78, -0.02, 0.28, 0.14) +
-      0.58 * gauss(nx, ny, 0.62, 0.06, 0.22, 0.12) +
-      0.55 * gauss(nx, ny, 0.0, 0.02, 0.18, 0.14) +
-      0.42 * gauss(nx, ny, -0.02, 0.18, 0.16, 0.16)
+      1.45 * gauss(nx, ny, 0.96, 0.12, 0.34, 0.2) +
+      1.18 * gauss(nx, ny, 1.02, 0.22, 0.28, 0.18) +
+      0.95 * gauss(nx, ny, 0.78, 0.08, 0.3, 0.14) +
+      0.7 * gauss(nx, ny, 0.64, 0.1, 0.22, 0.12) +
+      0.62 * gauss(nx, ny, 0.02, 0.1, 0.18, 0.14) +
+      0.48 * gauss(nx, ny, -0.02, 0.2, 0.16, 0.14)
     );
   }
   return (
-    1.22 * gauss(nx, ny, 0.96, 0.05, 0.22, 0.16) +
-    1.05 * gauss(nx, ny, 1.04, 0.2, 0.2, 0.18) +
-    0.7 * gauss(nx, ny, 0.04, 0.04, 0.16, 0.12) +
-    0.48 * gauss(nx, ny, -0.04, 0.18, 0.14, 0.14)
+    1.32 * gauss(nx, ny, 0.94, 0.1, 0.24, 0.16) +
+    1.1 * gauss(nx, ny, 1.02, 0.2, 0.22, 0.16) +
+    0.78 * gauss(nx, ny, 0.04, 0.1, 0.16, 0.12) +
+    0.52 * gauss(nx, ny, -0.02, 0.2, 0.14, 0.12)
   );
 }
 
@@ -216,7 +216,7 @@ export function cloudDensity(nx: number, ny: number, aspect: number): number {
   const well = headlineWell(nx, ny, aspect);
   dens *= 1 - 0.97 * well;
   dens *= sky;
-  return clamp01(dens * 1.7 - 0.04);
+  return clamp01(dens * 1.95 - 0.03);
 }
 
 export function glyphAt(
