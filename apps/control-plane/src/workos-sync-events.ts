@@ -586,6 +586,14 @@ async function applyMembershipEvent(
      WHERE org_id = $1 AND user_id = $2 FOR UPDATE`,
     [organizationId, userId],
   );
+  // A provider-side non-directory membership is not, by itself, a Zeros
+  // product authorization grant. Normal Zeros organization creation and
+  // invitation acceptance commit the local desired membership before the
+  // WorkOS command runs, so legitimate convergence always has this row.
+  // Refusing unsolicited materialization closes direct Dashboard/AuthKit
+  // invitation acceptance (including WorkOS' corporate-domain allowance)
+  // while preserving explicit SCIM provisioning for the enterprise path.
+  if (!current.rows[0] && !membership.directoryManaged) return "applied";
   const changed =
     !current.rows[0] ||
     current.rows[0].role !== role.data ||
@@ -674,12 +682,13 @@ async function applyInvitationEvent(
     `UPDATE invitations
      SET workos_invitation_id = $2, invitation_source = 'workos',
          workos_updated_at = $3,
-         accepted_at = CASE WHEN $4 = 'accepted'
-                            THEN COALESCE(accepted_at, $5::timestamptz)
-                            ELSE accepted_at END,
-         revoked_at = CASE WHEN $4 IN ('revoked', 'expired')
-                           THEN COALESCE(revoked_at, $6::timestamptz, now())
-                           ELSE revoked_at END
+         revoked_at = CASE
+           WHEN $4 IN ('revoked', 'expired')
+             THEN COALESCE(revoked_at, $6::timestamptz, now())
+           WHEN $4 = 'accepted' AND accepted_at IS NULL
+             THEN COALESCE(revoked_at, $5::timestamptz, now())
+           ELSE revoked_at
+         END
      WHERE id = $1
        AND (workos_updated_at IS NULL OR workos_updated_at <= $3::timestamptz)`,
     [

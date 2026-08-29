@@ -45,14 +45,18 @@ session. A defensive desktop error mapping remains so an unexpected
 `email_verification_required` response fails closed.
 
 WorkOS authenticates people and is authoritative for WorkOS identities,
-credentials, provider sessions, collaborative-organization objects, and the
-provider-side coarse membership lifecycle. Zeros Postgres remains
+credentials, provider sessions, collaborative-organization objects, native
+invitation delivery, and the provider-side membership lifecycle. Zeros
+Postgres remains
 authoritative for durable product account IDs, Personal, billing and
 entitlements, child teams, team membership, workspace/repository access,
 product permissions, audit history, and all cloud resources. Zeros also keeps
 the locally enforced projection and desired state for WorkOS organizations,
-memberships, and invitations. Provider objects are never queried on every API
-request; signed events and a durable repair stream converge the projection.
+memberships, and invitations, plus every non-SCIM product-access grant. A
+non-directory WorkOS membership can converge an existing locally authorized
+member but cannot create Zeros access by itself; SCIM remains the explicit
+enterprise provisioning exception. Provider objects are never queried on every
+API request; signed events and a durable repair stream converge the projection.
 
 This split is intentional: WorkOS can revoke authentication or enterprise
 membership, while a WorkOS outage cannot make Zeros forget who owns product
@@ -215,18 +219,38 @@ event arrives after WorkOS accepts a command but before the exact provider ID
 is committed locally, it is retained as ignored and replayed immediately after
 that exact ID is correlated; replay never falls back to email matching.
 
-Consuming a Zeros invitation retires every pending WorkOS invitation for the
+The invitation command asks WorkOS to send one seven-day native branded email,
+including the authenticated inviter when available. Each WorkOS Application's
+custom User Invitation URL points to the exact channel's `/invite`; WorkOS
+appends `invitation_token`. Web and Desktop carry that opaque value only to the
+authenticated Zeros acceptance endpoint. Railway resolves it through the
+WorkOS API, then requires the returned pending object to match the exact stored
+provider invitation ID, linked WorkOS organization, recipient email, and role.
+A WorkOS organization invitation is intentionally not passed into AuthKit's
+authenticate call: WorkOS documents that a corporate-domain invitation may be
+accepted by a different address on the same domain. Hosted AuthKit performs the
+normal identity ceremony, while Zeros' authenticated acceptance endpoint keeps
+the stricter exact-recipient product-authorization boundary. This assumes normal
+AuthKit registration remains available; an invite-only registration rollout
+would require a separately reviewed design that preserves this exact check.
+A command/email race is retryable only while the matching local outbox command
+is queued or leased. A Dashboard-created invitation with no Zeros record fails
+closed. The locally generated token remains a compatibility/copyable-link
+capability and follows the same recipient check.
+
+Consuming either supported invitation capability retires every pending WorkOS invitation for the
 exact organization/email pair before creating or updating the coarse WorkOS
 membership. Removing a member uses the same ordering key: pending invitations
 are revoked before the membership is deleted. Revoke and delete commands always
 reconcile their captured provider ID with the current provider listing, so a
 duplicate invitation, a lost-response replacement, or a membership created
-after the local transaction cannot escape cleanup. If invitation acceptance
-wins between listing and revocation, the worker treats the revoke as converged
-only after a re-list proves that exact invitation is no longer pending; the
-serialized membership command then enforces Zeros' current desired state. This
-closes the race where an old provider invitation could otherwise re-add a user
-after an administrator removed them.
+after the local transaction cannot escape cleanup. If provider-side invitation
+acceptance wins between listing and revocation, the event invalidates the
+still-pending local invitation rather than marking product access accepted.
+An unsolicited non-SCIM active membership is projected for audit/repair but is
+not materialized into `organization_members`. The serialized membership command
+then enforces Zeros' current desired state. This closes both the old-invite
+re-add race and WorkOS's documented same-corporate-domain invitation allowance.
 
 For an existing WorkOS user, sending a provider invitation also creates a
 `pending` organization membership. Revoking that invitation does not activate
@@ -457,16 +481,19 @@ result without copying secrets into tickets or repository files.
    verification and WorkOS-managed authentication email enabled. Keep
    email-and-password authentication disabled unless a later product decision
    adds it. Configure MFA/recovery policy in Hosted AuthKit, not in Zeros code.
-5. Under **Emails → Configuration**, disable only WorkOS's default **user
-   invitation** email. Zeros sends the one product invitation email through
-   ZeptoMail; its link carries the Zeros capability and enters either the exact
-   desktop channel or the Railway-owned browser state/PKCE flow. The browser
-   path holds the capability in tab-scoped `sessionStorage`, strips it from the
-   address bar, and gives AuthKit only `/invite?mode=resume` as its return path.
-   A WorkOS default invitation link enters AuthKit directly and is therefore
-   not a supported Zeros entry point. Keep Magic Auth, verification, recovery,
-   and other WorkOS authentication emails enabled. Create organization
-   invitations through Zeros, not manually in the WorkOS Dashboard. See WorkOS
+5. Keep WorkOS's native **user invitation** email enabled. Under the exact
+   channel Application's redirect settings, set **User Invitation URL** to
+   `https://app.zeros.build/invite`,
+   `https://app-beta.zeros.build/invite`, or
+   `https://app-alpha.zeros.build/invite` as appropriate. WorkOS appends
+   `invitation_token`; the page offers the exact Desktop channel or the
+   Railway-owned browser state/PKCE flow, stores the token only in tab-scoped
+   `sessionStorage`, and strips it from the address bar before sign-in. Create
+   organization invitations through Zeros, not manually in the WorkOS
+   Dashboard. Keep Magic Auth, verification, recovery, and other WorkOS
+   authentication emails enabled. See WorkOS
+   [Invitations](https://workos.com/docs/authkit/invitations),
+   [Applications](https://workos.com/docs/authkit/applications), and
    [Custom Emails](https://workos.com/docs/authkit/custom-emails).
 6. Configure Zeros-owned Google/GitHub OAuth credentials before Production.
    Provider tokens and extra provider scopes must remain disabled. Follow the
@@ -514,14 +541,15 @@ Railway-only secrets. Rotate each independently per channel. A cookie-password
 rotation invalidates outstanding browser sealed sessions, so schedule and
 communicate it as a forced browser sign-in.
 
-Every hosted channel configures `ZEPTOMAIL_TOKEN`, `EMAIL_FROM`, and the correct
-regional `ZEPTOMAIL_API_URL`. Zeros uses them for the application-owned
-invitation capability email and for recovery/account-lifecycle security
-notifications. Invitation creation waits for the bounded delivery attempt and
-still returns the exact copyable link to the administrator; security
-notifications use the durable outbox with a stable client reference. Operators
-must monitor delivery failures rather than assuming that an HTTP timeout means
-an email was not accepted.
+WorkOS mode does not require `ZEPTOMAIL_TOKEN` or `EMAIL_FROM` for organization
+invitations; the WorkOS invitation command owns the one delivery. Those
+variables remain optional for Zeros-specific recovery/account-lifecycle
+security notifications and the Auth0 rollback path. WorkOS custom email
+branding/domain configuration is not a generic transactional email API, so a
+separate provider is still required if those product notifications must be
+delivered. Security notifications use the durable outbox with a stable client
+reference, and operators must monitor failures rather than treating an HTTP
+timeout as proof that a message was not accepted.
 
 Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
 `CONTROL_PLANE_URL`. Electron compiles only public verification/configuration
@@ -588,9 +616,10 @@ Manual Alpha acceptance must verify:
 - user profile update/deletion, session revocation, organization/member/invite
   webhook idempotency, reordering, lost-response recovery, and Events API
   repair;
-- one and only one invitation email, proving WorkOS default invitation email is
-  disabled and the Zeros link accepts through strict state/PKCE on web and the
-  exact release-channel deep link on desktop;
+- one and only one native WorkOS invitation email, proving there is no Zepto
+  duplicate and `invitation_token` accepts through exact server-side
+  correlation, strict state/PKCE on web, and the exact release-channel deep
+  link on desktop;
 - WorkOS User deletion while browser and desktop are open, proving both clients
   terminate and that a recreated same-email identity enters reviewed recovery;
 - organization member removal/role change while both clients are open, proving
@@ -635,12 +664,13 @@ Verified against the deployed Alpha Web and signed macOS Alpha application:
   membership command dead-lettered. The corrective convergence and cross-object
   event-ordering regressions are implemented; a live post-deployment retest is
   still a promotion gate.
-- A later live email retest exposed a separate entry defect: WorkOS's default
-  invitation email authenticated successfully but returned to the callback
-  without Zeros-created state. The callback correctly failed closed. Zeros now
-  owns the sole invitation email and browser/desktop landing flow; disabling
-  only the WorkOS default invitation email and repeating both acceptance paths
-  remain release gates.
+- A later live email retest exposed a separate entry defect: WorkOS's native
+  invitation authenticated successfully but returned to a callback without
+  Zeros-created state. The callback correctly failed closed. The replacement
+  design keeps WorkOS delivery, points its custom Invitation URL at the bounded
+  Zeros landing, and resolves `invitation_token` server-side against the exact
+  local authorization record. A post-deployment browser/Desktop retest remains
+  a release gate; this historical failure is not relabeled as passing evidence.
 - The deployed control-plane health endpoint, exact release version, Personal
   bootstrap, secure browser cookie relay, strict same-site completion, and
   session-revocation persistence were inspected after promotion.
@@ -665,9 +695,10 @@ Still required before Alpha can be called fully qualified:
 - A clean first-time and returning Google/GitHub identity-linking exercise for
   the same person; existing preserved identities currently exercise the safer
   recovery path instead.
-- The corrective merged-SHA invitation retest proving WorkOS reports the member
-  `active`, provider invitation/pending-membership artifacts are retired after
-  acceptance and removal, and no command dead-letters. A live WorkOS/security-
+- The corrective merged-SHA native invitation retest proving there is exactly
+  one WorkOS email, browser and Desktop both accept its token, WorkOS reports
+  the member `active`, provider invitation/pending-membership artifacts are
+  retired after acceptance and removal, and no command dead-letters. A live WorkOS/security-
   stream interruption drill also remains; automated race/outage coverage is not
   relabeled as live evidence.
 - Windows and Linux release qualification on those operating systems. macOS
@@ -685,6 +716,10 @@ explicit product decision above.
 - [Email verification](https://workos.com/docs/authkit/email-verification)
 - [Identity linking](https://workos.com/docs/authkit/identity-linking)
 - [Applications](https://workos.com/docs/authkit/applications)
+- [Invitations](https://workos.com/docs/authkit/invitations)
+- [Invitation API](https://workos.com/docs/reference/authkit/invitation)
+- [Custom emails](https://workos.com/docs/authkit/custom-emails)
+- [Branding](https://workos.com/docs/authkit/branding)
 - [Sessions](https://workos.com/docs/authkit/sessions)
 - [Session resilience](https://workos.com/docs/authkit/session-resilience)
 - [Events](https://workos.com/docs/events)

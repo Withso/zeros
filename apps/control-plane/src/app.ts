@@ -54,6 +54,11 @@ export function createApp(
   } = {},
 ): Hono {
   const app = new Hono();
+  const workosProvider =
+    config.auth.provider === "workos" && config.workos
+      ? (runtime.workosProvider ??
+        new RailwayWorkOSProvider(config.auth, config.workos))
+      : undefined;
 
   // Health: no auth (Railway healthcheck), proves DB reachability.
   app.get("/healthz", async (c) => {
@@ -72,13 +77,10 @@ export function createApp(
   // endpoints are intentionally mounted before /v1 bearer authentication;
   // each carries its own stronger credential (PKCE state, opaque HttpOnly
   // cookie, webhook signature, or a verified Desktop Application bearer).
-  if (config.auth.provider === "workos" && config.workos) {
-    const provider =
-      runtime.workosProvider ??
-      new RailwayWorkOSProvider(config.auth, config.workos);
+  if (config.auth.provider === "workos" && config.workos && workosProvider) {
     const sessions = new WorkOSBrowserSessions(
       new PostgresWorkOSBrowserSessionRepository(pool),
-      provider,
+      workosProvider,
       config.workos.appOrigin,
     );
     app.route(
@@ -87,14 +89,17 @@ export function createApp(
     );
     app.route(
       "/",
-      createWorkOSDesktopAuthorizationRoutes(provider, config.workos.appOrigin),
+      createWorkOSDesktopAuthorizationRoutes(
+        workosProvider,
+        config.workos.appOrigin,
+      ),
     );
-    app.route("/", createWorkOSDesktopRevocationRoutes(provider));
+    app.route("/", createWorkOSDesktopRevocationRoutes(workosProvider));
     app.route(
       "/",
       createWorkOSManagementEventRoutes(
         pool,
-        provider,
+        workosProvider,
         config.workos.webhookSecret,
       ),
     );
@@ -201,6 +206,7 @@ export function createApp(
     "/",
     createRoutes(pool, emailConfig, config.cloudWorkspaces, {
       workosEnabled: config.auth.provider === "workos",
+      ...(workosProvider ? { workosProvider } : {}),
       inviteLinkBase: config.inviteLinkBase,
     }),
   );

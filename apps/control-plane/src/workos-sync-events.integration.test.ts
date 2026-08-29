@@ -40,7 +40,7 @@ d("WorkOS normalized event synchronization", () => {
 
   afterAll(async () => pool.end());
 
-  it("projects membership/role changes, rejects stale resurrection, and cuts only organization access", async () => {
+  it("projects locally-authorized membership changes, rejects unsolicited access and stale resurrection", async () => {
     const suffix = randomUUID().replaceAll("-", "");
     const owner = await ensureUser(pool, {
       provider: "workos",
@@ -54,6 +54,13 @@ d("WorkOS normalized event synchronization", () => {
       providerSubject: memberSubject,
       email: `member-${suffix}@example.com`,
       displayName: "Member",
+    });
+    const scimSubject = `user_scim_${suffix}`;
+    const scimMember = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: scimSubject,
+      email: `scim-${suffix}@example.com`,
+      displayName: "SCIM Member",
     });
     const organization = await pool.query<{ id: string }>(
       `INSERT INTO organizations (
@@ -101,12 +108,57 @@ d("WorkOS normalized event synchronization", () => {
       },
       createdAt,
     );
-    expect(await ingestWorkOSManagementEvent(pool, created, "webhook")).toEqual({
-      status: "applied",
-    });
-    expect(await ingestWorkOSManagementEvent(pool, created, "events_api")).toEqual({
+    expect(await ingestWorkOSManagementEvent(pool, created, "webhook")).toEqual(
+      {
+        status: "applied",
+      },
+    );
+    expect(
+      await ingestWorkOSManagementEvent(pool, created, "events_api"),
+    ).toEqual({
       status: "duplicate",
     });
+    const unsolicited = await pool.query(
+      `SELECT 1 FROM organization_members WHERE org_id = $1 AND user_id = $2`,
+      [orgId, member.id],
+    );
+    expect(unsolicited.rowCount).toBe(0);
+    const scimAt = new Date(Date.now() + 1_500).toISOString();
+    expect(
+      await ingestWorkOSManagementEvent(
+        pool,
+        managementEvent(
+          "organization_membership.created",
+          {
+            id: `om_scim_${suffix}`,
+            organizationId: workosOrgId,
+            userId: scimSubject,
+            status: "active",
+            directoryManaged: true,
+            role: { slug: "member" },
+            updatedAt: scimAt,
+          },
+          scimAt,
+        ),
+        "webhook",
+      ),
+    ).toEqual({ status: "applied" });
+    const provisionedScim = await pool.query<{ membership_source: string }>(
+      `SELECT membership_source FROM organization_members
+       WHERE org_id = $1 AND user_id = $2`,
+      [orgId, scimMember.id],
+    );
+    expect(provisionedScim.rows).toEqual([{ membership_source: "scim" }]);
+    await pool.query(
+      `INSERT INTO organization_members (org_id, user_id, role)
+       VALUES ($1, $2, 'member')`,
+      [orgId, member.id],
+    );
+    await pool.query(
+      `INSERT INTO team_members (team_id, org_id, user_id, role)
+       VALUES ($1, $2, $3, 'member')`,
+      [team.rows[0]!.id, orgId, member.id],
+    );
 
     const elevatedAt = new Date(Date.now() + 2_000).toISOString();
     expect(
@@ -188,6 +240,46 @@ d("WorkOS normalized event synchronization", () => {
     );
     expect(personal.rowCount).toBe(1);
 
+    const providerInvitationId = `inv_direct_${suffix}`;
+    await pool.query(
+      `INSERT INTO invitations (
+         org_id, email, role, token_hash, invited_by,
+         workos_invitation_id, invitation_source
+       ) VALUES ($1, $2, 'member', decode($3, 'hex'), $4, $5, 'workos')`,
+      [orgId, member.email, suffix, owner.id, providerInvitationId],
+    );
+    const providerAcceptedAt = new Date(Date.now() + 4_500).toISOString();
+    expect(
+      await ingestWorkOSManagementEvent(
+        pool,
+        managementEvent(
+          "invitation.accepted",
+          {
+            id: providerInvitationId,
+            organizationId: workosOrgId,
+            email: member.email,
+            state: "accepted",
+            roleSlug: "member",
+            acceptedAt: providerAcceptedAt,
+            revokedAt: null,
+            updatedAt: providerAcceptedAt,
+          },
+          providerAcceptedAt,
+        ),
+        "webhook",
+      ),
+    ).toEqual({ status: "applied" });
+    const directAcceptance = await pool.query<{
+      accepted_at: Date | null;
+      revoked_at: Date | null;
+    }>(
+      `SELECT accepted_at, revoked_at FROM invitations
+       WHERE workos_invitation_id = $1`,
+      [providerInvitationId],
+    );
+    expect(directAcceptance.rows[0]?.accepted_at).toBeNull();
+    expect(directAcceptance.rows[0]?.revoked_at).not.toBeNull();
+
     const beforeNoOp = await pool.query<{ count: number }>(
       `SELECT count(*)::int AS count FROM security_events
        WHERE org_id = $1 AND kind = 'organization.data_changed'`,
@@ -248,6 +340,13 @@ d("WorkOS normalized event synchronization", () => {
       [orgId, workosOrgId],
     );
     const activeMembershipId = `om_active_${suffix}`;
+    // Zeros has already authorized the member; the provider event converges
+    // that desired state to the exact WorkOS membership object.
+    await pool.query(
+      `INSERT INTO organization_members (org_id, user_id, role)
+       VALUES ($1, $2, 'member')`,
+      [orgId, member.id],
+    );
     const activeAt = new Date(Date.now() + 1_000).toISOString();
     expect(
       await ingestWorkOSManagementEvent(

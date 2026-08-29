@@ -8,13 +8,32 @@ const email = {
 };
 
 describe("invitation email ownership", () => {
-  it("delivers the Zeros capability email when WorkOS synchronization is enabled", async () => {
+  it("lets WorkOS deliver the native invitation when WorkOS is enabled", async () => {
     const send = vi.fn(async () => undefined);
 
     const result = await deliverInvitationEmail(
       {
         email,
         workosEnabled: true,
+        destination: "invitee@example.com",
+        organizationName: "Analytical Engines",
+        inviterName: "Ada",
+        acceptUrl: "https://app-alpha.zeros.build/invite?token=opaque",
+      },
+      send,
+    );
+
+    expect(result).toBe("provider_owned");
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("keeps the Zeros sender only for the Auth0 rollback path", async () => {
+    const send = vi.fn(async () => undefined);
+
+    const result = await deliverInvitationEmail(
+      {
+        email,
+        workosEnabled: false,
         destination: "invitee@example.com",
         organizationName: "Analytical Engines",
         inviterName: "Ada",
@@ -41,7 +60,7 @@ describe("invitation email ownership", () => {
     const result = await deliverInvitationEmail(
       {
         email: undefined,
-        workosEnabled: true,
+        workosEnabled: false,
         destination: "invitee@example.com",
         organizationName: "Analytical Engines",
         inviterName: "Ada",

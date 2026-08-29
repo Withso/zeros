@@ -101,6 +101,7 @@ const InvitationPayload = z.object({
   localInvitationId: Uuid,
   email: z.string().trim().toLowerCase().email().max(254),
   role: Role,
+  inviterWorkosUserId: Identifier.optional(),
 });
 const SessionPayload = z.object({ sessionId: Identifier });
 
@@ -346,9 +347,10 @@ export class WorkOSCommandProcessor {
         }
 
         // Sending a WorkOS invitation creates a pending membership for an
-        // existing user. Zeros' own invite is the capability consumed by the
-        // desktop app, so provider invitation revocation cannot activate that
-        // pending object. WorkOS requires pending memberships to be deleted;
+        // existing user. Zeros consumes either the native WorkOS token or its
+        // compatibility token at the local authorization endpoint; provider
+        // invitation revocation cannot activate that pending object. WorkOS
+        // requires pending memberships to be deleted;
         // a fresh create then produces the desired active membership.
         const pending = observed.filter(
           (membership) => membership.status === "pending",
@@ -456,6 +458,9 @@ export class WorkOSCommandProcessor {
             organizationId,
             email: payload.email,
             roleSlug: payload.role,
+            ...(payload.inviterWorkosUserId
+              ? { inviterUserId: payload.inviterWorkosUserId }
+              : {}),
           })),
       };
     }

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 import { Hono } from "hono";
 import pg from "pg";
@@ -6,6 +6,7 @@ import { ensureUser, type AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
 import { runMigrations } from "./migrate.js";
 import { createRoutes } from "./routes.js";
+import type { WorkOSInvitationRecord } from "./workos-provider.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -283,6 +284,235 @@ d("organization routes", () => {
       payload: { reason: "zeros_member_joined" },
     });
     actor = owner;
+  });
+
+  it("accepts only an exact locally-correlated WorkOS native invitation", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const nativeOwner = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_native_owner_${suffix}`,
+      email: `native-owner-${suffix}@example.com`,
+      displayName: "Native Owner",
+    });
+    const nativeMember = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_native_member_${suffix}`,
+      email: `native-member-${suffix}@example.com`,
+      displayName: "Native Member",
+    });
+    const raceMember = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_native_race_${suffix}`,
+      email: `native-race-${suffix}@example.com`,
+      displayName: "Native Race Member",
+    });
+    const workosOrganizationId = `org_native_${suffix}`;
+    const providerToken = `native_${"A".repeat(36)}`;
+    const manualToken = `manual_${"B".repeat(36)}`;
+    const unavailableToken = `outage_${"C".repeat(36)}`;
+    const raceToken = `race_${"D".repeat(38)}`;
+    const records = new Map<string, WorkOSInvitationRecord>();
+    const provider = {
+      findInvitationByToken: vi.fn(async (token: string) => {
+        if (token === unavailableToken) {
+          const unavailable = new Error("WorkOS unavailable") as Error & {
+            status: number;
+          };
+          unavailable.status = 503;
+          throw unavailable;
+        }
+        const record = records.get(token);
+        if (record) return record;
+        const missing = new Error("Invitation not found") as Error & {
+          status: number;
+        };
+        missing.status = 404;
+        throw missing;
+      }),
+    };
+    let nativeActor = nativeOwner;
+    const nativeApp = new Hono();
+    nativeApp.use("*", async (c, next) => {
+      c.set("user", nativeActor);
+      await next();
+    });
+    nativeApp.route(
+      "/",
+      createRoutes(pool, undefined, null, {
+        workosEnabled: true,
+        workosProvider: provider,
+        inviteLinkBase: "https://app-alpha.zeros.build/invite",
+      }),
+    );
+    nativeApp.onError((error, c) => {
+      if (error instanceof HttpError) {
+        return c.json(
+          { error: { code: error.code, message: error.message } },
+          error.status,
+        );
+      }
+      throw error;
+    });
+    const nativeRequest = (
+      path: string,
+      init?: { method?: string; body?: Record<string, unknown> },
+    ) =>
+      nativeApp.request(path, {
+        method: init?.method ?? "GET",
+        headers: init?.body
+          ? { "content-type": "application/json" }
+          : undefined,
+        body: init?.body ? JSON.stringify(init.body) : undefined,
+      });
+
+    const created = await nativeRequest("/v1/organizations", {
+      method: "POST",
+      body: { name: `Native invitations ${suffix}` },
+    });
+    expect(created.status).toBe(201);
+    const organizationId = (
+      (await created.json()) as { organization: { id: string } }
+    ).organization.id;
+    await pool.query(
+      `UPDATE workos_organization_links
+       SET workos_organization_id = $2, state = 'active'
+       WHERE organization_id = $1`,
+      [organizationId, workosOrganizationId],
+    );
+
+    const invited = await nativeRequest(
+      `/v1/organizations/${organizationId}/invitations`,
+      {
+        method: "POST",
+        body: { email: nativeMember.email, role: "member" },
+      },
+    );
+    expect(invited.status).toBe(201);
+    const localInvitationId = (
+      (await invited.json()) as { invitation: { id: string } }
+    ).invitation.id;
+    const providerInvitationId = `inv_native_${suffix}`;
+    await pool.query(
+      `UPDATE invitations
+       SET workos_invitation_id = $2, invitation_source = 'workos'
+       WHERE id = $1`,
+      [localInvitationId, providerInvitationId],
+    );
+    records.set(providerToken, {
+      id: providerInvitationId,
+      organizationId: workosOrganizationId,
+      email: nativeMember.email,
+      state: "pending",
+      roleSlug: "member",
+      updatedAt: new Date().toISOString(),
+    });
+
+    const wrongAccount = await nativeRequest("/v1/invitations/accept", {
+      method: "POST",
+      body: { token: providerToken },
+    });
+    expect(wrongAccount.status).toBe(403);
+    await expect(wrongAccount.json()).resolves.toMatchObject({
+      error: { code: "wrong_account" },
+    });
+
+    nativeActor = nativeMember;
+    records.set(providerToken, {
+      ...records.get(providerToken)!,
+      state: "revoked",
+    });
+    const providerRevoked = await nativeRequest("/v1/invitations/accept", {
+      method: "POST",
+      body: { token: providerToken },
+    });
+    expect(providerRevoked.status).toBe(404);
+    records.set(providerToken, {
+      ...records.get(providerToken)!,
+      state: "pending",
+      email: nativeOwner.email,
+    });
+    const providerRecipientMismatch = await nativeRequest(
+      "/v1/invitations/accept",
+      {
+        method: "POST",
+        body: { token: providerToken },
+      },
+    );
+    expect(providerRecipientMismatch.status).toBe(404);
+    records.set(providerToken, {
+      ...records.get(providerToken)!,
+      email: nativeMember.email,
+    });
+    const accepted = await nativeRequest("/v1/invitations/accept", {
+      method: "POST",
+      body: { token: providerToken },
+    });
+    expect(accepted.status).toBe(200);
+    await expect(accepted.json()).resolves.toMatchObject({
+      organization: { id: organizationId },
+    });
+
+    nativeActor = nativeOwner;
+    const racingInvite = await nativeRequest(
+      `/v1/organizations/${organizationId}/invitations`,
+      {
+        method: "POST",
+        body: { email: raceMember.email, role: "member" },
+      },
+    );
+    expect(racingInvite.status).toBe(201);
+    const racingInvitationId = (
+      (await racingInvite.json()) as { invitation: { id: string } }
+    ).invitation.id;
+    records.set(raceToken, {
+      id: `inv_race_${suffix}`,
+      organizationId: workosOrganizationId,
+      email: raceMember.email,
+      state: "pending",
+      roleSlug: "member",
+      updatedAt: new Date().toISOString(),
+    });
+    nativeActor = raceMember;
+    const preparing = await nativeRequest("/v1/invitations/accept", {
+      method: "POST",
+      body: { token: raceToken },
+    });
+    expect(preparing.status).toBe(503);
+    await expect(preparing.json()).resolves.toMatchObject({
+      error: { code: "invite_preparing" },
+    });
+    const stillPending = await pool.query<{ accepted_at: Date | null }>(
+      `SELECT accepted_at FROM invitations WHERE id = $1`,
+      [racingInvitationId],
+    );
+    expect(stillPending.rows[0]?.accepted_at).toBeNull();
+
+    records.set(manualToken, {
+      id: `inv_manual_${suffix}`,
+      organizationId: workosOrganizationId,
+      email: nativeMember.email,
+      state: "pending",
+      roleSlug: "member",
+      updatedAt: new Date().toISOString(),
+    });
+    const manual = await nativeRequest("/v1/invitations/accept", {
+      method: "POST",
+      body: { token: manualToken },
+    });
+    expect(manual.status).toBe(404);
+    await expect(manual.json()).resolves.toMatchObject({
+      error: { code: "invalid_invite" },
+    });
+
+    const unavailable = await nativeRequest("/v1/invitations/accept", {
+      method: "POST",
+      body: { token: unavailableToken },
+    });
+    expect(unavailable.status).toBe(503);
+    await expect(unavailable.json()).resolves.toMatchObject({
+      error: { code: "auth_unavailable" },
+    });
+    expect(provider.findInvitationByToken).toHaveBeenCalledWith(providerToken);
   });
 
   it("serializes provider invitation cleanup before membership creation and removal", async () => {

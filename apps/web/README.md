@@ -158,9 +158,12 @@ fallback. This document boundary is required because browsers correctly
 withhold Strict cookies throughout the original AuthKit redirect chain. Pages
 must preserve its body and append every `Set-Cookie` field separately.
 
-The Zeros-owned invitation email lands on `/invite?token=…`. The response is
-no-store/no-referrer and nonce-CSP bounded. It offers the exact channel's
-desktop deep link or an explicit browser continuation. Browser acceptance
+WorkOS's native invitation email uses the channel's configured custom
+invitation URL and lands on `/invite?invitation_token=…`; the legacy Zeros
+capability remains available as `/invite?token=…` for rollback and copyable
+link compatibility. The response is no-store/no-referrer and nonce-CSP
+bounded. It offers the exact channel's desktop deep link or an explicit
+browser continuation. Browser acceptance
 stores the opaque token only in that tab's `sessionStorage`, immediately strips
 it from the address bar, and posts it only to the same-origin allowlisted JSON
 facade. A 401 starts Railway's ordinary one-time state/PKCE flow with the
@@ -169,8 +172,11 @@ from the tab-scoped value. A tab permits one AuthKit attempt per freshly opened
 invitation; a second 401 terminates with a fixed error instead of redirecting
 again. Link scanners cannot accept an invitation because
 the landing GET has no mutation and web mode still requires an authenticated
-same-origin POST. WorkOS's default user-invitation email must remain disabled;
-other WorkOS authentication emails remain enabled.
+same-origin POST. Railway resolves a WorkOS token server-side and requires its
+exact provider invitation ID, organization, recipient email, role, and pending
+state to match an active Zeros invitation. WorkOS invitation email stays
+enabled; create invitations through Zeros rather than manually in the WorkOS
+Dashboard.
 
 Register `https://<channel-api-host>/auth/workos-webhook` for the user,
 session, organization, organization-membership, and invitation event set in

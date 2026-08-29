@@ -67,8 +67,8 @@ Core environment variables:
 | `WORKOS_API_KEY`         | WorkOS server API key; Railway-only                                                                                                              |
 | `WORKOS_COOKIE_PASSWORD` | Unique 32+ character key for WorkOS sealed sessions; Railway-only                                                                                |
 | `WORKOS_WEBHOOK_SECRET`  | Exact WorkOS endpoint signing secret; Railway-only                                                                                               |
-| `ZEPTOMAIL_TOKEN`        | Send Mail Token for Zeros-owned organization invitation and security-notification email                                                         |
-| `EMAIL_FROM`             | Verified invitation/security sender, for example `Zeros <hello@zeros.build>`                                                                     |
+| `ZEPTOMAIL_TOKEN`        | Optional Send Mail Token for Zeros security notifications and the Auth0 invitation rollback path                                                 |
+| `EMAIL_FROM`             | Optional ZeptoMail security/rollback sender, for example `Zeros <hello@zeros.build>`                                                             |
 | `ZEPTOMAIL_API_URL`      | Optional regional ZeptoMail API URL; defaults to the deployment's India endpoint                                                                 |
 | `ZEROS_SELF_HOSTED`      | Public templates only: `true` allows installer-owned platform domains; frontend and API origins must differ; official deployments leave it unset |
 | `AUTH0_DOMAIN`           | Legacy Auth0 fallback used only when explicit issuer/JWKS values are absent                                                                      |
@@ -79,11 +79,16 @@ The optional GitHub App, invitation-email, and feedback variables are documented
 [`.env.example`](.env.example). Secrets belong in Railway's secret store and
 must never be exposed through renderer `VITE_*` variables.
 
-When WorkOS synchronization is enabled, keep WorkOS's default **user
-invitation** email disabled while leaving its authentication emails enabled.
-Zeros sends the single capability email above; WorkOS retains the correlated
-pending invitation and coarse membership projection. Organization invitations
-must be created through Zeros rather than manually in the WorkOS Dashboard.
+When WorkOS synchronization is enabled, keep WorkOS's native **user
+invitation** email enabled and configure its custom User Invitation URL to the
+exact channel app origin plus `/invite`. WorkOS appends `invitation_token` and
+sends the single branded email; Railway resolves that token against the exact
+Zeros invitation before granting product access. Organization invitations must
+be created through Zeros rather than manually in the WorkOS Dashboard.
+Zeros intentionally does not pass organization invitation tokens into AuthKit's
+authenticate call because WorkOS permits corporate-domain invitations to be
+accepted by another address on the same domain; the authenticated Railway POST
+enforces exact recipient equality instead.
 
 ## Database migrations
 

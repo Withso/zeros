@@ -109,3 +109,58 @@ describe("WorkOS organization membership listing", () => {
     expect(memberships[0]?.status).toBe("pending");
   });
 });
+
+describe("WorkOS native invitations", () => {
+  const invitation = {
+    id: "invitation_example",
+    organizationId: "org_example",
+    email: "invitee@example.com",
+    state: "pending" as const,
+    roleSlug: "member",
+    updatedAt: "2026-08-29T00:00:00.000Z",
+  };
+
+  it("sends one seven-day branded invitation with the authenticated inviter", async () => {
+    let capturedOptions: unknown;
+    const client = {
+      userManagement: {
+        async sendInvitation(options: unknown) {
+          capturedOptions = options;
+          return invitation;
+        },
+      },
+    } as unknown as WorkOS;
+
+    await provider(client).sendInvitation({
+      organizationId: "org_example",
+      email: "invitee@example.com",
+      roleSlug: "member",
+      inviterUserId: "user_inviter",
+    });
+
+    expect(capturedOptions).toEqual({
+      organizationId: "org_example",
+      email: "invitee@example.com",
+      roleSlug: "member",
+      inviterUserId: "user_inviter",
+      expiresInDays: 7,
+    });
+  });
+
+  it("resolves a custom invitation token only on the trusted backend", async () => {
+    let capturedToken: unknown;
+    const client = {
+      userManagement: {
+        async findInvitationByToken(token: unknown) {
+          capturedToken = token;
+          return invitation;
+        },
+      },
+    } as unknown as WorkOS;
+
+    await expect(
+      provider(client).findInvitationByToken("provider_invitation_token"),
+    ).resolves.toEqual(invitation);
+    expect(capturedToken).toBe("provider_invitation_token");
+  });
+});
