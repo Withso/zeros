@@ -15,12 +15,25 @@ import {
 } from "../../components/scramble-text";
 
 const ROLE_WORDS = /builders|developers|designers|components/;
-const NON_ASCII = /[^\x00-\x7F]/;
+const NON_ASCII = /[^\u0020-\u007E]/;
 const CJK_OR_KATAKANA = /[\u3000-\u9FFF\uFF00-\uFFEF\u30A0-\u30FF]/;
 const LONG_DESIGN_WORDS = /auto|hug|fill|gap|align|var|8px/;
 
 function visibleText(html: string): string {
-  return html.replace(/<[^>]+>/g, "");
+  let out = "";
+  let inTag = false;
+  for (const ch of html) {
+    if (!inTag && ch === "<") {
+      inTag = true;
+      continue;
+    }
+    if (inTag) {
+      if (ch === ">") inTag = false;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
 }
 
 function svgCount(html: string): number {
