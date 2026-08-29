@@ -135,7 +135,7 @@ export function renderGlyphRun(glyphs: readonly Glyph[]): string {
 }
 
 function pickScrambleCell(set: ScrambleSet): ScrambleCell {
-  if (set.icons && set.icons.length > 0 && Math.random() < 0.42) {
+  if (set.icons && set.icons.length > 0 && Math.random() < 0.56) {
     return { kind: 'icon', html: pick(set.icons) }
   }
   return { kind: 'char', ch: pickChar(set.chars) }
