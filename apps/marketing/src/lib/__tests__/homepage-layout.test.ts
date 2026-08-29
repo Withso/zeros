@@ -11,6 +11,12 @@ const PREVIEW = join(ROOT, "apps/marketing/src/components/ProductPreview.tsx");
 const WORDMARK = join(ROOT, "apps/marketing/public/zeros-wordmark.svg");
 const HERO_CYCLE = join(ROOT, "apps/marketing/src/components/HeroRoleCycle.tsx");
 const HERO_CYCLE_CSS = join(ROOT, "apps/marketing/src/components/hero-role.css");
+const HERO_ASCII = join(ROOT, "apps/marketing/src/components/HeroAsciiClouds.tsx");
+const HERO_ASCII_CSS = join(
+  ROOT,
+  "apps/marketing/src/components/hero-ascii-clouds.css",
+);
+const HERO_ASCII_FIELD = join(ROOT, "apps/marketing/src/lib/hero-ascii-field.ts");
 
 function sliceFunction(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`);
@@ -90,6 +96,28 @@ describe("marketing homepage layout", () => {
     expect(scramble).not.toMatch(/components/);
     expect(scramble).not.toMatch(/CODE_ICONS/);
     expect(scramble).not.toMatch(/ﾊ/);
+  });
+
+  it("paints a pure-dark ASCII cloud void behind the hero", () => {
+    const ascii = readFileSync(HERO_ASCII, "utf8");
+    const css = readFileSync(HERO_ASCII_CSS, "utf8");
+    const field = readFileSync(HERO_ASCII_FIELD, "utf8");
+    expect(home).toMatch(/HeroAsciiClouds/);
+    expect(home).not.toMatch(/BackgroundGlow/);
+    expect(home).not.toMatch(/radial-gradient\(900px 520px/);
+    expect(ascii).toMatch(/paintHeroAsciiField/);
+    expect(ascii).toMatch(/data-hero-ascii-clouds/);
+    expect(css).toMatch(/background-color: #000000/);
+    expect(css).toMatch(/prefers-reduced-motion: reduce/);
+    expect(css).toMatch(/animation:\s*none/);
+    expect(css).toMatch(/hero-ascii-drift/);
+    expect(field).toMatch(/ASCII_CLOUD_RAMP/);
+    expect(field).toMatch(/headlineWell/);
+    expect(field).toMatch(/#000000/);
+    expect(field).toMatch(/"\."/);
+    expect(field).toMatch(/"@"/);
+    expect(field).toMatch(/"0"/);
+    expect(field).toMatch(/"1"/);
   });
 
   it("drops the hero download CTA and Dev/Design toggle", () => {
