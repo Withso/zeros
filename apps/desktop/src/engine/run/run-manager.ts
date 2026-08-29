@@ -49,6 +49,7 @@ import type {
   PreparedBoundary,
   RepoTaskBoundaryFactory,
 } from "../agents/containment/types";
+import { RetriableBoundaryRetirement } from "../agents/containment/boundary-retirement";
 
 export type RunState = "running" | "finished" | "failed" | "stopped";
 
@@ -136,7 +137,7 @@ interface RunEntry {
 }
 
 interface BoundaryTeardownRecord {
-  readonly promise: Promise<void>;
+  readonly retirement: RetriableBoundaryRetirement;
   readonly workspaceId: string | null;
   readonly territoryContributions:
     | readonly BoundaryTerritoryContributionSnapshot[]
@@ -180,15 +181,14 @@ export class RunManager {
       authority?: BoundaryAuthoritySnapshot;
     }
   >();
-  /** Failed teardown proof is durable for this engine lifetime. A later
-   * archive/delete must still see it even when the run entry was superseded. */
+  /** Failed teardown proof stays visible until a background retry proves it.
+   * A later archive/delete must still see it when the run was superseded. */
   private readonly boundaryTeardowns = new Map<
     string,
     Set<BoundaryTeardownRecord>
   >();
   /** Process-wide proof ledger, including rowless tasks and superseded entries.
-   * Failed records intentionally survive until restart recovery; neither a
-   * replacement run nor a missing workspace row may erase old authority. */
+   * Neither a replacement run nor a missing row may erase unproven authority. */
   private readonly allBoundaryTeardowns = new Set<BoundaryTeardownRecord>();
 
   constructor(
@@ -236,38 +236,37 @@ export class RunManager {
     boundary: PreparedBoundary,
     workspaceId: string | null,
   ): Promise<void> {
-    const promise = Promise.resolve().then(() => boundary.stopAndProve());
+    const retirement = new RetriableBoundaryRetirement(boundary, {
+      onFailure: (error, attempt) => {
+        console.error(
+          `[run] repo-task boundary teardown attempt ${attempt} failed; retrying automatically:`,
+          error,
+        );
+      },
+      onProven: (recovered) => {
+        this.allBoundaryTeardowns.delete(record);
+        if (workspaceId) {
+          const records = this.boundaryTeardowns.get(workspaceId);
+          records?.delete(record);
+          if (records?.size === 0) this.boundaryTeardowns.delete(workspaceId);
+        }
+        if (recovered) {
+          console.log("[run] repo-task boundary teardown proof recovered");
+        }
+      },
+    });
     const record = {
-      promise,
+      retirement,
       workspaceId,
       territoryContributions: boundary.territoryContributions,
     } satisfies BoundaryTeardownRecord;
     this.allBoundaryTeardowns.add(record);
-    void promise.then(
-      () => this.allBoundaryTeardowns.delete(record),
-      () => {
-        // Keep failed proof in the process-wide set until restart recovery.
-      },
-    );
     if (workspaceId) {
       const records = this.boundaryTeardowns.get(workspaceId) ?? new Set();
       records.add(record);
       this.boundaryTeardowns.set(workspaceId, records);
-      void promise.then(
-        () => {
-          records.delete(record);
-          if (records.size === 0) this.boundaryTeardowns.delete(workspaceId);
-        },
-        () => {
-          // Keep failed proof in the set. Only an engine restart can run the
-          // durable stale-domain recovery that makes removal safe again.
-        },
-      );
     }
-    void promise.catch((error) => {
-      console.error("[run] repo-task boundary teardown failed:", error);
-    });
-    return promise;
+    return retirement.start();
   }
 
   /** Lifecycle barrier used after PTY exit has been observed and before a
@@ -280,7 +279,7 @@ export class RunManager {
     }
     const records = [...(this.boundaryTeardowns.get(workspaceId) ?? [])];
     const results = await Promise.allSettled(
-      records.map((record) => record.promise),
+      records.map((record) => record.retirement.promise),
     );
     const failures = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],
@@ -288,7 +287,7 @@ export class RunManager {
     if (failures.length > 0) {
       throw new AggregateError(
         failures,
-        "repository run containment teardown was not proven. Restart Zeros before removing the workspace or changing Design territory.",
+        "repository run containment teardown was not proven. Automatic recovery is still retrying; removing the workspace or changing its Design territory remains blocked until proof succeeds.",
       );
     }
   }
@@ -311,7 +310,7 @@ export class RunManager {
     }
     for (const entry of entries) void this.finalizeBoundary(entry);
     const results = await Promise.allSettled(
-      [...this.allBoundaryTeardowns].map((record) => record.promise),
+      [...this.allBoundaryTeardowns].map((record) => record.retirement.promise),
     );
     const failures = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],
@@ -319,7 +318,7 @@ export class RunManager {
     if (failures.length > 0) {
       throw new AggregateError(
         failures,
-        "repository run boundaries were not globally retired. Restart Zeros before changing registered Design territory.",
+        "repository run boundaries were not all proven stopped. Automatic recovery is still retrying; registered Design territory changes remain blocked until proof succeeds.",
       );
     }
   }
@@ -374,7 +373,7 @@ export class RunManager {
       includesWorkspace(record.workspaceId, record.territoryContributions),
     );
     const results = await Promise.allSettled(
-      records.map((record) => record.promise),
+      records.map((record) => record.retirement.promise),
     );
     const failures = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],
@@ -382,7 +381,7 @@ export class RunManager {
     if (failures.length > 0) {
       throw new AggregateError(
         failures,
-        "repository run boundaries for this Design territory were not proven stopped. Restart Zeros before changing it.",
+        "repository run boundaries for this Design territory were not proven stopped. Automatic recovery is still retrying; this territory change remains blocked until proof succeeds.",
       );
     }
   }
@@ -626,8 +625,8 @@ export class RunManager {
           }
           return { ...launch, stdio: "inherit" as const };
         },
-        onSpawned: (pid) => {
-          boundary.trackProcessGroup(pid);
+        onSpawned: (pid, leaderExited) => {
+          boundary.trackProcessGroup(pid, { leaderExited });
         },
       });
     } catch (err) {

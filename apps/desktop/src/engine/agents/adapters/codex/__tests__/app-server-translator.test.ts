@@ -139,6 +139,72 @@ describe("CodexAppServerTranslator", () => {
   });
 
   describe("agent message streaming", () => {
+    it("preserves commentary and final-answer phases across delta notifications", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "agentMessage",
+          id: "commentary-1",
+          text: "",
+          phase: "commentary",
+        },
+      });
+      env.t.handle("item/agentMessage/delta", {
+        itemId: "commentary-1",
+        delta: "I will inspect it.",
+      });
+      env.t.handle("item/started", {
+        item: {
+          type: "agentMessage",
+          id: "final-1",
+          text: "",
+          phase: "final_answer",
+        },
+      });
+      env.t.handle("item/agentMessage/delta", {
+        itemId: "final-1",
+        delta: "The inspection is complete.",
+      });
+
+      const chunks = env.out.emitted
+        .filter((n) => n.update.sessionUpdate === "agent_message_chunk")
+        .map((n) => n.update as { phase?: string });
+      expect(chunks.map((chunk) => chunk.phase)).toEqual([
+        "commentary",
+        "final_answer",
+      ]);
+    });
+
+    it("publishes a late phase declared only by item/completed", () => {
+      env.t.handle("item/started", {
+        item: { type: "agentMessage", id: "late-phase", text: "" },
+      });
+      env.t.handle("item/agentMessage/delta", {
+        itemId: "late-phase",
+        delta: "I am still checking.",
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "agentMessage",
+          id: "late-phase",
+          text: "I am still checking.",
+          phase: "commentary",
+        },
+      });
+
+      const chunks = env.out.emitted
+        .filter((n) => n.update.sessionUpdate === "agent_message_chunk")
+        .map((n) => n.update as { content: { text: string }; phase?: string });
+      expect(chunks).toHaveLength(2);
+      expect(chunks[0]).toMatchObject({
+        content: { text: "I am still checking." },
+      });
+      expect(chunks[0]?.phase).toBeUndefined();
+      expect(chunks[1]).toMatchObject({
+        content: { text: "" },
+        phase: "commentary",
+      });
+    });
+
     it("agentMessage delta emits chunks with accumulated text", () => {
       env.t.handle("item/started", {
         item: { type: "agentMessage", id: "msg-1", text: "" },

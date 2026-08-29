@@ -125,6 +125,54 @@ describe("repository layout contracts", () => {
     expect(files.filter((file) => !existsSync(file))).toEqual([]);
   });
 
+  it("gates every ZSR boundary suite plus interactive init/resume contracts", () => {
+    const rootPackage = JSON.parse(read("package.json")) as {
+      scripts: Record<string, string>;
+    };
+    expect(rootPackage.scripts["check:zsr"]).toBe(
+      "pnpm check:zsr:contracts && pnpm check:zsr:runtime",
+    );
+    expect(rootPackage.scripts["check:zsr:contracts"]).toBe(
+      "pnpm build:zsr-supervisor && node scripts/run-zsr-contract-tests.mjs",
+    );
+    expect(rootPackage.scripts["check:zsr:runtime"]).toContain(
+      "scripts/zsr-qualification/run.mjs --require-secure",
+    );
+
+    const runner = read("scripts/run-zsr-contract-tests.mjs");
+    const automaticallyRequired = [
+      ...readdirSync("apps/desktop/src/engine/agents/containment/__tests__")
+        .filter((name) => name.endsWith(".test.ts"))
+        .map(
+          (name) =>
+            `apps/desktop/src/engine/agents/containment/__tests__/${name}`,
+        ),
+      ...readdirSync("apps/desktop/src/engine/agents/__tests__")
+        .filter((name) => /^gateway-.*\.test\.ts$/.test(name))
+        .map((name) => `apps/desktop/src/engine/agents/__tests__/${name}`),
+    ];
+    const interactiveContracts = [
+      "apps/desktop/src/engine/__tests__/agent-cancel-stop.test.ts",
+      "apps/desktop/src/engine/__tests__/agent-session-reload.test.ts",
+      "apps/desktop/src/engine/agents/__tests__/territory-resolution.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/agent-prewarm-singleflight.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/agent-registry-verification.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/chat-title-scheduler.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/composer-responsive-contract.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/permission-mode-display.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/session-admission-policy.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/session-reload-lifecycle.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/tail-indicators.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/turn-footer.test.ts",
+    ];
+    for (const testFile of [
+      ...automaticallyRequired,
+      ...interactiveContracts,
+    ]) {
+      expect(runner, `${testFile} must be ZSR-gated`).toContain(testFile);
+    }
+  });
+
   it("keeps active automation off retired repository roots", () => {
     expect(existsSync("backend")).toBe(false);
     expect(existsSync("website")).toBe(false);
@@ -304,6 +352,8 @@ describe("repository layout contracts", () => {
     const vite = read("vite.config.ts");
     expect(vite).not.toContain('"**/apps/**"');
     expect(vite).not.toContain('"**/website/**"');
+    expect(vite).toContain('"**/Zeros Design"');
+    expect(vite).toContain('"**/Zeros Design/**"');
     for (const app of ["control-plane", "web", "marketing"]) {
       expect(vite).toContain(`"**/apps/${app}/**"`);
     }

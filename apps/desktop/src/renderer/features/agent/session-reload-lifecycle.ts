@@ -187,6 +187,23 @@ export function sharedAdmissionFlightAction(input: {
     : "reuse";
 }
 
+/** Choose the provider admission route after no shared flight remains.
+ * Cancellation deliberately detaches a load flight without discarding its
+ * durable provider binding. Both ordinary admission and forced configuration
+ * recovery must therefore resume that binding before either is allowed to
+ * create a new provider conversation. Forced recovery first restarts the
+ * ephemeral execution so the resumed provider receives the new config. */
+export function admissionRouteWithoutFlight(input: {
+  force: boolean;
+  replaceProviderConversation: boolean;
+  hasProviderBinding: boolean;
+  canLoad: boolean;
+}): "resume" | "restart" | "create" {
+  if (!input.hasProviderBinding || !input.canLoad) return "create";
+  if (input.force && input.replaceProviderConversation) return "create";
+  return input.force ? "restart" : "resume";
+}
+
 /** Map a failure classification to the UI session status. The single
  * definition, shared by the RPC paths in <AgentSessionsProvider> and by the
  * store's turn-state settle — those two must not be able to disagree about
@@ -289,6 +306,103 @@ export function shouldQueuePrompt(input: {
     input.status === "streaming" ||
     input.status === "warming"
   );
+}
+
+/** Choose how a parked prompt is presented. The first send waiting only for
+ * session admission is already the user's active turn: it belongs in the
+ * transcript with the live timer, not in the follow-up queue card. Anything
+ * behind another send/turn remains a real queued message. */
+export function queuedPromptPresentation(input: {
+  reason: "admission" | "busy-turn";
+  hasLocalSend: boolean;
+  hasQueuedSends: boolean;
+  queueHeld: boolean;
+  flushing: boolean;
+}): "active-turn" | "queued-card" {
+  if (
+    input.reason === "admission" &&
+    !input.hasLocalSend &&
+    !input.hasQueuedSends &&
+    !input.queueHeld &&
+    !input.flushing
+  ) {
+    return "active-turn";
+  }
+  return "queued-card";
+}
+
+/** A protection failure is the one admission failure that owns a durable turn
+ * footer requested by product: keep its active prompt so the exact stopped
+ * label has an anchor. Ordinary provider/startup failures restore the text to
+ * the composer, and true follow-ups remain disposable queue rows. */
+export function shouldPreserveAdmissionPromptOnFailure(
+  failureKind: string | null | undefined,
+  presentation: "active-turn" | "queued-card" | undefined,
+): boolean {
+  return (
+    failureKind === "design-protection-failed" && presentation === "active-turn"
+  );
+}
+
+/** A first prompt waiting only for admission already owns the visible turn.
+ * Stop must settle that prompt in place so the transcript and STOPPED BY USER
+ * footer agree with what the user saw. True follow-ups are still discarded:
+ * they were queued behind work the user explicitly cancelled. */
+export function cancelledQueuedMessageAction(
+  presentation: "active-turn" | "queued-card" | undefined,
+): "preserve-as-turn" | "drop" {
+  return presentation === "active-turn" ? "preserve-as-turn" : "drop";
+}
+
+/** The first prompt is already a live user turn while its execution boundary
+ * and provider route are being admitted. Give that turn the same Stop control
+ * as a dispatched prompt; a bare warming session opened by focus/prewarm has no
+ * user-owned work and therefore keeps the ordinary Send control. Plan review
+ * owns its own submit actions and must not be replaced by Stop. */
+export function composerShowsStopControl(input: {
+  status: SessionStatus;
+  hasPendingLocalTurn: boolean;
+  planReview: boolean;
+}): boolean {
+  return (
+    !input.planReview &&
+    (input.status === "streaming" || input.hasPendingLocalTurn)
+  );
+}
+
+/** Route Stop to the lifecycle object that actually exists at that instant.
+ * Before the engine publishes an execution id there is no provider turn for
+ * AGENT_CANCEL to address: the chat-scoped bind itself must be invalidated.
+ * Once an execution exists it stays reusable and only its live/pending turn is
+ * cancelled. */
+export function admissionCancellationAction(input: {
+  hasAgent: boolean;
+  hasSession: boolean;
+  status: SessionStatus;
+  admissionInFlight: boolean;
+}): "abort-admission" | "cancel-session" | "local-only" {
+  if (!input.hasAgent) return "local-only";
+  if (input.hasSession) return "cancel-session";
+  if (input.admissionInFlight || input.status === "warming") {
+    return "abort-admission";
+  }
+  return "local-only";
+}
+
+/** Remove renderer ownership of one cancelled create/resume flight. The old
+ * async continuation is still protected by its cancel generation and exact
+ * promise identity; detaching here lets the next prompt install a replacement
+ * immediately instead of waiting behind work the user explicitly stopped. */
+export function detachAdmissionFlight<T>(
+  chatId: string,
+  flights: Map<string, T>,
+  loadKeys: Map<string, string>,
+  adoptOnly: Map<string, boolean>,
+): boolean {
+  const detached = flights.delete(chatId);
+  loadKeys.delete(chatId);
+  adoptOnly.delete(chatId);
+  return detached;
 }
 
 /** Route an explicit "Send now" for a queued row from authoritative session

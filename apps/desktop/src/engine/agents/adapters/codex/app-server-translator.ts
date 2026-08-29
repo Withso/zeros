@@ -155,6 +155,20 @@ export class CodexAppServerTranslator {
    *  events carry only the diff; the lifecycle events sometimes
    *  carry the full accumulated text.) */
   private readonly emittedMessageText = new Map<string, string>();
+  /** Agent-message deltas carry only itemId + text. Retain the phase announced
+   * by item/started so streamed chunks keep Codex's commentary/final
+   * distinction all the way to the renderer. */
+  private readonly messagePhases = new Map<
+    string,
+    "commentary" | "final_answer"
+  >();
+  /** Last phase forwarded for each streamed message. Some app-server builds
+   * attach phase only to item/completed, after the final text delta. An empty
+   * coalescing update can then reclassify the message without duplicating it. */
+  private readonly emittedMessagePhases = new Map<
+    string,
+    "commentary" | "final_answer"
+  >();
 
   /** Codex command output notifications are true deltas. Session updates,
    * however, replace a tool card's rawOutput snapshot. Retain one cumulative
@@ -294,6 +308,8 @@ export class CodexAppServerTranslator {
     this.emittedToolCallIds.clear();
     this.completedItemIds.clear();
     this.emittedMessageText.clear();
+    this.messagePhases.clear();
+    this.emittedMessagePhases.clear();
     this.emittedToolOutput.clear();
     this.hasSeenTurnTerminal = false;
     this.lastStopReason = "end_turn";
@@ -550,11 +566,17 @@ export class CodexAppServerTranslator {
       case "userMessage":
         // Message-shaped items — we wait for delta events to stream
         // text. Just remember the id for later delta correlation.
+        if (item.type === "agentMessage" && item.phase) {
+          this.messagePhases.set(item.id, item.phase);
+        }
         if (typeof (item as { text?: string }).text === "string") {
           this.emitMessageDelta(
             item.id,
             item.type === "reasoning",
             (item as { text: string }).text,
+            item.type === "agentMessage"
+              ? (item.phase ?? undefined)
+              : undefined,
           );
         }
         return;
@@ -668,14 +690,22 @@ export class CodexAppServerTranslator {
       case "reasoning":
       case "plan":
       case "userMessage":
+        if (item.type === "agentMessage" && item.phase) {
+          this.messagePhases.set(item.id, item.phase);
+        }
         if (typeof (item as { text?: string }).text === "string") {
           this.emitMessageDelta(
             item.id,
             item.type === "reasoning",
             (item as { text: string }).text,
+            item.type === "agentMessage"
+              ? (item.phase ?? this.messagePhases.get(item.id))
+              : undefined,
           );
         }
         this.emittedMessageText.delete(item.id);
+        this.messagePhases.delete(item.id);
+        this.emittedMessagePhases.delete(item.id);
         return;
 
       case "enteredReviewMode":
@@ -768,7 +798,12 @@ export class CodexAppServerTranslator {
   private onAgentMessageDelta(params: unknown): void {
     const p = params as { itemId?: string; delta?: string };
     if (typeof p?.itemId !== "string" || typeof p?.delta !== "string") return;
-    this.emitMessageDelta(p.itemId, false, this.appendDelta(p.itemId, p.delta));
+    this.emitMessageDelta(
+      p.itemId,
+      false,
+      this.appendDelta(p.itemId, p.delta),
+      this.messagePhases.get(p.itemId),
+    );
   }
 
   private onReasoningDelta(params: unknown): void {
@@ -1248,12 +1283,33 @@ export class CodexAppServerTranslator {
     itemId: string,
     isThought: boolean,
     fullText: string,
+    phase?: "commentary" | "final_answer",
   ): void {
     const already = this.emittedMessageText.get(itemId) ?? "";
-    if (fullText.length <= already.length) return;
+    if (fullText.length <= already.length) {
+      if (
+        !isThought &&
+        already.length > 0 &&
+        phase &&
+        this.emittedMessagePhases.get(itemId) !== phase
+      ) {
+        this.emittedMessagePhases.set(itemId, phase);
+        this.emit({
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "" } as ContentBlock,
+            messageId: `${this.turnPrefix}-${itemId}`,
+            phase,
+          },
+        });
+      }
+      return;
+    }
     const delta = fullText.slice(already.length);
     if (!delta) return;
     this.emittedMessageText.set(itemId, fullText);
+    if (!isThought && phase) this.emittedMessagePhases.set(itemId, phase);
     this.emit({
       sessionId: this.sessionId,
       update: {
@@ -1262,6 +1318,7 @@ export class CodexAppServerTranslator {
           : "agent_message_chunk",
         content: { type: "text", text: delta } as ContentBlock,
         messageId: `${this.turnPrefix}-${itemId}`,
+        ...(!isThought && phase ? { phase } : {}),
       },
     });
   }
@@ -1294,7 +1351,12 @@ type CommandActionLite =
 
 type ThreadItemUnion =
   | { type: "userMessage"; id: string; content?: unknown[] }
-  | { type: "agentMessage"; id: string; text: string }
+  | {
+      type: "agentMessage";
+      id: string;
+      text: string;
+      phase?: "commentary" | "final_answer" | null;
+    }
   | { type: "reasoning"; id: string; text?: string }
   | { type: "plan"; id: string; text: string }
   | {

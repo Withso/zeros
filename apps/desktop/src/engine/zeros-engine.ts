@@ -21,7 +21,11 @@ import { CSSResolver } from "./css-resolver";
 import { CSSFileWriter } from "./css-writer";
 import { FileWatcher } from "./watcher";
 import { SlowOperationReporter } from "./slow-operation-reporter";
-import { seedUserSettingsFromLegacyRoot } from "./settings/files";
+import {
+  repoLocalSettingsPath,
+  repoSettingsPath,
+  seedUserSettingsFromLegacyRoot,
+} from "./settings/files";
 import { startSettingsWatcher, type SettingsWatcher } from "./settings/watch";
 import { startGitWatcher, type GitWatcher } from "./git/watch";
 import { LocalTransport } from "./transport/local";
@@ -50,12 +54,17 @@ import {
 } from "./auth/verify-jwt";
 import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
-import { WorkspaceService } from "./workspace/service";
+import { LOCAL_MAIN_WORKSPACE_ID, WorkspaceService } from "./workspace/service";
 import { readDesignProtocolResource } from "./design/protocol-resource";
 import {
   DESIGN_CANVAS_FILE,
   designDirectoryNameFor,
 } from "./design/directory-registry";
+import {
+  discoverDesignDirectories,
+  resolveDesignDirectoryPointerState,
+} from "./design/directory";
+import { stickyRecognizedDesignDirectories } from "./design/recognition-store";
 import { withDesignDirectoryWritable } from "./design/workspace-lock";
 import { withDesignWorkspaceMutation } from "./design/document-write-lock";
 import {
@@ -124,6 +133,11 @@ import {
   resolveCodeAgentTerritory,
 } from "./agents/gateway";
 import { ZsrExecutionBoundary } from "./agents/containment/zsr-boundary";
+import {
+  designWatchIsolationEnvironment,
+  prepareReusableDesignWatchIsolation,
+  type DesignWatchIsolationArtifacts,
+} from "./agents/containment/design-watch-isolation";
 import {
   loadCloudWorkerConfiguration,
   type CloudWorkerConfiguration,
@@ -584,6 +598,29 @@ const LOCAL_REOWN_GRACE_MS = 30_000;
  *  one to declare a turn dead while a client still waits on it. */
 const PROMPT_STALE_AFTER_MS = 45 * 60_000;
 
+/** Bound client-authored elapsed-time metadata before it reaches live state or
+ * persistence. A renderer can legitimately wait through admission, retries,
+ * or a long queue, but a stale/skewed remote clock must not create a
+ * years-long timer or an absurd turn duration. Future values clamp to receipt. */
+const PROMPT_STARTED_AT_MAX_AGE_MS = 24 * 60 * 60_000;
+
+function normalizedPromptStartedAt(
+  candidate: number | undefined,
+  receivedAt: number,
+): number {
+  if (
+    candidate === undefined ||
+    !Number.isSafeInteger(candidate) ||
+    candidate < 0
+  ) {
+    return receivedAt;
+  }
+  return Math.min(
+    receivedAt,
+    Math.max(receivedAt - PROMPT_STARTED_AT_MAX_AGE_MS, candidate),
+  );
+}
+
 /** How long after a cancel the engine waits for the adapter's prompt promise to
  *  settle before it publishes the turn's ending itself.
  *
@@ -669,6 +706,23 @@ function engineErrorSeverity(
   if (!code) return "critical";
   if (code === "NETWORK_ERROR") return "minor";
   return "major";
+}
+
+/** Transient gate messages for an in-flight Design-territory transition.
+ *  designTransitionInterruptedProcessStart re-enters the bind when it sees
+ *  one instead of surfacing a provider error, so every producer of the gate
+ *  and the matcher must share these exact strings — an edited copy would
+ *  silently convert the transient gate into a user-visible failure. */
+const GLOBAL_DESIGN_TERRITORY_TRANSITION_MESSAGE =
+  "Registered Design territory is being updated.";
+const WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE =
+  "This workspace's Design territory is being updated.";
+
+function isDesignTerritoryTransitionMessage(message: string): boolean {
+  return (
+    message.endsWith(GLOBAL_DESIGN_TERRITORY_TRANSITION_MESSAGE) ||
+    message.endsWith(WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE)
+  );
 }
 
 export class ZerosEngine {
@@ -825,6 +879,19 @@ export class ZerosEngine {
    * on the global registered owner set, so registry expansion drains this
    * snapshot rather than one workspace bucket. Human terminals stay outside. */
   private readonly globalDesignAuthorityStarts = new Set<Promise<unknown>>();
+  /** One watcher-only artifact set per exact managed Design root. Human
+   * terminals deliberately remain outside ZSR and retain normal write
+   * authority; this cache only prevents supported dev-server watchers from
+   * observing Design churn. */
+  private readonly terminalDesignWatchGuardFlights = new Map<
+    string,
+    Promise<DesignWatchIsolationArtifacts | null>
+  >();
+  /** Qualified cloud terminals drop from the root coordinator to the human
+   * worker uid before Node reads NODE_OPTIONS. Keep their immutable watcher
+   * preload under one unpredictable, root-owned, worker-traversable temp root
+   * instead of the coordinator-private engine runtime directory. */
+  private cloudTerminalDesignWatchGuardsRoot: Promise<string> | null = null;
   /** Workspace ids whose active Design territory is being created or moved.
    * This is a short authority transition, independent of archive/delete
    * lifecycle. New code agents fail closed until old-authority sessions are
@@ -835,10 +902,6 @@ export class ZerosEngine {
   private globalDesignTerritoryTransitionCount = 0;
   private globalDesignTerritoryTransitionTail: Promise<void> =
     Promise.resolve();
-  /** A utility process domain that could not be proven stopped must never be
-   * reopened by a later queued transition. Gateway retirement health remains
-   * the admission-level diagnostic; this latch preserves the outer gate. */
-  private globalUtilityBoundaryRetirementFailed = false;
   /** Agent sessionId → the running coalesced message list — the accumulator the
    *  shared applyUpdate folds chunks into, so the engine upserts only the rows
    *  that changed on each chunk. */
@@ -2510,15 +2573,17 @@ export class ZerosEngine {
     // bun-safe, immune to phantom FSEvents (full metadata-signature guard).
     this.settingsWatcher = startSettingsWatcher(
       () => this.workspace.settingsRepoRoots(),
-      () => {
+      (changedPaths) => {
         // A settings file changed on disk (hand-edit or the Settings UI's
         // write). Re-resolve the global MCP registry so the change reaches each
         // agent's next session live, then tell clients to refetch.
         this.loadMcpRegistry();
         this.reloadGateway();
+        const scoped = this.settingsReconcileScope(changedPaths);
         this.scheduleDesignTerritoryReconcile(
-          listWorkspaces({ archived: false }),
+          scoped ?? listWorkspaces({ archived: false }),
           "settings",
+          scoped ? { skipKnownRepoRootExpansion: true } : {},
         );
         this.broadcast(
           createMessage({
@@ -2639,6 +2704,19 @@ export class ZerosEngine {
       await settle(() => mcpGateway.stop());
     }
     await settle(() => this.pty.killAll());
+    const cloudTerminalDesignWatchGuardsRoot =
+      this.cloudTerminalDesignWatchGuardsRoot;
+    this.cloudTerminalDesignWatchGuardsRoot = null;
+    // Optional access keeps stop safe for a constructor/startup failure that
+    // reaches cleanup before this optimization cache was initialized. The
+    // containment and transport stages below must still all be attempted.
+    this.terminalDesignWatchGuardFlights?.clear();
+    if (cloudTerminalDesignWatchGuardsRoot) {
+      await settle(async () => {
+        const guardsRoot = await cloudTerminalDesignWatchGuardsRoot;
+        await fs.promises.rm(guardsRoot, { recursive: true, force: true });
+      });
+    }
     // Tear down the out-of-process Node hosts (PTY shells + the @cursor/sdk
     // host) so neither lingers as an orphan after the engine stops.
     await settle(() => disposePtyHost());
@@ -2682,13 +2760,7 @@ export class ZerosEngine {
     workspaceId: string | null | undefined,
   ): string | null {
     if (this.globalDesignTerritoryTransitionCount > 0) {
-      return "Registered Design territory is being updated.";
-    }
-    if (this.globalUtilityBoundaryRetirementFailed) {
-      return (
-        "A prior provider boundary could not be proven stopped; restart Zeros " +
-        "before starting another code process."
-      );
+      return GLOBAL_DESIGN_TERRITORY_TRANSITION_MESSAGE;
     }
     if (!workspaceId) return null;
     let ws: ReturnType<typeof getWorkspaceById>;
@@ -2720,7 +2792,7 @@ export class ZerosEngine {
       return "This workspace's checkout is not present on disk.";
     }
     if (this.designTerritoryTransitions.has(workspaceId)) {
-      return "This workspace's Design territory is being updated.";
+      return WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE;
     }
     return null;
   }
@@ -2772,24 +2844,12 @@ export class ZerosEngine {
     // Those one-shots do not have a workspace start row, so the pool itself is
     // their gate. Each queued transition closes it again (incrementing its
     // epoch), while only the final transition may reopen it.
-    const utilityRetirement = this.agents
-      .retirePooledUtilityBoundaries({ reopen: false })
-      .catch((error) => {
-        this.globalUtilityBoundaryRetirementFailed = true;
-        throw error;
-      });
+    const utilityRetirement = this.agents.retirePooledUtilityBoundaries({
+      reopen: false,
+    });
     try {
       await utilityRetirement;
       await previous;
-      // A failed retirement removes the pool entry and latches the gateway, so
-      // a later disposeAll can be empty even though the old process domain was
-      // never proven dead. Never let that later transition publish a different
-      // registered-owner map under the surviving authority.
-      if (this.globalUtilityBoundaryRetirementFailed) {
-        throw new Error(
-          "A prior provider boundary could not be proven stopped; restart Zeros before changing registered Design territory.",
-        );
-      }
       await this.waitForWorkspaceProcessStartSnapshot(
         "registered-design-territory",
         admittedStarts,
@@ -2797,14 +2857,15 @@ export class ZerosEngine {
       await this.setup.stopAllAndProve();
       await this.runs.stopAllAndProve();
       await this.retireAllCodeAgentSessionsForTerritoryChange();
+      // A failed exact proof may have come from an already-closed session or
+      // pooled one-shot and therefore no longer appear in the live maps above.
+      // It blocks this owner-map mutation only, never unrelated admissions.
+      this.agents.assertRegisteredDesignAuthorityRetirementsProven();
       return await mutation();
     } finally {
       release();
       this.globalDesignTerritoryTransitionCount -= 1;
-      if (
-        this.globalDesignTerritoryTransitionCount === 0 &&
-        !this.globalUtilityBoundaryRetirementFailed
-      ) {
+      if (this.globalDesignTerritoryTransitionCount === 0) {
         this.agents.reopenPooledUtilityBoundaries();
       }
     }
@@ -2891,11 +2952,6 @@ export class ZerosEngine {
       ].filter((start) => !this.designTerritoryTransitionCallers.has(start));
       try {
         await previous;
-        if (this.globalUtilityBoundaryRetirementFailed) {
-          throw new Error(
-            "A prior provider boundary could not be proven stopped; restart Zeros before changing Design territory.",
-          );
-        }
         const retireTargetAuthority = async () => {
           const utilityRetirement = Promise.all(
             ordered.map((target) => {
@@ -2904,10 +2960,7 @@ export class ZerosEngine {
                 workspaceRoot,
               );
             }),
-          ).catch((error) => {
-            this.globalUtilityBoundaryRetirementFailed = true;
-            throw error;
-          });
+          );
           await Promise.all([
             utilityRetirement,
             ...ordered.flatMap((target) => {
@@ -2942,6 +2995,11 @@ export class ZerosEngine {
         // Catch a boundary that published its target contribution while the
         // drained admission was settling, and prove its teardown before write.
         await retireTargetAuthority();
+        for (const target of ordered) {
+          this.agents.assertWorkspaceDesignAuthorityRetirementsProven(
+            workspaceRoots.get(target.workspaceId)!,
+          );
+        }
         return await mutation();
       } finally {
         release();
@@ -3082,12 +3140,12 @@ export class ZerosEngine {
       this.agents.markBoundaryDraining(sessionId, "territory-restart");
     }
     // A failed retire must not leave SURVIVORS wearing a `draining` status
-    // that nothing will ever complete or clear — the renderer's boundary pill
-    // would spin forever on a session that is still live and routable. The
-    // sessions endSession already retired publish their own terminal state;
-    // everything still routable gets its pre-drain `ready` back before the
-    // failure propagates. Fail-closed enforcement is untouched: the transition
-    // itself still fails, and admission health still gates new boundaries.
+    // that nothing will ever complete or clear. The sessions endSession
+    // already retired publish their own terminal state; everything still
+    // routable gets its pre-drain `ready` back before the failure propagates.
+    // Fail-closed enforcement is untouched: the exact authority mutation stays
+    // blocked by its retained proof record while unrelated boundaries remain
+    // admissible.
     const undrainSurvivors = () => {
       for (const sessionId of sessionIds) {
         this.agents.markBoundaryDrainingCleared(sessionId);
@@ -3127,9 +3185,61 @@ export class ZerosEngine {
    * settings, Git, or Design-recognition mutation. Pure preview first:
    * ordinary source edits, fetches, commits, and unrelated settings saves do
    * not disturb agents. When authority did change, the existing transition
-   * primitive blocks starts and retires old sandboxes before
+   * primitive blocks matching starts and retires old boundaries before
    * publication/fencing. Any preview or fence failure records unhealthy state,
    * so subsequent process admission fails closed. */
+  /** Reconcile candidates for a settings-file change, or null when the change
+   *  demands the full fan-out. User and managed settings feed every
+   *  workspace's stack, so they keep the app-wide sweep; a repo-scoped
+   *  settings.toml feeds only that repository's stack, so its reconcile — a
+   *  real Design-tree walk per target — stays scoped to that repo's
+   *  workspaces plus the repo root itself. Unrecognized paths fail open to
+   *  the full fan-out. */
+  private settingsReconcileScope(changedPaths: readonly string[]): Array<{
+    id: string;
+    path: string;
+    repoRoot: string;
+    archivedAt?: number | null;
+  }> | null {
+    let repoRoots: string[];
+    try {
+      repoRoots = this.workspace.settingsRepoRoots();
+    } catch {
+      return null;
+    }
+    const rootBySettingsPath = new Map<string, string>();
+    for (const root of repoRoots) {
+      rootBySettingsPath.set(repoSettingsPath(root), root);
+      rootBySettingsPath.set(repoLocalSettingsPath(root), root);
+    }
+    const scopedRoots = new Set<string>();
+    for (const changed of changedPaths) {
+      const root = rootBySettingsPath.get(changed);
+      if (!root) return null;
+      scopedRoots.add(path.resolve(root));
+    }
+    if (scopedRoots.size === 0) return null;
+    const candidates: Array<{
+      id: string;
+      path: string;
+      repoRoot: string;
+      archivedAt?: number | null;
+    }> = listWorkspaces({ archived: false }).filter((workspace) =>
+      scopedRoots.has(path.resolve(workspace.repoRoot)),
+    );
+    // A registered repository without live workspace rows still owns Design
+    // territory; reconcile the root itself so its pointer change is honored.
+    for (const root of scopedRoots) {
+      candidates.push({
+        id: `repo-root:${root}`,
+        path: root,
+        repoRoot: root,
+        archivedAt: null,
+      });
+    }
+    return candidates;
+  }
+
   private scheduleDesignTerritoryReconcile(
     candidates: readonly {
       id: string;
@@ -3138,6 +3248,13 @@ export class ZerosEngine {
       archivedAt?: number | null;
     }[],
     source: "settings" | "git-refs" | "recognition",
+    options: {
+      /** The caller proved the change can only affect these candidates'
+       *  repositories (a repo-scoped settings.toml), so skip the app-wide
+       *  known-repo-root sweep. The global registered-authority preview below
+       *  still runs whenever Setup/Run/pooled authority is live. */
+      skipKnownRepoRootExpansion?: boolean;
+    } = {},
   ): void {
     const targetsByPath = new Map<
       string,
@@ -3184,21 +3301,23 @@ export class ZerosEngine {
         });
       }
     }
-    try {
-      for (const repoRootInput of listKnownRepoRoots()) {
-        const repoRoot = canonical(repoRootInput);
-        addTarget(
-          {
-            id: `repo-root:${repoRoot}`,
-            path: repoRoot,
-            repoRoot,
-            archivedAt: null,
-          },
-          true,
-        );
+    if (!options.skipKnownRepoRootExpansion) {
+      try {
+        for (const repoRootInput of listKnownRepoRoots()) {
+          const repoRoot = canonical(repoRootInput);
+          addTarget(
+            {
+              id: `repo-root:${repoRoot}`,
+              path: repoRoot,
+              repoRoot,
+              archivedAt: null,
+            },
+            true,
+          );
+        }
+      } catch {
+        // Retain the explicit watcher candidates during a transient DB failure.
       }
-    } catch {
-      // Retain the explicit watcher candidates during a transient DB failure.
     }
     const targets = [...targetsByPath.values()];
     this.designTerritoryReconcileChain = this.designTerritoryReconcileChain
@@ -3431,7 +3550,7 @@ export class ZerosEngine {
     return (
       isGitError(error) &&
       error.code === "VALIDATION_FAILED" &&
-      /Design territory is being updated\.?$/i.test(error.message)
+      isDesignTerritoryTransitionMessage(error.message)
     );
   }
 
@@ -4635,14 +4754,18 @@ export class ZerosEngine {
             return;
           }
           this.router.setOwner(msg.sessionId, client.id);
+          const promptReceivedAt = Date.now();
           const activePrompt: ActivePromptContext = {
             sessionId: msg.sessionId,
             agentId: msg.agentId,
             chatId: this.sessionChat.get(msg.sessionId) ?? null,
             turnId: msg.userMessageId ?? `turn-${msg.id}`,
             promptId: durablePromptId(msg.promptId, `prompt-${msg.id}`),
-            startedAt: Date.now(),
-            lastActivityAt: Date.now(),
+            startedAt: normalizedPromptStartedAt(
+              msg.startedAt,
+              promptReceivedAt,
+            ),
+            lastActivityAt: promptReceivedAt,
           };
           this.activePromptContexts.set(msg.sessionId, activePrompt);
           // Keep a start barrier registered from before the first await until
@@ -4667,13 +4790,18 @@ export class ZerosEngine {
               msg.prompt,
               msg.bubble,
               msg.userMessageId,
+              activePrompt.startedAt,
             );
             // Mark the engine busy for the duration of the turn so the dev
             // HMR watcher defers respawning (a save mid-turn must not kill
             // the in-flight response). Cleared in finally — including on the
             // error path — so a failed turn never leaves a stale marker.
             // Record this turn: snapshot the work tree BEFORE the agent runs.
-            turnCtx = await this.beginTurn(msg.sessionId, msg.userMessageId);
+            turnCtx = await this.beginTurn(
+              msg.sessionId,
+              msg.userMessageId,
+              activePrompt.startedAt,
+            );
             // Publish the snapshot itself on the record so the settle watchdog
             // can recognise THIS turn's row by reference instead of re-deriving
             // a turn id that can disagree with beginTurn's (see turnSnapshot).
@@ -6429,7 +6557,7 @@ export class ZerosEngine {
     if (workspaceId && this.designTerritoryTransitions.has(workspaceId)) {
       throw new GitError({
         code: "VALIDATION_FAILED",
-        message: "This workspace's Design territory is being updated.",
+        message: WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE,
         remediation:
           "Wait for the Design territory transition to finish, then retry the coding agent.",
         context: { workspaceId },
@@ -6449,7 +6577,7 @@ export class ZerosEngine {
       if (this.sessionWorkspace.get(sessionId) === transitioningWorkspaceId) {
         throw new GitError({
           code: "VALIDATION_FAILED",
-          message: "This workspace's Design territory is being updated.",
+          message: WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE,
           remediation:
             "Wait for the Design territory transition to finish, then retry the coding agent.",
           context: { workspaceId: transitioningWorkspaceId, sessionId },
@@ -6473,7 +6601,7 @@ export class ZerosEngine {
       ) {
         throw new GitError({
           code: "VALIDATION_FAILED",
-          message: "This workspace's Design territory is being updated.",
+          message: WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE,
           remediation:
             "Wait for the Design territory transition to finish, then retry the coding agent.",
           context: { workspaceId: transitioningWorkspaceId, sessionId },
@@ -6557,6 +6685,8 @@ export class ZerosEngine {
     /** The renderer's local user-message id (v13). Persist the user message
      *  under it so turn ids align with the renderer without a re-window. */
     userMessageId?: string,
+    /** Original renderer send time, already bounded at the engine boundary. */
+    startedAt?: number,
   ): void {
     const hasRich =
       !!bubble &&
@@ -6595,6 +6725,7 @@ export class ZerosEngine {
                 // Adopt the renderer's id so the persisted msg_id (and turn id)
                 // matches turn.userPrompt.id in the live session.
                 ...(userMessageId ? { id: userMessageId } : {}),
+                ...(startedAt !== undefined ? { createdAt: startedAt } : {}),
                 ...(m.segments == null &&
                 bubble.segments != null &&
                 bubble.segments.length > 0
@@ -6621,10 +6752,16 @@ export class ZerosEngine {
         } as SessionNotification,
         // Stamp the renderer's id onto the freshly-appended user bubble (later
         // blocks coalesce into it, so only the first append is stamped).
-        userMessageId
+        userMessageId || startedAt !== undefined
           ? (m) =>
               m.kind === "text" && m.role === "user"
-                ? { ...m, id: userMessageId }
+                ? {
+                    ...m,
+                    ...(userMessageId ? { id: userMessageId } : {}),
+                    ...(startedAt !== undefined
+                      ? { createdAt: startedAt }
+                      : {}),
+                  }
                 : m
           : undefined,
       );
@@ -6821,6 +6958,7 @@ export class ZerosEngine {
   private async beginTurn(
     sessionId: string,
     userMessageId?: string,
+    startedAt: number = Date.now(),
   ): Promise<TurnSnapshotContext | null> {
     try {
       const chatId = this.sessionChat.get(sessionId);
@@ -6876,7 +7014,7 @@ export class ZerosEngine {
         folder: root,
         agentId,
         summary,
-        startedAt: Date.now(),
+        startedAt,
         preSnapshot: pre,
       });
       return {
@@ -8182,6 +8320,145 @@ export class ZerosEngine {
     );
   }
 
+  private async terminalDesignWatchGuard(
+    workspaceId: string | null,
+  ): Promise<DesignWatchIsolationArtifacts | null> {
+    if (!workspaceId) return null;
+    let workspaceRoot: string;
+    let repoRoot: string;
+    if (workspaceId === LOCAL_MAIN_WORKSPACE_ID) {
+      workspaceRoot = path.resolve(this.root);
+      repoRoot = workspaceRoot;
+    } else {
+      let workspace: ReturnType<typeof getWorkspaceById>;
+      try {
+        workspace = getWorkspaceById(workspaceId);
+      } catch {
+        return null;
+      }
+      if (!workspace || workspace.archivedAt != null) return null;
+      workspaceRoot = path.resolve(workspace.path);
+      repoRoot = path.resolve(workspace.repoRoot);
+    }
+    const activeDesignDirectory = path.join(
+      workspaceRoot,
+      ...designDirectoryNameFor(workspaceRoot).split("/"),
+    );
+    let protectedRoots = [activeDesignDirectory];
+    try {
+      // This is notification isolation, not security admission. Read only the
+      // pointer and recognition evidence needed to enumerate watcher roots;
+      // the full territory/hard-link validation belongs to ZSR and would add
+      // avoidable Git/audit latency to every new human terminal.
+      const [pointer, discovered, sticky] = await Promise.all([
+        resolveDesignDirectoryPointerState({
+          repoRoot,
+          workspacePath: workspaceRoot,
+        }),
+        discoverDesignDirectories(workspaceRoot),
+        stickyRecognizedDesignDirectories(workspaceRoot),
+      ]);
+      protectedRoots = [
+        ...new Set([
+          activeDesignDirectory,
+          ...(pointer.valid
+            ? [path.join(workspaceRoot, ...pointer.directory.split("/"))]
+            : []),
+          ...[...discovered, ...sticky].map((directory) =>
+            path.join(workspaceRoot, ...directory.split("/")),
+          ),
+        ]),
+      ].sort((left, right) => left.localeCompare(right));
+    } catch {
+      // A terminal is human authority, so watcher filtering is best-effort and
+      // must never make the shell unavailable. The active/default destination
+      // still covers first-use Design creation and the ordinary configuration.
+    }
+    const key = protectedRoots.join("\0");
+    const existing = this.terminalDesignWatchGuardFlights.get(key);
+    if (existing) return existing;
+    const flight = (async () => {
+      const guardsRoot = await this.terminalDesignWatchGuardsRoot();
+      const artifacts = await prepareReusableDesignWatchIsolation(
+        guardsRoot,
+        protectedRoots,
+        [workspaceRoot],
+      );
+      if (!artifacts || !this.cloudWorker) return artifacts;
+
+      // The root coordinator creates and owns every component. The worker gets
+      // read/traverse only: enough for runtime preloads/ignore files after
+      // setpriv, never enough to replace the artifacts or their exact roots.
+      const ownerUid =
+        process.geteuid?.() ?? process.getuid?.() ?? this.cloudWorker.uid;
+      const fingerprintRoot = path.dirname(artifacts.nodeGuardPath);
+      for (const artifact of Object.values(artifacts)) {
+        await fs.promises.chown(artifact, ownerUid, this.cloudWorker.gid);
+        await fs.promises.chmod(artifact, 0o440);
+      }
+      await fs.promises.chown(fingerprintRoot, ownerUid, this.cloudWorker.gid);
+      await fs.promises.chmod(fingerprintRoot, 0o750);
+      return artifacts;
+    })();
+    this.terminalDesignWatchGuardFlights.set(key, flight);
+    try {
+      return await flight;
+    } catch {
+      if (this.terminalDesignWatchGuardFlights.get(key) === flight) {
+        this.terminalDesignWatchGuardFlights.delete(key);
+      }
+      // This is a reload-noise optimization, not the write fence. A damaged
+      // runtime cache must never prevent the user from opening a human shell.
+      console.warn(
+        "[terminal] Design watcher isolation could not be prepared; the terminal remains available",
+      );
+      return null;
+    }
+  }
+
+  private async terminalDesignWatchGuardsRoot(): Promise<string> {
+    if (!this.cloudWorker) {
+      return path.join(
+        engineRuntimeDir(this.root),
+        "terminal-design-watch-guards",
+      );
+    }
+    const existing = this.cloudTerminalDesignWatchGuardsRoot;
+    if (existing) return existing;
+    const cloudWorker = this.cloudWorker;
+    const flight = (async () => {
+      let guardsRoot: string | null = null;
+      try {
+        // Qualified cloud mode is Linux-only. Use the system temp root
+        // explicitly: root's TMPDIR may itself be private and therefore
+        // untraversable after the terminal drops to the worker uid.
+        guardsRoot = await fs.promises.mkdtemp(
+          path.join("/tmp", "zeros-terminal-design-watch-"),
+        );
+        const ownerUid = process.geteuid?.() ?? process.getuid?.() ?? 0;
+        await fs.promises.chown(guardsRoot, ownerUid, cloudWorker.gid);
+        await fs.promises.chmod(guardsRoot, 0o710);
+        return guardsRoot;
+      } catch (error) {
+        if (guardsRoot) {
+          await fs.promises
+            .rm(guardsRoot, { recursive: true, force: true })
+            .catch(() => undefined);
+        }
+        throw error;
+      }
+    })();
+    this.cloudTerminalDesignWatchGuardsRoot = flight;
+    try {
+      return await flight;
+    } catch (error) {
+      if (this.cloudTerminalDesignWatchGuardsRoot === flight) {
+        this.cloudTerminalDesignWatchGuardsRoot = null;
+      }
+      throw error;
+    }
+  }
+
   /** Spawn a host PTY for a client. Remote creation is gated by the
    *  remote-restriction list (trusted device; no per-spawn host prompt). */
   private async handlePtyCreate(
@@ -8219,8 +8496,10 @@ export class ZerosEngine {
     // explicit workspaceId if sent, else from the cwd token (which may be a
     // workspace ID or a real host PATH). Drives the restriction gate + the shared
     // registry for both local (cwd is always a path) and remote (id or path).
-    // Terminals run in every workspace regardless of view mode. The strong
-    // Design carve-out is attached only to Zeros-launched code agents.
+    // Terminals run in every workspace regardless of view mode. They are a
+    // human-authority surface, so unlike agents/Run/Setup they are not placed
+    // in ZSR; the watcher-only preload added below changes notifications, not
+    // their ability to edit files.
     const canonicalWsId =
       (reattach ? this.terminals.get(msg.sessionId)?.workspaceId : null) ??
       this.workspace.workspaceIdForCwd(msg.workspaceId) ??
@@ -8324,6 +8603,27 @@ export class ZerosEngine {
     }
     // Local credential setup is asynchronous too. Avoid spawning at all when
     // archive/delete acquired the workspace while it was resolving.
+    if (!this.workspaceAllowsProcessStart(canonicalWsId)) {
+      ptyExit();
+      return;
+    }
+    if (!reattach) {
+      const watchIsolation = await this.terminalDesignWatchGuard(canonicalWsId);
+      if (watchIsolation) {
+        env ??= buildPtyEnv({
+          scrub: !fullHumanEnvironment,
+          cwd: resolvedCwd,
+          workspaceId: canonicalWsId,
+        });
+        Object.assign(
+          env,
+          designWatchIsolationEnvironment(env, watchIsolation),
+        );
+      }
+    }
+    // Watcher preparation is asynchronous. Re-check the lifecycle gate before
+    // spawning so archive/delete cannot race a late human terminal into a
+    // checkout whose process set it already enumerated.
     if (!this.workspaceAllowsProcessStart(canonicalWsId)) {
       ptyExit();
       return;

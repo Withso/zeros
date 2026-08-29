@@ -11,6 +11,11 @@ const tool = (id: string): AgentMessage =>
   ({ kind: "tool", id, toolKind: "read" }) as unknown as AgentMessage;
 const agentText = (id: string): AgentMessage =>
   ({ kind: "text", role: "agent", id }) as unknown as AgentMessage;
+const phasedAgentText = (
+  id: string,
+  phase: "commentary" | "final_answer",
+): AgentMessage =>
+  ({ kind: "text", role: "agent", id, phase }) as unknown as AgentMessage;
 const systemText = (id: string): AgentMessage =>
   ({ kind: "text", role: "system", id }) as unknown as AgentMessage;
 const thought = (id: string): AgentMessage =>
@@ -49,6 +54,15 @@ describe("partitionTurn", () => {
     const { working, finalOutput } = partitionTurn([tool("a"), agentText("b")]);
     expect(ids(working)).toEqual(["a"]);
     expect(ids(finalOutput)).toEqual(["b"]);
+  });
+
+  it("keeps Codex commentary in working history and shows only its final answer", () => {
+    const { working, finalOutput } = partitionTurn([
+      phasedAgentText("interim", "commentary"),
+      phasedAgentText("answer", "final_answer"),
+    ]);
+    expect(ids(working)).toEqual(["interim"]);
+    expect(ids(finalOutput)).toEqual(["answer"]);
   });
 
   it("keeps in-between narration in the working group", () => {

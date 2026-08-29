@@ -301,19 +301,22 @@ describe("ZSR supervisor launch contract", () => {
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
-  it("still rejects a container launcher outside immutable private tools", async () => {
-    const result = await rejectCommand({
-      containerWorker: {
-        version: 1,
-        runtime: "podman",
-        node: process.execPath,
-        engine: process.execPath,
-        launcher: path.join(privateRoot, "attacker.mjs"),
-        state: path.join(privateRoot, "container"),
-        socket: path.join(privateRoot, "container", "podman.sock"),
-      },
-    });
-    expect(result.status).toBe(125);
-    expect(result.stderr).toContain("outside private tools");
-  });
+  it.runIf(process.platform === "linux")(
+    "still rejects a container launcher outside immutable private tools",
+    async () => {
+      const result = await rejectCommand({
+        containerWorker: {
+          version: 1,
+          runtime: "podman",
+          node: process.execPath,
+          engine: process.execPath,
+          launcher: path.join(privateRoot, "attacker.mjs"),
+          state: path.join(privateRoot, "container"),
+          socket: path.join(privateRoot, "container", "podman.sock"),
+        },
+      });
+      expect(result.status).toBe(125);
+      expect(result.stderr).toContain("outside private tools");
+    },
+  );
 });

@@ -27,7 +27,6 @@ function boundary(id: string): PreparedBoundary {
 function pool(overrides: {
   prepare?: (r: BoundaryRequest) => Promise<PreparedBoundary>;
   retire?: (id: string, b: PreparedBoundary) => Promise<void>;
-  assertHealthy?: () => void;
   idleMs?: number;
 }) {
   let created = 0;
@@ -46,9 +45,6 @@ function pool(overrides: {
       (async (id) => {
         retired.push(id);
       }),
-    ...(overrides.assertHealthy
-      ? { assertHealthy: overrides.assertHealthy }
-      : {}),
     ...(overrides.idleMs !== undefined ? { idleMs: overrides.idleMs } : {}),
   });
   return { instance, prepared, retired, created: () => created };
@@ -75,9 +71,9 @@ describe("utilityBoundaryKey", () => {
   });
 
   it("treats an absent field and an explicitly-undefined field as the same", () => {
-    expect(utilityBoundaryKey(request({ providerResumeId: undefined }))).toBe(
-      utilityBoundaryKey(request()),
-    );
+    expect(
+      utilityBoundaryKey(request({ containerWorkflowExpected: undefined })),
+    ).toBe(utilityBoundaryKey(request()));
   });
 });
 
@@ -234,6 +230,9 @@ describe("UtilityBoundaryPool", () => {
       request({ executionId: "utility-design", cwd: designRoot }),
       contribution(designRoot),
     );
+    expect(design.boundary.territoryContributions).toEqual(
+      contribution(designRoot),
+    );
 
     instance.suspendWorkspaceTerritory(designRoot);
     await instance.disposeWorkspaceTerritory(designRoot);
@@ -349,17 +348,34 @@ describe("UtilityBoundaryPool", () => {
     expect(instance.size()).toBe(0);
   });
 
-  it("refuses to admit while boundary retirement is unhealthy", async () => {
-    const { instance } = pool({
-      assertHealthy: () => {
-        throw new Error(
-          "a prior execution boundary could not be proven stopped",
-        );
-      },
+  it("retires a prepared boundary rejected for stale authority metadata", async () => {
+    const prepared = boundary("stale-authority");
+    Object.defineProperty(prepared, "territoryContributions", {
+      value: [
+        {
+          workspaceRoot: "/tmp/other",
+          grants: ["/tmp/other"],
+          full: true,
+          identity: "old",
+        },
+      ],
     });
-    await expect(instance.acquire(request())).rejects.toThrow(
-      /could not be proven stopped/,
+    const retire = vi.fn(async () => undefined);
+    const { instance } = pool({ prepare: async () => prepared, retire });
+    const requested = [
+      {
+        workspaceRoot: "/tmp/workspace",
+        grants: ["/tmp/workspace"],
+        full: true,
+        identity: "current",
+      },
+    ];
+
+    await expect(instance.acquire(request(), requested)).rejects.toThrow(
+      /territory authority is stale/i,
     );
+    expect(retire).toHaveBeenCalledWith("one-shot-1", prepared);
+    expect(instance.size()).toBe(0);
   });
 
   it("drops an entry whose teardown could not be proven instead of reusing it", async () => {

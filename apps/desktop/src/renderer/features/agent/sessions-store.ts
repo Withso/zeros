@@ -647,10 +647,7 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     let applied = false;
     set((state) => {
       const slot = state.sessions[chatId];
-      if (
-        !slot ||
-        (slot.executionId ?? slot.sessionId) !== executionId
-      ) {
+      if (!slot || (slot.executionId ?? slot.sessionId) !== executionId) {
         return state;
       }
       applied = true;
@@ -941,15 +938,27 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       )
         return;
       if (upd.state === "running") {
+        const engineStartedAt =
+          typeof upd.startedAt === "number" &&
+          Number.isFinite(upd.startedAt) &&
+          upd.startedAt >= 0
+            ? upd.startedAt
+            : null;
         get().patchSession(chatId, {
           status: "streaming",
           error: null,
           failure: null,
           lastStopReason: null,
+          // A local send starts this clock before session admission. Cursor's
+          // provider create can acknowledge seconds later; lifecycle updates
+          // may refine the start earlier, but must never move it forward and
+          // visibly reset the timer.
           activeTurnStartedAt:
-            typeof upd.startedAt === "number"
-              ? upd.startedAt
-              : slot.activeTurnStartedAt,
+            slot.activeTurnStartedAt == null
+              ? engineStartedAt
+              : engineStartedAt == null
+                ? slot.activeTurnStartedAt
+                : Math.min(slot.activeTurnStartedAt, engineStartedAt),
         });
       } else {
         get().patchSession(chatId, {
@@ -1026,11 +1035,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         // The agent is ALREADY running at this tier — it reported the change
         // itself. Advance the live slot's applied-env stamp with the chat, or
         // sendPrompt's settings-drift reconcile reads the write above as user
-        // drift and force-respawns COLD (AGENT_NEW_SESSION carries no prior
-        // session id, so Codex silently starts a brand-new thread and the
-        // conversation is gone while the transcript stays on screen). Only the
-        // effort slot moves, so an unapplied model/Fast/add-dir change is still
-        // reconciled. <AgentSessionsProvider> additionally pushes
+        // drift and performs an unnecessary close→resume before the next send.
+        // Only the effort slot moves, so an unapplied model/Fast/add-dir change
+        // is still reconciled. <AgentSessionsProvider> additionally pushes
         // AGENT_UPDATE_CONFIG so the ENGINE's session env matches what the
         // composer now shows (codex re-reads it on every turn/start).
         const applied = effortAdoptedEnvKey(
@@ -1400,6 +1407,39 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         return state;
       }
       if (status.state !== "revoked") {
+        if (status.failure === "design-protection-failed") {
+          const failure = {
+            kind: "design-protection-failed" as const,
+            stage: "prompt" as const,
+            agentId,
+            message:
+              "The agent was stopped because Design protection could not be proven.",
+          };
+          return {
+            sessions: {
+              ...state.sessions,
+              [chatId]: {
+                ...slot,
+                status: "failed" as SessionStatus,
+                error: failure.message,
+                failure,
+                boundary: status,
+                activeTurnStartedAt: null,
+                pendingPermission: null,
+                pendingPermissions: [],
+                pendingQuestions: [],
+                backgroundTasks: [],
+                workflows: [],
+                waitingForBackgroundTasks: false,
+                backgroundTasksWaitingSince: null,
+              },
+            },
+            pendingLocalTurns: withoutPendingLocalTurn(
+              state.pendingLocalTurns,
+              chatId,
+            ),
+          };
+        }
         if (slot.boundary === status) return state;
         return {
           sessions: {

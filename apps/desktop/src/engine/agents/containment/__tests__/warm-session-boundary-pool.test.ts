@@ -42,6 +42,7 @@ describe("WarmSessionBoundaryPool", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.stubEnv("ZEROS_ZSR_WARM_SESSION_BOUNDARIES", "1");
     prepared = [];
     retired = [];
     prepareError = null;
@@ -59,6 +60,7 @@ describe("WarmSessionBoundaryPool", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   it("adopts a replenished boundary exactly once for a byte-identical request", async () => {
@@ -73,8 +75,12 @@ describe("WarmSessionBoundaryPool", () => {
       contributions,
     );
     expect(adopted).not.toBeNull();
+    expect(adopted?.boundary.territoryContributions).toBe(contributions);
+    expect(adopted?.boundary.registeredDesignAuthorityIdentity).toBe("auth-1");
     expect(pool.size()).toBe(0);
-    expect(pool.adopt(request({ executionId: "session-3" }), contributions)).toBeNull();
+    expect(
+      pool.adopt(request({ executionId: "session-3" }), contributions),
+    ).toBeNull();
   });
 
   it("misses when any request byte or the contribution snapshot differs", async () => {
@@ -83,9 +89,7 @@ describe("WarmSessionBoundaryPool", () => {
       pool.adopt(request({ providerId: "codex" }), contributions),
     ).toBeNull();
     expect(
-      pool.adopt(request(), [
-        { ...contributions[0]!, identity: "identity-b" },
-      ]),
+      pool.adopt(request(), [{ ...contributions[0]!, identity: "identity-b" }]),
     ).toBeNull();
     expect(pool.size()).toBe(1);
   });
@@ -177,6 +181,25 @@ describe("WarmSessionBoundaryPool", () => {
     expect(pool.territoryContributionSnapshots()).toEqual([contributions]);
     expect(pool.registeredDesignAuthorityChanged("auth-1")).toBe(false);
     expect(pool.registeredDesignAuthorityChanged("auth-2")).toBe(true);
+  });
+
+  it("retires a prepared spare rejected for stale authority metadata", async () => {
+    const stale = fakeBoundary("stale-authority");
+    Object.defineProperty(stale, "registeredDesignAuthorityIdentity", {
+      value: "old-auth",
+    });
+    const retire = vi.fn(async (executionId: string) => {
+      retired.push(executionId);
+    });
+    const stalePool = new WarmSessionBoundaryPool({
+      prepare: async () => stale,
+      retire,
+    });
+
+    await stalePool.replenish(request(), contributions, "current-auth");
+
+    expect(retire).toHaveBeenCalledOnce();
+    expect(stalePool.size()).toBe(0);
   });
 
   it("dispose retires everything and permanently refuses more work", async () => {

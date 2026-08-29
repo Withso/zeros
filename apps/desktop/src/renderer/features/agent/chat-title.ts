@@ -35,6 +35,7 @@ import {
 import type { AgentTitleGeneratedMessage } from "../../platform/bridge/messages";
 import type { Action } from "../../state/workspace-store";
 import type { SessionStatus } from "./use-agent-session";
+import { scheduleChatTitleWork } from "./chat-title-scheduler";
 
 /** Ceiling on the prompt text sent to the title model — a title needs the
  *  gist, not a 100k-char paste, and small models are faster on less. */
@@ -86,9 +87,9 @@ export function sanitizeAiTitle(raw: string): string | null {
   return /[\p{L}\p{N}]/u.test(t) ? t : null;
 }
 
-/** Kick off the background AI title for a chat's settled first prompt.
- *  Synchronous and non-throwing by contract. Returns true only when a bridge
- *  request was launched, allowing the caller to retain an exact-message
+/** Queue the background AI title for a chat's settled first prompt.
+ *  Synchronous and non-throwing by contract. Returns true only when work was
+ *  scheduled, allowing the caller to retain an exact-message
  *  single-flight guard without suppressing a later bridge-ready retry. */
 export function requestAiChatTitle(args: {
   chatId: string;
@@ -113,9 +114,10 @@ export function requestAiChatTitle(args: {
     : null;
   const resolved = resolveChatTitleModel(args.agentId, connectedFamilies);
   if (!resolved || !args.prompt.trim()) return false;
-  const bridge = getActiveBridge();
-  if (!bridge) return false;
-  void (async () => {
+  if (!getActiveBridge()) return false;
+  scheduleChatTitleWork(args.chatId, async () => {
+    const bridge = getActiveBridge();
+    if (!bridge) return;
     // Family === engine agent id (claude/codex/cursor) — the same identity
     // mapping new-chat-defaults' settings mirror relies on.
     const env = await deriveProviderEnv(resolved.family);
@@ -154,10 +156,6 @@ export function requestAiChatTitle(args: {
       title,
       expectedTitle: args.expectedTitle,
     });
-  })().catch((err) => {
-    // Background best-effort — the tab keeps "Untitled". An old engine
-    // (restart needed) surfaces here as "Unknown bridge message type".
-    console.warn("[chat-title] request failed:", err);
   });
   return true;
 }

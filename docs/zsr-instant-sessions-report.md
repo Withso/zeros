@@ -7,6 +7,25 @@ The current contracts are
 [zeros-sandbox-runtime-plan.md](zeros-sandbox-runtime-plan.md) and
 [zeros-sandbox-runtime-qualification.md](zeros-sandbox-runtime-qualification.md).
 
+**2026-08-28 follow-up:** interactive cold create/resume now returns after the
+immutable kernel policy/process domain is established and runs its behavioral
+canary and fresh territory revalidation concurrently with provider startup.
+Warm spares remain pre-attested when the diagnostic switch enables them, but
+speculative session-spare preparation is off by default after live traces found
+it competing with the first provider turn for seconds to save at most a few
+hundred milliseconds later. Setup, Run, and utilities remain blocking. A failed
+background proof stops only that exact tree and reports
+`design-protection-failed`. Failed teardown proof is also exact-scoped and
+retried; it no longer trips a process-wide admission latch. The historical
+canary-before-provider and global-latch proposals below are not current
+contracts.
+
+The first prompt is also cancellable throughout this window. It is rendered as
+the live turn with a continuous timer and Stop control while admission is still
+pending. Stop aborts the chat-scoped create/resume rather than sending a cancel
+to a provider session that does not exist, and a later prompt starts a new
+single-flight admission without waiting for the cancelled preparation.
+
 This report analyzed the 2026-08-17 implementation: preflight admission,
 provider-HOME copies, shadow Git, credential projection, network/port brokers,
 and per-agent resource controls. It uses working-tree references from that
@@ -69,7 +88,8 @@ many admissions.
 **Can it feel exactly like before ZSR? Yes, by construction.** "Before ZSR" was
 never zero-latency — provider boot (Claude SDK / Codex app-server / Cursor host)
 existed then and still dominates the floor. What made it _feel_ instant was:
-(a) the message was **accepted immediately** (composer cleared, queued card), and
+(a) the message was **accepted immediately** (composer cleared, active turn and
+elapsed timer visible), and
 (b) there was **no admission in front of it**. Both are recoverable without
 weakening one guarantee, using the same patterns every fast system in industry
 uses (§4): build the expensive state **ahead of need**, keep refresh **O(changes)
@@ -79,11 +99,13 @@ never put background work in front of a person.
 **The plan in one line:** _park worlds, not boundaries_ — prewarm the expensive,
 env-independent session world (HOME overlay + shadow git) in the background, and at
 send time run only the thin env-dependent layer (policy, leases, tokens, process
-domain, canary) against it. Target end state (estimated): **send accepted &lt; 100 ms
+domain) against it, while the already-fenced execution and its live behavioral
+attestation start together. Target end state (estimated): **send accepted &lt; 100 ms
 always; engine-side session ready ~0.3–0.6 s on a pool hit (fully overlapped with
 typing → perceived ~0); ~1–1.5 s on a miss; provider boot unchanged (the pre-ZSR
-floor)**. Isolation is unchanged: same policy, same canary-before-any-provider-byte,
-same proven teardown, same fail-closed refusals, same generation anti-replay.
+floor)**. Isolation is unchanged: the same kernel policy is installed before any
+provider byte, the canary runs concurrently and stops that exact execution on
+failure, teardown remains proven, and generation anti-replay remains fail-closed.
 
 ---
 
@@ -380,16 +402,14 @@ invariants preserved by all of them are listed in §7.
 
 ### 5.0 UX contract first: a send is _always_ accepted instantly
 
-Renderer-only. Today `idle` sends block on a spinner with the text stuck in the
-composer (`agent-chat.tsx:3153-3180`), while `warming/streaming` sends get the
-queued card. Make the queued card universal: on send with no live session, enqueue
-the message, clear the composer, flip the chat to `warming`, and start the session
-in the background (the send path's existing self-heal already knows how to
-dispatch on readiness). Failures land as an actionable error card that returns the
-text. With keystroke-arming already landed, most sessions are `warming` by Enter —
-this closes the remaining gap so **no user ever watches a blocking spinner again**,
-regardless of what admission costs. This single change delivers the _feeling_ of
-"same as before ZSR" even before the engine gets faster.
+Renderer-only. An `idle`/`warming` send must clear the composer, appear as the
+active transcript turn, start its elapsed timer, and start or join session
+admission in the background. Only a second message waiting behind that turn is a
+queued-card row. Ordinary startup failures return unsent text to the composer;
+Design-protection failure keeps the active prompt and renders the exact stopped
+footer. With keystroke-arming already landed, most sessions are `warming` by
+Enter. This closes the remaining gap so **no user watches a blocking spinner or
+an incorrectly labelled first-message queue**, regardless of admission cost.
 
 ### 5.1 Demand diet — stop admitting what nobody asked for
 
@@ -548,7 +568,7 @@ promotion lock and currently log nothing — give retirement a
 
 | Phase  | Contents                                                                                                                                                       | Effort    | Risk                                                                                   | Engine-side session start (est.)                                                  |
 | ------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| **R0** | §5.0 universal queued-card send; §5.1 items 1–5 (priority bug, boot probe defer, lazy boot resume, utility boundary, preflight removal)                        | days      | low — UI + scheduling hints only; no policy/enforcement surface                        | solo ~2.4 s unchanged, but **queues collapse and every send is accepted <100 ms** |
+| **R0** | §5.0 immediate active-turn send; §5.1 items 1–5 (priority bug, boot probe defer, lazy boot resume, utility boundary, preflight removal)                        | days      | low — UI + scheduling hints only; no policy/enforcement surface                        | solo ~2.4 s unchanged, but **queues collapse and every send is accepted <100 ms** |
 | **R1** | §5.2 stage DAG; §5.3 canary fold + handshake instrumentation                                                                                                   | days      | low-medium — orchestration only; canary content unchanged                              | **~1.0–1.5 s solo**                                                               |
 | **R2** | §5.4 world reuse + FSEvents manifests + shadow-git spawn diet + Cursor scoped history + resume index                                                           | ~1 wk     | medium — touches overlay/git build, guarded by existing merge/conflict tests + benches | **~0.5–0.9 s solo**                                                               |
 | **R3** | §5.5 park-and-adopt worlds + predictive refill + hit/miss telemetry                                                                                            | ~1–2 wk   | medium — new lifecycle, but parked state is inert files; adoption re-proves via canary | **hit ~0.3–0.6 s (perceived ~0), miss ~1 s**                                      |
@@ -617,10 +637,10 @@ before the next phase is sized.
 | 8   | Two engine instances / multi-window                                          | promotion lock is already cross-process; parked namespaces are per-engine-instance                                                                                     |
 | 9   | Disk pressure                                                                | pool bytes are reflinked (cheap); budget + LRU eviction + existing GC sweep integration                                                                                |
 | 10  | Rapid agent-picker browsing                                                  | costs nothing (keystroke-arming landed); pool refill debounced                                                                                                         |
-| 11  | Send fails during background admission (unqualified backend, canary refusal) | queued card → actionable error card, text restored to composer                                                                                                         |
+| 11  | Send fails during background admission (unqualified backend, canary refusal) | ordinary failures restore the prompt to the composer; Design-protection failure keeps the active turn and exact stopped footer; queued follow-ups are dropped/restored |
 | 12  | Resume after app restart (`providerResumeId`)                                | not pool-served; fast path via resume index + scoped projection; optional post-adoption seeding later                                                                  |
 | 13  | Same-file promotion conflicts under concurrency                              | demand diet removes most concurrent same-provider admissions; utility boundary removes probe/title churn; conflict archiving semantics unchanged                       |
-| 14  | Teardown-proof failure                                                       | latch unchanged (by design, a maintainer-level product decision if it should ever be scoped narrower); pool adds zero new exposure because parked state needs no proof |
+| 14  | Teardown-proof failure                                                       | retain and retry the exact boundary; unrelated admissions continue, while only an authority transition affected by that old policy waits for proof                     |
 | 15  | Canary flake under load                                                      | gate bounds concurrency; canary remains fail-closed; R1 instrumentation distinguishes handshake wait from enforcement failure                                          |
 | 16  | Design-agent / repo-task actors                                              | separate world keys per actor (policy inversion differs); repo tasks keep today's path                                                                                 |
 | 17  | Many repositories (≤33)                                                      | broker port per repo reserved at adoption; parked shadow gitdirs per repo; concurrent build bounded                                                                    |
@@ -691,7 +711,7 @@ the Mac.**
 
 | Item                          | Where                                                                                                                                      | What changed                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| §5.0 universal instant accept | `session-reload-lifecycle.ts` (`sendSessionRecoveryMode`), `agent-chat.tsx`                                                                | A send into a chat with no session no longer blocks. `idle`/`reconnecting` now **park**: the session starts in the background (ensureSession publishes `warming` before its first await) and the message lands in the queued card immediately. Only `failed`/`auth-required` — an explicit retry after the user fixed something — still awaits, because that is where the failure belongs.                                                                                                                                                                                                 |
+| §5.0 universal instant accept | `session-reload-lifecycle.ts` (`sendSessionRecoveryMode`, `queuedPromptPresentation`), `agent-chat.tsx`                                    | A send into a chat with no session no longer blocks. The first admission-waiting prompt is presented immediately as the active transcript turn and starts its elapsed timer; only real follow-ups appear in the queued card. The session starts in the background (`ensureSession` publishes `warming` before its first await). Only `failed`/`auth-required` — an explicit retry after the user fixed something — still awaits, because that is where the failure belongs. A Design-protection failure preserves that active prompt so its exact stopped footer remains visible.          |
 | Dropped-queue recovery        | `sessions-provider.tsx` (`drainOrDropQueue`)                                                                                               | A queued message that can never be sent now goes **back into the composer** as this chat's draft (guarded on an empty draft so newer typing wins), and the toast says so. Parking made this reachable; losing the words would not have been acceptable.                                                                                                                                                                                                                                                                                                                                    |
 | Bug 1 — priority              | `containment/types.ts`, `repo-task-boundary.ts`, `zeros-engine.ts`, `setup-hooks.ts`, `setup-runner.ts`, `run-manager.ts`                  | `RepoTaskBoundaryRequest.admissionPriority` exists and every caller states its class: the boot login-shell PATH probe and the archive hook are **background**; user-clicked Setup and Run are explicitly **interactive**.                                                                                                                                                                                                                                                                                                                                                                  |
 | Boot self-probe               | `zeros-engine.ts`                                                                                                                          | The login-shell PATH probe is deferred `BOOT_LOGIN_SHELL_PATH_WARM_DELAY_MS` (20 s) behind an unref'd timer instead of admitting during engine construction.                                                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -705,10 +725,11 @@ to encode the new ones rather than the old:
 - A one-shot's boundary is **not** revoked when the call returns; it is revoked
   when the pool retires it (`gateway-identity.test.ts`).
 - A one-shot whose _teardown_ cannot be proven no longer suppresses its own
-  result. Nothing has failed at the moment the result is produced. The safety
-  property is unchanged and asserted where it now applies: when the pool tries to
-  retire that boundary and cannot prove it stopped, the process-wide latch trips
-  and every later admission is refused.
+  result. Nothing has failed at the moment the result is produced. The exact
+  boundary remains retained for idempotent teardown retry. Under the current
+  contract this does not refuse unrelated admissions; only a real authority
+  transition whose proposed territory is not covered by that old immutable
+  policy waits for the proof.
 
 ### 12.2 R1 — stage DAG and a measurable canary
 
@@ -792,14 +813,15 @@ Answering "it was working fine before — check the SDK":
    package also gained a `bun` export condition — investigated and it does **not**
    remove the Node host's reason to exist: the bundled build still lazily imports
    `@connectrpc/connect-node` with `httpVersion:"2"`, i.e. still `node:http2`.
-2. **Model discovery no longer blocks session start unboundedly.** `newSession`
-   awaited `Cursor.models.list()` through the freshly-spawned contained host,
-   bounded only by the host's 30 s control-request timeout — so on a slow network
-   that was up to 30 s before the user's prompt moved. It is now bounded by
-   `MODEL_DISCOVERY_START_BUDGET_MS` (2.5 s); discovery finishes in the background
-   and the next session (and the picker, via `modelsDynamic`) gets the catalog.
-   Safe by construction: the catalog only refines validation, and
-   `resolveValidModelId(base, undefined)` passes the user's pick through.
+2. **Model discovery no longer waits on the session-start path.** `newSession`
+   previously awaited `Cursor.models.list()` through the freshly spawned host,
+   first unbounded and then behind a 2.5 s budget. It now starts discovery,
+   yields one microtask so an SDK-memory cache can be adopted, and proceeds to
+   `Agent.create` without waiting for a timer or network response. Discovery
+   finishes in the background; the next session and the picker (via
+   `modelsDynamic`) get the catalog. Safe by construction: the catalog only
+   refines validation, and `resolveValidModelId(base, undefined)` passes the
+   user's pick through.
 3. **Subagent transcripts were being read from the wrong home.** `PreparedBoundary`
    now exposes `providerHomePath`, and the Cursor adapter roots
    `agentTranscriptsRoot` / `findSubagentTranscriptPath` / `findSubagentByPrompt`

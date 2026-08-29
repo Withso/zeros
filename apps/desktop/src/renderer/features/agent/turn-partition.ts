@@ -64,9 +64,13 @@ export function isManualCompaction(e: AgentMessage): boolean {
 
 function isOutputText(e: AgentMessage): boolean {
   if (e.kind !== "text") return false;
-  const role = (e as { role?: string }).role;
+  const text = e as { role?: string; phase?: string };
+  const role = text.role;
   // Reasoning ("thought") is working content, never the answer.
-  return role === "agent" || role === "system";
+  // Codex commentary is also working narration even when it immediately
+  // precedes a final answer. Phase-less text keeps legacy behavior for
+  // Claude, Cursor, and older persisted Codex turns.
+  return role === "system" || (role === "agent" && text.phase !== "commentary");
 }
 
 /** The "Turn stopped · BUDGET" record. It names the turn's ending,

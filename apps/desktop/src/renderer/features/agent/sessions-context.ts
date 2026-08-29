@@ -40,9 +40,14 @@ import type {
 export interface StartForChatOptions extends StartSessionOptions {
   /** Absolute path the agent subprocess should use as cwd. */
   cwd?: string;
-  /** Force a fresh session even when one is already ready. Used when
-   *  the user changes model/effort. */
+  /** Force the engine execution to rebuild even when one is already ready.
+   *  A durable provider conversation is resumed unless replacement is
+   *  explicitly requested below. Used when model/effort config drifted. */
   force?: boolean;
+  /** `ensureSession` only: replace the durable provider conversation instead
+   *  of resuming it. This is reserved for the cold fallback after a provider
+   *  resume has already confirmed that the old conversation is unusable. */
+  replaceProviderConversation?: boolean;
   /** `loadIntoChat` only: re-adopt a live engine execution but never mint one.
    *  A miss resolves `false` with the chat left `idle` (transcript intact,
    *  provider binding intact) — no boundary is admitted. Used by the lazy boot

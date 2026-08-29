@@ -27,6 +27,7 @@ import {
   isInterruptedTurn,
   TurnFilePill,
   TurnFooter,
+  turnFooterFailureLabel,
   turnFooterFiles,
   turnFooterStatusLabel,
 } from "../turn-footer";
@@ -86,6 +87,18 @@ describe("turnFooterFiles", () => {
       },
     ];
     expect(turnFooterFiles({ files })).toBe(files);
+  });
+});
+
+describe("turnFooterFailureLabel", () => {
+  it("uses the single compact Design-protection failure label", () => {
+    expect(
+      turnFooterFailureLabel({
+        kind: "design-protection-failed",
+        stage: "prompt",
+        message: "internal attestation detail",
+      }),
+    ).toBe("AGENT STOPPED - DESIGN PROTECTION FAILED");
   });
 });
 

@@ -19,6 +19,8 @@ import {
   upsertChat,
   type ChatRow,
 } from "../db/chats";
+import { windowChatMessages } from "../db/messages";
+import { listTurnsForChat } from "../db/turns";
 import { AgentFailureError } from "../agents/types";
 import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
 
@@ -138,6 +140,59 @@ function internals(engine: ZerosEngine): TestEngineInternals {
 }
 
 describe("agent session continuity across a local renderer reload", () => {
+  it("persists admission time on both the user bubble and completed turn", async () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-prompt-time-"));
+    const workDir = path.join(dbDir, "worktree");
+    fs.mkdirSync(workDir);
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    try {
+      upsertChat(persistedChat("chat-prompt-time", { folder: workDir }));
+      const engine = new ZerosEngine({ root: workDir, port: 29_903 });
+      const state = internals(engine);
+      const { client } = testClient();
+      state.router.register(client);
+      state.sessionAgent.set("execution-prompt-time", "cursor");
+      state.sessionChat.set("execution-prompt-time", "chat-prompt-time");
+      state.conversationExecution.set(
+        "chat-prompt-time",
+        "execution-prompt-time",
+      );
+      vi.spyOn(state.agents, "prompt").mockResolvedValue({
+        stopReason: "end_turn",
+      });
+      const sentAt = Date.now() - 4_000;
+
+      await state.handleMessage(
+        {
+          type: "AGENT_PROMPT",
+          id: "prompt-time",
+          source: "browser",
+          timestamp: Date.now(),
+          agentId: "cursor",
+          executionId: "execution-prompt-time",
+          sessionId: "execution-prompt-time",
+          prompt: [{ type: "text", text: "hi" }],
+          userMessageId: "user-prompt-time",
+          startedAt: sentAt,
+        },
+        client,
+      );
+
+      expect(listTurnsForChat("chat-prompt-time")[0]?.startedAt).toBe(sentAt);
+      const persisted = windowChatMessages("chat-prompt-time", 10)[0];
+      expect(persisted?.createdAt).toBe(sentAt);
+      expect(JSON.parse(persisted?.payload ?? "{}")).toMatchObject({
+        id: "user-prompt-time",
+        role: "user",
+        createdAt: sentAt,
+      });
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
   it("re-adopts an active prompt without asking the adapter to load it again", async () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_880 });
     const state = internals(engine);
@@ -229,9 +284,7 @@ describe("agent session continuity across a local renderer reload", () => {
         executionId: "execution-live",
       }),
     ]);
-    expect(state.conversationExecution.get("chat-live")).toBe(
-      "execution-live",
-    );
+    expect(state.conversationExecution.get("chat-live")).toBe("execution-live");
   });
 
   it("carries the renderer promptId through re-adoption", async () => {

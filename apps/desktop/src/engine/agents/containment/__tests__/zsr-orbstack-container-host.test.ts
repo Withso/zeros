@@ -215,22 +215,28 @@ describe("ZSR OrbStack container host bridge", () => {
       { stdio: ["pipe", "pipe", "pipe"] },
     );
     let stdout = "";
+    let stderr = "";
     relay.stdout.setEncoding("utf8");
+    relay.stderr.setEncoding("utf8");
     relay.stdout.on("data", (chunk) => {
       stdout += chunk;
+    });
+    relay.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const closeOutcome = new Promise<"closed" | "timed-out">((resolve) => {
+      const timeout = setTimeout(() => resolve("timed-out"), 2_000);
+      relay.once("close", () => {
+        clearTimeout(timeout);
+        resolve("closed");
+      });
     });
     relay.stdin.write("GET /_ping HTTP/1.1\r\nHost: localhost\r\n\r\n");
 
     try {
-      const outcome = await Promise.race([
-        new Promise<"exited">((resolve) =>
-          relay.once("exit", () => resolve("exited")),
-        ),
-        new Promise<"timed-out">((resolve) =>
-          setTimeout(() => resolve("timed-out"), 300),
-        ),
-      ]);
-      expect(outcome).toBe("exited");
+      const outcome = await closeOutcome;
+      expect(outcome, stderr).toBe("closed");
+      expect(relay.exitCode, stderr).toBe(0);
       expect(stdout).toBe("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK");
     } finally {
       relay.stdin.end();

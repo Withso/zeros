@@ -1,6 +1,6 @@
 # Zeros Sandbox Runtime qualification ledger
 
-**Contract revision:** 2026-08-19 host-parity consolidation.
+**Contract revision:** 2026-08-28 instant-session and exact-failure isolation.
 
 This ledger defines the evidence required to claim that the shipped execution
 boundary works. It does not treat historical results from removed shadow-Git,
@@ -10,13 +10,13 @@ release artifact or CI run, not by editing old pass counts into this document.
 
 ## Audited dependency
 
-| Field | Value |
-| --- | --- |
-| Package | `@anthropic-ai/sandbox-runtime` |
-| Version | `0.0.73` |
-| Upstream tag / commit | `v0.0.73` / `5feb5269f1c86f49e62224ffb8297b2f01a31806` |
-| License | Apache-2.0 |
-| Patch digest | Read from `scripts/zsr-qualification/pin.json` and enforced by `pnpm check:runtime-pins` |
+| Field                 | Value                                                                                    |
+| --------------------- | ---------------------------------------------------------------------------------------- |
+| Package               | `@anthropic-ai/sandbox-runtime`                                                          |
+| Version               | `0.0.73`                                                                                 |
+| Upstream tag / commit | `v0.0.73` / `5feb5269f1c86f49e62224ffb8297b2f01a31806`                                   |
+| License               | Apache-2.0                                                                               |
+| Patch digest          | Read from `scripts/zsr-qualification/pin.json` and enforced by `pnpm check:runtime-pins` |
 
 The patch is deliberately narrow. It adds host-parity profiles, explicit write
 exceptions within a deny, optional removal of SRT's built-in opinionated write
@@ -28,11 +28,11 @@ resource controls.
 
 The following are signed-off properties of the current cloud workspace boundary:
 
-| Surface | Current behavior | Boundary that remains |
-| --- | --- | --- |
-| Egress | Direct tenant-VM network; no per-agent deny/allow proxy | Provider/VM network policy |
+| Surface              | Current behavior                                                   | Boundary that remains                  |
+| -------------------- | ------------------------------------------------------------------ | -------------------------------------- |
+| Egress               | Direct tenant-VM network; no per-agent deny/allow proxy            | Provider/VM network policy             |
 | Provider credentials | Raw provider keys in normal process env/files; no sentinel masking | Tenant VM and non-root worker identity |
-| Resources | No per-agent cgroup limits | Provider/VM sizing and limits |
+| Resources            | No per-agent cgroup limits                                         | Provider/VM sizing and limits          |
 
 These rows must not be reported as tests that were skipped. They are absent
 features. Qualification instead proves that removing them did not leave stale
@@ -57,6 +57,13 @@ pnpm check:secrets
 pnpm check:licenses
 ```
 
+`pnpm check:zsr` is intentionally composite. It first runs the explicit
+source-level contract matrix in `scripts/run-zsr-contract-tests.mjs`, then the
+live `--require-secure` kernel/runtime qualification. Repository layout tests
+require every `gateway-*` and containment suite to stay in that named matrix,
+so adding a ZSR test file cannot silently leave the architecture-specific CI
+jobs without it.
+
 The focused containment tests must cover:
 
 - real Linux bwrap code-write success and Design-write denial;
@@ -77,8 +84,26 @@ The focused containment tests must cover:
   without launching an application during the probe;
 - cloud worker non-root UID/GID, empty capability sets, `no_new_privs`, and
   root-owned policy/descriptor state;
-- process adoption during retirement, descendant termination, proof retention,
-  and stale-process boot recovery;
+- process adoption during retirement, descendant termination, exact-generation
+  retry without unrelated-admission poisoning, and stale-process boot recovery;
+- interactive cold create/resume returning after kernel-policy installation
+  while the behavioral canary and fresh territory revalidation remain pending,
+  plus automatic exact-tree stop before either background proof failure is
+  reported;
+- first-send admission appearing immediately as a live turn with one continuous
+  timer and an enabled Stop control; Stop must invalidate the chat-scoped
+  create/resume, dispose a late result, and permit an immediate clean retry for
+  Codex, Claude, and Cursor without waiting behind the cancelled flight;
+- init/prewarm single-flight and cold create/resume ordering contracts that
+  prove provider startup is not awaiting background attestation or territory
+  revalidation. These are causal/order assertions rather than CI wall-clock
+  thresholds, so a slow runner cannot hide a critical-path dependency or make
+  the gate flaky;
+- blocking attestation for Setup, Run, utilities, and warm-spare preparation;
+- speculative warm-session preparation disabled by default, with the explicit
+  benchmark switch still requiring a fully attested boundary before adoption;
+- last-confirmed provider-auth retention across an isolated utility-boundary
+  failure;
 - direct port behavior, dedicated container capability, and container teardown;
 - app-wide owner add/remove/archive/restore transition ordering.
 
@@ -87,13 +112,13 @@ The focused containment tests must cover:
 Deterministic tests may run anywhere they support, but a backend graduates only
 with live evidence from the exact shipped environment.
 
-| Target | Required live evidence |
-| --- | --- |
-| macOS arm64 | Packaged Seatbelt profile, effective Apple Events/Launch Services denial, ambient container-socket denial, process-domain helper, Git dispatcher, host HOME/network/ports, Design deny, path-checkout denial, whole-tree integration, OrbStack worker if claimed, and proven teardown |
-| macOS x64 | Same matrix using the x64 packaged helpers; arm64 results do not substitute |
-| Linux x64 | Packaged bwrap/setpriv profile, ambient container-socket denial, exact worker identity when cloud mode is used, Design deny, Git split, direct network/services/ports, containers if claimed, and proven teardown |
-| Linux arm64 | Same matrix using arm64 package/runtime bytes; x64 results do not substitute |
-| Cloud provider image | Actual immutable image and deployment marker, tenant/workspace identity, root-owned engine state, non-root workload identity, lifecycle/reconnect/soak/SSH, snapshot deletion, and provider differential |
+| Target               | Required live evidence                                                                                                                                                                                                                                                                |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS arm64          | Packaged Seatbelt profile, effective Apple Events/Launch Services denial, ambient container-socket denial, process-domain helper, Git dispatcher, host HOME/network/ports, Design deny, path-checkout denial, whole-tree integration, OrbStack worker if claimed, and proven teardown |
+| macOS x64            | Same matrix using the x64 packaged helpers; arm64 results do not substitute                                                                                                                                                                                                           |
+| Linux x64            | Packaged bwrap/setpriv profile, ambient container-socket denial, exact worker identity when cloud mode is used, Design deny, Git split, direct network/services/ports, containers if claimed, and proven teardown                                                                     |
+| Linux arm64          | Same matrix using arm64 package/runtime bytes; x64 results do not substitute                                                                                                                                                                                                          |
+| Cloud provider image | Actual immutable image and deployment marker, tenant/workspace identity, root-owned engine state, non-root workload identity, lifecycle/reconnect/soak/SSH, snapshot deletion, and provider differential                                                                              |
 
 A sandbox that cannot create the required bwrap mounts or namespaces is an
 expected fail-closed environment, not a qualified Linux result. Likewise, a
@@ -102,13 +127,13 @@ image.
 
 ## Git acceptance matrix
 
-| Operation | Execution route | Expected Design result |
-| --- | --- | --- |
-| status/diff/log/add/commit/fetch/push | Native actor Git | Filesystem fence remains authoritative |
-| restore/clean/rm/mv/stash | Native actor Git | Design writes fail |
-| checkout/reset with `--`, pathspec, or path operand | Native actor Git | Design writes fail |
-| checkout/switch/pull/merge/rebase/cherry-pick/revert/tree-writing reset | Trusted engine broker after full argv/cwd validation | Tracked Design changes may materialize |
-| commit containing a synthetic Design tree, then brokered merge | Native commit + trusted integration | Materializes; accepted residual and regression-pinned |
+| Operation                                                               | Execution route                                      | Expected Design result                                |
+| ----------------------------------------------------------------------- | ---------------------------------------------------- | ----------------------------------------------------- |
+| status/diff/log/add/commit/fetch/push                                   | Native actor Git                                     | Filesystem fence remains authoritative                |
+| restore/clean/rm/mv/stash                                               | Native actor Git                                     | Design writes fail                                    |
+| checkout/reset with `--`, pathspec, or path operand                     | Native actor Git                                     | Design writes fail                                    |
+| checkout/switch/pull/merge/rebase/cherry-pick/revert/tree-writing reset | Trusted engine broker after full argv/cwd validation | Tracked Design changes may materialize                |
+| commit containing a synthetic Design tree, then brokered merge          | Native commit + trusted integration                  | Materializes; accepted residual and regression-pinned |
 
 The compiled dispatcher is an optimization, not authority. A dispatcher
 misclassification must still be corrected by the Node client/broker or fall

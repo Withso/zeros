@@ -205,6 +205,53 @@ afterEach(() => {
   }
 });
 
+describe("prompt start time continuity", () => {
+  it("publishes the original renderer send time after delayed admission", async () => {
+    const { state } = testEngine(29_940);
+    const { client, messages } = testClient();
+    state.router.register(client);
+    state.sessionAgent.set("session-1", "cursor");
+    vi.spyOn(state.agents, "prompt").mockResolvedValue({
+      stopReason: "end_turn",
+    });
+    const sentAt = Date.now() - 4_000;
+
+    await state.handleMessage(
+      {
+        ...promptMessage(),
+        startedAt: sentAt,
+      } as EngineMessage,
+      client,
+    );
+
+    const running = messages.find((message) => {
+      if (message.type !== "AGENT_SESSION_UPDATE") return false;
+      const update = (
+        message as {
+          notification?: {
+            update?: { sessionUpdate?: string; state?: string };
+          };
+        }
+      ).notification?.update;
+      return (
+        update?.sessionUpdate === "turn_state" && update.state === "running"
+      );
+    }) as
+      | {
+          notification?: {
+            update?: {
+              sessionUpdate?: string;
+              state?: string;
+              startedAt?: number;
+            };
+          };
+        }
+      | undefined;
+
+    expect(running?.notification?.update?.startedAt).toBe(sentAt);
+  });
+});
+
 describe("a Stop during the pre-dispatch window", () => {
   it("never hands the prompt to the adapter and settles the turn cancelled", async () => {
     const { state } = testEngine(29_891);
@@ -566,6 +613,87 @@ describe("explicit session close during a live turn", () => {
 });
 
 describe("tab close while a provider session is still binding", () => {
+  it.each(["codex", "claude", "cursor"])(
+    "aborts %s admission and lets the next prompt start a fresh bind immediately",
+    async (agentId) => {
+      const port = 30_031 + ["codex", "claude", "cursor"].indexOf(agentId);
+      const { state } = testEngine(port);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      vi.spyOn(state, "agentSpawnOpts").mockResolvedValue({});
+      vi.spyOn(state.agents, "ensureAgent").mockResolvedValue({});
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      let firstAdmissionSignal: AbortSignal | undefined;
+      const newSession = vi
+        .spyOn(state.agents, "newSession")
+        .mockImplementationOnce(async (_requestedAgentId, options) => {
+          firstAdmissionSignal = (
+            options as { admissionSignal?: AbortSignal }
+          ).admissionSignal;
+          await firstGate;
+          return {
+            executionId: `${agentId}-cancelled-late-execution`,
+            sessionId: `${agentId}-cancelled-late-execution`,
+          };
+        })
+        .mockResolvedValueOnce({
+          executionId: `${agentId}-retry-execution`,
+          sessionId: `${agentId}-retry-execution`,
+        });
+      const endSession = vi
+        .spyOn(state.agents, "endSession")
+        .mockResolvedValue(undefined);
+
+      const first = state.handleMessage(newSessionMessage(agentId), client);
+      await vi.waitFor(() => expect(newSession).toHaveBeenCalledTimes(1));
+
+      await state.handleMessage(closeConversationMessage(agentId), client);
+      expect(firstAdmissionSignal?.aborted).toBe(true);
+      const retry = state.handleMessage(
+        {
+          ...newSessionMessage(agentId),
+          id: `new-session-retry-${agentId}`,
+        } as EngineMessage,
+        client,
+      );
+
+      // The second bind must enter the gateway while the cancelled provider
+      // startup is still unresolved. Waiting for `firstGate` here would put
+      // the user's next prompt back behind the ZSR/provider work they stopped.
+      await vi.waitFor(() => expect(newSession).toHaveBeenCalledTimes(2));
+      await retry;
+      expect(messages).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            type: "AGENT_SESSION_CREATED",
+            requestId: `new-session-retry-${agentId}`,
+            session: expect.objectContaining({
+              executionId: `${agentId}-retry-execution`,
+            }),
+          }),
+        ]),
+      );
+
+      releaseFirst();
+      await first;
+      expect(endSession).toHaveBeenCalledWith(
+        agentId,
+        `${agentId}-cancelled-late-execution`,
+      );
+      expect(
+        messages.filter(
+          (message) =>
+            message.type === "AGENT_SESSION_CREATED" &&
+            message.session.executionId ===
+              `${agentId}-cancelled-late-execution`,
+        ),
+      ).toEqual([]);
+    },
+  );
+
   it.each(["codex", "claude", "cursor"])(
     "queues %s creation behind a registered Design territory update",
     async (agentId) => {

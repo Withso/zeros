@@ -73,6 +73,9 @@ export interface ExecutionBoundaryStatus {
   checkedAt: number;
   /** End-user next step. Never contains credentials or raw policy text. */
   remediation?: string;
+  /** Exact-execution terminal classification. This is internal routing state,
+   * not a composer diagnostic surface. */
+  failure?: "design-protection-failed";
 }
 
 export type ExecutionBoundaryServiceKind =

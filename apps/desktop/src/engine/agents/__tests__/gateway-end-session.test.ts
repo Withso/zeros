@@ -35,7 +35,9 @@ function makeGateway() {
 
 describe("AgentGateway.endSession", () => {
   it("removes a transient session directory only after its boundary stop proof succeeds", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "zeros-gateway-retire-proof-"));
+    const root = await mkdtemp(
+      path.join(tmpdir(), "zeros-gateway-retire-proof-"),
+    );
     const previousDataDir = process.env.ZEROS_DATA_DIR;
     process.env.ZEROS_DATA_DIR = path.join(root, "engine");
     const executionId = "transient-retirement";
@@ -198,7 +200,9 @@ describe("AgentGateway.endSession", () => {
   });
 
   it("keeps process-domain proof state until stop succeeds, then removes the session", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "zeros-gateway-stop-proof-"));
+    const root = await mkdtemp(
+      path.join(tmpdir(), "zeros-gateway-stop-proof-"),
+    );
     const previousDataDir = process.env.ZEROS_DATA_DIR;
     process.env.ZEROS_DATA_DIR = path.join(root, "engine");
     const sessionId = "proof-before-cleanup";
@@ -300,9 +304,9 @@ describe("AgentGateway.endSession", () => {
     ).rejects.toThrow("detached descendant remains");
     expect(stopAttempts).toBe(2);
 
-    await expect(gw.newSession("strict", { cwd: "/tmp" })).rejects.toThrow(
-      /prior execution boundary could not be proven stopped/i,
-    );
+    await expect(
+      gw.newSession("strict", { cwd: "/tmp" }),
+    ).resolves.toMatchObject({ executionId: expect.any(String) });
   });
 });
 

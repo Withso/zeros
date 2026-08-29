@@ -1,6 +1,6 @@
-// gateway boundary-retirement auto-heal — a failed stop proof latches
-// admissions (fail-closed, unchanged) and is retried automatically with
-// backoff; a successful retry lifts the hold without an app restart.
+// Gateway boundary-retirement auto-heal — a failed stop proof remains owned by
+// that exact execution and is retried with backoff without poisoning unrelated
+// agents, utilities, Run/Setup, auth, or app-core state.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -19,12 +19,17 @@ interface GatewayInternals {
   executionBoundaries: Map<string, PreparedBoundary>;
   failedBoundaryRetirements: Map<string, unknown>;
   boundaryRetirementRecoveryTimers: Map<string, unknown>;
-  assertBoundaryRetirementHealthy(): void;
+  newSession(
+    agentId: string,
+    opts: { cwd: string },
+  ): Promise<{ executionId: string }>;
   endSession(
     agentId: string,
     sessionId: string,
     opts: { failClosed: true },
   ): Promise<void>;
+  assertRegisteredDesignAuthorityRetirementsProven(): void;
+  assertWorkspaceDesignAuthorityRetirementsProven(workspaceRoot: string): void;
   dispose(): Promise<void>;
 }
 
@@ -51,7 +56,7 @@ describe("AgentGateway boundary retirement auto-heal", () => {
     vi.useRealTimers();
   });
 
-  it("retries a failed stop proof with backoff and lifts the admission hold on success", async () => {
+  it("retries a failed stop proof without holding unrelated admissions", async () => {
     const cleared: TerritoryGeneration[] = [];
     const boundaryFactory: ExecutionBoundary = {
       ...testExecutionBoundary(),
@@ -62,12 +67,28 @@ describe("AgentGateway boundary retirement auto-heal", () => {
     const gw = makeGateway(boundaryFactory);
     gw.adapters.set("strict", {
       agentId: "strict",
+      newSession: async (opts: { executionId?: string }) => ({
+        session: {
+          executionId: opts.executionId!,
+          sessionId: opts.executionId!,
+        },
+        initialize: {},
+      }),
       disposeSession: async () => {},
     } as unknown as AgentAdapter);
     gw.executionToAgent.set("r1", "strict");
     let stopAttempts = 0;
     gw.executionBoundaries.set("r1", {
       generation: "gen-r1" as TerritoryGeneration,
+      registeredDesignAuthorityIdentity: "registered-v1",
+      territoryContributions: [
+        {
+          workspaceRoot: "/tmp",
+          grants: [],
+          full: true,
+          identity: "workspace-v1",
+        },
+      ],
       revoke: async () => {},
       stopAndProve: async () => {
         stopAttempts += 1;
@@ -79,25 +100,36 @@ describe("AgentGateway boundary retirement auto-heal", () => {
       gw.endSession("strict", "r1", { failClosed: true }),
     ).rejects.toThrow("descendant still alive");
     expect(gw.failedBoundaryRetirements.has("r1")).toBe(true);
-    expect(() => gw.assertBoundaryRetirementHealthy()).toThrow(
-      /could not be proven stopped/i,
+    expect(() => gw.assertRegisteredDesignAuthorityRetirementsProven()).toThrow(
+      /not yet proven stopped/i,
     );
+    expect(() =>
+      gw.assertWorkspaceDesignAuthorityRetirementsProven("/tmp"),
+    ).toThrow(/not yet proven stopped/i);
+    expect(() =>
+      gw.assertWorkspaceDesignAuthorityRetirementsProven("/unrelated"),
+    ).not.toThrow();
+    await expect(
+      gw.newSession("strict", { cwd: "/tmp" }),
+    ).resolves.toMatchObject({ executionId: expect.any(String) });
 
     // First retry (5s) still fails and reschedules.
     await vi.advanceTimersByTimeAsync(5_000);
     expect(stopAttempts).toBe(2);
     expect(gw.failedBoundaryRetirements.has("r1")).toBe(true);
 
-    // Second retry (15s) succeeds: the hold lifts everywhere at once.
+    // Second retry (15s) proves and clears only r1.
     await vi.advanceTimersByTimeAsync(15_000);
     expect(stopAttempts).toBe(3);
     expect(gw.failedBoundaryRetirements.size).toBe(0);
     expect(gw.executionBoundaries.has("r1")).toBe(false);
     expect(cleared).toEqual(["gen-r1"]);
-    expect(() => gw.assertBoundaryRetirementHealthy()).not.toThrow();
+    expect(() =>
+      gw.assertRegisteredDesignAuthorityRetirementsProven(),
+    ).not.toThrow();
   });
 
-  it("keeps admissions refused while every retry still fails, and stops retrying after dispose", async () => {
+  it("keeps retrying the exact failed proof and stops retrying after dispose", async () => {
     const gw = makeGateway(testExecutionBoundary());
     gw.adapters.set("strict", {
       agentId: "strict",
@@ -121,10 +153,6 @@ describe("AgentGateway boundary retirement auto-heal", () => {
     await vi.advanceTimersByTimeAsync(15_000);
     await vi.advanceTimersByTimeAsync(60_000);
     expect(stopAttempts).toBe(4);
-    expect(() => gw.assertBoundaryRetirementHealthy()).toThrow(
-      /could not be proven stopped/i,
-    );
-
     await gw.dispose().catch(() => undefined);
     expect(gw.boundaryRetirementRecoveryTimers.size).toBe(0);
     const attemptsAtDispose = stopAttempts;

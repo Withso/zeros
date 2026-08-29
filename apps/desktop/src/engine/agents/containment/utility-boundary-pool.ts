@@ -29,10 +29,9 @@
 //     domain, because that never happens.
 //  4. IT NEVER SERVES A SESSION. Only background, engine-initiated one-shots
 //     take leases; user session admissions keep their own dedicated boundaries.
-//  5. TEARDOWN IS STILL PROVEN. Idle expiry, `disposeAll`, and an unhealthy
-//     retirement latch all route through the same proven-teardown callback the
-//     per-call path used. A teardown that cannot be proven propagates exactly as
-//     before — the pool adds no new way to skip a proof.
+//  5. TEARDOWN IS STILL PROVEN. Idle expiry and `disposeAll` route through the
+//     same proven-teardown callback the per-call path used. A teardown that
+//     cannot be proven remains owned and retried by that exact boundary.
 //  6. A BOUNDARY IS NEVER REUSED AFTER TROUBLE. Any operation error, any
 //     teardown failure, and any territory-generation change retires (or drops)
 //     the entry instead of handing it to the next caller.
@@ -89,10 +88,30 @@ export interface UtilityBoundaryPoolOptions {
     executionId: string,
     boundary: PreparedBoundary,
   ) => Promise<void>;
-  /** Refuse to admit while boundary retirement is unhealthy (fail-closed latch).
-   * Throws exactly as the per-call path does. */
-  readonly assertHealthy?: () => void;
   readonly idleMs?: number;
+}
+
+/** Keep immutable owner metadata on a prepared object before any transition
+ * can retire it. The gateway's exact failed-proof ledger outlives pool entries
+ * and needs this snapshot to decide which later territory mutation must wait. */
+export function attachBoundaryTerritoryContributions(
+  boundary: PreparedBoundary,
+  contributions: readonly BoundaryTerritoryContributionSnapshot[] | undefined,
+): void {
+  if (!contributions) return;
+  const existing = boundary.territoryContributions;
+  if (existing === undefined) {
+    Object.defineProperty(boundary, "territoryContributions", {
+      configurable: false,
+      enumerable: false,
+      writable: false,
+      value: contributions,
+    });
+    return;
+  }
+  if (JSON.stringify(existing) !== JSON.stringify(contributions)) {
+    throw new Error("prepared boundary territory authority is stale");
+  }
 }
 
 /** Stable digest of everything about a request except which execution asked for
@@ -230,7 +249,6 @@ export class UtilityBoundaryPool {
       this.clearIdle(entry);
       return this.lease(entry, true);
     }
-    this.options.assertHealthy?.();
     let resolveAdmission!: () => void;
     let rejectAdmission!: (error: unknown) => void;
     const pendingAdmission = new Promise<void>((resolve, reject) => {
@@ -249,8 +267,11 @@ export class UtilityBoundaryPool {
     // (`probe-codex-…`, `title-…`) instead of an opaque pool handle.
     const executionId = request.executionId;
     let admissionFailed = false;
+    let unownedBoundary: PreparedBoundary | null = null;
     try {
       const boundary = await this.options.prepare(request);
+      unownedBoundary = boundary;
+      attachBoundaryTerritoryContributions(boundary, territoryContributions);
       if (
         this.disposed ||
         transitionCrossed() ||
@@ -260,6 +281,7 @@ export class UtilityBoundaryPool {
         // boolean while prepare() was still building this boundary. The epoch is
         // the durable proof that it crossed a territory transition. Retire it
         // before any provider operation can receive the capability.
+        unownedBoundary = null;
         await this.options.retire(executionId, boundary);
         throw new Error(
           "utility boundary admission was invalidated by a territory transition",
@@ -275,13 +297,27 @@ export class UtilityBoundaryPool {
         busy: false,
       };
       this.entries.set(key, entry);
+      unownedBoundary = null;
       // lease() marks the entry busy before the admission reservation wakes a
       // waiter in finally, so the waiter queues behind this exact first lease.
       return this.lease(entry, false);
     } catch (error) {
+      let failure = error;
+      if (unownedBoundary) {
+        const rejectedBoundary = unownedBoundary;
+        unownedBoundary = null;
+        try {
+          await this.options.retire(executionId, rejectedBoundary);
+        } catch (teardownError) {
+          failure = new AggregateError(
+            [error, teardownError],
+            "utility boundary admission failed and teardown could not be proven",
+          );
+        }
+      }
       admissionFailed = true;
-      rejectAdmission(error);
-      throw error;
+      rejectAdmission(failure);
+      throw failure;
     } finally {
       if (!admissionFailed) resolveAdmission();
       if (this.pendingAdmissions.get(key) === pendingAdmission) {
@@ -334,9 +370,8 @@ export class UtilityBoundaryPool {
       if (entry.busy) return;
       void this.retire(entry).catch(() => {
         // A pooled boundary that cannot prove teardown is exactly the state the
-        // gateway's retirement latch exists for; the retire callback has already
-        // recorded it. Nothing here may swallow that — it just must not become
-        // an unhandled rejection on a timer.
+        // retire callback has already recorded this exact boundary for retry.
+        // Nothing here may reuse it or create an unhandled timer rejection.
       });
     }, this.idleMs);
     timer.unref?.();
@@ -356,7 +391,7 @@ export class UtilityBoundaryPool {
         await this.options.retire(entry.executionId, entry.boundary);
       } finally {
         // Drop the entry either way. On success it is gone; on failure the
-        // gateway now owns the un-proven boundary through its own latch, and
+        // gateway now owns the un-proven exact boundary through its retry map, and
         // reusing it here would be the one genuinely unsafe move available.
         if (this.entries.get(entry.key) === entry) {
           this.entries.delete(entry.key);

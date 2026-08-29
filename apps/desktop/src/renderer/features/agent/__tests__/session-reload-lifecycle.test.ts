@@ -5,18 +5,24 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  admissionRouteWithoutFlight,
   bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
   agentUpdateFlushMode,
+  admissionCancellationAction,
   bumpCancelGeneration,
+  cancelledQueuedMessageAction,
   cancelGeneration,
   cancelledSince,
   clearPrebindGoalSnapshotsForChat,
+  composerShowsStopControl,
+  detachAdmissionFlight,
   loadedSessionStatus,
   markPrebindGoalSnapshot,
   markPrebindDirty,
   promptFailureShouldRecover,
   promptFailureShouldResumeProvider,
+  queuedPromptPresentation,
   providerCapabilityRefreshCanRun,
   providerCapabilityRefreshNeeded,
   providerCapabilityRefreshExecution,
@@ -27,6 +33,7 @@ import {
   recoveryLoadLocator,
   resumeFailureInvalidatesBinding,
   sendAdmissionPark,
+  shouldPreserveAdmissionPromptOnFailure,
   sendNeedsSessionRecovery,
   sendSessionRecoveryMode,
   sharedAdmissionFlightAction,
@@ -53,6 +60,62 @@ const turnState = (
       ...extras,
     },
   }) as SessionNotification;
+
+describe("queuedPromptPresentation", () => {
+  it("presents the first admission-waiting send as an active turn", () => {
+    expect(
+      queuedPromptPresentation({
+        reason: "admission",
+        hasLocalSend: false,
+        hasQueuedSends: false,
+        queueHeld: false,
+        flushing: false,
+      }),
+    ).toBe("active-turn");
+  });
+
+  it("retains the active prompt when Design protection stops admission", () => {
+    expect(
+      shouldPreserveAdmissionPromptOnFailure(
+        "design-protection-failed",
+        "active-turn",
+      ),
+    ).toBe(true);
+    expect(
+      shouldPreserveAdmissionPromptOnFailure(
+        "provider-unavailable",
+        "active-turn",
+      ),
+    ).toBe(false);
+    expect(
+      shouldPreserveAdmissionPromptOnFailure(
+        "design-protection-failed",
+        "queued-card",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps follow-ups and held sends in the queued card", () => {
+    expect(
+      queuedPromptPresentation({
+        reason: "admission",
+        hasLocalSend: true,
+        hasQueuedSends: false,
+        queueHeld: false,
+        flushing: false,
+      }),
+    ).toBe("queued-card");
+    expect(
+      queuedPromptPresentation({
+        reason: "busy-turn",
+        hasLocalSend: false,
+        hasQueuedSends: false,
+        queueHeld: false,
+        flushing: false,
+      }),
+    ).toBe("queued-card");
+  });
+});
 
 describe("session reload lifecycle", () => {
   beforeEach(() => {
@@ -382,6 +445,48 @@ describe("session reload lifecycle", () => {
     });
   });
 
+  it("keeps the original send time when a later running acknowledgement arrives", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-1", {
+      ...BLANK,
+      agentId: "cursor",
+      sessionId: "session-1",
+      status: "streaming",
+      // The optimistic user bubble starts the timer immediately on Send.
+      activeTurnStartedAt: 1_000,
+    });
+
+    // Cursor can take several seconds to create its provider session. The
+    // engine's later acknowledgement must not restart the already-visible
+    // timer from this newer timestamp.
+    store.applyBridgeUpdate(
+      turnState("session-1", "running", { startedAt: 5_000 }),
+    );
+
+    expect(
+      useSessionsStore.getState().sessions["chat-1"]?.activeTurnStartedAt,
+    ).toBe(1_000);
+  });
+
+  it("adopts the engine start time when no local send timestamp survived", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-1", {
+      ...BLANK,
+      agentId: "cursor",
+      sessionId: "session-1",
+      status: "streaming",
+      activeTurnStartedAt: null,
+    });
+
+    store.applyBridgeUpdate(
+      turnState("session-1", "running", { startedAt: 5_000 }),
+    );
+
+    expect(
+      useSessionsStore.getState().sessions["chat-1"]?.activeTurnStartedAt,
+    ).toBe(5_000);
+  });
+
   it("settles a re-adopted successful turn and preserves its stop reason", () => {
     const store = useSessionsStore.getState();
     store.setSession("chat-1", {
@@ -652,6 +757,135 @@ describe("session reload lifecycle", () => {
 // pending prompt went out anyway and the agent started working on the turn the
 // user had just stopped.
 describe("stopping a send that has not gone out yet", () => {
+  it("shows Stop while the first prompt waits for ZSR admission", () => {
+    expect(
+      composerShowsStopControl({
+        status: "warming",
+        hasPendingLocalTurn: true,
+        planReview: false,
+      }),
+    ).toBe(true);
+    expect(
+      composerShowsStopControl({
+        status: "warming",
+        hasPendingLocalTurn: false,
+        planReview: false,
+      }),
+    ).toBe(false);
+    expect(
+      composerShowsStopControl({
+        status: "streaming",
+        hasPendingLocalTurn: false,
+        planReview: false,
+      }),
+    ).toBe(true);
+    expect(
+      composerShowsStopControl({
+        status: "warming",
+        hasPendingLocalTurn: true,
+        planReview: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("aborts chat-scoped preparation before a provider session exists", () => {
+    expect(
+      admissionCancellationAction({
+        hasAgent: true,
+        hasSession: false,
+        status: "warming",
+        admissionInFlight: true,
+      }),
+    ).toBe("abort-admission");
+    expect(
+      admissionCancellationAction({
+        hasAgent: true,
+        hasSession: true,
+        status: "warming",
+        admissionInFlight: true,
+      }),
+    ).toBe("cancel-session");
+    expect(
+      admissionCancellationAction({
+        hasAgent: false,
+        hasSession: false,
+        status: "idle",
+        admissionInFlight: false,
+      }),
+    ).toBe("local-only");
+  });
+
+  it("detaches a cancelled preparation so the next prompt owns a fresh flight", () => {
+    const oldFlight = Promise.resolve();
+    const nextFlight = Promise.resolve();
+    const flights = new Map<string, Promise<void>>([["chat-1", oldFlight]]);
+    const keys = new Map([["chat-1", "resume:old"]]);
+    const adoptOnly = new Map([["chat-1", true]]);
+
+    expect(detachAdmissionFlight("chat-1", flights, keys, adoptOnly)).toBe(
+      true,
+    );
+    expect(flights.has("chat-1")).toBe(false);
+    expect(keys.has("chat-1")).toBe(false);
+    expect(adoptOnly.has("chat-1")).toBe(false);
+    expect(
+      admissionRouteWithoutFlight({
+        force: false,
+        replaceProviderConversation: false,
+        hasProviderBinding: true,
+        canLoad: true,
+      }),
+    ).toBe("resume");
+
+    flights.set("chat-1", nextFlight);
+    // The old flight's identity-checked finalizer cannot erase the retry.
+    if (flights.get("chat-1") === oldFlight) flights.delete("chat-1");
+    expect(flights.get("chat-1")).toBe(nextFlight);
+  });
+
+  it("restarts through a durable provider binding during forced configuration recovery", () => {
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: false,
+        hasProviderBinding: true,
+        canLoad: true,
+      }),
+    ).toBe("restart");
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: false,
+        hasProviderBinding: false,
+        canLoad: true,
+      }),
+    ).toBe("create");
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: false,
+        hasProviderBinding: true,
+        canLoad: false,
+      }),
+    ).toBe("create");
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: true,
+        hasProviderBinding: true,
+        canLoad: true,
+      }),
+    ).toBe("create");
+  });
+
+  it("keeps the visible admission prompt as the stopped turn and drops only follow-ups", () => {
+    expect(cancelledQueuedMessageAction("active-turn")).toBe(
+      "preserve-as-turn",
+    );
+    expect(cancelledQueuedMessageAction("queued-card")).toBe("drop");
+    expect(cancelledQueuedMessageAction(undefined)).toBe("drop");
+  });
+
   it("marks the chat cancelled for a send captured before the stop", () => {
     const generations = new Map<string, number>();
     const sendGeneration = cancelGeneration(generations, "chat-1");

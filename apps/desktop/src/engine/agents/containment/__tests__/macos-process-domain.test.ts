@@ -57,6 +57,7 @@ describe("macOS ZSR process domain", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -180,6 +181,118 @@ describe("macOS ZSR process domain", () => {
         "9876",
       ]),
     );
+  });
+
+  it("keeps expected retirement misses quiet but reports explicit proof mismatches", async () => {
+    const runner = vi.fn<MacosProcessDomainCommandRunner>(
+      async (_helper, args) => {
+        if (args[0] === "self-test") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              version: 1,
+              platform: "darwin",
+              processIdentity: true,
+              sandboxInspection: true,
+              callerSandboxed: false,
+            }),
+            stderr: "",
+          };
+        }
+        if (args[0] === "identity") {
+          return {
+            exitCode: 0,
+            stdout: identity(Number(args[1])),
+            stderr: "",
+          };
+        }
+        return {
+          exitCode: 4,
+          stdout: JSON.stringify({
+            version: 1,
+            match: false,
+            eligible: false,
+            sandboxed: -2,
+            allowRead: -2,
+            allowWrite: -2,
+            denyRead: -2,
+            denyWrite: -2,
+          }),
+          stderr: "",
+        };
+      },
+    );
+    const domain = await MacosProcessDomain.create({
+      helperPath,
+      markerPath,
+      policyPath,
+      metadataPath,
+      generation: newTerritoryGeneration(),
+      enginePid: 4321,
+      runner,
+    });
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    await expect(domain.matches(9876)).resolves.toBe(false);
+    expect(consoleError).not.toHaveBeenCalled();
+
+    await expect(
+      domain.matches(9876, { reportMismatch: true }),
+    ).resolves.toBe(false);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[zsr] macOS process-domain mismatch (eligible=false sandboxed=-2 allowRead=-2 allowWrite=-2 denyRead=-2 denyWrite=-2)",
+    );
+  });
+
+  it("re-proves the helper self-test only when the binary identity changes", async () => {
+    const runner = vi.fn<MacosProcessDomainCommandRunner>(
+      async (_helper, args) => {
+        if (args[0] === "self-test") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              version: 1,
+              platform: "darwin",
+              processIdentity: true,
+              sandboxInspection: true,
+              callerSandboxed: false,
+            }),
+            stderr: "",
+          };
+        }
+        return {
+          exitCode: 0,
+          stdout: identity(Number(args[1])),
+          stderr: "",
+        };
+      },
+    );
+    const selfTests = () =>
+      runner.mock.calls.filter((call) => call[1][0] === "self-test").length;
+    const create = (metadata: string) =>
+      MacosProcessDomain.create({
+        helperPath,
+        markerPath,
+        policyPath,
+        metadataPath: metadata,
+        generation: newTerritoryGeneration(),
+        enginePid: 4321,
+        runner,
+      });
+
+    await create(metadataPath);
+    expect(selfTests()).toBe(1);
+    // Same runner, byte-identical helper: the per-admission self-test spawn
+    // is skipped; the trust checks (canonical path, immutability) still ran.
+    await create(path.join(root, "commands", "process-domain-2.json"));
+    expect(selfTests()).toBe(1);
+    // A replaced helper binary changes identity and must re-prove.
+    await rm(helperPath);
+    await writeFile(helperPath, "helper-updated", { mode: 0o500 });
+    await create(path.join(root, "commands", "process-domain-3.json"));
+    expect(selfTests()).toBe(2);
   });
 
   it("fails closed on malformed or unproved helper output", async () => {
@@ -413,9 +526,7 @@ describe("macOS ZSR process domain", () => {
     // First retire renames the descriptor to `.reaped`.
     await expect(domain.retireMetadata()).resolves.toBeUndefined();
     await expect(stat(metadataPath)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(
-      stat(`${metadataPath}.reaped`),
-    ).resolves.toBeDefined();
+    await expect(stat(`${metadataPath}.reaped`)).resolves.toBeDefined();
     // A retried teardown (or preparation-cleanup double-call) must not throw
     // ENOENT — this is what lets the gateway's recovery loop resume a wedged
     // teardown instead of churning forever. Finding A regression guard.

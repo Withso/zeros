@@ -1,9 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import {
-  boundaryPortLabel,
-  boundaryPortProblemCopy,
-} from "../boundary-ports";
+import { boundaryPortLabel, boundaryPortProblemCopy } from "../boundary-ports";
 
 describe("boundary port UI copy", () => {
   it("keeps transparent explicit-port parity", () => {
@@ -22,7 +19,7 @@ describe("boundary port UI copy", () => {
     expect(boundaryPortProblemCopy("listener-inspection-failed")).toEqual({
       title: "Preview detection is unavailable",
       description:
-        "The sandbox could not inspect this session's listeners. Restart the session to retry.",
+        "Preview detection could not inspect this session's listeners. Restart the session to retry.",
     });
     expect(
       JSON.stringify(boundaryPortProblemCopy("policy-update-failed")),

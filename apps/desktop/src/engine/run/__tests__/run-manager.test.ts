@@ -391,7 +391,9 @@ describe("RunManager", () => {
     releaseBoundary();
 
     await expect(starting).rejects.toThrow(/cancelled run domain/i);
-    await expect(mgr.stopAllAndProve()).rejects.toThrow(/restart Zeros/i);
+    await expect(mgr.stopAllAndProve()).rejects.toThrow(
+      /automatic recovery is still retrying/i,
+    );
     expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
   });
 
@@ -534,6 +536,43 @@ describe("RunManager", () => {
     );
   });
 
+  it("retries a transient teardown failure and releases the process-wide authority hold", async () => {
+    vi.useFakeTimers();
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { svc, live } = fakePty();
+      const stopAndProve = vi
+        .fn<PreparedBoundary["stopAndProve"]>()
+        .mockRejectedValueOnce(new Error("temporary process-group race"))
+        .mockResolvedValue(undefined);
+      const boundary = {
+        ...preparedTestBoundary(),
+        stopAndProve,
+      } as PreparedBoundary;
+      const mgr = make(svc, [], undefined, async () => boundary);
+      await mgr.start(startArgs());
+      live.delete(SID);
+      mgr.handleExit(SID, 0);
+
+      await expect(mgr.proveWorkspaceBoundariesStopped(WS)).rejects.toThrow(
+        /repository run containment teardown was not proven/i,
+      );
+      expect(stopAndProve).toHaveBeenCalledOnce();
+      expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(stopAndProve).toHaveBeenCalledTimes(2);
+      await expect(
+        mgr.proveWorkspaceBoundariesStopped(WS),
+      ).resolves.toBeUndefined();
+      expect(mgr.hasRepositoryCodeAuthority()).toBe(false);
+    } finally {
+      diagnostic.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("globally revokes and proves rowless run boundaries before an owner-map change", async () => {
     const { svc, killed } = fakePty();
     const revoke = vi.fn(async () => {});
@@ -669,7 +708,7 @@ describe("RunManager", () => {
 
       await mgr.start(startArgs({ workspaceId: null }));
       await expect(mgr.stopAllAndProve()).rejects.toThrow(
-        /run boundaries were not globally retired/i,
+        /run boundaries were not all proven stopped/i,
       );
       expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
       expect(mgr.registeredDesignAuthorityChanged(null)).toBe(true);

@@ -226,7 +226,7 @@ describe("AgentGateway identity lifecycle", () => {
     expect(spawnAfterCall).toThrow(/revoked/);
   });
 
-  it("holds every later admission when a one-shot boundary cannot prove teardown", async () => {
+  it("does not let one failed one-shot teardown poison later admissions", async () => {
     const gateway = new AgentGateway({
       projectRoot: "/tmp",
       executionBoundary: testExecutionBoundary({
@@ -277,23 +277,21 @@ describe("AgentGateway identity lifecycle", () => {
         prompt: "Hello",
       }),
     ).resolves.toEqual({ title: "must not be published" });
-    // The safety property is unchanged and is asserted where it now applies: the
-    // moment the pool tries to retire that boundary and cannot prove it stopped,
-    // the process-wide latch trips and EVERY later admission is refused until a
-    // fresh engine has run stale-domain recovery.
+    // The failed boundary remains fenced and independently retried, but its
+    // teardown state is not global product state.
     await expect(gateway.retirePooledUtilityBoundaries()).rejects.toThrow(
       /transient boundary teardown proof failed/,
     );
     await expect(
       gateway.newSession("future-agent", { cwd: "/tmp" }),
-    ).rejects.toThrow(/prior execution boundary could not be proven stopped/);
+    ).resolves.toMatchObject({ executionId: expect.any(String) });
     await expect(
       gateway.generateTitle("future-agent", {
         model: "model-1",
         systemPrompt: "Title this conversation",
         prompt: "Hello",
       }),
-    ).resolves.toMatchObject({ title: null });
+    ).resolves.toMatchObject({ title: "must not be published" });
   });
 
   it("publishes and cleans up a newly minted route around adapter startup", async () => {

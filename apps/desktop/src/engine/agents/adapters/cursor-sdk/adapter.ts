@@ -12,7 +12,7 @@
 // if the package / its native sqlite3 binding is missing.
 // ──────────────────────────────────────────────────────────
 
-import { createHash, createHmac, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, scrypt } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { providerBindingForResume } from "@zeros/protocol/identities";
 import type { AdvertisedModel } from "@zeros/protocol/agent-events";
@@ -89,30 +89,28 @@ const FALLBACK_MODEL_PREFERENCE = [
  *  Ordered most-capable-confirmed-good first. */
 const LOCAL_RETRY_MODELS = ["composer-2", "composer-1.5"];
 
-/** Process-local key for account cache partitions. The corresponding model
- * state is memory-only, so a fresh key on every engine start preserves all
+/** Process-local salt for account cache partitions. The corresponding model
+ * state is memory-only, so a fresh salt on every engine start preserves all
  * required behavior while preventing a leaked fingerprint from becoming an
  * offline API-key guessing oracle. */
-const CURSOR_MODEL_STATE_FINGERPRINT_KEY = randomBytes(32);
+const CURSOR_MODEL_STATE_FINGERPRINT_SALT = randomBytes(32);
 
-/** Return a keyed pseudonym for an API key without retaining the credential in
- * model discovery state. Exported to lock the security property in tests. */
-export function cursorModelStateFingerprint(
+/** Return a memory-hard pseudonym for an API key without retaining the
+ * credential in model discovery state. Exported to lock the security property
+ * in tests. */
+export async function cursorModelStateFingerprint(
   apiKey: string,
-  processKey: Uint8Array,
-): string {
-  // Cursor API keys are provider-generated tokens, and this value is an
-  // ephemeral keyed cache pseudonym—not a persisted password verifier.
-  // codeql[js/insufficient-password-hash]
-  return createHmac("sha256", processKey).update(apiKey).digest("hex");
+  processSalt: Uint8Array,
+): Promise<string> {
+  const derivedKey = await new Promise<Buffer>((resolve, reject) => {
+    scrypt(apiKey, processSalt, 32, (error, value) => {
+      if (error) reject(error);
+      else resolve(value);
+    });
+  });
+  return derivedKey.toString("hex");
 }
 
-/** How long a session start may wait for the account's model catalog before
- *  going ahead without it. See discoverModelsForSessionStart: the catalog only
- *  refines model validation, so a slow first network round-trip must not become
- *  the user's session-start latency. Generous enough that a healthy network
- *  answers inside it; short enough that a wedged one costs a blink. */
-const MODEL_DISCOVERY_START_BUDGET_MS = 2_500;
 // Billing is supplementary telemetry. The SDK may consult a provider/local
 // store that is temporarily unavailable, so cap both before/after snapshots;
 // an agent turn must never inherit the control client's much longer timeout.
@@ -648,8 +646,9 @@ export function cursorAdvertisedModel(
       const normalized = value.toLowerCase();
       return (
         CURSOR_EFFORT_VALUES.has(normalized) &&
-        values.findIndex((candidate) => candidate.toLowerCase() === normalized) ===
-          index
+        values.findIndex(
+          (candidate) => candidate.toLowerCase() === normalized,
+        ) === index
       );
     });
   const hasSpeedMetadata = parameters.some((parameter) =>
@@ -736,9 +735,7 @@ export interface CursorSdkModule {
    *  SDK without the export. */
   Cursor?: {
     models: {
-      list(
-        opts?: Record<string, unknown>,
-      ): Promise<CursorModelListItem[]>;
+      list(opts?: Record<string, unknown>): Promise<CursorModelListItem[]>;
     };
   };
   /** Build this workspace's local executor ahead of the first `send()` —
@@ -985,10 +982,10 @@ export class CursorSdkAdapter implements AgentAdapter {
    *  picks (resolveValidModelId) and feeds the picker via
    *  cachedInitialize._meta.models. Best-effort — failures leave the bundled
    *  catalog in place. */
-  private activateModelState(apiKey: string): CursorModelState {
-    const fingerprint = cursorModelStateFingerprint(
+  private async activateModelState(apiKey: string): Promise<CursorModelState> {
+    const fingerprint = await cursorModelStateFingerprint(
       apiKey,
-      CURSOR_MODEL_STATE_FINGERPRINT_KEY,
+      CURSOR_MODEL_STATE_FINGERPRINT_SALT,
     );
     if (this.modelState.fingerprint === fingerprint) return this.modelState;
     this.modelState = createCursorModelState(fingerprint);
@@ -1002,9 +999,9 @@ export class CursorSdkAdapter implements AgentAdapter {
 
   private async discoverModels(
     apiKey: string,
+    state: CursorModelState,
     sessionSdk?: CursorSdkModule,
   ): Promise<void> {
-    const state = this.activateModelState(apiKey);
     if (state.discovery) return state.discovery;
     state.discovery = (async () => {
       try {
@@ -1078,7 +1075,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     };
   }
 
-  /** Wait for the catalog only as long as it is worth waiting.
+  /** Start catalog discovery without putting it on the session critical path.
    *
    * Discovery is a real network round-trip — and under ZSR it is the FIRST one
    * this session's contained host makes, so it also pays the host's cold Node
@@ -1091,34 +1088,24 @@ export class CursorSdkAdapter implements AgentAdapter {
    * validates against it when present and passes the user's pick through
    * untouched when it is not (`resolveValidModelId(base, undefined)`), and a
    * genuinely unavailable model still surfaces the provider's own "Cannot use
-   * this model" error. So bound the wait, let discovery finish in the background,
-   * and let the NEXT session (and the model picker, via `modelsDynamic`) enjoy
-   * the result. */
-  private async discoverModelsForSessionStart(
+   * this model" error. Let discovery finish in the background and let the next
+   * session (and the model picker, via `modelsDynamic`) enjoy the result. Even
+   * a bounded wait visibly serialized two independent provider requests for a
+   * cold account. */
+  private async startModelDiscoveryForSession(
     apiKey: string,
     sessionSdk: CursorSdkModule,
   ): Promise<CursorModelState> {
-    const state = this.activateModelState(apiKey);
-    const discovery = this.discoverModels(apiKey, sessionSdk);
-    if (state.discoveredModelIds) {
-      // Already warm from an earlier session: awaiting is free.
-      await discovery;
-      return state;
-    }
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      await Promise.race([
-        discovery,
-        new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, MODEL_DISCOVERY_START_BUDGET_MS);
-          timer.unref?.();
-        }),
-      ]);
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-    // Never let the un-awaited remainder become an unhandled rejection.
+    const state = await this.activateModelState(apiKey);
+    const discovery = this.discoverModels(apiKey, state, sessionSdk);
+    // discoverModels classifies and reports failures itself. Keep a terminal
+    // sink anyway so future refactors cannot turn this deliberately detached
+    // optimization into an unhandled rejection.
     void discovery.catch(() => undefined);
+    // Yield one microtask only. A catalog already cached by the SDK can enrich
+    // this very session (aliases/default params included), while a real network
+    // request cannot serialize Agent.create even for one timer tick.
+    await Promise.resolve();
     return state;
   }
 
@@ -1340,7 +1327,8 @@ export class CursorSdkAdapter implements AgentAdapter {
   ): string | null {
     for (const m of LOCAL_RETRY_MODELS) {
       if (m === failed || state.deniedModels.has(m)) continue;
-      if (!state.discoveredModelIds || state.discoveredModelIds.has(m)) return m;
+      if (!state.discoveredModelIds || state.discoveredModelIds.has(m))
+        return m;
     }
     return null;
   }
@@ -1414,7 +1402,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
     // model: <id>". resolveModel falls back to a known-good model when the
     // selection isn't offered by this account.
-    const modelState = await this.discoverModelsForSessionStart(
+    const modelState = await this.startModelDiscoveryForSession(
       apiKey,
       runtime.sdk,
     );
@@ -1515,7 +1503,7 @@ export class CursorSdkAdapter implements AgentAdapter {
     // `composer-2-fast` default, or a persisted pick) throws "Cannot use this
     // model: <id>". resolveModel falls back to a known-good model when the
     // selection isn't offered by this account.
-    const modelState = await this.discoverModelsForSessionStart(
+    const modelState = await this.startModelDiscoveryForSession(
       apiKey,
       runtime.sdk,
     );
@@ -2249,7 +2237,7 @@ export class CursorSdkAdapter implements AgentAdapter {
       executionBoundary: opts.executionBoundary,
     });
     const sdk = runtime.sdk;
-    const modelState = await this.discoverModelsForSessionStart(apiKey, sdk);
+    const modelState = await this.startModelDiscoveryForSession(apiKey, sdk);
     // Validate the pick against discovered ids like a real send would —
     // an unknown id falls back to the account's best composer.
     const modelId = this.resolveModel(opts.model, opts.env, modelState);
