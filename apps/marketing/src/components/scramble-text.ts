@@ -93,17 +93,23 @@ function placeToken(out: string[], tokens: string[]): void {
 }
 
 /** HTML tail: icon glyphs mixed with chars/tokens. Each slot is one unit. */
-export function scrambleTail(length: number, set: ScrambleSet): string {
+export function scrambleTail(
+  length: number,
+  set: ScrambleSet,
+  { allowTokens = true }: { allowTokens?: boolean } = {},
+): string {
   if (length <= 0) return ''
   const slots: string[] = Array.from({ length }, () => {
-    if (set.icons.length > 0 && Math.random() < 0.3) return pick(set.icons)
+    if (set.icons.length > 0 && Math.random() < 0.32) return pick(set.icons)
     return escapeHtml(pickChar(set.chars))
   })
-  const usable = set.tokens.filter((token) => token.length <= length)
-  if (usable.length > 0 && Math.random() < 0.78) {
-    const token = pick(usable)
-    const start = Math.floor(Math.random() * (length - token.length + 1))
-    for (let i = 0; i < token.length; i += 1) slots[start + i] = escapeHtml(token[i])
+  if (allowTokens) {
+    const usable = set.tokens.filter((token) => token.length <= length)
+    if (usable.length > 0) {
+      const token = pick(usable)
+      const start = Math.floor(Math.random() * (length - token.length + 1))
+      for (let i = 0; i < token.length; i += 1) slots[start + i] = escapeHtml(token[i])
+    }
   }
   return slots.join('')
 }
@@ -120,8 +126,8 @@ export function playScramble(
     text,
     set,
     duration = SCRAMBLE_MS / 1000,
-    revealDelay = 0.2,
-    speed = 1.15,
+    revealDelay = 0.45,
+    speed = 1.2,
   }: {
     text: string
     set: ScrambleSet
@@ -153,7 +159,9 @@ export function playScramble(
       if (revealed !== lastRevealed || now - lastRefresh >= refreshMs) {
         lastRefresh = now
         lastRevealed = revealed
-        tail = scrambleTail(Math.max(0, len - revealed), set)
+        tail = scrambleTail(Math.max(0, len - revealed), set, {
+          allowTokens: revealed === 0,
+        })
       }
       const revealedText = escapeHtml(text.slice(0, revealed))
       el.innerHTML =
