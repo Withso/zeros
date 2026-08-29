@@ -127,7 +127,7 @@ function Tools({ act }: { act: Act | '' }) {
             d="M2 10 C 42 3, 92 14, 158 8"
             fill="none"
             stroke="color-mix(in srgb, var(--violet-primary) 65%, var(--fg1))"
-            strokeWidth="1.6"
+            strokeWidth="2.4"
             strokeLinecap="round"
           />
         </svg>
