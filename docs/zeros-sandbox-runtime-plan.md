@@ -170,15 +170,30 @@ Interactive agent create/resume has a two-part admission contract:
 1. Resolve and validate the authority inputs, create the immutable process
    domain, and install the kernel-enforced policy. No provider byte runs before
    this part completes.
-2. Start the provider and the exact live behavioral canary concurrently. A warm
-   spare has already completed this proof. On a cold boundary, a failed proof
-   revokes and proves that exact process tree stopped, and the turn ends with the
-   stable `design-protection-failed` classification.
+2. Start the provider, the exact live behavioral canary, and a fresh
+   post-install territory revalidation concurrently. A failed proof or a
+   territory change revokes and proves that exact process tree stopped, and the
+   turn ends with the stable `design-protection-failed` classification.
 
 The second part is deliberately off the create/resume critical path; it does not
 mean the provider runs uncontained. Utilities, warm-spare preparation, Setup,
 and Run retain blocking attestation because their work is not an interactive
 message-latency path.
+
+The renderer accepts the first prompt before create/resume completes and treats
+it as the active turn: its timer starts once and the composer shows Stop. A Stop
+before an execution id exists invalidates the chat-scoped admission, detaches
+the renderer's old single-flight coordinator, and leaves the next prompt free to
+start a fresh bind immediately. A late provider result is disposed and cannot
+publish into the stopped or replacement turn.
+
+Production does not speculatively prepare a second session boundary after a
+successful create/resume. Live traces showed that the extra process domain and
+canary could compete with the user's first provider turn for seconds while
+saving only tens to a few hundred milliseconds on a later admission. The warm
+session pool remains an explicit diagnostic/benchmark switch, and any boundary
+it produces is fully attested before adoption; it is not a second product mode
+or an unprotected fallback.
 
 Revocation closes the Git broker and container capability, retires all observed
 processes, handles processes adopted after retirement began, waits for the

@@ -57,6 +57,7 @@ describe("macOS ZSR process domain", () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await rm(root, { recursive: true, force: true });
   });
 
@@ -179,6 +180,69 @@ describe("macOS ZSR process domain", () => {
         "--pid",
         "9876",
       ]),
+    );
+  });
+
+  it("keeps expected retirement misses quiet but reports explicit proof mismatches", async () => {
+    const runner = vi.fn<MacosProcessDomainCommandRunner>(
+      async (_helper, args) => {
+        if (args[0] === "self-test") {
+          return {
+            exitCode: 0,
+            stdout: JSON.stringify({
+              version: 1,
+              platform: "darwin",
+              processIdentity: true,
+              sandboxInspection: true,
+              callerSandboxed: false,
+            }),
+            stderr: "",
+          };
+        }
+        if (args[0] === "identity") {
+          return {
+            exitCode: 0,
+            stdout: identity(Number(args[1])),
+            stderr: "",
+          };
+        }
+        return {
+          exitCode: 4,
+          stdout: JSON.stringify({
+            version: 1,
+            match: false,
+            eligible: false,
+            sandboxed: -2,
+            allowRead: -2,
+            allowWrite: -2,
+            denyRead: -2,
+            denyWrite: -2,
+          }),
+          stderr: "",
+        };
+      },
+    );
+    const domain = await MacosProcessDomain.create({
+      helperPath,
+      markerPath,
+      policyPath,
+      metadataPath,
+      generation: newTerritoryGeneration(),
+      enginePid: 4321,
+      runner,
+    });
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => undefined);
+
+    await expect(domain.matches(9876)).resolves.toBe(false);
+    expect(consoleError).not.toHaveBeenCalled();
+
+    await expect(
+      domain.matches(9876, { reportMismatch: true }),
+    ).resolves.toBe(false);
+    expect(consoleError).toHaveBeenCalledWith(
+      "[zsr] macOS process-domain mismatch (eligible=false sandboxed=-2 allowRead=-2 allowWrite=-2 denyRead=-2 denyWrite=-2)",
     );
   });
 

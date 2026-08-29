@@ -9,7 +9,15 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { afterAll, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import { AgentGateway } from "../gateway";
 import type { AgentAdapter } from "../types";
@@ -66,6 +74,14 @@ function fakeAdapter(): AgentAdapter {
 }
 
 describe("gateway warm session boundaries", () => {
+  beforeEach(() => {
+    vi.stubEnv("ZEROS_ZSR_WARM_SESSION_BOUNDARIES", "1");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("replenishes after a live session and adopts for the next identical one", async () => {
     const root = await fixture();
     const preparedIds: string[] = [];
@@ -166,36 +182,65 @@ describe("gateway warm session boundaries", () => {
 
   it("admits cold when the pool is disabled by configuration", async () => {
     const root = await fixture();
-    process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES = "0";
-    try {
-      const preparedIds: string[] = [];
-      const gw = new AgentGateway({
-        projectRoot: "/tmp/zeros-warm-test",
-        executionBoundary: testExecutionBoundary({
-          onPrepare: (request: BoundaryRequest) => {
-            preparedIds.push(request.executionId);
-          },
-        }),
-        events: {
-          onSessionUpdate: () => {},
-          onPermissionRequest: () => {},
-          onQuestionRequest: () => {},
-          onAgentStderr: () => {},
-          onAgentExit: () => {},
+    vi.stubEnv("ZEROS_ZSR_WARM_SESSION_BOUNDARIES", "0");
+    const preparedIds: string[] = [];
+    const gw = new AgentGateway({
+      projectRoot: "/tmp/zeros-warm-test",
+      executionBoundary: testExecutionBoundary({
+        onPrepare: (request: BoundaryRequest) => {
+          preparedIds.push(request.executionId);
         },
-      });
-      const internals = gw as unknown as {
-        adapters: Map<string, AgentAdapter>;
-        warmSessionBoundariesInstance: { size(): number } | null;
-      };
-      internals.adapters.set("contained", fakeAdapter());
-      const first = await gw.newSession("contained", { cwd: root });
-      const second = await gw.newSession("contained", { cwd: root });
-      expect(preparedIds).toEqual([first.executionId, second.executionId]);
-      expect(internals.warmSessionBoundariesInstance).toBeNull();
-      await gw.dispose();
-    } finally {
-      delete process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES;
-    }
+      }),
+      events: {
+        onSessionUpdate: () => {},
+        onPermissionRequest: () => {},
+        onQuestionRequest: () => {},
+        onAgentStderr: () => {},
+        onAgentExit: () => {},
+      },
+    });
+    const internals = gw as unknown as {
+      adapters: Map<string, AgentAdapter>;
+      warmSessionBoundariesInstance: { size(): number } | null;
+    };
+    internals.adapters.set("contained", fakeAdapter());
+    const first = await gw.newSession("contained", { cwd: root });
+    const second = await gw.newSession("contained", { cwd: root });
+    expect(preparedIds).toEqual([first.executionId, second.executionId]);
+    expect(internals.warmSessionBoundariesInstance).toBeNull();
+    await gw.dispose();
+  });
+
+  it("keeps speculative spare admission off the interactive path by default", async () => {
+    vi.stubEnv("ZEROS_ZSR_WARM_SESSION_BOUNDARIES", "");
+    const root = await fixture();
+    const preparedIds: string[] = [];
+    const gw = new AgentGateway({
+      projectRoot: "/tmp/zeros-warm-test",
+      executionBoundary: testExecutionBoundary({
+        onPrepare: (request: BoundaryRequest) => {
+          preparedIds.push(request.executionId);
+        },
+      }),
+      events: {
+        onSessionUpdate: () => {},
+        onPermissionRequest: () => {},
+        onQuestionRequest: () => {},
+        onAgentStderr: () => {},
+        onAgentExit: () => {},
+      },
+    });
+    const internals = gw as unknown as {
+      adapters: Map<string, AgentAdapter>;
+      warmSessionBoundariesInstance: { size(): number } | null;
+    };
+    internals.adapters.set("contained", fakeAdapter());
+
+    const first = await gw.newSession("contained", { cwd: root });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(preparedIds).toEqual([first.executionId]);
+    expect(internals.warmSessionBoundariesInstance).toBeNull();
+    await gw.dispose();
   });
 });

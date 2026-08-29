@@ -16,6 +16,7 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { finished as streamFinished } from "node:stream/promises";
 
 import {
   EXECUTION_BOUNDARY_STATUS_VERSION,
@@ -230,6 +231,8 @@ interface SharedMacosContainerEntry {
   readonly lease: Promise<MacosContainerWorkerLease>;
   readonly controlExecutionId: string;
   references: number;
+  activationFailed: boolean;
+  activationFailure?: unknown;
   idleTimer?: NodeJS.Timeout;
   stopping?: Promise<void>;
 }
@@ -367,10 +370,19 @@ class SharedMacosContainerWorkerLease implements MacosContainerWorkerLease {
     this.environment = delegate.environment;
   }
 
-  start(
+  async start(
     request: Parameters<MacosContainerWorkerLease["start"]>[0],
   ): Promise<void> {
-    return this.delegate.start(request);
+    try {
+      await this.delegate.start(request);
+    } catch (error) {
+      // A lease that could not be armed must never enter the warm pool. It may
+      // own a listening socket or a partially provisioned machine, and handing
+      // that shared entry to a later boundary would replay broken authority.
+      this.entry.activationFailed = true;
+      this.entry.activationFailure = error;
+      throw error;
+    }
   }
 
   stopAndProve(): Promise<void> {
@@ -381,7 +393,10 @@ class SharedMacosContainerWorkerLease implements MacosContainerWorkerLease {
         this.entry.references -= 1;
       }
       if (this.entry.references > 0) return;
-      if (containerWorkerIdlingSuspended(this.entry.workspaceRoot)) {
+      if (
+        this.entry.activationFailed ||
+        containerWorkerIdlingSuspended(this.entry.workspaceRoot)
+      ) {
         await retireSharedContainerEntry(this.entry);
         return;
       }
@@ -503,6 +518,24 @@ async function acquireSharedMacosContainerWorker(
       create,
     );
   }
+  if (entry?.activationFailed) {
+    // Do not add a new owner to an entry whose activation already failed.
+    // Existing owners release it through their exact cleanup; after the final
+    // release, a later admission can retire it and reserve a fresh worker.
+    if (entry.references > 0) {
+      throw (
+        entry.activationFailure ??
+        new Error("shared container worker activation failed")
+      );
+    }
+    await retireSharedContainerEntry(entry);
+    return acquireSharedMacosContainerWorker(
+      key,
+      workspaceRoot,
+      controlExecutionId,
+      create,
+    );
+  }
   if (entry?.idleTimer) {
     clearTimeout(entry.idleTimer);
     entry.idleTimer = undefined;
@@ -514,6 +547,7 @@ async function acquireSharedMacosContainerWorker(
       lease: Promise.resolve().then(create),
       controlExecutionId,
       references: 0,
+      activationFailed: false,
     };
     sharedMacosContainerWorkers.set(key, entry);
   }
@@ -1413,9 +1447,12 @@ class PreparedZsrBoundary implements PreparedBoundary {
     void attestation.catch(() => undefined);
   }
 
-  matchesMacosProcessDomain(pid: number): Promise<boolean> {
+  matchesMacosProcessDomain(
+    pid: number,
+    options: { reportMismatch?: boolean } = {},
+  ): Promise<boolean> {
     if (!this.macosProcessDomain) return Promise.resolve(true);
-    return this.macosProcessDomain.matches(pid);
+    return this.macosProcessDomain.matches(pid, options);
   }
 
   wrapSpawn(request: BoundarySpawnRequest): BoundaryLaunchSpec {
@@ -2500,10 +2537,8 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       let stdout = "";
       let stderr = "";
       let resolveLine: ((line: string) => void) | null = null;
-      let rejectLine: ((error: Error) => void) | null = null;
-      const firstLine = new Promise<string>((resolve, reject) => {
+      const firstLine = new Promise<string>((resolve) => {
         resolveLine = resolve;
-        rejectLine = reject;
       });
       processHandle.stdout?.setEncoding("utf8");
       processHandle.stderr?.setEncoding("utf8");
@@ -2513,24 +2548,52 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         if (newline >= 0 && resolveLine) {
           resolveLine(stdout.slice(0, newline));
           resolveLine = null;
-          rejectLine = null;
-        }
-      });
-      processHandle.stdout?.on("end", () => {
-        if (processDomain && rejectLine) {
-          rejectLine(new Error("host-parity canary produced no attestation"));
-          resolveLine = null;
-          rejectLine = null;
         }
       });
       processHandle.stderr?.on("data", (chunk: string) => {
         stderr = (stderr + chunk).slice(-4 * 1024);
       });
       const exitPromise = processHandle.wait();
+      const outputCompletion = Promise.all([
+        processHandle.stdout
+          ? streamFinished(processHandle.stdout, { cleanup: true }).catch(
+              () => undefined,
+            )
+          : Promise.resolve(),
+        processHandle.stderr
+          ? streamFinished(processHandle.stderr, { cleanup: true }).catch(
+              () => undefined,
+            )
+          : Promise.resolve(),
+      ]).then(() => undefined);
+      const drainCapturedOutput = async (): Promise<void> => {
+        let drainTimer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            outputCompletion,
+            new Promise<void>((resolve) => {
+              drainTimer = setTimeout(resolve, 100);
+              drainTimer.unref?.();
+            }),
+          ]);
+        } finally {
+          if (drainTimer) clearTimeout(drainTimer);
+        }
+      };
+      const canaryExitError = (exit: BoundaryProcessExit): Error => {
+        const diagnostic = finalSupervisorDiagnostic(
+          stderr,
+          Object.values(expectedEnv),
+        );
+        return new Error(
+          `host-parity canary exited ${exit.code ?? exit.signal}${diagnostic ? `: ${diagnostic}` : ""}`,
+        );
+      };
       let lineTimer: NodeJS.Timeout | undefined;
-      const liveText = processDomain
+      const handshake = processDomain
         ? await Promise.race([
-            firstLine,
+            firstLine.then((line) => ({ kind: "line" as const, line })),
+            exitPromise.then((exit) => ({ kind: "exit" as const, exit })),
             new Promise<never>((_, reject) => {
               lineTimer = setTimeout(
                 () => reject(new Error("host-parity canary timed out")),
@@ -2541,13 +2604,21 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
             if (lineTimer) clearTimeout(lineTimer);
           })
         : null;
+      if (handshake?.kind === "exit") {
+        await drainCapturedOutput();
+        throw canaryExitError(handshake.exit);
+      }
+      const liveText = handshake?.kind === "line" ? handshake.line : null;
       const live = liveText
         ? (JSON.parse(liveText) as { sandboxPid?: number })
         : null;
       const processDomainMatched = processDomain
         ? Number.isSafeInteger(live?.sandboxPid) &&
           Number(live?.sandboxPid) > 0 &&
-          (await boundary.matchesMacosProcessDomain(Number(live?.sandboxPid)))
+          (await boundary.matchesMacosProcessDomain(
+            Number(live?.sandboxPid),
+            { reportMismatch: true },
+          ))
         : true;
       if (processDomain) {
         await writeFile(releaseFile, "release\n", { mode: 0o600, flag: "wx" });
@@ -2564,14 +2635,9 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       ]).finally(() => {
         if (exitTimer) clearTimeout(exitTimer);
       });
+      await drainCapturedOutput();
       if (exit.code !== 0) {
-        const diagnostic = finalSupervisorDiagnostic(
-          stderr,
-          Object.values(expectedEnv),
-        );
-        throw new Error(
-          `host-parity canary exited ${exit.code ?? exit.signal}${diagnostic ? `: ${diagnostic}` : ""}`,
-        );
+        throw canaryExitError(exit);
       }
       const result = JSON.parse(liveText ?? stdout.trim()) as {
         codeWrite?: boolean;

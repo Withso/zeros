@@ -26,7 +26,9 @@ const temporaryDirectories: string[] = [];
 const execFileAsync = promisify(execFile);
 
 async function designRepo(): Promise<string> {
-  const root = await mkdtemp(path.join(os.tmpdir(), "zeros-repo-design-"));
+  const root = await realpath(
+    await mkdtemp(path.join(os.tmpdir(), "zeros-repo-design-")),
+  );
   temporaryDirectories.push(root);
   await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: root });
   await execFileAsync("git", ["config", "user.email", "test@test"], {
@@ -46,7 +48,9 @@ async function designRepo(): Promise<string> {
 }
 
 async function codeRepo(): Promise<string> {
-  const root = await mkdtemp(path.join(os.tmpdir(), "zeros-repo-code-"));
+  const root = await realpath(
+    await mkdtemp(path.join(os.tmpdir(), "zeros-repo-code-")),
+  );
   temporaryDirectories.push(root);
   await execFileAsync("git", ["init", "-q", "-b", "main"], { cwd: root });
   await execFileAsync("git", ["config", "user.email", "test@test"], {

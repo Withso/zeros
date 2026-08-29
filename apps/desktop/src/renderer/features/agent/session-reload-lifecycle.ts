@@ -337,6 +337,57 @@ export function cancelledQueuedMessageAction(
   return presentation === "active-turn" ? "preserve-as-turn" : "drop";
 }
 
+/** The first prompt is already a live user turn while its execution boundary
+ * and provider route are being admitted. Give that turn the same Stop control
+ * as a dispatched prompt; a bare warming session opened by focus/prewarm has no
+ * user-owned work and therefore keeps the ordinary Send control. Plan review
+ * owns its own submit actions and must not be replaced by Stop. */
+export function composerShowsStopControl(input: {
+  status: SessionStatus;
+  hasPendingLocalTurn: boolean;
+  planReview: boolean;
+}): boolean {
+  return (
+    !input.planReview &&
+    (input.status === "streaming" || input.hasPendingLocalTurn)
+  );
+}
+
+/** Route Stop to the lifecycle object that actually exists at that instant.
+ * Before the engine publishes an execution id there is no provider turn for
+ * AGENT_CANCEL to address: the chat-scoped bind itself must be invalidated.
+ * Once an execution exists it stays reusable and only its live/pending turn is
+ * cancelled. */
+export function admissionCancellationAction(input: {
+  hasAgent: boolean;
+  hasSession: boolean;
+  status: SessionStatus;
+  admissionInFlight: boolean;
+}): "abort-admission" | "cancel-session" | "local-only" {
+  if (!input.hasAgent) return "local-only";
+  if (input.hasSession) return "cancel-session";
+  if (input.admissionInFlight || input.status === "warming") {
+    return "abort-admission";
+  }
+  return "local-only";
+}
+
+/** Remove renderer ownership of one cancelled create/resume flight. The old
+ * async continuation is still protected by its cancel generation and exact
+ * promise identity; detaching here lets the next prompt install a replacement
+ * immediately instead of waiting behind work the user explicitly stopped. */
+export function detachAdmissionFlight<T>(
+  chatId: string,
+  flights: Map<string, T>,
+  loadKeys: Map<string, string>,
+  adoptOnly: Map<string, boolean>,
+): boolean {
+  const detached = flights.delete(chatId);
+  loadKeys.delete(chatId);
+  adoptOnly.delete(chatId);
+  return detached;
+}
+
 /** Route an explicit "Send now" for a queued row from authoritative session
  * lifecycle, not from the renderer-local prompt promise. A reloaded renderer
  * has no local send lock for the engine turn it adopted, but status remains

@@ -117,6 +117,7 @@ import { ActionsCtx, type SessionsActions } from "./sessions-context";
 import { questionRequestIsBrowserApproval } from "./pending-question-tools";
 import { nativeInvoke } from "../../platform/runtime";
 import {
+  admissionCancellationAction,
   agentUpdateFlushMode,
   bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
@@ -125,6 +126,7 @@ import {
   cancelGeneration,
   cancelledSince,
   clearPrebindGoalSnapshotsForChat,
+  detachAdmissionFlight,
   loadedSessionStatus,
   markPrebindGoalSnapshot,
   markPrebindDirty,
@@ -3271,8 +3273,40 @@ export function AgentSessionsProvider({
           lastStopReason: "cancelled",
         });
       }
-      if (!bridge) return;
-      if (!current?.agentId || !current.sessionId) return;
+      const currentExecutionId = current?.executionId ?? current?.sessionId;
+      const cancellationAction = admissionCancellationAction({
+        hasAgent: Boolean(current?.agentId),
+        hasSession: Boolean(currentExecutionId),
+        status: current?.status ?? "idle",
+        admissionInFlight: ensureInFlightRef.current.has(chatId),
+      });
+      if (cancellationAction === "abort-admission" && current?.agentId) {
+        // Stop the exact chat-scoped engine bind and release the renderer's
+        // single-flight slot immediately. The old continuation is generation-
+        // cancelled and identity-checked, so an immediate next Send can safely
+        // install a fresh admission without waiting for (or being erased by)
+        // the cancelled ZSR/provider preparation.
+        detachAdmissionFlight(
+          chatId,
+          ensureInFlightRef.current,
+          loadFlightKeysRef.current,
+          loadFlightAdoptOnlyRef.current,
+        );
+        getStore().patchSession(chatId, {
+          status: "idle",
+          error: null,
+          failure: null,
+          activeTurnStartedAt: null,
+          lastStopReason: "cancelled",
+          pendingPermission: null,
+          pendingPermissions: [],
+          pendingQuestions: [],
+        });
+        cancelStalledAdmission(current.agentId, chatId);
+        return;
+      }
+      if (!bridge || cancellationAction !== "cancel-session") return;
+      if (!current?.agentId || !currentExecutionId) return;
       // Optimistic state transition: cancel is intentional, the chat
       // should immediately be ready for the next prompt. The flag
       // suppresses the AGENT_PROMPT_FAILED that arrives when the
@@ -3306,11 +3340,11 @@ export function AgentSessionsProvider({
       bridge.send({
         type: "AGENT_CANCEL",
         agentId: current.agentId,
-        executionId: current.executionId ?? current.sessionId,
-        sessionId: current.sessionId,
+        executionId: currentExecutionId,
+        sessionId: currentExecutionId,
       });
     },
-    [bridge, getStore, evictUnretainedTranscripts],
+    [bridge, getStore, cancelStalledAdmission, evictUnretainedTranscripts],
   );
 
   const respondToPermission = useCallback<

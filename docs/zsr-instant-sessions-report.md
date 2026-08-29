@@ -9,12 +9,22 @@ The current contracts are
 
 **2026-08-28 follow-up:** interactive cold create/resume now returns after the
 immutable kernel policy/process domain is established and runs its behavioral
-canary concurrently with provider startup. Warm spares remain pre-attested;
-Setup, Run, and utilities remain blocking. A failed background proof stops only
-that exact tree and reports `design-protection-failed`. Failed teardown proof is
-also exact-scoped and retried; it no longer trips a process-wide admission
-latch. The historical canary-before-provider and global-latch proposals below
-are not current contracts.
+canary and fresh territory revalidation concurrently with provider startup.
+Warm spares remain pre-attested when the diagnostic switch enables them, but
+speculative session-spare preparation is off by default after live traces found
+it competing with the first provider turn for seconds to save at most a few
+hundred milliseconds later. Setup, Run, and utilities remain blocking. A failed
+background proof stops only that exact tree and reports
+`design-protection-failed`. Failed teardown proof is also exact-scoped and
+retried; it no longer trips a process-wide admission latch. The historical
+canary-before-provider and global-latch proposals below are not current
+contracts.
+
+The first prompt is also cancellable throughout this window. It is rendered as
+the live turn with a continuous timer and Stop control while admission is still
+pending. Stop aborts the chat-scoped create/resume rather than sending a cancel
+to a provider session that does not exist, and a later prompt starts a new
+single-flight admission without waiting for the cancelled preparation.
 
 This report analyzed the 2026-08-17 implementation: preflight admission,
 provider-HOME copies, shadow Git, credential projection, network/port brokers,

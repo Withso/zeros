@@ -1,13 +1,13 @@
 // ──────────────────────────────────────────────────────────
-// warm-session-boundary-pool.ts — one pre-admitted boundary per session shape
+// warm-session-boundary-pool.ts — optional pre-admitted session boundaries
 // ──────────────────────────────────────────────────────────
 //
-// Admitting a session boundary is the slowest part of starting a chat: policy
-// construction, the macOS process domain, the Git integration broker, and —
-// dominating all of them — the live host-parity canary. This pool moves that
-// cost off the user's critical path: after a session admits (or adopts), a
-// spare boundary for the byte-identical request is prepared in the background,
-// and the NEXT session with the same shape adopts it instantly.
+// A spare can make the next byte-identical admission instant, but preparing it
+// is not free: it creates another process domain, broker, session directory,
+// and behavioral canary. Live traces showed that speculative work competing
+// with the first real provider turn cost seconds while saving only tens to a
+// few hundred milliseconds on the next boundary. It is therefore OFF by
+// default and retained as an explicit diagnostics/benchmark switch only.
 //
 // The safety argument, stated plainly:
 //
@@ -70,8 +70,10 @@ function warmSessionBoundaryIdleMs(): number {
 }
 
 export function warmSessionBoundariesEnabled(): boolean {
-  if (process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES === "0") return false;
-  return warmSessionBoundaryIdleMs() > 0;
+  return (
+    process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES === "1" &&
+    warmSessionBoundaryIdleMs() > 0
+  );
 }
 
 interface WarmEntry {

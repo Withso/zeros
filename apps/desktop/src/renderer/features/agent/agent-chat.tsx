@@ -187,12 +187,15 @@ import {
   staticModesForAgent,
 } from "./model-catalog";
 import {
+  composerShowsStopControl,
   QUEUED_FIRST_TURN_MAX_WAIT_MS,
   queuedFirstTurnAction,
   sendSessionRecoveryMode,
   unreadableTranscriptSendAction,
 } from "./session-reload-lifecycle";
 import { requestAiChatTitle, settledFirstPromptForTitle } from "./chat-title";
+import { noteInteractiveAgentActivity } from "./chat-title-scheduler";
+import { permissionModeIdForDisplay } from "./permission-mode-display";
 import {
   newChatBornDefaults,
   rememberModelConfiguration,
@@ -239,6 +242,10 @@ import {
   usePendingLocalTurnId,
   useSessionsStore,
 } from "./sessions-store";
+import {
+  AGENT_REGISTRY_VERIFICATION_DELAY_MS,
+  canVerifyAgentRegistryInBackground,
+} from "./agent-registry-verification";
 import { collectPendingQuestionToolCallIds } from "./pending-question-tools";
 import {
   windowOlderMessages as ipcWindowOlderMessages,
@@ -491,6 +498,12 @@ export function AgentChat({
   const backgroundContinuationActive = shouldKeepTurnLiveForBackgroundTasks(
     backgroundTaskOptions,
   );
+  // Switching into a chat is interactive intent even before Send. Keep a
+  // queued cosmetic title provider out of the user's typing/startup window;
+  // the Send edge below refreshes the same quiet window once more.
+  useEffect(() => {
+    if (surfaceActive) noteInteractiveAgentActivity();
+  }, [chatId, surfaceActive]);
   useEffect(() => {
     if (
       !chatId ||
@@ -816,10 +829,12 @@ export function AgentChat({
   const agentsList = useAgentsSnapshot();
   const agentSessions = useAgentSessions();
 
-  // Tier 3 — background auth verification on chat mount. Trigger
-  // the cache's normal load path so that Codex's active `login
-  // status` command and Claude's expiry parsing have a
-  // chance to flip the snapshot before the user hits Send.
+  // Tier 3 — background auth verification after interactive startup. Trigger
+  // the cache's normal load path so Codex's active `login status` command and
+  // Claude's expiry parsing can refresh the snapshot, but only after this
+  // session is settled. Those probes run provider subprocesses under their own
+  // boundaries; starting them beside a cold resume or first turn competes for
+  // exactly the disk, CPU, and network work the user is waiting on.
   //
   // Non-blocking by design: composer stays usable, the user can
   // type immediately, and the pre-flight gate in handleSend below
@@ -832,11 +847,26 @@ export function AgentChat({
   // refresh path handles the "credentials silently expired in the
   // last 30s" edge case if it ever matters.
   useEffect(() => {
-    if (!session.agentId) return;
-    void loadAgents((force) => agentSessions.listAgents(force)).catch(() => {
-      /* failures surface via the regular toast pipeline */
-    });
-  }, [session.agentId, agentSessions]);
+    if (
+      !session.agentId ||
+      !surfaceActive ||
+      !canVerifyAgentRegistryInBackground(session.status)
+    ) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      const latestStatus = chatId
+        ? useSessionsStore.getState().sessions[chatId]?.status
+        : session.status;
+      if (!latestStatus || !canVerifyAgentRegistryInBackground(latestStatus)) {
+        return;
+      }
+      void loadAgents((force) => agentSessions.listAgents(force)).catch(() => {
+        /* failures surface via the regular toast pipeline */
+      });
+    }, AGENT_REGISTRY_VERIFICATION_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [agentSessions, chatId, session.agentId, session.status, surfaceActive]);
 
   // Chat-thread-backed composer settings. When `chatId` is absent
   // (picker/beta flows) this returns null and the pills render stubs.
@@ -1051,17 +1081,21 @@ export function AgentChat({
   // shows a real mode (Accept Edits, auto's classifier-less behavior); the
   // persisted mode is untouched, so switching back to an auto-capable model
   // restores "auto".
+  const fallbackPermissionModeId =
+    agentModeForPermission(
+      chatThread?.permissionMode ?? "auto",
+      effectiveModes,
+      chatAgentId,
+    )?.id ?? null;
   const currentPermissionModeId: string | null = coerceModeIdForModel(
     chatAgentId,
     chatThread?.model ?? null,
-    session.currentModeId ??
-      chatThread?.lastModeId ??
-      agentModeForPermission(
-        chatThread?.permissionMode ?? "auto",
-        effectiveModes,
-        chatAgentId,
-      )?.id ??
-      null,
+    permissionModeIdForDisplay({
+      status: session.status,
+      liveModeId: session.currentModeId,
+      persistedModeId: chatThread?.lastModeId ?? null,
+      fallbackModeId: fallbackPermissionModeId,
+    }),
     session.boundary,
   );
 
@@ -2941,7 +2975,11 @@ export function AgentChat({
 
   // During plan review the turn is PAUSED on the user, so the composer reads as
   // idle (Send a follow-up / Approve) rather than streaming (Stop).
-  const composerStreaming = session.status === "streaming" && !planReview;
+  const composerStreaming = composerShowsStopControl({
+    status: session.status,
+    hasPendingLocalTurn: pendingLocalTurnId !== null,
+    planReview: Boolean(planReview),
+  });
 
   // Mid-turn steering (queued-card "Send now" while running): advertised by
   // the adapter at session creation. Claude/Codex support it; Cursor doesn't
@@ -3655,6 +3693,10 @@ export function AgentChat({
   ): Promise<void> => {
     if (sendInFlightRef.current) return;
     sendInFlightRef.current = true;
+    // Title generation is cosmetic and may boot another provider process.
+    // Postpone queued title work before the first await in this send so it
+    // cannot compete with admission, provider startup, or the user's turn.
+    noteInteractiveAgentActivity();
     try {
       await runSend(override, extras, recordActivity);
     } finally {

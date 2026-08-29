@@ -866,7 +866,19 @@ async function canonicalTerritoryWorkspaceRoot(opts: {
       root = cwd;
     }
   }
-  const relative = path.relative(root, cwd);
+  // macOS exposes the same temporary-directory vnode through both `/var` and
+  // `/private/var`. Git reports the physical spelling while callers can retain
+  // the lexical spelling returned by `os.tmpdir()`. Compare physical paths so
+  // an ordinary code-only admission is not rejected as cross-workspace merely
+  // because the two names alias the same directory. Resolve only through the
+  // deepest existing ancestor because the normal provider contract also lets
+  // a user authorize a future additional directory. Keep an explicitly named
+  // root lexical so the Design-bearing path qualification below can still
+  // reject user-supplied symlink/case aliases; a Git-derived root is already a
+  // discovery result and is returned canonically.
+  const physicalRoot = canonicalProspectivePath(root);
+  const physicalCwd = canonicalProspectivePath(cwd);
+  const relative = path.relative(physicalRoot, physicalCwd);
   if (
     relative === ".." ||
     relative.startsWith(`..${path.sep}`) ||
@@ -874,7 +886,7 @@ async function canonicalTerritoryWorkspaceRoot(opts: {
   ) {
     throw new Error("The agent cwd is outside its canonical workspace.");
   }
-  return root;
+  return opts.workspaceRoot ? root : physicalRoot;
 }
 
 async function gitWorkspaceOwner(cwd: string): Promise<string | null> {
@@ -1316,6 +1328,7 @@ export class AgentGateway {
     string,
     {
       readonly boundary: PreparedBoundary;
+      readonly completion: Promise<void>;
       failure: AgentFailure | null;
       failureSignal: Promise<never>;
     }
@@ -1361,6 +1374,13 @@ export class AgentGateway {
     }
   >();
   private readonly agentInitializes = new Map<string, InitializeResponse>();
+  /** Renderer boot, reconnect, and focus warmups are independent triggers and
+   * may arrive together. Share the provider's initialization while it is in
+   * flight so duplicate bridge clients cannot multiply cold SDK/auth work. */
+  private readonly agentInitializeFlights = new Map<
+    string,
+    Promise<InitializeResponse>
+  >();
   /** Dedupe concurrent listAgents calls. Without this, every render
    *  loop in the renderer that hits sessions.listAgents() spawns its
    *  own round of N PATH+auth+version probes (one per agent). The renderer sometimes
@@ -2266,9 +2286,10 @@ export class AgentGateway {
     return this.utilityBoundariesInstance;
   }
 
-  /** Pre-admitted boundaries for the NEXT chat session of an identical shape.
-   * See containment/warm-session-boundary-pool.ts for the adoption contract.
-   * Created lazily so a gateway that never starts a session never holds one. */
+  /** Optional pre-admitted boundaries for diagnostics/benchmarking. Production
+   * keeps this disabled: a speculative process domain and canary contended with
+   * the first real turn for more time than cold kernel admission saved. See
+   * containment/warm-session-boundary-pool.ts for the adoption contract. */
   private warmSessionBoundariesInstance: WarmSessionBoundaryPool | null = null;
 
   /** Observed cost of the boundary admission that produced each prepared
@@ -2288,7 +2309,7 @@ export class AgentGateway {
   }
 
   /** Replenish inputs captured at admission, fired only once the owning
-   * session is fully live (post territory-recheck, post adapter startup). */
+   * session is fully live and its background authority recheck has passed. */
   private readonly warmReplenishPlans = new WeakMap<
     PreparedBoundary,
     {
@@ -2299,17 +2320,25 @@ export class AgentGateway {
   >();
 
   /** Fire-and-forget the background pre-admission for this session's shape.
-   * Called by newSession once the adapter reports the session live; a failed
-   * or superseded admission never replenishes. */
-  private replenishWarmSessionBoundary(prepared: PreparedBoundary): void {
+   * The adapter may report live before post-install territory revalidation
+   * finishes. Wait only in this background branch: a failed or superseded
+   * authority proof must never seed the warm pool. */
+  private replenishWarmSessionBoundary(
+    prepared: PreparedBoundary,
+    protectionAttestation: Promise<void>,
+  ): void {
     const plan = this.warmReplenishPlans.get(prepared);
     if (!plan) return;
     this.warmReplenishPlans.delete(prepared);
-    void this.warmSessionBoundaries.replenish(
-      plan.request,
-      plan.contributions,
-      plan.registeredDesignAuthorityIdentity,
-    );
+    void protectionAttestation
+      .then(() =>
+        this.warmSessionBoundaries.replenish(
+          plan.request,
+          plan.contributions,
+          plan.registeredDesignAuthorityIdentity,
+        ),
+      )
+      .catch(() => undefined);
   }
 
   private get warmSessionBoundaries(): WarmSessionBoundaryPool {
@@ -2867,17 +2896,19 @@ export class AgentGateway {
     this.boundaryPortSubscriptions.delete(executionId);
   }
 
-  /** Observe the live behavioral proof without holding provider startup. The
-   * boundary implementation rejects only after revoking its own tree; the
-   * extra idempotent stop below keeps that guarantee true for injected/custom
-   * backends too. */
+  /** Observe the complete post-install proof without holding provider startup.
+   * It combines the live behavioral canary with a fresh territory snapshot.
+   * The boundary implementation revokes itself on canary rejection; the extra
+   * idempotent stop below extends that guarantee to territory drift and to
+   * injected/custom backends. */
   private observeBoundaryAttestation(
     executionId: string,
     adapter: AgentAdapter,
     boundary: PreparedBoundary,
+    protectionAttestation: Promise<void> = boundary.attestation,
   ): void {
     const failureSignal = new Promise<never>((_resolve, reject) => {
-      void boundary.attestation.then(
+      void protectionAttestation.then(
         () => {
           if (this.boundaryAttestations.get(executionId) === record) {
             this.boundaryAttestations.delete(executionId);
@@ -2946,6 +2977,7 @@ export class AgentGateway {
     });
     const record = {
       boundary,
+      completion: protectionAttestation,
       failure: null as AgentFailure | null,
       failureSignal,
     };
@@ -3749,22 +3781,35 @@ export class AgentGateway {
   }
 
   async initializeAgent(agentId: string): Promise<InitializeResponse> {
-    const adapter = await this.adapterFor(agentId);
-    const cached = this.agentInitializes.get(agentId);
-    // Serve the cache UNLESS it's a dynamic-models adapter (Cursor) whose
-    // first initialize was model-less because the catalog is discovered only
-    // after a runtime boots. In that case re-read the adapter so a freshly
-    // populated `_meta.models` reaches the renderer instead of the stale
-    // model-less snapshot. adapter.initialize() is cheap+idempotent (returns
-    // the adapter's own cached object), so the re-poll is safe and self-
-    // limits once `models` lands.
-    if (cached && !shouldRepollInitialize(cached)) return cached;
-    const init = advertiseAgentCapabilities(
-      adapter,
-      await adapter.initialize(),
-    );
-    this.agentInitializes.set(agentId, init);
-    return init;
+    const existing = this.agentInitializeFlights.get(agentId);
+    if (existing) return existing;
+
+    const initialize = (async () => {
+      const adapter = await this.adapterFor(agentId);
+      const cached = this.agentInitializes.get(agentId);
+      // Serve the cache UNLESS it's a dynamic-models adapter (Cursor) whose
+      // first initialize was model-less because the catalog is discovered only
+      // after a runtime boots. In that case re-read the adapter so a freshly
+      // populated `_meta.models` reaches the renderer instead of the stale
+      // model-less snapshot. adapter.initialize() is cheap+idempotent (returns
+      // the adapter's own cached object), so the re-poll is safe and self-
+      // limits once `models` lands.
+      if (cached && !shouldRepollInitialize(cached)) return cached;
+      const init = advertiseAgentCapabilities(
+        adapter,
+        await adapter.initialize(),
+      );
+      if (!this.disposed) this.agentInitializes.set(agentId, init);
+      return init;
+    })();
+    this.agentInitializeFlights.set(agentId, initialize);
+    try {
+      return await initialize;
+    } finally {
+      if (this.agentInitializeFlights.get(agentId) === initialize) {
+        this.agentInitializeFlights.delete(agentId);
+      }
+    }
   }
 
   async ensureAgent(
@@ -4125,7 +4170,7 @@ export class AgentGateway {
       instructionCtx,
     );
     const executionId = randomUUID();
-    const { mcpServers, preparedBoundary } =
+    const { mcpServers, preparedBoundary, protectionAttestation } =
       await this.withProvisionalTerritory(
         executionId,
         territorySet.contributions,
@@ -4157,8 +4202,13 @@ export class AgentGateway {
               },
             },
           );
-          try {
-            await this.assertAdditionalTerritorySetStillCurrent(
+          // The immutable kernel policy is already installed. Re-read the
+          // authority immediately, but do not hold provider startup on this
+          // second full filesystem scan. Any drift joins the live canary's
+          // exact-execution failure path and stops this boundary before the
+          // failure card is published.
+          const territoryRevalidation = Promise.resolve().then(() =>
+            this.assertAdditionalTerritorySetStillCurrent(
               territorySet,
               adapter,
               cwd,
@@ -4166,26 +4216,25 @@ export class AgentGateway {
               mainRepoRoot,
               sessionEnv,
               "newSession",
-            );
-          } catch (error) {
-            await this.retirePreparedBoundaryAfterFailure(
-              executionId,
-              preparedBoundary,
-              error,
-            );
-          }
+            ),
+          );
+          const protectionAttestation = Promise.all([
+            preparedBoundary.attestation,
+            territoryRevalidation,
+          ]).then(() => undefined);
           this.executionBoundaries.set(executionId, preparedBoundary);
           this.observeBoundaryAttestation(
             executionId,
             adapter,
             preparedBoundary,
+            protectionAttestation,
           );
           this.executionToCwd.set(executionId, cwd);
           this.executionToTerritoryContributions.set(
             executionId,
             territorySet.contributions,
           );
-          return { mcpServers, preparedBoundary };
+          return { mcpServers, preparedBoundary, protectionAttestation };
         },
       );
     const boundary = preparedBoundary.status;
@@ -4264,8 +4313,8 @@ export class AgentGateway {
         this.describeBoundaryAdmission(preparedBoundary) +
         ` provider=${Date.now() - providerStartedAt}ms`,
     );
-    // The session is fully live: pre-admit the next spare of this shape.
-    this.replenishWarmSessionBoundary(preparedBoundary);
+    // Optional benchmark mode only: pre-admit the next spare of this shape.
+    this.replenishWarmSessionBoundary(preparedBoundary, protectionAttestation);
     this.executionToAgent.set(session.executionId, agentId);
     this.settleAdapterStartup(session.executionId);
     this.executionToCwd.set(session.executionId, cwd);
@@ -4394,7 +4443,7 @@ export class AgentGateway {
       cwd,
       instructionCtx,
     );
-    const { mcpServers, preparedBoundary } =
+    const { mcpServers, preparedBoundary, protectionAttestation } =
       await this.withProvisionalTerritory(
         executionId,
         territorySet.contributions,
@@ -4426,8 +4475,8 @@ export class AgentGateway {
               },
             },
           );
-          try {
-            await this.assertAdditionalTerritorySetStillCurrent(
+          const territoryRevalidation = Promise.resolve().then(() =>
+            this.assertAdditionalTerritorySetStillCurrent(
               territorySet,
               adapter,
               cwd,
@@ -4435,26 +4484,25 @@ export class AgentGateway {
               mainRepoRoot,
               sessionEnv,
               "loadSession",
-            );
-          } catch (error) {
-            await this.retirePreparedBoundaryAfterFailure(
-              executionId,
-              preparedBoundary,
-              error,
-            );
-          }
+            ),
+          );
+          const protectionAttestation = Promise.all([
+            preparedBoundary.attestation,
+            territoryRevalidation,
+          ]).then(() => undefined);
           this.executionBoundaries.set(executionId, preparedBoundary);
           this.observeBoundaryAttestation(
             executionId,
             adapter,
             preparedBoundary,
+            protectionAttestation,
           );
           this.executionToCwd.set(executionId, cwd);
           this.executionToTerritoryContributions.set(
             executionId,
             territorySet.contributions,
           );
-          return { mcpServers, preparedBoundary };
+          return { mcpServers, preparedBoundary, protectionAttestation };
         },
       );
     const boundary = preparedBoundary.status;
@@ -4534,10 +4582,10 @@ export class AgentGateway {
         this.describeBoundaryAdmission(preparedBoundary) +
         ` provider=${Date.now() - providerStartedAt}ms`,
     );
-    // The resumed session is fully live: pre-admit the next spare of this
-    // shape. Resume and new-session requests hash identically, so one spare
-    // serves either path.
-    this.replenishWarmSessionBoundary(preparedBoundary);
+    // Optional benchmark mode only: pre-admit the next spare of this shape.
+    // Resume and new-session requests hash identically, so one spare serves
+    // either path.
+    this.replenishWarmSessionBoundary(preparedBoundary, protectionAttestation);
     this.executionToAgent.set(executionId, agentId);
     this.settleAdapterStartup(executionId);
     this.executionToCwd.set(executionId, cwd);
@@ -4787,6 +4835,8 @@ export class AgentGateway {
       executionIds.filter(Boolean) as string[],
     )) {
       const boundary = this.executionBoundaries.get(executionId);
+      const protectionCompletion =
+        this.boundaryAttestations.get(executionId)?.completion;
       // Every path that abandons a startup lands here, so this is where a
       // prompt still waiting on that startup is released.
       this.settleAdapterStartup(executionId);
@@ -4835,6 +4885,7 @@ export class AgentGateway {
         this.failedBoundaryRetirements.delete(executionId);
         await this.removeRetiredSessionDir(executionId);
       }
+      await protectionCompletion?.catch(() => undefined);
       for (const err of failures) {
         console.warn(
           `[agents] ${adapter.agentId} failed to dispose rejected execution ` +
@@ -4852,6 +4903,8 @@ export class AgentGateway {
   ): Promise<void> {
     const resolvedAgentId = this.executionToAgent.get(sessionId) ?? agentId;
     const boundary = this.executionBoundaries.get(sessionId);
+    const protectionCompletion =
+      this.boundaryAttestations.get(sessionId)?.completion;
     this.settleAdapterStartup(sessionId);
     this.boundaryAttestations.delete(sessionId);
     this.stopObservingBoundaryPorts(sessionId);
@@ -4923,6 +4976,10 @@ export class AgentGateway {
       this.failedBoundaryRetirements.delete(sessionId);
       await this.removeRetiredSessionDir(sessionId);
     }
+    // A close never needs the proof result after the kernel tree is stopped,
+    // but it must not leave a filesystem revalidation running against a
+    // workspace the caller may archive or delete immediately afterward.
+    await protectionCompletion?.catch(() => undefined);
     if (failure && opts.failClosed) throw failure;
   }
 
@@ -5530,6 +5587,9 @@ export class AgentGateway {
     this.disposed = true;
     // Prevent a canary killed by intentional shutdown from publishing a late
     // Design-protection failure into a renderer whose execution is closing.
+    const protectionCompletions = [...this.boundaryAttestations.values()].map(
+      (record) => record.completion,
+    );
     this.boundaryAttestations.clear();
     for (const timer of this.boundaryRetirementRecoveryTimers.values()) {
       clearTimeout(timer);
@@ -5593,6 +5653,7 @@ export class AgentGateway {
         await this.removeRetiredSessionDir(boundaryEntries[index]![0]);
       }
     }
+    await Promise.allSettled(protectionCompletions);
     this.executionBoundaries.clear();
     this.failedBoundaryRetirements.clear();
     this.adapters.clear();
@@ -5610,6 +5671,7 @@ export class AgentGateway {
     this.sessionsCwdHinted.clear();
     this.sessionsInstructed.clear();
     this.agentInitializes.clear();
+    this.agentInitializeFlights.clear();
     this.runtimeAuthFailed.clear();
     this.lastConfirmedAuthentication.clear();
     this.cachedAgents = null;

@@ -38,6 +38,8 @@ function generation(value: string): TerritoryGeneration {
   return value as TerritoryGeneration;
 }
 
+const ampleDiskBytes = () => 8n * 1024n * 1024n * 1024n;
+
 describe("macOS OrbStack container worker", () => {
   let root: string;
   let workspace: string;
@@ -492,7 +494,7 @@ peer.once("error",()=>process.exit(125));`,
       containerWorkerPath: worker,
       orbAttestor: (candidate) => candidate,
       runner,
-      forwardedBridgeTimeoutMs: 100,
+      forwardedBridgeTimeoutMs: 2_000,
       sessionKeyFactory: () => sessionKey,
     });
     const lease = await controller.reserve(
@@ -709,7 +711,7 @@ peer.once("error",()=>process.exit(125));`,
       containerWorkerPath: worker,
       orbAttestor: (candidate) => candidate,
       runner,
-      forwardedBridgeTimeoutMs: 100,
+      forwardedBridgeTimeoutMs: 2_000,
       sessionKeyFactory: () => sessionKey,
     });
     const lease = await controller.reserve({
@@ -784,7 +786,7 @@ peer.once("error",()=>process.exit(125));`,
       containerWorkerPath: worker,
       orbAttestor: (candidate) => candidate,
       runner,
-      forwardedBridgeTimeoutMs: 100,
+      forwardedBridgeTimeoutMs: 2_000,
       maxActiveRelays: 1,
       sessionKeyFactory: () => sessionKey,
     });
@@ -925,7 +927,7 @@ peer.once("error",()=>process.exit(125));`,
       containerWorkerPath: worker,
       orbAttestor: (candidate) => candidate,
       runner,
-      forwardedBridgeTimeoutMs: 100,
+      forwardedBridgeTimeoutMs: 2_000,
       sessionKeyFactory: () => sessionKey,
     });
     const lease = await controller.reserve({
@@ -988,7 +990,7 @@ peer.once("error",()=>process.exit(125));`,
       containerWorkerPath: worker,
       orbAttestor: (candidate) => candidate,
       runner,
-      forwardedBridgeTimeoutMs: 100,
+      forwardedBridgeTimeoutMs: 2_000,
       sessionKeyFactory: () => sessionKey,
       stopTimeoutMs: 10,
     });
@@ -1068,7 +1070,7 @@ peer.once("error",()=>process.exit(125));`,
       containerWorkerPath: worker,
       orbAttestor: (candidate) => candidate,
       runner,
-      forwardedBridgeTimeoutMs: 100,
+      forwardedBridgeTimeoutMs: 2_000,
     });
     const lease = await controller.reserve({
       executionId: "forward-collision",
@@ -1452,6 +1454,7 @@ peer.once("error",()=>process.exit(125));`,
       containerWorkerPath: worker,
       orbAttestor: (candidate) => candidate,
       runner,
+      freeDiskBytes: ampleDiskBytes,
     });
 
     const lease = await controller.reserve({
@@ -1481,6 +1484,7 @@ peer.once("error",()=>process.exit(125));`,
       containerWorkerPath: worker,
       orbAttestor: (candidate) => candidate,
       runner,
+      freeDiskBytes: ampleDiskBytes,
     });
 
     const lease = await controller.reserve({
@@ -1508,6 +1512,7 @@ peer.once("error",()=>process.exit(125));`,
       containerWorkerPath: worker,
       orbAttestor: (candidate) => candidate,
       runner,
+      freeDiskBytes: ampleDiskBytes,
     });
 
     await expect(

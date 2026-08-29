@@ -8,11 +8,14 @@ import {
   bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
   agentUpdateFlushMode,
+  admissionCancellationAction,
   bumpCancelGeneration,
   cancelledQueuedMessageAction,
   cancelGeneration,
   cancelledSince,
   clearPrebindGoalSnapshotsForChat,
+  composerShowsStopControl,
+  detachAdmissionFlight,
   loadedSessionStatus,
   markPrebindGoalSnapshot,
   markPrebindDirty,
@@ -753,6 +756,84 @@ describe("session reload lifecycle", () => {
 // pending prompt went out anyway and the agent started working on the turn the
 // user had just stopped.
 describe("stopping a send that has not gone out yet", () => {
+  it("shows Stop while the first prompt waits for ZSR admission", () => {
+    expect(
+      composerShowsStopControl({
+        status: "warming",
+        hasPendingLocalTurn: true,
+        planReview: false,
+      }),
+    ).toBe(true);
+    expect(
+      composerShowsStopControl({
+        status: "warming",
+        hasPendingLocalTurn: false,
+        planReview: false,
+      }),
+    ).toBe(false);
+    expect(
+      composerShowsStopControl({
+        status: "streaming",
+        hasPendingLocalTurn: false,
+        planReview: false,
+      }),
+    ).toBe(true);
+    expect(
+      composerShowsStopControl({
+        status: "warming",
+        hasPendingLocalTurn: true,
+        planReview: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("aborts chat-scoped preparation before a provider session exists", () => {
+    expect(
+      admissionCancellationAction({
+        hasAgent: true,
+        hasSession: false,
+        status: "warming",
+        admissionInFlight: true,
+      }),
+    ).toBe("abort-admission");
+    expect(
+      admissionCancellationAction({
+        hasAgent: true,
+        hasSession: true,
+        status: "warming",
+        admissionInFlight: true,
+      }),
+    ).toBe("cancel-session");
+    expect(
+      admissionCancellationAction({
+        hasAgent: false,
+        hasSession: false,
+        status: "idle",
+        admissionInFlight: false,
+      }),
+    ).toBe("local-only");
+  });
+
+  it("detaches a cancelled preparation so the next prompt owns a fresh flight", () => {
+    const oldFlight = Promise.resolve();
+    const nextFlight = Promise.resolve();
+    const flights = new Map<string, Promise<void>>([["chat-1", oldFlight]]);
+    const keys = new Map([["chat-1", "resume:old"]]);
+    const adoptOnly = new Map([["chat-1", true]]);
+
+    expect(detachAdmissionFlight("chat-1", flights, keys, adoptOnly)).toBe(
+      true,
+    );
+    expect(flights.has("chat-1")).toBe(false);
+    expect(keys.has("chat-1")).toBe(false);
+    expect(adoptOnly.has("chat-1")).toBe(false);
+
+    flights.set("chat-1", nextFlight);
+    // The old flight's identity-checked finalizer cannot erase the retry.
+    if (flights.get("chat-1") === oldFlight) flights.delete("chat-1");
+    expect(flights.get("chat-1")).toBe(nextFlight);
+  });
+
   it("keeps the visible admission prompt as the stopped turn and drops only follow-ups", () => {
     expect(cancelledQueuedMessageAction("active-turn")).toBe(
       "preserve-as-turn",

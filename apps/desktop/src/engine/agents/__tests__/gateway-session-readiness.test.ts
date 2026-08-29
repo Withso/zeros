@@ -50,6 +50,119 @@ afterEach(async () => {
 });
 
 describe("gateway session readiness", () => {
+  it("starts the provider while post-install territory revalidation continues", async () => {
+    const root = await fixture();
+    const previousWarmSetting = process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES;
+    process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES = "0";
+    let passRevalidation!: () => void;
+    const revalidation = new Promise<void>((resolve) => {
+      passRevalidation = resolve;
+    });
+    const adapter = {
+      agentId: "contained",
+      newSession: vi.fn(async (opts: { executionId?: string }) => ({
+        session: {
+          executionId: opts.executionId!,
+          sessionId: opts.executionId!,
+        },
+        initialize: {},
+      })),
+      disposeSession: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
+    } as unknown as AgentAdapter;
+    const gw = gateway();
+    installAdapter(gw, adapter);
+    const recheck = vi.fn(() => revalidation);
+    (
+      gw as unknown as {
+        assertAdditionalTerritorySetStillCurrent: typeof recheck;
+      }
+    ).assertAdditionalTerritorySetStillCurrent = recheck;
+
+    try {
+      const starting = gw.newSession("contained", { cwd: root });
+      await vi.waitFor(() => expect(adapter.newSession).toHaveBeenCalledOnce());
+      const created = await starting;
+
+      expect(created.executionId).toBeTruthy();
+      expect(adapter.newSession).toHaveBeenCalledOnce();
+      expect(recheck).toHaveBeenCalledOnce();
+    } finally {
+      passRevalidation();
+      await revalidation;
+      await gw.dispose();
+      if (previousWarmSetting === undefined) {
+        delete process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES;
+      } else {
+        process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES = previousWarmSetting;
+      }
+    }
+  });
+
+  it("stops the exact live execution when background territory revalidation fails", async () => {
+    const root = await fixture();
+    const previousWarmSetting = process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES;
+    process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES = "0";
+    let passRevalidation!: () => void;
+    let failRevalidation!: (error: Error) => void;
+    const revalidation = new Promise<void>((resolve, reject) => {
+      passRevalidation = resolve;
+      failRevalidation = reject;
+    });
+    void revalidation.catch(() => undefined);
+    const disposeSession = vi.fn(async () => {});
+    const adapter = {
+      agentId: "contained",
+      newSession: vi.fn(async (opts: { executionId?: string }) => ({
+        session: {
+          executionId: opts.executionId!,
+          sessionId: opts.executionId!,
+        },
+        initialize: {},
+      })),
+      prompt: vi.fn(async () => ({
+        response: { stopReason: "must-not-complete" },
+      })),
+      disposeSession,
+      dispose: vi.fn(async () => {}),
+    } as unknown as AgentAdapter;
+    const gw = gateway();
+    installAdapter(gw, adapter);
+    (
+      gw as unknown as {
+        assertAdditionalTerritorySetStillCurrent: () => Promise<void>;
+      }
+    ).assertAdditionalTerritorySetStillCurrent = () => revalidation;
+
+    try {
+      const starting = gw.newSession("contained", { cwd: root });
+      await vi.waitFor(() => expect(adapter.newSession).toHaveBeenCalledOnce());
+      const created = await starting;
+      failRevalidation(new Error("Design territory changed after install"));
+
+      await vi.waitFor(() => expect(disposeSession).toHaveBeenCalled());
+      await expect(
+        gw.prompt("contained", created.executionId, [
+          { type: "text", text: "must not run" },
+        ] as never),
+      ).rejects.toMatchObject({
+        failure: {
+          kind: "design-protection-failed",
+          stage: "prompt",
+        },
+      });
+      expect(adapter.prompt).not.toHaveBeenCalled();
+    } finally {
+      passRevalidation();
+      await gw.dispose();
+      if (previousWarmSetting === undefined) {
+        delete process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES;
+      } else {
+        process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES = previousWarmSetting;
+      }
+    }
+  });
+
   it("starts a cold provider while behavioral attestation continues in the background", async () => {
     const root = await fixture();
     const previousWarmSetting = process.env.ZEROS_ZSR_WARM_SESSION_BOUNDARIES;

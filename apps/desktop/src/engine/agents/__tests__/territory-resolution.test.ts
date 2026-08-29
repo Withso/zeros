@@ -582,6 +582,26 @@ describe("code-agent territory resolution", () => {
     ).resolves.toBeUndefined();
   });
 
+  it("accepts a code-only Git cwd alias when Git reports its physical owner", async () => {
+    const physical = await realpath(
+      await mkdtemp(path.join(tmpdir(), "zeros-code-only-git-")),
+    );
+    roots.push(physical);
+    await execFileAsync("git", ["init", "-q", "-b", "main"], {
+      cwd: physical,
+    });
+    const aliasParent = await realpath(
+      await mkdtemp(path.join(tmpdir(), "zeros-code-only-git-alias-")),
+    );
+    roots.push(aliasParent);
+    const alias = path.join(aliasParent, "workspace");
+    await symlink(physical, alias, "dir");
+
+    await expect(
+      previewCodeAgentTerritory({ cwd: alias }),
+    ).resolves.toBeUndefined();
+  });
+
   it("fails closed when a declared workspace hides a nested Git owner with Design authority", async () => {
     const outer = await realpath(
       await mkdtemp(path.join(tmpdir(), "zeros-nested-owner-")),
@@ -808,17 +828,32 @@ describe("code-agent territory resolution", () => {
         initialize: {},
       })),
       disposeSession: vi.fn(async () => {}),
+      dispose: vi.fn(async () => {}),
     } as unknown as AgentAdapter;
     (gw as unknown as { adapters: Map<string, AgentAdapter> }).adapters.set(
       "contained",
       adapter,
     );
 
-    await expect(
-      gw.newSession("contained", { cwd: path.join(root, "src") }),
-    ).rejects.toThrow(/Design territory changed while.*prepared/i);
-    expect(adapter.newSession).not.toHaveBeenCalled();
-    expect(onStop).toHaveBeenCalledOnce();
+    try {
+      const session = await gw.newSession("contained", {
+        cwd: path.join(root, "src"),
+      });
+      expect(adapter.newSession).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(onStop).toHaveBeenCalled());
+      await expect(
+        gw.prompt("contained", session.executionId, [
+          { type: "text", text: "must not run" },
+        ] as never),
+      ).rejects.toMatchObject({
+        failure: {
+          kind: "design-protection-failed",
+          stage: "prompt",
+        },
+      });
+    } finally {
+      await gw.dispose();
+    }
   });
 
   it("subtracts Design authority from an attached workspace and tracks its lifecycle owner", async () => {
@@ -874,6 +909,7 @@ describe("code-agent territory resolution", () => {
           }),
         }),
       }),
+      { attestation: "background" },
     );
     expect(adapterTerritory?.protectedDesignDirectories).toEqual([
       attachedDesign,
@@ -1033,6 +1069,7 @@ describe("code-agent territory resolution", () => {
             ),
           }),
         }),
+        { attestation: "background" },
       );
       expect(
         (

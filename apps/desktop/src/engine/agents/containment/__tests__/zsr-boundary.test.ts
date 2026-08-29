@@ -480,8 +480,16 @@ describe("ZSR execution boundary", () => {
       });
 
     try {
-      await vi.waitFor(() => expect(canarySpy).toHaveBeenCalledOnce());
-      await vi.waitFor(() => expect(prepared).toBeDefined());
+      // macOS process-domain policy preparation can exceed Vitest's 1s
+      // waitFor default on a cold or contended machine. The assertion is about
+      // ordering (prepare returns while the canary remains pending), not a
+      // one-second performance budget; the qualification suite owns timing.
+      await vi.waitFor(() => expect(canarySpy).toHaveBeenCalledOnce(), {
+        timeout: 20_000,
+      });
+      await vi.waitFor(() => expect(prepared).toBeDefined(), {
+        timeout: 20_000,
+      });
       expect(prepared?.attestation).toBeInstanceOf(Promise);
     } finally {
       finishCanary([]);

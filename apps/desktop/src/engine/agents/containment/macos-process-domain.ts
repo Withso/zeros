@@ -412,7 +412,10 @@ export class MacosProcessDomain {
     ];
   }
 
-  async matches(pid: number): Promise<boolean> {
+  async matches(
+    pid: number,
+    options: { reportMismatch?: boolean } = {},
+  ): Promise<boolean> {
     if (!Number.isSafeInteger(pid) || pid <= 0) return false;
     const result = await invoke(
       this.helperPath,
@@ -428,7 +431,7 @@ export class MacosProcessDomain {
     ) {
       throw new Error("macOS process-domain helper returned invalid match");
     }
-    if (!value.match) {
+    if (!value.match && options.reportMismatch === true) {
       const decisions = [
         ["eligible", value.eligible],
         ["sandboxed", value.sandboxed],

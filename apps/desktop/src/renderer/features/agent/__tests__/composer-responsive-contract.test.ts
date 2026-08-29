@@ -45,6 +45,17 @@ describe("chat composer responsive contract", () => {
     expect(agentChat).not.toContain('from "./boundary-status"');
   });
 
+  it("keeps Stop wired to the first turn while admission is pending", () => {
+    expect(agentChat).toContain(
+      "hasPendingLocalTurn: pendingLocalTurnId !== null",
+    );
+    expect(agentChat).toMatch(
+      /if \(composerStreaming\) \{\s*void session\.cancel\(\);\s*return;/,
+    );
+    expect(agentChat).toContain("{composerStreaming ? (");
+    expect(agentChat).toContain('<Square className="size-3" />');
+  });
+
   it("does not revalidate every provider after a non-auth execution failure", () => {
     expect(agentChat).toMatch(
       /if \(isAuth\) \{\s*invalidateAgentsCache\(\);\s*void refreshAgents/,

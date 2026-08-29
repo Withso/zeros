@@ -57,6 +57,13 @@ pnpm check:secrets
 pnpm check:licenses
 ```
 
+`pnpm check:zsr` is intentionally composite. It first runs the explicit
+source-level contract matrix in `scripts/run-zsr-contract-tests.mjs`, then the
+live `--require-secure` kernel/runtime qualification. Repository layout tests
+require every `gateway-*` and containment suite to stay in that named matrix,
+so adding a ZSR test file cannot silently leave the architecture-specific CI
+jobs without it.
+
 The focused containment tests must cover:
 
 - real Linux bwrap code-write success and Design-write denial;
@@ -80,9 +87,21 @@ The focused containment tests must cover:
 - process adoption during retirement, descendant termination, exact-generation
   retry without unrelated-admission poisoning, and stale-process boot recovery;
 - interactive cold create/resume returning after kernel-policy installation
-  while the behavioral canary remains pending, plus automatic exact-tree stop
-  before a failed background attestation is reported;
+  while the behavioral canary and fresh territory revalidation remain pending,
+  plus automatic exact-tree stop before either background proof failure is
+  reported;
+- first-send admission appearing immediately as a live turn with one continuous
+  timer and an enabled Stop control; Stop must invalidate the chat-scoped
+  create/resume, dispose a late result, and permit an immediate clean retry for
+  Codex, Claude, and Cursor without waiting behind the cancelled flight;
+- init/prewarm single-flight and cold create/resume ordering contracts that
+  prove provider startup is not awaiting background attestation or territory
+  revalidation. These are causal/order assertions rather than CI wall-clock
+  thresholds, so a slow runner cannot hide a critical-path dependency or make
+  the gate flaky;
 - blocking attestation for Setup, Run, utilities, and warm-spare preparation;
+- speculative warm-session preparation disabled by default, with the explicit
+  benchmark switch still requiring a fully attested boundary before adoption;
 - last-confirmed provider-auth retention across an isolated utility-boundary
   failure;
 - direct port behavior, dedicated container capability, and container teardown;

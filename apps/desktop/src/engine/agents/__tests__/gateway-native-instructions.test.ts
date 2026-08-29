@@ -7,9 +7,11 @@
 // in-band <system_instruction> block. Adapters without the flag keep the
 // legacy mechanism A untouched.
 
+import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
+import path from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { AgentGateway } from "../gateway";
 import type {
@@ -111,6 +113,26 @@ function text(t: string): ContentBlock {
 const CWD = os.tmpdir();
 
 describe("gateway native system-instruction routing", () => {
+  let previousUserSettingsDir: string | undefined;
+  let userSettingsDir: string;
+
+  beforeEach(() => {
+    previousUserSettingsDir = process.env.ZEROS_USER_SETTINGS_DIR;
+    userSettingsDir = mkdtempSync(
+      path.join(os.tmpdir(), "zeros-native-instructions-user-"),
+    );
+    process.env.ZEROS_USER_SETTINGS_DIR = userSettingsDir;
+  });
+
+  afterEach(() => {
+    rmSync(userSettingsDir, { recursive: true, force: true });
+    if (previousUserSettingsDir === undefined) {
+      delete process.env.ZEROS_USER_SETTINGS_DIR;
+    } else {
+      process.env.ZEROS_USER_SETTINGS_DIR = previousUserSettingsDir;
+    }
+  });
+
   it("newSession passes the UNWRAPPED body to a native adapter and skips the in-band prepend", async () => {
     const gw = makeGateway();
     const c = calls();

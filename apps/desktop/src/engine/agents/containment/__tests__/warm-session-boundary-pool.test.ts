@@ -42,6 +42,7 @@ describe("WarmSessionBoundaryPool", () => {
 
   beforeEach(() => {
     vi.useFakeTimers();
+    vi.stubEnv("ZEROS_ZSR_WARM_SESSION_BOUNDARIES", "1");
     prepared = [];
     retired = [];
     prepareError = null;
@@ -59,6 +60,7 @@ describe("WarmSessionBoundaryPool", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   it("adopts a replenished boundary exactly once for a byte-identical request", async () => {
