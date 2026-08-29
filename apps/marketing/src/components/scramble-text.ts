@@ -1,53 +1,24 @@
 import gsap from 'gsap'
 
-export const SCRAMBLE_MS = 1200
-
-const ICON = (d: string) =>
-  `<svg class="hero-scramble-icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`
-
-/** Code-tool marks mixed into builders → developers. */
-export const CODE_ICONS = [
-  ICON('M5 3L1 8l4 5M11 3l4 5-4 5'),
-  ICON('M5 2v12M2 5h5M9 2v12M14 11H9'),
-  ICON('M3 4h10v8H3zM5 11h2'),
-  ICON('M2 3h12M2 8h7M2 13h10'),
-] as const
-
-/** Layout / frame / component marks mixed into developers → designers. */
-export const DESIGN_ICONS = [
-  ICON('M2 3h12M2 8h8M2 13h10'),
-  ICON('M3 3h10v10H3z'),
-  ICON('M8 1.8l1.7 1.7L8 5.2 6.3 3.5zM12.8 6.3l1.7 1.7-1.7 1.7-1.7-1.7zM8 10.8l1.7 1.7L8 14.2 6.3 12.5zM3.2 6.3L4.9 8 3.2 9.7 1.5 8z'),
-  ICON('M4 2v12M8 2v12M12 2v12'),
-  ICON('M3 4h10M8 4v8M3 12h10'),
-  ICON('M2 4h5v3H2zM9 9h5v3H9z'),
-] as const
+export const SCRAMBLE_MS = 1320
 
 export type ScrambleSet = {
   chars: string
-  tokens: string[]
-  icons: readonly string[]
 }
 
 /** builders → developers */
 export const CODE_SCRAMBLE: ScrambleSet = {
-  chars: '{}[]</>;:=()*&|#$@!?\\^~`01x',
-  tokens: ['fn', 'git', 'const', 'async', 'await', '=>', '</>', 'npm', 'cli', 'src', 'tsx', 'import'],
-  icons: CODE_ICONS,
+  chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
 /** developers → designers */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
-  chars: '#[]|=+*·',
-  tokens: ['align', 'frame', 'design', 'components', 'auto', 'layer', 'stack', 'grid', 'layout'],
-  icons: DESIGN_ICONS,
+  chars: '#[]|=+*·01',
 }
 
-/** designers → builders */
+/** designers → builders: matrix digits, no CJK. */
 export const MATRIX_SCRAMBLE: ScrambleSet = {
-  chars: '01ﾊﾐﾋｰｳｼﾅﾓﾆｻﾜﾂｵﾘｴｱﾎﾃﾏｹﾒ23456789',
-  tokens: ['01', '10', '11'],
-  icons: [],
+  chars: '0101010123456789',
 }
 
 export const SCRAMBLE_FROM: Record<string, ScrambleSet> = {
@@ -56,12 +27,15 @@ export const SCRAMBLE_FROM: Record<string, ScrambleSet> = {
   designers: MATRIX_SCRAMBLE,
 }
 
-function pickChar(chars: string): string {
-  return chars[Math.floor(Math.random() * chars.length)] ?? '0'
+export type GlyphKind = 'from' | 'scramble' | 'to'
+
+export type Glyph = {
+  kind: GlyphKind
+  ch: string
 }
 
-function pick<T>(items: readonly T[]): T {
-  return items[Math.floor(Math.random() * items.length)] as T
+function pickChar(chars: string): string {
+  return chars[Math.floor(Math.random() * chars.length)] ?? '0'
 }
 
 export function escapeHtml(value: string): string {
@@ -71,109 +45,57 @@ export function escapeHtml(value: string): string {
     .replace(/>/g, '&gt;')
 }
 
-/**
- * Random glyphs of a fixed length, with occasional related tokens
- * dropped in as consecutive characters (ScrambleTextPlugin `chars`
- * cannot hold multi-character words on their own).
- */
-export function scrambleFill(length: number, chars: string, tokens: string[]): string {
+/** Random glyphs of a fixed length. Character-level only — no planted words. */
+export function scrambleFill(length: number, chars: string): string {
   if (length <= 0) return ''
-  const out = Array.from({ length }, () => pickChar(chars))
-  placeToken(out, tokens)
-  return out.join('')
+  return Array.from({ length }, () => pickChar(chars)).join('')
 }
 
-function placeToken(out: string[], tokens: string[]): void {
-  const usable = tokens.filter((token) => token.length <= out.length)
-  if (usable.length === 0) return
-  if (Math.random() > 0.72) return
-  const token = pick(usable)
-  const start = Math.floor(Math.random() * (out.length - token.length + 1))
-  for (let i = 0; i < token.length; i += 1) out[start + i] = token[i]
+/**
+ * Left-to-right dissolve: keep the outgoing letter, flicker through the
+ * charset, then lock the incoming letter. Staggered so the whole word
+ * never pops in as one block.
+ */
+export function scrambleGlyphKind(i: number, t: number, count: number): GlyphKind {
+  const n = Math.max(1, count)
+  const start = (i / n) * 0.2
+  const lock = 0.3 + (i / n) * 0.62
+  if (t <= start) return 'from'
+  if (t < lock) return 'scramble'
+  return 'to'
 }
 
-const FEATURED_TOKENS = new Set([
-  'align',
-  'frame',
-  'design',
-  'components',
-  'const',
-  'async',
-  'await',
-  'git',
-])
-
-export function pickScrambleToken(tokens: string[], length: number): string | null {
-  const usable = tokens.filter((token) => token.length <= length)
-  if (usable.length === 0) return null
-  const featured = usable.filter((token) => FEATURED_TOKENS.has(token))
-  const pool = featured.length > 0 ? featured : usable
-  const longest = Math.max(...pool.map((token) => token.length))
-  return pick(pool.filter((token) => token.length === longest))
-}
-
-type ScrambleSlot =
-  | { kind: 'icon'; html: string }
-  | { kind: 'symbol'; ch: string }
-  | { kind: 'text'; ch: string }
-
-export function renderScrambleSlots(slots: readonly ScrambleSlot[]): string {
+export function renderGlyphRun(glyphs: readonly Glyph[]): string {
   let html = ''
   let i = 0
-  while (i < slots.length) {
-    const slot = slots[i]
-    if (slot.kind === 'icon') {
-      html += slot.html
-      i += 1
-      continue
-    }
-    const { kind } = slot
+  while (i < glyphs.length) {
+    const { kind } = glyphs[i]!
     let run = ''
-    while (i < slots.length && slots[i].kind === kind) {
-      run += escapeHtml((slots[i] as { ch: string }).ch)
+    while (i < glyphs.length && glyphs[i]!.kind === kind) {
+      run += escapeHtml(glyphs[i]!.ch)
       i += 1
     }
-    html += `<span class="hero-scramble-${kind}">${run}</span>`
+    const cls =
+      kind === 'scramble' ? 'hero-scramble-symbol' : 'hero-scramble-text hero-role-revealed'
+    html += `<span class="${cls}">${run}</span>`
   }
   return html
 }
 
-/** HTML tail: icon glyphs mixed with chars/tokens. Each slot is one unit. */
-export function scrambleTail(
-  length: number,
-  set: ScrambleSet,
-  {
-    allowTokens = true,
-    token = null,
-    tokenStart,
-  }: { allowTokens?: boolean; token?: string | null; tokenStart?: number } = {},
-): string {
+/** HTML tail of scramble glyphs. Each slot is one character. */
+export function scrambleTail(length: number, set: ScrambleSet): string {
   if (length <= 0) return ''
-  const slots: ScrambleSlot[] = Array.from({ length }, () => {
-    if (set.icons.length > 0 && Math.random() < 0.48) {
-      return { kind: 'icon', html: pick(set.icons) }
-    }
-    return { kind: 'symbol', ch: pickChar(set.chars) }
-  })
-  if (allowTokens) {
-    const chosen =
-      token && token.length <= length ? token : pickScrambleToken(set.tokens, length)
-    if (chosen) {
-      const maxStart = length - chosen.length
-      const start =
-        tokenStart === undefined
-          ? Math.floor(Math.random() * (maxStart + 1))
-          : Math.min(maxStart, Math.max(0, tokenStart))
-      for (let i = 0; i < chosen.length; i += 1) {
-        slots[start + i] = { kind: 'text', ch: chosen[i] }
-      }
-    }
-  }
-  return renderScrambleSlots(slots)
+  return renderGlyphRun(
+    Array.from({ length }, () => ({ kind: 'scramble' as const, ch: pickChar(set.chars) })),
+  )
+}
+
+function sineInOut(t: number): number {
+  return 0.5 - Math.cos(Math.PI * Math.min(1, Math.max(0, t))) / 2
 }
 
 /**
- * ScrambleText-style decode: random glyphs, then left-to-right reveal.
+ * ScrambleText-style decode: random glyphs, then a left-to-right settle.
  * Club ScrambleTextPlugin is not in the public `gsap` package; this uses
  * the documented tween shape (chars, tweenLength, revealDelay, speed).
  * https://gsap.com/docs/v3/Plugins/ScrambleTextPlugin/
@@ -184,8 +106,7 @@ export function playScramble(
     text,
     set,
     duration = SCRAMBLE_MS / 1000,
-    revealDelay = 0.72,
-    speed = 0.5,
+    speed = 1.15,
   }: {
     text: string
     set: ScrambleSet
@@ -197,14 +118,11 @@ export function playScramble(
   const from = el.textContent ?? ''
   const startLen = Math.max(1, from.length)
   const endLen = text.length
-  const refreshMs = Math.max(24, 62 / speed)
+  const maxLen = Math.max(startLen, endLen)
+  const refreshMs = Math.max(28, 40 / Math.max(0.4, speed))
+  const slots = Array.from({ length: maxLen }, () => pickChar(set.chars))
   let lastRefresh = -Infinity
-  let lastRevealed = -1
-  let tail = ''
-  const lockedToken = pickScrambleToken(set.tokens, Math.max(startLen, endLen))
-  const tokenStart = lockedToken
-    ? Math.max(0, Math.floor((Math.max(startLen, endLen) - lockedToken.length) / 2))
-    : 0
+  let lastHtml = ''
   const state = { t: 0 }
 
   return gsap.to(state, {
@@ -212,26 +130,33 @@ export function playScramble(
     duration,
     ease: 'none',
     onUpdate: () => {
-      const elapsed = state.t * duration
-      const revealWindow = Math.max(0.001, duration - revealDelay)
-      const revealT = elapsed <= revealDelay ? 0 : (elapsed - revealDelay) / revealWindow
-      const len = Math.max(1, Math.round(startLen + (endLen - startLen) * state.t))
-      const revealed = Math.min(endLen, Math.floor(endLen * revealT))
+      const visualT = sineInOut(state.t)
+      const len = Math.max(1, Math.round(startLen + (endLen - startLen) * visualT))
       const now = performance.now()
-      if (revealed !== lastRevealed || now - lastRefresh >= refreshMs) {
+      if (now - lastRefresh >= refreshMs) {
         lastRefresh = now
-        lastRevealed = revealed
-        tail = scrambleTail(Math.max(0, len - revealed), set, {
-          allowTokens: revealed === 0,
-          token: lockedToken,
-          tokenStart,
-        })
+        for (let i = 0; i < len; i += 1) {
+          if (scrambleGlyphKind(i, visualT, maxLen) === 'scramble' && Math.random() < 0.34) {
+            slots[i] = pickChar(set.chars)
+          }
+        }
       }
-      const revealedText = escapeHtml(text.slice(0, revealed))
-      el.innerHTML =
-        revealed > 0
-          ? `<span class="hero-scramble-text hero-role-revealed">${revealedText}</span>${tail}`
-          : tail
+      const glyphs: Glyph[] = []
+      for (let i = 0; i < len; i += 1) {
+        const kind = scrambleGlyphKind(i, visualT, maxLen)
+        if (kind === 'from' && i < from.length) {
+          glyphs.push({ kind: 'from', ch: from[i]! })
+        } else if (kind === 'to' && i < text.length) {
+          glyphs.push({ kind: 'to', ch: text[i]! })
+        } else {
+          glyphs.push({ kind: 'scramble', ch: slots[i] ?? pickChar(set.chars) })
+        }
+      }
+      const html = renderGlyphRun(glyphs)
+      if (html !== lastHtml) {
+        lastHtml = html
+        el.innerHTML = html
+      }
     },
     onComplete: () => {
       el.textContent = text

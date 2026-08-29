@@ -70,22 +70,21 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/hero-laptop/);
     expect(css).not.toMatch(/hero-brush/);
     expect(css).toMatch(/prefers-reduced-motion: reduce/);
-    expect(css).toMatch(/font-size: 0\.86em/);
+    expect(css).not.toMatch(/font-size: 0\.86em/);
+    expect(css).toMatch(/font-size: 1em/);
     expect(css).toMatch(/hero-scramble-text/);
     expect(css).toMatch(/hero-scramble-symbol/);
-    expect(css).toMatch(/hero-scramble-icon/);
+    expect(css).not.toMatch(/hero-scramble-icon/);
     expect(css).toMatch(/--fg2/);
     expect(css).toMatch(/--blue-fg/);
-    expect(css).toMatch(/--violet-fg/);
+    expect(css).toMatch(/--green-fg/);
     expect(scramble).toMatch(/CODE_SCRAMBLE/);
     expect(scramble).toMatch(/DESIGN_SCRAMBLE/);
     expect(scramble).toMatch(/MATRIX_SCRAMBLE/);
-    expect(scramble).toMatch(/align/);
-    expect(scramble).toMatch(/frame/);
-    expect(scramble).toMatch(/components/);
-    expect(scramble).toMatch(/const/);
-    expect(scramble).toMatch(/DESIGN_ICONS/);
-    expect(scramble).toMatch(/CODE_ICONS/);
+    expect(scramble).not.toMatch(/components/);
+    expect(scramble).not.toMatch(/DESIGN_ICONS/);
+    expect(scramble).not.toMatch(/CODE_ICONS/);
+    expect(scramble).not.toMatch(/ﾊ/);
   });
 
   it("drops the hero download CTA and Dev/Design toggle", () => {
