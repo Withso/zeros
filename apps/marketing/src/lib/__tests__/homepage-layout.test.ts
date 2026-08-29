@@ -69,7 +69,8 @@ describe("marketing homepage layout", () => {
     expect(brand).not.toMatch(/ZEROS-logo-name\.svg/);
     expect(brand).toMatch(/items-center/);
     expect(brand).toMatch(/h-6 w-6/);
-    expect(brand).toMatch(/h-\[28px\]/);
+    expect(brand).toMatch(/h-\[20px\]/);
+    expect(brand).not.toMatch(/h-\[28px\]/);
     expect(brand).not.toMatch(/font-medium tracking-\[0\.04em\]/);
     expect(brand).not.toMatch(/>Zeros</);
     expect(wordmark).toMatch(/fill="#ffffff"/);
