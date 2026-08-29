@@ -32,7 +32,7 @@ function Hero() {
         <span className="block" aria-hidden>
           Human-agent interaction
         </span>
-        <span className="block" aria-hidden>
+        <span className="mt-[0.12em] block whitespace-nowrap" aria-hidden>
           for <HeroRoleCycle />
         </span>
       </h1>

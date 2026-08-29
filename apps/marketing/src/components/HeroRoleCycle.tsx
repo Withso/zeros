@@ -70,17 +70,15 @@ export function HeroRoleCycle() {
       <span className="hero-role-sizer" aria-hidden>
         developers
       </span>
-      <span className="hero-role-slot">
-        {phase === 'act' && !reduce ? (
-          <>
-            <Word text={role} mode="out" />
-            <Word text={next} mode="in" />
-          </>
-        ) : (
-          <Word text={role} mode="idle" />
-        )}
-        {reduce ? null : <Tools act={act} />}
-      </span>
+      {phase === 'act' && !reduce ? (
+        <>
+          <Word text={role} mode="out" />
+          <Word text={next} mode="in" />
+        </>
+      ) : (
+        <Word text={role} mode="idle" />
+      )}
+      {reduce ? null : <Tools act={act} />}
     </span>
   )
 }
@@ -112,7 +110,7 @@ function Word({
 
 function Tools({ act }: { act: Act | '' }) {
   return (
-    <>
+    <span className="hero-role-tools" aria-hidden>
       <span className="hero-role-tool" data-kind="hammer" aria-hidden>
         <HammerMark />
       </span>
@@ -137,7 +135,7 @@ function Tools({ act }: { act: Act | '' }) {
       <i className="hero-role-spark" />
       <i className="hero-role-spark" />
       <i className="hero-role-spark" />
-    </>
+    </span>
   )
 }
 

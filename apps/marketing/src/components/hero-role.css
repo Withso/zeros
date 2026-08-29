@@ -5,12 +5,14 @@
   --hero-act: 1.15s;
   position: relative;
   display: inline-grid;
-  align-items: baseline;
+  justify-items: start;
+  align-items: end;
   vertical-align: baseline;
 }
 
 .hero-role-sizer,
-.hero-role-slot {
+.hero-role-word,
+.hero-role-tools {
   grid-area: 1 / 1;
 }
 
@@ -18,11 +20,17 @@
   visibility: hidden;
   pointer-events: none;
   user-select: none;
+  white-space: nowrap;
 }
 
-.hero-role-slot {
+.hero-role-tools {
   position: relative;
-  display: block;
+  z-index: 3;
+  justify-self: stretch;
+  align-self: stretch;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
 }
 
 .hero-role-word {
@@ -30,10 +38,12 @@
   white-space: nowrap;
 }
 
-.hero-role-word.is-in,
 .hero-role-word.is-out {
-  position: absolute;
-  inset: 0 auto auto 0;
+  z-index: 1;
+}
+
+.hero-role-word.is-in {
+  z-index: 2;
 }
 
 .hero-role-letter {
@@ -393,7 +403,9 @@
 
 @media (prefers-reduced-motion: reduce) {
   .hero-role-tool,
-  .hero-role-spark {
+  .hero-role-spark,
+  .hero-role-trail,
+  .hero-role-tools {
     display: none;
   }
 
@@ -407,10 +419,5 @@
     filter: none !important;
     opacity: 1 !important;
     transform: none !important;
-  }
-
-  .hero-role-word.is-in,
-  .hero-role-word.is-out {
-    position: static;
   }
 }
