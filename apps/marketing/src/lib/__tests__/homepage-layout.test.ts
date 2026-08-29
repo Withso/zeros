@@ -11,6 +11,12 @@ const PREVIEW = join(ROOT, "apps/marketing/src/components/ProductPreview.tsx");
 const WORDMARK = join(ROOT, "apps/marketing/public/zeros-wordmark.svg");
 const HERO_CYCLE = join(ROOT, "apps/marketing/src/components/HeroRoleCycle.tsx");
 const HERO_CYCLE_CSS = join(ROOT, "apps/marketing/src/components/hero-role.css");
+const HERO_ASCII = join(ROOT, "apps/marketing/src/components/HeroAsciiClouds.tsx");
+const HERO_ASCII_CSS = join(
+  ROOT,
+  "apps/marketing/src/components/hero-ascii-clouds.css",
+);
+const HERO_ASCII_FIELD = join(ROOT, "apps/marketing/src/lib/hero-ascii-field.ts");
 
 function sliceFunction(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`);
@@ -70,22 +76,65 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/hero-laptop/);
     expect(css).not.toMatch(/hero-brush/);
     expect(css).toMatch(/prefers-reduced-motion: reduce/);
-    expect(css).toMatch(/font-size: 0\.86em/);
+    expect(css).not.toMatch(/font-size: 0\.86em/);
+    expect(css).toMatch(/font-size: 1em/);
     expect(css).toMatch(/hero-scramble-text/);
     expect(css).toMatch(/hero-scramble-symbol/);
     expect(css).toMatch(/hero-scramble-icon/);
-    expect(css).toMatch(/--fg2/);
+    expect(css).not.toMatch(/hero-scramble-token/);
+    expect(css).not.toMatch(/width: 0\.86em/);
+    expect(css).not.toMatch(/width: 0\.62em/);
+    expect(css).toMatch(/--fg1/);
     expect(css).toMatch(/--blue-fg/);
+    expect(css).toMatch(/--green-fg/);
     expect(css).toMatch(/--violet-fg/);
     expect(scramble).toMatch(/CODE_SCRAMBLE/);
     expect(scramble).toMatch(/DESIGN_SCRAMBLE/);
     expect(scramble).toMatch(/MATRIX_SCRAMBLE/);
-    expect(scramble).toMatch(/align/);
-    expect(scramble).toMatch(/frame/);
-    expect(scramble).toMatch(/components/);
-    expect(scramble).toMatch(/const/);
     expect(scramble).toMatch(/DESIGN_ICONS/);
-    expect(scramble).toMatch(/CODE_ICONS/);
+    expect(scramble).toMatch(/DESIGN_MARKS/);
+    expect(scramble).toMatch(/data-hero-scramble-icon/);
+    expect(css).toMatch(/width: 0\.58em/);
+    expect(scramble).not.toMatch(/DESIGN_ICON_MAX/);
+    expect(scramble).not.toMatch(/DESIGN_TOKENS/);
+    expect(scramble).not.toMatch(/components/);
+    expect(scramble).not.toMatch(/CODE_ICONS/);
+    expect(scramble).not.toMatch(/ﾊ/);
+  });
+
+  it("paints a pure-dark ASCII cloud void behind the hero", () => {
+    const ascii = readFileSync(HERO_ASCII, "utf8");
+    const css = readFileSync(HERO_ASCII_CSS, "utf8");
+    const field = readFileSync(HERO_ASCII_FIELD, "utf8");
+    expect(home).toMatch(/HeroAsciiClouds/);
+    expect(home).not.toMatch(/BackgroundGlow/);
+    expect(home).not.toMatch(/radial-gradient\(900px 520px/);
+    expect(ascii).toMatch(/paintHeroAsciiField/);
+    expect(ascii).toMatch(/data-hero-ascii-clouds/);
+    expect(home).toMatch(/home-ascii-page/);
+    expect(home).toMatch(/isolate/);
+    expect(home).toMatch(/Nav flush/);
+    expect(home).toMatch(/relative z-10/);
+    expect(css).toMatch(/background-color: #000000/);
+    expect(css).toMatch(/z-index: 0/);
+    expect(css).not.toMatch(/z-index:\s*-10/);
+    expect(css).toMatch(/prefers-reduced-motion: reduce/);
+    expect(css).toMatch(/animation:\s*none/);
+    expect(css).toMatch(/hero-ascii-drift/);
+    expect(css).toMatch(/prefers-color-scheme: light/);
+    expect(css).toMatch(/--bg0: hsl\(0 0% 5%\)/);
+    expect(css).toMatch(/transparent 82%/);
+    expect(css).toMatch(/min\(58vh, 540px\)/);
+    expect(css).not.toMatch(/min\(120vh, 1100px\)/);
+    expect(field).toMatch(/ASCII_CLOUD_RAMP/);
+    expect(field).toMatch(/headlineWell/);
+    expect(field).toMatch(/skyGate/);
+    expect(field).toMatch(/productSkyline/);
+    expect(field).toMatch(/#000000/);
+    expect(field).toMatch(/"\."/);
+    expect(field).toMatch(/"@"/);
+    expect(field).toMatch(/"0"/);
+    expect(field).toMatch(/"1"/);
   });
 
   it("drops the hero download CTA and Dev/Design toggle", () => {
@@ -98,6 +147,8 @@ describe("marketing homepage layout", () => {
 
   it("merges the header into the page background", () => {
     expect(nav).toMatch(/bg-bg1/);
+    expect(nav).toMatch(/flush/);
+    expect(home).toMatch(/Nav flush/);
     expect(nav).not.toMatch(/border-b/);
     expect(nav).not.toMatch(/backdrop-blur/);
   });

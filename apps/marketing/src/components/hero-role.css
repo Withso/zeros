@@ -24,37 +24,60 @@
   white-space: nowrap;
 }
 
-/* Slightly smaller than the h1 while glyphs are decoding. */
+/* Same size/weight as the h1. Tabular digits keep the matrix flicker stable. */
 .hero-role-word.is-scrambling {
-  font-size: 0.86em;
-  line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
-/* Fixed roles: words, symbols, icons. No per-glyph randomization. */
-.hero-scramble-text {
-  color: var(--fg2);
+.hero-scramble-text,
+.hero-scramble-symbol {
+  font-size: 1em;
+  font-weight: inherit;
+  font-family: inherit;
+  letter-spacing: inherit;
+}
+
+/* Fixed roles: settled letters, then a quieter scramble tail. */
+.hero-scramble-text,
+.hero-role-revealed {
+  color: inherit;
 }
 
 .hero-scramble-symbol {
-  color: color-mix(in srgb, var(--blue-fg) 42%, var(--fg3));
+  color: color-mix(in srgb, var(--blue-fg) 18%, var(--fg1));
+  vertical-align: baseline;
 }
 
 .hero-scramble-icon {
   display: inline-block;
-  width: 0.62em;
-  height: 0.62em;
-  margin: 0 0.04em;
-  vertical-align: -0.08em;
-  color: color-mix(in srgb, var(--violet-fg) 44%, var(--fg3));
+  width: 0.58em;
+  height: 0.74em;
+  margin: 0 0.015em;
+  overflow: visible;
+  vertical-align: -0.1em;
+  color: color-mix(in srgb, var(--violet-fg) 42%, var(--fg1));
 }
 
-.hero-role-revealed {
-  color: var(--fg2);
+.hero-scramble-icon[data-hero-scramble-icon="component"] {
+  color: color-mix(in srgb, var(--violet-fg) 68%, var(--fg1));
 }
 
-.hero-role-word.is-scrambling.scramble-builders,
-.hero-role-word.is-scrambling.scramble-designers {
-  font-variant-numeric: tabular-nums;
+.hero-scramble-icon[data-hero-scramble-icon="align"] {
+  color: color-mix(in srgb, var(--blue-fg) 30%, var(--fg1));
+}
+
+.hero-scramble-icon[data-hero-scramble-icon="rect"],
+.hero-scramble-icon[data-hero-scramble-icon="circle"],
+.hero-scramble-icon[data-hero-scramble-icon="triangle"] {
+  color: color-mix(in srgb, var(--violet-fg) 28%, var(--fg1));
+}
+
+.hero-role-word.is-scrambling.scramble-developers .hero-scramble-symbol {
+  color: color-mix(in srgb, var(--violet-fg) 22%, var(--fg1));
+}
+
+.hero-role-word.is-scrambling.scramble-designers .hero-scramble-symbol {
+  color: color-mix(in srgb, var(--green-fg) 22%, var(--fg1));
 }
 
 @media (prefers-reduced-motion: reduce) {

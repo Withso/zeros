@@ -2,20 +2,23 @@ import { Nav } from '../components/Nav'
 import { Footer } from '../components/Footer'
 import { ProductPreview } from '../components/ProductPreview'
 import { HeroRoleCycle } from '../components/HeroRoleCycle'
+import { HeroAsciiClouds } from '../components/HeroAsciiClouds'
 
 export function HomePage() {
   return (
-    <div className="relative flex min-h-screen flex-col overflow-x-hidden">
-      <BackgroundGlow />
-      <Nav />
+    <div className="home-ascii-page relative isolate flex min-h-screen flex-col overflow-x-hidden">
+      <HeroAsciiClouds />
+      <Nav flush />
 
-      <main className="flex-1">
+      <main className="relative z-10 flex-1">
         <Hero />
         {/* Holding space for the next homepage section. */}
         <div className="h-28 sm:h-36 lg:h-44" aria-hidden />
       </main>
 
-      <Footer />
+      <div className="relative z-10">
+        <Footer />
+      </div>
     </div>
   )
 }
@@ -43,35 +46,5 @@ function Hero() {
         <ProductPreview />
       </div>
     </section>
-  )
-}
-
-/* ─────────────────────────── Background ─────────────────────────── */
-
-function BackgroundGlow() {
-  return (
-    <>
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 -z-10"
-        style={{
-          background:
-            'radial-gradient(900px 520px at 50% -10%, color-mix(in srgb, var(--fg1) 8%, transparent), transparent 60%)',
-        }}
-      />
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0 -z-10 opacity-[0.04]"
-        style={{
-          backgroundImage:
-            'radial-gradient(color-mix(in srgb, var(--fg1) 60%, transparent) 1px, transparent 1px)',
-          backgroundSize: '24px 24px',
-          maskImage:
-            'radial-gradient(ellipse 80% 50% at 50% 0%, black, transparent 70%)',
-          WebkitMaskImage:
-            'radial-gradient(ellipse 80% 50% at 50% 0%, black, transparent 70%)',
-        }}
-      />
-    </>
   )
 }
