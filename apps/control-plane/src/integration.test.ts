@@ -31,7 +31,7 @@ d("schema + signup transaction", () => {
     const sub = randomUUID();
     return ensureUser(pool, {
       provider: "auth0",
-      providerSub: sub,
+      providerSubject: sub,
       email: `t-${sub}@example.com`,
       displayName,
     });
@@ -107,7 +107,7 @@ d("schema + signup transaction", () => {
       const sub = randomUUID();
       const u = {
         provider: "auth0",
-        providerSub: sub,
+        providerSubject: sub,
         email: `t-${sub}@example.com`,
         displayName: "Staffer",
       };
@@ -201,7 +201,7 @@ d("schema + signup transaction", () => {
     const sub = randomUUID();
     const u = {
       provider: "auth0",
-      providerSub: sub,
+      providerSubject: sub,
       email: `t-${sub}@example.com`,
       displayName: "Twice",
     };
@@ -212,6 +212,58 @@ d("schema + signup transaction", () => {
       first.id,
     ]);
     expect(users.rowCount).toBe(1);
+  });
+
+  it("binds a WorkOS subject to one internal account without auto-linking by email", async () => {
+    const providerSubject = `user_${randomUUID().replaceAll("-", "")}`;
+    const email = `workos-${randomUUID()}@example.com`;
+    const first = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject,
+      email,
+      displayName: "WorkOS User",
+    });
+    const again = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject,
+      email,
+      displayName: "WorkOS User",
+    });
+
+    expect(again.id).toBe(first.id);
+    expect(first.id).not.toBe(providerSubject);
+    expect(first.identity).toEqual({
+      provider: "workos",
+      subject: providerSubject,
+    });
+    const binding = await pool.query<{
+      user_id: string;
+      provider: string;
+      provider_sub: string;
+    }>(
+      `SELECT user_id, provider, provider_sub
+       FROM user_identities WHERE user_id = $1`,
+      [first.id],
+    );
+    expect(binding.rows).toEqual([
+      {
+        user_id: first.id,
+        provider: "workos",
+        provider_sub: providerSubject,
+      },
+    ]);
+
+    await expect(
+      ensureUser(pool, {
+        provider: "workos",
+        providerSubject: `user_${randomUUID().replaceAll("-", "")}`,
+        email,
+        displayName: "Different WorkOS Subject",
+      }),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "account_exists",
+    });
   });
 
   it("repairs an imported account when a legacy organization owns its preferred Personal slug", async () => {
@@ -225,9 +277,11 @@ d("schema + signup transaction", () => {
       [userId, email],
     );
     await pool.query(
-      `INSERT INTO user_identities (user_id, provider, provider_sub)
-       VALUES ($1, 'auth0', $2)`,
-      [userId, sub],
+      `INSERT INTO user_identities (
+         user_id, provider, provider_sub, email_at_link, email_verified_at,
+         linked_via
+       ) VALUES ($1, 'auth0', $2, $3, now(), 'migration')`,
+      [userId, sub, email],
     );
     await pool.query(
       `INSERT INTO organizations (slug, name, created_by)
@@ -238,7 +292,7 @@ d("schema + signup transaction", () => {
     await expect(
       ensureUser(pool, {
         provider: "auth0",
-        providerSub: sub,
+        providerSubject: sub,
         email,
         displayName: "Imported",
       }),
@@ -258,7 +312,7 @@ d("schema + signup transaction", () => {
     const sub = randomUUID();
     const input = {
       provider: "auth0",
-      providerSub: sub,
+      providerSubject: sub,
       email: `parallel-${sub}@example.com`,
       displayName: "Parallel",
     };

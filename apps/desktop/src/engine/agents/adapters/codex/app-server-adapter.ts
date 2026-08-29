@@ -45,7 +45,9 @@ import {
 import type {
   AgentAdapter,
   AgentBrowserUse,
+  AgentCapabilityPorts,
   AgentAdapterContext,
+  AgentFilesystemTerritory,
   ContentBlock,
   InitializeResponse,
   ListSessionsResponse,
@@ -64,7 +66,9 @@ import type {
   StopReason,
 } from "../../types";
 import { AgentFailureError } from "../../types";
+import { advertiseAgentCapabilities } from "../../capabilities";
 import { PERMISSION_RESPONSE_TIMEOUT_MS } from "../shared/constants";
+import { FirstTokenLatency } from "../shared/first-token-latency";
 import {
   answerMcpElicitation,
   buildMcpElicitationQuestion,
@@ -75,10 +79,10 @@ import {
   type McpElicitationRequestLike,
 } from "../shared/mcp-elicitation";
 import { isDevRuntime } from "../../../runtime";
-import { openExternalUrl } from "../../gateway/open-url";
 import {
   codexPromptRequestsBrowserSkill,
   codexBrowserThreadConfig,
+  codexNativeBrowserUnavailableReason,
   injectCodexBrowserSkillInput,
   mergeCodexNativeBrowserMcp,
   resolveCodexNativeBrowserRuntime,
@@ -113,17 +117,55 @@ import { mergeCommands } from "@zeros/protocol/builtin-commands";
 import { buildQuestionStamp } from "@zeros/protocol/agent-messages";
 import { canonicalBrowserOriginGrantKey } from "@zeros/protocol/browser-tools";
 import type {
+  AgentConfigurationProvenance,
+  AgentGoal,
+  AgentMemorySettings,
+  AgentProviderQuota,
   AdvertisedModel,
   AvailableCommand,
+  BackgroundTask,
   PermissionOption,
 } from "@zeros/protocol/agent-events";
 import type { AccountDetails } from "@zeros/protocol/messages";
 import type { GetAccountResponse } from "./generated/v2/GetAccountResponse";
 import type { GetAccountParams } from "./generated/v2/GetAccountParams";
+import type { GetAccountRateLimitsResponse } from "./generated/v2/GetAccountRateLimitsResponse";
+import type { RateLimitSnapshot } from "./generated/v2/RateLimitSnapshot";
+import type { ThreadClosedNotification } from "./generated/v2/ThreadClosedNotification";
 import type { ThreadDeletedNotification } from "./generated/v2/ThreadDeletedNotification";
 import type { ThreadForkResponse } from "./generated/v2/ThreadForkResponse";
+import type { ThreadBackgroundTerminalsTerminateResponse } from "./generated/v2/ThreadBackgroundTerminalsTerminateResponse";
+import type { ThreadGoal } from "./generated/v2/ThreadGoal";
+import type { ThreadGoalGetResponse } from "./generated/v2/ThreadGoalGetResponse";
+import type { ThreadGoalSetResponse } from "./generated/v2/ThreadGoalSetResponse";
+import type { ItemGuardianApprovalReviewCompletedNotification } from "./generated/v2/ItemGuardianApprovalReviewCompletedNotification";
+import type { JsonValue } from "./generated/serde_json/JsonValue";
+import {
+  codexBackgroundTaskId,
+  collectBackgroundTerminals,
+  collectLoadedDescendantThreadIds,
+  MAX_CODEX_BACKGROUND_TERMINALS,
+  MAX_CODEX_BACKGROUND_THREADS,
+  reconcileBackgroundTerminals,
+} from "./background-terminals";
+import {
+  mergeCodexRateLimitSnapshot,
+  normalizeCodexQuota,
+  provenanceFromCodexLayers,
+  type CodexRateLimitSnapshotLike,
+} from "../../provider-diagnostics";
+import {
+  CODEX_CODE_TERRITORY_PROFILE,
+  codexConfiguredMcpNames,
+  codexTerritoryConfig,
+  probeCodexTerritoryRuntime,
+} from "./territory";
+import type { PreparedBoundary } from "../../containment/types";
 
 const AGENT_ID = "codex";
+const BACKGROUND_LIST_CONCURRENCY = 8;
+const BACKGROUND_TERMINAL_POLL_MS = 5_000;
+const MAX_GUARDIAN_DENIED_ACTIONS = 10;
 const CLIENT_INFO = { name: "Zeros", version: "0.0.5", title: "Zeros Mac App" };
 
 /** How long after a cancel() an orphan turn (one that starts with no prompt
@@ -175,6 +217,19 @@ export function autoEditCanAutoApprove(
   // a persistent policy". If the server supplied an explicit list, auto-settle
   // only when the plain one-shot accept is actually offered.
   return !Array.isArray(available) || available.includes("accept");
+}
+
+/** `/review` is a harness command, not a Zeros prompt convention. Recognize
+ * only the bare, attachment-free command so ordinary prose and custom review
+ * requests keep flowing through the normal turn path. */
+export function isCodexWorkingTreeReviewPrompt(
+  prompt: ContentBlock[],
+): boolean {
+  return (
+    prompt.length === 1 &&
+    prompt[0]?.type === "text" &&
+    prompt[0].text.trim() === "/review"
+  );
 }
 
 const CODEX_MODES: SessionMode[] = [
@@ -241,11 +296,15 @@ export interface PendingApproval {
   params: Record<string, unknown>;
 }
 
-interface CodexSession {
+export interface CodexSession {
   zerosSessionId: string;
   cwd: string;
   env?: Record<string, string>;
   cliBinary?: string;
+  territory?: AgentFilesystemTerritory;
+  /** Authoritative outer ZSR boundary. When present, Codex keeps its normal
+   * per-mode sandbox/approval posture; the kernel projection subtracts Design. */
+  executionBoundary?: PreparedBoundary;
   runtime: CodexAppServerHandle;
   translator: CodexAppServerTranslator;
   /** Codex threadId — captured from thread/start (new) or thread/resume (load). */
@@ -323,16 +382,23 @@ interface CodexSession {
    *  server fires the first event (post-initialized + post-login). */
   authMode: string | null;
   planType: string | null;
-  /** Latest rate-limit snapshot from `account/rateLimits/updated`. Raw
-   *  shape kept opaque — a future usage UI can unpack it. Stored as a
-   *  per-session value rather than a global because thread/turn-level
-   *  policies can lift session-scoped overrides off the latest snapshot. */
-  latestRateLimits: unknown | null;
+  /** Latest sparse-merged native rate-limit snapshot. */
+  latestRateLimits: CodexRateLimitSnapshotLike | null;
+  /** Set after an authoritative signed-out account update. It fences sparse
+   * rate-limit events and an already-in-flight initial read from resurrecting
+   * the previous account's quota after logout. */
+  quotaUpdatesSuppressed: boolean;
   /** True between `prompt()` start and settle. Lets the runtime-exit
    *  handler tell a mid-turn crash (owned by the in-flight prompt()'s
    *  recoverable retry) from an idle crash (broadcast so the chat shows
    *  reconnecting). */
   turnActive: boolean;
+  /** Time-to-first-token for this thread's turns. `turn/started` acknowledges
+   *  within milliseconds of `turn/start`, so the settled duration alone could
+   *  never say whether a slow turn was slow to BEGIN or slow to finish. */
+  firstToken: FirstTokenLatency;
+  /** No turn on this app-server child has produced output yet. */
+  sawFirstTurnOutput: boolean;
   /** Flips false the moment the `codex app-server` child exits. Checked at
    *  `prompt()` entry so a send that lands after the child died self-heals
    *  (throw recoverable transport-closed → the renderer rebuilds) instead
@@ -343,10 +409,65 @@ interface CodexSession {
    *  renderer auto-rebuilds + resends — no manual "send again") instead of
    *  the generic protocol-error that stranded the user before. */
   childExitedMidTurn: boolean;
+  /** Parent plus bounded loaded descendant threads whose detached terminals
+   * belong to this exact Zeros execution. */
+  backgroundThreadIds: Set<string>;
+  /** Last confirmed replace snapshot and the private native routing index. */
+  backgroundTasks: Map<string, BackgroundTask>;
+  backgroundTaskTargets: Map<string, { threadId: string; processId: string }>;
+  /** Coalesces rapid repeated Stop gestures for one exact task. */
+  backgroundStopOperations: Map<string, Promise<void>>;
+  backgroundWaiting: boolean;
+  /** Latest-wins invalidation for overlapping list/terminate refreshes. */
+  backgroundRefreshEpoch: number;
+  /** One self-scheduling revalidation while native terminal rows are visible. */
+  backgroundPollTimer: NodeJS.Timeout | null;
+  /** Bounded engine-only raw events. The renderer receives only opaque ids and
+   * sanitized review metadata, never a command, cwd, argv, or policy payload. */
+  guardianDeniedActions: Map<
+    string,
+    ItemGuardianApprovalReviewCompletedNotification
+  >;
+  guardianRetryByReviewId: Map<string, string>;
+  guardianRetryOperations: Map<string, Promise<void>>;
+  /** Invalidates an older in-flight `thread/goal/get` after any confirmed
+   * mutation or native goal notification. */
+  goalSnapshotEpoch: number;
 }
 
 export class CodexAppServerAdapter implements AgentAdapter {
   readonly agentId = AGENT_ID;
+  readonly capabilityPorts = {
+    browser: { nativeSession: true },
+    account: {
+      readQuota: (opts) => this.readProviderQuota(opts),
+    },
+    configuration: {
+      readProvenance: (opts) => this.readConfigurationProvenance(opts),
+    },
+    memory: {
+      readSettings: (opts) => this.readMemorySettings(opts),
+      updateSettings: (opts) => this.updateMemorySettings(opts),
+      reset: (opts) => this.resetMemory(opts),
+    },
+    goal: {
+      get: (opts) => this.getGoal(opts),
+      set: (opts) => this.setGoal(opts),
+      clear: (opts) => this.clearGoal(opts),
+    },
+    safety: {
+      retryDeniedAction: (opts) => this.retryDeniedAction(opts),
+    },
+  } satisfies AgentCapabilityPorts;
+  readonly enforcesFilesystemTerritory = true;
+  readonly filesystemTerritoryBackend = "provider-native" as const;
+  readonly filesystemTerritoryRestrictions = [
+    "additional-directories-disabled",
+    "local-mcp-disabled",
+    "plugins-disabled",
+    "shadow-git-unavailable",
+    "local-services-unavailable",
+  ] as const;
   /** Zeros' first-turn instruction rides the app-server's NATIVE channel
    *  (`thread/start|resume.developerInstructions`) instead of an in-band
    *  <system_instruction> first user turn — it survives compaction and never
@@ -358,6 +479,12 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   private readonly ctx: AgentAdapterContext;
   private readonly sessions = new Map<string, CodexSession>();
+  /** Last confirmed account snapshot shared across live runtimes and one-shot
+   * settings reads. Rolling notifications merge into this value. */
+  private latestRateLimitSnapshot: CodexRateLimitSnapshotLike | null = null;
+  /** Invalidates in-flight account reads when an authoritative logout clears
+   * account-scoped quota state. */
+  private quotaSnapshotEpoch = 0;
   /** Zeros session ids being torn down intentionally — so the resulting
    *  app-server child exit doesn't broadcast an agent-wide death. One
    *  `codex app-server` child runs per session, but onAgentExit is
@@ -372,12 +499,309 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  the app's lifetime, so we don't re-query it per session. */
   private modelsDiscovered = false;
 
-  constructor(ctx: AgentAdapterContext) {
+  private readonly territoryProbe: (
+    territory: AgentFilesystemTerritory,
+    opts?: { cliBinary?: string },
+  ) => Promise<void>;
+
+  constructor(
+    ctx: AgentAdapterContext,
+    opts?: {
+      territoryProbe?: (
+        territory: AgentFilesystemTerritory,
+        probeOpts?: { cliBinary?: string },
+      ) => Promise<void>;
+    },
+  ) {
     this.ctx = ctx;
+    this.territoryProbe = opts?.territoryProbe ?? probeCodexTerritoryRuntime;
+  }
+
+  async prepareFilesystemTerritory(
+    territory: AgentFilesystemTerritory,
+    opts?: { cliBinary?: string },
+  ): Promise<void> {
+    await this.territoryProbe(territory, opts);
+  }
+
+  private async withMemoryRuntime<T>(
+    opts: {
+      cwd: string;
+      env?: Record<string, string>;
+      cliBinary?: string;
+      executionBoundary?: PreparedBoundary;
+    },
+    operation: (runtime: CodexAppServerHandle) => Promise<T>,
+  ): Promise<T> {
+    const runtime = await bootCodexAppServerRuntime({
+      cwd: opts.cwd,
+      env: opts.env,
+      cliBinary: opts.cliBinary,
+      clientInfo: CLIENT_INFO,
+      executionBoundary: opts.executionBoundary,
+      mcpServers: [],
+      logTag: "codex-app-server:memory",
+      onStderr: (line) => this.ctx.emit.onAgentStderr(this.agentId, line),
+    });
+    try {
+      return await operation(runtime);
+    } finally {
+      await runtime.dispose();
+    }
+  }
+
+  async readConfigurationProvenance(opts: {
+    cwd: string;
+    env?: Record<string, string>;
+    cliBinary?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
+  }): Promise<AgentConfigurationProvenance> {
+    return this.withMemoryRuntime(opts, async (runtime) => {
+      const response = await runtime.requestTyped<
+        "config/read",
+        { layers: unknown }
+      >("config/read", { includeLayers: true });
+      return provenanceFromCodexLayers(
+        response.layers,
+        Boolean(opts.territory),
+      );
+    });
+  }
+
+  private async readProviderRateLimitSnapshot(
+    runtime: CodexAppServerHandle,
+  ): Promise<RateLimitSnapshot & CodexRateLimitSnapshotLike> {
+    const response = await runtime.requestTyped<
+      "account/rateLimits/read",
+      GetAccountRateLimitsResponse
+    >("account/rateLimits/read", undefined);
+    return response.rateLimits as RateLimitSnapshot & CodexRateLimitSnapshotLike;
+  }
+
+  async readProviderQuota(opts: {
+    cwd: string;
+    env?: Record<string, string>;
+    cliBinary?: string;
+    executionBoundary?: PreparedBoundary;
+  }): Promise<AgentProviderQuota | null> {
+    return this.withMemoryRuntime(opts, async (runtime) =>
+      normalizeCodexQuota(await this.readProviderRateLimitSnapshot(runtime)),
+    );
+  }
+
+  private async readMemorySettingsFromRuntime(
+    runtime: CodexAppServerHandle,
+  ): Promise<{ settings: AgentMemorySettings; userVersion: string | null }> {
+    const response = await runtime.requestTyped<
+      "config/read",
+      {
+        config: unknown;
+        layers: Array<{ name: { type?: string }; version: string }> | null;
+      }
+    >("config/read", { includeLayers: true });
+    const config =
+      response.config && typeof response.config === "object"
+        ? (response.config as Record<string, unknown>)
+        : {};
+    const features =
+      config.features && typeof config.features === "object"
+        ? (config.features as Record<string, unknown>)
+        : {};
+    const memories =
+      config.memories && typeof config.memories === "object"
+        ? (config.memories as Record<string, unknown>)
+        : {};
+    return {
+      settings: {
+        providerId: AGENT_ID,
+        // Codex local memories are opt-in. Missing config must remain off.
+        localMemoriesEnabled: features.memories === true,
+        // The native key is negative; expose a positive product setting.
+        toolAssistedGenerationEnabled:
+          memories.disable_on_external_context !== true,
+        canReset: true,
+      },
+      userVersion:
+        response.layers?.find((layer) => layer.name.type === "user")?.version ??
+        null,
+    };
+  }
+
+  async readMemorySettings(opts: {
+    cwd: string;
+    env?: Record<string, string>;
+    cliBinary?: string;
+    executionBoundary?: PreparedBoundary;
+  }): Promise<AgentMemorySettings> {
+    return this.withMemoryRuntime(
+      opts,
+      async (runtime) =>
+        (await this.readMemorySettingsFromRuntime(runtime)).settings,
+    );
+  }
+
+  async updateMemorySettings(opts: {
+    cwd: string;
+    env?: Record<string, string>;
+    cliBinary?: string;
+    executionBoundary?: PreparedBoundary;
+    settings: Partial<
+      Pick<
+        AgentMemorySettings,
+        "localMemoriesEnabled" | "toolAssistedGenerationEnabled"
+      >
+    >;
+  }): Promise<AgentMemorySettings> {
+    const updated = await this.withMemoryRuntime(opts, async (runtime) => {
+      const write = async (): Promise<AgentMemorySettings> => {
+        const current = await this.readMemorySettingsFromRuntime(runtime);
+        const edits = [
+          ...(opts.settings.localMemoriesEnabled === undefined
+            ? []
+            : [
+                {
+                  keyPath: "features.memories",
+                  value: opts.settings.localMemoriesEnabled,
+                  mergeStrategy: "upsert" as const,
+                },
+              ]),
+          ...(opts.settings.toolAssistedGenerationEnabled === undefined
+            ? []
+            : [
+                {
+                  keyPath: "memories.disable_on_external_context",
+                  value: !opts.settings.toolAssistedGenerationEnabled,
+                  mergeStrategy: "upsert" as const,
+                },
+              ]),
+        ];
+        await runtime.requestTyped("config/batchWrite", {
+          edits,
+          expectedVersion: current.userVersion,
+          reloadUserConfig: true,
+        });
+        return (await this.readMemorySettingsFromRuntime(runtime)).settings;
+      };
+
+      try {
+        return await write();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!/(?:version|conflict|stale)/i.test(message)) throw error;
+        // User config changed between read and write. Re-read and retry the
+        // same idempotent boolean edits once; never loop over external writes.
+        return write();
+      }
+    });
+
+    if (opts.settings.localMemoriesEnabled !== undefined) {
+      const mode = updated.localMemoriesEnabled ? "enabled" : "disabled";
+      const live = Array.from(this.sessions.values()).filter(
+        (session) => session.runtimeAlive,
+      );
+      const results = await Promise.allSettled(
+        live.map((session) =>
+          session.runtime.requestTyped("thread/memoryMode/set", {
+            threadId: session.threadId,
+            mode,
+          }),
+        ),
+      );
+      for (const result of results) {
+        if (result.status === "rejected") {
+          this.ctx.emit.onAgentStderr(
+            this.agentId,
+            `[codex-app-server] Failed to synchronize memory mode on a live thread: ${
+              result.reason instanceof Error
+                ? result.reason.message
+                : String(result.reason)
+            }`,
+          );
+        }
+      }
+    }
+    return updated;
+  }
+
+  async resetMemory(opts: {
+    cwd: string;
+    env?: Record<string, string>;
+    cliBinary?: string;
+    executionBoundary?: PreparedBoundary;
+  }): Promise<void> {
+    await this.withMemoryRuntime(opts, (runtime) =>
+      runtime.requestTyped("memory/reset", undefined),
+    );
+  }
+
+  async getGoal(opts: { sessionId: string }): Promise<AgentGoal | null> {
+    const session = this.requireSession(opts.sessionId);
+    const response = await session.runtime.requestTyped<
+      "thread/goal/get",
+      ThreadGoalGetResponse
+    >("thread/goal/get", { threadId: session.threadId });
+    return response.goal ? canonicalGoal(response.goal) : null;
+  }
+
+  async setGoal(opts: {
+    sessionId: string;
+    update: {
+      objective?: string;
+      status?: AgentGoal["status"];
+      tokenBudget?: number | null;
+    };
+  }): Promise<AgentGoal> {
+    const session = this.requireSession(opts.sessionId);
+    const response = await session.runtime.requestTyped<
+      "thread/goal/set",
+      ThreadGoalSetResponse
+    >("thread/goal/set", {
+      threadId: session.threadId,
+      ...opts.update,
+    });
+    session.goalSnapshotEpoch += 1;
+    return canonicalGoal(response.goal);
+  }
+
+  async clearGoal(opts: { sessionId: string }): Promise<void> {
+    const session = this.requireSession(opts.sessionId);
+    await session.runtime.requestTyped("thread/goal/clear", {
+      threadId: session.threadId,
+    });
+    session.goalSnapshotEpoch += 1;
+  }
+
+  async retryDeniedAction(opts: {
+    sessionId: string;
+    retryId: string;
+  }): Promise<void> {
+    const session = this.requireSession(opts.sessionId);
+    const inFlight = session.guardianRetryOperations.get(opts.retryId);
+    if (inFlight) return inFlight;
+    const event = session.guardianDeniedActions.get(opts.retryId);
+    if (!event) {
+      throw new Error("This denied action is no longer available to retry.");
+    }
+    const operation = session.runtime
+      .requestTyped("thread/approveGuardianDeniedAction", {
+        threadId: session.threadId,
+        event: event as unknown as JsonValue,
+      })
+      .then(() => {
+        session.guardianDeniedActions.delete(opts.retryId);
+        session.guardianRetryByReviewId.delete(event.reviewId);
+        session.translator.markSafetyReviewRetried(opts.retryId);
+      })
+      .finally(() => {
+        session.guardianRetryOperations.delete(opts.retryId);
+      });
+    session.guardianRetryOperations.set(opts.retryId, operation);
+    return operation;
   }
 
   async initialize(): Promise<InitializeResponse> {
-    return this.initializeResponse();
+    return advertiseAgentCapabilities(this, this.initializeResponse());
   }
 
   /** Memoized InitializeResponse so model/list discovery can populate
@@ -455,7 +879,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       if (models.length > 0) {
         this.modelsDiscovered = true;
         const base = this.initializeResponse();
-        const meta = (base._meta ?? {}) as Record<string, unknown>;
+        const meta = base._meta ?? {};
         this.cachedInitialize = { ...base, _meta: { ...meta, models } };
       }
     } catch {
@@ -471,6 +895,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     mcpServers?: McpServerRegistration[];
     browserUse?: AgentBrowserUse;
     systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
   }): Promise<{ session: NewSessionResponse; initialize: InitializeResponse }> {
     const { session } = await this.bootSession({
       cwd: opts.cwd,
@@ -479,6 +905,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       mcpServers: opts.mcpServers,
       browserUse: opts.browserUse,
       systemInstruction: opts.systemInstruction,
+      territory: opts.territory,
+      executionBoundary: opts.executionBoundary,
       kind: "new",
       zerosSessionId: opts.executionId,
     });
@@ -503,7 +931,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
           availableModes: CODEX_MODES,
         },
       },
-      initialize: this.initializeResponse(),
+      initialize: await this.initialize(),
     };
   }
 
@@ -517,6 +945,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     mcpServers?: McpServerRegistration[];
     browserUse?: AgentBrowserUse;
     systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
   }): Promise<LoadSessionResponse> {
     // Resume the provider thread into a separately-minted Zeros execution. The
     // native thread id never keys the live runtime or its attachment directory.
@@ -539,6 +969,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       mcpServers: opts.mcpServers,
       browserUse: opts.browserUse,
       systemInstruction: opts.systemInstruction,
+      territory: opts.territory,
+      executionBoundary: opts.executionBoundary,
       kind: "resume",
       resumeThreadId,
       zerosSessionId: executionId,
@@ -577,6 +1009,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     cliBinary?: string;
     mcpServers?: McpServerRegistration[];
     systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
   }): Promise<{ providerBinding: ProviderBinding }> {
     const source = coerceProviderBinding(opts.providerBinding);
     if (!source || source.providerId !== AGENT_ID || source.kind !== "native") {
@@ -588,10 +1022,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
       });
     }
 
-    const liveSource = Array.from(this.sessions.values()).find(
-      (candidate) =>
-        candidate.runtimeAlive && candidate.threadId === source.resumeId,
-    );
+    // A live source runtime may have been admitted with a different cwd,
+    // binary, MCP registry, or filesystem authority. Never reuse it for a
+    // territory-bound fork; boot the exact, already-qualified target runtime
+    // and keep the fork RPC turnless instead.
+    const liveSource =
+      opts.executionBoundary || opts.territory
+        ? undefined
+        : Array.from(this.sessions.values()).find(
+            (candidate) =>
+              candidate.runtimeAlive && candidate.threadId === source.resumeId,
+          );
     let runtime = liveSource?.runtime;
     let ownsRuntime = false;
     if (!runtime) {
@@ -601,7 +1042,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
           env: opts.env,
           cliBinary: opts.cliBinary,
           clientInfo: CLIENT_INFO,
-          mcpServers: opts.mcpServers ?? this.ctx.mcpServers,
+          executionBoundary: opts.executionBoundary,
+          mcpServers:
+            opts.territory && !opts.executionBoundary
+              ? []
+              : (opts.mcpServers ?? this.ctx.mcpServers),
           logTag: `codex-app-server:fork:${source.resumeId.slice(0, 8)}`,
           onStderr: (line) => this.ctx.emit.onAgentStderr(this.agentId, line),
         });
@@ -701,13 +1146,17 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // this prompt settles.
     session.postCancelInterruptUntil = 0;
 
-    let input = await this.buildUserInput(session, opts.prompt);
-    if (
-      session.browserSessionId &&
-      session.browserSkill &&
-      codexPromptRequestsBrowserSkill(input)
-    ) {
-      input = injectCodexBrowserSkillInput(input, session.browserSkill);
+    const nativeWorkingTreeReview = isCodexWorkingTreeReviewPrompt(opts.prompt);
+    let input: CodexUserInput[] = [];
+    if (!nativeWorkingTreeReview) {
+      input = await this.buildUserInput(session, opts.prompt);
+      if (
+        session.browserSessionId &&
+        session.browserSkill &&
+        codexPromptRequestsBrowserSkill(input)
+      ) {
+        input = injectCodexBrowserSkillInput(input, session.browserSkill);
+      }
     }
     const { approvalPolicy, sandboxPolicy } = modePolicyFor(session.modeId);
 
@@ -739,6 +1188,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // reconnecting flip. `childExitedMidTurn` is reset per turn.
     session.turnActive = true;
     session.childExitedMidTurn = false;
+    // Clock starts at the handoff to the app-server, so the number reported
+    // is the provider's wait rather than our own dispatch above it.
+    session.firstToken.beginTurn();
     try {
       // Collaboration mode (EXPERIMENTAL): codex only allows the
       // request_user_input tool in PLAN mode, or in DEFAULT mode with our
@@ -752,49 +1204,67 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // developer_instructions:null = "use the built-in instructions for the
       // selected mode" (which teach the model when to ask questions).
       const collabModel = model ?? session.threadModel ?? undefined;
-      const result = await session.runtime.runTurn(
-        {
-          threadId: session.threadId,
-          input,
-          approvalPolicy,
-          sandboxPolicy,
-          ...(model ? { model } : {}),
-          ...(effort ? { effort } : {}),
-          // ZEROS_FAST_MODE → Codex "fast" service tier (priority inference, GPT-5.x).
-          ...(fast ? { serviceTier: "fast" } : {}),
-          ...(collabModel
-            ? {
-                collaborationMode: {
-                  mode: "default" as const,
-                  settings: {
-                    model: collabModel,
-                    reasoning_effort: effort ?? null,
-                    developer_instructions: null,
-                  },
-                },
-              }
-            : {}),
+      // Both turn/start and inline review/start acknowledge a live turn and
+      // settle through turn/completed. Capture the id immediately so the
+      // existing Stop path can interrupt either one, including the ack race.
+      const turnOptions = {
+        onTurnStarted: (turnId: string) => {
+          session.activeTurnId = turnId;
+          if (session.cancelRequested) {
+            void session.runtime.interruptTurn(session.threadId, turnId);
+          }
         },
-        {
-          // `runTurn` resolves only after `turn/completed` arrives, but
-          // the turnId is known from the `turn/start` ack — capture it
-          // synchronously so `cancel()` has a target for the in-flight
-          // turn (otherwise interruptTurn has nothing to call). This
-          // also lets the UI's activeTurnId tracking reflect reality
-          // during the streaming window.
-          onTurnStarted: (turnId) => {
-            session.activeTurnId = turnId;
-            // Stop clicked while turn/start's ack was in flight — the
-            // cancel() sweep ran against an empty target set, so this
-            // turn would run to completion (while the eventual
-            // stopReason claimed "cancelled"). Interrupt it the moment
-            // its id exists.
-            if (session.cancelRequested) {
-              void session.runtime.interruptTurn(session.threadId, turnId);
-            }
-          },
-        },
-      );
+      };
+      const result = nativeWorkingTreeReview
+        ? await (async () => {
+            // review/start has no per-turn model controls. Synchronize the
+            // thread first so the live composer selection remains authoritative
+            // for native review just as it is for turn/start.
+            await session.runtime.requestTyped("thread/settings/update", {
+              threadId: session.threadId,
+              model: model ?? session.threadModel ?? null,
+              effort: effort ?? null,
+              serviceTier: fast ? "fast" : null,
+            });
+            if (model) session.threadModel = model;
+            return session.runtime.runReview(
+              {
+                threadId: session.threadId,
+                target: { type: "uncommittedChanges" },
+                delivery: "inline",
+              },
+              turnOptions,
+            );
+          })()
+        : await session.runtime.runTurn(
+            {
+              threadId: session.threadId,
+              input,
+              approvalPolicy,
+              ...codexTurnAuthority(
+                session.territory,
+                session.executionBoundary,
+                sandboxPolicy,
+              ),
+              ...(model ? { model } : {}),
+              ...(effort ? { effort } : {}),
+              // ZEROS_FAST_MODE → Codex "fast" service tier (priority inference, GPT-5.x).
+              ...(fast ? { serviceTier: "fast" } : {}),
+              ...(collabModel
+                ? {
+                    collaborationMode: {
+                      mode: "default" as const,
+                      settings: {
+                        model: collabModel,
+                        reasoning_effort: effort ?? null,
+                        developer_instructions: null,
+                      },
+                    },
+                  }
+                : {}),
+            },
+            turnOptions,
+          );
       session.activeTurnId = null;
       // The app-server child died mid-turn — runTurn resolves "failed" from
       // the runtime's proc.exited handler (which also set childExitedMidTurn
@@ -909,6 +1379,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // The turn has settled (completed, failed, or threw) — a subsequent
       // child exit is now an idle crash, not a mid-turn one.
       session.turnActive = false;
+      // A turn that produced nothing must not hand its pending measurement to
+      // whichever turn runs next.
+      session.firstToken.endTurn();
       session.cancelRequested = false;
       // A completed/failed turn cannot still service one of its approval
       // or question resolvers. Fail closed and receipt every straggler before
@@ -1075,6 +1548,85 @@ export class CodexAppServerAdapter implements AgentAdapter {
     );
   }
 
+  /** Stop exactly one session-owned Codex background terminal. The renderer's
+   * opaque task id is resolved through the latest authoritative snapshot; it
+   * is never forwarded or parsed as a native process id. */
+  async stopBackgroundTask(opts: {
+    sessionId: string;
+    taskId: string;
+  }): Promise<void> {
+    const session = this.sessions.get(opts.sessionId);
+    if (!session || !session.runtimeAlive) {
+      throw new AgentFailureError({
+        kind: "transport-closed",
+        message: "Codex background work is no longer connected.",
+        stage: "stopBackgroundTask",
+        agentId: AGENT_ID,
+      });
+    }
+    const ongoing = session.backgroundStopOperations.get(opts.taskId);
+    if (ongoing) return ongoing;
+    const target = session.backgroundTaskTargets.get(opts.taskId);
+    if (!target) {
+      throw new AgentFailureError({
+        kind: "protocol-error",
+        message: "That Codex background task is no longer active.",
+        stage: "stopBackgroundTask",
+        agentId: AGENT_ID,
+      });
+    }
+    const operation = (async (): Promise<void> => {
+      try {
+        await session.runtime.requestTyped<
+          "thread/backgroundTerminals/terminate",
+          ThreadBackgroundTerminalsTerminateResponse
+        >(
+          "thread/backgroundTerminals/terminate",
+          {
+            threadId: target.threadId,
+            processId: target.processId,
+          },
+          { timeoutMs: 5_000 },
+        );
+      } catch (error) {
+        throw new AgentFailureError({
+          kind: "protocol-error",
+          message: `Codex could not stop the background task: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+          stage: "stopBackgroundTask",
+          agentId: AGENT_ID,
+        });
+      }
+      if (
+        !session.runtimeAlive ||
+        this.sessions.get(session.zerosSessionId) !== session
+      ) {
+        return;
+      }
+
+      // Invalidate any list that began before termination, remove the row on
+      // the terminate acknowledgement, then revalidate. A false `terminated`
+      // response is an idempotent already-gone race; the fresh list can restore
+      // the row if it truly remains live.
+      session.backgroundRefreshEpoch += 1;
+      const next = new Map(session.backgroundTasks);
+      next.delete(opts.taskId);
+      session.backgroundTasks = next;
+      session.backgroundTaskTargets.delete(opts.taskId);
+      this.emitBackgroundTasks(session);
+      void this.refreshBackgroundTasks(session);
+    })();
+    session.backgroundStopOperations.set(opts.taskId, operation);
+    try {
+      await operation;
+    } finally {
+      if (session.backgroundStopOperations.get(opts.taskId) === operation) {
+        session.backgroundStopOperations.delete(opts.taskId);
+      }
+    }
+  }
+
   /** Change a live session's model without rebuilding it. runTurn reads
    *  `session.env.OPENAI_MODEL` fresh on EVERY turn (see prompt()), so
    *  rewriting the env is all it takes — the next turn carries the new model.
@@ -1218,9 +1770,6 @@ export class CodexAppServerAdapter implements AgentAdapter {
           pending.request,
           response,
         );
-        if ("openUrl" in mapped && mapped.openUrl) {
-          openExternalUrl(mapped.openUrl);
-        }
         if (isMcpElicitationResponse(mapped.response)) {
           delivered = deliveredQuestionOutcome(outcome, mapped.response);
           // Only a fail-closed `cancel` is a surprise. Picking a Decline row
@@ -1260,13 +1809,18 @@ export class CodexAppServerAdapter implements AgentAdapter {
    *  RPC. Prefers a live session's runtime; otherwise boots a short-lived
    *  one and disposes it. Best-effort — returns null on any failure or for
    *  non-ChatGPT (API-key) auth, so the panel shows "—". */
-  async getAccountInfo(): Promise<AccountDetails | null> {
+  async getAccountInfo(opts?: {
+    liveOnly?: boolean;
+    env?: Record<string, string>;
+    executionBoundary?: PreparedBoundary;
+  }): Promise<AccountDetails | null> {
     // Fast path: reuse a live session's runtime — no extra boot.
     for (const s of this.sessions.values()) {
       const acct = await this.readAccount(s.runtime).catch(() => null);
       if (acct) return acct;
       break;
     }
+    if (opts?.liveOnly) return null;
     // No live runtime → boot a throwaway just to read the account. Spawns a
     // `codex app-server` child; disposed in finally even if the race below
     // times out. Verify on a Mac with codex signed in (not in the sandbox).
@@ -1275,6 +1829,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
       clientInfo: CLIENT_INFO,
       mcpServers: [],
       logTag: "codex-app-server:account",
+      ...(opts?.env ? { env: opts.env } : {}),
+      ...(opts?.executionBoundary
+        ? { executionBoundary: opts.executionBoundary }
+        : {}),
     });
     try {
       const runtime = await Promise.race([
@@ -1304,6 +1862,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     prompt: string;
     env?: Record<string, string>;
     timeoutMs?: number;
+    executionBoundary?: PreparedBoundary;
   }): Promise<string> {
     const boot = bootCodexAppServerRuntime({
       cwd: this.ctx.projectRoot,
@@ -1311,6 +1870,9 @@ export class CodexAppServerAdapter implements AgentAdapter {
       mcpServers: [],
       logTag: "codex-app-server:title",
       ...(opts.env ? { env: opts.env } : {}),
+      ...(opts.executionBoundary
+        ? { executionBoundary: opts.executionBoundary }
+        : {}),
     });
     try {
       const runtime = await Promise.race([
@@ -1404,6 +1966,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
   async disposeSession(sessionId: string): Promise<void> {
     const s = this.sessions.get(sessionId);
     if (!s) return;
+    this.clearBackgroundTaskPoll(s);
     this.drainPendingApprovals(s, s.runtimeAlive);
     this.drainPendingQuestions(s, s.runtimeAlive);
     this.disposing.add(sessionId);
@@ -1443,7 +2006,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
 
   async dispose(): Promise<void> {
     const all = Array.from(this.sessions.values());
-    for (const s of all) this.disposing.add(s.zerosSessionId);
+    for (const s of all) {
+      this.disposing.add(s.zerosSessionId);
+      this.clearBackgroundTaskPoll(s);
+    }
     this.sessions.clear();
     await Promise.allSettled(
       all.map(async (s) => {
@@ -1485,6 +2051,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
     /** Zeros' first-turn instruction body → `developerInstructions` on
      *  thread/start AND thread/resume (see `nativeSystemInstruction`). */
     systemInstruction?: string;
+    territory?: AgentFilesystemTerritory;
+    executionBoundary?: PreparedBoundary;
     kind: "new" | "resume";
     /** Required when kind === "resume". */
     resumeThreadId?: string;
@@ -1511,6 +2079,13 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // reconcile over AGENT_SET_MODE. This makes the first turn truthful even
     // when it is dispatched immediately after session creation.
     const initialMode = codexModeFromEnv(opts.env);
+    // ZSR is the authoritative outer sandbox. Feeding the same territory into
+    // Codex's provider-native profile would reintroduce the migration-only MCP,
+    // plugin and additional-root restrictions and create a conflicting nested
+    // policy. Keep that profile solely for direct legacy adapter callers.
+    const providerNativeTerritory = opts.executionBoundary
+      ? undefined
+      : opts.territory;
 
     // Boot the runtime first; we pass an onApprovalRequest closure that
     // will mutate `session.pendingApprovals` once the session object
@@ -1523,22 +2098,49 @@ export class CodexAppServerAdapter implements AgentAdapter {
     let nativeBrowserSkill: CodexNativeBrowserSkill | null = null;
     let mcpServers = opts.mcpServers ?? this.ctx.mcpServers;
     if (opts.browserUse?.kind === "codex-app-server") {
-      const codexBinary = await resolveCodexBinary({
-        override: opts.cliBinary,
+      const containmentReason = codexNativeBrowserUnavailableReason({
+        contained: Boolean(opts.executionBoundary),
       });
-      const nativeBrowser = await resolveCodexNativeBrowserRuntime({
-        codexCliPath: codexBinary.path,
-        codexHome: opts.env?.CODEX_HOME,
-      });
-      if (nativeBrowser) {
-        mcpServers = mergeCodexNativeBrowserMcp(mcpServers, nativeBrowser);
-        nativeBrowserSkill = nativeBrowser.browserSkill;
-      } else {
+      if (containmentReason) {
         effectiveBrowserUse = undefined;
         this.ctx.emit.onAgentStderr(
           this.agentId,
-          "[codex-app-server] Official Browser runtime unavailable: install or update ChatGPT/Codex Desktop so browser@openai-bundled and its node_repl runtime are present. Zeros browser tools will not be substituted.",
+          `[codex-app-server] ${containmentReason}. Codex will continue without Browser for this thread.`,
         );
+      } else {
+        let nativeBrowser: Awaited<
+          ReturnType<typeof resolveCodexNativeBrowserRuntime>
+        > = null;
+        try {
+          const codexBinary = await resolveCodexBinary({
+            override: opts.cliBinary,
+          });
+          nativeBrowser = await resolveCodexNativeBrowserRuntime({
+            codexCliPath: codexBinary.path,
+            codexHome: opts.env?.CODEX_HOME,
+          });
+        } catch (error) {
+          // Browser is an optional per-thread capability. A stale plugin cache
+          // must not strand the whole Codex conversation after its session
+          // directory has already been created.
+          effectiveBrowserUse = undefined;
+          this.ctx.emit.onAgentStderr(
+            this.agentId,
+            `[codex-app-server] Official Browser runtime discovery failed: ${
+              error instanceof Error ? error.message : String(error)
+            }. Codex will continue without Browser for this thread.`,
+          );
+        }
+        if (nativeBrowser) {
+          mcpServers = mergeCodexNativeBrowserMcp(mcpServers, nativeBrowser);
+          nativeBrowserSkill = nativeBrowser.browserSkill;
+        } else if (effectiveBrowserUse) {
+          effectiveBrowserUse = undefined;
+          this.ctx.emit.onAgentStderr(
+            this.agentId,
+            "[codex-app-server] Official Browser runtime unavailable: install or update ChatGPT/Codex Desktop so browser@openai-bundled and its node_repl runtime are present. Zeros browser tools will not be substituted.",
+          );
+        }
       }
     }
     try {
@@ -1547,7 +2149,10 @@ export class CodexAppServerAdapter implements AgentAdapter {
         env: opts.env,
         cliBinary: opts.cliBinary,
         clientInfo: CLIENT_INFO,
-        mcpServers,
+        executionBoundary: opts.executionBoundary,
+        // Provider MCP tools execute with authority separate from the command
+        // sandbox. Never inject them into a code-territory runtime.
+        mcpServers: opts.territory && !opts.executionBoundary ? [] : mcpServers,
         logTag: `codex-app-server:${zerosSessionId.slice(0, 8)}`,
         onApprovalRequest: (request) =>
           this.handleApprovalRequest(session, request),
@@ -1581,6 +2186,29 @@ export class CodexAppServerAdapter implements AgentAdapter {
     let threadId: string;
     let providerSessionId: string;
     let threadModel: string | null = null;
+    let territoryConfig:
+      | Record<string, import("./generated/serde_json/JsonValue").JsonValue>
+      | undefined;
+    try {
+      if (opts.territory && !opts.executionBoundary) {
+        // Disable MCP servers inherited from every Codex config layer. Read
+        // only the identifiers; values may contain credentials and are never
+        // retained or logged. This occurs before any model thread exists.
+        const effective = await runtime.request<{ config?: unknown }>(
+          "config/read",
+          { cwd: opts.cwd, includeLayers: false },
+        );
+        territoryConfig = codexTerritoryConfig(
+          opts.territory,
+          codexConfiguredMcpNames(effective.config),
+          runtime.binarySource.sandboxRuntimeRoot,
+        );
+      }
+    } catch (error) {
+      const runtimeFailure = await withRuntimeDisposeFailure(runtime, error);
+      await removeSessionDir(zerosSessionId).catch(() => {});
+      throw runtimeFailure;
+    }
     // True when a `kind:"resume"` could not load the rollout and fell through to
     // a fresh thread below — the gateway re-injects the first-turn
     // <system_instruction> in that case (the fresh thread has no history).
@@ -1599,12 +2227,24 @@ export class CodexAppServerAdapter implements AgentAdapter {
           const result = await runtime.resumeThread({
             threadId: opts.resumeThreadId,
             cwd: opts.cwd,
-            // Enable the official bundled Browser plugin only when this thread
-            // has a conversation-owned native IAB host. No Zeros MCP or
-            // dynamic-tool namespace is registered.
-            config: codexBrowserThreadConfig(
-              effectiveBrowserUse?.kind === "codex-app-server",
-            ),
+            ...(providerNativeTerritory
+              ? {
+                  permissions: CODEX_CODE_TERRITORY_PROFILE,
+                  config: territoryConfig,
+                  runtimeWorkspaceRoots: [
+                    providerNativeTerritory.workspaceRoot,
+                  ],
+                }
+              : {
+                  // Enable the official bundled Browser plugin only when this
+                  // thread has a conversation-owned native IAB host. No Zeros
+                  // MCP or dynamic-tool namespace is registered. The
+                  // code-territory profile above instead disables every
+                  // plugin/browser surface as part of its carveout config.
+                  config: codexBrowserThreadConfig(
+                    effectiveBrowserUse?.kind === "codex-app-server",
+                  ),
+                }),
             ...(opts.systemInstruction
               ? { developerInstructions: opts.systemInstruction }
               : {}),
@@ -1636,6 +2276,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
               opts.env,
               initialMode,
               opts.systemInstruction,
+              providerNativeTerritory,
+              territoryConfig,
               effectiveBrowserUse,
             ),
           );
@@ -1651,6 +2293,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
             opts.env,
             initialMode,
             opts.systemInstruction,
+            providerNativeTerritory,
+            territoryConfig,
             effectiveBrowserUse,
           ),
         );
@@ -1659,7 +2303,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
         threadModel = result.model ?? null;
       }
     } catch (err) {
-      await runtime.dispose().catch(() => {});
+      const runtimeFailure = await withRuntimeDisposeFailure(runtime, err);
       await removeSessionDir(zerosSessionId).catch(() => {});
       // thread/resume against a rollout codex has cleaned up surfaces
       // as a "no rollout found"-shaped error. Classify so the UI's
@@ -1667,7 +2311,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // resume → start fallback above absorbs the common case, so by
       // the time we reach here the error is non-recoverable.
       throw classifyThreadFailure(
-        err,
+        runtimeFailure,
         opts.kind === "resume" ? "loadSession" : "newSession",
       );
     }
@@ -1716,6 +2360,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       cwd: opts.cwd,
       env: opts.env,
       cliBinary: opts.cliBinary,
+      territory: opts.territory,
+      executionBoundary: opts.executionBoundary,
       runtime,
       translator,
       threadId,
@@ -1736,17 +2382,59 @@ export class CodexAppServerAdapter implements AgentAdapter {
       authMode: null,
       planType: null,
       latestRateLimits: null,
+      quotaUpdatesSuppressed: false,
       turnActive: false,
+      firstToken: new FirstTokenLatency("codex"),
+      sawFirstTurnOutput: false,
       runtimeAlive: true,
       childExitedMidTurn: false,
+      backgroundThreadIds: new Set([threadId]),
+      backgroundTasks: new Map(),
+      backgroundTaskTargets: new Map(),
+      backgroundStopOperations: new Map(),
+      backgroundWaiting: false,
+      backgroundRefreshEpoch: 0,
+      backgroundPollTimer: null,
+      guardianDeniedActions: new Map(),
+      guardianRetryByReviewId: new Map(),
+      guardianRetryOperations: new Map(),
+      goalSnapshotEpoch: 0,
     };
     this.sessions.set(zerosSessionId, session);
+
+    // Goal state is keyed server state. Publish the exact native snapshot once
+    // the route is registered; a failed read keeps the renderer's last
+    // confirmed snapshot rather than inventing an empty goal.
+    const goalSnapshotEpoch = session.goalSnapshotEpoch;
+    void this.getGoal({ sessionId: zerosSessionId })
+      .then((goal) => {
+        if (
+          this.sessions.get(zerosSessionId) !== session ||
+          session.goalSnapshotEpoch !== goalSnapshotEpoch
+        ) {
+          return;
+        }
+        this.ctx.emit.onSessionUpdate(this.agentId, {
+          sessionId: zerosSessionId,
+          update: { sessionUpdate: "goal_update", goal },
+        });
+      })
+      .catch((error) => {
+        this.ctx.emit.onAgentStderr(
+          this.agentId,
+          `[codex-app-server] Goal snapshot failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      });
 
     // Provider deletion owns only the opaque provider reference. Codex
     // archive, unarchive, close, name, and pin state are intentionally not
     // subscribed: Zeros remains authoritative for conversation lifecycle and
     // product metadata.
     const onThreadDeleted = (deleted: ThreadDeletedNotification) => {
+      if (this.sessions.get(session.zerosSessionId) !== session) return;
+      this.forgetBackgroundThread(session, deleted.threadId);
       if (deleted.threadId !== session.threadId) return;
       this.ctx.emit.onSessionUpdate(this.agentId, {
         sessionId: session.zerosSessionId,
@@ -1761,19 +2449,33 @@ export class CodexAppServerAdapter implements AgentAdapter {
         },
       });
     };
+    const onThreadClosed = (closed: ThreadClosedNotification) => {
+      if (this.sessions.get(session.zerosSessionId) !== session) return;
+      this.forgetBackgroundThread(session, closed.threadId);
+    };
     if (typeof runtime.onNotificationTyped === "function") {
       runtime.onNotificationTyped("thread/deleted", onThreadDeleted);
+      runtime.onNotificationTyped("thread/closed", onThreadClosed);
     } else {
       // Compatibility for old embedded/test handles; shipping app-server
       // runtimes always expose the generated typed subscription.
       runtime.onNotification("thread/deleted", (raw) =>
         onThreadDeleted(raw as ThreadDeletedNotification),
       );
+      runtime.onNotification("thread/closed", (raw) =>
+        onThreadClosed(raw as ThreadClosedNotification),
+      );
     }
 
     this.wireTurnTracking(session, runtime);
     this.wireFileChangeCapture(session, runtime);
     this.wireAccountListeners(session, runtime);
+    // A resumed Codex thread may already own detached terminals, including on
+    // loaded collaboration descendants that predate this runtime connection.
+    // New threads remain query-free until a turn actually settles.
+    if (opts.kind === "resume") {
+      void this.refreshBackgroundTasks(session, true);
+    }
     // Slash-command discovery. Codex is a bespoke (non-stream-json)
     // adapter, so it doesn't inherit the shared first-prompt discovery
     // hook. We pull from two sources and merge them:
@@ -1832,6 +2534,14 @@ export class CodexAppServerAdapter implements AgentAdapter {
     //     codex side is gone.
     session.activeTurnId = null;
     session.activeTurns.clear();
+    session.backgroundStopOperations.clear();
+    session.backgroundRefreshEpoch += 1;
+    this.clearBackgroundTaskPoll(session);
+    if (session.backgroundTasks.size > 0 || session.backgroundWaiting) {
+      session.backgroundTasks = new Map();
+      session.backgroundTaskTargets = new Map();
+      this.emitBackgroundTasks(session);
+    }
     // The runtime is already dead, so only drop local resolver handles and
     // emit their receipts; there is no JSON-RPC peer left to answer.
     this.drainPendingApprovals(session, false);
@@ -1950,6 +2660,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const prevAuthMode = session.authMode;
       session.authMode = p.authMode ?? null;
       session.planType = p.planType ?? null;
+      session.quotaUpdatesSuppressed = !session.authMode;
       this.ctx.emit.onAgentStderr(
         this.agentId,
         `[codex-app-server:${session.zerosSessionId.slice(0, 8)}] account.updated authMode=${session.authMode} plan=${session.planType}`,
@@ -1959,6 +2670,21 @@ export class CodexAppServerAdapter implements AgentAdapter {
       // listAgents probe / settings panel re-poll. A future polish is
       // to emit a typed bridge event so the UI's auth banner flips
       // without waiting for the next listAgents tick.
+      if (!session.authMode) {
+        // Quotas belong to the signed-in account. Keeping the previous plan's
+        // snapshot visible after logout is both misleading and a cross-account
+        // data leak if another account is connected next. Invalidate even when
+        // no snapshot was published yet: the signed-out event can race the
+        // initial read, and a replacement login can unsuppress notifications
+        // before that old request resolves.
+        this.quotaSnapshotEpoch += 1;
+        this.latestRateLimitSnapshot = null;
+        for (const active of this.sessions.values()) {
+          active.latestRateLimits = null;
+          active.quotaUpdatesSuppressed = true;
+        }
+        this.ctx.emit.onProviderQuotaUpdated?.(this.agentId, null);
+      }
       if (prevAuthMode && !session.authMode) {
         this.ctx.emit.onAgentStderr(
           this.agentId,
@@ -1968,10 +2694,20 @@ export class CodexAppServerAdapter implements AgentAdapter {
     });
 
     runtime.onNotification("account/rateLimits/updated", (params) => {
-      session.latestRateLimits = params ?? null;
-      // No bridge fan-out yet — the legacy adapter didn't have one
-      // either. nimbalyst built a UsageService around this; we'll
-      // follow suit when the UI has a usage surface to render into.
+      if (session.quotaUpdatesSuppressed) return;
+      const incoming = (params as { rateLimits?: RateLimitSnapshot } | null)
+        ?.rateLimits;
+      if (!incoming) return;
+      const merged = mergeCodexRateLimitSnapshot(
+        this.latestRateLimitSnapshot,
+        incoming as RateLimitSnapshot & CodexRateLimitSnapshotLike,
+      );
+      this.latestRateLimitSnapshot = merged;
+      session.latestRateLimits = merged;
+      this.ctx.emit.onProviderQuotaUpdated?.(
+        this.agentId,
+        normalizeCodexQuota(merged),
+      );
     });
 
     runtime.onNotification("account/login/completed", (_params) => {
@@ -1980,6 +2716,255 @@ export class CodexAppServerAdapter implements AgentAdapter {
         `[codex-app-server:${session.zerosSessionId.slice(0, 8)}] account.login.completed`,
       );
     });
+
+    // Seed the rolling-notification merge with an authoritative snapshot.
+    // Best-effort: quota is a settings diagnostic and must never delay or fail
+    // conversation admission.
+    const quotaReadEpoch = this.quotaSnapshotEpoch;
+    void this.readProviderRateLimitSnapshot(runtime)
+      .then((snapshot) => {
+        if (
+          session.quotaUpdatesSuppressed ||
+          this.sessions.get(session.zerosSessionId) !== session ||
+          quotaReadEpoch !== this.quotaSnapshotEpoch
+        ) {
+          return;
+        }
+        this.latestRateLimitSnapshot = snapshot;
+        session.latestRateLimits = snapshot;
+        this.ctx.emit.onProviderQuotaUpdated?.(
+          this.agentId,
+          normalizeCodexQuota(snapshot),
+        );
+      })
+      .catch(() => undefined);
+  }
+
+  private emitBackgroundTasks(session: CodexSession): void {
+    const waiting =
+      session.backgroundTasks.size > 0 && session.activeTurns.size === 0;
+    session.backgroundWaiting = waiting;
+    this.ctx.emit.onSessionUpdate(this.agentId, {
+      sessionId: session.zerosSessionId,
+      update: {
+        sessionUpdate: "background_tasks_update",
+        tasks: [...session.backgroundTasks.values()],
+        waiting,
+      },
+    });
+  }
+
+  private clearBackgroundTaskPoll(session: CodexSession): void {
+    if (!session.backgroundPollTimer) return;
+    clearTimeout(session.backgroundPollTimer);
+    session.backgroundPollTimer = null;
+  }
+
+  /** The app-server has no terminal-exit notification. Revalidate only while
+   * a row is visible so naturally completed commands disappear without
+   * polling ordinary foreground commands or idle sessions. Self-scheduling
+   * (instead of setInterval) guarantees a slow list cannot overlap itself. */
+  private scheduleBackgroundTaskPoll(session: CodexSession): void {
+    if (
+      session.backgroundPollTimer ||
+      session.backgroundTasks.size === 0 ||
+      !session.runtimeAlive ||
+      this.sessions.get(session.zerosSessionId) !== session
+    ) {
+      return;
+    }
+    session.backgroundPollTimer = setTimeout(() => {
+      session.backgroundPollTimer = null;
+      void this.refreshBackgroundTasks(session);
+    }, BACKGROUND_TERMINAL_POLL_MS);
+    session.backgroundPollTimer.unref?.();
+  }
+
+  /** A closed/deleted loaded thread cannot retain a running app-server
+   * terminal. Remove its private route and visible row immediately; otherwise
+   * a later list against the now-unloaded child can fail forever while the
+   * last confirmed snapshot keeps a ghost task alive. */
+  private forgetBackgroundThread(
+    session: CodexSession,
+    threadId: string,
+  ): void {
+    if (!session.backgroundThreadIds.has(threadId)) return;
+    session.backgroundRefreshEpoch += 1;
+    this.clearBackgroundTaskPoll(session);
+    if (threadId === session.threadId) {
+      session.backgroundThreadIds = new Set([session.threadId]);
+      session.backgroundTasks = new Map();
+      session.backgroundTaskTargets = new Map();
+      this.emitBackgroundTasks(session);
+      return;
+    }
+
+    session.backgroundThreadIds.delete(threadId);
+    const nextTasks = new Map(session.backgroundTasks);
+    const nextTargets = new Map(session.backgroundTaskTargets);
+    let changed = false;
+    for (const [taskId, target] of session.backgroundTaskTargets) {
+      if (target.threadId !== threadId) continue;
+      nextTargets.delete(taskId);
+      changed = nextTasks.delete(taskId) || changed;
+    }
+    session.backgroundTaskTargets = nextTargets;
+    if (!changed) {
+      this.scheduleBackgroundTaskPoll(session);
+      return;
+    }
+    session.backgroundTasks = nextTasks;
+    this.emitBackgroundTasks(session);
+    this.scheduleBackgroundTaskPoll(session);
+  }
+
+  /** Revalidate every known exact-thread list as one replace snapshot. A
+   * partial failure retains the last confirmed whole-session snapshot; a
+   * monotonic epoch prevents an older list from resurrecting a task after its
+   * terminate acknowledgement. */
+  private async refreshBackgroundTasks(
+    session: CodexSession,
+    discoverLoadedDescendants = false,
+  ): Promise<void> {
+    if (
+      !session.runtimeAlive ||
+      this.sessions.get(session.zerosSessionId) !== session
+    ) {
+      return;
+    }
+    this.clearBackgroundTaskPoll(session);
+    const epoch = ++session.backgroundRefreshEpoch;
+    const runtime = session.runtime;
+    try {
+      if (discoverLoadedDescendants) {
+        const descendants = await collectLoadedDescendantThreadIds(
+          (method, params, requestOpts) =>
+            runtime.request(method, params, requestOpts),
+          session.threadId,
+        );
+        if (
+          !session.runtimeAlive ||
+          this.sessions.get(session.zerosSessionId) !== session
+        ) {
+          return;
+        }
+        for (const threadId of descendants) {
+          if (
+            session.backgroundThreadIds.size >= MAX_CODEX_BACKGROUND_THREADS
+          ) {
+            break;
+          }
+          session.backgroundThreadIds.add(threadId);
+        }
+        // A lifecycle invalidation can race discovery after the newer refresh
+        // already captured its thread-id set. Preserve the discovered owners
+        // and run one non-discovery revalidation so the child cannot stay
+        // invisible until another turn happens to settle.
+        if (epoch !== session.backgroundRefreshEpoch) {
+          void this.refreshBackgroundTasks(session);
+          return;
+        }
+      }
+
+      const threadIds = [...session.backgroundThreadIds].slice(
+        0,
+        MAX_CODEX_BACKGROUND_THREADS,
+      );
+      const nextTasks = new Map<string, BackgroundTask>();
+      const nextTargets = new Map<
+        string,
+        { threadId: string; processId: string }
+      >();
+      const now = Date.now();
+      // A resumed multi-agent tree can contain up to the explicit 100-thread
+      // bound. Keep local JSON-RPC fan-out bounded instead of dumping every
+      // list request into one app-server event-loop turn. Stop walking once the
+      // whole-session row budget is full: the per-thread collector is also
+      // capped, so intermediate memory is bounded by one eight-thread batch.
+      for (
+        let index = 0;
+        index < threadIds.length;
+        index += BACKGROUND_LIST_CONCURRENCY
+      ) {
+        const batch = threadIds.slice(
+          index,
+          index + BACKGROUND_LIST_CONCURRENCY,
+        );
+        const snapshots = await Promise.all(
+          batch.map(async (threadId) => ({
+            threadId,
+            terminals: await collectBackgroundTerminals(
+              (method, params, requestOpts) =>
+                runtime.request(method, params, requestOpts),
+              threadId,
+            ),
+          })),
+        );
+        if (epoch !== session.backgroundRefreshEpoch) return;
+        for (const { threadId, terminals } of snapshots) {
+          const reconciled = reconcileBackgroundTerminals(
+            session.backgroundTasks,
+            terminals,
+            now,
+            (terminal) =>
+              codexBackgroundTaskId(
+                session.zerosSessionId,
+                threadId,
+                terminal.processId,
+              ),
+          );
+          for (const [taskId, task] of reconciled.active) {
+            if (nextTasks.size >= MAX_CODEX_BACKGROUND_TERMINALS) break;
+            nextTasks.set(taskId, task);
+          }
+          for (const terminal of terminals) {
+            if (!terminal.processId) continue;
+            const taskId = codexBackgroundTaskId(
+              session.zerosSessionId,
+              threadId,
+              terminal.processId,
+            );
+            if (!nextTasks.has(taskId)) continue;
+            nextTargets.set(taskId, {
+              threadId,
+              processId: terminal.processId,
+            });
+          }
+          if (nextTasks.size >= MAX_CODEX_BACKGROUND_TERMINALS) break;
+        }
+        if (nextTasks.size >= MAX_CODEX_BACKGROUND_TERMINALS) break;
+      }
+      if (
+        epoch !== session.backgroundRefreshEpoch ||
+        !session.runtimeAlive ||
+        this.sessions.get(session.zerosSessionId) !== session
+      ) {
+        return;
+      }
+
+      const waiting = nextTasks.size > 0 && session.activeTurns.size === 0;
+      const unchanged =
+        waiting === session.backgroundWaiting &&
+        nextTasks.size === session.backgroundTasks.size &&
+        [...nextTasks].every(
+          ([taskId, task]) => session.backgroundTasks.get(taskId) === task,
+        );
+      session.backgroundTasks = nextTasks;
+      session.backgroundTaskTargets = nextTargets;
+      if (!unchanged) this.emitBackgroundTasks(session);
+      this.scheduleBackgroundTaskPoll(session);
+    } catch (error) {
+      // Listing is keyed server state. A failed revalidation keeps the last
+      // exact-session snapshot instead of blanking the card or guessing that
+      // every process exited.
+      if (epoch !== session.backgroundRefreshEpoch) return;
+      console.warn(
+        `[codex-app-server:${session.zerosSessionId.slice(0, 8)}] background terminal refresh failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+      this.scheduleBackgroundTaskPoll(session);
+    }
   }
 
   /** Maintain `session.activeTurns` (threadId → in-flight turnId) from the
@@ -1996,9 +2981,18 @@ export class CodexAppServerAdapter implements AgentAdapter {
   ): void {
     const track = (threadId: unknown, turnId: unknown): void => {
       if (typeof threadId !== "string" || typeof turnId !== "string") return;
+      if (
+        session.backgroundThreadIds.has(threadId) ||
+        session.backgroundThreadIds.size < MAX_CODEX_BACKGROUND_THREADS
+      ) {
+        session.backgroundThreadIds.add(threadId);
+      }
       if (threadId !== session.threadId) session.sawCollabTurns = true;
       const known = session.activeTurns.get(threadId) === turnId;
       if (!known) session.activeTurns.set(threadId, turnId);
+      if (!known && session.backgroundWaiting) {
+        this.emitBackgroundTasks(session);
+      }
       if (known) return;
       // Interrupt a NEW turn on sight in two windows:
       //   - cancelRequested: Stop was clicked and this turn wasn't in the
@@ -2028,6 +3022,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
       const p = params as { threadId?: string };
       if (typeof p?.threadId === "string") {
         session.activeTurns.delete(p.threadId);
+        void this.refreshBackgroundTasks(session);
       }
     });
   }
@@ -2061,6 +3056,22 @@ export class CodexAppServerAdapter implements AgentAdapter {
     session: CodexSession,
     request: CodexApprovalRequest,
   ): void {
+    if (session.territory && territoryApprovalMustBeDenied(session, request)) {
+      // A territory profile is immutable authority, not something Ask/Auto or
+      // a user click may widen. Legacy exec/apply-patch approvals predate named
+      // profiles, while permissions requests explicitly ask to expand them;
+      // both fail closed. Modern ordinary in-profile gates may still proceed.
+      session.runtime.respondToPermission(
+        request.permissionId,
+        defaultMethodResponse(request.method, "decline"),
+      );
+      this.ctx.emit.onPermissionSettled?.(
+        this.agentId,
+        request.permissionId,
+        session.zerosSessionId,
+      );
+      return;
+    }
     // Approve for me auto-settles in-sandbox tool gates only. Permission-profile
     // escalations (network / out-of-workspace paths) still require a user card.
     if (session.modeId === "auto-edit" && autoEditCanAutoApprove(request)) {
@@ -2383,6 +3394,21 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
   }
 
+  /** One line per slow turn, on the same stderr channel and in the same shape
+   *  as the Claude adapter and the Cursor host, so the three providers can be
+   *  compared without translating between three formats. No-op once the turn
+   *  has reported, and for any turn that started talking promptly. */
+  private reportFirstOutput(zerosSessionId: string): void {
+    const session = this.sessions.get(zerosSessionId);
+    if (!session?.firstToken.awaitingFirstOutput) return;
+    const line = session.firstToken.firstOutput({
+      cold: !session.sawFirstTurnOutput,
+      model: session.env?.OPENAI_MODEL?.trim() || session.threadModel || undefined,
+    });
+    session.sawFirstTurnOutput = true;
+    if (line) console.info(line);
+  }
+
   private wireRuntimeToTranslator(
     runtime: CodexAppServerHandle,
     translator: CodexAppServerTranslator,
@@ -2407,6 +3433,8 @@ export class CodexAppServerAdapter implements AgentAdapter {
       "item/commandExecution/terminalInteraction",
       "item/fileChange/outputDelta",
       "item/fileChange/patchUpdated",
+      "externalAgentConfig/import/progress",
+      "externalAgentConfig/import/completed",
       "process/outputDelta",
       "command/exec/outputDelta",
       "error",
@@ -2418,8 +3446,56 @@ export class CodexAppServerAdapter implements AgentAdapter {
       "account/rateLimits/updated",
       "account/login/completed",
     ];
+    // First model output of the turn. `turn/started` and the thread-status
+    // frames acknowledge within milliseconds of `turn/start` even when the
+    // model takes seconds to say anything, so the measurement keys on the
+    // notifications that carry actual model output: a reasoning or message
+    // delta, or the first item (a tool call) starting.
+    const FIRST_OUTPUT_METHODS = new Set([
+      "item/started",
+      "item/agentMessage/delta",
+      "item/reasoning/textDelta",
+      "item/reasoning/summaryTextDelta",
+    ]);
     for (const m of methods) {
-      runtime.onNotification(m, (params) => translator.handle(m, params));
+      runtime.onNotification(m, (params) => {
+        if (FIRST_OUTPUT_METHODS.has(m)) {
+          this.reportFirstOutput(owner.zerosSessionId);
+        }
+        translator.handle(m, params);
+      });
+    }
+    for (const method of [
+      "item/mcpToolCall/progress",
+      "hook/started",
+      "hook/completed",
+      "model/rerouted",
+      "model/verification",
+      "model/safetyBuffering/updated",
+      "autoApprovalReview/strictReviewRequired",
+    ] as const) {
+      runtime.onNotification(method, (params) => {
+        if ((params as { threadId?: unknown }).threadId !== owner.threadId) {
+          return;
+        }
+        translator.handle(method, params);
+      });
+    }
+    for (const method of [
+      "mcpServer/oauthLogin/completed",
+      "mcpServer/startupStatus/updated",
+    ] as const) {
+      runtime.onNotification(method, (params) => {
+        const threadId = (params as { threadId?: unknown }).threadId;
+        if (
+          threadId !== null &&
+          threadId !== undefined &&
+          threadId !== owner.threadId
+        ) {
+          return;
+        }
+        translator.handle(method, params);
+      });
     }
     // Codex may autonomously raise the thread to native `ultra`. Keep the ONE
     // existing composer effort picker truthful by persisting that provider
@@ -2431,6 +3507,92 @@ export class CodexAppServerAdapter implements AgentAdapter {
       this.ctx.emit.onSessionUpdate(this.agentId, {
         sessionId: owner.zerosSessionId,
         update: { sessionUpdate: "current_effort_update", effort },
+      });
+    });
+    runtime.onNotification("thread/goal/updated", (rawParams) => {
+      const params = rawParams as {
+        threadId: string;
+        goal: ThreadGoal;
+      };
+      if (params.threadId !== owner.threadId) return;
+      const session = this.sessions.get(owner.zerosSessionId);
+      if (session) session.goalSnapshotEpoch += 1;
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        sessionId: owner.zerosSessionId,
+        update: {
+          sessionUpdate: "goal_update",
+          goal: canonicalGoal(params.goal),
+        },
+      });
+    });
+    runtime.onNotification("thread/goal/cleared", (rawParams) => {
+      const params = rawParams as { threadId: string };
+      if (params.threadId !== owner.threadId) return;
+      const session = this.sessions.get(owner.zerosSessionId);
+      if (session) session.goalSnapshotEpoch += 1;
+      this.ctx.emit.onSessionUpdate(this.agentId, {
+        sessionId: owner.zerosSessionId,
+        update: { sessionUpdate: "goal_update", goal: null },
+      });
+    });
+    for (const method of [
+      "thread/environment/connected",
+      "thread/environment/disconnected",
+    ] as const) {
+      runtime.onNotification(method, (params) => {
+        if ((params as { threadId?: unknown }).threadId !== owner.threadId) {
+          return;
+        }
+        translator.handle(method, params);
+      });
+    }
+    runtime.onNotification("item/autoApprovalReview/started", (params) => {
+      if ((params as { threadId?: unknown }).threadId !== owner.threadId) {
+        return;
+      }
+      translator.handle("item/autoApprovalReview/started", params);
+    });
+    runtime.onNotification("item/autoApprovalReview/completed", (rawParams) => {
+      const params =
+        rawParams as ItemGuardianApprovalReviewCompletedNotification;
+      if (params.threadId !== owner.threadId) return;
+      const session = this.sessions.get(owner.zerosSessionId);
+      let retryId: string | undefined;
+      if (
+        session &&
+        params.review.status === "denied" &&
+        params.decisionSource === "agent"
+      ) {
+        retryId = session.guardianRetryByReviewId.get(params.reviewId);
+        if (retryId && !session.guardianDeniedActions.has(retryId)) {
+          session.guardianRetryByReviewId.delete(params.reviewId);
+          retryId = undefined;
+        }
+        retryId ??= randomUUID();
+        // Replayed completed notifications update the existing engine-only
+        // authority in place. Only a genuinely new authority consumes cache
+        // capacity; otherwise a provider replay at the bound could revoke an
+        // unrelated, still-valid renderer affordance.
+        if (!session.guardianDeniedActions.has(retryId)) {
+          while (
+            session.guardianDeniedActions.size >= MAX_GUARDIAN_DENIED_ACTIONS
+          ) {
+            const oldest = session.guardianDeniedActions.keys().next().value;
+            if (typeof oldest !== "string") break;
+            const evicted = session.guardianDeniedActions.get(oldest);
+            session.translator.revokeSafetyReviewRetry(oldest);
+            session.guardianDeniedActions.delete(oldest);
+            if (evicted) {
+              session.guardianRetryByReviewId.delete(evicted.reviewId);
+            }
+          }
+        }
+        session.guardianDeniedActions.set(retryId, params);
+        session.guardianRetryByReviewId.set(params.reviewId, retryId);
+      }
+      translator.handle("item/autoApprovalReview/completed", {
+        ...params,
+        ...(retryId ? { zerosRetryId: retryId } : {}),
       });
     });
   }
@@ -2511,32 +3673,100 @@ export class CodexAppServerAdapter implements AgentAdapter {
   }
 }
 
+function pathIsWriteDeniedByTerritory(
+  territory: AgentFilesystemTerritory,
+  candidate: string,
+): boolean {
+  const absolute = path.isAbsolute(candidate)
+    ? path.resolve(candidate)
+    : path.resolve(territory.workspaceRoot, candidate);
+  return territory.writeCapabilities.deniedPaths.some((directory) => {
+    const denied = path.resolve(directory);
+    return absolute === denied || absolute.startsWith(denied + path.sep);
+  });
+}
+
+function canonicalGoal(goal: ThreadGoal): AgentGoal {
+  return {
+    objective: goal.objective,
+    status: goal.status,
+    tokenBudget: goal.tokenBudget,
+    tokensUsed: goal.tokensUsed,
+    timeUsedSeconds: goal.timeUsedSeconds,
+    createdAt: goal.createdAt,
+    updatedAt: goal.updatedAt,
+  };
+}
+
+/** Defense in depth around provider approval RPCs. The OS permission profile
+ * remains the boundary; this prevents Zeros itself from issuing an approval
+ * that asks Codex to widen or bypass that profile. */
+export function territoryApprovalMustBeDenied(
+  session: Pick<
+    CodexSession,
+    "territory" | "executionBoundary" | "fileEditPathsByItemId"
+  >,
+  request: Pick<CodexApprovalRequest, "method" | "params">,
+): boolean {
+  const territory = session.territory;
+  if (!territory) return false;
+  const providerNativeTerritory = !session.executionBoundary;
+  if (
+    providerNativeTerritory &&
+    (request.method === "item/permissions/requestApproval" ||
+      request.method === "execCommandApproval" ||
+      request.method === "applyPatchApproval")
+  ) {
+    return true;
+  }
+  if (request.method === "item/commandExecution/requestApproval") {
+    // A request carrying additional filesystem authority or a persistent rule
+    // is not an ordinary in-profile command gate.
+    if (
+      providerNativeTerritory &&
+      (request.params.additionalPermissions != null ||
+        request.params.proposedExecpolicyAmendment != null ||
+        request.params.proposedNetworkPolicyAmendments != null)
+    ) {
+      return true;
+    }
+  }
+  const itemId = stringField(request.params, "itemId");
+  const paths = itemId ? (session.fileEditPathsByItemId.get(itemId) ?? []) : [];
+  const grantRoot = stringField(request.params, "grantRoot");
+  return (
+    (grantRoot ? pathIsWriteDeniedByTerritory(territory, grantRoot) : false) ||
+    paths.some((candidate) =>
+      pathIsWriteDeniedByTerritory(territory, candidate),
+    )
+  );
+}
+
 // ── Helpers ──────────────────────────────────────────────────
 
 function buildInitializeResponse(): InitializeResponse {
   return {
-    protocolVersion: 1 as never,
-    agentInfo: { name: "Codex", version: "app-server" } as never,
+    protocolVersion: 1,
+    agentInfo: { name: "Codex", version: "app-server" },
     agentCapabilities: {
-      loadSession: { enabled: true } as never,
+      loadSession: true,
       promptCapabilities: {
         image: true,
         audio: false,
         embeddedContext: false,
-      } as never,
-      mcpCapabilities: { http: true, sse: false } as never,
-      sessionCapabilities: { list: {} } as never,
+      },
       // Mid-turn steering: steer() sends `turn/steer` against the active
       // turn id. Drives the queued-card "Send now" action.
       steering: true,
-    } as never,
+    },
     authMethods: [
       {
+        type: "terminal",
         id: "terminal",
         name: "Sign in via Terminal",
         description: "Open Terminal.app and run `codex login`.",
       },
-    ] as never,
+    ],
     // The chosen model is carried via OPENAI_MODEL (replaces the bundled
     // catalog's modelEnvVars map). `modelsDynamic` makes the gateway re-poll
     // initialize until model/list discovery fills `_meta.models` post-boot.
@@ -2553,22 +3783,60 @@ export function buildThreadStartParams(
    *  (the native channel — layers on Codex's built-in system prompt; never
    *  baseInstructions, which would REPLACE it). */
   systemInstruction?: string,
+  territory?: AgentFilesystemTerritory,
+  territoryConfig?: Record<
+    string,
+    import("./generated/serde_json/JsonValue").JsonValue
+  >,
   browserUse?: AgentBrowserUse,
 ): CodexThreadStartParams {
   const model = env?.OPENAI_MODEL;
   const { approvalPolicy, sandboxMode } = modePolicyFor(modeId);
   return {
     cwd,
+    ...(territory
+      ? {
+          runtimeWorkspaceRoots: [territory.workspaceRoot],
+          permissions: CODEX_CODE_TERRITORY_PROFILE,
+          // The code-territory carveout config already disables every
+          // plugin/browser surface, so `browserUse` never applies here.
+          config: territoryConfig ?? codexTerritoryConfig(territory),
+        }
+      : {
+          sandbox: sandboxMode,
+          // App-server applies this only to the Zeros-owned thread. When
+          // enabled, Codex loads its official bundled Browser plugin and talks
+          // to the native IAB pipe hosted by Electron. There is deliberately
+          // no `zeros_browser` dynamic namespace or MCP fallback.
+          config: codexBrowserThreadConfig(
+            browserUse?.kind === "codex-app-server",
+          ),
+        }),
     ...(model ? { model } : {}),
     ...(systemInstruction ? { developerInstructions: systemInstruction } : {}),
-    // App-server applies this only to the Zeros-owned thread. When enabled,
-    // Codex loads its official bundled Browser plugin and talks to the native
-    // IAB pipe hosted by Electron. There is deliberately no `zeros_browser`
-    // dynamic namespace or MCP fallback.
-    config: codexBrowserThreadConfig(browserUse?.kind === "codex-app-server"),
     approvalPolicy,
-    sandbox: sandboxMode,
   };
+}
+
+/** Preserve the exact normal Codex mode inside a uniform outer ZSR boundary.
+ * The provider-native territory profile remains only for direct legacy adapter
+ * callers that have no outer kernel boundary. */
+export function codexTurnAuthority(
+  territory: AgentFilesystemTerritory | undefined,
+  executionBoundary: PreparedBoundary | undefined,
+  sandboxPolicy: CodexSandboxPolicy,
+):
+  | { sandboxPolicy: CodexSandboxPolicy }
+  | {
+      permissions: typeof CODEX_CODE_TERRITORY_PROFILE;
+      runtimeWorkspaceRoots: string[];
+    } {
+  return territory && !executionBoundary
+    ? {
+        permissions: CODEX_CODE_TERRITORY_PROFILE,
+        runtimeWorkspaceRoots: [territory.workspaceRoot],
+      }
+    : { sandboxPolicy };
 }
 
 export interface CodexModePolicy {
@@ -2799,9 +4067,9 @@ function browserOriginRequestIdentity(
   return turnId && key ? { turnId, key, origin } : null;
 }
 
-function normalizedBrowserApprovalOrigin(value: string | undefined):
-  | string
-  | null {
+function normalizedBrowserApprovalOrigin(
+  value: string | undefined,
+): string | null {
   if (!value) return null;
   try {
     const url = new URL(value);
@@ -3447,6 +4715,21 @@ export function codexDisconnectedFailure(): AgentFailureError {
     stage: "prompt",
     agentId: AGENT_ID,
   });
+}
+
+async function withRuntimeDisposeFailure(
+  runtime: CodexAppServerHandle,
+  original: unknown,
+): Promise<unknown> {
+  try {
+    await runtime.dispose();
+    return original;
+  } catch (disposeError) {
+    return new AggregateError(
+      [original, disposeError],
+      "Codex startup failed and its process group did not stop cleanly",
+    );
+  }
 }
 
 function classifyBootFailure(

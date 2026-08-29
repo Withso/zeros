@@ -52,6 +52,7 @@ import {
   type StdioAgentProcess,
 } from "../shared/stdio-process";
 import type { McpServerRegistration } from "../../types";
+import type { PreparedBoundary } from "../../containment/types";
 import {
   JSON_RPC_NO_RESPONSE,
   JsonRpcStdioClient,
@@ -93,6 +94,7 @@ import type { ThreadStartParams as GenThreadStartParams } from "./generated/v2/T
 import type { ThreadStartResponse as GenThreadStartResponse } from "./generated/v2/ThreadStartResponse";
 import type { ThreadResumeResponse as GenThreadResumeResponse } from "./generated/v2/ThreadResumeResponse";
 import type { TurnStartParams as GenTurnStartParams } from "./generated/v2/TurnStartParams";
+import type { ReviewStartParams as GenReviewStartParams } from "./generated/v2/ReviewStartParams";
 import type { AttestationGenerateResponse as GenAttestationGenerateResponse } from "./generated/v2/AttestationGenerateResponse";
 import type { ChatgptAuthTokensRefreshParams as GenChatgptAuthTokensRefreshParams } from "./generated/v2/ChatgptAuthTokensRefreshParams";
 import type { ChatgptAuthTokensRefreshResponse as GenChatgptAuthTokensRefreshResponse } from "./generated/v2/ChatgptAuthTokensRefreshResponse";
@@ -336,6 +338,8 @@ export interface CodexAppServerBootOptions {
   cliBinary?: string;
   /** Extra env to layer on top of process.env + login-shell PATH. */
   env?: Record<string, string>;
+  /** Zeros-owned outer process boundary for this app-server and every child. */
+  executionBoundary?: PreparedBoundary;
   /** Client identity reported in `initialize.clientInfo`. */
   clientInfo: { name: string; version: string; title?: string };
   /** MCP servers to register via `-c mcp_servers.<name>.…` overrides at
@@ -457,6 +461,17 @@ export interface CodexAppServerHandle {
     raw: unknown;
   }>;
 
+  /** Start Codex's native reviewer inline on an existing thread and settle on
+   * the same turn-completion channel as an ordinary turn. */
+  runReview(
+    params: GenReviewStartParams,
+    opts?: { onTurnStarted?: (turnId: string) => void },
+  ): Promise<{
+    turnId: string;
+    status: "completed" | "failed" | "cancelled";
+    raw: unknown;
+  }>;
+
   /** Cancel the current turn — request the server interrupt; turn
    *  resolves with status="cancelled". */
   interruptTurn(threadId: string, turnId: string): Promise<void>;
@@ -530,6 +545,26 @@ const TURN_INACTIVITY_TIMEOUT_MS = PERMISSION_RESPONSE_TIMEOUT_MS;
 // adapters share one cap.
 const APPROVAL_TIMEOUT_MS = PERMISSION_RESPONSE_TIMEOUT_MS;
 
+/** Per-process Codex configuration. A ZSR child cannot access the host
+ * keychain by design, so both Codex and MCP OAuth refreshes must remain in the
+ * private CODEX_HOME that the outer boundary owns and promotes atomically. */
+export function codexAppServerFeatureArgs(contained: boolean): string[] {
+  return [
+    "-c",
+    "features.default_mode_request_user_input=true",
+    "-c",
+    "suppress_unstable_features_warning=true",
+    ...(contained
+      ? [
+          "-c",
+          'cli_auth_credentials_store="file"',
+          "-c",
+          'mcp_oauth_credentials_store="file"',
+        ]
+      : []),
+  ];
+}
+
 /** Boot a codex app-server. Resolves with a ready-to-use handle once
  *  the initialize handshake succeeds and the version check passes.
  *  Throws on:
@@ -567,18 +602,16 @@ export async function bootCodexAppServerRuntime(
   //     append "Warning: Under-development features enabled…" to EVERY
   //     turn's output. We enabled the feature deliberately; the per-turn
   //     banner is pure noise for the user.
-  const featureArgs = [
-    "-c",
-    "features.default_mode_request_user_input=true",
-    "-c",
-    "suppress_unstable_features_warning=true",
-  ];
+  const featureArgs = codexAppServerFeatureArgs(
+    Boolean(opts.executionBoundary),
+  );
 
   const proc = spawnStdioAgent({
     command,
     args: [...baseArgs, "app-server", ...featureArgs, ...mcpArgs],
     cwd: opts.cwd,
     env,
+    executionBoundary: opts.executionBoundary,
     logTag,
   });
 
@@ -1103,6 +1136,86 @@ export async function bootCodexAppServerRuntime(
         );
   };
 
+  /** `turn/start` and inline `review/start` acknowledge with the same Turn
+   * shape and settle through the same `turn/completed` notification stream.
+   * Keep correlation, terminal-error races, and inactivity handling in one
+   * place so native review cannot strand or prematurely unlock the composer. */
+  const runTurnLike = async (
+    method: "turn/start" | "review/start",
+    params: unknown,
+    runOpts?: { onTurnStarted?: (turnId: string) => void },
+  ): Promise<{
+    turnId: string;
+    status: "completed" | "failed" | "cancelled";
+    raw: unknown;
+  }> => {
+    const startingErrorEpoch = unscopedTerminalErrorEpoch;
+    const ack = await requestWithRetry<{
+      turn: { id: string; status: string };
+    }>(method, params);
+    const turnId = ack.turn.id;
+    runOpts?.onTurnStarted?.(turnId);
+
+    const ackStatus = ack.turn.status;
+    if (
+      ackStatus === "completed" ||
+      ackStatus === "failed" ||
+      ackStatus === "cancelled" ||
+      ackStatus === "interrupted"
+    ) {
+      return {
+        turnId,
+        status: ackStatus === "interrupted" ? "cancelled" : ackStatus,
+        raw: ack,
+      };
+    }
+
+    if (unscopedTerminalErrorEpoch !== startingErrorEpoch) {
+      return { turnId, status: "failed", raw: ack };
+    }
+
+    const buffered = pendingTurnCompletions.get(turnId);
+    if (buffered) {
+      pendingTurnCompletions.delete(turnId);
+      return { turnId, status: buffered, raw: ack };
+    }
+
+    const finalStatus = await new Promise<"completed" | "failed" | "cancelled">(
+      (resolve) => {
+        let timer: NodeJS.Timeout | null = null;
+        const cleanup = () => {
+          if (timer) clearTimeout(timer);
+          timer = null;
+          turnActivityListeners.delete(touchActivity);
+        };
+        const arm = () => {
+          if (timer) clearTimeout(timer);
+          timer = setTimeout(() => {
+            if (turnWaiters.delete(turnId)) {
+              cleanup();
+              console.warn(
+                `[${logTag}] ${method} turn ${turnId}: no app-server activity for ${TURN_INACTIVITY_TIMEOUT_MS}ms; treating as failed`,
+              );
+              resolve("failed");
+            }
+          }, TURN_INACTIVITY_TIMEOUT_MS);
+          timer.unref?.();
+        };
+        const touchActivity = () => arm();
+        turnActivityListeners.add(touchActivity);
+        arm();
+        turnWaiters.set(turnId, {
+          resolve: (status) => {
+            cleanup();
+            resolve(status);
+          },
+          touchActivity,
+        });
+      },
+    );
+    return { turnId, status: finalStatus, raw: ack };
+  };
+
   return {
     initializeResponse: initResp,
     cliVersion,
@@ -1140,94 +1253,11 @@ export async function bootCodexAppServerRuntime(
     },
 
     async runTurn(params, runOpts) {
-      const startingErrorEpoch = unscopedTerminalErrorEpoch;
-      // Step 1 — send `turn/start` and await its ACKNOWLEDGMENT.
-      //
-      // Per the codex app-server contract, this response carries the
-      // freshly-allocated turnId and `status: "inProgress"`. The
-      // actual final status arrives later via the `turn/completed`
-      // notification.
-      //
-      // The RPC timeout here is short (60s default) because the ack
-      // should be near-instant. After that there is no wall-clock turn
-      // limit; only the inactivity watchdog below can fail a quiet turn.
-      const ack = await requestWithRetry<{
-        turn: { id: string; status: string };
-      }>("turn/start", params);
-      const turnId = ack.turn.id;
-      runOpts?.onTurnStarted?.(turnId);
+      return runTurnLike("turn/start", params, runOpts);
+    },
 
-      // Fast-path: in rare cases the ack may already carry a terminal
-      // status (server caught a validation failure synchronously, or
-      // returned a cached completion). Use it directly.
-      const ackStatus = ack.turn.status;
-      if (
-        ackStatus === "completed" ||
-        ackStatus === "failed" ||
-        ackStatus === "cancelled" ||
-        ackStatus === "interrupted"
-      ) {
-        return {
-          turnId,
-          status: ackStatus === "interrupted" ? "cancelled" : ackStatus,
-          raw: ack,
-        };
-      }
-
-      if (unscopedTerminalErrorEpoch !== startingErrorEpoch) {
-        return { turnId, status: "failed", raw: ack };
-      }
-
-      // Step 2 — await `turn/completed` (or `error`) for this turnId.
-      //
-      // The notification may have arrived BETWEEN the ack landing on
-      // our event loop and us registering the waiter — that's why the
-      // notification handlers buffer into `pendingTurnCompletions`.
-      // Check the buffer first.
-      const buffered = pendingTurnCompletions.get(turnId);
-      if (buffered) {
-        pendingTurnCompletions.delete(turnId);
-        return { turnId, status: buffered, raw: ack };
-      }
-
-      // Long goal runs can legitimately last hours. Do not cap total turn
-      // duration; fail only when the app-server goes quiet for the inactivity
-      // window, which catches lost/missed `turn/completed` without killing a
-      // healthy long-running turn.
-      const finalStatus = await new Promise<
-        "completed" | "failed" | "cancelled"
-      >((resolve) => {
-        let timer: NodeJS.Timeout | null = null;
-        const cleanup = () => {
-          if (timer) clearTimeout(timer);
-          timer = null;
-          turnActivityListeners.delete(touchActivity);
-        };
-        const arm = () => {
-          if (timer) clearTimeout(timer);
-          timer = setTimeout(() => {
-            if (turnWaiters.delete(turnId)) {
-              cleanup();
-              console.warn(
-                `[${logTag}] turn ${turnId}: no app-server activity for ${TURN_INACTIVITY_TIMEOUT_MS}ms; treating as failed`,
-              );
-              resolve("failed");
-            }
-          }, TURN_INACTIVITY_TIMEOUT_MS);
-          timer.unref?.();
-        };
-        const touchActivity = () => arm();
-        turnActivityListeners.add(touchActivity);
-        arm();
-        turnWaiters.set(turnId, {
-          resolve: (status) => {
-            cleanup();
-            resolve(status);
-          },
-          touchActivity,
-        });
-      });
-      return { turnId, status: finalStatus, raw: ack };
+    async runReview(params, runOpts) {
+      return runTurnLike("review/start", params, runOpts);
     },
 
     async interruptTurn(threadId, turnId) {
@@ -1484,10 +1514,7 @@ export function buildMcpServerOverrides(
         s.startupTimeoutSec > 0 &&
         s.startupTimeoutSec <= 3_600
       ) {
-        args.push(
-          "-c",
-          `${base}.startup_timeout_sec=${s.startupTimeoutSec}`,
-        );
+        args.push("-c", `${base}.startup_timeout_sec=${s.startupTimeoutSec}`);
       }
     }
   }

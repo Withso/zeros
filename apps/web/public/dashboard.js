@@ -40,6 +40,115 @@ export async function tryWriteClipboard(clipboard, value) {
 }
 
 const COLLABORATIVE_SECTIONS = new Set(["members", "teams", "billing"]);
+const SECURITY_REVALIDATE_SILENCE_MS = 60_000;
+
+export function securityEventAction(kind) {
+  if (kind === "account.revoked" || kind === "session.revoked") {
+    return { signOut: true, refreshOrganizations: false };
+  }
+  if (
+    kind === "account.authorization_changed" ||
+    kind === "organization.access_revoked" ||
+    kind === "organization.authorization_changed" ||
+    kind === "organization.data_changed"
+  ) {
+    return { signOut: false, refreshOrganizations: true };
+  }
+  return { signOut: false, refreshOrganizations: false };
+}
+
+function securitySnapshotSignature(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") return "";
+  const organizations = Array.isArray(snapshot.organizations)
+    ? snapshot.organizations
+        .map((organization) => [
+          organization.id,
+          organization.role,
+          organization.authorizationRevision,
+          organization.membershipRevision,
+          organization.dataRevision,
+        ])
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0])))
+    : [];
+  return JSON.stringify([
+    snapshot.account?.id,
+    snapshot.account?.status,
+    snapshot.account?.revision,
+    snapshot.session?.id,
+    snapshot.session?.status,
+    organizations,
+  ]);
+}
+
+export function securitySnapshotChanged(previous, next) {
+  return securitySnapshotSignature(previous) !== securitySnapshotSignature(next);
+}
+
+/** Drop only retained server state owned by the organization named by an
+ * event. Account-wide/lifecycle changes have no exact owner and clear all
+ * section snapshots. The confirmed organization shell stays visible while
+ * render() revalidates the affected exact keys. */
+export function invalidateExactSnapshot(snapshots, key, options = {}) {
+  snapshots.delete(key);
+  options.inflight?.delete(key);
+  if (options.generations) {
+    options.generations.set(key, (options.generations.get(key) || 0) + 1);
+  }
+}
+
+export function invalidateOrganizationSnapshots(
+  snapshots,
+  organizationId,
+  options = {},
+) {
+  const keys = new Set(snapshots.keys());
+  for (const key of options.inflight?.keys() || []) keys.add(key);
+  for (const key of options.generations?.keys() || []) keys.add(key);
+  const prefix = organizationId ? `${organizationId}:` : null;
+  for (const key of keys) {
+    if (prefix === null || String(key).startsWith(prefix)) {
+      invalidateExactSnapshot(snapshots, key, options);
+    }
+  }
+}
+
+/** Share one exact-key request while it is current. If a security event
+ * invalidates that key before the response arrives, every waiter follows the
+ * replacement request and the stale response can neither publish nor render. */
+export function loadExactSnapshot(cache, key, loader) {
+  const existing = cache.inflight.get(key);
+  if (existing) return existing;
+  const generation = cache.generations.get(key) || 0;
+  let task;
+  task = Promise.resolve()
+    .then(loader)
+    .then(
+      (value) => {
+        if ((cache.generations.get(key) || 0) !== generation) {
+          if (cache.inflight.get(key) === task) cache.inflight.delete(key);
+          return loadExactSnapshot(cache, key, loader);
+        }
+        cache.snapshots.set(key, value);
+        return value;
+      },
+      (error) => {
+        if ((cache.generations.get(key) || 0) !== generation) {
+          if (cache.inflight.get(key) === task) cache.inflight.delete(key);
+          return loadExactSnapshot(cache, key, loader);
+        }
+        throw error;
+      },
+    )
+    .finally(() => {
+      if (cache.inflight.get(key) === task) cache.inflight.delete(key);
+    });
+  cache.inflight.set(key, task);
+  return task;
+}
+
+export function shouldRevalidateSecurityLifecycle(lastContactAt, now) {
+  return now - lastContactAt >= SECURITY_REVALIDATE_SILENCE_MS;
+}
 
 export function collaborationSectionDisabled(organization, section) {
   return (
@@ -76,7 +185,11 @@ export function memberPermissions({
   targetRole,
   isSelf,
   ownerCount,
+  directoryManaged = false,
 }) {
+  if (directoryManaged) {
+    return { canChangeRole: false, canRemove: false, availableRoles: [] };
+  }
   const lastOwner = targetRole === "owner" && ownerCount <= 1;
   const ownerMayManage = actorRole === "owner";
   const adminMayManage = actorRole === "admin" && targetRole !== "owner";
@@ -112,7 +225,19 @@ function bootDashboard() {
   };
   const snapshots = new Map();
   const inflight = new Map();
+  const snapshotGenerations = new Map();
+  const snapshotCache = {
+    snapshots,
+    inflight,
+    generations: snapshotGenerations,
+  };
   const submissions = createSubmissionGate();
+  let securitySnapshot = null;
+  let securityEventSource = null;
+  let securityRevalidation = null;
+  let securityRefreshQueued = false;
+  let securitySigningOut = false;
+  let lastSecurityContactAt = 0;
 
   const normalizeOrganization = (organization) => ({
     ...organization,
@@ -248,6 +373,7 @@ function bootDashboard() {
       const error = new Error(body?.error?.message || `Request failed (${response.status})`);
       error.code = body?.error?.code || "request_failed";
       error.status = response.status;
+      error.details = body?.error?.details;
       throw error;
     }
     return body;
@@ -314,7 +440,7 @@ function bootDashboard() {
         <div class="settings-row"><span class="settings-copy"><strong>Your role</strong><p>What you can do in this organization.</p></span><span class="settings-value"><span class="badge">${escapeHtml(organization.role)}</span></span></div>
       </div>
       <div class="card"><div class="card-title"><div><strong>Workspace access</strong><p>Capability metadata; cloud provisioning will still enforce plan and quota.</p></div></div><div class="capability-grid"><div class="capability"><span class="status-dot success"></span><div><strong>Local workspaces</strong><p>Available on your Mac</p></div></div><div class="capability ${organization.workspaceCapabilities?.cloud ? "" : "disabled"}"><span class="status-dot ${organization.workspaceCapabilities?.cloud ? "success" : ""}"></span><div><strong>Cloud workspaces</strong><p>${organization.workspaceCapabilities?.cloud ? "Organization eligible" : "Not available in Personal"}</p></div></div></div></div>
-      ${organization.isPersonal ? `<div class="notice"><strong>Personal is permanent</strong><p>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</p></div>` : canOwn(organization) ? `<div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete organization</strong><p>Revokes pending invitations and removes the organization from Zeros. Cloud-resource cleanup will be coordinated here before cloud workspaces ship.</p></div><button class="button danger" type="button" data-action="delete-organization">Delete organization</button></div></div>` : ""}
+      ${organization.isPersonal ? `<div class="notice"><strong>Personal is permanent</strong><p>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</p></div>` : canOwn(organization) ? `<div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete organization</strong><p>Revokes pending invitations and removes the organization from Zeros. Every cloud workspace must be deleted and provider cleanup verified first.</p></div><button class="button danger" type="button" data-action="delete-organization">Delete organization</button></div></div>` : ""}
     </section>`;
   }
 
@@ -337,6 +463,7 @@ function bootDashboard() {
           targetRole: member.role,
           isSelf: member.id === state.user.id,
           ownerCount,
+          directoryManaged: member.directory_managed === true,
         });
         const roleControl = permissions.canChangeRole
           ? `<select aria-label="Role for ${escapeHtml(name)}" data-member-role="${escapeHtml(member.id)}">${permissions.availableRoles.map((role) => `<option value="${role}" ${member.role === role ? "selected" : ""}>${role[0].toUpperCase() + role.slice(1)}</option>`).join("")}</select>`
@@ -344,7 +471,7 @@ function bootDashboard() {
         const removeControl = permissions.canRemove
           ? `<button class="icon-button" type="button" data-remove-member="${escapeHtml(member.id)}" aria-label="${member.id === state.user.id ? "Leave organization" : `Remove ${escapeHtml(name)}`}">×</button>`
           : "";
-        return `<div class="member-row"><span class="avatar">${escapeHtml(initials(name))}</span><span class="member-copy"><strong>${escapeHtml(name)}${member.id === state.user.id ? " (you)" : ""}</strong><small>${escapeHtml(member.email)}</small></span><span class="row-actions">${roleControl}${removeControl}</span></div>`;
+        return `<div class="member-row"><span class="avatar">${escapeHtml(initials(name))}</span><span class="member-copy"><strong>${escapeHtml(name)}${member.id === state.user.id ? " (you)" : ""}</strong><small>${escapeHtml(member.email)}${member.directory_managed === true ? " · Directory managed" : ""}</small></span><span class="row-actions">${roleControl}${removeControl}</span></div>`;
       })
       .join("");
   }
@@ -383,15 +510,7 @@ function bootDashboard() {
   }
 
   async function loadExact(key, loader) {
-    if (inflight.has(key)) return inflight.get(key);
-    const task = loader()
-      .then((value) => {
-        snapshots.set(key, value);
-        return value;
-      })
-      .finally(() => inflight.delete(key));
-    inflight.set(key, task);
-    return task;
+    return loadExactSnapshot(snapshotCache, key, loader);
   }
 
   async function render() {
@@ -546,6 +665,136 @@ function bootDashboard() {
     }
   }
 
+  function signOutForSecurityEvent() {
+    if (securitySigningOut) return;
+    securitySigningOut = true;
+    securityEventSource?.close();
+    const returnTo = `${window.location.origin}/`;
+    window.location.replace(
+      `/auth/logout?return=${encodeURIComponent(returnTo)}`,
+    );
+  }
+
+  function queueSecurityRefresh() {
+    if (securityRefreshQueued || securitySigningOut) return;
+    securityRefreshQueued = true;
+    queueMicrotask(async () => {
+      securityRefreshQueued = false;
+      await reloadMe();
+    });
+  }
+
+  function handleSecurityEvent(kind, event) {
+    lastSecurityContactAt = Date.now();
+    let data = null;
+    try {
+      data = event?.data ? JSON.parse(event.data) : null;
+    } catch {
+      return;
+    }
+    if (data && Number.isSafeInteger(data.sequence) && securitySnapshot) {
+      securitySnapshot = {
+        ...securitySnapshot,
+        cursor: Math.max(securitySnapshot.cursor || 0, data.sequence),
+      };
+    }
+    const action = securityEventAction(kind);
+    if (action.signOut) signOutForSecurityEvent();
+    else if (action.refreshOrganizations) {
+      invalidateOrganizationSnapshots(
+        snapshots,
+        typeof data?.organizationId === "string"
+          ? data.organizationId
+          : null,
+        { inflight, generations: snapshotGenerations },
+      );
+      queueSecurityRefresh();
+    }
+  }
+
+  function connectSecurityEvents(cursor) {
+    if (typeof EventSource !== "function" || securitySigningOut) return;
+    securityEventSource?.close();
+    const source = new EventSource(
+      `/api/v1/auth/events?after=${encodeURIComponent(String(cursor || 0))}`,
+    );
+    securityEventSource = source;
+    for (const kind of [
+      "account.revoked",
+      "account.authorization_changed",
+      "session.revoked",
+      "organization.access_revoked",
+      "organization.authorization_changed",
+      "organization.data_changed",
+    ]) {
+      source.addEventListener(kind, (event) => handleSecurityEvent(kind, event));
+    }
+    source.addEventListener("ready", () => {
+      lastSecurityContactAt = Date.now();
+    });
+    source.addEventListener("heartbeat", () => {
+      lastSecurityContactAt = Date.now();
+    });
+    source.onerror = () => {
+      if (
+        navigator.onLine !== false &&
+        shouldRevalidateSecurityLifecycle(lastSecurityContactAt, Date.now())
+      ) {
+        void revalidateSecurityLifecycle();
+      }
+      // Native EventSource reconnects with Last-Event-ID. Do not create a
+      // competing reconnect/poll loop here.
+    };
+  }
+
+  function revalidateSecurityLifecycle() {
+    if (securitySigningOut) return Promise.resolve();
+    if (securityRevalidation) return securityRevalidation;
+    securityRevalidation = (async () => {
+      try {
+        const next = await api("/v1/auth/snapshot");
+        lastSecurityContactAt = Date.now();
+        const changed =
+          securitySnapshot !== null &&
+          securitySnapshotChanged(securitySnapshot, next);
+        securitySnapshot = next;
+        if (changed) {
+          // A lifecycle snapshot tells us that something changed but not which
+          // retained section owns it. This is a rare silence/reconnect backstop,
+          // so clear the bounded section cache once and refetch on render.
+          invalidateOrganizationSnapshots(snapshots, null, {
+            inflight,
+            generations: snapshotGenerations,
+          });
+          queueSecurityRefresh();
+        }
+        if (
+          !securityEventSource ||
+          securityEventSource.readyState === EventSource.CLOSED
+        ) {
+          connectSecurityEvents(next.cursor);
+        }
+      } catch (error) {
+        if (error?.status === 401) signOutForSecurityEvent();
+        // A timeout/5xx is not evidence of revocation. Keep the last confirmed
+        // UI and let EventSource/lifecycle recovery try again later.
+      }
+    })().finally(() => {
+      securityRevalidation = null;
+    });
+    return securityRevalidation;
+  }
+
+  function onSecurityLifecycleHint() {
+    if (
+      document.visibilityState !== "hidden" &&
+      navigator.onLine !== false &&
+      shouldRevalidateSecurityLifecycle(lastSecurityContactAt, Date.now())
+    ) {
+      void revalidateSecurityLifecycle();
+    }
+  }
+
   document.addEventListener("click", async (event) => {
     const target = event.target.closest("button, [data-action]");
     if (!target) return;
@@ -579,7 +828,13 @@ function bootDashboard() {
       await reloadMe();
     } else if (action === "retry-section") {
       const organization = activeOrganization();
-      if (organization) snapshots.delete(`${organization.id}:${state.section}`);
+      if (organization) {
+        invalidateExactSnapshot(
+          snapshots,
+          `${organization.id}:${state.section}`,
+          { inflight, generations: snapshotGenerations },
+        );
+      }
       await render();
     } else if (action === "remove-organization-logo") {
       const organization = activeOrganization();
@@ -614,6 +869,10 @@ function bootDashboard() {
       if (!window.confirm(`Delete ${organization.name}? This cannot be undone.`)) return;
       try {
         await api(`/v1/organizations/${organization.id}`, { method: "DELETE", body: {} });
+        invalidateOrganizationSnapshots(snapshots, organization.id, {
+          inflight,
+          generations: snapshotGenerations,
+        });
         state.organizations = state.organizations.filter((item) => item.id !== organization.id);
         state.activeOrganizationId = state.organizations.find((item) => item.isPersonal)?.id || null;
         state.section = "profile";
@@ -630,7 +889,10 @@ function bootDashboard() {
       if (!window.confirm(self ? "Leave this organization?" : "Remove this member?")) return;
       try {
         await api(`/v1/organizations/${organization.id}/members/${memberId}`, { method: "DELETE", body: {} });
-        snapshots.delete(`${organization.id}:members`);
+        invalidateOrganizationSnapshots(snapshots, organization.id, {
+          inflight,
+          generations: snapshotGenerations,
+        });
         if (self) await reloadMe();
         else await render();
       } catch (error) {
@@ -641,7 +903,10 @@ function bootDashboard() {
       if (!organization) return;
       try {
         await api(`/v1/organizations/${organization.id}/invitations/${target.dataset.revokeInvite}`, { method: "DELETE", body: {} });
-        snapshots.delete(`${organization.id}:members`);
+        invalidateExactSnapshot(snapshots, `${organization.id}:members`, {
+          inflight,
+          generations: snapshotGenerations,
+        });
         await render();
       } catch (error) {
         toast(error.message, true);
@@ -697,13 +962,19 @@ function bootDashboard() {
         method: "PATCH",
         body: { role: select.value },
       });
-      snapshots.delete(`${organization.id}:members`);
+      invalidateOrganizationSnapshots(snapshots, organization.id, {
+        inflight,
+        generations: snapshotGenerations,
+      });
       toast("Member role updated");
       if (select.dataset.memberRole === state.user.id) await reloadMe();
       else await render();
     } catch (error) {
       toast(error.message, true);
-      snapshots.delete(`${organization.id}:members`);
+      invalidateExactSnapshot(snapshots, `${organization.id}:members`, {
+        inflight,
+        generations: snapshotGenerations,
+      });
       await render();
     }
   });
@@ -753,7 +1024,10 @@ function bootDashboard() {
           method: "POST",
           body: { email: data.get("email"), role: data.get("role") },
         });
-        snapshots.delete(`${organization.id}:members`);
+        invalidateExactSnapshot(snapshots, `${organization.id}:members`, {
+          inflight,
+          generations: snapshotGenerations,
+        });
         form.reset();
         const link = result.invitation?.acceptUrl;
         if (link && await tryWriteClipboard(navigator.clipboard, link)) {
@@ -778,6 +1052,11 @@ function bootDashboard() {
   if (boot.action === "create-organization") {
     document.getElementById("create-organization-dialog")?.showModal();
   }
+  window.addEventListener("focus", onSecurityLifecycleHint);
+  window.addEventListener("online", onSecurityLifecycleHint);
+  window.addEventListener("pageshow", onSecurityLifecycleHint);
+  document.addEventListener("visibilitychange", onSecurityLifecycleHint);
+  void revalidateSecurityLifecycle();
   void render();
 }
 

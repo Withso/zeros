@@ -87,4 +87,59 @@ describe("readWorkspaceImageThumbnail", () => {
     });
     expect(mocks.bridgeFileRead).not.toHaveBeenCalled();
   });
+
+  it("falls back to the workspace engine when the local thumbnail command cannot reach the file", async () => {
+    mocks.nativeInvoke.mockRejectedValue(new Error("unknown native command"));
+    mocks.resolveWorkspaceId.mockResolvedValue("ws_cloud-preview");
+    mocks.bridgeFileRead.mockResolvedValue({
+      kind: "image",
+      path: ".context-graph/local/attachments/att-1/shot.png",
+      bytes: 42_000,
+      dataUrl: "data:image/png;base64,REMOTE",
+    });
+
+    await expect(
+      readWorkspaceImageThumbnail(
+        "/workspace/cloud",
+        ".context-graph/local/attachments/att-1/shot.png",
+        64,
+      ),
+    ).resolves.toMatchObject({
+      kind: "image",
+      dataUrl: "data:image/png;base64,REMOTE",
+      fullResolution: true,
+    });
+    expect(mocks.bridgeFileRead).toHaveBeenCalledWith(
+      mocks.bridge,
+      "ws_cloud-preview",
+      ".context-graph/local/attachments/att-1/shot.png",
+    );
+  });
+
+  it("retains the engine's deterministic size refusal after a native decode error", async () => {
+    mocks.nativeInvoke.mockResolvedValue({
+      kind: "error",
+      path: "large.png",
+      bytes: 8_000_000,
+      error: "native format could not be decoded",
+    });
+    mocks.resolveWorkspaceId.mockResolvedValue("ws_cloud-preview");
+    mocks.bridgeFileRead.mockResolvedValue({
+      kind: "too-large",
+      path: "large.png",
+      bytes: 8_000_000,
+      error: "file is too large to preview",
+    });
+
+    await expect(
+      readWorkspaceImageThumbnail(
+        "/workspace/cloud",
+        ".context-graph/local/attachments/att-1/large.png",
+        64,
+      ),
+    ).resolves.toMatchObject({
+      kind: "too-large",
+      error: "file is too large to preview",
+    });
+  });
 });

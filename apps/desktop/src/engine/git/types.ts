@@ -24,8 +24,40 @@ export type WorkspaceStatus =
   | "cancelled";
 
 export type PrState = "draft" | "ready" | "merged" | "closed";
-export type WorkspaceKind = "code" | "design";
+/** The workspace's CURRENT presentation mode — one workspace, two surfaces.
+ *
+ *  "code" shows the coding workbench; "design" shows the canvas over the same
+ *  semantic workspace. This value grants no filesystem or tool authority.
+ *  Code actors may continue working outside protected Design territory while
+ *  the user views Design. Every workspace still uses the same provisioning
+ *  pipeline; the surface is a reversible state changed by
+ *  `workspace.setMode` (engine/git/design-mode.ts), not a workspace species.
+ *
+ *  Persisted canonically in `workspaces.view_mode` and carried explicitly as
+ *  `viewMode`. The older `kind` DB/wire field remains a mirrored compatibility
+ *  projection during rolling upgrades; neither field is an authorization
+ *  input. */
+export type WorkspaceViewMode = "code" | "design";
+/** Compatibility name retained while call sites migrate to the presentation-
+ * only `WorkspaceViewMode` vocabulary. */
+export type WorkspaceMode = WorkspaceViewMode;
+/** Compatibility alias — `kind` predates explicit `viewMode`. New code should
+ *  read `workspaceViewMode(...)`; the wire/DB field remains mirrored only for
+ *  older clients and recovery data. */
+export type WorkspaceKind = WorkspaceMode;
 export type WorkspacePlacement = "local" | "cloud";
+
+/** Read the presentation mode from the legacy persisted/wire field. Keeping
+ * this projection explicit prevents authorization code from treating `kind`
+ * as an actor role or a write capability. */
+export function workspaceViewMode(
+  workspace: Pick<Workspace, "kind" | "viewMode">,
+): WorkspaceViewMode {
+  return workspace.viewMode === "design" ||
+    (workspace.viewMode === undefined && workspace.kind === "design")
+    ? "design"
+    : "code";
+}
 
 /** Background setup-script state. NULL/undefined = no setup configured or it
  *  never ran. "running" while the setup PTY is live, then "passed"/"failed" on
@@ -45,11 +77,15 @@ export type DetectedTool =
 
 export interface Workspace {
   id: string;
-  /** Product surface and provisioning contract. Design workspaces retain the
-   * normal Git lifecycle but expose only `Zeros Design/` to agents. */
-  kind?: WorkspaceKind;
+  /** Explicit presentation state. Absent only on legacy wire objects and
+   * recovery seeds. It never participates in mutation authorization. */
+  viewMode?: WorkspaceViewMode;
+  /** Legacy presentation projection. Mutable via workspace.setMode and
+   * mirrored with `viewMode`; never use it as actor identity or authority.
+   * Absent means "code" for pre-design rows. */
+  kind?: WorkspaceMode;
   /** Organization that semantically owns this workspace. NULL identifies a
-   * pre-v28 local workspace and is interpreted as Personal until claimed. */
+   * pre-v31 local workspace and is interpreted as Personal until claimed. */
   organizationId?: string | null;
   /** Execution location. Desktop creation currently emits only `local`;
    * `cloud` is reserved for the organization-only provisioner. */
@@ -187,8 +223,11 @@ export interface PR {
 }
 
 export interface CreateWorkspaceOptions {
-  /** Defaults to code for compatibility with every pre-design caller. */
-  kind?: WorkspaceKind;
+  /** INITIAL mode for the new workspace; defaults to code. Creation always
+   *  runs the full code provisioning pipeline (same base ref, seeding, setup);
+   *  "design" additionally enters design mode at the end of create — the same
+   *  transition workspace.setMode performs on a live workspace. */
+  kind?: WorkspaceMode;
   organizationId?: string | null;
   placement?: WorkspacePlacement;
   /** Optional — createWorkspace derives it from the origin URL

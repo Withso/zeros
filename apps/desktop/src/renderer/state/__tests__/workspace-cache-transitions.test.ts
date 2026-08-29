@@ -2,9 +2,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type {
   CreateWorkspaceFromBranchStatus,
+  DesignWorkspaceSnapshotWire,
   Workspace,
   WorkspaceLifecycleStatus,
 } from "../../platform/git";
+import {
+  designWorkspaceSnapshotCache,
+  resetDesignWorkspaceCacheForTests,
+} from "../../features/design-workspace/state/design-workspace-cache";
 import { setActiveBridge } from "../../platform/bridge/active-bridge";
 import type { RuntimeClient } from "../../platform/bridge/ws-client";
 import {
@@ -12,14 +17,19 @@ import {
   classifyTimedOutWorkspaceCreate,
   commitWorkspaceArchived,
   commitWorkspaceDeleted,
+  commitWorkspaceMode,
   commitWorkspaceRestored,
+  peekLiveWorkspaceUnion,
   peekWorkspacesFor,
   reloadWorkspacesFor,
   runWorkspaceDiscoveryForTesting,
   setWorkspaceRowsForTesting,
 } from "../use-projects";
 
-afterEach(() => setActiveBridge(null));
+afterEach(() => {
+  setActiveBridge(null);
+  resetDesignWorkspaceCacheForTests();
+});
 
 function workspace(
   id: string,
@@ -47,6 +57,19 @@ function workspace(
 }
 
 describe("confirmed workspace cache transitions", () => {
+  it("exposes one synchronous deduplicated union for cross-repository navigation", () => {
+    const a = workspace("ws_union_a", "cache-union-a");
+    const b = workspace("ws_union_b", "cache-union-b");
+    setWorkspaceRowsForTesting(a.repoSlug, [a]);
+    setWorkspaceRowsForTesting(b.repoSlug, [b]);
+
+    const union = peekLiveWorkspaceUnion();
+    expect(union.filter((row) => row.id === a.id || row.id === b.id)).toEqual([
+      a,
+      b,
+    ]);
+  });
+
   it("does not call a rowless create rolled back while its exact flight is active", () => {
     const active: WorkspaceLifecycleStatus = {
       active: true,
@@ -135,6 +158,68 @@ describe("confirmed workspace cache transitions", () => {
 
     commitWorkspaceDeleted(restored);
     expect(peekWorkspacesFor(slug)).toEqual([]);
+  });
+
+  it("commits only the confirmed mode onto the newest exact-key row", () => {
+    const slug = "cache-transition-mode";
+    const target = {
+      ...workspace("ws_mode", slug),
+      kind: "code" as const,
+      status: "done" as const,
+      lastActiveAt: 42,
+    };
+    const sibling = workspace("ws_sibling", slug);
+    setWorkspaceRowsForTesting(slug, [target, sibling]);
+
+    commitWorkspaceMode({
+      workspaceId: target.id,
+      repoSlug: slug,
+      mode: "design",
+    });
+
+    const rows = peekWorkspacesFor(slug);
+    expect(rows?.[0]).toEqual({ ...target, kind: "design" });
+    expect(rows?.[1]).toBe(sibling);
+  });
+
+  it("publishes the mode-switch snapshot receipt before revealing Design", () => {
+    const slug = "cache-transition-design-receipt";
+    const target = {
+      ...workspace("ws_design_receipt", slug),
+      kind: "code" as const,
+    };
+    const receipt: DesignWorkspaceSnapshotWire = {
+      protocolCapability: "c".repeat(64),
+      frames: [],
+      tokens: [],
+      tokenSourceVersion: "a".repeat(24),
+      assets: [],
+      lint: {
+        workspacePath: target.path,
+        checkedFiles: [],
+        violations: [],
+        healedOids: 0,
+      },
+    };
+    setWorkspaceRowsForTesting(slug, [target]);
+
+    const commitWithReceipt = commitWorkspaceMode as unknown as (args: {
+      workspaceId: string;
+      repoSlug: string;
+      mode: "design";
+      snapshot: DesignWorkspaceSnapshotWire;
+    }) => void;
+    commitWithReceipt({
+      workspaceId: target.id,
+      repoSlug: slug,
+      mode: "design",
+      snapshot: receipt,
+    });
+
+    expect(
+      designWorkspaceSnapshotCache.peekSnapshot(target.id).data,
+    ).toBe(receipt);
+    expect(peekWorkspacesFor(slug)?.[0]?.kind).toBe("design");
   });
 
   it("does not manufacture a partial exact-key list for a cold repository", () => {

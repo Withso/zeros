@@ -92,7 +92,7 @@ describe("workspace change-line generations", () => {
 });
 
 describe("workspace change-line targets", () => {
-  it("keeps the established code target while design tabs start no Git read", () => {
+  it("targets design-mode tabs like any other (concurrent duality)", () => {
     const base = {
       id: "ws-a",
       path: "/repo/worktrees/a",
@@ -103,8 +103,17 @@ describe("workspace change-line targets", () => {
     expect(
       workspaceChangeLinesTarget({ ...base, kind: "code" } as Workspace),
     ).toBe("ws-a");
+    // A design-mode workspace's code territory stays live (agents keep
+    // committing there), so its tab shows the same ± badge as any other.
     expect(
       workspaceChangeLinesTarget({ ...base, kind: "design" } as Workspace),
+    ).toBe("ws-a");
+    expect(
+      workspaceChangeLinesTarget({
+        ...base,
+        kind: "design",
+        present: false,
+      } as Workspace),
     ).toBeNull();
   });
 });

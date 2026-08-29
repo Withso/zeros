@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "backend": "cloud-worker",
+  "profile": "zeros-cloud-worker-v1",
+  "uid": 10001,
+  "gid": 10001,
+  "toolchain": {
+    "node": "/usr/local/bin/node",
+    "supervisor": "/opt/zeros/apps/desktop/src/engine/agents/containment/zsr-supervisor.mjs",
+    "bwrap": "/usr/bin/bwrap",
+    "setpriv": "/usr/bin/setpriv"
+  }
+}

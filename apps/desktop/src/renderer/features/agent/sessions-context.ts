@@ -16,7 +16,12 @@
 
 import { createContext } from "react";
 import type {
+  AgentConfigurationProvenance,
   ContentBlock,
+  AgentGoal,
+  AgentGoalStatus,
+  AgentMemorySettings,
+  AgentProviderQuota,
   InitializeResponse,
   QuestionResponse,
   RequestPermissionResponse,
@@ -35,9 +40,20 @@ import type {
 export interface StartForChatOptions extends StartSessionOptions {
   /** Absolute path the agent subprocess should use as cwd. */
   cwd?: string;
-  /** Force a fresh session even when one is already ready. Used when
-   *  the user changes model/effort. */
+  /** Force the engine execution to rebuild even when one is already ready.
+   *  A durable provider conversation is resumed unless replacement is
+   *  explicitly requested below. Used when model/effort config drifted. */
   force?: boolean;
+  /** `ensureSession` only: replace the durable provider conversation instead
+   *  of resuming it. This is reserved for the cold fallback after a provider
+   *  resume has already confirmed that the old conversation is unusable. */
+  replaceProviderConversation?: boolean;
+  /** `loadIntoChat` only: re-adopt a live engine execution but never mint one.
+   *  A miss resolves `false` with the chat left `idle` (transcript intact,
+   *  provider binding intact) — no boundary is admitted. Used by the lazy boot
+   *  resume for surfaced-but-unfocused chats; see
+   *  AgentLoadSessionMessage.adoptOnly. */
+  adoptOnly?: boolean;
 }
 
 /** Full replacement payload for a still-queued send — the same pieces
@@ -100,6 +116,10 @@ export interface SessionsActions {
   /** Stop one background task while leaving the foreground turn and sibling
    * tasks alone. Fire-and-forget; the next provider snapshot removes it. */
   stopBackgroundTask(chatId: string, taskId: string): void;
+  openBoundaryPort(
+    chatId: string,
+    portId: string,
+  ): Promise<{ url: string; admissionUrl: string; expiresAt: number }>;
   respondToPermission(
     chatId: string,
     response: RequestPermissionResponse,
@@ -126,6 +146,32 @@ export interface SessionsActions {
    *  store; this just applies the full composer env to the running session so
    *  the change takes effect on the next turn instead of only on a rebuild. */
   updateConfig(chatId: string): void;
+  setGoal(
+    chatId: string,
+    update: {
+      objective?: string;
+      status?: AgentGoalStatus;
+      tokenBudget?: number | null;
+    },
+  ): Promise<AgentGoal>;
+  clearGoal(chatId: string): Promise<void>;
+  retrySafetyReview(chatId: string, retryId: string): Promise<void>;
+  readMemorySettings(agentId: string): Promise<AgentMemorySettings>;
+  updateMemorySettings(
+    agentId: string,
+    settings: Partial<
+      Pick<
+        AgentMemorySettings,
+        "localMemoriesEnabled" | "toolAssistedGenerationEnabled"
+      >
+    >,
+  ): Promise<AgentMemorySettings>;
+  resetMemory(agentId: string): Promise<void>;
+  readConfigurationProvenance(
+    agentId: string,
+    cwd?: string,
+  ): Promise<AgentConfigurationProvenance>;
+  readProviderQuota(agentId: string): Promise<AgentProviderQuota | null>;
   /** Drop a still-pending queued send (by its placeholder message id) and
    *  remove its greyed bubble, before it flushes. */
   removeQueued(chatId: string, messageId: string): void;

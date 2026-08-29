@@ -35,7 +35,7 @@ const homeSource = `<!doctype html>
       body { margin: 0; background: white; color: black; font-family: ui-sans-serif, system-ui, sans-serif; }
       main { min-height: 100vh; display: flex; flex-direction: column; justify-content: space-between; padding: 72px; }
       nav { display: flex; align-items: center; justify-content: space-between; }
-      .mark { font-weight: 700; letter-spacing: -0.04em; }
+      .mark { margin-left: 2px; font-weight: 700; letter-spacing: -0.04em; }
       .hero { display: flex; max-width: 900px; flex-direction: column; gap: 24px; }
       h1 { margin: 0; font-size: 88px; line-height: 0.95; letter-spacing: -0.06em; }
       p { max-width: 620px; margin: 0; color: dimgray; font-size: 24px; line-height: 1.5; }
@@ -133,14 +133,22 @@ async function main() {
   const { DesignWorkspaceSidebar } =
     await import("../features/design-workspace/design-workspace-sidebar");
   const {
+    applyDesignWorkspaceRefreshVersion,
+    designFoundationCache,
+    designFoundationKey,
     designFrameDocumentCache,
     designFrameDocumentKey,
     designWorkspaceSnapshotCache,
+    setDesignNodeTextCached,
+    updateDesignNodeStylesCached,
   } = await import("../features/design-workspace/state/design-workspace-cache");
+  const { captureDesignRuntimeScreenshot } =
+    await import("../features/design-workspace/state/design-selection");
   const { useDesignWorkspaceUiStore } =
     await import("../features/design-workspace/state/design-workspace-ui");
   const { useDesignRuntimeStore } =
     await import("../features/design-workspace/state/design-runtime-store");
+  const { setActiveBridge } = await import("../platform/bridge/active-bridge");
   const { setWorkspaceRowsForTesting } = await import("../state/use-projects");
   const { useWorkspaceStore } = await import("../state/store");
 
@@ -218,6 +226,48 @@ async function main() {
       healedOids: 0,
     },
   });
+  for (const [file, sourceVersion, nodeCount] of [
+    ["home.html", HOME_SOURCE_VERSION, 12],
+    ["pricing.html", PRICING_SOURCE_VERSION, 18],
+  ] as const) {
+    designFoundationCache.setData(
+      designFoundationKey(workspaceId, file, sourceVersion),
+      {
+        summary: {
+          apiVersion: 1,
+          documentId: `harness:${file}`,
+          revision: `harness:${sourceVersion}`,
+          entryFile: file,
+          fileCount: 1,
+          nodeCount,
+          valid: true,
+          diagnostics: [],
+          lastValidRevision: `harness:${sourceVersion}`,
+          history: {
+            canUndo: false,
+            canRedo: false,
+            undoDepth: 0,
+            redoDepth: 0,
+            retainedBytes: 0,
+            retainedReceiptBytes: 0,
+            revision: `harness:${sourceVersion}`,
+            lastReconciliationReason: null,
+          },
+        },
+        foundation: {
+          documentId: `harness:${file}`,
+          revision: `harness:${sourceVersion}`,
+          manifest: {
+            schemaVersion: 1,
+            parameters: [],
+            variants: [],
+            components: [],
+          },
+          keyframes: [],
+        },
+      } as never,
+    );
+  }
   designFrameDocumentCache.setData(
     designFrameDocumentKey(workspaceId, "home.html", HOME_SOURCE_VERSION),
     {
@@ -389,6 +439,735 @@ async function main() {
     .getState()
     .setSelection(workspaceId, "home.html", "home-heading");
 
+  let currentWorkspaceSnapshot =
+    designWorkspaceSnapshotCache.getSnapshot(workspaceId).data!;
+  let currentHomeSource = homeSource;
+  let styleGenerationCounter = 0;
+  let textTransactionCounter = 0;
+  let looseTextFrameCounter = 0;
+  let appendedTextCounter = 0;
+  const frameDeletionUndo: Array<
+    (typeof currentWorkspaceSnapshot.frames)[number]
+  > = [];
+  const frameDeletionRedo: Array<
+    (typeof currentWorkspaceSnapshot.frames)[number]
+  > = [];
+  const nextStyleSourceVersion = () => {
+    styleGenerationCounter += 1;
+    return styleGenerationCounter.toString(16).padStart(24, "c");
+  };
+  const styleMutationSources: string[] = [];
+  const designShortcutOperations: string[] = [];
+  (
+    window as Window & {
+      __zerosHarnessStyleMutationSources?: string[];
+    }
+  ).__zerosHarnessStyleMutationSources = styleMutationSources;
+  (
+    window as Window & {
+      __zerosHarnessDesignShortcutOperations?: string[];
+    }
+  ).__zerosHarnessDesignShortcutOperations = designShortcutOperations;
+  setActiveBridge({
+    status: "connected",
+    on: () => () => {},
+    onStatusChange: () => () => {},
+    request: async (message: {
+      type?: string;
+      op?: string;
+      params?: Record<string, unknown>;
+    }) => {
+      if (message.op === "design.node.styles") {
+        const requestedSourceVersion = String(
+          message.params?.sourceVersion ?? "",
+        );
+        const currentSourceVersion = currentWorkspaceSnapshot.frames.find(
+          (frame) => frame.file === "home.html",
+        )?.sourceVersion;
+        if (requestedSourceVersion !== currentSourceVersion) {
+          throw new Error(
+            `Design frame changed before the mutation: expected ${currentSourceVersion}, received ${requestedSourceVersion}.`,
+          );
+        }
+        designShortcutOperations.push("style:start");
+        styleMutationSources.push(requestedSourceVersion);
+        const nextSourceVersion = nextStyleSourceVersion();
+        const nextWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          frames: currentWorkspaceSnapshot.frames.map((frame) =>
+            frame.file === "home.html"
+              ? {
+                  ...frame,
+                  sourceVersion: nextSourceVersion,
+                  modifiedAt: frame.modifiedAt + 1,
+                }
+              : frame,
+          ),
+          // Runtime audits are exact-source data. The live browser repopulates
+          // this after adoption; the inspector must retain its confirmed row
+          // rather than flashing it off during this engine response.
+          lint: { ...currentWorkspaceSnapshot.lint, violations: [] },
+        };
+        designFrameDocumentCache.setData(
+          designFrameDocumentKey(workspaceId, "home.html", nextSourceVersion),
+          {
+            ...nextWorkspaceSnapshot.frames[0]!,
+            source: currentHomeSource,
+            srcDoc: withDesignRuntime(currentHomeSource, nextSourceVersion),
+            tree: [],
+          },
+        );
+        const previousFoundation = designFoundationCache.getSnapshot(
+          designFoundationKey(workspaceId, "home.html", requestedSourceVersion),
+        ).data;
+        if (previousFoundation) {
+          designFoundationCache.setData(
+            designFoundationKey(workspaceId, "home.html", nextSourceVersion),
+            {
+              ...previousFoundation,
+              summary: {
+                ...previousFoundation.summary,
+                revision: `harness:${nextSourceVersion}`,
+              },
+              foundation: {
+                ...previousFoundation.foundation,
+                revision: `harness:${nextSourceVersion}`,
+              },
+            },
+          );
+        }
+        currentWorkspaceSnapshot = nextWorkspaceSnapshot;
+        // Model the real worktree watcher seeing the file before this bridge
+        // reply reaches updateDesignNodeStylesCached.
+        applyDesignWorkspaceRefreshVersion(workspaceId, 1);
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        designShortcutOperations.push("style:end");
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: {
+            mutation: {
+              changed: true,
+              frame: {
+                ...nextWorkspaceSnapshot.frames[0]!,
+                source: currentHomeSource,
+                srcDoc: withDesignRuntime(currentHomeSource, nextSourceVersion),
+                tree: [],
+              },
+              lint: nextWorkspaceSnapshot.lint,
+            },
+            snapshot: nextWorkspaceSnapshot,
+            foundationRevision: {
+              before: `harness:${requestedSourceVersion}`,
+              after: `harness:${nextSourceVersion}`,
+            },
+          },
+        };
+      }
+      if (message.op === "design.transaction.apply") {
+        const transaction = message.params?.transaction as
+          | {
+              transactionId?: string;
+              documentId?: string;
+              operations?: Array<{
+                operationId?: string;
+                type?: string;
+                nodeId?: string;
+                text?: string;
+                styles?: Record<string, string>;
+              }>;
+            }
+          | undefined;
+        const textOperation = transaction?.operations?.find(
+          (operation) => operation.type === "node.set-text",
+        );
+        if (textOperation) {
+          const frameFile = String(message.params?.frame ?? "");
+          const currentFrame = currentWorkspaceSnapshot.frames.find(
+            (frame) => frame.file === frameFile,
+          );
+          if (!currentFrame || !textOperation.nodeId) {
+            throw new Error("The text transaction target is unavailable.");
+          }
+          const beforeRevision = `harness:${currentFrame.sourceVersion}`;
+          const parsed = new DOMParser().parseFromString(
+            currentHomeSource,
+            "text/html",
+          );
+          const target = parsed.querySelector<HTMLElement>(
+            `[data-oid="${CSS.escape(textOperation.nodeId)}"]`,
+          );
+          if (!target) {
+            throw new Error("The text transaction node is unavailable.");
+          }
+          target.textContent = String(textOperation.text ?? "");
+          for (const operation of transaction?.operations ?? []) {
+            if (operation.type !== "node.set-styles") continue;
+            for (const [property, value] of Object.entries(
+              operation.styles ?? {},
+            )) {
+              target.style.setProperty(property, value);
+            }
+          }
+          currentHomeSource = `<!doctype html>${parsed.documentElement.outerHTML}`;
+          textTransactionCounter += 1;
+          const nextSourceVersion = textTransactionCounter
+            .toString(16)
+            .padStart(24, "b")
+            .slice(-24);
+          const nextWorkspaceSnapshot = {
+            ...currentWorkspaceSnapshot,
+            frames: currentWorkspaceSnapshot.frames.map((frame) =>
+              frame.file === frameFile
+                ? {
+                    ...frame,
+                    sourceVersion: nextSourceVersion,
+                    modifiedAt: frame.modifiedAt + 1,
+                  }
+                : frame,
+            ),
+            lint: { ...currentWorkspaceSnapshot.lint, violations: [] },
+          };
+          const nextFrame = nextWorkspaceSnapshot.frames.find(
+            (frame) => frame.file === frameFile,
+          )!;
+          designFrameDocumentCache.setData(
+            designFrameDocumentKey(workspaceId, frameFile, nextSourceVersion),
+            {
+              ...nextFrame,
+              source: currentHomeSource,
+              srcDoc: withDesignRuntime(currentHomeSource, nextSourceVersion),
+              tree: [],
+            },
+          );
+          const previousFoundation = designFoundationCache.getSnapshot(
+            designFoundationKey(
+              workspaceId,
+              frameFile,
+              currentFrame.sourceVersion,
+            ),
+          ).data;
+          if (previousFoundation) {
+            designFoundationCache.setData(
+              designFoundationKey(workspaceId, frameFile, nextSourceVersion),
+              {
+                ...previousFoundation,
+                summary: {
+                  ...previousFoundation.summary,
+                  revision: `harness:${nextSourceVersion}`,
+                },
+                foundation: {
+                  ...previousFoundation.foundation,
+                  revision: `harness:${nextSourceVersion}`,
+                },
+              },
+            );
+          }
+          currentWorkspaceSnapshot = nextWorkspaceSnapshot;
+          applyDesignWorkspaceRefreshVersion(
+            workspaceId,
+            10 + textTransactionCounter,
+          );
+          await new Promise((resolve) => window.setTimeout(resolve, 50));
+          const afterRevision = `harness:${nextSourceVersion}`;
+          return {
+            type: "WORKSPACE_RESPONSE",
+            result: {
+              result: {
+                revision: afterRevision,
+                receipt: {
+                  status: "applied",
+                  transactionId: transaction?.transactionId ?? "harness:text",
+                  documentId: transaction?.documentId ?? "harness:home.html",
+                  beforeRevision,
+                  afterRevision,
+                  appliedOperationIds: (transaction?.operations ?? []).map(
+                    (operation) => operation.operationId ?? "harness:operation",
+                  ),
+                  skippedOperationIds: [],
+                },
+              },
+              snapshot: nextWorkspaceSnapshot,
+            },
+          };
+        }
+      }
+      if (message.op === "design.node.text") {
+        const nextSourceVersion = "ffffffffffffffffffffffff";
+        const previousSourceVersion = String(
+          message.params?.sourceVersion ?? "",
+        );
+        const nextWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          frames: currentWorkspaceSnapshot.frames.map((frame) =>
+            frame.file === "home.html"
+              ? {
+                  ...frame,
+                  sourceVersion: nextSourceVersion,
+                  modifiedAt: frame.modifiedAt + 1,
+                }
+              : frame,
+          ),
+          lint: { ...currentWorkspaceSnapshot.lint, violations: [] },
+        };
+        designFrameDocumentCache.setData(
+          designFrameDocumentKey(workspaceId, "home.html", nextSourceVersion),
+          {
+            ...nextWorkspaceSnapshot.frames[0]!,
+            source: currentHomeSource,
+            srcDoc: withDesignRuntime(currentHomeSource, nextSourceVersion),
+            tree: [],
+          },
+        );
+        const previousFoundation = designFoundationCache.getSnapshot(
+          designFoundationKey(workspaceId, "home.html", previousSourceVersion),
+        ).data;
+        if (previousFoundation) {
+          designFoundationCache.setData(
+            designFoundationKey(workspaceId, "home.html", nextSourceVersion),
+            {
+              ...previousFoundation,
+              summary: {
+                ...previousFoundation.summary,
+                revision: `harness:${nextSourceVersion}`,
+              },
+              foundation: {
+                ...previousFoundation.foundation,
+                revision: `harness:${nextSourceVersion}`,
+              },
+            },
+          );
+        }
+        currentWorkspaceSnapshot = nextWorkspaceSnapshot;
+        applyDesignWorkspaceRefreshVersion(workspaceId, 2);
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: {
+            mutation: {
+              changed: true,
+              frame: {
+                ...nextWorkspaceSnapshot.frames[0]!,
+                source: currentHomeSource,
+                srcDoc: withDesignRuntime(currentHomeSource, nextSourceVersion),
+                tree: [],
+              },
+              lint: nextWorkspaceSnapshot.lint,
+            },
+            snapshot: nextWorkspaceSnapshot,
+            foundationRevision: {
+              before: `harness:${previousSourceVersion}`,
+              after: `harness:${nextSourceVersion}`,
+            },
+          },
+        };
+      }
+      if (message.op === "design.node.html") {
+        const frameFile = String(message.params?.frame ?? "");
+        const parentNodeId = String(message.params?.nodeId ?? "");
+        const html = String(message.params?.html ?? "");
+        const previousSourceVersion = String(
+          message.params?.sourceVersion ?? "",
+        );
+        if (
+          frameFile !== "home.html" ||
+          parentNodeId !== "home-main" ||
+          message.params?.mode !== "append" ||
+          !html.includes("data-oid=")
+        ) {
+          throw new Error("The harness only appends text to home-main.");
+        }
+        appendedTextCounter += 1;
+        const nextSourceVersion = appendedTextCounter
+          .toString(16)
+          .padStart(24, "d")
+          .slice(-24);
+        currentHomeSource = currentHomeSource.replace(
+          /<\/main>/i,
+          `${html}</main>`,
+        );
+        const nextWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          frames: currentWorkspaceSnapshot.frames.map((frame) =>
+            frame.file === frameFile
+              ? {
+                  ...frame,
+                  nodeCount: frame.nodeCount + 1,
+                  sourceVersion: nextSourceVersion,
+                  modifiedAt: frame.modifiedAt + 1,
+                }
+              : frame,
+          ),
+        };
+        const nextFrame = nextWorkspaceSnapshot.frames.find(
+          (frame) => frame.file === frameFile,
+        )!;
+        designFrameDocumentCache.setData(
+          designFrameDocumentKey(workspaceId, frameFile, nextSourceVersion),
+          {
+            ...nextFrame,
+            source: currentHomeSource,
+            srcDoc: withDesignRuntime(currentHomeSource, nextSourceVersion),
+            tree: [],
+          },
+        );
+        const previousFoundation = designFoundationCache.getSnapshot(
+          designFoundationKey(workspaceId, frameFile, previousSourceVersion),
+        ).data;
+        if (previousFoundation) {
+          designFoundationCache.setData(
+            designFoundationKey(workspaceId, frameFile, nextSourceVersion),
+            {
+              ...previousFoundation,
+              summary: {
+                ...previousFoundation.summary,
+                revision: `harness:${nextSourceVersion}`,
+              },
+              foundation: {
+                ...previousFoundation.foundation,
+                revision: `harness:${nextSourceVersion}`,
+              },
+            },
+          );
+        }
+        currentWorkspaceSnapshot = nextWorkspaceSnapshot;
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: {
+            mutation: {
+              changed: true,
+              frame: {
+                ...nextFrame,
+                source: currentHomeSource,
+                srcDoc: withDesignRuntime(currentHomeSource, nextSourceVersion),
+                tree: [],
+              },
+              lint: nextWorkspaceSnapshot.lint,
+            },
+            snapshot: nextWorkspaceSnapshot,
+            foundationRevision: {
+              before: `harness:${previousSourceVersion}`,
+              after: `harness:${nextSourceVersion}`,
+            },
+          },
+        };
+      }
+      if (
+        message.op === "design.frame.create" &&
+        message.params?.kind === "text"
+      ) {
+        looseTextFrameCounter += 1;
+        const encode = (value: unknown) =>
+          String(value ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+        const file = `canvas-text-${looseTextFrameCounter}.html`;
+        const sourceVersion = looseTextFrameCounter
+          .toString(16)
+          .padStart(24, "e")
+          .slice(-24);
+        const nodeId = String(message.params.textNodeId ?? "canvas-text");
+        const text = String(message.params.text ?? "");
+        const title = String(message.params.title ?? "Text");
+        const frame = {
+          file,
+          title,
+          kind: "text" as const,
+          width: Number(message.params.w ?? 1),
+          height: Number(message.params.h ?? 1),
+          x: Number(message.params.x ?? 0),
+          y: Number(message.params.y ?? 0),
+          z: Number(message.params.z ?? currentWorkspaceSnapshot.frames.length),
+          nodeCount: 1,
+          modifiedAt: Date.now(),
+          sourceVersion,
+        };
+        const source = `<!doctype html><html><head><meta name="zeros-frame" content="width=${frame.width},height=${frame.height},kind=text,title=${encode(title)}"><style>*{box-sizing:border-box}html,body{width:100%;height:100%;min-height:0;margin:0;background:transparent;overflow:visible}body{font:16px/1.5 ui-sans-serif,system-ui,sans-serif;color:black}body>[data-oid]{${message.params.textFixedSize === true ? "width:100%;min-height:100%;" : "width:max-content;max-width:none;"}margin:0;white-space:pre-wrap;overflow-wrap:anywhere}</style><title>${encode(title)}</title></head><body><div data-oid="${encode(nodeId)}">${encode(text)}</div></body></html>`;
+        currentWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          frames: [...currentWorkspaceSnapshot.frames, frame],
+        };
+        designFrameDocumentCache.setData(
+          designFrameDocumentKey(workspaceId, file, sourceVersion),
+          {
+            ...frame,
+            source,
+            srcDoc: withDesignRuntime(source, sourceVersion),
+            tree: [],
+          },
+        );
+        designFoundationCache.setData(
+          designFoundationKey(workspaceId, file, sourceVersion),
+          {
+            summary: {
+              apiVersion: 1,
+              documentId: `harness:${file}`,
+              revision: `harness:${sourceVersion}`,
+              entryFile: file,
+              fileCount: 1,
+              nodeCount: 1,
+              valid: true,
+              diagnostics: [],
+              lastValidRevision: `harness:${sourceVersion}`,
+              history: {
+                canUndo: false,
+                canRedo: false,
+                undoDepth: 0,
+                redoDepth: 0,
+                retainedBytes: 0,
+                retainedReceiptBytes: 0,
+                revision: `harness:${sourceVersion}`,
+                lastReconciliationReason: null,
+              },
+            },
+            foundation: {
+              documentId: `harness:${file}`,
+              revision: `harness:${sourceVersion}`,
+              manifest: {
+                schemaVersion: 1,
+                parameters: [],
+                variants: [],
+                components: [],
+              },
+              keyframes: [],
+            },
+          } as never,
+        );
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: { frame, snapshot: currentWorkspaceSnapshot },
+        };
+      }
+      if (message.op === "design.foundation.open") {
+        const frameFile = String(message.params?.frame ?? "");
+        const sourceVersion = currentWorkspaceSnapshot.frames.find(
+          (frame) => frame.file === frameFile,
+        )?.sourceVersion;
+        const foundation = sourceVersion
+          ? designFoundationCache.getSnapshot(
+              designFoundationKey(workspaceId, frameFile, sourceVersion),
+            ).data
+          : null;
+        if (!foundation) {
+          throw new Error("The harness foundation is unavailable.");
+        }
+        return { type: "WORKSPACE_RESPONSE", result: foundation };
+      }
+      if (message.op === "design.snapshot") {
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: { snapshot: currentWorkspaceSnapshot },
+        };
+      }
+      if (message.op === "design.frame.delete") {
+        const frameFile = String(message.params?.frame ?? "");
+        const deleted = currentWorkspaceSnapshot.frames.find(
+          (frame) => frame.file === frameFile,
+        );
+        if (!deleted) throw new Error(`Frame not found: ${frameFile}`);
+        currentWorkspaceSnapshot = {
+          ...currentWorkspaceSnapshot,
+          frames: currentWorkspaceSnapshot.frames.filter(
+            (frame) => frame.file !== frameFile,
+          ),
+        };
+        frameDeletionUndo.push(deleted);
+        frameDeletionRedo.length = 0;
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: {
+            deleted: { file: frameFile },
+            snapshot: currentWorkspaceSnapshot,
+          },
+        };
+      }
+      if (
+        message.op === "design.history.undo" ||
+        message.op === "design.history.redo"
+      ) {
+        const direction = message.op.endsWith("undo") ? "undo" : "redo";
+        designShortcutOperations.push(`${direction}:start`);
+        const source =
+          direction === "undo" ? frameDeletionUndo : frameDeletionRedo;
+        const destination =
+          direction === "undo" ? frameDeletionRedo : frameDeletionUndo;
+        const deletedFrame = source.pop();
+        let historySelection: string | null | undefined;
+        if (deletedFrame) {
+          if (direction === "undo") {
+            currentWorkspaceSnapshot = {
+              ...currentWorkspaceSnapshot,
+              frames: [...currentWorkspaceSnapshot.frames, deletedFrame].sort(
+                (left, right) => left.z - right.z,
+              ),
+            };
+            historySelection = deletedFrame.file;
+          } else {
+            currentWorkspaceSnapshot = {
+              ...currentWorkspaceSnapshot,
+              frames: currentWorkspaceSnapshot.frames.filter(
+                (frame) => frame.file !== deletedFrame.file,
+              ),
+            };
+            historySelection = currentWorkspaceSnapshot.frames[0]?.file ?? null;
+          }
+          destination.push(deletedFrame);
+        } else {
+          await new Promise((resolve) => window.setTimeout(resolve, 50));
+        }
+        designShortcutOperations.push(`${direction}:end`);
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: {
+            result: null,
+            snapshot: currentWorkspaceSnapshot,
+            ...(historySelection !== undefined ? { historySelection } : {}),
+          },
+        };
+      }
+      if (message.op === "design.stage") {
+        designShortcutOperations.push("stage:start");
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        designShortcutOperations.push("stage:end");
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: { ok: true },
+        };
+      }
+      if (message.op === "design.save") {
+        designShortcutOperations.push("commit");
+        return {
+          type: "WORKSPACE_RESPONSE",
+          result: { sha: "a".repeat(40), branch: workspace.branch },
+        };
+      }
+      if (message.op === "design.runtime.audit") {
+        const frame = String(message.params?.frame ?? "");
+        const sourceVersion = String(message.params?.sourceVersion ?? "");
+        const runtimeWarnings = Array.isArray(message.params?.warnings)
+          ? message.params.warnings
+              .filter(
+                (
+                  warning,
+                ): warning is {
+                  ruleId: "contrast" | "overflow" | "spacing-scale";
+                  oid: string;
+                  message: string;
+                  fix: string;
+                } =>
+                  Boolean(
+                    warning &&
+                    typeof warning === "object" &&
+                    typeof (warning as { ruleId?: unknown }).ruleId ===
+                      "string" &&
+                    (warning as { ruleId?: unknown }).ruleId ===
+                      "spacing-scale" &&
+                    typeof (warning as { oid?: unknown }).oid === "string" &&
+                    typeof (warning as { message?: unknown }).message ===
+                      "string" &&
+                    typeof (warning as { fix?: unknown }).fix === "string",
+                  ),
+              )
+              .map((warning, index) => ({
+                ...warning,
+                severity: "warning" as const,
+                file: frame,
+                line: index + 1,
+                column: 1,
+              }))
+          : [];
+        const warnings =
+          runtimeWarnings.length > 0
+            ? runtimeWarnings
+            : [
+                {
+                  ruleId: "spacing-scale" as const,
+                  severity: "warning" as const,
+                  message: "Spacing needs review on the current frame.",
+                  file: frame,
+                  line: 1,
+                  column: 1,
+                  oid: `${frame.replace(/\.html$/i, "")}-main`,
+                  fix: "Use a design spacing token or a multiple of 4px.",
+                },
+              ];
+        if (
+          currentWorkspaceSnapshot.frames.some(
+            (candidate) =>
+              candidate.file === frame &&
+              candidate.sourceVersion === sourceVersion,
+          )
+        ) {
+          currentWorkspaceSnapshot = {
+            ...currentWorkspaceSnapshot,
+            lint: {
+              ...currentWorkspaceSnapshot.lint,
+              violations: [
+                ...currentWorkspaceSnapshot.lint.violations.filter(
+                  (violation) => violation.file !== frame,
+                ),
+                ...warnings,
+              ],
+            },
+          };
+        }
+        return { type: "WORKSPACE_RESPONSE", result: { ok: true } };
+      }
+      return { type: "WORKSPACE_RESPONSE", result: { ok: true } };
+    },
+  } as never);
+
+  (
+    window as Window & {
+      __zerosHarnessCommitStyleGeneration?: () => Promise<string>;
+    }
+  ).__zerosHarnessCommitStyleGeneration = async () => {
+    const frame = designWorkspaceSnapshotCache
+      .getSnapshot(workspaceId)
+      .data?.frames.find((candidate) => candidate.file === "home.html");
+    if (!frame) throw new Error("The style harness frame is unavailable.");
+    await updateDesignNodeStylesCached(workspaceId, {
+      frame: "home.html",
+      nodeId: "home-heading",
+      sourceVersion: frame.sourceVersion,
+      styles: { width: "901px" },
+    });
+    const committedFrame = designWorkspaceSnapshotCache
+      .getSnapshot(workspaceId)
+      .data?.frames.find((candidate) => candidate.file === "home.html");
+    if (!committedFrame) {
+      throw new Error("The committed style harness frame is unavailable.");
+    }
+    return committedFrame.sourceVersion;
+  };
+  (
+    window as Window & {
+      __zerosHarnessCommitStructuralGeneration?: () => Promise<string>;
+    }
+  ).__zerosHarnessCommitStructuralGeneration = async () => {
+    const frame = designWorkspaceSnapshotCache
+      .getSnapshot(workspaceId)
+      .data?.frames.find((candidate) => candidate.file === "home.html");
+    if (!frame) throw new Error("The structural harness frame is unavailable.");
+    await captureDesignRuntimeScreenshot(
+      workspaceId,
+      workspacePath,
+      frame.file,
+      frame.sourceVersion,
+      null,
+      0.5,
+    );
+    const nextSourceVersion = "ffffffffffffffffffffffff";
+    await setDesignNodeTextCached(workspaceId, {
+      frame: frame.file,
+      nodeId: "home-heading",
+      sourceVersion: frame.sourceVersion,
+      text: "Make the next move unmistakable.",
+    });
+    return nextSourceVersion;
+  };
+
   function Harness() {
     return (
       <TooltipProvider delayDuration={300} skipDelayDuration={0}>
@@ -398,7 +1177,6 @@ async function main() {
             workspace={workspace}
             folder={workspacePath}
             surfaceActive
-            onToggleWorkbench={() => {}}
           />
         </main>
       </TooltipProvider>

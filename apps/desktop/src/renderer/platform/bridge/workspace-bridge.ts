@@ -21,6 +21,7 @@ import type {
   ChangeCounts,
   ChangeLineCounts,
   Hunk,
+  DiffFileSummary,
   Commit,
   Branch,
   DiffMode,
@@ -118,6 +119,13 @@ const NETWORK_GIT_TIMEOUT_MS = 60_000;
 /** Budget for LOCAL-ONLY index writes (stage / commit). No network, but a huge
  *  working tree or hook-heavy repo can outlive the 10s default. */
 const LOCAL_GIT_TIMEOUT_MS = 30_000;
+
+/** Context-graph mutations can intentionally wait behind workspace creation's
+ * app-wide Design-owner publication. Give those queued requests the same
+ * budget as the create that owns the transition. Transcript windows are served
+ * throughout that transition, but share the budget because reading a legacy
+ * image can migrate it into the graph. */
+const CONTEXT_GRAPH_QUEUE_TIMEOUT_MS = 60_000;
 
 /** Send a WORKSPACE_REQUEST and await its WORKSPACE_RESPONSE / WORKSPACE_ERROR
  *  (both echo requestId, so request() resolves on whichever arrives). Throws on
@@ -228,7 +236,7 @@ export async function requestWorkspaceList(
     | undefined;
   // This helper exists for the coding-agent cwd → workspace-id resolver. A
   // Design workspace must never become an additional-directory or agent cwd,
-  // even for staff who enabled the separate Design surface.
+  // because the public Design surface does not grant code-agent authority.
   return (result?.workspaces ?? []).filter(
     (workspace) => workspace.kind !== "design",
   );
@@ -371,6 +379,12 @@ export const WORKING_DIRECTORIES_UNSUPPORTED_COPY: Record<
 export interface WorkingDirectoriesWire {
   /** Every top-level tracked directory — the full candidate set. */
   all: string[];
+  /** Top-level directories holding Design territory. They can never be
+   *  excluded — hiding one takes the canvas off disk — so the picker renders
+   *  them checked and non-interactive. The engine force-includes them anyway,
+   *  so an older renderer that ignores this is corrected server-side rather
+   *  than able to hide the canvas. */
+  locked: string[];
   /** The subset currently materialized on disk. */
   included: string[];
   /** Whether sparse-checkout is active right now. */
@@ -388,6 +402,7 @@ export interface WorkingDirectoriesWire {
 
 const EMPTY_WORKING_DIRS: WorkingDirectoriesWire = {
   all: [],
+  locked: [],
   included: [],
   sparse: false,
   supported: false,
@@ -406,6 +421,11 @@ function toWorkingDirs(r: unknown): WorkingDirectoriesWire {
       : undefined;
   return {
     all: v.all.filter((d): d is string => typeof d === "string"),
+    // An engine that predates the field sends nothing; an empty lock set is
+    // the pre-existing behaviour, and the engine still force-includes.
+    locked: Array.isArray(v.locked)
+      ? v.locked.filter((d): d is string => typeof d === "string")
+      : [],
     included: v.included.filter((d): d is string => typeof d === "string"),
     sparse: v.sparse === true,
     supported: v.supported === true,
@@ -692,7 +712,7 @@ export async function bridgeMessageWindow(
   chatId: string,
   limit: number,
   before?: number,
-  timeoutMs?: number,
+  timeoutMs = CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
 ): Promise<PersistedMessageWire[]> {
   const r = (await workspaceOp(
     bridge,
@@ -712,7 +732,7 @@ export async function bridgeMessageWindowOlder(
   chatId: string,
   limit: number,
   beforeMsgId: string,
-  timeoutMs?: number,
+  timeoutMs = CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
 ): Promise<PersistedMessageWire[]> {
   const r = (await workspaceOp(
     bridge,
@@ -854,10 +874,18 @@ export async function bridgeAttachmentWrite(
   bytes: number;
   skipped?: boolean;
 }> {
-  return (await workspaceOp(bridge, "attachment.write", {
-    workspaceId,
-    ...args,
-  })) as {
+  return (await workspaceOp(
+    bridge,
+    "attachment.write",
+    {
+      workspaceId,
+      ...args,
+    },
+    // A write accepted during another workspace's creation waits behind the
+    // engine's Design-owner transition instead of failing. Match the create
+    // request budget so the durable queued result can reach this caller.
+    CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
+  )) as {
     absolutePath: string;
     relativePath: string;
     mimeType: string;
@@ -892,9 +920,12 @@ export async function bridgeContextGraphScaffold(
   bridge: RuntimeClient,
   workspaceId: string,
 ): Promise<{ ok: boolean; created: boolean }> {
-  const r = (await workspaceOp(bridge, "context.graph.scaffold", {
-    workspaceId,
-  })) as { ok?: boolean; created?: boolean } | undefined;
+  const r = (await workspaceOp(
+    bridge,
+    "context.graph.scaffold",
+    { workspaceId },
+    CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
+  )) as { ok?: boolean; created?: boolean } | undefined;
   return { ok: r?.ok === true, created: r?.created === true };
 }
 
@@ -905,11 +936,16 @@ export async function bridgeContextGraphSetShared(
   attachmentId: string,
   shared: boolean,
 ): Promise<{ ok: boolean; moved: boolean }> {
-  const r = (await workspaceOp(bridge, "context.graph.setShared", {
-    workspaceId,
-    attachmentId,
-    shared,
-  })) as { ok?: boolean; moved?: boolean } | undefined;
+  const r = (await workspaceOp(
+    bridge,
+    "context.graph.setShared",
+    {
+      workspaceId,
+      attachmentId,
+      shared,
+    },
+    CONTEXT_GRAPH_QUEUE_TIMEOUT_MS,
+  )) as { ok?: boolean; moved?: boolean } | undefined;
   return { ok: r?.ok === true, moved: r?.moved === true };
 }
 
@@ -918,9 +954,12 @@ export async function bridgeContextGraphSetShared(
 export async function bridgeGitStatus(
   bridge: RuntimeClient,
   workspaceId: string,
+  options: { paths?: string[]; includeTracking?: boolean } = {},
 ): Promise<StatusResult> {
   return (await workspaceOp(bridge, "git.status", {
     workspaceId,
+    paths: options.paths,
+    includeTracking: options.includeTracking,
   })) as StatusResult;
 }
 
@@ -982,8 +1021,14 @@ export async function bridgeGitDiff(
     base?: string;
     head?: string;
     rawPatch?: boolean;
+    summaryLimit?: number;
   },
-): Promise<{ hunks: Hunk[]; patch?: string }> {
+): Promise<{
+  hunks: Hunk[];
+  patch?: string;
+  files?: DiffFileSummary[];
+  summary?: boolean;
+}> {
   return (await workspaceOp(bridge, "git.diff", {
     workspaceId: args.workspaceId,
     filePath: args.filePath,
@@ -992,7 +1037,13 @@ export async function bridgeGitDiff(
     base: args.base,
     head: args.head,
     rawPatch: args.rawPatch,
-  })) as { hunks: Hunk[]; patch?: string };
+    summaryLimit: args.summaryLimit,
+  })) as {
+    hunks: Hunk[];
+    patch?: string;
+    files?: DiffFileSummary[];
+    summary?: boolean;
+  };
 }
 
 /** Show a single commit (its file list + the raw multi-file patch) over the
@@ -1789,6 +1840,30 @@ export async function bridgeWorkspaceReassignLocalOrganization(
   )) as { changes: number; repoSlugs: string[] };
 }
 
+export async function bridgeWorkspaceSetMode(
+  bridge: RuntimeClient,
+  args: { workspaceId: string; mode: "code" | "design" },
+): Promise<{
+  ok: true;
+  mode: "code" | "design";
+  snapshot?: unknown;
+}> {
+  // Entering Design ensures + commits its foundation; exit may materialize a
+  // legacy sparse cone. Either can take seconds, so use the lifecycle budget
+  // rather than the 10s default. The engine bounds its own admission drain, so
+  // this budget sits above that and lets the real error surface first.
+  return (await workspaceOp(
+    bridge,
+    "workspace.setMode",
+    { ...args },
+    60_000,
+  )) as {
+    ok: true;
+    mode: "code" | "design";
+    snapshot?: unknown;
+  };
+}
+
 export async function bridgeWorkspaceArchive(
   bridge: RuntimeClient,
   args: { workspaceId: string; stashUncommitted?: boolean },
@@ -2003,7 +2078,7 @@ export async function bridgeWorkspaceStartRun(
 /** Stop a live run action — records "stopped", not "failed". */
 export async function bridgeWorkspaceStopRun(
   bridge: RuntimeClient,
-  args: { sessionId: string },
+  args: { workspaceId: string; sessionId: string },
 ): Promise<{ ok: boolean }> {
   return (await workspaceOp(bridge, "workspace.stopRun", {
     ...args,
@@ -2014,7 +2089,7 @@ export async function bridgeWorkspaceStopRun(
  *  too late to attach to a fast-exiting run PTY (its live mirror is gone). */
 export async function bridgeWorkspaceRunLog(
   bridge: RuntimeClient,
-  args: { sessionId: string },
+  args: { workspaceId?: string; sessionId: string },
 ): Promise<{ log: string; truncated: boolean }> {
   return (await workspaceOp(bridge, "workspace.runLog", {
     ...args,
@@ -2364,9 +2439,9 @@ export async function bridgeMcpGatewayDisconnect(
 }
 
 /** Store a static auth-header secret for an auth:"header" gateway backend. The
- *  value transits the LOCAL bridge once, then lives engine-only (the gateway
- *  vault + safeStorage) — never settings.toml, the renderer keychain, or the
- *  relay. Desktop-only. */
+ *  value transits the authenticated bridge once, then lives engine-only (the
+ *  gateway vault + platform credential store) — never settings.toml or the
+ *  renderer's durable state. Works identically for local and cloud engines. */
 export async function bridgeMcpGatewaySetHeaderSecret(
   bridge: RuntimeClient,
   url: string,
@@ -2418,11 +2493,15 @@ export async function bridgeSettingsWrite(
   layer: Exclude<SettingsLayer, "managed">,
   patch: SettingsDoc,
   repoRoot?: string,
+  options: { confirmDesignDirectoryChange?: boolean } = {},
 ): Promise<SettingsWriteWire> {
   return (await workspaceOp(bridge, "settings.write", {
     layer,
     patch,
     ...(repoRoot ? { repoRoot } : {}),
+    ...(options.confirmDesignDirectoryChange
+      ? { confirmDesignDirectoryChange: true }
+      : {}),
   })) as SettingsWriteWire;
 }
 

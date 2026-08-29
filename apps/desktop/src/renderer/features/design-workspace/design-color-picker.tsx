@@ -28,6 +28,7 @@ import {
 interface DesignColorPickerProps {
   value: string;
   label: string;
+  trigger?: React.ReactNode;
   disabled?: boolean;
   side?: "top" | "right" | "bottom" | "left";
   align?: "start" | "center" | "end";
@@ -145,6 +146,7 @@ export function DesignColorSwatch({
 export function DesignColorPicker({
   value,
   label,
+  trigger,
   disabled = false,
   side = "left",
   align = "start",
@@ -193,6 +195,14 @@ export function DesignColorPicker({
   const commitValue = (nextValue: string) => {
     const next = nextValue.trim();
     if (!next) return;
+    // One interaction is one source write. Enter blurs, and Done steals focus
+    // and so blurs too, which brings the already-committed value back around a
+    // second time — two source generations for one keypress or click, and one
+    // undo with nothing visible left to do.
+    if (next === baselineRef.current) {
+      cancelPreview();
+      return;
+    }
     baselineRef.current = next;
     previewingRef.current = false;
     setDraft(next);
@@ -270,7 +280,7 @@ export function DesignColorPicker({
           )}
           aria-label={`Edit ${label.toLocaleLowerCase()}`}
         >
-          <DesignColorSwatch value={value} className="size-5" />
+          {trigger ?? <DesignColorSwatch value={value} className="size-5" />}
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -520,20 +530,18 @@ export function DesignColorPicker({
               aria-label={`${label} value`}
               spellCheck={false}
               onChange={(event) => {
+                // Typed text stays a draft: the canvas hears about it on Enter
+                // or on blur, not on every character.
                 const nextValue = event.currentTarget.value;
                 setDraft(nextValue);
                 const parsed =
                   parseDesignColor(nextValue) ?? resolveBrowserColor(nextValue);
-                if (!parsed) return;
-                setHsva(rgbaToHsva(parsed));
-                previewingRef.current = true;
-                safePreview(onPreview, nextValue);
+                if (parsed) setHsva(rgbaToHsva(parsed));
               }}
               onBlur={() => commitOnBlur(draft)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
                   event.preventDefault();
-                  commitValue(draft);
                   event.currentTarget.blur();
                 } else if (event.key === "Escape") {
                   event.preventDefault();
@@ -554,9 +562,14 @@ export function DesignColorPicker({
                   1,
                 );
                 if (!Number.isFinite(opacity)) return;
-                previewHsva({ ...hsva, a: opacity });
+                setHsva({ ...hsva, a: opacity });
               }}
               onBlur={() => commitOnBlur(formatted)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                event.currentTarget.blur();
+              }}
             />
           </div>
 

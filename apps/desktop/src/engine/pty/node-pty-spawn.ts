@@ -6,6 +6,8 @@
 // stays the single place that computes the Zeros shell setup (login shell,
 // managed ZDOTDIR, scrubbed-or-full env) and hands it to the host.
 
+import path from "node:path";
+
 import {
   buildLoginArgs,
   buildOneShotArgs,
@@ -17,6 +19,37 @@ import { spawnPtyViaHost } from "./pty-host-client";
 import type { PtyHandle, PtyMirrorFactory, PtySpawnRequest } from "./service";
 
 export { disposePtyHost } from "./pty-host-client";
+
+export function cloudHumanPtyLaunch(
+  request: Pick<
+    PtySpawnRequest,
+    "cloudWorkerIdentity" | "cloudWorkerSetprivPath" | "wrapSpawn"
+  >,
+  launch: { command: string; args: readonly string[] },
+): { command: string; args: string[] } {
+  if (!request.cloudWorkerIdentity || request.wrapSpawn) {
+    return { command: launch.command, args: [...launch.args] };
+  }
+  if (
+    !request.cloudWorkerSetprivPath ||
+    !path.isAbsolute(request.cloudWorkerSetprivPath)
+  ) {
+    throw new Error(
+      "cloud terminal identity requires an absolute setpriv path",
+    );
+  }
+  return {
+    command: request.cloudWorkerSetprivPath,
+    args: [
+      `--reuid=${request.cloudWorkerIdentity.uid}`,
+      `--regid=${request.cloudWorkerIdentity.gid}`,
+      "--clear-groups",
+      "--",
+      launch.command,
+      ...launch.args,
+    ],
+  };
+}
 
 /** The real PtySpawnFn: forks a Zeros login shell via the Node PTY host,
  *  adapted to the transport-agnostic PtyHandle. The shell, login args, and
@@ -33,10 +66,22 @@ export function createNodePtyShell(req: PtySpawnRequest): PtyHandle {
   const args = oneShot
     ? buildOneShotArgs(shell, req.command as string, req.interactive === true)
     : buildLoginArgs();
+  const env =
+    req.env ?? buildPtyEnv({ scrub: req.scrubEnv === true, cwd: req.cwd });
+  const launch = req.wrapSpawn
+    ? req.wrapSpawn({
+        command: shell,
+        args,
+        cwd: req.cwd,
+        env,
+        stdio: "inherit",
+      })
+    : { command: shell, args, cwd: req.cwd, env, stdio: "inherit" as const };
+  const hostLaunch = cloudHumanPtyLaunch(req, launch);
   return spawnPtyViaHost({
-    shell,
-    args,
-    cwd: req.cwd,
+    shell: hostLaunch.command,
+    args: hostLaunch.args,
+    cwd: launch.cwd,
     cols: req.cols,
     rows: req.rows,
     // For one-shot the engine passes a fully-resolved env we use VERBATIM
@@ -45,7 +90,7 @@ export function createNodePtyShell(req: PtySpawnRequest): PtyHandle {
     // worktree, scrubbing host secrets for remote). Nothing is added here — the
     // env a caller hands us has to be the exact set it can be reviewed against
     // (that is what makes setup-hooks.ts's allowlist auditable).
-    env: req.env ?? buildPtyEnv({ scrub: req.scrubEnv === true, cwd: req.cwd }),
+    env: { ...launch.env },
     name: "xterm-256color",
   });
 }

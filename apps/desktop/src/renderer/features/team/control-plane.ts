@@ -35,6 +35,8 @@ export type OrganizationSummary = {
   logo: string | null;
   role: OrganizationRole;
   isPersonal: boolean;
+  /** Mixed-version marker for a pre-hierarchy flat Team response. */
+  legacyFlat?: boolean;
   defaultTeamId: string | null;
   workspaceCapabilities: { local: true; cloud: boolean };
   teamCapabilities: { multiple: false; canCreate: false };
@@ -46,7 +48,7 @@ export type TeamSummary = OrganizationSummary;
  *  null ⇒ ordinary user.
  *  Backed by `users.staff_role` and re-read from Postgres on every request;
  *  see apps/control-plane/migrations/0007_staff_role.sql. */
-export type StaffRole = "developer";
+export type StaffRole = "developer" | "support_admin";
 
 export type Me = {
   user: {
@@ -117,7 +119,11 @@ async function request<T>(
   body?: unknown,
 ): Promise<T> {
   if (!CONTROL_PLANE_URL) {
-    throw new ControlPlaneError(0, "not_configured", "Control plane URL not configured");
+    throw new ControlPlaneError(
+      0,
+      "not_configured",
+      "Control plane URL not configured",
+    );
   }
   const session = await getSession();
   const token = session?.access_token;
@@ -193,15 +199,15 @@ export const controlPlane = {
   /** Compatibility operation: the flat-Team route now creates an organization
    *  and its default child team. New UI creates organizations in the web app. */
   createTeam: (name: string, logo?: string | null) =>
-    request<{ team: { id: string; slug: string; name: string; logo: string | null } }>(
-      "POST",
-      "/v1/teams",
-      { name, ...(logo ? { logo } : {}) },
-    ),
+    request<{
+      team: { id: string; slug: string; name: string; logo: string | null };
+    }>("POST", "/v1/teams", { name, ...(logo ? { logo } : {}) }),
 
   /** Partial update: rename and/or change the logo (logo: null clears it). */
-  updateTeam: (teamId: string, patch: { name?: string; logo?: string | null }) =>
-    request<{ team: TeamSummary }>("PATCH", `/v1/teams/${teamId}`, patch),
+  updateTeam: (
+    teamId: string,
+    patch: { name?: string; logo?: string | null },
+  ) => request<{ team: TeamSummary }>("PATCH", `/v1/teams/${teamId}`, patch),
 
   /** Owner-only soft delete; pending invitations are revoked server-side. */
   deleteTeam: (teamId: string) =>
@@ -211,7 +217,9 @@ export const controlPlane = {
     request<{ members: TeamMember[] }>("GET", `/v1/teams/${teamId}/members`),
 
   setMemberRole: (teamId: string, userId: string, role: TeamRole) =>
-    request<{ ok: true }>("PATCH", `/v1/teams/${teamId}/members/${userId}`, { role }),
+    request<{ ok: true }>("PATCH", `/v1/teams/${teamId}/members/${userId}`, {
+      role,
+    }),
 
   removeMember: (teamId: string, userId: string) =>
     request<{ ok: true }>("DELETE", `/v1/teams/${teamId}/members/${userId}`),
@@ -224,10 +232,16 @@ export const controlPlane = {
     ),
 
   listInvitations: (teamId: string) =>
-    request<{ invitations: TeamInvitation[] }>("GET", `/v1/teams/${teamId}/invitations`),
+    request<{ invitations: TeamInvitation[] }>(
+      "GET",
+      `/v1/teams/${teamId}/invitations`,
+    ),
 
   revokeInvitation: (teamId: string, invitationId: string) =>
-    request<{ ok: true }>("DELETE", `/v1/teams/${teamId}/invitations/${invitationId}`),
+    request<{ ok: true }>(
+      "DELETE",
+      `/v1/teams/${teamId}/invitations/${invitationId}`,
+    ),
 
   acceptInvitation: (token: string) =>
     request<{ team: { id: string; slug: string; name: string } }>(
@@ -238,7 +252,11 @@ export const controlPlane = {
 
   /** The team settings doc (the engine's `team` resolve layer). */
   getTeamSettings: (teamId: string, scope = "*") =>
-    request<{ scope: string; doc: Record<string, unknown>; updated_at: string | null }>(
+    request<{
+      scope: string;
+      doc: Record<string, unknown>;
+      updated_at: string | null;
+    }>(
       "GET",
       `/v1/teams/${teamId}/settings?scope=${encodeURIComponent(scope)}`,
     ),

@@ -93,6 +93,9 @@ export interface ContextGraphItem {
   kind: ContextGraphKind;
   bytes: number;
   mtimeMs: number;
+  /** Metadata-change time makes thumbnail revisions exact across rapid,
+   *  same-size atomic replacements. Additive for older renderer clients. */
+  ctimeMs: number;
   /** The `<attachmentId>` folder for attachment items — the share toggle's key. */
   attachmentId?: string;
   /** First ~480 chars for text/markdown cards, so the canvas renders previews
@@ -255,6 +258,7 @@ async function collectFile(
     kind,
     bytes: stat.size,
     mtimeMs: Math.round(stat.mtimeMs),
+    ctimeMs: Math.round(stat.ctimeMs),
     ...(attachmentId ? { attachmentId } : {}),
   };
   if (kind === "markdown" || kind === "text") {
@@ -452,7 +456,13 @@ async function atomicWriteAttachment(
 export function safeAttachmentFilename(raw: string): string {
   const base = path.basename(raw);
   const cleaned = base.replace(/[^a-zA-Z0-9._-]+/g, "_");
-  const capped = cleaned.length <= 80 ? cleaned : cleaned.slice(0, 80);
+  const extension = path.extname(cleaned);
+  const capped =
+    cleaned.length <= 80
+      ? cleaned
+      : extension.length > 0 && extension.length < 80
+        ? `${cleaned.slice(0, 80 - extension.length)}${extension}`
+        : cleaned.slice(0, 80);
   // basename("..") === ".." and a fully-hostile name can clean to "" — both
   // would corrupt the one-folder-one-file layout. Park such names on a
   // constant instead of failing the write.

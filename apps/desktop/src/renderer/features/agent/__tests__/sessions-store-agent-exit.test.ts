@@ -14,6 +14,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { useSessionsStore, BLANK } from "../sessions-store";
+import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
 
 const seed = (
   chatId: string,
@@ -75,7 +76,9 @@ describe("applyBridgeAgentExit — session-scoped (Codex per-chat child)", () =>
 
     useSessionsStore.getState().applyBridgeAgentExit("codex", "sidA");
 
-    expect(useSessionsStore.getState().sessions["chatA"]?.status).toBe("warming");
+    expect(useSessionsStore.getState().sessions["chatA"]?.status).toBe(
+      "warming",
+    );
   });
 
   it("evicts a stale pendingPermission on exit even for a streaming chat", () => {
@@ -112,7 +115,9 @@ describe("applyBridgeAgentExit — session-scoped (Codex per-chat child)", () =>
     useSessionsStore.getState().applyBridgeAgentExit("codex", "sidA");
     useSessionsStore.getState().applyBridgeAgentExit("codex", "sidB");
 
-    expect(useSessionsStore.getState().sessions["chatA"]?.status).toBe("failed");
+    expect(useSessionsStore.getState().sessions["chatA"]?.status).toBe(
+      "failed",
+    );
     expect(useSessionsStore.getState().sessions["chatB"]?.status).toBe(
       "auth-required",
     );
@@ -124,7 +129,9 @@ describe("applyBridgeAgentExit — session-scoped (Codex per-chat child)", () =>
     useSessionsStore.getState().applyBridgeAgentExit("codex", "does-not-exist");
 
     expect(useSessionsStore.getState().sessions["chatA"]?.status).toBe("ready");
-    expect(useSessionsStore.getState().sessions["chatA"]?.sessionId).toBe("sidA");
+    expect(useSessionsStore.getState().sessions["chatA"]?.sessionId).toBe(
+      "sidA",
+    );
   });
 });
 
@@ -150,5 +157,99 @@ describe("applyBridgeAgentExit — agent-wide (no sessionId, shared subprocess)"
     expect(s["chatC"]?.status).toBe("ready");
     // The whole agent cools.
     expect(useSessionsStore.getState().warmAgentIds.has("claude")).toBe(false);
+  });
+});
+
+describe("territory-revoked execution routing", () => {
+  beforeEach(() => {
+    useSessionsStore.getState().clearAll();
+  });
+
+  it.each(["codex", "claude", "cursor"])(
+    "invalidates only the exact retired %s execution before the next prompt",
+    (agentId) => {
+      seed("chatA", agentId, "retired-execution", "streaming");
+      seed("chatB", agentId, "replacement-execution", "ready");
+      const state = useSessionsStore.getState();
+      const providerBinding = {
+        version: 1 as const,
+        providerId: agentId,
+        kind: "native" as const,
+        resumeId: `${agentId}-durable-thread`,
+      };
+      state.patchSession("chatA", { providerBinding });
+      const revoked = {
+        version: 1,
+        actor: "agent-code",
+        state: "revoked",
+        backend: "zeros-srt",
+        designProtection: {
+          required: true,
+          enforced: true,
+          protectedDirectoryCount: 1,
+        },
+        parity: { level: "full", restrictions: [] },
+        checkedAt: Date.now(),
+      } satisfies ExecutionBoundaryStatus;
+
+      state.applyBridgeBoundaryStatus(agentId, "retired-execution", revoked);
+
+      const sessions = useSessionsStore.getState().sessions;
+      expect(sessions["chatA"]).toMatchObject({
+        status: "reconnecting",
+        executionId: null,
+        sessionId: null,
+        boundary: null,
+        providerBinding,
+      });
+      expect(sessions["chatB"]?.sessionId).toBe("replacement-execution");
+
+      // A delayed terminal event from that retired execution must not clobber
+      // a route subsequently admitted for the same chat.
+      seed("chatA", agentId, "new-execution", "ready");
+      state.applyBridgeBoundaryStatus(agentId, "retired-execution", revoked);
+      expect(useSessionsStore.getState().sessions["chatA"]?.executionId).toBe(
+        "new-execution",
+      );
+    },
+  );
+
+  it("fails only the exact execution when background Design protection fails", () => {
+    seed("chatA", "codex", "failed-execution", "streaming");
+    seed("chatB", "codex", "healthy-execution", "ready");
+    const failed = {
+      version: 1,
+      actor: "agent-code",
+      state: "unavailable",
+      backend: "zeros-srt",
+      designProtection: {
+        required: true,
+        enforced: false,
+        protectedDirectoryCount: 1,
+      },
+      parity: { level: "full", restrictions: [] },
+      checkedAt: Date.now(),
+      failure: "design-protection-failed",
+    } as ExecutionBoundaryStatus & {
+      failure: "design-protection-failed";
+    };
+
+    useSessionsStore
+      .getState()
+      .applyBridgeBoundaryStatus("codex", "failed-execution", failed);
+
+    expect(useSessionsStore.getState().sessions["chatA"]).toMatchObject({
+      status: "failed",
+      activeTurnStartedAt: null,
+      failure: {
+        kind: "design-protection-failed",
+        stage: "prompt",
+      },
+    });
+    expect(useSessionsStore.getState().sessions["chatB"]).toMatchObject({
+      status: "ready",
+      sessionId: "healthy-execution",
+      failure: null,
+    });
   });
 });

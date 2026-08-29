@@ -143,7 +143,9 @@ describe("Design Foundation 1.0 acceptance", () => {
         frames: initial.frames,
       },
     ]);
-    const api = new DesignApi(repository);
+    const api = new DesignApi(repository, {
+      authorization: { kind: "trusted-in-process" },
+    });
 
     const applied = await api.apply(transaction);
     expect(applied.revision).toBe(direct.state.revision);

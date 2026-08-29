@@ -62,7 +62,7 @@ export function spawnTerminalTab(args: {
     createdAt: now,
     updatedAt: now,
   };
-  dispatch({ type: "ADD_CHAT", chat });
+  dispatch({ type: "ADD_CHAT", chat, recordWorkspaceActivity: true });
   dispatch({ type: "SET_ACTIVE_CHAT", id: chat.id });
   return chat;
 }

@@ -15,16 +15,24 @@
 // `pnpm codegen:codex` first, then update the assertions to match
 // the new shape — DON'T edit the wire format by hand.
 
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
-import type { AgentBrowserUse } from "../../../types";
+import type {
+  AgentBrowserUse,
+  AgentFilesystemTerritory,
+} from "../../../types";
+
 import {
   buildThreadStartParams,
+  codexTurnAuthority,
   codexEffortFromThreadSettings,
   fileChangePaths,
   mapCodexAdvertisedEffort,
   mapCodexEffortFromEnv,
   modePolicyFor,
+  territoryApprovalMustBeDenied,
   type CodexModeId,
 } from "../app-server-adapter";
 
@@ -123,6 +131,55 @@ describe("buildThreadStartParams", () => {
     ).not.toHaveProperty("developerInstructions");
   });
 
+  it.each(MODES)(
+    "keeps the immutable territory profile in the %s permission posture",
+    (mode) => {
+      const workspaceRoot = path.resolve("/tmp/zeros-contained");
+      const designDirectory = path.join(workspaceRoot, "Zeros Design");
+      const territory: AgentFilesystemTerritory = {
+        agentRole: "code",
+        workspaceRoot,
+        designDirectory,
+        protectedDesignDirectories: [designDirectory],
+        designRecognitionPaths: [],
+        writeCapabilities: {
+          workspace: "write",
+          deniedPaths: [
+            designDirectory,
+            path.join(workspaceRoot, ".zeros"),
+            path.join(workspaceRoot, ".git"),
+          ],
+        },
+      };
+
+      const params = buildThreadStartParams(
+        workspaceRoot,
+        undefined,
+        mode,
+        undefined,
+        territory,
+      );
+
+      expect(params).not.toHaveProperty("sandbox");
+      expect(params.permissions).toBe("zeros_code_territory");
+      expect(params.runtimeWorkspaceRoots).toEqual([workspaceRoot]);
+      expect(params.config).toMatchObject({
+        permissions: {
+          zeros_code_territory: {
+            workspace_roots: { [workspaceRoot]: true },
+            filesystem: {
+              ":minimal": "read",
+              ":workspace_roots": "write",
+              [designDirectory]: "read",
+              [path.join(workspaceRoot, ".zeros")]: "read",
+              [path.join(workspaceRoot, ".git")]: "read",
+            },
+          },
+        },
+      });
+    },
+  );
+
   it("keeps the bundled Browser plugin off without a native host binding", () => {
     const params = buildThreadStartParams("/tmp", undefined, "ask");
 
@@ -142,6 +199,8 @@ describe("buildThreadStartParams", () => {
       undefined,
       "ask",
       undefined,
+      undefined,
+      undefined,
       browserUse,
     );
 
@@ -149,6 +208,60 @@ describe("buildThreadStartParams", () => {
       "plugins.browser@openai-bundled.enabled": true,
     });
     expect(params).not.toHaveProperty("dynamicTools");
+  });
+});
+
+describe("uniform ZSR turn authority", () => {
+  const workspaceRoot = path.resolve("/tmp/zeros-contained-turn");
+  const designDirectory = path.join(workspaceRoot, "Zeros Design");
+  const territory: AgentFilesystemTerritory = {
+    agentRole: "code",
+    workspaceRoot,
+    designDirectory,
+    protectedDesignDirectories: [designDirectory],
+    designRecognitionPaths: [],
+    writeCapabilities: {
+      workspace: "write",
+      deniedPaths: [designDirectory],
+    },
+  };
+
+  it.each(MODES)(
+    "keeps the normal %s per-turn sandbox inside the outer ZSR boundary",
+    (mode) => {
+      const sandboxPolicy = modePolicyFor(mode).sandboxPolicy;
+
+      expect(
+        codexTurnAuthority(territory, {} as never, sandboxPolicy),
+      ).toEqual({ sandboxPolicy });
+      expect(
+        codexTurnAuthority(territory, undefined, sandboxPolicy),
+      ).toEqual({
+        permissions: "zeros_code_territory",
+        runtimeWorkspaceRoots: [workspaceRoot],
+      });
+    },
+  );
+
+  it("does not suppress ordinary approvals that remain kernel-bounded by ZSR", () => {
+    const session = {
+      territory,
+      executionBoundary: {} as never,
+      fileEditPathsByItemId: new Map(),
+    };
+
+    expect(
+      territoryApprovalMustBeDenied(session, {
+        method: "execCommandApproval",
+        params: { command: "pnpm test" },
+      } as never),
+    ).toBe(false);
+    expect(
+      territoryApprovalMustBeDenied(session, {
+        method: "item/fileChange/requestApproval",
+        params: { grantRoot: designDirectory },
+      } as never),
+    ).toBe(true);
   });
 });
 

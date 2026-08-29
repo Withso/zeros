@@ -44,6 +44,7 @@ import {
   KeyRound,
   LaptopMinimal,
   Pencil,
+  PenTool,
   Plus,
   Trash2,
   Wand2,
@@ -156,6 +157,7 @@ import {
 } from "../settings/settings-ui";
 import { RunActionsSection } from "./run-actions-section";
 import { FilesToCopySection } from "./files-to-copy-section";
+import { DesignSection } from "./design-section";
 import { AddEnvVariableDialog } from "./add-env-variable-dialog";
 import { MCP_SECRET_SENTINEL } from "../agent-extensions/mcp-server-model";
 import {
@@ -179,6 +181,7 @@ export type RepoSectionId =
   | "git"
   | "actions"
   | "files"
+  | "design"
   | "paths";
 
 export const REPO_SECTIONS: {
@@ -193,6 +196,9 @@ export const REPO_SECTIONS: {
   // which answers "where does it live", and before it, because this is the one
   // people hit on day one when a fresh workspace won't boot without its .env.
   { id: "files", label: "Files", icon: Copy },
+  // Which committed folder is the design directory (mode-model pointer).
+  // Internal-gated at the repo-page tab strip, not here.
+  { id: "design", label: "Design", icon: PenTool },
   { id: "paths", label: "Paths", icon: Folder },
 ];
 
@@ -412,6 +418,11 @@ export function RepoDetail({
   switch (section) {
     case "paths":
       return <PathsSection project={project} />;
+    case "design":
+      // The committed design-folder pointer + recognition of every design
+      // folder in the checkout. Gated on surfaceActive like Files so a
+      // retained-but-hidden pane never scans the repo.
+      return <DesignSection project={project} surfaceActive={surfaceActive} />;
     case "files":
       // Per-repo by design: saving writes THIS project's
       // `.zeros/settings.local.toml`, never a global list (see the section

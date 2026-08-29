@@ -119,6 +119,67 @@ describe("workbench default slice", () => {
   });
 });
 
+describe("Active workspace action clock", () => {
+  it("touches on a genuinely new tab but not when selecting an existing tab", () => {
+    const folder = freshScope();
+    const existingId = slice().tabs[1].id;
+    expect(
+      useWorkspaceStore.getState().workspaceActivityByFolder[folder],
+    ).toBeUndefined();
+
+    dispatch({ type: "ACTIVATE_WORKBENCH_TAB", id: existingId });
+    expect(
+      useWorkspaceStore.getState().workspaceActivityByFolder[folder],
+    ).toBeUndefined();
+
+    dispatch({ type: "ADD_WORKBENCH_TAB", tab: createEmptyFilesTab() });
+    expect(
+      useWorkspaceStore.getState().workspaceActivityByFolder[folder],
+    ).toEqual(expect.any(Number));
+  });
+
+  it("does not touch when a tab is inserted into a background scope", () => {
+    const folder = freshScope();
+
+    dispatch({
+      type: "ADD_WORKBENCH_TAB",
+      tab: createEmptyFilesTab(),
+      activate: false,
+    });
+
+    expect(
+      useWorkspaceStore.getState().workspaceActivityByFolder[folder],
+    ).toBeUndefined();
+  });
+
+  it("touches when a different file is opened but not on a same-file focus", () => {
+    const folder = freshScope();
+    const fileHome = slice().tabs[0];
+    dispatch({
+      type: "OPEN_WORKBENCH_TAB",
+      id: fileHome.id,
+      updates: { filePath: "src/one.ts" },
+    });
+    const first =
+      useWorkspaceStore.getState().workspaceActivityByFolder[folder];
+    expect(first).toEqual(expect.any(Number));
+
+    dispatch({ type: "ACTIVATE_WORKBENCH_TAB", id: fileHome.id });
+    expect(useWorkspaceStore.getState().workspaceActivityByFolder[folder]).toBe(
+      first,
+    );
+
+    dispatch({
+      type: "OPEN_WORKBENCH_TAB",
+      id: fileHome.id,
+      updates: { filePath: "src/one.ts" },
+    });
+    expect(useWorkspaceStore.getState().workspaceActivityByFolder[folder]).toBe(
+      first,
+    );
+  });
+});
+
 describe("ADD_WORKBENCH_TAB", () => {
   it("keeps only Changes and Review singleton", () => {
     freshScope();

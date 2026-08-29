@@ -49,9 +49,11 @@ import { AttachmentNode } from "../composer-editor/nodes";
 import { collectAttachmentIds } from "../composer-editor/attachment-keys";
 import {
   executeGraphSync,
+  discardQueuedContextGraphWrites,
   isBuildSkewFailure,
   planGraphSync,
   planSeedStage,
+  resetQueuedContextGraphWritesForTests,
   resetStagingFailureNoticesForTests,
   stageablePayload,
 } from "../composer-editor/context-graph-staging";
@@ -203,33 +205,161 @@ describe("planSeedStage", () => {
 describe("executeGraphSync while the worktree is provisioning", () => {
   beforeEach(() => {
     writeContextAttachment.mockReset().mockResolvedValue({});
+    resetQueuedContextGraphWritesForTests();
   });
 
-  it("skips every write for a provisioning cwd and works again once it lands", async () => {
+  it("queues every write for a provisioning cwd and flushes once it lands", async () => {
     // The dispatcher reserves the worktree path before `git worktree add`
     // creates it. A stage write in that window would mkdir into the reserved
-    // path and fail the creation itself — so the whole plan is dropped (the
-    // provisioning-end sweep re-covers it) rather than queued.
+    // path and fail the creation itself. Keep the bytes in memory and flush
+    // them when the exact create publishes instead of relying on the composer
+    // to remain mounted with the chip still present for a later sweep.
     const token = beginPendingCreate({
       repoRoot: "/repo",
       repoSlug: "o/r",
       path: "/repo-worktrees/mauve",
     });
-    try {
-      executeGraphSync("/repo-worktrees/mauve", {
-        stage: [att()],
-        nextIds: new Set(["att-1"]),
-      });
-      await new Promise((r) => setTimeout(r, 0));
-      expect(writeContextAttachment).not.toHaveBeenCalled();
-    } finally {
-      finishPendingCreate(token);
-    }
     executeGraphSync("/repo-worktrees/mauve", {
       stage: [att()],
       nextIds: new Set(["att-1"]),
     });
+    await new Promise((r) => setTimeout(r, 0));
+    expect(writeContextAttachment).not.toHaveBeenCalled();
+
+    finishPendingCreate(token);
     await vi.waitFor(() => expect(writeContextAttachment).toHaveBeenCalled());
+  });
+
+  it("discards queued bytes when the prepared workspace is rolled back", async () => {
+    const cwd = "/repo-worktrees/failed";
+    const token = beginPendingCreate({
+      repoRoot: "/repo",
+      repoSlug: "o/r",
+      path: cwd,
+    });
+    executeGraphSync(cwd, {
+      stage: [att()],
+      nextIds: new Set(["att-1"]),
+    });
+
+    discardQueuedContextGraphWrites(cwd);
+    finishPendingCreate(token);
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(writeContextAttachment).not.toHaveBeenCalled();
+  });
+
+  it("coalesces the same attachment while provisioning", async () => {
+    const cwd = "/repo-worktrees/deduped";
+    const token = beginPendingCreate({
+      repoRoot: "/repo",
+      repoSlug: "o/r",
+      path: cwd,
+    });
+    const plan = {
+      stage: [att()],
+      nextIds: new Set(["att-1"]),
+    };
+    executeGraphSync(cwd, plan);
+    executeGraphSync(cwd, plan);
+
+    finishPendingCreate(token);
+    await vi.waitFor(() =>
+      expect(writeContextAttachment).toHaveBeenCalledTimes(1),
+    );
+  });
+
+  it("retains an accepted graph record if its chip is removed before checkout", async () => {
+    const cwd = "/repo-worktrees/removed-chip";
+    const token = beginPendingCreate({
+      repoRoot: "/repo",
+      repoSlug: "o/r",
+      path: cwd,
+    });
+    executeGraphSync(cwd, {
+      stage: [att()],
+      nextIds: new Set(["att-1"]),
+    });
+    // Context graph writes are append-only. Removing the chip changes the
+    // prompt, but must not erase the already-accepted graph intent.
+    executeGraphSync(cwd, { stage: [], nextIds: new Set() });
+
+    finishPendingCreate(token);
+    await vi.waitFor(() =>
+      expect(writeContextAttachment).toHaveBeenCalledTimes(1),
+    );
+  });
+
+  it("retains the accepted bytes if later validation changes before checkout", async () => {
+    const cwd = "/repo-worktrees/revalidated";
+    const token = beginPendingCreate({
+      repoRoot: "/repo",
+      repoSlug: "o/r",
+      path: cwd,
+    });
+    executeGraphSync(cwd, {
+      stage: [att({ text: "accepted" })],
+      nextIds: new Set(["att-1"]),
+    });
+    // Model changes can revalidate the same attachment object while checkout
+    // is pending. They must not retroactively erase bytes already accepted as
+    // append-only graph intent.
+    executeGraphSync(cwd, {
+      stage: [
+        att({
+          text: "accepted",
+          validation: { ok: false, reason: "model changed" },
+        }),
+      ],
+      nextIds: new Set(["att-1"]),
+    });
+
+    finishPendingCreate(token);
+    await vi.waitFor(() =>
+      expect(writeContextAttachment).toHaveBeenCalledTimes(1),
+    );
+    expect(writeContextAttachment).toHaveBeenCalledWith(
+      expect.objectContaining({ base64: "YWNjZXB0ZWQ=" }),
+    );
+  });
+
+  it("flushes concurrent prepared workspaces by exact cwd", async () => {
+    const cwdA = "/repo-worktrees/a";
+    const cwdB = "/repo-worktrees/b";
+    const tokenA = beginPendingCreate({
+      repoRoot: "/repo",
+      repoSlug: "o/r",
+      path: cwdA,
+    });
+    const tokenB = beginPendingCreate({
+      repoRoot: "/repo",
+      repoSlug: "o/r",
+      path: cwdB,
+    });
+    executeGraphSync(cwdA, {
+      stage: [att({ id: "att-a", name: "a.txt" })],
+      nextIds: new Set(["att-a"]),
+    });
+    executeGraphSync(cwdB, {
+      stage: [att({ id: "att-b", name: "b.txt" })],
+      nextIds: new Set(["att-b"]),
+    });
+
+    finishPendingCreate(tokenA);
+    await vi.waitFor(() =>
+      expect(writeContextAttachment).toHaveBeenCalledTimes(1),
+    );
+    expect(writeContextAttachment).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cwd: cwdA, attachmentId: "att-a" }),
+    );
+
+    finishPendingCreate(tokenB);
+    await vi.waitFor(() =>
+      expect(writeContextAttachment).toHaveBeenCalledTimes(2),
+    );
+    expect(writeContextAttachment).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cwd: cwdB, attachmentId: "att-b" }),
+    );
   });
 
   it("leaves other workspaces' staging untouched", async () => {

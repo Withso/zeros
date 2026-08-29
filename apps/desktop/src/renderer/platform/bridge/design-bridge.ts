@@ -21,9 +21,17 @@ import type { DesignRuntimeMatchedDeclaration } from "@zeros/protocol/design-run
 import type { RuntimeClient } from "./ws-client";
 import { workspaceOp } from "./workspace-bridge";
 
+// A cold aggregate snapshot intentionally parses, lints, and composes every
+// frame's lightweight render identity. Large documents can exceed the generic
+// 10s workspace RPC budget even on a healthy engine; the renderer retains a
+// warm exact-key snapshot while this bounded revalidation runs.
+const DESIGN_AGGREGATE_READ_TIMEOUT_MS = 30_000;
+
 export interface DesignFrameSummaryWire {
   file: string;
   title: string;
+  /** Omitted by older remote engines; absence is a conventional frame. */
+  kind?: "frame" | "text";
   width: number;
   height: number;
   x: number;
@@ -96,6 +104,13 @@ export interface DesignFrameGeometryWire {
   z: number;
 }
 
+export interface DesignTextFrameSeedWire {
+  kind: "text";
+  nodeId: string;
+  text: string;
+  fixedSize: boolean;
+}
+
 export interface DesignAssetWire {
   path: string;
   name: string;
@@ -125,15 +140,41 @@ function validProtocolCapability(
   );
 }
 
+export function isDesignWorkspaceSnapshotWire(
+  value: unknown,
+): value is DesignWorkspaceSnapshotWire {
+  const snapshot = value as DesignWorkspaceSnapshotWire | undefined;
+  if (!snapshot || !validProtocolCapability(snapshot)) return false;
+  return (
+    Array.isArray(snapshot.frames) &&
+    Array.isArray(snapshot.tokens) &&
+    Array.isArray(snapshot.assets) &&
+    typeof snapshot.tokenSourceVersion === "string" &&
+    typeof snapshot.lint?.workspacePath === "string" &&
+    Array.isArray(snapshot.lint.checkedFiles) &&
+    Array.isArray(snapshot.lint.violations) &&
+    typeof snapshot.lint.healedOids === "number"
+  );
+}
+
 export interface DesignMutationResultWire {
   changed: boolean;
   frame: DesignFrameDocumentWire;
   lint: DesignLintReportWire;
 }
 
+export interface DesignFoundationRevisionWire {
+  before: string;
+  after: string;
+}
+
 export interface DesignMutationReplyWire {
   mutation: DesignMutationResultWire;
   snapshot: DesignWorkspaceSnapshotWire;
+  /** Exact authored lineage produced by this compatibility mutation. Older
+   * engines may omit it; the renderer then refreshes the current Foundation
+   * before its next transaction instead of guessing across a revision. */
+  foundationRevision?: DesignFoundationRevisionWire;
 }
 
 export interface DesignSelectionInputWire {
@@ -161,7 +202,12 @@ export interface DesignScreenshotInputWire {
 }
 
 export interface DesignRuntimeWarningWire {
-  ruleId: "contrast" | "overflow" | "spacing-scale";
+  ruleId:
+    | "contrast"
+    | "overflow"
+    | "spacing-scale"
+    | "audit-limit"
+    | "layer-tree-limit";
   message: string;
   oid: string;
   fix: string;
@@ -222,6 +268,12 @@ function validDesignKeyframes(
 export interface DesignApiMutationReplyWire {
   result: DesignApiApplyResult | null;
   snapshot?: DesignWorkspaceSnapshotWire;
+  /** Structural history can restore/delete a frame independently of the frame
+   * that happened to own keyboard focus when the shortcut was pressed. */
+  historySelection?: string | null;
+  /** Exact document whose DesignApi history moved. Structural history omits
+   * this because it invalidates the aggregate frame set instead. */
+  historyFrame?: string;
 }
 
 function designFoundationOpenReply(value: unknown): DesignFoundationOpenWire {
@@ -268,6 +320,11 @@ function designApiMutationReply(
       (typeof reply.result !== "object" ||
         typeof reply.result.revision !== "string" ||
         typeof reply.result.receipt?.status !== "string")) ||
+    (reply.historySelection !== undefined &&
+      reply.historySelection !== null &&
+      typeof reply.historySelection !== "string") ||
+    (reply.historyFrame !== undefined &&
+      typeof reply.historyFrame !== "string") ||
     (requireSnapshot &&
       (!reply.snapshot ||
         !validProtocolCapability(reply.snapshot) ||
@@ -342,13 +399,13 @@ export async function bridgeDesignApplyTransaction(
 export async function bridgeDesignHistory(
   bridge: RuntimeClient,
   workspaceId: string,
-  frame: string,
+  frame: string | null,
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
   return designApiMutationReply(
     await workspaceOp(bridge, `design.history.${direction}`, {
       workspaceId,
-      frame,
+      ...(frame ? { frame } : {}),
     }),
     `design.history.${direction}`,
     true,
@@ -386,18 +443,13 @@ export async function bridgeDesignSnapshot(
   bridge: RuntimeClient,
   workspaceId: string,
 ): Promise<DesignWorkspaceSnapshotWire> {
-  const result = (await workspaceOp(bridge, "design.snapshot", {
-    workspaceId,
-  })) as { snapshot?: DesignWorkspaceSnapshotWire };
-  if (
-    !result?.snapshot ||
-    !validProtocolCapability(result.snapshot) ||
-    !Array.isArray(result.snapshot.frames) ||
-    !Array.isArray(result.snapshot.tokens) ||
-    !Array.isArray(result.snapshot.assets) ||
-    typeof result.snapshot.tokenSourceVersion !== "string" ||
-    !Array.isArray(result.snapshot.lint?.violations)
-  ) {
+  const result = (await workspaceOp(
+    bridge,
+    "design.snapshot",
+    { workspaceId },
+    DESIGN_AGGREGATE_READ_TIMEOUT_MS,
+  )) as { snapshot?: DesignWorkspaceSnapshotWire };
+  if (!isDesignWorkspaceSnapshotWire(result?.snapshot)) {
     throw new Error("design.snapshot: malformed engine response");
   }
   return result.snapshot;
@@ -408,6 +460,7 @@ function designMutationReply(
   operation: string,
 ): DesignMutationReplyWire {
   const reply = result as Partial<DesignMutationReplyWire> | null;
+  const revision = reply?.foundationRevision;
   if (
     !reply?.mutation ||
     typeof reply.mutation.changed !== "boolean" ||
@@ -416,7 +469,10 @@ function designMutationReply(
     !validProtocolCapability(reply.snapshot) ||
     !Array.isArray(reply.snapshot.frames) ||
     !Array.isArray(reply.snapshot.assets) ||
-    typeof reply.snapshot.tokenSourceVersion !== "string"
+    typeof reply.snapshot.tokenSourceVersion !== "string" ||
+    (revision !== undefined &&
+      (typeof revision.before !== "string" ||
+        typeof revision.after !== "string"))
   ) {
     throw new Error(`${operation}: malformed engine response`);
   }
@@ -446,6 +502,7 @@ export async function bridgeDesignUpdateToken(
 ): Promise<{
   mutation: DesignTokenMutationWire;
   snapshot: DesignWorkspaceSnapshotWire;
+  foundationRevision?: DesignFoundationRevisionWire;
 }> {
   const result = (await workspaceOp(bridge, "design.token.update", {
     workspaceId,
@@ -453,20 +510,26 @@ export async function bridgeDesignUpdateToken(
   })) as {
     mutation?: DesignTokenMutationWire;
     snapshot?: DesignWorkspaceSnapshotWire;
+    foundationRevision?: DesignFoundationRevisionWire;
   };
+  const revision = result.foundationRevision;
   if (
     !result.mutation ||
     typeof result.mutation.changed !== "boolean" ||
     !result.snapshot ||
     !validProtocolCapability(result.snapshot) ||
     !Array.isArray(result.snapshot.tokens) ||
-    typeof result.snapshot.tokenSourceVersion !== "string"
+    typeof result.snapshot.tokenSourceVersion !== "string" ||
+    (revision !== undefined &&
+      (typeof revision.before !== "string" ||
+        typeof revision.after !== "string"))
   ) {
     throw new Error("design.token.update: malformed engine response");
   }
   return {
     mutation: result.mutation,
     snapshot: result.snapshot,
+    ...(revision ? { foundationRevision: revision } : {}),
   };
 }
 
@@ -528,6 +591,8 @@ export async function bridgeDesignCreateFrame(
   bridge: RuntimeClient,
   workspaceId: string,
   title?: string,
+  geometry?: DesignFrameGeometryWire,
+  seed?: DesignTextFrameSeedWire,
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
@@ -535,6 +600,15 @@ export async function bridgeDesignCreateFrame(
   const result = (await workspaceOp(bridge, "design.frame.create", {
     workspaceId,
     ...(title ? { title } : {}),
+    ...(geometry ? geometry : {}),
+    ...(seed
+      ? {
+          kind: seed.kind,
+          textNodeId: seed.nodeId,
+          text: seed.text,
+          textFixedSize: seed.fixedSize,
+        }
+      : {}),
   })) as {
     frame?: DesignFrameSummaryWire;
     snapshot?: DesignWorkspaceSnapshotWire;
@@ -586,6 +660,7 @@ export async function bridgeDesignUpdateCanvas(
 ): Promise<{
   geometry: DesignFrameGeometryWire;
   snapshot: DesignWorkspaceSnapshotWire;
+  foundationRevision?: DesignFoundationRevisionWire;
 }> {
   const result = (await workspaceOp(bridge, "design.canvas.update", {
     workspaceId,
@@ -594,16 +669,25 @@ export async function bridgeDesignUpdateCanvas(
   })) as {
     geometry?: DesignFrameGeometryWire;
     snapshot?: DesignWorkspaceSnapshotWire;
+    foundationRevision?: DesignFoundationRevisionWire;
   };
+  const revision = result.foundationRevision;
   if (
     !result?.geometry ||
     typeof result.geometry.x !== "number" ||
     !result.snapshot ||
-    !validProtocolCapability(result.snapshot)
+    !validProtocolCapability(result.snapshot) ||
+    (revision !== undefined &&
+      (typeof revision.before !== "string" ||
+        typeof revision.after !== "string"))
   ) {
     throw new Error("design.canvas.update: malformed engine response");
   }
-  return { geometry: result.geometry, snapshot: result.snapshot };
+  return {
+    geometry: result.geometry,
+    snapshot: result.snapshot,
+    ...(revision ? { foundationRevision: revision } : {}),
+  };
 }
 
 export async function bridgeDesignDuplicateFrame(
@@ -734,6 +818,15 @@ export async function bridgeDesignInsertAsset(
   );
 }
 
+export async function bridgeDesignStage(
+  bridge: RuntimeClient,
+  workspaceId: string,
+): Promise<{ ok: true }> {
+  return (await workspaceOp(bridge, "design.stage", {
+    workspaceId,
+  })) as { ok: true };
+}
+
 export async function bridgeDesignSave(
   bridge: RuntimeClient,
   workspaceId: string,
@@ -743,4 +836,29 @@ export async function bridgeDesignSave(
     workspaceId,
     ...(message ? { message } : {}),
   })) as { sha: string; branch: string };
+}
+
+/** Every design folder in a checkout (recognized by its committed
+ *  `.zeros-canvas.json` marker) plus the resolved `[design] directory`
+ *  pointer. `workspaceId` may be a workspace id or a known repo root — the
+ *  repo settings Design tab passes the main checkout. */
+export async function bridgeDesignListDirectories(
+  bridge: RuntimeClient,
+  workspaceId: string,
+): Promise<{ directories: string[]; pointer: string; active: string }> {
+  return (await workspaceOp(bridge, "design.listDirectories", {
+    workspaceId,
+  })) as { directories: string[]; pointer: string; active: string };
+}
+
+/** Rename the repo's design folder — `git mv` + the committed pointer update
+ *  in ONE commit, in the repo's main checkout. The engine refuses while live
+ *  design-mode workspaces exist for the repo. */
+export async function bridgeDesignRenameDirectory(
+  bridge: RuntimeClient,
+  args: { repoRoot: string; from: string; to: string },
+): Promise<{ committedPointer: boolean }> {
+  return (await workspaceOp(bridge, "design.renameDirectory", {
+    ...args,
+  })) as { committedPointer: boolean };
 }

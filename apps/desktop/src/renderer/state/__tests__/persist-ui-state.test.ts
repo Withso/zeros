@@ -145,6 +145,59 @@ describe("loadPersistedUiState — repo page (activePage + activeRepoId pair)", 
 });
 
 describe("loadPersistedUiState — scoped navigation", () => {
+  it("restores the top-bar workspace filter and rejects malformed values", () => {
+    for (const workspaceListFilter of [
+      "grouped",
+      "ungrouped",
+      "active",
+      "repo:project-a",
+    ]) {
+      localStorage.setItem(KEY, JSON.stringify({ workspaceListFilter }));
+      expect(loadPersistedUiState().workspaceListFilter).toBe(
+        workspaceListFilter,
+      );
+    }
+
+    localStorage.setItem(KEY, JSON.stringify({ workspaceListFilter: "repo:" }));
+    expect(loadPersistedUiState().workspaceListFilter).toBe("grouped");
+  });
+
+  it("validates the bounded workspace activity clock independently", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        workspaceActivityByFolder: {
+          "/wt-a": 10,
+          "/wt-b": -1,
+          "/wt-c": "20",
+          "": 30,
+        },
+      }),
+    );
+
+    expect(loadPersistedUiState().workspaceActivityByFolder).toEqual({
+      "/wt-a": 10,
+    });
+  });
+
+  it("restores Create with its project target without replacing Home memory", () => {
+    localStorage.setItem(
+      KEY,
+      JSON.stringify({
+        activePage: "create",
+        createWorkspaceProjectId: "project-b",
+        lastHomePage: "repo",
+        activeRepoId: "project-a",
+      }),
+    );
+    expect(loadPersistedUiState()).toMatchObject({
+      activePage: "create",
+      createWorkspaceProjectId: "project-b",
+      lastHomePage: "repo",
+      activeRepoId: "project-a",
+    });
+  });
+
   it("restores Home, per-repo workspace, and per-repo hub view independently", () => {
     localStorage.setItem(
       KEY,

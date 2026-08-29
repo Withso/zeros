@@ -4,6 +4,8 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  APP_CSP,
+  applyHostHeaders,
   appOrigin,
   classifyHost,
   isAppOnlyPath,
@@ -11,6 +13,26 @@ import {
   normalizeMarketingPath,
   redirectUri,
 } from "./hosts.ts";
+
+describe("applyHostHeaders", () => {
+  it("preserves a route-specific Content-Security-Policy", async () => {
+    const strictCsp = "default-src 'none'; script-src 'nonce-desktop-auth'";
+    const response = applyHostHeaders(
+      new Response("desktop callback", {
+        headers: { "content-security-policy": strictCsp },
+      }),
+      "app",
+    );
+
+    assert.equal(response.headers.get("content-security-policy"), strictCsp);
+    assert.equal(await response.text(), "desktop callback");
+  });
+
+  it("adds the default app policy when a route does not provide one", () => {
+    const response = applyHostHeaders(new Response("hub"), "app");
+    assert.equal(response.headers.get("content-security-policy"), APP_CSP);
+  });
+});
 
 describe("classifyHost", () => {
   const env = {};

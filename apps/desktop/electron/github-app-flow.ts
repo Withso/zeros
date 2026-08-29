@@ -9,6 +9,7 @@ import type { GithubCredential } from "@zeros/protocol/github-auth";
 
 import { channel, schemeForChannel } from "../src/engine/runtime";
 import {
+  getProductAccountIdForMain,
   getSessionUserForMain,
   getValidSessionForMain,
 } from "./ipc/commands/auth-session";
@@ -17,10 +18,7 @@ import {
   githubCredentialStore,
   replaceGithubAppCredentialIfCurrent,
 } from "./github-auth-runtime";
-import {
-  GithubAppClient,
-  type GithubAppFlowKind,
-} from "./github-app-client";
+import { GithubAppClient, type GithubAppFlowKind } from "./github-app-client";
 import {
   GithubAppController,
   GithubAppFlowError,
@@ -199,7 +197,12 @@ function githubAppController(): GithubAppController {
     getSession: async () => {
       const session = await getValidSessionForMain();
       return session
-        ? { accessToken: session.accessToken, sub: session.sub }
+        ? {
+            accessToken: session.accessToken,
+            // Controller field name is serialized compatibility; its value is
+            // the stable Zeros account UUID in WorkOS mode.
+            sub: session.accountId ?? session.sub,
+          }
         : null;
     },
     savePending(input) {
@@ -297,11 +300,13 @@ export async function scheduleGithubAppRefresh(
     return;
   }
   const session = getSessionUserForMain();
+  const accountId = getProductAccountIdForMain();
   if (
     generation !== scheduleGeneration ||
     !session ||
+    !accountId ||
     !credential.ownerSub ||
-    credential.ownerSub !== session.sub
+    credential.ownerSub !== accountId
   ) {
     return;
   }

@@ -13,10 +13,12 @@
 // has its own EventRow-based record (QuestionRecordCard).
 // ──────────────────────────────────────────────────────────
 
-import { memo } from "react";
+import { memo, useState } from "react";
 import { Globe2, SquareMousePointer } from "lucide-react";
 
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { Button } from "@/renderer/shared/ui";
+import { toast } from "@/renderer/shared/ui/primitives/elements";
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
 import { EventRow } from "./event-row";
 import { isImagePath, nativeCodexBrowserPresentation } from "./event-meta";
@@ -129,6 +131,22 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
       );
     }
     if (message.kind === "tool") {
+      const safetyReview = readSafetyReview(message as AgentToolMessage);
+      if (safetyReview) {
+        const retryId = ctx.safetyReviewRetries?.[message.toolCallId];
+        return (
+          <EventRow
+            message={message}
+            ctx={ctx}
+            detail={
+              <SafetyReviewDetail
+                review={{ ...safetyReview, ...(retryId ? { retryId } : {}) }}
+                ctx={ctx}
+              />
+            }
+          />
+        );
+      }
       const activity = browserToolActivity(message as AgentToolMessage);
       if (activity) {
         return (
@@ -144,6 +162,82 @@ export const EventRowRenderer: Renderer<AgentMessage> = memo(
     return <EventRow message={message} ctx={ctx} detail={detail} />;
   },
 );
+
+interface SafetyReviewView {
+  status: string;
+  actionType?: string;
+  riskLevel?: string;
+  rationale?: string;
+  retryId?: string;
+  retried?: boolean;
+}
+
+function readSafetyReview(tool: AgentToolMessage): SafetyReviewView | null {
+  if (!tool.rawOutput || typeof tool.rawOutput !== "object") return null;
+  const value = (tool.rawOutput as Record<string, unknown>).zerosSafetyReview;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const review = value as Record<string, unknown>;
+  if (typeof review.status !== "string") return null;
+  return {
+    status: review.status,
+    ...(typeof review.actionType === "string"
+      ? { actionType: review.actionType }
+      : {}),
+    ...(typeof review.riskLevel === "string"
+      ? { riskLevel: review.riskLevel }
+      : {}),
+    ...(typeof review.rationale === "string"
+      ? { rationale: review.rationale }
+      : {}),
+    ...(review.retried === true ? { retried: true } : {}),
+  };
+}
+
+function SafetyReviewDetail({
+  review,
+  ctx,
+}: {
+  review: SafetyReviewView;
+  ctx: RendererContext;
+}) {
+  const [busy, setBusy] = useState(false);
+  const retry = async () => {
+    if (!review.retryId || busy) return;
+    setBusy(true);
+    try {
+      await ctx.retrySafetyReview(review.retryId);
+    } catch (error) {
+      toast.error("Couldn't retry the denied action", {
+        description: error instanceof Error ? error.message : String(error),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="text-fg2 space-y-2 text-sm">
+      <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs">
+        <span>Status: {review.retried ? "Retried" : review.status}</span>
+        {review.actionType ? <span>Action: {review.actionType}</span> : null}
+        {review.riskLevel ? <span>Risk: {review.riskLevel}</span> : null}
+      </div>
+      {review.rationale ? (
+        <p className="whitespace-pre-wrap">{review.rationale}</p>
+      ) : null}
+      {review.status === "denied" && review.retryId ? (
+        <Button
+          type="button"
+          size="sm"
+          variant="secondary"
+          disabled={busy}
+          onClick={() => void retry()}
+        >
+          Approve and retry once
+        </Button>
+      ) : null}
+    </div>
+  );
+}
 
 /** Provider-native Browser calls remain ordinary, expandable tool calls, but
  * their leading glyph and copy describe the page action instead of MCP/REPL

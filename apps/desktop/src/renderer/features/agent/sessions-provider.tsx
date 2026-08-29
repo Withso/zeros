@@ -24,16 +24,26 @@ import React, {
   useRef,
 } from "react";
 import type {
+  AgentGoal,
   ContentBlock,
   InitializeResponse,
   SessionMode,
   SessionNotification,
 } from "../../platform/bridge/agent-events";
 import type {
+  AgentBoundaryStatusChangedMessage,
+  AgentBoundaryPortsChangedMessage,
+  AgentBoundaryPortOpenedMessage,
   AgentAgentsListMessage,
   AgentAgentInitializedMessage,
   AgentErrorMessage,
+  AgentGoalChangedMessage,
+  AgentConfigurationProvenanceMessage,
   AgentModeChangedMessage,
+  AgentMemoryResetCompleteMessage,
+  AgentMemorySettingsMessage,
+  AgentProviderQuotaMessage,
+  AgentProviderQuotaUpdatedMessage,
   AgentPromptBubble,
   AgentPromptCompleteMessage,
   AgentPromptFailedMessage,
@@ -41,6 +51,7 @@ import type {
   AgentSessionCreatedMessage,
   AgentSessionLoadedMessage,
   AgentSessionsListMessage,
+  AgentSafetyReviewRetriedMessage,
   AgentSteeredMessage,
 } from "../../platform/bridge/messages";
 import { useBridge, useBridgeStatus } from "../../platform/bridge/use-bridge";
@@ -70,7 +81,6 @@ import {
 import { toast } from "@/renderer/shared/ui/primitives/elements";
 import {
   classifyRpcError,
-  isRecoverable as failureIsRecoverable,
   type AgentFailure,
 } from "../../platform/bridge/failure";
 import { findMatchingPolicy } from "./policies";
@@ -82,7 +92,15 @@ import {
 } from "./model-catalog";
 import { agentAppliesConfigLive } from "./live-config-support";
 import { useWorkspaceStore } from "../../state/workspace-store";
+import { providerQuotaCache } from "../../state/read-caches";
 import { requestUserSettingsSection } from "../settings/settings-navigation";
+import { shellOpenUrl } from "../../platform/app";
+import { externalUrlsForQuestionResponse } from "./question-external-actions";
+import {
+  AGENT_NEW_SESSION_TIMEOUT_MS,
+  shouldCancelStalledSessionAdmission,
+  shouldRetrySessionAdmission,
+} from "./session-admission-policy";
 import {
   getClaudeIdleTimeoutMinutes,
   isClaudeWakeupBeyondIdleTimeout,
@@ -99,22 +117,37 @@ import { ActionsCtx, type SessionsActions } from "./sessions-context";
 import { questionRequestIsBrowserApproval } from "./pending-question-tools";
 import { nativeInvoke } from "../../platform/runtime";
 import {
+  admissionRouteWithoutFlight,
+  admissionCancellationAction,
+  agentUpdateFlushMode,
   bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
   bumpCancelGeneration,
+  cancelledQueuedMessageAction,
   cancelGeneration,
   cancelledSince,
+  clearPrebindGoalSnapshotsForChat,
+  detachAdmissionFlight,
   loadedSessionStatus,
+  markPrebindGoalSnapshot,
   markPrebindDirty,
+  type PrebindGoalSnapshot,
+  promptFailureShouldRecover,
+  promptFailureShouldResumeProvider,
   providerCapabilityRefreshCanRun,
   providerCapabilityRefreshExecution,
+  queuedPromptPresentation,
   queuedSendNowAction,
   queueReleaseAction,
   recoveredSessionIdentity,
   recoveryLoadLocator,
   resumeFailureInvalidatesBinding,
+  sendAdmissionPark,
+  sharedAdmissionFlightAction,
+  shouldPreserveAdmissionPromptOnFailure,
   shouldQueuePrompt,
   statusForFailure,
+  takePrebindGoalSnapshot,
   takePrebindDirty,
 } from "./session-reload-lifecycle";
 import {
@@ -147,6 +180,7 @@ import {
   closeActivityForSession,
   closeRouteForSession,
 } from "./session-close-lifecycle";
+import { tryRestoreLiveChatDraft } from "./composer-live-drafts";
 
 // 2026-06-09: reconcile now runs on EVERY bind (new session, respawn, resume).
 // It used to run at most once per chat to avoid clobbering a mode the user
@@ -303,13 +337,10 @@ const HYDRATE_WINDOW = 200;
 // to keep its HMR boundary clean. Consumers import the constant
 // directly from `./sessions-store`.)
 
-/** User-visible ceiling for session creation. Three attempts with
- *  exponential backoff so transient flakes (cold-start lock, brief
- *  network hiccup, slow process spawn) don't immediately surface as
- *  "Session failed". 10s per attempt gives Claude Agent and Codex
- *  enough room for their cold newSession RPC. Retrying avoids surfacing a
- *  transient first-spawn failure that succeeds after the runtime settles. */
-const ENSURE_SESSION_ATTEMPT_TIMEOUT_MS = 10_000;
+/** Three attempts with exponential backoff for failures that prove the prior
+ *  request is no longer running (transport replacement or an expired durable
+ *  binding). Admission timeouts deliberately do not retry; see
+ *  session-admission-policy.ts. */
 const ENSURE_SESSION_ATTEMPTS = 3;
 const ENSURE_SESSION_BACKOFF_MS = [0, 800, 2_000];
 
@@ -419,6 +450,9 @@ export function AgentSessionsProvider({
   // that exact chat/session dirty (bounded) and re-window once the turn settles;
   // replaying raw chunks would duplicate text already present in the DB window.
   const prebindDirtySessionsRef = useRef(new Map<string, string>());
+  const prebindGoalSnapshotsRef = useRef(
+    new Map<string, PrebindGoalSnapshot>(),
+  );
 
   // Per-chat in-flight ensureSession promises. Concurrent callers wait on
   // the existing promise instead of starting a duplicate. Force=true
@@ -430,6 +464,19 @@ export function AgentSessionsProvider({
   const capabilityRefreshInFlightRef = useRef(
     new Map<string, Promise<boolean>>(),
   );
+
+  // Identity of the loadIntoChat flight currently registered in
+  // ensureInFlightRef, keyed by chatId. Boot effect re-fires re-call
+  // loadIntoChat with the same (agent, binding) while the first load is
+  // still warming; without this key each re-run bumped the cancel
+  // generation, superseded the in-flight admission at the engine
+  // ("lifecycle-superseded") and started over. Only a DIFFERENT explicit
+  // binding may supersede a running load.
+  const loadFlightKeysRef = useRef(new Map<string, string>());
+  // Whether the registered load flight is only probing for an already-live
+  // execution. A real focus/send may share the RPC, but must retry admission
+  // if that probe settles without a route.
+  const loadFlightAdoptOnlyRef = useRef(new Map<string, boolean>());
 
   // Chats whose disk hydrate could NOT be trusted: the bridge was absent /
   // mid-reconnect (an engine respawn, a cold boot racing the socket, a dev
@@ -786,6 +833,7 @@ export function AgentSessionsProvider({
       const state = useSessionsStore.getState();
       const sessionUpdate = msg.notification.update as {
         sessionUpdate?: string;
+        goal?: AgentGoal | null;
         tasks?: Array<{
           taskId: string;
           taskType?: string;
@@ -839,6 +887,21 @@ export function AgentSessionsProvider({
         state.executionToChatId[
           msg.notification.executionId ?? msg.notification.sessionId
         ];
+      const sourceExecution =
+        msg.notification.executionId ?? msg.notification.sessionId;
+      if (
+        chatId &&
+        sessionUpdate.sessionUpdate === "goal_update" &&
+        (state.sessions[chatId]?.executionId ??
+          state.sessions[chatId]?.sessionId) !== sourceExecution
+      ) {
+        markPrebindGoalSnapshot(
+          prebindGoalSnapshotsRef.current,
+          chatId,
+          sourceExecution,
+          sessionUpdate.goal ?? null,
+        );
+      }
       // Only a genuinely unbound/cold slot needs a later disk reconcile. A
       // different non-null session id is an intentionally superseded owner;
       // remembering its late pushes would retain a stale dirty key forever.
@@ -888,8 +951,46 @@ export function AgentSessionsProvider({
           ? ({ ...msg.notification, chatId: msg.chatId } as SessionNotification)
           : msg.notification,
       );
-      schedule();
+      if (agentUpdateFlushMode(sessionUpdate) === "turn-boundary") {
+        // The engine sends terminal turn_state before AGENT_PROMPT_COMPLETE.
+        // Drain the final text/tool chunks and that terminal marker in this
+        // callback, as one transition. Otherwise the awaited prompt response
+        // can publish `ready` while those chunks still sit in the next-frame
+        // buffer, briefly mounting partial prose as a bright final answer.
+        if (rafHandle !== null) {
+          cancelAnimationFrame(rafHandle);
+          rafHandle = null;
+        }
+        flush();
+      } else {
+        schedule();
+      }
     });
+
+    const unsubBoundaryPorts = bridge.on(
+      "AGENT_BOUNDARY_PORTS_CHANGED",
+      (raw) => {
+        const msg = raw as AgentBoundaryPortsChangedMessage;
+        const state = useSessionsStore.getState();
+        const chatId = msg.chatId ?? state.executionToChatId[msg.executionId];
+        if (!chatId) return;
+        const session = state.sessions[chatId];
+        // An event from a retired execution must never overwrite the exact
+        // snapshot published atomically with its replacement route.
+        if (session?.executionId !== msg.executionId) return;
+        state.patchSession(chatId, { boundaryPorts: msg.snapshot });
+      },
+    );
+
+    const unsubBoundaryStatus = bridge.on(
+      "AGENT_BOUNDARY_STATUS_CHANGED",
+      (raw) => {
+        const msg = raw as AgentBoundaryStatusChangedMessage;
+        useSessionsStore
+          .getState()
+          .applyBridgeBoundaryStatus(msg.agentId, msg.executionId, msg.status);
+      },
+    );
 
     const unsubPerm = bridge.on("AGENT_PERMISSION_REQUEST", (raw) => {
       const msg = raw as {
@@ -970,6 +1071,14 @@ export function AgentSessionsProvider({
       schedule();
     });
 
+    const unsubProviderQuota = bridge.on(
+      "AGENT_PROVIDER_QUOTA_UPDATED",
+      (raw) => {
+        const message = raw as AgentProviderQuotaUpdatedMessage;
+        providerQuotaCache.setData(message.agentId, message.quota);
+      },
+    );
+
     const unsubStderr = bridge.on("AGENT_AGENT_STDERR", (raw) => {
       const msg = raw as { agentId: string; line: string };
       stderrBuffer.push({ agentId: msg.agentId, line: msg.line });
@@ -1015,10 +1124,13 @@ export function AgentSessionsProvider({
       }
       flush();
       unsubUpdate();
+      unsubBoundaryStatus();
+      unsubBoundaryPorts();
       unsubPerm();
       unsubPermissionSettled();
       unsubQuestion();
       unsubQuestionSettled();
+      unsubProviderQuota();
       unsubStderr();
       unsubExit();
       // Answer-ack watchdogs are deliberately NOT cleared here: a bridge swap
@@ -1078,13 +1190,14 @@ export function AgentSessionsProvider({
   const ensureSessionRef = useRef<SessionsActions["ensureSession"] | null>(
     null,
   );
+  const loadIntoChatRef = useRef<SessionsActions["loadIntoChat"] | null>(null);
   /** Self-ref so sendPrompt's turn-completion flush can re-invoke it for the
    *  next queued send (a useCallback can't reference itself in its body). */
   const sendPromptRef = useRef<SessionsActions["sendPrompt"] | null>(null);
-  /** Per-chat FIFO of sends that arrived while a turn was already in flight.
-   *  Flushed one at a time as each turn completes, so the engine only ever
-   *  sees a single turn (no "prompt already in flight" rejection) and the
-   *  user's follow-up is never silently dropped (the prior behavior). */
+  /** Per-chat FIFO of sends waiting for admission or an earlier live turn.
+   * Flushed one at a time, so the engine only ever sees one turn. The first
+   * admission-waiting entry is presented as active; later entries are the
+   * editable follow-up queue. */
   const sendQueueRef = useRef(
     new Map<
       string,
@@ -1098,11 +1211,10 @@ export function AgentSessionsProvider({
 
   // When a queued send flushes, the finally below hands its placeholder bubble
   // id to the re-entrant sendPrompt via this map (chatId → bubbleId). sendPrompt
-  // then PROMOTES that placeholder into a live bubble at the transcript end
-  // (queued messages render in the composer's queued-card, not the transcript,
-  // so the promoted bubble must land after the previous turn's tail events) —
-  // and, if the session can't be re-established, demotes it to a normal bubble
-  // so the user's text is never silently dropped.
+  // then PROMOTES that placeholder into a live bubble at the transcript end.
+  // Follow-up placeholders live in the queued card; the admission placeholder
+  // is already visible at the tail and retains its id/time through promotion.
+  // If the session cannot be re-established, demotion keeps the user's text.
   const flushBubbleRef = useRef(new Map<string, string>());
 
   /** Chats whose send queue is PARKED because the user is editing a queued
@@ -1129,6 +1241,27 @@ export function AgentSessionsProvider({
         executionId,
         sessionId: executionId,
       });
+    },
+    [bridge],
+  );
+
+  /** A timed-out RPC has only stopped the renderer's wait; the engine may
+   * still be preparing a boundary or awaiting provider startup. Invalidate the
+   * chat-scoped bind so its provisional/late execution is revoked and proved
+   * stopped. The engine's close-flight barrier also keeps an immediate manual
+   * retry from racing that teardown. */
+  const cancelStalledAdmission = useCallback(
+    (agentId: string, chatId: string): void => {
+      void bridge
+        ?.request<AgentSessionClosedMessage | AgentErrorMessage>(
+          {
+            type: "AGENT_CLOSE_SESSION",
+            agentId,
+            chatId,
+          },
+          { timeoutMs: 15_000 },
+        )
+        .catch(() => {});
     },
     [bridge],
   );
@@ -1251,24 +1384,96 @@ export function AgentSessionsProvider({
       // hence the toast, so the user knows to resend once
       // the chat is healthy again.
       const ids = new Set(queued.map((e) => e.bubbleId));
+      const hadActiveTurn = settled?.messages.some(
+        (message) =>
+          message.kind === "text" &&
+          ids.has(message.id) &&
+          message.queuedPresentation === "active-turn",
+      );
+      const preservedIds = new Set(
+        (settled?.messages ?? [])
+          .filter(
+            (message): message is AgentTextMessage =>
+              message.kind === "text" &&
+              ids.has(message.id) &&
+              shouldPreserveAdmissionPromptOnFailure(
+                settled?.failure?.kind,
+                message.queuedPresentation,
+              ),
+          )
+          .map((message) => message.id),
+      );
+      const dropped = queued.filter(
+        (entry) => !preservedIds.has(entry.bubbleId),
+      );
       sendQueueRef.current.delete(chatId);
       if (settled) {
         getStore().patchSession(chatId, {
-          messages: settled.messages.filter(
-            (m) => !(m.kind === "text" && ids.has(m.id)),
-          ),
+          messages: settled.messages.flatMap((message) => {
+            if (!(message.kind === "text" && ids.has(message.id))) {
+              return [message];
+            }
+            if (!preservedIds.has(message.id)) return [];
+            return [
+              {
+                ...message,
+                queued: false,
+                queuedPresentation: undefined,
+                queuedEditable: undefined,
+              },
+            ];
+          }),
+          ...(hadActiveTurn ? { activeTurnStartedAt: null } : {}),
         });
       }
-      const n = queued.length;
-      toast.warning(
-        n === 1
-          ? "A queued message wasn’t sent"
-          : `${n} queued messages weren’t sent`,
-        {
-          description:
-            "This chat hit an error before your follow-up could go out — resend once it reconnects.",
-        },
-      );
+      if (hadActiveTurn) {
+        getStore().setPendingLocalTurn(chatId, null);
+      }
+      // Give the words back. Now that a plain first send parks instead of
+      // blocking (§5.0 sendSessionRecoveryMode), a failed spawn drops a message
+      // the user never got to keep — so restore the oldest dropped text as this
+      // chat's composer draft. Guarded on an empty draft: whatever the user has
+      // typed since is newer and must win.
+      const restorable = dropped
+        .map((entry) => {
+          const [, wire, display] = entry.args;
+          const text = (display ?? wire ?? "").trim();
+          return text;
+        })
+        .find((text) => text.length > 0);
+      let restored = false;
+      if (restorable) {
+        const workspace = useWorkspaceStore.getState();
+        const existingDraft = workspace.chatComposerDrafts[chatId];
+        const draftIsEmpty =
+          !existingDraft ||
+          (existingDraft.text.trim().length === 0 &&
+            existingDraft.attachments.length === 0);
+        if (draftIsEmpty) {
+          const draft = { text: restorable, attachments: [], json: null };
+          if (tryRestoreLiveChatDraft(chatId, draft)) {
+            workspace.dispatch({
+              type: "SET_CHAT_DRAFT",
+              chatId,
+              draft,
+            });
+            restored = true;
+          }
+        }
+      }
+      const n = dropped.length;
+      if (n > 0) {
+        toast.warning(
+          n === 1
+            ? "A queued message wasn’t sent"
+            : `${n} queued messages weren’t sent`,
+          {
+            description: restored
+              ? "This chat hit an error before your follow-up could go out — the text is back in the composer."
+              : "This chat hit an error before your follow-up could go out — resend once it reconnects.",
+          },
+        );
+      }
     },
     [getStore, drainNextQueued],
   );
@@ -1278,7 +1483,7 @@ export function AgentSessionsProvider({
     async (chatId, agentId, options) => {
       if (!bridge) return;
       const store = getStore();
-      const existing = store.sessions[chatId];
+      let existing = store.sessions[chatId];
 
       // Already wired up and healthy — nothing to do unless the caller
       // forces a rebuild. `reconnecting` and `auth-required` count as
@@ -1299,7 +1504,120 @@ export function AgentSessionsProvider({
       // promise instead. Force still bypasses.
       if (!options?.force) {
         const inflight = ensureInFlightRef.current.get(chatId);
-        if (inflight) return inflight;
+        if (inflight) {
+          const activeAdoptOnly =
+            loadFlightAdoptOnlyRef.current.get(chatId) === true;
+          await inflight;
+          existing = getStore().sessions[chatId];
+          if (
+            sharedAdmissionFlightAction({
+              activeAdoptOnly,
+              requestedAdoptOnly: false,
+              hasLiveSession: Boolean(
+                existing?.executionId ?? existing?.sessionId,
+              ),
+            }) === "reuse"
+          ) {
+            return;
+          }
+        }
+      }
+
+      // A send behind a lazy probe, or the first send after Stop detached a
+      // cancelled resume, must adopt the durable provider conversation before
+      // falling back to a fresh session. Cancellation keeps that binding on
+      // purpose even though no admission flight remains.
+      const providerBinding = existing?.providerBinding;
+      const loadIntoChat = loadIntoChatRef.current;
+      const bindGeneration = cancelGeneration(
+        cancelGenerationsRef.current,
+        chatId,
+      );
+      const bindCancelled = () =>
+        cancelledSince(cancelGenerationsRef.current, chatId, bindGeneration);
+      const admissionRoute = admissionRouteWithoutFlight({
+        force: options?.force === true,
+        replaceProviderConversation:
+          options?.replaceProviderConversation === true,
+        hasProviderBinding: Boolean(providerBinding),
+        canLoad: Boolean(loadIntoChat),
+      });
+      if (admissionRoute !== "create" && providerBinding && loadIntoChat) {
+        // A forced config recovery must replace the ephemeral execution before
+        // loading its durable provider binding. AGENT_LOAD_SESSION deliberately
+        // re-adopts a live execution as-is, so loading without this close would
+        // preserve context but silently keep the stale model/effort config.
+        if (admissionRoute === "restart") {
+          const executionId = existing?.executionId ?? existing?.sessionId;
+          if (executionId) {
+            getStore().patchSession(chatId, {
+              status: "warming",
+              error: null,
+              failure: null,
+            });
+            try {
+              const closed = await bridge.request<
+                AgentSessionClosedMessage | AgentErrorMessage
+              >(
+                {
+                  type: "AGENT_CLOSE_SESSION",
+                  agentId,
+                  chatId,
+                  executionId,
+                  sessionId: executionId,
+                },
+                { timeoutMs: 30_000 },
+              );
+              if (bindCancelled()) return;
+              if (closed.type === "AGENT_ERROR") {
+                const failure = failureFromAgentError(closed, "loadSession");
+                getStore().patchSession(chatId, {
+                  status: statusForFailure(failure),
+                  error: failure.message,
+                  failure,
+                });
+                drainOrDropQueue(chatId);
+                return;
+              }
+            } catch (error) {
+              if (bindCancelled()) return;
+              const failure = classifyRpcError({
+                agentId,
+                stage: "loadSession",
+                error,
+              });
+              if (shouldCancelStalledSessionAdmission(failure.kind)) {
+                cancelStalledAdmission(agentId, chatId);
+              }
+              getStore().patchSession(chatId, {
+                status: statusForFailure(failure),
+                error: failure.message,
+                failure,
+              });
+              drainOrDropQueue(chatId);
+              return;
+            }
+
+            // A replacement lifecycle won the slot while close was pending.
+            // Never resume the old provider binding over its new route.
+            const current = getStore().sessions[chatId];
+            if (
+              !current ||
+              current.agentId !== agentId ||
+              (current.executionId !== executionId &&
+                current.sessionId !== executionId)
+            ) {
+              return;
+            }
+          }
+        }
+        const adopted = await loadIntoChat(chatId, agentId, providerBinding, {
+          agentName: options?.agentName ?? existing?.agentName ?? agentId,
+          cwd: options?.cwd ?? existing?.cwd ?? undefined,
+          env: options?.env,
+        });
+        if (adopted) return;
+        existing = getStore().sessions[chatId];
       }
 
       // Resolve cwd ONCE so the slot and the bridge call agree. Earlier
@@ -1312,12 +1630,6 @@ export function AgentSessionsProvider({
       // OWN folder / active scope from the store, so a spawn from ANY
       // recovery path lands in the right folder instead of throwing.
       const resolvedCwd = resolveSpawnCwd(chatId, options?.cwd, existing?.cwd);
-      const bindGeneration = cancelGeneration(
-        cancelGenerationsRef.current,
-        chatId,
-      );
-      const bindCancelled = () =>
-        cancelledSince(cancelGenerationsRef.current, chatId, bindGeneration);
 
       let bindWasSuperseded = false;
       const work = (async () => {
@@ -1348,17 +1660,13 @@ export function AgentSessionsProvider({
         const attemptOnce = async (): Promise<
           AgentSessionCreatedMessage | AgentErrorMessage | null
         > => {
-          const timer = new Promise<never>((_, reject) => {
-            window.setTimeout(
-              () =>
-                reject(
-                  new Error(
-                    `Request timeout: AGENT_NEW_SESSION (${ENSURE_SESSION_ATTEMPT_TIMEOUT_MS}ms cap)`,
-                  ),
-                ),
-              ENSURE_SESSION_ATTEMPT_TIMEOUT_MS,
-            );
-          });
+          const cliBinaryOverride = getProviderBinaryOverride(agentId);
+          const spawnWorkspaceId = await resolveSpawnWorkspaceId(
+            bridge,
+            resolvedCwd,
+          );
+          if (bindCancelled()) return null;
+
           // Merge env from Settings → Providers (auth method +
           // gateway URL) with any explicit env the caller supplied.
           // Explicit env (e.g. from the AuthModal first-time flow)
@@ -1383,14 +1691,20 @@ export function AgentSessionsProvider({
                   ...(options?.env ?? {}),
                 }
               : undefined;
-          const cliBinaryOverride = getProviderBinaryOverride(agentId);
-
-          const spawnWorkspaceId = await resolveSpawnWorkspaceId(
-            bridge,
-            resolvedCwd,
-          );
           if (bindCancelled()) return null;
 
+          let timeout: number | undefined;
+          const timer = new Promise<never>((_, reject) => {
+            timeout = window.setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Request timeout: AGENT_NEW_SESSION (${AGENT_NEW_SESSION_TIMEOUT_MS}ms cap)`,
+                  ),
+                ),
+              AGENT_NEW_SESSION_TIMEOUT_MS,
+            );
+          });
           const request = bridge.request<
             AgentSessionCreatedMessage | AgentErrorMessage
           >(
@@ -1403,9 +1717,13 @@ export function AgentSessionsProvider({
               env: mergedEnv,
               cliBinary: cliBinaryOverride,
             },
-            ENSURE_SESSION_ATTEMPT_TIMEOUT_MS,
+            AGENT_NEW_SESSION_TIMEOUT_MS,
           );
-          return Promise.race([request, timer]);
+          try {
+            return await Promise.race([request, timer]);
+          } finally {
+            if (timeout !== undefined) window.clearTimeout(timeout);
+          }
         };
 
         for (let attempt = 1; attempt <= ENSURE_SESSION_ATTEMPTS; attempt++) {
@@ -1437,7 +1755,7 @@ export function AgentSessionsProvider({
                 bindWasSuperseded = true;
                 return;
               }
-              if (!failureIsRecoverable(lastFailure)) break;
+              if (!shouldRetrySessionAdmission(lastFailure.kind)) break;
               continue;
             }
             const executionId =
@@ -1447,6 +1765,11 @@ export function AgentSessionsProvider({
               (resp.session.executionId
                 ? null
                 : legacyProviderBinding(agentId, resp.session.sessionId));
+            const prebindGoal = takePrebindGoalSnapshot(
+              prebindGoalSnapshotsRef.current,
+              chatId,
+              executionId,
+            );
             getStore().patchSession(chatId, {
               // Keep the session non-sendable until its persisted permission
               // mode has been applied. Publishing ready first allowed an
@@ -1457,6 +1780,8 @@ export function AgentSessionsProvider({
               sessionId: executionId,
               providerBinding,
               providerMetadata: resp.session.providerMetadata ?? null,
+              boundary: resp.session.boundary ?? null,
+              boundaryPorts: resp.session.boundaryPorts ?? null,
               session: resp.session,
               initialize: resp.initialize,
               availableModes: resp.session.modes?.availableModes ?? [],
@@ -1470,7 +1795,12 @@ export function AgentSessionsProvider({
               // ACTUALLY created with, so sendPrompt can detect a stale
               // session (model/effort changed while warming) and respawn.
               appliedChatEnvKey: chatEnvDriftKey(options?.env),
+              ...(prebindGoal !== undefined ? { goal: prebindGoal } : {}),
             });
+            clearPrebindGoalSnapshotsForChat(
+              prebindGoalSnapshotsRef.current,
+              chatId,
+            );
             prebindDirtySessionsRef.current.delete(chatId);
             getStore().setWarmAgent(agentId, true);
             // Honour a permission posture picked in the empty composer
@@ -1485,8 +1815,21 @@ export function AgentSessionsProvider({
                 bindCancelled,
               });
             }
-            if (bindCancelled()) {
-              closeLateExecution(agentId, executionId);
+            const cancelled = bindCancelled();
+            const boundSlot = getStore().sessions[chatId];
+            if (
+              !bindStillOwnsSessionSlot({
+                cancelled,
+                expectedExecutionId: executionId,
+                slotExecutionId: boundSlot?.executionId,
+                slotSessionId: boundSlot?.sessionId,
+              })
+            ) {
+              // A cancelled bind may have created an execution the engine does
+              // not know the renderer abandoned, so dispose it. Exact-route
+              // replacement/revocation is already owned by the engine and must
+              // not be overwritten by this stale continuation.
+              if (cancelled) closeLateExecution(agentId, executionId);
               return;
             }
             getStore().patchSession(chatId, { status: "ready" });
@@ -1506,6 +1849,9 @@ export function AgentSessionsProvider({
               stage: "newSession",
               error: err,
             });
+            if (shouldCancelStalledSessionAdmission(lastFailure.kind)) {
+              cancelStalledAdmission(agentId, chatId);
+            }
             console.warn(
               `[Zeros ensureSession] attempt ${attempt}/${ENSURE_SESSION_ATTEMPTS} for ${agentId} threw: kind=${lastFailure.kind} msg=${lastFailure.message}`,
             );
@@ -1513,7 +1859,7 @@ export function AgentSessionsProvider({
               bindWasSuperseded = true;
               return;
             }
-            if (!failureIsRecoverable(lastFailure)) break;
+            if (!shouldRetrySessionAdmission(lastFailure.kind)) break;
           }
         }
 
@@ -1573,6 +1919,7 @@ export function AgentSessionsProvider({
       drainNextQueued,
       drainOrDropQueue,
       closeLateExecution,
+      cancelStalledAdmission,
       evictUnretainedTranscripts,
     ],
   );
@@ -1606,6 +1953,12 @@ export function AgentSessionsProvider({
       const flushBubbleId = flushBubbleRef.current.get(chatId);
       if (flushBubbleId) flushBubbleRef.current.delete(chatId);
       const entryStatus = getStore().sessions[chatId]?.status ?? "idle";
+      const queueFacts = {
+        hasLocalSend: sendingChatsRef.current.has(chatId),
+        hasQueuedSends: (sendQueueRef.current.get(chatId)?.length ?? 0) > 0,
+        queueHeld: queueHeldRef.current.has(chatId),
+        flushing: !!flushBubbleId,
+      };
       // A turn is already in flight for this chat (sendingChatsRef stays set
       // for the whole turn) — OR earlier sends are still queued/parked (a
       // holdQueue edit, or a queue awaiting drain): QUEUE this send FIFO and
@@ -1617,15 +1970,16 @@ export function AgentSessionsProvider({
       if (
         shouldQueuePrompt({
           status: entryStatus,
-          hasLocalSend: sendingChatsRef.current.has(chatId),
-          hasQueuedSends: (sendQueueRef.current.get(chatId)?.length ?? 0) > 0,
-          queueHeld: queueHeldRef.current.has(chatId),
-          flushing: !!flushBubbleId,
+          ...queueFacts,
         })
       ) {
         const bubbleId = `queued-${Date.now()}-${Math.random()
           .toString(36)
           .slice(2, 8)}`;
+        const presentation = queuedPromptPresentation({
+          reason: entryStatus === "warming" ? "admission" : "busy-turn",
+          ...queueFacts,
+        });
         const queuedMsg: AgentTextMessage = {
           id: bubbleId,
           kind: "text",
@@ -1633,6 +1987,9 @@ export function AgentSessionsProvider({
           text: displayText ?? text,
           createdAt: Date.now(),
           queued: true,
+          ...(presentation === "active-turn"
+            ? { queuedPresentation: "active-turn" as const }
+            : {}),
           // The composer-based edit flow rebuilds the wire text through the
           // normal send pipeline (mentions re-expand), so an @-mention
           // expansion no longer blocks editing. The ONE remaining unsafe case
@@ -1654,7 +2011,13 @@ export function AgentSessionsProvider({
               queuedMsg,
               slot.historyExpanded,
             ),
+            ...(presentation === "active-turn"
+              ? { activeTurnStartedAt: queuedMsg.createdAt }
+              : {}),
           });
+          if (presentation === "active-turn") {
+            getStore().setPendingLocalTurn(chatId, queuedMsg.id);
+          }
         }
         const q = sendQueueRef.current.get(chatId) ?? [];
         q.push({
@@ -1675,6 +2038,123 @@ export function AgentSessionsProvider({
         // stranded. No-op while held/in-flight/non-ready.
         drainNextQueued(chatId);
         return;
+      }
+      // The send needs an admission before it can dispatch: either no session
+      // exists yet (fresh chat still admitting, engine respawn, a pristine
+      // agent switch racing the keystroke-armed spawn) or the live session's
+      // env drifted from the composer pills (model/effort changed while it was
+      // warming) and must be force-respawned. The old path fell into the turn
+      // body and awaited the FULL ZSR admission there — after runSend had
+      // already cleared the composer and before any bubble was appended — so
+      // the user's first send into a new chat was invisible for the whole
+      // admission (tens of seconds under a burst), while a SECOND send
+      // correctly queued behind sendingChatsRef. Park such a send the same way
+      // a send into a `warming` chat parks: active turn visible now, session
+      // build kicked in the background, dispatch via ensureSession's
+      // ready-drain. Must happen BEFORE sendingChatsRef.add — the
+      // turn-completion finally treats a non-`ready` settle as unhealthy and
+      // would drop this very queue.
+      {
+        const slot = getStore().sessions[chatId];
+        const expectedEnv = slot?.agentId
+          ? chatComposerEnv(chatId, slot.initialize)
+          : undefined;
+        const park = slot?.agentId
+          ? sendAdmissionPark({
+              hasAgent: true,
+              hasSession: !!slot.sessionId,
+              status: slot.status,
+              appliedChatEnvKey: slot.appliedChatEnvKey,
+              expectedEnvKey: expectedEnv
+                ? chatEnvDriftKey(expectedEnv)
+                : undefined,
+            })
+          : null;
+        if (slot?.agentId && park && ensureSessionRef.current) {
+          const bubbleId =
+            flushBubbleId ??
+            `queued-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+          if (!flushBubbleId) {
+            const presentation = queuedPromptPresentation({
+              reason: "admission",
+              hasLocalSend: sendingChatsRef.current.has(chatId),
+              hasQueuedSends:
+                (sendQueueRef.current.get(chatId)?.length ?? 0) > 0,
+              queueHeld: queueHeldRef.current.has(chatId),
+              flushing: false,
+            });
+            // Same shape as the queue branch above; a flush already has its
+            // placeholder in the transcript store, so it is reused untouched.
+            const queuedMsg: AgentTextMessage = {
+              id: bubbleId,
+              kind: "text",
+              role: "user",
+              text: displayText ?? text,
+              createdAt: Date.now(),
+              queued: true,
+              ...(presentation === "active-turn"
+                ? { queuedPresentation: "active-turn" as const }
+                : {}),
+              queuedEditable:
+                !autoAction &&
+                !text.trimStart().startsWith("<from_previous_chat"),
+              ...(bubbleAttachments && bubbleAttachments.length > 0
+                ? { attachments: bubbleAttachments }
+                : {}),
+              ...(segments && segments.length > 0 ? { segments } : {}),
+              ...(autoAction ? { autoAction } : {}),
+            };
+            getStore().patchSession(chatId, {
+              messages: capUserAppend(
+                slot.messages,
+                queuedMsg,
+                slot.historyExpanded,
+              ),
+              ...(presentation === "active-turn"
+                ? { activeTurnStartedAt: queuedMsg.createdAt }
+                : {}),
+            });
+            if (presentation === "active-turn") {
+              getStore().setPendingLocalTurn(chatId, queuedMsg.id);
+            }
+          }
+          const q = sendQueueRef.current.get(chatId) ?? [];
+          const entry: {
+            args: Parameters<SessionsActions["sendPrompt"]>;
+            bubbleId: string;
+          } = {
+            args: [
+              chatId,
+              text,
+              displayText,
+              attachments,
+              bubbleAttachments,
+              segments,
+              autoAction,
+            ],
+            bubbleId,
+          };
+          // A re-parked flush was popped from the head and must return there;
+          // a fresh send appends, so two rapid sends into a sessionless chat
+          // keep their order even when the second also lands here.
+          if (flushBubbleId) q.unshift(entry);
+          else q.push(entry);
+          sendQueueRef.current.set(chatId, q);
+          // Publishes `warming` synchronously (so later sends queue behind),
+          // drains this queue on ready, and returns the text to the composer
+          // via drainOrDropQueue on failure. De-duped against an admission the
+          // mount spawn already has in flight; `force` only for a genuine
+          // drift respawn (which resumes the provider thread, exactly like the
+          // in-turn reconcile it replaces on this path).
+          void ensureSessionRef
+            .current(chatId, slot.agentId, {
+              cwd: slot.cwd ?? undefined,
+              env: expectedEnv,
+              ...(park === "drift-respawn" ? { force: true } : {}),
+            })
+            .catch(() => {});
+          return;
+        }
       }
       sendingChatsRef.current.add(chatId);
       let promptDiagnostics: {
@@ -1809,12 +2289,20 @@ export function AgentSessionsProvider({
           return;
         }
 
+        const admissionPlaceholder = flushBubbleId
+          ? current.messages.find(
+              (message): message is AgentTextMessage =>
+                message.kind === "text" &&
+                message.id === flushBubbleId &&
+                message.queuedPresentation === "active-turn",
+            )
+          : undefined;
         const userMessage: AgentTextMessage = {
-          id: `user-${Date.now()}`,
+          id: admissionPlaceholder?.id ?? `user-${Date.now()}`,
           kind: "text",
           role: "user",
           text: displayText ?? text,
-          createdAt: Date.now(),
+          createdAt: admissionPlaceholder?.createdAt ?? Date.now(),
           // Persist attachment chips on
           // the user bubble so the timeline shows them right above the
           // text — matches what the user staged in the composer.
@@ -1891,11 +2379,10 @@ export function AgentSessionsProvider({
           failure: null,
           lastStopReason: null,
           activeTurnStartedAt: userMessage.createdAt,
-          // On a queued-send flush, PROMOTE the placeholder: remove the
-          // greyed bubble (its array slot is mid-previous-turn — queued
-          // messages render in the composer's queued-card, not the
-          // transcript) and append the live bubble at the end, where the new
-          // turn actually starts. Otherwise append normally.
+          // On a queued-send flush, PROMOTE the placeholder. A follow-up's
+          // array slot is mid-previous-turn and must move to the end; an active
+          // admission placeholder is already the tail, so this preserves its
+          // identity/time without a visible reset. Otherwise append normally.
           messages: flushBubbleId
             ? promoteToEnd(
                 current.messages,
@@ -1995,6 +2482,9 @@ export function AgentSessionsProvider({
                   executionId: sessionId,
                   sessionId,
                   prompt: promptToSend,
+                  // Keep elapsed time continuous across the admission/provider
+                  // startup that happened after the optimistic bubble appeared.
+                  startedAt: userMessage.createdAt,
                   // Persist the user msg under the renderer's id so turn ids align
                   // (the footer + reset key on it) without a transcript re-window.
                   userMessageId: userMessage.id,
@@ -2094,10 +2584,22 @@ export function AgentSessionsProvider({
               providerMetadata: recoveryProviderMetadata,
             });
             if (!recovered) return null;
+            const prebindGoal = takePrebindGoalSnapshot(
+              prebindGoalSnapshotsRef.current,
+              chatId,
+              recovered.executionId,
+            );
             // Publish the new route before any retry (or a Stop observed after
             // the load). The old execution disappeared with the engine and can
             // no longer receive prompts, cancellation, or lifecycle events.
-            getStore().patchSession(chatId, recovered);
+            getStore().patchSession(chatId, {
+              ...recovered,
+              ...(prebindGoal !== undefined ? { goal: prebindGoal } : {}),
+            });
+            clearPrebindGoalSnapshotsForChat(
+              prebindGoalSnapshotsRef.current,
+              chatId,
+            );
             // The resume above can take up to a minute with the chat still
             // showing Stop. Re-check before re-sending: rebuildAndRetry treats
             // null as "couldn't resume" and its own post-await check turns that
@@ -2135,54 +2637,78 @@ export function AgentSessionsProvider({
           // "Continuing session" banner. Only when there's prior context to
           // preserve — a fresh chat falls straight through to a cold start.
           if (opts?.replayHistory && current.sessionId && hasPriorContext) {
-            getStore().patchSession(chatId, {
-              status: "warming",
-              error: null,
-              failure: null,
-            });
-            const resumed = await tryResumeSameSession();
-            if (stoppedByUser()) {
-              settleStoppedSend();
-              return null;
-            }
-            if (resumed === "superseded") {
-              // A newer local adoption may already be in flight. Wait for it
-              // and route the retry through the execution it publishes; never
-              // turn this ownership race into a cold provider conversation.
-              const replacementFlight = ensureInFlightRef.current.get(chatId);
-              if (replacementFlight) {
-                await replacementFlight.catch(() => {});
-              }
+            // A second registered-owner transition can begin after loadSession
+            // admits the replacement but before its prompt dispatch. Retry the
+            // durable resume a small bounded number of times; never fall into a
+            // cold provider conversation merely because workspace switching
+            // happened twice in quick succession.
+            for (let resumeAttempt = 1; resumeAttempt <= 3; resumeAttempt++) {
+              getStore().patchSession(chatId, {
+                status: "warming",
+                error: null,
+                failure: null,
+              });
+              const resumed = await tryResumeSameSession();
               if (stoppedByUser()) {
                 settleStoppedSend();
                 return null;
               }
-              const replacement = getStore().sessions[chatId];
-              if (replacement?.sessionId && replacement.status === "ready") {
-                promptRetryCount += 1;
-                return runPrompt(replacement.sessionId, prompt);
+              if (resumed === "superseded") {
+                // A newer local adoption may already be in flight. Wait for it
+                // and route the retry through the execution it publishes; never
+                // turn this ownership race into a cold provider conversation.
+                const replacementFlight = ensureInFlightRef.current.get(chatId);
+                if (replacementFlight) {
+                  await replacementFlight.catch(() => {});
+                }
+                if (stoppedByUser()) {
+                  settleStoppedSend();
+                  return null;
+                }
+                const replacement = getStore().sessions[chatId];
+                if (replacement?.sessionId && replacement.status === "ready") {
+                  promptRetryCount += 1;
+                  return runPrompt(replacement.sessionId, prompt);
+                }
+                if (replacement && replacement.status !== "streaming") {
+                  getStore().patchSession(chatId, {
+                    status: "reconnecting",
+                    error: null,
+                    failure: null,
+                  });
+                }
+                return null;
               }
-              if (replacement && replacement.status !== "streaming") {
+              if (!resumed) break;
+
+              const resumeFailure =
+                resumed.type === "AGENT_PROMPT_FAILED"
+                  ? failureFromAgentError(
+                      {
+                        ...resumed,
+                        message: resumed.error,
+                      } as unknown as AgentErrorMessage,
+                      "prompt",
+                    )
+                  : null;
+              const territoryRestartedAgain =
+                resumeFailure?.kind === "lifecycle-superseded" &&
+                resumeFailure.stage === "prompt";
+              if (territoryRestartedAgain && resumeAttempt < 3) continue;
+              if (territoryRestartedAgain) {
+                // Three consecutive authority changes is no longer one
+                // transition to replay through. Stay calm and resumable; the
+                // next user action will adopt the durable binding again.
                 getStore().patchSession(chatId, {
                   status: "reconnecting",
                   error: null,
                   failure: null,
                 });
+                return null;
               }
-              return null;
-            }
-            if (resumed) {
               const resumeFailedRecoverably =
-                resumed.type === "AGENT_PROMPT_FAILED" &&
-                failureIsRecoverable(
-                  failureFromAgentError(
-                    {
-                      ...resumed,
-                      message: resumed.error,
-                    } as unknown as AgentErrorMessage,
-                    "prompt",
-                  ),
-                );
+                resumeFailure !== null &&
+                promptFailureShouldRecover(resumeFailure);
               // Clean success (or a non-recoverable failure the user must
               // see) ends here. Only a recoverable RE-failure (a real
               // --resume rejection: "no conversation found") falls through to
@@ -2195,6 +2721,7 @@ export function AgentSessionsProvider({
                 });
                 return resumed;
               }
+              break;
             }
           }
 
@@ -2213,6 +2740,7 @@ export function AgentSessionsProvider({
             // chat first warmed (see ensureSession's setSession block).
             await ensureSessionRef.current?.(chatId, current.agentId!, {
               force: true,
+              replaceProviderConversation: true,
               cwd: current.cwd ?? undefined,
               env: chatComposerEnv(chatId, current.initialize),
             });
@@ -2336,7 +2864,14 @@ export function AgentSessionsProvider({
             | AgentPromptFailedMessage
             | null;
           try {
-            resp = await runPrompt(current.sessionId, prompt);
+            // `current` was snapshotted several awaits ago; a concurrent
+            // load/rebuild may have replaced this chat's execution since.
+            // Dispatch to the LIVE execution so the prompt cannot target a
+            // superseded id the adapter no longer owns ("no live session").
+            resp = await runPrompt(
+              getStore().sessions[chatId]?.sessionId ?? current.sessionId,
+              prompt,
+            );
           } catch (firstErr) {
             // A Stop is the most common reason this rejects: killing the
             // provider tears the stream down, which classifies as the
@@ -2355,7 +2890,7 @@ export function AgentSessionsProvider({
               stage: "prompt",
               error: firstErr,
             });
-            if (!failureIsRecoverable(failure)) {
+            if (!promptFailureShouldRecover(failure)) {
               getStore().patchSession(chatId, {
                 status: statusForFailure(failure),
                 error: failure.message,
@@ -2384,7 +2919,7 @@ export function AgentSessionsProvider({
             // are network glitches — the agent's context is still alive
             // on the other end of the rebuild, so no replay needed.
             resp = await rebuildAndRetry({
-              replayHistory: failure.kind === "session-expired",
+              replayHistory: promptFailureShouldResumeProvider(failure),
             });
             if (!resp) return;
           }
@@ -2412,7 +2947,7 @@ export function AgentSessionsProvider({
             // of surfacing a hard error to the user. Without this hop, the user
             // saw an "Error: Session expired" pill and a
             // disabled composer — for what should be self-healing.
-            if (failureIsRecoverable(failure)) {
+            if (promptFailureShouldRecover(failure)) {
               // Same cursor duplicate-turn guard as the throw path above: a
               // recoverable AGENT_PROMPT_FAILED for a turn that already streamed
               // content means the answer is in; don't rebuild + resend. Keep the
@@ -2427,7 +2962,7 @@ export function AgentSessionsProvider({
                 return;
               }
               const retried = await rebuildAndRetry({
-                replayHistory: failure.kind === "session-expired",
+                replayHistory: promptFailureShouldResumeProvider(failure),
               });
               if (!retried) return;
               if (retried.type === "AGENT_PROMPT_FAILED") {
@@ -2475,7 +3010,21 @@ export function AgentSessionsProvider({
               }
             | undefined;
           const slot = getStore().sessions[chatId];
-          if (!slot) return;
+          const responseExecutionId = resp.executionId ?? resp.sessionId;
+          if (
+            !slot ||
+            !bindStillOwnsSessionSlot({
+              cancelled: false,
+              expectedExecutionId: responseExecutionId,
+              slotExecutionId: slot.executionId,
+              slotSessionId: slot.sessionId,
+            })
+          ) {
+            // A territory revoke can settle an old prompt after a replacement
+            // route (or no route) is already authoritative. Its usage/status
+            // must not resurrect or mark that newer slot ready.
+            return;
+          }
           const wasCancelling = getStore().cancellingChats.has(chatId);
           if (wasCancelling) getStore().setCancelling(chatId, false);
           const u = slot.usage;
@@ -2517,9 +3066,7 @@ export function AgentSessionsProvider({
           void (async () => {
             const refreshAgentId = current.agentId;
             if (!refreshAgentId || !bridge) return;
-            const stale = getStore().sessions[chatId]?.initialize?._meta as
-              | { models?: unknown; modelsDynamic?: unknown }
-              | undefined;
+            const stale = getStore().sessions[chatId]?.initialize?._meta;
             const stillFloored =
               !!stale?.modelsDynamic &&
               !(Array.isArray(stale.models) && stale.models.length > 0);
@@ -2529,9 +3076,7 @@ export function AgentSessionsProvider({
                 AgentAgentInitializedMessage | AgentErrorMessage
               >({ type: "AGENT_INIT_AGENT", agentId: refreshAgentId }, 30_000);
               if (initResp.type === "AGENT_ERROR") return;
-              const freshMeta = initResp.initialize?._meta as
-                | { models?: unknown }
-                | undefined;
+              const freshMeta = initResp.initialize?._meta;
               if (
                 !Array.isArray(freshMeta?.models) ||
                 freshMeta.models.length === 0
@@ -2540,9 +3085,7 @@ export function AgentSessionsProvider({
               }
               // Re-check the chat is still floored before patching (don't clobber
               // a concurrent update / a live model the user just picked).
-              const cur = getStore().sessions[chatId]?.initialize?._meta as
-                | { models?: unknown }
-                | undefined;
+              const cur = getStore().sessions[chatId]?.initialize?._meta;
               if (!(Array.isArray(cur?.models) && cur.models.length > 0)) {
                 getStore().patchSession(chatId, {
                   initialize: initResp.initialize,
@@ -2692,13 +3235,10 @@ export function AgentSessionsProvider({
         // If this was a queued-send flush that bailed BEFORE committing a live
         // bubble (e.g. the session couldn't be re-established under engine
         // churn), the placeholder is still present and greyed. Demote it to a
-        // normal bubble — moved to the transcript END, since a queued
-        // placeholder is invisible in the transcript (it lives in the
-        // composer's queued-card) and its array slot is mid-old-turn — so the
-        // user's typed text isn't silently lost; the chat already shows the
-        // failure/reconnecting status. On the success path the placeholder was
-        // already promoted, so this is a no-op. (Demoting clears `queued`, so
-        // it now persists like any other user message.)
+        // normal bubble — moved to the transcript END, because a follow-up
+        // placeholder's array slot can be mid-old-turn. An active admission
+        // placeholder is already the tail. Either way the user's text remains;
+        // on success the placeholder was already promoted, so this is a no-op.
         if (flushBubbleId) {
           const slot = getStore().sessions[chatId];
           const ph = slot?.messages.find((m) => m.id === flushBubbleId);
@@ -2706,9 +3246,17 @@ export function AgentSessionsProvider({
             getStore().patchSession(chatId, {
               messages: capUserAppend(
                 slot!.messages.filter((m) => m.id !== flushBubbleId),
-                { ...ph, queued: false },
+                {
+                  ...ph,
+                  queued: false,
+                  queuedPresentation: undefined,
+                  queuedEditable: undefined,
+                },
                 slot!.historyExpanded,
               ),
+              ...(ph.queuedPresentation === "active-turn"
+                ? { activeTurnStartedAt: null }
+                : {}),
             });
           }
         }
@@ -2759,26 +3307,82 @@ export function AgentSessionsProvider({
       // cannot be conditional on having one. It is a local counter bump; no
       // bridge is needed to make the in-flight send read it.
       bumpCancelGeneration(cancelGenerationsRef.current, chatId);
-      if (!bridge) return;
-      // Cancelling the active turn discards any sends queued behind it —
-      // the user explicitly stopped, so the follow-ups shouldn't fire. Also
-      // drop their greyed placeholder bubbles.
+      getStore().setPendingLocalTurn(chatId, null);
+      // Cancelling discards sends queued behind the active turn. A first
+      // prompt waiting only for admission is different: it has already been
+      // presented as the live turn, so settle that prompt in place and let the
+      // ordinary STOPPED BY USER footer explain its outcome.
       const pendingQ = sendQueueRef.current.get(chatId);
       if (pendingQ?.length) {
         const ids = new Set(pendingQ.map((e) => e.bubbleId));
         const slot = getStore().sessions[chatId];
         if (slot) {
           getStore().patchSession(chatId, {
-            messages: slot.messages.filter(
-              (m) => !(m.kind === "text" && ids.has(m.id)),
-            ),
+            messages: slot.messages.flatMap((message) => {
+              if (!(message.kind === "text" && ids.has(message.id))) {
+                return [message];
+              }
+              if (
+                cancelledQueuedMessageAction(message.queuedPresentation) ===
+                "drop"
+              ) {
+                return [];
+              }
+              return [
+                {
+                  ...message,
+                  queued: false,
+                  queuedPresentation: undefined,
+                  queuedEditable: undefined,
+                },
+              ];
+            }),
           });
         }
       }
       sendQueueRef.current.delete(chatId);
       evictUnretainedTranscripts();
       const current = getStore().sessions[chatId];
-      if (!current?.agentId || !current.sessionId) return;
+      if (current) {
+        getStore().patchSession(chatId, {
+          activeTurnStartedAt: null,
+          lastStopReason: "cancelled",
+        });
+      }
+      const currentExecutionId = current?.executionId ?? current?.sessionId;
+      const cancellationAction = admissionCancellationAction({
+        hasAgent: Boolean(current?.agentId),
+        hasSession: Boolean(currentExecutionId),
+        status: current?.status ?? "idle",
+        admissionInFlight: ensureInFlightRef.current.has(chatId),
+      });
+      if (cancellationAction === "abort-admission" && current?.agentId) {
+        // Stop the exact chat-scoped engine bind and release the renderer's
+        // single-flight slot immediately. The old continuation is generation-
+        // cancelled and identity-checked, so an immediate next Send can safely
+        // install a fresh admission without waiting for (or being erased by)
+        // the cancelled ZSR/provider preparation.
+        detachAdmissionFlight(
+          chatId,
+          ensureInFlightRef.current,
+          loadFlightKeysRef.current,
+          loadFlightAdoptOnlyRef.current,
+        );
+        getStore().patchSession(chatId, {
+          status: "idle",
+          error: null,
+          failure: null,
+          activeTurnStartedAt: null,
+          lastStopReason: "cancelled",
+          pendingPermission: null,
+          pendingPermissions: [],
+          pendingQuestions: [],
+        });
+        cancelStalledAdmission(current.agentId, chatId);
+        return;
+      }
+      if (!bridge || cancellationAction !== "cancel-session") return;
+      if (!current?.agentId || !currentExecutionId) return;
       // Optimistic state transition: cancel is intentional, the chat
       // should immediately be ready for the next prompt. The flag
       // suppresses the AGENT_PROMPT_FAILED that arrives when the
@@ -2812,11 +3416,11 @@ export function AgentSessionsProvider({
       bridge.send({
         type: "AGENT_CANCEL",
         agentId: current.agentId,
-        executionId: current.executionId ?? current.sessionId,
-        sessionId: current.sessionId,
+        executionId: currentExecutionId,
+        sessionId: currentExecutionId,
       });
     },
-    [bridge, getStore, evictUnretainedTranscripts],
+    [bridge, getStore, cancelStalledAdmission, evictUnretainedTranscripts],
   );
 
   const respondToPermission = useCallback<
@@ -2858,6 +3462,20 @@ export function AgentSessionsProvider({
       const current = getStore().sessions[chatId];
       const head = current?.pendingQuestions?.[0];
       if (!head) return;
+      // URL/OAuth elicitation is a trusted UI action. Perform it from the
+      // renderer that received the user's explicit choice, never from the
+      // contained provider or a headless/cloud engine. shellOpenUrl validates
+      // again in Electron main; browser-only clients use a noopener window.
+      for (const url of externalUrlsForQuestionResponse(
+        head.request,
+        response,
+      )) {
+        void shellOpenUrl(url).catch((error) => {
+          toast.error("Couldn't open the authorization page", {
+            description: error instanceof Error ? error.message : String(error),
+          });
+        });
+      }
       bridge.send({
         type: "AGENT_QUESTION_RESPONSE",
         questionId: head.questionId,
@@ -3048,6 +3666,49 @@ export function AgentSessionsProvider({
     [bridge, getStore],
   );
 
+  const openBoundaryPort = useCallback<SessionsActions["openBoundaryPort"]>(
+    async (chatId, portId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const slot = getStore().sessions[chatId];
+      if (!slot?.executionId || !slot.agentId) {
+        throw new Error("This session is not ready for previews.");
+      }
+      const response = await bridge.request<
+        AgentBoundaryPortOpenedMessage | AgentErrorMessage
+      >(
+        {
+          type: "AGENT_OPEN_BOUNDARY_PORT",
+          agentId: slot.agentId,
+          executionId: slot.executionId,
+          portId,
+        },
+        10_000,
+      );
+      if (response.type === "AGENT_ERROR") {
+        throw new Error(response.message || "The preview could not be opened.");
+      }
+      const current = getStore().sessions[chatId];
+      if (
+        current?.executionId !== response.executionId ||
+        response.portId !== portId
+      ) {
+        throw new Error("The preview changed while it was opening.");
+      }
+      if (
+        !Number.isSafeInteger(response.expiresAt) ||
+        response.expiresAt <= Date.now()
+      ) {
+        throw new Error("preview admission expiry is invalid");
+      }
+      return {
+        url: response.url,
+        admissionUrl: response.admissionUrl,
+        expiresAt: response.expiresAt,
+      };
+    },
+    [bridge, getStore],
+  );
+
   const setModel = useCallback<SessionsActions["setModel"]>(
     (chatId, model) => {
       if (!bridge || !model) return;
@@ -3129,9 +3790,9 @@ export function AgentSessionsProvider({
       // `current.initialize` is passed for the same reason: sendPrompt's
       // reconcile compares against envForChat(chat, initialize), and a stamp
       // built WITHOUT it reads as drift for any agent that overrides its model
-      // env var via _meta — which force-respawns the session COLD on the next
-      // send (no resume, so the agent loses the conversation) for a change
-      // that had already been applied live. The two must be built identically.
+      // env var via _meta — which unnecessarily close→resumes the provider on
+      // the next send for a change that had already been applied live. The two
+      // must be built identically.
       const env = envForChat(chat, current.initialize);
       bridge.send({
         type: "AGENT_UPDATE_CONFIG",
@@ -3154,6 +3815,87 @@ export function AgentSessionsProvider({
       getStore().patchSession(chatId, {
         appliedChatEnvKey: chatEnvDriftKey(env),
       });
+    },
+    [bridge, getStore],
+  );
+
+  const setGoal = useCallback<SessionsActions["setGoal"]>(
+    async (chatId, update) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const current = getStore().sessions[chatId];
+      if (!current?.agentId || !current.sessionId) {
+        throw new Error("The agent session is not ready.");
+      }
+      const response = await bridge.request<
+        AgentGoalChangedMessage | AgentErrorMessage
+      >(
+        {
+          type: "AGENT_GOAL_SET",
+          agentId: current.agentId,
+          executionId: current.executionId ?? current.sessionId,
+          sessionId: current.sessionId,
+          update,
+        },
+        30_000,
+      );
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      getStore().applyGoalSnapshot(
+        chatId,
+        response.executionId ?? response.sessionId,
+        response.goal,
+      );
+      if (!response.goal) throw new Error("The agent did not return a goal.");
+      return response.goal;
+    },
+    [bridge, getStore],
+  );
+
+  const clearGoal = useCallback<SessionsActions["clearGoal"]>(
+    async (chatId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const current = getStore().sessions[chatId];
+      if (!current?.agentId || !current.sessionId) return;
+      const response = await bridge.request<
+        AgentGoalChangedMessage | AgentErrorMessage
+      >(
+        {
+          type: "AGENT_GOAL_CLEAR",
+          agentId: current.agentId,
+          executionId: current.executionId ?? current.sessionId,
+          sessionId: current.sessionId,
+        },
+        30_000,
+      );
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      getStore().applyGoalSnapshot(
+        chatId,
+        response.executionId ?? response.sessionId,
+        null,
+      );
+    },
+    [bridge, getStore],
+  );
+
+  const retrySafetyReview = useCallback<SessionsActions["retrySafetyReview"]>(
+    async (chatId, retryId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const current = getStore().sessions[chatId];
+      if (!current?.agentId || !current.sessionId) {
+        throw new Error("The agent session is not ready.");
+      }
+      const response = await bridge.request<
+        AgentSafetyReviewRetriedMessage | AgentErrorMessage
+      >(
+        {
+          type: "AGENT_RETRY_SAFETY_REVIEW",
+          agentId: current.agentId,
+          executionId: current.executionId ?? current.sessionId,
+          sessionId: current.sessionId,
+          retryId,
+        },
+        30_000,
+      );
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
     },
     [bridge, getStore],
   );
@@ -3387,6 +4129,7 @@ export function AgentSessionsProvider({
             {
               ...ph,
               queued: false,
+              queuedPresentation: undefined,
               queuedEditable: undefined,
               createdAt: Date.now(),
               ...(steeredTurnId ? { steeredTurnId } : {}),
@@ -3403,6 +4146,7 @@ export function AgentSessionsProvider({
   const reset = useCallback<SessionsActions["reset"]>(
     (chatId) => {
       prebindDirtySessionsRef.current.delete(chatId);
+      clearPrebindGoalSnapshotsForChat(prebindGoalSnapshotsRef.current, chatId);
       pendingHydratesRef.current.delete(chatId);
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
@@ -3700,9 +4444,109 @@ export function AgentSessionsProvider({
     [bridge],
   );
 
+  const readMemorySettings = useCallback<SessionsActions["readMemorySettings"]>(
+    async (agentId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const response = await bridge.request<
+        AgentMemorySettingsMessage | AgentErrorMessage
+      >({ type: "AGENT_MEMORY_SETTINGS_READ", agentId }, 30_000);
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      return response.settings;
+    },
+    [bridge],
+  );
+
+  const updateMemorySettings = useCallback<
+    SessionsActions["updateMemorySettings"]
+  >(
+    async (agentId, settings) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const response = await bridge.request<
+        AgentMemorySettingsMessage | AgentErrorMessage
+      >({ type: "AGENT_MEMORY_SETTINGS_UPDATE", agentId, settings }, 30_000);
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      return response.settings;
+    },
+    [bridge],
+  );
+
+  const resetMemory = useCallback<SessionsActions["resetMemory"]>(
+    async (agentId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const response = await bridge.request<
+        AgentMemoryResetCompleteMessage | AgentErrorMessage
+      >({ type: "AGENT_MEMORY_RESET", agentId }, 30_000);
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+    },
+    [bridge],
+  );
+
+  const readConfigurationProvenance = useCallback<
+    SessionsActions["readConfigurationProvenance"]
+  >(
+    async (agentId, cwd) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const response = await bridge.request<
+        AgentConfigurationProvenanceMessage | AgentErrorMessage
+      >(
+        {
+          type: "AGENT_CONFIGURATION_PROVENANCE_READ",
+          agentId,
+          cwd,
+        },
+        30_000,
+      );
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      return response.provenance;
+    },
+    [bridge],
+  );
+
+  const readProviderQuota = useCallback<SessionsActions["readProviderQuota"]>(
+    async (agentId) => {
+      if (!bridge) throw new Error("Engine not connected");
+      const response = await bridge.request<
+        AgentProviderQuotaMessage | AgentErrorMessage
+      >({ type: "AGENT_PROVIDER_QUOTA_READ", agentId }, 30_000);
+      if (response.type === "AGENT_ERROR") throw new Error(response.message);
+      return response.quota;
+    },
+    [bridge],
+  );
+
   const loadIntoChat = useCallback<SessionsActions["loadIntoChat"]>(
     async (chatId, agentId, providerBinding, options) => {
       if (!bridge) return true;
+      // An admission is already running for this chat. A re-fired mount
+      // effect (deps flip during boot) or a null-binding probe must ride it
+      // rather than bump the cancel generation and supersede it mid-flight;
+      // only an explicit request for a DIFFERENT binding may replace it.
+      const inflightAdmission = ensureInFlightRef.current.get(chatId);
+      if (inflightAdmission) {
+        const activeAdoptOnly =
+          loadFlightAdoptOnlyRef.current.get(chatId) === true;
+        const activeKey = loadFlightKeysRef.current.get(chatId);
+        const requestedKey = providerBinding
+          ? `${agentId}\0${
+              providerBinding.resumeId ?? providerBinding.legacySessionId ?? ""
+            }`
+          : null;
+        if (requestedKey === null || requestedKey === activeKey) {
+          await inflightAdmission;
+          const settled = getStore().sessions[chatId];
+          if (
+            sharedAdmissionFlightAction({
+              activeAdoptOnly,
+              requestedAdoptOnly: options?.adoptOnly === true,
+              hasLiveSession: Boolean(
+                settled?.executionId ?? settled?.sessionId,
+              ),
+            }) === "reuse"
+          ) {
+            return true;
+          }
+        }
+      }
       const bindGeneration = cancelGeneration(
         cancelGenerationsRef.current,
         chatId,
@@ -3745,7 +4589,20 @@ export function AgentSessionsProvider({
         resolveLoadFlight = resolve;
       });
       ensureInFlightRef.current.set(chatId, loadFlight);
+      loadFlightKeysRef.current.set(
+        chatId,
+        `${agentId}\0${
+          providerBinding?.resumeId ?? providerBinding?.legacySessionId ?? ""
+        }`,
+      );
+      loadFlightAdoptOnlyRef.current.set(chatId, options?.adoptOnly === true);
       try {
+        const cliBinaryOverride = getProviderBinaryOverride(agentId);
+        const resumeWorkspaceId = await resolveSpawnWorkspaceId(
+          bridge,
+          resolvedCwd,
+        );
+        if (bindCancelled()) return true;
         // Resume must honour the same Provider prefs as new sessions:
         // env injection for API-key mode + binary-path override for the
         // /Settings → Advanced disclosure.
@@ -3764,12 +4621,6 @@ export function AgentSessionsProvider({
                 ...(options?.env ?? {}),
               }
             : undefined;
-        const cliBinaryOverride = getProviderBinaryOverride(agentId);
-
-        const resumeWorkspaceId = await resolveSpawnWorkspaceId(
-          bridge,
-          resolvedCwd,
-        );
         if (bindCancelled()) return true;
 
         const resp = await bridge.request<
@@ -3793,6 +4644,7 @@ export function AgentSessionsProvider({
             workspaceId: resumeWorkspaceId ?? undefined,
             env: mergedEnv,
             cliBinary: cliBinaryOverride,
+            ...(options?.adoptOnly ? { adoptOnly: true } : {}),
           },
           5 * 60_000,
         );
@@ -3814,6 +4666,21 @@ export function AgentSessionsProvider({
           if (bindFailureWasSuperseded(failure)) {
             bindWasSuperseded = true;
             return true;
+          }
+          // Adopt-only miss (lazy boot resume): there was no live execution to
+          // re-own, and by construction nothing was admitted, nothing was asked
+          // of the provider, and therefore nothing was learned about whether the
+          // durable binding is still good. Fall back to `idle` with the binding
+          // and transcript untouched — NOT to the invalidate/create branches
+          // below, which would throw away a perfectly valid resume id on every
+          // app start. The chat admits for real on focus / keystroke / send.
+          if (options?.adoptOnly) {
+            getStore().patchSession(chatId, {
+              status: "idle",
+              error: null,
+              failure: null,
+            });
+            return false;
           }
           // No durable binding is an intentional probe for an engine-owned
           // execution that survived a renderer reload. A miss means the caller
@@ -3854,6 +4721,11 @@ export function AgentSessionsProvider({
         const executionId = resp.executionId ?? resp.sessionId;
         const resolvedProviderBinding =
           resp.response.providerBinding ?? providerBinding;
+        const prebindGoal = takePrebindGoalSnapshot(
+          prebindGoalSnapshotsRef.current,
+          chatId,
+          executionId,
+        );
         getStore().patchSession(chatId, {
           // As on new-session bind, do not expose a sendable state until the
           // user's persisted native permission mode has reached the adapter.
@@ -3865,6 +4737,8 @@ export function AgentSessionsProvider({
             resp.response.providerMetadata ??
             existing?.providerMetadata ??
             null,
+          boundary: resp.response.boundary ?? null,
+          boundaryPorts: resp.response.boundaryPorts ?? null,
           availableModes: resp.response.modes?.availableModes ?? [],
           currentModeId: resp.response.modes?.currentModeId ?? null,
           error: null,
@@ -3876,7 +4750,12 @@ export function AgentSessionsProvider({
           // Settings-drift guard: same stamp as ensureSession — the chat env
           // this resumed session was actually loaded with.
           appliedChatEnvKey: chatEnvDriftKey(options?.env),
+          ...(prebindGoal !== undefined ? { goal: prebindGoal } : {}),
         });
+        clearPrebindGoalSnapshotsForChat(
+          prebindGoalSnapshotsRef.current,
+          chatId,
+        );
         // Re-attach prompt telemetry correlation for a still-running turn so
         // permission/finish events after reload keep the original prompt_id.
         if (resp.promptActive === true && resp.promptId) {
@@ -3904,8 +4783,17 @@ export function AgentSessionsProvider({
             bindCancelled,
           });
         }
-        if (bindCancelled()) {
-          closeLateExecution(agentId, executionId);
+        const cancelled = bindCancelled();
+        const boundSlot = getStore().sessions[chatId];
+        if (
+          !bindStillOwnsSessionSlot({
+            cancelled,
+            expectedExecutionId: executionId,
+            slotExecutionId: boundSlot?.executionId,
+            slotSessionId: boundSlot?.sessionId,
+          })
+        ) {
+          if (cancelled) closeLateExecution(agentId, executionId);
           return true;
         }
         getStore().patchSession(chatId, {
@@ -3938,9 +4826,22 @@ export function AgentSessionsProvider({
           stage: "loadSession",
           error: err,
         });
+        if (shouldCancelStalledSessionAdmission(failure.kind)) {
+          cancelStalledAdmission(agentId, chatId);
+        }
         if (bindFailureWasSuperseded(failure)) {
           bindWasSuperseded = true;
           return true;
+        }
+        // Same reasoning as the AGENT_ERROR branch: an adopt-only probe proved
+        // nothing about the durable binding, so it can only fall back to idle.
+        if (options?.adoptOnly) {
+          getStore().patchSession(chatId, {
+            status: "idle",
+            error: null,
+            failure: null,
+          });
+          return false;
         }
         // Most engine failures arrive as AGENT_ERROR responses above, but a
         // bridge implementation may reject its RPC with the same structured
@@ -3977,6 +4878,8 @@ export function AgentSessionsProvider({
         }
         if (ensureInFlightRef.current.get(chatId) === loadFlight) {
           ensureInFlightRef.current.delete(chatId);
+          loadFlightKeysRef.current.delete(chatId);
+          loadFlightAdoptOnlyRef.current.delete(chatId);
         }
         evictUnretainedTranscripts();
       }
@@ -3987,10 +4890,20 @@ export function AgentSessionsProvider({
       drainNextQueued,
       drainOrDropQueue,
       closeLateExecution,
+      cancelStalledAdmission,
       reconcileChatMessages,
       evictUnretainedTranscripts,
     ],
   );
+
+  useEffect(() => {
+    loadIntoChatRef.current = loadIntoChat;
+    return () => {
+      if (loadIntoChatRef.current === loadIntoChat) {
+        loadIntoChatRef.current = null;
+      }
+    };
+  }, [loadIntoChat]);
 
   const refreshProviderCapabilities = useCallback<
     SessionsActions["refreshProviderCapabilities"]
@@ -4148,10 +5061,12 @@ export function AgentSessionsProvider({
   const disposeAll = useCallback<SessionsActions["disposeAll"]>(() => {
     getStore().clearAll();
     prebindDirtySessionsRef.current.clear();
+    prebindGoalSnapshotsRef.current.clear();
     pendingHydratesRef.current.clear();
     hydrateInFlightRef.current.clear();
     reconcileInFlightRef.current.clear();
     capabilityRefreshInFlightRef.current.clear();
+    loadFlightAdoptOnlyRef.current.clear();
     persistedMessageRefsRef.current.clear();
     // Note: we deliberately do NOT clear the disk transcript here.
     // disposeAll is called on engine respawn (in-place project swap),
@@ -4167,6 +5082,7 @@ export function AgentSessionsProvider({
       bumpCancelGeneration(cancelGenerationsRef.current, chatId);
       const slot = getStore().sessions[chatId];
       prebindDirtySessionsRef.current.delete(chatId);
+      clearPrebindGoalSnapshotsForChat(prebindGoalSnapshotsRef.current, chatId);
       pendingHydratesRef.current.delete(chatId);
       invalidateTranscriptRequest(hydrateInFlightRef.current, chatId);
       invalidateTranscriptRequest(reconcileInFlightRef.current, chatId);
@@ -4174,6 +5090,8 @@ export function AgentSessionsProvider({
       // Release the dedupe owner immediately. Its promise still settles behind
       // identity checks, while a fast History reopen may start a fresh bind.
       ensureInFlightRef.current.delete(chatId);
+      loadFlightKeysRef.current.delete(chatId);
+      loadFlightAdoptOnlyRef.current.delete(chatId);
       sendQueueRef.current.delete(chatId);
       queueHeldRef.current.delete(chatId);
       flushBubbleRef.current.delete(chatId);
@@ -4226,12 +5144,21 @@ export function AgentSessionsProvider({
       cancel,
       stopBrowserUse,
       stopBackgroundTask,
+      openBoundaryPort,
       respondToPermission,
       respondToQuestion,
       setMode,
       setModel,
       compactContext,
       updateConfig,
+      setGoal,
+      clearGoal,
+      retrySafetyReview,
+      readMemorySettings,
+      updateMemorySettings,
+      resetMemory,
+      readConfigurationProvenance,
+      readProviderQuota,
       removeQueued,
       editQueued,
       steerQueued,
@@ -4256,12 +5183,21 @@ export function AgentSessionsProvider({
       cancel,
       stopBrowserUse,
       stopBackgroundTask,
+      openBoundaryPort,
       respondToPermission,
       respondToQuestion,
       setMode,
       setModel,
       compactContext,
       updateConfig,
+      setGoal,
+      clearGoal,
+      retrySafetyReview,
+      readMemorySettings,
+      updateMemorySettings,
+      resetMemory,
+      readConfigurationProvenance,
+      readProviderQuota,
       removeQueued,
       editQueued,
       steerQueued,

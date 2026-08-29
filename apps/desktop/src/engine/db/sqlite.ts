@@ -24,6 +24,7 @@
 
 import BetterSqlite3 from "better-sqlite3";
 import { createRequire } from "node:module";
+import * as path from "node:path";
 
 /** bun sets a `Bun` global; Node/Electron-main never do. */
 const isBun = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
@@ -136,8 +137,13 @@ export function openSqlite(
 ): BetterSqlite3.Database {
   if (isBun) {
     // createRequire works in bun's ESM; the module id is computed so neither tsup
-    // nor a Node import graph tries to resolve "bun:sqlite". Only runs under bun.
-    const req = createRequire(import.meta.url);
+    // nor a Node import graph tries to resolve "bun:sqlite". Give it a stable
+    // absolute synthetic parent instead of import.meta.url: this source is also
+    // bundled into the CommonJS dev engine and Electron main, where import.meta
+    // is empty and makes both builds warn on every start.
+    const req = createRequire(
+      path.join(process.cwd(), "__zeros_bun_sqlite_loader__.cjs"),
+    );
     const { Database } = req(["bun", "sqlite"].join(":")) as {
       Database: new (path: string, o?: Record<string, boolean>) => BunDatabase;
     };

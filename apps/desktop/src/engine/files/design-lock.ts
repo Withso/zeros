@@ -1,40 +1,28 @@
 // ──────────────────────────────────────────────────────────
-// Design-mode lock — make the codebase read-only, except the design folder
+// Historical macOS ACL compatibility and cleanup helpers
 // ──────────────────────────────────────────────────────────
 //
-// Design mode is a modal state: the agent (and the user) may edit only the
-// design folder, while still READING the rest of the repo for context. That
-// "read but never write" shape is why sparse-checkout is the wrong tool here —
-// it removes files entirely — and why this is enforced with macOS ACLs.
+// Early Zeros builds experimented with persistent same-user ACLs. That scope
+// was incorrect: the checkout is shared with the user's editors, Git clients,
+// and other coding platforms, so an on-disk ACL affected actors outside Zeros.
+// Production code no longer installs these ACLs. The exact helpers remain so
+// startup can remove guards left behind by those builds.
 //
-// Why the filesystem and not agent config
+// Why this is not the promised agent boundary
 // ───────────────────────────────────────
-// A per-agent permission would have to be re-expressed for Claude, Codex and
-// Cursor separately, could never cover the terminal, and would need redoing for
-// every agent added later. An ACL sits below all of them: measured on macOS
-// 26.3, a `deny write,delete,append,writeattr,writeextattr` ACE blocks a shell
-// redirect, `python open(w)`, `sed -i`, `mv` and `rm` alike. One mechanism,
-// every agent, no cooperation required.
+// Same-user ACLs affect every app running as the user and can also be removed
+// by that user. Agent containment therefore lives in each provider's immutable
+// process sandbox; these constants exist solely to identify old metadata.
 //
-// What gets locked
+// What historical builds locked
 // ────────────────
-// TRACKED files outside the design folder — nothing else. Gitignored paths stay
-// writable on purpose: `node_modules/`, `dist*/`, `.vite/` and friends are
-// where installs and dev servers write, and locking them would break the
-// preview that design work depends on. The rule is "lock what git tracks".
+// The retired fence walked the real Design tree: its root, every existing
+// subdirectory, and every tracked, ignored, or untracked entry. Legacy helpers
+// farther below still enumerate tracked code files only so old whole-codebase
+// locks can be swept after upgrades.
 //
-// Two behaviours worth knowing before wiring this to UI
-// ─────────────────────────────────────────────────────
-//   1. A DIRECTORY ACE IS NOT ENOUGH. Denying `add_file,delete_child` on a
-//      folder stops files being created/removed inside it, but an existing
-//      file stays writable in place — verified on macOS 26.3. So the ACE has
-//      to go on each file, which is why this enumerates `git ls-files`.
-//   2. GIT DOES NOT REPORT FAILURE. `git checkout` across a locked file prints
-//      "unable to unlink old <path>: Permission denied" to stderr, then exits
-//      0 and switches the branch anyway, leaving that file stale and showing
-//      as a phantom modification. Design mode must therefore either block
-//      branch switching or run git through `withUnlocked()`. It is NOT safe to
-//      leave locks on across an arbitrary git operation.
+// Cleanup covers directories and existing files because historical builds used
+// separate ACEs for directory creation/deletion and in-place content writes.
 //
 // Locks are process-independent (they live on disk), so `unlock` must be
 // callable cold — after a crash, on next boot — without any retained state.
@@ -58,18 +46,27 @@ const execFileAsync = promisify(execFile);
  *  chmod/xattr end-run. Removal matches on the same string, so it must stay
  *  byte-identical across versions — changing it strands locks applied by an
  *  older build. */
+// Compatibility contract: older builds installed this exact per-file ACE and
+// `chmod -a` removes by exact text. Never mutate it; add a separate ACE for new
+// directory permissions instead.
 const DENY_PERMS = "deny write,delete,append,writeattr,writeextattr";
+// On a directory, `write` means add-file, `append` means add-subdirectory, and
+// `delete_child` blocks removal/rename of children (Apple ACL semantics).
+const DIRECTORY_DENY_PERMS =
+  "deny write,delete,append,delete_child,writeattr,writeextattr";
 
 /** Full ACE, including the principal.
  *
- *  The identity is NOT optional: `chmod +a "deny write,…"` fails outright with
+ *  The identity was NOT optional: `chmod +a "deny write,…"` failed with
  *  "Unable to translate 'deny' to a UUID" because chmod parses the first token
  *  as the principal. It is scoped to the current user rather than `everyone`
- *  so the lock cannot affect other accounts on the machine — and the agent,
- *  the terminal and the editor all run as this user, so it still covers every
- *  writer we care about. */
-export function denyAce(): string {
+ *  so the historical lock did not affect other accounts on the machine. */
+function denyAce(): string {
   return `user:${userInfo().username} ${DENY_PERMS}`;
+}
+
+function denyDirectoryAce(): string {
+  return `user:${userInfo().username} ${DIRECTORY_DENY_PERMS}`;
 }
 
 /** `chmod` accepts many paths per call. Batch to keep the total argv well
@@ -77,14 +74,8 @@ export function denyAce(): string {
  *  few dozen spawns instead of 10k. */
 const CHMOD_BATCH = 200;
 
-export interface DesignLockOptions {
-  /** Repo-relative design folder, e.g. `styles/Artifacts/Designs`. Everything
-   *  inside it stays writable. Normalized to POSIX, no leading/trailing slash. */
-  designDir: string;
-}
-
 export interface DesignLockResult {
-  /** Number of files the ACE was applied to (or removed from). */
+  /** Number of paths whose historical ACE was removed (or was already absent). */
   changed: number;
   /** Paths that could not be updated — surfaced rather than swallowed, since a
    *  partially applied lock is a false sense of safety. */
@@ -98,14 +89,14 @@ export function designLockSupported(): boolean {
 
 /** Normalize a repo-relative directory to a POSIX prefix with no leading or
  *  trailing separator. Returns "" for a path that escapes the repo, which
- *  callers must treat as "no design dir" rather than "lock everything".
+ *  callers must treat as "no design dir" rather than "scan the repository".
  *
  *  An ABSOLUTE path is refused, not reinterpreted. Stripping its leading slash
  *  would turn `/Users/me/repo/designs` into the repo-relative
  *  `Users/me/repo/designs`, which matches no tracked file — so `isInsideDir`
  *  exempts nothing, the design folder is locked along with everything else, and
- *  `lockCodebase` reports a clean success. git paths are repo-relative, so an
- *  absolute input is a caller bug and refusing is the only safe reading. */
+ *  no Design entry. Git paths are repo-relative, so an absolute input is a
+ *  caller bug and refusing is the only safe reading. */
 export function normalizeDesignDir(dir: string): string {
   const posix = dir.replace(/\\/g, "/").trim();
   if (!posix || posix === "." || posix === "/") return "";
@@ -173,11 +164,8 @@ export async function lockableFiles(
  *  only the previously locked files have the ACE — so it must not be counted
  *  as a failure. Without this, a successful unlock reports thousands of bogus
  *  failures and looks like a broken lock. */
-export function isBenignRemoveError(
-  flag: "+a" | "-a",
-  stderr: string,
-): boolean {
-  return flag === "-a" && /No ACL present/i.test(stderr);
+export function isBenignRemoveError(stderr: string): boolean {
+  return /No ACL present/i.test(stderr);
 }
 
 /** Whether a failed BATCH can be accepted wholesale instead of retried per
@@ -185,42 +173,34 @@ export function isBenignRemoveError(
  *  present" — the negative lookahead finds any `chmod:` line that says
  *  something else, and a single one of those forces the per-file fallback so a
  *  genuine failure is never miscounted as success. */
-export function canSkipPerFileRetry(
-  flag: "+a" | "-a",
-  stderr: string,
-): boolean {
+export function canSkipPerFileRetry(stderr: string): boolean {
   return (
-    isBenignRemoveError(flag, stderr) &&
-    !/chmod: (?!No ACL present)/i.test(stderr)
+    isBenignRemoveError(stderr) && !/chmod: (?!No ACL present)/i.test(stderr)
   );
 }
 
-/** Run `chmod -h <flag> <ace> <files…>` in batches, collecting real failures.
+/** Remove one exact historical ACE in batches, collecting real failures.
  *
  *  `-h` is load-bearing, not tidiness. Without it chmod FOLLOWS symlinks, and
- *  git happily tracks a symlink with an absolute target (`.env -> /etc/app/.env`,
- *  dotfile-style links). Locking would then write a deny-write ACE onto a file
- *  OUTSIDE the repo, and unlocking only clears it while that link is still
- *  tracked and present — rename the link and the external file stays
- *  permanently unwritable. `-h` confines every change to the link itself.
+ *  git happily tracks symlinks with absolute targets. `-h` confines cleanup to
+ *  the link instead of changing metadata on a target outside the checkout.
  *
  *  chmod keeps going after a per-file error and exits non-zero, so a batch
  *  result is ambiguous: some paths may have been updated. A failing batch is
  *  therefore retried one path at a time — that costs a spawn per file only in
  *  the rare mixed batch, and it is what lets `failed` name exactly which paths
  *  are unprotected rather than blaming all 200. */
-async function chmodAce(
+async function removeAclAce(
   cwd: string,
-  flag: "+a" | "-a",
   files: readonly string[],
+  ace = denyAce(),
 ): Promise<DesignLockResult> {
-  const ace = denyAce();
   let changed = 0;
   const failed: string[] = [];
   for (let i = 0; i < files.length; i += CHMOD_BATCH) {
     const batch = files.slice(i, i + CHMOD_BATCH);
     try {
-      await execFileAsync("chmod", ["-h", flag, ace, ...batch], { cwd });
+      await execFileAsync("chmod", ["-h", "-a", ace, ...batch], { cwd });
       changed += batch.length;
     } catch (batchErr) {
       const batchStderr = String(
@@ -232,19 +212,19 @@ async function chmodAce(
       // when those are the ONLY errors there is nothing to retry — skipping
       // the fallback keeps a cold unlock at a few dozen spawns instead of one
       // per tracked file.
-      if (canSkipPerFileRetry(flag, batchStderr)) {
+      if (canSkipPerFileRetry(batchStderr)) {
         changed += batch.length;
         continue;
       }
       for (const file of batch) {
         try {
-          await execFileAsync("chmod", ["-h", flag, ace, file], { cwd });
+          await execFileAsync("chmod", ["-h", "-a", ace, file], { cwd });
           changed += 1;
         } catch (err) {
           const stderr = String(
             (err as { stderr?: unknown } | null)?.stderr ?? "",
           );
-          if (!isBenignRemoveError(flag, stderr)) failed.push(file);
+          if (!isBenignRemoveError(stderr)) failed.push(file);
         }
       }
     }
@@ -252,17 +232,13 @@ async function chmodAce(
   return { changed, failed };
 }
 
-/** Resolve the design folder for a LOCK, or throw with a message the UI can
- *  show. Every rejection here has the same failure mode behind it: a design dir
- *  that matches no path under `cwd` exempts nothing, so the lock covers the
- *  design folder too and still reports a clean success — design mode with
- *  nothing writable at all.
+/** Resolve a real Design folder for containment validation or ACL cleanup.
  *
  *  Two independent checks, because normalization alone cannot see the disk:
  *
  *    1. `normalizeDesignDir` collapses "", ".", "..", an escaping path and an
  *       absolute path to the "" sentinel, which `isInsideDir` reads as "exempt
- *       nothing" — correct for the unlock sweep, catastrophic here.
+ *       nothing" — correct only for the historical whole-tree cleanup sweep.
  *    2. The folder must actually exist under `cwd`, spelled exactly as given.
  *       A typo or a case difference is indistinguishable from a valid dir
  *       otherwise, and macOS is case-INSENSITIVE by default: `fs.stat` happily
@@ -302,26 +278,156 @@ export async function resolveDesignDirForLock(
       );
     }
     dir = path.join(dir, segment);
+    let info: Awaited<ReturnType<typeof fs.lstat>>;
+    try {
+      // lstat is intentional: stat would follow a symlink and turn an
+      // apparently in-workspace Design pointer into authority over some other
+      // subtree. Every path segment must be a real directory.
+      info = await fs.lstat(dir);
+    } catch {
+      throw new Error(
+        `Design-mode locking needs an existing design folder; "${normalized}" is not in this workspace.`,
+      );
+    }
+    if (info.isSymbolicLink() || !info.isDirectory()) {
+      throw new Error(
+        `Design-mode locking needs a real, symlink-free directory inside this workspace; "${normalized}" is not one.`,
+      );
+    }
   }
   return normalized;
 }
 
-/** Make every tracked file outside `designDir` read-only.
+export interface DesignDirFenceEntries {
+  /** Root first, then descendants in lexical/top-down order. */
+  directories: string[];
+  /** Every non-directory entry, including ignored files and symlinks. */
+  files: string[];
+}
+
+export interface DesignDirAliasHazard {
+  /** Repo-relative Design entry whose inode is reachable by another name. */
+  path: string;
+  links: number;
+}
+
+/** Enumerate the ACTUAL Design tree, not Git's index.
  *
- *  Idempotent: re-locking an already-locked tree is a no-op per file, because
- *  macOS collapses a duplicate `+a` of an identical ACE. */
-export async function lockCodebase(
+ * The protection promise applies equally to tracked documents, ignored visual
+ * experiments, and untracked drafts created seconds ago by the Design engine.
+ * `Dirent.isDirectory()` deliberately does not follow symlinks: a symlink is a
+ * file-like fence target, never a traversal edge into code or outside the repo.
+ * Any read failure aborts the sweep so fence health fails closed rather than
+ * recording an incomplete tree as protected. */
+export async function designDirFenceEntries(
   cwd: string,
-  opts: DesignLockOptions,
-): Promise<DesignLockResult> {
-  if (!designLockSupported()) {
-    throw new Error(
-      "Design-mode locking needs macOS — no filesystem ACL support on this platform.",
-    );
+  designDir: string,
+): Promise<DesignDirFenceEntries> {
+  const root = await resolveDesignDirForLock(cwd, designDir);
+  const directories = [root];
+  const files: string[] = [];
+  const pending = [root];
+
+  while (pending.length > 0) {
+    const directory = pending.shift()!;
+    const entries = await fs.readdir(path.join(cwd, ...directory.split("/")), {
+      withFileTypes: true,
+    });
+    entries.sort((left, right) => left.name.localeCompare(right.name));
+    for (const entry of entries) {
+      const child = `${directory}/${entry.name}`;
+      if (entry.isDirectory()) {
+        directories.push(child);
+        pending.push(child);
+      } else {
+        files.push(child);
+      }
+    }
   }
-  const designDir = await resolveDesignDirForLock(cwd, opts.designDir);
-  const files = await lockableFiles(cwd, designDir);
-  return chmodAce(cwd, "+a", files);
+
+  directories.sort((left, right) => left.localeCompare(right));
+  files.sort((left, right) => left.localeCompare(right));
+  return { directories, files };
+}
+
+/** Reject pre-existing hard-link aliases before admitting a path-scoped agent.
+ *
+ * A sandbox policy authorizes names, while a hard link is a second name for
+ * the same inode. If one Design file already has a code-side hard link, a code
+ * actor could mutate the Design document through the otherwise-allowed name.
+ * We intentionally do not try to discover one alias by scanning the whole
+ * volume (that is incomplete and unbounded); `nlink > 1` itself is sufficient
+ * to fail closed. Symlinks are safe to enumerate with `lstat` and are left for
+ * the provider's canonical path enforcement. */
+export async function designDirAliasHazards(
+  cwd: string,
+  designDir: string,
+): Promise<DesignDirAliasHazard[]> {
+  const { files } = await designDirFenceEntries(cwd, designDir);
+  const hazards: DesignDirAliasHazard[] = [];
+  // One lstat per file is the dominant cost of this sweep on large Design
+  // trees and each probe is independent, so batch them like the policy
+  // builder's alias audit. A failed lstat still rejects the whole sweep, and
+  // hazards keep the sorted file order because batches slice it in place.
+  const batchSize = 256;
+  for (let start = 0; start < files.length; start += batchSize) {
+    const batch = files.slice(start, start + batchSize);
+    const infos = await Promise.all(
+      batch.map((file) => fs.lstat(path.join(cwd, ...file.split("/")))),
+    );
+    for (let index = 0; index < batch.length; index += 1) {
+      const info = infos[index]!;
+      if (info.isFile() && info.nlink > 1) {
+        hazards.push({ path: batch[index]!, links: info.nlink });
+      }
+    }
+  }
+  return hazards;
+}
+
+export async function assertDesignDirHasNoHardlinkAliases(
+  cwd: string,
+  designDir: string,
+): Promise<void> {
+  const hazards = await designDirAliasHazards(cwd, designDir);
+  if (hazards.length === 0) return;
+  throw new Error(
+    `The active Design directory contains ${hazards.length} hard-linked ` +
+      `${hazards.length === 1 ? "file" : "files"}; path-scoped containment ` +
+      `cannot safely distinguish those aliases.`,
+  );
+}
+
+/** Every non-directory entry INSIDE `designDir` that exists on disk. Kept as
+ * a compatibility export for callers that historically asked for files. */
+export async function designDirFiles(
+  cwd: string,
+  designDir: string,
+): Promise<string[]> {
+  return (await designDirFenceEntries(cwd, designDir)).files;
+}
+
+/** Remove a historical Design-directory fence. Sweeps every existing entry
+ *  (missing ACEs are benign — see isBenignRemoveError), so it works cold after
+ *  a crash and after files were added/removed since the fence was applied. */
+export async function unfenceDesignDirFiles(
+  cwd: string,
+  designDir: string,
+): Promise<DesignLockResult> {
+  if (!designLockSupported()) return { changed: 0, failed: [] };
+  const { directories, files } = await designDirFenceEntries(cwd, designDir);
+  // Release leaves before parents. This keeps containment in place for as long
+  // as possible during the engine's serialized mutation hand-off.
+  const fileResult = await removeAclAce(cwd, files);
+  const directoryResult = await removeAclAce(
+    cwd,
+    [...directories].reverse(),
+    denyDirectoryAce(),
+  );
+  return {
+    changed: directoryResult.changed + fileResult.changed,
+    failed: [...directoryResult.failed, ...fileResult.failed],
+  };
 }
 
 /** Remove the design lock.
@@ -337,38 +443,5 @@ export async function lockCodebase(
 export async function unlockCodebase(cwd: string): Promise<DesignLockResult> {
   if (!designLockSupported()) return { changed: 0, failed: [] };
   const files = await lockableFiles(cwd, "");
-  return chmodAce(cwd, "-a", files);
-}
-
-/** Run `fn` with the lock lifted, then restore it.
- *
- *  Every git operation that can rewrite the worktree — checkout, merge, stash
- *  pop, reset — must go through this. git does not fail loudly on a locked
- *  path (see the header note), so skipping this silently desynchronizes the
- *  worktree from HEAD. The lock is restored even if `fn` throws.
- *
- *  Re-locking is NOT done in a `finally`. It can legitimately fail — the very
- *  operations this wraps can move the design folder out from under it (a
- *  checkout of a branch where it doesn't exist), and `lockCodebase` refuses
- *  rather than lock the whole tree — and a throw from `finally` would replace
- *  `fn`'s own error with that one, hiding why the git operation failed. So a
- *  failed relock is surfaced only when `fn` succeeded; otherwise `fn`'s error
- *  wins. Either way the tree is left UNLOCKED, which is the safe direction: a
- *  visible unlocked codebase beats a stale worktree or a locked design folder. */
-export async function withUnlocked<T>(
-  cwd: string,
-  opts: DesignLockOptions,
-  fn: () => Promise<T>,
-): Promise<T> {
-  if (!designLockSupported()) return fn();
-  await unlockCodebase(cwd);
-  let result: T;
-  try {
-    result = await fn();
-  } catch (err) {
-    await lockCodebase(cwd, opts).catch(() => {});
-    throw err;
-  }
-  await lockCodebase(cwd, opts);
-  return result;
+  return removeAclAce(cwd, files);
 }

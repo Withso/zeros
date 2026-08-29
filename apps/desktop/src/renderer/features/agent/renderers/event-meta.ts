@@ -32,6 +32,7 @@ import {
 import type { ComponentType } from "react";
 
 import type { AgentMessage, AgentToolMessage } from "../use-agent-session";
+import { formatElapsed } from "@/renderer/shared/ui/loading";
 import {
   browserToolActivity,
   type BrowserToolActivity,
@@ -84,6 +85,24 @@ export function isImagePath(p: string | null | undefined): boolean {
   return IMAGE_EXT.has(ext);
 }
 
+/** Provider transports may cap tool arguments/results before Zeros receives
+ * them. Adapters preserve that fact in a provider-neutral marker so the
+ * collapsed common row can disclose an incomplete payload without learning a
+ * Cursor event type. */
+export function hasTransportTruncation(tool: AgentToolMessage): boolean {
+  const truncated = (value: unknown) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    const transport = (value as Record<string, unknown>).zerosTransport;
+    return (
+      !!transport &&
+      typeof transport === "object" &&
+      !Array.isArray(transport) &&
+      (transport as Record<string, unknown>).truncated === true
+    );
+  };
+  return truncated(tool.rawInput) || truncated(tool.rawOutput);
+}
+
 function basename(p: string): string {
   const cleaned = p.replace(/\/+$/, "");
   const i = cleaned.lastIndexOf("/");
@@ -97,6 +116,7 @@ export function metaForEvent(message: AgentMessage): EventMeta {
   }
   if (message.kind === "text" && (message as any).role === "thought") {
     const text = (message as any).text as string;
+    const durationMs = (message as { durationMs?: unknown }).durationMs;
     const chars = text?.length ?? 0;
     return {
       Icon: Brain,
@@ -111,7 +131,19 @@ export function metaForEvent(message: AgentMessage): EventMeta {
         : undefined,
       // Char count intentionally omitted from the right edge. The thought text
       // is still inspectable via expand.
-      trailing: undefined,
+      //
+      // The duration only earns the right edge when it says something. Only
+      // Cursor reports one at all (`thinking_duration_ms`), and it is almost
+      // always sub-second, so every Thinking row wore a meaningless "0s" —
+      // formatElapsed floors anything under a second to exactly that. Match
+      // DurationChip's settled-card behaviour and drop the chip instead of
+      // printing a zero; a genuinely long thought still shows its time.
+      trailing:
+        typeof durationMs === "number" &&
+        Number.isFinite(durationMs) &&
+        durationMs >= 1000
+          ? formatElapsed(durationMs)
+          : undefined,
       expandable: chars > 0,
     };
   }

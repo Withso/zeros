@@ -25,7 +25,6 @@ import {
 import { lstatSync } from "node:fs";
 import path from "node:path";
 import { GitError } from "./errors";
-import { runFile } from "./git-exec";
 // Reuse the engine's cached login-shell PATH resolver so an inline command
 // like `pnpm install` finds the user's tools (the Electron-spawned engine's
 // own PATH is often minimal). path-resolver has no engine imports → no cycle.
@@ -38,6 +37,8 @@ import {
   stripLauncherBinFromPath,
   TOOLCHAIN_ENV_NAMES,
 } from "../env/launcher-env";
+import { randomUUID } from "node:crypto";
+import type { RepoTaskBoundaryFactory } from "../agents/containment/types";
 
 export interface SetupHookOptions {
   workspaceId: string;
@@ -102,6 +103,120 @@ interface RunInlineScriptArgs {
   worktreePath: string;
   repoRoot: string;
   baseBranch: string;
+  boundaryFactory?: RepoTaskBoundaryFactory;
+}
+
+const INLINE_SCRIPT_MAX_BYTES = 256 * 1024 * 1024;
+
+class RepoTaskContainmentTeardownError extends Error {
+  readonly cause: unknown;
+  readonly taskError: unknown;
+
+  constructor(cause: unknown, taskError: unknown) {
+    super(
+      `repository task containment teardown was not proven: ${
+        cause instanceof Error ? cause.message : String(cause)
+      }`,
+    );
+    this.name = "RepoTaskContainmentTeardownError";
+    this.cause = cause;
+    this.taskError = taskError;
+  }
+}
+
+export async function runContainedInlineScript(
+  args: RunInlineScriptArgs,
+  shell: string,
+  flag: string,
+  command: string,
+  env: Record<string, string>,
+  limits: {
+    maxOutputBytes?: number;
+    timeoutMs?: number;
+  } = {},
+): Promise<{ stderr: string }> {
+  if (!args.boundaryFactory) {
+    throw new Error(
+      "repository script refused: no Zeros Sandbox Runtime boundary is configured",
+    );
+  }
+  const boundary = await args.boundaryFactory({
+    executionId: `repo-${args.kind}-${randomUUID()}`,
+    cwd: args.worktreePath,
+    workspaceRoot: args.worktreePath,
+    repoRoot: args.repoRoot,
+    env,
+  });
+  let processHandle: Awaited<ReturnType<typeof boundary.spawn>> | null = null;
+  let stderr = "";
+  let outputBytes = 0;
+  const maxOutputBytes = limits.maxOutputBytes ?? INLINE_SCRIPT_MAX_BYTES;
+  const timeoutMs =
+    limits.timeoutMs ??
+    (args.kind === "archive" ? 30 * 1000 : 5 * 60 * 1000);
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let taskError: unknown;
+  let taskFailed = false;
+  try {
+    processHandle = await boundary.spawn({
+      command: shell,
+      args: [flag, command],
+      cwd: args.worktreePath,
+      env,
+      stdio: "pipe",
+    });
+    let abortError: Error | null = null;
+    let rejectAbort!: (error: Error) => void;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      rejectAbort = reject;
+    });
+    const abort = (error: Error) => {
+      if (abortError) return;
+      abortError = error;
+      // Reject the task wait first so `finally` immediately performs the
+      // authoritative boundary-wide stop proof. This eager child stop only
+      // shortens the latency; its rejection is deliberately observed here and
+      // the boundary proof below remains the fail-closed verdict.
+      rejectAbort(error);
+      void processHandle?.stopAndProve().catch(() => undefined);
+    };
+    const account = (chunk: Buffer | string, isStderr: boolean) => {
+      const text = String(chunk);
+      outputBytes += Buffer.byteLength(text);
+      if (isStderr && stderr.length < 8 * 1024) {
+        stderr += text.slice(0, 8 * 1024 - stderr.length);
+      }
+      if (outputBytes > maxOutputBytes && !abortError) {
+        abort(new Error("repository script output exceeded 256 MB"));
+      }
+    };
+    processHandle.stdout?.on("data", (chunk) => account(chunk, false));
+    processHandle.stderr?.on("data", (chunk) => account(chunk, true));
+    timer = setTimeout(
+      () => abort(new Error(`repository script timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    const exit = await Promise.race([processHandle.wait(), aborted]);
+    if (exit.code !== 0) {
+      const error = new Error(
+        `repository script exited ${exit.code ?? exit.signal ?? "unknown"}`,
+      ) as Error & { stderr?: string };
+      error.stderr = stderr;
+      throw error;
+    }
+  } catch (error) {
+    taskError = error;
+    taskFailed = true;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+  try {
+    await boundary.stopAndProve();
+  } catch (error) {
+    throw new RepoTaskContainmentTeardownError(error, taskError);
+  }
+  if (taskFailed) throw taskError;
+  return { stderr };
 }
 
 /** Run an inline shell command (from the repo's resolved TOML scripts) in the
@@ -131,20 +246,17 @@ export async function runInlineScript(
   const [shell, flag] =
     process.platform === "win32" ? ["cmd.exe", "/c"] : ["/bin/sh", "-c"];
   try {
-    await runFile(shell, [flag, command], {
-      cwd: args.worktreePath,
-      env,
-      // 256 MB: a chatty `pnpm install` / `cargo build` easily exceeds 16 MB of
-      // combined stdout+stderr, which would otherwise reject setup and roll the
-      // whole workspace back.
-      maxBufferBytes: 256 * 1024 * 1024,
-      // Archive hooks are optional, non-load-bearing cleanup. Letting one hold
-      // a lifecycle open for five minutes makes a workspace appear stuck even
-      // though its durable pre-hook checkpoint is already safe. Setup retains
-      // the longer budget for backwards compatibility.
-      timeoutMs: args.kind === "archive" ? 30 * 1000 : 5 * 60 * 1000,
-    });
+    await runContainedInlineScript(args, shell, flag, command, env);
   } catch (err) {
+    if (err instanceof RepoTaskContainmentTeardownError) {
+      throw new GitError({
+        code: "CONTAINMENT_TEARDOWN_FAILED",
+        message: err.message,
+        cause: err,
+        remediation:
+          "Restart Zeros so stale process-domain recovery can run, then retry. The worktree was kept intact.",
+      });
+    }
     const stderr =
       err && typeof err === "object" && "stderr" in err
         ? String((err as { stderr: unknown }).stderr ?? "")

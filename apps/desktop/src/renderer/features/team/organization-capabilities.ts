@@ -57,7 +57,7 @@ export function filterRowsForOrganization<T extends OrganizationOwned>(
 ): T[] {
   if (!organization) return rows as T[];
   const filtered = rows.filter((row) =>
-    organization.isPersonal
+    organization.isPersonal || organization.legacyFlat
       ? row.organizationId == null || row.organizationId === organization.id
       : row.organizationId === organization.id,
   );

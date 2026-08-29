@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { zerosStateRoot } from "../db/paths";
 import { getLoginShellPath } from "../agents/adapters/shared/login-shell-path";
+import { stripEngineAuthorityEnv } from "../agents/adapters/shared/config-isolation";
 import {
   pruneLauncherScriptEnv,
   sanitizeProbedPath,
@@ -266,9 +267,11 @@ const REMOTE_ENV_ALLOW = new Set<string>([
 ]);
 
 /** The child env for a PTY: truecolor, Apple-Terminal session noise off, and
- *  ZDOTDIR pointed at the Zeros wrapper. When `scrub` is set (remote clients),
- *  the env is rebuilt from the allowlist so NO host secret can leak. `cwd` (the
- *  resolved worktree) scopes the shell's location env to THIS worktree. */
+ *  ZDOTDIR pointed at the Zeros wrapper. When `scrub` is set (an explicitly
+ *  untrusted relay surface), the env is rebuilt from the allowlist so NO host
+ *  secret can leak. Qualified in-workspace cloud terminals use the full normal
+ *  worker env, just like local human terminals. Engine authority is removed in
+ *  both modes. `cwd` scopes the shell's location env to THIS worktree. */
 export function buildPtyEnv(opts?: {
   scrub?: boolean;
   cwd?: string;
@@ -376,7 +379,12 @@ export function buildPtyEnv(opts?: {
   pruneInheritedZdotdir(env);
   const zdotdir = ensureZerosZdotdir();
   if (zdotdir) env.ZDOTDIR = zdotdir;
-  return env;
+  // The full-parity path deliberately retains ordinary provider credentials,
+  // toolchain variables, and application service URLs. It must not retain the
+  // coordinator's bridge token, private-state roots, ZSR launch controls, or a
+  // Conductor control credential. Keep this final so future layering above
+  // cannot accidentally put engine authority back.
+  return stripEngineAuthorityEnv(env);
 }
 
 /** The child env for a RUN ACTION's one-shot PTY — the Run tab's counterpart to

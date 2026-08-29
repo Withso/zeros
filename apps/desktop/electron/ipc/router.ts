@@ -71,7 +71,7 @@ const commandTable: Record<string, CommandHandler> = {
   detect_open_apps: notImpl("detect_open_apps", 3),
   open_in_app: notImpl("open_in_app", 3),
 
-  // ── Auth0 session @ rest — main owns the full token pair; the renderer only
+  // ── WorkOS session at rest — main owns the full token pair; the renderer only
   // ever gets a live access token or decoded identity claims. The pair is written
   // to the keychain by auth_redeem_handoff itself (no renderer-reachable install
   // command), so an XSS can't plant forged tokens. See
@@ -82,6 +82,9 @@ const commandTable: Record<string, CommandHandler> = {
   auth_get_session_user: notImpl("auth_get_session_user", 5),
   auth_clear_session: notImpl("auth_clear_session", 5),
   auth_sign_out_everywhere: notImpl("auth_sign_out_everywhere", 5),
+  auth_start_signin: notImpl("auth_start_signin", 5),
+  auth_cancel_signin: notImpl("auth_cancel_signin", 5),
+  auth_security_revalidate: notImpl("auth_security_revalidate", 5),
 
   // ── Web sign-in handoff — the website owns OAuth; the desktop redeems an
   // opaque single-use ticket for a session. Verifier stays in main safeStorage.
@@ -138,6 +141,14 @@ const commandTable: Record<string, CommandHandler> = {
   "iframe:clear-cookies": notImpl("iframe:clear-cookies", 0),
   "iframe-picker:capture-region": notImpl("iframe-picker:capture-region", 0),
   "browser:reinject-picker": notImpl("browser:reinject-picker", 0),
+  "browser:authorize-preview-origin": notImpl(
+    "browser:authorize-preview-origin",
+    0,
+  ),
+  "browser:revoke-preview-origin": notImpl(
+    "browser:revoke-preview-origin",
+    0,
+  ),
   "browser:control-iframe": notImpl("browser:control-iframe", 0),
   browser_confirmation_respond: notImpl("browser_confirmation_respond", 0),
   browser_confirmation_requests: notImpl("browser_confirmation_requests", 0),

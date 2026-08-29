@@ -102,8 +102,8 @@ describe("filesystem Design API repository", () => {
     const current = await readDesignWebDocumentState(root, frame.file);
     const source = current.files[frame.file]!;
     const nextSource = source.replace(
-      "Shape this frame with the canvas and inspector.",
-      "Recovered transaction",
+      "</main>",
+      '<span data-oid="recovered-transaction">Recovered transaction</span></main>',
     );
     const next = {
       ...current,
@@ -448,8 +448,8 @@ describe("filesystem Design API repository", () => {
     const frame = await createDesignFrame(root, { title: "Forged journal" });
     const current = await readDesignWebDocumentState(root, frame.file);
     const forged = current.files[frame.file]!.replace(
-      "Shape this frame with the canvas and inspector.",
-      "This must not be written",
+      "</main>",
+      '<span data-oid="forged-content">This must not be written</span></main>',
     );
     await writeFile(
       path.join(root, DESIGN_DIRECTORY_NAME, DESIGN_TRANSACTION_JOURNAL_FILE),

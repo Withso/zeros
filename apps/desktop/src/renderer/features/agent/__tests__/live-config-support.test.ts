@@ -8,8 +8,8 @@ import { chatEnvDriftKey, PERMISSION_MODE_ENV_VAR } from "../model-catalog";
 //
 //   1. agentAppliesConfigLive decides whether the chat view force-respawns on a
 //      model/effort/Fast change. A false positive strands the session on stale
-//      config; a false negative tears down a live agent COLD (no --resume) and
-//      silently drops its conversation.
+//      config; a false negative needlessly interrupts and restarts the live
+//      execution even though its provider conversation can be resumed.
 //   2. chatEnvDriftKey is the single key behind both the appliedChatEnvKey
 //      stamp and sendPrompt's drift comparison. If the two ever compute it
 //      differently, every send looks like drift and respawns.

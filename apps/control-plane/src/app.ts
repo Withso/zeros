@@ -7,7 +7,7 @@
 // that position is the whole contract for the two routes that must answer
 // without a bearer token. A 401 where a 503 belongs is invisible to a
 // per-router test and indistinguishable, from the desktop, from an expired
-// Auth0 session.
+// authentication session.
 // ──────────────────────────────────────────────────────────
 
 import { Hono } from "hono";
@@ -29,13 +29,36 @@ import {
   createGithubUnconfiguredRoutes,
 } from "./github.js";
 import { createFeedbackRoutes } from "./feedback.js";
+import {
+  PostgresWorkOSBrowserSessionRepository,
+  WorkOSBrowserSessions,
+  createWorkOSBrowserSessionRoutes,
+} from "./workos-browser-sessions.js";
+import { createWorkOSDesktopRevocationRoutes } from "./workos-desktop-revocation.js";
+import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
+import { RailwayWorkOSProvider } from "./workos-provider.js";
+import { createAccountRecoveryRoutes } from "./account-recovery.js";
+import {
+  PostgresSecurityEventBroker,
+  createSecurityEventRoutes,
+} from "./security-events.js";
+import { createWorkOSManagementEventRoutes } from "./workos-sync-events.js";
 
 export function createApp(
   config: Config,
   pool: pg.Pool,
   emailConfig: EmailConfig,
+  runtime: {
+    securityEventBroker?: PostgresSecurityEventBroker;
+    workosProvider?: RailwayWorkOSProvider;
+  } = {},
 ): Hono {
   const app = new Hono();
+  const workosProvider =
+    config.auth.provider === "workos" && config.workos
+      ? (runtime.workosProvider ??
+        new RailwayWorkOSProvider(config.auth, config.workos))
+      : undefined;
 
   // Health: no auth (Railway healthcheck), proves DB reachability.
   app.get("/healthz", async (c) => {
@@ -47,6 +70,41 @@ export function createApp(
     }
   });
 
+  // Railway owns the complete WorkOS browser/desktop authentication boundary:
+  // Hosted AuthKit authorization, authorization-code exchange, encrypted
+  // session state, serialized refresh, provider-signed lifecycle events, and
+  // desktop session revocation. These
+  // endpoints are intentionally mounted before /v1 bearer authentication;
+  // each carries its own stronger credential (PKCE state, opaque HttpOnly
+  // cookie, webhook signature, or a verified Desktop Application bearer).
+  if (config.auth.provider === "workos" && config.workos && workosProvider) {
+    const sessions = new WorkOSBrowserSessions(
+      new PostgresWorkOSBrowserSessionRepository(pool),
+      workosProvider,
+      config.workos.appOrigin,
+    );
+    app.route(
+      "/",
+      createWorkOSBrowserSessionRoutes(sessions, config.workos.appOrigin),
+    );
+    app.route(
+      "/",
+      createWorkOSDesktopAuthorizationRoutes(
+        workosProvider,
+        config.workos.appOrigin,
+      ),
+    );
+    app.route("/", createWorkOSDesktopRevocationRoutes(workosProvider));
+    app.route(
+      "/",
+      createWorkOSManagementEventRoutes(
+        pool,
+        workosProvider,
+        config.workos.webhookSecret,
+      ),
+    );
+  }
+
   // CORS: the callers are the Electron renderer (localhost dev origin /
   // packaged origin) and later app.zeros.build. Auth is a bearer token —
   // no cookies, nothing ambient — so a wildcard origin with credentials
@@ -56,7 +114,7 @@ export function createApp(
     cors({
       origin: "*",
       allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-      allowHeaders: ["authorization", "content-type"],
+      allowHeaders: ["authorization", "content-type", "idempotency-key"],
       maxAge: 86400,
     }),
   );
@@ -73,16 +131,17 @@ export function createApp(
   });
 
   // GitHub calls the callback from the system browser, so it cannot carry the
-  // desktop user's Auth0 bearer token. Its one-time state is the
+  // desktop user's bearer token. Its one-time state is the
   // authorization. Register it before the auth middleware; every other GitHub
-  // route stays behind the normal Auth0, body-limit, and per-user rate limits.
+  // route stays behind the normal authentication, body-limit, and per-user
+  // rate limits.
   //
   // The unconfigured stand-in mounts in the SAME pre-auth position on purpose.
   // Behind the middleware it was unreachable without a token, so the one
   // caller that never has one — GitHub's browser callback — got `401 Missing
   // bearer token` where `503 github_not_configured` belongs, and a desktop
-  // whose Auth0 session had merely lapsed could not tell "GitHub App sign-in
-  // is off on this control plane" from "sign in again".
+  // whose authentication session had merely lapsed could not tell "GitHub App
+  // sign-in is off on this control plane" from "sign in again".
   if (config.github) {
     app.route("/", createGithubPublicRoutes(pool, config.github));
   } else {
@@ -114,7 +173,7 @@ export function createApp(
     c.req.path === "/v1/feedback" ? next() : defaultBodyLimit(c, next),
   );
 
-  // Everything under /v1 requires a verified Auth0-issued JWT.
+  // Everything under /v1 requires a verified JWT from the selected provider.
   app.use("/v1/*", createAuthMiddleware(config, pool));
 
   // Per-user ceiling across ALL /v1 routes. The sensitive endpoints keep their
@@ -135,7 +194,22 @@ export function createApp(
   app.use("/v1/feedback", feedbackBodyLimit);
 
   app.route("/", createFeedbackRoutes(config.feedback));
-  app.route("/", createRoutes(pool, emailConfig));
+  app.route("/", createAccountRecoveryRoutes(pool));
+  app.route(
+    "/",
+    createSecurityEventRoutes(
+      pool,
+      runtime.securityEventBroker ?? new PostgresSecurityEventBroker(pool),
+    ),
+  );
+  app.route(
+    "/",
+    createRoutes(pool, emailConfig, config.cloudWorkspaces, {
+      workosEnabled: config.auth.provider === "workos",
+      ...(workosProvider ? { workosProvider } : {}),
+      inviteLinkBase: config.inviteLinkBase,
+    }),
+  );
   if (config.github) app.route("/", createGithubRoutes(pool, config.github));
 
   app.onError((err, c) => {
@@ -145,7 +219,13 @@ export function createApp(
     if (err instanceof HTTPException) return err.getResponse();
     if (err instanceof HttpError) {
       return c.json(
-        { error: { code: err.code, message: err.message } },
+        {
+          error: {
+            code: err.code,
+            message: err.message,
+            ...(err.details ? { details: err.details } : {}),
+          },
+        },
         err.status,
       );
     }

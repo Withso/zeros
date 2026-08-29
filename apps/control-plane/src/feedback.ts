@@ -3,7 +3,7 @@
 //
 // This route replaces the standalone Cloudflare feedback Worker. Authentication
 // is deliberately NOT repeated here: app.ts mounts it after the control-plane
-// Auth0 middleware, and sender identity comes only from c.get("user"). Body
+// Authentication middleware, and sender identity comes only from c.get("user"). Body
 // fields are strict so an email/name/token impersonation field cannot quietly
 // return later.
 // ──────────────────────────────────────────────────────────
@@ -150,12 +150,12 @@ async function findIntercomContact(
 
 async function getOrCreateIntercomContact(
   config: IntercomConfig,
-  sender: { providerSub: string; email: string; displayName: string | null },
+  sender: { id: string; email: string; displayName: string | null },
   deadline: AbortSignal,
 ): Promise<string> {
   const existing = await findIntercomContact(
     config,
-    sender.providerSub,
+    sender.id,
     deadline,
   );
   if (typeof existing?.id === "string" && existing.id) return existing.id;
@@ -168,7 +168,7 @@ async function getOrCreateIntercomContact(
       deadline,
       {
         role: "user",
-        external_id: sender.providerSub,
+        external_id: sender.id,
         email: sender.email,
         ...(sender.displayName ? { name: sender.displayName } : {}),
       },
@@ -181,7 +181,7 @@ async function getOrCreateIntercomContact(
     if (error instanceof UpstreamError && error.status === 409) {
       const raced = await findIntercomContact(
         config,
-        sender.providerSub,
+        sender.id,
         deadline,
       );
       if (typeof raced?.id === "string" && raced.id) return raced.id;
@@ -204,7 +204,7 @@ function posthogLink(
 
 async function deliverToIntercom(
   config: IntercomConfig,
-  sender: { providerSub: string; email: string; displayName: string | null },
+  sender: { id: string; email: string; displayName: string | null },
   payload: FeedbackPayload,
   link: string,
   deadline: AbortSignal,

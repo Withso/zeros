@@ -57,6 +57,7 @@
 // Exit 0 = every pin is exact, installed, and provable. 1 = it is not.
 // ──────────────────────────────────────────────────────────
 
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -72,10 +73,15 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CLAUDE_SDK = "@anthropic-ai/claude-agent-sdk";
 const CODEX = "@openai/codex";
 const CURSOR_SDK = "@cursor/sdk";
+const SANDBOX_RUNTIME = "@anthropic-ai/sandbox-runtime";
+// Claude's built-in Write tool began consulting Edit(path) rules at this
+// version. The command sandbox alone cannot protect an in-process file tool, so
+// this is a release requirement for Zeros' all-tool Design containment claim.
+const CLAUDE_DESIGN_CONTAINMENT_MIN_VERSION = "2.1.228";
 
 /** The runtimes this gate owns. Keep in lockstep with renovate.json's
  *  "agent CLIs" packageRule — that rule is what opens the PRs this checks. */
-const BUNDLED_RUNTIMES = [CLAUDE_SDK, CODEX, CURSOR_SDK];
+const BUNDLED_RUNTIMES = [CLAUDE_SDK, CODEX, CURSOR_SDK, SANDBOX_RUNTIME];
 
 const errors = [];
 const warnings = [];
@@ -253,6 +259,20 @@ function checkClaudeArtifact(installedWrapperVersion) {
     );
   }
 
+  if (
+    compareVersions(
+      declaredCodeVersion,
+      CLAUDE_DESIGN_CONTAINMENT_MIN_VERSION,
+    ) < 0
+  ) {
+    fail(
+      `Claude Code ${declaredCodeVersion} is below the Design-containment ` +
+        `minimum ${CLAUDE_DESIGN_CONTAINMENT_MIN_VERSION}. Older runtimes do ` +
+        `not apply Edit(path) rules to the built-in Write tool, so shell ` +
+        `sandboxing alone cannot support the advertised all-tool boundary.`,
+    );
+  }
+
   // 4. The two version fields the repo reads in two different orders.
   const manifestVersion = readClaudeCodeVersion(source.sdkMain);
   if (manifestVersion && manifestVersion !== declaredCodeVersion) {
@@ -335,6 +355,115 @@ function checkCodexTriple(installedCodexVersion) {
   }
 }
 
+// ── ZSR component: provenance, reviewed patch, and opt-in defaults ──
+
+async function checkSandboxRuntime(installedVersion) {
+  const pinPath = join(ROOT, "scripts", "zsr-qualification", "pin.json");
+  const workspacePath = join(ROOT, "pnpm-workspace.yaml");
+  if (!existsSync(pinPath)) {
+    fail(
+      "ZSR provenance manifest scripts/zsr-qualification/pin.json is missing.",
+    );
+    return;
+  }
+  const pin = JSON.parse(readFileSync(pinPath, "utf8"));
+  if (pin.package !== SANDBOX_RUNTIME || pin.version !== installedVersion) {
+    fail(
+      `ZSR provenance says ${pin.package}@${pin.version}, installed is ` +
+        `${SANDBOX_RUNTIME}@${installedVersion ?? "missing"}.`,
+    );
+    return;
+  }
+  if (!/^[0-9a-f]{40}$/.test(pin.upstreamCommit ?? "")) {
+    fail(
+      "ZSR provenance must pin the upstream tag to one full Git commit SHA.",
+    );
+  }
+  const installed = installedManifest(SANDBOX_RUNTIME);
+  if (installed?.license !== pin.license || pin.license !== "Apache-2.0") {
+    fail(
+      `ZSR license mismatch: provenance=${pin.license}, ` +
+        `installed=${installed?.license ?? "missing"}.`,
+    );
+  }
+  const patch = join(
+    ROOT,
+    "patches",
+    `@anthropic-ai__sandbox-runtime@${pin.version}.patch`,
+  );
+  if (!existsSync(patch)) {
+    fail(`ZSR reviewed patch is missing: ${patch}`);
+    return;
+  }
+  const digest = createHash("sha256").update(readFileSync(patch)).digest("hex");
+  if (digest !== pin.patchSha256) {
+    fail(
+      `ZSR patch digest changed (${digest}); audit the diff and update ` +
+        `pin.json only after the qualification matrix passes.`,
+    );
+  }
+  const workspace = readFileSync(workspacePath, "utf8");
+  if (
+    !workspace.includes(
+      `"${SANDBOX_RUNTIME}@${pin.version}": patches/@anthropic-ai__sandbox-runtime@${pin.version}.patch`,
+    )
+  ) {
+    fail(
+      "pnpm-workspace.yaml does not bind the exact ZSR version to its patch.",
+    );
+  }
+  const lock = readFileSync(join(ROOT, "pnpm-lock.yaml"), "utf8");
+  if (!lock.includes(`resolution: {integrity: ${pin.tarballIntegrity}}`)) {
+    fail("ZSR lockfile tarball integrity differs from the audited provenance.");
+  }
+
+  try {
+    const { FilesystemConfigSchema, SandboxRuntimeConfigSchema } =
+      await import("@anthropic-ai/sandbox-runtime");
+    const fsBase = {
+      denyRead: [],
+      allowRead: [],
+      allowWrite: [],
+      denyWrite: [],
+    };
+    const fsDefault = FilesystemConfigSchema.parse(fsBase);
+    const fsOptIn = FilesystemConfigSchema.parse({
+      ...fsBase,
+      disableMandatoryWriteProtection: true,
+      allowWriteWithinDeny: ["/private/session"],
+    });
+    const hostParity = SandboxRuntimeConfigSchema.parse({
+      hostParity: true,
+      linuxPrivilegedWorker: {
+        uid: 1000,
+        gid: 1000,
+        setprivPath: "/usr/bin/setpriv",
+      },
+      filesystem: fsBase,
+      network: { allowedDomains: [], deniedDomains: [] },
+    });
+    if (
+      fsDefault.disableMandatoryWriteProtection !== undefined ||
+      fsDefault.allowWriteWithinDeny !== undefined ||
+      fsOptIn.disableMandatoryWriteProtection !== true ||
+      fsOptIn.allowWriteWithinDeny?.[0] !== "/private/session" ||
+      hostParity.hostParity !== true ||
+      hostParity.linuxPrivilegedWorker?.uid !== 1000
+    ) {
+      fail(
+        "ZSR patch contract drifted: host-parity filesystem and worker " +
+          "switches must remain explicit opt-ins.",
+      );
+    }
+  } catch (error) {
+    fail(
+      `ZSR patched schema could not be validated: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+}
+
 // ── --drift: how far behind latest are we? (never fails) ──
 
 async function reportDrift(resolved) {
@@ -394,6 +523,7 @@ const drift = process.argv.includes("--drift");
 const resolved = checkPins();
 checkClaudeArtifact(resolved[CLAUDE_SDK]);
 checkCodexTriple(resolved[CODEX]);
+await checkSandboxRuntime(resolved[SANDBOX_RUNTIME]);
 
 for (const n of notes) console.log(`  · ${n}`);
 for (const w of warnings) console.warn(`⚠ ${w}`);

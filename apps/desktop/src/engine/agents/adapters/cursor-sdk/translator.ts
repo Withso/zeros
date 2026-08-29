@@ -72,7 +72,9 @@ interface SdkMsg {
   status?: string;
   args?: unknown;
   result?: unknown;
+  truncated?: { args?: boolean; result?: boolean };
   text?: string;
+  thinking_duration_ms?: number;
   message?: { role?: string; content?: Array<TextBlock | ToolUseBlock> };
 }
 
@@ -170,6 +172,18 @@ export class CursorSdkTranslator {
 
   private hasSeenTerminal = false;
   private hasSeenError = false;
+  private hasSeenAssistantText = false;
+  private hasSeenThinkingText = false;
+  /** onDelta is the richer native lifecycle. Once it supplies a category, the
+   * corresponding completed onStep/SDKMessage records are replays. A runtime
+   * may omit deltas and emit several onStep records, though, so those are
+   * tracked individually below instead of turning off the whole category. */
+  private callbackAssistantObserved = false;
+  private callbackThinkingObserved = false;
+  private callbackToolObserved = false;
+  private readonly assistantStepMirrors = new Map<string, number>();
+  private readonly thinkingStepMirrors = new Map<string, number>();
+  private readonly toolStepMirrors = new Map<string, number>();
   private errorMessage: string | null = null;
   private lastStopReason: StopReason = "end_turn";
 
@@ -191,6 +205,13 @@ export class CursorSdkTranslator {
    *  user cancelled), so a failed turn never reports as a clean end_turn. */
   get sawError(): boolean {
     return this.hasSeenError;
+  }
+  /** Whether this turn emitted any visible assistant text. Cursor's stream can
+   *  occasionally finish without an assistant event even though wait().result
+   *  contains the complete final answer; the adapter uses this to apply that
+   *  result only as a non-duplicating fallback. */
+  get sawAssistantText(): boolean {
+    return this.hasSeenAssistantText;
   }
   /** Error detail from the in-band ERROR/EXPIRED status message
    *  (SDKStatusMessage.message), when the CLI provided one — so the adapter
@@ -217,13 +238,38 @@ export class CursorSdkTranslator {
         // Echo of our own prompt — Zeros already renders it locally.
         break;
       case "assistant":
-        this.onAssistant(msg);
+        if (!this.callbackAssistantObserved) this.onAssistant(msg, true);
         break;
       case "tool_call":
-        this.onToolCall(msg);
+        if (
+          !this.callbackToolObserved &&
+          !consumeMirror(
+            this.toolStepMirrors,
+            toolMirrorKey(
+              typeof msg.name === "string" ? msg.name : "tool",
+              msg.args,
+              msg.result,
+              msg.status === "error" || isFailureResult(msg.result)
+                ? "error"
+                : msg.status === "running"
+                  ? "running"
+                  : "completed",
+            ),
+          )
+        ) {
+          this.onToolCall(msg);
+        }
         break;
       case "thinking":
-        this.onThinking(msg);
+        if (
+          !this.callbackThinkingObserved &&
+          !consumeMirror(
+            this.thinkingStepMirrors,
+            typeof msg.text === "string" ? msg.text : "",
+          )
+        ) {
+          this.onThinking(msg);
+        }
         break;
       case "status":
         this.onStatus(msg);
@@ -241,20 +287,163 @@ export class CursorSdkTranslator {
     }
   }
 
+  /** Native incremental lifecycle supplied through SendOptions.onDelta. The
+   * SDK also mirrors completed content through run.stream(); callback-backed
+   * categories become authoritative so those mirrors never render twice. */
+  feedDelta(raw: unknown): void {
+    if (!isObj(raw) || typeof raw.type !== "string") {
+      this.onUnknown?.(raw);
+      return;
+    }
+    switch (raw.type) {
+      case "text-delta": {
+        if (typeof raw.text !== "string" || raw.text.length === 0) return;
+        this.callbackAssistantObserved = true;
+        this.hasSeenAssistantText = true;
+        this.emit({
+          sessionId: this.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: raw.text } as ContentBlock,
+            messageId: `${this.turnPrefix}-text`,
+          },
+        });
+        return;
+      }
+      case "thinking-delta": {
+        if (typeof raw.text !== "string" || raw.text.length === 0) return;
+        this.callbackThinkingObserved = true;
+        this.emitThinking(raw.text);
+        return;
+      }
+      case "thinking-completed": {
+        const duration = finiteNonNegative(raw.thinkingDurationMs);
+        if (duration === undefined) return;
+        this.callbackThinkingObserved = true;
+        this.emitThinking("", duration);
+        return;
+      }
+      case "tool-call-started":
+      case "partial-tool-call":
+      case "tool-call-completed": {
+        if (typeof raw.callId !== "string" || !isObj(raw.toolCall)) return;
+        const tool = raw.toolCall;
+        if (typeof tool.type !== "string") return;
+        this.callbackToolObserved = true;
+        this.onToolCall({
+          type: "tool_call",
+          call_id: raw.callId,
+          name: tool.type,
+          status:
+            raw.type === "tool-call-completed"
+              ? isFailureResult(tool.result)
+                ? "error"
+                : "completed"
+              : "running",
+          args: tool.args,
+          result: tool.result,
+        });
+        if (raw.type === "partial-tool-call") {
+          const toolCallId = this.toolCallIds.get(raw.callId);
+          if (toolCallId) {
+            this.emit({
+              sessionId: this.sessionId,
+              update: {
+                sessionUpdate: "tool_call_update",
+                toolCallId,
+                status: "in_progress",
+                rawInput: safeToolInput(tool.type, tool.args, false),
+              },
+            });
+          }
+        }
+        return;
+      }
+      // turn-ended is consumed by the adapter for usage; step/summary/shell
+      // lifecycle remains informational until Zeros has a common consumer.
+      default:
+        return;
+    }
+  }
+
+  /** Completed-step callback. It is a fallback for SDK versions/runtimes that
+   * omit a corresponding delta category. When deltas already supplied that
+   * category this is intentionally a no-op. */
+  feedStep(raw: unknown): void {
+    if (!isObj(raw) || typeof raw.type !== "string") {
+      this.onUnknown?.(raw);
+      return;
+    }
+    if (raw.type === "assistantMessage") {
+      if (this.callbackAssistantObserved) return;
+      const text = isObj(raw.message) ? raw.message.text : undefined;
+      if (typeof text !== "string" || text.length === 0) return;
+      rememberMirror(this.assistantStepMirrors, text);
+      this.hasSeenAssistantText = true;
+      this.emit({
+        sessionId: this.sessionId,
+        update: {
+          sessionUpdate: "agent_message_chunk",
+          content: { type: "text", text } as ContentBlock,
+          messageId: `${this.turnPrefix}-text`,
+        },
+      });
+      return;
+    }
+    if (raw.type === "thinkingMessage") {
+      if (this.callbackThinkingObserved) return;
+      const message = isObj(raw.message) ? raw.message : null;
+      const text = message?.text;
+      if (typeof text !== "string" || text.length === 0) return;
+      rememberMirror(this.thinkingStepMirrors, text);
+      this.emitThinking(
+        text,
+        finiteNonNegative(message?.thinkingDurationMs),
+      );
+      return;
+    }
+    if (raw.type === "toolCall") {
+      if (this.callbackToolObserved || !isObj(raw.message)) return;
+      const tool = raw.message;
+      if (typeof tool.type !== "string") return;
+      const status = isFailureResult(tool.result) ? "error" : "completed";
+      rememberMirror(
+        this.toolStepMirrors,
+        toolMirrorKey(tool.type, tool.args, tool.result, status),
+      );
+      this.onToolCall({
+        type: "tool_call",
+        call_id: `step-${randomUUID()}`,
+        name: tool.type,
+        status,
+        args: tool.args,
+        result: tool.result,
+      });
+    }
+  }
+
   private onThinking(msg: SdkMsg): void {
     const text = typeof msg.text === "string" ? msg.text : "";
-    if (!text) return;
+    const duration = finiteNonNegative(msg.thinking_duration_ms);
+    if (!text && duration === undefined) return;
+    this.emitThinking(text, duration);
+  }
+
+  private emitThinking(text: string, durationMs?: number): void {
+    if (!text && !this.hasSeenThinkingText) return;
+    if (text) this.hasSeenThinkingText = true;
     this.emit({
       sessionId: this.sessionId,
       update: {
         sessionUpdate: "agent_thought_chunk",
         content: { type: "text", text } as ContentBlock,
         messageId: `${this.turnPrefix}-thought`,
+        ...(durationMs !== undefined ? { durationMs } : {}),
       },
     });
   }
 
-  private onAssistant(msg: SdkMsg): void {
+  private onAssistant(msg: SdkMsg, suppressStepMirrors = false): void {
     const blocks = msg.message?.content;
     if (!Array.isArray(blocks)) return;
     for (const block of blocks) {
@@ -263,6 +452,13 @@ export class CursorSdkTranslator {
         typeof block.text === "string" &&
         block.text.length > 0
       ) {
+        if (
+          suppressStepMirrors &&
+          consumeMirror(this.assistantStepMirrors, block.text)
+        ) {
+          continue;
+        }
+        this.hasSeenAssistantText = true;
         this.emit({
           sessionId: this.sessionId,
           update: {
@@ -285,6 +481,12 @@ export class CursorSdkTranslator {
     if (!callId) return;
     const args = msg.args ?? null;
     const result = msg.result;
+    const rawInput = safeToolInput(name, args, msg.truncated?.args === true);
+    const presentation = safeToolResult(
+      name,
+      result,
+      msg.truncated?.result === true,
+    );
 
     // The subagent's agentId rides on the task tool args — capture it now (the
     // completed message may not echo args) so we can find its transcript later.
@@ -346,7 +548,9 @@ export class CursorSdkTranslator {
           sessionUpdate: "tool_call_update",
           toolCallId: existing,
           status: failed ? "failed" : "completed",
-          rawOutput: result,
+          rawInput,
+          rawOutput: presentation.rawOutput,
+          ...(presentation.content ? { content: presentation.content } : {}),
         },
       });
       if (isSubagent) this.markSubagentDone(existing, callId, result);
@@ -366,8 +570,9 @@ export class CursorSdkTranslator {
         title: describeTool(name, args),
         kind: mapToolKind(name),
         status: failed ? "failed" : "completed",
-        rawInput: args,
-        rawOutput: result,
+        rawInput,
+        rawOutput: presentation.rawOutput,
+        ...(presentation.content ? { content: presentation.content } : {}),
         ...(mergeKey ? { mergeKey } : {}),
       },
     });
@@ -662,7 +867,7 @@ export class CursorSdkTranslator {
         title: describeTool(toolName, input),
         kind: mapToolKind(toolName),
         status: "in_progress",
-        rawInput: input ?? null,
+        rawInput: safeToolInput(toolName, input ?? null, false),
         ...(mergeKey ? { mergeKey } : {}),
       },
     });
@@ -683,9 +888,200 @@ function isObj(x: unknown): x is Record<string, unknown> {
   return !!x && typeof x === "object" && !Array.isArray(x);
 }
 
+function rememberMirror(mirrors: Map<string, number>, key: string): void {
+  mirrors.set(key, (mirrors.get(key) ?? 0) + 1);
+}
+
+function consumeMirror(mirrors: Map<string, number>, key: string): boolean {
+  const count = mirrors.get(key) ?? 0;
+  if (count === 0) return false;
+  if (count === 1) mirrors.delete(key);
+  else mirrors.set(key, count - 1);
+  return true;
+}
+
+function toolMirrorKey(
+  name: string,
+  args: unknown,
+  result: unknown,
+  status: "running" | "completed" | "error",
+): string {
+  return `${name}\0${status}\0${stableMirrorJson(args)}\0${stableMirrorJson(result)}`;
+}
+
+function stableMirrorJson(value: unknown): string {
+  const seen = new WeakSet<object>();
+  try {
+    return (
+      JSON.stringify(value, (_key, current: unknown) => {
+        if (typeof current !== "object" || current === null) return current;
+        if (seen.has(current)) return "[Circular]";
+        seen.add(current);
+        if (Array.isArray(current)) return current;
+        const sorted: Record<string, unknown> = {};
+        for (const key of Object.keys(current).sort()) {
+          sorted[key] = (current as Record<string, unknown>)[key];
+        }
+        return sorted;
+      }) ?? "undefined"
+    );
+  } catch {
+    return String(value);
+  }
+}
+
+function finiteNonNegative(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+const MAX_INLINE_CURSOR_IMAGE_BASE64_CHARS = 12 * 1024 * 1024;
+
+function pathBasename(value: unknown): string | undefined {
+  if (typeof value !== "string" || value.length === 0) return undefined;
+  const clean = value.replace(/[\\/]+$/, "");
+  const pieces = clean.split(/[\\/]/);
+  return pieces[pieces.length - 1] || undefined;
+}
+
+function imageMimeType(fileName: string | undefined): string {
+  const extension = fileName?.split(".").pop()?.toLowerCase();
+  if (extension === "jpg" || extension === "jpeg") return "image/jpeg";
+  if (extension === "webp") return "image/webp";
+  if (extension === "gif") return "image/gif";
+  return "image/png";
+}
+
+function safeInlineBase64(value: unknown): string | undefined {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > MAX_INLINE_CURSOR_IMAGE_BASE64_CHARS ||
+    value.length % 4 !== 0
+  ) {
+    return undefined;
+  }
+  // Validate the alphabet without decoding/copying a multi-megabyte payload.
+  return /^[A-Za-z0-9+/]*={0,2}$/.test(value) ? value : undefined;
+}
+
+function withTruncation(value: unknown, truncated: boolean): unknown {
+  if (!truncated) return value;
+  if (isObj(value)) {
+    return {
+      ...value,
+      zerosTransport: { truncated: true },
+    };
+  }
+  return {
+    value,
+    zerosTransport: { truncated: true },
+  };
+}
+
+function safeToolInput(
+  name: string,
+  args: unknown,
+  truncated: boolean,
+): unknown {
+  const lower = name.toLowerCase();
+  if (lower === "generateimage" && isObj(args)) {
+    return withTruncation(
+      {
+        ...(typeof args.description === "string"
+          ? { description: args.description }
+          : {}),
+        ...(pathBasename(args.filePath)
+          ? { fileName: pathBasename(args.filePath) }
+          : {}),
+      },
+      truncated,
+    );
+  }
+  return withTruncation(args, truncated);
+}
+
+function safeToolResult(
+  name: string,
+  result: unknown,
+  truncated: boolean,
+): {
+  rawOutput: unknown;
+  content?: Array<{ type: "content"; content: ContentBlock }>;
+} {
+  const lower = name.toLowerCase();
+  if (lower === "generateimage" && isObj(result)) {
+    const value = isObj(result.value) ? result.value : null;
+    if (result.status === "success" && value) {
+      const fileName = pathBasename(value.filePath);
+      const imageData = safeInlineBase64(value.imageData);
+      const rawOutput = withTruncation(
+        {
+          status: "success",
+          value: {
+            ...(fileName ? { fileName } : {}),
+            ...(imageData === undefined && typeof value.imageData === "string"
+              ? { imageOmitted: "invalid_or_too_large" }
+              : {}),
+          },
+        },
+        truncated,
+      );
+      return {
+        rawOutput,
+        ...(imageData
+          ? {
+              content: [
+                {
+                  type: "content" as const,
+                  content: {
+                    type: "image",
+                    data: imageData,
+                    mimeType: imageMimeType(fileName),
+                  } as ContentBlock,
+                },
+              ],
+            }
+          : {}),
+      };
+    }
+    return { rawOutput: withTruncation(result, truncated) };
+  }
+  if (lower === "recordscreen" && isObj(result)) {
+    const value = isObj(result.value) ? result.value : null;
+    if (result.status === "success" && value) {
+      return {
+        rawOutput: withTruncation(
+          {
+            status: "success",
+            value: {
+              ...(pathBasename(value.path)
+                ? { fileName: pathBasename(value.path) }
+                : {}),
+              ...(typeof value.recordingDurationMs === "number"
+                ? { recordingDurationMs: value.recordingDurationMs }
+                : {}),
+              ...(typeof value.wasPriorRecordingCancelled === "boolean"
+                ? {
+                    wasPriorRecordingCancelled:
+                      value.wasPriorRecordingCancelled,
+                  }
+                : {}),
+            },
+          },
+          truncated,
+        ),
+      };
+    }
+    return { rawOutput: withTruncation(result, truncated) };
+  }
+  return { rawOutput: withTruncation(result, truncated) };
+}
+
 function isFailureResult(result: unknown): boolean {
   if (!isObj(result)) return false;
-  return "error" in result;
+  return result.status === "error" || "error" in result;
 }
 
 function extractResultText(result: unknown): string {
@@ -997,6 +1393,19 @@ function mapToolKind(name: string): ToolKind {
 function describeTool(name: string, args: unknown): string {
   const a = isObj(args) ? args : {};
   const n = name.toLowerCase();
+  if (n === "generateimage") return "Generating image";
+  if (n === "createplan") return "Creating plan";
+  if (n === "updatetodos") return "Updating todos";
+  if (n === "recordscreen") {
+    switch (a.mode) {
+      case "START_RECORDING":
+        return "Starting screen recording";
+      case "DISCARD_RECORDING":
+        return "Discarding screen recording";
+      default:
+        return "Saving screen recording";
+    }
+  }
   if (/read/.test(n)) return `Reading ${a.path ?? "file"}`;
   if (/(edit|write)/.test(n)) return `Editing ${a.path ?? "file"}`;
   if (/(shell|bash|exec|run|terminal)/.test(n))
@@ -1004,7 +1413,7 @@ function describeTool(name: string, args: unknown): string {
   if (/grep/.test(n))
     return `Grep ${truncate(String(a.pattern ?? a.query ?? ""), 40)}`;
   if (/glob/.test(n)) return `Searching for ${a.pattern ?? "files"}`;
-  if (/^(todo|updatetodos)/i.test(name)) return "Updating plan";
+  if (/^todo/i.test(name)) return "Updating todos";
   if (/^task/.test(n))
     return `Subagent ${truncate(String(a.description ?? a.prompt ?? ""), 40)}`;
   return name;

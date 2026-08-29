@@ -4,11 +4,16 @@ import {
   collaborationSectionDisabled,
   createSubmissionGate,
   dashboardOrganizationDataUnavailable,
+  invalidateOrganizationSnapshots,
+  loadExactSnapshot,
   memberPermissions,
   organizationDisplayName,
   safeOrganizationLogo,
   sectionLoadErrorNeedsInlineRetry,
   sectionRequestStillCurrent,
+  securityEventAction,
+  securitySnapshotChanged,
+  shouldRevalidateSecurityLifecycle,
   tryWriteClipboard,
 } from "../public/dashboard.js";
 
@@ -85,6 +90,19 @@ test("admins cannot mutate owners or promote members to owner", () => {
   );
 });
 
+test("directory-managed members cannot be edited or removed locally", () => {
+  assert.deepEqual(
+    memberPermissions({
+      actorRole: "owner",
+      targetRole: "member",
+      isSelf: false,
+      ownerCount: 2,
+      directoryManaged: true,
+    }),
+    { canChangeRole: false, canRemove: false, availableRoles: [] },
+  );
+});
+
 test("the final owner cannot demote, leave, or be removed", () => {
   assert.deepEqual(
     memberPermissions({
@@ -146,4 +164,123 @@ test("section responses publish only into their exact organization and section",
     sectionRequestStillCurrent("org-a", "billing", "org-a", "members"),
     false,
   );
+});
+
+test("security events distinguish terminal session loss from scoped data refresh", () => {
+  assert.deepEqual(securityEventAction("account.revoked"), {
+    signOut: true,
+    refreshOrganizations: false,
+  });
+  assert.deepEqual(securityEventAction("session.revoked"), {
+    signOut: true,
+    refreshOrganizations: false,
+  });
+  assert.deepEqual(securityEventAction("organization.access_revoked"), {
+    signOut: false,
+    refreshOrganizations: true,
+  });
+  assert.deepEqual(securityEventAction("heartbeat"), {
+    signOut: false,
+    refreshOrganizations: false,
+  });
+});
+
+test("organization events invalidate only that organization's retained sections", () => {
+  const snapshots = new Map([
+    ["org-a:members", { members: ["stale"] }],
+    ["org-a:billing", { memberCount: 1 }],
+    ["org-b:members", { members: ["retained"] }],
+  ]);
+  invalidateOrganizationSnapshots(snapshots, "org-a");
+  assert.deepEqual([...snapshots.keys()], ["org-b:members"]);
+
+  invalidateOrganizationSnapshots(snapshots, null);
+  assert.equal(snapshots.size, 0);
+});
+
+test("an invalidated in-flight section cannot republish its stale snapshot", async () => {
+  const snapshots = new Map();
+  const inflight = new Map();
+  const generations = new Map();
+  const resolutions = [];
+  const loader = () =>
+    new Promise((resolve) => {
+      resolutions.push(resolve);
+    });
+  const cache = { snapshots, inflight, generations };
+
+  const staleRequest = loadExactSnapshot(cache, "org-a:members", loader);
+  await Promise.resolve();
+  assert.equal(resolutions.length, 1);
+  invalidateOrganizationSnapshots(snapshots, "org-a", {
+    inflight,
+    generations,
+  });
+  const freshRequest = loadExactSnapshot(cache, "org-a:members", loader);
+  await Promise.resolve();
+  assert.equal(resolutions.length, 2);
+
+  resolutions[0]({ members: ["removed"] });
+  resolutions[1]({ members: ["current"] });
+  assert.deepEqual(await staleRequest, { members: ["current"] });
+  assert.deepEqual(await freshRequest, { members: ["current"] });
+  assert.deepEqual(snapshots.get("org-a:members"), {
+    members: ["current"],
+  });
+  assert.equal(inflight.size, 0);
+});
+
+test("an invalidated in-flight failure follows the replacement request", async () => {
+  const snapshots = new Map();
+  const inflight = new Map();
+  const generations = new Map();
+  const settlements = [];
+  const loader = () =>
+    new Promise((resolve, reject) => {
+      settlements.push({ resolve, reject });
+    });
+  const cache = { snapshots, inflight, generations };
+
+  const staleRequest = loadExactSnapshot(cache, "org-a:members", loader);
+  await Promise.resolve();
+  invalidateOrganizationSnapshots(snapshots, "org-a", {
+    inflight,
+    generations,
+  });
+  const freshRequest = loadExactSnapshot(cache, "org-a:members", loader);
+  await Promise.resolve();
+
+  settlements[0].reject(new Error("superseded outage"));
+  settlements[1].resolve({ members: ["current"] });
+  assert.deepEqual(await staleRequest, { members: ["current"] });
+  assert.deepEqual(await freshRequest, { members: ["current"] });
+});
+
+test("security snapshots compare authorization/data revisions by exact organization", () => {
+  const first = {
+    account: { id: "user", status: "active", revision: 1 },
+    session: { id: "session", status: "active" },
+    organizations: [
+      {
+        id: "org-a",
+        role: "member",
+        authorizationRevision: 1,
+        membershipRevision: 1,
+        dataRevision: 1,
+      },
+    ],
+  };
+  assert.equal(securitySnapshotChanged(first, structuredClone(first)), false);
+  const changed = structuredClone(first);
+  changed.organizations[0].membershipRevision = 2;
+  assert.equal(securitySnapshotChanged(first, changed), true);
+  assert.equal(
+    securitySnapshotChanged(first, { ...first, organizations: [] }),
+    true,
+  );
+});
+
+test("focus/visibility is a silence backstop, not a periodic poll", () => {
+  assert.equal(shouldRevalidateSecurityLifecycle(1_000, 60_999), false);
+  assert.equal(shouldRevalidateSecurityLifecycle(1_000, 61_000), true);
 });

@@ -19,7 +19,16 @@ import { WebSocket } from "ws";
 
 import { PROTOCOL_VERSION } from "../../../packages/protocol/src/version";
 
-type AnyMsg = Record<string, unknown> & { type: string; id?: string };
+export type BridgeMessage = Record<string, unknown> & {
+  type: string;
+  source?: "browser" | "engine";
+  id?: string;
+  requestId?: string;
+};
+
+export type ClientBridgeMessage = Omit<BridgeMessage, "source"> & {
+  source?: "browser";
+};
 
 interface PendingRequest {
   resolve: (result: unknown) => void;
@@ -32,8 +41,11 @@ export interface BridgeClientOpts {
   url: string;
   /** Daytona preview-proxy token → `x-daytona-preview-token`. */
   previewToken?: string;
-  /** Zeros bridge bearer token → `x-zeros-cloud-token`. */
+  /** Zeros bridge bearer token → the browser-compatible, non-negotiated
+   * `zeros-cloud-token.<base64url>` WebSocket protocol carrier. */
   cloudToken?: string;
+  /** Account access JWT sent only inside CONNECTED after the WSS gates pass. */
+  accountToken?: string;
   /** Per-request timeout (ms). */
   requestTimeoutMs?: number;
 }
@@ -46,9 +58,14 @@ export class BridgeClient {
   private readonly ptyExit: Array<
     (sessionId: string, code: number | null) => void
   > = [];
+  private readonly messageListeners = new Set<
+    (message: BridgeMessage) => void
+  >();
   private readyResolve:
     | ((info: { root: string; version: string }) => void)
     | null = null;
+  private readyReject: ((error: Error) => void) | null = null;
+  private readyTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly reqTimeout: number;
 
   engineRoot = "";
@@ -56,39 +73,65 @@ export class BridgeClient {
 
   constructor(private readonly opts: BridgeClientOpts) {
     this.reqTimeout = opts.requestTimeoutMs ?? 15_000;
+    if (
+      !Number.isInteger(this.reqTimeout) ||
+      this.reqTimeout < 100 ||
+      this.reqTimeout > 10 * 60_000
+    ) {
+      throw new Error("bridge request timeout is invalid");
+    }
+    if (
+      opts.cloudToken !== undefined &&
+      (opts.cloudToken.length < 16 ||
+        Buffer.byteLength(opts.cloudToken, "utf8") > 4_096 ||
+        /[\0\r\n]/.test(opts.cloudToken))
+    ) {
+      throw new Error("cloud bridge token is invalid");
+    }
   }
 
   /** Open the socket, wait for ENGINE_READY, send CONNECTED. Resolves with the
    *  engine root + version once the handshake is in flight. */
   connect(): Promise<{ root: string; version: string }> {
+    if (this.ws) {
+      return Promise.reject(new Error("bridge client is already connected"));
+    }
     return new Promise((resolve, reject) => {
       this.readyResolve = resolve;
+      this.readyReject = reject;
       const headers: Record<string, string> = {};
       if (this.opts.previewToken) {
         headers["x-daytona-preview-token"] = this.opts.previewToken;
       }
-      if (this.opts.cloudToken) {
-        headers["x-zeros-cloud-token"] = this.opts.cloudToken;
-      }
-      const ws = new WebSocket(
-        this.opts.url,
-        Object.keys(headers).length > 0 ? { headers } : undefined,
-      );
+      const protocols = this.opts.cloudToken
+        ? [
+            "zeros-v1",
+            `zeros-cloud-token.${Buffer.from(this.opts.cloudToken, "utf8").toString("base64url")}`,
+          ]
+        : undefined;
+      const clientOptions =
+        Object.keys(headers).length > 0 ? { headers } : undefined;
+      const ws = protocols
+        ? new WebSocket(this.opts.url, protocols, clientOptions)
+        : new WebSocket(this.opts.url, clientOptions);
       this.ws = ws;
 
-      const openTimer = setTimeout(
-        () => reject(new Error("ws open timed out (10s)")),
+      this.readyTimer = setTimeout(
+        () => this.failAll("ws ENGINE_READY timed out (10s)"),
         10_000,
       );
-      ws.on("open", () => clearTimeout(openTimer));
+      this.readyTimer.unref?.();
       ws.on("error", (err) =>
-        reject(err instanceof Error ? err : new Error(String(err))),
+        this.failAll(
+          err instanceof Error ? err.message : `socket error: ${String(err)}`,
+        ),
       );
-      ws.on("close", (code, reason) =>
-        this.failAll(`socket closed ${code} ${reason}`),
-      );
+      ws.on("close", (code, reason) => {
+        if (this.ws === ws) this.ws = null;
+        this.failAll(`socket closed ${code} ${reason}`);
+      });
       ws.on("message", (data) => {
-        let msg: AnyMsg;
+        let msg: BridgeMessage;
         try {
           msg = JSON.parse(data.toString());
         } catch {
@@ -99,23 +142,44 @@ export class BridgeClient {
     });
   }
 
-  private dispatch(msg: AnyMsg): void {
+  private dispatch(msg: BridgeMessage): void {
+    for (const listener of this.messageListeners) {
+      try {
+        listener(msg);
+      } catch {
+        // A diagnostic listener must not break bridge protocol dispatch.
+      }
+    }
     switch (msg.type) {
       case "ENGINE_READY": {
         this.engineRoot = String(msg.root ?? "");
         this.engineVersion = String(msg.version ?? "");
         // Reply with CONNECTED to complete the protocol handshake.
-        this.send({
-          type: "CONNECTED",
-          source: "client",
-          capabilities: [],
-          protocolVersion: PROTOCOL_VERSION,
-        });
-        this.readyResolve?.({
-          root: this.engineRoot,
-          version: this.engineVersion,
-        });
-        this.readyResolve = null;
+        try {
+          this.sendMessage({
+            type: "CONNECTED",
+            source: "browser",
+            capabilities: [],
+            protocolVersion: PROTOCOL_VERSION,
+            ...(this.opts.accountToken
+              ? { authToken: this.opts.accountToken }
+              : {}),
+          });
+          if (this.readyTimer) clearTimeout(this.readyTimer);
+          this.readyTimer = null;
+          this.readyResolve?.({
+            root: this.engineRoot,
+            version: this.engineVersion,
+          });
+          this.readyResolve = null;
+          this.readyReject = null;
+        } catch (error) {
+          this.failAll(
+            error instanceof Error
+              ? error.message
+              : "could not complete bridge handshake",
+          );
+        }
         break;
       }
       case "CONNECTION_REJECTED":
@@ -166,19 +230,41 @@ export class BridgeClient {
     }
   }
 
-  private send(fields: AnyMsg): string {
+  /** Send one protocol envelope. The validation harness exposes this narrow
+   * primitive for live provider qualification; callers still receive every
+   * inbound frame through the schema-validating engine. */
+  sendMessage(fields: ClientBridgeMessage): string {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      throw new Error("bridge WebSocket is not open");
+    }
     const id = randomUUID();
-    const envelope = { ...fields, id, timestamp: Date.now() };
-    this.ws?.send(JSON.stringify(envelope));
+    // `browser` is the single canonical client-origin discriminator in the
+    // shared protocol. Force it here so an operator call site cannot recreate
+    // the historical non-canonical source discriminator that the engine
+    // correctly dropped at its trust boundary.
+    const envelope = {
+      ...fields,
+      source: "browser" as const,
+      id,
+      timestamp: Date.now(),
+    };
+    this.ws.send(JSON.stringify(envelope));
     return id;
+  }
+
+  /** Observe sanitized protocol frames for operator-only qualification logic.
+   * Returns an idempotent unsubscribe closure. */
+  onMessage(listener: (message: BridgeMessage) => void): () => void {
+    this.messageListeners.add(listener);
+    return () => this.messageListeners.delete(listener);
   }
 
   /** WORKSPACE_REQUEST → result (e.g. op="file.tree", params={workspaceId:"local-main"}). */
   request(op: string, params: Record<string, unknown> = {}): Promise<unknown> {
     return new Promise((resolve, reject) => {
-      const id = this.send({
+      const id = this.sendMessage({
         type: "WORKSPACE_REQUEST",
-        source: "client",
+        source: "browser",
         op,
         params,
       });
@@ -197,11 +283,11 @@ export class BridgeClient {
     cols?: number;
     rows?: number;
     ephemeral?: boolean;
-  }): Promise<AnyMsg> {
+  }): Promise<BridgeMessage> {
     return new Promise((resolve, reject) => {
-      const id = this.send({
+      const id = this.sendMessage({
         type: "PTY_CREATE",
-        source: "client",
+        source: "browser",
         sessionId: args.sessionId,
         cwd: args.cwd,
         cols: args.cols ?? 80,
@@ -213,7 +299,7 @@ export class BridgeClient {
         reject(new Error("PTY_CREATE timed out"));
       }, this.reqTimeout);
       this.pending.set(id, {
-        resolve: (m) => resolve(m as AnyMsg),
+        resolve: (m) => resolve(m as BridgeMessage),
         reject,
         timer,
       });
@@ -221,7 +307,12 @@ export class BridgeClient {
   }
 
   ptyWrite(sessionId: string, data: string): void {
-    this.send({ type: "PTY_WRITE", source: "client", sessionId, data });
+    this.sendMessage({
+      type: "PTY_WRITE",
+      source: "browser",
+      sessionId,
+      data,
+    });
   }
 
   onPtyData(cb: (sessionId: string, data: string) => void): void {
@@ -238,18 +329,39 @@ export class BridgeClient {
   }
 
   private failAll(reason: string): void {
+    if (this.readyTimer) clearTimeout(this.readyTimer);
+    this.readyTimer = null;
+    const error = new Error(reason);
+    this.readyReject?.(error);
+    this.readyResolve = null;
+    this.readyReject = null;
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
-      p.reject(new Error(reason));
+      p.reject(error);
     }
     this.pending.clear();
   }
 
   close(): void {
+    const ws = this.ws;
+    this.ws = null;
+    this.failAll("bridge client closed");
+    if (!ws || ws.readyState === WebSocket.CLOSED) return;
     try {
-      this.ws?.close();
+      if (ws.readyState === WebSocket.CONNECTING) ws.terminate();
+      else ws.close();
     } catch {
       /* ignore */
     }
+    if (ws.readyState === WebSocket.CLOSED) return;
+    const forceClose = setTimeout(() => {
+      try {
+        ws.terminate();
+      } catch {
+        /* ignore */
+      }
+    }, 1_000);
+    forceClose.unref?.();
+    ws.once("close", () => clearTimeout(forceClose));
   }
 }

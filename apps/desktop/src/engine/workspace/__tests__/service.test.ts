@@ -17,11 +17,19 @@ import { insertWorkspace } from "../../git/state";
 import type { Workspace } from "../../git/types";
 import { getDesignRuntimeAudit } from "../../design/runtime-audits";
 import {
+  forgetDesignDirectoryName,
+  primeDesignDirectoryName,
+} from "../../design/directory-registry";
+import {
   getWorkspaceDesignApi,
   resetWorkspaceDesignApisForTests,
 } from "../../design/design-api";
 import { getDesignSelection } from "../../design/selection";
+import { getDesignScreenshot } from "../../design/screenshots";
 import { MAX_CONTEXT_GRAPH_ATTACHMENT_BYTES } from "../../files/context-graph";
+
+const PNG_1X1_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
 
 describe("WorkspaceService", () => {
   let dir: string;
@@ -473,6 +481,14 @@ describe("WorkspaceService", () => {
     ).toBe(LOCAL_MAIN_WORKSPACE_ID);
   });
 
+  it("registers Design staging with the workspace lifecycle barrier", () => {
+    expect(
+      svc.lifecycleMutationWorkspaceId("design.stage", {
+        workspaceId: "design-workspace",
+      }),
+    ).toBe("design-workspace");
+  });
+
   it("file.write writes a registered repo ROOT file for LOCAL; remote raw-path + non-strings rejected", async () => {
     const { upsertRepoByRoot } = await import("../../db/projects");
     const repoC = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-write-op-"));
@@ -629,6 +645,941 @@ describe("WorkspaceService", () => {
     } finally {
       await svc.handle("workspace.delete", {
         workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("shares concurrent aggregate Design snapshot scans for one workspace", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-snapshot-single-flight",
+      kind: "design",
+    });
+    try {
+      const [first, second] = (await Promise.all([
+        svc.handle("design.snapshot", { workspaceId: design.workspaceId }),
+        svc.handle("design.snapshot", { workspaceId: design.workspaceId }),
+      ])) as Array<{ snapshot: object }>;
+
+      // Sharing the exact result object pins that only one filesystem parse /
+      // lint / render-identity pass owned this concurrent cold generation.
+      expect(first.snapshot).toBe(second.snapshot);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("undoes and redoes a frame deletion through the shared Design history", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-frame-delete-history",
+      kind: "design",
+    });
+    try {
+      const first = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "First frame",
+        x: 35,
+        y: 45,
+        w: 640,
+        h: 360,
+        z: 2,
+      })) as { frame: { file: string } };
+      const second = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "Second frame",
+      })) as { frame: { file: string } };
+
+      const deleted = (await svc.handle("design.frame.delete", {
+        workspaceId: design.workspaceId,
+        frame: first.frame.file,
+      })) as { snapshot: { frames: Array<{ file: string }> } };
+      expect(deleted.snapshot.frames.map((frame) => frame.file)).not.toContain(
+        first.frame.file,
+      );
+
+      const undone = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+        frame: second.frame.file,
+      })) as {
+        historySelection?: string | null;
+        snapshot: {
+          frames: Array<{
+            file: string;
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+            z: number;
+          }>;
+        };
+      };
+      expect(undone.historySelection).toBe(first.frame.file);
+      expect(
+        undone.snapshot.frames.find((frame) => frame.file === first.frame.file),
+      ).toMatchObject({ x: 35, y: 45, width: 640, height: 360, z: 2 });
+
+      const redone = (await svc.handle("design.history.redo", {
+        workspaceId: design.workspaceId,
+        frame: first.frame.file,
+      })) as {
+        historySelection?: string | null;
+        snapshot: { frames: Array<{ file: string }> };
+      };
+      expect(redone.historySelection).toBe(second.frame.file);
+      expect(redone.snapshot.frames.map((frame) => frame.file)).not.toContain(
+        first.frame.file,
+      );
+
+      const emptied = (await svc.handle("design.frame.delete", {
+        workspaceId: design.workspaceId,
+        frame: second.frame.file,
+      })) as { snapshot: { frames: Array<{ file: string }> } };
+      expect(emptied.snapshot.frames).toEqual([]);
+      const restoredFromEmptyCanvas = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+      })) as {
+        historySelection?: string | null;
+        snapshot: { frames: Array<{ file: string }> };
+      };
+      expect(restoredFromEmptyCanvas.historySelection).toBe(second.frame.file);
+      expect(
+        restoredFromEmptyCanvas.snapshot.frames.map((frame) => frame.file),
+      ).toEqual([second.frame.file]);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("orders frame creation, renaming, and duplication in shared Design history", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-frame-lifecycle-history",
+      kind: "design",
+    });
+    try {
+      const created = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "Original frame",
+        x: 18,
+        y: 28,
+        w: 720,
+        h: 480,
+        z: 3,
+      })) as { frame: { file: string } };
+
+      const undoneCreation = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+      })) as {
+        historySelection?: string | null;
+        snapshot: { frames: Array<{ file: string }> };
+      };
+      expect(undoneCreation.snapshot.frames).toEqual([]);
+      expect(undoneCreation.historySelection).toBeNull();
+
+      const redoneCreation = (await svc.handle("design.history.redo", {
+        workspaceId: design.workspaceId,
+      })) as {
+        historySelection?: string | null;
+        snapshot: {
+          frames: Array<{
+            file: string;
+            title: string;
+            x: number;
+            y: number;
+            width: number;
+            height: number;
+            z: number;
+          }>;
+        };
+      };
+      expect(redoneCreation.historySelection).toBe(created.frame.file);
+      expect(redoneCreation.snapshot.frames).toEqual([
+        expect.objectContaining({
+          file: created.frame.file,
+          title: "Original frame",
+          x: 18,
+          y: 28,
+          width: 720,
+          height: 480,
+          z: 3,
+        }),
+      ]);
+
+      await svc.handle("design.frame.rename", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+        title: "Renamed frame",
+      });
+      const undoneRename = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+      })) as { snapshot: { frames: Array<{ title: string }> } };
+      expect(undoneRename.snapshot.frames[0]?.title).toBe("Original frame");
+      const redoneRename = (await svc.handle("design.history.redo", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+      })) as { snapshot: { frames: Array<{ title: string }> } };
+      expect(redoneRename.snapshot.frames[0]?.title).toBe("Renamed frame");
+
+      const duplicated = (await svc.handle("design.frame.duplicate", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+      })) as { frame: { file: string } };
+      const undoneDuplicate = (await svc.handle("design.history.undo", {
+        workspaceId: design.workspaceId,
+        frame: duplicated.frame.file,
+      })) as { snapshot: { frames: Array<{ file: string }> } };
+      expect(
+        undoneDuplicate.snapshot.frames.map((frame) => frame.file),
+      ).toEqual([created.frame.file]);
+      const redoneDuplicate = (await svc.handle("design.history.redo", {
+        workspaceId: design.workspaceId,
+        frame: created.frame.file,
+      })) as {
+        historySelection?: string | null;
+        snapshot: { frames: Array<{ file: string }> };
+      };
+      expect(redoneDuplicate.historySelection).toBe(duplicated.frame.file);
+      expect(
+        redoneDuplicate.snapshot.frames.map((frame) => frame.file),
+      ).toContain(duplicated.frame.file);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("publishes validated Design screenshots without replacing the cache on malformed input", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-artifact-export",
+      kind: "design",
+    });
+    try {
+      const createdFrame = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "Artifact frame",
+        x: 0,
+        y: 0,
+        w: 1,
+        h: 1,
+        z: 0,
+      })) as { frame: { file: string; sourceVersion: string } };
+      const snapshotReply = (await svc.handle("design.snapshot", {
+        workspaceId: design.workspaceId,
+      })) as {
+        snapshot: { frames: Array<{ file: string; sourceVersion: string }> };
+      };
+      const frame =
+        snapshotReply.snapshot.frames.find(
+          (candidate) => candidate.file === createdFrame.frame.file,
+        ) ?? createdFrame.frame;
+      const screenshot = {
+        workspaceId: design.workspaceId,
+        frame: frame.file,
+        nodeId: null,
+        mimeType: "image/png",
+        data: PNG_1X1_BASE64,
+        width: 1,
+        height: 1,
+        scale: 1,
+        capturedAt: 1,
+        sourceVersion: frame.sourceVersion,
+      };
+
+      await expect(
+        svc.handle("design.screenshot.set", screenshot),
+      ).resolves.toEqual({ ok: true });
+
+      await expect(
+        svc.handle("design.screenshot.set", {
+          ...screenshot,
+          data: Buffer.from("valid-base64-but-not-a-png").toString("base64"),
+        }),
+      ).rejects.toThrow(/PNG/i);
+      expect(
+        getDesignScreenshot(
+          design.workspaceId,
+          frame.file,
+          null,
+          frame.sourceVersion,
+        )?.data,
+      ).toBe(PNG_1X1_BASE64);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("workspace.setMode flips modes concurrently (never blocks on processes) and stays local-only", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const created = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "mode-switch",
+    });
+    try {
+      // Concurrent duality: the switch enforces nothing and blocks on
+      // nothing — agents/terminals keep running through it in both
+      // directions. (The old census refusal is retired.)
+      const entered = (await svc.handle("workspace.setMode", {
+        workspaceId: created.workspaceId,
+        mode: "design",
+      })) as {
+        ok: true;
+        mode: "design";
+        snapshot?: { frames: unknown[]; tokenSourceVersion: string };
+      };
+      expect(entered).toMatchObject({
+        ok: true,
+        mode: "design",
+        snapshot: {
+          frames: expect.any(Array),
+          tokenSourceVersion: expect.any(String),
+        },
+      });
+      const afterEnter = (await svc.handle("workspace.list")) as {
+        workspaces: Array<{ id: string; kind?: string }>;
+      };
+      expect(
+        afterEnter.workspaces.find((w) => w.id === created.workspaceId)?.kind,
+      ).toBe("design");
+      // The design document was ensured + committed on entry.
+      expect(
+        fs.existsSync(path.join(created.path, "Zeros Design", "tokens.css")),
+      ).toBe(true);
+      // Idempotent no-op when already in the requested mode.
+      await expect(
+        svc.handle("workspace.setMode", {
+          workspaceId: created.workspaceId,
+          mode: "design",
+        }),
+      ).resolves.toEqual({ ok: true, mode: "design" });
+
+      // Exit returns a code-surface workspace; the checkout was never
+      // whole-tree locked in the first place.
+      await expect(
+        svc.handle("workspace.setMode", {
+          workspaceId: created.workspaceId,
+          mode: "code",
+        }),
+      ).resolves.toEqual({ ok: true, mode: "code" });
+      const afterExit = (await svc.handle("workspace.list")) as {
+        workspaces: Array<{ id: string; kind?: string }>;
+      };
+      expect(
+        afterExit.workspaces.find((w) => w.id === created.workspaceId)?.kind,
+      ).toBe("code");
+
+      await expect(
+        svc.handle(
+          "workspace.setMode",
+          { workspaceId: created.workspaceId, mode: "design" },
+          { remote: true },
+        ),
+      ).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+      await expect(
+        svc.handle("workspace.setMode", {
+          workspaceId: created.workspaceId,
+          mode: "sparse",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: created.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("keeps Design API authority independent from the presentation view mode", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const created = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-view-mode-independence",
+      kind: "design",
+    });
+    try {
+      const inDesign = (await svc.handle("design.snapshot", {
+        workspaceId: created.workspaceId,
+      })) as { snapshot: { revision: string } };
+      await svc.handle("workspace.setMode", {
+        workspaceId: created.workspaceId,
+        mode: "code",
+      });
+      const inCode = (await svc.handle("design.snapshot", {
+        workspaceId: created.workspaceId,
+      })) as { snapshot: { revision: string } };
+
+      expect(inCode.snapshot.revision).toBe(inDesign.snapshot.revision);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: created.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("requires explicit confirmation before changing a live design-directory pointer", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const created = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-pointer-confirmation",
+      kind: "design",
+    });
+    try {
+      const currentDesign = path.join(created.path, "Zeros Design");
+      const alternateDesign = path.join(created.path, "Alternate Design");
+      fs.cpSync(currentDesign, alternateDesign, { recursive: true });
+      execFileSync("git", ["add", "-f", "--", "Alternate Design"], {
+        cwd: created.path,
+      });
+      execFileSync("git", ["commit", "-q", "-m", "add alternate design"], {
+        cwd: created.path,
+      });
+      await expect(
+        svc.handle("settings.write", {
+          layer: "workspace-local",
+          repoRoot: created.path,
+          patch: { design: { directory: "Alternate Design" } },
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        message: expect.stringMatching(/confirmation/i),
+      });
+      await expect(
+        svc.handle("settings.write", {
+          layer: "workspace-local",
+          repoRoot: created.path,
+          patch: { design: { directory: "Alternate Design" } },
+          confirmDesignDirectoryChange: true,
+        }),
+      ).resolves.toMatchObject({
+        doc: { design: { directory: "Alternate Design" } },
+      });
+      await expect(
+        svc.handle("design.snapshot", { workspaceId: created.workspaceId }),
+      ).resolves.toMatchObject({
+        snapshot: { lint: { workspacePath: created.path } },
+      });
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: created.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("rejects confirmed Design pointers that are absent, uncommitted, or symlinked", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const created = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-pointer-validation",
+      kind: "design",
+    });
+    try {
+      for (const directory of ["Missing Design", "Uncommitted Design"]) {
+        if (directory === "Uncommitted Design") {
+          fs.mkdirSync(path.join(created.path, directory));
+          fs.writeFileSync(
+            path.join(created.path, directory, ".zeros-canvas.json"),
+            "{}\n",
+          );
+        }
+        await expect(
+          svc.handle("settings.write", {
+            layer: "workspace-local",
+            repoRoot: created.path,
+            patch: { design: { directory } },
+            confirmDesignDirectoryChange: true,
+          }),
+        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      }
+
+      const outside = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-outside-"));
+      try {
+        fs.symlinkSync(outside, path.join(created.path, "Linked Design"));
+        await expect(
+          svc.handle("settings.write", {
+            layer: "workspace-local",
+            repoRoot: created.path,
+            patch: { design: { directory: "Linked Design" } },
+            confirmDesignDirectoryChange: true,
+          }),
+        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      } finally {
+        fs.rmSync(outside, { recursive: true, force: true });
+      }
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: created.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("serializes Design transactions, deduplicates retries, and rejects stale revisions", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const created = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-command-journal",
+      kind: "design",
+    });
+    try {
+      const frameReply = (await svc.handle("design.frame.create", {
+        workspaceId: created.workspaceId,
+        title: "Journal",
+      })) as { frame: { file: string } };
+      const foundation = (await svc.handle("design.foundation.open", {
+        workspaceId: created.workspaceId,
+        frame: frameReply.frame.file,
+      })) as { summary: { revision: string } };
+      const projection = (await svc.handle("design.projection", {
+        workspaceId: created.workspaceId,
+        frame: frameReply.frame.file,
+        expectedRevision: foundation.summary.revision,
+        limit: 1,
+      })) as { projection: { nodes: Array<{ id: string }> } };
+      const targetNodeId = projection.projection.nodes[0]?.id;
+      expect(targetNodeId).toBeTruthy();
+      const transaction = {
+        schemaVersion: 1,
+        transactionId: "transaction-one",
+        documentId: `frame:${frameReply.frame.file}`,
+        baseRevision: foundation.summary.revision,
+        actor: { kind: "human", id: "desktop" },
+        intent: "Update the journal frame",
+        createdAt: 1,
+        operations: [
+          {
+            operationId: "style-one",
+            type: "node.set-styles",
+            nodeId: targetNodeId!,
+            styles: { gap: "24px" },
+            scope: "auto",
+            responsiveContext: "base",
+            stateContext: "default",
+          },
+        ],
+      };
+      const params = {
+        workspaceId: created.workspaceId,
+        frame: frameReply.frame.file,
+        transaction,
+      };
+      const first = (await svc.handle("design.transaction.apply", params)) as {
+        result: { revision: string; receipt: { status: string } };
+      };
+      const duplicate = (await svc.handle(
+        "design.transaction.apply",
+        params,
+      )) as typeof first;
+
+      expect(first.result.receipt.status).toBe("applied");
+      expect(duplicate.result.receipt.status).toBe("duplicate");
+      expect(duplicate.result.revision).toBe(first.result.revision);
+
+      const stale = {
+        ...transaction,
+        transactionId: "transaction-stale",
+        baseRevision: foundation.summary.revision,
+      };
+      const staleParams = {
+        workspaceId: created.workspaceId,
+        frame: frameReply.frame.file,
+        transaction: stale,
+      };
+      await expect(
+        svc.handle("design.transaction.apply", staleParams),
+      ).rejects.toMatchObject({ code: "DESIGN_REVISION_CONFLICT" });
+
+      const invalidParams = {
+        workspaceId: created.workspaceId,
+        frame: frameReply.frame.file,
+        transaction: {
+          ...transaction,
+          transactionId: "transaction-invalid-node",
+          baseRevision: first.result.revision,
+          operations: [
+            {
+              operationId: "style-missing-node",
+              type: "node.set-styles",
+              nodeId: "missing-node",
+              styles: { gap: "8px" },
+              scope: "inline",
+              responsiveContext: "base",
+              stateContext: "default",
+            },
+          ],
+        },
+      };
+      await expect(
+        svc.handle("design.transaction.apply", invalidParams),
+      ).rejects.toThrow(/Design element not found/i);
+      const afterRejected = (await svc.handle("design.foundation.open", {
+        workspaceId: created.workspaceId,
+        frame: frameReply.frame.file,
+      })) as { summary: { revision: string } };
+      expect(afterRejected.summary.revision).toBe(first.result.revision);
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: created.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("refuses code-side writes into the design directory (territorial fences)", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const created = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-fences",
+      kind: "design",
+    });
+    try {
+      const designFile = "Zeros Design/tokens.css";
+      const saveDesigns = expect.stringContaining("Save designs");
+      const trackedDesignFile = path.join(
+        created.path,
+        "Zeros Design",
+        "tracked.txt",
+      );
+      fs.writeFileSync(trackedDesignFile, "original\n");
+      execFileSync("git", ["add", "--", "Zeros Design/tracked.txt"], {
+        cwd: created.path,
+      });
+      execFileSync("git", ["commit", "-q", "-m", "track design fixture"], {
+        cwd: created.path,
+      });
+      fs.writeFileSync(trackedDesignFile, "edited\n");
+      await expect(
+        svc.handle("git.reset", {
+          workspaceId: created.workspaceId,
+          mode: "hard",
+          confirm: true,
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        message: expect.stringContaining("unsaved design"),
+        remediation: saveDesigns,
+      });
+      expect(fs.readFileSync(trackedDesignFile, "utf8")).toBe("edited\n");
+      // Staging, hunk-staging, discard, commit-with-files, and the file
+      // editor all refuse design paths — design files have ONE write path.
+      await expect(
+        svc.handle("git.stage", {
+          workspaceId: created.workspaceId,
+          paths: [designFile],
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+      await expect(
+        svc.handle("git.discard", {
+          workspaceId: created.workspaceId,
+          paths: [designFile],
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+      await expect(
+        svc.handle("git.restore", {
+          workspaceId: created.workspaceId,
+          paths: ["Zeros Design/tracked.txt"],
+          source: "HEAD",
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+      await expect(
+        svc.handle("git.unstage", {
+          workspaceId: created.workspaceId,
+          paths: [designFile],
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+      // `--` stops option parsing, not Git pathspec expansion. A magic-looking
+      // exact filename must be literalized rather than expanding back onto
+      // protected content inside the trusted Git bridge.
+      await expect(
+        svc.handle("git.discard", {
+          workspaceId: created.workspaceId,
+          paths: [":(top)Zeros Design/tracked.txt"],
+        }),
+      ).rejects.toMatchObject({ code: "GIT_COMMAND_FAILED" });
+      expect(fs.readFileSync(trackedDesignFile, "utf8")).toBe("edited\n");
+      await expect(
+        svc.handle("git.commit", {
+          workspaceId: created.workspaceId,
+          message: "mixed",
+          files: ["hello.txt", designFile],
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+      await expect(
+        svc.handle("git.unstageHunk", {
+          workspaceId: created.workspaceId,
+          patch: `diff --git a/${designFile} b/${designFile}\n--- a/${designFile}\n+++ b/${designFile}\n@@ -1 +1 @@\n-a\n+b\n`,
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+      await expect(
+        svc.handle("git.stageHunk", {
+          workspaceId: created.workspaceId,
+          patch: `diff --git a/${designFile} b/${designFile}\n--- a/${designFile}\n+++ b/${designFile}\n@@ -1 +1 @@\n-a\n+b\n`,
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+      // `git apply` also accepts traditional patches without a `diff --git`
+      // header. An empty best-effort path parse must fail closed instead of
+      // handing such a patch to the trusted worktree writer.
+      await expect(
+        svc.handle("git.discardHunk", {
+          workspaceId: created.workspaceId,
+          patch:
+            "--- a/Zeros Design/tracked.txt\n" +
+            "+++ b/Zeros Design/tracked.txt\n" +
+            "@@ -1 +1 @@\n" +
+            "-original\n" +
+            "+edited\n",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      expect(fs.readFileSync(trackedDesignFile, "utf8")).toBe("edited\n");
+      await expect(
+        svc.handle("file.write", {
+          workspaceId: created.workspaceId,
+          path: designFile,
+          content: "/* nope */\n",
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+      // A pathless clean is refused while unsaved (untracked) design files
+      // exist — it would silently destroy not-yet-saved frames.
+      fs.writeFileSync(
+        path.join(created.path, "Zeros Design", "unsaved-frame.html"),
+        "<!doctype html><html><body>unsaved</body></html>\n",
+      );
+      await expect(
+        svc.handle("git.clean", {
+          workspaceId: created.workspaceId,
+          confirm: true,
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        message: expect.stringContaining("unsaved design"),
+      });
+      // Code territory stays fully live: staging code paths works in design
+      // mode (concurrent duality — agents keep committing code).
+      fs.writeFileSync(path.join(created.path, "hello.txt"), "edited\n");
+      await expect(
+        svc.handle("git.stage", {
+          workspaceId: created.workspaceId,
+          paths: ["hello.txt"],
+        }),
+      ).resolves.toEqual({ ok: true });
+    } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: created.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("recognizes renamed, nested, and multiple design folders by marker with nothing primed", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const created = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-markers",
+      kind: "code",
+    });
+    try {
+      // A code-mode workspace primes nothing: not Design mode, not an agent
+      // territory, not a settings change. The guard therefore used to compare
+      // against the DEFAULT name, match none of these folders, and allow every
+      // write below. Recognition is by marker, so no priming is required.
+      const renamed = "designs";
+      const nested = "apps/web/canvas";
+
+      // Creating the marker is itself a Design-authority mutation. A generic
+      // code editor must not manufacture a new Design document and then keep
+      // writing it through the code path.
+      await expect(
+        svc.handle("file.write", {
+          workspaceId: created.workspaceId,
+          path: "brand-new-design/.zeros-canvas.json",
+          content: "{}\n",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      expect(
+        fs.existsSync(
+          path.join(created.path, "brand-new-design", ".zeros-canvas.json"),
+        ),
+      ).toBe(false);
+
+      for (const relative of [renamed, nested]) {
+        fs.mkdirSync(path.join(created.path, ...relative.split("/")), {
+          recursive: true,
+        });
+        fs.writeFileSync(
+          path.join(created.path, ...relative.split("/"), ".zeros-canvas.json"),
+          "{}\n",
+        );
+      }
+      fs.writeFileSync(path.join(created.path, renamed, "tokens.css"), "a{}\n");
+      const saveDesigns = expect.stringContaining("Save designs");
+      for (const designPath of [
+        `${renamed}/tokens.css`,
+        `${nested}/frame.html`,
+        renamed, // the folder itself, not just files inside it
+      ]) {
+        await expect(
+          svc.handle("file.write", {
+            workspaceId: created.workspaceId,
+            path: designPath,
+            content: "nope\n",
+          }),
+        ).rejects.toMatchObject({
+          code: "VALIDATION_FAILED",
+          remediation: saveDesigns,
+        });
+        await expect(
+          svc.handle("git.stage", {
+            workspaceId: created.workspaceId,
+            paths: [designPath],
+          }),
+        ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      }
+
+      // Git treats an exact directory path as its complete subtree. A code
+      // actor must not stage a writable ancestor and sweep a nested Design
+      // document into the index indirectly.
+      await expect(
+        svc.handle("git.stage", {
+          workspaceId: created.workspaceId,
+          paths: ["apps"],
+        }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        remediation: saveDesigns,
+      });
+
+      // A sibling under the same parent as a nested design folder stays
+      // writable — recognition is per-folder, never per-ancestor, and the
+      // workspace root is deliberately never probed.
+      await expect(
+        svc.handle("file.write", {
+          workspaceId: created.workspaceId,
+          path: "apps/web/server.ts",
+          content: "export const ok = true;\n",
+        }),
+      ).resolves.toBeTruthy();
+
+      // The viewer is told, so it renders read-only instead of offering an
+      // Edit action the write path is going to refuse.
+      await expect(
+        svc.handle("file.read", {
+          workspaceId: created.workspaceId,
+          path: `${renamed}/tokens.css`,
+        }),
+      ).resolves.toMatchObject({ designPath: true });
+      const codeRead = (await svc.handle("file.read", {
+        workspaceId: created.workspaceId,
+        path: "apps/web/server.ts",
+      })) as { designPath?: boolean };
+      expect(codeRead.designPath).toBeUndefined();
+
+      // A folder reserved for first use has no marker yet. The primed pointer
+      // is unioned in — never intersected — so it is still refused.
+      primeDesignDirectoryName(created.path, "reserved-designs");
+      await expect(
+        svc.handle("file.write", {
+          workspaceId: created.workspaceId,
+          path: "reserved-designs/document.json",
+          content: "nope\n",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+
+      // HEAD/index recognition remains authoritative while a marker is
+      // missing from the worktree (for example an unstaged deletion). The
+      // service guard must agree with the ZSR territory resolver here.
+      execFileSync("git", ["add", renamed, nested], { cwd: created.path });
+      execFileSync("git", ["commit", "-q", "-m", "recognize designs"], {
+        cwd: created.path,
+      });
+      fs.rmSync(path.join(created.path, renamed, ".zeros-canvas.json"));
+      await expect(
+        svc.handle("file.write", {
+          workspaceId: created.workspaceId,
+          path: `${renamed}/after-marker-delete.txt`,
+          content: "nope\n",
+        }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    } finally {
+      forgetDesignDirectoryName(created.path);
+      await svc.handle("workspace.delete", {
+        workspaceId: created.workspaceId,
         includeBranch: true,
       });
     }
@@ -1250,6 +2201,94 @@ describe("WorkspaceService", () => {
     expect(r.content).toBe("hi there");
   });
 
+  it("treats local-main file and Git writes as code authority around Design markers", async () => {
+    const design = path.join(dir, "Product Design");
+    fs.mkdirSync(design, { recursive: true });
+    fs.writeFileSync(path.join(design, ".zeros-canvas.json"), "{}\n");
+    fs.writeFileSync(path.join(design, "tokens.css"), "a{}\n");
+
+    await expect(
+      svc.handle("file.write", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        path: "Product Design/tokens.css",
+        content: "nope\n",
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(
+      svc.handle("git.stage", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        paths: ["Product Design/tokens.css"],
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    await expect(
+      svc.handle("git.clean", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        confirm: true,
+        directories: true,
+      }),
+    ).rejects.toMatchObject({
+      code: "VALIDATION_FAILED",
+      message: expect.stringContaining("unsaved design"),
+    });
+  });
+
+  it("keeps ordinary local-main Git path mutations available", async () => {
+    execFileSync("git", ["config", "user.email", "test@zeros.local"], {
+      cwd: dir,
+    });
+    execFileSync("git", ["config", "user.name", "Zeros Test"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "initial"], { cwd: dir });
+
+    fs.writeFileSync(path.join(dir, "hello.txt"), "changed\n");
+    await expect(
+      svc.handle("git.stage", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        paths: ["hello.txt"],
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(
+      execFileSync("git", ["diff", "--cached", "--name-only"], {
+        cwd: dir,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("hello.txt");
+
+    await expect(
+      svc.handle("git.unstage", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        paths: ["hello.txt"],
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(
+      execFileSync("git", ["diff", "--cached", "--name-only"], {
+        cwd: dir,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe("");
+
+    await expect(
+      svc.handle("git.restore", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        paths: ["hello.txt"],
+        source: "HEAD",
+      }),
+    ).resolves.toEqual({ ok: true });
+    expect(fs.readFileSync(path.join(dir, "hello.txt"), "utf8")).toBe(
+      "hi there",
+    );
+
+    fs.writeFileSync(path.join(dir, "ordinary-untracked.txt"), "remove me\n");
+    await expect(
+      svc.handle("git.clean", {
+        workspaceId: LOCAL_MAIN_WORKSPACE_ID,
+        paths: ["ordinary-untracked.txt"],
+        confirm: true,
+      }),
+    ).resolves.toEqual({ removed: ["ordinary-untracked.txt"] });
+    expect(fs.existsSync(path.join(dir, "ordinary-untracked.txt"))).toBe(false);
+  });
+
   it("refuses to read outside the workspace (no client path escape)", async () => {
     const r = (await svc.handle("file.read", {
       workspaceId: LOCAL_MAIN_WORKSPACE_ID,
@@ -1555,11 +2594,31 @@ describe("WorkspaceService", () => {
     });
     const protocolCapability = "d".repeat(64);
     svc.setDesignProtocolCapabilityProvider(() => protocolCapability);
+    await expect(
+      svc.handle("design.frame.create", {
+        workspaceId: workspace.workspaceId,
+        x: 90,
+        y: 120,
+      }),
+    ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
     const createdReply = (await svc.handle("design.frame.create", {
       workspaceId: workspace.workspaceId,
       title: "Checkout",
+      x: 90,
+      y: 120,
+      w: 720,
+      h: 480,
+      z: 4,
     })) as {
-      frame: { file: string };
+      frame: {
+        file: string;
+        x: number;
+        y: number;
+        width: number;
+        height: number;
+        z: number;
+        nodeCount: number;
+      };
       snapshot: {
         protocolCapability: string | null;
         frames: Array<{ file: string }>;
@@ -1569,6 +2628,42 @@ describe("WorkspaceService", () => {
     expect(createdReply.snapshot.frames.map((frame) => frame.file)).toContain(
       createdReply.frame.file,
     );
+    expect(createdReply.frame).toMatchObject({
+      x: 90,
+      y: 120,
+      width: 720,
+      height: 480,
+      z: 4,
+      nodeCount: 1,
+    });
+    expect(
+      fs.readFileSync(
+        path.join(workspace.path, "Zeros Design", createdReply.frame.file),
+        "utf8",
+      ),
+    ).toMatch(/<main\b[^>]*>\s*<\/main>/);
+    const textReply = (await svc.handle("design.frame.create", {
+      workspaceId: workspace.workspaceId,
+      title: "Loose text",
+      kind: "text",
+      textNodeId: "text-service-1",
+      text: "Type immediately",
+      textFixedSize: false,
+      x: 40,
+      y: 60,
+      w: 160,
+      h: 28,
+      z: 5,
+    })) as {
+      frame: { file: string; kind: string; nodeCount: number };
+    };
+    expect(textReply.frame).toMatchObject({ kind: "text", nodeCount: 1 });
+    expect(
+      fs.readFileSync(
+        path.join(workspace.path, "Zeros Design", textReply.frame.file),
+        "utf8",
+      ),
+    ).toContain('data-oid="text-service-1"');
     const renamedReply = (await svc.handle("design.frame.rename", {
       workspaceId: workspace.workspaceId,
       frame: createdReply.frame.file,
@@ -1634,23 +2729,23 @@ describe("WorkspaceService", () => {
     expect(afterCanvasFoundation.summary.history.canUndo).toBe(true);
     expect(afterCanvasFoundation.summary.history.undoDepth).toBe(1);
 
-    await expect(
-      svc.handle("git.checkoutBranch", {
-        workspaceId: workspace.workspaceId,
-        branch: "main",
-      }),
-    ).rejects.toMatchObject({
-      code: "VALIDATION_FAILED",
-      message: expect.stringMatching(/unavailable in a design workspace/i),
-    });
-
+    // Concurrent duality: generic workspace machinery keeps working in
+    // design mode (agents/terminals live in code territory) — only the
+    // sparse-checkout picker stays blocked, since hiding folders could
+    // remove the design directory from disk under the open canvas.
     await expect(
       svc.handle("context.graph.scaffold", {
         workspaceId: workspace.workspaceId,
       }),
+    ).resolves.toMatchObject({ ok: true, created: false });
+    await expect(
+      svc.handle("workspace.setWorkingDirectories", {
+        workspaceId: workspace.workspaceId,
+        directories: [],
+      }),
     ).rejects.toMatchObject({
       code: "VALIDATION_FAILED",
-      message: expect.stringMatching(/unavailable in a design workspace/i),
+      message: expect.stringMatching(/design mode/i),
     });
 
     const tokenSnapshot = (await svc.handle("design.snapshot", {
@@ -1741,6 +2836,7 @@ describe("WorkspaceService", () => {
     })) as {
       mutation: { frame: { source: string; sourceVersion: string } };
       snapshot: { frames: Array<{ sourceVersion: string }> };
+      foundationRevision: { before: string; after: string };
     };
     expect(response.mutation.frame.source).toContain("padding:36px;");
     expect(response.snapshot.frames[0]?.sourceVersion).toBe(
@@ -1758,6 +2854,13 @@ describe("WorkspaceService", () => {
       documentId: `frame:${frame.file}`,
       valid: true,
     });
+    expect(response.foundationRevision).toEqual({
+      before: expect.stringMatching(/^[a-f0-9]{24}$/),
+      after: foundation.summary.revision,
+    });
+    expect(response.foundationRevision.after).not.toBe(
+      response.foundationRevision.before,
+    );
     expect(foundation.foundation.manifest.schemaVersion).toBe(1);
     const projection = (await svc.handle("design.projection", {
       workspaceId: workspace.workspaceId,
@@ -1825,15 +2928,20 @@ describe("WorkspaceService", () => {
       origin: "inline",
       winner: { file: frame.file },
     });
-    await expect(
-      svc.handle("design.history.undo", {
-        workspaceId: workspace.workspaceId,
-        frame: frame.file,
-      }),
-    ).resolves.toMatchObject({
-      result: { receipt: { status: "applied" } },
-      snapshot: { frames: [expect.any(Object)] },
-    });
+    const undoReply = (await svc.handle("design.history.undo", {
+      workspaceId: workspace.workspaceId,
+      frame: frame.file,
+    })) as {
+      result: { receipt: { status: string } };
+      snapshot: { frames: Array<{ file: string; kind?: string }> };
+    };
+    expect(undoReply.result.receipt.status).toBe("applied");
+    expect(undoReply.snapshot.frames).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ file: frame.file }),
+        expect.objectContaining({ file: textReply.frame.file, kind: "text" }),
+      ]),
+    );
 
     const selectedAt = Date.now();
     await svc.handle("design.selection.set", {
@@ -1952,6 +3060,27 @@ describe("WorkspaceService", () => {
     ).toEqual([main!.oid!]);
 
     fs.writeFileSync(path.join(workspace.path, "outside.txt"), "leave me\n");
+    const headBeforeStage = execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: workspace.path,
+      encoding: "utf8",
+    }).trim();
+    await expect(
+      svc.handle("design.stage", { workspaceId: workspace.workspaceId }),
+    ).resolves.toEqual({ ok: true });
+    expect(
+      execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: workspace.path,
+        encoding: "utf8",
+      }).trim(),
+    ).toBe(headBeforeStage);
+    const staged = execFileSync(
+      "git",
+      ["diff", "--cached", "--name-only", "--no-renames"],
+      { cwd: workspace.path, encoding: "utf8" },
+    );
+    expect(staged).toContain("Zeros Design/checkout.html");
+    expect(staged).not.toContain("outside.txt");
+
     const saved = (await svc.handle("design.save", {
       workspaceId: workspace.workspaceId,
     })) as { sha: string; branch: string };
@@ -1987,6 +3116,18 @@ describe("WorkspaceService", () => {
     });
   });
 
+  it.each(["design.explore", "agent.spawn", "cloud.execution.create"])(
+    "keeps future operation %s fail-closed until its real vertical slice exists",
+    async (op) => {
+      await expect(
+        svc.handle(op, { workspaceId: LOCAL_MAIN_WORKSPACE_ID }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        message: `unknown workspace op: ${op}`,
+      });
+    },
+  );
+
   // ── Remote deny-by-default allowlist (FIX 2) ──────────────────────────────
 
   it("allowlists supported relay reads and metadata ops, denying the rest", () => {
@@ -2017,6 +3158,13 @@ describe("WorkspaceService", () => {
       "gh.prChecks",
       "gh.prCommits",
       "gh.prReviews",
+      // Qualified cloud clients see the same repo-task state/output as the
+      // desktop. The commands themselves run under repo-code-task ZSR.
+      "workspace.setupInfo",
+      "workspace.runInfo",
+      "workspace.runLog",
+      "mcp.resolveComposed",
+      "mcp.gateway.status",
     ]) {
       expect(svc.remoteReadable(op)).toBe(true);
       expect(svc.isRemoteAllowed(op)).toBe(true);
@@ -2036,6 +3184,18 @@ describe("WorkspaceService", () => {
     // Writes are allowed at the gate (then restriction-gated separately).
     expect(svc.isRemoteAllowed("git.commit")).toBe(true);
     expect(svc.isRemoteAllowed("gh.prMerge")).toBe(true);
+    for (const op of [
+      "workspace.rerunSetup",
+      "workspace.stopSetup",
+      "workspace.startRun",
+      "workspace.stopRun",
+      "mcp.gateway.beginAuth",
+      "mcp.gateway.completeAuth",
+      "mcp.gateway.disconnect",
+      "mcp.gateway.setHeaderSecret",
+    ]) {
+      expect(svc.isRemoteAllowed(op)).toBe(true);
+    }
     // Exact local timeout-recovery probes and unknown/future ops are denied.
     for (const op of [
       "workspace.get",
@@ -2064,6 +3224,100 @@ describe("WorkspaceService", () => {
     ]) {
       expect(svc.isRemoteAllowed(op)).toBe(false);
     }
+  });
+
+  it("uses the headless MCP credential flow for a qualified cloud client", async () => {
+    const calls: string[] = [];
+    const connected = {
+      name: "docs",
+      url: "https://mcp.example.test",
+      state: "connected" as const,
+      toolCount: 2,
+      tools: ["search", "read"],
+    };
+    const gateway = {
+      running: true,
+      getStatuses: () => [
+        {
+          ...connected,
+          state: "needs-auth" as const,
+          toolCount: 0,
+        },
+      ],
+      beginAuthorize: async (server: string) => {
+        calls.push(`begin:${server}`);
+        return {
+          authorizationUrl:
+            "https://identity.example.test/authorize?state=opaque",
+        };
+      },
+      completeAuthorize: async (server: string, code: string) => {
+        calls.push(`complete:${server}:${code}`);
+        return connected;
+      },
+      disconnect: async (server: string) => {
+        calls.push(`disconnect:${server}`);
+      },
+    };
+    const headerSecrets: Array<{
+      url: string;
+      headerName: string;
+      value: string;
+    }> = [];
+    svc.setGatewayAccessor(() => gateway as never);
+    svc.setGatewayHeaderSecretSetter((url, headerName, value) => {
+      headerSecrets.push({ url, headerName, value });
+    });
+
+    await expect(
+      svc.handle("mcp.gateway.status", {}, { remote: true }),
+    ).resolves.toMatchObject({
+      running: true,
+      servers: [{ name: "docs", state: "needs-auth" }],
+    });
+    await expect(
+      svc.handle("mcp.gateway.beginAuth", { server: "docs" }, { remote: true }),
+    ).resolves.toEqual({
+      authorizationUrl: "https://identity.example.test/authorize?state=opaque",
+    });
+    await expect(
+      svc.handle(
+        "mcp.gateway.completeAuth",
+        { server: "docs", code: "auth-code" },
+        { remote: true },
+      ),
+    ).resolves.toEqual({ status: connected });
+    await expect(
+      svc.handle(
+        "mcp.gateway.setHeaderSecret",
+        {
+          url: "https://mcp.example.test",
+          headerName: "Authorization",
+          value: "Bearer secret",
+        },
+        { remote: true },
+      ),
+    ).resolves.toEqual({ ok: true });
+    await expect(
+      svc.handle(
+        "mcp.gateway.disconnect",
+        { server: "docs" },
+        { remote: true },
+      ),
+    ).resolves.toEqual({ ok: true });
+
+    expect(calls).toEqual([
+      "begin:docs",
+      "complete:docs:auth-code",
+      "disconnect:docs",
+    ]);
+    expect(headerSecrets).toEqual([
+      {
+        url: "https://mcp.example.test",
+        headerName: "Authorization",
+        value: "Bearer secret",
+      },
+    ]);
   });
 
   // ── Path redaction for remote clients (FIX 3) ──────────────────────────────
@@ -2259,7 +3513,9 @@ describe("WorkspaceService", () => {
     });
     const setupStarts: string[] = [];
     const runStarts: string[] = [];
-    svc.setSetupRunner((workspaceId) => setupStarts.push(workspaceId));
+    svc.setSetupRunner((workspaceId) => {
+      setupStarts.push(workspaceId);
+    });
     svc.setRunStarter(async ({ workspaceId }) => {
       if (workspaceId) runStarts.push(workspaceId);
       return { alreadyRunning: false };
@@ -2519,7 +3775,9 @@ describe("WorkspaceService", () => {
     // Record every background-setup kickoff (the engine wires this to its
     // SetupManager in production; here we just capture the call).
     const calls: { id: string; command: string }[] = [];
-    svc.setSetupRunner((id, command) => calls.push({ id, command }));
+    svc.setSetupRunner((id, command) => {
+      calls.push({ id, command });
+    });
 
     const created = await createWorkspace({
       repoRoot: dir,
@@ -2541,6 +3799,112 @@ describe("WorkspaceService", () => {
     expect(calls).toHaveLength(0);
   });
 
+  it("lets a cloud client control contained setup/run tasks for a managed workspace", async () => {
+    fs.writeFileSync(path.join(dir, "README.md"), "# x\n");
+    execFileSync("git", ["add", "."], { cwd: dir });
+    execFileSync(
+      "git",
+      [
+        "-c",
+        "user.email=t@t",
+        "-c",
+        "user.name=t",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+      ],
+      { cwd: dir },
+    );
+    const created = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "svcrepo",
+    });
+    await svc.handle("settings.write", {
+      layer: "repo",
+      repoRoot: dir,
+      patch: {
+        scripts: {
+          setup: "echo deps",
+          run_actions: [{ id: "dev", name: "Dev", command: "echo running" }],
+        },
+      },
+    });
+    const setupStarts: string[] = [];
+    const setupStops: string[] = [];
+    const runStarts: string[] = [];
+    const runStops: Array<{
+      sessionId: string;
+      expectedWorkspaceId?: string;
+    }> = [];
+    const runLogReads: Array<{
+      sessionId: string;
+      expectedWorkspaceId?: string;
+    }> = [];
+    svc.setSetupRunner((workspaceId) => {
+      setupStarts.push(workspaceId);
+    });
+    svc.setSetupStopper((workspaceId) => setupStops.push(workspaceId));
+    svc.setRunStarter(async ({ workspaceId }) => {
+      if (workspaceId) runStarts.push(workspaceId);
+      return { alreadyRunning: false };
+    });
+    svc.setRunStopper((sessionId, expectedWorkspaceId) =>
+      runStops.push({ sessionId, expectedWorkspaceId }),
+    );
+    svc.setRunLogGetter((sessionId, expectedWorkspaceId) => {
+      runLogReads.push({ sessionId, expectedWorkspaceId });
+      return { log: "cloud output", truncated: false };
+    });
+
+    await expect(
+      svc.handle(
+        "workspace.rerunSetup",
+        { workspaceId: created.workspaceId },
+        { remote: true },
+      ),
+    ).resolves.toMatchObject({ ok: true, hasCommand: true });
+    await expect(
+      svc.handle(
+        "workspace.stopSetup",
+        { workspaceId: created.workspaceId },
+        { remote: true },
+      ),
+    ).resolves.toEqual({ ok: true });
+    const sessionId = runSessionId(created.path, "dev");
+    await expect(
+      svc.handle(
+        "workspace.startRun",
+        { workspaceId: created.workspaceId, actionId: "dev", sessionId },
+        { remote: true },
+      ),
+    ).resolves.toMatchObject({ ok: true, hasCommand: true });
+    await expect(
+      svc.handle(
+        "workspace.stopRun",
+        { workspaceId: created.workspaceId, sessionId },
+        { remote: true },
+      ),
+    ).resolves.toEqual({ ok: true });
+    await expect(
+      svc.handle(
+        "workspace.runLog",
+        { workspaceId: created.workspaceId, sessionId },
+        { remote: true },
+      ),
+    ).resolves.toEqual({ log: "cloud output", truncated: false });
+
+    expect(setupStarts).toEqual([created.workspaceId]);
+    expect(setupStops).toEqual([created.workspaceId]);
+    expect(runStarts).toEqual([created.workspaceId]);
+    expect(runStops).toEqual([
+      { sessionId, expectedWorkspaceId: created.workspaceId },
+    ]);
+    expect(runLogReads).toEqual([
+      { sessionId, expectedWorkspaceId: created.workspaceId },
+    ]);
+  });
+
   it("runs setup for the ROWLESS trunk via repoRoot (local:<slug>, no workspace row)", async () => {
     await svc.handle("settings.write", {
       layer: "repo",
@@ -2550,9 +3914,9 @@ describe("WorkspaceService", () => {
 
     const runs: { id: string; command: string; target?: unknown }[] = [];
     const stops: string[] = [];
-    svc.setSetupRunner((id, command, target) =>
-      runs.push({ id, command, target }),
-    );
+    svc.setSetupRunner((id, command, target) => {
+      runs.push({ id, command, target });
+    });
     svc.setSetupStopper((id) => stops.push(id));
 
     const localId = "local:svcrepo";
@@ -2589,8 +3953,8 @@ describe("WorkspaceService", () => {
     expect(runs[0]!.command).toContain("echo trunk-deps");
     expect(runs[0]!.target).toMatchObject({ cwd: dir, repoRoot: dir });
 
-    // stopSetup reaches the stopper; a remote client is refused (host shell
-    // control stays desktop-only, like rerunSetup).
+    // stopSetup reaches the stopper; a remote client is refused because raw
+    // rowless-path control stays desktop-only, like rerunSetup.
     await svc.handle("workspace.stopSetup", {
       workspaceId: localId,
       repoRoot: dir,
@@ -2603,6 +3967,72 @@ describe("WorkspaceService", () => {
         { remote: true },
       ),
     ).rejects.toThrow();
+  });
+
+  it("acknowledges a setup rerun only after the setup runner is admitted", async () => {
+    await svc.handle("settings.write", {
+      layer: "repo",
+      repoRoot: dir,
+      patch: { scripts: { setup: "echo trunk-deps" } },
+    });
+
+    let releaseRunner = () => {};
+    const runnerBlocked = new Promise<void>((resolve) => {
+      releaseRunner = resolve;
+    });
+    let announceRunner = () => {};
+    const runnerStarted = new Promise<void>((resolve) => {
+      announceRunner = resolve;
+    });
+    svc.setSetupRunner(async () => {
+      announceRunner();
+      await runnerBlocked;
+    });
+
+    let acknowledged = false;
+    const rerun = svc
+      .handle("workspace.rerunSetup", {
+        workspaceId: "local:svcrepo",
+        repoRoot: dir,
+      })
+      .then((result) => {
+        acknowledged = true;
+        return result;
+      });
+
+    try {
+      await runnerStarted;
+      // Let the request's async command-resolution chain settle. The retry RPC
+      // must still be pending while the engine admission itself is pending.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(acknowledged).toBe(false);
+    } finally {
+      releaseRunner();
+    }
+
+    await expect(rerun).resolves.toMatchObject({
+      ok: true,
+      hasCommand: true,
+    });
+  });
+
+  it("propagates an asynchronous setup admission failure to the rerun caller", async () => {
+    await svc.handle("settings.write", {
+      layer: "repo",
+      repoRoot: dir,
+      patch: { scripts: { setup: "echo trunk-deps" } },
+    });
+    svc.setSetupRunner(async () => {
+      await Promise.resolve();
+      throw new Error("setup admission refused");
+    });
+
+    await expect(
+      svc.handle("workspace.rerunSetup", {
+        workspaceId: "local:svcrepo",
+        repoRoot: dir,
+      }),
+    ).rejects.toThrow(/setup admission refused/i);
   });
 
   // ── Working directories: the watcher must go deaf for the rewrite ──

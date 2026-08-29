@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  acceptedControlPlaneResponseType,
   allowedControlPlaneRoute,
   cancelUnusedResponseBody,
   jsonContentTypeOrCancel,
   readBoundedBody,
+  readBoundedResponseBody,
   validMutationOrigin,
 } from "./control-plane-policy.mjs";
 
@@ -13,6 +15,8 @@ const USER = "de7159b8-b163-44ef-9742-a63099bc4f38";
 
 test("proxy allow-list exposes only dashboard organization operations", () => {
   assert.equal(allowedControlPlaneRoute("GET", "/v1/me"), true);
+  assert.equal(allowedControlPlaneRoute("GET", "/v1/auth/snapshot"), true);
+  assert.equal(allowedControlPlaneRoute("GET", "/v1/auth/events"), true);
   assert.equal(allowedControlPlaneRoute("POST", "/v1/organizations"), true);
   assert.equal(
     allowedControlPlaneRoute("PATCH", `/v1/organizations/${ORG}/members/${USER}`),
@@ -21,6 +25,28 @@ test("proxy allow-list exposes only dashboard organization operations", () => {
   assert.equal(allowedControlPlaneRoute("GET", "/v1/github/installations"), false);
   assert.equal(allowedControlPlaneRoute("DELETE", "/v1/organizations/not-a-uuid"), false);
   assert.equal(allowedControlPlaneRoute("GET", `/v1/organizations/${ORG}/../me`), false);
+});
+
+test("proxy accepts JSON snapshots and SSE streams only on their exact routes", () => {
+  assert.equal(
+    acceptedControlPlaneResponseType(
+      "/v1/auth/events",
+      "text/event-stream; charset=utf-8",
+    ),
+    "sse",
+  );
+  assert.equal(
+    acceptedControlPlaneResponseType("/v1/auth/events", "application/json"),
+    null,
+  );
+  assert.equal(
+    acceptedControlPlaneResponseType("/v1/auth/snapshot", "application/json"),
+    "json",
+  );
+  assert.equal(
+    acceptedControlPlaneResponseType("/v1/me", "text/event-stream"),
+    null,
+  );
 });
 
 test("mutations require same-origin JSON plus a non-simple dashboard header", () => {
@@ -94,6 +120,41 @@ test("bounded request bodies are replayable exact bytes", async () => {
   const result = await readBoundedBody(request, 8);
   assert.equal(result.ok, true);
   assert.equal(new TextDecoder().decode(result.body), "{}");
+});
+
+test("oversized upstream JSON is cancelled before it can cross the browser boundary", async () => {
+  let cancelled = false;
+  const response = new Response(
+    new ReadableStream({
+      start(controller) {
+        controller.enqueue(new Uint8Array(6));
+        controller.enqueue(new Uint8Array(6));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    }),
+    { headers: { "content-type": "application/json" } },
+  );
+
+  assert.deepEqual(await readBoundedResponseBody(response, 8), { ok: false });
+  assert.equal(cancelled, true);
+});
+
+test("declared oversized upstream JSON is rejected without reading it", async () => {
+  let pulled = false;
+  const response = new Response(
+    new ReadableStream({
+      pull(controller) {
+        pulled = true;
+        controller.enqueue(new Uint8Array(1));
+      },
+    }),
+    { headers: { "content-length": "999" } },
+  );
+
+  assert.deepEqual(await readBoundedResponseBody(response, 8), { ok: false });
+  assert.equal(pulled, false);
 });
 
 test("a superseded upstream response releases its unread body", async () => {

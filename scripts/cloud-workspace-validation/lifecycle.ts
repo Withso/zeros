@@ -9,12 +9,25 @@
 // archived-restore so wake thresholds are based on observed provider behavior.
 //
 // NOTE: archive() requires the box be stopped first; restore is start() from
-// archived. Both clear RAM → the engine cold-boots (re-launch via start-engine.sh
-// belongs to the eventual lifecycle controller; this script measures only the
-// provider transition).
+// archived. Both clear RAM. Each wake therefore runs the same qualification +
+// coordinator relaunch path used by the reconnect test before it is counted as
+// ready.
 // ──────────────────────────────────────────────────────────
 
-import { clearState, loadState, makeDaytona } from "./config";
+import {
+  clearRuntimeAttestation,
+  clearState,
+  loadState,
+  loadSnapshotAttestation,
+  makeDaytona,
+  withCloudValidationMutationLock,
+} from "./config";
+import {
+  relaunchQualifiedCloudEngine,
+  revokeCloudEngineIngressState,
+  revokeCloudPreviewState,
+} from "./runtime";
+import { verifySandboxAbsent } from "./lib/provider-cleanup";
 
 async function timeIt<T>(label: string, fn: () => Promise<T>): Promise<number> {
   const t0 = Date.now();
@@ -24,19 +37,80 @@ async function timeIt<T>(label: string, fn: () => Promise<T>): Promise<number> {
   return ms;
 }
 
-async function main() {
-  const state = loadState();
+async function runLifecycle() {
+  let state = loadState();
   const daytona = makeDaytona();
-  const sandbox = await daytona.get(state.sandboxId);
-  await sandbox.refreshData();
 
   if (process.argv.includes("--delete")) {
+    let sandbox: Awaited<ReturnType<typeof daytona.get>>;
+    try {
+      sandbox = await daytona.get(state.sandboxId);
+    } catch (lookupFailure) {
+      try {
+        await verifySandboxAbsent(daytona, state.sandboxId);
+      } catch (verificationFailure) {
+        throw new AggregateError(
+          [lookupFailure, verificationFailure],
+          "sandbox lookup failed and deletion could not be verified",
+        );
+      }
+      clearState();
+      clearRuntimeAttestation();
+      console.log(
+        `\n  ✓ sandbox ${state.sandboxId} was already absent; removed local connection state.\n`,
+      );
+      return;
+    }
     console.log(`\n  Deleting sandbox ${state.sandboxId}…`);
-    await sandbox.delete();
+    const cleanupFailures: unknown[] = [];
+    const revocations = await Promise.allSettled([
+      revokeCloudPreviewState(sandbox, state),
+      revokeCloudEngineIngressState(sandbox, state),
+    ]);
+    for (const result of revocations) {
+      if (result.status === "rejected") cleanupFailures.push(result.reason);
+    }
+    let deleteFailure: unknown = null;
+    try {
+      await sandbox.delete();
+    } catch (error) {
+      deleteFailure = error;
+    }
+    let deletionVerified = false;
+    try {
+      await verifySandboxAbsent(daytona, state.sandboxId);
+      deletionVerified = true;
+    } catch (verificationFailure) {
+      cleanupFailures.push(
+        deleteFailure
+          ? new AggregateError(
+              [deleteFailure, verificationFailure],
+              "sandbox deletion failed and inventory still contains it",
+            )
+          : verificationFailure,
+      );
+    }
+    if (!deletionVerified) {
+      throw new AggregateError(
+        cleanupFailures,
+        "cloud sandbox cleanup was incomplete",
+      );
+    }
     clearState();
+    clearRuntimeAttestation();
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError(
+        cleanupFailures,
+        "cloud sandbox was deleted but capability revocation reported a failure",
+      );
+    }
     console.log(`  ✓ deleted sandbox and local connection state.\n`);
     return;
   }
+
+  const snapshot = loadSnapshotAttestation();
+  const sandbox = await daytona.get(state.sandboxId);
+  await sandbox.refreshData();
 
   console.log(
     `\n  Resume-latency measurements — sandbox ${state.sandboxId} (state=${sandbox.state})\n`,
@@ -52,6 +126,9 @@ async function main() {
     await sandbox.start();
     await sandbox.waitUntilStarted();
   });
+  const stoppedReady = await timeIt("attest + engine ready", async () => {
+    state = await relaunchQualifiedCloudEngine(sandbox, state, snapshot);
+  });
 
   // 2. archived → restore (start). Must stop() before archive().
   console.log("\n── archived → start() (restore) ──");
@@ -66,21 +143,31 @@ async function main() {
     await sandbox.start();
     await sandbox.waitUntilStarted();
   });
+  const archivedReady = await timeIt("attest + engine ready", async () => {
+    state = await relaunchQualifiedCloudEngine(sandbox, state, snapshot);
+  });
 
   console.log(`\n── Resume latency summary ──`);
   console.log(`  stopped → start:   ${(stoppedStart / 1000).toFixed(1)}s`);
+  console.log(
+    `  stopped → secure ready: ${((stoppedStart + stoppedReady) / 1000).toFixed(1)}s`,
+  );
   console.log(`  archived → start:  ${(archivedStart / 1000).toFixed(1)}s`);
   console.log(
+    `  archived → secure ready: ${((archivedStart + archivedReady) / 1000).toFixed(1)}s`,
+  );
+  console.log(
     `\n  Guidance: the wake budget must cover the slower path + the engine` +
-      `\n  cold-boot (~a few s). If archived-restore is much slower, prefer a longer` +
+      `\n  live qualification and cold boot. If archived-restore is much slower, prefer a longer` +
       `\n  autoArchiveInterval so day-to-day wakes hit the faster stopped-start path.\n`,
   );
   console.log(
-    `  (The engine is NOT auto-relaunched after these transitions — run`,
+    `  The final archived restore is attested, healthy, and reachable.\n`,
   );
-  console.log(
-    `   provision.ts again or start-engine.sh in a session to make it reachable.)\n`,
-  );
+}
+
+async function main() {
+  await withCloudValidationMutationLock(runLifecycle);
 }
 
 main().catch((err) => {

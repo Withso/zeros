@@ -278,6 +278,49 @@ describe("read_file", () => {
     );
   });
 
+  it("requests a tiny aspect-correct thumbnail for a fitted overview", async () => {
+    const imagePath = path.join(dir, "overview.png");
+    writeFileSync(imagePath, pngFixture(64, 2_400, 1_350));
+    nativeImageMock.thumbnail.getSize.mockReturnValue({
+      width: 64,
+      height: 36,
+    });
+
+    const res = await callThumbnail({
+      cwd: dir,
+      path: "overview.png",
+      maxDimension: 64,
+    });
+
+    expect(nativeImageMock.createThumbnailFromPath).toHaveBeenCalledWith(
+      imagePath,
+      { width: 64, height: 36 },
+    );
+    expect(res).toMatchObject({ kind: "image", width: 64, height: 36 });
+  });
+
+  it("marks a source smaller than the requested bucket as fully resolved", async () => {
+    const imagePath = path.join(dir, "small.png");
+    writeFileSync(imagePath, pngFixture(64, 32, 18));
+    nativeImageMock.thumbnail.getSize.mockReturnValue({
+      width: 32,
+      height: 18,
+    });
+
+    const res = await callThumbnail({
+      cwd: dir,
+      path: "small.png",
+      maxDimension: 64,
+    });
+
+    expect(res).toMatchObject({
+      kind: "image",
+      width: 32,
+      height: 18,
+      fullResolution: true,
+    });
+  });
+
   it("supports a sharper close-up bucket without decoding beyond its bound", async () => {
     const imagePath = path.join(dir, "close-up.png");
     writeFileSync(imagePath, pngFixture(64, 2_400, 1_350));

@@ -23,9 +23,18 @@
 // ──────────────────────────────────────────────────────────
 
 import type { PtyService } from "../pty/service";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { getWorkspaceById, updateWorkspace, listWorkspaces } from "./state";
 import type { SetupState } from "./types";
 import { buildSetupCommandEnv } from "./setup-hooks";
+import type {
+  BoundaryAuthoritySnapshot,
+  BoundaryTerritoryContributionSnapshot,
+  PreparedBoundary,
+  RepoTaskBoundaryFactory,
+} from "../agents/containment/types";
+import { RetriableBoundaryRetirement } from "../agents/containment/boundary-retirement";
 
 const SETUP_PREFIX = "setup:";
 /** Keep at most the last 512 KB of setup output in memory (the tail is what a
@@ -69,6 +78,7 @@ export interface SetupTarget {
 }
 
 interface SetupEntry {
+  workspaceId: string;
   /** The CURRENT run's session id. appendData/handleExit ignore any event whose
    *  session id doesn't match this — that's a superseded (killed) run. */
   sessionId: string;
@@ -85,7 +95,24 @@ interface SetupEntry {
   /** Fired once if THIS run ends "passed" — the workspace-create path hangs
    *  the run-on-create actions off it (never set for manual reruns). */
   onPassed?: () => void;
+  boundary: PreparedBoundary;
+  boundaryFinalized: boolean;
+  boundaryTeardown?: Promise<void>;
 }
+
+interface BoundaryTeardownRecord {
+  readonly retirement: RetriableBoundaryRetirement;
+  readonly workspaceId: string;
+  readonly territoryContributions:
+    | readonly BoundaryTerritoryContributionSnapshot[]
+    | undefined;
+}
+
+const missingRepoTaskBoundary: RepoTaskBoundaryFactory = async () => {
+  throw new Error(
+    "repository setup refused: no Zeros Sandbox Runtime boundary is configured",
+  );
+};
 
 export class SetupManager {
   /** workspaceId → the CURRENT run's buffer + session id. */
@@ -93,9 +120,18 @@ export class SetupManager {
   /** Starts whose login-shell environment is still resolving. They have no
    *  PTY or entry yet, so stop()/archive needs this separate cancellation
    *  handle to prevent a setup shell from appearing after shutdown. */
-  private readonly starting = new Map<string, { cancelled: boolean }>();
+  private readonly starting = new Map<
+    string,
+    { cancelled: boolean; authority?: BoundaryAuthoritySnapshot }
+  >();
   /** Monotonic run counter → a unique session id per run (rerun-race guard). */
   private gen = 0;
+  /** Failed teardown proof survives reruns until a background retry proves it,
+   * so archive/delete cannot mistake a superseded entry for safe removal. */
+  private readonly boundaryTeardowns = new Map<
+    string,
+    Set<BoundaryTeardownRecord>
+  >();
 
   constructor(
     private readonly pty: PtyService,
@@ -104,7 +140,235 @@ export class SetupManager {
     /** Injectable because resolving the login-shell PATH is asynchronous; the
      *  cancellation seam must be deterministic in unit tests. */
     private readonly envBuilder: typeof buildSetupCommandEnv = buildSetupCommandEnv,
+    private readonly boundaryFactory: RepoTaskBoundaryFactory = missingRepoTaskBoundary,
   ) {}
+
+  private beginBoundaryRevocation(entry: SetupEntry): void {
+    void entry.boundary.revoke().catch((error) => {
+      console.error("[setup] failed to revoke repo-task capabilities:", error);
+    });
+  }
+
+  private finalizeBoundary(entry: SetupEntry): Promise<void> {
+    if (entry.boundaryTeardown) return entry.boundaryTeardown;
+    entry.boundaryFinalized = true;
+    const promise = this.trackBoundaryTeardown(
+      entry.boundary,
+      entry.workspaceId,
+    );
+    entry.boundaryTeardown = promise;
+    return promise;
+  }
+
+  /** Track teardown even when cancellation lands after boundary admission but
+   * before a SetupEntry exists. The durable process-domain proof must remain a
+   * lifecycle barrier if that detached teardown fails. */
+  private trackBoundaryTeardown(
+    boundary: PreparedBoundary,
+    workspaceId: string,
+  ): Promise<void> {
+    const records =
+      this.boundaryTeardowns.get(workspaceId) ??
+      new Set<BoundaryTeardownRecord>();
+    const retirement = new RetriableBoundaryRetirement(boundary, {
+      onFailure: (error, attempt) => {
+        console.error(
+          `[setup] repo-task boundary teardown attempt ${attempt} failed; retrying automatically:`,
+          error,
+        );
+      },
+      onProven: (recovered) => {
+        records.delete(record);
+        if (records.size === 0) this.boundaryTeardowns.delete(workspaceId);
+        if (recovered) {
+          console.log("[setup] repo-task boundary teardown proof recovered");
+        }
+      },
+    });
+    const record = {
+      retirement,
+      workspaceId,
+      territoryContributions: boundary.territoryContributions,
+    } satisfies BoundaryTeardownRecord;
+    records.add(record);
+    this.boundaryTeardowns.set(workspaceId, records);
+    return retirement.start();
+  }
+
+  /** Lifecycle barrier used after PTY exit and before checkout removal. */
+  async proveWorkspaceBoundaryStopped(workspaceId: string): Promise<void> {
+    const entry = this.entries.get(workspaceId);
+    if (entry) void this.finalizeBoundary(entry);
+    const records = [...(this.boundaryTeardowns.get(workspaceId) ?? [])];
+    const results = await Promise.allSettled(
+      records.map((record) => record.retirement.promise),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "repository setup containment teardown was not proven. Automatic recovery is still retrying; removing the workspace or changing its Design territory remains blocked until proof succeeds.",
+      );
+    }
+  }
+
+  /** Revoke every repository-controlled setup boundary before the app-wide
+   * Design-owner map changes. Human terminals are deliberately unrelated; a
+   * setup script is code authority and must not retain an older deny union. */
+  async stopAllAndProve(): Promise<void> {
+    const workspaceIds = new Set([
+      ...this.starting.keys(),
+      ...this.entries.keys(),
+      // A superseded entry is removed before its replacement builds the env.
+      // If that replacement aborts, this ledger is the only remaining handle
+      // to an older teardown whose process-domain proof may have failed.
+      ...this.boundaryTeardowns.keys(),
+    ]);
+    for (const workspaceId of workspaceIds) this.stop(workspaceId);
+    const results = await Promise.allSettled(
+      [...workspaceIds].map((workspaceId) =>
+        this.proveWorkspaceBoundaryStopped(workspaceId),
+      ),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "repository setup boundaries were not all proven stopped. Automatic recovery is still retrying; registered Design territory changes remain blocked until proof succeeds.",
+      );
+    }
+  }
+
+  /** Retire only setup boundaries whose immutable authority includes one
+   * managed workspace. A sibling workspace's Design pointer is not part of
+   * this boundary unless the setup owns that workspace or explicitly carries
+   * its contribution. The engine calls this before and after draining matching
+   * admissions, so both already-published and late-published boundaries are
+   * stopped without touching unrelated starts. */
+  async stopForWorkspaceTerritoryAndProve(
+    workspaceId: string,
+    workspaceRoot: string,
+  ): Promise<void> {
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    const includesWorkspace = (
+      owner: string,
+      contributions:
+        | readonly BoundaryTerritoryContributionSnapshot[]
+        | undefined,
+    ): boolean =>
+      owner === workspaceId ||
+      contributions?.some(
+        (contribution) =>
+          path.resolve(contribution.workspaceRoot) === normalizedWorkspace,
+      ) === true;
+
+    const workspaceIds = new Set<string>();
+    for (const [owner, flight] of this.starting) {
+      if (includesWorkspace(owner, flight.authority?.territoryContributions)) {
+        workspaceIds.add(owner);
+      }
+    }
+    for (const entry of this.entries.values()) {
+      if (
+        includesWorkspace(
+          entry.workspaceId,
+          entry.boundary.territoryContributions,
+        )
+      ) {
+        workspaceIds.add(entry.workspaceId);
+      }
+    }
+    for (const owner of workspaceIds) this.stop(owner);
+
+    const records = [...this.boundaryTeardowns.values()]
+      .flatMap((entries) => [...entries])
+      .filter((record) =>
+        includesWorkspace(record.workspaceId, record.territoryContributions),
+      );
+    const results = await Promise.allSettled(
+      records.map((record) => record.retirement.promise),
+    );
+    const failures = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : [],
+    );
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        "repository setup boundaries for this Design territory were not proven stopped. Automatic recovery is still retrying; this territory change remains blocked until proof succeeds.",
+      );
+    }
+  }
+
+  /** Whether a live or admitting setup task was compiled from a different
+   * app-wide Design subtraction. An in-flight admission has not published its
+   * identity yet, so a concurrent external territory event is conservatively
+   * treated as changed and the global start drain resolves the race. */
+  registeredDesignAuthorityChanged(identity: string | null): boolean {
+    if (this.boundaryTeardowns.size > 0) return true;
+    for (const flight of this.starting.values()) {
+      if (
+        flight.authority &&
+        flight.authority.registeredDesignAuthorityIdentity !== identity
+      ) {
+        return true;
+      }
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.state !== "running" || entry.boundaryFinalized) continue;
+      if (
+        !entry.boundary ||
+        entry.boundary.registeredDesignAuthorityIdentity !== identity
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  workspaceTerritoryChanged(
+    workspaceRoot: string,
+    territoryIdentity: string | null,
+  ): boolean {
+    const normalizedWorkspace = path.resolve(workspaceRoot);
+    const changed = (snapshot: BoundaryAuthoritySnapshot): boolean =>
+      snapshot.territoryContributions.some(
+        (contribution) =>
+          path.resolve(contribution.workspaceRoot) === normalizedWorkspace &&
+          contribution.identity !== territoryIdentity,
+      );
+    for (const flight of this.starting.values()) {
+      if (flight.authority && changed(flight.authority)) return true;
+    }
+    for (const entry of this.entries.values()) {
+      if (entry.state !== "running" || entry.boundaryFinalized) continue;
+      const contributions = entry.boundary.territoryContributions;
+      if (
+        !contributions ||
+        changed({
+          registeredDesignAuthorityIdentity:
+            entry.boundary.registeredDesignAuthorityIdentity ?? null,
+          territoryContributions: contributions,
+        })
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  hasRepositoryCodeAuthority(): boolean {
+    return (
+      this.starting.size > 0 ||
+      this.boundaryTeardowns.size > 0 ||
+      [...this.entries.values()].some(
+        (entry) => entry.state === "running" && !entry.boundaryFinalized,
+      )
+    );
+  }
 
   /** On engine start the in-memory buffers are empty, so any workspace row still
    *  marked "running" is an orphan from a previous process (the engine was quit
@@ -157,7 +421,10 @@ export class SetupManager {
     // block checks identity, so it cannot retire this replacement's slot.
     const priorFlight = this.starting.get(args.workspaceId);
     if (priorFlight) priorFlight.cancelled = true;
-    const flight = { cancelled: false };
+    const flight: {
+      cancelled: boolean;
+      authority?: BoundaryAuthoritySnapshot;
+    } = { cancelled: false };
     this.starting.set(args.workspaceId, flight);
     // Orphan the previous run BEFORE killing it, then kill.
     //
@@ -175,7 +442,9 @@ export class SetupManager {
     const prev = this.entries.get(args.workspaceId);
     if (prev) {
       this.entries.delete(args.workspaceId);
+      this.beginBoundaryRevocation(prev);
       if (this.pty.has(prev.sessionId)) this.pty.kill(prev.sessionId);
+      void this.finalizeBoundary(prev);
     }
     // Resolve the env BEFORE publishing "running". It awaits the login-shell
     // PATH probe (up to 3s cold), and with the entry already registered a Stop
@@ -192,8 +461,23 @@ export class SetupManager {
       // Stop/archive can land while the login-shell PATH probe is awaiting.
       // The request has already been acknowledged, but no child may spawn now.
       if (flight.cancelled) return;
+      const boundary = await this.boundaryFactory({
+        executionId: `repo-setup-${randomUUID()}`,
+        cwd,
+        workspaceRoot: cwd,
+        repoRoot,
+        env,
+        onAuthorityResolved: (authority) => {
+          if (!flight.cancelled) flight.authority = authority;
+        },
+      });
+      if (flight.cancelled) {
+        await this.trackBoundaryTeardown(boundary, args.workspaceId);
+        return;
+      }
       const sessionId = setupSessionId(args.workspaceId, ++this.gen);
       this.entries.set(args.workspaceId, {
+        workspaceId: args.workspaceId,
         sessionId,
         command: args.command,
         log: "",
@@ -201,17 +485,44 @@ export class SetupManager {
         state: "running",
         stopRequested: false,
         onPassed: args.onPassed,
+        boundary,
+        boundaryFinalized: false,
       });
       this.setState(args.workspaceId, "running");
-      this.pty.create({
-        sessionId,
-        resolvedCwd: cwd,
-        command: args.command,
-        env,
-        cols: 120,
-        rows: 30,
-        scrubEnv: false, // env is supplied verbatim (already scrubbed)
-      });
+      try {
+        this.pty.create({
+          sessionId,
+          resolvedCwd: cwd,
+          command: args.command,
+          env,
+          cols: 120,
+          rows: 30,
+          scrubEnv: false, // env is supplied verbatim (already scrubbed)
+          wrapSpawn: (request) => {
+            const launch = boundary.wrapSpawn(request);
+            if (launch.stdio !== "inherit") {
+              throw new Error("setup boundary did not preserve PTY stdio");
+            }
+            return { ...launch, stdio: "inherit" as const };
+          },
+          onSpawned: (pid, leaderExited) => {
+            boundary.trackProcessGroup(pid, { leaderExited });
+          },
+        });
+      } catch (error) {
+        this.setState(args.workspaceId, "failed");
+        const entry = this.entries.get(args.workspaceId)!;
+        this.beginBoundaryRevocation(entry);
+        try {
+          await this.finalizeBoundary(entry);
+        } catch (teardownError) {
+          throw new AggregateError(
+            [error, teardownError],
+            "setup spawn failed and containment teardown was not proven",
+          );
+        }
+        throw error;
+      }
     } finally {
       if (this.starting.get(args.workspaceId) === flight) {
         this.starting.delete(args.workspaceId);
@@ -254,11 +565,19 @@ export class SetupManager {
     if (entry && this.pty.has(entry.sessionId)) {
       entry.stopRequested = true;
       this.setState(workspaceId, "stopped");
+      this.beginBoundaryRevocation(entry);
       this.pty.kill(entry.sessionId);
+      void this.finalizeBoundary(entry);
       return;
     }
     const rowState = getWorkspaceById(workspaceId)?.setupState ?? entry?.state;
-    if (rowState === "running") this.setState(workspaceId, "stopped");
+    if (rowState === "running") {
+      this.setState(workspaceId, "stopped");
+      if (entry) {
+        this.beginBoundaryRevocation(entry);
+        void this.finalizeBoundary(entry);
+      }
+    }
   }
 
   /** Append a chunk of the CURRENT setup PTY's output (ignores non-setup AND
@@ -301,6 +620,7 @@ export class SetupManager {
         ? "passed"
         : "failed";
     this.setState(workspaceId, state);
+    void this.finalizeBoundary(entry);
     if (state === "passed" && entry.onPassed) {
       const cb = entry.onPassed;
       entry.onPassed = undefined; // fire once

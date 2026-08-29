@@ -57,6 +57,18 @@ export type WorkingDirectoriesUnsupportedReason =
 export interface WorkingDirectoriesState {
   /** Every top-level tracked directory, sorted. The full candidate set. */
   all: string[];
+  /** Top-level directories that hold Design territory and therefore may never
+   *  be excluded, sorted. Hiding one takes the canvas off disk: Design mode
+   *  would open onto nothing, and the marker every code-side write guard
+   *  recognizes would be gone with it. The picker renders these checked and
+   *  non-interactive, and `set` force-includes them regardless of what a
+   *  caller asks for — the engine, not the UI, is the authority.
+   *
+   *  The caller supplies them because Design resolution lives above Git and
+   *  importing it here would be a cycle. A NESTED design folder contributes
+   *  its TOP-LEVEL segment: excluding `apps` would take `apps/web/canvas`
+   *  with it. */
+  locked: string[];
   /** The subset currently materialized. Equals `all` when not sparse. */
   included: string[];
   /** Whether sparse-checkout is active in this worktree right now. */
@@ -240,9 +252,11 @@ async function isConeMode(cwd: string): Promise<boolean> {
  *  unsupported checkout reports `supported: false` and an empty set. */
 export async function getWorkingDirectories(
   cwd: string,
+  options: { designRoots?: readonly string[] } = {},
 ): Promise<WorkingDirectoriesState> {
   const unsupported: WorkingDirectoriesState = {
     all: [],
+    locked: [],
     included: [],
     sparse: false,
     supported: false,
@@ -257,6 +271,17 @@ export async function getWorkingDirectories(
     // Not a repo, or an unborn HEAD (fresh `git init`, nothing committed).
     return unsupported;
   }
+  // Only a candidate the picker actually offers can be locked; a design folder
+  // that isn't a tracked top-level directory needs no protection here because
+  // this feature cannot reach it.
+  const allSet = new Set(all);
+  const locked = [
+    ...new Set(
+      (options.designRoots ?? [])
+        .map((root) => root.replace(/\\/g, "/").split("/")[0] ?? "")
+        .filter((segment) => segment.length > 0 && allSet.has(segment)),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
   const cone = await listSparseCone(cwd);
   // A tracked folder whose name we cannot write as a cone entry (a newline or
   // NUL in it) would be absent from every cone we write, so git would delete it
@@ -267,6 +292,7 @@ export async function getWorkingDirectories(
   if (unrepresentable.length > 0) {
     return {
       all,
+      locked,
       included: all,
       sparse: cone !== null,
       supported: false,
@@ -274,12 +300,13 @@ export async function getWorkingDirectories(
     };
   }
   if (cone === null) {
-    return { all, included: all, sparse: false, supported: true };
+    return { all, locked, included: all, sparse: false, supported: true };
   }
   // Sparse, but with hand-written non-cone patterns we must not rewrite.
   if (!(await isConeMode(cwd))) {
     return {
       all,
+      locked,
       included: all,
       sparse: true,
       supported: false,
@@ -290,9 +317,15 @@ export async function getWorkingDirectories(
   // directory that no longer exists at HEAD (deleted on another branch), and
   // surfacing it as a checked row the user cannot uncheck would be a dead end.
   const coneSet = new Set(cone);
+  const lockedSet = new Set(locked);
   return {
     all,
-    included: all.filter((d) => coneSet.has(d)),
+    locked,
+    // A cone written before a folder became Design territory (or by another
+    // tool) can omit a locked directory. Report it as included so the picker
+    // is never in the impossible state of showing a locked row unchecked; the
+    // next save materializes it again.
+    included: all.filter((d) => coneSet.has(d) || lockedSet.has(d)),
     sparse: true,
     supported: true,
   };
@@ -358,7 +391,7 @@ function withSaveLock<T>(cwd: string, fn: () => Promise<T>): Promise<T> {
 export function setWorkingDirectories(
   cwd: string,
   included: string[],
-  options: { forceSparse?: boolean } = {},
+  options: { forceSparse?: boolean; designRoots?: readonly string[] } = {},
 ): Promise<SetWorkingDirectoriesResult> {
   return withSaveLock(cwd, () =>
     applyWorkingDirectories(cwd, included, options),
@@ -368,9 +401,9 @@ export function setWorkingDirectories(
 async function applyWorkingDirectories(
   cwd: string,
   included: string[],
-  options: { forceSparse?: boolean },
+  options: { forceSparse?: boolean; designRoots?: readonly string[] },
 ): Promise<SetWorkingDirectoriesResult> {
-  const state = await getWorkingDirectories(cwd);
+  const state = await getWorkingDirectories(cwd, options);
   if (!state.supported) {
     // Name the actual obstacle. One shared "needs a repo with a commit" line
     // was wrong for two of the three cases and left the user nothing to act on.
@@ -381,7 +414,14 @@ async function applyWorkingDirectories(
   }
 
   const allowed = new Set(state.all);
-  const wanted = [...new Set(included)].filter((d) => allowed.has(d)).sort();
+  // Design territory is force-included rather than rejected. "Deselect all"
+  // then reads naturally instead of erroring, and the picker already shows
+  // these rows as locked, so nothing changes behind the user's back. The
+  // engine holds this regardless of caller: a stale renderer, an older client,
+  // or a direct op cannot hide the canvas.
+  const wanted = [...new Set([...included, ...state.locked])]
+    .filter((d) => allowed.has(d))
+    .sort();
   const unknown = included.filter((d) => !allowed.has(d));
   if (unknown.length > 0) {
     throw new GitError({
@@ -393,7 +433,7 @@ async function applyWorkingDirectories(
   // Everything selected → return to the non-sparse default.
   if (wanted.length === state.all.length && !options.forceSparse) {
     if (state.sparse) await runGit(cwd, ["sparse-checkout", "disable"]);
-    return { ...(await getWorkingDirectories(cwd)), leftBehind: [] };
+    return { ...(await getWorkingDirectories(cwd, options)), leftBehind: [] };
   }
 
   // ONE call, with `--cone` folded in — never a separate `init --cone` first.
@@ -426,7 +466,7 @@ async function applyWorkingDirectories(
   });
 
   return {
-    ...(await getWorkingDirectories(cwd)),
+    ...(await getWorkingDirectories(cwd, options)),
     leftBehind: parseLeftBehind(stderr),
   };
 }

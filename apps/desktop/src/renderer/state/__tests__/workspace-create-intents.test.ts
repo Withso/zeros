@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { ChatThread } from "../store";
 import { selectActiveFolder, useWorkspaceStore } from "../workspace-store";
@@ -49,25 +49,37 @@ describe("prepared workspace renderer intents", () => {
   });
 
   it("queues and consumes many exact chat sends independently", () => {
-    const dispatch = useWorkspaceStore.getState().dispatch;
-    dispatch({ type: "REQUEST_AUTO_SEND", chatId: "chat-a" });
-    dispatch({ type: "REQUEST_AUTO_SEND", chatId: "chat-b" });
-    dispatch({ type: "REQUEST_AUTO_SEND", chatId: "chat-a" });
+    // The value is when the turn was parked: the release site bounds its wait
+    // on it (queuedFirstTurnAction) and boot recovery decides on it
+    // (recoverPendingAutoSend).
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(1_000);
+      const dispatch = useWorkspaceStore.getState().dispatch;
+      dispatch({ type: "REQUEST_AUTO_SEND", chatId: "chat-a" });
+      dispatch({ type: "REQUEST_AUTO_SEND", chatId: "chat-b" });
+      // Pressing Send again while still provisioning must NOT restart the
+      // clock, or repeated presses could extend the wait indefinitely.
+      vi.setSystemTime(9_000);
+      dispatch({ type: "REQUEST_AUTO_SEND", chatId: "chat-a" });
 
-    expect(useWorkspaceStore.getState().pendingAutoSend).toEqual({
-      "chat-a": true,
-      "chat-b": true,
-    });
+      expect(useWorkspaceStore.getState().pendingAutoSend).toEqual({
+        "chat-a": 1_000,
+        "chat-b": 1_000,
+      });
 
-    dispatch({ type: "CONSUME_AUTO_SEND", chatId: "chat-a" });
-    expect(useWorkspaceStore.getState().pendingAutoSend).toEqual({
-      "chat-b": true,
-    });
+      dispatch({ type: "CONSUME_AUTO_SEND", chatId: "chat-a" });
+      expect(useWorkspaceStore.getState().pendingAutoSend).toEqual({
+        "chat-b": 1_000,
+      });
 
-    dispatch({ type: "CONSUME_AUTO_SEND", chatId: "missing" });
-    expect(useWorkspaceStore.getState().pendingAutoSend).toEqual({
-      "chat-b": true,
-    });
+      dispatch({ type: "CONSUME_AUTO_SEND", chatId: "missing" });
+      expect(useWorkspaceStore.getState().pendingAutoSend).toEqual({
+        "chat-b": 1_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("cancels an exact queued send when its chat is closed", () => {

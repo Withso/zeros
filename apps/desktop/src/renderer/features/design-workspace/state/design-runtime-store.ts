@@ -68,6 +68,15 @@ interface DesignRuntimeStore {
     screenshot: DesignRuntimeScreenshot,
     sourceVersion: string,
   ): void;
+  adoptFrameGeneration(
+    workspaceId: string,
+    frame: string,
+    previousSourceVersion: string,
+    nextSourceVersion: string,
+    snapshot: DesignRuntimeSnapshot,
+    details: DesignRuntimeNodeDetails[],
+    treeUnchanged?: boolean,
+  ): boolean;
   setHoveredNode(
     workspaceId: string,
     frame: string | null,
@@ -130,6 +139,24 @@ function sameStringRecord(
   );
 }
 
+function sameNodeBox(
+  left: DesignRuntimeNodeDetails["box"],
+  right: DesignRuntimeNodeDetails["box"],
+): boolean {
+  if (!left || !right) return left === right;
+  return (
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height &&
+    left.rotation === right.rotation &&
+    left.scaleX === right.scaleX &&
+    left.scaleY === right.scaleY &&
+    left.originX === right.originX &&
+    left.originY === right.originY
+  );
+}
+
 function sameNodeDetails(
   left: DesignRuntimeNodeDetails | undefined,
   right: DesignRuntimeNodeDetails,
@@ -142,12 +169,18 @@ function sameNodeDetails(
     left.name === right.name &&
     left.text === right.text &&
     left.textEditable === right.textEditable &&
+    left.textSizing?.width === right.textSizing?.width &&
+    left.textSizing?.height === right.textSizing?.height &&
+    left.textSizing?.availableWidth === right.textSizing?.availableWidth &&
     left.selector === right.selector &&
     left.visible === right.visible &&
     left.rect.x === right.rect.x &&
     left.rect.y === right.rect.y &&
     left.rect.width === right.rect.width &&
     left.rect.height === right.rect.height &&
+    // Rotating a square leaves its bounding box identical, so orientation has
+    // to be compared or the canvas keeps painting the previous angle.
+    sameNodeBox(left.box, right.box) &&
     sameStringArray(left.breadcrumb, right.breadcrumb) &&
     sameStringArray(
       left.authoredStyleProperties,
@@ -221,14 +254,29 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
 
   publishSnapshot(workspaceId, folder, frame, snapshot, sourceVersion) {
     if (snapshot.sourceVersion !== sourceVersion) return;
-    set((state) =>
-      updateWorkspace(state, workspaceId, folder, frame, (current, now) => ({
-        ...current,
-        snapshot,
-        sourceVersion,
-        updatedAt: now,
-      })),
-    );
+    set((state) => {
+      const workspace = state.byWorkspace[workspaceId];
+      const current = workspace?.frames[frame];
+      if (
+        workspace?.folder === folder &&
+        current?.sourceVersion === sourceVersion &&
+        current.snapshot === snapshot
+      ) {
+        return state;
+      }
+      return updateWorkspace(
+        state,
+        workspaceId,
+        folder,
+        frame,
+        (ownedFrame, now) => ({
+          ...ownedFrame,
+          snapshot,
+          sourceVersion,
+          updatedAt: now,
+        }),
+      );
+    });
   },
 
   publishNodeDetails(workspaceId, folder, frame, details, sourceVersion) {
@@ -309,6 +357,67 @@ export const useDesignRuntimeStore = create<DesignRuntimeStore>((set) => ({
         };
       }),
     );
+  },
+
+  adoptFrameGeneration(
+    workspaceId,
+    frame,
+    previousSourceVersion,
+    nextSourceVersion,
+    snapshot,
+    details,
+    treeUnchanged = false,
+  ) {
+    if (
+      snapshot.sourceVersion !== nextSourceVersion ||
+      details.some((value) => value.sourceVersion !== nextSourceVersion)
+    ) {
+      return false;
+    }
+    let adopted = false;
+    set((state) => {
+      const workspace = state.byWorkspace[workspaceId];
+      const current = workspace?.frames[frame];
+      if (!workspace || current?.sourceVersion !== previousSourceVersion) {
+        return state;
+      }
+      adopted = true;
+      return updateWorkspace(
+        state,
+        workspaceId,
+        workspace.folder,
+        frame,
+        (ownedFrame, now) => {
+          const rebasedDetails = Object.fromEntries(
+            Object.entries(ownedFrame.detailsByNode).map(([nodeId, value]) => [
+              nodeId,
+              { ...value, sourceVersion: nextSourceVersion },
+            ]),
+          );
+          let detailOrder = ownedFrame.detailOrder;
+          for (const value of details) {
+            rebasedDetails[value.oid] = value;
+            detailOrder = touchOrder(
+              detailOrder,
+              value.oid,
+              MAX_DETAILS_PER_FRAME,
+            );
+          }
+          return {
+            ...ownedFrame,
+            sourceVersion: nextSourceVersion,
+            snapshot:
+              treeUnchanged && ownedFrame.snapshot
+                ? { ...snapshot, tree: ownedFrame.snapshot.tree }
+                : snapshot,
+            detailsByNode: keepKeys(rebasedDetails, detailOrder),
+            detailOrder,
+            updatedAt: now,
+          };
+        },
+      );
+    });
+    return adopted;
   },
 
   setHoveredNode(workspaceId, hoveredFrame, hoveredNodeId) {

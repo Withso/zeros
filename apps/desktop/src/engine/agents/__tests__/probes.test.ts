@@ -13,12 +13,19 @@
 // only as a defensive fast path. These tests pin that behaviour so a
 // future refactor breaks the suite, not the user's sign-in.
 
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { evaluateAuthProbe, latestAuthFileMtimeMs } from "../probes";
+import {
+  clearVersionCache,
+  evaluateAuthProbe,
+  isOnPath,
+  latestAuthFileMtimeMs,
+  probeCliVersion,
+  type ProbeCommandRunner,
+} from "../probes";
 import { findAgent, type AuthProbe } from "../registry";
 
 const HOUR_MS = 60 * 60_000;
@@ -38,6 +45,15 @@ afterEach(async () => {
 async function writeCreds(obj: unknown): Promise<void> {
   await writeFile(credPath, JSON.stringify(obj), "utf-8");
 }
+
+describe("CLI executable discovery", () => {
+  it("accepts an explicit absolute executable outside PATH", async () => {
+    const binary = path.join(dir, "custom-provider");
+    await writeFile(binary, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(binary, 0o755);
+    await expect(isOnPath(binary)).resolves.toBe(true);
+  });
+});
 
 /** An any-of OAuth-credential-file probe (refresh-token presence OR expiry),
  *  pointed at a temp file instead of a real credentials path. */
@@ -285,5 +301,50 @@ describe("Cursor manifest entry shape", () => {
     expect(probe.kind).toBe("secret-account");
     if (probe.kind !== "secret-account") throw new Error("expected secret-account");
     expect(probe.account).toBe("cursor-api-key");
+  });
+});
+
+describe("contained command probes", () => {
+  it("delegates command auth and version execution to the supplied runner", async () => {
+    const run = vi
+      .fn<ProbeCommandRunner["run"]>()
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "signed in\n" })
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "probe 9.8.7\n" });
+    const runner: ProbeCommandRunner = {
+      cacheKey: "contained-test",
+      run,
+    };
+    const binary = "definitely-not-on-the-host-path-contained-probe";
+    clearVersionCache();
+
+    expect(
+      await evaluateAuthProbe(
+        { kind: "command", binary, args: ["login", "status"] },
+        runner,
+      ),
+    ).toBe(true);
+    expect(await probeCliVersion(binary, runner)).toBe("9.8.7");
+    expect(run).toHaveBeenNthCalledWith(1, binary, ["login", "status"], {
+      timeoutMs: 5_000,
+    });
+    expect(run).toHaveBeenNthCalledWith(2, binary, ["--version"], {
+      timeoutMs: 8_000,
+    });
+  });
+
+  it("propagates a contained-runner failure instead of calling it signed out", async () => {
+    const runner: ProbeCommandRunner = {
+      cacheKey: "unavailable-boundary",
+      run: async () => {
+        throw new Error("provider boundary could not be prepared");
+      },
+    };
+
+    await expect(
+      evaluateAuthProbe(
+        { kind: "command", binary: "codex", args: ["login", "status"] },
+        runner,
+      ),
+    ).rejects.toThrow(/boundary could not be prepared/i);
   });
 });

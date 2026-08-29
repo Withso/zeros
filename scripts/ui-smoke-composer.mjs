@@ -37,12 +37,10 @@
 //      indentation instead of dropping them to column 0.
 //  12. The Files-tab tree keeps its indent guides visible without hover and
 //      nests ~15.5px per level.
-//  13. The collapsed Files tab's floating tree popup wears the popover recipe
-//      (inset + rounded + shadow, quick-open search row, padded list),
-//      freezes its open-time height across container resizes, re-measures on
-//      reopen, keeps its filter input focused through tree clicks, and
-//      dismisses on file-open / double Escape / outside pointerdown while the
-//      trigger stays a toggle.
+//  13. The Files tab's Search action opens a persistent base-surface sidebar
+//      (not a floating popup), starts with an input-only state, filters on
+//      demand, follows the shared sidebar width, survives result/outside clicks,
+//      and closes via double Escape or its active toggle.
 //  14. A file editor is ALREADY syntax-colored on its first painted frame, with
 //      the code theme's own base foreground — the "opens white, then repaints"
 //      flash. Only a real browser can prove this: the editor is mounted inside
@@ -1354,6 +1352,7 @@ try {
     !!resultBox &&
       !!filteredSearchBox &&
       resultBox.y >= filteredSearchBox.y + filteredSearchBox.height,
+    JSON.stringify({ resultBox, filteredSearchBox }),
   );
   const fableFavorite = modelRow("Fable 5").locator(
     "[data-model-favorite-action]",
@@ -2018,238 +2017,177 @@ try {
     `opacity ${tree?.guideOpacity}`,
   );
 
-  // The collapsed Files tab's floating tree POPUP (FilesTreePanel over the
-  // same primed listing). Real-browser contract: popover geometry captured at
-  // open time, focus locked to the filter input across shadow-DOM tree
-  // clicks, and the popup's dismissal surface (file open, Escape, outside
-  // pointerdown, trigger toggle).
-  const treePanelTrigger = page.getByTestId("tree-panel-trigger");
-  const treePanel = page.locator('[data-testid="files-tree-panel"]');
-  const treePanelInput = page.locator(
-    '[data-testid="files-tree-panel"] input[aria-label="Search workspace files"]',
-  );
-  const treePanelVisible = () => treePanel.isVisible().catch(() => false);
-  const treePanelHidden = () =>
-    treePanel
+  // Search is now a same-size base sidebar, not a floating popup. It starts
+  // empty, follows its shared shell's resized width, and remains open while a
+  // result routes to the viewer.
+  const searchSidebarTrigger = page.getByTestId("search-sidebar-trigger");
+  const searchSidebarResize = page.getByTestId("search-sidebar-resize");
+  const searchSidebarShell = page.getByTestId("search-sidebar-shell");
+  const searchSidebar = page.getByTestId("files-search-sidebar");
+  const searchSidebarInput = searchSidebar.getByRole("textbox", {
+    name: "Search workspace files",
+  });
+  const searchSidebarVisible = () =>
+    searchSidebar.isVisible().catch(() => false);
+  const searchSidebarHidden = () =>
+    searchSidebar
       .isVisible()
-      .then((v) => !v)
+      .then((value) => !value)
       .catch(() => true);
-  const treePanelInputFocused = () =>
-    treePanelInput
-      .evaluate((el) => el === document.activeElement)
-      .catch(() => false);
 
-  await treePanelTrigger.click();
-  check(
-    "Tree panel opens from its trigger",
-    await waitFor(treePanelVisible, "tree-panel-open"),
-  );
-  const panelGeo = await page
+  await searchSidebarTrigger.click();
+  await searchSidebar.waitFor({ state: "visible", timeout: 10_000 });
+  const initialSearchSidebar = await page
     .evaluate(() => {
-      const container = document.querySelector(
-        '[data-testid="tree-panel-container"]',
+      const shell = document.querySelector(
+        '[data-testid="search-sidebar-shell"]',
       );
-      const panel = document.querySelector('[data-testid="files-tree-panel"]');
-      if (!container || !panel) return null;
-      const c = container.getBoundingClientRect();
-      const p = panel.getBoundingClientRect();
-      const cs = getComputedStyle(panel);
-      const row = panel.firstElementChild;
-      const list = panel.lastElementChild;
-      const input = row?.querySelector("input");
+      const sidebar = document.querySelector(
+        '[data-testid="files-search-sidebar"]',
+      );
+      const baseTree = document.querySelector(
+        '[data-testid="file-tree-host"] > div',
+      );
+      const input = sidebar?.querySelector("input");
+      const row = input?.parentElement;
+      if (!shell || !sidebar || !baseTree || !input || !row) return null;
+      const shellRect = shell.getBoundingClientRect();
+      const sidebarRect = sidebar.getBoundingClientRect();
+      const style = getComputedStyle(sidebar);
       return {
-        clientHeight: container.clientHeight,
-        clientWidth: container.clientWidth,
-        topInset: p.top - (c.top + container.clientTop),
-        leftInset: p.left - (c.left + container.clientLeft),
-        height: p.height,
-        width: p.width,
-        bottomGap:
-          c.top +
-          container.clientTop +
-          container.clientHeight -
-          (p.top + p.height),
-        radius: parseFloat(cs.borderRadius),
-        shadow: cs.boxShadow,
-        borderWidth: cs.borderTopWidth,
-        rowHeight: row ? row.getBoundingClientRect().height : null,
-        rowBorderBottom: row ? getComputedStyle(row).borderBottomWidth : null,
-        rowHasIcon: !!row?.querySelector("svg"),
-        inputBorder: input ? getComputedStyle(input).borderTopWidth : null,
-        listPadding: list ? getComputedStyle(list).padding : null,
+        shellWidth: shell.clientWidth,
+        shellHeight: shell.clientHeight,
+        sidebarWidth: sidebarRect.width,
+        sidebarHeight: sidebarRect.height,
+        position: style.position,
+        radius: style.borderRadius,
+        shadow: style.boxShadow,
+        background: style.backgroundColor,
+        treeBackground: getComputedStyle(baseTree).backgroundColor,
+        rowHeight: row.getBoundingClientRect().height,
+        rowBorderBottom: getComputedStyle(row).borderBottomWidth,
+        inputBorder: getComputedStyle(input).borderTopWidth,
+        left: sidebarRect.left - (shellRect.left + shell.clientLeft),
+        top: sidebarRect.top - (shellRect.top + shell.clientTop),
       };
     })
     .catch(() => null);
   check(
-    "Tree panel floats inset below the header band",
-    panelGeo !== null &&
-      Math.abs(panelGeo.topInset - 40) < 1 &&
-      Math.abs(panelGeo.leftInset - 8) < 1,
-    `top inset ${panelGeo?.topInset}, left inset ${panelGeo?.leftInset}`,
+    "Search sidebar fills the shared column instead of floating",
+    initialSearchSidebar !== null &&
+      Math.abs(
+        initialSearchSidebar.sidebarWidth - initialSearchSidebar.shellWidth,
+      ) < 1 &&
+      Math.abs(
+        initialSearchSidebar.sidebarHeight - initialSearchSidebar.shellHeight,
+      ) < 1 &&
+      Math.abs(initialSearchSidebar.left) < 1 &&
+      Math.abs(initialSearchSidebar.top) < 1 &&
+      initialSearchSidebar.position === "static" &&
+      initialSearchSidebar.radius === "0px" &&
+      initialSearchSidebar.shadow === "none",
+    JSON.stringify(initialSearchSidebar),
   );
   check(
-    "Tree panel height is the open-time tab body minus header + bottom gap",
-    panelGeo !== null &&
-      Math.abs(panelGeo.height - (panelGeo.clientHeight - 48)) < 1 &&
-      Math.abs(panelGeo.bottomGap - 8) < 1,
-    `height ${panelGeo?.height}, bottom gap ${panelGeo?.bottomGap}`,
+    "Search sidebar uses the same base background as the file tree",
+    initialSearchSidebar?.background === initialSearchSidebar?.treeBackground,
+    `${initialSearchSidebar?.background} vs ${initialSearchSidebar?.treeBackground}`,
   );
   check(
-    "Tree panel takes 80% of the tab width",
-    panelGeo !== null &&
-      Math.abs(panelGeo.width - panelGeo.clientWidth * 0.8) < 1.5,
-    `width ${panelGeo?.width} of ${panelGeo?.clientWidth}`,
+    "Search sidebar starts with only its 36px search row",
+    initialSearchSidebar?.rowHeight === 36 &&
+      initialSearchSidebar.rowBorderBottom === "1px" &&
+      initialSearchSidebar.inputBorder === "0px" &&
+      (await searchSidebar.locator("[data-item-path]").count()) === 0,
+    JSON.stringify(initialSearchSidebar),
   );
   check(
-    "Tree panel wears the popover recipe (rounded + border + shadow)",
-    panelGeo !== null &&
-      panelGeo.radius >= 6 &&
-      panelGeo.shadow !== "none" &&
-      panelGeo.borderWidth === "1px",
-    `radius ${panelGeo?.radius}, border ${panelGeo?.borderWidth}`,
-  );
-  check(
-    "Tree panel search row matches the quick-open recipe",
-    panelGeo !== null &&
-      panelGeo.rowHeight === 36 &&
-      panelGeo.rowBorderBottom === "1px" &&
-      panelGeo.rowHasIcon &&
-      panelGeo.inputBorder === "0px",
-    `row ${panelGeo?.rowHeight}px, separator ${panelGeo?.rowBorderBottom}, borderless input ${panelGeo?.inputBorder}`,
-  );
-  check(
-    "Tree panel list is padded on all sides",
-    panelGeo?.listPadding === "4px",
-    `padding ${panelGeo?.listPadding}`,
-  );
-  check(
-    "Tree panel focuses its search on open",
-    await waitFor(treePanelInputFocused, "tree-panel-input-focus"),
-  );
-
-  // The trigger stays a TOGGLE while the popup is open (it is exempt from the
-  // outside-pointerdown dismissal — without the exemption this click would
-  // dismiss-then-reopen and the panel would appear stuck open).
-  await treePanelTrigger.click();
-  check(
-    "Trigger click closes the open panel (toggle, not dismiss-then-reopen)",
-    await waitFor(treePanelHidden, "tree-panel-toggle-close"),
-  );
-
-  await treePanelTrigger.click();
-  await treePanel.waitFor({ state: "visible", timeout: 10_000 });
-  await page
-    .locator('[data-testid="files-tree-panel"] [data-item-path="lib/"]')
-    .click();
-  check(
-    "Tree panel folder click expands the folder",
+    "Search sidebar focuses its input when opened",
     await waitFor(
       () =>
-        page
-          .locator(
-            '[data-testid="files-tree-panel"] [data-item-path="lib/readme.md"]',
-          )
-          .isVisible()
+        searchSidebarInput
+          .evaluate((el) => el === document.activeElement)
           .catch(() => false),
-      "tree-panel-folder-expand",
+      "search-sidebar-input-focus",
     ),
   );
-  check(
-    "Tree panel search keeps focus through tree clicks",
-    await waitFor(treePanelInputFocused, "tree-panel-focus-lock"),
-  );
 
-  // A popup keeps its size: shrinking the tab body must not reflow it.
-  const frozenHeight = await treePanel.evaluate(
-    (el) => el.getBoundingClientRect().height,
-  );
-  await page.getByTestId("tree-panel-container").evaluate((el) => {
-    el.style.height = "300px";
-  });
-  const shrunkHeight = await treePanel.evaluate(
-    (el) => el.getBoundingClientRect().height,
-  );
+  await searchSidebarInput.fill("readme");
   check(
-    "Tree panel keeps its open-time height when the tab body resizes",
-    Math.abs(shrunkHeight - frozenHeight) < 0.5,
-    `${shrunkHeight} after shrink vs ${frozenHeight} at open`,
-  );
-
-  await page
-    .locator(
-      '[data-testid="files-tree-panel"] [data-item-path="lib/readme.md"]',
-    )
-    .click();
-  check(
-    "Tree panel closes on file open",
-    await waitFor(treePanelHidden, "tree-panel-file-close"),
-  );
-  check(
-    "Tree panel routed the opened file",
-    consoleLines.some((l) => l.includes("[harness] panel open lib/readme.md")),
-  );
-
-  // Reopening measures the CURRENT tab body — the freeze is per open.
-  await treePanelTrigger.click();
-  await treePanel.waitFor({ state: "visible", timeout: 10_000 });
-  const reopened = await page
-    .evaluate(() => {
-      const container = document.querySelector(
-        '[data-testid="tree-panel-container"]',
-      );
-      const panel = document.querySelector('[data-testid="files-tree-panel"]');
-      if (!container || !panel) return null;
-      return {
-        height: panel.getBoundingClientRect().height,
-        clientHeight: container.clientHeight,
-      };
-    })
-    .catch(() => null);
-  check(
-    "Reopening re-measures the resized tab body",
-    reopened !== null &&
-      Math.abs(reopened.height - (reopened.clientHeight - 48)) < 1,
-    `height ${reopened?.height} for body ${reopened?.clientHeight}`,
-  );
-
-  await page.keyboard.type("readme");
-  check(
-    "Typing lands in the locked filter input",
-    (await treePanelInput.inputValue().catch(() => "")) === "readme",
-  );
-  check(
-    "Header-driven tree search keeps matches and filters unrelated rows",
+    "Typing mounts only matching search results",
     await waitFor(async () => {
-      const match = page.locator(
-        '[data-testid="files-tree-panel"] [data-item-path="lib/readme.md"]',
-      );
-      const unrelated = page.locator(
-        '[data-testid="files-tree-panel"] [data-item-path="package.json"]',
+      const match = searchSidebar.locator('[data-item-path="lib/readme.md"]');
+      const unrelated = searchSidebar.locator(
+        '[data-item-path="package.json"]',
       );
       return (
         (await match.isVisible().catch(() => false)) &&
         !(await unrelated.isVisible().catch(() => true))
       );
-    }, "tree-panel-search-filter"),
+    }, "search-sidebar-filter"),
   );
-  await page.keyboard.press("Escape");
+  await searchSidebar.locator('[data-item-path="lib/readme.md"]').click();
   check(
-    "Escape clears a live filter without dismissing",
-    (await treePanelInput.inputValue().catch(() => null)) === "" &&
-      (await treePanelVisible()),
+    "Search result routes the opened file",
+    consoleLines.some((line) =>
+      line.includes("[harness] search open lib/readme.md"),
+    ),
   );
-  await page.keyboard.press("Escape");
   check(
-    "Escape on an empty filter dismisses the panel",
-    await waitFor(treePanelHidden, "tree-panel-escape-close"),
+    "Search remains a visible sidebar after opening a result",
+    await searchSidebarVisible(),
   );
 
-  await treePanelTrigger.click();
-  await treePanel.waitFor({ state: "visible", timeout: 10_000 });
+  await searchSidebarResize.click();
+  const resizedSearchSidebar = await page
+    .evaluate(() => {
+      const shell = document.querySelector(
+        '[data-testid="search-sidebar-shell"]',
+      );
+      const sidebar = document.querySelector(
+        '[data-testid="files-search-sidebar"]',
+      );
+      return shell && sidebar
+        ? {
+            shell: shell.clientWidth,
+            sidebar: sidebar.getBoundingClientRect().width,
+          }
+        : null;
+    })
+    .catch(() => null);
+  check(
+    "Search follows the shared sidebar's resized width",
+    resizedSearchSidebar !== null &&
+      resizedSearchSidebar.shell >= 358 &&
+      Math.abs(resizedSearchSidebar.sidebar - resizedSearchSidebar.shell) < 1,
+    JSON.stringify(resizedSearchSidebar),
+  );
+
+  await searchSidebarInput.focus();
+  await page.keyboard.press("Escape");
+  check(
+    "Escape clears Search back to its input-only state",
+    (await searchSidebarInput.inputValue().catch(() => null)) === "" &&
+      (await searchSidebar.locator("[data-item-path]").count()) === 0 &&
+      (await searchSidebarVisible()),
+  );
+  await page.keyboard.press("Escape");
+  check(
+    "Escape on an empty Search closes the sidebar mode",
+    await waitFor(searchSidebarHidden, "search-sidebar-escape-close"),
+  );
+
+  await searchSidebarTrigger.click();
+  await searchSidebar.waitFor({ state: "visible", timeout: 10_000 });
   await page.getByTestId("parking-lot").click();
   check(
-    "Outside pointerdown dismisses the panel",
-    await waitFor(treePanelHidden, "tree-panel-outside-close"),
+    "Outside clicks do not dismiss the persistent Search sidebar",
+    await searchSidebarVisible(),
+  );
+  await searchSidebarTrigger.click();
+  check(
+    "The active Search action toggles its sidebar closed",
+    await waitFor(searchSidebarHidden, "search-sidebar-toggle-close"),
   );
 
   // 5. The GitHub settings overflow and disconnect dialog use Radix focus

@@ -6,8 +6,7 @@ const spawnDefaultChatForWorkspace = vi.fn();
 const prefetchWorkspaceSurface = vi.fn();
 const prepareChatView = vi.fn();
 const selectChatToRestoreForFolder = vi.fn();
-const useInternalFeatureActive = vi.fn((_feature: string) => true);
-const isInternalFeatureActive = vi.fn((_feature: string) => true);
+const pendingWorkspaceMode = vi.fn();
 
 vi.mock("react", () => ({
   useCallback: <T extends (...args: never[]) => unknown>(callback: T) =>
@@ -31,28 +30,20 @@ vi.mock("../../shell/prefetch-workspace-surface", () => ({
     prefetchWorkspaceSurface(...args),
 }));
 vi.mock("../../shell/conversation/chat-intent", () => ({
-  prepareChatView: (...args: unknown[]) =>
-    prepareChatView(...args),
+  prepareChatView: (...args: unknown[]) => prepareChatView(...args),
 }));
-vi.mock("../../features/settings/internal-features", () => ({
-  useInternalFeatureActive: (feature: string) =>
-    useInternalFeatureActive(feature),
-  isInternalFeatureActive: (feature: string) =>
-    isInternalFeatureActive(feature),
+vi.mock("../pending-workspaces", () => ({
+  pendingWorkspaceMode: (...args: unknown[]) => pendingWorkspaceMode(...args),
 }));
-
 const { useOpenWorkspace } = await import("../use-open-workspace");
 
 beforeEach(() => {
   vi.clearAllMocks();
-  useInternalFeatureActive.mockReturnValue(true);
-  isInternalFeatureActive.mockReturnValue(true);
+  pendingWorkspaceMode.mockReturnValue(null);
 });
 
 describe("useOpenWorkspace", () => {
-  it("keeps a design destination completely inert while its Internal gate is off", () => {
-    useInternalFeatureActive.mockReturnValue(false);
-
+  it("opens a public Design destination directly", () => {
     useOpenWorkspace()({
       id: "ws_design",
       kind: "design",
@@ -60,27 +51,17 @@ describe("useOpenWorkspace", () => {
       repoRoot: "/repo",
     });
 
-    expect(useInternalFeatureActive).toHaveBeenCalledWith("designWorkspaces");
-    expect(prefetchWorkspaceSurface).not.toHaveBeenCalled();
-    expect(dispatch).not.toHaveBeenCalled();
+    expect(prefetchWorkspaceSurface).toHaveBeenCalledOnce();
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "OPEN_WORKSPACE",
+      folder: "/design workspaces/zeros/landing-page",
+      repoRoot: "/repo",
+      chatId: null,
+      validationPending: undefined,
+    });
     expect(selectChatToRestoreForFolder).not.toHaveBeenCalled();
     expect(hydrateChat).not.toHaveBeenCalled();
     expect(spawnDefaultChatForWorkspace).not.toHaveBeenCalled();
-  });
-
-  it("rechecks the live gate when a previously-rendered callback runs", () => {
-    isInternalFeatureActive.mockReturnValue(false);
-
-    useOpenWorkspace()({
-      id: "ws_design",
-      kind: "design",
-      path: "/design workspaces/zeros/landing-page",
-      repoRoot: "/repo",
-    });
-
-    expect(isInternalFeatureActive).toHaveBeenCalledWith("designWorkspaces");
-    expect(prefetchWorkspaceSurface).not.toHaveBeenCalled();
-    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("never restores, hydrates, or spawns coding chat for a design destination", () => {
@@ -106,6 +87,30 @@ describe("useOpenWorkspace", () => {
     expect(selectChatToRestoreForFolder).not.toHaveBeenCalled();
     expect(hydrateChat).not.toHaveBeenCalled();
     expect(prepareChatView).not.toHaveBeenCalled();
+    expect(spawnDefaultChatForWorkspace).not.toHaveBeenCalled();
+  });
+
+  it("opens an in-flight Code-to-Design request without reviving coding chat", () => {
+    pendingWorkspaceMode.mockReturnValue("design");
+    selectChatToRestoreForFolder.mockReturnValue("stale-code-chat");
+
+    useOpenWorkspace()({
+      id: "ws_switching_design",
+      kind: "code",
+      path: "/workspaces/zeros/switching-design",
+      repoRoot: "/repo",
+    });
+
+    expect(pendingWorkspaceMode).toHaveBeenCalledWith("ws_switching_design");
+    expect(dispatch).toHaveBeenCalledWith({
+      type: "OPEN_WORKSPACE",
+      folder: "/workspaces/zeros/switching-design",
+      repoRoot: "/repo",
+      chatId: null,
+      validationPending: undefined,
+    });
+    expect(selectChatToRestoreForFolder).not.toHaveBeenCalled();
+    expect(hydrateChat).not.toHaveBeenCalled();
     expect(spawnDefaultChatForWorkspace).not.toHaveBeenCalled();
   });
 

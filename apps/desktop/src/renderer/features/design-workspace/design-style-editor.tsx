@@ -4,16 +4,13 @@
 // USED IN: DesignInspector for the exact selected data-oid
 // ============================================
 
-import React, { useMemo, useState } from "react";
+import React, { useState } from "react";
 import {
   ChevronDown,
-  Code2,
   Diamond,
   Layers3,
   Play,
-  Plus,
   RotateCw,
-  Search,
   Sparkles,
   Square,
   Type,
@@ -26,14 +23,12 @@ import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-  Input,
   Label,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-  Textarea,
   Tooltip,
   toast,
 } from "../../shared/ui/primitives";
@@ -44,11 +39,7 @@ import {
   DesignTransformControl,
 } from "./design-effect-editor";
 import { DesignFillEditor } from "./design-fill-editor";
-import {
-  parseDesignCssDeclarations,
-  readDesignComputedStyle,
-  serializeDesignCssDeclarations,
-} from "./design-style-values";
+import { readDesignComputedStyle } from "./design-style-values";
 import { useDesignLivePreviewValue } from "./state/design-live-preview";
 
 interface DesignLivePreviewOwner {
@@ -68,7 +59,9 @@ interface DesignStyleEditorProps {
   onPreviewStyles?: (styles: Record<string, string | null>) => Promise<void>;
   onCancelStylePreview?: () => Promise<void>;
   onCommitStyles: (styles: Record<string, string | null>) => Promise<void>;
-  onOpenMotionTimeline: () => void;
+  motionTimelineOpen?: boolean;
+  motionProperties?: readonly string[];
+  onOpenMotionTimeline: (property?: string, value?: string) => void;
   disabled?: boolean;
 }
 
@@ -115,36 +108,23 @@ function StyleSection({
   icon,
   defaultOpen = false,
   summary,
-  filter = "",
-  keywords = "",
   children,
 }: {
   title: string;
   icon: React.ReactNode;
   defaultOpen?: boolean;
   summary?: string;
-  filter?: string;
-  keywords?: string;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
-  if (
-    filter &&
-    !`${title} ${keywords}`
-      .toLocaleLowerCase()
-      .includes(filter.toLocaleLowerCase())
-  ) {
-    return null;
-  }
-  const effectiveOpen = Boolean(filter) || open;
   return (
-    <Collapsible open={effectiveOpen} onOpenChange={setOpen}>
+    <Collapsible open={open} onOpenChange={setOpen}>
       <section className="border-border1 border-b">
         <CollapsibleTrigger asChild>
           <button
             type="button"
             className="hover:bg-bg1-hover flex h-9 w-full items-center gap-2 px-3 text-left"
-            aria-label={`${effectiveOpen ? "Collapse" : "Expand"} ${title}`}
+            aria-label={`${open ? "Collapse" : "Expand"} ${title}`}
           >
             <span className="text-muted-fg [&>svg]:size-3.5">{icon}</span>
             <span className="text-fg1 text-xs font-medium">{title}</span>
@@ -156,7 +136,7 @@ function StyleSection({
             <ChevronDown
               className={cn(
                 "text-muted-fg size-3.5 transition-transform",
-                effectiveOpen ? "rotate-0" : "-rotate-90",
+                open ? "rotate-0" : "-rotate-90",
               )}
             />
           </button>
@@ -186,7 +166,7 @@ function PropertySelect({
     ? options
     : [{ value, label: value }, ...options];
   return (
-    <div className="grid min-w-0 grid-cols-[48px_minmax(0,1fr)] items-center gap-2">
+    <div className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] items-center gap-2">
       <span className="text-muted-fg truncate text-[10px]" title={label}>
         {label}
       </span>
@@ -194,6 +174,7 @@ function PropertySelect({
         <SelectTrigger
           size="sm"
           className="zd-design-control-quiet h-7 w-full min-w-0 px-2 text-[11px]"
+          aria-label={label}
         >
           <SelectValue />
         </SelectTrigger>
@@ -224,11 +205,17 @@ function FlexAlignmentControl({
 }) {
   const values = ["flex-start", "center", "flex-end"] as const;
   const column = direction.startsWith("column");
-  const selectedX = column ? align : justify;
-  const selectedY = column ? justify : align;
+  const resolvedAlign = align === "normal" ? "stretch" : align;
+  const resolvedJustify = justify === "normal" ? "flex-start" : justify;
+  const selectedX = column ? resolvedAlign : resolvedJustify;
+  const selectedY = column ? resolvedJustify : resolvedAlign;
   return (
-    <div className="grid grid-cols-[68px_minmax(0,1fr)] items-center gap-3">
-      <div className="zd-design-control-applied grid size-[68px] grid-cols-3 rounded-md p-1">
+    <div className="grid grid-cols-[68px_minmax(0,1fr)] items-start gap-3">
+      <div
+        className="zd-design-control-applied grid size-[68px] grid-cols-3 rounded-md p-1"
+        role="group"
+        aria-label="Quick alignment"
+      >
         {values.flatMap((vertical) =>
           values.map((horizontal) => {
             const selected = selectedX === horizontal && selectedY === vertical;
@@ -265,11 +252,34 @@ function FlexAlignmentControl({
           }),
         )}
       </div>
-      <div className="text-muted-fg flex flex-col gap-1.5 text-[10px]">
-        <span className="text-fg2">Alignment</span>
-        <span className="truncate">X · {selectedX}</span>
-        <span className="truncate">Y · {selectedY}</span>
-        <span>Click a point to align</span>
+      <div className="flex min-w-0 flex-col gap-1.5">
+        <PropertySelect
+          label="Align"
+          value={resolvedAlign}
+          disabled={disabled}
+          options={[
+            { value: "stretch", label: "Stretch" },
+            { value: "flex-start", label: "Start" },
+            { value: "center", label: "Center" },
+            { value: "flex-end", label: "End" },
+            { value: "baseline", label: "Baseline" },
+          ]}
+          onChange={(value) => onChange({ "align-items": value })}
+        />
+        <PropertySelect
+          label="Distribute"
+          value={resolvedJustify}
+          disabled={disabled}
+          options={[
+            { value: "flex-start", label: "Start" },
+            { value: "center", label: "Center" },
+            { value: "flex-end", label: "End" },
+            { value: "space-between", label: "Space between" },
+            { value: "space-around", label: "Space around" },
+            { value: "space-evenly", label: "Space evenly" },
+          ]}
+          onChange={(value) => onChange({ "justify-content": value })}
+        />
       </div>
     </div>
   );
@@ -288,17 +298,25 @@ function ChoiceGroup({
   disabled?: boolean;
   onChange: (value: string) => void;
 }) {
+  const choices = options.some((option) => option.value === value)
+    ? options
+    : [{ value, label: value, title: value }, ...options];
   return (
-    <div className="grid min-w-0 grid-cols-[48px_minmax(0,1fr)] items-center gap-2">
+    <div className="grid min-w-0 grid-cols-[64px_minmax(0,1fr)] items-center gap-2">
       <Label className="text-muted-fg truncate text-[10px]" title={label}>
         {label}
       </Label>
-      <div className="zd-design-segment-group grid h-7 grid-flow-col rounded-sm">
-        {options.map((option) => (
+      <div
+        className="zd-design-segment-group grid h-7 grid-flow-col rounded-sm"
+        role="group"
+        aria-label={label}
+      >
+        {choices.map((option) => (
           <Tooltip key={option.value} label={option.title ?? option.label}>
             <button
               type="button"
               disabled={disabled}
+              aria-label={option.title ?? `${label}: ${option.label}`}
               aria-pressed={value === option.value}
               className={cn(
                 "zd-design-segment text-fg2 min-w-0 px-1 text-[10px] disabled:opacity-50",
@@ -312,6 +330,51 @@ function ChoiceGroup({
         ))}
       </div>
     </div>
+  );
+}
+
+function MotionPropertyAction({
+  label,
+  property,
+  value,
+  active,
+  timelineOpen,
+  disabled,
+  onRequest,
+}: {
+  label: string;
+  property: string;
+  value: string;
+  active: boolean;
+  timelineOpen: boolean;
+  disabled?: boolean;
+  onRequest: (property: string, value: string) => void;
+}) {
+  if (!timelineOpen) return null;
+
+  return (
+    <Tooltip
+      label={
+        active ? `Add ${label} keyframe at the playhead` : `Animate ${label}`
+      }
+    >
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        className={cn(
+          "size-7 shrink-0 transition-opacity",
+          active ? "zd-design-motion-property-active" : "opacity-100",
+        )}
+        aria-label={
+          active ? `Add ${label} keyframe at the playhead` : `Animate ${label}`
+        }
+        disabled={disabled}
+        onClick={() => onRequest(property, value)}
+      >
+        <Diamond className={cn("size-3", active && "fill-current")} />
+      </Button>
+    </Tooltip>
   );
 }
 
@@ -357,85 +420,15 @@ function styleValue(
   return readDesignComputedStyle(details.styles, property) || fallback;
 }
 
-const CSS_EXPORT_PROPERTIES = [
-  "position",
-  "left",
-  "top",
-  "right",
-  "bottom",
-  "width",
-  "height",
-  "min-width",
-  "min-height",
-  "max-width",
-  "max-height",
-  "aspect-ratio",
-  "box-sizing",
-  "z-index",
-  "overflow",
-  "object-fit",
-  "object-position",
-  "display",
-  "flex-direction",
-  "flex-wrap",
-  "flex-grow",
-  "flex-shrink",
-  "flex-basis",
-  "gap",
-  "row-gap",
-  "column-gap",
-  "align-items",
-  "align-self",
-  "justify-content",
-  "justify-self",
-  "grid-template-columns",
-  "grid-template-rows",
-  "padding",
-  "margin",
-  "background-color",
-  "background-image",
-  "background-position",
-  "background-size",
-  "background-repeat",
-  "background-blend-mode",
-  "border",
-  "border-radius",
-  "color",
-  "font-family",
-  "font-size",
-  "font-weight",
-  "line-height",
-  "letter-spacing",
-  "text-align",
-  "text-transform",
-  "text-decoration",
-  "white-space",
-  "opacity",
-  "mix-blend-mode",
-  "box-shadow",
-  "text-shadow",
-  "filter",
-  "backdrop-filter",
-  "transform",
-  "transform-origin",
-  "perspective",
-  "transition",
-  "animation",
-] as const;
+function spacingStyleValue(
+  details: DesignRuntimeNodeDetails,
+  property: "gap" | "row-gap" | "column-gap",
+): string {
+  const value = styleValue(details, property, "0px");
+  return value === "normal" ? "0px" : value;
+}
 
 const OBJECT_FIT_TAGS = new Set(["img", "video", "canvas", "svg", "iframe"]);
-
-const STYLE_SEARCH_INDEX = [
-  "size position width height min max aspect ratio object fit overflow z-index",
-  "layout display flex grid gap padding margin align justify wrap",
-  "fill background gradient image border radius opacity blend",
-  "typography text font color weight line height tracking alignment decoration",
-  "effects shadow blur filter backdrop blend",
-  "transform translate rotate scale skew origin perspective",
-  "transition duration delay easing timing",
-  "motion animation keyframes timeline iterations direction fill mode",
-  "css declarations advanced code",
-];
 
 export function DesignStyleEditor({
   details,
@@ -444,28 +437,20 @@ export function DesignStyleEditor({
   onPreviewStyles,
   onCancelStylePreview,
   onCommitStyles,
+  motionTimelineOpen = false,
+  motionProperties = [],
   onOpenMotionTimeline,
   disabled = false,
 }: DesignStyleEditorProps) {
-  const [cssDraft, setCssDraft] = useState("");
-  const [propertyQuery, setPropertyQuery] = useState("");
-  const [cssError, setCssError] = useState<string | null>(null);
-  const [cssSaving, setCssSaving] = useState(false);
-
-  const computedCss = useMemo(
-    () =>
-      serializeDesignCssDeclarations(
-        Object.fromEntries(
-          CSS_EXPORT_PROPERTIES.map((property) => [
-            property,
-            styleValue(details, property),
-          ]).filter(([, value]) => Boolean(value)),
-        ),
-      ),
-    [details],
-  );
+  const [layoutAdvancedOpen, setLayoutAdvancedOpen] = useState(false);
+  const [appearanceAdvancedOpen, setAppearanceAdvancedOpen] = useState(false);
+  const [typographyAdvancedOpen, setTypographyAdvancedOpen] = useState(false);
 
   const commit = (styles: Record<string, string | null>, label: string) => {
+    // Selects and segmented controls do not emit a separate drag/change
+    // preview. Mirror their choice into the mounted runtime immediately while
+    // the ordered source mutation persists in the background.
+    void onPreviewStyles?.(styles).catch(() => {});
     void onCommitStyles(styles).catch((error) => {
       toast.error(`Couldn't update ${label.toLocaleLowerCase()}`, {
         description: errorMessage(error),
@@ -473,60 +458,24 @@ export function DesignStyleEditor({
     });
   };
 
-  const applyCss = async () => {
-    setCssError(null);
-    setCssSaving(true);
-    try {
-      const declarations = parseDesignCssDeclarations(cssDraft, 64);
-      if (Object.keys(declarations).length === 0) {
-        throw new Error("Enter at least one CSS declaration.");
-      }
-      await onCommitStyles(declarations);
-      setCssDraft("");
-      toast.success("CSS declarations applied");
-    } catch (error) {
-      const message = errorMessage(error);
-      setCssError(message);
-      toast.error("Couldn't apply CSS", { description: message });
-    } finally {
-      setCssSaving(false);
-    }
-  };
-
-  const normalizedQuery = propertyQuery.trim().toLocaleLowerCase();
-  const hasSearchMatch =
-    !normalizedQuery ||
-    STYLE_SEARCH_INDEX.some((terms) => terms.includes(normalizedQuery));
   const display = styleValue(details, "display", "block");
+  const flexLayout = display === "flex" || display === "inline-flex";
+  const gridLayout = display === "grid" || display === "inline-grid";
+  const showAdvancedLayout = layoutAdvancedOpen;
+  const showAdvancedAppearance = appearanceAdvancedOpen;
+  const showAdvancedTypography = typographyAdvancedOpen;
 
   return (
-    <div className="flex flex-col">
-      <div className="bg-bg1 sticky top-0 z-10 flex h-11 items-center px-3">
-        <div className="relative min-w-0 flex-1">
-          <Search className="text-muted-fg pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2" />
-          <Input
-            value={propertyQuery}
-            className="zd-design-search h-7 pl-7 text-[11px]"
-            aria-label="Find a style property"
-            placeholder="Find a property"
-            onChange={(event) => setPropertyQuery(event.currentTarget.value)}
-          />
-        </div>
-      </div>
-      {!hasSearchMatch ? (
-        <div className="text-muted-fg px-3 py-6 text-center text-xs">
-          No visual control matches “{propertyQuery}”. Use CSS for any valid
-          property.
-        </div>
-      ) : null}
+    <div data-design-style-editor className="flex flex-col">
       <StyleSection
-        title="Size & position"
-        icon={<Square />}
+        title="Layout"
+        icon={<Layers3 />}
         defaultOpen
-        summary={`${Math.round(details.rect.width)} × ${Math.round(details.rect.height)}`}
-        filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[0]}
+        summary={`${Math.round(details.rect.width)} × ${Math.round(details.rect.height)} · ${display}`}
       >
+        <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
+          Position &amp; size
+        </span>
         <div className="grid grid-cols-2 gap-2">
           {renderField(
             "X",
@@ -552,53 +501,30 @@ export function DesignStyleEditor({
               `${Math.round(details.rect.height)}px`,
             ),
           )}
-          {renderField(
-            "Min W",
-            "min-width",
-            styleValue(details, "min-width", "0px"),
-          )}
-          {renderField(
-            "Min H",
-            "min-height",
-            styleValue(details, "min-height", "0px"),
-          )}
-          {renderField(
-            "Max W",
-            "max-width",
-            styleValue(details, "max-width", "none"),
-          )}
-          {renderField(
-            "Max H",
-            "max-height",
-            styleValue(details, "max-height", "none"),
-          )}
-        </div>
-        <div className="grid grid-cols-2 gap-2">
-          {renderField(
-            "Ratio",
-            "aspect-ratio",
-            styleValue(details, "aspect-ratio", "auto"),
-          )}
-          {renderField(
-            "Object",
-            "object-position",
-            styleValue(details, "object-position", "50% 50%"),
-          )}
         </div>
         {OBJECT_FIT_TAGS.has(details.tag) ? (
-          <PropertySelect
-            label="Fit"
-            value={styleValue(details, "object-fit", "fill")}
-            disabled={disabled}
-            options={[
-              { value: "fill", label: "Fill" },
-              { value: "contain", label: "Fit" },
-              { value: "cover", label: "Cover" },
-              { value: "none", label: "None" },
-              { value: "scale-down", label: "Scale down" },
-            ]}
-            onChange={(value) => commit({ "object-fit": value }, "object fit")}
-          />
+          <>
+            <PropertySelect
+              label="Fit"
+              value={styleValue(details, "object-fit", "fill")}
+              disabled={disabled}
+              options={[
+                { value: "fill", label: "Fill" },
+                { value: "contain", label: "Fit" },
+                { value: "cover", label: "Cover" },
+                { value: "none", label: "None" },
+                { value: "scale-down", label: "Scale down" },
+              ]}
+              onChange={(value) =>
+                commit({ "object-fit": value }, "object fit")
+              }
+            />
+            {renderField(
+              "Object",
+              "object-position",
+              styleValue(details, "object-position", "50% 50%"),
+            )}
+          </>
         ) : null}
         <PropertySelect
           label="Position"
@@ -613,14 +539,17 @@ export function DesignStyleEditor({
           ]}
           onChange={(value) => commit({ position: value }, "position")}
         />
-        <div className="grid grid-cols-2 gap-2">
-          {renderField("Z", "z-index", styleValue(details, "z-index", "auto"))}
-          {renderField(
-            "Box",
-            "box-sizing",
-            styleValue(details, "box-sizing", "border-box"),
-          )}
-        </div>
+        {renderField("Z", "z-index", styleValue(details, "z-index", "auto"))}
+        <PropertySelect
+          label="Box sizing"
+          value={styleValue(details, "box-sizing", "border-box")}
+          disabled={disabled}
+          options={[
+            { value: "border-box", label: "Border box" },
+            { value: "content-box", label: "Content box" },
+          ]}
+          onChange={(value) => commit({ "box-sizing": value }, "box sizing")}
+        />
         <PropertySelect
           label="Overflow"
           value={styleValue(details, "overflow", "visible")}
@@ -634,16 +563,126 @@ export function DesignStyleEditor({
           ]}
           onChange={(value) => commit({ overflow: value }, "overflow")}
         />
-      </StyleSection>
-
-      <StyleSection
-        title="Layout"
-        icon={<Layers3 />}
-        defaultOpen
-        summary={display}
-        filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[1]}
-      >
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-muted-fg h-7 justify-start px-1.5 text-[10px]"
+          aria-expanded={showAdvancedLayout}
+          onClick={() => setLayoutAdvancedOpen((open) => !open)}
+        >
+          <ChevronDown
+            className={cn(
+              "size-3 transition-transform",
+              showAdvancedLayout ? "rotate-0" : "-rotate-90",
+            )}
+          />
+          {showAdvancedLayout ? "Hide sizing limits" : "Sizing limits"}
+        </Button>
+        {showAdvancedLayout ? (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              {renderField(
+                "Min W",
+                "min-width",
+                styleValue(details, "min-width", "0px"),
+              )}
+              {renderField(
+                "Min H",
+                "min-height",
+                styleValue(details, "min-height", "0px"),
+              )}
+              {renderField(
+                "Max W",
+                "max-width",
+                styleValue(details, "max-width", "none"),
+              )}
+              {renderField(
+                "Max H",
+                "max-height",
+                styleValue(details, "max-height", "none"),
+              )}
+              {renderField(
+                "Ratio",
+                "aspect-ratio",
+                styleValue(details, "aspect-ratio", "auto"),
+              )}
+              {renderField(
+                "Right",
+                "right",
+                styleValue(details, "right", "auto"),
+              )}
+              {renderField(
+                "Bottom",
+                "bottom",
+                styleValue(details, "bottom", "auto"),
+              )}
+              {renderField(
+                "Float",
+                "float",
+                styleValue(details, "float", "none"),
+              )}
+              {renderField(
+                "Clear",
+                "clear",
+                styleValue(details, "clear", "none"),
+              )}
+            </div>
+            <PropertySelect
+              label="Visibility"
+              value={styleValue(details, "visibility", "visible")}
+              disabled={disabled}
+              options={[
+                { value: "visible", label: "Visible" },
+                { value: "hidden", label: "Hidden" },
+                { value: "collapse", label: "Collapse" },
+              ]}
+              onChange={(value) => commit({ visibility: value }, "visibility")}
+            />
+            <div className="grid grid-cols-2 gap-2">
+              {renderField(
+                "Overflow X",
+                "overflow-x",
+                styleValue(details, "overflow-x", "visible"),
+              )}
+              {renderField(
+                "Overflow Y",
+                "overflow-y",
+                styleValue(details, "overflow-y", "visible"),
+              )}
+            </div>
+            <PropertySelect
+              label="Pointer"
+              value={styleValue(details, "pointer-events", "auto")}
+              disabled={disabled}
+              options={[
+                { value: "auto", label: "Auto" },
+                { value: "none", label: "None" },
+              ]}
+              onChange={(value) =>
+                commit({ "pointer-events": value }, "pointer events")
+              }
+            />
+            <PropertySelect
+              label="Cursor"
+              value={styleValue(details, "cursor", "auto")}
+              disabled={disabled}
+              options={[
+                { value: "auto", label: "Auto" },
+                { value: "default", label: "Default" },
+                { value: "pointer", label: "Pointer" },
+                { value: "text", label: "Text" },
+                { value: "move", label: "Move" },
+                { value: "grab", label: "Grab" },
+                { value: "not-allowed", label: "Not allowed" },
+              ]}
+              onChange={(value) => commit({ cursor: value }, "cursor")}
+            />
+          </>
+        ) : null}
+        <span className="text-muted-fg mt-1 text-[10px] font-medium tracking-wide uppercase">
+          Layout mode
+        </span>
         <ChoiceGroup
           label="Display"
           value={display}
@@ -656,7 +695,7 @@ export function DesignStyleEditor({
           ]}
           onChange={(value) => commit({ display: value }, "display")}
         />
-        {display === "flex" ? (
+        {flexLayout ? (
           <>
             <ChoiceGroup
               label="Flow"
@@ -682,11 +721,16 @@ export function DesignStyleEditor({
               onChange={(styles) => commit(styles, "alignment")}
             />
             <div className="grid grid-cols-2 gap-2">
-              {renderField("Gap", "gap", styleValue(details, "gap", "0px"))}
+              {renderField("Gap", "gap", spacingStyleValue(details, "gap"))}
               {renderField(
                 "Row",
                 "row-gap",
-                styleValue(details, "row-gap", "0px"),
+                spacingStyleValue(details, "row-gap"),
+              )}
+              {renderField(
+                "Column",
+                "column-gap",
+                spacingStyleValue(details, "column-gap"),
               )}
             </div>
             <PropertySelect
@@ -702,14 +746,35 @@ export function DesignStyleEditor({
             />
           </>
         ) : null}
-        {display === "grid" ? (
+        {gridLayout ? (
           <>
+            <ChoiceGroup
+              label="Flow"
+              value={styleValue(details, "grid-auto-flow", "row")}
+              disabled={disabled}
+              options={[
+                { value: "row", label: "Row" },
+                { value: "column", label: "Col" },
+                { value: "row dense", label: "R dense" },
+                { value: "column dense", label: "C dense" },
+              ]}
+              onChange={(value) =>
+                commit({ "grid-auto-flow": value }, "grid flow")
+              }
+            />
+            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
+              Tracks
+            </span>
             <div className="grid grid-cols-2 gap-2">
-              {renderField("Gap", "gap", styleValue(details, "gap", "0px"))}
               {renderField(
-                "Row",
+                "Col gap",
+                "column-gap",
+                spacingStyleValue(details, "column-gap"),
+              )}
+              {renderField(
+                "Row gap",
                 "row-gap",
-                styleValue(details, "row-gap", "0px"),
+                spacingStyleValue(details, "row-gap"),
               )}
             </div>
             <div className="grid grid-cols-2 gap-2">
@@ -724,6 +789,82 @@ export function DesignStyleEditor({
                 styleValue(details, "grid-template-rows", "none"),
               )}
             </div>
+            <div className="grid grid-cols-2 gap-2">
+              {renderField(
+                "Auto col",
+                "grid-auto-columns",
+                styleValue(details, "grid-auto-columns", "auto"),
+              )}
+              {renderField(
+                "Auto row",
+                "grid-auto-rows",
+                styleValue(details, "grid-auto-rows", "auto"),
+              )}
+            </div>
+            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
+              Grid alignment
+            </span>
+            <PropertySelect
+              label="Items"
+              value={styleValue(details, "align-items", "stretch")}
+              disabled={disabled}
+              options={[
+                { value: "stretch", label: "Stretch" },
+                { value: "start", label: "Start" },
+                { value: "center", label: "Center" },
+                { value: "end", label: "End" },
+                { value: "baseline", label: "Baseline" },
+              ]}
+              onChange={(value) =>
+                commit({ "align-items": value }, "grid item alignment")
+              }
+            />
+            <PropertySelect
+              label="Justify"
+              value={styleValue(details, "justify-items", "stretch")}
+              disabled={disabled}
+              options={[
+                { value: "stretch", label: "Stretch" },
+                { value: "start", label: "Start" },
+                { value: "center", label: "Center" },
+                { value: "end", label: "End" },
+              ]}
+              onChange={(value) =>
+                commit({ "justify-items": value }, "grid justification")
+              }
+            />
+            <PropertySelect
+              label="Content"
+              value={styleValue(details, "align-content", "normal")}
+              disabled={disabled}
+              options={[
+                { value: "normal", label: "Normal" },
+                { value: "start", label: "Start" },
+                { value: "center", label: "Center" },
+                { value: "end", label: "End" },
+                { value: "stretch", label: "Stretch" },
+                { value: "space-between", label: "Space between" },
+              ]}
+              onChange={(value) =>
+                commit({ "align-content": value }, "grid content alignment")
+              }
+            />
+            <PropertySelect
+              label="Distribute"
+              value={styleValue(details, "justify-content", "normal")}
+              disabled={disabled}
+              options={[
+                { value: "normal", label: "Normal" },
+                { value: "start", label: "Start" },
+                { value: "center", label: "Center" },
+                { value: "end", label: "End" },
+                { value: "stretch", label: "Stretch" },
+                { value: "space-between", label: "Space between" },
+              ]}
+              onChange={(value) =>
+                commit({ "justify-content": value }, "grid distribution")
+              }
+            />
           </>
         ) : null}
         <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
@@ -777,20 +918,14 @@ export function DesignStyleEditor({
           )}
         </div>
         <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
-          Flex child
+          Child layout
         </span>
-        <ChoiceGroup
-          label="Grow"
-          value={styleValue(details, "flex-grow", "0")}
-          disabled={disabled}
-          options={[
-            { value: "0", label: "0", title: "Do not grow" },
-            { value: "1", label: "1", title: "Fill available space" },
-            { value: "2", label: "2", title: "Grow twice as much" },
-          ]}
-          onChange={(value) => commit({ "flex-grow": value }, "flex grow")}
-        />
         <div className="grid grid-cols-2 gap-2">
+          {renderField(
+            "Grow",
+            "flex-grow",
+            styleValue(details, "flex-grow", "0"),
+          )}
           {renderField(
             "Shrink",
             "flex-shrink",
@@ -815,30 +950,101 @@ export function DesignStyleEditor({
             ]}
             onChange={(value) => commit({ "align-self": value }, "align self")}
           />
+          {renderField(
+            "Grid col",
+            "grid-column",
+            styleValue(details, "grid-column", "auto"),
+          )}
+          {renderField(
+            "Grid row",
+            "grid-row",
+            styleValue(details, "grid-row", "auto"),
+          )}
         </div>
+        <PropertySelect
+          label="Justify self"
+          value={styleValue(details, "justify-self", "auto")}
+          disabled={disabled}
+          options={[
+            { value: "auto", label: "Auto" },
+            { value: "start", label: "Start" },
+            { value: "center", label: "Center" },
+            { value: "end", label: "End" },
+            { value: "stretch", label: "Stretch" },
+          ]}
+          onChange={(value) =>
+            commit({ "justify-self": value }, "justify self")
+          }
+        />
       </StyleSection>
 
       <StyleSection
-        title="Fill & border"
+        title="Appearance"
         icon={<Square />}
         defaultOpen
         summary={styleValue(details, "background-color", "transparent")}
-        filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[2]}
       >
-        <DesignFillEditor
-          color={styleValue(details, "background-color", "transparent")}
-          image={styleValue(details, "background-image", "none")}
-          position={styleValue(details, "background-position", "0% 0%")}
-          size={styleValue(details, "background-size", "auto")}
-          repeat={styleValue(details, "background-repeat", "repeat")}
-          disabled={disabled}
-          onPreview={(styles) => void onPreviewStyles?.(styles)}
-          onCancelPreview={() => void onCancelStylePreview?.()}
-          onCommit={(styles) => commit(styles, "fill")}
-        />
+        <div className="grid grid-cols-2 gap-2">
+          {renderField(
+            "Opacity",
+            "opacity",
+            styleValue(details, "opacity", "1"),
+          )}
+          <PropertySelect
+            label="Blend"
+            value={styleValue(details, "mix-blend-mode", "normal")}
+            disabled={disabled}
+            options={[
+              { value: "normal", label: "Normal" },
+              { value: "multiply", label: "Multiply" },
+              { value: "screen", label: "Screen" },
+              { value: "overlay", label: "Overlay" },
+              { value: "difference", label: "Difference" },
+            ]}
+            onChange={(value) =>
+              commit({ "mix-blend-mode": value }, "blend mode")
+            }
+          />
+        </div>
         <PropertySelect
-          label="Blend"
+          label="Isolation"
+          value={styleValue(details, "isolation", "auto")}
+          disabled={disabled}
+          options={[
+            { value: "auto", label: "Auto" },
+            { value: "isolate", label: "Isolate" },
+          ]}
+          onChange={(value) => commit({ isolation: value }, "isolation")}
+        />
+        <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
+          Fill
+        </span>
+        <div className="group/motion flex min-w-0 items-center gap-1">
+          <div className="min-w-0 flex-1">
+            <DesignFillEditor
+              color={styleValue(details, "background-color", "transparent")}
+              image={styleValue(details, "background-image", "none")}
+              position={styleValue(details, "background-position", "0% 0%")}
+              size={styleValue(details, "background-size", "auto")}
+              repeat={styleValue(details, "background-repeat", "repeat")}
+              disabled={disabled}
+              onPreview={(styles) => void onPreviewStyles?.(styles)}
+              onCancelPreview={() => void onCancelStylePreview?.()}
+              onCommit={(styles) => commit(styles, "fill")}
+            />
+          </div>
+          <MotionPropertyAction
+            label="fill"
+            property="background-color"
+            value={styleValue(details, "background-color", "transparent")}
+            active={motionProperties.includes("background-color")}
+            timelineOpen={motionTimelineOpen}
+            disabled={disabled}
+            onRequest={onOpenMotionTimeline}
+          />
+        </div>
+        <PropertySelect
+          label="Fill mode"
           value={styleValue(details, "background-blend-mode", "normal")}
           disabled={disabled}
           options={[
@@ -852,6 +1058,9 @@ export function DesignStyleEditor({
             commit({ "background-blend-mode": value }, "blend")
           }
         />
+        <span className="text-muted-fg mt-1 text-[10px] font-medium tracking-wide uppercase">
+          Border
+        </span>
         <div className="grid grid-cols-2 gap-2">
           {renderField(
             "Width",
@@ -888,18 +1097,127 @@ export function DesignStyleEditor({
             commit({ "border-color": value }, "border color")
           }
         />
+        {renderField(
+          "Radius",
+          "border-radius",
+          styleValue(details, "border-radius", "0px"),
+        )}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-muted-fg h-7 justify-start px-1.5 text-[10px]"
+          aria-expanded={showAdvancedAppearance}
+          onClick={() => setAppearanceAdvancedOpen((open) => !open)}
+        >
+          <ChevronDown
+            className={cn(
+              "size-3 transition-transform",
+              showAdvancedAppearance ? "rotate-0" : "-rotate-90",
+            )}
+          />
+          {showAdvancedAppearance
+            ? "Hide independent sides"
+            : "Independent sides"}
+        </Button>
+        {showAdvancedAppearance ? (
+          <>
+            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
+              Border width
+            </span>
+            <div className="grid grid-cols-2 gap-2">
+              {renderField(
+                "Top",
+                "border-top-width",
+                styleValue(details, "border-top-width", "0px"),
+              )}
+              {renderField(
+                "Right",
+                "border-right-width",
+                styleValue(details, "border-right-width", "0px"),
+              )}
+              {renderField(
+                "Bottom",
+                "border-bottom-width",
+                styleValue(details, "border-bottom-width", "0px"),
+              )}
+              {renderField(
+                "Left",
+                "border-left-width",
+                styleValue(details, "border-left-width", "0px"),
+              )}
+            </div>
+            <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
+              Corner radius
+            </span>
+            <div className="grid grid-cols-2 gap-2">
+              {renderField(
+                "Top L",
+                "border-top-left-radius",
+                styleValue(details, "border-top-left-radius", "0px"),
+              )}
+              {renderField(
+                "Top R",
+                "border-top-right-radius",
+                styleValue(details, "border-top-right-radius", "0px"),
+              )}
+              {renderField(
+                "Bottom R",
+                "border-bottom-right-radius",
+                styleValue(details, "border-bottom-right-radius", "0px"),
+              )}
+              {renderField(
+                "Bottom L",
+                "border-bottom-left-radius",
+                styleValue(details, "border-bottom-left-radius", "0px"),
+              )}
+            </div>
+          </>
+        ) : null}
+        <span className="text-muted-fg mt-1 text-[10px] font-medium tracking-wide uppercase">
+          Outline
+        </span>
         <div className="grid grid-cols-2 gap-2">
           {renderField(
-            "Radius",
-            "border-radius",
-            styleValue(details, "border-radius", "0px"),
+            "Width",
+            "outline-width",
+            styleValue(details, "outline-width", "0px"),
           )}
           {renderField(
-            "Opacity",
-            "opacity",
-            styleValue(details, "opacity", "1"),
+            "Offset",
+            "outline-offset",
+            styleValue(details, "outline-offset", "0px"),
           )}
         </div>
+        <PropertySelect
+          label="Style"
+          value={styleValue(details, "outline-style", "none")}
+          disabled={disabled}
+          options={[
+            { value: "none", label: "None" },
+            { value: "solid", label: "Solid" },
+            { value: "dashed", label: "Dashed" },
+            { value: "dotted", label: "Dotted" },
+            { value: "double", label: "Double" },
+          ]}
+          onChange={(value) =>
+            commit({ "outline-style": value }, "outline style")
+          }
+        />
+        <ColorField
+          label="Outline color"
+          property="outline-color"
+          value={styleValue(details, "outline-color", "currentColor")}
+          disabled={disabled}
+          renderField={renderField}
+          onPreview={(value) =>
+            void onPreviewStyles?.({ "outline-color": value })
+          }
+          onCancelPreview={() => void onCancelStylePreview?.()}
+          onCommit={(value) =>
+            commit({ "outline-color": value }, "outline color")
+          }
+        />
       </StyleSection>
 
       <StyleSection
@@ -907,8 +1225,6 @@ export function DesignStyleEditor({
         icon={<Type />}
         defaultOpen={Boolean(details.text)}
         summary={styleValue(details, "font-size")}
-        filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[3]}
       >
         {renderField("Font", "font-family", styleValue(details, "font-family"))}
         <div className="grid grid-cols-2 gap-2">
@@ -929,6 +1245,17 @@ export function DesignStyleEditor({
             styleValue(details, "letter-spacing"),
           )}
         </div>
+        <PropertySelect
+          label="Style"
+          value={styleValue(details, "font-style", "normal")}
+          disabled={disabled}
+          options={[
+            { value: "normal", label: "Normal" },
+            { value: "italic", label: "Italic" },
+            { value: "oblique", label: "Oblique" },
+          ]}
+          onChange={(value) => commit({ "font-style": value }, "font style")}
+        />
         <ColorField
           label="Text color"
           property="color"
@@ -978,7 +1305,7 @@ export function DesignStyleEditor({
           }
         />
         <PropertySelect
-          label="Wrap"
+          label="White space"
           value={styleValue(details, "white-space", "normal")}
           disabled={disabled}
           options={[
@@ -989,72 +1316,236 @@ export function DesignStyleEditor({
           ]}
           onChange={(value) => commit({ "white-space": value }, "wrap")}
         />
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="text-muted-fg h-7 justify-start px-1.5 text-[10px]"
+          aria-expanded={showAdvancedTypography}
+          onClick={() => setTypographyAdvancedOpen((open) => !open)}
+        >
+          <ChevronDown
+            className={cn(
+              "size-3 transition-transform",
+              showAdvancedTypography ? "rotate-0" : "-rotate-90",
+            )}
+          />
+          {showAdvancedTypography ? "Hide text details" : "Text details"}
+        </Button>
+        {showAdvancedTypography ? (
+          <>
+            <div className="grid grid-cols-2 gap-2">
+              {renderField(
+                "Stretch",
+                "font-stretch",
+                styleValue(details, "font-stretch", "100%"),
+              )}
+              {renderField(
+                "Word gap",
+                "word-spacing",
+                styleValue(details, "word-spacing", "0px"),
+              )}
+              {renderField(
+                "Indent",
+                "text-indent",
+                styleValue(details, "text-indent", "0px"),
+              )}
+            </div>
+            <PropertySelect
+              label="Line wrap"
+              value={styleValue(details, "text-wrap", "wrap")}
+              disabled={disabled}
+              options={[
+                { value: "wrap", label: "Wrap" },
+                { value: "nowrap", label: "No wrap" },
+                { value: "balance", label: "Balance" },
+                { value: "pretty", label: "Pretty" },
+                { value: "stable", label: "Stable" },
+              ]}
+              onChange={(value) => commit({ "text-wrap": value }, "line wrap")}
+            />
+            <PropertySelect
+              label="Overflow"
+              value={styleValue(details, "text-overflow", "clip")}
+              disabled={disabled}
+              options={[
+                { value: "clip", label: "Clip" },
+                { value: "ellipsis", label: "Ellipsis" },
+              ]}
+              onChange={(value) =>
+                commit({ "text-overflow": value }, "text overflow")
+              }
+            />
+            <PropertySelect
+              label="Word break"
+              value={styleValue(details, "word-break", "normal")}
+              disabled={disabled}
+              options={[
+                { value: "normal", label: "Normal" },
+                { value: "break-all", label: "Break all" },
+                { value: "keep-all", label: "Keep all" },
+                { value: "break-word", label: "Break word" },
+              ]}
+              onChange={(value) =>
+                commit({ "word-break": value }, "word break")
+              }
+            />
+            <PropertySelect
+              label="Long words"
+              value={styleValue(details, "overflow-wrap", "normal")}
+              disabled={disabled}
+              options={[
+                { value: "normal", label: "Normal" },
+                { value: "break-word", label: "Break word" },
+                { value: "anywhere", label: "Anywhere" },
+              ]}
+              onChange={(value) =>
+                commit({ "overflow-wrap": value }, "long word wrapping")
+              }
+            />
+            <PropertySelect
+              label="Vertical"
+              value={styleValue(details, "vertical-align", "baseline")}
+              disabled={disabled}
+              options={[
+                { value: "baseline", label: "Baseline" },
+                { value: "middle", label: "Middle" },
+                { value: "top", label: "Top" },
+                { value: "bottom", label: "Bottom" },
+                { value: "text-top", label: "Text top" },
+                { value: "text-bottom", label: "Text bottom" },
+                { value: "sub", label: "Subscript" },
+                { value: "super", label: "Superscript" },
+              ]}
+              onChange={(value) =>
+                commit({ "vertical-align": value }, "vertical alignment")
+              }
+            />
+            <PropertySelect
+              label="Writing"
+              value={styleValue(details, "writing-mode", "horizontal-tb")}
+              disabled={disabled}
+              options={[
+                { value: "horizontal-tb", label: "Horizontal" },
+                { value: "vertical-rl", label: "Vertical right" },
+                { value: "vertical-lr", label: "Vertical left" },
+              ]}
+              onChange={(value) =>
+                commit({ "writing-mode": value }, "writing mode")
+              }
+            />
+            <PropertySelect
+              label="Hyphens"
+              value={styleValue(details, "hyphens", "manual")}
+              disabled={disabled}
+              options={[
+                { value: "none", label: "None" },
+                { value: "manual", label: "Manual" },
+                { value: "auto", label: "Auto" },
+              ]}
+              onChange={(value) => commit({ hyphens: value }, "hyphens")}
+            />
+          </>
+        ) : null}
       </StyleSection>
 
       <StyleSection
         title="Effects"
         icon={<Sparkles />}
         summary={styleValue(details, "box-shadow", "none")}
-        filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[4]}
       >
-        <DesignShadowControl
-          label="Box shadow"
-          value={styleValue(details, "box-shadow", "none")}
-          disabled={disabled}
-          onPreview={(value) => void onPreviewStyles?.({ "box-shadow": value })}
-          onCancelPreview={() => void onCancelStylePreview?.()}
-          onCommit={(value) => commit({ "box-shadow": value }, "box shadow")}
-        />
-        <DesignShadowControl
-          label="Text shadow"
-          value={styleValue(details, "text-shadow", "none")}
-          textShadow
-          disabled={disabled}
-          onPreview={(value) =>
-            void onPreviewStyles?.({ "text-shadow": value })
-          }
-          onCancelPreview={() => void onCancelStylePreview?.()}
-          onCommit={(value) => commit({ "text-shadow": value }, "text shadow")}
-        />
+        <div className="group/motion flex min-w-0 items-center gap-1">
+          <div className="min-w-0 flex-1">
+            <DesignShadowControl
+              label="Box shadow"
+              value={styleValue(details, "box-shadow", "none")}
+              disabled={disabled}
+              onPreview={(value) =>
+                void onPreviewStyles?.({ "box-shadow": value })
+              }
+              onCancelPreview={() => void onCancelStylePreview?.()}
+              onCommit={(value) =>
+                commit({ "box-shadow": value }, "box shadow")
+              }
+            />
+          </div>
+          <MotionPropertyAction
+            label="box shadow"
+            property="box-shadow"
+            value={styleValue(details, "box-shadow", "none")}
+            active={motionProperties.includes("box-shadow")}
+            timelineOpen={motionTimelineOpen}
+            disabled={disabled}
+            onRequest={onOpenMotionTimeline}
+          />
+        </div>
+        <div className="group/motion flex min-w-0 items-center gap-1">
+          <div className="min-w-0 flex-1">
+            <DesignShadowControl
+              label="Text shadow"
+              value={styleValue(details, "text-shadow", "none")}
+              textShadow
+              disabled={disabled}
+              onPreview={(value) =>
+                void onPreviewStyles?.({ "text-shadow": value })
+              }
+              onCancelPreview={() => void onCancelStylePreview?.()}
+              onCommit={(value) =>
+                commit({ "text-shadow": value }, "text shadow")
+              }
+            />
+          </div>
+          <MotionPropertyAction
+            label="text shadow"
+            property="text-shadow"
+            value={styleValue(details, "text-shadow", "none")}
+            active={motionProperties.includes("text-shadow")}
+            timelineOpen={motionTimelineOpen}
+            disabled={disabled}
+            onRequest={onOpenMotionTimeline}
+          />
+        </div>
         {renderField("Filter", "filter", styleValue(details, "filter", "none"))}
         {renderField(
           "Backdrop",
           "backdrop-filter",
           styleValue(details, "backdrop-filter", "none"),
         )}
-        <PropertySelect
-          label="Blend"
-          value={styleValue(details, "mix-blend-mode", "normal")}
-          disabled={disabled}
-          options={[
-            { value: "normal", label: "Normal" },
-            { value: "multiply", label: "Multiply" },
-            { value: "screen", label: "Screen" },
-            { value: "overlay", label: "Overlay" },
-            { value: "difference", label: "Difference" },
-          ]}
-          onChange={(value) =>
-            commit({ "mix-blend-mode": value }, "blend mode")
-          }
-        />
+        {renderField(
+          "Clip path",
+          "clip-path",
+          styleValue(details, "clip-path", "none"),
+        )}
       </StyleSection>
 
       <StyleSection
         title="Transform"
         icon={<RotateCw />}
         summary={styleValue(details, "transform", "none")}
-        filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[5]}
       >
-        <LiveDesignTransformControl
-          owner={livePreviewOwner}
-          value={styleValue(details, "transform", "none")}
-          disabled={disabled}
-          onPreview={(value) => void onPreviewStyles?.({ transform: value })}
-          onCancelPreview={() => void onCancelStylePreview?.()}
-          onCommit={(value) => commit({ transform: value }, "transform")}
-        />
+        <div className="group/motion flex min-w-0 items-center gap-1">
+          <div className="min-w-0 flex-1">
+            <LiveDesignTransformControl
+              owner={livePreviewOwner}
+              value={styleValue(details, "transform", "none")}
+              disabled={disabled}
+              onPreview={(value) =>
+                void onPreviewStyles?.({ transform: value })
+              }
+              onCancelPreview={() => void onCancelStylePreview?.()}
+              onCommit={(value) => commit({ transform: value }, "transform")}
+            />
+          </div>
+          <MotionPropertyAction
+            label="transform"
+            property="transform"
+            value={styleValue(details, "transform", "none")}
+            active={motionProperties.includes("transform")}
+            timelineOpen={motionTimelineOpen}
+            disabled={disabled}
+            onRequest={onOpenMotionTimeline}
+          />
+        </div>
         <div className="grid grid-cols-2 gap-2">
           {renderField(
             "Origin",
@@ -1067,14 +1558,17 @@ export function DesignStyleEditor({
             styleValue(details, "perspective", "none"),
           )}
         </div>
+        {renderField(
+          "Perspective origin",
+          "perspective-origin",
+          styleValue(details, "perspective-origin", "50% 50%"),
+        )}
       </StyleSection>
 
       <StyleSection
         title="Transition"
         icon={<Play />}
         summary={styleValue(details, "transition-duration", "0s")}
-        filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[6]}
       >
         {renderField(
           "Property",
@@ -1114,8 +1608,6 @@ export function DesignStyleEditor({
         title="Motion"
         icon={<Diamond />}
         summary={styleValue(details, "animation-name", "none")}
-        filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[7]}
       >
         <p className="text-muted-fg text-[11px] leading-4">
           Edit property tracks, keyframes, timing, and playback in the canvas
@@ -1127,58 +1619,10 @@ export function DesignStyleEditor({
           variant="secondary"
           className="zd-design-control-applied"
           disabled={disabled}
-          onClick={onOpenMotionTimeline}
+          onClick={() => onOpenMotionTimeline()}
         >
           <Diamond />
           Open motion timeline
-        </Button>
-      </StyleSection>
-
-      <StyleSection
-        title="CSS"
-        icon={<Code2 />}
-        summary="Declarations"
-        filter={normalizedQuery}
-        keywords={STYLE_SEARCH_INDEX[8]}
-      >
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-muted-fg text-xs">
-            Paste a declaration list; selectors and nested rules are rejected.
-          </span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setCssDraft(computedCss);
-              setCssError(null);
-            }}
-          >
-            Computed
-          </Button>
-        </div>
-        <Textarea
-          value={cssDraft}
-          className="zd-design-control-applied min-h-32 resize-y font-mono text-xs"
-          aria-label="Element CSS declarations"
-          placeholder={"display: flex;\ngap: 16px;\ntransform: translateY(0);"}
-          spellCheck={false}
-          onChange={(event) => {
-            setCssDraft(event.target.value);
-            setCssError(null);
-          }}
-        />
-        {cssError ? (
-          <span className="text-red-primary text-xs">{cssError}</span>
-        ) : null}
-        <Button
-          type="button"
-          size="sm"
-          disabled={disabled || cssSaving || !cssDraft.trim()}
-          onClick={() => void applyCss()}
-        >
-          <Plus />
-          {cssSaving ? "Applying…" : "Apply CSS"}
         </Button>
       </StyleSection>
     </div>

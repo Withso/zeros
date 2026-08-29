@@ -82,6 +82,7 @@ import {
   BrowserWindow,
   nativeImage,
   nativeTheme,
+  powerMonitor,
   screen,
   shell,
   type IpcMainInvokeEvent,
@@ -89,6 +90,7 @@ import {
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
 import {
   isBrowserConfirmationDecision,
   isBrowserProductId,
@@ -146,7 +148,13 @@ import {
   initializeGithubAppFlow,
   scheduleGithubAppRefresh,
 } from "./github-app-flow";
-import { onMainAuthSessionChanged } from "./ipc/commands/auth-session";
+import {
+  clearWorkOSSessionAfterServerRevocation,
+  getValidSessionForMain,
+  onMainAuthSessionChanged,
+} from "./ipc/commands/auth-session";
+import { controlPlaneBaseUrl } from "./workos-desktop-account";
+import { WorkOSDesktopSecurityMonitor } from "./auth-security-monitor";
 import {
   appIdentity,
   zerosChannelDataDir,
@@ -865,18 +873,16 @@ function createMainWindow(): BrowserWindow {
   // via shell.openExternal; everything else is denied. (Browser-tab content is
   // <iframe>, not window.open, so this doesn't touch it.)
   win.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("http://") || url.startsWith("https://")) {
-      void shell.openExternal(url);
-    }
+    const externalUrl = normalizeExternalHttpUrl(url);
+    if (externalUrl) void shell.openExternal(externalUrl);
     return { action: "deny" };
   });
   win.webContents.on("will-navigate", (event, url) => {
     // Allow only the app's own document (dev server / packaged file://).
     if (url.startsWith(DEV_URL) || url.startsWith("file://")) return;
     event.preventDefault();
-    if (url.startsWith("http://") || url.startsWith("https://")) {
-      void shell.openExternal(url);
-    }
+    const externalUrl = normalizeExternalHttpUrl(url);
+    if (externalUrl) void shell.openExternal(externalUrl);
   });
 
   // CSP for the app's OWN document (packaged file:// only — the dev server needs
@@ -1489,12 +1495,41 @@ app.whenReady().then(async () => {
     });
     return true;
   });
+  const authSecurityMonitor = new WorkOSDesktopSecurityMonitor({
+    baseUrl: controlPlaneBaseUrl(),
+    getSession: getValidSessionForMain,
+    clearSession: clearWorkOSSessionAfterServerRevocation,
+    emit: emitEvent,
+  });
+  setCommand("auth_security_revalidate", (_args, event) => {
+    trustedBrowserWindow(event);
+    void authSecurityMonitor.revalidate("online", true);
+    return true;
+  });
+  const onAuthWindowFocus = () => {
+    void authSecurityMonitor.revalidate("focus");
+  };
+  const onAuthResume = () => {
+    void authSecurityMonitor.revalidate("resume");
+  };
+  app.on("browser-window-focus", onAuthWindowFocus);
+  powerMonitor.on("resume", onAuthResume);
+  powerMonitor.on("unlock-screen", onAuthResume);
+
   const disposeGithubSessionSync = onMainAuthSessionChanged(async () => {
+    emitEvent("auth-store-changed", {});
+    void authSecurityMonitor.revalidate("session_changed", true);
     await pushGithubCredentialToEngine();
     await scheduleGithubAppRefresh();
     emitEvent("github-credential-store-changed", {});
   });
-  app.on("will-quit", disposeGithubSessionSync);
+  app.on("will-quit", () => {
+    disposeGithubSessionSync();
+    app.off("browser-window-focus", onAuthWindowFocus);
+    powerMonitor.off("resume", onAuthResume);
+    powerMonitor.off("unlock-screen", onAuthResume);
+    void authSecurityMonitor.stop();
+  });
   setEngineSpawnBarrier(Promise.all([githubAuthReady, browserReady]));
   const root = defaultProjectRoot();
   const engineBoot = spawnEngine(root);
@@ -1510,6 +1545,7 @@ app.whenReady().then(async () => {
   const win = createMainWindow();
   browserRendererEpoch += 1;
   setMainWindow(win);
+  authSecurityMonitor.start();
   win.on("closed", () => {
     browserRendererEpoch += 1;
     void browserService?.revokeConfirmationSurface();

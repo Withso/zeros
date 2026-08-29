@@ -5,13 +5,24 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  admissionRouteWithoutFlight,
   bindFailureWasSuperseded,
   bindStillOwnsSessionSlot,
+  agentUpdateFlushMode,
+  admissionCancellationAction,
   bumpCancelGeneration,
+  cancelledQueuedMessageAction,
   cancelGeneration,
   cancelledSince,
+  clearPrebindGoalSnapshotsForChat,
+  composerShowsStopControl,
+  detachAdmissionFlight,
   loadedSessionStatus,
+  markPrebindGoalSnapshot,
   markPrebindDirty,
+  promptFailureShouldRecover,
+  promptFailureShouldResumeProvider,
+  queuedPromptPresentation,
   providerCapabilityRefreshCanRun,
   providerCapabilityRefreshNeeded,
   providerCapabilityRefreshExecution,
@@ -21,8 +32,13 @@ import {
   recoveredSessionIdentity,
   recoveryLoadLocator,
   resumeFailureInvalidatesBinding,
+  sendAdmissionPark,
+  shouldPreserveAdmissionPromptOnFailure,
   sendNeedsSessionRecovery,
+  sendSessionRecoveryMode,
+  sharedAdmissionFlightAction,
   shouldQueuePrompt,
+  takePrebindGoalSnapshot,
   takePrebindDirty,
 } from "../session-reload-lifecycle";
 import { BLANK, useSessionsStore } from "../sessions-store";
@@ -45,6 +61,62 @@ const turnState = (
     },
   }) as SessionNotification;
 
+describe("queuedPromptPresentation", () => {
+  it("presents the first admission-waiting send as an active turn", () => {
+    expect(
+      queuedPromptPresentation({
+        reason: "admission",
+        hasLocalSend: false,
+        hasQueuedSends: false,
+        queueHeld: false,
+        flushing: false,
+      }),
+    ).toBe("active-turn");
+  });
+
+  it("retains the active prompt when Design protection stops admission", () => {
+    expect(
+      shouldPreserveAdmissionPromptOnFailure(
+        "design-protection-failed",
+        "active-turn",
+      ),
+    ).toBe(true);
+    expect(
+      shouldPreserveAdmissionPromptOnFailure(
+        "provider-unavailable",
+        "active-turn",
+      ),
+    ).toBe(false);
+    expect(
+      shouldPreserveAdmissionPromptOnFailure(
+        "design-protection-failed",
+        "queued-card",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps follow-ups and held sends in the queued card", () => {
+    expect(
+      queuedPromptPresentation({
+        reason: "admission",
+        hasLocalSend: true,
+        hasQueuedSends: false,
+        queueHeld: false,
+        flushing: false,
+      }),
+    ).toBe("queued-card");
+    expect(
+      queuedPromptPresentation({
+        reason: "busy-turn",
+        hasLocalSend: false,
+        hasQueuedSends: false,
+        queueHeld: false,
+        flushing: false,
+      }),
+    ).toBe("queued-card");
+  });
+});
+
 describe("session reload lifecycle", () => {
   beforeEach(() => {
     useSessionsStore.getState().clearAll();
@@ -53,6 +125,23 @@ describe("session reload lifecycle", () => {
   it("restores an engine-active prompt as streaming instead of ready", () => {
     expect(loadedSessionStatus(true)).toBe("streaming");
     expect(loadedSessionStatus(false)).toBe("ready");
+  });
+
+  it("flushes the terminal turn boundary with all preceding content", () => {
+    for (const state of ["completed", "failed", "cancelled"] as const) {
+      expect(agentUpdateFlushMode({ sessionUpdate: "turn_state", state })).toBe(
+        "turn-boundary",
+      );
+    }
+    expect(
+      agentUpdateFlushMode({
+        sessionUpdate: "turn_state",
+        state: "running",
+      }),
+    ).toBe("frame");
+    expect(agentUpdateFlushMode({ sessionUpdate: "agent_message_chunk" })).toBe(
+      "frame",
+    );
   });
 
   it("reloads only an idle native Codex or Claude execution for a boot-scoped capability", () => {
@@ -208,6 +297,30 @@ describe("session reload lifecycle", () => {
     ).toBe(true);
   });
 
+  it("upgrades a real admission that shared an adopt-only probe which missed", () => {
+    expect(
+      sharedAdmissionFlightAction({
+        activeAdoptOnly: true,
+        requestedAdoptOnly: false,
+        hasLiveSession: false,
+      }),
+    ).toBe("retry");
+    expect(
+      sharedAdmissionFlightAction({
+        activeAdoptOnly: true,
+        requestedAdoptOnly: false,
+        hasLiveSession: true,
+      }),
+    ).toBe("reuse");
+    expect(
+      sharedAdmissionFlightAction({
+        activeAdoptOnly: true,
+        requestedAdoptOnly: true,
+        hasLiveSession: false,
+      }),
+    ).toBe("reuse");
+  });
+
   it("rejects stale bind callbacks after close or a replacement execution", () => {
     expect(
       bindStillOwnsSessionSlot({
@@ -330,6 +443,48 @@ describe("session reload lifecycle", () => {
       failure: null,
       lastStopReason: null,
     });
+  });
+
+  it("keeps the original send time when a later running acknowledgement arrives", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-1", {
+      ...BLANK,
+      agentId: "cursor",
+      sessionId: "session-1",
+      status: "streaming",
+      // The optimistic user bubble starts the timer immediately on Send.
+      activeTurnStartedAt: 1_000,
+    });
+
+    // Cursor can take several seconds to create its provider session. The
+    // engine's later acknowledgement must not restart the already-visible
+    // timer from this newer timestamp.
+    store.applyBridgeUpdate(
+      turnState("session-1", "running", { startedAt: 5_000 }),
+    );
+
+    expect(
+      useSessionsStore.getState().sessions["chat-1"]?.activeTurnStartedAt,
+    ).toBe(1_000);
+  });
+
+  it("adopts the engine start time when no local send timestamp survived", () => {
+    const store = useSessionsStore.getState();
+    store.setSession("chat-1", {
+      ...BLANK,
+      agentId: "cursor",
+      sessionId: "session-1",
+      status: "streaming",
+      activeTurnStartedAt: null,
+    });
+
+    store.applyBridgeUpdate(
+      turnState("session-1", "running", { startedAt: 5_000 }),
+    );
+
+    expect(
+      useSessionsStore.getState().sessions["chat-1"]?.activeTurnStartedAt,
+    ).toBe(5_000);
   });
 
   it("settles a re-adopted successful turn and preserves its stop reason", () => {
@@ -556,6 +711,43 @@ describe("session reload lifecycle", () => {
       ["chat-3", "session-3"],
     ]);
   });
+
+  it("replays an early goal snapshot only into its exact execution", () => {
+    const goals = new Map();
+    const goal = {
+      objective: "Ship the renderer fix",
+      status: "active" as const,
+      tokenBudget: null,
+      tokensUsed: 4,
+      timeUsedSeconds: 2,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    markPrebindGoalSnapshot(goals, "chat-1", "old-session", goal);
+
+    expect(
+      takePrebindGoalSnapshot(goals, "chat-1", "new-session"),
+    ).toBeUndefined();
+    expect(takePrebindGoalSnapshot(goals, "chat-1", "old-session")).toEqual(
+      goal,
+    );
+  });
+
+  it("retains null goal clears and bounds pre-bind goal snapshots", () => {
+    const goals = new Map();
+    markPrebindGoalSnapshot(goals, "chat-1", "session-1", null, 2);
+    markPrebindGoalSnapshot(goals, "chat-2", "session-2", null, 2);
+    markPrebindGoalSnapshot(goals, "chat-3", "session-3", null, 2);
+
+    expect(goals.size).toBe(2);
+    expect(
+      takePrebindGoalSnapshot(goals, "chat-1", "session-1"),
+    ).toBeUndefined();
+    expect(takePrebindGoalSnapshot(goals, "chat-2", "session-2")).toBeNull();
+
+    clearPrebindGoalSnapshotsForChat(goals, "chat-3");
+    expect(goals.size).toBe(0);
+  });
 });
 
 // A send is not atomic: it can await a session rebuild, a settings-drift
@@ -565,6 +757,135 @@ describe("session reload lifecycle", () => {
 // pending prompt went out anyway and the agent started working on the turn the
 // user had just stopped.
 describe("stopping a send that has not gone out yet", () => {
+  it("shows Stop while the first prompt waits for ZSR admission", () => {
+    expect(
+      composerShowsStopControl({
+        status: "warming",
+        hasPendingLocalTurn: true,
+        planReview: false,
+      }),
+    ).toBe(true);
+    expect(
+      composerShowsStopControl({
+        status: "warming",
+        hasPendingLocalTurn: false,
+        planReview: false,
+      }),
+    ).toBe(false);
+    expect(
+      composerShowsStopControl({
+        status: "streaming",
+        hasPendingLocalTurn: false,
+        planReview: false,
+      }),
+    ).toBe(true);
+    expect(
+      composerShowsStopControl({
+        status: "warming",
+        hasPendingLocalTurn: true,
+        planReview: true,
+      }),
+    ).toBe(false);
+  });
+
+  it("aborts chat-scoped preparation before a provider session exists", () => {
+    expect(
+      admissionCancellationAction({
+        hasAgent: true,
+        hasSession: false,
+        status: "warming",
+        admissionInFlight: true,
+      }),
+    ).toBe("abort-admission");
+    expect(
+      admissionCancellationAction({
+        hasAgent: true,
+        hasSession: true,
+        status: "warming",
+        admissionInFlight: true,
+      }),
+    ).toBe("cancel-session");
+    expect(
+      admissionCancellationAction({
+        hasAgent: false,
+        hasSession: false,
+        status: "idle",
+        admissionInFlight: false,
+      }),
+    ).toBe("local-only");
+  });
+
+  it("detaches a cancelled preparation so the next prompt owns a fresh flight", () => {
+    const oldFlight = Promise.resolve();
+    const nextFlight = Promise.resolve();
+    const flights = new Map<string, Promise<void>>([["chat-1", oldFlight]]);
+    const keys = new Map([["chat-1", "resume:old"]]);
+    const adoptOnly = new Map([["chat-1", true]]);
+
+    expect(detachAdmissionFlight("chat-1", flights, keys, adoptOnly)).toBe(
+      true,
+    );
+    expect(flights.has("chat-1")).toBe(false);
+    expect(keys.has("chat-1")).toBe(false);
+    expect(adoptOnly.has("chat-1")).toBe(false);
+    expect(
+      admissionRouteWithoutFlight({
+        force: false,
+        replaceProviderConversation: false,
+        hasProviderBinding: true,
+        canLoad: true,
+      }),
+    ).toBe("resume");
+
+    flights.set("chat-1", nextFlight);
+    // The old flight's identity-checked finalizer cannot erase the retry.
+    if (flights.get("chat-1") === oldFlight) flights.delete("chat-1");
+    expect(flights.get("chat-1")).toBe(nextFlight);
+  });
+
+  it("restarts through a durable provider binding during forced configuration recovery", () => {
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: false,
+        hasProviderBinding: true,
+        canLoad: true,
+      }),
+    ).toBe("restart");
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: false,
+        hasProviderBinding: false,
+        canLoad: true,
+      }),
+    ).toBe("create");
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: false,
+        hasProviderBinding: true,
+        canLoad: false,
+      }),
+    ).toBe("create");
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: true,
+        hasProviderBinding: true,
+        canLoad: true,
+      }),
+    ).toBe("create");
+  });
+
+  it("keeps the visible admission prompt as the stopped turn and drops only follow-ups", () => {
+    expect(cancelledQueuedMessageAction("active-turn")).toBe(
+      "preserve-as-turn",
+    );
+    expect(cancelledQueuedMessageAction("queued-card")).toBe("drop");
+    expect(cancelledQueuedMessageAction(undefined)).toBe("drop");
+  });
+
   it("marks the chat cancelled for a send captured before the stop", () => {
     const generations = new Map<string, number>();
     const sendGeneration = cancelGeneration(generations, "chat-1");
@@ -644,6 +965,8 @@ describe("send-time session recovery", () => {
     ).toEqual({
       executionId: "replacement-execution",
       sessionId: "replacement-execution",
+      boundary: null,
+      boundaryPorts: null,
       providerBinding: replacementBinding,
       providerMetadata: { version: 1 },
     });
@@ -657,6 +980,120 @@ describe("send-time session recovery", () => {
     expect(sendNeedsSessionRecovery("ready")).toBe(false);
     expect(sendNeedsSessionRecovery("warming")).toBe(false);
     expect(sendNeedsSessionRecovery("streaming")).toBe(false);
+  });
+
+  it("blocks a send only for a chat whose last spawn ended badly", () => {
+    // Nothing in flight and nothing broken: the message is accepted instantly
+    // and the session builds behind it (§5.0).
+    expect(sendSessionRecoveryMode("idle")).toBe("park");
+    expect(sendSessionRecoveryMode("reconnecting")).toBe("park");
+    // An explicit retry after fixing something: the failure belongs on the send.
+    expect(sendSessionRecoveryMode("failed")).toBe("await");
+    expect(sendSessionRecoveryMode("auth-required")).toBe("await");
+    // Already live or already warming: shouldQueuePrompt owns these.
+    expect(sendSessionRecoveryMode("ready")).toBe("none");
+    expect(sendSessionRecoveryMode("warming")).toBe("none");
+    expect(sendSessionRecoveryMode("streaming")).toBe("none");
+  });
+
+  it("parks a send behind a session that is only just starting", () => {
+    // The pairing that makes §5.0 work: ensureSession publishes `warming`
+    // synchronously, and a warming chat queues rather than blocking.
+    expect(sendSessionRecoveryMode("idle")).toBe("park");
+    expect(
+      shouldQueuePrompt({
+        status: "warming",
+        hasLocalSend: false,
+        hasQueuedSends: false,
+        queueHeld: false,
+        flushing: false,
+      }),
+    ).toBe(true);
+  });
+
+  it("parks any send that still needs an admission before it can dispatch", () => {
+    // The invisible-first-send bug: a send into a chat whose session hadn't
+    // been minted yet fell into the turn body and awaited the FULL admission
+    // with the composer already cleared and no bubble anywhere — while the
+    // SECOND send (queued behind the first's local lock) rendered instantly.
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: false,
+        status: "idle",
+        appliedChatEnvKey: undefined,
+        expectedEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+      }),
+    ).toBe("session-build");
+    // Ready-but-sessionless (a razor-thin exit race) parks the same way.
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: false,
+        status: "ready",
+        appliedChatEnvKey: undefined,
+        expectedEnvKey: undefined,
+      }),
+    ).toBe("session-build");
+    // A live session whose recorded env stamp no longer matches the pills
+    // needs a force-respawn — also an admission, also parked.
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: true,
+        status: "ready",
+        appliedChatEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+        expectedEnvKey: '{"OPENAI_MODEL":"gpt-5.6-sol"}',
+      }),
+    ).toBe("drift-respawn");
+    // Matching stamp, unstamped legacy slot, or no thread env: dispatch now.
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: true,
+        status: "ready",
+        appliedChatEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+        expectedEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+      }),
+    ).toBeNull();
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: true,
+        status: "ready",
+        appliedChatEnvKey: undefined,
+        expectedEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+      }),
+    ).toBeNull();
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: true,
+        status: "ready",
+        appliedChatEnvKey: '{"OPENAI_MODEL":"gpt-5.6-luna"}',
+        expectedEnvKey: undefined,
+      }),
+    ).toBeNull();
+    // A streaming turn or an agentless chat is never parked here — the queue
+    // branch and the turn body's own guards own those.
+    expect(
+      sendAdmissionPark({
+        hasAgent: true,
+        hasSession: false,
+        status: "streaming",
+        appliedChatEnvKey: undefined,
+        expectedEnvKey: undefined,
+      }),
+    ).toBeNull();
+    expect(
+      sendAdmissionPark({
+        hasAgent: false,
+        hasSession: false,
+        status: "idle",
+        appliedChatEnvKey: undefined,
+        expectedEnvKey: undefined,
+      }),
+    ).toBeNull();
   });
 
   it("forgets a binding only when the provider confirms it expired", () => {
@@ -701,6 +1138,34 @@ describe("send-time session recovery", () => {
     };
     expect(bindFailureWasSuperseded(legacyEngineFailure)).toBe(true);
     expect(resumeFailureInvalidatesBinding(legacyEngineFailure)).toBe(false);
+  });
+
+  it("silently rebinds a prompt interrupted by a territory restart without treating binds as retryable", () => {
+    const promptFailure = {
+      kind: "lifecycle-superseded" as const,
+      message: "Design territory changed while the prompt was starting.",
+      stage: "prompt" as const,
+    };
+    const bindFailure = { ...promptFailure, stage: "loadSession" as const };
+
+    expect(promptFailureShouldRecover(promptFailure)).toBe(true);
+    expect(promptFailureShouldResumeProvider(promptFailure)).toBe(true);
+    expect(promptFailureShouldRecover(bindFailure)).toBe(false);
+    expect(promptFailureShouldResumeProvider(bindFailure)).toBe(false);
+    expect(
+      promptFailureShouldResumeProvider({
+        kind: "session-expired",
+        message: "thread not found",
+        stage: "prompt",
+      }),
+    ).toBe(true);
+    expect(
+      promptFailureShouldResumeProvider({
+        kind: "transport-closed",
+        message: "connection reset",
+        stage: "prompt",
+      }),
+    ).toBe(false);
   });
 
   it("hands a warming chat's send to the queue instead", () => {

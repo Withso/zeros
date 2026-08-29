@@ -53,7 +53,7 @@ export const ReviewSurface = React.memo(function ReviewSurface({
   const originHost = parseRemote(project?.originUrl)?.host ?? "github.com";
   const provider = resolveReviewProvider(originHost);
   // Agent turn-end / git & gh writes / editor saves → re-pull the PR surface.
-  const refreshKey = useGitRefreshKey(workspace?.path, changesTarget);
+  const refreshKey = useGitRefreshKey(workspace?.path, changesTarget, active);
   // Parks the header's Merge / Mark-as-ready writes while a turn is in flight.
   const agentWorking = useWorkspaceAgentWorking(workspace);
 

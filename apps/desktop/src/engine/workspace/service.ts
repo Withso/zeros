@@ -15,22 +15,22 @@
 // path, so it can't escape a workspace. Writes are gated by the host
 // (see authorizeRemoteWrite in ZerosEngine — the remote-restriction list).
 //
-// Deferred (follow-ups): artifacts/canvas (renderer-owned persistence).
+// Design screenshots remain bounded renderer/engine-memory state. Explicit
+// exports are handed directly to the desktop save surface.
 // ──────────────────────────────────────────────────────────
 
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as nodePath from "node:path";
+import { parse as parseToml } from "smol-toml";
 import {
   GitError,
-  addPrComment,
   changeTargetBranch,
   checkoutBranch,
   commit,
   continueOnNewBranch,
   createBranchFrom,
-  createPr,
   checkRepoNameAvailable,
   changeCounts,
   changeLineCounts,
@@ -40,7 +40,6 @@ import {
   diff,
   fetch,
   getAuthStatus,
-  getPr,
   getPrChecks,
   getPrCommits,
   getPrReviews,
@@ -48,6 +47,9 @@ import {
   getWorkspaceRepoAccess,
   createWorkspace,
   prepareWorkspaceCreate,
+  enterDesignMode,
+  exitDesignMode,
+  renameDesignDirectory,
   getWorkspace,
   getWorkspaceLifecycleStatus,
   getWorkspaceById,
@@ -65,9 +67,8 @@ import {
   setWorkingDirectories,
   setWorkspaceRemoteRestricted,
   setWorkspaceStatus,
+  setSyntheticGitWorkspaceResolver,
   log,
-  markPrReady,
-  mergePr,
   pull,
   discardFiles,
   push,
@@ -83,8 +84,10 @@ import {
   syncWorkspacePr,
   readOriginUrl,
   unstagePaths,
-  updatePr,
+  changeRequestToLegacyPr,
+  githubForgeAdapter,
   type Workspace,
+  type WorkspaceMode,
   type WorkspaceStatus,
   type DiffMode,
   type SetupInfo,
@@ -94,12 +97,16 @@ import { resolveRepoScript, resolveRunActions } from "../settings/repo-scripts";
 import { isRunSessionId, runActionOneShot } from "@zeros/protocol/run-actions";
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import { sameProviderBinding } from "@zeros/protocol/identities";
-import type { DesignOperation } from "@zeros/design-core";
+import {
+  designTransactionSchema,
+  type DesignOperation,
+} from "@zeros/design-core";
 import type {
   RunActionStatus,
   RunStartArgs,
   RunStartResult,
 } from "../run/run-manager";
+import type { RepoTaskBoundaryFactory } from "../agents/containment/types";
 // The remaining database-touching Git, workspace, and pull-request operations the
 // desktop drove via in-process Electron IPC, now exposed on the bridge so the
 // engine is the sole zeros.db writer. Thin pass-throughs, same as above — the
@@ -121,6 +128,7 @@ import {
   stageHunk,
   unstageHunk,
   discardHunk,
+  inspectApplyPatchPaths,
   createTag,
   listTags,
   deleteTag,
@@ -156,8 +164,10 @@ import {
 } from "../files/context-graph";
 import {
   opSettingsMigrateLegacy,
+  opSettingsPreviewWrite,
   opSettingsRead,
   opSettingsResolve,
+  opSettingsResolveWithOverride,
   opSettingsWrite,
   opSettingsWriteRaw,
   READABLE_LAYERS,
@@ -177,9 +187,11 @@ import {
   getWorkspaceDesignApi,
 } from "../design/design-api";
 import {
+  captureDesignFrameRestorePoint,
   createDesignFrame,
   deleteDesignFrame,
-  DESIGN_DIRECTORY_NAME,
+  designDirectoryNameFor,
+  DESIGN_CANVAS_FILE,
   DESIGN_TOKENS_FILE,
   duplicateDesignFrame,
   lintDesignDocument,
@@ -194,11 +206,30 @@ import {
   readDesignTokensDocument,
   prepareDesignAssetInsertion,
   renameDesignFrame,
+  replaceDesignFrameFromHistory,
+  restoreDesignFrame,
+  type DesignFrameRestorePoint,
   type DesignLintViolation,
+  type DesignWorkspaceSnapshot,
 } from "../design/document";
+import {
+  discoverDesignDirectories,
+  resolveDesignDirectoryPointer,
+  validateDesignDirectoryPointerTarget,
+} from "../design/directory";
+import {
+  DEFAULT_DESIGN_DIRECTORY_NAME,
+  forgetDesignDirectoryName,
+  primeDesignDirectoryName,
+  sanitizeDesignDirectoryName,
+} from "../design/directory-registry";
+import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
+import { withDesignWorkspaceMutation } from "../design/document-write-lock";
+import { unfenceDesignDirectory } from "../design/workspace-lock";
 import { setDesignRuntimeAudit } from "../design/runtime-audits";
 import {
   forgetDesignScreenshots,
+  normalizeDesignScreenshot,
   setDesignScreenshot,
 } from "../design/screenshots";
 import { forgetDesignSelection, setDesignSelection } from "../design/selection";
@@ -470,6 +501,21 @@ const WRITE_OPS = new Set<string>([
   // edits), so gating this would be theater. Remote repo targeting is still
   // clamped to repos the owner opened (isKnownRepoRoot in the handler).
   "settings.write",
+  // Repository-controlled automation is no longer a host-authority bridge:
+  // setup/run commands are resolved engine-side and spawned through the
+  // repo-code-task ZSR boundary. Cloud clients therefore get the same controls
+  // as the desktop, still subject to the workspace restriction gate.
+  "workspace.rerunSetup",
+  "workspace.stopSetup",
+  "workspace.startRun",
+  "workspace.stopRun",
+  // These mutate only the engine-owned MCP vault/authorization flight. OAuth
+  // tokens never leave the engine; begin/complete carries only the short-lived
+  // authorization URL/code over the authenticated cloud bridge.
+  "mcp.gateway.beginAuth",
+  "mcp.gateway.completeAuth",
+  "mcp.gateway.disconnect",
+  "mcp.gateway.setHeaderSecret",
   // Files-tab manual edit — write one file's content. Open to paired devices on
   // the SAME terms as settings.write (a paired device already holds PTY =
   // arbitrary file edits, so gating this would be theater). The handler still
@@ -506,6 +552,7 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "design.history.redo",
   "design.asset.insert",
   "design.token.update",
+  "design.stage",
   "design.save",
   // Create/move files under `.context-graph/` — archive's snapshot force-adds
   // that tree, so a mid-flight scaffold or share-toggle must drain first.
@@ -517,6 +564,10 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   // a worktree, and an unregistered sparse-checkout would still be
   // materializing or deleting folders underneath it.
   "workspace.setWorkingDirectories",
+  // A mode switch may create/commit the Design foundation or materialize a
+  // legacy sparse checkout, so archive/delete must drain it — and it must be
+  // refused once a lifecycle flight owns the row.
+  "workspace.setMode",
   "git.stage",
   "git.unstage",
   "git.discard",
@@ -555,45 +606,304 @@ const LIFECYCLE_GATED_WORKSPACE_OPS = new Set<string>([
   "detach.start",
 ]);
 
-/** Design workspaces have a dedicated document mutation/save path. Generic
- * checkout/index writers could otherwise make Git partially rewrite an
- * ACL-locked tree (Git may still exit zero), so reject them before dispatch.
- * Fetch/push and target-branch metadata remain separate, non-checkout actions. */
+/** Concurrent duality: a design-MODE workspace is an ordinary workspace whose
+ * codebase stays fully live (agents/terminals/git keep working), so generic
+ * mutations are NOT blocked anymore. The design document's protection is
+ * territorial instead — agent sandbox capabilities plus path fences in the
+ * individual handlers (see designPathsFence). The one survivor: hiding
+ * folders via sparse-checkout could remove the design directory from disk
+ * underneath an open canvas, so the picker stays unavailable while the
+ * design surface owns the workspace's presentation. */
 const DESIGN_WORKSPACE_BLOCKED_MUTATIONS = new Set<string>([
-  "file.write",
-  "context.graph.scaffold",
-  "context.graph.setShared",
   "workspace.setWorkingDirectories",
-  "git.stage",
-  "git.unstage",
-  "git.discard",
-  "git.clean",
-  "git.commit",
-  "git.pull",
-  "git.rebase",
-  "git.stashSave",
-  "git.stashPop",
-  "git.checkoutBranch",
-  "git.createBranch",
-  "git.renameBranch",
-  "git.reset",
-  "git.restore",
-  "git.merge",
-  "git.cherryPick",
-  "git.revert",
-  "git.continue",
-  "git.abort",
-  "git.stashApply",
-  "git.stashDrop",
-  "git.deleteBranch",
-  "git.stageHunk",
-  "git.unstageHunk",
-  "git.discardHunk",
-  "git.tagCreate",
-  "git.tagDelete",
-  "turns.reset",
-  "turns.undoReset",
 ]);
+const MAX_DESIGN_DESCENDANT_SCAN_ENTRIES = 65_536;
+
+/** Recognizes design territory the way the agent boundary does: by MARKER, not
+ *  by name.
+ *
+ *  The pointer name alone was never sufficient. `designDirectoryNameFor` is an
+ *  in-memory registry primed by entering Design mode, resolving the pointer,
+ *  building an agent territory, or changing the setting — none of which run on
+ *  a plain code-mode workspace load. Until something primed it the registry
+ *  answered with the DEFAULT name, so a renamed or nested design folder
+ *  (`apps/web/designs`) matched nothing and every code-side write into it was
+ *  allowed. A repo may also hold SEVERAL design folders, of which the pointer
+ *  names only the active one; the others are design territory too.
+ *
+ *  `.zeros-canvas.json` is the same evidence `discoverDesignDirectories` uses,
+ *  so recognition needs no priming, survives renames, and covers every design
+ *  folder at once. The file has to exist on disk to be written, so its marker
+ *  is on disk as well — the git-based discovery stays the authority for the
+ *  territory/boundary, which additionally needs the HEAD-and-index view.
+ *
+ *  The primed pointer is UNIONED in, never intersected: a folder reserved for
+ *  first use has no marker yet, and more evidence may only refuse more. The
+ *  workspace root itself is never probed — a marker there would otherwise turn
+ *  the whole repository read-only. */
+function makeDesignPathRecognizer(
+  workspacePath: string,
+  pointerName: string,
+): (candidate: string) => boolean {
+  // One `git.stage` can carry thousands of paths that share a handful of
+  // directories, so each directory is probed at most once per operation.
+  const probed = new Map<string, boolean>();
+  const hasMarker = (relativeDir: string): boolean => {
+    const cached = probed.get(relativeDir);
+    if (cached !== undefined) return cached;
+    const found = fs.existsSync(
+      nodePath.join(
+        workspacePath,
+        ...relativeDir.split("/"),
+        DESIGN_CANVAS_FILE,
+      ),
+    );
+    probed.set(relativeDir, found);
+    return found;
+  };
+  const descendantProbes = new Map<string, boolean>();
+  const containsMarker = (relativeDir: string): boolean => {
+    const cached = descendantProbes.get(relativeDir);
+    if (cached !== undefined) return cached;
+    const pending = [nodePath.join(workspacePath, ...relativeDir.split("/"))];
+    let visited = 0;
+    while (pending.length > 0) {
+      const directory = pending.pop()!;
+      let metadata: fs.Stats;
+      let entries: fs.Dirent[];
+      try {
+        metadata = fs.lstatSync(directory);
+        if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+          descendantProbes.set(relativeDir, false);
+          return false;
+        }
+        entries = fs.readdirSync(directory, { withFileTypes: true });
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ENOENT" || code === "ENOTDIR") {
+          descendantProbes.set(relativeDir, false);
+          return false;
+        }
+        // If Git was handed this directory but the trusted bridge cannot
+        // inspect it, refusing is safer than allowing a subtree sweep whose
+        // Design overlap is unknown.
+        descendantProbes.set(relativeDir, true);
+        return true;
+      }
+      // A nested repository is an opaque gitlink/embedded-repo path to the
+      // current owner. Git does not recurse into it, so neither should this
+      // repository's Design guard.
+      if (entries.some((entry) => entry.name === ".git")) continue;
+      for (const entry of entries) {
+        visited += 1;
+        if (visited > MAX_DESIGN_DESCENDANT_SCAN_ENTRIES) {
+          descendantProbes.set(relativeDir, true);
+          return true;
+        }
+        if (entry.name === DESIGN_CANVAS_FILE) {
+          descendantProbes.set(relativeDir, true);
+          return true;
+        }
+        if (entry.isDirectory() && !entry.isSymbolicLink()) {
+          pending.push(nodePath.join(directory, entry.name));
+        }
+      }
+    }
+    descendantProbes.set(relativeDir, false);
+    return false;
+  };
+  return (candidate: string): boolean => {
+    const normalized = normalizeRepoMutationPath(candidate);
+    if (!normalized) return false;
+    if (
+      pointerName &&
+      (normalized === pointerName || normalized.startsWith(`${pointerName}/`))
+    ) {
+      return true;
+    }
+    const segments = normalized
+      .split("/")
+      .filter((segment) => segment.length > 0);
+    // A marker at depth >= 1 establishes the folder containing it as Design
+    // territory. Treat the marker itself as protected before it exists, too,
+    // so the generic code editor cannot manufacture a new Design document and
+    // continue writing it through code authority. A root-level marker remains
+    // invalid recognition and is deliberately not special-cased.
+    if (
+      segments.length > 1 &&
+      segments[segments.length - 1] === DESIGN_CANVAS_FILE
+    ) {
+      return true;
+    }
+    // Depth 0 is the workspace root and is deliberately skipped.
+    for (let depth = segments.length; depth >= 1; depth -= 1) {
+      if (hasMarker(segments.slice(0, depth).join("/"))) return true;
+    }
+    return containsMarker(normalized);
+  };
+}
+
+function normalizeRepoMutationPath(candidate: string): string | null {
+  const slash = candidate.replace(/\\/g, "/");
+  if (!slash || slash.startsWith("/") || /^[A-Za-z]:\//.test(slash)) {
+    return null;
+  }
+  const normalized = nodePath.posix.normalize(slash).replace(/\/+$/, "");
+  if (
+    !normalized ||
+    normalized === "." ||
+    normalized === ".." ||
+    normalized.startsWith("../")
+  ) {
+    return null;
+  }
+  return normalized.replace(/^\.\//, "");
+}
+
+/** The bridge's path arrays are exact repository paths, never Git pathspec
+ * programs. `--` ends option parsing but does not disable `:(top)`, glob, or
+ * exclude expansion, so lower Git helpers wrap every validated path in
+ * `:(literal)`. This gate rejects only values that cannot name a
+ * repository-relative path; metacharacters remain valid filename bytes. */
+function assertLiteralGitMutationPaths(
+  paths: readonly string[],
+  action: string,
+): void {
+  for (const candidate of paths) {
+    const normalized = normalizeRepoMutationPath(candidate);
+    if (!normalized || candidate.includes("\0")) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: `${action} requires exact repository-relative paths.`,
+        remediation: "Select the exact files in the Changes view and retry.",
+      });
+    }
+  }
+}
+
+/** Every Design folder the Working Folders picker must lock.
+ *
+ *  Deliberately GIT-based rather than the on-disk marker walk used by the write
+ *  guard: this is the one place that has to see a design folder which is
+ *  already excluded from the checkout, so that unticking it can never be the
+ *  thing that hides it from every later check. `discoverDesignDirectories`
+ *  reads the index and HEAD, so a folder off disk is still found. The primed
+ *  pointer is unioned in for a folder reserved before its first save.
+ *
+ *  Discovery failure yields the pointer alone rather than an empty list: fewer
+ *  locks would be the unsafe direction. */
+async function designRootsForWorkingDirectories(
+  cwd: string,
+): Promise<string[]> {
+  const roots = new Set<string>();
+  const pointer = designDirectoryNameFor(cwd);
+  if (pointer) roots.add(pointer);
+  try {
+    for (const discovered of await discoverDesignDirectories(cwd)) {
+      roots.add(discovered);
+    }
+  } catch {
+    // A non-Git or unborn checkout has no Working Folders feature at all, so
+    // there is nothing left to protect here.
+  }
+  return [...roots];
+}
+
+function repoMutationPathOverlapsDesignRoot(
+  candidate: string,
+  designRoot: string,
+): boolean {
+  const normalized = normalizeRepoMutationPath(candidate);
+  const normalizedRoot = normalizeRepoMutationPath(designRoot);
+  if (!normalized || !normalizedRoot) return false;
+  return (
+    normalized === normalizedRoot ||
+    normalized.startsWith(`${normalizedRoot}/`) ||
+    normalizedRoot.startsWith(`${normalized}/`)
+  );
+}
+
+/** Return code-side paths inside or containing any Design directory. Git
+ *  treats a directory path as its complete subtree, so an ancestor is just as
+ *  authority-sensitive as a file below the root. The fast path uses current
+ *  on-disk markers and the active/prospective pointer. If that finds nothing,
+ *  consult Git HEAD/index plus sticky engine recognition so an externally
+ *  deleted marker cannot reopen an inactive Design root to the trusted
+ *  Files/Git bridge while ZSR still protects it. */
+async function designPathsInCodeMutation(
+  workspaceId: string,
+  paths: readonly string[],
+  resolvedWorkspacePath?: string,
+): Promise<string[]> {
+  const workspace = getWorkspaceById(workspaceId);
+  const workspacePath = workspace?.path ?? resolvedWorkspacePath;
+  if (!workspacePath) return [];
+  const activeDesignRoot = designDirectoryNameFor(workspacePath);
+  const isDesignPath = makeDesignPathRecognizer(
+    workspacePath,
+    activeDesignRoot,
+  );
+  const immediate = paths.filter(
+    (candidate) =>
+      isDesignPath(candidate) ||
+      repoMutationPathOverlapsDesignRoot(candidate, activeDesignRoot),
+  );
+  if (immediate.length > 0) return immediate;
+
+  let recognized: string[];
+  try {
+    const [gitRecognized, stickyRecognized] = await Promise.all([
+      discoverDesignDirectories(workspacePath),
+      stickyRecognizedDesignDirectories(workspacePath),
+    ]);
+    recognized = [...new Set([...gitRecognized, ...stickyRecognized])];
+  } catch (cause) {
+    throw new GitError({
+      code: "GIT_COMMAND_FAILED",
+      message: "Could not verify the repository's Design territory.",
+      cause,
+      remediation:
+        "Retry after Git is available; code-side writes remain refused until Design territory can be verified.",
+      context: { workspaceId },
+    });
+  }
+  if (recognized.length === 0) return [];
+  return paths.filter((candidate) =>
+    recognized.some((root) =>
+      repoMutationPathOverlapsDesignRoot(candidate, root),
+    ),
+  );
+}
+
+/** Hard-refuse code-side writes aimed at the design directory. Design files
+ *  are edited through the design surface and committed with "Save designs" —
+ *  the ONE write path — so generic staging/discard/commit/editor writes into
+ *  that territory are refused with a pointer instead of competing with the
+ *  Design mutation sequencer. Managed worktrees, local-main, and registered
+ *  rowless project roots all use the same recognizer. */
+async function assertNoDesignPathWrites(
+  workspaceId: string,
+  paths: readonly string[],
+  action: string,
+  resolvedWorkspacePath?: string,
+): Promise<void> {
+  const offending = await designPathsInCodeMutation(
+    workspaceId,
+    paths,
+    resolvedWorkspacePath,
+  );
+  if (offending.length === 0) return;
+  throw new GitError({
+    code: "VALIDATION_FAILED",
+    message:
+      offending.length === 1
+        ? `"${offending[0]}" is inside the design directory — ${action} is refused for design files.`
+        : `${offending.length} paths are inside the design directory — ${action} is refused for design files.`,
+    remediation:
+      'Design files are edited in Design Mode and committed with "Save designs".',
+    context: { workspaceId },
+  });
+}
 
 /** Read (non-mutating) ops a RELAY client is permitted to invoke — the
  *  deny-by-default allowlist for remote reads (the engine gates on this BEFORE
@@ -657,6 +967,15 @@ const REMOTE_READABLE = new Set<string>([
   // clients in the handler; settings.migrateLegacy stays LOCAL-ONLY).
   "settings.resolve",
   "settings.read",
+  // Setup/run status and bounded logs are ordinary workspace state in a cloud
+  // workspace, not local-host data. Their command execution stays contained.
+  "workspace.setupInfo",
+  "workspace.runInfo",
+  "workspace.runLog",
+  // Gateway status/composition contains endpoint names and redacted state, not
+  // bearer credentials. It is required for cloud MCP parity.
+  "mcp.resolveComposed",
+  "mcp.gateway.status",
 ]);
 
 /** Chat/transcript LIST mutations a remote client may issue without host
@@ -678,27 +997,27 @@ const REMOTE_METADATA_OPS = new Set<string>([
   "messages.truncateFrom",
 ]);
 
-/** Top-level settings keys a REMOTE client may NOT write (any layer). These
- *  resolve into the scrubbed spawn/setup execution paths — a shell command
- *  (`scripts`), the spawned agent binary + its gateway (`providers`), an
- *  arbitrary host-file read into the agent env (`env_files`), or an MCP server
- *  the agent CLI executes (`mcp`: a stdio `command`/`args` is an arbitrary host
- *  process spawned when the agent boots the server — straight host RCE — and the
- *  engine boot-loads + live-reloads the user-level `[[mcp.servers]]` set, so a
- *  remote user-layer write would run on the next agent spawn) — so a paired
- *  device planting them is host RCE / secret exfiltration. The desktop owner
- *  edits these locally (MCP via the Customize tab). The `env` table's plain VALUES
- *  are remote-writable, but its NAMES are constrained two ways: a remote write of
- *  a secret-shaped name is refused here (see `secretEnvNamesInPatch`), and at
- *  spawn `spawnEnvNameHazard` drops any code-injection / credential-redirect /
- *  secret-shaped name from BOTH the `env` table and `env_files` (spawn-env.ts) —
- *  that spawn filter, not this denylist, is the actual backstop, since a
- *  committed file reaches it with no paired device involved. */
+/** Top-level settings keys a cloud client may NOT write (any layer).
+ *
+ *  `scripts`, `providers`, `env_files`, and `mcp` used to be denied because the
+ *  retired relay model could turn them into unsandboxed host execution. That
+ *  would now be both a parity bug and a misleading security boundary: every
+ *  repository script runs under `repo-code-task`, while provider binaries,
+ *  plugins, and stdio MCP children inherit the session's `agent-code` ZSR.
+ *  Env-file paths remain repo-relative and their names are filtered again at
+ *  spawn. Qualified cloud workspaces therefore get the same settings surface
+ *  as local workspaces without granting engine authority.
+ *
+ *  `design` is different: it selects engine-owned mutation territory. It stays
+ *  on the typed Design-directory transition path instead of a generic remote
+ *  settings patch. The `env` table's plain values are cloud-writable, but a
+ *  secret-shaped name is still refused here (see `secretEnvNamesInPatch`) and
+ *  all code-injection / credential-redirect / secret-shaped names are scrubbed
+ *  again in `spawn-env.ts`. */
 const REMOTE_WRITE_DENYLIST = [
-  "scripts",
-  "providers",
-  "env_files",
-  "mcp",
+  // This pointer selects the engine-owned Design mutation territory and changes
+  // future Zeros-agent authority. It must use the explicit transition surface.
+  "design",
 ] as const;
 
 /** A remote client may freely edit its OWN chat metadata (title, pin, model,
@@ -1066,6 +1385,65 @@ async function applyDesktopDesignOperation(
   });
 }
 
+type WorkspaceDesignHistoryEntry =
+  | {
+      kind: "document";
+      frame: string;
+      coalesceKey?: string;
+      createdAt: number;
+      bytes: number;
+    }
+  | {
+      kind: "frame";
+      before: DesignFrameRestorePoint | null;
+      after: DesignFrameRestorePoint | null;
+      bytes: number;
+    };
+
+interface WorkspaceDesignHistoryState {
+  undo: WorkspaceDesignHistoryEntry[];
+  redo: WorkspaceDesignHistoryEntry[];
+  bytes: number;
+}
+
+const MAX_DESIGN_HISTORY_WORKSPACES = 16;
+const MAX_DESIGN_HISTORY_ENTRIES = 100;
+const MAX_DESIGN_HISTORY_BYTES = 16 * 1024 * 1024;
+
+function documentDesignHistoryEntry(
+  frame: string,
+  coalesceKey?: string,
+  createdAt = Date.now(),
+): WorkspaceDesignHistoryEntry {
+  return {
+    kind: "document",
+    frame,
+    ...(coalesceKey ? { coalesceKey } : {}),
+    createdAt,
+    bytes: (frame.length + (coalesceKey?.length ?? 0) + 32) * 2,
+  };
+}
+
+function frameDesignHistoryEntry(
+  before: DesignFrameRestorePoint | null,
+  after: DesignFrameRestorePoint | null,
+): WorkspaceDesignHistoryEntry {
+  const file = before?.file ?? after?.file;
+  if (!file || (before && after && before.file !== after.file)) {
+    throw new Error("Design frame history requires one stable file identity.");
+  }
+  return {
+    kind: "frame",
+    before,
+    after,
+    bytes:
+      (before ? Buffer.byteLength(before.source, "utf8") : 0) +
+      (after ? Buffer.byteLength(after.source, "utf8") : 0) +
+      file.length * 2 +
+      128,
+  };
+}
+
 const workspaceKind = (
   p: Params,
   key = "kind",
@@ -1092,7 +1470,30 @@ const strArr = (p: Params, k: string): string[] =>
     ? (p[k] as unknown[]).filter((x): x is string => typeof x === "string")
     : [];
 
+interface DesignTerritoryTransitionTarget {
+  workspaceId: string;
+  designDirectory: string;
+}
+
+interface DesignTerritoryTransitionOptions {
+  /** First publication may skip retirement only when every live immutable
+   * contribution already contains this prospective Design subtraction. */
+  firstDesignCreation?: boolean;
+}
+
 export class WorkspaceService {
+  /** Engine-owned authority transition around a mutation that changes the
+   * active Design territory. The service owns the settings/document operation;
+   * the engine owns spawned agents, so neither side can close this race alone.
+   * Production always wires this before serving requests. */
+  private designTerritoryTransitioner:
+    | ((
+        targets: readonly DesignTerritoryTransitionTarget[],
+        mutation: () => Promise<unknown>,
+        options?: DesignTerritoryTransitionOptions,
+      ) => Promise<unknown>)
+    | null = null;
+
   constructor(private readonly root: string) {
     // v11: hand the chats DB layer an authoritative folder→workspaceId resolver
     // so every chat upsert caches its owning workspace (db/chats.ts stays free of
@@ -1100,6 +1501,9 @@ export class WorkspaceService {
     // registry; safe to wire in the constructor since it's only invoked later, at
     // upsert/backfill time — never before the DB is migrated.
     setChatWorkspaceResolver((folder) => this.workspaceIdForCwd(folder));
+    setSyntheticGitWorkspaceResolver((workspaceId) =>
+      workspaceId === LOCAL_MAIN_WORKSPACE_ID ? this.localMainEntry() : null,
+    );
   }
 
   /** Live accessor for the engine's MCP gateway (created lazily after this
@@ -1113,6 +1517,80 @@ export class WorkspaceService {
   private designProtocolCapabilityProvider:
     | ((workspaceId: string) => string)
     | null = null;
+  /** Concurrent renderer siblings and a safe read retry must share one cold
+   * parse/lint/render pass. This retains only in-flight work; filesystem and
+   * mutation generations remain authoritative for every later request. */
+  private readonly designSnapshotFlights = new Map<
+    string,
+    Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>
+  >();
+  /** One bounded workspace-wide ordering layer sits above DesignApi's
+   * per-frame stacks. It lets Command-Z restore a deleted frame even when the
+   * selected frame changed—or when deletion left the canvas empty. */
+  private readonly designHistoryByWorkspace = new Map<
+    string,
+    WorkspaceDesignHistoryState
+  >();
+
+  private designHistoryState(
+    workspacePath: string,
+    create = false,
+  ): WorkspaceDesignHistoryState | undefined {
+    const key = nodePath.resolve(workspacePath);
+    let state = this.designHistoryByWorkspace.get(key);
+    if (!state && create) {
+      state = { undo: [], redo: [], bytes: 0 };
+      this.designHistoryByWorkspace.set(key, state);
+    } else if (state) {
+      this.designHistoryByWorkspace.delete(key);
+      this.designHistoryByWorkspace.set(key, state);
+    }
+    while (this.designHistoryByWorkspace.size > MAX_DESIGN_HISTORY_WORKSPACES) {
+      const oldest = this.designHistoryByWorkspace.keys().next().value as
+        | string
+        | undefined;
+      if (!oldest || oldest === key) break;
+      this.designHistoryByWorkspace.delete(oldest);
+    }
+    return state;
+  }
+
+  private recordDesignHistory(
+    workspacePath: string,
+    entry: WorkspaceDesignHistoryEntry,
+  ): void {
+    const state = this.designHistoryState(workspacePath, true)!;
+    for (const redo of state.redo) state.bytes -= redo.bytes;
+    state.redo = [];
+    const previous = state.undo.at(-1);
+    if (
+      entry.kind === "document" &&
+      entry.coalesceKey &&
+      previous?.kind === "document" &&
+      previous.frame === entry.frame &&
+      previous.coalesceKey === entry.coalesceKey &&
+      entry.createdAt >= previous.createdAt &&
+      entry.createdAt - previous.createdAt <= 750
+    ) {
+      previous.createdAt = entry.createdAt;
+      return;
+    }
+    state.undo.push(entry);
+    state.bytes += entry.bytes;
+    while (
+      state.undo.length > MAX_DESIGN_HISTORY_ENTRIES ||
+      state.bytes > MAX_DESIGN_HISTORY_BYTES
+    ) {
+      const removed = state.undo.shift();
+      if (!removed) break;
+      state.bytes -= removed.bytes;
+    }
+    state.bytes = Math.max(0, state.bytes);
+  }
+
+  private forgetDesignHistory(workspacePath: string): void {
+    this.designHistoryByWorkspace.delete(nodePath.resolve(workspacePath));
+  }
   setDesignProtocolCapabilityProvider(
     fn: (workspaceId: string) => string,
   ): void {
@@ -1135,18 +1613,33 @@ export class WorkspaceService {
   ): void {
     this.gatewayHeaderSecretSetter = fn;
   }
-  /** Starts (or restarts) a background setup PTY. Wired by the engine (which
-   *  owns the PtyService + SetupManager); driven by the LOCAL-ONLY
-   *  workspace.rerunSetup op. `target` carries the cwd/repo for a ROWLESS run
-   *  (the trunk / "main" synthetic workspace); a real workspace omits it and
-   *  the SetupManager resolves everything from the row. */
+  /** Starts (or restarts) a contained background setup PTY. Wired by the
+   *  engine (which owns the PtyService + SetupManager); managed workspaces are
+   *  available to qualified local/cloud clients. `target` carries the cwd/repo
+   *  for a LOCAL-ONLY ROWLESS run (the trunk / "main" synthetic workspace); a
+   *  real workspace omits it and SetupManager resolves everything from the row. */
   private setupRunner:
-    | ((workspaceId: string, command: string, target?: SetupTarget) => void)
+    | ((
+        workspaceId: string,
+        command: string,
+        target?: SetupTarget,
+      ) => void | Promise<void>)
     | null = null;
   setSetupRunner(
-    fn: (workspaceId: string, command: string, target?: SetupTarget) => void,
+    fn: (
+      workspaceId: string,
+      command: string,
+      target?: SetupTarget,
+    ) => void | Promise<void>,
   ): void {
     this.setupRunner = fn;
+  }
+  /** Boundary used by non-PTY repository hooks (currently archive cleanup).
+   * Kept engine-injected so the Git module never constructs a weaker backend
+   * or silently falls back to an ordinary host shell. */
+  private repoTaskBoundaryFactory: RepoTaskBoundaryFactory | null = null;
+  setRepoTaskBoundaryFactory(factory: RepoTaskBoundaryFactory): void {
+    this.repoTaskBoundaryFactory = factory;
   }
   /** Stops a live setup run (records "stopped", not "failed"). Wired by the
    *  engine; driven by the LOCAL-ONLY workspace.stopSetup op. */
@@ -1167,6 +1660,32 @@ export class WorkspaceService {
     fn: (workspaceId: string, worktreePath: string) => Promise<void>,
   ): void {
     this.workspaceProcessReaper = fn;
+  }
+  setDesignTerritoryTransitioner(
+    fn: (
+      targets: readonly DesignTerritoryTransitionTarget[],
+      mutation: () => Promise<unknown>,
+      options?: DesignTerritoryTransitionOptions,
+    ) => Promise<unknown>,
+  ): void {
+    this.designTerritoryTransitioner = fn;
+  }
+
+  /** A Design territory may be published only after the engine proves every
+   * live process already carries the same subtraction or retires the obsolete
+   * ones. Unit-level service users that never spawn processes may leave the
+   * hook unwired; the engine path is fail-closed and always supplies it. */
+  private async withDesignTerritoryTransition<T>(
+    targets: readonly DesignTerritoryTransitionTarget[],
+    mutation: () => Promise<T>,
+    options?: DesignTerritoryTransitionOptions,
+  ): Promise<T> {
+    if (!this.designTerritoryTransitioner) return mutation();
+    return (await this.designTerritoryTransitioner(
+      targets,
+      mutation,
+      options,
+    )) as T;
   }
   /** Retires the engine's exact recursive filesystem subscription before a
    * managed checkout is moved for archive/delete. The returned release lets a
@@ -1200,8 +1719,12 @@ export class WorkspaceService {
   }
   /** Stops a live run (records "stopped", not "failed"). Wired by the engine;
    *  driven by the LOCAL-ONLY workspace.stopRun op. */
-  private runStopper: ((sessionId: string) => void) | null = null;
-  setRunStopper(fn: (sessionId: string) => void): void {
+  private runStopper:
+    | ((sessionId: string, expectedWorkspaceId?: string) => void)
+    | null = null;
+  setRunStopper(
+    fn: (sessionId: string, expectedWorkspaceId?: string) => void,
+  ): void {
     this.runStopper = fn;
   }
   /** Reads run-action statuses (live + durable). Wired by the engine; driven
@@ -1224,21 +1747,29 @@ export class WorkspaceService {
    *  that exited before the renderer could attach — its live PTY mirror is
    *  gone). Wired by the engine; driven by the LOCAL-ONLY workspace.runLog op. */
   private runLogGetter:
-    | ((sessionId: string) => { log: string; truncated: boolean })
+    | ((
+        sessionId: string,
+        expectedWorkspaceId?: string,
+      ) => { log: string; truncated: boolean })
     | null = null;
   setRunLogGetter(
-    fn: (sessionId: string) => { log: string; truncated: boolean },
+    fn: (
+      sessionId: string,
+      expectedWorkspaceId?: string,
+    ) => { log: string; truncated: boolean },
   ): void {
     this.runLogGetter = fn;
   }
-  /** Resolve + kick off a workspace's background setup PTY (host shell — LOCAL
-   *  ONLY). Used by workspace.rerunSetup and create-from-branch so dependency
-   *  setup is explicit for an existing workspace and automatic only for a newly
-   *  created checkout.
+  /** Resolve + kick off a workspace's contained background setup PTY. Used by
+   *  workspace.rerunSetup and create-from-branch so dependency setup is
+   *  explicit for an existing workspace and automatic only for a newly created
+   *  checkout.
    *  Returns whether a setup command was found + started; no-op (false) when the
    *  repo has no setup configured or the runner isn't wired (e.g. unit tests).
-   *  Fire-and-forget — the PTY runs in the background (Setup tab), so callers
-   *  don't await completion. */
+   *  Waits only for admission + PTY spawn; the setup command itself continues
+   *  in the background. This keeps the rerun acknowledgement aligned with the
+   *  first observable `running` snapshot without holding the RPC until setup
+   *  completes. */
   private assertWorkspaceProcessStartAllowed(ws: Workspace): void {
     const lifecycle = getWorkspaceLifecycleStatus(ws.id);
     const unavailable =
@@ -1273,7 +1804,7 @@ export class WorkspaceService {
     // Re-check after that await, immediately before the engine registers the
     // tracked SetupManager start.
     this.assertWorkspaceProcessStartAllowed(ws);
-    this.setupRunner?.(ws.id, command);
+    await this.setupRunner?.(ws.id, command);
     return true;
   }
   /** Same, for the trunk / "main" — the renderer's synthetic `local:<repoSlug>`
@@ -1290,7 +1821,7 @@ export class WorkspaceService {
       allowAutoSetup: true,
     });
     if (!command) return false;
-    this.setupRunner?.(workspaceId, command, {
+    await this.setupRunner?.(workspaceId, command, {
       cwd: repoRoot,
       repoRoot,
       baseBranch: "",
@@ -1449,7 +1980,7 @@ export class WorkspaceService {
    *  read-only git-op trunk resolution). A REMOTE client gets the strict
    *  resolveCwd (it addresses workspaces by opaque id, never a raw host path), so
    *  this widens local Files parity without granting a remote client any new path. */
-  private resolveReadCwd(workspaceId: string, remote: boolean): string {
+  resolveReadCwd(workspaceId: string, remote: boolean): string {
     try {
       return this.resolveCwd(workspaceId);
     } catch (err) {
@@ -1458,10 +1989,21 @@ export class WorkspaceService {
     }
   }
 
-  /** Resolve and kind-check a design workspace from its opaque id. This is the
-   * shared trust boundary for renderer design reads/writes: a caller can never
-   * point a design operation at an arbitrary host directory or a code
-   * workspace. */
+  /** Engine lifecycle classification shares Git's exact patch parser with the
+   * eventual hunk mutation. Keeping this on the service avoids a second,
+   * weaker header parser at the admission boundary. */
+  inspectGitApplyPatchPaths(
+    workspaceId: string,
+    patch: string,
+  ): Promise<string[]> {
+    return inspectApplyPatchPaths({ workspaceId, patch });
+  }
+
+  /** Resolve a design-capable semantic workspace from its opaque id. View mode
+   * is presentation only and therefore MUST NOT authorize this boundary. A
+   * workspace is design-capable when its resolved design directory exists;
+   * entering Design view creates that document, but returning to Code view does
+   * not revoke access to it. */
   private resolveDesignWorkspace(
     workspaceId: string,
     remote: boolean,
@@ -1474,25 +2016,50 @@ export class WorkspaceService {
     }
     const cwd = this.resolveReadCwd(workspaceId, remote);
     const workspace = getWorkspaceById(workspaceId);
-    if (!workspace || workspace.kind !== "design" || workspace.path !== cwd) {
+    if (
+      !workspace ||
+      workspace.path !== cwd ||
+      !fs.existsSync(
+        nodePath.join(
+          workspace.path,
+          ...designDirectoryNameFor(workspace.path).split("/"),
+        ),
+      )
+    ) {
       throw new GitError({
         code: "VALIDATION_FAILED",
-        message: "This operation requires a design workspace.",
+        message: "This workspace does not have an initialized design document.",
       });
     }
     return workspace;
   }
 
   private async readDesignSnapshot(workspace: Workspace, remote: boolean) {
-    const snapshot = await readDesignWorkspaceSnapshot(workspace.path, {
-      writeBack: !remote,
-    });
-    return {
-      ...snapshot,
-      protocolCapability: remote
-        ? null
-        : (this.designProtocolCapabilityProvider?.(workspace.id) ?? null),
-    };
+    // Restore keeps a workspace id but may adapt its checkout path. Include
+    // that semantic owner in the flight key so an overlapping pre-archive read
+    // can never satisfy the restored workspace from the old filesystem root.
+    const key = `${workspace.id}\u0000${nodePath.resolve(workspace.path)}\u0000${remote ? "remote" : "local"}`;
+    const current = this.designSnapshotFlights.get(key);
+    if (current) return current;
+    const request = (async () => {
+      const snapshot = await readDesignWorkspaceSnapshot(workspace.path, {
+        writeBack: !remote,
+      });
+      return {
+        ...snapshot,
+        protocolCapability: remote
+          ? null
+          : (this.designProtocolCapabilityProvider?.(workspace.id) ?? null),
+      };
+    })();
+    this.designSnapshotFlights.set(key, request);
+    try {
+      return await request;
+    } finally {
+      if (this.designSnapshotFlights.get(key) === request) {
+        this.designSnapshotFlights.delete(key);
+      }
+    }
   }
 
   /** Canonicalize a pty/agent cwd token to its managed workspace id. The token
@@ -1721,9 +2288,8 @@ export class WorkspaceService {
         ) {
           throw new GitError({
             code: "VALIDATION_FAILED",
-            message: `${op} is unavailable in a design workspace.`,
-            remediation:
-              "Edit under Zeros Design/ and use Save designs; change the target branch as metadata in its separate picker.",
+            message: `${op} is unavailable while this workspace is in design mode.`,
+            remediation: "Switch to code mode first.",
           });
         }
       }
@@ -1913,28 +2479,42 @@ export class WorkspaceService {
           remote,
         );
         const documentId = designDocumentIdForFrame(reqStr(params, "frame"));
-        if (
-          !params.transaction ||
-          typeof params.transaction !== "object" ||
-          Array.isArray(params.transaction) ||
-          (params.transaction as Record<string, unknown>).documentId !==
-            documentId
-        ) {
+        let transaction;
+        try {
+          transaction = designTransactionSchema.parse(params.transaction);
+        } catch (error) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Design transaction is invalid.",
+            cause: error,
+          });
+        }
+        if (transaction.documentId !== documentId) {
           throw new GitError({
             code: "VALIDATION_FAILED",
             message: "Design transaction does not target the selected frame.",
           });
         }
         const dryRun = params.dryRun === true;
-        const result = await getWorkspaceDesignApi(workspace.path).apply(
-          params.transaction,
-          { dryRun },
-        );
+        const api = getWorkspaceDesignApi(workspace.path);
+        if (dryRun) {
+          return { result: await api.apply(transaction, { dryRun: true }) };
+        }
+
+        const result = await api.apply(transaction);
+        if (result.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(
+              reqStr(params, "frame"),
+              transaction.coalesceKey,
+              transaction.createdAt,
+            ),
+          );
+        }
         return {
           result,
-          ...(dryRun
-            ? {}
-            : { snapshot: await this.readDesignSnapshot(workspace, remote) }),
+          snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
       case "design.history.undo":
@@ -1943,10 +2523,84 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
-        const documentId = designDocumentIdForFrame(reqStr(params, "frame"));
+        const direction = op === "design.history.undo" ? "undo" : "redo";
+        const history = this.designHistoryState(workspace.path);
+        const source = history?.[direction];
+        const entry = source?.pop();
+        if (history && source && entry) {
+          const destination =
+            direction === "undo" ? history.redo : history.undo;
+          if (entry.kind === "frame") {
+            const expected = direction === "undo" ? entry.after : entry.before;
+            const replacement =
+              direction === "undo" ? entry.before : entry.after;
+            try {
+              if (expected && replacement) {
+                await replaceDesignFrameFromHistory(
+                  workspace.path,
+                  expected,
+                  replacement,
+                );
+              } else if (expected) {
+                await deleteDesignFrame(
+                  workspace.path,
+                  expected.file,
+                  expected,
+                );
+              } else if (replacement) {
+                await restoreDesignFrame(workspace.path, replacement);
+              } else {
+                throw new Error("Design frame history entry is empty.");
+              }
+            } catch (error) {
+              source.push(entry);
+              throw error;
+            }
+            destination.push(entry);
+            const snapshot = await this.readDesignSnapshot(workspace, remote);
+            return {
+              result: null,
+              snapshot,
+              historySelection:
+                replacement?.file ?? snapshot.frames[0]?.file ?? null,
+            };
+          }
+
+          const api = getWorkspaceDesignApi(workspace.path);
+          const documentId = designDocumentIdForFrame(entry.frame);
+          let result;
+          try {
+            result =
+              direction === "undo"
+                ? await api.undo(documentId)
+                : await api.redo(documentId);
+          } catch (error) {
+            source.push(entry);
+            throw error;
+          }
+          if (result) destination.push(entry);
+          else history.bytes = Math.max(0, history.bytes - entry.bytes);
+          return {
+            result,
+            snapshot: await this.readDesignSnapshot(workspace, remote),
+            ...(result ? { historyFrame: entry.frame } : {}),
+          };
+        }
+
+        // Compatibility fallback for a history session created before this
+        // service began tracking workspace-wide ordering. An empty canvas has
+        // no fallback document, but a structural deletion above still works.
+        const frame = optStr(params, "frame");
+        if (!frame) {
+          return {
+            result: null,
+            snapshot: await this.readDesignSnapshot(workspace, remote),
+          };
+        }
+        const documentId = designDocumentIdForFrame(frame);
         const api = getWorkspaceDesignApi(workspace.path);
         const result =
-          op === "design.history.undo"
+          direction === "undo"
             ? await api.undo(documentId)
             : await api.redo(documentId);
         return {
@@ -2059,9 +2713,22 @@ export class WorkspaceService {
           changed: applied.receipt.status === "applied",
           document: await readDesignTokensDocument(workspace.path),
         };
+        if (mutation.changed) {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(
+              frame,
+              `token:${theme ?? "base"}:${name}`,
+            ),
+          );
+        }
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
+          foundationRevision: {
+            before: applied.receipt.beforeRevision,
+            after: applied.receipt.afterRevision,
+          },
         };
       }
       case "design.lint": {
@@ -2153,7 +2820,7 @@ export class WorkspaceService {
           workspaceId,
           {
             frame: frame.file,
-            filePath: `${DESIGN_DIRECTORY_NAME}/${frame.file}`,
+            filePath: `${designDirectoryNameFor(workspace.path)}/${frame.file}`,
             sourceVersion,
             nodeIds,
             breadcrumb: breadcrumb.length > 0 ? breadcrumb : [frame.title],
@@ -2224,18 +2891,20 @@ export class WorkspaceService {
             message: `Unsupported design screenshot type: ${mimeType}`,
           });
         }
-        setDesignScreenshot({
-          workspaceId,
-          frame: frame.file,
-          nodeId,
-          mimeType,
-          data: reqStr(params, "data"),
-          width: reqNum(params, "width"),
-          height: reqNum(params, "height"),
-          scale: reqNum(params, "scale"),
-          capturedAt: Date.now(),
-          sourceVersion,
-        });
+        setDesignScreenshot(
+          normalizeDesignScreenshot({
+            workspaceId,
+            frame: frame.file,
+            nodeId,
+            mimeType,
+            data: reqStr(params, "data"),
+            width: reqNum(params, "width"),
+            height: reqNum(params, "height"),
+            scale: reqNum(params, "scale"),
+            capturedAt: Date.now(),
+            sourceVersion,
+          }),
+        );
         return { ok: true };
       }
       case "design.runtime.audit": {
@@ -2271,7 +2940,13 @@ export class WorkspaceService {
             (offset) => [offset.oid, offset],
           ),
         );
-        const allowed = new Set(["contrast", "overflow", "spacing-scale"]);
+        const allowed = new Set([
+          "contrast",
+          "overflow",
+          "spacing-scale",
+          "audit-limit",
+          "layer-tree-limit",
+        ]);
         const warnings: DesignLintViolation[] = [];
         for (const rawWarning of params.warnings) {
           if (
@@ -2325,9 +3000,50 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
+        const geometryKeys = ["x", "y", "w", "h", "z"] as const;
+        const suppliedGeometryKeys = geometryKeys.filter(
+          (key) => params[key] !== undefined,
+        );
+        if (
+          suppliedGeometryKeys.length > 0 &&
+          suppliedGeometryKeys.length !== geometryKeys.length
+        ) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: "Initial frame geometry requires x, y, w, h, and z.",
+          });
+        }
         const frame = await createDesignFrame(workspace.path, {
           title: optStr(params, "title"),
+          ...(suppliedGeometryKeys.length === geometryKeys.length
+            ? {
+                geometry: {
+                  x: reqNum(params, "x"),
+                  y: reqNum(params, "y"),
+                  w: reqNum(params, "w"),
+                  h: reqNum(params, "h"),
+                  z: reqNum(params, "z"),
+                },
+              }
+            : {}),
+          ...(params.kind === "text"
+            ? {
+                seed: {
+                  kind: "text" as const,
+                  nodeId: reqStr(params, "textNodeId"),
+                  text: reqStr(params, "text"),
+                  fixedSize: optBool(params, "textFixedSize") ?? false,
+                },
+              }
+            : {}),
         });
+        this.recordDesignHistory(
+          workspace.path,
+          frameDesignHistoryEntry(
+            null,
+            await captureDesignFrameRestorePoint(workspace.path, frame.file),
+          ),
+        );
         return {
           frame,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2338,11 +3054,26 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
+        const file = reqStr(params, "frame");
+        const before = await captureDesignFrameRestorePoint(
+          workspace.path,
+          file,
+        );
         const frame = await renameDesignFrame(
           workspace.path,
-          reqStr(params, "frame"),
+          file,
           reqStr(params, "title"),
         );
+        const after = await captureDesignFrameRestorePoint(
+          workspace.path,
+          file,
+        );
+        if (before.source !== after.source) {
+          this.recordDesignHistory(
+            workspace.path,
+            frameDesignHistoryEntry(before, after),
+          );
+        }
         return {
           frame,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2357,6 +3088,13 @@ export class WorkspaceService {
           workspace.path,
           reqStr(params, "frame"),
         );
+        this.recordDesignHistory(
+          workspace.path,
+          frameDesignHistoryEntry(
+            null,
+            await captureDesignFrameRestorePoint(workspace.path, frame.file),
+          ),
+        );
         return {
           frame,
           snapshot: await this.readDesignSnapshot(workspace, remote),
@@ -2367,12 +3105,16 @@ export class WorkspaceService {
           reqStr(params, "workspaceId"),
           remote,
         );
-        const deleted = await deleteDesignFrame(
+        const restorePoint = await deleteDesignFrame(
           workspace.path,
           reqStr(params, "frame"),
         );
+        this.recordDesignHistory(
+          workspace.path,
+          frameDesignHistoryEntry(restorePoint, null),
+        );
         return {
-          deleted,
+          deleted: { file: restorePoint.file },
           snapshot: await this.readDesignSnapshot(workspace, remote),
         };
       }
@@ -2385,12 +3127,12 @@ export class WorkspaceService {
         const geometry = {
           x: Math.min(1_000_000, Math.max(-1_000_000, reqNum(params, "x"))),
           y: Math.min(1_000_000, Math.max(-1_000_000, reqNum(params, "y"))),
-          w: Math.min(16_384, Math.max(120, reqNum(params, "w"))),
-          h: Math.min(16_384, Math.max(80, reqNum(params, "h"))),
+          w: Math.min(16_384, Math.max(1, reqNum(params, "w"))),
+          h: Math.min(16_384, Math.max(1, reqNum(params, "h"))),
           z: Math.round(Math.min(256, Math.max(0, reqNum(params, "z")))),
         };
         const operationId = randomUUID();
-        await applyDesktopDesignOperation(
+        const applied = await applyDesktopDesignOperation(
           workspace.path,
           frame,
           `Move or resize ${frame}`,
@@ -2408,9 +3150,19 @@ export class WorkspaceService {
           },
           `frame-geometry:${frame}`,
         );
+        if (applied.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(frame, `frame-geometry:${frame}`),
+          );
+        }
         return {
           geometry,
           snapshot: await this.readDesignSnapshot(workspace, remote),
+          foundationRevision: {
+            before: applied.receipt.beforeRevision,
+            after: applied.receipt.afterRevision,
+          },
         };
       }
       case "design.node.styles": {
@@ -2460,9 +3212,19 @@ export class WorkspaceService {
           frame,
           applied.receipt.status === "applied",
         );
+        if (applied.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(frame),
+          );
+        }
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
+          foundationRevision: {
+            before: applied.receipt.beforeRevision,
+            after: applied.receipt.afterRevision,
+          },
         };
       }
       case "design.node.text": {
@@ -2515,9 +3277,19 @@ export class WorkspaceService {
           frame,
           applied.receipt.status === "applied",
         );
+        if (applied.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(frame),
+          );
+        }
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
+          foundationRevision: {
+            before: applied.receipt.beforeRevision,
+            after: applied.receipt.afterRevision,
+          },
         };
       }
       case "design.node.html": {
@@ -2576,9 +3348,19 @@ export class WorkspaceService {
           frame,
           applied.receipt.status === "applied",
         );
+        if (applied.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(frame),
+          );
+        }
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
+          foundationRevision: {
+            before: applied.receipt.beforeRevision,
+            after: applied.receipt.afterRevision,
+          },
         };
       }
       case "design.asset.insert": {
@@ -2628,10 +3410,34 @@ export class WorkspaceService {
           frame,
           applied.receipt.status === "applied",
         );
+        if (applied.receipt.status === "applied") {
+          this.recordDesignHistory(
+            workspace.path,
+            documentDesignHistoryEntry(frame),
+          );
+        }
         return {
           mutation,
           snapshot: await this.readDesignSnapshot(workspace, remote),
+          foundationRevision: {
+            before: applied.receipt.beforeRevision,
+            after: applied.receipt.afterRevision,
+          },
         };
+      }
+      case "design.stage": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const workspace = this.resolveDesignWorkspace(workspaceId, remote);
+        // Command-S is a lightweight Git-index checkpoint, so it deliberately
+        // does not lint or create a commit. Stage exactly the ACTIVE Design
+        // directory; generic git.stage remains forbidden from this territory.
+        const designDir = designDirectoryNameFor(workspace.path);
+        await stagePaths({
+          workspaceId,
+          paths: [designDir],
+          force: true,
+        });
+        return { ok: true };
       }
       case "design.save": {
         const workspaceId = reqStr(params, "workspaceId");
@@ -2647,15 +3453,77 @@ export class WorkspaceService {
             remediation: errors[0]!.message,
           });
         }
+        // Stage + commit exactly the ACTIVE design folder for this workspace
+        // (the `[design] directory` pointer) — never the historical default.
+        const designDir = designDirectoryNameFor(workspace.path);
         await stagePaths({
           workspaceId,
-          paths: [DESIGN_DIRECTORY_NAME],
+          paths: [designDir],
           force: true,
         });
-        return commit({
+        const saved = await commit({
           workspaceId,
           message: optStr(params, "message") ?? "Save designs",
-          files: [DESIGN_DIRECTORY_NAME],
+          files: [designDir],
+          authority: "design-save",
+        });
+        return saved;
+      }
+      // ── Design directory discovery (settings picker + adoption) ──
+      // LOCAL-ONLY (off every remote allowlist). Lists every design folder in
+      // a checkout — recognized by its COMMITTED `.zeros-canvas.json` marker —
+      // plus the resolved pointer, so the repo settings picker can offer
+      // "which folder is active" without guessing. Accepts a workspace id or
+      // a known repo root (the settings page targets the main checkout).
+      case "design.listDirectories": {
+        const target = reqStr(params, "workspaceId");
+        const cwd = this.resolveReadCwd(target, remote);
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message: "Design workspaces are available only in the desktop app.",
+          });
+        }
+        const workspace = getWorkspaceById(target);
+        const repoRoot = workspace?.repoRoot ?? cwd;
+        const [directories, pointer] = await Promise.all([
+          discoverDesignDirectories(cwd),
+          resolveDesignDirectoryPointer(
+            workspace
+              ? { repoRoot, workspacePath: workspace.path }
+              : { repoRoot },
+          ),
+        ]);
+        return {
+          directories,
+          pointer,
+          active: designDirectoryNameFor(cwd),
+        };
+      }
+      // ── Design directory rename (repo settings → Design tab) ──
+      // LOCAL-ONLY. Renames the committed folder AND the committed pointer in
+      // one commit, in the repo's MAIN checkout. The engine refuses it while
+      // live design-mode workspaces exist (their locks and open documents are
+      // rooted at the old name).
+      case "design.renameDirectory": {
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message: "Design workspaces are available only in the desktop app.",
+          });
+        }
+        const repoRoot = reqStr(params, "repoRoot");
+        if (!isKnownRepoRoot(repoRoot)) {
+          throw new GitError({
+            code: "WORKSPACE_NOT_FOUND",
+            message:
+              "That repository isn't open in Zeros — open the folder first.",
+          });
+        }
+        return renameDesignDirectory({
+          repoRoot,
+          from: reqStr(params, "from"),
+          to: reqStr(params, "to"),
         });
       }
       // ── Working directories (per-worktree sparse-checkout) ──
@@ -2669,9 +3537,10 @@ export class WorkspaceService {
       // the worktree's own `.git` config and it survives restarts. A second
       // copy in settings could only drift from the real thing.
       case "workspace.listWorkingDirectories": {
-        return getWorkingDirectories(
-          this.resolveReadCwd(reqStr(params, "workspaceId"), remote),
-        );
+        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        return getWorkingDirectories(cwd, {
+          designRoots: await designRootsForWorkingDirectories(cwd),
+        });
       }
       case "workspace.setWorkingDirectories": {
         const raw = params.directories;
@@ -2716,7 +3585,9 @@ export class WorkspaceService {
           cwd,
         );
         try {
-          return await setWorkingDirectories(cwd, directories);
+          return await setWorkingDirectories(cwd, directories, {
+            designRoots: await designRootsForWorkingDirectories(cwd),
+          });
         } finally {
           // Always resume, including after a throw: the checkout is still live
           // (unlike archive/delete, nothing moved it), so leaving it unwatched
@@ -2731,12 +3602,11 @@ export class WorkspaceService {
       case "workspace.create": {
         const repoRoot = reqStr(params, "repoRoot");
         if (remote) {
-          // Security: a remote client may only create a worktree
+          // Security: a cloud client may only create a worktree
           // in a repo the owner already opened — never an arbitrary host path —
-          // and the RCE-capable inputs (setupScript / copyPaths / symlinkPaths)
-          // are DROPPED (local-only). Without this, workspace.create skipped the
-          // write gate (no workspaceId to restriction-check) → arbitrary-repo
-          // `git worktree add` + setup-script execution with the full host env.
+          // and caller-supplied copy/symlink paths remain dropped. Repository
+          // lifecycle bytes are safe to honor now: setup/run-on-create execute
+          // under repo-code-task ZSR, never with engine authority.
           if (!isKnownRepoRoot(repoRoot)) {
             throw new GitError({
               code: "WORKSPACE_NOT_FOUND",
@@ -2750,10 +3620,8 @@ export class WorkspaceService {
             baseBranch: optStr(params, "baseBranch"),
             prompt: optStr(params, "prompt"),
             agentId: optStr(params, "agentId"),
-            // Remote create must not trigger the repo's `scripts.setup` (host
-            // shell). The committed/working-tree TOML is not a remote-trusted
-            // execution source — see REMOTE_WRITE_DENYLIST.
-            runRepoScripts: false,
+            runRepoScripts: true,
+            allowAutoSetup: true,
           });
         }
         return createWorkspace({
@@ -2879,22 +3747,23 @@ export class WorkspaceService {
           truncated: live?.truncated ?? false,
         };
       }
-      // ── Setup tab: (re)run setup in the background. LOCAL-ONLY: it runs host
-      // shell, so the RCE gate must keep a remote client from triggering it.
-      // (It's not on any remote allowlist, so isRemoteAllowed already refuses a
-      // remote client before here — this guard is defence in depth.) A real
+      // ── Setup tab: (re)run setup in the background. Repository-controlled
+      // bytes run through the repo-code-task ZSR boundary, so a cloud client may
+      // trigger the same action for a managed workspace. A raw-path rowless
+      // trunk remains desktop-only. A real
       // workspace runs in its worktree; the trunk (`local:` id + `repoRoot`)
       // runs in the repo root itself. ──
       case "workspace.rerunSetup": {
-        if (remote) {
-          throw new GitError({
-            code: "REMOTE_RESTRICTED",
-            message: "Setup can only be run from the desktop app.",
-          });
-        }
         const workspaceId = reqStr(params, "workspaceId");
         const ws = getWorkspaceById(workspaceId);
         const localRepoRoot = optStr(params, "repoRoot");
+        if (remote && !ws) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message:
+              "Cloud setup requires a managed workspace id; raw repository paths are refused.",
+          });
+        }
         if (!ws && !localRepoRoot) {
           throw new GitError({
             code: "WORKSPACE_NOT_FOUND",
@@ -2907,15 +3776,16 @@ export class WorkspaceService {
         return { ok: started, hasCommand: started };
       }
       // ── Setup tab: stop a live setup run (records "stopped", not "failed").
-      // LOCAL-ONLY, same defence-in-depth remote guard as rerunSetup. ──
+      // Cloud control is allowed only for a managed workspace id. ──
       case "workspace.stopSetup": {
-        if (remote) {
+        const workspaceId = reqStr(params, "workspaceId");
+        if (remote && !getWorkspaceById(workspaceId)) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
-            message: "Setup can only be controlled from the desktop app.",
+            message:
+              "Cloud setup control requires a managed workspace id; raw repository paths are refused.",
           });
         }
-        const workspaceId = reqStr(params, "workspaceId");
         if (!getWorkspaceById(workspaceId) && !optStr(params, "repoRoot")) {
           throw new GitError({
             code: "WORKSPACE_NOT_FOUND",
@@ -2950,21 +3820,22 @@ export class WorkspaceService {
           actions: this.runInfoGetter?.(sessionIds, ws ? ws.id : null) ?? {},
         };
       }
-      // ── Run tab: start (or focus) a run action in the background. LOCAL-ONLY:
-      // it runs a host shell, so the RCE gate must keep a remote client from
-      // triggering it (defence in depth — it's not on any remote allowlist).
+      // ── Run tab: start (or focus) a run action in the background. The command
+      // is a repo-code-task ZSR process, so cloud has the same managed-workspace
+      // control while raw-path rowless trunks remain desktop-only.
       // The COMMAND is resolved engine-side from the repo's settings by
       // actionId; the client never supplies it. A real workspace runs in its
       // worktree; the trunk (`local:` id + `repoRoot`) in the repo root. ──
       case "workspace.startRun": {
-        if (remote) {
-          throw new GitError({
-            code: "REMOTE_RESTRICTED",
-            message: "Run actions can only be started from the desktop app.",
-          });
-        }
         const workspaceId = reqStr(params, "workspaceId");
         const ws = getWorkspaceById(workspaceId);
+        if (remote && !ws) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message:
+              "Cloud run actions require a managed workspace id; raw repository paths are refused.",
+          });
+        }
         const localRepoRoot = optStr(params, "repoRoot");
         const repoRoot = ws?.repoRoot ?? localRepoRoot;
         if (!repoRoot) {
@@ -3008,12 +3879,14 @@ export class WorkspaceService {
         };
       }
       // ── Run tab: stop a live run (records "stopped", not "failed").
-      // LOCAL-ONLY, same defence-in-depth remote guard as startRun. ──
+      // Cloud callers must identify the managed owner as well as the session. ──
       case "workspace.stopRun": {
-        if (remote) {
+        const workspaceId = optStr(params, "workspaceId");
+        if (remote && (!workspaceId || !getWorkspaceById(workspaceId))) {
           throw new GitError({
             code: "REMOTE_RESTRICTED",
-            message: "Run actions can only be controlled from the desktop app.",
+            message:
+              "Cloud run control requires a managed workspace id; raw session ids are refused.",
           });
         }
         const sessionId = reqStr(params, "sessionId");
@@ -3023,7 +3896,10 @@ export class WorkspaceService {
             message: "Not a run session id.",
           });
         }
-        this.runStopper?.(sessionId);
+        this.runStopper?.(
+          sessionId,
+          remote ? (workspaceId as string) : undefined,
+        );
         return { ok: true };
       }
       // ── Run tab: one run's buffered output. The terminal replays this when it
@@ -3037,7 +3913,21 @@ export class WorkspaceService {
         if (!isRunSessionId(sessionId)) {
           return { log: "", truncated: false };
         }
-        return this.runLogGetter?.(sessionId) ?? { log: "", truncated: false };
+        const expectedWorkspaceId = remote
+          ? reqStr(params, "workspaceId")
+          : undefined;
+        if (expectedWorkspaceId && !getWorkspaceById(expectedWorkspaceId)) {
+          throw new GitError({
+            code: "WORKSPACE_NOT_FOUND",
+            message: "Workspace not found.",
+          });
+        }
+        return (
+          this.runLogGetter?.(sessionId, expectedWorkspaceId) ?? {
+            log: "",
+            truncated: false,
+          }
+        );
       }
       // ── Read: projects — unified Zeros DB, seeded from workspaces ──
       // ── Read: browse host directories (folder picker) ──
@@ -3218,14 +4108,89 @@ export class WorkspaceService {
             message: "settings.write requires a `patch` object.",
           });
         }
-        // SECURITY: a REMOTE (paired-but-untrusted) client may NOT write the
-        // execution/IO-bearing keys. These flow into the *scrubbed* spawn/setup
-        // paths (shell scripts, the spawned agent binary, arbitrary host-file
-        // reads via env_files) — letting a remote client plant them re-arms the
-        // exact RCE and exfiltration vectors the workspace.create clamp and
-        // environment scrubbing prevent. Remote writes are confined to
-        // declarative config (git, env values [name-denylisted at spawn],
-        // workspaces). The desktop is the trusted local operator.
+        const hasDesignDirectoryPatch = (() => {
+          const design = (patch as Record<string, unknown>).design;
+          if (!design || typeof design !== "object" || Array.isArray(design)) {
+            return false;
+          }
+          return Object.prototype.hasOwnProperty.call(design, "directory");
+        })();
+        const affectedDesignWorkspaces = hasDesignDirectoryPatch
+          ? listWorkspaces({ archived: false }).filter((candidate) => {
+              if (!repoRoot) return layer === "user";
+              if (layer === "workspace-local") {
+                return (
+                  nodePath.resolve(candidate.path) ===
+                  nodePath.resolve(repoRoot)
+                );
+              }
+              return (
+                nodePath.resolve(candidate.repoRoot) ===
+                  nodePath.resolve(repoRoot) ||
+                nodePath.resolve(candidate.path) === nodePath.resolve(repoRoot)
+              );
+            })
+          : [];
+        const pointerTransitions = hasDesignDirectoryPatch
+          ? (() => {
+              const preview = this.settingsOp(() =>
+                opSettingsPreviewWrite(
+                  layer as WritableLayer,
+                  patch as Record<string, unknown>,
+                  repoRoot,
+                ),
+              );
+              return affectedDesignWorkspaces.map((candidate) => {
+                const projected = opSettingsResolveWithOverride(
+                  candidate.path,
+                  candidate.repoRoot,
+                  preview,
+                );
+                const raw = (
+                  projected.effective as {
+                    design?: { directory?: unknown };
+                  }
+                ).design?.directory;
+                const next =
+                  sanitizeDesignDirectoryName(raw) ??
+                  DEFAULT_DESIGN_DIRECTORY_NAME;
+                return {
+                  workspace: candidate,
+                  before: designDirectoryNameFor(candidate.path),
+                  next,
+                };
+              });
+            })()
+          : [];
+        // Apply the remote deny before validating targets. Otherwise a paired
+        // client could use this privileged key as a Design-directory oracle.
+        if (remote && Object.prototype.hasOwnProperty.call(patch, "design")) {
+          throw new GitError({
+            code: "SETTINGS_REMOTE_KEY_DENIED",
+            message:
+              "Remote clients cannot write settings keys: design. Edit this on the desktop.",
+          });
+        }
+        if (
+          pointerTransitions.some(({ before, next }) => before !== next) &&
+          params.confirmDesignDirectoryChange !== true
+        ) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message:
+              "Changing the active Design directory for a live workspace requires explicit confirmation.",
+            remediation:
+              "Confirm the Design folder change in the desktop settings UI.",
+          });
+        }
+        for (const { workspace, before, next } of pointerTransitions) {
+          if (before === next) continue;
+          await validateDesignDirectoryPointerTarget(workspace.path, next);
+        }
+        // Cloud writes have the local settings surface for execution-bearing
+        // keys because their consumers are ZSR-contained. Authority-retargeting
+        // keys remain on the denylist, and secret-shaped env names are refused
+        // before the patch reaches disk.
         if (remote) {
           const denied = REMOTE_WRITE_DENYLIST.filter((k) =>
             Object.prototype.hasOwnProperty.call(patch, k),
@@ -3248,13 +4213,82 @@ export class WorkspaceService {
             });
           }
         }
-        return this.settingsOp(() =>
-          opSettingsWrite(
-            layer as WritableLayer,
-            patch as Record<string, unknown>,
-            repoRoot,
-          ),
+        const changedPointers = pointerTransitions.filter(
+          ({ before, next }) => before !== next,
         );
+        if (changedPointers.length === 0) {
+          return this.settingsOp(() =>
+            opSettingsWrite(
+              layer as WritableLayer,
+              patch as Record<string, unknown>,
+              repoRoot,
+            ),
+          );
+        }
+
+        // Hold every affected workspace's Design mutation lane in stable order
+        // while one shared settings file is replaced. The old territory stays
+        // fenced until the new pointer is durable; only then is it released.
+        const ordered = [...changedPointers].sort((left, right) =>
+          nodePath
+            .resolve(left.workspace.path)
+            .localeCompare(nodePath.resolve(right.workspace.path)),
+        );
+        const transitionAt = async (
+          index: number,
+        ): Promise<ReturnType<typeof opSettingsWrite>> => {
+          if (index < ordered.length) {
+            return withDesignWorkspaceMutation(
+              ordered[index]!.workspace.path,
+              () => transitionAt(index + 1),
+            );
+          }
+          for (const transition of ordered) {
+            await validateDesignDirectoryPointerTarget(
+              transition.workspace.path,
+              transition.next,
+            );
+          }
+          return this.withDesignTerritoryTransition(
+            ordered.map((transition) => ({
+              workspaceId: transition.workspace.id,
+              designDirectory: nodePath.join(
+                transition.workspace.path,
+                ...transition.next.split("/"),
+              ),
+            })),
+            async () => {
+              // Remove any ACL left by an older build from the old territory
+              // after old-authority agents are gone. Do this before the settings
+              // write so a cleanup failure leaves the pointer unchanged.
+              for (const transition of ordered) {
+                primeDesignDirectoryName(
+                  transition.workspace.path,
+                  transition.before,
+                );
+                await unfenceDesignDirectory(transition.workspace.path);
+              }
+
+              const written = this.settingsOp(() =>
+                opSettingsWrite(
+                  layer as WritableLayer,
+                  patch as Record<string, unknown>,
+                  repoRoot,
+                ),
+              );
+              for (const transition of ordered) {
+                // Prime only the validated effective pointer. Re-resolving
+                // here would reintroduce a TOCTOU gap after validation.
+                primeDesignDirectoryName(
+                  transition.workspace.path,
+                  transition.next,
+                );
+              }
+              return written;
+            },
+          );
+        };
+        return transitionAt(0);
       }
       case "settings.writeRaw": {
         // LOCAL-ONLY: raw text bypasses the per-key denylist settings.write
@@ -3280,6 +4314,59 @@ export class WorkspaceService {
           throw new GitError({
             code: "SETTINGS_BAD_PATCH",
             message: "settings.writeRaw requires a `text` string.",
+          });
+        }
+        // Raw editing deliberately bypasses the structured patch path. Until a
+        // raw-document preview can run the same multi-workspace authority
+        // transition atomically, it may not change the engine-owned Design
+        // pointer behind live code-agent sandboxes.
+        let rawDocument: Record<string, unknown>;
+        try {
+          rawDocument = parseToml(text) as Record<string, unknown>;
+        } catch {
+          // Preserve opSettingsWriteRaw's canonical SETTINGS_BAD_TOML error.
+          return this.settingsOp(() =>
+            opSettingsWriteRaw(layer as WritableLayer, text, repoRoot),
+          );
+        }
+        const rawPath = this.settingsOp(
+          () => opSettingsRead(layer as WritableLayer, repoRoot).path,
+        );
+        const rawAffected = listWorkspaces({ archived: false }).filter(
+          (candidate) => {
+            if (!repoRoot) return layer === "user";
+            if (layer === "workspace-local") {
+              return (
+                nodePath.resolve(candidate.path) === nodePath.resolve(repoRoot)
+              );
+            }
+            return (
+              nodePath.resolve(candidate.repoRoot) ===
+                nodePath.resolve(repoRoot) ||
+              nodePath.resolve(candidate.path) === nodePath.resolve(repoRoot)
+            );
+          },
+        );
+        const rawChangesTerritory = rawAffected.some((candidate) => {
+          const projected = opSettingsResolveWithOverride(
+            candidate.path,
+            candidate.repoRoot,
+            { path: rawPath, doc: rawDocument },
+          );
+          const raw = (
+            projected.effective as { design?: { directory?: unknown } }
+          ).design?.directory;
+          const next =
+            sanitizeDesignDirectoryName(raw) ?? DEFAULT_DESIGN_DIRECTORY_NAME;
+          return next !== designDirectoryNameFor(candidate.path);
+        });
+        if (rawChangesTerritory) {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message:
+              "The active Design folder cannot be changed in the raw settings editor.",
+            remediation:
+              "Use the Design folder picker so Zeros can retire old-authority agents and move the boundary safely.",
           });
         }
         return this.settingsOp(() =>
@@ -3310,13 +4397,9 @@ export class WorkspaceService {
         // repo's own repo-local servers are read directly off that layer by
         // the Customize tab's repo scope), each server tagged with the layer
         // it came from, for the Customize → MCP source badges.
-        // Local-only. Legacy repoRoot/mainRepoRoot params are ignored.
-        if (remote) {
-          throw new GitError({
-            code: "SETTINGS_REMOTE_KEY_DENIED",
-            message: "MCP resolve is desktop-only.",
-          });
-        }
+        // Safe over the authenticated cloud bridge: the composed result carries
+        // declarations and endpoint URLs, never OAuth/header vault values.
+        // Legacy repoRoot/mainRepoRoot params are ignored.
         const r = resolveMcpServers();
         const direct = r.servers.map((s, i) => ({
           name: s.name,
@@ -3335,15 +4418,8 @@ export class WorkspaceService {
         }));
         return { servers: [...direct, ...gateway], warnings: r.warnings };
       }
-      // LOCAL-ONLY: the MCP gateway holds OAuth tokens + opens the system
-      // browser — all desktop concerns, never driven from a remote client.
+      // Gateway status is credential-free and shared with qualified cloud UI.
       case "mcp.gateway.status": {
-        if (remote) {
-          throw new GitError({
-            code: "SETTINGS_REMOTE_KEY_DENIED",
-            message: "MCP gateway status is desktop-only.",
-          });
-        }
         const gw = this.gatewayForScope();
         return {
           running: gw?.running ?? false,
@@ -3369,24 +4445,13 @@ export class WorkspaceService {
         return { status: await gw.authorize(reqStr(params, "server")) };
       }
       case "mcp.gateway.disconnect": {
-        if (remote) {
-          throw new GitError({
-            code: "SETTINGS_REMOTE_KEY_DENIED",
-            message: "MCP disconnect is desktop-only.",
-          });
-        }
         const gw = this.gatewayForScope();
         if (gw) await gw.disconnect(reqStr(params, "server"));
         return { ok: true };
       }
       case "mcp.gateway.beginAuth": {
         // Headless sign-in step 1 — return the authorization URL (no browser).
-        if (remote) {
-          throw new GitError({
-            code: "SETTINGS_REMOTE_KEY_DENIED",
-            message: "MCP sign-in is desktop-only.",
-          });
-        }
+        // This is the cloud path: the renderer opens it on the user's device.
         const gw = this.gatewayForScope();
         if (!gw) {
           throw new GitError({
@@ -3398,12 +4463,6 @@ export class WorkspaceService {
       }
       case "mcp.gateway.completeAuth": {
         // Headless sign-in step 2 — finish with the pasted code/URL.
-        if (remote) {
-          throw new GitError({
-            code: "SETTINGS_REMOTE_KEY_DENIED",
-            message: "MCP sign-in is desktop-only.",
-          });
-        }
         const gw = this.gatewayForScope();
         if (!gw) {
           throw new GitError({
@@ -3419,14 +4478,9 @@ export class WorkspaceService {
         };
       }
       case "mcp.gateway.setHeaderSecret": {
-        // LOCAL-ONLY: the secret value transits the loopback bridge once, then
-        // lives engine-only in the vault — never settings.toml / remote clients.
-        if (remote) {
-          throw new GitError({
-            code: "SETTINGS_REMOTE_KEY_DENIED",
-            message: "MCP header secrets are desktop-only.",
-          });
-        }
+        // The value transits the authenticated bridge once, then lives only in
+        // the engine vault. It is never written to settings or returned to any
+        // renderer, which gives local and cloud workspaces the same flow.
         this.gatewayHeaderSecretSetter?.(
           reqStr(params, "url"),
           reqStr(params, "headerName"),
@@ -3734,10 +4788,17 @@ export class WorkspaceService {
         }
         // readWorkspaceFile re-checks the RESOLVED + realpath target so a
         // collapsing path ('.env/.') or an innocuously-named symlink can't leak.
-        return readWorkspaceFile(cwd, rel, { remote });
+        const read = await readWorkspaceFile(cwd, rel, { remote });
+        // Tag Design territory with the SAME recognizer file.write refuses by,
+        // so the viewer never advertises an Edit action the write path will
+        // reject. This is presentation only — the guard below is the authority.
+        return makeDesignPathRecognizer(cwd, designDirectoryNameFor(cwd))(rel)
+          ? { ...read, designPath: true }
+          : read;
       }
       case "file.write": {
-        const cwd = this.resolveReadCwd(reqStr(params, "workspaceId"), remote);
+        const targetWorkspaceId = reqStr(params, "workspaceId");
+        const cwd = this.resolveReadCwd(targetWorkspaceId, remote);
         const rel = reqStr(params, "path");
         const content = params.content;
         if (typeof content !== "string") {
@@ -3746,6 +4807,14 @@ export class WorkspaceService {
             message: "file.write requires string content",
           });
         }
+        // The file editor is a code actor — design files have exactly one
+        // write path (the design surface's transactional writes).
+        await assertNoDesignPathWrites(
+          targetWorkspaceId,
+          [rel],
+          "editing",
+          cwd,
+        );
         if (remote && isSensitiveRepoPath(rel)) {
           throw new GitError({
             code: "VALIDATION_FAILED",
@@ -3836,7 +4905,10 @@ export class WorkspaceService {
 
       // ── Read: git ─────────────────────────────────────────
       case "git.status": {
-        const result = await status(reqStr(params, "workspaceId"));
+        const result = await status(reqStr(params, "workspaceId"), {
+          paths: optStrArr(params, "paths"),
+          includeTracking: optBool(params, "includeTracking"),
+        });
         if (!remote) return result;
         // (#1) Mirror the file.tree/read/diff secret boundary: a remote client
         // must not ENUMERATE secret file paths via status either — `-uall` now
@@ -3913,9 +4985,11 @@ export class WorkspaceService {
           base: optStr(params, "base"),
           head: optStr(params, "head"),
           rawPatch: params.rawPatch === true,
+          summaryLimit: optNum(params, "summaryLimit"),
         });
         if (remote) {
           result.hunks = filterSecretHunks(result.hunks);
+          if (result.files) result.files = filterSecretFiles(result.files);
           // rawPatch returns a whole-tree multi-file patch (file CONTENT) — apply
           // the same per-section secret filter as git.show, or it would leak a
           // secret file's contents in the raw text.
@@ -3977,36 +5051,77 @@ export class WorkspaceService {
       }
 
       // ── Write: git (restriction-gated for remote clients (trusted device; no per-op prompt)) ─────
-      case "git.stage":
-        await stagePaths({
-          workspaceId: reqStr(params, "workspaceId"),
-          paths: strArr(params, "paths"),
-        });
+      case "git.stage": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const paths = strArr(params, "paths");
+        assertLiteralGitMutationPaths(paths, "Staging");
+        await assertNoDesignPathWrites(
+          workspaceId,
+          paths,
+          "staging",
+          this.resolveReadCwd(workspaceId, remote),
+        );
+        await stagePaths({ workspaceId, paths });
         return { ok: true };
-      case "git.unstage":
+      }
+      case "git.unstage": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const paths = strArr(params, "paths");
+        assertLiteralGitMutationPaths(paths, "Unstaging");
+        await assertNoDesignPathWrites(
+          workspaceId,
+          paths,
+          "unstaging",
+          this.resolveReadCwd(workspaceId, remote),
+        );
         await unstagePaths({
-          workspaceId: reqStr(params, "workspaceId"),
-          paths: strArr(params, "paths"),
+          workspaceId,
+          paths,
         });
         return { ok: true };
-      case "git.discard":
+      }
+      case "git.discard": {
         // discardFiles resolves the worktree server-side from workspaceId and
         // runs `git restore --worktree -- <paths>` (git's `--` confines paths to
         // the repo). In WRITE_OPS, so a remote client is restriction-gated.
-        await discardFiles({
-          workspaceId: reqStr(params, "workspaceId"),
-          paths: strArr(params, "paths"),
-        });
+        const workspaceId = reqStr(params, "workspaceId");
+        const paths = strArr(params, "paths");
+        assertLiteralGitMutationPaths(paths, "Discarding");
+        // Discarding design paths would destroy unsaved canvas work AND
+        // half-apply under the fence — refused with the design-mode pointer.
+        await assertNoDesignPathWrites(
+          workspaceId,
+          paths,
+          "discarding",
+          this.resolveReadCwd(workspaceId, remote),
+        );
+        await discardFiles({ workspaceId, paths });
         return { ok: true };
-      case "git.commit":
+      }
+      case "git.commit": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const files = Array.isArray(params.files)
+          ? strArr(params, "files")
+          : undefined;
+        // Territory purity is what makes the one-branch/one-PR story clean:
+        // code commits carry only code. Design paths commit via design.save.
+        if (files) {
+          assertLiteralGitMutationPaths(files, "Committing");
+          await assertNoDesignPathWrites(
+            workspaceId,
+            files,
+            "committing",
+            this.resolveReadCwd(workspaceId, remote),
+          );
+        }
         return commit({
-          workspaceId: reqStr(params, "workspaceId"),
+          workspaceId,
           message: reqStr(params, "message"),
-          files: Array.isArray(params.files)
-            ? strArr(params, "files")
-            : undefined,
+          files,
           amend: optBool(params, "amend") ?? false,
+          authority: "code",
         });
+      }
       case "git.push":
         return push({
           workspaceId: reqStr(params, "workspaceId"),
@@ -4161,11 +5276,18 @@ export class WorkspaceService {
       // getWorkspaceRepoAccess.
       case "gh.repoAccess":
         return getWorkspaceRepoAccess(reqStr(params, "workspaceId"));
-      case "gh.prGet":
-        return getPr({
-          workspaceId: reqStr(params, "workspaceId"),
-          prNumber: reqNum(params, "prNumber"),
-        });
+      case "gh.prGet": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const repository =
+          await githubForgeAdapter.resolveRepository(workspaceId);
+        return changeRequestToLegacyPr(
+          await githubForgeAdapter.get({
+            workspaceId,
+            repository,
+            number: reqNum(params, "prNumber"),
+          }),
+        );
+      }
       case "gh.prChecks":
         return getPrChecks({
           workspaceId: reqStr(params, "workspaceId"),
@@ -4183,25 +5305,49 @@ export class WorkspaceService {
         });
 
       // ── Write: GitHub PR mutations (restriction-gated for remote clients (trusted device; no per-op prompt)) ──
-      case "gh.prCreate":
-        return createPr({
-          workspaceId: reqStr(params, "workspaceId"),
-          title: reqStr(params, "title"),
-          body: reqStr(params, "body"),
-          draft: optBool(params, "draft") ?? true,
-        });
-      case "gh.prUpdate":
-        return updatePr({
-          workspaceId: reqStr(params, "workspaceId"),
-          prNumber: reqNum(params, "prNumber"),
-          title: optStr(params, "title"),
-          body: optStr(params, "body"),
-        });
-      case "gh.prMarkReady":
-        return markPrReady({
-          workspaceId: reqStr(params, "workspaceId"),
-          prNumber: reqNum(params, "prNumber"),
-        });
+      case "gh.prCreate": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const { repository, gitRemote } =
+          await githubForgeAdapter.resolvePublicationTarget(workspaceId);
+        // Raw branch publication is a Git transport operation, separate from
+        // the hosted-review adapter. Preserve today's one-click behavior.
+        await push({ workspaceId, setUpstream: true, remote: gitRemote });
+        return changeRequestToLegacyPr(
+          await githubForgeAdapter.create({
+            workspaceId,
+            repository,
+            title: reqStr(params, "title"),
+            body: reqStr(params, "body"),
+            draft: optBool(params, "draft") ?? true,
+          }),
+        );
+      }
+      case "gh.prUpdate": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const repository =
+          await githubForgeAdapter.resolveRepository(workspaceId);
+        return changeRequestToLegacyPr(
+          await githubForgeAdapter.update({
+            workspaceId,
+            repository,
+            number: reqNum(params, "prNumber"),
+            title: optStr(params, "title"),
+            body: optStr(params, "body"),
+          }),
+        );
+      }
+      case "gh.prMarkReady": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const repository =
+          await githubForgeAdapter.resolveRepository(workspaceId);
+        return changeRequestToLegacyPr(
+          await githubForgeAdapter.markReady({
+            workspaceId,
+            repository,
+            number: reqNum(params, "prNumber"),
+          }),
+        );
+      }
       case "gh.prMerge": {
         const method = reqStr(params, "method");
         if (method !== "squash" && method !== "merge" && method !== "rebase") {
@@ -4210,20 +5356,31 @@ export class WorkspaceService {
             message: `gh.prMerge: 'method' must be 'squash', 'merge', or 'rebase', got "${method}"`,
           });
         }
-        return mergePr({
-          workspaceId: reqStr(params, "workspaceId"),
-          prNumber: reqNum(params, "prNumber"),
+        const workspaceId = reqStr(params, "workspaceId");
+        const repository =
+          await githubForgeAdapter.resolveRepository(workspaceId);
+        const result = await githubForgeAdapter.merge({
+          workspaceId,
+          repository,
+          number: reqNum(params, "prNumber"),
           method,
           commitTitle: optStr(params, "commitTitle"),
           commitMessage: optStr(params, "commitMessage"),
         });
+        return { sha: result.resultGitObject.hex };
       }
-      case "gh.prComment":
-        return addPrComment({
-          workspaceId: reqStr(params, "workspaceId"),
-          prNumber: reqNum(params, "prNumber"),
+      case "gh.prComment": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const repository =
+          await githubForgeAdapter.resolveRepository(workspaceId);
+        const result = await githubForgeAdapter.comment({
+          workspaceId,
+          repository,
+          number: reqNum(params, "prNumber"),
           body: reqStr(params, "body"),
         });
+        return { id: Number(result.providerCommentId), url: result.url };
+      }
       case "gh.prSync":
         // Detect + backfill the workspace's PR from GitHub. Returns the PR (or
         // null) and stamps the row when a not-yet-recorded PR is found.
@@ -4236,29 +5393,102 @@ export class WorkspaceService {
       //    refused by deny-by-default (the gate runs before dispatch); only the
       //    LOCAL desktop reaches them. ──
       // Write: git — extended
-      case "git.reset":
+      case "git.reset": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const mode = reqStr(params, "mode") as ResetMode;
+        const confirm = optBool(params, "confirm");
+        if (mode === "hard" && confirm === true) {
+          const current = await status(workspaceId);
+          const changedPaths = new Set(current.untracked);
+          for (const change of [
+            ...current.staged,
+            ...current.unstaged,
+            ...current.conflicted,
+          ]) {
+            changedPaths.add(change.path);
+            if (change.oldPath) changedPaths.add(change.oldPath);
+          }
+          const unsavedDesign = await designPathsInCodeMutation(
+            workspaceId,
+            [...changedPaths],
+            this.resolveReadCwd(workspaceId, remote),
+          );
+          if (unsavedDesign.length > 0) {
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message: `Resetting would discard ${unsavedDesign.length} unsaved design ${unsavedDesign.length === 1 ? "path" : "paths"} (e.g. ${unsavedDesign[0]}).`,
+              remediation:
+                'Commit the current Design document with "Save designs" before resetting the checkout.',
+              context: { workspaceId },
+            });
+          }
+        }
         await reset({
-          workspaceId: reqStr(params, "workspaceId"),
-          mode: reqStr(params, "mode") as ResetMode,
+          workspaceId,
+          mode,
           ref: optStr(params, "ref"),
-          confirm: optBool(params, "confirm"),
+          confirm,
         });
         return { ok: true };
-      case "git.restore":
+      }
+      case "git.restore": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const paths = strArr(params, "paths");
+        assertLiteralGitMutationPaths(paths, "Restoring");
+        await assertNoDesignPathWrites(
+          workspaceId,
+          paths,
+          "restoring",
+          this.resolveReadCwd(workspaceId, remote),
+        );
         await restoreFrom({
-          workspaceId: reqStr(params, "workspaceId"),
-          paths: strArr(params, "paths"),
+          workspaceId,
+          paths,
           source: reqStr(params, "source"),
           staged: optBool(params, "staged"),
         });
         return { ok: true };
-      case "git.clean":
+      }
+      case "git.clean": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const paths = optStrArr(params, "paths");
+        if (paths && paths.length > 0) {
+          assertLiteralGitMutationPaths(paths, "Cleaning");
+          await assertNoDesignPathWrites(
+            workspaceId,
+            paths,
+            "cleaning",
+            this.resolveReadCwd(workspaceId, remote),
+          );
+        } else {
+          // A pathless clean sweeps every untracked file — including
+          // not-yet-saved frames (untracked ON PURPOSE, so the engine can
+          // write them without an unfence). Refuse while any exist rather
+          // than silently destroying unsaved design work. Rowless/local-main
+          // roots use the same semantic check as managed worktrees.
+          const cwd = this.resolveReadCwd(workspaceId, remote);
+          const untrackedDesign = await designPathsInCodeMutation(
+            workspaceId,
+            (await status(workspaceId)).untracked,
+            cwd,
+          );
+          if (untrackedDesign.length > 0) {
+            throw new GitError({
+              code: "VALIDATION_FAILED",
+              message: `Cleaning would delete ${untrackedDesign.length} unsaved design ${untrackedDesign.length === 1 ? "file" : "files"} (e.g. ${untrackedDesign[0]}).`,
+              remediation:
+                "Save designs first (Design Mode → Save designs), or clean specific paths outside the design directory.",
+              context: { workspaceId },
+            });
+          }
+        }
         return clean({
-          workspaceId: reqStr(params, "workspaceId"),
-          paths: optStrArr(params, "paths"),
+          workspaceId,
+          paths,
           directories: optBool(params, "directories"),
           confirm: optBool(params, "confirm") ?? false,
         });
+      }
       case "git.merge":
         return merge({
           workspaceId: reqStr(params, "workspaceId"),
@@ -4297,24 +5527,57 @@ export class WorkspaceService {
           force: optBool(params, "force"),
         });
         return { ok: true };
-      case "git.stageHunk":
-        await stageHunk({
-          workspaceId: reqStr(params, "workspaceId"),
-          patch: reqStr(params, "patch"),
-        });
+      case "git.stageHunk": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const patch = reqStr(params, "patch");
+        const patchPaths = await this.inspectGitApplyPatchPaths(
+          workspaceId,
+          patch,
+        );
+        await assertNoDesignPathWrites(
+          workspaceId,
+          patchPaths,
+          "staging",
+          this.resolveReadCwd(workspaceId, remote),
+        );
+        await stageHunk({ workspaceId, patch });
         return { ok: true };
-      case "git.unstageHunk":
+      }
+      case "git.unstageHunk": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const patch = reqStr(params, "patch");
+        const patchPaths = await this.inspectGitApplyPatchPaths(
+          workspaceId,
+          patch,
+        );
+        await assertNoDesignPathWrites(
+          workspaceId,
+          patchPaths,
+          "unstaging",
+          this.resolveReadCwd(workspaceId, remote),
+        );
         await unstageHunk({
-          workspaceId: reqStr(params, "workspaceId"),
-          patch: reqStr(params, "patch"),
+          workspaceId,
+          patch,
         });
         return { ok: true };
-      case "git.discardHunk":
-        await discardHunk({
-          workspaceId: reqStr(params, "workspaceId"),
-          patch: reqStr(params, "patch"),
-        });
+      }
+      case "git.discardHunk": {
+        const workspaceId = reqStr(params, "workspaceId");
+        const patch = reqStr(params, "patch");
+        const patchPaths = await this.inspectGitApplyPatchPaths(
+          workspaceId,
+          patch,
+        );
+        await assertNoDesignPathWrites(
+          workspaceId,
+          patchPaths,
+          "discarding",
+          this.resolveReadCwd(workspaceId, remote),
+        );
+        await discardHunk({ workspaceId, patch });
         return { ok: true };
+      }
       case "git.tagCreate":
         await createTag({
           workspaceId: reqStr(params, "workspaceId"),
@@ -4359,6 +5622,69 @@ export class WorkspaceService {
         setWorkspaceStatus(workspaceId, status as WorkspaceStatus);
         return { ok: true };
       }
+      // ── Mode switch: one workspace, two modes ─────────────
+      // LOCAL-ONLY (on no remote allowlist — deny-by-default refuses a relay
+      // client): entering Design can initialize and commit workspace-owned
+      // files, and a paired device is not the place to trigger that transition
+      // blind.
+      // The lifecycle prologue already refused archived rows, active
+      // lifecycle flights, and missing checkouts (setMode is in
+      // LIFECYCLE_GATED_WORKSPACE_OPS).
+      case "workspace.setMode": {
+        // Deny-by-default already refuses relay clients before dispatch; keep
+        // the defence-in-depth check anyway (same posture as prepareCreate).
+        if (remote) {
+          throw new GitError({
+            code: "REMOTE_RESTRICTED",
+            message: "Workspace modes can be switched only in the desktop app.",
+          });
+        }
+        const workspaceId = reqStr(params, "workspaceId");
+        const requested = reqStr(params, "mode");
+        if (requested !== "code" && requested !== "design") {
+          throw new GitError({
+            code: "VALIDATION_FAILED",
+            message: `Invalid workspace mode "${requested}"`,
+          });
+        }
+        const mode = requested as WorkspaceMode;
+        const workspace = getWorkspaceById(workspaceId);
+        if (!workspace) {
+          throw new GitError({
+            code: "WORKSPACE_NOT_FOUND",
+            message: `Workspace ${workspaceId} not found`,
+          });
+        }
+        const current: WorkspaceMode =
+          workspace.kind === "design" ? "design" : "code";
+        if (current === mode) return { ok: true, mode };
+        // Concurrent duality: switching views does not restart a correctly
+        // contained code agent. Managed admission reserves the default Design
+        // vnode in advance; the hook proves every live contribution already
+        // subtracts it and retires only a legacy/stale boundary that does not.
+        if (mode === "design") {
+          await enterDesignMode(workspace, {
+            withFirstTerritoryCreation: (designDirectory, mutation) =>
+              this.withDesignTerritoryTransition(
+                [{ workspaceId, designDirectory }],
+                mutation,
+                { firstDesignCreation: true },
+              ),
+          });
+          // Hand the renderer the aggregate generated by this same lifecycle
+          // turn. Without this receipt, it confirms the mode, mounts Design,
+          // and immediately pays a second full parse/lint request before the
+          // first frame can paint.
+          return {
+            ok: true,
+            mode,
+            snapshot: await this.readDesignSnapshot(workspace, remote),
+          };
+        } else {
+          await exitDesignMode(workspace);
+        }
+        return { ok: true, mode };
+      }
       case "workspace.archive": {
         const workspaceId = reqStr(params, "workspaceId");
         const result = await archiveWorkspace(
@@ -4377,8 +5703,11 @@ export class WorkspaceService {
             }
           },
           this.workspaceCheckoutWatchSuspender ?? undefined,
+          this.repoTaskBoundaryFactory ?? undefined,
         );
         forgetWorkspaceDesignApi(result.workspace.path);
+        this.forgetDesignHistory(result.workspace.path);
+        forgetDesignDirectoryName(result.workspace.path);
         forgetDesignSelection(workspaceId);
         forgetDesignScreenshots(workspaceId);
         return result;
@@ -4413,7 +5742,11 @@ export class WorkspaceService {
           },
           this.workspaceCheckoutWatchSuspender ?? undefined,
         );
-        if (workspacePath) forgetWorkspaceDesignApi(workspacePath);
+        if (workspacePath) {
+          forgetWorkspaceDesignApi(workspacePath);
+          this.forgetDesignHistory(workspacePath);
+          forgetDesignDirectoryName(workspacePath);
+        }
         forgetDesignSelection(workspaceId);
         forgetDesignScreenshots(workspaceId);
         return { ok: true };
@@ -4427,15 +5760,14 @@ export class WorkspaceService {
           sourceTool: optStr(params, "sourceTool") as DetectedTool | undefined,
           prNumber: optNum(params, "prNumber"),
           prUrl: optStr(params, "prUrl"),
-          // A remote (relay) client must not trigger a settings-driven file
-          // copy from the host checkout, mirroring workspace.create's gate,
-          // which skips seeding for remote creates.
-          seedFiles: !remote,
+          // These are engine-resolved, repo-scoped seed paths (not arbitrary
+          // caller paths), so cloud creation keeps local workspace parity.
+          seedFiles: true,
         });
         // Branch/PR workspaces need the same dependency setup as an ordinary
         // newly created workspace. Resolution is quick; the setup PTY itself
-        // is background and local-only.
-        if (!remote) {
+        // is background and runs through repo-code-task ZSR for local or cloud.
+        {
           // A bounded create-time seed scan may still be completing. Do not let
           // setup read a half-copied .env/.npmrc, and do not hold the create RPC
           // open while that uncommon cold-disk pass finishes.

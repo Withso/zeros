@@ -38,9 +38,10 @@ export const getEnginePort: CommandHandler = async () => {
   return currentPort() ?? (await ensureEngineRunning());
 };
 
-export const getEngineToken: CommandHandler = () => {
-  // The per-launch secret the renderer presents on its loopback /ws
-  // connection. Reachable only over this IPC bridge (not from a web page).
+export const getEngineToken: CommandHandler = async () => {
+  // The child-minted, per-process secret the renderer presents on its loopback
+  // /ws connection. Await readiness so port + token always name one generation.
+  await ensureEngineRunning();
   return currentLocalToken();
 };
 

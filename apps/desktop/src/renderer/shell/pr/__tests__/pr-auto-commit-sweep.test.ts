@@ -1,14 +1,8 @@
 // The one assumption in the Create PR auto-commit that unit tests cannot check:
-// what `git add -- . ':(exclude).zeros'` ACTUALLY stages. The constant is
-// asserted structurally next door (pr-auto-commit.test.ts); this pins its
-// SEMANTICS against a real git, because every alternative shape was wrong in a
-// way only git can tell you about:
-//
-//   • a per-file list runs each name through git's pathspec parser, where
-//     `weird[1].txt` is a character class that matches nothing;
-//   • a pathspec that isn't a directory misses REMOVALS;
-//   • an exclude that git quietly ignored would sweep `.zeros` into the commit,
-//     which every Changes surface hides and every count leaves out.
+// whether the exact visible paths produced from status stage edits, additions,
+// deletions, and pathspec-hostile filenames when the engine literalizes them.
+// This pins those semantics against a real git while keeping `.zeros` outside
+// the status-derived list handed across the workspace bridge.
 //
 // It shells out to git in a temp repo — the same shape as the engine's own git
 // suites (see the temp-repo note in vitest.config.ts). It deliberately does NOT
@@ -22,7 +16,10 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import { AUTO_COMMIT_PATHSPECS } from "../pr-auto-commit";
+import {
+  summarizePendingWork,
+  type WorktreeFacts,
+} from "../pr-auto-commit";
 
 const execFileAsync = promisify(execFile);
 
@@ -31,6 +28,11 @@ describe("the auto-commit sweep, against a real git", () => {
   let repo: string;
   const git = (...args: string[]) =>
     execFileAsync("git", args, { cwd: repo }).then((r) => r.stdout);
+  const stageVisible = async (facts: WorktreeFacts) => {
+    const paths = summarizePendingWork(facts).paths;
+    if (paths.length === 0) return;
+    await git("add", "--", ...paths.map((path) => `:(literal)${path}`));
+  };
 
   beforeEach(async () => {
     workdir = await mkdtemp(path.join(tmpdir(), "zeros-pr-sweep-"));
@@ -65,7 +67,13 @@ describe("the auto-commit sweep, against a real git", () => {
     // Tracked and modified, and still invisible everywhere in Zeros.
     await writeFile(path.join(repo, ".zeros", "settings.toml"), "[git]\nx=1\n");
 
-    await git("add", "--", ...AUTO_COMMIT_PATHSPECS);
+    await stageVisible({
+      staged: [],
+      unstaged: [{ path: "gone.txt" }, { path: "kept.txt" }],
+      untracked: ["sub/new.txt", "weird[1].txt"],
+      conflicted: [],
+      conflictState: null,
+    });
 
     const staged = (await git("diff", "--cached", "--name-status"))
       .trim()
@@ -86,7 +94,13 @@ describe("the auto-commit sweep, against a real git", () => {
     await git("commit", "-q", "-m", "untrack");
     await writeFile(path.join(repo, "kept.txt"), "changed\n");
 
-    await git("add", "--", ...AUTO_COMMIT_PATHSPECS);
+    await stageVisible({
+      staged: [],
+      unstaged: [{ path: "kept.txt" }],
+      untracked: [".zeros/settings.toml"],
+      conflicted: [],
+      conflictState: null,
+    });
 
     expect(await git("diff", "--cached", "--name-only")).toBe("kept.txt\n");
     expect(await git("status", "--porcelain")).toContain("?? .zeros/");
@@ -97,7 +111,13 @@ describe("the auto-commit sweep, against a real git", () => {
     await mkdir(path.join(repo, "dist"), { recursive: true });
     await writeFile(path.join(repo, "dist", "bundle.js"), "// built\n");
 
-    await git("add", "--", ...AUTO_COMMIT_PATHSPECS);
+    await stageVisible({
+      staged: [],
+      unstaged: [],
+      untracked: [".gitignore"],
+      conflicted: [],
+      conflictState: null,
+    });
 
     const staged = await git("diff", "--cached", "--name-only");
     expect(staged).toContain(".gitignore");
@@ -108,7 +128,13 @@ describe("the auto-commit sweep, against a real git", () => {
   // an empty commit — the orchestrator treats that as "the tree went clean",
   // which is only correct if git really does refuse.
   it("commits nothing when the sweep found nothing", async () => {
-    await git("add", "--", ...AUTO_COMMIT_PATHSPECS);
+    await stageVisible({
+      staged: [],
+      unstaged: [],
+      untracked: [],
+      conflicted: [],
+      conflictState: null,
+    });
     await expect(git("commit", "-m", "empty")).rejects.toMatchObject({
       stdout: expect.stringContaining("nothing to commit"),
     });

@@ -1,38 +1,23 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
   canSkipPerFileRetry,
-  denyAce,
+  assertDesignDirHasNoHardlinkAliases,
+  designDirFenceEntries,
+  designDirAliasHazards,
   isInsideDir,
   lockableFiles,
   normalizeDesignDir,
-  designLockSupported,
-  lockCodebase,
   resolveDesignDirForLock,
-  withUnlocked,
 } from "../design-lock";
 import { setWorkingDirectories } from "../../git/sparse-checkout";
 
 const execFileAsync = promisify(execFile);
-
-describe("denyAce", () => {
-  it("names a principal before the deny clause", () => {
-    // Regression: the ACE originally started at "deny …" with no principal.
-    // chmod parses the first token as the identity, so every invocation failed
-    // with "Unable to translate 'deny' to a UUID" and the lock silently did
-    // nothing. Unit tests could not catch it (chmod +a is macOS-only), so this
-    // asserts the shape instead.
-    const ace = denyAce();
-    expect(ace).toMatch(/^user:.+ deny /);
-    expect(ace.startsWith("deny")).toBe(false);
-    expect(ace).toContain("write,delete,append,writeattr,writeextattr");
-  });
-});
 
 describe("canSkipPerFileRetry", () => {
   // Real macOS 26.3 stderr shapes.
@@ -40,32 +25,22 @@ describe("canSkipPerFileRetry", () => {
     "chmod: No ACL present 'b.txt'\nchmod: No ACL present 'd.txt'\n";
 
   it("accepts a batch whose only errors are 'No ACL present'", () => {
-    expect(canSkipPerFileRetry("-a", noAcl)).toBe(true);
+    expect(canSkipPerFileRetry(noAcl)).toBe(true);
   });
 
   it("forces a per-file retry when ANY other chmod error is present", () => {
     // The dangerous case: one real failure hidden among benign ones must not
     // let the whole batch be counted as unlocked.
     expect(
-      canSkipPerFileRetry(
-        "-a",
-        `${noAcl}chmod: Operation not permitted 'x.txt'\n`,
-      ),
+      canSkipPerFileRetry(`${noAcl}chmod: Operation not permitted 'x.txt'\n`),
     ).toBe(false);
     expect(
-      canSkipPerFileRetry(
-        "-a",
-        "chmod: Unable to translate 'deny' to a UUID\n",
-      ),
+      canSkipPerFileRetry("chmod: Unable to translate 'deny' to a UUID\n"),
     ).toBe(false);
-  });
-
-  it("never short-circuits the lock path", () => {
-    expect(canSkipPerFileRetry("+a", noAcl)).toBe(false);
   });
 
   it("does not treat an empty stderr as benign", () => {
-    expect(canSkipPerFileRetry("-a", "")).toBe(false);
+    expect(canSkipPerFileRetry("")).toBe(false);
   });
 });
 
@@ -90,10 +65,8 @@ describe("normalizeDesignDir", () => {
   it("returns empty for an absolute path instead of rebasing it", () => {
     // Regression: the leading-slash strip ran BEFORE the escape check, so
     // `/Users/me/repo/designs` became the repo-relative
-    // `Users/me/repo/designs` — truthy, past lockCodebase's guard, and matching
-    // no tracked file. isInsideDir then exempted nothing, so the design folder
-    // was locked with the rest of the tree and the call reported success:
-    // design mode with nothing writable at all.
+    // `Users/me/repo/designs` — truthy and matching no tracked file. Historical
+    // ACL builds then treated the Design folder like ordinary code.
     expect(normalizeDesignDir("/abs/designs")).toBe("");
     expect(normalizeDesignDir("/Users/me/repo/styles/Designs")).toBe("");
     expect(normalizeDesignDir("//abs//designs//")).toBe("");
@@ -165,6 +138,62 @@ describe("lockableFiles", () => {
     expect(files.some((f) => f.startsWith("ignored/"))).toBe(false);
   });
 
+  it("enumerates the real Design tree, including ignored drafts and every nested directory", async () => {
+    await writeFile(
+      path.join(repo, ".gitignore"),
+      "ignored/\ndesigns/private/\n",
+    );
+    await mkdir(path.join(repo, "designs", "drafts", "nested"), {
+      recursive: true,
+    });
+    await mkdir(path.join(repo, "designs", "private"), { recursive: true });
+    await writeFile(
+      path.join(repo, "designs", "drafts", "nested", "option.html"),
+      "untracked\n",
+    );
+    await writeFile(
+      path.join(repo, "designs", "private", "ignored.html"),
+      "ignored\n",
+    );
+    await symlink("../src", path.join(repo, "designs", "code-link"), "dir");
+
+    const entries = await designDirFenceEntries(repo, "designs");
+    expect(entries.directories).toEqual([
+      "designs",
+      "designs/drafts",
+      "designs/drafts/nested",
+      "designs/private",
+    ]);
+    expect(entries.files).toEqual([
+      "designs/code-link",
+      "designs/d.css",
+      "designs/drafts/nested/option.html",
+      "designs/private/ignored.html",
+    ]);
+    // A symlink is fenced as an entry; discovery must never follow it into code.
+    expect(entries.files).not.toContain("designs/code-link/a.ts");
+  });
+
+  it("fails closed when a Design inode already has a hard-link alias", async () => {
+    const alias = path.join(repo, "src", "design-alias.css");
+    await link(path.join(repo, "designs", "d.css"), alias);
+
+    await expect(designDirAliasHazards(repo, "designs")).resolves.toEqual([
+      { path: "designs/d.css", links: 2 },
+    ]);
+    await expect(
+      assertDesignDirHasNoHardlinkAliases(repo, "designs"),
+    ).rejects.toThrow(/hard-linked file/i);
+  });
+
+  it("accepts ordinary files and symlinks without following them", async () => {
+    await symlink("../src/a.ts", path.join(repo, "designs", "code-file"));
+    await expect(designDirAliasHazards(repo, "designs")).resolves.toEqual([]);
+    await expect(
+      assertDesignDirHasNoHardlinkAliases(repo, "designs"),
+    ).resolves.toBeUndefined();
+  });
+
   it("sweeps everything when no design dir is given (the unlock path)", async () => {
     const files = await lockableFiles(repo, "");
     expect(files).toContain("designs/d.css");
@@ -230,6 +259,13 @@ describe("lockableFiles", () => {
       ).rejects.toThrow(/not in this workspace/i);
     });
 
+    it("refuses a symlink in the active Design-directory path", async () => {
+      await symlink("designs", path.join(repo, "design-link"), "dir");
+      await expect(
+        resolveDesignDirForLock(repo, "design-link"),
+      ).rejects.toThrow(/real, symlink-free directory/i);
+    });
+
     it("refuses a case-mismatched spelling and names the real one", async () => {
       // macOS is case-INSENSITIVE by default, so `fs.stat("designs")` resolves
       // a folder actually called `Designs` — while isInsideDir compares git's
@@ -240,54 +276,5 @@ describe("lockableFiles", () => {
         /spelled exactly as on disk; got "Designs", found "designs"/,
       );
     });
-  });
-
-  it("refuses to lock on a platform without ACL support", async () => {
-    if (designLockSupported()) return; // covered by the macOS probe instead
-    await expect(lockCodebase(repo, { designDir: "designs" })).rejects.toThrow(
-      /needs macOS/i,
-    );
-  });
-
-  it("withUnlocked surfaces fn's error, not a failed relock", async () => {
-    // The operations this wraps (checkout, merge, reset) can move the design
-    // folder out from under the relock, which then legitimately refuses — and in
-    // a `finally` that error REPLACES fn's, hiding why the git command failed.
-    // The wrapper is a passthrough off macOS, so the platform is forced here to
-    // exercise the unlock → fn → relock path. The chmod calls themselves fail on
-    // Linux and are counted, not thrown, which is what makes this reachable.
-    const real = process.platform;
-    Object.defineProperty(process, "platform", {
-      value: "darwin",
-      configurable: true,
-    });
-    try {
-      const boom = new Error("checkout exploded");
-      await expect(
-        withUnlocked(repo, { designDir: "nope" }, () => Promise.reject(boom)),
-      ).rejects.toBe(boom);
-      // A relock failure after a SUCCESSFUL fn is the caller's problem, though:
-      // the codebase is no longer locked and nothing else would say so.
-      await expect(
-        withUnlocked(repo, { designDir: "nope" }, () => Promise.resolve("ok")),
-      ).rejects.toThrow(/not in this workspace/i);
-    } finally {
-      Object.defineProperty(process, "platform", {
-        value: real,
-        configurable: true,
-      });
-    }
-  });
-
-  it("refuses to lock with an unusable design dir", async () => {
-    if (!designLockSupported()) return; // the macOS check fires first
-    for (const bad of ["", "..", "/abs/designs"]) {
-      await expect(lockCodebase(repo, { designDir: bad })).rejects.toThrow(
-        /repo-relative design folder/i,
-      );
-    }
-    await expect(lockCodebase(repo, { designDir: "nope" })).rejects.toThrow(
-      /not in this workspace/i,
-    );
   });
 });

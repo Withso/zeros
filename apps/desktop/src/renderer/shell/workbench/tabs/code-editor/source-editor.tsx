@@ -23,6 +23,7 @@ import { triggerGitRefresh } from "@/renderer/shell/use-git-refresh-key";
 import { setWorkbenchEditorDirty } from "./editor-state";
 import { resolveDiskContentSync } from "./source-editor-sync";
 import { ZerosSpinner } from "@/renderer/shared/ui/loading";
+import { recordWorkspaceActivity } from "@/renderer/state/workspace-store";
 
 interface SourceEditorProps {
   /** Owning File-tab id. Dirty state is registered per tab so this editor can
@@ -103,6 +104,11 @@ export function SourceEditor({
       pendingSaveRef.current = text;
       setSaving(true);
       setError(null);
+      // A save attempt is a deliberate workspace action at invocation time,
+      // just like a submitted terminal command or prompt. Record before the
+      // transport await so a slow write cannot leapfrog a later action in a
+      // different workspace; ordinary typing remains passive.
+      recordWorkspaceActivity(cwd);
       // writeWorkspaceFile rejects on transport absence (engine bridge down /
       // still connecting) instead of resolving null. Fold that into the same
       // failure branch as an engine-reported error, so `saving` always resets

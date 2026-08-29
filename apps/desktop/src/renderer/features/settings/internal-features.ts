@@ -4,11 +4,13 @@
 //
 // NOT experimental features. Experimental (experimental-features.ts) is
 // visible to every user as an opt-in; Internal is invisible to everyone
-// except accounts whose database row carries `staff_role`. These features may never
-// ship to users — they exist for maintainers to debug/dogfood the app
+// except accounts whose database row carries the exact `developer` role. These
+// features may never ship to users — they exist for maintainers to debug/dogfood the app
 // (Settings → Internal, gated in settings-page.tsx `availableSections`).
 //
-// Who counts as internal comes from the DATABASE: `users.staff_role`,
+// Who counts as internal comes from the DATABASE: `users.staff_role =
+// 'developer'`. The orthogonal `support_admin` role authorizes reviewed account
+// recovery only and must not expose engineering surfaces.
 // surfaced on `GET /v1/me` and cached by the team store. It used to be a
 // build-time email allowlist (`VITE_INTERNAL_USER_EMAILS`), which was wrong
 // in three ways: Vite inlines VITE_* into the renderer bundle, so the
@@ -26,17 +28,15 @@
 //      ⌘/ shortcuts catalog, menus, tooltips, or any surface a
 //      non-internal user can see.
 //   3. The role is resolved SERVER-side from Postgres against the verified
-//      Auth0 token (apps/control-plane/src/auth.ts `ensureUser` runs per request) and
+//      WorkOS token (apps/control-plane/src/auth.ts `ensureUser` runs per request) and
 //      is never read from a JWT claim, so revoking staff takes effect
 //      immediately rather than at token expiry. Signed out, control plane
 //      unconfigured, or fetch not yet landed ⇒ null ⇒ everything internal
 //      is off. Fail-closed in every direction.
-//   4. This is a shipped-app rollout gate, not a sandbox against the owner of
-//      the local Mac. `copyLogs` exposes only already-scrubbed local logs;
-//      design operations stay on the trusted local-desktop engine path (remote
-//      create drops `kind`, and design RPCs are not remote-allowlisted). Any
-//      future internal feature that unlocks server data or server-side power
-//      must also call backend `requireStaff` on the endpoint behind it.
+//   4. This is a shipped-app rollout gate, not an authority boundary.
+//      `copyLogs` exposes only already-scrubbed local logs. Any future internal
+//      feature that unlocks server data or server-side power must also call
+//      backend `requireStaff` on the endpoint behind it.
 //
 // Per-app scoping comes free: flags persist to localStorage, and each
 // channel (Zeros / Zeros Alpha / Zeros Beta / Zeros Dev, plus per-worktree
@@ -52,12 +52,7 @@
 
 import { useCallback, useSyncExternalStore } from "react";
 
-import {
-  getTeamStoreState,
-  useTeams,
-  type TeamStoreStatus,
-} from "../team/team-store";
-import { CONTROL_PLANE_URL } from "../team/control-plane";
+import { getTeamStoreState, useTeams } from "../team/team-store";
 
 // ── Who counts as internal ──────────────────────────────
 
@@ -69,7 +64,7 @@ import { CONTROL_PLANE_URL } from "../team/control-plane";
  *  first fetch still in flight — because "not yet known" must behave as
  *  "not internal", never the reverse. */
 export function isInternalUser(): boolean {
-  return getTeamStoreState().me?.user.staffRole != null;
+  return getTeamStoreState().me?.user.staffRole === "developer";
 }
 
 /** Hook: is the signed-in user staff? Gates the Internal settings tab and
@@ -78,34 +73,15 @@ export function isInternalUser(): boolean {
  *  `useTeams` is single-flight, so calling it here costs no extra request. */
 export function useIsInternalUser(): boolean {
   const { me } = useTeams();
-  return me?.user.staffRole != null;
-}
-
-/** Whether the database-backed staff lookup has reached an authoritative
- * answer. An unconfigured control plane is settled-unavailable immediately;
- * a configured first load stays pending until success or failure. */
-export function isInternalUserResolutionSettled(
-  status: TeamStoreStatus,
-  controlPlaneConfigured = CONTROL_PLANE_URL !== null,
-): boolean {
-  return !controlPlaneConfigured || status === "ready" || status === "error";
-}
-
-/** Hook used only for fail-closed route recovery: unresolved access may hide a
- * surface, but must not erase or redirect a staff user's remembered route. */
-export function useInternalUserResolutionSettled(): boolean {
-  const { status } = useTeams();
-  return isInternalUserResolutionSettled(status);
+  return me?.user.staffRole === "developer";
 }
 
 // ── The flags ───────────────────────────────────────────
 
 /** The set of internal feature flags.
  *  - `copyLogs` — ⇧⌘L copies the scrubbed recent-log tail (the exact
- *    bytes a feedback submission shares) to the clipboard.
- *  - `designWorkspaces` — exposes the native design-workspace UX to staff
- *    without connecting it to the coding-agent harness. */
-export type InternalFeature = "copyLogs" | "designWorkspaces";
+ *    bytes a feedback submission shares) to the clipboard. */
+export type InternalFeature = "copyLogs";
 
 const STORAGE_KEY = "zeros.internalFeatures";
 

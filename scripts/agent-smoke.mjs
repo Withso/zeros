@@ -66,9 +66,26 @@ import { execFileSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { build } from "esbuild";
 
+import {
+  agentSmokeProviderCwd,
+  agentSmokeSkipReason,
+  canonicalAgentSmokeWorkspace,
+  installAgentSmokeZsrEnvironment,
+} from "./agent-smoke-zsr-assets.mjs";
+import {
+  formatAdmissionFailures,
+  parseAdmissionCopies,
+} from "./agent-smoke-options.mjs";
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const TMP = path.join(ROOT, ".zeros", "agent-smoke");
+
+// The gateway serves a throwaway repository below, while its ZSR executables
+// belong to this source checkout. Electron's sidecar normally exports these
+// exact paths; the standalone smoke must do the same before it constructs the
+// gateway or every contained provider probe fails before reaching the CLI.
+installAgentSmokeZsrEnvironment(ROOT);
 
 // ── args ─────────────────────────────────────────────────
 const argv = process.argv.slice(2);
@@ -79,6 +96,8 @@ if (argv.includes("--help") || argv.includes("-h")) {
       "",
       "  pnpm agents:smoke                 core matrix, default model/agent",
       "  pnpm agents:smoke --full          + sweep every advertised model + effort",
+      "  pnpm agents:smoke --admission-only  start + tear down; sends no model prompt",
+      "  pnpm agents:smoke --admission-only --admission-copies 2",
       "  pnpm agents:smoke --agents a,b    only these agent ids",
       "  pnpm agents:smoke --require a,b   FAIL if a named agent skipped (for CI)",
       "",
@@ -90,6 +109,14 @@ if (argv.includes("--help") || argv.includes("-h")) {
   process.exit(0);
 }
 const FULL = argv.includes("--full");
+const ADMISSION_ONLY = argv.includes("--admission-only");
+const ADMISSION_COPIES = parseAdmissionCopies(argv);
+if (FULL && ADMISSION_ONLY) {
+  throw new Error("--full and --admission-only are mutually exclusive");
+}
+if (!ADMISSION_ONLY && ADMISSION_COPIES !== 1) {
+  throw new Error("--admission-copies requires --admission-only");
+}
 /** Comma-separated agent ids following `flag`, or null when absent. */
 function idList(flag) {
   const i = argv.indexOf(flag);
@@ -196,7 +223,11 @@ function makeTempRepo() {
     /* git optional — most agents run in a plain dir too */
   }
   fs.writeFileSync(path.join(dir, "README.md"), "# zeros agent smoke\n");
-  return dir;
+  // macOS exposes /var as a symlink to /private/var. Git reports the physical
+  // top-level while Node's os.tmpdir() commonly returns the lexical alias; a
+  // mixed pair correctly fails the canonical Design-territory containment
+  // check. Normalize once before the path becomes gateway/session identity.
+  return canonicalAgentSmokeWorkspace(dir);
 }
 
 // Gateway whose onSessionUpdate accumulates assistant text per session, and
@@ -276,6 +307,54 @@ async function smokeAgent(harness, agent, cwd) {
   const id = agent.id;
   const r = { agent: id, name: agent.name, checks: {}, full: { models: [], efforts: [] } };
   const gw = harness.gateway;
+
+  if (ADMISSION_ONLY) {
+    const sessionIds = [];
+    r.checks.admission = await check(async () => {
+      const startedAt = Date.now();
+      const outcomes = await withTimeout(
+        Promise.allSettled(
+          Array.from({ length: ADMISSION_COPIES }, () =>
+            gw.newSession(id, { cwd }),
+          ),
+        ),
+        120_000,
+        `${id} admission ×${ADMISSION_COPIES}`,
+      );
+      const failures = [];
+      for (const outcome of outcomes) {
+        if (outcome.status === "rejected") {
+          failures.push(outcome.reason);
+          continue;
+        }
+        const sessionId = outcome.value.executionId ?? outcome.value.sessionId;
+        if (sessionId) sessionIds.push(sessionId);
+        else failures.push(new Error("admission returned no execution id"));
+      }
+      if (failures.length > 0) {
+        throw new AggregateError(
+          failures,
+          formatAdmissionFailures(failures, ADMISSION_COPIES),
+        );
+      }
+      return `${ADMISSION_COPIES} ready in ${((Date.now() - startedAt) / 1000).toFixed(1)}s`;
+    });
+    r.checks.teardown = sessionIds.length > 0
+      ? await check(async () => {
+          await withTimeout(
+            Promise.all(
+              sessionIds.map((sessionId) =>
+                gw.endSession(id, sessionId, { failClosed: true }),
+              ),
+            ),
+            30_000,
+            `${id} teardown ×${sessionIds.length}`,
+          );
+          return `${sessionIds.length} endSession + boundary proofs ok`;
+        })
+      : { ok: false, detail: "skipped (admission failed)" };
+    return r;
+  }
 
   // ── 1. spawn + prompt + 2. context (same session) ──
   let ctxSession = null;
@@ -376,7 +455,9 @@ function pad(s, n) {
 }
 
 function render(rows) {
-  const cols = ["prompt", "context", "cancel", "teardown"];
+  const cols = ADMISSION_ONLY
+    ? ["admission", "teardown"]
+    : ["prompt", "context", "cancel", "teardown"];
   console.log("");
   console.log(
     pad("AGENT", 16) + pad("INSTALL", 9) + pad("AUTH", 7) + cols.map((c) => pad(c.toUpperCase(), 10)).join(""),
@@ -414,8 +495,18 @@ function render(rows) {
 // ── main ─────────────────────────────────────────────────
 async function main() {
   console.log("── Zeros LIVE agent smoke ──");
-  console.log("Spawns real, authed agent CLIs and sends real prompts (uses tokens).");
-  console.log(FULL ? "Mode: --full (every advertised model + effort)\n" : "Mode: core matrix (default model)\n");
+  console.log(
+    ADMISSION_ONLY
+      ? "Starts real, authed agent runtimes and tears them down without sending a model prompt."
+      : "Spawns real, authed agent CLIs and sends real prompts (uses tokens).",
+  );
+  console.log(
+    ADMISSION_ONLY
+      ? "Mode: admission-only (no model turn)\n"
+      : FULL
+        ? "Mode: --full (every advertised model + effort)\n"
+        : "Mode: core matrix (default model)\n",
+  );
 
   const mod = await compileGateway();
   const Gateway = mod.AgentGateway;
@@ -444,12 +535,16 @@ async function main() {
         installed,
         authenticated: authed,
         skipped: true,
-        reason: !installed ? "not installed" : "not authenticated",
+        reason: agentSmokeSkipReason(agent),
       });
       continue;
     }
     process.stdout.write(`  running ${id} …\n`);
-    const cwd = makeTempRepo();
+    // Keep the provider cwd inside the gateway's one canonical repository.
+    // A sibling mkdtemp is a different workspace and must be rejected by the
+    // Design-territory guard, which made the old harness fail before spawn.
+    const cwd = agentSmokeProviderCwd(projectRoot, id);
+    fs.mkdirSync(cwd, { recursive: true });
     try {
       rows.push(await smokeAgent(harness, agent, cwd));
     } catch (err) {
@@ -506,7 +601,15 @@ async function main() {
   fs.writeFileSync(
     out,
     JSON.stringify(
-      { full: FULL, required: [...(required ?? [])], tested, coverage, rows },
+      {
+        full: FULL,
+        admissionOnly: ADMISSION_ONLY,
+        admissionCopies: ADMISSION_COPIES,
+        required: [...(required ?? [])],
+        tested,
+        coverage,
+        rows,
+      },
       null,
       2,
     ),

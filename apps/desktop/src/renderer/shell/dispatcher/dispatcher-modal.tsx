@@ -1,8 +1,8 @@
 // ──────────────────────────────────────────────────────────
-// DispatcherModal — one entry point to create a workspace + dispatch
+// DispatcherPage — one entry point to create a workspace + dispatch
 // ──────────────────────────────────────────────────────────
 //
-// The "+ Create" launcher above Projects opens this. It unifies the
+// The global "+" destination opens this inside the Home shell. It unifies the
 // new-workspace / open-project / clone flows behind one surface:
 //
 //   ┌ project pill ▾ · + folder menu ···· Create from… ▾ ┐  (top bar)
@@ -18,17 +18,17 @@
 // model" rule).
 // ──────────────────────────────────────────────────────────
 
-import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, FolderOpen, FolderPlus, Sparkles } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  ChevronDown,
+  FolderOpen,
+  FolderPlus,
+  PenTool,
+  Sparkles,
+} from "lucide-react";
 
 import { GithubIcon } from "../../shared/ui";
 import { Tooltip } from "@/renderer/shared/ui/primitives";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogTitle,
-} from "../../shared/ui/primitives/dialog";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -52,6 +52,7 @@ import {
   markWorkspaceSettling,
 } from "../../state/pending-workspaces";
 import type { Project } from "../../state/projects-store";
+import { findProjectForFolder } from "../../state/workspace-resolution";
 import {
   useWorkspaceDispatch,
   useChats,
@@ -65,6 +66,7 @@ import {
 } from "../../features/agent/agents-cache";
 import { useBridgeStatus } from "../../platform/bridge/use-bridge";
 import { dbDeleteChat } from "../../features/agent/agent-history-client";
+import { discardQueuedContextGraphWrites } from "../../features/agent/composer-editor/context-graph-staging";
 import { useAgentSessions } from "../../features/agent/sessions-hooks";
 import {
   workspaceCreate,
@@ -82,10 +84,14 @@ import {
   getActiveOrganizationSnapshot,
 } from "../../features/team/team-store";
 import { localWorkspaceOwner } from "../../features/team/organization-capabilities";
+import { useNativeRuntime } from "../../platform/runtime";
+import { createWorkspaceForProject } from "../create-workspace";
+import { RepositoryIcon } from "../../features/repositories/repository-icon";
 
-interface DispatcherModalProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
+interface DispatcherPageProps {
+  /** Retained Home surfaces stay mounted. Gate effects and selection resets to
+   * the visible Create route so hidden pages remain inert. */
+  active: boolean;
   /** Repository context supplied by the global top bar, when available. */
   initialProjectId?: string | null;
   /** Shared add-project flows (from AddProjectProvider) for the + folder menu. */
@@ -104,33 +110,38 @@ function resolveInitialProjectId(
   if (activeChatId) {
     const folder = chats.find((c) => c.id === activeChatId)?.folder;
     if (folder) {
-      const owner = projects.find((p) => folder.startsWith(p.repoRoot));
+      const owner = findProjectForFolder(folder, projects);
       if (owner) return owner.id;
     }
   }
   return projects[0]?.id ?? null;
 }
 
-export function DispatcherModal({
-  open,
-  onOpenChange,
+export function DispatcherPage({
+  active,
   initialProjectId,
   onOpenProject,
   onOpenGithubProject,
   onQuickStart,
-}: DispatcherModalProps) {
+}: DispatcherPageProps) {
   const { projects } = useProjects();
   const agents = useAgentsSnapshot();
   const sessions = useAgentSessions();
   const dispatch = useWorkspaceDispatch();
   const chats = useChats();
   const activeChatId = useActiveChatId();
+  const nativeRuntime = useNativeRuntime();
+  const designWorkspaceCreationAvailable =
+    nativeRuntime.ready || nativeRuntime.expectedElectron;
 
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(
     null,
   );
   const [base, setBase] = useState<DispatcherBase | null>(null);
   const [busy, setBusy] = useState(false);
+  const [designBusy, setDesignBusy] = useState(false);
+  const wasActiveRef = useRef(false);
+  const lastInitialProjectIdRef = useRef<string | null | undefined>(undefined);
 
   // The base is repo-scoped — clear it whenever the target project changes so a
   // branch from project A never leaks into a create on project B.
@@ -138,39 +149,61 @@ export function DispatcherModal({
     setBase(null);
   }, [selectedProjectId]);
 
-  // Warm the agent registry each time the modal opens (route through
+  // Warm the agent registry each time the page becomes active (route through
   // loadAgents — a raw sessions.listAgents() round-trips the engine but never
-  // fills the agents-cache snapshot this modal renders from, so on a cold
+  // fills the agents-cache snapshot this page renders from, so on a cold
   // cache the model pill would sit in "loading" forever). Gated on a
   // connected bridge like settings-page; the status flip re-runs it.
   const bridgeStatus = useBridgeStatus();
   useEffect(() => {
-    if (!open || bridgeStatus !== "connected") return;
+    if (!active || bridgeStatus !== "connected") return;
     void loadAgents((force) => sessions.listAgents(force)).catch(() => {});
     // `sessions` identity churns with provider state; the ref-free read here
     // is safe because the effect only fires on open/connect edges.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, bridgeStatus]);
+  }, [active, bridgeStatus]);
 
-  // Pick the initial project each time the modal opens (a project may have
-  // been added/removed since last time).
-  useEffect(() => {
-    if (!open) return;
+  // Pick the requested repository before paint whenever Create becomes active
+  // or the top-bar retargets the already-open page. A removed project falls
+  // through to the retained valid choice, active-chat owner, then first repo.
+  useLayoutEffect(() => {
+    const honorRouteTarget =
+      active &&
+      (!wasActiveRef.current ||
+        lastInitialProjectIdRef.current !== initialProjectId);
+    wasActiveRef.current = active;
+    lastInitialProjectIdRef.current = initialProjectId;
+    if (!active) return;
     setSelectedProjectId((prev) =>
-      initialProjectId && projects.some((p) => p.id === initialProjectId)
+      honorRouteTarget &&
+      initialProjectId &&
+      projects.some((p) => p.id === initialProjectId)
         ? initialProjectId
         : prev && projects.some((p) => p.id === prev)
           ? prev
           : resolveInitialProjectId(projects, chats, activeChatId),
     );
-    // Re-resolve only on open; project switches mid-session are user-driven.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+  }, [active, activeChatId, chats, initialProjectId, projects]);
 
   const selectedProject = useMemo(
     () => projects.find((p) => p.id === selectedProjectId) ?? null,
     [projects, selectedProjectId],
   );
+
+  const handleCreateDesign = async () => {
+    const project = selectedProject;
+    if (!project || designBusy || !designWorkspaceCreationAvailable) return;
+    setDesignBusy(true);
+    try {
+      await createWorkspaceForProject({
+        project,
+        dispatch,
+        kind: "design",
+      });
+    } finally {
+      setDesignBusy(false);
+    }
+  };
 
   const handleCreate = async (payload: DispatcherCreatePayload) => {
     const project = selectedProject;
@@ -184,7 +217,7 @@ export function DispatcherModal({
     );
     // Optimistic create, three beats:
     //   1. prepareCreate reserves identity + final path without touching disk.
-    //   2. Navigate NOW: close the modal, add the chat bound to the announced
+    //   2. Navigate NOW: add the chat bound to the announced
     //      path, mark it settling — Workbench shows its "Setting up
     //      workspace" rows, and the chat view defers the agent spawn until
     //      the exact create lifecycle publishes.
@@ -192,7 +225,7 @@ export function DispatcherModal({
     //      reserved identity; on resolve the workspace list refetch reveals
     //      everything, on failure the optimistic chat is rolled back.
     // `busy` only guards a double-submit in the same frame — it is cleared
-    // synchronously after the modal closes, never held across the awaits.
+    // synchronously after navigation, never held across the awaits.
     setBusy(true);
     const baseBranch = base?.branch;
     let prepared: Awaited<ReturnType<typeof workspacePrepareCreate>>;
@@ -227,7 +260,6 @@ export function DispatcherModal({
     // Workbench shows its loading rows from the very first frame; the flag
     // clears once the workspace row lands AND its surface data is in.
     markWorkspaceSettling(prepared.path);
-    onOpenChange(false);
     setBusy(false);
 
     const chatId = newChatId();
@@ -270,6 +302,7 @@ export function DispatcherModal({
     dispatch({
       type: "ADD_CHAT",
       chat,
+      recordWorkspaceActivity: true,
       openWorkspace: {
         repoRoot: project.repoRoot,
         validationPending: true,
@@ -280,6 +313,7 @@ export function DispatcherModal({
     }
 
     const rollbackOptimisticChat = () => {
+      discardQueuedContextGraphWrites(prepared.path);
       clearWorkspaceSettling(prepared.path);
       dispatch({ type: "CONSUME_AUTO_SEND", chatId });
       dispatch({ type: "DELETE_CHAT", id: chatId });
@@ -293,6 +327,7 @@ export function DispatcherModal({
     const settleArchivedOptimisticChat = () => {
       // Archive preserves chat metadata/transcript/draft for restore. Cancel
       // only the first-send intent because its cwd intentionally went away.
+      discardQueuedContextGraphWrites(prepared.path);
       clearWorkspaceSettling(prepared.path);
       dispatch({ type: "CONSUME_AUTO_SEND", chatId });
       finishPendingCreate(pendingToken);
@@ -392,23 +427,22 @@ export function DispatcherModal({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        className="bg-bg2 max-w-[640px] gap-0 overflow-visible p-0"
-        showCloseButton={false}
-        dismissable
-      >
-        <DialogTitle className="sr-only">Create a workspace</DialogTitle>
-        {/* Screen-reader-only description; also silences Radix's "Missing
-            `Description` or `aria-describedby`" console warning (which showed
-            up in field logs every time this dialog opened). */}
-        <DialogDescription className="sr-only">
-          Pick a repository and describe the task to create a new workspace.
-        </DialogDescription>
+    <main
+      className="bg-bg1 flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-auto p-8"
+      aria-labelledby="create-workspace-title"
+      aria-describedby="create-workspace-description"
+    >
+      <section className="border-border1 bg-bg2 w-full max-w-[640px] overflow-visible rounded-lg border shadow-[var(--shadow-xl)]">
+        <h1 id="create-workspace-title" className="sr-only">
+          Create a workspace
+        </h1>
+        <p id="create-workspace-description" className="sr-only">
+          Pick a repository and describe a task, or create a design workspace.
+        </p>
 
         {/* Top bar — project pill · + folder menu · Create from…. One
-            continuous surface with the composer below: same bg (transparent →
-            the dialog surface), no separator line. */}
+            continuous surface with the composer below: same card background,
+            no separator line. */}
         <div className="flex items-center gap-1.5 px-4 pt-3 pb-1">
           {/* Project selector */}
           <DropdownMenu>
@@ -419,7 +453,14 @@ export function DispatcherModal({
                   className="text-fg1 hover:bg-bg2-hover inline-flex items-center gap-1.5 rounded-sm px-2 py-1 text-sm font-medium transition-colors"
                 >
                   <span className="bg-bg2-hover inline-flex size-4 items-center justify-center rounded-sm text-xs">
-                    {(selectedProject?.name[0] ?? "·").toUpperCase()}
+                    {selectedProject ? (
+                      <RepositoryIcon
+                        project={selectedProject}
+                        className="size-full rounded-sm"
+                      />
+                    ) : (
+                      "·"
+                    )}
                   </span>
                   <span className="max-w-[180px] truncate">
                     {selectedProject?.name ?? "Select a project"}
@@ -443,7 +484,10 @@ export function DispatcherModal({
                   onSelect={() => setSelectedProjectId(p.id)}
                 >
                   <span className="bg-bg2-hover inline-flex size-4 items-center justify-center rounded-sm text-xs">
-                    {(p.name[0] ?? "·").toUpperCase()}
+                    <RepositoryIcon
+                      project={p}
+                      className="size-full rounded-sm"
+                    />
                   </span>
                   <span className="truncate">{p.name}</span>
                 </DropdownMenuItem>
@@ -487,6 +531,24 @@ export function DispatcherModal({
 
           <div className="flex-1" />
 
+          {/* Design workspaces do not have an agent prompt. Preserve their
+              Internal-only direct-create route on the full-page surface that
+              replaced the old per-repository trailing plus. */}
+          {designWorkspaceCreationAvailable && (
+            <Tooltip label="Create design workspace">
+              <button
+                type="button"
+                className="text-fg2 hover:bg-bg2-hover hover:text-fg1 inline-flex h-7 items-center gap-1.5 rounded-sm px-2 text-xs transition-colors disabled:pointer-events-none disabled:opacity-50"
+                aria-label="Create design workspace"
+                disabled={!selectedProject || busy || designBusy}
+                onClick={() => void handleCreateDesign()}
+              >
+                <PenTool size={14} strokeWidth={1.5} />
+                <span>Design</span>
+              </button>
+            </Tooltip>
+          )}
+
           {/* Create from… — pick a PR/branch base (right-aligned, matching
               the shared design). Cloud toggle is intentionally omitted. */}
           <CreateFromSource
@@ -503,9 +565,9 @@ export function DispatcherModal({
           cwd={selectedProject?.repoRoot ?? null}
           originUrl={selectedProject?.originUrl ?? null}
           onCreate={handleCreate}
-          busy={busy}
+          busy={busy || designBusy}
         />
-      </DialogContent>
-    </Dialog>
+      </section>
+    </main>
   );
 }

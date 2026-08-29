@@ -31,7 +31,7 @@ vi.mock("../../team/team-store", () => {
 });
 
 /** Point the mocked store at a signed-in user with the given staff role. */
-function signedInAs(staffRole: "developer" | null): void {
+function signedInAs(staffRole: "developer" | "support_admin" | null): void {
   teamStore.me = {
     user: {
       id: "00000000-0000-0000-0000-000000000001",
@@ -70,11 +70,14 @@ beforeEach(() => {
 });
 
 describe("isInternalUser — the staff gate", () => {
-  it("is true only when /v1/me reports a staff role", async () => {
+  it("is true only for the developer role, not an unrelated support capability", async () => {
     const store = await freshStore();
 
     signedInAs("developer");
     expect(store.isInternalUser()).toBe(true);
+
+    signedInAs("support_admin");
+    expect(store.isInternalUser()).toBe(false);
 
     signedInAs(null);
     expect(store.isInternalUser()).toBe(false);
@@ -96,16 +99,6 @@ describe("isInternalUser — the staff gate", () => {
     // or account A's staff role would leak into account B's session.
     signedOut();
     expect(store.isInternalUser()).toBe(false);
-  });
-
-  it("distinguishes a pending staff lookup from a settled unavailable result", async () => {
-    const store = await freshStore();
-
-    expect(store.isInternalUserResolutionSettled("idle", true)).toBe(false);
-    expect(store.isInternalUserResolutionSettled("loading", true)).toBe(false);
-    expect(store.isInternalUserResolutionSettled("ready", true)).toBe(true);
-    expect(store.isInternalUserResolutionSettled("error", true)).toBe(true);
-    expect(store.isInternalUserResolutionSettled("idle", false)).toBe(true);
   });
 });
 
@@ -145,18 +138,6 @@ describe("internal feature flags", () => {
       store.setInternalFeatureEnabled("copyLogs", true),
     ).not.toThrow();
   });
-
-  it("keeps design workspaces off until this app channel explicitly enables them", async () => {
-    const backing = installLocalStorageStub();
-    const store = await freshStore();
-
-    expect(store.isInternalFeatureEnabled("designWorkspaces")).toBe(false);
-    store.setInternalFeatureEnabled("designWorkspaces", true);
-    expect(store.isInternalFeatureEnabled("designWorkspaces")).toBe(true);
-    expect(backing.get("zeros.internalFeatures")).toBe(
-      JSON.stringify({ designWorkspaces: true }),
-    );
-  });
 });
 
 describe("isInternalFeatureActive — the effective gate", () => {
@@ -178,22 +159,5 @@ describe("isInternalFeatureActive — the effective gate", () => {
 
     signedOut();
     expect(store.isInternalFeatureActive("copyLogs")).toBe(false);
-  });
-
-  it("never activates design workspaces for a non-staff or unresolved account", async () => {
-    installLocalStorageStub();
-    const store = await freshStore();
-
-    // A forged local flag is not sufficient: the live database-backed staff
-    // role is the second factor.
-    store.setInternalFeatureEnabled("designWorkspaces", true);
-    signedInAs(null);
-    expect(store.isInternalFeatureActive("designWorkspaces")).toBe(false);
-
-    signedOut();
-    expect(store.isInternalFeatureActive("designWorkspaces")).toBe(false);
-
-    signedInAs("developer");
-    expect(store.isInternalFeatureActive("designWorkspaces")).toBe(true);
   });
 });

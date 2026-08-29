@@ -17,6 +17,11 @@ These instructions apply to the entire repository. Read and follow
 - For a bug, add a failing regression test first, implement the fix, and retain
   the test.
 - Run adjacent Vitest suites after each meaningful edit, not only at handoff.
+- Treat the active Design directory (resolved from `[design] directory`, with
+  `Zeros Design/` as the default) as engine-owned territory. Do not create,
+  edit, move, delete, stage, or commit files there with shell, patch, editor, or
+  generic Git tools. Use the Design API/Design surface; when it is unavailable,
+  stop and ask the user instead of removing ACLs or retrying around an error.
 
 ## Renderer invariants
 

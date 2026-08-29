@@ -28,6 +28,10 @@ import type {
   ProviderBinding,
   ProviderMetadata,
 } from "./identities";
+import type {
+  ExecutionBoundaryPortsSnapshot,
+  ExecutionBoundaryStatus,
+} from "./containment";
 
 /** @deprecated Agent "session" on the Zeros wire is an execution route. */
 export type SessionId = ExecutionId;
@@ -266,6 +270,14 @@ export interface AdvertisedModel {
   value: string;
   label: string;
   badge?: string;
+  description?: string;
+  aliases?: string[];
+  parameters?: AdvertisedModelParameter[];
+  variants?: AdvertisedModelVariant[];
+  /** False when a provider catalog advertises an account-level alias that the
+   * active Zeros execution mode cannot actually send. Conditional curated
+   * rows require explicit true. */
+  selectable?: boolean;
   /** Ordered reasoning-effort ladder (low→high). An explicit empty array means
    *  the live runtime says this model has no effort knob. Omit only when the
    *  adapter has no capability answer and the renderer may use its fallback. */
@@ -273,6 +285,24 @@ export interface AdvertisedModel {
   /** Whether this model supports Fast mode (drives the FastPill). Explicit
    *  false is authoritative; omit only when capability is unknown. */
   supportsFast?: boolean;
+}
+
+export interface AdvertisedModelParameterValue {
+  value: string;
+  label?: string;
+}
+
+export interface AdvertisedModelParameter {
+  id: string;
+  label?: string;
+  values: AdvertisedModelParameterValue[];
+}
+
+export interface AdvertisedModelVariant {
+  label: string;
+  description?: string;
+  parameters: Array<{ id: string; value: string }>;
+  isDefault?: boolean;
 }
 
 export interface AvailableCommand {
@@ -295,6 +325,7 @@ export {
   mergeCommands,
   composerCommandsFor,
   slashCommandKind,
+  bareInlineSlashCommand,
 } from "./builtin-commands";
 export type { SlashCommandKind } from "./builtin-commands";
 
@@ -334,7 +365,8 @@ export interface UsageStats {
  * lifecycle events arrive, but `taskId`, `name`, and `startedAt` are always
  * present so the renderer can key rows and tick elapsed time immediately. */
 export interface BackgroundTask {
-  /** Provider-native task/process id, scoped by the owning agent session. */
+  /** Opaque task identity scoped by the owning agent session. It may map to a
+   * provider-native process internally, but renderer clients never parse it. */
   taskId: string;
   /** Human-readable row label (description, command, condition, or reason). */
   name: string;
@@ -379,6 +411,78 @@ export interface WorkflowProgress {
   phases: WorkflowPhaseProgress[];
 }
 
+/** Provider-neutral projection of harness-owned local memory settings.
+ * Settings are global to one provider installation, not one chat. */
+export interface AgentMemorySettings {
+  providerId: string;
+  localMemoriesEnabled: boolean;
+  /** Some harnesses distinguish memory generation from memory use. */
+  toolAssistedGenerationEnabled?: boolean;
+  canReset: boolean;
+}
+
+/** One provider configuration layer projected onto a safe Zeros-owned
+ * diagnostic. `loaded` means the harness loader was enabled for that layer;
+ * it is not a claim that a particular file existed or contributed keys.
+ * Native paths, values, commands, and credentials never cross this boundary. */
+export interface AgentConfigurationSource {
+  id: string;
+  label: string;
+  status: "loaded" | "suppressed" | "unavailable" | "injected";
+  /** Short engine-authored explanation. Never provider config content. */
+  reason?: string;
+}
+
+/** Read-only configuration provenance for one provider/workspace context. */
+export interface AgentConfigurationProvenance {
+  providerId: string;
+  sources: AgentConfigurationSource[];
+  protectedTerritory: boolean;
+}
+
+/** A normalized provider usage-limit window. Percent is clamped to 0..100;
+ * `resetsAt` is epoch milliseconds regardless of the native protocol unit. */
+export interface AgentQuotaWindow {
+  usedPercent: number;
+  resetsAt?: number;
+  windowDurationMinutes?: number;
+}
+
+/** Read-only account quota projection. Per-turn token/cost usage continues to
+ * use PromptResponse/usage_update and is deliberately not duplicated here. */
+export interface AgentProviderQuota {
+  providerId: string;
+  primary?: AgentQuotaWindow;
+  secondary?: AgentQuotaWindow;
+  credits?: {
+    available: boolean;
+    unlimited?: boolean;
+    /** Provider-formatted balance; retained as text to avoid money rounding. */
+    balance?: string;
+  };
+  plan?: string;
+  fetchedAt: number;
+}
+
+export type AgentGoalStatus =
+  | "active"
+  | "paused"
+  | "blocked"
+  | "usageLimited"
+  | "budgetLimited"
+  | "complete";
+
+/** Zeros-owned view of a harness-native goal. */
+export interface AgentGoal {
+  objective: string;
+  status: AgentGoalStatus;
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
 // ── Session updates (the streaming notification payload) ────
 //
 // Engine adapters emit these over the bridge as the chat unfolds.
@@ -402,7 +506,25 @@ export type SessionUpdate =
   | SessionInfoUpdateNotification
   | ProviderBindingUpdateNotification
   | ProviderBindingDetachedNotification
+  | GoalUpdate
+  | SafetyReviewRetryAvailabilityUpdate
   | TurnStateUpdateNotification;
+
+/** Full replacement snapshot for the goal attached to this exact session. */
+export interface GoalUpdate {
+  sessionUpdate: "goal_update";
+  goal: AgentGoal | null;
+}
+
+/** Ephemeral capability for one live safety-review row. The engine's shared
+ * transcript reducer deliberately ignores this update, so an opaque retry id
+ * cannot outlive the engine-only denied action it resolves. */
+export interface SafetyReviewRetryAvailabilityUpdate {
+  sessionUpdate: "safety_review_retry_available";
+  toolCallId: string;
+  /** Null revokes a previously advertised action after bounded eviction. */
+  retryId: string | null;
+}
 
 /** Engine-authored lifecycle notification for a provider turn. Unlike the
  * AGENT_PROMPT RPC response, this survives renderer reload/re-adoption because
@@ -427,10 +549,16 @@ export interface UserMessageChunkUpdate {
   messageId?: string | null;
 }
 
+export type AgentMessagePhase = "commentary" | "final_answer";
+
 export interface AgentMessageChunkUpdate {
   sessionUpdate: "agent_message_chunk";
   content: ContentBlock;
   messageId?: string | null;
+  /** Provider-declared role for assistant prose. Codex emits commentary while
+   * working and a final_answer when the turn concludes. Absent preserves the
+   * legacy behavior for providers that do not classify message phases. */
+  phase?: AgentMessagePhase | null;
   /** When a subagent emits text through this stream,
    *  the parent Task's toolCallId. Renderer hides the message from
    *  the top-level timeline and routes it into the SubagentCard. */
@@ -441,6 +569,11 @@ export interface AgentThoughtChunkUpdate {
   sessionUpdate: "agent_thought_chunk";
   content: ContentBlock;
   messageId?: string | null;
+  /** Provider-reported reasoning duration. Adapters normally attach this to
+   * the final chunk (or emit an empty final chunk with the same messageId), so
+   * the shared reducer can enrich one existing Thinking row without creating
+   * a provider-specific lifecycle surface. */
+  durationMs?: number | null;
   /** Anthropic's `redacted_thinking` content blocks
    *  carry encrypted reasoning the model produced but won't surface
    *  in plaintext. The renderer shows a distinct "redacted" stub
@@ -674,6 +807,14 @@ export interface QuestionOption {
   /** Selecting this option clears every sibling selection; selecting a normal
    *  option clears any exclusive sibling. Used by MCP None/Skip sentinels. */
   exclusive?: boolean;
+  /** Trusted-client action performed only after this exact option is selected.
+   *  The engine never opens the URL itself: a local or cloud renderer hands it
+   *  to its native/browser shell, keeping Apple Events and desktop browser
+   *  authority outside every agent process and remote engine. */
+  externalAction?: {
+    kind: "open-url";
+    url: string;
+  };
 }
 
 export interface QuestionSpec {
@@ -834,6 +975,11 @@ export interface NewSessionResponse {
   providerMetadata?: ProviderMetadata;
   modes?: SessionModeState;
   models?: SessionModelState;
+  /** Redacted engine-authoritative containment state for this execution. */
+  boundary?: ExecutionBoundaryStatus;
+  /** Exact initial listener snapshot. Later changes arrive as
+   * AGENT_BOUNDARY_PORTS_CHANGED. */
+  boundaryPorts?: ExecutionBoundaryPortsSnapshot;
 }
 
 export interface LoadSessionResponse {
@@ -842,6 +988,11 @@ export interface LoadSessionResponse {
   providerMetadata?: ProviderMetadata;
   modes?: SessionModeState;
   models?: SessionModelState;
+  /** Redacted engine-authoritative containment state for this execution. */
+  boundary?: ExecutionBoundaryStatus;
+  /** Exact initial listener snapshot. Later changes arrive as
+   * AGENT_BOUNDARY_PORTS_CHANGED. */
+  boundaryPorts?: ExecutionBoundaryPortsSnapshot;
   /** The adapter could NOT resume a prior transcript and started a FRESH
    *  thread/agent instead (Codex stale rollout → `startThread`; Cursor "agent
    *  not found" → `Agent.create`; Claude with no persisted session id). The
@@ -902,6 +1053,88 @@ export interface AgentAuthCapabilities {
   terminal?: boolean;
 }
 
+/** Where a product capability is implemented. Harness-native means the
+ * provider's own supported protocol/SDK is used behind an engine adapter;
+ * Zeros-native means the platform provides the behavior independently of a
+ * harness. `unavailable` is explicit so method absence is never mistaken for
+ * an implementation claim. */
+export type AgentCapabilityImplementation =
+  | "harness-native"
+  | "zeros-native"
+  | "unavailable";
+
+export type AgentCapabilityRequirement =
+  | "authentication"
+  | "provider-binding"
+  | "live-runtime"
+  | "live-session"
+  | "active-turn";
+
+export type AgentCapabilityDescriptor =
+  | {
+      implementation: Exclude<AgentCapabilityImplementation, "unavailable">;
+      /** Runtime-dependent capabilities are implemented but cannot return
+       * authoritative data until a provider runtime has been started. */
+      availability: "available" | "runtime-dependent";
+      requirements?: AgentCapabilityRequirement[];
+    }
+  | {
+      implementation: "unavailable";
+      availability: "unavailable";
+      reason: string;
+    };
+
+/** Engine-owned product semantics. These descriptors are intentionally data,
+ * not a generic RPC catalogue: a renderer can decide whether to show a Zeros
+ * action, but cannot invoke an arbitrary harness method through this object. */
+export interface AgentDomainCapabilities {
+  conversation: {
+    resume: AgentCapabilityDescriptor;
+    fork: AgentCapabilityDescriptor;
+  };
+  turn: {
+    steering: AgentCapabilityDescriptor;
+    modeSwitch: AgentCapabilityDescriptor;
+    contextCompaction: AgentCapabilityDescriptor;
+  };
+  backgroundWork: {
+    stopTask: AgentCapabilityDescriptor;
+  };
+  interaction: {
+    permissionResponse: AgentCapabilityDescriptor;
+    questionResponse: AgentCapabilityDescriptor;
+  };
+  models: {
+    catalog: AgentCapabilityDescriptor;
+    liveSwitch: AgentCapabilityDescriptor;
+    liveConfiguration: AgentCapabilityDescriptor;
+  };
+  account: {
+    read: AgentCapabilityDescriptor;
+    validateApiKey: AgentCapabilityDescriptor;
+    quota: AgentCapabilityDescriptor;
+  };
+  generation: {
+    oneShotText: AgentCapabilityDescriptor;
+  };
+  browser: {
+    nativeSession: AgentCapabilityDescriptor;
+  };
+  goal: {
+    lifecycle: AgentCapabilityDescriptor;
+  };
+  memory: {
+    settings: AgentCapabilityDescriptor;
+    reset: AgentCapabilityDescriptor;
+  };
+  configuration: {
+    provenance: AgentCapabilityDescriptor;
+  };
+  safety: {
+    retryDeniedAction: AgentCapabilityDescriptor;
+  };
+}
+
 export interface AgentCapabilities {
   loadSession?: boolean;
   promptCapabilities?: PromptCapabilities;
@@ -911,11 +1144,23 @@ export interface AgentCapabilities {
    *  streaming input queue; codex calls `turn/steer`. Absent/false → the
    *  queued-messages card disables its "Send now" action for this agent. */
   steering?: boolean;
+  /** Provider-neutral, engine-derived product capability descriptors. */
+  domains?: AgentDomainCapabilities;
 }
 
 export interface AgentInfo {
   name?: string;
   version?: string;
+}
+
+export interface AgentInitializeMetadata {
+  models?: AdvertisedModel[];
+  modelEnvVar?: string;
+  modelsDynamic?: boolean;
+  /** Compatibility for existing agent-owned metadata. Known product keys stay
+   * explicitly typed above; new keys should become typed before consumers use
+   * them for product behavior. */
+  [key: string]: unknown;
 }
 
 export interface InitializeResponse {
@@ -932,5 +1177,5 @@ export interface InitializeResponse {
    *      (e.g. "ANTHROPIC_MODEL"); replaces the catalog's `modelEnvVars` map.
    *    - `modelsDynamic?: boolean`     — `models` is filled asynchronously after
    *      a runtime boots; the gateway re-polls `initialize` until it lands. */
-  _meta?: { [key: string]: unknown } | null;
+  _meta?: AgentInitializeMetadata | null;
 }

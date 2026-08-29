@@ -29,6 +29,7 @@ import { emitEvent } from "./events";
 import { PICKER_SCRIPT } from "../iframe-picker-script";
 import { isLoopbackUrl } from "../../src/renderer/shell/workbench/tabs/localhost-url";
 import { PendingIframeNavigations } from "../iframe-navigation-state";
+import { previewFrameAuthorizations } from "../preview-frame-authorizations";
 import {
   declaredIframeFaviconUrls,
   iframeFaviconNavigationDisposition,
@@ -91,6 +92,14 @@ function isBrowserTabFrame(
 ): boolean {
   return (
     isTopLevelChildFrame(frame, mainFrame) && browserFrameName(frame) != null
+  );
+}
+
+function pickerAllowedForFrame(frame: WebFrameMain): boolean {
+  if (isLoopbackUrl(frame.url)) return true;
+  const frameName = browserFrameName(frame);
+  return Boolean(
+    frameName && previewFrameAuthorizations.allows(frameName, frame.url),
   );
 }
 
@@ -277,7 +286,7 @@ export async function reinjectBrowserPicker(
       continue;
     await emitFinishedBrowserNavigation(child);
     await emitIframeFavicon(win, child);
-    if (isLoopbackUrl(child.url)) {
+    if (pickerAllowedForFrame(child)) {
       await injectPicker(child);
       injected = true;
     }
@@ -371,7 +380,7 @@ function attachAutoInject(win: BrowserWindow): void {
       void emitIframeFavicon(win, frame);
       // Picker code is privileged main-world injection: external pages never
       // receive it, even if they forge renderer postMessages or redirects.
-      if (isLoopbackUrl(frame.url)) void injectPicker(frame);
+      if (pickerAllowedForFrame(frame)) void injectPicker(frame);
     },
   );
 
@@ -543,6 +552,7 @@ export function registerIframePickerCommands(opts: {
 }): void {
   browserFrameNames.clear();
   pendingBrowserNavigations.clear();
+  previewFrameAuthorizations.clear();
   iframeFaviconGenerationByName.clear();
   iframeFaviconUrlByName.clear();
   mainWindowRef = opts.mainWindow;
@@ -559,6 +569,20 @@ export function registerIframePickerCommands(opts: {
         : undefined;
     const ok = await reinjectBrowserPicker(opts.mainWindow, frameName);
     return { ok };
+  });
+  setCommand("browser:authorize-preview-origin", async (args) => ({
+    ok: previewFrameAuthorizations.authorize(args),
+  }));
+  setCommand("browser:revoke-preview-origin", async (args) => {
+    const frameName =
+      typeof args.frameName === "string" &&
+      args.frameName.startsWith("zeros-browser-") &&
+      args.frameName.length <= 320
+        ? args.frameName
+        : null;
+    if (!frameName) return { ok: false };
+    previewFrameAuthorizations.revoke(frameName);
+    return { ok: true };
   });
   setCommand("browser:control-iframe", async (args) => {
     const request = parseBrowserIframeControl(args);
@@ -580,6 +604,7 @@ export function registerIframePickerCommands(opts: {
       mainWindowRef = null;
       browserFrameNames.clear();
       pendingBrowserNavigations.clear();
+      previewFrameAuthorizations.clear();
       iframeFaviconGenerationByName.clear();
       iframeFaviconUrlByName.clear();
     }

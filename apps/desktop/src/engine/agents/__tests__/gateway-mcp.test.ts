@@ -22,10 +22,12 @@ import type {
   McpServerRegistration,
   NewSessionResponse,
 } from "../types";
+import { testExecutionBoundary } from "./helpers/test-execution-boundary";
 
 function makeGateway() {
   return new AgentGateway({
     projectRoot: "/tmp/zeros-test",
+    executionBoundary: testExecutionBoundary(),
     events: {
       onSessionUpdate: () => {},
       onPermissionRequest: () => {},
@@ -64,6 +66,8 @@ function capturingAdapter(
         initialize: {} as InitializeResponse,
       };
     },
+    disposeSession: async () => {},
+    dispose: async () => {},
   } as unknown as AgentAdapter;
 }
 
@@ -107,8 +111,15 @@ describe("AgentGateway per-session MCP resolution", () => {
       "claude",
       capturingAdapter("claude", captured),
     );
-    await (gw as unknown as GwInternals).newSession("claude", { cwd });
-    return captured.servers;
+    try {
+      await (gw as unknown as GwInternals).newSession("claude", { cwd });
+      return captured.servers;
+    } finally {
+      // newSession deliberately returns before the post-install authority scan.
+      // Dispose joins that background proof before the fixture directories are
+      // removed, preventing a later test from receiving this gateway's failure.
+      await gw.dispose();
+    }
   }
 
   it("a chat in a repo composes user + that repo's PERSONAL local servers; the committed [mcp] stays inert", async () => {

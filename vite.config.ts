@@ -191,6 +191,11 @@ export default defineConfig(({ command, mode }) => ({
       ignored: [
         "**/*.0c",
         "**/.zeros/**",
+        // Design artifacts are engine-owned and rendered through the Design
+        // surface. Their creation or edits must not reload the desktop
+        // renderer or disturb an independently running Run server.
+        "**/Zeros Design",
+        "**/Zeros Design/**",
         // Per-workspace scratch dirs written by worktree/agent runners
         // (attachments, hand-off files). Gitignored and rewritten
         // constantly; their churn must never reload the Mac-app renderer.

@@ -10,8 +10,8 @@
 //   • the engine runs under bun — native watcher addons are exactly the
 //     class of dependency that broke node-pty (see terminal-bun-nodepty);
 //   • macOS FSEvents phantom events caused the engine respawn loop — the
-//     mtime+size real-change guard below is the same fix sidecar.ts uses;
-//   • the watch set is tiny (2 user files + 2 per repo), so a 3s stat poll
+//     metadata-signature real-change guard below is the same fix sidecar.ts uses;
+//   • the watch set is tiny (2 user files + 2 per repo), so a 1s stat poll
 //     is microseconds of work.
 // ──────────────────────────────────────────────────────────
 
@@ -23,21 +23,35 @@ import {
   userSettingsPath,
 } from "./files";
 
-const POLL_INTERVAL_MS = 3_000;
+const POLL_INTERVAL_MS = 1_000;
 
 interface FileSig {
   mtimeMs: number;
+  ctimeMs: number;
   size: number;
+  dev: number;
+  ino: number;
 }
 
 export interface SettingsWatcher {
   stop(): void;
 }
 
+export interface SettingsWatcherOptions {
+  /** Test seam; production uses the bounded one-second recognition poll. */
+  pollIntervalMs?: number;
+}
+
 function signature(filePath: string): FileSig | null {
   try {
     const s = statSync(filePath);
-    return { mtimeMs: s.mtimeMs, size: s.size };
+    return {
+      mtimeMs: s.mtimeMs,
+      ctimeMs: s.ctimeMs,
+      size: s.size,
+      dev: s.dev,
+      ino: s.ino,
+    };
   } catch {
     return null; // missing file — a valid state (appears later = a change)
   }
@@ -45,16 +59,23 @@ function signature(filePath: string): FileSig | null {
 
 function sigEqual(a: FileSig | null, b: FileSig | null): boolean {
   if (a === null || b === null) return a === b;
-  return a.mtimeMs === b.mtimeMs && a.size === b.size;
+  return (
+    a.mtimeMs === b.mtimeMs &&
+    a.ctimeMs === b.ctimeMs &&
+    a.size === b.size &&
+    a.dev === b.dev &&
+    a.ino === b.ino
+  );
 }
 
 /** Start polling every settings file for real changes. `repoRoots` is
  *  re-evaluated each tick so newly opened repos are picked up without a
  *  restart. `onChange` fires once per tick at most, with the paths that
- *  actually changed (mtime+size, not just an event). */
+ *  actually changed (mtime/ctime/size/device/inode, not just an event). */
 export function startSettingsWatcher(
   repoRoots: () => string[],
   onChange: (changedPaths: string[]) => void,
+  options: SettingsWatcherOptions = {},
 ): SettingsWatcher {
   const known = new Map<string, FileSig | null>();
   let primed = false;
@@ -84,7 +105,7 @@ export function startSettingsWatcher(
   };
 
   tick(); // prime the signatures so the first interval doesn't fire spuriously
-  const timer = setInterval(tick, POLL_INTERVAL_MS);
+  const timer = setInterval(tick, options.pollIntervalMs ?? POLL_INTERVAL_MS);
   // Never keep the engine process alive just for settings polling.
   timer.unref?.();
 

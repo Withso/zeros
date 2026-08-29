@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import {
+  clearCommittedDesignLivePreviewStyles,
   clearDesignLivePreview,
   designLivePreviewValue,
   publishDesignLivePreviewStyles,
@@ -53,5 +54,35 @@ describe("design live preview", () => {
     unsubscribe();
 
     expect(notifications).toBe(1);
+  });
+
+  it("rejects and settles previews per property without erasing newer input", () => {
+    const firstWidth = publishDesignLivePreviewStyles(
+      "workspace-a",
+      "home.html",
+      "heading",
+      { width: "320px" },
+    );
+    publishDesignLivePreviewStyles("workspace-a", "home.html", "heading", {
+      height: "180px",
+    });
+    publishDesignLivePreviewStyles("workspace-a", "home.html", "heading", {
+      width: "360px",
+    });
+
+    clearDesignLivePreview("workspace-a", "home.html", "heading", firstWidth);
+    clearCommittedDesignLivePreviewStyles(
+      "workspace-a",
+      "home.html",
+      "heading",
+      { width: "320px", height: "180px" },
+    );
+
+    expect(
+      designLivePreviewValue("workspace-a", "home.html", "heading", "width"),
+    ).toBe("360px");
+    expect(
+      designLivePreviewValue("workspace-a", "home.html", "heading", "height"),
+    ).toBeUndefined();
   });
 });

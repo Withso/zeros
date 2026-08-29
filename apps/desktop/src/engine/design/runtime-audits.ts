@@ -4,7 +4,13 @@ import type { DesignLintViolation } from "./document";
 
 const MAX_AUDITS = 256;
 const MAX_WARNINGS_PER_AUDIT = 128;
-const RUNTIME_RULE_IDS = new Set(["contrast", "overflow", "spacing-scale"]);
+const RUNTIME_RULE_IDS = new Set([
+  "contrast",
+  "overflow",
+  "spacing-scale",
+  "audit-limit",
+  "layer-tree-limit",
+]);
 
 interface DesignRuntimeAuditInput {
   workspacePath: string;

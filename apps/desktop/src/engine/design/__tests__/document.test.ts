@@ -12,6 +12,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  captureDesignFrameRestorePoint,
   createDesignFrame,
   deleteDesignFrame,
   DESIGN_DIRECTORY_NAME,
@@ -29,6 +30,7 @@ import {
   readDesignTokens,
   readDesignTokensDocument,
   renameDesignFrame,
+  restoreDesignFrame,
   setDesignNodeText,
   updateDesignFrameGeometry,
   updateDesignNodeStyles,
@@ -77,16 +79,30 @@ describe("design document", () => {
       },
     });
 
-    const created = await createDesignFrame(root, { title: "Landing page" });
+    const created = await createDesignFrame(root, {
+      title: "Landing page",
+      geometry: { x: 125, y: -40, w: 640, h: 360, z: 7 },
+    });
     expect(created.file).toBe("landing-page.html");
+    expect(created).toMatchObject({
+      x: 125,
+      y: -40,
+      width: 640,
+      height: 360,
+      z: 7,
+      nodeCount: 1,
+    });
     const source = await readFile(
       path.join(root, DESIGN_DIRECTORY_NAME, created.file),
       "utf8",
     );
     expect(source).toContain('name="zeros-frame"');
+    expect(source).toContain("width=640,height=360");
     expect(source).toContain('href="./tokens.css"');
     expect(source).not.toContain("<script");
-    expect(source).toContain("Shape this frame with the canvas and inspector.");
+    expect(source).toMatch(/<main\b[^>]*>\s*<\/main>/);
+    expect(source).not.toContain("<h1");
+    expect(source).not.toContain("<p");
     expect(source).not.toMatch(/\bchat\b/i);
     expect(source).not.toMatch(
       /<(?:html|head|meta|link|title|style|body)\b[^>]*\bdata-oid=/i,
@@ -116,6 +132,37 @@ describe("design document", () => {
       height: 720,
       z: 3,
     });
+  });
+
+  it("atomically creates transparent top-level text with stable source ownership", async () => {
+    const created = await createDesignFrame(root, {
+      title: "Canvas text",
+      geometry: { x: 125, y: 80, w: 180, h: 32, z: 4 },
+      seed: {
+        kind: "text",
+        nodeId: "text-loose-1",
+        text: "Loose <text> & source",
+        fixedSize: false,
+      },
+    });
+    const source = await readFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, created.file),
+      "utf8",
+    );
+
+    expect(created).toMatchObject({
+      kind: "text",
+      x: 125,
+      y: 80,
+      width: 180,
+      height: 32,
+      nodeCount: 1,
+    });
+    expect(source).toContain("kind=text");
+    expect(source).toContain('data-oid="text-loose-1"');
+    expect(source).toContain("Loose &lt;text&gt; &amp; source");
+    expect(source).toMatch(/background:\s*transparent\s*!important/);
+    expect(source).not.toContain("Shape this frame");
   });
 
   it("migrates version-1 canvas metadata forward without losing geometry", async () => {
@@ -1043,12 +1090,19 @@ describe("design document", () => {
     const beforeSummary = (await readDesignWorkspaceSnapshot(root)).frames[0]!;
     const before = await readDesignFrame(root, beforeSummary.file);
     const main = before.tree[0];
-    const heading = main?.children[0];
+    const seededHeading = await writeDesignNodeHtml(root, {
+      frame: created.file,
+      nodeId: main!.oid!,
+      sourceVersion: before.sourceVersion,
+      mode: "append",
+      html: "<h1>Checkout</h1>",
+    });
+    const heading = seededHeading.frame.tree[0]?.children[0];
 
     const textMutation = await setDesignNodeText(root, {
       frame: created.file,
       nodeId: heading!.oid!,
-      sourceVersion: before.sourceVersion,
+      sourceVersion: seededHeading.frame.sourceVersion,
       text: "Pay < securely & quickly",
     });
     expect(textMutation.frame.source).toContain(
@@ -1065,7 +1119,9 @@ describe("design document", () => {
     expect(htmlMutation.frame.source).toMatch(
       /<button data-oid="o-[^"]+">Pay now<\/button><\/main>/,
     );
-    expect(htmlMutation.frame.nodeCount).toBe(before.nodeCount + 1);
+    expect(htmlMutation.frame.nodeCount).toBe(
+      seededHeading.frame.nodeCount + 1,
+    );
 
     await expect(
       writeDesignNodeHtml(root, {
@@ -1098,13 +1154,66 @@ describe("design document", () => {
       copy.file,
     ]);
 
-    await deleteDesignFrame(root, original.file);
+    const source = await readFile(
+      path.join(root, DESIGN_DIRECTORY_NAME, original.file),
+      "utf8",
+    );
+    const deleted = await deleteDesignFrame(root, original.file);
+    expect(deleted).toMatchObject({
+      file: original.file,
+      source,
+      geometry: {
+        x: original.x,
+        y: original.y,
+        w: original.width,
+        h: original.height,
+        z: original.z,
+      },
+    });
     expect((await listDesignFrames(root)).map((frame) => frame.file)).toEqual([
       copy.file,
     ]);
     await expect(
       readDesignElementOffsetMap(root, original.file),
     ).rejects.toThrow("Design frame not found");
+
+    await restoreDesignFrame(root, deleted);
+    expect(
+      await readFile(
+        path.join(root, DESIGN_DIRECTORY_NAME, original.file),
+        "utf8",
+      ),
+    ).toBe(source);
+    expect(
+      (await listDesignFrames(root)).find(
+        (frame) => frame.file === original.file,
+      ),
+    ).toMatchObject({
+      x: original.x,
+      y: original.y,
+      width: original.width,
+      height: original.height,
+      z: original.z,
+    });
+  });
+
+  it("refuses to restore a frame back over a file that already exists", async () => {
+    await initializeDesignDocument(root);
+    const frame = await createDesignFrame(root, { title: "Occupied" });
+    const restorePoint = await captureDesignFrameRestorePoint(root, frame.file);
+
+    // The frame is still on disk, so the atomic `wx` create must lose rather
+    // than overwrite it — the same refusal the removed pre-check produced,
+    // now without a stat-then-write window in between.
+    await expect(restoreDesignFrame(root, restorePoint)).rejects.toThrow(
+      `Design frame already exists: ${frame.file}`,
+    );
+    expect(
+      await readFile(
+        path.join(root, DESIGN_DIRECTORY_NAME, frame.file),
+        "utf8",
+      ),
+    ).toBe(restorePoint.source);
   });
 
   it("discovers safe local image assets, inlines them for rendering, and inserts them by oid", async () => {

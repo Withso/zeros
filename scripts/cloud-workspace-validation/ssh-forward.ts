@@ -14,10 +14,68 @@
 // Requires the `ssh` + `curl` binaries on the host.
 // ──────────────────────────────────────────────────────────
 
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import net from "node:net";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { loadState, makeDaytona, ENGINE_CLOUD_PORT } from "./config";
+import { requireHttpRoundTrip } from "./lib/qualification-gates";
 
-const LOCAL_PORT = 38555;
+async function reserveLocalPort(): Promise<number> {
+  const server = net.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("could not reserve an SSH forwarding port");
+  }
+  await new Promise<void>((resolve, reject) =>
+    server.close((error) => (error ? reject(error) : resolve())),
+  );
+  return address.port;
+}
+
+function validatedSshTarget(command: string, token: string): string {
+  const fields = command.trim().split(/\s+/);
+  if (
+    fields.length !== 2 ||
+    fields[0] !== "ssh" ||
+    !fields[1].startsWith(`${token}@`)
+  ) {
+    throw new Error("provider returned an invalid SSH command");
+  }
+  const host = fields[1].slice(token.length + 1);
+  if (
+    !host ||
+    host.length > 253 ||
+    !/^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/.test(
+      host,
+    )
+  ) {
+    throw new Error("provider returned an invalid SSH gateway host");
+  }
+  return fields[1];
+}
+
+async function stopChild(child: ChildProcess): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  child.kill("SIGTERM");
+  await Promise.race([
+    new Promise<void>((resolve) => child.once("close", () => resolve())),
+    new Promise<void>((resolve) =>
+      setTimeout(() => {
+        if (child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGKILL");
+        }
+        resolve();
+      }, 2_000),
+    ),
+  ]);
+}
 
 function curlHealth(port: number): Promise<{ code: number; body: string }> {
   return new Promise((resolve) => {
@@ -51,67 +109,86 @@ async function main() {
     `\n  Requesting SSH access (60 min) for sandbox ${state.sandboxId}…`,
   );
   const ssh = await sandbox.createSshAccess(60);
-  // Daytona's sshCommand looks like `ssh <token>@ssh.app.daytona.io`. Parse the
-  // `user@host` target from it so we don't hardcode the gateway hostname.
-  const m = ssh.sshCommand.match(/ssh\s+(\S+@\S+)/);
-  const target = m ? m[1] : `${ssh.token}@ssh.app.daytona.io`;
-  console.log(
-    `  target: ${target.replace(ssh.token, ssh.token.slice(0, 6) + "…")}`,
-  );
-
-  console.log(
-    `  Opening ssh -L ${LOCAL_PORT}:127.0.0.1:${ENGINE_CLOUD_PORT} …`,
-  );
-  const sshProc = spawn(
-    "ssh",
-    [
-      "-N",
-      "-o",
-      "StrictHostKeyChecking=accept-new",
-      "-o",
-      "UserKnownHostsFile=/dev/null",
-      "-o",
-      "ExitOnForwardFailure=yes",
-      "-o",
-      "ConnectTimeout=15",
-      "-L",
-      `${LOCAL_PORT}:127.0.0.1:${ENGINE_CLOUD_PORT}`,
-      target,
-    ],
-    { stdio: ["ignore", "ignore", "pipe"] },
-  );
-  let sshErr = "";
-  sshProc.stderr.on("data", (d) => (sshErr += d.toString()));
-
-  // Give the tunnel a moment, then probe the forwarded /health a few times.
-  let result = { code: 0, body: "" };
-  for (let i = 0; i < 8 && result.code === 0; i++) {
-    await new Promise((r) => setTimeout(r, 1500));
-    result = await curlHealth(LOCAL_PORT);
-  }
-
-  sshProc.kill("SIGTERM");
-  await sandbox.revokeSshAccess(ssh.token).catch(() => {});
-
-  console.log("");
-  if (result.code === 200) {
+  let sshProc: ChildProcess | null = null;
+  const knownHostsDir = mkdtempSync(path.join(tmpdir(), "zeros-ssh-host-"));
+  let failure: unknown = null;
+  try {
+    // Use the provider-returned command only as structured data; never execute
+    // it through a shell. No token fragment or provider stderr reaches logs.
+    const target = validatedSshTarget(ssh.sshCommand, ssh.token);
+    const localPort = await reserveLocalPort();
     console.log(
-      `  \x1b[32m✓ ssh -L works\x1b[0m — forwarded /health returned 200.`,
+      `  Opening a token-authenticated ssh -L tunnel to engine port ${ENGINE_CLOUD_PORT} …`,
+    );
+    sshProc = spawn(
+      "ssh",
+      [
+        "-N",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        `UserKnownHostsFile=${path.join(knownHostsDir, "known_hosts")}`,
+        "-o",
+        "LogLevel=ERROR",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-o",
+        "ConnectTimeout=15",
+        "-L",
+        `${localPort}:127.0.0.1:${ENGINE_CLOUD_PORT}`,
+        target,
+      ],
+      { stdio: ["ignore", "ignore", "pipe"] },
+    );
+    // Drain stderr so the child cannot block, but never retain or print it: SSH
+    // diagnostics may echo its bearer username.
+    sshProc.stderr?.resume();
+
+    let result = { code: 0, body: "" };
+    for (let i = 0; i < 8 && result.code === 0; i++) {
+      if (sshProc.exitCode !== null || sshProc.signalCode !== null) break;
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      result = await curlHealth(localPort);
+    }
+    requireHttpRoundTrip("SSH forward /health round trip", result.code);
+    console.log(
+      `\n  \x1b[32m✓ ssh -L works\x1b[0m — forwarded /health returned 200.`,
     );
     console.log(
-      `    → the "Open in Cursor / forward a port" feature is viable.\n`,
+      `    → the "Open in Cursor / forward a port" fallback is viable.\n`,
     );
-  } else {
-    console.log(
-      `  \x1b[33m⚠ ssh -L did not complete a /health round-trip\x1b[0m (got ${result.code || "no response"}).`,
-    );
-    if (sshErr.trim())
-      console.log(
-        `    ssh stderr: ${sshErr.trim().split("\n").slice(-3).join(" | ")}`,
+  } catch (error) {
+    failure = error;
+  } finally {
+    const cleanupFailures: unknown[] = [];
+    if (sshProc) {
+      try {
+        await stopChild(sshProc);
+      } catch (error) {
+        cleanupFailures.push(error);
+      }
+    }
+    try {
+      await sandbox.revokeSshAccess(ssh.token);
+    } catch (error) {
+      cleanupFailures.push(error);
+    }
+    rmSync(knownHostsDir, { recursive: true, force: true });
+    if (failure && cleanupFailures.length > 0) {
+      throw new AggregateError(
+        [failure, ...cleanupFailures],
+        "SSH forward failed and credential cleanup was incomplete",
       );
-    console.log(
-      `    Either the engine was not up on :${ENGINE_CLOUD_PORT}, or -L is gated.\n`,
-    );
+    }
+    if (failure) throw failure;
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError(
+        cleanupFailures,
+        "SSH credential cleanup was incomplete",
+      );
+    }
   }
 }
 

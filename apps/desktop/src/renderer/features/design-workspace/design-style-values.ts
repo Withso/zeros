@@ -350,6 +350,116 @@ function formatDesignNumber(value: number): string {
   return Object.is(rounded, -0) ? "0" : String(rounded);
 }
 
+export interface DesignStyleNumericParts {
+  number: number;
+  text: string;
+  unit: string;
+}
+
+/** Split a simple CSS number from its unit for compact design-tool controls.
+ * Functional values such as calc() deliberately stay intact in the text field. */
+export function parseDesignStyleNumericParts(
+  value: string,
+): DesignStyleNumericParts | null {
+  const parsed = parseDesignNumericValue(value);
+  if (!parsed) return null;
+  return {
+    number: parsed.number,
+    text: formatDesignNumber(parsed.number),
+    unit: parsed.unit.toLocaleLowerCase(),
+  };
+}
+
+const DESIGN_LENGTH_UNITS = ["px", "%", "em", "rem", "vw", "vh"];
+const DESIGN_ABSOLUTE_LENGTH_UNITS = ["px", "em", "rem"];
+const DESIGN_GRID_LENGTH_UNITS = ["px", "%", "fr", "em", "rem", "vw", "vh"];
+
+const DESIGN_PERCENT_LENGTH_PROPERTIES = new Set([
+  "top",
+  "right",
+  "bottom",
+  "left",
+  "width",
+  "height",
+  "min-width",
+  "min-height",
+  "max-width",
+  "max-height",
+  "padding",
+  "padding-top",
+  "padding-right",
+  "padding-bottom",
+  "padding-left",
+  "margin",
+  "margin-top",
+  "margin-right",
+  "margin-bottom",
+  "margin-left",
+  "gap",
+  "row-gap",
+  "column-gap",
+  "flex-basis",
+  "border-radius",
+  "border-top-left-radius",
+  "border-top-right-radius",
+  "border-bottom-right-radius",
+  "border-bottom-left-radius",
+  "font-size",
+  "line-height",
+  "text-indent",
+]);
+
+const DESIGN_ABSOLUTE_LENGTH_PROPERTIES = new Set([
+  "border-width",
+  "border-top-width",
+  "border-right-width",
+  "border-bottom-width",
+  "border-left-width",
+  "outline-width",
+  "outline-offset",
+  "letter-spacing",
+  "word-spacing",
+  "perspective",
+]);
+
+/** Return the concise units that are valid and useful for a simple numeric
+ * property. Keep an already-authored uncommon unit available so opening the
+ * selector can never make a valid value lossy. */
+export function designStyleUnitOptions(
+  property: string,
+  currentUnit = "",
+): string[] {
+  const normalizedProperty = cssStyleProperty(property);
+  let options: readonly string[] = [];
+  if (DESIGN_MS_DEFAULT_PROPERTIES.has(normalizedProperty)) {
+    options = ["ms", "s"];
+  } else if (
+    normalizedProperty === "grid-auto-columns" ||
+    normalizedProperty === "grid-auto-rows"
+  ) {
+    options = DESIGN_GRID_LENGTH_UNITS;
+  } else if (DESIGN_PERCENT_LENGTH_PROPERTIES.has(normalizedProperty)) {
+    options = DESIGN_LENGTH_UNITS;
+  } else if (DESIGN_ABSOLUTE_LENGTH_PROPERTIES.has(normalizedProperty)) {
+    options = DESIGN_ABSOLUTE_LENGTH_UNITS;
+  }
+
+  const normalizedUnit = currentUnit.trim().toLocaleLowerCase();
+  return normalizedUnit && !options.includes(normalizedUnit)
+    ? [...options, normalizedUnit]
+    : [...options];
+}
+
+export function replaceDesignStyleNumericUnit(
+  value: string,
+  unit: string,
+): string | null {
+  const parsed = parseDesignStyleNumericParts(value);
+  const normalizedUnit = unit.trim().toLocaleLowerCase();
+  if (!parsed || !/^(?:[a-z]+|%)$/.test(normalizedUnit)) return null;
+  return `${parsed.text}${normalizedUnit}`;
+}
+
 export function scrubDesignNumericValue(
   value: string,
   delta: number,
@@ -357,6 +467,170 @@ export function scrubDesignNumericValue(
   const parsed = parseDesignNumericValue(value);
   if (!parsed || !Number.isFinite(delta)) return null;
   return `${formatDesignNumber(parsed.number + delta)}${parsed.unit}`;
+}
+
+const DESIGN_PX_DEFAULT_PROPERTIES = new Set([
+  "top",
+  "right",
+  "bottom",
+  "left",
+  "width",
+  "height",
+  "min-width",
+  "min-height",
+  "max-width",
+  "max-height",
+  "padding",
+  "padding-top",
+  "padding-right",
+  "padding-bottom",
+  "padding-left",
+  "margin",
+  "margin-top",
+  "margin-right",
+  "margin-bottom",
+  "margin-left",
+  "gap",
+  "row-gap",
+  "column-gap",
+  "flex-basis",
+  "grid-auto-columns",
+  "grid-auto-rows",
+  "border-width",
+  "border-top-width",
+  "border-right-width",
+  "border-bottom-width",
+  "border-left-width",
+  "border-radius",
+  "border-top-left-radius",
+  "border-top-right-radius",
+  "border-bottom-right-radius",
+  "border-bottom-left-radius",
+  "outline-width",
+  "outline-offset",
+  "font-size",
+  "letter-spacing",
+  "word-spacing",
+  "text-indent",
+  "perspective",
+  "transform-origin",
+  "object-position",
+  "background-position",
+  "background-size",
+]);
+
+const DESIGN_MS_DEFAULT_PROPERTIES = new Set([
+  "transition-duration",
+  "transition-delay",
+  "animation-duration",
+  "animation-delay",
+]);
+
+const DESIGN_LAYOUT_PROPERTIES = new Set([
+  "position",
+  "top",
+  "right",
+  "bottom",
+  "left",
+  "inset",
+  "width",
+  "height",
+  "min-width",
+  "min-height",
+  "max-width",
+  "max-height",
+  "aspect-ratio",
+  "box-sizing",
+  "margin",
+  "padding",
+  "border-width",
+  "border-style",
+  "display",
+  "flex",
+  "flex-direction",
+  "flex-wrap",
+  "flex-grow",
+  "flex-shrink",
+  "flex-basis",
+  "align-items",
+  "align-self",
+  "align-content",
+  "justify-content",
+  "justify-items",
+  "justify-self",
+  "order",
+  "gap",
+  "row-gap",
+  "column-gap",
+  "grid",
+  "grid-template-columns",
+  "grid-template-rows",
+  "grid-auto-flow",
+  "grid-auto-columns",
+  "grid-auto-rows",
+  "grid-column",
+  "grid-row",
+  "float",
+  "clear",
+  "font",
+  "font-family",
+  "font-size",
+  "font-weight",
+  "font-style",
+  "font-stretch",
+  "line-height",
+  "letter-spacing",
+  "word-spacing",
+  "text-indent",
+  "text-overflow",
+  "text-wrap",
+  "word-break",
+  "overflow-wrap",
+  "text-transform",
+  "white-space",
+  "vertical-align",
+  "writing-mode",
+  "hyphens",
+  "transform",
+  "transform-origin",
+  "perspective",
+  "perspective-origin",
+]);
+
+/** Design tools treat a bare spatial value as pixels and a bare timing value
+ * as milliseconds. CSS itself rejects values such as `width: 320`, so apply
+ * the editor convention before both speculative preview and source commit. */
+export function normalizeDesignStyleFieldInput(
+  property: string,
+  input: string,
+  baseline: string,
+): string {
+  const normalizedProperty = cssStyleProperty(property);
+  const resolved = resolveDesignNumericExpression(input, baseline);
+  const parsed = parseDesignNumericValue(resolved);
+  if (!parsed || parsed.unit) return resolved;
+  if (DESIGN_PX_DEFAULT_PROPERTIES.has(normalizedProperty)) {
+    return `${formatDesignNumber(parsed.number)}px`;
+  }
+  if (DESIGN_MS_DEFAULT_PROPERTIES.has(normalizedProperty)) {
+    return `${formatDesignNumber(parsed.number)}ms`;
+  }
+  return resolved;
+}
+
+/** Whether a preview needs browser layout readback to keep the selected box,
+ * spacing controls, and child gap bands aligned with the painted element. */
+export function designStylePropertyAffectsLayout(property: string): boolean {
+  const normalized = cssStyleProperty(property);
+  return (
+    normalized.startsWith("--") ||
+    DESIGN_LAYOUT_PROPERTIES.has(normalized) ||
+    /^(?:margin|padding|border)-(?:top|right|bottom|left)(?:-width)?$/.test(
+      normalized,
+    ) ||
+    /^(?:margin|padding|inset)-(?:block|inline)/.test(normalized) ||
+    /^grid-(?:column|row)(?:-|$)/.test(normalized)
+  );
 }
 
 class NumericExpressionParser {

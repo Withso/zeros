@@ -40,11 +40,8 @@ import {
 } from "../../state/use-projects";
 import {
   dedupePendingCreates,
-  filterPendingCreatesForDesignAccess,
-  filterWorkspacesForDesignAccess,
   selectLiveVisible,
 } from "../../state/live-workspace-selectors";
-import { useInternalFeatureActive } from "../settings/internal-features";
 import {
   usePendingCreatesAll,
   useWorkspaceArchiving,
@@ -64,6 +61,11 @@ import { ZerosSpinner } from "@/renderer/shared/ui/loading";
 import { ghPrMerge, ghPrSync, type Workspace } from "../../platform/git";
 import { useActiveOrganization } from "../team/team-store";
 import { filterRowsForOrganization } from "../team/organization-capabilities";
+import {
+  projectInitial,
+  RepositoryIcon,
+} from "../repositories/repository-icon";
+import type { Project } from "../../state/projects-store";
 
 const REPO_CHIP_CLS =
   "inline-flex size-5 shrink-0 items-center justify-center rounded-sm bg-bg2-hover text-xxs font-medium leading-none text-fg2";
@@ -89,10 +91,6 @@ function readShowArchived(): boolean {
   }
 }
 
-function projectInitial(name: string): string {
-  return (name.trim()[0] ?? "·").toUpperCase();
-}
-
 // Branch → workspace name goes through the shared branchDisplayName (see
 // renderer/shared/lib/branch-name.ts). The private `zeros/`-literal strip that used to
 // live here stopped being correct when Settings → Git made the prefix a
@@ -105,6 +103,7 @@ const EMPTY_PENDING_ROWS: PendingWorkspaceCreate[] = [];
 
 interface BoardRow {
   workspace: Workspace;
+  project: Project | null;
   repoName: string;
   /** Owning-chat title if present, else the (prefix-stripped) branch. */
   title: string;
@@ -115,15 +114,10 @@ export function DashboardPage() {
   const { projects } = useProjects();
   const chats = useChats();
   const { workspaces: liveWorkspaces, loading } = useLiveWorkspaces();
-  const designWorkspacesActive = useInternalFeatureActive("designWorkspaces");
   const activeOrganization = useActiveOrganization();
   const accessibleLiveWorkspaces = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterWorkspacesForDesignAccess(liveWorkspaces, designWorkspacesActive),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, liveWorkspaces],
+    () => filterRowsForOrganization(liveWorkspaces, activeOrganization),
+    [activeOrganization, liveWorkspaces],
   );
   // Destructive membership is confirmed-only: a busy row stays in its current
   // status column until the engine publishes the archive/delete result.
@@ -133,24 +127,13 @@ export function DashboardPage() {
   );
   const rawPending = usePendingCreatesAll();
   const allPending = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterPendingCreatesForDesignAccess(rawPending, designWorkspacesActive),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, rawPending],
+    () => filterRowsForOrganization(rawPending, activeOrganization),
+    [activeOrganization, rawPending],
   );
   const { workspaces: rawArchivedWorkspaces } = useArchivedWorkspaces();
   const archivedWorkspaces = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterWorkspacesForDesignAccess(
-          rawArchivedWorkspaces,
-          designWorkspacesActive,
-        ),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, rawArchivedWorkspaces],
+    () => filterRowsForOrganization(rawArchivedWorkspaces, activeOrganization),
+    [activeOrganization, rawArchivedWorkspaces],
   );
   const openWorkspace = useOpenWorkspace();
   // Persist the requested repository identity. A removed/stale slug derives to
@@ -199,8 +182,11 @@ export function DashboardPage() {
   // (most-recently-updated chat in the worktree folder), else the branch. Reused
   // for BOTH live and archived rows — archive doesn't move the chat's folder, so
   // titleByFolder still resolves for an archived workspace's (now-gone) path.
+  const projectBySlug = useMemo(
+    () => new Map(projects.map((project) => [project.repoSlug, project])),
+    [projects],
+  );
   const toRow = useMemo(() => {
-    const repoNameBySlug = new Map(projects.map((p) => [p.repoSlug, p.name]));
     const titleByFolder = new Map<
       string,
       { title: string; updatedAt: number }
@@ -216,21 +202,18 @@ export function DashboardPage() {
     }
     return (w: Workspace): BoardRow => {
       const branch = branchDisplayName(w.branch);
+      const project = projectBySlug.get(w.repoSlug) ?? null;
       return {
         workspace: w,
-        repoName: repoNameBySlug.get(w.repoSlug) ?? w.repoSlug,
+        project,
+        repoName: project?.name ?? w.repoSlug,
         title: titleByFolder.get(w.path)?.title || branch,
         branch,
       };
     };
-  }, [projects, chats]);
+  }, [chats, projectBySlug]);
 
   const rows = useMemo(() => workspaces.map(toRow), [workspaces, toRow]);
-  // Repo display names for the pending "Setting up…" placeholders.
-  const repoNameBySlug = useMemo(
-    () => new Map(projects.map((p) => [p.repoSlug, p.name])),
-    [projects],
-  );
   // In-flight optimistic creates as board placeholders, deduped against the real
   // union so a placeholder vanishes the instant its real row lands.
   const dedupedPending = useMemo(
@@ -321,9 +304,7 @@ export function DashboardPage() {
             active={repoFilter === p.repoSlug}
             onClick={() => setRepoFilter(p.repoSlug)}
           >
-            <span className={REPO_CHIP_CLS} aria-hidden="true">
-              {projectInitial(p.name)}
-            </span>
+            <DashboardRepositoryIcon project={p} name={p.name} />
             <span className="truncate">{p.name}</span>
           </FilterTab>
         ))}
@@ -371,8 +352,10 @@ export function DashboardPage() {
                           : "New workspace"
                       }
                       repoName={
-                        repoNameBySlug.get(pending.repoSlug) ?? pending.repoSlug
+                        projectBySlug.get(pending.repoSlug)?.name ??
+                        pending.repoSlug
                       }
+                      project={projectBySlug.get(pending.repoSlug) ?? null}
                       showRepoChip={showRepoChip}
                     />
                   ))}
@@ -417,6 +400,24 @@ function FilterTab({
     >
       {children}
     </button>
+  );
+}
+
+function DashboardRepositoryIcon({
+  project,
+  name,
+}: {
+  project: Project | null;
+  name: string;
+}) {
+  return (
+    <span className={REPO_CHIP_CLS} aria-hidden="true">
+      {project ? (
+        <RepositoryIcon project={project} className="size-full rounded-sm" />
+      ) : (
+        projectInitial(name)
+      )}
+    </span>
   );
 }
 
@@ -482,9 +483,7 @@ function ArchivedCard({
     <div className="border-border1 flex flex-col rounded-lg border p-3 text-left select-none">
       <div className="flex items-center gap-2">
         {showRepoChip && (
-          <span className={REPO_CHIP_CLS} aria-hidden="true">
-            {projectInitial(row.repoName)}
-          </span>
+          <DashboardRepositoryIcon project={row.project} name={row.repoName} />
         )}
         <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
           {row.branch}
@@ -520,10 +519,12 @@ function ArchivedCard({
  *  Workspace, so it never enters toRow / byStatus / the lazy change probe. */
 function PendingDashboardCard({
   label,
+  project,
   repoName,
   showRepoChip,
 }: {
   label: string;
+  project: Project | null;
   repoName: string;
   showRepoChip: boolean;
 }) {
@@ -535,9 +536,7 @@ function PendingDashboardCard({
     >
       <div className="flex items-center gap-2">
         {showRepoChip && (
-          <span className={REPO_CHIP_CLS} aria-hidden="true">
-            {projectInitial(repoName)}
-          </span>
+          <DashboardRepositoryIcon project={project} name={repoName} />
         )}
         <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
           {label}
@@ -718,9 +717,10 @@ function DashboardCard({
         {/* Top: repo chip (all-projects view) + branch + status glyph. */}
         <div className="flex items-center gap-2">
           {showRepoChip && (
-            <span className={REPO_CHIP_CLS} aria-hidden="true">
-              {projectInitial(row.repoName)}
-            </span>
+            <DashboardRepositoryIcon
+              project={row.project}
+              name={row.repoName}
+            />
           )}
           <span className="text-fg2 min-w-0 flex-1 truncate text-xs">
             {row.branch}

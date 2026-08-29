@@ -24,7 +24,6 @@ import {
   setActiveInPane,
   setSplitRatio,
   splitLeaf,
-  topRightLeafId,
 } from "../chat-panes";
 
 const chat = (id: string, createdAt = 0) => ({ id, createdAt });
@@ -348,19 +347,5 @@ describe("hasLeaf", () => {
     layout = splitLeaf(layout, "p2", "column", "p3", null)!;
     expect(hasLeaf(layout.root, "p3")).toBe(true);
     expect(hasLeaf(layout.root, "nope")).toBe(false);
-  });
-});
-
-describe("topRightLeafId", () => {
-  it("follows right halves of rows and top halves of columns", () => {
-    // main | (p2 over p3)  → top-right is p2.
-    let layout = splitRight(DEFAULT_PANE_LAYOUT, MAIN_PANE_ID, "p2");
-    layout = splitLeaf(layout, "p2", "column", "p3", null)!;
-    expect(topRightLeafId(layout.root)).toBe("p2");
-    // Single pane → itself.
-    expect(topRightLeafId(DEFAULT_PANE_LAYOUT.root)).toBe(MAIN_PANE_ID);
-    // (main over p4) as the left half — top-right stays p2.
-    layout = splitLeaf(layout, MAIN_PANE_ID, "column", "p4", null)!;
-    expect(topRightLeafId(layout.root)).toBe("p2");
   });
 });

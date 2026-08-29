@@ -135,11 +135,10 @@ describe("Zeros DB (unified engine store)", () => {
     const applied = db
       .prepare("SELECT version FROM schema_migrations ORDER BY version")
       .all() as { version: number }[];
-    expect(applied.map((r) => r.version)).toEqual([
-      1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
-      22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
-    ]);
-    expect(latestSchemaVersion()).toBe(31);
+    const latest = latestSchemaVersion();
+    expect(applied.map((r) => r.version)).toEqual(
+      Array.from({ length: latest }, (_, index) => index + 1),
+    );
   });
 
   it("stamps + backfills chats.workspace_id from folder via the resolver (v11)", () => {
@@ -191,7 +190,7 @@ describe("Zeros DB (unified engine store)", () => {
     const count = db
       .prepare("SELECT COUNT(*) AS n FROM schema_migrations")
       .get() as { n: number };
-    expect(count.n).toBe(31);
+    expect(count.n).toBe(latestSchemaVersion());
   });
 
   it("preserves created_at on upsert (immutable after first insert)", () => {

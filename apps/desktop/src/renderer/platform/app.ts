@@ -22,6 +22,7 @@ import {
   nativeInvoke,
   nativeListen,
 } from "./runtime";
+import { normalizeExternalHttpUrl } from "@zeros/protocol/external-url";
 
 // Re-export the runtime predicates so call sites can pull them
 // from either module.
@@ -111,11 +112,13 @@ export async function listSkills(
 
 /** Open an external http(s) URL in the user's default browser. */
 export async function shellOpenUrl(url: string): Promise<void> {
+  const normalized = normalizeExternalHttpUrl(url);
+  if (!normalized) throw new Error("only valid http(s) URLs are allowed");
   if (!isNativeRuntime()) {
-    window.open(url, "_blank", "noopener,noreferrer");
+    window.open(normalized, "_blank", "noopener,noreferrer");
     return;
   }
-  await nativeInvoke<void>("shell_open_url", { url });
+  await nativeInvoke<void>("shell_open_url", { url: normalized });
 }
 
 /** Reveal a path in macOS Finder. */

@@ -90,14 +90,17 @@ export function workspaceKindFromManagedPath(
   return worktreePathParts(folder)?.kind ?? null;
 }
 
-/** A confirmed Workspace row is authoritative. Pending/path hints exist only
- * to paint a prepared destination before that row arrives; they must
- * never turn a confirmed code workspace into a design surface. */
+/** A confirmed Workspace row is authoritative server state. A current user
+ * request is a separate renderer-local presentation intent and therefore wins
+ * only while its exact mode RPC is pending. Create/path hints still apply only
+ * before a row confirms. */
 export function resolveWorkspacePresentationKind(input: {
   confirmedKind?: "code" | "design" | null;
+  requestedKind?: "code" | "design" | null;
   pendingKind?: "code" | "design" | null;
   folder?: string | null;
 }): "code" | "design" {
+  if (input.requestedKind) return input.requestedKind;
   if (input.confirmedKind) return input.confirmedKind;
   return (
     input.pendingKind ??
@@ -192,7 +195,7 @@ export function folderIsWithinRoot(
  *  forms (the "No workspace selected" flicker in a fresh worktree). */
 export function findWorkspaceForFolder<T extends { path: string }>(
   folder: string | null | undefined,
-  workspaces: T[],
+  workspaces: readonly T[],
 ): T | null {
   if (!folder) return null;
   return workspaces.find((w) => folderIsWithinRoot(folder, w.path)) ?? null;
@@ -285,7 +288,7 @@ export function repoRootForCwd<T extends { path: string; repoRoot: string }>(
  */
 export function findProjectForFolder(
   folder: string | null | undefined,
-  projects: Project[],
+  projects: readonly Project[],
 ): Project | null {
   if (!folder) return null;
   // Normalize the /private symlink on BOTH sides, matching

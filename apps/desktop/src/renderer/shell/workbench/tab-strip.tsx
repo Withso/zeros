@@ -2,10 +2,8 @@
 // Workbench Tab Strip — inline tab strip for Workbench's header band
 // ──────────────────────────────────────────────────────────
 //
-// The tab strip is rendered INSIDE
-// Workbench's own 40px header band. No outer wrapper /
-// border-bottom: the header band's own border is the visual
-// divider.
+// The tab strip is rendered INSIDE Workbench's own borderless 40px header
+// band. Any separator belongs to the active surface's second-row chrome.
 //
 // Layout: [Open file] [Changes] [Review] [...File/Browser tabs] [+]
 // - Changes + Review are pinned homes, and the leading File tab is the FIXED

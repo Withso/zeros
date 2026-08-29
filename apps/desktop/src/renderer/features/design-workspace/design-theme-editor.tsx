@@ -55,6 +55,7 @@ import {
   inferDesignTokenType,
   parseDesignCssVariables,
   type DesignCssVariableImport,
+  type DesignTokenValueType,
 } from "./design-theme-css";
 import { DesignColorPicker } from "./design-color-picker";
 
@@ -78,6 +79,14 @@ interface ThemeEditorPosition {
 }
 
 const THEME_EDITOR_VIEWPORT_MARGIN = 12;
+const THEME_TOKEN_TYPES = [
+  "color",
+  "length",
+  "number",
+  "time",
+  "angle",
+  "other",
+] as const satisfies readonly DesignTokenValueType[];
 
 function clampThemeEditorPosition(
   position: ThemeEditorPosition,
@@ -221,7 +230,7 @@ function importSummary(imports: readonly DesignCssVariableImport[]): string {
   return `${variables.size} ${variables.size === 1 ? "variable" : "variables"} · ${themes.size} ${themes.size === 1 ? "theme" : "themes"}`;
 }
 
-export function DesignThemeEditor({
+export const DesignThemeEditor = React.memo(function DesignThemeEditor({
   workspaceId,
   frame,
   tokens,
@@ -254,6 +263,9 @@ export function DesignThemeEditor({
     active && Boolean(frame),
   );
   const [query, setQuery] = useState("");
+  const [typeFilter, setTypeFilter] = useState<DesignTokenValueType | "all">(
+    "all",
+  );
   const [pasteOpen, setPasteOpen] = useState(false);
   const [cssDraft, setCssDraft] = useState(
     ':root {\n  --brand: rebeccapurple;\n}\n\n[data-theme="dark"] {\n  --brand: mediumpurple;\n}',
@@ -278,11 +290,24 @@ export function DesignThemeEditor({
       return { imports: [], error: errorMessage(error) };
     }
   }, [cssDraft]);
+  const tokenTypeCounts = useMemo(() => {
+    const counts = new Map<DesignTokenValueType, number>();
+    for (const token of tokens) {
+      const type = inferDesignTokenType(
+        token.name,
+        token.value || token.initialValue,
+        token.syntax,
+      );
+      counts.set(type, (counts.get(type) ?? 0) + 1);
+    }
+    return counts;
+  }, [tokens]);
   const groupedTokens = useMemo(() => {
     const normalizedQuery = query.trim().toLocaleLowerCase();
     const groups = new Map<string, DesignTokenWire[]>();
     for (const token of tokens) {
       const type = inferDesignTokenType(token.name, token.value, token.syntax);
+      if (typeFilter !== "all" && type !== typeFilter) continue;
       if (
         normalizedQuery &&
         !`${token.name} ${type} ${designTokenGroup(token.name)}`
@@ -299,7 +324,7 @@ export function DesignThemeEditor({
     return [...groups.entries()].sort(([left], [right]) =>
       left.localeCompare(right),
     );
-  }, [query, tokens]);
+  }, [query, tokens, typeFilter]);
 
   const applyOperations = async (
     key: string,
@@ -639,6 +664,34 @@ export function DesignThemeEditor({
               <Plus />
               Variable
             </Button>
+            <div
+              data-design-theme-type-filter=""
+              role="group"
+              aria-label="Filter variables by type"
+              className="flex basis-full items-center gap-1 overflow-x-auto pt-0.5"
+            >
+              {(["all", ...THEME_TOKEN_TYPES] as const).map((type) => {
+                const count =
+                  type === "all"
+                    ? tokens.length
+                    : (tokenTypeCounts.get(type) ?? 0);
+                if (type !== "all" && count === 0) return null;
+                return (
+                  <button
+                    key={type}
+                    type="button"
+                    aria-pressed={typeFilter === type}
+                    className={cn(
+                      "zd-design-theme-filter shrink-0 rounded-sm px-2 py-1 text-[10px] capitalize",
+                      typeFilter === type && "zd-design-theme-mode-active",
+                    )}
+                    onClick={() => setTypeFilter(type)}
+                  >
+                    {type} <span className="font-mono opacity-70">{count}</span>
+                  </button>
+                );
+              })}
+            </div>
           </div>
 
           <div className="flex min-h-0 flex-col overflow-hidden">
@@ -755,14 +808,17 @@ export function DesignThemeEditor({
                   <div className="text-muted-fg bg-bg1 sticky left-0 z-30 px-4 py-2 text-xs font-medium">
                     Variable
                   </div>
-                  <div
+                  <button
+                    type="button"
                     className={cn(
                       "text-fg2 m-1 w-fit rounded-sm px-3 py-1 text-xs font-medium",
-                      activeTheme === null && "bg-bg2-hover text-fg1",
+                      activeTheme === null && "zd-design-theme-mode-active",
                     )}
+                    aria-pressed={activeTheme === null}
+                    onClick={() => onActiveThemeChange(null)}
                   >
                     Base
-                  </div>
+                  </button>
                   {themes.map((theme) => (
                     <button
                       key={theme}
@@ -770,9 +826,10 @@ export function DesignThemeEditor({
                       className={cn(
                         "m-1 w-fit rounded-sm px-3 py-1 text-left text-xs font-medium",
                         activeTheme === theme
-                          ? "bg-bg2-hover text-fg1"
+                          ? "zd-design-theme-mode-active"
                           : "text-fg2",
                       )}
+                      aria-pressed={activeTheme === theme}
                       onClick={() => onActiveThemeChange(theme)}
                     >
                       {theme}
@@ -918,4 +975,4 @@ export function DesignThemeEditor({
       </DialogPrimitive.Portal>
     </DialogPrimitive.Root>
   );
-}
+});

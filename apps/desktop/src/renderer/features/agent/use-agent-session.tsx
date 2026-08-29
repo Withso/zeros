@@ -18,6 +18,7 @@
 
 import type {
   AvailableCommand,
+  AgentGoal,
   BackgroundTask,
   ContentBlock,
   InitializeResponse,
@@ -35,6 +36,10 @@ import type {
   ProviderBinding,
   ProviderMetadata,
 } from "@zeros/protocol/identities";
+import type {
+  ExecutionBoundaryPortsSnapshot,
+  ExecutionBoundaryStatus,
+} from "@zeros/protocol/containment";
 
 // The agent message model + the pure SessionNotification→message folder moved to
 // @zeros/protocol so the engine can run the same coalescer it does. Re-
@@ -113,6 +118,11 @@ export interface AgentSessionState {
    * the live routing/cache key. */
   providerBinding: ProviderBinding | null;
   providerMetadata: ProviderMetadata | null;
+  /** Engine-authoritative, redacted preflight/admission health. */
+  boundary: ExecutionBoundaryStatus | null;
+  /** Exact live listener state for this execution. Never persisted across an
+   * execution replacement. */
+  boundaryPorts: ExecutionBoundaryPortsSnapshot | null;
   /** The chat's folder, captured
    *  on first ensureSession + restored on rebuilds. Without this, the
    *  silent-retry path called ensureSession({ force:true })
@@ -187,6 +197,11 @@ export interface AgentSessionState {
    * engine snapshots replace this ephemeral list; narrator lines live in the
    * ordinary tool-call transcript instead. */
   workflows: WorkflowProgress[];
+  /** Harness-native goal projected into Zeros session state. */
+  goal: AgentGoal | null;
+  /** Live engine-only safety actions keyed by their durable audit row. Opaque
+   * ids are never written into the transcript. */
+  safetyReviewRetries: Record<string, string>;
   /** Parent session is parked and waiting for the active task set to wake it. */
   waitingForBackgroundTasks: boolean;
   /** Start of the current continuous parked interval. Session-owned so a
@@ -244,6 +259,11 @@ export interface AgentSessionControls {
   cancel(): Promise<void>;
   /** Stop one background task without cancelling the foreground turn. */
   stopBackgroundTask(taskId: string): void;
+  /** Exchange one redacted live-port id for an ephemeral browser admission.
+   * The caller must keep `admissionUrl` out of persisted state. */
+  openBoundaryPort?(
+    portId: string,
+  ): Promise<{ url: string; admissionUrl: string; expiresAt: number }>;
   /** Resolve a pending permission request. */
   respondToPermission(response: RequestPermissionResponse): void;
   /** Answer the head pending question (queue front). */
@@ -261,6 +281,13 @@ export interface AgentSessionControls {
    *  allow-deny / maxTurns) to the live session without rebuilding it
    *  (fire-and-forget; carries the full composer env). */
   updateConfig?(): void;
+  setGoal?(update: {
+    objective?: string;
+    status?: AgentGoal["status"];
+    tokenBudget?: number | null;
+  }): Promise<AgentGoal>;
+  clearGoal?(): Promise<void>;
+  retrySafetyReview?(retryId: string): Promise<void>;
   /** Remove a still-pending QUEUED send (by its placeholder message id)
    *  before it flushes — the user changed their mind. */
   removeQueued?(messageId: string): void;

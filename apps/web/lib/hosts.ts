@@ -131,10 +131,12 @@ export function applyHostHeaders(res: Response, kind: HostKind): Response {
   for (const [k, v] of Object.entries(SHARED_SECURITY_HEADERS)) {
     if (!headers.has(k)) headers.set(k, v);
   }
-  headers.set(
-    "Content-Security-Policy",
-    kind === "marketing" ? MARKETING_CSP : APP_CSP,
-  );
+  if (!headers.has("Content-Security-Policy")) {
+    headers.set(
+      "Content-Security-Policy",
+      kind === "marketing" ? MARKETING_CSP : APP_CSP,
+    );
+  }
   return new Response(res.body, {
     status: res.status,
     statusText: res.statusText,

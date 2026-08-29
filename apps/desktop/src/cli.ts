@@ -40,7 +40,13 @@ async function runServe(
   process.on("unhandledRejection", (err) => {
     console.error(
       "[Zeros] unhandledRejection:",
-      err instanceof Error ? err.stack : err,
+      err instanceof Error
+        ? err.stack
+        : // A non-Error reason (classically `undefined`, from an event
+          // handler passed straight to reject) carries no site at all. Print
+          // the type alongside it so the next occurrence is at least
+          // searchable rather than a bare "undefined".
+          `${typeof err} ${String(err)}`,
     );
   });
 
@@ -54,17 +60,18 @@ async function runServe(
 
   const shutdown = async () => {
     console.log("\n[Zeros] Shutting down...");
-    // Bound the dispose. engine.stop() disposes the chat adapters, and one of
-    // them (the Codex app-server) does a JSON-RPC `dispose` round-trip + child
-    // kill that can wedge. An unbounded await here is exactly why the engine
-    // sometimes "ignored SIGTERM" for the full 5 s the parent waits before
-    // SIGKILL (apps/desktop/electron/sidecar.ts killCurrentChild). Race a 3 s cap so we
-    // always exit promptly — a clean dispose finishes in ~1-2 s and wins the
-    // race; a wedged one is abandoned (the process is dying anyway, and the
-    // parent's SIGKILL ceiling still backstops a fully-blocked event loop).
+    // Bound the dispose, but leave room for ZSR teardown to finish. Stopping
+    // a session promotes its private provider-HOME and shadow-Git state and
+    // retires the process-domain descriptor; abandoning that mid-write is why
+    // every dev restart used to boot into "recovered N crashed process
+    // domain(s)" + conflict-preservation sweeps. A clean dispose with live
+    // sessions runs seconds, not milliseconds, under ZSR. A genuinely wedged
+    // dispose (e.g. the Codex app-server JSON-RPC round-trip) is still
+    // abandoned at the cap, and the parent's SIGKILL ceiling
+    // (apps/desktop/electron/sidecar.ts killCurrentChild) must stay above it.
     await Promise.race([
       engine.stop().catch(() => {}),
-      new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+      new Promise<void>((resolve) => setTimeout(resolve, 12_000)),
     ]);
     process.exit(0);
   };
@@ -73,8 +80,26 @@ async function runServe(
   process.on("SIGINT", shutdown);
   process.on("SIGHUP", shutdown);
 
+  // A startup step that never settles — a dropped promise, a floating
+  // rejection whose reason is not an Error — drains the event loop instead of
+  // throwing. Node then exits 0, and the supervisor reports only the useless
+  // "engine child exited before binding (code=0)" before retrying into the
+  // same wall. beforeExit fires only when the loop is genuinely empty, so
+  // reaching it without a started engine is unambiguous: say so, and exit
+  // non-zero so the failure is visible as a failure.
+  let started = false;
+  process.on("beforeExit", () => {
+    if (started) return;
+    console.error(
+      "\n  \x1b[31mZeros engine startup never completed\x1b[0m — nothing is " +
+        "keeping the process alive, so a startup step settled neither way. " +
+        "Any [Zeros] unhandledRejection above is the cause.\n",
+    );
+    process.exit(1);
+  });
   try {
     await engine.start();
+    started = true;
     console.log("");
     console.log("  \x1b[2mPress Ctrl+C to stop.\x1b[0m");
     console.log("");

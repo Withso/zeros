@@ -11,8 +11,18 @@
 // be before a background revalidation is worth a bridge/GitHub round-trip?
 // ──────────────────────────────────────────────────────────
 
-import type { Branch, GithubOwner, PR, Workspace } from "../platform/git";
+import type {
+  Branch,
+  GithubOwner,
+  PR,
+  WorkingDirectoriesWire,
+  Workspace,
+} from "../platform/git";
 import type { GithubAuthSnapshot } from "@zeros/protocol/github-auth";
+import type {
+  AgentMemorySettings,
+  AgentProviderQuota,
+} from "@zeros/protocol/agent-events";
 import type { FilesToCopyPreviewWire } from "../platform/bridge/workspace-bridge";
 import type { TurnInfo } from "../platform/turns";
 import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
@@ -21,9 +31,20 @@ import { KeyedAsyncCache } from "../shared/lib/keyed-async-cache";
  *  revalidate after a short window — still instant within a browsing burst. */
 export const GIT_READ_MAX_AGE_MS = 30_000;
 
+/** Working-folder candidates are Git-derived and receive exact change-bus
+ * invalidations. This window is only a safety recheck for missed out-of-band
+ * changes; ordinary sidebar round trips remain cache-only. */
+export const WORKING_DIRECTORIES_MAX_AGE_MS = 60_000;
+
 /** GitHub API reads: PRs/owners change on human timescales; probing more than
  *  once a minute per key burns rate limit for no visible benefit. */
 export const GITHUB_READ_MAX_AGE_MS = 60_000;
+
+/** Provider settings are host-local diagnostics. Reopening or switching the
+ * provider tab is not an invalidation; explicit writes and engine reconnects
+ * refresh these snapshots. The bounded freshness window still catches edits
+ * made directly in a provider's native configuration. */
+export const PROVIDER_DIAGNOSTIC_MAX_AGE_MS = 60_000;
 
 /** Keyed by workspace id — remote branches offered as PR targets. */
 export const remoteBranchesCache = new KeyedAsyncCache<Branch[]>(32);
@@ -38,6 +59,103 @@ export const openPrsCache = new KeyedAsyncCache<PR[]>(32);
  *  pickers that only need branch/name rows, not the live board collections. */
 export const pickerWorkspacesCache = new KeyedAsyncCache<Workspace[]>(16);
 
+/** Top-level sparse-checkout candidates, keyed by both the worktree path used
+ * for the request and its opaque workspace identity. The modest hard bound is
+ * several times larger than the retained workbench deck while preventing old
+ * repository snapshots from accumulating for the renderer's lifetime. */
+export const workingDirectoriesCache =
+  new KeyedAsyncCache<WorkingDirectoriesWire>(64);
+
+export interface WorkingDirectoriesRequest {
+  cwd: string;
+  workspaceId: string | null;
+}
+
+function normalizeWorkingDirectoriesCwd(cwd: string): string {
+  if (cwd === "/" || /^[A-Za-z]:[\\/]$/.test(cwd)) return cwd;
+  return cwd.replace(/[\\/]+$/, "") || cwd;
+}
+
+/** The request is encoded in the key because a queued cache refresh can run
+ * after the component closure that initiated it has moved to another owner. */
+export function workingDirectoriesCacheKey(
+  cwd: string,
+  workspaceId?: string | null,
+): string {
+  return JSON.stringify([
+    normalizeWorkingDirectoriesCwd(cwd),
+    workspaceId?.trim() || null,
+  ]);
+}
+
+export function workingDirectoriesRequest(
+  key: string,
+): WorkingDirectoriesRequest {
+  const [cwd, workspaceId] = JSON.parse(key) as [string, string | null];
+  return { cwd, workspaceId };
+}
+
+function sameOrderedStrings(
+  first: readonly string[],
+  second: readonly string[],
+): boolean {
+  return (
+    first.length === second.length &&
+    first.every((value, index) => value === second[index])
+  );
+}
+
+/** Strip mutation-only diagnostics and preserve the confirmed object/array
+ * identities when a background Git read returns the same state. */
+export function stableWorkingDirectoriesSnapshot(
+  key: string,
+  next: WorkingDirectoriesWire,
+): WorkingDirectoriesWire {
+  const previous = workingDirectoriesCache.peekSnapshot(key).data;
+  if (
+    previous &&
+    previous.sparse === next.sparse &&
+    previous.supported === next.supported &&
+    previous.unsupportedReason === next.unsupportedReason &&
+    sameOrderedStrings(previous.all, next.all) &&
+    sameOrderedStrings(previous.locked, next.locked) &&
+    sameOrderedStrings(previous.included, next.included)
+  ) {
+    return previous;
+  }
+  const { leftBehind: _leftBehind, ...snapshot } = next;
+  return snapshot;
+}
+
+/** Mark matching retained worktrees stale without clearing their confirmed
+ * rows. With no scope this is the deliberate coarse fallback. */
+export function invalidateWorkingDirectoriesReadCache(
+  cwd?: string | null,
+  workspaceId?: string | null,
+): void {
+  const normalizedCwd = cwd ? normalizeWorkingDirectoriesCwd(cwd) : null;
+  const normalizedWorkspaceId = workspaceId?.trim() || null;
+  if (!normalizedCwd && !normalizedWorkspaceId) {
+    workingDirectoriesCache.invalidateAll();
+    return;
+  }
+  for (const key of workingDirectoriesCache.keys()) {
+    let request: WorkingDirectoriesRequest;
+    try {
+      request = workingDirectoriesRequest(key);
+    } catch {
+      continue;
+    }
+    if (
+      (normalizedCwd !== null && request.cwd === normalizedCwd) ||
+      (normalizedWorkspaceId !== null &&
+        request.workspaceId === normalizedWorkspaceId)
+    ) {
+      workingDirectoriesCache.invalidate(key);
+    }
+  }
+}
+
 /** Single-key ("auth") — GitHub auth probe (status + CLI detection) for the
  *  settings section. Auth changes only on explicit sign-in/out, which write
  *  through setData; the freshness window merely catches out-of-band changes. */
@@ -45,6 +163,12 @@ export const ghAuthStatusCache = new KeyedAsyncCache<GithubAuthSnapshot>(1);
 
 /** Single-key ("owners") — authed user + orgs for the publish dialog. */
 export const ghOwnersCache = new KeyedAsyncCache<GithubOwner[]>(1);
+
+/** Provider-global usage limits and memory settings, keyed by agent id. */
+export const providerQuotaCache =
+  new KeyedAsyncCache<AgentProviderQuota | null>(8);
+export const providerMemorySettingsCache =
+  new KeyedAsyncCache<AgentMemorySettings>(8);
 
 /** Files-to-copy preview, keyed by `filesToCopyPreviewKey(repoRoot, patterns)`.
  *
@@ -179,7 +303,10 @@ export function invalidateAllEngineReadCaches(): void {
   pickerWorkspacesCache.invalidateAll();
   ghAuthStatusCache.invalidateAll();
   ghOwnersCache.invalidateAll();
+  providerQuotaCache.invalidateAll();
+  providerMemorySettingsCache.invalidateAll();
   filesToCopyPreviewCache.invalidateAll();
+  workingDirectoriesCache.invalidateAll();
   // Turn rows are engine state too: a reset (or a turn settling) on ANOTHER
   // device lands while this renderer is deaf to DB_CHANGED.
   turnRowCache.invalidateAll();

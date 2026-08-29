@@ -9,8 +9,10 @@ not create a second, incompatible workspace model.
 
 ## User-visible guarantees
 
-- A workspace has one stable identity independent of its current machine,
-  lifecycle state, client device, or sandbox provider.
+- A cloud workspace has one stable identity independent of its lifecycle state,
+  viewing client, or sandbox provider. A local checkout created from it is a
+  separate local workspace with an optional source link; the two must never be
+  presented as one transparently movable record.
 - Opening an existing workspace reconnects or wakes that workspace; it does not
   silently create a replacement.
 - Stop, wake, archive, delete, reconnect, and retry are explicit states with
@@ -24,9 +26,12 @@ not create a second, incompatible workspace model.
   authorization, and repository checkout are ready for the requested action.
 - A provider or network failure retains the last confirmed state and reports
   that it is stale; it does not replace known state with an empty workspace.
-- Local and cloud target selection changes routing metadata only. Moving work,
-  rebasing, publishing, or deleting a checkout remains a separate explicit
-  action.
+- Changing the Personal/organization or local/cloud target in the UI changes
+  routing metadata for a future explicit creation only; it never retargets an
+  existing workspace. Creating cloud from local, opening cloud locally, or
+  forking cloud are copy-like workflows with separate identities. Transferring
+  uncommitted work, rebasing, publishing, or deleting a checkout remains a
+  separate explicit action.
 
 ## Initial product scope
 

@@ -6,7 +6,7 @@
 // right-side work surface:
 //
 //   ┌─────────────────────────────────────────────────────┐
-//   │ Home · Create │ Repository │ main · workspaces · + │
+//   │ Home · Create · Filter │ repository/workspace tabs │
 //   ├─────────────────────────┬───────────────────────────┤
 //   │ Agent Workspace         │ Browser / panels          │
 //   │ chat                    │ tabs + workspace          │
@@ -22,6 +22,7 @@ import {
   useActiveChatId,
   useActivePage,
   useActiveRepoId,
+  useCreateWorkspaceProjectId,
   useWorkspaceDispatch,
   useWorkspaceStore,
   normalizeChatPermissionMode,
@@ -46,7 +47,11 @@ import {
 } from "./features/settings/migrate-legacy";
 import { AgentSessionsProvider } from "./features/agent/sessions-provider";
 import { useAgentSessions } from "./features/agent/sessions-hooks";
-import { loadAgents } from "./features/agent/agents-cache";
+import {
+  getAgentsSnapshot,
+  hasConfirmedAgents,
+  loadAgents,
+} from "./features/agent/agents-cache";
 import { migrateDefaultModelSelection } from "./features/agent/model-favorites";
 import { UpdateNotifications } from "./features/update/update-notifications";
 import { useCopyLogsHotkey } from "./shell/use-copy-logs-hotkey";
@@ -68,11 +73,18 @@ import { DesignWorkspaceColumn } from "./features/design-workspace/design-worksp
 import { DesignWorkspaceSidebar } from "./features/design-workspace/design-workspace-sidebar";
 import { useWorkspacePrSync } from "./shell/pr/use-workspace-pr-sync";
 import { WorktreeMissingPanel } from "./shell/worktree-missing-panel";
-import { AddProjectProvider } from "./shell/add-project-provider";
+import {
+  AddProjectProvider,
+  useAddProject,
+} from "./shell/add-project-provider";
+import { DispatcherPage } from "./shell/dispatcher/dispatcher-modal";
 import { NoProjectsView } from "./shell/no-projects-view";
 import { HomeSidebar } from "./shell/home-sidebar";
 import { useActiveWorkspace } from "./state/use-active-workspace";
-import { usePendingWorkspaceKind } from "./state/pending-workspaces";
+import {
+  usePendingWorkspaceKind,
+  usePendingWorkspaceMode,
+} from "./state/pending-workspaces";
 import { resolveWorkspacePresentationKind } from "./state/workspace-resolution";
 import { notifyWorkspacesChanged, useProjects } from "./state/use-projects";
 import { deleteWorkspacePermanently } from "./state/archive-actions";
@@ -80,6 +92,7 @@ import { SettingsPage } from "./features/settings/settings-page";
 import { DashboardPage } from "./features/dashboard/dashboard-page";
 import { CustomizePage } from "./features/agent-extensions/customize-page";
 import { RepoPage } from "./features/repositories/repo-page";
+import { useWarmAutomaticRepositoryIcons } from "./features/repositories/repository-icons";
 import { onProjectChanged } from "./platform/app";
 import {
   loadStickyDefaults,
@@ -91,9 +104,13 @@ import {
   useInviteDeepLink,
   clearPendingInviteToken,
 } from "./features/team/invite-link";
-import { useTeamEngineSync } from "./features/team/team-sync";
-import { clearTeamStore } from "./features/team/team-store";
+import {
+  requestTeamResync,
+  useTeamEngineSync,
+} from "./features/team/team-sync";
+import { clearTeamStore, refreshTeams } from "./features/team/team-store";
 import { useAuth } from "./features/auth";
+import { nativeListen } from "./platform/runtime";
 import { rememberProject } from "./platform/recent-projects";
 import {
   dbChatSnapshot,
@@ -111,6 +128,11 @@ import {
   pruneScrollPositions,
 } from "./features/agent/device-local";
 import { useSessionsStore } from "./features/agent/sessions-store";
+import {
+  claimAgentPrewarmForEngineSession,
+  prewarmAgentOnce,
+  resetAgentPrewarmForEngineSession,
+} from "./features/agent/agent-prewarm-singleflight";
 import { AnalyticsBoot } from "./platform/observability/analytics/boot";
 import { AppearanceProvider } from "./shared/theme/provider";
 import { getVariant, setPrefs } from "./shared/theme/store";
@@ -118,14 +140,18 @@ import { AuthProvider, AuthGate } from "./features/auth";
 import { Toaster, toast } from "./shared/ui/primitives/elements";
 import { TooltipProvider } from "./shared/ui/primitives/tooltip";
 import { useInstantViewSwitch } from "./shared/ui/use-instant-view-switch";
-import { useRetainedViewKeys } from "./shell/use-retained-view-keys";
+import {
+  useRetainedViewKeys,
+  useStableRetainedViewOrder,
+} from "./shell/use-retained-view-keys";
 import { useGitRefreshCoordinator } from "./shell/use-git-refresh-key";
 import { GithubAppNotifications } from "./platform/bridge/github-app-notifications";
-import {
-  useInternalFeatureActive,
-  useInternalUserResolutionSettled,
-} from "./features/settings/internal-features";
-import { shouldLeaveBlockedDesignWorkspace } from "./shell/design-workspace-access";
+import type { Workspace } from "./platform/git";
+
+interface RetainedDesignWorkspace {
+  workspace: Workspace;
+  folder: string;
+}
 
 // Chat localStorage cache keys live in a shared module so the repo-removal
 // path (which bulk-deletes a repo's chats) reconciles the exact same keys this
@@ -137,21 +163,12 @@ import {
   CHATS_TOMBSTONE_KEY,
 } from "./state/chats-local-cache";
 
-/** Module-level prewarm sentinel.
+/** Engine-session prewarm claim.
  *
- *  Why module-scope (not useRef): Vite Fast Refresh remounts the
- *  PreWarmAgents component on every renderer-side HMR. A React ref
- *  resets to its initial value on each remount, so the prewarm effect
- *  re-fired the AGENT_INIT_AGENT calls for all enabled agents every
- *  time the user saved a file. The engine's event loop got overwhelmed processing the
- *  avalanche, the sidecar watchdog failed its TCP probes, and the
- *  engine was force-respawned mid-session — the exact pattern the
- *  user pasted in their log.
- *
- *  This sentinel lives outside the component, so it survives HMR.
- *  Reset only when `engineReady` drops to false (engine actually died
- *  / restarted) — then the next ENGINE_READY rearms a fresh prewarm. */
-let prewarmedForEngineSession = false;
+ *  This lives in agent-prewarm-singleflight's renderer-global state—not merely
+ *  at module scope, because a directly edited module is re-evaluated by Vite.
+ *  It resets only when `engineReady` drops false (the engine actually died),
+ *  then the next ENGINE_READY transition can claim one fresh warmup. */
 
 // Device-local scroll positions must exist before the first chat layout effect;
 // a passive ChatsPersistence effect is already too late and causes a visible
@@ -184,13 +201,17 @@ function PreWarmAgents() {
 
   const warmAll = React.useCallback(async () => {
     try {
-      // Route the list through loadAgents so this boot-time warm ALSO fills
-      // the shared agents-cache snapshot (a raw sessions.listAgents() reply
-      // never lands in the cache). Every agent-resolution surface — the
-      // AutoBindAgent binder, spawn-default-chat's synchronous born path,
-      // the dispatcher — reads that snapshot, and on a fresh data dir this
-      // is the first (often only) boot-path call that can populate it.
-      const registry = await loadAgents((force) => sessions.listAgents(force));
+      // A confirmed stale-while-revalidate snapshot is enough to choose which
+      // providers to initialize. Do not turn every engine reconnect into a
+      // synchronous auth/version probe sweep: those provider subprocesses and
+      // utility canaries otherwise compete with the active chat's cold resume.
+      // A genuinely fresh data dir still loads the registry here; settled chat
+      // and Settings surfaces refresh an existing snapshot later.
+      const snapshot = getAgentsSnapshot();
+      const registry =
+        snapshot && hasConfirmedAgents()
+          ? snapshot
+          : await loadAgents((force) => sessions.listAgents(force));
       const persisted = readEnabledAgentIds();
       // Mirror useEnabledAgents.isEnabled — first-run defaults exclude
       // beta agents so the warmup loop doesn't fire AGENT_INIT_AGENT
@@ -237,7 +258,7 @@ function PreWarmAgents() {
 
       await Promise.all(
         needsWarm.map((id) =>
-          sessions.initAgent(id).catch((err) => {
+          prewarmAgentOnce(id, sessions.initAgent).catch((err) => {
             // Log at debug so a genuine init bug isn't invisible. Don't
             // re-throw — pre-warm is best-effort by design and the next
             // user prompt will surface a real failure via ensureSession.
@@ -261,11 +282,10 @@ function PreWarmAgents() {
   //     Clear the sentinel so the next ENGINE_READY arms a re-warm.
   useEffect(() => {
     if (!engineReady) {
-      prewarmedForEngineSession = false;
+      resetAgentPrewarmForEngineSession();
       return;
     }
-    if (prewarmedForEngineSession) return;
-    prewarmedForEngineSession = true;
+    if (!claimAgentPrewarmForEngineSession()) return;
     void warmAll();
   }, [engineReady, warmAll]);
 
@@ -977,24 +997,23 @@ function MainShellBody({
   useGitRefreshCoordinator();
   const activePage = useActivePage();
   const activeRepoId = useActiveRepoId();
+  const createWorkspaceProjectId = useCreateWorkspaceProjectId();
+  const { openProject, openGithubProject, quickStart } = useAddProject();
   const {
     workspace: activeWorkspace,
     folder: activeWorkspaceFolder,
     project: activeProject,
   } = useActiveWorkspace();
   const pendingWorkspaceKind = usePendingWorkspaceKind(activeWorkspaceFolder);
-  const designWorkspacesActive = useInternalFeatureActive("designWorkspaces");
-  const internalUserResolutionSettled = useInternalUserResolutionSettled();
+  const requestedWorkspaceKind = usePendingWorkspaceMode(activeWorkspace?.id);
   const designWorkspaceRequested =
     resolveWorkspacePresentationKind({
       confirmedKind: activeWorkspace?.kind,
+      requestedKind: requestedWorkspaceKind,
       pendingKind: pendingWorkspaceKind,
       folder: activeWorkspaceFolder,
     }) === "design";
-  const designWorkspaceActive =
-    designWorkspacesActive && designWorkspaceRequested;
-  const designWorkspaceBlocked =
-    designWorkspaceRequested && !designWorkspacesActive;
+  const designWorkspaceActive = designWorkspaceRequested;
   useOpenBrowserHotkey(
     activePage === "workspace" &&
       Boolean(activeWorkspaceFolder) &&
@@ -1003,7 +1022,7 @@ function MainShellBody({
   );
   const shellSurfaceRef = useRef<HTMLDivElement | null>(null);
   useInstantViewSwitch(
-    `${activePage}:${activeWorkspace?.id ?? activeRepoId ?? activeProject?.id ?? "none"}`,
+    `${activePage}:${activeWorkspace?.id ?? activeRepoId ?? activeProject?.id ?? "none"}:${designWorkspaceRequested ? "design" : "code"}`,
     shellSurfaceRef,
   );
   // Reveal a PR opened outside the engine (agent `gh pr create` / terminal): if
@@ -1011,34 +1030,11 @@ function MainShellBody({
   // Workbench PR-status island appears and the header "Create PR" button hides.
   useWorkspacePrSync(designWorkspaceRequested ? null : activeWorkspace);
   const dispatch = useWorkspaceDispatch();
-  // A persisted design destination can outlive its per-channel Internal flag
-  // (or the staff role can be revoked between launches). Leave the workspace
-  // identity remembered, but move to the user's complete Home destination
-  // before paint. This avoids mounting either design UI or the coding harness,
-  // and avoids auto-spawning a coding chat merely as an access fallback.
-  React.useLayoutEffect(() => {
-    if (
-      !shouldLeaveBlockedDesignWorkspace({
-        workspaceRoute: activePage === "workspace",
-        designRequested: designWorkspaceRequested,
-        designActive: designWorkspaceActive,
-        internalUserResolutionSettled,
-      })
-    ) {
-      return;
-    }
-    dispatch({ type: "OPEN_HOME" });
-  }, [
-    activePage,
-    designWorkspaceActive,
-    designWorkspaceRequested,
-    dispatch,
-    internalUserResolutionSettled,
-  ]);
   const { projects } = useProjects();
+  useWarmAutomaticRepositoryIcons(projects);
   // ⌘T opens a chat; ⌘⇧T opens a terminal-agent tab when that feature is
   // enabled. Mounted here so neither shortcut fires from Settings.
-  useNewTabHotkeys(!designWorkspaceRequested);
+  useNewTabHotkeys(activePage === "workspace" && !designWorkspaceRequested);
   const worktreeMissing =
     !!activeWorkspace && activeWorkspace.present === false;
   // Zero projects -> full-window welcome (logo + Open project / GitHub /
@@ -1049,6 +1045,7 @@ function MainShellBody({
   // page (workspaces + settings) reached from the rail's REPOS rows;
   // "customize" is agent capabilities (MCP now) scoped User / per-repo.
   const isHome =
+    activePage === "create" ||
     activePage === "dashboard" ||
     activePage === "customize" ||
     activePage === "settings" ||
@@ -1060,17 +1057,20 @@ function MainShellBody({
       ? (projects.find((p) => p.id === activeRepoId) ?? null)
       : null;
   const activeHomePageId = isHome
-    ? activePage === "settings"
-      ? "settings"
-      : activePage === "customize"
-        ? "customize"
-        : activeRepoProject
-          ? "repo"
-          : "dashboard"
+    ? activePage === "create"
+      ? "create"
+      : activePage === "settings"
+        ? "settings"
+        : activePage === "customize"
+          ? "customize"
+          : activeRepoProject
+            ? "repo"
+            : "dashboard"
     : null;
-  // All four Home sub-pages stay mounted after their first visit, preserving
-  // their local models and scroll-adjacent DOM while the active wrapper shows.
-  const homePageIdsToRender = useRetainedViewKeys(activeHomePageId, 4);
+  // Five bounded Home wrappers retain navigation layout. Create's portal-heavy
+  // composer mounts only while active below, so hidden menus/editors cannot
+  // keep effects, focus, or overlays alive behind another surface.
+  const homePageIdsToRender = useRetainedViewKeys(activeHomePageId, 5);
   // Keeps RepoPage's bounded per-repository deck alive while Dashboard or
   // Settings is visible; updated only by a valid repo route.
   const retainedRepoProjectRef = React.useRef(activeRepoProject);
@@ -1093,16 +1093,55 @@ function MainShellBody({
   const renderWorkspaceShell =
     !showWelcome &&
     (workspaceShellRetainedRef.current || activePage === "workspace");
+  const activeDesignWorkspace = React.useMemo<RetainedDesignWorkspace | null>(
+    () =>
+      designWorkspaceActive && activeWorkspace && activeWorkspaceFolder
+        ? { workspace: activeWorkspace, folder: activeWorkspaceFolder }
+        : null,
+    [designWorkspaceActive, activeWorkspace, activeWorkspaceFolder],
+  );
+  const retainedDesignWorkspaceRef = React.useRef(
+    new Map<string, RetainedDesignWorkspace>(),
+  );
+  const designWorkspaceIdsToRender = useRetainedViewKeys(
+    activeDesignWorkspace?.workspace.id ?? null,
+    2,
+    undefined,
+    "design-workspaces",
+  );
+  // MRU chooses the two live Design surfaces, but rendering that changing
+  // order physically moves their iframe-owning DOM nodes. Chromium reloads a
+  // nested browsing context when it moves, so keep surviving A → B → A
+  // siblings in place and append only genuinely new workspaces.
+  const stableDesignWorkspaceIdsToRender = useStableRetainedViewOrder(
+    designWorkspaceIdsToRender,
+    "design-workspaces",
+  );
+  const designWorkspaceEntriesToRender =
+    stableDesignWorkspaceIdsToRender.flatMap((id) => {
+      if (activeDesignWorkspace?.workspace.id === id) {
+        return [activeDesignWorkspace];
+      }
+      const retained = retainedDesignWorkspaceRef.current.get(id);
+      return retained ? [retained] : [];
+    });
+  React.useLayoutEffect(() => {
+    if (activeDesignWorkspace) {
+      retainedDesignWorkspaceRef.current.set(
+        activeDesignWorkspace.workspace.id,
+        activeDesignWorkspace,
+      );
+    }
+    const retainedIds = new Set(designWorkspaceIdsToRender);
+    for (const id of retainedDesignWorkspaceRef.current.keys()) {
+      if (!retainedIds.has(id)) retainedDesignWorkspaceRef.current.delete(id);
+    }
+  }, [activeDesignWorkspace, designWorkspaceIdsToRender]);
 
   // Only the workspace view swaps in the missing-worktree panel — the Home
   // sub-pages have no active worktree content to lose, so they render normally
   // even while the selected workspace's folder is gone.
-  if (
-    worktreeMissing &&
-    activeWorkspace &&
-    !designWorkspaceBlocked &&
-    activePage === "workspace"
-  ) {
+  if (worktreeMissing && activeWorkspace && activePage === "workspace") {
     // Drop the DB row + worktree folder (branch kept), scrub every renderer
     // surface keyed on it, and repoint to the project's Local main so the open
     // chat isn't stranded. Shared with the corrupted-workspace archive-failure
@@ -1166,39 +1205,60 @@ function MainShellBody({
               ].join(" ")}
               aria-hidden={isHome}
             >
-              {designWorkspaceBlocked ? (
-                <div className="bg-bg1 flex min-h-0 min-w-0 flex-1" />
-              ) : designWorkspaceActive ? (
-                <>
-                  <DesignWorkspaceSidebar
-                    surfaceActive={!isHome}
-                    canvasCollapsed={workbenchCollapsed}
-                  />
-                  <DesignWorkspaceColumn
-                    workspace={
-                      activeWorkspace?.kind === "design"
-                        ? activeWorkspace
-                        : null
-                    }
-                    folder={activeWorkspaceFolder}
-                    surfaceActive={!isHome && !workbenchCollapsed}
-                    collapsed={workbenchCollapsed}
-                    onToggleWorkbench={toggleWorkbench}
-                  />
-                </>
-              ) : (
-                <>
-                  <ConversationPane
-                    workbenchCollapsed={workbenchCollapsed}
-                    onToggleWorkbench={toggleWorkbench}
-                  />
-                  <WorkbenchPane
-                    onToggleWorkbench={toggleWorkbench}
-                    surfaceActive={!isHome && !workbenchCollapsed}
-                    collapsed={workbenchCollapsed}
-                  />
-                </>
-              )}
+              <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
+                {designWorkspaceEntriesToRender.map((entry) => {
+                  const entryActive =
+                    designWorkspaceActive &&
+                    entry.workspace.id === activeDesignWorkspace?.workspace.id;
+                  // `visible` re-enables painting under any hidden ancestor,
+                  // so the active deck must drop it while a Home page owns the
+                  // window — otherwise its z-indexed layer rows paint straight
+                  // through the Home sidebar.
+                  const entryVisible = entryActive && !isHome;
+                  return (
+                    <div
+                      key={entry.workspace.id}
+                      data-design-retained-workspace={entry.workspace.id}
+                      {...(!entryVisible ? { inert: "" } : {})}
+                      aria-hidden={!entryVisible}
+                      className={[
+                        "absolute inset-0 flex min-h-0 min-w-0 overflow-hidden",
+                        entryVisible
+                          ? "pointer-events-auto visible"
+                          : "pointer-events-none invisible",
+                      ].join(" ")}
+                    >
+                      {/* Design owns an always-present canvas/inspector pair;
+                          the persisted code Workbench collapse applies only to
+                          ordinary coding workspaces. */}
+                      <DesignWorkspaceSidebar
+                        workspace={entry.workspace}
+                        folder={entry.folder}
+                        surfaceActive={entryActive && !isHome}
+                      />
+                      <DesignWorkspaceColumn
+                        workspace={entry.workspace}
+                        folder={entry.folder}
+                        surfaceActive={entryActive && !isHome}
+                      />
+                    </div>
+                  );
+                })}
+                {!designWorkspaceActive ? (
+                  <div className="absolute inset-0 flex min-h-0 min-w-0 overflow-hidden">
+                    <ConversationPane
+                      workbenchCollapsed={workbenchCollapsed}
+                      onToggleWorkbench={toggleWorkbench}
+                      workspace={activeWorkspace}
+                    />
+                    <WorkbenchPane
+                      onToggleWorkbench={toggleWorkbench}
+                      surfaceActive={!isHome && !workbenchCollapsed}
+                      collapsed={workbenchCollapsed}
+                    />
+                  </div>
+                ) : null}
+              </div>
             </div>
           )}
           {showWelcome && !isHome && (
@@ -1284,6 +1344,28 @@ function MainShellBody({
                     <RepoPage project={repoProjectForDeck} />
                   </div>
                 )}
+                {homePageIdsToRender.includes("create") && (
+                  <div
+                    {...(activeHomePageId !== "create" ? { inert: "" } : {})}
+                    className={[
+                      "absolute inset-0 flex min-h-0 min-w-0",
+                      activeHomePageId === "create"
+                        ? "pointer-events-auto visible"
+                        : "pointer-events-none invisible",
+                    ].join(" ")}
+                    aria-hidden={activeHomePageId !== "create"}
+                  >
+                    {activeHomePageId === "create" && (
+                      <DispatcherPage
+                        active
+                        initialProjectId={createWorkspaceProjectId}
+                        onOpenProject={openProject}
+                        onOpenGithubProject={openGithubProject}
+                        onQuickStart={quickStart}
+                      />
+                    )}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -1353,6 +1435,29 @@ function InviteDeepLinkHandler() {
   return null;
 }
 
+/** WorkOS/organization events invalidate the shared exact `/v1/me` snapshot;
+ * the store retains its last confirmed value while the refresh is in flight. */
+function AuthSecurityEventHandler() {
+  const { status } = useAuth();
+  React.useEffect(() => {
+    if (status !== "authenticated") return;
+    let active = true;
+    let off: (() => void) | undefined;
+    void nativeListen("auth-security-event", () => {
+      if (!active) return;
+      void refreshTeams().finally(() => requestTeamResync());
+    }).then((unsubscribe) => {
+      if (active) off = unsubscribe;
+      else unsubscribe();
+    });
+    return () => {
+      active = false;
+      off?.();
+    };
+  }, [status]);
+  return null;
+}
+
 export function AppShell() {
   return (
     <AppearanceProvider>
@@ -1374,6 +1479,7 @@ export function AppShell() {
             provider below the gate is required. */}
         <UpdateNotifications />
         <InviteDeepLinkHandler />
+        <AuthSecurityEventHandler />
         <AuthGate>
           <AppShellBody />
         </AuthGate>

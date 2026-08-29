@@ -19,7 +19,10 @@ import {
   upsertChat,
   type ChatRow,
 } from "../db/chats";
+import { windowChatMessages } from "../db/messages";
+import { listTurnsForChat } from "../db/turns";
 import { AgentFailureError } from "../agents/types";
+import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
 
 interface ActivePromptRecord {
   sessionId: string;
@@ -34,6 +37,7 @@ interface ActivePromptRecord {
 interface TestEngineInternals {
   router: MessageRouter;
   agents: {
+    cancel(agentId: string, sessionId: string): Promise<void>;
     events: {
       onSessionUpdate: (agentId: string, notification: unknown) => void;
       onAgentExit: (
@@ -56,6 +60,7 @@ interface TestEngineInternals {
   promptSessions: Set<string>;
   activePromptContexts: Map<string, ActivePromptRecord>;
   sessionLoadResponses: Map<string, LoadSessionResponse>;
+  cloudWorker: CloudWorkerConfiguration | null;
   pendingPermissionRequests: Map<
     string,
     { agentId: string; request: RequestPermissionRequest }
@@ -135,6 +140,59 @@ function internals(engine: ZerosEngine): TestEngineInternals {
 }
 
 describe("agent session continuity across a local renderer reload", () => {
+  it("persists admission time on both the user bubble and completed turn", async () => {
+    const dbDir = fs.mkdtempSync(path.join(os.tmpdir(), "zeros-prompt-time-"));
+    const workDir = path.join(dbDir, "worktree");
+    fs.mkdirSync(workDir);
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    try {
+      upsertChat(persistedChat("chat-prompt-time", { folder: workDir }));
+      const engine = new ZerosEngine({ root: workDir, port: 29_903 });
+      const state = internals(engine);
+      const { client } = testClient();
+      state.router.register(client);
+      state.sessionAgent.set("execution-prompt-time", "cursor");
+      state.sessionChat.set("execution-prompt-time", "chat-prompt-time");
+      state.conversationExecution.set(
+        "chat-prompt-time",
+        "execution-prompt-time",
+      );
+      vi.spyOn(state.agents, "prompt").mockResolvedValue({
+        stopReason: "end_turn",
+      });
+      const sentAt = Date.now() - 4_000;
+
+      await state.handleMessage(
+        {
+          type: "AGENT_PROMPT",
+          id: "prompt-time",
+          source: "browser",
+          timestamp: Date.now(),
+          agentId: "cursor",
+          executionId: "execution-prompt-time",
+          sessionId: "execution-prompt-time",
+          prompt: [{ type: "text", text: "hi" }],
+          userMessageId: "user-prompt-time",
+          startedAt: sentAt,
+        },
+        client,
+      );
+
+      expect(listTurnsForChat("chat-prompt-time")[0]?.startedAt).toBe(sentAt);
+      const persisted = windowChatMessages("chat-prompt-time", 10)[0];
+      expect(persisted?.createdAt).toBe(sentAt);
+      expect(JSON.parse(persisted?.payload ?? "{}")).toMatchObject({
+        id: "user-prompt-time",
+        role: "user",
+        createdAt: sentAt,
+      });
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
+  });
+
   it("re-adopts an active prompt without asking the adapter to load it again", async () => {
     const engine = new ZerosEngine({ root: process.cwd(), port: 29_880 });
     const state = internals(engine);
@@ -226,9 +284,7 @@ describe("agent session continuity across a local renderer reload", () => {
         executionId: "execution-live",
       }),
     ]);
-    expect(state.conversationExecution.get("chat-live")).toBe(
-      "execution-live",
-    );
+    expect(state.conversationExecution.get("chat-live")).toBe("execution-live");
   });
 
   it("carries the renderer promptId through re-adoption", async () => {
@@ -355,32 +411,42 @@ describe("agent session continuity across a local renderer reload", () => {
   });
 
   it("classifies a conversation with no live execution or binding as an expected miss", async () => {
-    const engine = new ZerosEngine({ root: process.cwd(), port: 29_898 });
-    const state = internals(engine);
-    const { client, messages } = testClient();
-    state.router.register(client);
-    const loadSession = vi.spyOn(state.agents, "loadSession");
-
-    await state.handleMessage(
-      {
-        type: "AGENT_LOAD_SESSION",
-        id: "load-missing-conversation",
-        source: "browser",
-        timestamp: 1,
-        agentId: "codex",
-        chatId: "conversation-missing",
-        cwd: process.cwd(),
-      },
-      client,
+    const dbDir = fs.mkdtempSync(
+      path.join(os.tmpdir(), "zeros-missing-conversation-"),
     );
+    setZerosDbPathForTesting(path.join(dbDir, "zeros.db"));
+    try {
+      const engine = new ZerosEngine({ root: process.cwd(), port: 29_898 });
+      const state = internals(engine);
+      const { client, messages } = testClient();
+      state.router.register(client);
+      const loadSession = vi.spyOn(state.agents, "loadSession");
 
-    expect(loadSession).not.toHaveBeenCalled();
-    expect(messages).toEqual([
-      expect.objectContaining({
-        type: "AGENT_ERROR",
-        failure: expect.objectContaining({ kind: "session-expired" }),
-      }),
-    ]);
+      await state.handleMessage(
+        {
+          type: "AGENT_LOAD_SESSION",
+          id: "load-missing-conversation",
+          source: "browser",
+          timestamp: 1,
+          agentId: "codex",
+          chatId: "conversation-missing",
+          cwd: process.cwd(),
+        },
+        client,
+      );
+
+      expect(loadSession).not.toHaveBeenCalled();
+      expect(messages).toEqual([
+        expect.objectContaining({
+          type: "AGENT_ERROR",
+          failure: expect.objectContaining({ kind: "session-expired" }),
+        }),
+      ]);
+    } finally {
+      closeZerosDb();
+      setZerosDbPathForTesting(null);
+      fs.rmSync(dbDir, { recursive: true, force: true });
+    }
   });
 
   it("never degrades a dead executionId into a provider resume locator", async () => {
@@ -880,6 +946,34 @@ describe("agent session continuity across a local renderer reload", () => {
 
     state.handleDisconnect(client);
 
+    expect(state.sessionAgent.get("session-1")).toBe("claude");
+  });
+
+  it("keeps an attested cloud agent alive across a transient WSS disconnect", () => {
+    const engine = new ZerosEngine({ root: process.cwd(), port: 29_882 });
+    const state = internals(engine);
+    state.cloudWorker = {
+      version: 1,
+      backend: "cloud-worker",
+      profile: "zeros-cloud-worker-v1",
+      uid: process.getuid?.() || 10_001,
+      gid: process.getgid?.() || 10_001,
+      toolchain: {
+        node: "/usr/bin/node",
+        supervisor: "/opt/zeros/zsr-supervisor.mjs",
+        bwrap: "/usr/bin/bwrap",
+        setpriv: "/usr/bin/setpriv",
+      },
+    };
+    const { client } = testClient("cloud-renderer-reload", "cloud");
+    state.router.register(client);
+    state.router.setOwner("session-1", client.id);
+    state.sessionAgent.set("session-1", "claude");
+    const cancel = vi.spyOn(state.agents, "cancel").mockResolvedValue();
+
+    state.handleDisconnect(client);
+
+    expect(cancel).not.toHaveBeenCalled();
     expect(state.sessionAgent.get("session-1")).toBe("claude");
   });
 });

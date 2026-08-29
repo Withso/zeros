@@ -64,6 +64,8 @@ interface DiffSource {
   patch?: string;
 }
 
+const MAX_RENDERED_BATCH_EDITS = 50;
+
 export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
   message,
   ctx,
@@ -74,10 +76,17 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
   // session, that prior content is the real "before" — use it so an overwrite
   // shows what CHANGED, not the whole file. (Ch.1, 2026-06-20)
   const baseline = ctx.editBaselines.get(tool.toolCallId);
-  const source = useMemo(
-    () => extractDiffSource(tool, baseline),
+  const sources = useMemo(
+    () => extractDiffSources(tool, baseline),
     [tool, baseline],
   );
+  const source = sources[0] ?? null;
+  const batchLabel = editBatchLabel(sources);
+  const multiFile = batchLabel !== null;
+  const renderedSources = multiFile
+    ? sources.slice(0, MAX_RENDERED_BATCH_EDITS)
+    : sources;
+  const hiddenSourceCount = sources.length - renderedSources.length;
   // When no structured diff is available, fall back to any captured
   // output/content text rather than a dead-end "No diff available" — keeps
   // edit cards from rendering blank for adapters with unexpected field names.
@@ -89,13 +98,26 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
   // fall back to diffing the rendered before/after — and when the card shows an
   // overwrite diffed against a session `baseline`, the diff IS the count (see
   // `resolveEditCounts`). (Ch.1)
-  const counts = useMemo(
-    () => resolveEditCounts(tool, source, baseline),
-    [tool, source, baseline],
-  );
+  const counts = useMemo(() => {
+    if (!multiFile) return resolveEditCounts(tool, source, baseline);
+    return sources.reduce(
+      (total, current) => {
+        const next = current.patch
+          ? patchSigilCounts(current.patch)
+          : countLineDelta(current);
+        return {
+          added: total.added + (next?.added ?? 0),
+          removed: total.removed + (next?.removed ?? 0),
+        };
+      },
+      { added: 0, removed: 0 },
+    );
+  }, [tool, source, sources, baseline, multiFile]);
 
-  const path = source?.path ?? readPath(tool.rawInput) ?? tool.title;
-  const isWrite = source?.write === true;
+  const path = multiFile
+    ? undefined
+    : (source?.path ?? readPath(tool.rawInput) ?? tool.title);
+  const isWrite = !multiFile && source?.write === true;
   // The N in "Write N lines" = the written file's line count. Prefer the
   // INPUT's full content: when the diff body comes from a real patch
   // (structuredPatch overwrite), source.after is just the delta+context, not
@@ -115,10 +137,12 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
   // pattern as "Read N lines".
   const editMeta: EventMeta = {
     Icon: FileEdit,
-    label: writeLineCount != null ? `Write ${writeLineCount} lines` : "Edit",
+    label:
+      batchLabel ??
+      (writeLineCount != null ? `Write ${writeLineCount} lines` : "Edit"),
     target: path,
-    targetFile: true,
-    targetKind: "file",
+    targetFile: !multiFile,
+    ...(multiFile ? {} : { targetKind: "file" as const }),
     expandable: true,
   };
 
@@ -153,24 +177,43 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
     [failed, tool],
   );
 
-  const detail = source ? (
-    <>
-      {failureText && (
-        <pre className="text-red-primary/90 m-0 mb-2 max-h-[200px] overflow-y-auto font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">
-          {failureText}
-        </pre>
-      )}
-      <EditDiff source={source} />
-    </>
-  ) : fallbackText ? (
-    <pre className="bg-bg2/60 text-fg1 m-0 max-h-[200px] overflow-y-auto rounded-md p-2 font-mono text-sm leading-relaxed break-words whitespace-pre-wrap">
-      {fallbackText}
-    </pre>
-  ) : (
-    <div className="text-fg2 text-xs italic">
-      No diff available — adapter did not provide before/after content.
-    </div>
-  );
+  const detail =
+    sources.length > 0 ? (
+      <>
+        {failureText && (
+          <pre className="text-red-primary/90 m-0 mb-2 max-h-[200px] overflow-y-auto font-mono text-xs leading-relaxed break-words whitespace-pre-wrap">
+            {failureText}
+          </pre>
+        )}
+        {multiFile ? (
+          <div className="space-y-3">
+            {renderedSources.map((entry, index) => (
+              <section key={`${entry.path}:${index}`}>
+                <div className="text-fg2 mb-1 truncate px-1 font-mono text-xs">
+                  {entry.path}
+                </div>
+                <EditDiff source={entry} />
+              </section>
+            ))}
+            {hiddenSourceCount > 0 && (
+              <div className="text-fg2 px-1 text-xs italic">
+                {hiddenSourceCount} more files are preserved in the tool input.
+              </div>
+            )}
+          </div>
+        ) : (
+          <EditDiff source={source!} />
+        )}
+      </>
+    ) : fallbackText ? (
+      <pre className="bg-bg2/60 text-fg1 m-0 max-h-[200px] overflow-y-auto rounded-md p-2 font-mono text-sm leading-relaxed break-words whitespace-pre-wrap">
+        {fallbackText}
+      </pre>
+    ) : (
+      <div className="text-fg2 text-xs italic">
+        No diff available — adapter did not provide before/after content.
+      </div>
+    );
 
   // NO defaultOpen — a failed edit stays collapsed like every other failed
   // tool row; the red tint + icon are the signal, expand is the user's move.
@@ -188,7 +231,7 @@ export const EditCard: Renderer<AgentToolMessage> = memo(function EditCard({
       detail={detail}
       trailingNode={trailingNode}
       hoverPreview={
-        !failed && hasChanges && source ? (
+        !failed && !multiFile && hasChanges && source ? (
           <EditDiff source={source} compact />
         ) : undefined
       }
@@ -592,6 +635,42 @@ export function extractDiffSource(
   return null;
 }
 
+/** Every file represented by one edit tool call. Codex intentionally batches
+ * an atomic apply_patch operation into `changes[]`; keeping only its first
+ * entry made a five-file write render as “Write london.md”. The singular
+ * helper remains the compatibility API for callers that need a preview. */
+export function extractDiffSources(
+  tool: AgentToolMessage,
+  baseline?: string,
+): DiffSource[] {
+  const contentSources = (tool.content ?? []).flatMap((block) =>
+    block.type === "diff"
+      ? [
+          {
+            path: block.path,
+            before: block.oldText ?? "",
+            after: block.newText,
+          } satisfies DiffSource,
+        ]
+      : [],
+  );
+  if (contentSources.length > 0) return contentSources;
+
+  if (isObj(tool.rawInput)) {
+    const fileChanges = readFileChanges(tool.rawInput);
+    if (fileChanges.length > 0) return fileChanges;
+  }
+  const source = extractDiffSource(tool, baseline);
+  return source ? [source] : [];
+}
+
+export function editBatchLabel(
+  sources: readonly { write?: boolean }[],
+): string | null {
+  if (sources.length <= 1) return null;
+  return `${sources.every((entry) => entry.write) ? "Write" : "Edit"} ${sources.length} files`;
+}
+
 function readPath(input: unknown): string | null {
   if (!isObj(input)) return null;
   // `target_file` is Cursor's edit-path field; include it so Cursor edits
@@ -743,14 +822,22 @@ function readEdits(
  *  content for an `add`, the full removed content for a `delete`, and a unified
  *  diff for an `update`. The renderer turns each into a before/after pair so
  *  Codex edits show a diff on expand like Claude (old/new) and Cursor
- *  (result diffString). Renders the FIRST path-bearing change — the same one
- *  the card's title and mergeKey already use. */
+ *  (result diffString). Every path-bearing change remains available to a
+ *  batched edit card; the singular helper below preserves its legacy API. */
+function readFileChanges(inp: Record<string, unknown>): DiffSource[] {
+  if (!Array.isArray(inp.changes)) return [];
+  return inp.changes.flatMap((change) => {
+    if (!isObj(change) || typeof change.path !== "string") return [];
+    const source = fileChangeSource(change);
+    return source ? [source] : [];
+  });
+}
+
 function readFileChange(inp: Record<string, unknown>): DiffSource | null {
-  if (!Array.isArray(inp.changes)) return null;
-  const change = inp.changes.find(
-    (c): c is Record<string, unknown> => isObj(c) && typeof c.path === "string",
-  );
-  if (!change) return null;
+  return readFileChanges(inp)[0] ?? null;
+}
+
+function fileChangeSource(change: Record<string, unknown>): DiffSource | null {
   const path = change.path as string;
   const diff = readString(change, ["diff", "unified_diff", "content"]);
   if (diff === null) return null;

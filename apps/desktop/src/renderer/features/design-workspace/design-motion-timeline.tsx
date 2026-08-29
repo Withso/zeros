@@ -7,17 +7,22 @@
 import React, {
   useCallback,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
 } from "react";
 import {
+  Box,
   ChevronDown,
+  ChevronRight,
+  Clock3,
   Diamond,
   Pause,
   Play,
   Plus,
   Save,
+  SlidersHorizontal,
   Trash2,
 } from "lucide-react";
 
@@ -28,6 +33,9 @@ import { cn } from "../../shared/ui/cn";
 import {
   Button,
   Input,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
   Select,
   SelectContent,
   SelectItem,
@@ -37,16 +45,26 @@ import {
   toast,
 } from "../../shared/ui/primitives";
 import {
+  addDesignMotionPropertyKeyframe,
   designDurationMs,
+  designMotionEasingIsValid,
+  designMotionFirstListValue,
   designMotionIterationCount,
+  designMotionNudgedOffset,
+  designMotionPlaybackStartOffset,
   designMotionPoints,
+  designMotionPresetKeyframes,
   designMotionPreviewCurrentTime,
   designMotionProperties,
+  designMotionRulerMarks,
+  designMotionTimeAtOffset,
+  designMotionTimeInputOffset,
   designMotionTracksAreValid,
   moveDesignMotionPoint,
   removeDesignMotionPoint,
   setDesignMotionPoint,
   type DesignMotionKeyframe,
+  type DesignMotionPresetId,
 } from "./design-motion-values";
 
 export interface DesignMotionTimelineDraft {
@@ -61,10 +79,25 @@ export interface DesignMotionTimelineDraft {
   fillMode: "none" | "forwards" | "backwards" | "both";
 }
 
+export interface DesignMotionPropertyRequest {
+  id: number;
+  property: string;
+  value: string;
+}
+
+export interface DesignMotionSeekRequest {
+  id: number;
+  offset: number;
+}
+
 interface DesignMotionTimelineProps {
   open: boolean;
+  ownerKey: string;
+  sessionOwnerKey: string;
   details: DesignRuntimeNodeDetails | null;
   definitions: readonly DesignAuthoredKeyframes[];
+  propertyRequest?: DesignMotionPropertyRequest | null;
+  seekRequest?: DesignMotionSeekRequest | null;
   disabled?: boolean;
   onOpenChange: (open: boolean) => void;
   onPreview: (
@@ -74,6 +107,12 @@ interface DesignMotionTimelineProps {
   ) => Promise<void>;
   onClearPreview: () => Promise<void>;
   onSave: (draft: DesignMotionTimelineDraft) => Promise<void>;
+  onDeleteMotion: () => Promise<void>;
+  onPropertyRequestHandled?: (id: number) => void;
+  onSeekRequestHandled?: (id: number) => void;
+  onPropertiesChange?: (properties: readonly string[]) => void;
+  onDraftChange?: (draft: DesignMotionTimelineDraft | null) => void;
+  onPlayheadChange?: (offset: number) => void;
 }
 
 interface SelectedPoint {
@@ -81,18 +120,171 @@ interface SelectedPoint {
   offset: number;
 }
 
+interface MotionDraftCacheEntry {
+  definitionsSignature: string;
+  draft: DesignMotionTimelineDraft;
+  playhead: number;
+  selectedPoint: SelectedPoint | null;
+  selectedProperty: string | null;
+  presetId: DesignMotionPresetId | null;
+  layerExpanded: boolean;
+  propertyDraft: string;
+  persistedMotion: boolean;
+}
+
+const motionDraftCache = new Map<string, MotionDraftCacheEntry>();
+const MOTION_DRAFT_CACHE_LIMIT = 16;
+
+function rememberMotionDraft(key: string, entry: MotionDraftCacheEntry) {
+  motionDraftCache.delete(key);
+  motionDraftCache.set(key, entry);
+  while (motionDraftCache.size > MOTION_DRAFT_CACHE_LIMIT) {
+    const oldest = motionDraftCache.keys().next().value;
+    if (oldest === undefined) break;
+    motionDraftCache.delete(oldest);
+  }
+}
+
+function MotionTimeField({
+  label,
+  time,
+  duration,
+  className,
+  disabled,
+  onOffsetChange,
+}: {
+  label: string;
+  time: number;
+  duration: number;
+  className?: string;
+  disabled?: boolean;
+  onOffsetChange: (offset: number) => void;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const cancelRef = useRef(false);
+  const [draft, setDraft] = useState(String(time));
+
+  useEffect(() => {
+    if (document.activeElement !== inputRef.current) setDraft(String(time));
+  }, [time]);
+
+  const commit = () => {
+    if (cancelRef.current) {
+      cancelRef.current = false;
+      return;
+    }
+    const offset = designMotionTimeInputOffset(draft, duration);
+    if (offset === null) {
+      setDraft(String(time));
+      return;
+    }
+    onOffsetChange(offset);
+  };
+
+  return (
+    <Input
+      ref={inputRef}
+      type="number"
+      min={0}
+      max={duration}
+      step={1}
+      value={draft}
+      aria-label={label}
+      className={className}
+      disabled={disabled}
+      onFocus={() => setDraft(String(time))}
+      onChange={(event) => setDraft(event.currentTarget.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          event.currentTarget.blur();
+        } else if (event.key === "Escape") {
+          event.preventDefault();
+          cancelRef.current = true;
+          setDraft(String(time));
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
 const MOTION_PROPERTY_OPTIONS = [
   "opacity",
   "transform",
+  "translate",
+  "rotate",
+  "scale",
+  "width",
+  "height",
+  "min-width",
+  "min-height",
+  "max-width",
+  "max-height",
+  "inset",
+  "top",
+  "right",
+  "bottom",
+  "left",
+  "padding",
+  "padding-top",
+  "padding-right",
+  "padding-bottom",
+  "padding-left",
+  "margin",
+  "gap",
+  "row-gap",
+  "column-gap",
   "background-color",
   "color",
+  "border-color",
+  "border-width",
   "filter",
   "border-radius",
+  "box-shadow",
+  "text-shadow",
   "clip-path",
+  "font-size",
+  "line-height",
   "letter-spacing",
 ] as const;
 
-const RULER_MARKS = [0, 25, 50, 75, 100] as const;
+const MOTION_PRESETS: ReadonlyArray<{
+  id: DesignMotionPresetId;
+  label: string;
+  easing: string;
+}> = [
+  { id: "fade-in", label: "Fade in", easing: "ease-out" },
+  {
+    id: "slide-up",
+    label: "Slide up",
+    easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+  },
+  {
+    id: "slide-down",
+    label: "Slide down",
+    easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+  },
+  {
+    id: "slide-left",
+    label: "Slide left",
+    easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+  },
+  {
+    id: "slide-right",
+    label: "Slide right",
+    easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+  },
+  {
+    id: "scale-in",
+    label: "Scale in",
+    easing: "cubic-bezier(0.22, 1, 0.36, 1)",
+  },
+  { id: "blur-in", label: "Blur in", easing: "ease-out" },
+  { id: "pulse", label: "Pulse", easing: "ease-in-out" },
+  { id: "spin", label: "Spin", easing: "linear" },
+];
 
 function style(
   details: DesignRuntimeNodeDetails,
@@ -103,47 +295,68 @@ function style(
 }
 
 function animationName(details: DesignRuntimeNodeDetails): string | null {
-  const value = style(details, "animationName", "none")
-    .split(",", 1)[0]
-    ?.trim();
+  const value = designMotionFirstListValue(
+    style(details, "animationName", "none"),
+  );
   return !value || value === "none" ? null : value;
 }
 
-function hasAuthoredMotion(
-  details: DesignRuntimeNodeDetails,
-  definitions: readonly DesignAuthoredKeyframes[],
-): boolean {
-  const name = animationName(details);
-  return Boolean(
-    name && definitions.some((definition) => definition.name === name),
-  );
+function motionOwnerHash(value: string): string {
+  let hash = 2_166_136_261;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0).toString(36);
 }
 
-function defaultMotionName(details: DesignRuntimeNodeDetails): string {
-  const suffix = details.oid.replace(/[^A-Za-z0-9_-]+/g, "-");
-  return `motion-${suffix}`.slice(0, 128);
+function defaultMotionName(
+  details: DesignRuntimeNodeDetails,
+  ownerKey: string,
+): string {
+  const suffix = details.oid
+    .replace(/[^A-Za-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 96);
+  return `motion-${suffix || "layer"}-${motionOwnerHash(`${ownerKey}\u0000${details.oid}`)}`;
+}
+
+function emptyMotionDraft(
+  details: DesignRuntimeNodeDetails,
+  ownerKey: string,
+): DesignMotionTimelineDraft {
+  return {
+    file: "tokens.css",
+    name: defaultMotionName(details, ownerKey),
+    keyframes: [],
+    duration: "300ms",
+    delay: "0ms",
+    easing: "ease-out",
+    iterations: "1",
+    direction: "normal",
+    fillMode: "both",
+  };
 }
 
 function initialMotionDraft(
   details: DesignRuntimeNodeDetails,
   definitions: readonly DesignAuthoredKeyframes[],
+  ownerKey: string,
 ): DesignMotionTimelineDraft {
   const authoredName = animationName(details);
   const definition = definitions.find((item) => item.name === authoredName);
-  const name = definition?.name ?? authoredName ?? defaultMotionName(details);
-  const finalOpacity = style(details, "opacity", "1");
-  const authoredDuration = style(details, "animationDuration", "300ms")
-    .split(",", 1)[0]!
-    .trim();
+  if (!authoredName && !definition) return emptyMotionDraft(details, ownerKey);
+  const name =
+    definition?.name ?? authoredName ?? defaultMotionName(details, ownerKey);
+  const authoredDuration = designMotionFirstListValue(
+    style(details, "animationDuration", "300ms"),
+  );
   const keyframes = definition?.keyframes.length
     ? definition.keyframes.map((keyframe) => ({
         offset: keyframe.offset,
         styles: { ...keyframe.styles },
       }))
-    : [
-        { offset: 0, styles: { opacity: finalOpacity === "0" ? "1" : "0" } },
-        { offset: 100, styles: { opacity: finalOpacity } },
-      ];
+    : [];
   return {
     file: definition?.file ?? "tokens.css",
     name,
@@ -151,15 +364,13 @@ function initialMotionDraft(
     duration: /^0(?:\.0+)?(?:ms|s)$/i.test(authoredDuration)
       ? "300ms"
       : authoredDuration,
-    delay: style(details, "animationDelay", "0ms").split(",", 1)[0]!,
-    easing: style(details, "animationTimingFunction", "ease-out").split(
-      ",",
-      1,
-    )[0]!,
-    iterations: style(details, "animationIterationCount", "1").split(
-      ",",
-      1,
-    )[0]!,
+    delay: designMotionFirstListValue(style(details, "animationDelay", "0ms")),
+    easing: designMotionFirstListValue(
+      style(details, "animationTimingFunction", "ease-out"),
+    ),
+    iterations: designMotionFirstListValue(
+      style(details, "animationIterationCount", "1"),
+    ),
     direction: designMotionDirection(
       style(details, "animationDirection", "normal"),
     ),
@@ -170,7 +381,7 @@ function initialMotionDraft(
 function designMotionDirection(
   value: string,
 ): DesignMotionTimelineDraft["direction"] {
-  const candidate = value.split(",", 1)[0]?.trim();
+  const candidate = designMotionFirstListValue(value);
   return candidate === "reverse" ||
     candidate === "alternate" ||
     candidate === "alternate-reverse"
@@ -181,7 +392,7 @@ function designMotionDirection(
 function designMotionFill(
   value: string,
 ): DesignMotionTimelineDraft["fillMode"] {
-  const candidate = value.split(",", 1)[0]?.trim();
+  const candidate = designMotionFirstListValue(value);
   return candidate === "none" ||
     candidate === "forwards" ||
     candidate === "backwards"
@@ -225,40 +436,107 @@ function previewIterations(value: string): number {
   return parsed === Infinity ? 1_000 : (parsed ?? 1);
 }
 
-function validMotionDraft(draft: DesignMotionTimelineDraft): boolean {
+function motionDraftIssue(draft: DesignMotionTimelineDraft): string | null {
   const iterations = designMotionIterationCount(draft.iterations);
-  return (
-    /^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(draft.name) &&
-    draft.keyframes.length >= 2 &&
-    draft.keyframes.length <= 32 &&
-    designMotionTracksAreValid(draft.keyframes) &&
-    designDurationMs(draft.duration, 0) > 0 &&
-    iterations !== null &&
-    iterations > 0 &&
-    draft.keyframes.every((keyframe) => Object.keys(keyframe.styles).length > 0)
-  );
+  if (!/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(draft.name)) {
+    return "Use a CSS-safe animation name.";
+  }
+  if (draft.keyframes.length < 2) return "Add at least two keyframes.";
+  if (draft.keyframes.length > 32) return "Keep the motion to 32 keyframes.";
+  if (!designMotionTracksAreValid(draft.keyframes)) {
+    return "Every property track needs at least two keyframes.";
+  }
+  if (designDurationMs(draft.duration, 0) <= 0) {
+    return "Enter a duration greater than 0ms.";
+  }
+  if (!/^-?(?:\d+(?:\.\d*)?|\.\d+)(?:ms|s)$/i.test(draft.delay.trim())) {
+    return "Enter the delay in ms or s.";
+  }
+  if (!designMotionEasingIsValid(draft.easing)) {
+    return "Choose or enter a valid CSS easing.";
+  }
+  if (iterations === null || iterations <= 0) {
+    return "Enter a positive loop count or infinite.";
+  }
+  if (
+    draft.keyframes.some(
+      (keyframe) =>
+        Object.keys(keyframe.styles).length === 0 ||
+        Object.values(keyframe.styles).some((value) => !value.trim()),
+    )
+  ) {
+    return "Keyframe values cannot be empty.";
+  }
+  return null;
 }
 
-export function DesignMotionTimeline({
+function validMotionDraft(draft: DesignMotionTimelineDraft): boolean {
+  return motionDraftIssue(draft) === null;
+}
+
+export const DesignMotionTimeline = React.memo(function DesignMotionTimeline({
   open,
+  ownerKey,
+  sessionOwnerKey,
   details,
   definitions,
+  propertyRequest = null,
+  seekRequest = null,
   disabled = false,
   onOpenChange,
   onPreview,
   onClearPreview,
   onSave,
+  onDeleteMotion,
+  onPropertyRequestHandled,
+  onSeekRequestHandled,
+  onPropertiesChange,
+  onDraftChange,
+  onPlayheadChange,
 }: DesignMotionTimelineProps) {
-  const [draft, setDraft] = useState<DesignMotionTimelineDraft | null>(() =>
-    details ? initialMotionDraft(details, definitions) : null,
+  const motionPropertiesListId = useId();
+  const motionEasingsListId = useId();
+  const detailsOwner = details?.oid ?? "";
+  const motionOwner = `${ownerKey}\u0000${detailsOwner}`;
+  const definitionsSignature = useMemo(
+    () => JSON.stringify(definitions),
+    [definitions],
   );
-  const [playhead, setPlayhead] = useState(0);
+  const definitionsRef = useRef(definitions);
+  definitionsRef.current = definitions;
+  const detailsRef = useRef(details);
+  detailsRef.current = details;
+  const cachedSessionCandidate = motionDraftCache.get(sessionOwnerKey);
+  const cachedSession =
+    cachedSessionCandidate?.definitionsSignature === definitionsSignature
+      ? cachedSessionCandidate
+      : null;
+  const [draft, setDraft] = useState<DesignMotionTimelineDraft | null>(
+    () =>
+      cachedSession?.draft ??
+      (details ? initialMotionDraft(details, definitions, ownerKey) : null),
+  );
+  const [playhead, setPlayhead] = useState(cachedSession?.playhead ?? 0);
   const [selectedPoint, setSelectedPoint] = useState<SelectedPoint | null>(
-    null,
+    cachedSession?.selectedPoint ?? null,
   );
-  const [propertyDraft, setPropertyDraft] = useState("opacity");
-  const [dirty, setDirty] = useState(() =>
-    details ? !hasAuthoredMotion(details, definitions) : false,
+  const [selectedProperty, setSelectedProperty] = useState<string | null>(
+    cachedSession?.selectedProperty ?? null,
+  );
+  const [presetId, setPresetId] = useState<DesignMotionPresetId | null>(
+    cachedSession?.presetId ?? null,
+  );
+  const [layerExpanded, setLayerExpanded] = useState(
+    cachedSession?.layerExpanded ?? true,
+  );
+  const [propertyDraft, setPropertyDraft] = useState(
+    cachedSession?.propertyDraft ?? "opacity",
+  );
+  const [dirty, setDirty] = useState(cachedSession !== null);
+  const [persistedMotion, setPersistedMotion] = useState(
+    () =>
+      cachedSession?.persistedMotion ??
+      (details ? animationName(details) !== null : false),
   );
   const [saving, setSaving] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -274,6 +552,28 @@ export function DesignMotionTimeline({
   const motionPreviewActiveRef = useRef(false);
   const clearPreviewRef = useRef(onClearPreview);
   clearPreviewRef.current = onClearPreview;
+  const handledPropertyRequestIdRef = useRef<number | null>(null);
+  const handledSeekRequestIdRef = useRef<number | null>(null);
+  const pointDragMovedRef = useRef(false);
+  const activePointerCleanupRef = useRef<(() => void) | null>(null);
+  const motionDraftSessionRef = useRef<MotionDraftCacheEntry | null>(null);
+  motionDraftSessionRef.current = draft
+    ? {
+        definitionsSignature,
+        draft,
+        playhead,
+        selectedPoint,
+        selectedProperty,
+        presetId,
+        layerExpanded,
+        propertyDraft,
+        persistedMotion,
+      }
+    : null;
+  const dirtyRef = useRef(dirty);
+  dirtyRef.current = dirty;
+  const sessionOwnerKeyRef = useRef(sessionOwnerKey);
+  sessionOwnerKeyRef.current = sessionOwnerKey;
 
   const properties = useMemo(
     () => (draft ? designMotionProperties(draft.keyframes) : []),
@@ -284,22 +584,61 @@ export function DesignMotionTimeline({
     [draft],
   );
   const durationMs = draft ? designDurationMs(draft.duration) : 300;
+  const rulerMarks = useMemo(
+    () => designMotionRulerMarks(durationMs),
+    [durationMs],
+  );
   const iterationCount = draft
     ? (designMotionIterationCount(draft.iterations) ?? 1)
     : 1;
 
   useEffect(() => {
-    if (!details) {
+    onPropertiesChange?.(properties);
+  }, [onPropertiesChange, properties]);
+
+  useEffect(() => {
+    onDraftChange?.(draft && validMotionDraft(draft) ? draft : null);
+  }, [draft, onDraftChange]);
+
+  useEffect(() => {
+    onPlayheadChange?.(playhead);
+  }, [onPlayheadChange, playhead]);
+
+  useEffect(() => {
+    const cached = motionDraftCache.get(sessionOwnerKey);
+    if (cached?.definitionsSignature === definitionsSignature) {
+      motionDraftCache.delete(sessionOwnerKey);
+      setDraft(cached.draft);
+      setPlayhead(cached.playhead);
+      setSelectedPoint(cached.selectedPoint);
+      setSelectedProperty(cached.selectedProperty);
+      setPresetId(cached.presetId);
+      setLayerExpanded(cached.layerExpanded);
+      setPropertyDraft(cached.propertyDraft);
+      setDirty(true);
+      setPersistedMotion(cached.persistedMotion);
+      setPlaying(false);
+      return;
+    }
+    motionDraftCache.delete(sessionOwnerKey);
+    const ownerDetails = detailsRef.current;
+    if (!ownerDetails) {
       setDraft(null);
       setPlaying(false);
       return;
     }
-    setDraft(initialMotionDraft(details, definitions));
+    setDraft(
+      initialMotionDraft(ownerDetails, definitionsRef.current, ownerKey),
+    );
     setPlayhead(0);
     setSelectedPoint(null);
-    setDirty(!hasAuthoredMotion(details, definitions));
+    setSelectedProperty(null);
+    setPresetId(null);
+    setLayerExpanded(true);
+    setDirty(false);
+    setPersistedMotion(animationName(ownerDetails) !== null);
     setPlaying(false);
-  }, [definitions, details]);
+  }, [definitionsSignature, motionOwner, ownerKey, sessionOwnerKey]);
 
   const queuePreview = useCallback(
     (
@@ -337,13 +676,32 @@ export function DesignMotionTimeline({
     [onPreview],
   );
 
-  useEffect(() => {
-    if (!open || !draft || playing) return;
-    queuePreview(draft, (playhead / 100) * durationMs, false);
-  }, [draft, durationMs, open, playhead, playing, queuePreview]);
+  const clearActivePreview = useCallback(() => {
+    queuedPreviewRef.current = null;
+    if (!motionPreviewActiveRef.current) return;
+    motionPreviewActiveRef.current = false;
+    void clearPreviewRef.current().catch(() => {});
+  }, []);
 
   useEffect(() => {
-    if (!open || !draft || !playing) return;
+    if (!open || playing) return;
+    if (!draft || !validMotionDraft(draft)) {
+      clearActivePreview();
+      return;
+    }
+    queuePreview(draft, (playhead / 100) * durationMs, false);
+  }, [
+    clearActivePreview,
+    draft,
+    durationMs,
+    open,
+    playhead,
+    playing,
+    queuePreview,
+  ]);
+
+  useEffect(() => {
+    if (!open || !draft || !playing || !validMotionDraft(draft)) return;
     const startingPlayhead = playheadRef.current;
     queuePreview(draft, (startingPlayhead / 100) * durationMs, true);
     const origin = {
@@ -376,15 +734,18 @@ export function DesignMotionTimeline({
 
   useEffect(() => {
     if (open) return;
-    queuedPreviewRef.current = null;
     setPlaying(false);
-    if (!motionPreviewActiveRef.current) return;
-    motionPreviewActiveRef.current = false;
-    void clearPreviewRef.current().catch(() => {});
-  }, [open]);
+    clearActivePreview();
+  }, [clearActivePreview, open]);
 
   useEffect(
     () => () => {
+      activePointerCleanupRef.current?.();
+      activePointerCleanupRef.current = null;
+      const cachedDraft = motionDraftSessionRef.current;
+      if (dirtyRef.current && cachedDraft) {
+        rememberMotionDraft(sessionOwnerKeyRef.current, cachedDraft);
+      }
       queuedPreviewRef.current = null;
       if (!motionPreviewActiveRef.current) return;
       motionPreviewActiveRef.current = false;
@@ -398,11 +759,82 @@ export function DesignMotionTimeline({
       mutate: (current: DesignMotionTimelineDraft) => DesignMotionTimelineDraft,
     ) => {
       setPlaying(false);
+      setPresetId(null);
       setDraft((current) => (current ? mutate(current) : current));
       setDirty(true);
     },
     [],
   );
+
+  const applyPreset = useCallback(
+    (presetId: string) => {
+      const preset = MOTION_PRESETS.find(({ id }) => id === presetId);
+      if (!preset) return;
+      mutateDraft((current) => ({
+        ...current,
+        keyframes: designMotionPresetKeyframes(preset.id),
+        duration: preset.id === "pulse" ? "600ms" : "300ms",
+        easing: preset.easing,
+        iterations: "1",
+        direction: "normal",
+        fillMode: "both",
+      }));
+      setPlayhead(0);
+      setSelectedPoint(null);
+      setSelectedProperty(null);
+      setPresetId(preset.id);
+      setLayerExpanded(true);
+    },
+    [mutateDraft],
+  );
+
+  useEffect(() => {
+    if (
+      !open ||
+      !details ||
+      !propertyRequest ||
+      handledPropertyRequestIdRef.current === propertyRequest.id
+    ) {
+      return;
+    }
+    handledPropertyRequestIdRef.current = propertyRequest.id;
+    const property = propertyRequest.property.trim().toLocaleLowerCase();
+    if (!/^(--[A-Za-z0-9_-]+|-?[a-z][a-z0-9-]*)$/.test(property)) {
+      onPropertyRequestHandled?.(propertyRequest.id);
+      return;
+    }
+    const offset = Math.round(playheadRef.current * 10) / 10;
+    mutateDraft((current) => ({
+      ...current,
+      keyframes: addDesignMotionPropertyKeyframe(
+        current.keyframes,
+        property,
+        offset,
+        propertyRequest.value,
+      ),
+    }));
+    setPropertyDraft(property);
+    setPlayhead(offset);
+    setSelectedPoint({ property, offset });
+    setSelectedProperty(property);
+    onPropertyRequestHandled?.(propertyRequest.id);
+  }, [details, mutateDraft, onPropertyRequestHandled, open, propertyRequest]);
+
+  useEffect(() => {
+    if (
+      !open ||
+      !seekRequest ||
+      handledSeekRequestIdRef.current === seekRequest.id
+    ) {
+      return;
+    }
+    handledSeekRequestIdRef.current = seekRequest.id;
+    setPlaying(false);
+    setPlayhead(
+      Math.round(Math.min(100, Math.max(0, seekRequest.offset)) * 10) / 10,
+    );
+    onSeekRequestHandled?.(seekRequest.id);
+  }, [onSeekRequestHandled, open, seekRequest]);
 
   const addProperty = useCallback(() => {
     if (!details || !draft) return;
@@ -426,6 +858,7 @@ export function DesignMotionTimeline({
       ),
     }));
     setSelectedPoint({ property, offset: 0 });
+    setSelectedProperty(property);
   }, [details, draft, mutateDraft, propertyDraft]);
 
   const addPoint = useCallback(
@@ -453,6 +886,7 @@ export function DesignMotionTimeline({
         ),
       }));
       setSelectedPoint({ property, offset: Math.round(playhead * 10) / 10 });
+      setSelectedProperty(property);
     },
     [details, draft, mutateDraft, playhead, points],
   );
@@ -477,8 +911,85 @@ export function DesignMotionTimeline({
       setSelectedPoint((current) =>
         current?.property === property ? null : current,
       );
+      setSelectedProperty((current) => (current === property ? null : current));
     },
     [mutateDraft],
+  );
+
+  const removePoint = useCallback(
+    (property: string, offset: number) => {
+      mutateDraft((current) => ({
+        ...current,
+        keyframes: removeDesignMotionPoint(current.keyframes, property, offset),
+      }));
+      setSelectedPoint(null);
+    },
+    [mutateDraft],
+  );
+
+  const retimePoint = useCallback(
+    (property: string, offset: number, nextOffset: number) => {
+      if (offset === nextOffset) return;
+      mutateDraft((current) => ({
+        ...current,
+        keyframes: moveDesignMotionPoint(
+          current.keyframes,
+          property,
+          offset,
+          nextOffset,
+        ),
+      }));
+      setPlayhead(nextOffset);
+      setSelectedPoint({ property, offset: nextOffset });
+      setSelectedProperty(property);
+    },
+    [mutateDraft],
+  );
+
+  const setPlayheadFromClientX = useCallback(
+    (clientX: number, track: HTMLElement) => {
+      const bounds = track.getBoundingClientRect();
+      if (bounds.width <= 0) return;
+      setPlaying(false);
+      setPlayhead(
+        Math.round(
+          Math.min(
+            100,
+            Math.max(0, ((clientX - bounds.left) / bounds.width) * 100),
+          ) * 10,
+        ) / 10,
+      );
+    },
+    [],
+  );
+
+  const startTimelineScrub = useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      if (disabled || event.button !== 0) return;
+      event.preventDefault();
+      activePointerCleanupRef.current?.();
+      const track = event.currentTarget;
+      const move = (pointerEvent: PointerEvent) =>
+        setPlayheadFromClientX(pointerEvent.clientX, track);
+      const finish = () => {
+        window.removeEventListener("pointermove", move);
+        window.removeEventListener("pointerup", finish);
+        window.removeEventListener("pointercancel", finish);
+        document.body.style.cursor = "";
+        document.body.style.userSelect = "";
+        if (activePointerCleanupRef.current === finish) {
+          activePointerCleanupRef.current = null;
+        }
+      };
+      activePointerCleanupRef.current = finish;
+      setPlayheadFromClientX(event.clientX, track);
+      document.body.style.cursor = "ew-resize";
+      document.body.style.userSelect = "none";
+      window.addEventListener("pointermove", move);
+      window.addEventListener("pointerup", finish);
+      window.addEventListener("pointercancel", finish);
+    },
+    [disabled, setPlayheadFromClientX],
   );
 
   const startPointDrag = useCallback(
@@ -490,6 +1001,8 @@ export function DesignMotionTimeline({
       if (disabled || !draft || event.button !== 0) return;
       event.preventDefault();
       event.stopPropagation();
+      activePointerCleanupRef.current?.();
+      pointDragMovedRef.current = false;
       const track = event.currentTarget.closest<HTMLElement>(
         "[data-motion-track]",
       );
@@ -507,6 +1020,7 @@ export function DesignMotionTimeline({
           ),
         );
         if (nextOffset === lastOffset) return;
+        pointDragMovedRef.current = true;
         setDraft((current) =>
           current
             ? {
@@ -520,6 +1034,7 @@ export function DesignMotionTimeline({
               }
             : current,
         );
+        setPresetId(null);
         lastOffset = nextOffset;
         setPlayhead(nextOffset);
         setSelectedPoint({ property, offset: nextOffset });
@@ -531,9 +1046,14 @@ export function DesignMotionTimeline({
         window.removeEventListener("pointercancel", finish);
         document.body.style.cursor = "";
         document.body.style.userSelect = "";
+        if (activePointerCleanupRef.current === finish) {
+          activePointerCleanupRef.current = null;
+        }
       };
+      activePointerCleanupRef.current = finish;
       setPlaying(false);
       setSelectedPoint({ property, offset: initialOffset });
+      setSelectedProperty(property);
       document.body.style.cursor = "ew-resize";
       document.body.style.userSelect = "none";
       window.addEventListener("pointermove", move);
@@ -548,7 +1068,9 @@ export function DesignMotionTimeline({
     setSaving(true);
     try {
       await onSave(draft);
+      motionDraftCache.delete(sessionOwnerKey);
       setDirty(false);
+      setPersistedMotion(true);
       toast.success("Motion saved", {
         description: `${draft.name} · ${draft.keyframes.length} keyframes`,
       });
@@ -562,7 +1084,43 @@ export function DesignMotionTimeline({
     } finally {
       setSaving(false);
     }
-  }, [draft, onSave, saving]);
+  }, [draft, onSave, saving, sessionOwnerKey]);
+
+  const deleteMotion = useCallback(async () => {
+    if (!details || saving) return;
+    setPlaying(false);
+    clearActivePreview();
+    setSaving(true);
+    try {
+      if (persistedMotion) await onDeleteMotion();
+      motionDraftCache.delete(sessionOwnerKey);
+      setDraft(emptyMotionDraft(details, ownerKey));
+      setPlayhead(0);
+      setSelectedPoint(null);
+      setSelectedProperty(null);
+      setPresetId(null);
+      setDirty(false);
+      setPersistedMotion(false);
+      toast.success(persistedMotion ? "Motion removed" : "Motion cleared");
+    } catch (error) {
+      toast.error("Couldn't remove the motion", {
+        description:
+          error instanceof Error
+            ? error.message
+            : "The motion could not be removed.",
+      });
+    } finally {
+      setSaving(false);
+    }
+  }, [
+    clearActivePreview,
+    details,
+    onDeleteMotion,
+    ownerKey,
+    persistedMotion,
+    saving,
+    sessionOwnerKey,
+  ]);
 
   if (!open) return null;
 
@@ -601,56 +1159,108 @@ export function DesignMotionTimeline({
           point.offset === selectedPoint.offset,
       )?.value
     : null;
+  const draftIssue = motionDraftIssue(draft);
 
   return (
     <section
       data-design-controls
-      className="border-border1 bg-bg1 absolute inset-x-0 bottom-0 z-40 flex h-72 min-w-0 flex-col border-t shadow-lg"
+      className="zd-design-motion-timeline border-border1 bg-bg1 absolute inset-x-0 bottom-0 z-40 flex h-80 min-w-0 flex-col border-t shadow-lg"
       aria-label="Motion timeline"
     >
-      <div className="flex h-10 shrink-0 items-center gap-1 overflow-x-auto px-3">
-        <Diamond className="text-highlighted-bright mr-1 size-3.5 fill-current" />
-        <span className="text-fg1 mr-1 text-xs font-medium">Motion</span>
-        <Input
-          value={draft.name}
-          aria-label="Animation name"
-          className="zd-design-control-applied h-7 w-32 shrink-0 font-mono text-[11px]"
-          disabled={disabled}
-          onChange={(event) =>
-            mutateDraft((current) => ({
-              ...current,
-              name: event.currentTarget.value,
-            }))
-          }
-        />
-        <Tooltip label={playing ? "Pause preview" : "Play preview"}>
-          <Button
-            type="button"
-            variant={playing ? "secondary-on" : "ghost"}
-            size="icon-sm"
-            className={playing ? "zd-design-state-active" : undefined}
-            aria-label={
-              playing ? "Pause motion preview" : "Play motion preview"
-            }
-            onClick={() => setPlaying((current) => !current)}
-          >
-            {playing ? <Pause /> : <Play />}
-          </Button>
-        </Tooltip>
-        <span className="text-muted-fg ml-auto shrink-0 font-mono text-[10px]">
-          {Math.round(playhead)}% · {Math.round((playhead / 100) * durationMs)}
-          ms
+      <div className="zd-design-motion-header border-border1 flex h-10 shrink-0 items-center gap-1 border-b px-3">
+        <span className="zd-design-motion-accent mr-1 flex size-5 items-center justify-center rounded-sm">
+          <Diamond className="size-3 fill-current" />
         </span>
-        <Tooltip label={dirty ? "Save keyframes" : "Motion is saved"}>
+        <span className="text-fg1 text-xs font-semibold">Motion</span>
+        {dirty ? (
+          <span
+            className="bg-highlighted-bright size-1.5 shrink-0 rounded-full"
+            aria-label="Unsaved motion changes"
+            title="Unsaved motion changes"
+          />
+        ) : null}
+        <span className="zd-design-motion-owner bg-bg2 text-fg2 ml-1 max-w-44 truncate rounded px-1.5 py-0.5 text-[10px]">
+          {details.name}
+        </span>
+        <span className="zd-design-motion-owner text-muted-fg font-mono text-[9px] uppercase">
+          {details.tag}
+        </span>
+        <div className="border-border1 ml-2 flex items-center gap-0.5 border-l pl-2">
+          <Tooltip label={playing ? "Pause preview" : "Play preview"}>
+            <Button
+              type="button"
+              variant={playing ? "secondary-on" : "ghost"}
+              size="icon-sm"
+              className={playing ? "zd-design-state-active" : undefined}
+              aria-label={
+                playing ? "Pause motion preview" : "Play motion preview"
+              }
+              disabled={disabled || !validMotionDraft(draft)}
+              onClick={() => {
+                if (playing) {
+                  setPlaying(false);
+                  return;
+                }
+                setPlayhead(
+                  designMotionPlaybackStartOffset(playheadRef.current),
+                );
+                setPlaying(true);
+              }}
+            >
+              {playing ? <Pause /> : <Play />}
+            </Button>
+          </Tooltip>
+          <Clock3 className="text-muted-fg ml-1 size-3" />
+          <MotionTimeField
+            label="Motion current time"
+            time={designMotionTimeAtOffset(playhead, durationMs)}
+            duration={durationMs}
+            className="zd-design-control-quiet h-6 w-16 shrink-0 text-right font-mono text-[10px]"
+            disabled={disabled}
+            onOffsetChange={(offset) => {
+              setPlaying(false);
+              setPlayhead(offset);
+            }}
+          />
+          <span className="text-muted-fg shrink-0 font-mono text-[9px]">
+            ms / {durationMs}ms
+          </span>
+        </div>
+        <span className="zd-design-motion-hint text-muted-fg ml-auto shrink-0 text-[9px]">
+          Inspector diamonds add keys at the playhead
+        </span>
+        {persistedMotion || draft.keyframes.length > 0 ? (
+          <Tooltip
+            label={persistedMotion ? "Delete motion" : "Clear motion draft"}
+          >
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label={
+                persistedMotion ? "Delete motion" : "Clear motion draft"
+              }
+              disabled={disabled || saving}
+              onClick={() => void deleteMotion()}
+            >
+              <Trash2 />
+            </Button>
+          </Tooltip>
+        ) : null}
+        <Tooltip
+          label={dirty ? (draftIssue ?? "Save keyframes") : "Motion is saved"}
+        >
           <Button
             type="button"
             variant={dirty ? "default" : "ghost"}
             size="sm"
-            disabled={disabled || saving || !dirty || !validMotionDraft(draft)}
+            disabled={disabled || saving || !dirty || draftIssue !== null}
             onClick={() => void save()}
           >
             <Save />
-            {saving ? "Saving…" : "Save"}
+            <span className="zd-design-motion-save-label">
+              {saving ? "Saving…" : "Save"}
+            </span>
           </Button>
         </Tooltip>
         <Button
@@ -664,136 +1274,226 @@ export function DesignMotionTimeline({
         </Button>
       </div>
 
-      <div className="border-border1 flex h-9 shrink-0 items-center gap-1.5 overflow-x-auto border-b px-3">
-        <span className="text-muted-fg text-[9px] uppercase">Duration</span>
+      <div className="zd-design-motion-settings border-border1 flex h-9 min-w-0 shrink-0 items-center gap-1.5 border-b px-3">
+        <span className="zd-design-motion-setting-label text-muted-fg text-[9px] uppercase">
+          Preset
+        </span>
+        <Select
+          value={presetId ?? ""}
+          disabled={disabled}
+          onValueChange={applyPreset}
+        >
+          <SelectTrigger
+            size="sm"
+            className="zd-design-control-quiet h-6 w-24 shrink-0 text-[10px]"
+            aria-label="Motion preset"
+          >
+            <SelectValue placeholder="Custom" />
+          </SelectTrigger>
+          <SelectContent>
+            {MOTION_PRESETS.map((preset) => (
+              <SelectItem key={preset.id} value={preset.id}>
+                {preset.label}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        <span className="bg-border1 mx-0.5 h-4 w-px shrink-0" />
+        <span className="zd-design-motion-setting-label text-muted-fg text-[9px] uppercase">
+          Duration
+        </span>
         <Input
           value={draft.duration}
           aria-label="Animation duration"
+          aria-invalid={designDurationMs(draft.duration, 0) <= 0}
           className="zd-design-control-applied h-6 w-16 shrink-0 font-mono text-[10px]"
           disabled={disabled}
-          onChange={(event) =>
-            mutateDraft((current) => ({
-              ...current,
-              duration: event.currentTarget.value,
-            }))
-          }
+          onChange={(event) => {
+            const duration = event.currentTarget.value;
+            mutateDraft((current) => ({ ...current, duration }));
+          }}
         />
-        <span className="text-muted-fg text-[9px] uppercase">Delay</span>
+        <span className="zd-design-motion-setting-label text-muted-fg text-[9px] uppercase">
+          Ease
+        </span>
         <Input
-          value={draft.delay}
-          aria-label="Animation delay"
-          className="zd-design-control-applied h-6 w-16 shrink-0 font-mono text-[10px]"
-          disabled={disabled}
-          onChange={(event) =>
-            mutateDraft((current) => ({
-              ...current,
-              delay: event.currentTarget.value,
-            }))
-          }
-        />
-        <span className="text-muted-fg text-[9px] uppercase">Ease</span>
-        <Select
+          list={motionEasingsListId}
           value={draft.easing}
+          aria-label="Animation easing"
+          aria-invalid={!designMotionEasingIsValid(draft.easing)}
+          className="zd-design-control-applied h-6 min-w-24 flex-1 font-mono text-[10px]"
           disabled={disabled}
-          onValueChange={(easing) =>
-            mutateDraft((current) => ({ ...current, easing }))
-          }
-        >
-          <SelectTrigger
-            size="sm"
-            className="zd-design-control-applied h-6 w-24 shrink-0 text-[10px]"
-            aria-label="Animation easing"
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {[
-              ...new Set([
-                draft.easing,
-                "linear",
-                "ease",
-                "ease-in",
-                "ease-out",
-                "ease-in-out",
-              ]),
-            ].map((easing) => (
-              <SelectItem key={easing} value={easing}>
-                {easing}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <span className="text-muted-fg text-[9px] uppercase">Loop</span>
-        <Input
-          value={draft.iterations}
-          aria-label="Animation iterations"
-          className="zd-design-control-applied h-6 w-12 shrink-0 font-mono text-[10px]"
-          disabled={disabled}
-          onChange={(event) =>
-            mutateDraft((current) => ({
-              ...current,
-              iterations: event.currentTarget.value,
-            }))
-          }
+          onChange={(event) => {
+            const easing = event.currentTarget.value;
+            mutateDraft((current) => ({ ...current, easing }));
+          }}
         />
-        <Select
-          value={draft.direction}
-          disabled={disabled}
-          onValueChange={(direction) =>
-            mutateDraft((current) => ({
-              ...current,
-              direction: designMotionDirection(direction),
-            }))
-          }
-        >
-          <SelectTrigger
-            size="sm"
-            className="zd-design-control-applied h-6 w-24 shrink-0 text-[10px]"
-            aria-label="Animation direction"
+        <datalist id={motionEasingsListId}>
+          <option value="linear" />
+          <option value="ease" />
+          <option value="ease-in" />
+          <option value="ease-out" />
+          <option value="ease-in-out" />
+          <option value="cubic-bezier(0.22, 1, 0.36, 1)" />
+          <option value="cubic-bezier(0.34, 1.56, 0.64, 1)" />
+          <option value="steps(4, end)" />
+        </datalist>
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="shrink-0"
+              aria-label="More motion settings"
+              disabled={disabled}
+            >
+              <SlidersHorizontal />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            data-design-motion-settings
+            align="end"
+            sideOffset={6}
+            className="w-72 p-3"
           >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {["normal", "reverse", "alternate", "alternate-reverse"].map(
-              (direction) => (
-                <SelectItem key={direction} value={direction}>
-                  {direction}
-                </SelectItem>
-              ),
-            )}
-          </SelectContent>
-        </Select>
-        <Select
-          value={draft.fillMode}
-          disabled={disabled}
-          onValueChange={(fillMode) =>
-            mutateDraft((current) => ({
-              ...current,
-              fillMode: designMotionFill(fillMode),
-            }))
-          }
-        >
-          <SelectTrigger
-            size="sm"
-            className="zd-design-control-applied h-6 w-20 shrink-0 text-[10px]"
-            aria-label="Animation fill mode"
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent>
-            {["none", "forwards", "backwards", "both"].map((fill) => (
-              <SelectItem key={fill} value={fill}>
-                {fill}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+            <div className="flex flex-col gap-3">
+              <div className="flex flex-col gap-0.5">
+                <span className="text-fg1 text-xs font-medium">
+                  Motion settings
+                </span>
+                <span className="text-muted-fg text-[10px]">
+                  Naming, delay, looping, and playback behavior
+                </span>
+              </div>
+              <label className="flex flex-col gap-1">
+                <span className="text-muted-fg text-[10px]">Name</span>
+                <Input
+                  value={draft.name}
+                  aria-label="Animation name"
+                  aria-invalid={
+                    !/^[A-Za-z_][A-Za-z0-9_-]{0,127}$/.test(draft.name)
+                  }
+                  className="zd-design-control-applied h-7 font-mono text-[10px]"
+                  disabled={disabled}
+                  onChange={(event) => {
+                    const name = event.currentTarget.value;
+                    mutateDraft((current) => ({ ...current, name }));
+                  }}
+                />
+              </label>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="text-muted-fg text-[10px]">Delay</span>
+                  <Input
+                    value={draft.delay}
+                    aria-label="Animation delay"
+                    aria-invalid={
+                      !/^-?(?:\d+(?:\.\d*)?|\.\d+)(?:ms|s)$/i.test(
+                        draft.delay.trim(),
+                      )
+                    }
+                    className="zd-design-control-applied h-7 font-mono text-[10px]"
+                    disabled={disabled}
+                    onChange={(event) => {
+                      const delay = event.currentTarget.value;
+                      mutateDraft((current) => ({ ...current, delay }));
+                    }}
+                  />
+                </label>
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="text-muted-fg text-[10px]">Loop</span>
+                  <Input
+                    value={draft.iterations}
+                    aria-label="Animation iterations"
+                    aria-invalid={
+                      designMotionIterationCount(draft.iterations) === null ||
+                      (designMotionIterationCount(draft.iterations) ?? 0) <= 0
+                    }
+                    className="zd-design-control-applied h-7 font-mono text-[10px]"
+                    disabled={disabled}
+                    onChange={(event) => {
+                      const iterations = event.currentTarget.value;
+                      mutateDraft((current) => ({ ...current, iterations }));
+                    }}
+                  />
+                </label>
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="text-muted-fg text-[10px]">Direction</span>
+                  <Select
+                    value={draft.direction}
+                    disabled={disabled}
+                    onValueChange={(direction) =>
+                      mutateDraft((current) => ({
+                        ...current,
+                        direction: designMotionDirection(direction),
+                      }))
+                    }
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      className="zd-design-control-applied h-7 w-full text-[10px]"
+                      aria-label="Animation direction"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[
+                        "normal",
+                        "reverse",
+                        "alternate",
+                        "alternate-reverse",
+                      ].map((direction) => (
+                        <SelectItem key={direction} value={direction}>
+                          {direction}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </label>
+                <label className="flex min-w-0 flex-col gap-1">
+                  <span className="text-muted-fg text-[10px]">Fill</span>
+                  <Select
+                    value={draft.fillMode}
+                    disabled={disabled}
+                    onValueChange={(fillMode) =>
+                      mutateDraft((current) => ({
+                        ...current,
+                        fillMode: designMotionFill(fillMode),
+                      }))
+                    }
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      className="zd-design-control-applied h-7 w-full text-[10px]"
+                      aria-label="Animation fill mode"
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {["none", "forwards", "backwards", "both"].map((fill) => (
+                        <SelectItem key={fill} value={fill}>
+                          {fill}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </label>
+              </div>
+              <span className="text-muted-fg truncate font-mono text-[9px]">
+                {draft.file}
+              </span>
+            </div>
+          </PopoverContent>
+        </Popover>
       </div>
 
-      <div className="border-border1 grid h-8 shrink-0 grid-cols-[176px_minmax(280px,1fr)] border-b">
+      <div className="zd-design-motion-grid border-border1 grid h-7 shrink-0 border-b">
         <div className="border-border1 flex items-center gap-1 border-r px-2">
           <Input
-            list="design-motion-properties"
+            list={motionPropertiesListId}
             value={propertyDraft}
             aria-label="Motion property"
             className="zd-design-control-quiet h-6 min-w-0 flex-1 font-mono text-[10px]"
@@ -805,7 +1505,7 @@ export function DesignMotionTimeline({
               }
             }}
           />
-          <datalist id="design-motion-properties">
+          <datalist id={motionPropertiesListId}>
             {MOTION_PROPERTY_OPTIONS.map((property) => (
               <option key={property} value={property} />
             ))}
@@ -821,151 +1521,274 @@ export function DesignMotionTimeline({
             <Plus />
           </Button>
         </div>
-        <div className="relative">
-          {RULER_MARKS.map((mark) => (
+        <div
+          className="relative cursor-ew-resize"
+          aria-label="Motion time ruler"
+          onPointerDown={startTimelineScrub}
+        >
+          {rulerMarks.map((mark) => (
             <span
-              key={mark}
+              key={mark.time}
               className={cn(
-                "text-muted-fg absolute top-1/2 -translate-y-1/2 font-mono text-[9px]",
-                mark === 0
+                "text-muted-fg pointer-events-none absolute top-1/2 -translate-y-1/2 font-mono text-[9px]",
+                mark.offset === 0
                   ? "translate-x-0"
-                  : mark === 100
+                  : mark.offset === 100
                     ? "-translate-x-full"
                     : "-translate-x-1/2",
               )}
-              style={{ left: `${mark}%` }}
+              style={{ left: `${mark.offset}%` }}
             >
-              {mark}%
+              {mark.time}ms
             </span>
           ))}
+          <span
+            className="zd-design-motion-playhead pointer-events-none absolute inset-y-0 z-20 w-px"
+            style={{ left: `${playhead}%` }}
+          >
+            <span className="absolute top-0 left-1/2 size-1.5 -translate-x-1/2 rotate-45" />
+          </span>
         </div>
       </div>
 
       <div className="min-h-0 flex-1 overflow-auto">
-        {properties.map((property) => {
-          const propertyPoints = points.filter(
-            (point) => point.property === property,
-          );
-          return (
-            <div
-              key={property}
-              data-design-motion-track-row=""
-              className="group/track grid h-8 grid-cols-[176px_minmax(280px,1fr)]"
+        <div className="zd-design-motion-grid grid h-8">
+          <div className="border-border1 flex min-w-0 items-center gap-1 border-r px-1.5">
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              className="size-5 shrink-0"
+              aria-label={
+                layerExpanded ? "Collapse motion layer" : "Expand motion layer"
+              }
+              aria-expanded={layerExpanded}
+              onClick={() => setLayerExpanded((current) => !current)}
             >
-              <div className="border-border1 group flex min-w-0 items-center border-r px-2">
-                <span className="text-fg2 min-w-0 flex-1 truncate font-mono text-[10px]">
-                  {property}
-                </span>
-                <Tooltip
-                  label={`Add ${property} keyframe at ${Math.round(playhead)}%`}
+              {layerExpanded ? <ChevronDown /> : <ChevronRight />}
+            </Button>
+            <Box className="text-muted-fg size-3 shrink-0" />
+            <span className="text-fg1 min-w-0 flex-1 truncate text-[10px] font-medium">
+              {details.name}
+            </span>
+            <span className="text-muted-fg font-mono text-[9px]">
+              {properties.length}
+            </span>
+          </div>
+          <div
+            className="relative cursor-ew-resize"
+            data-motion-track
+            onPointerDown={startTimelineScrub}
+          >
+            {rulerMarks.map((mark) => (
+              <span
+                key={mark.time}
+                className="bg-border1 pointer-events-none absolute inset-y-0 w-px opacity-50"
+                style={{ left: `${mark.offset}%` }}
+              />
+            ))}
+            <span className="zd-design-motion-range pointer-events-none absolute top-1/2 right-1.5 left-1.5 h-3 -translate-y-1/2 rounded-sm border">
+              <span className="absolute inset-y-0 left-0 w-1 rounded-l-sm" />
+              <span className="absolute inset-y-0 right-0 w-1 rounded-r-sm" />
+            </span>
+            <span
+              className="zd-design-motion-playhead pointer-events-none absolute inset-y-0 z-20 w-px"
+              style={{ left: `${playhead}%` }}
+            />
+          </div>
+        </div>
+        {layerExpanded
+          ? properties.map((property) => {
+              const propertyPoints = points.filter(
+                (point) => point.property === property,
+              );
+              const propertySelected = selectedProperty === property;
+              return (
+                <div
+                  key={property}
+                  data-design-motion-track-row=""
+                  data-selected={propertySelected ? "true" : undefined}
+                  className={cn(
+                    "zd-design-motion-grid group/track grid h-8",
+                    propertySelected && "zd-design-motion-track-selected",
+                  )}
                 >
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-sm"
-                    className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-                    aria-label={`Add ${property} keyframe`}
-                    disabled={disabled}
-                    onClick={() => addPoint(property)}
+                  <div
+                    className="border-border1 group flex min-w-0 items-center border-r pr-1 pl-8"
+                    onClick={() => setSelectedProperty(property)}
                   >
-                    <Diamond />
-                  </Button>
-                </Tooltip>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
-                  aria-label={`Remove ${property} track`}
-                  disabled={disabled || properties.length === 1}
-                  onClick={() => removeProperty(property)}
-                >
-                  <Trash2 />
-                </Button>
-              </div>
-              <div
-                data-motion-track
-                className="hover:bg-bg1-hover relative cursor-crosshair"
-                onPointerDown={(event) => {
-                  if (event.target !== event.currentTarget) return;
-                  const bounds = event.currentTarget.getBoundingClientRect();
-                  setPlaying(false);
-                  setPlayhead(
-                    Math.round(
-                      Math.min(
-                        100,
-                        Math.max(
-                          0,
-                          ((event.clientX - bounds.left) / bounds.width) * 100,
-                        ),
-                      ),
-                    ),
-                  );
-                }}
-                onDoubleClick={() => addPoint(property)}
-              >
-                {RULER_MARKS.map((mark) => (
-                  <span
-                    key={mark}
-                    className="bg-border1 pointer-events-none absolute inset-y-0 w-px opacity-60"
-                    style={{ left: `${mark}%` }}
-                  />
-                ))}
-                {propertyPoints.map((point) => {
-                  const selected =
-                    selectedPoint?.property === property &&
-                    selectedPoint.offset === point.offset;
-                  return (
-                    <button
-                      key={point.offset}
-                      type="button"
+                    <Diamond
                       className={cn(
-                        "border-highlighted-bright absolute top-1/2 z-10 size-3 -translate-x-1/2 -translate-y-1/2 rotate-45 border",
-                        selected
-                          ? "bg-highlighted-bright"
-                          : "bg-bg1 hover:bg-highlighted-bg",
+                        "mr-1 size-2.5 shrink-0",
+                        propertySelected
+                          ? "zd-design-motion-keyframe-icon fill-current"
+                          : "text-muted-fg",
                       )}
-                      style={{
-                        left:
-                          point.offset === 0
-                            ? 6
-                            : point.offset === 100
-                              ? "calc(100% - 6px)"
-                              : `${point.offset}%`,
-                      }}
-                      aria-label={`${property} keyframe at ${point.offset}%`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        setPlaying(false);
-                        setPlayhead(point.offset);
-                        setSelectedPoint({ property, offset: point.offset });
-                      }}
-                      onPointerDown={(event) =>
-                        startPointDrag(event, property, point.offset)
-                      }
                     />
-                  );
-                })}
-                <span
-                  className="bg-red-primary pointer-events-none absolute inset-y-0 z-20 w-px"
-                  style={{ left: `${playhead}%` }}
-                />
-              </div>
-            </div>
-          );
-        })}
+                    <span className="text-fg2 min-w-0 flex-1 truncate font-mono text-[10px]">
+                      {property}
+                    </span>
+                    <span className="text-muted-fg mr-0.5 font-mono text-[8px]">
+                      {propertyPoints.length}
+                    </span>
+                    <Tooltip
+                      label={`Add ${property} keyframe at ${designMotionTimeAtOffset(playhead, durationMs)}ms`}
+                    >
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-sm"
+                        className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                        aria-label={`Add ${property} keyframe`}
+                        disabled={disabled}
+                        onClick={() => addPoint(property)}
+                      >
+                        <Diamond />
+                      </Button>
+                    </Tooltip>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-sm"
+                      className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                      aria-label={`Remove ${property} track`}
+                      disabled={disabled}
+                      onClick={() => removeProperty(property)}
+                    >
+                      <Trash2 />
+                    </Button>
+                  </div>
+                  <div
+                    data-motion-track
+                    className="hover:bg-bg1-hover relative cursor-ew-resize"
+                    onPointerDown={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      setSelectedProperty(property);
+                      startTimelineScrub(event);
+                    }}
+                    onDoubleClick={(event) => {
+                      if (event.target !== event.currentTarget) return;
+                      addPoint(property);
+                    }}
+                  >
+                    <span className="bg-border2 pointer-events-none absolute top-1/2 right-0 left-0 h-px opacity-70" />
+                    {rulerMarks.map((mark) => (
+                      <span
+                        key={mark.time}
+                        className="bg-border1 pointer-events-none absolute inset-y-0 w-px opacity-60"
+                        style={{ left: `${mark.offset}%` }}
+                      />
+                    ))}
+                    {propertyPoints.map((point) => {
+                      const selected =
+                        selectedPoint?.property === property &&
+                        selectedPoint.offset === point.offset;
+                      return (
+                        <button
+                          key={point.offset}
+                          type="button"
+                          className={cn(
+                            "zd-design-motion-keyframe absolute top-1/2 z-10 size-3 -translate-x-1/2 -translate-y-1/2 rotate-45 border",
+                            selected && "zd-design-motion-keyframe-selected",
+                          )}
+                          style={{
+                            left:
+                              point.offset === 0
+                                ? 6
+                                : point.offset === 100
+                                  ? "calc(100% - 6px)"
+                                  : `${point.offset}%`,
+                          }}
+                          aria-label={`${property} keyframe at ${point.offset}% (${designMotionTimeAtOffset(point.offset, durationMs)}ms)`}
+                          aria-keyshortcuts="ArrowLeft ArrowRight Home End Delete Backspace"
+                          disabled={disabled}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            if (pointDragMovedRef.current) {
+                              pointDragMovedRef.current = false;
+                              return;
+                            }
+                            setPlaying(false);
+                            setPlayhead(point.offset);
+                            setSelectedPoint({
+                              property,
+                              offset: point.offset,
+                            });
+                            setSelectedProperty(property);
+                          }}
+                          onKeyDown={(event) => {
+                            if (
+                              event.key === "Delete" ||
+                              event.key === "Backspace"
+                            ) {
+                              event.preventDefault();
+                              event.stopPropagation();
+                              removePoint(property, point.offset);
+                              return;
+                            }
+                            let nextOffset: number | null = null;
+                            if (event.key === "ArrowLeft") {
+                              nextOffset = designMotionNudgedOffset(
+                                point.offset,
+                                -1,
+                                event.shiftKey,
+                              );
+                            } else if (event.key === "ArrowRight") {
+                              nextOffset = designMotionNudgedOffset(
+                                point.offset,
+                                1,
+                                event.shiftKey,
+                              );
+                            } else if (event.key === "Home") {
+                              nextOffset = 0;
+                            } else if (event.key === "End") {
+                              nextOffset = 100;
+                            }
+                            if (nextOffset === null) return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            setPlaying(false);
+                            retimePoint(property, point.offset, nextOffset);
+                          }}
+                          onPointerDown={(event) =>
+                            startPointDrag(event, property, point.offset)
+                          }
+                        />
+                      );
+                    })}
+                    <span
+                      className="zd-design-motion-playhead pointer-events-none absolute inset-y-0 z-20 w-px"
+                      style={{ left: `${playhead}%` }}
+                    />
+                  </div>
+                </div>
+              );
+            })
+          : null}
       </div>
 
       <div className="border-border1 flex h-10 shrink-0 items-center gap-2 border-t px-3">
         {selectedPoint && selectedValue != null ? (
           <>
-            <Diamond className="text-highlighted-bright size-3 fill-current" />
-            <span className="text-muted-fg font-mono text-[10px]">
-              {selectedPoint.offset}%
-            </span>
+            <Diamond className="zd-design-motion-keyframe-icon size-3 fill-current" />
             <span className="text-fg2 max-w-28 truncate font-mono text-[10px]">
               {selectedPoint.property}
             </span>
+            <MotionTimeField
+              label="Selected keyframe time"
+              time={designMotionTimeAtOffset(selectedPoint.offset, durationMs)}
+              duration={durationMs}
+              className="zd-design-control-applied h-7 w-16 shrink-0 text-right font-mono text-[10px]"
+              disabled={disabled}
+              onOffsetChange={(nextOffset) =>
+                retimePoint(
+                  selectedPoint.property,
+                  selectedPoint.offset,
+                  nextOffset,
+                )
+              }
+            />
+            <span className="text-muted-fg font-mono text-[9px]">ms</span>
             <Input
               value={selectedValue}
               aria-label={`${selectedPoint.property} keyframe value`}
@@ -989,40 +1812,43 @@ export function DesignMotionTimeline({
               variant="ghost"
               size="icon-sm"
               aria-label="Delete selected keyframe"
-              disabled={
-                disabled ||
-                points.filter(
-                  (point) => point.property === selectedPoint.property,
-                ).length <= 2
+              disabled={disabled}
+              onClick={() =>
+                removePoint(selectedPoint.property, selectedPoint.offset)
               }
-              onClick={() => {
-                mutateDraft((current) => ({
-                  ...current,
-                  keyframes: removeDesignMotionPoint(
-                    current.keyframes,
-                    selectedPoint.property,
-                    selectedPoint.offset,
-                  ),
-                }));
-                setSelectedPoint(null);
-              }}
             >
               <Trash2 />
             </Button>
           </>
         ) : (
-          <span className="text-muted-fg text-[10px]">
-            Double-click a track to add a keyframe. Drag diamonds to retime.
-          </span>
+          <>
+            <span className="text-muted-fg min-w-0 truncate text-[10px]">
+              {properties.length === 0
+                ? "No motion on this layer · add a property or choose a preset"
+                : "Click to scrub · double-click a track to add · drag a diamond to retime"}
+            </span>
+            <span className="zd-design-motion-accent-soft rounded px-1.5 py-0.5 text-[9px]">
+              {properties.length} {properties.length === 1 ? "track" : "tracks"}
+            </span>
+          </>
         )}
-        <span className="text-muted-fg ml-auto font-mono text-[9px]">
+        {dirty && draftIssue ? (
+          <span
+            className="text-red-primary min-w-0 truncate text-[10px]"
+            title={draftIssue}
+            role="status"
+          >
+            {draftIssue}
+          </span>
+        ) : null}
+        <span className="zd-design-motion-footer-meta text-muted-fg ml-auto shrink-0 font-mono text-[9px]">
           {draft.file} · delay {signedTimeMs(draft.delay)}ms ·{" "}
           {draft.iterations}× · {draft.direction} · {draft.fillMode}
         </span>
       </div>
     </section>
   );
-}
+});
 
 export function designMotionPreviewInput(
   draft: DesignMotionTimelineDraft,

@@ -18,8 +18,10 @@ describe("design workspace UI memory", () => {
 
   it("normalizes corrupt persisted values and clamps zoom", () => {
     expect(clampDesignZoom(Number.NaN)).toBe(0.25);
-    expect(clampDesignZoom(0)).toBe(0.05);
-    expect(clampDesignZoom(4)).toBe(2);
+    expect(clampDesignZoom(0)).toBe(0.01);
+    expect(clampDesignZoom(0.005)).toBe(0.01);
+    expect(clampDesignZoom(4)).toBe(4);
+    expect(clampDesignZoom(512)).toBe(256);
     expect(
       normalizeDesignWorkspaceView({
         selectedFrame: "../outside.html",
@@ -27,6 +29,7 @@ describe("design workspace UI memory", () => {
         selectedNodeIds: ["valid", "valid", "\u0000invalid"],
         panel: "unknown",
         activeTheme: "Not valid!",
+        canvasBackground: "not a color",
         codeView: "yes",
         zoom: Number.POSITIVE_INFINITY,
         panX: Number.NaN,
@@ -35,10 +38,12 @@ describe("design workspace UI memory", () => {
       }),
     ).toEqual({
       selectedFrame: null,
+      frameSelected: false,
       selectedNodeId: null,
       selectedNodeIds: [],
       panel: "layers",
       activeTheme: null,
+      canvasBackground: null,
       codeView: false,
       zoom: 0.25,
       panX: 64,
@@ -47,10 +52,51 @@ describe("design workspace UI memory", () => {
     });
   });
 
+  it("keeps frame-selected only while the frame is the selection target", () => {
+    // A persisted frame-selected flag survives only alongside its frame and
+    // never together with a node selection.
+    expect(
+      normalizeDesignWorkspaceView({
+        selectedFrame: "home.html",
+        frameSelected: true,
+      }),
+    ).toMatchObject({ selectedFrame: "home.html", frameSelected: true });
+    expect(
+      normalizeDesignWorkspaceView({
+        selectedFrame: "home.html",
+        frameSelected: true,
+        selectedNodeId: "hero",
+      }),
+    ).toMatchObject({ selectedNodeId: "hero", frameSelected: false });
+    expect(normalizeDesignWorkspaceView({ frameSelected: true })).toMatchObject(
+      { selectedFrame: null, frameSelected: false },
+    );
+
+    const store = useDesignWorkspaceUiStore.getState();
+    store.setSelection("workspace-a", "home.html", null, undefined, {
+      frameSelected: true,
+    });
+    expect(designWorkspaceView("workspace-a").frameSelected).toBe(true);
+    // Selecting a node steals the selection from the frame.
+    store.setSelection("workspace-a", "home.html", "hero");
+    expect(designWorkspaceView("workspace-a").frameSelected).toBe(false);
+    // Clearing back to activation leaves nothing selected.
+    store.setSelection("workspace-a", "home.html", null);
+    expect(designWorkspaceView("workspace-a").frameSelected).toBe(false);
+    // Switching the active frame drops a stale frame selection.
+    store.setSelection("workspace-a", "home.html", null, undefined, {
+      frameSelected: true,
+    });
+    store.setSelectedFrame("workspace-a", "pricing.html");
+    expect(designWorkspaceView("workspace-a").frameSelected).toBe(false);
+  });
+
   it("keeps selection and viewport isolated by workspace across A to B to A", () => {
     const store = useDesignWorkspaceUiStore.getState();
     store.setSelection("workspace-a", "home.html", "hero-heading");
     store.setViewport("workspace-a", { zoom: 0.8, panX: 12, panY: 24 });
+    // check:ui ignore-next -- authored workspace canvas-color fixture.
+    store.setCanvasBackground("workspace-a", "rgb(51 102 153 / 0.5)");
     store.setPanel("workspace-b", "assets");
     store.setActiveTheme("workspace-b", "dark");
     store.setSelectedFrame("workspace-b", "pricing.html");
@@ -62,11 +108,13 @@ describe("design workspace UI memory", () => {
       zoom: 0.8,
       panX: 12,
       panY: 24,
+      canvasBackground: "#33669980", // check:ui ignore-line -- canonical authored canvas color.
     });
     expect(designWorkspaceView("workspace-b")).toMatchObject({
       selectedFrame: "pricing.html",
       panel: "assets",
       activeTheme: "dark",
+      canvasBackground: null,
     });
   });
 

@@ -1,8 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  designStyleUnitOptions,
+  designStylePropertyAffectsLayout,
   designStyleFieldValue,
   isDesignRuntimeStylePropertyAuthored,
+  normalizeDesignStyleFieldInput,
+  parseDesignStyleNumericParts,
+  replaceDesignStyleNumericUnit,
   resolveDesignNumericExpression,
   scrubDesignNumericValue,
   parseDesignCssDeclarations,
@@ -127,6 +132,39 @@ describe("design style values", () => {
     expect(scrubDesignNumericValue("auto", 10)).toBeNull();
   });
 
+  it("separates simple numeric values from their editable CSS units", () => {
+    expect(parseDesignStyleNumericParts("32px")).toEqual({
+      number: 32,
+      text: "32",
+      unit: "px",
+    });
+    expect(parseDesignStyleNumericParts(".5REM")).toEqual({
+      number: 0.5,
+      text: "0.5",
+      unit: "rem",
+    });
+    expect(parseDesignStyleNumericParts("calc(100% - 8px)")).toBeNull();
+    expect(parseDesignStyleNumericParts("auto")).toBeNull();
+  });
+
+  it("offers property-aware unit changes without corrupting complex CSS", () => {
+    expect(designStyleUnitOptions("width")).toEqual([
+      "px",
+      "%",
+      "em",
+      "rem",
+      "vw",
+      "vh",
+    ]);
+    expect(designStyleUnitOptions("grid-auto-columns")).toContain("fr");
+    expect(designStyleUnitOptions("border-width")).not.toContain("%");
+    expect(designStyleUnitOptions("transition-duration")).toEqual(["ms", "s"]);
+    expect(designStyleUnitOptions("opacity")).toEqual([]);
+    expect(replaceDesignStyleNumericUnit("32px", "%")).toBe("32%");
+    expect(replaceDesignStyleNumericUnit("0", "px")).toBe("0px");
+    expect(replaceDesignStyleNumericUnit("auto", "%")).toBeNull();
+  });
+
   it("resolves field equations against the focused baseline", () => {
     expect(resolveDesignNumericExpression("+10", "24px")).toBe("34px");
     expect(resolveDesignNumericExpression("-5", "24px")).toBe("-5px");
@@ -134,6 +172,52 @@ describe("design style values", () => {
     expect(resolveDesignNumericExpression("*2", "24px")).toBe("48px");
     expect(resolveDesignNumericExpression("(x / 2) + 6", "24px")).toBe("18px");
     expect(resolveDesignNumericExpression("18px", "24px")).toBe("18px");
+  });
+
+  it("normalizes design-tool numeric input with property-aware CSS units", () => {
+    expect(normalizeDesignStyleFieldInput("width", "320", "240px")).toBe(
+      "320px",
+    );
+    expect(normalizeDesignStyleFieldInput("width", "+16", "240px")).toBe(
+      "256px",
+    );
+    expect(
+      normalizeDesignStyleFieldInput("transition-duration", "180", "0s"),
+    ).toBe("180ms");
+    expect(normalizeDesignStyleFieldInput("opacity", "0.5", "1")).toBe("0.5");
+    expect(normalizeDesignStyleFieldInput("outline-offset", "-2", "0px")).toBe(
+      "-2px",
+    );
+    expect(normalizeDesignStyleFieldInput("text-indent", "+8", "16px")).toBe(
+      "24px",
+    );
+    expect(
+      normalizeDesignStyleFieldInput(
+        "grid-template-columns",
+        "1fr minmax(0, 2fr)",
+        "none",
+      ),
+    ).toBe("1fr minmax(0, 2fr)");
+  });
+
+  it("classifies every geometry-producing property for live canvas readback", () => {
+    for (const property of [
+      "width",
+      "padding-left",
+      "gap",
+      "font-size",
+      "font-style",
+      "word-break",
+      "writing-mode",
+      "grid-template-columns",
+      "grid-column",
+      "float",
+      "transform",
+    ]) {
+      expect(designStylePropertyAffectsLayout(property), property).toBe(true);
+    }
+    expect(designStylePropertyAffectsLayout("background-color")).toBe(false);
+    expect(designStylePropertyAffectsLayout("opacity")).toBe(false);
   });
 
   it("makes authored offsets effective for statically positioned elements", () => {

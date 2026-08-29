@@ -3,7 +3,7 @@ import path from "node:path";
 import postcss from "postcss";
 
 import {
-  DESIGN_DIRECTORY_NAME,
+  designDirectoryNameFor,
   DesignRenderBudgetError,
   insertDesignRuntimeScript,
   readDesignFrameRenderSourceFromSource,
@@ -174,7 +174,10 @@ export async function readDesignProtocolResource(
     topLevelHtml || extension === ".css"
       ? MAX_TEXT_RESOURCE_BYTES
       : MAX_BINARY_RESOURCE_BYTES;
-  const designRoot = path.join(workspacePath, DESIGN_DIRECTORY_NAME);
+  const designRoot = path.join(
+    workspacePath,
+    ...designDirectoryNameFor(workspacePath).split("/"),
+  );
   const safe = await readSafeRegularFile(
     designRoot,
     path.join(designRoot, ...relativePath.split("/")),

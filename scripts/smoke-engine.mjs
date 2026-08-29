@@ -28,7 +28,7 @@
 // ──────────────────────────────────────────────────────────
 
 import { execSync, spawn } from "node:child_process";
-import { randomBytes, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
@@ -194,7 +194,7 @@ async function smokeWorkspaceLifecycle({ port, token, root }) {
     if (msg.type === "ENGINE_READY") {
       send({
         type: "CONNECTED",
-        source: "client",
+        source: "browser",
         capabilities: [],
         protocolVersion: 3,
       });
@@ -250,7 +250,7 @@ async function smokeWorkspaceLifecycle({ port, token, root }) {
       ws.send(
         JSON.stringify({
           type: "WORKSPACE_REQUEST",
-          source: "client",
+          source: "browser",
           op,
           params,
           id,
@@ -320,7 +320,7 @@ const sandbox = mkdtempSync(join(tmpdir(), "zeros-engine-smoke-"));
 const root = join(sandbox, "repo");
 const dataDir = join(sandbox, "data");
 const workspacesDir = join(sandbox, "workspaces");
-const localToken = randomBytes(32).toString("hex");
+let localToken = null;
 mkdirSync(root, { recursive: true });
 // Mirror a real workspace. This is a release gate for workspace lifecycle, so
 // inability to construct the Git fixture is itself a hard failure.
@@ -360,7 +360,10 @@ const child = spawn(
   ],
   {
     cwd: repoRoot,
-    stdio: ["ignore", "pipe", "pipe"],
+    // fd 3 mirrors Electron's private engine→host control pipe. The engine
+    // mints its loopback bearer and returns it here; putting it in the spawn
+    // environment would leak it to every agent subprocess.
+    stdio: ["ignore", "pipe", "pipe", "pipe"],
     env: {
       ...process.env,
       // A developer may launch this check from inside Zeros itself. Do not
@@ -372,7 +375,7 @@ const child = spawn(
       ZEROS_DATA_DIR: dataDir,
       ZEROS_WORKSPACES_DIR: workspacesDir,
       ZEROS_USER_SETTINGS_DIR: join(sandbox, "settings"),
-      ZEROS_LOCAL_WS_TOKEN: localToken,
+      ZEROS_CONTROL_FD: "3",
       ZEROS_REQUIRE_ACCOUNT: "0",
     },
   },
@@ -380,6 +383,29 @@ const child = spawn(
 child.stdout.on("data", (b) => (output += b.toString()));
 child.stderr.on("data", (b) => (output += b.toString()));
 child.on("exit", (code, signal) => (exited = { code, signal }));
+let controlBuffer = "";
+child.stdio[3]?.setEncoding("utf8");
+child.stdio[3]?.on("data", (chunk) => {
+  controlBuffer += chunk;
+  for (;;) {
+    const newline = controlBuffer.indexOf("\n");
+    if (newline < 0) break;
+    const line = controlBuffer.slice(0, newline);
+    controlBuffer = controlBuffer.slice(newline + 1);
+    try {
+      const message = JSON.parse(line);
+      if (
+        message?.type === "engine.localAuthority" &&
+        typeof message.token === "string" &&
+        /^[a-f0-9]{64}$/.test(message.token)
+      ) {
+        localToken = message.token;
+      }
+    } catch {
+      // Other control messages are irrelevant to this lifecycle smoke.
+    }
+  }
+});
 
 function cleanup() {
   try {
@@ -465,6 +491,14 @@ if (!healthy) {
   cleanup();
   fail(
     `engine did not answer 127.0.0.1:${port}/health within ${BIND_TIMEOUT_MS / 1000}s`,
+    output,
+  );
+}
+
+if (!localToken) {
+  cleanup();
+  fail(
+    "engine did not publish its loopback authority over the private control pipe",
     output,
   );
 }

@@ -3,6 +3,8 @@
 // handles the gnarly edge cases (auth helpers, refspecs, line-ending
 // conversion) that isomorphic-git is shakier on.
 
+import path from "node:path";
+
 import { getWorkspace, resolveRepoForGitOp } from "./worktree";
 import {
   assertSafeGitRef,
@@ -15,8 +17,17 @@ import { withStashLock } from "./stash-lock";
 import { isConflictEntry, parsePorcelainZ } from "./porcelain";
 import { getInProgressState } from "./repo";
 import { GitError } from "./errors";
-import { updateWorkspace } from "./state";
+import { getWorkspaceById, updateWorkspace } from "./state";
 import { resolveRepoGit } from "../settings/repo-git";
+import {
+  DEFAULT_DESIGN_DIRECTORY_NAME,
+  designDirectoryNameFor,
+} from "../design/directory-registry";
+import {
+  discoverDesignDirectories,
+  resolveDesignDirectoryPointerState,
+} from "../design/directory";
+import { stickyRecognizedDesignDirectories } from "../design/recognition-store";
 
 /** `git -c core.editor=true` — neutralizes the editor so --continue /
  *  merge / cherry-pick / revert never block on an interactive prompt. */
@@ -47,11 +58,79 @@ export interface CommitOptions {
   /** Amend the previous commit instead of creating a new one. The
    *  message replaces the previous message. */
   amend?: boolean;
+  /** Narrow engine-only escape hatch for Design Mode → Save designs. Generic
+   * code commits must never set this; commit() independently verifies that the
+   * explicit pathspec is exactly the active Design directory. */
+  authority?: "code" | "design-save";
 }
 
 export interface CommitResult {
   sha: string;
   branch: string;
+}
+
+function pathOverlapsDesign(candidate: string, designDir: string): boolean {
+  const normalized = candidate
+    .replace(/\\/g, "/")
+    .replace(/^\.\//, "")
+    .replace(/\/+$/, "");
+  return (
+    normalized === designDir ||
+    normalized.startsWith(`${designDir}/`) ||
+    designDir.startsWith(`${normalized}/`)
+  );
+}
+
+/** Commit path arrays are exact repository paths, not Git pathspec programs.
+ * Keep this lower-level backstop even though the workspace bridge validates
+ * its payload: commit() is also an internal API, and `--` does not disable
+ * Git's `:(top)`/glob/exclude expansion. */
+function exactCommitPaths(candidates: readonly string[]): string[] {
+  return candidates.map((candidate) => {
+    const slash = candidate.replace(/\\/g, "/");
+    const normalized = path.posix.normalize(slash).replace(/\/+$/, "");
+    if (
+      !candidate ||
+      candidate.includes("\0") ||
+      slash.startsWith("/") ||
+      /^[A-Za-z]:\//.test(slash) ||
+      normalized === "." ||
+      normalized === ".." ||
+      normalized.startsWith("../")
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "commit files must be exact repository-relative paths",
+      });
+    }
+    return normalized.replace(/^\.\//, "");
+  });
+}
+
+async function stagedDesignPaths(
+  cwd: string,
+  designDirs: readonly string[],
+): Promise<string[]> {
+  const { stdout } = await runGit(cwd, [
+    "diff",
+    "--cached",
+    "--name-only",
+    "-z",
+    // A rename ordinarily reports only its destination in --name-only
+    // output. Disable rename detection so moving a protected Design file out
+    // of the directory is represented as a protected deletion plus an add.
+    "--no-renames",
+    "--diff-filter=ACDMRTUXB",
+  ]);
+  return stdout
+    .split("\0")
+    .filter(
+      (candidate) =>
+        candidate &&
+        designDirs.some((designDir) =>
+          pathOverlapsDesign(candidate, designDir),
+        ),
+    );
 }
 
 export async function commit(opts: CommitOptions): Promise<CommitResult> {
@@ -62,10 +141,82 @@ export async function commit(opts: CommitOptions): Promise<CommitResult> {
       message: "commit: 'message' must be a non-empty string",
     });
   }
+  const activeDesignDir = getWorkspaceById(opts.workspaceId)
+    ? designDirectoryNameFor(ws.path)
+    : DEFAULT_DESIGN_DIRECTORY_NAME;
+  // An empty array does not add a Git pathspec, so it has exactly the same
+  // commit semantics as omission. Normalize it before enforcing authority.
+  const files =
+    opts.files && opts.files.length > 0
+      ? exactCommitPaths(opts.files)
+      : undefined;
+  if (opts.authority === "design-save") {
+    if (!files || files.length !== 1 || files[0] !== activeDesignDir) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message:
+          "Design-save authority may commit only the active Design directory.",
+      });
+    }
+  } else if (opts.authority === "code") {
+    // Code authority is the complement of EVERY semantic Design root, not only
+    // the active canvas. HEAD/index can retain an old root during a rename and
+    // a repository may intentionally carry several Design documents. Sticky
+    // recognition keeps this final commit backstop aligned with ZSR after an
+    // agent or external Git command edits away the repository evidence.
+    // Design-save is already exact-path authorized above and deliberately
+    // avoids these repository-wide reads on every canvas save.
+    const [discoveredDesignDirs, stickyDesignDirs, pointer] =
+      await Promise.all([
+        discoverDesignDirectories(ws.path),
+        stickyRecognizedDesignDirectories(ws.path),
+        resolveDesignDirectoryPointerState({
+          repoRoot: ws.repoRoot,
+          workspacePath: ws.path,
+        }),
+      ]);
+    const protectedDesignDirs = [
+      ...new Set([
+        activeDesignDir,
+        ...(pointer.configured ? [pointer.directory] : []),
+        ...discoveredDesignDirs,
+        ...stickyDesignDirs,
+      ]),
+    ];
+    const explicitDesignPaths = (files ?? []).filter((candidate) =>
+      protectedDesignDirs.some((designDir) =>
+        pathOverlapsDesign(candidate, designDir),
+      ),
+    );
+    const stagedDesign = files
+      ? []
+      : await stagedDesignPaths(ws.path, protectedDesignDirs);
+    if (explicitDesignPaths.length > 0 || stagedDesign.length > 0) {
+      // A pathspec commit does not include unrelated staged paths. For that
+      // form inspect the explicit paths; for the ordinary no-pathspec form
+      // inspect the exact staged tree that Git will commit.
+      const blocked = [
+        ...new Set([...explicitDesignPaths, ...(!files ? stagedDesign : [])]),
+      ];
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message:
+          blocked.length === 1
+            ? `"${blocked[0]}" is inside the Design directory — a code commit cannot include it.`
+            : `${blocked.length} staged paths are inside the Design directory — a code commit cannot include them.`,
+        remediation:
+          'Unstage those paths and use Design Mode → "Save designs".',
+        context: { workspaceId: opts.workspaceId },
+      });
+    }
+  }
   const args = ["commit", "-m", opts.message];
   if (opts.amend) args.push("--amend");
-  if (opts.files && opts.files.length > 0) {
-    args.push("--", ...opts.files);
+  if (files) {
+    args.push(
+      "--",
+      ...files.map((candidate) => `:(literal)${candidate}`),
+    );
   }
   const result = await runGit(ws.path, args, {
     treatAsExpected: ["nothing-to-do"],

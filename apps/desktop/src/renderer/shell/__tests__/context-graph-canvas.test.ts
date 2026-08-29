@@ -7,7 +7,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ContextGraphCanvas,
+  contextGraphCardRenderKey,
   contextGraphImageOrientationTransform,
+  contextGraphImageLoadPriority,
+  contextGraphItemContentRevision,
   contextGraphShareControlCompensation,
   contextGraphThumbnailFailureIsPermanent,
   contextGraphThumbnailDimension,
@@ -75,6 +78,52 @@ describe("computeContextGraphLayout", () => {
         ({ x, y, depthPlane, itemKey }) => [x, y, depthPlane, itemKey],
       ),
     );
+  });
+
+  it("keeps a card's React identity when an appended item reflows the diamond", () => {
+    const firstFour = Array.from({ length: 4 }, (_, i) =>
+      item({
+        attachmentId: `att-${i}`,
+        relPath: `a/${i}`,
+        name: `${i}.png`,
+      }),
+    );
+    const before = computeContextGraphLayout(firstFour).placed.find(
+      ({ itemKey }) => itemKey === "att-3/3.png",
+    )!;
+    const after = computeContextGraphLayout([
+      ...firstFour,
+      item({ attachmentId: "att-4", relPath: "a/4", name: "4.png" }),
+    ]).placed.find(({ itemKey }) => itemKey === "att-3/3.png")!;
+
+    expect([before.row, before.column]).not.toEqual([after.row, after.column]);
+    expect(contextGraphCardRenderKey(before)).toBe(
+      contextGraphCardRenderKey(after),
+    );
+  });
+
+  it("invalidates a decoded preview when exact file metadata changes", () => {
+    const revision = { mtimeMs: 100, ctimeMs: 200, bytes: 42 };
+
+    expect(contextGraphItemContentRevision(revision)).not.toBe(
+      contextGraphItemContentRevision({ ...revision, ctimeMs: 201 }),
+    );
+    expect(contextGraphItemContentRevision(revision)).not.toBe(
+      contextGraphItemContentRevision({ ...revision, bytes: 43 }),
+    );
+  });
+
+  it("prioritises a newly written image ahead of an older overview backlog", () => {
+    const older = contextGraphImageLoadPriority({
+      mtimeMs: 100,
+      ctimeMs: 100,
+    });
+    const newlyWritten = contextGraphImageLoadPriority({
+      mtimeMs: 200,
+      ctimeMs: 210,
+    });
+
+    expect(newlyWritten).toBeGreaterThan(older);
   });
 
   it("gives manually duplicated local/shared attachment ids distinct jitter", () => {
@@ -256,14 +305,14 @@ describe("computeContextGraphLayout", () => {
     expect(zoomViewportAtPoint(before, 0, 0, -1_000_000).scale).toBe(2);
   });
 
-  it("defers thumbnails while cards are too small to inspect", () => {
-    expect(shouldLoadImageThumbnailsAtScale(0.2)).toBe(false);
-    expect(shouldLoadImageThumbnailsAtScale(0.29)).toBe(true);
+  it("keeps a tiny preview at fitted overview zoom instead of leaving image cards blank", () => {
+    expect(shouldLoadImageThumbnailsAtScale(0.08)).toBe(true);
+    expect(contextGraphThumbnailDimension(0.08, 2)).toBe(64);
+    expect(contextGraphThumbnailDimension(0.2, 2)).toBe(128);
   });
 
   it("upgrades thumbnail detail for rendered size and display density", () => {
-    expect(contextGraphThumbnailDimension(0.2, 2)).toBe(0);
-    expect(contextGraphThumbnailDimension(0.3, 1)).toBe(256);
+    expect(contextGraphThumbnailDimension(0.3, 1)).toBe(128);
     expect(contextGraphThumbnailDimension(0.6, 2)).toBe(512);
     expect(contextGraphThumbnailDimension(1.5, 2)).toBe(1024);
     expect(contextGraphThumbnailDimension(2, 2)).toBe(1536);

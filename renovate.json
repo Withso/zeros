@@ -38,6 +38,15 @@
       "automerge": false
     },
     {
+      "description": "Zeros Sandbox Runtime is a security boundary, exact-pinned to a reviewed upstream commit and a digest-pinned local patch. A version bump must refresh the patch/provenance and pass packaging, license, attack, parity, and deployed-image qualification; it is therefore isolated in its own weekly, never-auto-merged PR.",
+      "matchPackageNames": ["@anthropic-ai/sandbox-runtime"],
+      "enabled": true,
+      "groupName": "zeros sandbox runtime",
+      "labels": ["dependencies", "automated", "security", "runtime-pin"],
+      "schedule": ["* * * * 1"],
+      "automerge": false
+    },
+    {
       "description": "GitHub Actions are pinned to full commit SHAs (with the version in a trailing comment) so a compromised upstream can't repoint a tag into a job that holds the Developer ID cert and the R2 write keys. A SHA pin only stays safe if something bumps it, and that something is this rule — without it the pins silently rot into permanently-outdated code. Grouped into one monthly PR so the pin refresh is a single reviewable diff rather than a trickle, and never auto-merged: the whole point of a SHA pin is that a human looks at what the new SHA is. SCHEDULE IS A WHOLE DAY, NOT A MORNING: `* * 1 * *` = any time on the 1st (cron, in the `timezone` above), widened from `before 6am on the first day of the month` on 2026-08-04 for the reason spelled out in the agent-CLI rule above — a 3m34s margin against the observed run time, where a miss costs a MONTH rather than a week. Whole-day windows are the shape Renovate's own presets use for day-granular schedules (`schedule:quarterly` is `* * 1 */3 *`), so this is the documented idiom, not a workaround. A missed window here is the worst kind: this rule is the only thing that stops the SHA pins rotting, so silently skipping a month directly weakens the supply-chain posture the pins exist to provide.",
       "matchManagers": ["github-actions"],
       "enabled": true,

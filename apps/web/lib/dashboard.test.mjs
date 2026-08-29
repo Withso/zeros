@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { dashboardPage, dashboardReturnUrl } from "./dashboard.mjs";
+import {
+  accountAccessPage,
+  accountRecoveryPage,
+  dashboardPage,
+  dashboardReturnUrl,
+  parseAccountRecoveryError,
+  parseAccountResolutionError,
+} from "./dashboard.mjs";
 
 const session = {
   sub: "auth0|1",
@@ -145,7 +152,7 @@ test("server-rendered organization identity uses safe raster logos only", () => 
   assert.match(page, /data-copy-organization-id/);
   assert.match(page, /Delete organization/);
   assert.match(page, /Capability metadata; cloud provisioning will still enforce plan and quota/);
-  assert.match(page, /Cloud-resource cleanup will be coordinated here/);
+  assert.match(page, /provider cleanup verified first/);
 
   const unsafe = dashboardPage({
     session,
@@ -157,4 +164,82 @@ test("server-rendered organization identity uses safe raster logos only", () => 
     signOutHref: "/auth/logout",
   });
   assert.doesNotMatch(unsafe, /data:image\/svg\+xml/);
+});
+
+test("reviewed account recovery is distinct from an organization outage", () => {
+  assert.deepEqual(
+    parseAccountRecoveryError(409, {
+      error: {
+        code: "account_recovery_required",
+        details: { recoveryCode: "ZR-ABCD-2345", expiresInSeconds: 86_400 },
+      },
+    }),
+    { recoveryCode: "ZR-ABCD-2345" },
+  );
+  assert.equal(
+    parseAccountRecoveryError(409, {
+      error: {
+        code: "account_recovery_required",
+        details: { recoveryCode: "<script>alert(1)</script>" },
+      },
+    }).recoveryCode,
+    null,
+  );
+
+  const page = accountRecoveryPage({
+    session,
+    recoveryCode: "ZR-ABCD-2345",
+    signOutHref: "/auth/logout",
+  });
+  assert.match(page, /Account recovery required/);
+  assert.match(page, /ZR-ABCD-2345/);
+  assert.match(page, /hello@zeros\.build/);
+  assert.match(page, /Sign out/);
+  assert.doesNotMatch(page, /Organization data is unavailable/);
+  assert.doesNotMatch(page, /secret-token-must-not-render/);
+  assert.doesNotMatch(page, /refresh-secret-must-not-render/);
+});
+
+test("sign-in conflicts and fresh-auth requirements get dedicated safe guidance", () => {
+  assert.deepEqual(
+    parseAccountResolutionError(409, {
+      error: { code: "account_exists", message: "<script>untrusted</script>" },
+    }),
+    { kind: "account_exists" },
+  );
+  assert.deepEqual(
+    parseAccountResolutionError(401, {
+      error: { code: "reauthentication_required" },
+    }),
+    { kind: "reauthentication_required" },
+  );
+  assert.deepEqual(
+    parseAccountResolutionError(401, {
+      error: { code: "account_suspended" },
+    }),
+    { kind: "account_unavailable" },
+  );
+  assert.equal(
+    parseAccountResolutionError(503, {
+      error: { code: "auth_unavailable" },
+    }),
+    null,
+  );
+
+  for (const kind of [
+    "account_exists",
+    "reauthentication_required",
+    "account_unavailable",
+  ]) {
+    const page = accountAccessPage({
+      session,
+      kind,
+      signOutHref: "/auth/logout",
+    });
+    assert.match(page, /Sign out/);
+    assert.doesNotMatch(page, /Organization data is unavailable/);
+    assert.doesNotMatch(page, /secret-token-must-not-render/);
+    assert.doesNotMatch(page, /refresh-secret-must-not-render/);
+    assert.doesNotMatch(page, /untrusted/);
+  }
 });

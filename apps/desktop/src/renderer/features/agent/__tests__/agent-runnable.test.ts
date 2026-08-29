@@ -1,12 +1,45 @@
-// Regression coverage for isRemovedAgent — the "Agent no longer available"
-// card was firing for a live Claude chat (snapshot transiently missing
-// "claude" / a legacy variant id), even though Claude is a current agent.
-// The card must only appear for identifiers in the explicit retired set.
-
 import { describe, expect, it } from "vitest";
 
-import { isRemovedAgent } from "../agent-runnable";
 import type { BridgeRegistryAgent } from "../../../platform/bridge/messages";
+import { isRemovedAgent, isRunnableAgent } from "../agent-runnable";
+
+function agent(
+  id: string,
+  overrides: Partial<BridgeRegistryAgent>,
+): BridgeRegistryAgent {
+  return {
+    id,
+    name: id,
+    version: "",
+    description: "",
+    distribution: {},
+    authBinary: id,
+    ...overrides,
+  };
+}
+
+describe("isRunnableAgent", () => {
+  it("does not turn an unavailable contained auth probe into signed-out state", () => {
+    const unavailable = {
+      installed: true,
+      authenticated: undefined,
+      authenticationUnavailableReason:
+        "Authentication could not be checked right now.",
+    } as const;
+
+    expect(isRunnableAgent(agent("codex", unavailable))).toBe(true);
+    expect(isRunnableAgent(agent("claude", unavailable))).toBe(true);
+    expect(isRunnableAgent(agent("cursor", unavailable))).toBe(true);
+  });
+
+  it("still blocks a confirmed signed-out CLI", () => {
+    expect(
+      isRunnableAgent(
+        agent("codex", { installed: true, authenticated: false }),
+      ),
+    ).toBe(false);
+  });
+});
 
 // Minimal registry fixtures — isRemovedAgent only reads `id`.
 const agents = (...ids: string[]) =>
@@ -14,33 +47,30 @@ const agents = (...ids: string[]) =>
 const FULL = agents("claude", "codex", "cursor");
 
 describe("isRemovedAgent", () => {
-  it("flags retired adapters (gemini, copilot, opencode, droid, antigravity) + variants", () => {
+  it("flags retired adapters and their persisted identifier variants", () => {
     expect(isRemovedAgent("gemini", FULL)).toBe(true);
     expect(isRemovedAgent("gemini-cli", FULL)).toBe(true);
     expect(isRemovedAgent("copilot", FULL)).toBe(true);
     expect(isRemovedAgent("github-copilot", FULL)).toBe(true);
-    // Retired 2026-06-16 alongside the ACP fabric.
     expect(isRemovedAgent("opencode", FULL)).toBe(true);
     expect(isRemovedAgent("factory-droid", FULL)).toBe(true);
     expect(isRemovedAgent("antigravity", FULL)).toBe(true);
   });
 
-  it("NEVER flags a current agent — even when the snapshot lacks it (the bug)", () => {
-    // This is the reported regression: a Claude chat showing "removed".
+  it("never flags a current agent when a transient snapshot omits it", () => {
     expect(isRemovedAgent("claude", [])).toBe(false);
     expect(isRemovedAgent("claude", agents("codex"))).toBe(false);
     expect(isRemovedAgent("codex", [])).toBe(false);
   });
 
-  it("resolves legacy/variant ids to their current family (not removed)", () => {
+  it("resolves legacy current-agent identifiers by family", () => {
     expect(isRemovedAgent("claude-code", [])).toBe(false);
     expect(isRemovedAgent("@anthropic-ai/claude-code", [])).toBe(false);
     expect(isRemovedAgent("openai", [])).toBe(false);
   });
 
-  it("flags a genuinely unknown id only once the registry has loaded", () => {
+  it("flags a genuinely unknown id only after the registry has loaded", () => {
     expect(isRemovedAgent("totally-unknown-xyz", FULL)).toBe(true);
-    // Still loading → no cold-start flash.
     expect(isRemovedAgent("totally-unknown-xyz", null)).toBe(false);
   });
 

@@ -186,11 +186,7 @@ export function planIgnoredPathDelta(
     visitAncestorDirs(path, (ancestor) => nextAncestorDirs.add(ancestor));
   }
   for (const path of applied) {
-    if (
-      isDirEntry(path) &&
-      !next.has(path) &&
-      nextAncestorDirs.has(path)
-    ) {
+    if (isDirEntry(path) && !next.has(path) && nextAncestorDirs.has(path)) {
       effectiveNext.add(path);
     }
   }
@@ -336,6 +332,7 @@ export function useIgnoredEntries(
   cwd: string | undefined,
   reloadKey: number | undefined,
   model: IgnoredTreeModel | null,
+  enabled = true,
 ): IgnoredEntriesState {
   const [state, setState] = useState<IgnoredState>(() => warmState(cwd));
   const active = state.cwd === cwd ? state : null;
@@ -366,6 +363,7 @@ export function useIgnoredEntries(
   // Both are no-ops when nothing changed, so an idle refresh costs two cheap
   // reads and does not touch React state.
   useEffect(() => {
+    if (!enabled) return;
     if (!cwd) {
       // Identity-stable, so a reloadKey bump with no workspace doesn't hand the
       // tree a fresh (empty) status array and re-render it for nothing.
@@ -423,11 +421,11 @@ export function useIgnoredEntries(
     return () => {
       cancelled = true;
     };
-  }, [cwd, reloadKey]);
+  }, [cwd, enabled, reloadKey]);
 
   const loadDir = useCallback(
     async (dir: string): Promise<LoadOutcome> => {
-      if (!cwd) return "failed";
+      if (!enabled || !cwd) return "failed";
       let children: string[];
       try {
         children = await listIgnoredEntries(cwd, dir);
@@ -445,7 +443,7 @@ export function useIgnoredEntries(
       setState((prev) => withLoadedDir(prev, cwd, dir, children));
       return "loaded";
     },
-    [cwd],
+    [cwd, enabled],
   );
 
   // Watch for the user expanding an ignored directory we haven't listed yet.
@@ -460,7 +458,7 @@ export function useIgnoredEntries(
   pendingRef.current = pending;
   const inFlightRef = useRef(new Set<string>());
   useEffect(() => {
-    if (!model) return;
+    if (!enabled || !model) return;
     // This effect re-runs on a cwd change (loadDir is keyed to it). Drop the
     // in-flight keys with it: a request still settling for the PREVIOUS
     // workspace would otherwise make us skip the same-named directory here —
@@ -501,9 +499,11 @@ export function useIgnoredEntries(
         // alone — only an explicit collapse counts here. A branch that is gone
         // for real is pruned from the LISTINGS instead (withoutVanishedDirs),
         // which is the durable signal and doesn't fight a transient tree state.
-        if (item && item.isDirectory() && !isExpanded(item)) collapsed.push(dir);
+        if (item && item.isDirectory() && !isExpanded(item))
+          collapsed.push(dir);
       }
-      if (collapsed.length > 0) setState((prev) => withCollapsed(prev, collapsed));
+      if (collapsed.length > 0)
+        setState((prev) => withCollapsed(prev, collapsed));
     };
     const unsubscribe = model.subscribe(rescan);
     scan(); // an expansion restored by resetPaths fires no notification
@@ -512,7 +512,7 @@ export function useIgnoredEntries(
       if (frame) cancelAnimationFrame(frame);
       unsubscribe();
     };
-  }, [model, loadDir]);
+  }, [enabled, model, loadDir]);
 
   // Every ignored DIRECTORY, not just the roots — flattened chains break
   // inheritance (see the header). Files inherit and are omitted.
@@ -525,9 +525,9 @@ export function useIgnoredEntries(
   // the rows did, which the warm snapshot made visible: `.env` and
   // `node_modules/` painted like tracked code and then greyed out.
   useLayoutEffect(() => {
-    if (!model) return;
+    if (!enabled || !model) return;
     model.setGitStatus(status.length > 0 ? status : undefined);
-  }, [model, status]);
+  }, [enabled, model, status]);
 
   const paths = useMemo(
     () => mergeIgnoredPaths(activeRoots, loaded),

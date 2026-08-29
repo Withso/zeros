@@ -40,15 +40,68 @@ const githubConfig: GithubBackendConfig = {
 function config(github: GithubBackendConfig | null): Config {
   return {
     databaseUrl: "postgres://unused",
-    authIssuers: ["https://tenant.example.test/"],
-    authJwksUrl: "https://tenant.example.test/.well-known/jwks.json",
-    authAudience: "https://api.example.test",
+    auth: {
+      provider: "auth0",
+      issuers: ["https://tenant.example.test/"],
+      jwksUrl: "https://tenant.example.test/.well-known/jwks.json",
+      audience: "https://api.example.test",
+    },
+    workos: null,
+    inviteLinkBase: "https://app.example.test/invite",
     port: 8080,
     isProduction: true,
     github,
     feedback: null,
+    cloudWorkspaces: null,
   };
 }
+
+function workosConfig(): Config {
+  return {
+    ...config(null),
+    auth: {
+      provider: "workos",
+      issuer: "https://identity.example.test/user_management/client_web",
+      jwksUrl: "https://identity.example.test/sso/jwks/client_web",
+      audience: "https://api.example.test",
+      webClientId: "client_web",
+      desktopClientId: "client_desktop",
+    },
+    workos: {
+      appOrigin: "https://app.example.test",
+      apiKey: "workos-api-key-for-tests",
+      cookiePassword: "cookie-password-for-tests".repeat(2),
+      webhookSecret: "webhook-secret-for-tests",
+    },
+  };
+}
+
+describe("app assembly — Railway WorkOS boundary", () => {
+  const app = createApp(workosConfig(), pool, emailConfig as never);
+
+  it("mounts browser, webhook, and desktop routes before /v1 bearer auth", async () => {
+    const cases = [
+      ["GET", "/auth/start?provider=unknown", 400],
+      ["GET", "/auth/browser/session", 401],
+      ["GET", "/auth/desktop/start?provider=unknown", 400],
+      ["POST", "/auth/desktop-revoke", 400],
+      ["POST", "/auth/workos-webhook", 401],
+    ] as const;
+    for (const [method, path, status] of cases) {
+      const response = await app.request(path, { method });
+      expect({ path, status: response.status }).toEqual({ path, status });
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    }
+  });
+
+  it("does not expose an anonymous verification-continuation endpoint", async () => {
+    const response = await app.request(
+      "/auth/desktop/complete-github-verification",
+      { method: "POST" },
+    );
+    expect(response.status).toBe(404);
+  });
+});
 
 describe("app assembly — no GitHub App registered", () => {
   const app = createApp(config(null), pool, emailConfig as never);
@@ -111,9 +164,13 @@ describe("app assembly — GitHub App registered", () => {
 
 describe("app assembly — healthz", () => {
   it("needs no bearer token so Railway's healthcheck can pass", async () => {
-    const healthy = createApp(config(null), {
-      query: async () => ({ rows: [] }),
-    } as unknown as pg.Pool, emailConfig as never);
+    const healthy = createApp(
+      config(null),
+      {
+        query: async () => ({ rows: [] }),
+      } as unknown as pg.Pool,
+      emailConfig as never,
+    );
     const response = await healthy.request("/healthz");
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });

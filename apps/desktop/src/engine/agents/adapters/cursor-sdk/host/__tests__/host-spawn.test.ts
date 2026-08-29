@@ -10,16 +10,27 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
+import type { ChildProcess } from "node:child_process";
 
 const { spawnSpy } = vi.hoisted(() => ({ spawnSpy: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn: spawnSpy }));
 
-import { resolveHostCwd, spawnSubprocessTransport } from "../host-client";
+import {
+  formatHostStderrLines,
+  resolveHostCwd,
+  spawnSubprocessTransport,
+} from "../host-client";
+import type {
+  BoundaryProcess,
+  PreparedBoundary,
+  TerritoryGeneration,
+} from "../../../../containment/types";
 
 /** Minimal ChildProcess stand-in: only the members touched right after spawn. */
 function fakeChild() {
   const stream = () => ({ setEncoding: vi.fn(), on: vi.fn() });
   return {
+    pid: 43_210,
     stdout: stream(),
     stderr: stream(),
     stdin: { write: vi.fn(), end: vi.fn(), destroyed: false },
@@ -75,5 +86,96 @@ describe("spawnSubprocessTransport — host cwd safety", () => {
     expect(opts.cwd).toBe(resolveHostCwd());
     // The exact regression: the host must not inherit the engine repo root.
     expect(opts.cwd).not.toBe(process.cwd());
+  });
+
+  it("runs a session host through its prepared boundary with no ambient authority", () => {
+    const stopAndProve = vi.fn(async () => undefined);
+    const tracked = {
+      pid: 43_210,
+      stdin: null,
+      stdout: null,
+      stderr: null,
+      wait: vi.fn(),
+      signal: vi.fn(),
+      stopAndProve,
+    } as unknown as BoundaryProcess;
+    const wrapSpawn = vi.fn((request) => ({
+      command: "/sandbox/supervisor",
+      args: ["--contained"],
+      cwd: request.cwd,
+      env: { BOOTSTRAP_ONLY: "1" },
+      stdio: "pipe" as const,
+    }));
+    const trackProcess = vi.fn(() => tracked);
+    const boundary = {
+      generation: "test-generation" as TerritoryGeneration,
+      status: {},
+      wrapSpawn,
+      trackProcess,
+    } as unknown as PreparedBoundary;
+
+    const transport = spawnSubprocessTransport({
+      executionBoundary: boundary,
+      cwd: "/worktree",
+      env: {
+        HOME: "/user/home",
+        SAFE: "visible",
+        ZEROS_LOCAL_WS_TOKEN: "engine-secret",
+      },
+    });
+
+    expect(wrapSpawn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        command: expect.stringMatching(/^\//),
+        cwd: "/worktree",
+        env: {
+          HOME: "/user/home",
+          // Node fetch/http/https do not consume HTTPS_PROXY unless the
+          // runtime's built-in environment proxy support is enabled at boot.
+          // Without this, Cursor ignores the user's configured HTTPS proxy.
+          NODE_USE_ENV_PROXY: "1",
+          SAFE: "visible",
+        },
+      }),
+    );
+    expect(spawnSpy).toHaveBeenCalledWith(
+      "/sandbox/supervisor",
+      ["--contained"],
+      expect.objectContaining({
+        cwd: "/worktree",
+        env: { BOOTSTRAP_ONLY: "1" },
+        detached: true,
+      }),
+    );
+    expect(trackProcess).toHaveBeenCalledWith(
+      expect.objectContaining({ pid: 43_210 }) as ChildProcess,
+    );
+
+    transport?.dispose();
+    expect(stopAndProve).toHaveBeenCalledOnce();
+  });
+});
+
+describe("formatHostStderrLines", () => {
+  it("tags every line of a chunk exactly once", () => {
+    // The host prefixes its own diagnostics; @cursor/sdk's arrive bare. A
+    // chunk-level prefix doubled the first and left the rest untagged.
+    expect(
+      formatHostStderrLines(
+        "[cursor-host] ready in 132ms\n" +
+          "shell-parser: tree-sitter natives are unavailable\n",
+      ),
+    ).toEqual([
+      "[cursor-host] ready in 132ms",
+      "[cursor-host] shell-parser: tree-sitter natives are unavailable",
+    ]);
+  });
+
+  it("collapses an already-doubled prefix and drops blank lines", () => {
+    expect(
+      formatHostStderrLines(
+        "[cursor-host] [cursor-host] workspace prewarmed in 9670ms\n\n",
+      ),
+    ).toEqual(["[cursor-host] workspace prewarmed in 9670ms"]);
   });
 });

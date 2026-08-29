@@ -32,7 +32,6 @@ import { useWorkspaceDispatch } from "../state/store";
 import { useOpenWorkspace } from "../state/use-open-workspace";
 import { useAgentSessions } from "../features/agent/sessions-hooks";
 import { isExperimentalEnabled } from "../features/settings/experimental-features";
-import { isInternalFeatureActive } from "../features/settings/internal-features";
 import {
   deriveProjectName,
   loadProjects,
@@ -45,7 +44,6 @@ import {
   peekWorkspacesFor,
   useProjects,
 } from "../state/use-projects";
-import { filterWorkspacesForDesignAccess } from "../state/live-workspace-selectors";
 import {
   workspaceInspectFolder,
   type InspectFolderResult,
@@ -63,7 +61,6 @@ import { QuickStartDialog } from "./dialogs/quick-start";
 import { OpenGithubProjectDialog } from "./dialogs/open-github-project";
 import { AddLocalProjectDialog } from "./dialogs/add-local-project";
 import { PublishToGithubDialog } from "./dialogs/publish-to-github";
-import { DispatcherModal } from "./dispatcher/dispatcher-modal";
 
 /** A folder the user has just picked that hasn't finished registering yet.
  *  Drives the minimal shimmer state in the global top bar. */
@@ -149,14 +146,6 @@ export function AddProjectProvider({
   // state since they have no per-row state.
   const [quickStartOpen, setQuickStartOpen] = useState(false);
   const [openGithubOpen, setOpenGithubOpen] = useState(false);
-  // New-workspace dispatcher ("+ Create" launcher).
-  const [dispatcherOpen, setDispatcherOpen] = useState(false);
-  // Carries the top bar's repository context into the dispatcher. Without this,
-  // Dashboard keeps a dormant chat in repo A and Create would incorrectly
-  // preselect A after the user explicitly switched the top bar to repo B.
-  const [dispatcherProjectId, setDispatcherProjectId] = useState<string | null>(
-    null,
-  );
   // Add local project dialog — populated when pickProjectFolder picks a
   // linked-worktree (foreign tool's branch). Stays null when the
   // picked folder is a fresh repo / primary checkout.
@@ -242,10 +231,7 @@ export function AddProjectProvider({
       const land = (registered: Project) => {
         if (!isExperimentalEnabled("workInLocalMain")) {
           const alternative = leftmostLiveWorkspace(
-            filterWorkspacesForDesignAccess(
-              peekWorkspacesFor(registered.repoSlug) ?? [],
-              isInternalFeatureActive("designWorkspaces"),
-            ),
+            peekWorkspacesFor(registered.repoSlug) ?? [],
           );
           if (alternative) {
             openWorkspace(alternative);
@@ -465,10 +451,15 @@ export function AddProjectProvider({
     setQuickStartOpen(true);
   }, []);
 
-  const openDispatcher = useCallback((initialProjectId?: string) => {
-    setDispatcherProjectId(initialProjectId ?? null);
-    setDispatcherOpen(true);
-  }, []);
+  const openDispatcher = useCallback(
+    (initialProjectId?: string) => {
+      dispatch({
+        type: "OPEN_CREATE_PAGE",
+        projectId: initialProjectId ?? null,
+      });
+    },
+    [dispatch],
+  );
 
   const publishToGithub = useCallback(
     (repoRoot: string, defaultName?: string) => {
@@ -545,20 +536,6 @@ export function AddProjectProvider({
         repoRoot={publishTarget?.repoRoot ?? null}
         defaultName={publishTarget?.name}
         onPublished={() => refreshProjects()}
-      />
-      {/* New-workspace dispatcher ("+ Create"). Its + folder menu reuses the
-          same open/clone/quick-start flows above, so adding a project from
-          inside the dispatcher drives the identical paths. */}
-      <DispatcherModal
-        open={dispatcherOpen}
-        onOpenChange={(open) => {
-          setDispatcherOpen(open);
-          if (!open) setDispatcherProjectId(null);
-        }}
-        initialProjectId={dispatcherProjectId}
-        onOpenProject={openProject}
-        onOpenGithubProject={openGithubProject}
-        onQuickStart={quickStart}
       />
     </AddProjectContext.Provider>
   );

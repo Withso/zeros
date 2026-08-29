@@ -94,6 +94,13 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install contained-execution runtime
+        # The suite below drives real bubblewrap/seccomp containment. Without
+        # these host prerequisites those tests fail with "absolute bwrap
+        # unavailable" — an environmental failure that reads exactly like a
+        # regression and blocked the v0.1.10 Production gate.
+        uses: ./.github/actions/contained-execution-runtime
+
       - name: Typecheck (app · electron · packages)
         # vite + tsup strip types via esbuild WITHOUT checking them, so before this
         # the ONLY type safety on the release path was that preflight gated the PR
@@ -112,7 +119,11 @@ jobs:
       - name: Run Vitest suite
         # Same suite as the standalone "Vitest suite" workflow — a red suite
         # blocks the release instead of shipping a known regression.
-        run: pnpm test:git
+        #
+        # Runs through with-userns.sh for the same reason preflight does: the
+        # contained-execution tests nest a capability-bearing user namespace that
+        # Ubuntu's bwrap AppArmor profile strips by default.
+        run: bash scripts/ci/with-userns.sh pnpm test:git
 
       - name: Ship guards (catalog · packaging · prod env · security)
         # Defense-in-depth on the ONLY path that produces a public DMG. These are
@@ -125,6 +136,7 @@ jobs:
           pnpm models:verify --strict
           pnpm check:cursor-asar
           pnpm check:licenses
+          pnpm check:audit
           pnpm check:packaging-paths
           pnpm check:vite-env
           pnpm check:codex-pin
@@ -237,6 +249,9 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Qualify ZSR on the shipping kernel
+        run: pnpm check:zsr
+
       - name: Build engine sidecar (bun → binaries/zeros-engine-*)
         run: pnpm build:sidecar
 
@@ -256,6 +271,11 @@ jobs:
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+          AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
+          AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
+          AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
+          AUTH_JWKS_URL: ${{ vars.AUTH_JWKS_URL }}
+          AUTH_AUDIENCE: ${{ vars.AUTH_AUDIENCE }}
         run: pnpm exec tsx scripts/release-environment.ts production
 
       - name: Compile Electron main + preload
@@ -264,6 +284,11 @@ jobs:
           # client secrets remain backend-only.
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+          AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
+          AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
+          AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
+          AUTH_JWKS_URL: ${{ vars.AUTH_JWKS_URL }}
+          AUTH_AUDIENCE: ${{ vars.AUTH_AUDIENCE }}
         run: pnpm electron:compile
 
       - name: Build Vite renderer
@@ -317,6 +342,24 @@ jobs:
         # every pty.spawn failed. Exercise the exact .app executable + dedicated
         # native resource + shipped PTY host and require real shell output.
         run: pnpm smoke:packaged-pty
+
+      - name: Verify installer + updater signatures
+        # Notarization submits the DMG, while electron-updater installs the ZIP.
+        # Verify both signed containers before either leaves this build job and
+        # require the exact public Zeros Developer ID identity, hardened runtime,
+        # secure timestamp, matching code directory, and ShipIt-safe modes.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          DMG="release/Zeros-${VERSION}-arm64.dmg"
+          ZIP="release/Zeros-${VERSION}-arm64-mac.zip"
+          node scripts/verify-macos-release-artifacts.mjs \
+            --dmg "$DMG" \
+            --zip "$ZIP" \
+            --app-name "Zeros.app" \
+            --bundle-id com.zeros \
+            --team-id H8MS56JU2Z
 
       - name: Submit to Apple notary (--no-wait, no poll)
         # Submit the DMG and STOP — do NOT block this job on Apple's analysis. The
@@ -482,7 +525,20 @@ jobs:
           # submission.
           xcrun stapler validate "$DMG"
           spctl -a -vvv -t exec "$APP"
-          echo "✓ Developer ID signed · hardened · notarized · stapled DMG · Gatekeeper-accepted"
+          # ShipIt updateability: EVERY packaged file/dir must keep owner-write.
+          # Squirrel's ShipIt strips quarantine xattrs from the update payload,
+          # removexattr() requires write permission, and a single read-only file
+          # aborts every in-place update with EPERM after staging — the app
+          # relaunches on the old build with no error in its own log (2026-08-25
+          # field incident on alpha: zsr helpers packaged at 0o555). The
+          # read-only DMG mount still reports the stored mode bits.
+          READ_ONLY=$(find "$APP" \( -type f -o -type d \) ! -perm -200 | head -20)
+          if [ -n "$READ_ONLY" ]; then
+            echo "::error::Packaged entries without owner-write would break Squirrel in-place updates:"
+            echo "$READ_ONLY"
+            exit 1
+          fi
+          echo "✓ Developer ID signed · hardened · notarized · stapled DMG · Gatekeeper-accepted · all entries owner-writable"
 
       - name: Publish GitHub release
         env:

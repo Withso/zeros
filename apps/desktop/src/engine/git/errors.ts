@@ -31,6 +31,7 @@ export type GitErrorCode =
   | "GITHUB_REPO_NOT_INSTALLED"
   | "GITHUB_INSTALLATION_SUSPENDED"
   | "SETUP_SCRIPT_FAILED"
+  | "CONTAINMENT_TEARDOWN_FAILED"
   | "REMOTE_RESTRICTED"
   | "REMOTE_PATH_DENIED"
   // Settings TOML ops (apps/desktop/src/engine/settings/ops.ts — surfaced via the same

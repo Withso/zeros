@@ -348,6 +348,13 @@ describe("stageContextGraphAttachment", () => {
     expect(safeAttachmentFilename("ok name.png")).toBe("ok_name.png");
   });
 
+  it("preserves an image extension when a long attachment name is capped", () => {
+    const safeName = safeAttachmentFilename(`${"a".repeat(100)}.png`);
+
+    expect(safeName).toHaveLength(80);
+    expect(safeName).toBe(`${"a".repeat(76)}.png`);
+  });
+
   it("rejects traversal-shaped ids outright", async () => {
     for (const id of ["../escape", "a/b", ".", "..", ""]) {
       const res = await stageContextGraphAttachment(root, {

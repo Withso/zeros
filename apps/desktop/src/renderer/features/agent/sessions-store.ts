@@ -62,6 +62,8 @@ import { effortAdoptedEnvKey } from "./model-catalog";
 import { useWorkspaceStore } from "../../state/workspace-store";
 import type { ChatEffort } from "../../state/store";
 import { sameProviderBinding } from "@zeros/protocol/identities";
+import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
+import type { AgentGoal } from "@zeros/protocol/agent-events";
 
 const MAX_STDERR_LINES = 200;
 const MAX_BACKGROUND_TASKS_PER_CHAT = 100;
@@ -238,6 +240,8 @@ export const BLANK: AgentSessionState = {
   sessionId: null,
   providerBinding: null,
   providerMetadata: null,
+  boundary: null,
+  boundaryPorts: null,
   cwd: null,
   initialize: null,
   session: null,
@@ -261,6 +265,8 @@ export const BLANK: AgentSessionState = {
   availableSubagents: [],
   backgroundTasks: [],
   workflows: [],
+  goal: null,
+  safetyReviewRetries: {},
   waitingForBackgroundTasks: false,
   backgroundTasksWaitingSince: null,
 };
@@ -331,6 +337,13 @@ export interface SessionsStoreState {
   // ── Pure mutators ───────────────────────────────────────
   setSession: (chatId: string, slot: AgentSessionState) => void;
   patchSession: (chatId: string, patch: Partial<AgentSessionState>) => void;
+  /** Apply a goal snapshot only while its exact execution still owns the chat.
+   * Used by both bridge pushes and awaited goal mutation replies. */
+  applyGoalSnapshot: (
+    chatId: string,
+    executionId: string,
+    goal: AgentGoal | null,
+  ) => boolean;
   /** Release only the heavyweight transcript payload for a chat that left the
    *  bounded retained-view deck. The live runtime shell and reverse routing
    *  index stay intact so turns, gates and scheduled work keep functioning. */
@@ -447,6 +460,16 @@ export interface SessionsStoreState {
    *  isn't cooled. When absent, the exit is agent-wide (a shared
    *  subprocess) and every non-terminal chat flips. */
   applyBridgeAgentExit: (agentId: string, sessionId?: string | null) => void;
+
+  /** Apply an exact execution-boundary update. A revoked boundary is stronger
+   *  than a generic subprocess-exit hint: it invalidates the route even while
+   *  a turn or bind is active, while preserving the durable provider identity
+   *  needed to resume the conversation on a replacement execution. */
+  applyBridgeBoundaryStatus: (
+    agentId: string,
+    executionId: string,
+    status: ExecutionBoundaryStatus,
+  ) => void;
 }
 
 export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
@@ -555,6 +578,14 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       ) {
         normalized = { ...normalized, executionId, sessionId: executionId };
       }
+      const previous = state.sessions[chatId];
+      if (
+        previous &&
+        (previous.executionId ?? previous.sessionId) !== executionId &&
+        Object.keys(normalized.safetyReviewRetries).length > 0
+      ) {
+        normalized = { ...normalized, safetyReviewRetries: {} };
+      }
       const next = { ...state.sessions, [chatId]: normalized };
       return {
         sessions: next,
@@ -593,6 +624,12 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       ) {
         updated = { ...updated, executionId, sessionId: executionId };
       }
+      if (
+        (existing.executionId ?? existing.sessionId) !== executionId &&
+        Object.keys(updated.safetyReviewRetries).length > 0
+      ) {
+        updated = { ...updated, safetyReviewRetries: {} };
+      }
       const next = { ...state.sessions, [chatId]: updated };
       // Only rebuild the reverse index if executionId changed — saves work
       // on the common path (token chunks don't touch routing identity).
@@ -604,6 +641,26 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           : state.executionToChatId,
       };
     });
+  },
+
+  applyGoalSnapshot: (chatId, executionId, goal) => {
+    let applied = false;
+    set((state) => {
+      const slot = state.sessions[chatId];
+      if (!slot || (slot.executionId ?? slot.sessionId) !== executionId) {
+        return state;
+      }
+      applied = true;
+      if (slot.goal === goal) return state;
+      return {
+        ...state,
+        sessions: {
+          ...state.sessions,
+          [chatId]: { ...slot, goal },
+        },
+      };
+    });
+    return applied;
   },
 
   evictTranscript: (chatId) => {
@@ -775,6 +832,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       effort?: string;
       providerBinding?: import("@zeros/protocol/identities").ProviderBinding;
       providerMetadata?: import("@zeros/protocol/identities").ProviderMetadata;
+      goal?: import("@zeros/protocol/agent-events").AgentGoal | null;
+      toolCallId?: string;
+      retryId?: string | null;
     };
 
     if (
@@ -797,6 +857,48 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         ...(upd.providerMetadata
           ? { providerMetadata: upd.providerMetadata }
           : {}),
+      });
+      return;
+    }
+
+    if (upd.sessionUpdate === "goal_update") {
+      get().applyGoalSnapshot(
+        chatId,
+        notification.executionId ?? notification.sessionId,
+        upd.goal ?? null,
+      );
+      return;
+    }
+
+    if (upd.sessionUpdate === "safety_review_retry_available") {
+      const sourceExecution =
+        notification.executionId ?? notification.sessionId;
+      set((state) => {
+        const slot = state.sessions[chatId];
+        if (
+          !slot ||
+          (slot.executionId ?? slot.sessionId) !== sourceExecution ||
+          typeof upd.toolCallId !== "string" ||
+          (typeof upd.retryId !== "string" && upd.retryId !== null)
+        ) {
+          return state;
+        }
+        const current = slot.safetyReviewRetries[upd.toolCallId];
+        if (
+          (upd.retryId === null && current === undefined) ||
+          current === upd.retryId
+        ) {
+          return state;
+        }
+        const safetyReviewRetries = { ...slot.safetyReviewRetries };
+        if (upd.retryId === null) delete safetyReviewRetries[upd.toolCallId];
+        else safetyReviewRetries[upd.toolCallId] = upd.retryId;
+        return {
+          sessions: {
+            ...state.sessions,
+            [chatId]: { ...slot, safetyReviewRetries },
+          },
+        };
       });
       return;
     }
@@ -836,15 +938,27 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
       )
         return;
       if (upd.state === "running") {
+        const engineStartedAt =
+          typeof upd.startedAt === "number" &&
+          Number.isFinite(upd.startedAt) &&
+          upd.startedAt >= 0
+            ? upd.startedAt
+            : null;
         get().patchSession(chatId, {
           status: "streaming",
           error: null,
           failure: null,
           lastStopReason: null,
+          // A local send starts this clock before session admission. Cursor's
+          // provider create can acknowledge seconds later; lifecycle updates
+          // may refine the start earlier, but must never move it forward and
+          // visibly reset the timer.
           activeTurnStartedAt:
-            typeof upd.startedAt === "number"
-              ? upd.startedAt
-              : slot.activeTurnStartedAt,
+            slot.activeTurnStartedAt == null
+              ? engineStartedAt
+              : engineStartedAt == null
+                ? slot.activeTurnStartedAt
+                : Math.min(slot.activeTurnStartedAt, engineStartedAt),
         });
       } else {
         get().patchSession(chatId, {
@@ -921,11 +1035,9 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
         // The agent is ALREADY running at this tier — it reported the change
         // itself. Advance the live slot's applied-env stamp with the chat, or
         // sendPrompt's settings-drift reconcile reads the write above as user
-        // drift and force-respawns COLD (AGENT_NEW_SESSION carries no prior
-        // session id, so Codex silently starts a brand-new thread and the
-        // conversation is gone while the transcript stays on screen). Only the
-        // effort slot moves, so an unapplied model/Fast/add-dir change is still
-        // reconciled. <AgentSessionsProvider> additionally pushes
+        // drift and performs an unnecessary close→resume before the next send.
+        // Only the effort slot moves, so an unapplied model/Fast/add-dir change
+        // is still reconciled. <AgentSessionsProvider> additionally pushes
         // AGENT_UPDATE_CONFIG so the ENGINE's session env matches what the
         // composer now shows (codex re-reads it on every turn/start).
         const applied = effortAdoptedEnvKey(
@@ -1282,6 +1394,109 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
     });
   },
 
+  applyBridgeBoundaryStatus: (agentId, executionId, status) => {
+    set((state) => {
+      const chatId = state.executionToChatId[executionId];
+      if (!chatId) return state;
+      const slot = state.sessions[chatId];
+      if (
+        !slot ||
+        slot.agentId !== agentId ||
+        (slot.executionId ?? slot.sessionId) !== executionId
+      ) {
+        return state;
+      }
+      if (status.state !== "revoked") {
+        if (status.failure === "design-protection-failed") {
+          const failure = {
+            kind: "design-protection-failed" as const,
+            stage: "prompt" as const,
+            agentId,
+            message:
+              "The agent was stopped because Design protection could not be proven.",
+          };
+          return {
+            sessions: {
+              ...state.sessions,
+              [chatId]: {
+                ...slot,
+                status: "failed" as SessionStatus,
+                error: failure.message,
+                failure,
+                boundary: status,
+                activeTurnStartedAt: null,
+                pendingPermission: null,
+                pendingPermissions: [],
+                pendingQuestions: [],
+                backgroundTasks: [],
+                workflows: [],
+                waitingForBackgroundTasks: false,
+                backgroundTasksWaitingSince: null,
+              },
+            },
+            pendingLocalTurns: withoutPendingLocalTurn(
+              state.pendingLocalTurns,
+              chatId,
+            ),
+          };
+        }
+        if (slot.boundary === status) return state;
+        return {
+          sessions: {
+            ...state.sessions,
+            [chatId]: { ...slot, boundary: status },
+          },
+        };
+      }
+
+      // Revocation is authoritative and execution-scoped. Do not retain the
+      // route merely because a local send/rebind is active: doing so lets its
+      // next AGENT_PROMPT target an execution the engine has already removed.
+      // Keep transcript, cwd, usage and providerBinding/providerMetadata — they
+      // are conversation state and are exactly what silent re-adoption needs.
+      const terminal =
+        slot.status === "failed" || slot.status === "auth-required";
+      const sessions = {
+        ...state.sessions,
+        [chatId]: {
+          ...slot,
+          status: terminal ? slot.status : ("reconnecting" as SessionStatus),
+          error: terminal ? slot.error : null,
+          failure: terminal ? slot.failure : null,
+          executionId: null,
+          sessionId: null,
+          session: null,
+          boundary: null,
+          boundaryPorts: null,
+          activeTurnStartedAt: null,
+          pendingPermission: null,
+          pendingPermissions: [],
+          pendingQuestions: [],
+          backgroundTasks: [],
+          workflows: [],
+          waitingForBackgroundTasks: false,
+          backgroundTasksWaitingSince: null,
+        },
+      };
+      const cancellingChats = state.cancellingChats.has(chatId)
+        ? new Set(
+            [...state.cancellingChats].filter(
+              (candidate) => candidate !== chatId,
+            ),
+          )
+        : state.cancellingChats;
+      return {
+        sessions,
+        executionToChatId: rebuildIndex(sessions),
+        cancellingChats,
+        pendingLocalTurns: withoutPendingLocalTurn(
+          state.pendingLocalTurns,
+          chatId,
+        ),
+      };
+    });
+  },
+
   applyBridgeAgentExit: (agentId, sessionId) => {
     // A per-session exit (Codex: one app-server child per chat) must NOT
     // cool the whole agent — sibling chats on the same agent are still
@@ -1376,6 +1591,13 @@ export const useSessionsStore = create<SessionsStoreState>((set, get) => ({
           executionId: null,
           sessionId: null,
           session: null,
+          // The boundary belonged to the exact execution that just died, and
+          // with executionId nulled the status-changed guard drops any late
+          // engine publish for it — so a stale snapshot here (e.g. `draining`
+          // from a territory restart) would render, and spin, forever. The
+          // next create/load response repopulates both fields.
+          boundary: null,
+          boundaryPorts: null,
         };
       }
       if (!changed) return state;
@@ -1446,6 +1668,47 @@ export function useAnyChatStreaming(chatIds: readonly string[]): boolean {
   return useSessionsStore((s) => {
     for (const id of chatIds) {
       if (s.sessions[id]?.status === "streaming") return true;
+    }
+    return false;
+  });
+}
+
+/** Exact visual answer to "is an agent doing work?" Session admission alone
+ * is not work: every newly-opened chat warms an execution before the user has
+ * sent anything. A live/rebuilding turn, an owned optimistic turn, an active
+ * background task, or a running workflow is real work. */
+export function agentSessionHasActiveWork(
+  slot: AgentSessionState | undefined,
+  pendingLocalTurnId: string | null | undefined,
+): boolean {
+  if (pendingLocalTurnId) return true;
+  if (!slot) return false;
+  if (slot.status === "streaming") return true;
+  if (
+    (slot.status === "warming" || slot.status === "reconnecting") &&
+    slot.activeTurnStartedAt !== null
+  ) {
+    return true;
+  }
+  if (slot.backgroundTasks.length > 0) return true;
+  // Paused workflows remain resumable/stoppable lifecycle entries, but they
+  // are not executing and must not paint the "Agent working" spinner alone.
+  return slot.workflows.some((workflow) => workflow.status === "running");
+}
+
+/** Workspace-tab activity indicator. Unlike useAnyChatWorking (a conservative
+ * mutation-safety gate), this excludes pristine session warm-up. */
+export function useAnyChatAgentWorking(chatIds: readonly string[]): boolean {
+  return useSessionsStore((state) => {
+    for (const id of chatIds) {
+      if (
+        agentSessionHasActiveWork(
+          state.sessions[id],
+          state.pendingLocalTurns[id],
+        )
+      ) {
+        return true;
+      }
     }
     return false;
   });

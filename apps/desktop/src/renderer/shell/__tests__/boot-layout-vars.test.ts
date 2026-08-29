@@ -19,8 +19,10 @@ import {
 } from "../conversation/pane-sizing";
 import { TERMINAL_PANEL_HEIGHT_VAR } from "../terminal/terminal-panel-layout";
 import {
-  DESIGN_WORKSPACE_SIDEBAR_RATIO_KEY,
-  DESIGN_WORKSPACE_SIDEBAR_RATIO_VAR,
+  DESIGN_WORKSPACE_LAYERS_WIDTH_KEY,
+  DESIGN_WORKSPACE_LAYERS_WIDTH_VAR,
+  DESIGN_WORKSPACE_STYLE_WIDTH_KEY,
+  DESIGN_WORKSPACE_STYLE_WIDTH_VAR,
 } from "../../features/design-workspace/design-workspace-width";
 
 // `environment: "node"` — stand up just enough of window/document for the
@@ -96,12 +98,14 @@ describe("applyBootLayoutVars", () => {
     expect(declared.get(TERMINAL_PANEL_HEIGHT_VAR)).toBe("30%");
   });
 
-  it("publishes design's independent sidebar ratio without changing Conversation pane", () => {
+  it("publishes Design's independent panel widths without changing Conversation pane", () => {
     store.set(CONVERSATION_RATIO_KEY, "0.6");
-    store.set(DESIGN_WORKSPACE_SIDEBAR_RATIO_KEY, "0.4");
+    store.set(DESIGN_WORKSPACE_LAYERS_WIDTH_KEY, "360");
+    store.set(DESIGN_WORKSPACE_STYLE_WIDTH_KEY, "420");
     applyBootLayoutVars();
     expect(declared.get(CONVERSATION_RATIO_VAR)).toBe("0.6");
-    expect(declared.get(DESIGN_WORKSPACE_SIDEBAR_RATIO_VAR)).toBe("0.4");
+    expect(declared.get(DESIGN_WORKSPACE_LAYERS_WIDTH_VAR)).toBe("360px");
+    expect(declared.get(DESIGN_WORKSPACE_STYLE_WIDTH_VAR)).toBe("420px");
   });
 
   it("agrees with what the column hook reads a moment later", () => {

@@ -74,6 +74,7 @@ import {
   bridgeWorkspaceList,
   bridgeWorkspaceDelete,
   bridgeWorkspaceArchive,
+  bridgeWorkspaceSetMode,
   bridgeWorkspaceSetStatus,
   bridgeWorkspaceReassignLocalOrganization,
   bridgeWorkspaceRestore,
@@ -108,6 +109,7 @@ import {
   bridgeDesignRenameFrame,
   bridgeDesignProvenance,
   bridgeDesignSave,
+  bridgeDesignStage,
   bridgeDesignSetText,
   bridgeDesignSetScreenshot,
   bridgeDesignSetRuntimeAudit,
@@ -119,10 +121,13 @@ import {
   bridgeDesignUpdateStyles,
   bridgeDesignWriteHtml,
   bridgeDesignInsertAsset,
+  isDesignWorkspaceSnapshotWire,
   type DesignFrameDocumentWire,
+  type DesignFoundationRevisionWire,
   type DesignFoundationOpenWire,
   type DesignApiMutationReplyWire,
   type DesignFrameGeometryWire,
+  type DesignTextFrameSeedWire,
   type DesignFrameSummaryWire,
   type DesignLintReportWire,
   type DesignMutationReplyWire,
@@ -153,7 +158,9 @@ export type {
   DesignCanvasFrameWire,
   DesignFrameDocumentWire,
   DesignFrameGeometryWire,
+  DesignTextFrameSeedWire,
   DesignFrameSummaryWire,
+  DesignFoundationRevisionWire,
   DesignFoundationOpenWire,
   DesignApiMutationReplyWire,
   DesignFrameTreeNodeWire,
@@ -267,6 +274,14 @@ export interface FileChange {
   path: string;
   status: FileChangeStatus;
   oldPath?: string;
+}
+
+/** Content-free row returned when a whole-tree patch is too large to
+ * materialize safely. The selected file still loads its exact patch. */
+export interface DiffFileSummary extends FileChange {
+  additions: number;
+  deletions: number;
+  binary: boolean;
 }
 
 export interface Hunk {
@@ -479,7 +494,7 @@ export async function designApplyTransaction(
 
 export async function designHistory(
   workspaceId: string,
-  frame: string,
+  frame: string | null,
   direction: "undo" | "redo",
 ): Promise<DesignApiMutationReplyWire> {
   return bridgeDesignHistory(
@@ -530,6 +545,7 @@ export async function designUpdateToken(
 ): Promise<{
   mutation: DesignTokenMutationWire;
   snapshot: DesignWorkspaceSnapshotWire;
+  foundationRevision?: DesignFoundationRevisionWire;
 }> {
   return bridgeDesignUpdateToken(
     requireBridge("update a design token"),
@@ -587,6 +603,8 @@ export async function designSetRuntimeAudit(
 export async function designCreateFrame(
   workspaceId: string,
   title?: string,
+  geometry?: DesignFrameGeometryWire,
+  seed?: DesignTextFrameSeedWire,
 ): Promise<{
   frame: DesignFrameSummaryWire;
   snapshot: DesignWorkspaceSnapshotWire;
@@ -595,6 +613,8 @@ export async function designCreateFrame(
     requireBridge("create a design frame"),
     workspaceId,
     title,
+    geometry,
+    seed,
   );
 }
 
@@ -621,6 +641,7 @@ export async function designUpdateCanvas(
 ): Promise<{
   geometry: DesignFrameGeometryWire;
   snapshot: DesignWorkspaceSnapshotWire;
+  foundationRevision?: DesignFoundationRevisionWire;
 }> {
   return bridgeDesignUpdateCanvas(
     requireBridge("move a design frame"),
@@ -724,6 +745,10 @@ export async function designInsertAsset(
   );
 }
 
+export async function designStage(workspaceId: string): Promise<{ ok: true }> {
+  return bridgeDesignStage(requireBridge("stage designs"), workspaceId);
+}
+
 export async function designSave(
   workspaceId: string,
   message?: string,
@@ -741,9 +766,9 @@ export async function workspaceList(
     /** true → engine stamps `hasChanges` per live row (git probes). The Dashboard
      *  opts in; the sidebar does not, to keep its refetches git-free. */
     withChanges?: boolean;
-    /** Local façade option. Existing/code-only consumers stay isolated from
-     *  Design rows; the shared workspace store opts in and applies its Internal
-     *  runtime gate at each Design-capable surface. Never sent to the engine. */
+    /** Local façade option. Code-only consumers (notably coding-agent cwd
+     *  pickers) stay isolated from Design rows; public workspace stores opt in.
+     *  Never sent to the engine. */
     includeDesign?: boolean;
   } = {},
 ): Promise<Workspace[]> {
@@ -868,6 +893,38 @@ export async function workspaceSetStatus(args: {
     requireBridge("set the workspace status"),
     args,
   );
+}
+
+/** Switch a workspace between code and design modes (right-click → Switch to
+ *  … Mode). One workspace, two views: entering Design keeps the same checkout
+ *  and code processes live. On first Design initialization the engine retires
+ *  code-agent sessions admitted before that territory existed; Setup, runs,
+ *  and human terminals do not block the view transition. */
+export async function workspaceSetMode(args: {
+  workspaceId: string;
+  mode: "code" | "design";
+}): Promise<{
+  ok: true;
+  mode: "code" | "design";
+  snapshot?: DesignWorkspaceSnapshotWire;
+}> {
+  const result = await bridgeWorkspaceSetMode(
+    requireBridge("switch the workspace mode"),
+    args,
+  );
+  if (
+    result.ok !== true ||
+    (result.mode !== "code" && result.mode !== "design") ||
+    (result.snapshot !== undefined &&
+      !isDesignWorkspaceSnapshotWire(result.snapshot))
+  ) {
+    throw new Error("workspace.setMode: malformed engine response");
+  }
+  return {
+    ok: true,
+    mode: result.mode,
+    ...(result.snapshot ? { snapshot: result.snapshot } : {}),
+  };
 }
 
 /** Restore (unarchive) a workspace. The engine adapts the path/branch when the
@@ -1005,6 +1062,7 @@ export async function workspaceStartRun(args: {
 
 /** Stop a live run action — records "stopped", not "failed" (Run tab). */
 export async function workspaceStopRun(args: {
+  workspaceId: string;
   sessionId: string;
 }): Promise<{ ok: boolean }> {
   return bridgeWorkspaceStopRun(requireBridge("stop run"), args);
@@ -1013,6 +1071,7 @@ export async function workspaceStopRun(args: {
 /** Read a run action's buffered output. The terminal replays this when it
  *  mounts too late to attach to a fast-exiting run PTY (Run tab). */
 export async function workspaceRunLog(args: {
+  workspaceId?: string;
   sessionId: string;
 }): Promise<{ log: string; truncated: boolean }> {
   return bridgeWorkspaceRunLog(requireBridge("read run output"), args);
@@ -1135,8 +1194,15 @@ export interface ChangeLineCounts {
   deletions: number;
 }
 
-export async function gitStatus(workspaceId: string): Promise<StatusResult> {
-  return bridgeGitStatus(requireBridge("read Git status"), workspaceId);
+export async function gitStatus(
+  workspaceId: string,
+  options: { paths?: string[]; includeTracking?: boolean } = {},
+): Promise<StatusResult> {
+  return bridgeGitStatus(
+    requireBridge("read Git status"),
+    workspaceId,
+    options,
+  );
 }
 
 export async function gitChangeCounts(
@@ -1178,14 +1244,16 @@ async function bridgeWorkspaceIdFor(
 }
 
 /** Which top-level tracked folders are materialized in this worktree.
- *  Engine-only (no native IPC fast path) — an on-demand popover read. */
+ *  Engine-only (no native IPC fast path). A known workspace id skips the
+ *  resolver/list round trip on the Files sidebar's cold path. */
 export async function listWorkingDirectories(
   cwd: string,
+  workspaceId?: string | null,
 ): Promise<WorkingDirectoriesWire> {
   const bridge = requireBridge("read working folders");
   return bridgeListWorkingDirectories(
     bridge,
-    await bridgeWorkspaceIdFor(bridge, cwd),
+    workspaceId?.trim() || (await bridgeWorkspaceIdFor(bridge, cwd)),
   );
 }
 
@@ -1193,11 +1261,12 @@ export async function listWorkingDirectories(
 export async function setWorkingDirectories(
   cwd: string,
   directories: string[],
+  workspaceId?: string | null,
 ): Promise<WorkingDirectoriesWire> {
   const bridge = requireBridge("update working folders");
   return bridgeSetWorkingDirectories(
     bridge,
-    await bridgeWorkspaceIdFor(bridge, cwd),
+    workspaceId?.trim() || (await bridgeWorkspaceIdFor(bridge, cwd)),
     directories,
   );
 }
@@ -1284,7 +1353,13 @@ export async function gitDiff(args: {
   base?: string;
   head?: string;
   rawPatch?: boolean;
-}): Promise<{ hunks: Hunk[]; patch?: string }> {
+  summaryLimit?: number;
+}): Promise<{
+  hunks: Hunk[];
+  patch?: string;
+  files?: DiffFileSummary[];
+  summary?: boolean;
+}> {
   return bridgeGitDiff(requireBridge("read the Git diff"), args);
 }
 

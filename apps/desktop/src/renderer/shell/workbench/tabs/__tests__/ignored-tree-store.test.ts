@@ -21,7 +21,7 @@ import {
   mergeIgnoredPaths,
   planIgnoredPathDelta,
 } from "../ignored-entries";
-import { ancestorDirPrefixes } from "../tree-paths";
+import { ancestorDirPrefixes, reconcileTreePathList } from "../tree-paths";
 
 /** A headless controller with the same options WorkspaceFileTree uses.
  *  `flattenEmptyDirectories` went false on 2026-08-03 (Finder-style nesting —
@@ -42,14 +42,20 @@ const map = (entries: Array<[string, string[]]>) => new Map(entries);
 /** The merge WorkspaceFileTree performs before handing `paths` to the tree —
  *  kept in sync with the memo there. Tracked always wins on a kind clash. */
 function mergeForTree(tracked: string[], ignored: string[]) {
+  tracked = reconcileTreePathList(tracked);
+  ignored = reconcileTreePathList(ignored);
   const kinds = new Set<string>();
+  const trackedFiles = new Set<string>();
   for (const p of tracked) {
     kinds.add(p);
+    if (!p.endsWith("/")) trackedFiles.add(p);
     for (const dir of ancestorDirPrefixes(p)) kinds.add(`${dir}/`);
   }
   const keep = ignored.filter(
     (p) =>
-      !kinds.has(p) && !kinds.has(p.endsWith("/") ? p.slice(0, -1) : `${p}/`),
+      !kinds.has(p) &&
+      !kinds.has(p.endsWith("/") ? p.slice(0, -1) : `${p}/`) &&
+      ancestorDirPrefixes(p).every((dir) => !trackedFiles.has(dir)),
   );
   return { paths: [...tracked, ...keep], appliedIgnored: keep };
 }
@@ -174,10 +180,7 @@ describe("the store accepts every op ignoredPathDelta produces", () => {
 
   it("rebuilds when replacing an inferred directory and its descendants with a file", () => {
     const tree = makeTree(["src/a.ts", "cache/item.bin"]);
-    const plan = planIgnoredPathDelta(
-      set("cache/item.bin"),
-      set("cache"),
-    );
+    const plan = planIgnoredPathDelta(set("cache/item.bin"), set("cache"));
 
     expect(plan.requiresReset).toBe(true);
     expect(plan.operations).toEqual([]);
@@ -189,6 +192,20 @@ describe("the store accepts every op ignoredPathDelta produces", () => {
 });
 
 describe("resetPaths input is reconciled before the store sees it", () => {
+  it("drops a tracked symlink row when the same Git listing contains descendants", () => {
+    const { paths } = mergeForTree(
+      [
+        "node_modules/vite",
+        "node_modules/vite/LICENSE.md",
+        "node_modules/vite/dist/index.js",
+      ],
+      [],
+    );
+    expect(paths).not.toContain("node_modules/vite");
+    expect(() => makeTree(paths)).not.toThrow();
+    expect(paths).toContain("node_modules/vite/LICENSE.md");
+  });
+
   it("drops an ignored DIRECTORY that the tracked listing calls a file", () => {
     // `src/generated` is a tracked file; the dev turns it into a gitignored
     // directory. The ignored query reports `src/generated/` while the cached

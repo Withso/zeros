@@ -16,45 +16,6 @@ import type { PendingWorkspaceCreate } from "./pending-workspaces";
 
 const EMPTY_PENDING: PendingWorkspaceCreate[] = [];
 
-/** Remove internal design rows before they reach any shared workspace surface.
- * Returns the bridge-owned array unchanged whenever possible so turning the
- * gate on does not add churn to hot navigation selectors. */
-export function filterWorkspacesForDesignAccess(
-  rows: readonly Workspace[],
-  designWorkspacesActive: boolean,
-): Workspace[] {
-  if (designWorkspacesActive) return rows as Workspace[];
-  let anyFiltered = false;
-  const out: Workspace[] = [];
-  for (const workspace of rows) {
-    if (workspace.kind === "design") {
-      anyFiltered = true;
-      continue;
-    }
-    out.push(workspace);
-  }
-  return anyFiltered ? out : (rows as Workspace[]);
-}
-
-/** Pending design creates are internal state too: hiding only confirmed rows
- * would briefly leak a "Setting up" tab and inflate repository counts. */
-export function filterPendingCreatesForDesignAccess(
-  rows: readonly PendingWorkspaceCreate[],
-  designWorkspacesActive: boolean,
-): PendingWorkspaceCreate[] {
-  if (designWorkspacesActive) return rows as PendingWorkspaceCreate[];
-  let anyFiltered = false;
-  const out: PendingWorkspaceCreate[] = [];
-  for (const pending of rows) {
-    if (pending.kind === "design") {
-      anyFiltered = true;
-      continue;
-    }
-    out.push(pending);
-  }
-  return anyFiltered ? out : (rows as PendingWorkspaceCreate[]);
-}
-
 /** The single visibility filter: drop only rows the server has confirmed
  * archived. Deliberately KEEPS `present === false` (orphaned worktree) rows so
  * every surface's SET — and therefore its count — agrees; each surface still
@@ -77,21 +38,32 @@ export function selectLiveVisible(rows: readonly Workspace[]): Workspace[] {
 
 /** Drop any pending create whose reserved branch (fallback: path) already
  *  appears as a real row — the moment the real workspace lands, its
- *  "Setting up…" placeholder must vanish rather than double-render. Mirrors the
- *  top bar's existing branch-based dedup. */
+ *  "Setting up…" placeholder must vanish rather than double-render.
+ *
+ *  A branch match only counts WITHIN the pending create's own repository. The
+ *  engine allocates workspace names from a per-repository free set of colour
+ *  words (git/naming.ts), so two repositories routinely hold the same branch,
+ *  and the DB's uniqueness index is (repo_slug, branch) for exactly that
+ *  reason. Matching branches globally would let an unrelated repository that
+ *  already owns that colour erase a brand-new workspace's placeholder — the
+ *  one frame the optimistic create exists to guarantee — for every caller that
+ *  passes the cross-repository union (top bar, Dashboard, archive repoint).
+ *  Paths are absolute and therefore remain a global identity. */
 export function dedupePendingCreates(
   pending: readonly PendingWorkspaceCreate[],
   realRows: readonly Workspace[],
 ): PendingWorkspaceCreate[] {
   if (pending.length === 0) return EMPTY_PENDING;
-  const branches = new Set<string>();
+  const branchesBySlug = new Map<string, Set<string>>();
   const paths = new Set<string>();
   for (const w of realRows) {
-    branches.add(w.branch);
+    const branches = branchesBySlug.get(w.repoSlug);
+    if (branches) branches.add(w.branch);
+    else branchesBySlug.set(w.repoSlug, new Set([w.branch]));
     paths.add(w.path);
   }
   return pending.filter((p) => {
-    if (p.branch && branches.has(p.branch)) return false;
+    if (p.branch && branchesBySlug.get(p.repoSlug)?.has(p.branch)) return false;
     if (p.path && paths.has(p.path)) return false;
     return true;
   });

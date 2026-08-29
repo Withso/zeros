@@ -12,13 +12,18 @@
 # ──────────────────────────────────────────────────────────
 set -uo pipefail
 
+failures=0
+
 probe() {
   local label="$1" url="$2"
   # -s silent, -o /dev/null, -w status, fail fast on connect, cap total time.
   local code
-  code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 6 --max-time 12 "$url" 2>/dev/null || echo "000")
-  if [[ "$code" == "000" ]]; then
+  if ! code=$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 6 --max-time 12 "$url" 2>/dev/null); then
+    code="000"
+  fi
+  if [[ ! "$code" =~ ^[1-5][0-9][0-9]$ ]]; then
     printf '  %-12s %-42s  \033[31mBLOCKED\033[0m (no HTTP response)\n' "$label" "$url"
+    failures=$((failures + 1))
   else
     printf '  %-12s %-42s  \033[32mreachable\033[0m (HTTP %s)\n' "$label" "$url" "$code"
   fi
@@ -44,3 +49,10 @@ echo ""
 echo "If an endpoint is BLOCKED, choose a provider egress policy that permits it"
 echo "before enabling that integration in a remote workspace."
 echo ""
+
+if (( failures > 0 )); then
+  printf '\033[31mEgress qualification failed: %d required endpoint(s) were blocked.\033[0m\n' "$failures"
+  exit 1
+fi
+
+printf '\033[32mEgress qualification passed: every required endpoint returned HTTP.\033[0m\n'

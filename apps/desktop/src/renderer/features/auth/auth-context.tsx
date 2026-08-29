@@ -1,8 +1,8 @@
 // ──────────────────────────────────────────────────────────
-// Top-level auth provider for the Zeros app (Auth0, rebuilt 2026-07)
+// Top-level auth provider for the Zeros desktop app
 // ──────────────────────────────────────────────────────────
 //
-// The main process owns the full Auth0 token pair
+// The main process owns the full authentication token pair
 // (apps/desktop/electron/ipc/commands/auth-session.ts); this provider is a thin,
 // offline-tolerant mirror over IPC. It never sees a refresh token and has no
 // browser persistence fallback.
@@ -37,6 +37,11 @@ import { setAuthAccessToken } from "./auth-token";
 import { isElectron, nativeInvoke, nativeListen } from "../../platform/runtime";
 import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { CHANNEL } from "../../config/release-channel";
+import { useDismissStartupLoader } from "../../shared/ui/startup-loader";
+import {
+  safeBrowserSignInStartError,
+  workOSSignInFailureMessage,
+} from "./auth-errors";
 import {
   schemeForChannel,
   type Channel,
@@ -49,6 +54,9 @@ export interface AuthResult {
   ok: boolean;
   /** User-facing message when `ok` is false. */
   error?: string;
+  /** Main-owned deadline for the pending browser ceremony. Presentation only;
+   *  Electron main remains the authority that rejects an expired callback. */
+  expiresAt?: number;
 }
 
 export interface AuthContextValue {
@@ -57,10 +65,8 @@ export interface AuthContextValue {
   session: AuthSessionInfo | null;
   userId: string | null;
   email: string | null;
-  /** Open the system browser at the web hub (app.zeros.build/launch) to sign in.
-   *  ALL OAuth happens in the browser; the desktop receives an opaque, single-use
-   *  handoff ticket back over the zeros:// deep link and redeems it (via the main
-   *  process, which holds the PKCE verifier) for a session. */
+  /** Open the system browser. WorkOS PKCE/callback state lives entirely in
+   *  Electron main; Auth0 retains the legacy web-ticket path until Phase 5. */
   startBrowserSignIn: () => Promise<AuthResult>;
   /** A LATER async failure of the desktop OAuth browser handoff (the browser
    *  round-trip completed but the returning deep link couldn't be redeemed), so
@@ -109,6 +115,9 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
     let active = true;
     let offHandoff: (() => void) | undefined;
     let offStoreChanged: (() => void) | undefined;
+    let offWorkOSComplete: (() => void) | undefined;
+    let offWorkOSError: (() => void) | undefined;
+    let offSecurityRevoked: (() => void) | undefined;
 
     const apply = (next: AuthSessionInfo | null) => {
       if (!active) return;
@@ -224,9 +233,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
           console.warn(
             `[auth] sign-in handoff redeem failed: ${redeemed?.error ?? "unknown"}`,
           );
-          setOAuthError(
-            "We couldn't finish signing you in from the browser. Please try again.",
-          );
+          setOAuthError(workOSSignInFailureMessage("exchange_failed", null));
           return;
         }
         // Main already wrote the session; just mirror it into renderer state.
@@ -266,11 +273,72 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
       else off();
     });
 
+    // WorkOS completion carries no OAuth artifact. Main has already verified
+    // and stored the session; renderer only re-reads its bounded mirror.
+    void nativeListen("auth-signin-complete", async () => {
+      if (!active) return;
+      pendingNonceRef.current = null;
+      clearPendingNonce();
+      try {
+        const next = await resync();
+        if (!next) throw new Error("session unavailable");
+        setOAuthError(null);
+      } catch {
+        setOAuthError(workOSSignInFailureMessage("exchange_failed", null));
+      }
+    }).then((off) => {
+      if (active) offWorkOSComplete = off;
+      else off();
+    });
+
+    void nativeListen<{ reason?: string; recoveryCode?: string }>(
+      "auth-signin-error",
+      ({ reason, recoveryCode }) => {
+        if (!active) return;
+        console.warn("[auth] WorkOS sign-in failed:", reason ?? "unknown");
+        setOAuthError(workOSSignInFailureMessage(reason ?? "", recoveryCode));
+      },
+    ).then((off) => {
+      if (active) offWorkOSError = off;
+      else off();
+    });
+
+    void nativeListen<{ reason?: string }>(
+      "auth-security-revoked",
+      async ({ reason }) => {
+        if (!active) return;
+        try {
+          getActiveBridge()?.signalOwnerSignedOut();
+        } catch {
+          /* bridge already unavailable */
+        }
+        await resync().catch(() => null);
+        if (!active) return;
+        setOAuthError(
+          reason === "account.revoked" || reason === "account_deleted"
+            ? "Your Zeros account is no longer active. Sign in again only if access has been restored."
+            : "This session is no longer active. Sign in again to continue.",
+        );
+      },
+    ).then((off) => {
+      if (active) offSecurityRevoked = off;
+      else off();
+    });
+
+    const onOnline = () => {
+      void nativeInvoke("auth_security_revalidate").catch(() => undefined);
+    };
+    window.addEventListener("online", onOnline);
+
     return () => {
       active = false;
       offStateChange();
       offHandoff?.();
       offStoreChanged?.();
+      offWorkOSComplete?.();
+      offWorkOSError?.();
+      offSecurityRevoked?.();
+      window.removeEventListener("online", onOnline);
     };
   }, []);
 
@@ -278,6 +346,27 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
     // Clear any stale handoff error from a prior attempt before starting fresh.
     setOAuthError(null);
     try {
+      // In WorkOS mode this command opens the hosted Zeros provider page and
+      // retains state + verifier in Electron main, outside renderer JS. Auth0
+      // mode returns a compatibility marker and continues below.
+      const selected = await nativeInvoke<{
+        mode?: "auth0" | "workos";
+        expiresAt?: number;
+      }>("auth_start_signin");
+      if (selected?.mode === "workos") {
+        return {
+          ok: true,
+          expiresAt:
+            typeof selected.expiresAt === "number" &&
+            Number.isFinite(selected.expiresAt)
+              ? selected.expiresAt
+              : undefined,
+        };
+      }
+      if (selected?.mode !== "auth0") {
+        return { ok: false, error: "Couldn't start sign-in." };
+      }
+
       // One-time nonce: the auth-handoff listener fails CLOSED on a missing/
       // mismatched nonce (blocks login-CSRF via a planted deep link). Persisted so
       // a renderer reload / cold launch BY the deep link still matches; valid
@@ -322,11 +411,11 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
         `&nonce=${encodeURIComponent(nonce)}` +
         `&challenge=${encodeURIComponent(begin.challenge)}`;
       await nativeInvoke("shell_open_url", { url });
-      return { ok: true };
+      return { ok: true, expiresAt };
     } catch (err) {
       return {
         ok: false,
-        error: (err as Error)?.message ?? "Couldn't start sign-in.",
+        error: safeBrowserSignInStartError(err),
       };
     }
   }, []);
@@ -337,6 +426,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
     pendingNonceRef.current = null;
     clearPendingNonce();
     setOAuthError(null);
+    void nativeInvoke("auth_cancel_signin").catch(() => undefined);
   }, []);
 
   // Shared local teardown for both sign-out scopes.
@@ -372,9 +462,8 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
 
   const signOutEverywhere = useCallback(async () => {
     try {
-      // Global scope revokes the refresh token server-side (via Auth0) —
-      // including any session that forked off a stolen/exfiltrated token. This
-      // is the compromise-recovery action that `local` can't do.
+      // Global scope asks the server-side broker to enumerate and revoke every
+      // active WorkOS session (or uses the Auth0 compatibility revoke path).
       await storeSignOut("global");
     } catch (err) {
       console.warn("[auth] global signOut failed:", (err as Error)?.message);
@@ -385,7 +474,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
   const value: AuthContextValue = {
     status,
     session,
-    userId: session?.user.sub ?? null,
+    userId: session?.user.accountId ?? session?.user.sub ?? null,
     email: session?.user.email ?? null,
     startBrowserSignIn,
     oauthError,
@@ -401,6 +490,10 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
 /** Full-screen fallback for a non-Electron context — there is no browser
  *  fallback for auth (desktop-only product, 2026-06-25). */
 function AuthConfigErrorScreen() {
+  // AuthGate is not mounted in a non-Electron context, so this terminal
+  // replacement surface owns dismissal of the HTML startup loader.
+  useDismissStartupLoader(true);
+
   return (
     <div className="bg-bg1 text-fg2 fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 px-6 text-center">
       <div className="text-fg1 text-sm font-medium">
@@ -460,7 +553,7 @@ function clearPendingNonce(): void {
 
 // The desktop deep-link scheme (zeros:// stable, zeros-beta:// beta, zeros-dev://
 // dev) is constant for the life of the process, so resolve it once and reuse it —
-// avoids an app_info IPC round-trip on every "Continue with Google/GitHub" click.
+// avoids an app_info IPC round-trip on every Hosted AuthKit sign-in click.
 let cachedScheme: DeepLinkScheme | null = null;
 
 async function resolveDesktopScheme(): Promise<DeepLinkScheme> {

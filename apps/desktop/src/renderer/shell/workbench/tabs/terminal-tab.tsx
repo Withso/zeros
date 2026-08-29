@@ -432,10 +432,10 @@ export function TerminalPanel({
   // miss replays the engine's buffered output instead of showing a blank pane.
   const replayRunOnMiss = useCallback(
     (sessionId: string) =>
-      workspaceRunLog({ sessionId })
+      workspaceRunLog({ workspaceId: activeWs?.id, sessionId })
         .then((r) => r.log || null)
         .catch(() => null),
-    [],
+    [activeWs?.id],
   );
 
   const activePlainId = plainTerminals.some((t) => t.id === activeSubTab)

@@ -16,6 +16,21 @@ import type { CodexUserInput } from "./app-server";
 const BROWSER_PLUGIN_ID = "browser@openai-bundled";
 const MAX_BROWSER_CLIENT_BYTES = 16 * 1024 * 1024;
 
+/** The official macOS Browser helper applies its own Seatbelt profile. A
+ * process that already carries ZSR's deny-bearing profile cannot apply that
+ * nested profile, while moving the helper outside ZSR would turn its mutable
+ * plugin code into a filesystem-authority escape. Keep the optional capability
+ * disabled until the provider offers a verifiable, composable launch contract. */
+export function codexNativeBrowserUnavailableReason(options: {
+  contained: boolean;
+  platform?: NodeJS.Platform;
+}): string | null {
+  if (options.contained && (options.platform ?? process.platform) === "darwin") {
+    return "Official Browser cannot safely run inside the macOS containment boundary";
+  }
+  return null;
+}
+
 export interface CodexNativeBrowserRuntime {
   pluginId: typeof BROWSER_PLUGIN_ID;
   pluginRoot: string;

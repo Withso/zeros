@@ -62,8 +62,66 @@ permissions:
   contents: read
 
 jobs:
+  # ── Linux quality gate ───────────────────────────────────
+  #
+  # Typecheck, lint and the Vitest suite run HERE on ubuntu-latest rather than in
+  # the macOS packaging job below, which `needs:` this one — so a red suite still
+  # blocks publishing. Nothing was weakened; the gate moved to a host that can
+  # honour it.
+  #
+  # WHY IT MOVED: the suite drives real bubblewrap/seccomp containment, and
+  # bubblewrap cannot exist on macOS. Running it in the packaging job failed 18
+  # test files with "absolute bwrap unavailable" — an environmental failure that
+  # reads exactly like a regression — while preflight ran the identical
+  # `pnpm test:git` on Ubuntu and passed. Alpha was red on that alone from
+  # 2026-08-16 onward.
+  #
+  # The ~1-2 min a second checkout + install costs is the price of a gate that
+  # can actually go green.
+  test:
+    name: Quality gate (typecheck · lint · vitest)
+    # Mirrors the packaging job: a fork has no signing secrets and no release
+    # permissions, so there is nothing here for it to gate.
+    if: github.event.repository.fork == false
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install contained-execution runtime
+        uses: ./.github/actions/contained-execution-runtime
+
+      - name: Typecheck (app · electron · packages)
+        # vite + tsup strip types via esbuild WITHOUT checking them, so without
+        # this nothing on the release path validates types at all.
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Install Playwright Chromium headless shell
+        # The Vitest suite contains real-browser design-runtime protocol tests.
+        # pnpm installs Playwright's API package but intentionally not its browser.
+        run: pnpm exec playwright install --with-deps --only-shell chromium
+
+      - name: Run Vitest suite
+        run: bash scripts/ci/with-userns.sh pnpm test:git
+
   alpha:
     name: Build + publish Alpha (macOS arm64 · signed · NOT notarized)
+    needs: test
     # Don't fire on forks (no signing secrets / release perms there). Key this
     # to repository identity rather than an owner/name pair so an ownership
     # transfer cannot silently disable the alpha release job again.
@@ -167,33 +225,18 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Qualify ZSR on the shipping kernel
+        run: pnpm check:zsr
+
       # ── Gates ────────────────────────────────────────────
       #
-      # These run as STEPS in this job rather than a separate `needs:` job on
-      # purpose: a separate job would re-checkout and re-install (~1-2 min) just to
-      # duplicate work this job already did. Placed before build:sidecar so a
-      # failure costs seconds instead of a full pack.
+      # Typecheck, lint and the Vitest suite live in the `test` job above (see the
+      # comment there for why they cannot run on macOS). This job `needs:` it, so
+      # they still gate every publish.
       #
-      # WHY THIS EXISTS: see the "GATED (changed)" note in the file header. Alpha is
-      # the ring we dogfood, so an Alpha broken for reasons unrelated to the change
-      # under test is worse than a slower Alpha.
-      #
-      # NOTE: before this change NEITHER release workflow typechecked or linted.
-      # vite + tsup strip types via esbuild WITHOUT checking them, so nothing on
-      # either release path validated types at all.
-      - name: Typecheck (app · electron · packages)
-        run: pnpm typecheck
-
-      - name: Lint
-        run: pnpm lint
-
-      - name: Install Playwright Chromium headless shell
-        # The Vitest suite contains real-browser design-runtime protocol tests.
-        # pnpm installs Playwright's API package but intentionally not its browser.
-        run: pnpm exec playwright install --with-deps --only-shell chromium
-
-      - name: Run Vitest suite
-        run: pnpm test:git
+      # The guards BELOW stay here on purpose: they inspect macOS packaging inputs,
+      # and they are cheap, so they run before build:sidecar where a failure costs
+      # seconds instead of a full pack.
 
       - name: Ship guards (catalog · packaging · prod env · security)
         # The same set the stable release job runs. Each guards a concrete way the
@@ -205,6 +248,7 @@ jobs:
           pnpm models:verify --strict
           pnpm check:cursor-asar
           pnpm check:licenses
+          pnpm check:audit
           pnpm check:packaging-paths
           pnpm check:vite-env
           pnpm check:codex-pin
@@ -221,12 +265,22 @@ jobs:
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+          AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
+          AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
+          AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
+          AUTH_JWKS_URL: ${{ vars.AUTH_JWKS_URL }}
+          AUTH_AUDIENCE: ${{ vars.AUTH_AUDIENCE }}
         run: pnpm exec tsx scripts/release-environment.ts alpha
 
       - name: Compile Electron main + preload (bakes channel=alpha)
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+          AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
+          AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
+          AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
+          AUTH_JWKS_URL: ${{ vars.AUTH_JWKS_URL }}
+          AUTH_AUDIENCE: ${{ vars.AUTH_AUDIENCE }}
         run: pnpm electron:compile
 
       - name: Build Vite renderer
@@ -270,47 +324,24 @@ jobs:
         # `posix_spawnp failed` regression) before the rolling alpha is replaced.
         run: pnpm smoke:packaged-pty
 
-      - name: Verify signature + hardened runtime
-        # This channel had NO signature verification at all, while stable asserts four
-        # things. That mattered more than it looks: electron-updater's macOS
-        # in-place update REQUIRES a valid, matching signature, so an Alpha that
-        # silently failed to sign would publish successfully and only surface later
-        # as "auto-update is broken" with no build-time signal.
-        #
-        # Deliberately does NOT run `stapler validate` / `spctl -t exec`: alpha is
-        # signed but NOT notarized by design (see the packaging step above), so
-        # those would fail on a correct build. Everything up to notarization IS
-        # asserted.
+      - name: Verify installer + updater signatures
+        # The updater installs the ZIP, not the DMG. Verify both independently,
+        # require the expected Apple team + bundle identity + secure timestamp,
+        # and prove both containers carry the same signed root before publishing.
+        # Alpha is intentionally not notarized, so Gatekeeper/stapler checks stay
+        # exclusive to the Production workflow.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          DMG=""
-          for CANDIDATE in release/Zeros-Alpha-*-arm64.dmg; do
-            [ -f "$CANDIDATE" ] || continue
-            DMG="$CANDIDATE"
-            break
-          done
-          if [ -z "$DMG" ]; then echo "::error::no versioned Alpha .dmg to validate"; exit 1; fi
-          MNT=$(mktemp -d)
-          cleanup() { hdiutil detach "$MNT" -quiet 2>/dev/null || true; }
-          trap cleanup EXIT
-          hdiutil attach "$DMG" -readonly -nobrowse -quiet -mountpoint "$MNT"
-          APP="$MNT/Zeros Alpha.app"
-          if [ ! -d "$APP" ]; then
-            echo "::error::No 'Zeros Alpha.app' found inside $DMG"
-            ls -la "$MNT" || true
-            exit 1
-          fi
-          echo "Verifying: $APP"
-          # Signature valid + sealed.
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          # Hardened runtime flag proves the entitlements were actually applied.
-          # Without this the four entitlements are inert and library validation /
-          # JIT / keychain-ACL behavior silently differs from what users get.
-          if ! codesign --display --verbose=4 "$APP" 2>&1 | grep -qE 'flags=.*runtime'; then
-            echo "::error::Hardened runtime not applied — signing/entitlements misconfigured"
-            exit 1
-          fi
-          echo "✓ Developer ID signed · hardened runtime applied (notarization intentionally skipped for alpha)"
+          DMG="release/Zeros-Alpha-${VERSION}-arm64.dmg"
+          ZIP="release/Zeros-Alpha-${VERSION}-arm64-mac.zip"
+          node scripts/verify-macos-release-artifacts.mjs \
+            --dmg "$DMG" \
+            --zip "$ZIP" \
+            --app-name "Zeros Alpha.app" \
+            --bundle-id com.zeros.alpha \
+            --team-id H8MS56JU2Z
 
       - name: Publish rolling "alpha" prerelease
         env:

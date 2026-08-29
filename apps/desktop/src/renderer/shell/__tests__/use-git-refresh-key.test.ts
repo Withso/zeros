@@ -9,11 +9,12 @@ import {
   notifyWorkspacesChanged,
   notifyWorkspacesChangedForIds,
 } from "../../state/use-projects";
-import {
-  ghOwnersCache,
-  remoteBranchesCache,
-} from "../../state/read-caches";
+import { ghOwnersCache, remoteBranchesCache } from "../../state/read-caches";
 import { loadAgents } from "../../features/agent/agents-cache";
+import {
+  workingDirectoriesCache,
+  workingDirectoriesCacheKey,
+} from "../workbench/tabs/working-directories-cache";
 import {
   finishedStreamingChatIds,
   getGitRefreshKeyForTests,
@@ -27,6 +28,7 @@ import {
 beforeEach(() => {
   vi.clearAllMocks();
   resetGitRefreshKeysForTests();
+  workingDirectoriesCache.clear();
 });
 
 describe("finishedStreamingChatIds", () => {
@@ -59,6 +61,30 @@ describe("git refresh scope generations", () => {
 
     expect(getGitRefreshKeyForTests("/repo/a")).toBeGreaterThan(beforeA);
     expect(getGitRefreshKeyForTests("/repo/b")).toBe(beforeB);
+  });
+
+  it("invalidates only the changed worktree's cached Working folders", () => {
+    const keyA = workingDirectoriesCacheKey("/repo/a", "workspace-a");
+    const keyB = workingDirectoriesCacheKey("/repo/b", "workspace-b");
+    const value = {
+      all: ["src"],
+      locked: [],
+      included: ["src"],
+      sparse: false,
+      supported: true,
+    };
+    workingDirectoriesCache.setData(keyA, value);
+    workingDirectoriesCache.setData(keyB, value);
+    const beforeA = workingDirectoriesCache.getSnapshot(keyA);
+    const beforeB = workingDirectoriesCache.getSnapshot(keyB);
+
+    triggerGitRefresh("/repo/a/");
+
+    expect(workingDirectoriesCache.getSnapshot(keyA)).toMatchObject({
+      data: value,
+      invalidationVersion: beforeA.invalidationVersion + 1,
+    });
+    expect(workingDirectoriesCache.getSnapshot(keyB)).toBe(beforeB);
   });
 
   it("notifies exact and unscoped listeners without waking another cwd", () => {
@@ -161,10 +187,20 @@ describe("bridge reconnection cache boundary", () => {
     // revalidation to.
     remoteBranchesCache.setData("workspace-a", []);
     ghOwnersCache.setData("owners", []);
+    const directoriesKey = workingDirectoriesCacheKey("/repo/a", "workspace-a");
+    workingDirectoriesCache.setData(directoriesKey, {
+      all: ["src"],
+      locked: [],
+      included: ["src"],
+      sparse: false,
+      supported: true,
+    });
     const branchesBefore =
       remoteBranchesCache.getSnapshot("workspace-a").invalidationVersion;
     const ownersBefore =
       ghOwnersCache.getSnapshot("owners").invalidationVersion;
+    const directoriesBefore =
+      workingDirectoriesCache.getSnapshot(directoriesKey).invalidationVersion;
 
     // Initial connection: only a mount — cached engine reads stay fresh.
     triggerGitBridgeConnectionForTests(true);
@@ -174,6 +210,9 @@ describe("bridge reconnection cache boundary", () => {
     expect(ghOwnersCache.getSnapshot("owners").invalidationVersion).toBe(
       ownersBefore,
     );
+    expect(
+      workingDirectoriesCache.getSnapshot(directoriesKey).invalidationVersion,
+    ).toBe(directoriesBefore);
 
     // Reconnect: the engine may have restarted — every retained key goes
     // stale so pre-restart snapshots can't shadow the fresh engine.
@@ -184,6 +223,9 @@ describe("bridge reconnection cache boundary", () => {
     expect(ghOwnersCache.getSnapshot("owners").invalidationVersion).toBe(
       ownersBefore + 1,
     );
+    expect(
+      workingDirectoriesCache.getSnapshot(directoriesKey).invalidationVersion,
+    ).toBe(directoriesBefore + 1);
   });
 
   it("forces the agent registry to reload after a reconnect", async () => {

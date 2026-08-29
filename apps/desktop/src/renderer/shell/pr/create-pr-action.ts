@@ -24,7 +24,6 @@
 //   3. Everything else commits, pushes (inside the engine's create), and opens.
 
 import {
-  AUTO_COMMIT_PATHSPECS,
   buildAutoCommitMessage,
   summarizePendingWork,
   type AutoCommitBlocker,
@@ -227,7 +226,12 @@ async function commitPendingWork<TResult>(
   if (pending.paths.length === 0) return null;
   const { subject: commitSubject, body } = buildAutoCommitMessage(pending.paths);
   try {
-    await deps.stage({ workspaceId, paths: [...AUTO_COMMIT_PATHSPECS] });
+    // The workspace bridge accepts exact repository paths and the engine
+    // literalizes each one before `git add`. The status snapshot already
+    // produced the complete visible set (including tracked deletions), so pass
+    // that set through unchanged instead of re-introducing a Git pathspec
+    // program at the RPC boundary.
+    await deps.stage({ workspaceId, paths: pending.paths });
     await deps.commit({ workspaceId, message: `${commitSubject}\n\n${body}` });
   } catch (err) {
     if (isNothingToCommit(err)) return null;

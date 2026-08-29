@@ -25,6 +25,32 @@ export declare function dashboardReturnUrl(
   appBase: string,
   requestUrl: string,
 ): string;
+export declare function parseAccountRecoveryError(
+  status: number,
+  body: unknown,
+): { recoveryCode: string | null } | null;
+export type AccountResolutionError =
+  | { kind: "recovery_required"; recoveryCode: string | null }
+  | {
+      kind:
+        | "account_exists"
+        | "reauthentication_required"
+        | "account_unavailable";
+    };
+export declare function parseAccountResolutionError(
+  status: number,
+  body: unknown,
+): AccountResolutionError | null;
+export declare function accountAccessPage(input: {
+  session: SessionData;
+  kind: Exclude<AccountResolutionError["kind"], "recovery_required">;
+  signOutHref: string;
+}): string;
+export declare function accountRecoveryPage(input: {
+  session: SessionData;
+  recoveryCode: string | null;
+  signOutHref: string;
+}): string;
 export declare function dashboardPage(input: {
   session: SessionData;
   me: DashboardMe | null;

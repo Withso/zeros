@@ -10,6 +10,9 @@ import {
   parseSubagentTranscript,
   cursorProjectSlug,
   findSubagentByPrompt,
+  findSubagentTranscriptPath,
+  agentTranscriptsRoot,
+  loadSubagentTranscript,
   loadSubagentTranscriptByPath,
   agentIdFromTranscriptPath,
 } from "../subagent-transcript";
@@ -226,5 +229,60 @@ describe("agentIdFromTranscriptPath", () => {
     ).toBe("sub-123");
     expect(agentIdFromTranscriptPath("sub-9.jsonl")).toBe("sub-9");
     expect(agentIdFromTranscriptPath("C:\\cursor\\subagents\\sub-w.jsonl")).toBe("sub-w");
+  });
+});
+
+describe("transcript roots follow the HOME the session actually ran with", () => {
+  // Regression: under ZSR the Cursor host runs with the boundary's PROJECTED
+  // HOME, so it writes `.cursor/projects/<slug>/agent-transcripts` there. These
+  // lookups defaulted to the engine's own `homedir()`, found nothing, and every
+  // subagent card came up empty for contained sessions.
+  const projectedHome = mkdtempSync(join(tmpdir(), "zeros-cursor-home-"));
+  const cwd = "/work/ws";
+  const root = join(
+    projectedHome,
+    ".cursor",
+    "projects",
+    cursorProjectSlug(cwd),
+    "agent-transcripts",
+  );
+
+  afterAll(() => rmSync(projectedHome, { recursive: true, force: true }));
+
+  it("finds a subagent transcript under the projected HOME", () => {
+    mkdirSync(join(root, "agent-parent", "subagents"), { recursive: true });
+    const file = join(root, "agent-parent", "subagents", "sub-1.jsonl");
+    writeFileSync(
+      file,
+      [
+        line({
+          role: "user",
+          message: {
+            content: [
+              { type: "text", text: "<user_query>look around</user_query>" },
+            ],
+          },
+        }),
+        line({
+          role: "assistant",
+          message: { content: [{ type: "text", text: "done" }] },
+        }),
+      ].join("\n"),
+    );
+
+    expect(agentTranscriptsRoot(cwd, { home: projectedHome })).toBe(root);
+    expect(findSubagentTranscriptPath(cwd, "sub-1", { home: projectedHome })).toBe(
+      file,
+    );
+    expect(
+      loadSubagentTranscript(cwd, "sub-1", { home: projectedHome })?.finalText,
+    ).toBe("done");
+    expect(
+      findSubagentByPrompt(cwd, "look around", new Set(), {
+        home: projectedHome,
+      }),
+    ).toBe("sub-1");
+    // …and the engine's own home is NOT where a contained session's state is.
+    expect(findSubagentTranscriptPath(cwd, "sub-1")).toBeNull();
   });
 });

@@ -17,6 +17,7 @@ describe("normalizeOrganizationSummary", () => {
       logo: null,
       role: "owner",
       isPersonal: false,
+      legacyFlat: true,
       defaultTeamId: null,
       workspaceCapabilities: { local: true, cloud: true },
       teamCapabilities: { multiple: false, canCreate: false },
@@ -34,5 +35,17 @@ describe("normalizeOrganizationSummary", () => {
         workspaceCapabilities: { local: true, cloud: true },
       }).workspaceCapabilities,
     ).toEqual({ local: true, cloud: false });
+  });
+
+  it("marks a pre-hierarchy flat Team for legacy local-row compatibility", () => {
+    const normalized = normalizeOrganizationSummary({
+      id: "legacy_team_1",
+      slug: "arun-org",
+      name: "Arun Raj Kumar's Org",
+      role: "owner",
+    });
+
+    expect(normalized.isPersonal).toBe(false);
+    expect(normalized.legacyFlat).toBe(true);
   });
 });

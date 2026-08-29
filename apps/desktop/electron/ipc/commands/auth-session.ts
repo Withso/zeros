@@ -1,52 +1,7 @@
-// ──────────────────────────────────────────────────────────
-// IPC commands: Auth0 session storage + refresh (main-process-owned)
-// ──────────────────────────────────────────────────────────
-//
-// Replaces the old SDK-in-the-renderer model. The refresh token NEVER
-// crosses into the renderer's JS heap — main owns the full token pair
-// (safeStorage), the renderer only ever asks for "a valid access token" or "who's
-// signed in" and gets back exactly that, nothing more:
-//
-//   persistSession({accessToken, refreshToken, sub, email, name})  [in-process]
-//       Called once, right after auth_redeem_handoff redeems a handoff ticket —
-//       IN THE MAIN PROCESS, not over IPC. Stores the pair + identity claims (the
-//       API-audience access token itself only carries scope/aud claims, not
-//       profile info — identity is threaded through the handoff response instead,
-//       see app.zeros.build/handoff/mint.ts). There is deliberately no renderer-
-//       reachable install command: the refresh token never crosses into the
-//       renderer, and a renderer XSS can't plant a forged session.
-//
-//   auth_get_access_token() → { access_token } | { access_token: null }
-//       Returns a live access token, transparently refreshing first (via
-//       app.zeros.build/handoff/refresh, which holds the Auth0 client secret so
-//       this process never has to) if it's within REFRESH_SKEW_MS of expiry.
-//
-//       OFFLINE TOLERANCE (the whole point of splitting refresh outcomes): only a
-//       TERMINAL refusal — the relay maps a dead/expired/revoked refresh token to
-//       HTTP 401/403 — clears the stored session. A TRANSIENT failure (offline,
-//       DNS, TLS, wake-from-sleep before Wi-Fi, or a 429/5xx from Cloudflare or
-//       Auth0) KEEPS the token pair and returns the still-valid cached access
-//       token (or null without clearing) so a momentary blip never forces a fresh
-//       browser sign-in. Concurrent callers share ONE in-flight refresh, so a
-//       burst of API calls near expiry can't race the same refresh token into a
-//       rotation-reuse revocation.
-//
-//   auth_get_session_user() → { sub, email, name } | null
-//       Decoded identity for UI state, without exposing either token.
-//
-//   auth_clear_session() → true
-//       Local sign-out: drop the stored tokens. No network call — this device
-//       only, mirrors the old client.auth.signOut({scope:"local"}).
-//
-//   auth_sign_out_everywhere() → true
-//       Revokes the refresh token server-side (app.zeros.build/handoff/revoke)
-//       then clears local storage — the compromise-recovery action.
-//
-// SECURITY: tokens are namespaced under "auth-session:" — distinct from the
-// legacy "supabase:" namespace (now retired) and from generic keychain_* secrets
-// (apps/desktop/electron/keychain-accounts.ts) — mutually isolated the same way the old
-// auth-storage.ts was.
-// ──────────────────────────────────────────────────────────
+// Main-process-owned desktop authentication session. The persisted account
+// name remains `auth-session:tokens` for compatibility; WorkOS adds provider,
+// internal-account, client-kind, and session identity fields without exposing
+// refresh material to renderer IPC.
 
 import type { CommandHandler } from "../router";
 import {
@@ -58,30 +13,31 @@ import {
 } from "../../secret-store";
 import { withCrossProcessFileLock } from "../../cross-process-lock";
 import { appBaseUrl } from "../../app-base-url";
+import {
+  mergeWorkOSRefresh,
+  parseStoredTokenSnapshot,
+  type StoredTokens,
+  type StoredTokenSnapshot,
+  type WorkOSStoredTokens,
+} from "../../auth-session-record";
+import type { WorkOSDesktopSession } from "../../workos-desktop-client";
+import { workOSDesktopClientForMain } from "../../workos-desktop-runtime";
+import { requestWorkOSDesktopRevocation } from "../../workos-desktop-revocation";
 
 const TOKENS_KEY = "auth-session:tokens";
 const REFRESH_SKEW_MS = 60_000;
 const AUTH_REQUEST_TIMEOUT_MS = 15_000;
-
-type StoredTokens = {
-  accessToken: string;
-  refreshToken: string;
-  expiresAt: number;
-  sub: string;
-  email: string;
-  name: string | null;
-};
-
-interface StoredTokenSnapshot {
-  raw: string;
-  tokens: StoredTokens;
-}
 
 export interface MainAuthSession {
   accessToken: string;
   sub: string;
   email: string;
   name: string | null;
+  provider: "auth0" | "workos";
+  accountId?: string;
+  sessionId?: string;
+  clientKind?: "desktop";
+  authenticationMethod?: string | null;
 }
 
 type AuthSessionChangeListener = () => void | Promise<void>;
@@ -115,11 +71,6 @@ export function onMainAuthSessionChanged(
   return () => sessionChangeListeners.delete(listener);
 }
 
-/** Base URL of the web hub that hosts /handoff/*. Fixed to the deployed app in
- *  prod; overridable via env ONLY for local/preview iteration — matches
- *  auth-handoff.ts's handoffBaseUrl(). */
-const handoffBaseUrl = appBaseUrl;
-
 function decodeJwtExp(token: string): number | null {
   try {
     const payload = token.split(".")[1] ?? "";
@@ -128,39 +79,14 @@ function decodeJwtExp(token: string): number | null {
       "base64",
     ).toString("utf8");
     const claims = JSON.parse(json) as { exp?: unknown };
-    return typeof claims.exp === "number" ? claims.exp * 1000 : null;
-  } catch {
-    return null;
-  }
-}
-
-function parseTokenSnapshot(raw: string | null): StoredTokenSnapshot | null {
-  if (!raw) return null;
-  try {
-    const value = JSON.parse(raw) as Record<string, unknown>;
-    if (
-      typeof value.accessToken !== "string" ||
-      !value.accessToken ||
-      typeof value.refreshToken !== "string" ||
-      !value.refreshToken ||
-      typeof value.expiresAt !== "number" ||
-      !Number.isFinite(value.expiresAt) ||
-      typeof value.sub !== "string" ||
-      !value.sub ||
-      typeof value.email !== "string" ||
-      !value.email ||
-      (value.name !== null && typeof value.name !== "string")
-    ) {
-      return null;
-    }
-    return { raw, tokens: value as StoredTokens };
+    return typeof claims.exp === "number" ? claims.exp * 1_000 : null;
   } catch {
     return null;
   }
 }
 
 function readTokenSnapshot(): StoredTokenSnapshot | null {
-  return parseTokenSnapshot(getSecret(TOKENS_KEY));
+  return parseStoredTokenSnapshot(getSecret(TOKENS_KEY));
 }
 
 function readTokens(): StoredTokens | null {
@@ -171,12 +97,7 @@ function writeTokens(tokens: StoredTokens): void {
   setSecret(TOKENS_KEY, JSON.stringify(tokens));
 }
 
-/** Persist a freshly-redeemed token pair + identity into the keychain. Called
- *  IN-PROCESS by auth_redeem_handoff (auth-handoff.ts), NOT over IPC: the refresh
- *  token is written straight to safeStorage here and never returned to the
- *  renderer. There is deliberately no renderer-reachable "install session"
- *  command, so a renderer XSS can neither read the refresh token nor plant a
- *  forged session by installing attacker-supplied tokens. */
+/** Auth0 compatibility install, called only by the main-owned handoff redeem. */
 export function persistSession(input: {
   accessToken: string;
   refreshToken: string;
@@ -188,6 +109,7 @@ export function persistSession(input: {
     throw new Error("persistSession: missing required field");
   }
   writeTokens({
+    provider: "auth0",
     accessToken: input.accessToken,
     refreshToken: input.refreshToken,
     expiresAt: decodeJwtExp(input.accessToken) ?? Date.now() + 60_000,
@@ -198,51 +120,86 @@ export function persistSession(input: {
   notifySessionChanged();
 }
 
-// Outcome of a refresh attempt, split so the caller can tell a genuinely dead
-// refresh token (clear the session) apart from a momentary outage (keep it).
+/** WorkOS install accepts only a session already verified in Electron main and
+ * enriched by authenticated `/v1/me`. It is intentionally not an IPC command. */
+export function persistWorkOSSession(
+  input: WorkOSDesktopSession & { accountId: string },
+): void {
+  if (
+    !input.accessToken ||
+    !input.refreshToken ||
+    !input.providerSubject ||
+    !input.sessionId ||
+    !input.email ||
+    !input.accountId ||
+    input.clientKind !== "desktop"
+  ) {
+    throw new Error("persistWorkOSSession: missing required field");
+  }
+  writeTokens({
+    provider: "workos",
+    accessToken: input.accessToken,
+    refreshToken: input.refreshToken,
+    expiresAt: input.expiresAt,
+    sub: input.providerSubject,
+    email: input.email,
+    name: input.name,
+    accountId: input.accountId,
+    sessionId: input.sessionId,
+    clientKind: "desktop",
+    authenticationMethod: input.authenticationMethod,
+  });
+  notifySessionChanged();
+}
+
 type RefreshOutcome =
   | { status: "ok"; tokens: StoredTokens }
-  | { status: "terminal"; expectedRaw?: string } // 401/403 — refresh token is dead; sign out.
-  | { status: "transient" }; // offline / 5xx / 429 / bad body — keep tokens.
+  | { status: "terminal"; expectedRaw?: string }
+  | { status: "transient" };
 
-async function refreshTokens(
+function latestAfterLostCommit(
+  successStatus: "ok" | "transient",
+): RefreshOutcome {
+  const latest = readTokens();
+  if (!latest) return { status: "terminal" };
+  return successStatus === "ok"
+    ? { status: "ok", tokens: latest }
+    : { status: "transient" };
+}
+
+async function refreshAuth0Tokens(
   snapshot: StoredTokenSnapshot,
 ): Promise<RefreshOutcome> {
   const current = snapshot.tokens;
-  let res: Response;
+  let response: Response;
   try {
-    res = await fetch(`${handoffBaseUrl()}/handoff/refresh`, {
+    response = await fetch(`${appBaseUrl()}/handoff/refresh`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ refresh_token: current.refreshToken }),
       signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
     });
-  } catch (err) {
-    // Offline / DNS / TLS / captive portal — NOT a dead token. Keep the session.
+  } catch (error) {
     console.warn(
-      `[auth] refresh network error (keeping session): ${(err as Error).message}`,
+      `[auth] refresh network error (keeping session): ${(error as Error).message}`,
     );
     return { status: "transient" };
   }
-  if (!res.ok) {
-    // The relay maps a dead refresh grant to 401 (403 defensively). Everything
-    // else — 429, 5xx, an unexpected status — is transient: the token itself may
-    // be fine, so we must NOT wipe it or the user gets logged out by a blip.
-    if (res.status === 401 || res.status === 403) {
-      console.warn(`[auth] refresh rejected as terminal: HTTP ${res.status}`);
+  if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      console.warn(
+        `[auth] refresh rejected as terminal: HTTP ${response.status}`,
+      );
       return { status: "terminal", expectedRaw: snapshot.raw };
     }
     console.warn(
-      `[auth] refresh unavailable (keeping session): HTTP ${res.status}`,
+      `[auth] refresh unavailable (keeping session): HTTP ${response.status}`,
     );
     return { status: "transient" };
   }
   let body: { access_token?: unknown; refresh_token?: unknown };
   try {
-    body = (await res.json()) as {
-      access_token?: unknown;
-      refresh_token?: unknown;
-    };
+    body = (await response.json()) as typeof body;
   } catch {
     return { status: "transient" };
   }
@@ -259,23 +216,69 @@ async function refreshTokens(
     refreshToken,
     expiresAt: decodeJwtExp(accessToken) ?? Date.now() + 60_000,
   };
-  if (
-    replaceSecretIfUnchanged(TOKENS_KEY, snapshot.raw, JSON.stringify(next))
-  ) {
-    return { status: "ok", tokens: next };
-  }
-  // A sign-in/sign-out or sibling worktree won while the network request was
-  // in flight. Never resurrect or overwrite it with this stale response.
-  const latest = readTokens();
-  return latest ? { status: "ok", tokens: latest } : { status: "terminal" };
+  return replaceSecretIfUnchanged(
+    TOKENS_KEY,
+    snapshot.raw,
+    JSON.stringify(next),
+  )
+    ? { status: "ok", tokens: next }
+    : latestAfterLostCommit("ok");
 }
 
-// Single-flight guard: a burst of near-expiry callers (mount + resync + every
-// control-plane request) must share ONE refresh, or they race the same refresh
-// token through /handoff/refresh concurrently — and with Auth0 rotation the
-// losers present an already-consumed token, which reads as terminal and (worse,
-// under reuse-detection) can revoke the whole token family. The check-and-set is
-// synchronous, so at most one refresh is ever in flight.
+async function refreshWorkOSTokens(
+  snapshot: StoredTokenSnapshot & { tokens: WorkOSStoredTokens },
+): Promise<RefreshOutcome> {
+  let providerOutcome;
+  try {
+    providerOutcome = await workOSDesktopClientForMain().refresh({
+      refreshToken: snapshot.tokens.refreshToken,
+      expectedSubject: snapshot.tokens.sub,
+      expectedSessionId: snapshot.tokens.sessionId,
+    });
+  } catch (error) {
+    console.warn(
+      `[auth] WorkOS refresh unavailable (keeping session): ${(error as Error).message}`,
+    );
+    return { status: "transient" };
+  }
+  const merged = mergeWorkOSRefresh(snapshot.tokens, providerOutcome);
+  if (merged.status === "terminal") {
+    return { status: "terminal", expectedRaw: snapshot.raw };
+  }
+
+  // Every active response is durably rewritten even when WorkOS returned the
+  // same refresh token. A transient post-rotation verification failure writes
+  // only the replacement refresh token and withholds the bearer.
+  const mustWrite =
+    merged.status === "active" || merged.tokens !== snapshot.tokens;
+  if (
+    mustWrite &&
+    !replaceSecretIfUnchanged(
+      TOKENS_KEY,
+      snapshot.raw,
+      JSON.stringify(merged.tokens),
+    )
+  ) {
+    return latestAfterLostCommit(
+      merged.status === "active" ? "ok" : "transient",
+    );
+  }
+  if (merged.status === "active") {
+    return { status: "ok", tokens: merged.tokens };
+  }
+  return { status: "transient" };
+}
+
+async function refreshTokens(
+  snapshot: StoredTokenSnapshot,
+): Promise<RefreshOutcome> {
+  return snapshot.tokens.provider === "workos"
+    ? refreshWorkOSTokens(
+        snapshot as StoredTokenSnapshot & { tokens: WorkOSStoredTokens },
+      )
+    : refreshAuth0Tokens(snapshot);
+}
+
 let inFlightRefresh: Promise<RefreshOutcome> | null = null;
 
 function refreshOnce(): Promise<RefreshOutcome> {
@@ -283,8 +286,6 @@ function refreshOnce(): Promise<RefreshOutcome> {
     inFlightRefresh = withCrossProcessFileLock(
       `${secretsFilePath()}.auth-session-refresh.lock`,
       async (): Promise<RefreshOutcome> => {
-        // Re-read after acquiring the cross-worktree lock: a sibling may have
-        // already rotated this single-use refresh token while we waited.
         const snapshot = readTokenSnapshot();
         if (!snapshot) return { status: "terminal" };
         if (snapshot.tokens.expiresAt - Date.now() >= REFRESH_SKEW_MS) {
@@ -300,106 +301,174 @@ function refreshOnce(): Promise<RefreshOutcome> {
   return inFlightRefresh;
 }
 
-export async function getValidSessionForMain(): Promise<MainAuthSession | null> {
-  const tokens = readTokens();
-  if (!tokens) return null;
-  const toSession = (value: StoredTokens): MainAuthSession => ({
+function toMainSession(value: StoredTokens): MainAuthSession {
+  return {
     accessToken: value.accessToken,
     sub: value.sub,
     email: value.email,
     name: value.name,
-  });
-  // Fast path: comfortably valid, no network at all.
+    provider: value.provider,
+    ...(value.accountId ? { accountId: value.accountId } : {}),
+    ...(value.provider === "workos"
+      ? {
+          sessionId: value.sessionId,
+          clientKind: value.clientKind,
+          authenticationMethod: value.authenticationMethod,
+        }
+      : {}),
+  };
+}
+
+export async function getValidSessionForMain(): Promise<MainAuthSession | null> {
+  const tokens = readTokens();
+  if (!tokens) return null;
   if (tokens.expiresAt - Date.now() >= REFRESH_SKEW_MS) {
-    return toSession(tokens);
+    return toMainSession(tokens);
   }
   const outcome = await refreshOnce();
-  if (outcome.status === "ok") return toSession(outcome.tokens);
+  if (outcome.status === "ok") return toMainSession(outcome.tokens);
   if (outcome.status === "terminal") {
     const removed =
       outcome.expectedRaw !== undefined &&
       replaceSecretIfUnchanged(TOKENS_KEY, outcome.expectedRaw, null);
     if (removed) notifySessionChanged();
     const latest = readTokens();
-    return latest ? toSession(latest) : null;
+    return latest ? toMainSession(latest) : null;
   }
-  // Transient: KEEP the stored tokens. Hand back the cached access token if it's
-  // not yet actually expired (we refresh at exp−60s, so it usually has seconds
-  // left); otherwise null WITHOUT clearing, so the next call simply retries.
   const latest = readTokens() ?? tokens;
-  const stillValid = latest.expiresAt - Date.now() > 0;
-  return stillValid ? toSession(latest) : null;
+  return latest.expiresAt - Date.now() > 0 ? toMainSession(latest) : null;
 }
 
-/** Main-process consumers use this rather than routing a privileged call back
- *  through renderer IPC. */
 export async function getValidAccessTokenForMain(): Promise<string | null> {
   return (await getValidSessionForMain())?.accessToken ?? null;
 }
 
-export function getSessionUserForMain(): {
-  sub: string;
-  email: string;
-  name: string | null;
-} | null {
+export function getSessionUserForMain(): Omit<
+  MainAuthSession,
+  "accessToken"
+> | null {
   const tokens = readTokens();
-  return tokens
-    ? { sub: tokens.sub, email: tokens.email, name: tokens.name }
-    : null;
+  if (!tokens) return null;
+  const { accessToken: _accessToken, ...user } = toMainSession(tokens);
+  return user;
 }
 
-export const authGetAccessToken: CommandHandler = async () => {
-  return { access_token: await getValidAccessTokenForMain() };
-};
+/** Durable product/integration owner. Auth0 compatibility records fall back to
+ * their provider subject; WorkOS records always carry the `/v1/me` account UUID. */
+export function getProductAccountIdForMain(): string | null {
+  const user = getSessionUserForMain();
+  return user?.accountId ?? user?.sub ?? null;
+}
 
-export const authGetSessionUser: CommandHandler = () => {
-  return getSessionUserForMain();
-};
+/**
+ * Remove a server-revoked WorkOS session without making another provider
+ * request. Both stable identities must still match the captured monitor
+ * binding, so a delayed SSE/401 from Session A cannot erase a replacement
+ * Session B installed while the request was in flight.
+ */
+export function clearWorkOSSessionAfterServerRevocation(expected: {
+  accountId: string;
+  sessionId: string;
+}): boolean {
+  const snapshot = readTokenSnapshot();
+  if (
+    snapshot?.tokens.provider !== "workos" ||
+    snapshot.tokens.accountId !== expected.accountId ||
+    snapshot.tokens.sessionId !== expected.sessionId
+  ) {
+    return false;
+  }
+  const removed = replaceSecretIfUnchanged(TOKENS_KEY, snapshot.raw, null);
+  if (removed) notifySessionChanged();
+  return removed;
+}
 
-export const authClearSession: CommandHandler = () => {
+export const authGetAccessToken: CommandHandler = async () => ({
+  access_token: await getValidAccessTokenForMain(),
+});
+
+export const authGetSessionUser: CommandHandler = () => getSessionUserForMain();
+
+function sameAccount(left: StoredTokens, right: StoredTokens): boolean {
+  return (left.accountId || left.sub) === (right.accountId || right.sub);
+}
+
+function clearCapturedSession(
+  rawAtStart: string | null,
+  snapshot: StoredTokenSnapshot | null,
+  scope: "current" | "all",
+): void {
+  let removed =
+    rawAtStart !== null &&
+    replaceSecretIfUnchanged(TOKENS_KEY, rawAtStart, null);
+  if (!removed && rawAtStart !== null) {
+    const latest = readTokenSnapshot();
+    const sameTarget =
+      latest &&
+      snapshot &&
+      (scope === "all"
+        ? sameAccount(latest.tokens, snapshot.tokens)
+        : latest.tokens.provider === "workos" &&
+          snapshot.tokens.provider === "workos" &&
+          latest.tokens.sessionId === snapshot.tokens.sessionId);
+    if (sameTarget && latest) {
+      removed = replaceSecretIfUnchanged(TOKENS_KEY, latest.raw, null);
+    }
+  }
+  if (removed) notifySessionChanged();
+}
+
+async function signOutWorkOS(scope: "current" | "all"): Promise<boolean> {
+  const session = await getValidSessionForMain().catch(() => null);
+  const rawAtStart = getSecret(TOKENS_KEY);
+  const snapshot = parseStoredTokenSnapshot(rawAtStart);
+  if (
+    session?.provider === "workos" &&
+    snapshot?.tokens.provider === "workos" &&
+    session.sessionId === snapshot.tokens.sessionId
+  ) {
+    if (!(await requestWorkOSDesktopRevocation(scope, session.accessToken))) {
+      console.warn("[auth] WorkOS revoke unavailable");
+    }
+  }
+  clearCapturedSession(rawAtStart, snapshot, scope);
+  return true;
+}
+
+export const authClearSession: CommandHandler = async () => {
+  const snapshot = readTokenSnapshot();
+  if (snapshot?.tokens.provider === "workos") {
+    return signOutWorkOS("current");
+  }
   deleteSecret(TOKENS_KEY);
   notifySessionChanged();
   return true;
 };
 
-export const authSignOutEverywhere: CommandHandler = async () => {
-  // Capture the exact encrypted-record payload once. The final CAS removes
-  // either that valid session or a malformed record, but never a newer login
-  // that another shared dev worktree commits while revoke is in flight.
+async function signOutAuth0Everywhere(): Promise<boolean> {
   const rawAtStart = getSecret(TOKENS_KEY);
-  const snapshot = parseTokenSnapshot(rawAtStart);
+  const snapshot = parseStoredTokenSnapshot(rawAtStart);
   if (snapshot) {
     try {
-      await fetch(`${handoffBaseUrl()}/handoff/revoke`, {
+      await fetch(`${appBaseUrl()}/handoff/revoke`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          refresh_token: snapshot.tokens.refreshToken,
-        }),
+        body: JSON.stringify({ refresh_token: snapshot.tokens.refreshToken }),
         signal: AbortSignal.timeout(AUTH_REQUEST_TIMEOUT_MS),
       });
-    } catch (err) {
+    } catch (error) {
       console.warn(
-        `[auth] revoke network call failed: ${(err as Error).message}`,
+        `[auth] revoke network call failed: ${(error as Error).message}`,
       );
-      // Local teardown wins even if the network call fails — matches the old
-      // signOut({scope:"global"}) contract's error handling.
     }
   }
-  let removed =
-    rawAtStart !== null &&
-    replaceSecretIfUnchanged(TOKENS_KEY, rawAtStart, null);
-  if (!removed && rawAtStart !== null) {
-    // The record changed while revoke was in flight. Only a DIFFERENT account
-    // may survive an explicit sign-out: a plain rotation of the SAME session
-    // (this process's own refreshOnce, or a sibling dev worktree's) must still
-    // be torn down, or the user keeps a session whose refresh token is already
-    // revoked server-side and the UI flips back to signed-in on the next probe.
-    const latest = readTokenSnapshot();
-    if (latest && (!snapshot || latest.tokens.sub === snapshot.tokens.sub)) {
-      removed = replaceSecretIfUnchanged(TOKENS_KEY, latest.raw, null);
-    }
-  }
-  if (removed) notifySessionChanged();
+  clearCapturedSession(rawAtStart, snapshot, "all");
   return true;
+}
+
+export const authSignOutEverywhere: CommandHandler = async () => {
+  const snapshot = readTokenSnapshot();
+  return snapshot?.tokens.provider === "workos"
+    ? signOutWorkOS("all")
+    : signOutAuth0Everywhere();
 };

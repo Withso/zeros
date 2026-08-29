@@ -3,12 +3,18 @@
 // executes in the worktree on create, and the archive command runs before removal.
 
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { promisify } from "node:util";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type {
+  BoundaryProcess,
+  BoundarySpawnRequest,
+  PreparedBoundary,
+  RepoTaskBoundaryFactory,
+} from "../../agents/containment/types";
 
 import {
   archiveWorkspace,
@@ -20,6 +26,68 @@ import {
 } from "..";
 
 const execFileAsync = promisify(execFile);
+
+/** The lifecycle suite tests hook semantics, not the platform sandbox. Keep a
+ * structural boundary here so production's fail-closed factory requirement is
+ * exercised without requiring Seatbelt/bwrap in the unit-test process. */
+const testBoundaryFactory: RepoTaskBoundaryFactory = async () => {
+  const processes = new Set<BoundaryProcess>();
+  return {
+    spawn: async (request: BoundarySpawnRequest) => {
+      const child = spawn(request.command, [...request.args], {
+        cwd: request.cwd,
+        env: { ...request.env },
+        stdio: ["pipe", "pipe", "pipe"],
+        detached: true,
+      });
+      const exited = new Promise<{
+        code: number | null;
+        signal: string | null;
+      }>((resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code, signal) => resolve({ code, signal }));
+      });
+      const handle = {
+        pid: child.pid!,
+        child,
+        stdin: child.stdin,
+        stdout: child.stdout,
+        stderr: child.stderr,
+        wait: () => exited,
+        signal: async (signal: NodeJS.Signals) => {
+          child.kill(signal);
+        },
+        stopAndProve: async () => {
+          if (child.exitCode === null && child.signalCode === null) {
+            child.kill("SIGKILL");
+          }
+          await exited;
+        },
+      } satisfies BoundaryProcess;
+      processes.add(handle);
+      void exited.finally(() => processes.delete(handle));
+      return handle;
+    },
+    stopAndProve: async () => {
+      await Promise.all(
+        [...processes].map((process) => process.stopAndProve()),
+      );
+    },
+  } as unknown as PreparedBoundary;
+};
+
+const teardownFailureBoundaryFactory: RepoTaskBoundaryFactory = async (
+  request,
+) => {
+  const boundary = await testBoundaryFactory(request);
+  return {
+    ...boundary,
+    stopAndProve: async () => {
+      await boundary.stopAndProve();
+      throw new Error("repository task process-domain teardown was not proven");
+    },
+  } as PreparedBoundary;
+};
 
 async function git(cwd: string, ...args: string[]): Promise<void> {
   await execFileAsync("git", args, { cwd });
@@ -119,10 +187,15 @@ describe("repo lifecycle scripts", () => {
       `[scripts]\narchive = "touch \\"$ZEROS_REPO_ROOT/archived-ran.txt\\""\n`,
     );
     const created = await createWorkspace({ repoRoot });
-    await archiveWorkspace({
-      workspaceId: created.workspaceId,
-      stashUncommitted: false,
-    });
+    await archiveWorkspace(
+      {
+        workspaceId: created.workspaceId,
+        stashUncommitted: false,
+      },
+      undefined,
+      undefined,
+      testBoundaryFactory,
+    );
     expect(existsSync(path.join(repoRoot, "archived-ran.txt"))).toBe(true);
     expect(getWorkspace(created.workspaceId).archivedAt).not.toBeNull();
   });
@@ -133,10 +206,15 @@ describe("repo lifecycle scripts", () => {
       `[scripts]\narchive = "printf hook-state > archive-hook.txt"\n`,
     );
     const created = await createWorkspace({ repoRoot });
-    await archiveWorkspace({
-      workspaceId: created.workspaceId,
-      stashUncommitted: false,
-    });
+    await archiveWorkspace(
+      {
+        workspaceId: created.workspaceId,
+        stashUncommitted: false,
+      },
+      undefined,
+      undefined,
+      testBoundaryFactory,
+    );
     const restored = await restoreWorkspace(created.workspaceId);
     expect(
       await readFile(path.join(restored.path, "archive-hook.txt"), "utf8"),
@@ -146,10 +224,36 @@ describe("repo lifecycle scripts", () => {
   it("a failing scripts.archive does NOT block archiving", async () => {
     await initRepo(repoRoot, `[scripts]\narchive = "exit 3"\n`);
     const created = await createWorkspace({ repoRoot });
-    await archiveWorkspace({
-      workspaceId: created.workspaceId,
-      stashUncommitted: false,
-    });
+    await archiveWorkspace(
+      {
+        workspaceId: created.workspaceId,
+        stashUncommitted: false,
+      },
+      undefined,
+      undefined,
+      testBoundaryFactory,
+    );
     expect(getWorkspace(created.workspaceId).archivedAt).not.toBeNull();
+  });
+
+  it("refuses to remove the worktree when archive-script containment teardown is not proven", async () => {
+    await initRepo(repoRoot, `[scripts]\narchive = "true"\n`);
+    const created = await createWorkspace({ repoRoot });
+    const workspacePath = getWorkspace(created.workspaceId).path;
+
+    await expect(
+      archiveWorkspace(
+        {
+          workspaceId: created.workspaceId,
+          stashUncommitted: false,
+        },
+        undefined,
+        undefined,
+        teardownFailureBoundaryFactory,
+      ),
+    ).rejects.toThrow(/containment teardown was not proven/i);
+
+    expect(existsSync(workspacePath)).toBe(true);
+    expect(getWorkspace(created.workspaceId).archivedAt).toBeNull();
   });
 });

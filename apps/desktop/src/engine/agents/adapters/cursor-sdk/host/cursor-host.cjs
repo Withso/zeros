@@ -67,6 +67,23 @@
 
 "use strict";
 
+const fs = require("node:fs");
+const path = require("node:path");
+
+/** Process start, so every later measurement can be stated relative to boot. */
+const hostStartedAt = Date.now();
+
+const cursorTransportDebug =
+  process.env.ZEROS_CURSOR_TRANSPORT_DEBUG === "1";
+function debugCursorTransport(message) {
+  if (!cursorTransportDebug) return;
+  try {
+    process.stderr.write(`[cursor-transport] ${message}\n`);
+  } catch {
+    /* diagnostics must never change transport behavior */
+  }
+}
+
 // @cursor/sdk wires several AbortSignal listeners per run (its connect-node
 // HTTP/2 client + tool/subagent plumbing) onto a single shared signal — ~11 on
 // a turn that spawns subagents. Node's default cap is 10, so it prints a
@@ -85,6 +102,845 @@ try {
   /* non-fatal — the warning is cosmetic */
 }
 
+/**
+ * Node's built-in environment-proxy support covers fetch/http/https, but not
+ * node:http2. Cursor uses both: API-key exchange/model discovery ride fetch,
+ * while the local agent protocol rides @connectrpc/connect-node → http2.
+ * ZSR host parity does not install a proxy. This shim matters only when the
+ * deployment itself sets NODE_USE_ENV_PROXY and HTTP(S)_PROXY; without it the
+ * two Cursor transports would disagree about that ordinary host configuration.
+ *
+ * Install this before requiring @cursor/sdk, while its bundled connect-node
+ * modules still resolve `require("node:http2").connect`. The HTTP/2 connector
+ * establishes an authenticated CONNECT tunnel, then returns a real TLSSocket
+ * whose `secureConnect` event cannot fire until the tunnel is ready. Provider
+ * credentials stay in Cursor's normal request path and are never handled here.
+ */
+function installEnvironmentProxyTransports() {
+  if (process.env.NODE_USE_ENV_PROXY !== "1") return;
+  const proxy =
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy;
+  if (!proxy) return;
+
+  const http = require("node:http");
+  const http2 = require("node:http2");
+  const net = require("node:net");
+  const tls = require("node:tls");
+  const { Duplex, PassThrough } = require("node:stream");
+
+  let proxyUrl;
+  try {
+    proxyUrl = new URL(proxy);
+  } catch {
+    return;
+  }
+  if (proxyUrl.protocol !== "http:" && proxyUrl.protocol !== "https:") return;
+
+  const normalizedHostname = (hostname) =>
+    hostname.replace(/^\[/, "").replace(/\]$/, "").replace(/\.$/, "").toLowerCase();
+  const shouldBypassProxy = (hostname, port) => {
+    const targetHost = normalizedHostname(hostname);
+    const noProxy = process.env.NO_PROXY || process.env.no_proxy || "";
+    for (const rawEntry of noProxy.split(",")) {
+      let entry = rawEntry.trim().toLowerCase();
+      if (!entry) continue;
+      if (entry === "*") return true;
+      let entryPort;
+      if (entry.startsWith("[")) {
+        const bracket = entry.indexOf("]");
+        if (bracket !== -1 && entry[bracket + 1] === ":") {
+          entryPort = entry.slice(bracket + 2);
+          entry = entry.slice(0, bracket + 1);
+        }
+      } else {
+        const colon = entry.lastIndexOf(":");
+        if (colon > 0 && /^\d+$/.test(entry.slice(colon + 1))) {
+          entryPort = entry.slice(colon + 1);
+          entry = entry.slice(0, colon);
+        }
+      }
+      if (entryPort && Number(entryPort) !== port) continue;
+      const wildcard = entry.startsWith("*.") || entry.startsWith(".");
+      const entryHost = normalizedHostname(entry.replace(/^\*\./, "."));
+      if (
+        targetHost === entryHost.replace(/^\./, "") ||
+        (wildcard && targetHost.endsWith(entryHost))
+      ) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // A generic JS Duplex makes http2 emit `connect` as soon as it attaches,
+  // before an asynchronous HTTPS Agent has completed CONNECT + TLS. Cursor then
+  // opens AgentService/Run and cancels it before TLS is ready. Instead, start a
+  // real client TLSSocket over a buffered duplex immediately. It retains
+  // `secureConnecting=true` (which http2 understands) while the separate proxy
+  // socket performs CONNECT; only then are the buffered ClientHello bytes
+  // released into the tunnel.
+  const connectHttp2ThroughProxy = (target, socketOptions) => {
+    const hostname = normalizedHostname(target.hostname);
+    const port = target.port ? Number(target.port) : 443;
+    const authority = `${net.isIP(hostname) === 6 ? `[${hostname}]` : hostname}:${port}`;
+    // Phase timing for the one hop Zeros owns end to end. A contained session
+    // pays ~2.6s to open a connection that costs ~0.55s from the same machine
+    // unproxied, and the provider opens several of them SERIALLY before a turn
+    // can start — which is most of a cold turn's latency. "A connection is
+    // slow" is not actionable; each of these phases points somewhere different:
+    //   dial    — reaching the sandbox's proxy listener (local; a slow dial
+    //             means the bridge in front of it, not the network)
+    //   connect — CONNECT sent → 200 received: the proxy's own upstream dial,
+    //             DNS and policy check
+    //   tls     — 200 → secureConnect: the TLS handshake, which for a
+    //             credential-substituted authority is terminated by the proxy
+    //             and so should be LOCAL and fast
+    const phaseStartedAt = Date.now();
+    let dialedAt = null;
+    let tunnelledAt = null;
+    const reportTunnelPhases = (outcome) => {
+      const total = Date.now() - phaseStartedAt;
+      if (total < SLOW_OP_MS && !cursorTransportDebug) return;
+      const dial = dialedAt === null ? null : dialedAt - phaseStartedAt;
+      const connect =
+        dialedAt === null || tunnelledAt === null ? null : tunnelledAt - dialedAt;
+      const tls = tunnelledAt === null ? null : Date.now() - tunnelledAt;
+      const ms = (value) => (value === null ? "n/a" : `${value}ms`);
+      process.stderr.write(
+        `[cursor-host] proxy tunnel ${authority} ${outcome} in ${total}ms ` +
+          `(dial=${ms(dial)} connect=${ms(connect)} tls=${ms(tls)})\n`,
+      );
+    };
+    const outbound = new PassThrough();
+    const inbound = new PassThrough();
+    const bridge = Duplex.from({ writable: outbound, readable: inbound });
+    let proxySocket;
+    let secureSocket;
+    let closed = false;
+
+    outbound.on("error", () => {});
+    inbound.on("error", () => {});
+    const fail = (error) => {
+      if (closed) return;
+      closed = true;
+      debugCursorTransport(
+        `${authority} bridge failed (${error?.code || error?.message || "unknown"})`,
+      );
+      reportTunnelPhases(`failed (${error?.code || error?.message || "unknown"})`);
+      outbound.destroy(error);
+      inbound.destroy(error);
+      bridge.destroy(error);
+      proxySocket?.destroy();
+      secureSocket?.destroy(error);
+    };
+    bridge.once("close", () => {
+      closed = true;
+      debugCursorTransport(`${authority} bridge closed`);
+      proxySocket?.destroy();
+    });
+    bridge.on("error", () => {});
+
+    try {
+      secureSocket = tls.connect({
+        ...(socketOptions || {}),
+        socket: bridge,
+        host: hostname,
+        hostname,
+        port,
+        ALPNProtocols: ["h2"],
+        ...(net.isIP(hostname) ? {} : { servername: hostname }),
+      });
+      secureSocket.once("secureConnect", () => {
+        debugCursorTransport(
+          `${authority} proxy TLS ready (alpn=${String(
+            secureSocket.alpnProtocol || "none",
+          )}, authorized=${String(secureSocket.authorized)})`,
+        );
+        reportTunnelPhases("ready");
+      });
+      secureSocket.on("error", (error) =>
+        debugCursorTransport(
+          `${authority} TLS error (${error?.code || error?.message || "unknown"})`,
+        ),
+      );
+
+      const proxyHost = normalizedHostname(proxyUrl.hostname);
+      const proxyPort = proxyUrl.port
+        ? Number(proxyUrl.port)
+        : proxyUrl.protocol === "https:"
+          ? 443
+          : 80;
+      const onProxyConnected = () => {
+        dialedAt = Date.now();
+        debugCursorTransport(`${authority} proxy TCP connected`);
+        let authorization = "";
+        if (proxyUrl.username || proxyUrl.password) {
+          const username = decodeURIComponent(proxyUrl.username);
+          const password = decodeURIComponent(proxyUrl.password);
+          authorization = `Proxy-Authorization: Basic ${Buffer.from(
+            `${username}:${password}`,
+          ).toString("base64")}\r\n`;
+        }
+        proxySocket.write(
+          `CONNECT ${authority} HTTP/1.1\r\n` +
+            `Host: ${authority}\r\n` +
+            authorization +
+            "Proxy-Connection: Keep-Alive\r\n\r\n",
+        );
+      };
+      proxySocket =
+        proxyUrl.protocol === "https:"
+          ? tls.connect(
+              {
+                host: proxyHost,
+                port: proxyPort,
+                ...(net.isIP(proxyHost) ? {} : { servername: proxyHost }),
+              },
+              onProxyConnected,
+            )
+          : net.connect(
+              { host: proxyHost, port: proxyPort },
+              onProxyConnected,
+            );
+      proxySocket.on("error", fail);
+      const timeout = Number(socketOptions?.timeout) || 30_000;
+      proxySocket.setTimeout(timeout, () => {
+        const error = new Error(
+          `proxy CONNECT to ${authority} timed out after ${timeout}ms`,
+        );
+        error.code = "ERR_PROXY_TUNNEL";
+        fail(error);
+      });
+
+      let response = Buffer.alloc(0);
+      const onProxyData = (chunk) => {
+        response = Buffer.concat([response, chunk]);
+        if (response.length > 64 * 1024) {
+          const error = new Error("proxy CONNECT response headers are too large");
+          error.code = "ERR_PROXY_TUNNEL";
+          fail(error);
+          return;
+        }
+        const marker = response.indexOf("\r\n\r\n");
+        if (marker === -1) return;
+        const statusLine = response
+          .subarray(0, response.indexOf("\r\n"))
+          .toString("latin1");
+        const status = Number(statusLine.split(" ")[1]);
+        if (status !== 200) {
+          const error = new Error(
+            `proxy CONNECT to ${authority} failed with status ${Number.isFinite(status) ? status : "unknown"}`,
+          );
+          error.code = "ERR_PROXY_TUNNEL";
+          fail(error);
+          return;
+        }
+        tunnelledAt = Date.now();
+        proxySocket.setTimeout(0);
+        proxySocket.removeListener("data", onProxyData);
+        const head = response.subarray(marker + 4);
+        response = Buffer.alloc(0);
+        if (head.length > 0) inbound.write(head);
+        proxySocket.pipe(inbound);
+        outbound.pipe(proxySocket);
+      };
+      proxySocket.on("data", onProxyData);
+      proxySocket.once("close", () =>
+        debugCursorTransport(`${authority} proxy TCP closed`),
+      );
+    } catch (error) {
+      fail(error);
+    }
+    return secureSocket;
+  };
+
+  // Electron 43 / Node 24 exposes this API. Calling it explicitly makes the
+  // startup contract observable and also configures global fetch's dispatcher.
+  if (typeof http.setGlobalProxyFromEnv === "function") {
+    http.setGlobalProxyFromEnv();
+  }
+
+  const directConnect = http2.connect;
+  http2.connect = function proxiedHttp2Connect(authority, options, listener) {
+    let connectOptions = options;
+    let connectListener = listener;
+    if (typeof connectOptions === "function") {
+      connectListener = connectOptions;
+      connectOptions = undefined;
+    }
+    const target = authority instanceof URL ? authority : new URL(authority);
+    // Cursor's backend is HTTPS. Preserve explicit/custom transports and
+    // plaintext HTTP/2 exactly; the kernel boundary remains the final fence.
+    if (
+      target.protocol !== "https:" ||
+      (connectOptions && typeof connectOptions.createConnection === "function")
+    ) {
+      return directConnect.call(
+        this,
+        authority,
+        connectOptions,
+        connectListener,
+      );
+    }
+    const targetPort = target.port ? Number(target.port) : 443;
+    if (shouldBypassProxy(target.hostname, targetPort)) {
+      return directConnect.call(
+        this,
+        authority,
+        connectOptions,
+        connectListener,
+      );
+    }
+
+    const proxiedOptions = {
+      ...(connectOptions || {}),
+      createConnection: (_target, socketOptions) =>
+        connectHttp2ThroughProxy(target, socketOptions),
+    };
+    const session = directConnect.call(
+      this,
+      authority,
+      proxiedOptions,
+      connectListener,
+    );
+    if (cursorTransportDebug) {
+      let requestSequence = 0;
+      const directRequest = session.request;
+      session.request = function debuggedHttp2Request(headers, options) {
+        const requestId = ++requestSequence;
+        const method = String(headers?.[":method"] || "unknown");
+        const requestPath = String(headers?.[":path"] || "")
+          .split("?", 1)[0]
+          .slice(0, 160);
+        debugCursorTransport(
+          `${target.host} http2 request ${requestId} ${method} ${requestPath}`,
+        );
+        const stream = directRequest.call(this, headers, options);
+        stream.once("response", (responseHeaders) =>
+          debugCursorTransport(
+            `${target.host} http2 response ${requestId} (${String(
+              responseHeaders?.[":status"] || "unknown",
+            )})`,
+          ),
+        );
+        stream.once("aborted", () =>
+          debugCursorTransport(
+            `${target.host} http2 request ${requestId} aborted`,
+          ),
+        );
+        stream.once("error", (error) =>
+          debugCursorTransport(
+            `${target.host} http2 request ${requestId} error (${error?.code || error?.message || "unknown"})`,
+          ),
+        );
+        stream.once("close", () =>
+          debugCursorTransport(
+            `${target.host} http2 request ${requestId} closed (rst=${String(
+              stream.rstCode,
+            )})`,
+          ),
+        );
+        return stream;
+      };
+      session.once("connect", () =>
+        debugCursorTransport(`${target.host} http2 session connected`),
+      );
+      session.once("remoteSettings", () =>
+        debugCursorTransport(`${target.host} http2 remote settings received`),
+      );
+      session.on("goaway", (code) =>
+        debugCursorTransport(`${target.host} http2 GOAWAY (${String(code)})`),
+      );
+      session.on("error", (error) =>
+        debugCursorTransport(
+          `${target.host} http2 error (${error?.code || error?.message || "unknown"})`,
+        ),
+      );
+      session.once("close", () =>
+        debugCursorTransport(`${target.host} http2 session closed`),
+      );
+    }
+    return session;
+  };
+}
+
+/**
+ * Cursor's ripwalk already excludes descendants of `.git`, which covers the
+ * contents of an ordinary Git directory. It does not cover the `.git` entry itself. That
+ * distinction matters for linked worktrees (where `.git` is a file) and under
+ * ZSR (where the canonical entry is kernel-denied): ripgrep reports EPERM and
+ * the SDK's ignore-map initialization aborts before it can scan normal files.
+ *
+ * Intercept only the exact, absolute ripgrep executable selected by Cursor and
+ * only in a contained per-session host. The two negative globs are inserted
+ * before ripgrep's `--` search-path separator, preserving every SDK argument,
+ * VCS-ignore behavior, and user-visible workspace file. Git commands continue
+ * through the separate shadow-Git capability; this never weakens that fence.
+ */
+function installContainedRipgrepBoundary() {
+  const ripgrepPath = process.env.CURSOR_RIPGREP_PATH;
+  if (
+    !process.env.ZEROS_CURSOR_STATE_ROOT ||
+    !ripgrepPath ||
+    !path.isAbsolute(ripgrepPath)
+  ) {
+    return;
+  }
+
+  const childProcess = require("node:child_process");
+  const directSpawn = childProcess.spawn;
+  const sameExecutable = (command) => {
+    if (typeof command !== "string") return false;
+    if (process.platform === "win32") {
+      return path.resolve(command).toLowerCase() === path.resolve(ripgrepPath).toLowerCase();
+    }
+    return path.resolve(command) === path.resolve(ripgrepPath);
+  };
+  const hasGlob = (args, pattern) =>
+    args.some(
+      (arg, index) =>
+        (arg === "--glob" || arg === "--iglob" || arg === "-g") &&
+        args[index + 1] === pattern,
+    );
+
+  childProcess.spawn = function containedRipgrepSpawn(command, args, options) {
+    if (!sameExecutable(command) || !Array.isArray(args)) {
+      return directSpawn.call(this, command, args, options);
+    }
+    const boundedArgs = [...args];
+    const boundaryArgs = [];
+    for (const pattern of ["!.git", "!**/.git"]) {
+      if (!hasGlob(boundedArgs, pattern)) {
+        boundaryArgs.push("--iglob", pattern);
+      }
+    }
+    if (boundaryArgs.length > 0) {
+      const separator = boundedArgs.indexOf("--");
+      boundedArgs.splice(
+        separator === -1 ? boundedArgs.length : separator,
+        0,
+        ...boundaryArgs,
+      );
+    }
+    return directSpawn.call(this, command, boundedArgs, options);
+  };
+}
+
+// ── First-turn latency attribution ────────────────────────
+//
+// WHY THIS EXISTS
+// A Cursor turn is `agent.send()` followed by items arriving on `run.stream()`.
+// Everything between them happens INSIDE @cursor/sdk's local runtime — it loads
+// the settings layers named by `local.settingSources` (user/project/team/mdm/
+// plugins), walks the workspace for rules/skills/ignore files, bootstraps its
+// feature-gate client, and opens the backend connection — and none of it emits
+// a single line. Measured against this host's own run store, the FIRST run in a
+// fresh contained host spent 77s in that window while every later run in the
+// same process spent ~4s; uncontained hosts start at ~4s cold. 77 seconds of
+// total silence is not a diagnosable state, and the gap is exactly where a
+// containment boundary changes the cost of ordinary work (every outbound
+// request is proxied, every spawn is sandbox-wrapped, HOME is a fresh
+// projection), so the missing information is always "which operation blocked".
+//
+// So: time every outbound request and every child spawn, and attribute the
+// pre-first-item window to the ones that overlapped it. Recording is a closure
+// and two timestamps per operation; nothing is logged unless an operation is
+// slow or a run is slow to produce its first item, so a healthy turn stays
+// silent. `ZEROS_CURSOR_TRANSPORT_DEBUG=1` additionally reports every recorded
+// operation regardless of duration.
+//
+// Diagnostics go to stderr (stdout is the protocol) and the engine forwards
+// them, so the attribution lands in the same log as the `[zsr] admitted` line.
+
+/** An operation slower than this is reported on its own as it completes. */
+const SLOW_OP_MS = Number(process.env.ZEROS_CURSOR_SLOW_OP_MS) || 3_000;
+/** A run whose first stream item takes longer than this gets an attribution
+ *  breakdown. Below it the wait is ordinary model latency, not a stall. */
+const SLOW_FIRST_ITEM_MS =
+  Number(process.env.ZEROS_CURSOR_SLOW_FIRST_ITEM_MS) || 5_000;
+/** Ring-buffer ceiling. A turn that spawns thousands of children must not
+ *  turn diagnostics into the leak they were added to find. */
+const MAX_TRACED_OPS = 512;
+/** Longest label kept per operation — URLs carry query strings and argv can be
+ *  arbitrarily long, and neither belongs in a log at full length. */
+const MAX_OP_LABEL_CHARS = 120;
+
+/** Completed operations, oldest first, bounded to MAX_TRACED_OPS. */
+const tracedOps = [];
+/** Operations still running. Reported as `(in flight)` — a still-unfinished
+ *  operation is the MOST likely culprit for a stall, so it must never be
+ *  omitted just because it has no end time yet. */
+const inFlightOps = new Set();
+
+function shortLabel(value) {
+  let text;
+  try {
+    text = String(value ?? "");
+  } catch {
+    // A null-prototype or Proxy-wrapped value can throw on coercion. A
+    // diagnostic must never be the thing that breaks the transport it measures.
+    text = "(unprintable)";
+  }
+  return text.length > MAX_OP_LABEL_CHARS
+    ? `${text.slice(0, MAX_OP_LABEL_CHARS - 1)}…`
+    : text;
+}
+
+/** Start timing one operation. The returned function ends it exactly once;
+ *  extra calls (a socket that emits both `error` and `close`) are ignored so a
+ *  single connect can attach to several events without double-reporting. */
+function beginOp(kind, detail) {
+  // Long-lived children (a stdio MCP server) and kept-alive sessions stay
+  // in flight for the host's lifetime, so this set needs the same hard ceiling
+  // the completed ring has. Past it, tracing stops rather than accumulating.
+  if (inFlightOps.size >= MAX_TRACED_OPS) return () => {};
+  const op = {
+    kind,
+    label: shortLabel(detail),
+    startedAt: Date.now(),
+    endedAt: null,
+    outcome: null,
+  };
+  inFlightOps.add(op);
+  return (outcome) => {
+    if (op.endedAt !== null) return;
+    op.endedAt = Date.now();
+    op.outcome = outcome == null ? "ok" : shortLabel(outcome);
+    inFlightOps.delete(op);
+    tracedOps.push(op);
+    if (tracedOps.length > MAX_TRACED_OPS) tracedOps.shift();
+    const elapsed = op.endedAt - op.startedAt;
+    if (elapsed >= SLOW_OP_MS || cursorTransportDebug) {
+      process.stderr.write(
+        `[cursor-host] slow ${op.kind} ${op.label} took ${elapsed}ms (${op.outcome})\n`,
+      );
+    }
+  };
+}
+
+/** Every operation that was running at any point inside [from, to], slowest
+ *  first. In-flight operations are treated as still running "now". */
+function opsOverlapping(from, to) {
+  const overlapping = [];
+  for (const op of [...tracedOps, ...inFlightOps]) {
+    const endedAt = op.endedAt ?? Date.now();
+    if (endedAt < from || op.startedAt > to) continue;
+    overlapping.push({
+      kind: op.kind,
+      label: op.label,
+      outcome: op.endedAt === null ? "in flight" : op.outcome,
+      // Only the part of the operation that overlaps the window can explain
+      // the window; a connection opened long before and still open is not
+      // 20 minutes of this turn's latency.
+      elapsed: Math.min(endedAt, to) - Math.max(op.startedAt, from),
+      // Offset from the start of the window. Durations alone cannot tell
+      // five concurrent 3s calls (3s of latency) from five serial ones (15s),
+      // and which one it is decides whether the fix is "make each call
+      // cheaper" or "stop making so many".
+      offset: Math.max(op.startedAt, from) - from,
+    });
+  }
+  overlapping.sort((left, right) => right.elapsed - left.elapsed);
+  return overlapping;
+}
+
+/** How much of a window had at least one traced operation in flight. A window
+ *  far longer than its own covered span is waiting on something untraced
+ *  (in-process work); one close to it is spending its time on these calls. */
+function coveredSpan(ops) {
+  const spans = ops
+    .map((op) => [op.offset, op.offset + op.elapsed])
+    .sort((left, right) => left[0] - right[0]);
+  let covered = 0;
+  let cursor = -1;
+  for (const [start, end] of spans) {
+    const from = Math.max(start, cursor);
+    if (end > from) {
+      covered += end - from;
+      cursor = end;
+    }
+  }
+  return covered;
+}
+
+/** One line naming the slowest op in a window, for the compact report. */
+function slowestOpSummary(ops) {
+  const slowest = ops[0];
+  if (!slowest) return "";
+  const others = ops.length - 1;
+  return (
+    `; slowest ${slowest.kind} ${slowest.label} ${slowest.elapsed}ms` +
+    (others > 0 ? ` (+${others} more)` : "")
+  );
+}
+
+/** Printed once, the first time a compact report is emitted, so the reader
+ *  knows the staircase still exists without paying for it on every turn. */
+let breakdownHintPrinted = false;
+
+/** Attribute a slow pre-first-item window to the operations inside it.
+ *
+ *  DEFAULT: one line. A cold Cursor session is slow on purpose (see the
+ *  prewarm block) and used to spend 12+ stderr lines saying so on EVERY run,
+ *  which drowned the surrounding engine log. The headline plus a slowest-op
+ *  callout is what anyone reads first; the per-operation staircase — which is
+ *  the part that actually distinguishes "one slow call" from "ten serial
+ *  calls" — is worth its length only when someone is looking, so it lives
+ *  behind ZEROS_CURSOR_TRANSPORT_DEBUG=1. */
+function reportFirstItemLatency(runId, from, to, extra) {
+  const waited = to - from;
+  const candidates = opsOverlapping(from, to).filter(
+    (op) => op.elapsed >= 250 || cursorTransportDebug,
+  );
+  if (candidates.length === 0) {
+    process.stderr.write(
+      `[cursor-host] run ${runId} first model output after ${waited}ms ` +
+        `(${extra}) — no outbound request or child process overlapped the ` +
+        `wait; the time is inside @cursor/sdk's own work (settings layers, ` +
+        `workspace scan) or its already-open connection\n`,
+    );
+    return;
+  }
+  const covered = coveredSpan(candidates);
+  const attribution =
+    `${covered}ms across ${candidates.length} traced op(s) ` +
+    `(${Math.round((covered / Math.max(waited, 1)) * 100)}%), ` +
+    `${waited - covered}ms untraced in-process`;
+
+  if (!cursorTransportDebug) {
+    process.stderr.write(
+      `[cursor-host] run ${runId} first model output after ${waited}ms ` +
+        `(${extra}) — ${attribution}${slowestOpSummary(candidates)}\n`,
+    );
+    if (!breakdownHintPrinted) {
+      breakdownHintPrinted = true;
+      process.stderr.write(
+        "[cursor-host] (set ZEROS_CURSOR_TRANSPORT_DEBUG=1 for the " +
+          "per-operation breakdown of these waits)\n",
+      );
+    }
+  } else {
+    process.stderr.write(
+      `[cursor-host] run ${runId} first model output after ${waited}ms (${extra})\n`,
+    );
+    // Ordered by START, not duration: read top to bottom and the serial chain
+    // is visible as a staircase of offsets, while concurrent calls share one.
+    const byStart = [...candidates].sort(
+      (left, right) => left.offset - right.offset,
+    );
+    for (const op of byStart.slice(0, 14)) {
+      process.stderr.write(
+        `[cursor-host]   ↳ @${String(op.offset).padStart(6)}ms ` +
+          `${String(op.elapsed).padStart(6)}ms ${op.kind} ${op.label} ` +
+          `(${op.outcome})\n`,
+      );
+    }
+    if (byStart.length > 14) {
+      process.stderr.write(
+        `[cursor-host]   ↳ …and ${byStart.length - 14} shorter operation(s)\n`,
+      );
+    }
+    process.stderr.write(`[cursor-host]   ∑ ${attribution}\n`);
+  }
+  // The dominant case is worth naming rather than leaving as a row in a table:
+  // an MCP server the provider spawned, killed at its connect budget, having
+  // consumed most of the window. A stdio MCP server that has to authorize
+  // interactively can never finish in a headless contained session, so it costs
+  // this on EVERY session until its credentials are valid on disk — and the only
+  // visible symptom is the user's first message being slow.
+  const dominant = candidates[0];
+  if (
+    dominant &&
+    dominant.kind === "spawn" &&
+    /SIGTERM|SIGKILL/.test(String(dominant.outcome)) &&
+    dominant.elapsed >= waited / 2
+  ) {
+    process.stderr.write(
+      `[cursor-host]   ⚠ "${dominant.label}" is almost certainly an MCP server ` +
+        `from your MCP config: it never became usable and was killed at the ` +
+        `provider's connect budget, and the turn started right after. Until its ` +
+        `credentials are valid inside the session HOME, every first message ` +
+        `pays this. Authorize it once on the host, or remove it from the MCP ` +
+        `config, to get the time back.\n`,
+    );
+  }
+}
+
+/**
+ * Wrap every transport @cursor/sdk can reach the network through, plus child
+ * spawns. Install AFTER installEnvironmentProxyTransports so this wrapper is
+ * outermost and measures what the SDK actually experiences (proxy dial + CONNECT
+ * + TLS included), and BEFORE `require("@cursor/sdk")` so the SDK's bundled
+ * connect-node/undici copies capture the wrapped functions.
+ */
+function installFirstTurnTracer() {
+  const http = require("node:http");
+  const https = require("node:https");
+  const http2 = require("node:http2");
+  const net = require("node:net");
+  const tls = require("node:tls");
+  const childProcess = require("node:child_process");
+
+  const authorityOf = (options, fallback) => {
+    if (typeof options === "string") return options;
+    if (options && typeof options === "object") {
+      const host = options.host ?? options.hostname;
+      if (host) return options.port ? `${host}:${options.port}` : String(host);
+      if (options.path) return String(options.path);
+    }
+    return fallback;
+  };
+
+  /** Label a net/tls connect from its argument list, which Node overloads as
+   *  (options[, cb]) / (port[, host][, cb]) / (path[, cb]). Never interpolate
+   *  an argument blindly: Node's own https agent passes a NULL-PROTOTYPE
+   *  options object into tls.connect, and `${obj}` on one throws "Cannot
+   *  convert object to primitive value" — which a diagnostic must never do to
+   *  the transport it is measuring. */
+  const connectLabel = (args) => {
+    const [first, second] = args;
+    if (typeof first === "number") {
+      return `${typeof second === "string" ? second : "localhost"}:${first}`;
+    }
+    if (typeof first === "string") return first;
+    return authorityOf(first, "socket");
+  };
+
+  // A socket's operation ends at the first terminal event. `connect` for a
+  // plain socket, `secureConnect` for TLS; `error`/`close` cover the failures,
+  // which is the case that matters — an outbound socket the sandbox never lets
+  // reach anything is precisely the shape of stall this exists to name.
+  //
+  // A TLSSocket emits `connect` too — at TCP-established, BEFORE the
+  // handshake — so a `tls` op almost always ends there. Say `tcp-connected`
+  // rather than `connected` so the number is not misread as handshake time:
+  // "tls api2.cursor.sh:443 2018ms (connected)" is DNS + TCP, and the fix for
+  // that (resolver, IPv6 fallback, connection reuse) is nowhere near the fix
+  // for a slow handshake.
+  const traceSocket = (socket, kind, label) => {
+    if (!socket || typeof socket.once !== "function") return socket;
+    const end = beginOp(kind, label);
+    socket.once("connect", () =>
+      end(kind === "tls" ? "tcp-connected" : "connected"),
+    );
+    socket.once("secureConnect", () => end("tls-ready"));
+    socket.once("error", (error) => end(error?.code || error?.message || "error"));
+    socket.once("close", () => end("closed before connect"));
+    return socket;
+  };
+
+  const directFetch = globalThis.fetch;
+  if (typeof directFetch === "function") {
+    globalThis.fetch = function tracedFetch(input, init) {
+      const url =
+        typeof input === "string"
+          ? input
+          : input && typeof input === "object" && "url" in input
+            ? String(input.url)
+            : String(input);
+      const method = String(init?.method || input?.method || "GET");
+      const end = beginOp("fetch", `${method} ${url.split("?", 1)[0]}`);
+      let result;
+      try {
+        result = directFetch.call(this, input, init);
+      } catch (error) {
+        end(error?.code || error?.message || "threw");
+        throw error;
+      }
+      return Promise.resolve(result).then(
+        (response) => {
+          end(String(response?.status ?? "ok"));
+          return response;
+        },
+        (error) => {
+          end(error?.code || error?.message || "rejected");
+          throw error;
+        },
+      );
+    };
+  }
+
+  for (const [module, scheme] of [
+    [http, "http"],
+    [https, "https"],
+  ]) {
+    // `get` does not route through the patched `request` export (Node resolves
+    // it against the module's own scope), so both are wrapped.
+    for (const name of ["request", "get"]) {
+      const direct = module[name];
+      if (typeof direct !== "function") continue;
+      module[name] = function tracedHttpRequest(...args) {
+        const request = direct.apply(this, args);
+        const target =
+          args[0] instanceof URL
+            ? args[0].host
+            : authorityOf(args[0], `${scheme} request`);
+        const end = beginOp(`${scheme}`, target);
+        request.once("response", (response) =>
+          end(String(response?.statusCode ?? "ok")),
+        );
+        request.once("error", (error) =>
+          end(error?.code || error?.message || "error"),
+        );
+        request.once("close", () => end("closed"));
+        return request;
+      };
+    }
+  }
+
+  const directHttp2Connect = http2.connect;
+  http2.connect = function tracedHttp2Connect(authority, options, listener) {
+    const session = directHttp2Connect.call(this, authority, options, listener);
+    const target =
+      authority instanceof URL ? authority.host : String(authority ?? "http2");
+    const end = beginOp("http2", target);
+    session.once("connect", () => end("connected"));
+    session.once("error", (error) =>
+      end(error?.code || error?.message || "error"),
+    );
+    session.once("close", () => end("closed before connect"));
+    return session;
+  };
+
+  for (const name of ["connect", "createConnection"]) {
+    const direct = net[name];
+    if (typeof direct !== "function") continue;
+    net[name] = function tracedNetConnect(...args) {
+      return traceSocket(direct.apply(this, args), "tcp", connectLabel(args));
+    };
+  }
+
+  const directTlsConnect = tls.connect;
+  tls.connect = function tracedTlsConnect(...args) {
+    return traceSocket(
+      directTlsConnect.apply(this, args),
+      "tls",
+      connectLabel(args),
+    );
+  };
+
+  const directSpawn = childProcess.spawn;
+  childProcess.spawn = function tracedSpawn(command, args, options) {
+    const child = directSpawn.call(this, command, args, options);
+    const end = beginOp(
+      "spawn",
+      `${path.basename(String(command))}${
+        Array.isArray(args) && args.length > 0 ? ` ${args[0]}` : ""
+      }`,
+    );
+    child.once("exit", (code, signal) => end(`exit ${signal || code}`));
+    child.once("error", (error) => end(error?.code || error?.message || "error"));
+    return child;
+  };
+}
+
+installEnvironmentProxyTransports();
+installContainedRipgrepBoundary();
+installFirstTurnTracer();
+
 // @cursor/sdk location: the engine passes an absolute path
 // (ZEROS_CURSOR_SDK_ENTRY) resolved to the package's CJS entry — in a packaged
 // app that's the app.asar.unpacked copy (its require closure reaches native
@@ -94,6 +950,7 @@ try {
 // resolution, which walks up to the repo node_modules.
 const sdkEntry = process.env.ZEROS_CURSOR_SDK_ENTRY;
 let sdk;
+const sdkRequireStartedAt = Date.now();
 try {
   // Two branches on purpose: the env-path branch lets the engine hand us an
   // absolute, asar-unpacked entry in a packaged app; the literal-specifier
@@ -101,7 +958,10 @@ try {
   // node_modules walk in source/dev mode and (b) can be statically bundled by
   // esbuild/tsup if a future build inlines the SDK into this host. Don't fold
   // them into one `require(<ternary>)` — that would defeat static bundling.
-  sdk = sdkEntry && sdkEntry.length > 0 ? require(sdkEntry) : require("@cursor/sdk");
+  sdk =
+    sdkEntry && sdkEntry.length > 0
+      ? require(sdkEntry)
+      : require("@cursor/sdk");
 } catch (err) {
   try {
     process.stdout.write(
@@ -117,15 +977,138 @@ try {
   }
   process.exit(1);
 }
+// Loading the SDK is a multi-megabyte CJS bundle plus native bindings, and it
+// happens lazily on the FIRST control request — so it sits on the critical path
+// between ZSR admission and the session appearing, where it was previously
+// indistinguishable from the boundary's own cost.
+process.stderr.write(
+  `[cursor-host] ready in ${Date.now() - hostStartedAt}ms ` +
+    `(@cursor/sdk require=${Date.now() - sdkRequireStartedAt}ms)\n`,
+);
 
 const Agent = sdk && sdk.Agent;
 const Cursor = sdk && sdk.Cursor;
 const JsonlLocalAgentStore = sdk && sdk.JsonlLocalAgentStore;
 const getDefaultSdkStateRoot = sdk && sdk.getDefaultSdkStateRoot;
 
+// ── Workspace scan cache TTL ──────────────────────────────
+//
+// @cursor/sdk caches its scan of the workspace for rules, skills, AGENTS.md and
+// ignore files, and expires it after 20s by default — a value tuned for an
+// EDITOR, whose files change under it while the user works. Every expiry costs a
+// full re-walk of the tree, which on a repo this size is seconds.
+//
+// That default undoes the prewarm. This host builds the workspace executor
+// during session start precisely so the first turn doesn't pay for the walk; if
+// the user opens a chat, reads for half a minute and then sends, the scan has
+// already expired and the turn re-walks anyway. Widening the window keeps the
+// warm scan alive across the gap between opening a chat and sending in it.
+//
+// THE TRADE IS FRESHNESS, and it is sharper here than in an editor because the
+// agent edits the repo itself: a rule, skill or `.cursorignore` written DURING a
+// session — by the user or by the agent — can go unseen for up to this long.
+// Five minutes covers a realistic read-then-send gap without letting a session's
+// own edits go stale for an unbounded time. It is not a correctness boundary:
+// the scan governs which ambient rules load, not what a tool may touch.
+//
+// Precedence is deliberate: an explicit CURSOR_RIPWALK_CACHE_TTL_MS wins, so
+// this only configures the dial when the operator has NOT set one. The SDK reads
+// the configured value ahead of the env var (it is captured into the ripwalk
+// cache when the local executor is built), so leaving it unset is the only way
+// to let the environment through.
+const WORKSPACE_SCAN_CACHE_TTL_MS = 5 * 60_000;
+try {
+  const configured = process.env.CURSOR_RIPWALK_CACHE_TTL_MS?.trim();
+  const operatorSet =
+    configured !== undefined &&
+    configured !== "" &&
+    Number.isFinite(Number(configured)) &&
+    Number(configured) > 0;
+  if (!operatorSet && typeof sdk.configureCursorSdk === "function") {
+    sdk.configureCursorSdk({
+      local: { workspaceScanCacheTtlMs: WORKSPACE_SCAN_CACHE_TTL_MS },
+    });
+  }
+} catch (error) {
+  // A rejected dial must never cost the session its host — the SDK validates
+  // the value and throws, and the 20s default is a perfectly working fallback.
+  process.stderr.write(
+    `[cursor-host] workspace scan cache TTL left at the SDK default: ${
+      error && error.message ? error.message : String(error)
+    }\n`,
+  );
+}
+
+/** A contained session gets a Zeros-owned, workspace/provider-scoped store.
+ * Seed it once from Cursor's normal store so existing conversations resume;
+ * all later writes stay on the explicit capability instead of the user's
+ * broader HOME. This code runs inside ZSR, where the source is read-only and
+ * the destination is the sole writable provider-state root. */
+function initializeContainedStateRoot() {
+  const target = process.env.ZEROS_CURSOR_STATE_ROOT;
+  if (!target) return null;
+  if (!path.isAbsolute(target)) {
+    throw new Error("ZEROS_CURSOR_STATE_ROOT must be absolute");
+  }
+  fs.mkdirSync(target, { recursive: true, mode: 0o700 });
+  fs.chmodSync(target, 0o700);
+  if (
+    fs.readdirSync(target).length === 0 &&
+    typeof getDefaultSdkStateRoot === "function"
+  ) {
+    const source = getDefaultSdkStateRoot(process.cwd());
+    if (
+      path.isAbsolute(source) &&
+      path.resolve(source) !== path.resolve(target) &&
+      fs.existsSync(source)
+    ) {
+      try {
+        fs.cpSync(source, target, {
+          recursive: true,
+          errorOnExist: false,
+          force: false,
+        });
+      } catch (error) {
+        // Migration failure must not make Cursor unusable: start with a clean
+        // private store and surface a redacted diagnostic. Resume will use the
+        // adapter's established fresh-session recovery path.
+        process.stderr.write(
+          `[cursor-host] existing state migration skipped: ${
+            error && error.code ? String(error.code) : "copy failed"
+          }\n`,
+        );
+      }
+    }
+  }
+  return target;
+}
+
+let containedStateRoot = null;
+try {
+  containedStateRoot = initializeContainedStateRoot();
+} catch (error) {
+  try {
+    process.stdout.write(
+      JSON.stringify({
+        k: "fatal",
+        message: `contained Cursor state initialization failed: ${
+          error && error.message ? error.message : String(error)
+        }`,
+      }) + "\n",
+    );
+  } catch {
+    /* parent stdout already gone */
+  }
+  process.exit(1);
+}
+
 /** runId → { run, done } ; sdk agentId → SdkAgent ; storeId → store */
 const runs = new Map();
 const agents = new Map();
+// Run ids whose native callback events are still allowed onto the protocol.
+// Removing an id is the cancellation/terminal fence: late provider callbacks
+// become no-ops instead of mutating a stopped or already-reaped Zeros turn.
+const observedRuns = new Set();
 const stores = new Map();
 let nextRunId = 1;
 let nextStoreId = 1;
@@ -211,6 +1194,7 @@ function storeRefFor(cwd) {
 }
 
 function localStoreFor(cwd) {
+  if (containedStateRoot) return jsonlStoreAt(containedStateRoot);
   if (!getDefaultSdkStateRoot) return null;
   try {
     return jsonlStoreAt(getDefaultSdkStateRoot(storeRefFor(cwd)));
@@ -229,8 +1213,7 @@ function withLocalStore(opts) {
   const out = { ...(opts || {}) };
   const local = { ...(out.local || {}) };
   if (local.store) return out;
-  const cwd =
-    typeof local.cwd === "string" && local.cwd ? local.cwd : out.cwd;
+  const cwd = typeof local.cwd === "string" && local.cwd ? local.cwd : out.cwd;
   const store = localStoreFor(cwd);
   if (!store) return out;
   local.store = store;
@@ -251,12 +1234,101 @@ function withListStore(opts) {
   return out;
 }
 
+// ── Workspace prewarm ─────────────────────────────────────
+//
+// @cursor/sdk 1.0.26 added `platform.prewarmLocalWorkspace(options)`: build the
+// local executor — Cursor rules, skills, MCP, ignore mappings, and the backend
+// auth/config round-trips they need — BEFORE the first `send()` instead of
+// inside it. The SDK's own words: resolving a workspace "is the slowest part of
+// a local agent's first turn, and on a large repo it dominates it."
+//
+// It is exactly the shape of the measured problem. A contained first turn spends
+// its time on a SERIAL staircase of fresh connections to api2.cursor.sh (five
+// `exchange_user_api_key` calls, `GetServerConfig`, statsig) plus a workspace
+// scan — ~72% network, ~28% in-process — and none of it depends on the user's
+// message. Meanwhile the host sits idle for ~9s between boot and the first
+// prompt while admission, model discovery and `Agent.create` finish. Prewarming
+// moves that work into the idle window.
+//
+// The executor cache is module-level and keyed on the options that SHAPE an
+// executor (cwd, dirs, apiKey, settingSources, sandbox, autoReview, mcpServers,
+// subagents), so a later `Agent.create` with the same options is a cache HIT.
+// Passing anything different silently warms a different executor and the first
+// turn still pays — so the adapter sends the identical option object it will
+// create the agent with.
+//
+// The lease is reference counted; holding it keeps the executor alive for this
+// host's lifetime, which is exactly one session. Prewarming is a pure
+// optimization: every failure here is swallowed, and `send()` rebuilds.
+
+/** Memoized platform handle — the prewarm entry point is a method on it. */
+let platformPromise = null;
+function getPlatform() {
+  if (!platformPromise) {
+    platformPromise = (async () => {
+      if (typeof sdk.createAgentPlatform !== "function") return null;
+      return sdk.createAgentPlatform(
+        containedStateRoot ? { localStore: jsonlStoreAt(containedStateRoot) } : {},
+      );
+    })().catch(() => null);
+  }
+  return platformPromise;
+}
+
+/** Leases held for this host's lifetime. Releasing the last reference tears the
+ *  executor down, which would hand the first turn back the cost we just paid. */
+const prewarmLeases = [];
+
+async function prewarmWorkspace(opts) {
+  const platform = await getPlatform();
+  if (!platform || typeof platform.prewarmLocalWorkspace !== "function") {
+    return { prewarmed: false, reason: "unsupported" };
+  }
+  const startedAt = Date.now();
+  const release = await platform.prewarmLocalWorkspace(withLocalStore(opts));
+  if (typeof release === "function") prewarmLeases.push(release);
+  const elapsed = Date.now() - startedAt;
+  process.stderr.write(`[cursor-host] workspace prewarmed in ${elapsed}ms\n`);
+  return { prewarmed: true, elapsedMs: elapsed };
+}
+
 function send(msg) {
   try {
     process.stdout.write(JSON.stringify(msg) + "\n");
   } catch {
     /* stdout closed — the parent is gone; nothing we can do */
   }
+}
+
+/** Native callbacks may arrive faster than the engine can consume them. The
+ * SDK awaits callback promises, so serialize these writes and honor stdout's
+ * drain signal: pressure propagates back into Cursor instead of accumulating
+ * an unbounded second queue in this host. Ordinary request/stream writes remain
+ * on Node's ordered stdout stream; every callback has completed its write
+ * before the SDK proceeds to the corresponding completed stream message. */
+let callbackWriteChain = Promise.resolve();
+function sendCallbackEvent(msg) {
+  const line = JSON.stringify(msg) + "\n";
+  const write = () =>
+    new Promise((resolve) => {
+      try {
+        if (process.stdout.write(line)) {
+          resolve();
+          return;
+        }
+        const done = () => {
+          process.stdout.off("drain", done);
+          process.stdout.off("error", done);
+          resolve();
+        };
+        process.stdout.once("drain", done);
+        process.stdout.once("error", done);
+      } catch {
+        resolve();
+      }
+    });
+  callbackWriteChain = callbackWriteChain.then(write, write);
+  return callbackWriteChain;
 }
 
 /** Flatten an Error (incl. @cursor/sdk's typed errors) into a plain JSON object
@@ -277,10 +1349,47 @@ function serializeErr(e) {
 }
 
 function ok(id, result) {
-  send({ k: "res", id, ok: true, result: result === undefined ? null : result });
+  send({
+    k: "res",
+    id,
+    ok: true,
+    result: result === undefined ? null : result,
+  });
 }
 function fail(id, e) {
   send({ k: "res", id, ok: false, error: serializeErr(e) });
+}
+
+/** Runs started by THIS host process. The first one pays every once-per-process
+ *  cost @cursor/sdk defers to the first turn, so "cold" is the single most
+ *  important qualifier on a slow first-item measurement. */
+let runsStarted = 0;
+
+/** Local acknowledgements rather than model output. The SDK's persisted run
+ *  events show these landing at seq 1–2 within ~10ms of `send` even on a turn
+ *  whose first token took 77s, so latency must be measured past them. */
+const RUN_CONTROL_FRAME_TYPES = new Set(["request", "status"]);
+function isRunControlFrame(msg) {
+  return RUN_CONTROL_FRAME_TYPES.has(String(msg?.type ?? ""));
+}
+
+/** Report (and attribute) how long a run took to produce its first stream item.
+ *  Quiet under SLOW_FIRST_ITEM_MS unless the transport debug flag is on, so
+ *  ordinary turns add nothing to the log. */
+function reportRunFirstItem(runId, timing, outcome) {
+  if (!timing) return;
+  const now = Date.now();
+  const waited = now - timing.sentAt;
+  if (waited < SLOW_FIRST_ITEM_MS && !cursorTransportDebug) return;
+  reportFirstItemLatency(
+    runId,
+    timing.sentAt,
+    now,
+    `${timing.cold ? "cold host — first run in this process" : `run #${timing.index} in this process`}` +
+      `; agent.send=${timing.sendMs}ms` +
+      `; host up ${Math.round((timing.sentAt - hostStartedAt) / 1000)}s` +
+      (outcome ? `; ${outcome}` : ""),
+  );
 }
 
 /** Eagerly drain a run's stream, forwarding every item, so nothing is lost
@@ -295,19 +1404,37 @@ function fail(id, e) {
  *   - stream error → the engine never calls wait() after a streamError (the
  *                   throw skips it), so reap HERE — and cancel() so a local
  *                   run's detached cursor-agent subprocess is reaped too. */
-function drainRun(runId, run) {
+function drainRun(runId, run, timing) {
   (async () => {
+    let sawContent = false;
     try {
       for await (const msg of run.stream()) {
+        // Measure to the first CONTENT item, not the first item. `request` and
+        // `status` are local acknowledgements the SDK emits within ~10ms of
+        // send — in the 77s stall they arrived on time and everything waited
+        // behind them, so keying on "first item" would report nothing at all.
+        if (!sawContent && !isRunControlFrame(msg)) {
+          sawContent = true;
+          reportRunFirstItem(runId, timing);
+        }
+        debugCursorTransport(
+          `run ${runId} stream message (${String(msg?.type || "unknown")})`,
+        );
         send({ k: "ev", ev: "run.msg", runId, msg });
       }
+      // A run that ends without ever producing content still spent the whole
+      // turn somewhere; attribute it rather than losing the only measurement.
+      if (!sawContent) reportRunFirstItem(runId, timing, "no content streamed");
       const entry = runs.get(runId);
       if (entry && entry.run === run) entry.endedAt = Date.now();
+      observedRuns.delete(runId);
       send({ k: "ev", ev: "run.streamEnd", runId });
     } catch (err) {
+      if (!sawContent) reportRunFirstItem(runId, timing, "stream failed");
       const entry = runs.get(runId);
       if (entry && entry.run === run) {
         runs.delete(runId);
+        observedRuns.delete(runId);
         try {
           const cancelled = run.cancel && run.cancel();
           if (cancelled && typeof cancelled.catch === "function") {
@@ -331,6 +1458,7 @@ const endedRunSweep = setInterval(() => {
   for (const [runId, entry] of runs) {
     if (entry.endedAt && now - entry.endedAt > ENDED_RUN_TTL_MS) {
       runs.delete(runId);
+      observedRuns.delete(runId);
     }
   }
 }, 60_000);
@@ -340,6 +1468,10 @@ async function handle(m) {
   const { id, op } = m;
   const args = m.args || {};
   switch (op) {
+    case "platform.prewarm": {
+      ok(id, await prewarmWorkspace(args));
+      return;
+    }
     case "agent.create": {
       const agent = await Agent.create(withLocalStore(args));
       agents.set(agent.agentId, agent);
@@ -347,10 +1479,7 @@ async function handle(m) {
       return;
     }
     case "agent.resume": {
-      const agent = await Agent.resume(
-        args.agentId,
-        withLocalStore(args.opts),
-      );
+      const agent = await Agent.resume(args.agentId, withLocalStore(args.opts));
       agents.set(agent.agentId, agent);
       ok(id, { agentId: agent.agentId });
       return;
@@ -358,7 +1487,11 @@ async function handle(m) {
     case "agent.list": {
       const res = await Agent.list(withListStore(args.opts));
       // Normalize to a plain {items} shape the engine tolerates either way.
-      const items = Array.isArray(res) ? res : res && res.items ? res.items : [];
+      const items = Array.isArray(res)
+        ? res
+        : res && res.items
+          ? res.items
+          : [];
       ok(id, { items });
       return;
     }
@@ -371,19 +1504,59 @@ async function handle(m) {
       // from the engine. The copy keeps that seam open without mutating the
       // decoded request.
       const sendOptions = { ...(args.options || {}) };
-      const run = await agent.send(args.message, sendOptions);
-      // The engine assigns the runId and registers its stream queue BEFORE
-      // sending this request, so no run.msg event can race ahead of the
-      // queue's existence. Fall back to a host-generated id if absent.
       const runId =
         typeof args.runId === "string" && args.runId
           ? args.runId
           : String(nextRunId++);
+      const observeDelta = args.observers && args.observers.delta === true;
+      const observeStep = args.observers && args.observers.step === true;
+      if (observeDelta || observeStep) observedRuns.add(runId);
+      if (observeDelta) {
+        sendOptions.onDelta = async ({ update }) => {
+          if (!observedRuns.has(runId)) return;
+          await sendCallbackEvent({
+            k: "ev",
+            ev: "run.delta",
+            runId,
+            update,
+          });
+        };
+      }
+      if (observeStep) {
+        sendOptions.onStep = async ({ step }) => {
+          if (!observedRuns.has(runId)) return;
+          await sendCallbackEvent({
+            k: "ev",
+            ev: "run.step",
+            runId,
+            step,
+          });
+        };
+      }
+      const sendStartedAt = Date.now();
+      let run;
+      try {
+        run = await agent.send(args.message, sendOptions);
+      } catch (error) {
+        observedRuns.delete(runId);
+        throw error;
+      }
+      const timing = {
+        index: ++runsStarted,
+        cold: runsStarted === 1,
+        sendMs: Date.now() - sendStartedAt,
+        // The window to attribute opens at `send` (not at its return): a local
+        // run's pre-turn work can happen on either side of that boundary.
+        sentAt: sendStartedAt,
+      };
+      // The engine assigns the runId and registers its stream queue BEFORE
+      // sending this request, so no run.msg event can race ahead of the
+      // queue's existence. Fall back to a host-generated id if absent.
       runs.set(runId, { run, endedAt: null });
       // Respond FIRST (so the engine pairs sdkRunId with the run), THEN start
       // draining — NDJSON over one pipe preserves order.
       ok(id, { sdkRunId: run && run.id ? run.id : null });
-      drainRun(runId, run);
+      drainRun(runId, run, timing);
       return;
     }
     case "agent.close": {
@@ -399,6 +1572,15 @@ async function handle(m) {
       ok(id, null);
       return;
     }
+    case "agent.getUsage": {
+      const agent = agents.get(args.agentId);
+      if (!agent) throw new Error(`Agent ${args.agentId} not found`);
+      if (typeof agent.getUsage !== "function") {
+        throw new Error("Cursor SDK agent.getUsage is unavailable");
+      }
+      ok(id, await agent.getUsage(args.options || {}));
+      return;
+    }
     case "run.wait": {
       const entry = runs.get(args.runId);
       if (!entry) {
@@ -412,14 +1594,26 @@ async function handle(m) {
         res = await entry.run.wait();
       } finally {
         runs.delete(args.runId);
+        observedRuns.delete(args.runId);
       }
-      ok(id, res ? { status: res.status, result: res.result } : null);
+      debugCursorTransport(
+        `run ${args.runId} wait completed (status=${String(
+          res?.status || "unknown",
+        )}, resultChars=${String(
+          typeof res?.result === "string" ? res.result.length : 0,
+        )})`,
+      );
+      // Preserve every public RunResult field. New SDK versions add model /
+      // usage metadata here; narrowing to {status,result} silently discarded
+      // it at the process boundary.
+      ok(id, res ?? null);
       return;
     }
     case "run.cancel": {
       const entry = runs.get(args.runId);
       if (entry) {
         runs.delete(args.runId);
+        observedRuns.delete(args.runId);
         try {
           await entry.run.cancel();
         } catch {
@@ -444,9 +1638,11 @@ async function handle(m) {
       // opened the SDK's `SqliteLocalAgentStore`; 1.0.26 stopped exporting that
       // symbol altogether, which silently turned every store.open into
       // {storeId: null} and left the adapter's terminal-error recovery dead.
-      const store = args.stateRoot
-        ? jsonlStoreAt(args.stateRoot)
-        : localStoreFor(args.workspaceRef);
+      const store = containedStateRoot
+        ? jsonlStoreAt(containedStateRoot)
+        : args.stateRoot
+          ? jsonlStoreAt(args.stateRoot)
+          : localStoreFor(args.workspaceRef);
       if (!store) {
         ok(id, { storeId: null });
         return;
@@ -539,7 +1735,8 @@ async function shutdown() {
   }
   for (const agent of agents.values()) {
     try {
-      if (typeof agent.close === "function") pending.push(Promise.resolve(agent.close()));
+      if (typeof agent.close === "function")
+        pending.push(Promise.resolve(agent.close()));
     } catch {
       /* ignore */
     }
@@ -547,6 +1744,7 @@ async function shutdown() {
   // Stores need no teardown: they are file-backed JSONL, hold no connection or
   // handle, and every write is already awaited by the call that made it.
   runs.clear();
+  observedRuns.clear();
   agents.clear();
   stores.clear();
   localStores.clear();

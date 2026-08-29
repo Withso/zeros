@@ -21,13 +21,14 @@
 // optimistic state and surfaces a toast; the top bar's workspace-list
 // validation effect then picks a valid destination.
 //
-// NOT shared with the Dispatcher's create (dispatcher-modal.tsx), which
-// layers a prompt, a base branch, and auto-send onto the same skeleton.
-// That one is still a near-copy of this file — worth unifying, but its
-// extra semantics make it a separate change.
+// The Dispatcher's code-workspace create (dispatcher-modal.tsx) is separate
+// because it layers a prompt, a base branch, and auto-send onto the same
+// skeleton. Its Internal-only Design shortcut intentionally calls this shared
+// direct-create flow because Design has no agent prompt.
 // ──────────────────────────────────────────────────────────
 
 import { dbDeleteChat } from "../features/agent/agent-history-client";
+import { discardQueuedContextGraphWrites } from "../features/agent/composer-editor/context-graph-staging";
 import { trackWorkspaceOpened } from "../platform/observability/analytics/agent-events";
 import {
   isGitErrorShape,
@@ -51,7 +52,6 @@ import {
   watchTimedOutWorkspaceCreate,
 } from "../state/use-projects";
 import { toast } from "../shared/ui/primitives/elements";
-import { isInternalFeatureActive } from "../features/settings/internal-features";
 import { isExpectedElectron, isNativeRuntime } from "../platform/runtime";
 import {
   getActiveOrganizationIdSnapshot,
@@ -75,9 +75,10 @@ export async function createWorkspaceForProject(args: {
     getActiveOrganizationSnapshot(),
     getActiveOrganizationIdSnapshot(),
   );
-  const designCreationAllowed = () =>
-    isInternalFeatureActive("designWorkspaces") &&
-    (isNativeRuntime() || isExpectedElectron());
+  // The Design document API is intentionally desktop-local. This is a runtime
+  // capability check, not a rollout/access flag: every desktop user gets the
+  // Design option without account state or per-channel opt-in.
+  const designCreationAllowed = () => isNativeRuntime() || isExpectedElectron();
   if (kind === "design" && !designCreationAllowed()) {
     return false;
   }
@@ -102,8 +103,8 @@ export async function createWorkspaceForProject(args: {
     }
     return false;
   }
-  // Staff role or the per-channel switch can change while prepare crosses the
-  // bridge. Prepare is metadata-only, so stop before publishing pending state,
+  // Native bridge availability can change while prepare crosses the bridge.
+  // Prepare is metadata-only, so stop before publishing pending state,
   // navigation, or the filesystem-mutating create request.
   if (kind === "design" && !designCreationAllowed()) {
     return false;
@@ -142,6 +143,7 @@ export async function createWorkspaceForProject(args: {
     });
   }
   const rollbackOptimisticChat = () => {
+    discardQueuedContextGraphWrites(prepared.path);
     clearWorkspaceSettling(prepared.path);
     if (chat) {
       dispatch({ type: "CONSUME_AUTO_SEND", chatId: chat.id });
@@ -153,6 +155,7 @@ export async function createWorkspaceForProject(args: {
   const settleArchivedOptimisticChat = () => {
     // Archive keeps this chat/draft for a later restore; only its queued first
     // turn is no longer runnable because the worktree was removed.
+    discardQueuedContextGraphWrites(prepared.path);
     clearWorkspaceSettling(prepared.path);
     if (chat) dispatch({ type: "CONSUME_AUTO_SEND", chatId: chat.id });
     finishPendingCreate(pendingToken);

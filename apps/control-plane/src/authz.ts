@@ -27,13 +27,15 @@ export function roleAtLeast(
 /** Staff role — product-wide, NOT team-scoped, and deliberately NOT ranked
  *  against OrganizationRole (see migrations 0007/0009 for why the
  *  two must not share an axis). null ⇒ not staff. */
-export type StaffRole = "developer";
+export type StaffRole = "developer" | "support_admin";
 
 export class HttpError extends Error {
   constructor(
     public status: 400 | 401 | 403 | 404 | 409 | 422 | 429 | 502 | 503,
     public code: string,
     message: string,
+    /** Bounded, deliberately non-secret machine-readable recovery context. */
+    public details?: Record<string, unknown>,
   ) {
     super(message);
   }
@@ -54,8 +56,7 @@ export async function requireOrganizationMembership(
     [orgId, userId],
   );
   const role = rows[0]?.role;
-  if (!role)
-    throw new HttpError(404, "not_found", "Organization not found");
+  if (!role) throw new HttpError(404, "not_found", "Organization not found");
   return role;
 }
 
@@ -76,15 +77,15 @@ export async function requireOrganizationRole(
 export const requireMembership = requireOrganizationMembership;
 export const requireRole = requireOrganizationRole;
 
-/** Gate a route on staff. Takes the role off the AuthedUser the auth
- *  middleware already resolved, which re-reads it from Postgres on every
- *  request (auth.ts `ensureUser`) — so revoking staff takes effect on the
- *  next call, with no token to wait out.
- *
- *  404, not 403: a staff-only route should not confirm its own existence to a
- *  non-staff caller. Mirrors requireMembership's reasoning about not leaking
- *  which team ids exist. */
-export function requireStaff(staffRole: StaffRole | null): StaffRole {
-  if (!staffRole) throw new HttpError(404, "not_found", "Not found");
+/** Require one exact product-wide capability. Staff roles are deliberately
+ * not ranked: developer tooling and support account recovery are different
+ * trust domains, so possession of either must never imply the other. */
+export function requireStaffRole(
+  staffRole: StaffRole | null,
+  required: StaffRole,
+): StaffRole {
+  if (staffRole !== required) {
+    throw new HttpError(404, "not_found", "Not found");
+  }
   return staffRole;
 }

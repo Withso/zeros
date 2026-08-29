@@ -208,10 +208,6 @@ export interface ChatTabsProps {
   onSplit: (dir: "right" | "down") => void;
   canSplitRight: boolean;
   canSplitDown: boolean;
-  /** Workspace-level chrome rendered after the pane "⋯" menu (the
-   *  workbench expand button lives here while the panel is collapsed —
-   *  its old home, the conversation pane topbar, is hidden). */
-  extraTrailing?: React.ReactNode;
 }
 
 // ── Component ────────────────────────────────────────────
@@ -231,7 +227,6 @@ export function ChatTabs({
   onSplit,
   canSplitRight,
   canSplitDown,
-  extraTrailing,
 }: ChatTabsProps) {
   // Sticky strip refs + compositor-synced fade/hover machinery. All of
   // this is unchanged from the single-strip era — just scoped per pane.
@@ -571,7 +566,6 @@ export function ChatTabs({
             )}
           </DropdownMenuContent>
         </DropdownMenu>
-        {extraTrailing}
       </div>
     </div>
   );

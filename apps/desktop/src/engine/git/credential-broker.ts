@@ -12,9 +12,11 @@
 // API subcommands, excluding the ones that execute arbitrary scripts
 // (extensions, aliases, completions) and gh's own auth management.
 
+import { randomBytes } from "node:crypto";
+import { execFile } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { accessSync, constants as fsConstants } from "node:fs";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -25,6 +27,9 @@ export interface GitCredentialRequest {
   host: string;
   /** Hostname plus an optional port, exactly as Git supplied it. */
   authority: string;
+  /** Optional URL username and path used by host helpers with useHttpPath. */
+  username?: string;
+  path?: string;
 }
 
 export interface GitCredential {
@@ -57,10 +62,26 @@ export interface GitCredentialInvocation {
   env: Record<string, string>;
   request: GitCredentialRequest;
   credentialFingerprint: string | null;
+  /** Releases an invocation-scoped ambient credential grant. Provider-backed
+   * invocations read their rotating source lazily and do not need one. */
+  release?(): void;
+}
+
+export interface AmbientGitCredentialOptions {
+  /** Trusted, absolute Git executable selected before agent admission. */
+  gitBinary: string;
+  /** Canonical host HOME whose human-owned credential helpers are consulted. */
+  home: string;
+  xdgConfigHome?: string;
 }
 
 export interface GitCredentialShellEnvironment {
   env: Record<string, string>;
+}
+
+export interface GitCredentialShellConsumerIdentity {
+  uid: number;
+  gid: number;
 }
 
 let credentialSource: GitCredentialSource | null = null;
@@ -112,6 +133,29 @@ function safeCredentialValue(value: string): boolean {
   return value.length > 0 && !/[\0\r\n]/.test(value);
 }
 
+function optionalCredentialField(
+  value: string | null,
+  maximum: number,
+): string | undefined {
+  if (!value) return undefined;
+  if (value.length > maximum || /[\0\r\n]/.test(value)) return undefined;
+  return value;
+}
+
+function sameCredentialRequest(
+  left: GitCredentialRequest,
+  right: GitCredentialRequest,
+): boolean {
+  return (
+    left.contextId === right.contextId &&
+    left.protocol === right.protocol &&
+    left.host === right.host &&
+    left.authority === right.authority &&
+    (left.username ?? "") === (right.username ?? "") &&
+    (left.path ?? "") === (right.path ?? "")
+  );
+}
+
 /** Git runs a `credential.*.helper` value through `sh -c` as soon as it contains
  *  whitespace, so an unquoted path under a TMPDIR with a space silently became
  *  two words — and the URL-scoped reset beside it then left the host with NO
@@ -142,39 +186,34 @@ async function ensureBroker(): Promise<GitCredentialBroker> {
  *  this host/method; unsupported hosts retain the user's normal helper chain. */
 export async function prepareGitCredentialInvocation(
   request: GitCredentialRequest,
+  options: {
+    ambient?: AmbientGitCredentialOptions;
+    consumerIdentity?: GitCredentialShellConsumerIdentity;
+  } = {},
 ): Promise<GitCredentialInvocation | null> {
   const source = credentialSource;
-  if (!source?.supports(request)) return null;
-  if (source.shouldHandle && !(await source.shouldHandle(request))) return null;
-
+  const sourceOwns =
+    source?.supports(request) &&
+    (!source.shouldHandle || (await source.shouldHandle(request)));
+  if (!sourceOwns && !options.ambient) return null;
   const activeBroker = await ensureBroker();
-  const credentialFingerprint = source.credentialFingerprint
-    ? await source.credentialFingerprint(request)
-    : null;
-  return {
-    // The empty URL-scoped value resets every inherited helper for this host
-    // before the Zeros helper is installed. Keeping the reset URL-scoped is
-    // important for commands such as `git fetch --all`: a GitHub credential
-    // must not disable the user's helper for a second, non-GitHub remote.
-    gitConfigArgs: [
-      "-c",
-      `credential.${request.protocol}://${request.authority}.helper=`,
-      "-c",
-      `credential.${request.protocol}://${request.authority}.helper=${shellQuotedHelper(
-        activeBroker.helperPath,
-      )}`,
-    ],
-    env: {
-      ZEROS_GIT_AUTH_CONTEXT: request.contextId,
-      ZEROS_GIT_AUTH_SOCKET: activeBroker.socketPath,
-      ZEROS_GIT_AUTH_PROTOCOL: request.protocol,
-      ZEROS_GIT_AUTH_HOST: request.authority,
-      GIT_ASKPASS: activeBroker.askpassPath,
-      GIT_TERMINAL_PROMPT: "0",
-    },
+  if (options.consumerIdentity) {
+    await activeBroker.grantConsumer(options.consumerIdentity);
+  }
+  if (sourceOwns && source) {
+    const credentialFingerprint = source.credentialFingerprint
+      ? await source.credentialFingerprint(request)
+      : null;
+    return activeBroker.invocation(request, credentialFingerprint);
+  }
+  if (!options.ambient) return null;
+  const credential = await readAmbientGitCredential(
     request,
-    credentialFingerprint,
-  };
+    options.ambient,
+    activeBroker.helpersDir,
+  );
+  if (!credential) return null;
+  return activeBroker.grantInvocation(request, credential);
 }
 
 /** Give the same source that owns the broker a chance to replace a rejected
@@ -215,6 +254,129 @@ function findExecutable(name: string, pathValue: string): string | null {
   return null;
 }
 
+const AMBIENT_CREDENTIAL_OUTPUT_LIMIT = 1024 * 1024;
+
+function ambientCredentialEnvironment(
+  options: AmbientGitCredentialOptions,
+): Record<string, string> {
+  if (
+    !path.isAbsolute(options.gitBinary) ||
+    options.gitBinary.includes("\0") ||
+    !path.isAbsolute(options.home) ||
+    options.home.includes("\0") ||
+    (options.xdgConfigHome !== undefined &&
+      (!path.isAbsolute(options.xdgConfigHome) ||
+        options.xdgConfigHome.includes("\0")))
+  ) {
+    throw new Error("ambient Git credential configuration is invalid");
+  }
+  const allowed = [
+    "DBUS_SESSION_BUS_ADDRESS",
+    "DISPLAY",
+    "LANG",
+    "LC_ALL",
+    "LOGNAME",
+    "TMPDIR",
+    "USER",
+    "WAYLAND_DISPLAY",
+    "XDG_DATA_HOME",
+    "XDG_RUNTIME_DIR",
+  ] as const;
+  const env: Record<string, string> = {
+    HOME: options.home,
+    PATH:
+      process.env.PATH ??
+      "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    GCM_INTERACTIVE: "Never",
+    GIT_ASKPASS: "/usr/bin/false",
+    GIT_TERMINAL_PROMPT: "0",
+    SSH_ASKPASS: "/usr/bin/false",
+  };
+  if (options.xdgConfigHome) env.XDG_CONFIG_HOME = options.xdgConfigHome;
+  for (const name of allowed) {
+    const value = process.env[name];
+    if (value && !value.includes("\0")) env[name] = value;
+  }
+  return env;
+}
+
+function parseAmbientCredential(
+  stdout: string,
+  request: GitCredentialRequest,
+): GitCredential | null {
+  if (Buffer.byteLength(stdout) > AMBIENT_CREDENTIAL_OUTPUT_LIMIT) return null;
+  const fields = new Map<string, string>();
+  for (const line of stdout.split(/\r?\n/)) {
+    if (!line) continue;
+    const separator = line.indexOf("=");
+    if (separator <= 0) return null;
+    const key = line.slice(0, separator);
+    const value = line.slice(separator + 1);
+    if (!/^[a-z_][a-z0-9_]{0,63}$/i.test(key) || /[\0\r\n]/.test(value)) {
+      return null;
+    }
+    fields.set(key, value);
+  }
+  const username = fields.get("username") ?? request.username ?? "";
+  const password = fields.get("password") ?? "";
+  if (!safeCredentialValue(username) || !safeCredentialValue(password)) {
+    return null;
+  }
+  const rawExpiry = fields.get("password_expiry_utc");
+  const passwordExpiryUtc =
+    rawExpiry === undefined ? undefined : Number(rawExpiry);
+  if (
+    passwordExpiryUtc !== undefined &&
+    (!Number.isSafeInteger(passwordExpiryUtc) || passwordExpiryUtc <= 0)
+  ) {
+    return null;
+  }
+  return {
+    username,
+    password,
+    ...(passwordExpiryUtc !== undefined ? { passwordExpiryUtc } : {}),
+  };
+}
+
+/** Resolve the user's ordinary global/system helper chain outside any
+ * repository. The remote must already have been admitted by the caller. This
+ * keeps repository-local helpers and includes from becoming an engine
+ * confused deputy while retaining Keychain/libsecret/GCM parity. */
+async function readAmbientGitCredential(
+  request: GitCredentialRequest,
+  options: AmbientGitCredentialOptions,
+  cwd: string,
+): Promise<GitCredential | null> {
+  const input = [
+    `protocol=${request.protocol}`,
+    `host=${request.authority}`,
+    ...(request.username ? [`username=${request.username}`] : []),
+    ...(request.path ? [`path=${request.path}`] : []),
+    "",
+  ].join("\n");
+  return new Promise((resolve) => {
+    const child = execFile(
+      options.gitBinary,
+      ["credential", "fill"],
+      {
+        cwd,
+        encoding: "utf8",
+        env: ambientCredentialEnvironment(options),
+        timeout: 10_000,
+        killSignal: "SIGKILL",
+        maxBuffer: AMBIENT_CREDENTIAL_OUTPUT_LIMIT,
+      },
+      (error, stdout) => {
+        // Credential helper diagnostics can contain secrets. Treat every
+        // failure as an unavailable ambient credential and never propagate or
+        // log its stderr across the broker boundary.
+        resolve(error ? null : parseAmbientCredential(stdout, request));
+      },
+    );
+    child.stdin?.end(input);
+  });
+}
+
 /** Prepare a workspace shell/agent PATH shim.
  *
  * The parent shell receives socket coordinates and real binary paths, never a
@@ -225,6 +387,7 @@ function findExecutable(name: string, pathValue: string): string | null {
 export async function prepareGitCredentialShellEnvironment(
   contextId: string,
   pathValue: string,
+  consumerIdentity?: GitCredentialShellConsumerIdentity,
 ): Promise<GitCredentialShellEnvironment | null> {
   const request: GitCredentialRequest = {
     contextId,
@@ -238,6 +401,7 @@ export async function prepareGitCredentialShellEnvironment(
   // observe the new selection without being respawned.
   if (!credentialSource?.supports(request)) return null;
   const activeBroker = await ensureBroker();
+  if (consumerIdentity) await activeBroker.grantConsumer(consumerIdentity);
   const realGit = findExecutable("git", pathValue);
   if (!realGit) return null;
   const realGh = findExecutable("gh", pathValue);
@@ -269,13 +433,158 @@ export async function closeGitCredentialBrokerForTesting(): Promise<void> {
 }
 
 class GitCredentialBroker {
+  private grantedConsumer: GitCredentialShellConsumerIdentity | null = null;
+  private readonly ambientGrants = new Map<
+    string,
+    {
+      request: GitCredentialRequest;
+      credential: GitCredential;
+      expiresAt: number;
+    }
+  >();
+
   private constructor(
     private readonly server: Server,
     readonly socketPath: string,
     readonly helpersDir: string,
     readonly helperPath: string,
     readonly askpassPath: string,
+    private readonly executablePaths: readonly string[],
   ) {}
+
+  invocation(
+    request: GitCredentialRequest,
+    credentialFingerprint: string | null,
+    grant?: string,
+  ): GitCredentialInvocation {
+    return {
+      // The empty URL-scoped value resets every inherited helper for this host
+      // before the Zeros helper is installed. Keeping the reset URL-scoped is
+      // important for commands such as `git fetch --all`: one credential must
+      // not disable the user's helper for a second authority.
+      gitConfigArgs: [
+        "-c",
+        `credential.${request.protocol}://${request.authority}.helper=`,
+        "-c",
+        `credential.${request.protocol}://${request.authority}.helper=${shellQuotedHelper(
+          this.helperPath,
+        )}`,
+      ],
+      env: {
+        ZEROS_GIT_AUTH_CONTEXT: request.contextId,
+        ZEROS_GIT_AUTH_SOCKET: this.socketPath,
+        ZEROS_GIT_AUTH_PROTOCOL: request.protocol,
+        ZEROS_GIT_AUTH_HOST: request.authority,
+        ...(request.username
+          ? { ZEROS_GIT_AUTH_USERNAME: request.username }
+          : {}),
+        ...(request.path ? { ZEROS_GIT_AUTH_PATH: request.path } : {}),
+        ...(grant ? { ZEROS_GIT_AUTH_GRANT: grant } : {}),
+        GIT_ASKPASS: this.askpassPath,
+        GIT_TERMINAL_PROMPT: "0",
+      },
+      request,
+      credentialFingerprint,
+      ...(grant
+        ? {
+            release: () => {
+              this.ambientGrants.delete(grant);
+            },
+          }
+        : {}),
+    };
+  }
+
+  grantInvocation(
+    request: GitCredentialRequest,
+    credential: GitCredential,
+  ): GitCredentialInvocation {
+    if (
+      !safeCredentialValue(credential.username) ||
+      !safeCredentialValue(credential.password) ||
+      (credential.passwordExpiryUtc !== undefined &&
+        (!Number.isSafeInteger(credential.passwordExpiryUtc) ||
+          credential.passwordExpiryUtc <= 0))
+    ) {
+      throw new Error("ambient Git credential is invalid");
+    }
+    const now = Date.now();
+    for (const [grant, value] of this.ambientGrants) {
+      if (value.expiresAt <= now) this.ambientGrants.delete(grant);
+    }
+    if (this.ambientGrants.size >= 256) {
+      throw new Error("too many ambient Git credential grants are active");
+    }
+    const grant = randomBytes(32).toString("hex");
+    this.ambientGrants.set(grant, {
+      request: { ...request },
+      credential: { ...credential },
+      expiresAt: now + 5 * 60_000,
+    });
+    return this.invocation(request, null, grant);
+  }
+
+  /** Make the broker consumable by the attested cloud worker without making
+   * it worker-owned. The root coordinator remains the owner; the one dedicated
+   * worker group gets traverse/execute access to immutable shims and connect
+   * access to the socket. Contained agents receive a private scratch `/tmp`
+   * and no socket coordinates, so this projection reaches only the explicit
+   * human terminal outside agent containment. */
+  async grantConsumer(
+    identity: GitCredentialShellConsumerIdentity,
+  ): Promise<void> {
+    if (
+      process.platform !== "linux" ||
+      !Number.isSafeInteger(identity.uid) ||
+      identity.uid <= 0 ||
+      !Number.isSafeInteger(identity.gid) ||
+      identity.gid <= 0
+    ) {
+      throw new Error("git credential consumer identity is invalid");
+    }
+    if (this.grantedConsumer) {
+      if (
+        this.grantedConsumer.uid !== identity.uid ||
+        this.grantedConsumer.gid !== identity.gid
+      ) {
+        throw new Error("git credential broker already has another consumer");
+      }
+      return;
+    }
+    const ownerUid = process.geteuid?.();
+    const ownerGid = process.getegid?.();
+    const supplementaryGroups = process.getgroups?.() ?? [];
+    if (
+      ownerUid === undefined ||
+      ownerGid === undefined ||
+      (ownerUid !== 0 &&
+        (identity.uid !== ownerUid ||
+          (identity.gid !== ownerGid &&
+            !supplementaryGroups.includes(identity.gid))))
+    ) {
+      throw new Error("git credential consumer grant requires owner authority");
+    }
+
+    const socketDir = path.dirname(this.socketPath);
+    // Change ownership while both parent directories are still 0700. Only
+    // after every leaf is root/owner-controlled and group-readable do we open
+    // the final traverse bits, avoiding a partially-published projection.
+    for (const candidate of [
+      socketDir,
+      this.socketPath,
+      this.helpersDir,
+      ...this.executablePaths,
+    ]) {
+      await chown(candidate, ownerUid, identity.gid);
+    }
+    await chmod(this.socketPath, 0o660);
+    for (const candidate of this.executablePaths) {
+      await chmod(candidate, 0o750);
+    }
+    await chmod(this.helpersDir, 0o750);
+    await chmod(socketDir, 0o710);
+    this.grantedConsumer = { ...identity };
+  }
 
   static async start(): Promise<GitCredentialBroker> {
     const helpersDir = await mkdtemp(path.join(tmpdir(), "zeros-git-auth-"));
@@ -312,6 +621,7 @@ class GitCredentialBroker {
       mode: 0o700,
     });
 
+    let owner: GitCredentialBroker | null = null;
     const server = createServer(async (req, res) => {
       if (req.method !== "GET" || !req.url) {
         res.statusCode = 404;
@@ -330,12 +640,20 @@ class GitCredentialBroker {
         ? parseAuthority(protocol, url.searchParams.get("host") ?? "")
         : null;
       const contextId = url.searchParams.get("context") ?? "";
+      const rawUsername = url.searchParams.get("username");
+      const rawCredentialPath = url.searchParams.get("path");
+      const username = optionalCredentialField(rawUsername, 1_024);
+      const credentialPath = optionalCredentialField(rawCredentialPath, 16_384);
+      const grant = url.searchParams.get("grant") ?? "";
       if (
         !protocol ||
         !parsedAuthority ||
         contextId.length === 0 ||
         contextId.length > 500 ||
-        /[\0\r\n]/.test(contextId)
+        /[\0\r\n]/.test(contextId) ||
+        (Boolean(rawUsername) && !username) ||
+        (Boolean(rawCredentialPath) && !credentialPath) ||
+        (grant !== "" && !/^[0-9a-f]{64}$/.test(grant))
       ) {
         res.statusCode = 400;
         res.end();
@@ -346,7 +664,35 @@ class GitCredentialBroker {
         contextId,
         protocol,
         ...parsedAuthority,
+        ...(username ? { username } : {}),
+        ...(credentialPath ? { path: credentialPath } : {}),
       };
+      if (grant) {
+        const scoped = owner?.ambientGrants.get(grant);
+        if (
+          !scoped ||
+          scoped.expiresAt <= Date.now() ||
+          !sameCredentialRequest(scoped.request, request)
+        ) {
+          owner?.ambientGrants.delete(grant);
+          res.statusCode = 403;
+          res.end();
+          return;
+        }
+        res.setHeader("Content-Type", "text/plain; charset=utf-8");
+        res.setHeader("Cache-Control", "no-store");
+        res.end(
+          [
+            `username=${scoped.credential.username}`,
+            `password=${scoped.credential.password}`,
+            ...(scoped.credential.passwordExpiryUtc !== undefined
+              ? [`password_expiry_utc=${scoped.credential.passwordExpiryUtc}`]
+              : []),
+            "",
+          ].join("\n"),
+        );
+        return;
+      }
       const source = credentialSource;
       if (!source?.supports(request)) {
         res.statusCode = 204;
@@ -408,6 +754,14 @@ class GitCredentialBroker {
         res.end();
       }
     });
+    owner = new GitCredentialBroker(
+      server,
+      socketPath,
+      helpersDir,
+      helperPath,
+      askpassPath,
+      [helperPath, askpassPath, gitShimPath, ghShimPath],
+    );
 
     try {
       await new Promise<void>((resolve, reject) => {
@@ -416,13 +770,7 @@ class GitCredentialBroker {
       });
       await chmod(socketPath, 0o600);
       server.unref();
-      return new GitCredentialBroker(
-        server,
-        socketPath,
-        helpersDir,
-        helperPath,
-        askpassPath,
-      );
+      return owner;
     } catch (error) {
       server.close();
       await rm(socketDir, { recursive: true, force: true }).catch(() => {});
@@ -432,6 +780,7 @@ class GitCredentialBroker {
   }
 
   async close(): Promise<void> {
+    this.ambientGrants.clear();
     await new Promise<void>((resolve) => {
       this.server.close(() => resolve());
     });
@@ -450,11 +799,15 @@ set -eu
 
 protocol=""
 host=""
+username="\${ZEROS_GIT_AUTH_USERNAME:-}"
+path="\${ZEROS_GIT_AUTH_PATH:-}"
 while IFS='=' read -r key value; do
   [ -n "$key" ] || break
   case "$key" in
     protocol) protocol="$value" ;;
     host) host="$value" ;;
+    username) username="$value" ;;
+    path) path="$value" ;;
   esac
 done
 
@@ -470,6 +823,9 @@ exec curl --silent --show-error --fail \\
   --data-urlencode "context=$ZEROS_GIT_AUTH_CONTEXT" \\
   --data-urlencode "protocol=$protocol" \\
   --data-urlencode "host=$host" \\
+  --data-urlencode "username=$username" \\
+  --data-urlencode "path=$path" \\
+  --data-urlencode "grant=\${ZEROS_GIT_AUTH_GRANT:-}" \\
   "http://localhost/credential"
 `;
 
@@ -495,6 +851,9 @@ credential="$(
     --data-urlencode "context=$ZEROS_GIT_AUTH_CONTEXT" \\
     --data-urlencode "protocol=$ZEROS_GIT_AUTH_PROTOCOL" \\
     --data-urlencode "host=$ZEROS_GIT_AUTH_HOST" \\
+    --data-urlencode "username=\${ZEROS_GIT_AUTH_USERNAME:-}" \\
+    --data-urlencode "path=\${ZEROS_GIT_AUTH_PATH:-}" \\
+    --data-urlencode "grant=\${ZEROS_GIT_AUTH_GRANT:-}" \\
     "http://localhost/credential"
 )"
 

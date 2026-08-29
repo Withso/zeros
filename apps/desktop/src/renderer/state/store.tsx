@@ -1,6 +1,7 @@
 import type { ComposerAttachment } from "../features/agent/composer-attachments";
 import type { AgentTextMessageAttachment } from "../features/agent/use-agent-session";
 import type { WorkbenchScopeMap } from "../shell/workbench/tab-model";
+import type { WorkspaceListFilter } from "./workspace-list-filter";
 import type {
   ProviderBinding,
   ProviderMetadata,
@@ -22,6 +23,10 @@ export {
   selectLastWorkspaceFolderForRepo,
   selectRepoPageView,
   useActivePage,
+  useWorkspaceListFilter,
+  useWorkspaceActivityByFolder,
+  recordWorkspaceActivity,
+  useCreateWorkspaceProjectId,
   useActiveRepoId,
   useActiveChatId,
   useNewAgentFolder,
@@ -30,6 +35,7 @@ export {
   useBrowserPickerSelection,
   usePendingChatSubmission,
   usePendingAutoSend,
+  usePendingAutoSendAt,
   usePendingComposerAppend,
   useChats,
   useChatById,
@@ -96,12 +102,15 @@ export type BrowserPickerSelection = {
 export type AppView = "onboarding" | "workspace";
 export type WorkspacePage =
   | "workspace"
+  | "create"
   | "settings"
   | "dashboard"
   | "customize"
   | "repo";
-/** Home's durable destinations. `repo` is paired with `activeRepoId`. */
-export type HomePage = Exclude<WorkspacePage, "workspace">;
+/** Home's durable destinations. Create shares the Home shell/sidebar but has
+ * its own top-bar destination and does not replace the Home button's memory. */
+export type HomePage = Exclude<WorkspacePage, "workspace" | "create">;
+export type { WorkspaceListFilter } from "./workspace-list-filter";
 /** One repository hub's durable inner destination. */
 export type RepoPageView =
   | "workspaces"
@@ -109,6 +118,7 @@ export type RepoPageView =
   | "git"
   | "actions"
   | "files"
+  | "design"
   | "paths";
 
 // Current providers use CLI-subprocess backends. Legacy values
@@ -192,6 +202,18 @@ export type WorkspaceState = {
 
   activePage: WorkspacePage;
 
+  /** Persisted top-bar workspace presentation. Repository filters carry the
+   * semantic project id as `repo:<id>`. */
+  workspaceListFilter: WorkspaceListFilter;
+
+  /** Bounded, persisted clock of deliberate workspace actions, keyed by the
+   * exact folder that originated them. TopBar resolves descendants to their
+   * semantic workspace owner; passive navigation never writes this map. */
+  workspaceActivityByFolder: Record<string, number>;
+
+  /** Repository initially selected by the routed Create Workspace page. */
+  createWorkspaceProjectId: string | null;
+
   // Last destination inside the Home surface. Workspace navigation hides Home
   // without replacing this identity, so returning through the Home button
   // restores Dashboard / Settings / the repository hub in the first snapshot.
@@ -231,7 +253,14 @@ export type WorkspaceState = {
   // the session is ready, AgentChat serializes its own composer and consumes
   // only that id. A map (rather than the former single slot) lets many workspace
   // creates queue independently without the newest one overwriting the others.
-  pendingAutoSend: Record<string, true>;
+  //
+  // The value is WHEN the turn was parked (epoch ms). It is what bounds the
+  // wait: a park whose session never settles has no status transition to be
+  // noticed by, so without a stamp it could sit armed and unreported forever —
+  // which is precisely what it did. Persisted with the draft that is its
+  // payload (persist-composer-drafts) so a reload inside the setup window
+  // still delivers the message instead of stranding it in the composer.
+  pendingAutoSend: Record<string, number>;
 
   // ⌥+click in the browser-tab element picker
   // appends element context to the active chat's composer WITHOUT
@@ -497,11 +526,10 @@ export type ChatThread = {
    *  deleted. The on-disk transcript is never touched by archive —
    *  only DELETE_CHAT removes the metadata entry. */
   archived?: boolean;
-  /** Chat that spawned this one via agent-switch. When set and this chat
-   *  has no messages yet, the composer offers a "summary handoff" pill
-   *  at the top so the user can paste the prior conversation into the
-   *  new agent's first turn. Cleared the moment the user either accepts
-   *  or dismisses the handoff. */
+  /** Zeros conversation that this chat branched from. This is product-owned
+   * lineage only: it never identifies or resumes a provider session. The
+   * current fork flow separately stages a bounded transcript attachment in
+   * the new composer. */
   sourceChatId?: string;
 };
 

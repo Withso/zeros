@@ -108,6 +108,21 @@ describe("organization workspace capabilities", () => {
     ).toEqual(["acme"]);
   });
 
+  it("keeps pre-ownership local rows visible under a legacy flat Team", () => {
+    const rows = [
+      { id: "legacy" },
+      { id: "flat-team", organizationId: "legacy_team_1" },
+      { id: "other", organizationId: "org_2" },
+    ];
+
+    expect(
+      filterRowsForOrganization(
+        rows,
+        organization({ id: "legacy_team_1", legacyFlat: true }),
+      ).map((row) => row.id),
+    ).toEqual(["legacy", "flat-team"]);
+  });
+
   it("fails open before organization state is available and preserves stable arrays", () => {
     const rows = [{ id: "legacy" }, { id: "acme", organizationId: "org_1" }];
 

@@ -13,14 +13,14 @@
 // grep the codebase for where it's USED (build.ts / the send path).
 //
 // Delivery model — two mechanisms, chosen per agent by the gateway:
-//   • Mechanism "A" (in-band — Claude, Cursor): wrapped in
+//   • Mechanism "A" (in-band — Cursor and adapters without a native channel): wrapped in
 //     <system_instruction>…</system_instruction> and PREPENDED to a user
 //     message's agent-facing text. Used for agents whose protocol gives us no
 //     separate system channel; the bubble the user sees stays clean.
 //     FIRST-TURN preamble: injected ONCE, on the first user message of a chat
 //     (it then rides along in the conversation history; not re-sent per turn).
 //   • Mechanism "B" (native channel — adapters declaring
-//     `nativeSystemInstruction`, today Codex): the SAME assembled body, sent
+//     `nativeSystemInstruction`, today Codex and Claude): the SAME assembled body, sent
 //     UNWRAPPED on the protocol's instruction field
 //     (thread/start|resume.developerInstructions) instead of the first user
 //     turn — it survives compaction and never masquerades as user speech.
@@ -51,6 +51,13 @@ Do not rename the current branch unless the user explicitly tells you to do so.`
  *  first-turn preamble (when dirs already exist) and as a standalone per-message
  *  notice when the user adds a dir mid-chat. Substitution: {DIRS}. */
 export const ADDITIONAL_DIRS_NOTICE = `You also have access to these additional directories (read from them with your tools as needed): {DIRS}.`;
+
+/** [SYS-INSTR: code-agent-design-territory]
+ *  Behavioral defense in depth for the code actor. The runtime filesystem
+ *  policy is the actual boundary; this notice keeps the model from wasting
+ *  turns attempting a forbidden mutation and makes the handoff semantics
+ *  explicit. Substitution: {DESIGN_DIR} (absolute path). */
+export const CODE_AGENT_DESIGN_TERRITORY_NOTICE = `You are a coding agent. The active Design directory is {DESIGN_DIR}. Read access is allowed: you may and should read it when relevant, and you must never tell the user that protected Design files are unreadable. You must never create, edit, append, truncate, replace, move, delete, stage, or commit anything in that directory through shell, patch, editor, filesystem, or generic Git tools—even if the user asks. Do not change permissions, ACLs, links, or sandbox settings to work around this boundary. When you create or edit a dev-server or file-watcher configuration, exclude this directory from its watch scope so Design edits do not trigger code-server reloads or restarts. Design changes require the Design surface or a separately contained design specialist; no Design mutation API is available to you. Continue code work outside that directory.`;
 
 /** The XML-ish wrapper tag for mechanism "A". Agents reliably read an
  *  angle-bracketed block like this as out-of-band orientation rather than as

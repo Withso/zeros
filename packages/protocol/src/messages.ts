@@ -10,6 +10,11 @@
 // ──────────────────────────────────────────────────────────
 
 import type {
+  AgentConfigurationProvenance,
+  AgentGoal,
+  AgentGoalStatus,
+  AgentMemorySettings,
+  AgentProviderQuota,
   ContentBlock,
   InitializeResponse,
   ListSessionsResponse,
@@ -34,6 +39,10 @@ import type {
   ProviderBinding,
   WorkspaceId,
 } from "./identities";
+import type {
+  ExecutionBoundaryPortsSnapshot,
+  ExecutionBoundaryStatus,
+} from "./containment";
 
 export type MessageSource = "browser" | "engine";
 
@@ -114,6 +123,10 @@ export interface BridgeRegistryAgent {
    *  every send failed with "AGENT RESPONSE FAILURE". Credentials present ≠
    *  agent usable. */
   authenticated?: boolean;
+  /** Present when Zeros could not execute the authentication probe. This is an
+   * infrastructure result, not proof that the provider rejected credentials;
+   * `authenticated` is intentionally absent in this state. */
+  authenticationUnavailableReason?: string;
   /** Set when the agent's RUNTIME cannot be started at all, carrying a
    *  user-actionable reason. Distinguishes "you need to sign in" from "this
    *  build is missing the Claude Code binary" — previously indistinguishable,
@@ -184,6 +197,8 @@ export interface EnrichedRegistryAgent extends RegistryAgent {
     docsUrl?: string;
   };
   authenticated?: boolean;
+  /** See BridgeRegistryAgent.authenticationUnavailableReason. */
+  authenticationUnavailableReason?: string;
   /** See BridgeRegistryAgent.runtimeUnavailableReason — set when the agent's own
    *  runtime can't be started, which is a different failure from "not signed
    *  in" and must not render as either "Connected" or "CLI not authenticated". */
@@ -220,9 +235,9 @@ export interface EngineReadyMessage extends BaseMessage {
 
 /** Engine → clients broadcast: a list-changing write hit the engine DB. Clients
  *  refetch the named lists so a change on one device shows up live on the others
- *  through cross-device synchronization. `kinds` names which lists changed (e.g. "chats",
- *  "projects"); optional opaque ids scope the pull, but row data is never sent
- *  in the event itself. */
+ *  through cross-device synchronization. `kinds` names which lists or keyed
+ *  surfaces changed (e.g. "chats", "projects", "setup"); optional opaque ids
+ *  scope the pull, but row data is never sent in the event itself. */
 export interface DbChangedMessage extends BaseMessage {
   type: "DB_CHANGED";
   kinds: string[];
@@ -242,12 +257,15 @@ export interface DbChangedMessage extends BaseMessage {
   chatIds?: string[];
 }
 
-/** Host → engine (LOCAL clients only): seed/refresh the in-memory GitHub token
+/** Host → engine (local Electron or an attested cloud-workspace owner):
+ * seed/refresh the in-memory GitHub token
  *  the engine's TokenStore reads for `gh.*` ops. The token stays encrypted at
  *  rest in Electron safeStorage on the host — this is just the working copy the
  *  engine (which can't call safeStorage) needs to talk to the GitHub API. The
- *  engine IGNORES this from a relay client: a remote device must never be able
- *  to set the host's GitHub token. `token: null` clears it. */
+ *  engine IGNORES this from a desktop relay client: a remote device must never
+ *  be able to set the host's GitHub token. A qualified cloud transport is the
+ *  workspace's owner-facing host, not that retired relay. `token: null` clears
+ *  it. */
 export interface GithubTokenSetMessage extends BaseMessage {
   type: "GITHUB_TOKEN_SET";
   token: string | null;
@@ -262,8 +280,9 @@ export interface GithubTokenChangedMessage extends BaseMessage {
   token: string | null;
 }
 
-/** Engine → local host: the selected credential was invalidated. This event is
- *  intentionally secret-free; Electron main clears the addressed durable slot. */
+/** Engine → owner credential coordinator: the selected credential was
+ * invalidated. This event is intentionally secret-free; local Electron or the
+ * qualified cloud coordinator refreshes/clears the addressed durable slot. */
 export interface GithubCredentialChangedMessage extends BaseMessage {
   type: "GITHUB_CREDENTIAL_CHANGED";
   method: "gh-cli" | "github-app" | "pat";
@@ -377,6 +396,14 @@ export interface AgentNewSessionMessage extends BaseMessage {
   cliBinary?: string;
 }
 
+/** Exchange a redacted live-port id for a one-use browser admission URL. */
+export interface AgentOpenBoundaryPortMessage extends BaseMessage {
+  type: "AGENT_OPEN_BOUNDARY_PORT";
+  agentId: string;
+  executionId: ExecutionId;
+  portId: string;
+}
+
 export interface AgentInitAgentMessage extends BaseMessage {
   type: "AGENT_INIT_AGENT";
   agentId: string;
@@ -472,6 +499,11 @@ export interface AgentPromptMessage extends BaseMessage {
   sessionId: string;
   executionId?: ExecutionId;
   prompt: ContentBlock[];
+  /** When the user committed this send in the originating renderer. The
+   *  engine carries this through admission, persistence, and turn-state
+   *  updates so a delayed provider session cannot restart the elapsed timer.
+   *  Older clients omit it; the engine then uses receipt time. */
+  startedAt?: number;
   /** Optional faithful-bubble payload (segments/attachments/displayText).
    *  Older clients omit it; the engine then persists the plain wire text. */
   bubble?: AgentPromptBubble;
@@ -642,6 +674,125 @@ export interface AgentUpdateConfigMessage extends BaseMessage {
   env: Record<string, string>;
 }
 
+/** Read or update harness-native memory using a narrow Zeros product surface.
+ * The renderer supplies no path, config key, or native method name. */
+export interface AgentMemorySettingsReadMessage extends BaseMessage {
+  type: "AGENT_MEMORY_SETTINGS_READ";
+  agentId: string;
+}
+
+export interface AgentMemorySettingsUpdateMessage extends BaseMessage {
+  type: "AGENT_MEMORY_SETTINGS_UPDATE";
+  agentId: string;
+  settings: Partial<
+    Pick<
+      AgentMemorySettings,
+      "localMemoriesEnabled" | "toolAssistedGenerationEnabled"
+    >
+  >;
+}
+
+export interface AgentMemorySettingsMessage extends BaseMessage {
+  type: "AGENT_MEMORY_SETTINGS";
+  requestId: string;
+  agentId: string;
+  settings: AgentMemorySettings;
+}
+
+export interface AgentMemoryResetMessage extends BaseMessage {
+  type: "AGENT_MEMORY_RESET";
+  agentId: string;
+}
+
+export interface AgentMemoryResetCompleteMessage extends BaseMessage {
+  type: "AGENT_MEMORY_RESET_COMPLETE";
+  requestId: string;
+  agentId: string;
+}
+
+/** Read-only product diagnostics. These intentionally expose no provider
+ * operation name, arbitrary params, raw config, or account credentials. */
+export interface AgentConfigurationProvenanceReadMessage extends BaseMessage {
+  type: "AGENT_CONFIGURATION_PROVENANCE_READ";
+  agentId: string;
+  cwd?: string;
+}
+
+export interface AgentConfigurationProvenanceMessage extends BaseMessage {
+  type: "AGENT_CONFIGURATION_PROVENANCE";
+  requestId: string;
+  agentId: string;
+  provenance: AgentConfigurationProvenance;
+}
+
+export interface AgentProviderQuotaReadMessage extends BaseMessage {
+  type: "AGENT_PROVIDER_QUOTA_READ";
+  agentId: string;
+}
+
+export interface AgentProviderQuotaMessage extends BaseMessage {
+  type: "AGENT_PROVIDER_QUOTA";
+  requestId: string;
+  agentId: string;
+  quota: AgentProviderQuota | null;
+}
+
+/** Account-scoped local-desktop push from a live provider notification. */
+export interface AgentProviderQuotaUpdatedMessage extends BaseMessage {
+  type: "AGENT_PROVIDER_QUOTA_UPDATED";
+  agentId: string;
+  /** null invalidates a previously confirmed account snapshot (for example,
+   * immediately after the provider reports logout). */
+  quota: AgentProviderQuota | null;
+}
+
+/** Goal lifecycle stays session-scoped and provider-neutral. */
+export interface AgentGoalSetMessage extends BaseMessage {
+  type: "AGENT_GOAL_SET";
+  agentId: string;
+  sessionId: string;
+  executionId?: ExecutionId;
+  update: {
+    objective?: string;
+    status?: AgentGoalStatus;
+    tokenBudget?: number | null;
+  };
+}
+
+export interface AgentGoalClearMessage extends BaseMessage {
+  type: "AGENT_GOAL_CLEAR";
+  agentId: string;
+  sessionId: string;
+  executionId?: ExecutionId;
+}
+
+export interface AgentGoalChangedMessage extends BaseMessage {
+  type: "AGENT_GOAL_CHANGED";
+  requestId: string;
+  agentId: string;
+  sessionId: string;
+  executionId?: ExecutionId;
+  goal: AgentGoal | null;
+}
+
+/** Retry one engine-retained denied action. `retryId` is opaque to clients. */
+export interface AgentRetrySafetyReviewMessage extends BaseMessage {
+  type: "AGENT_RETRY_SAFETY_REVIEW";
+  agentId: string;
+  sessionId: string;
+  executionId?: ExecutionId;
+  retryId: string;
+}
+
+export interface AgentSafetyReviewRetriedMessage extends BaseMessage {
+  type: "AGENT_SAFETY_REVIEW_RETRIED";
+  requestId: string;
+  agentId: string;
+  sessionId: string;
+  executionId?: ExecutionId;
+  retryId: string;
+}
+
 export interface AgentListSessionsMessage extends BaseMessage {
   type: "AGENT_LIST_SESSIONS";
   agentId: string;
@@ -667,6 +818,15 @@ export interface AgentLoadSessionMessage extends BaseMessage {
   /** Optional CLI binary path override (Settings → Providers →
    *  Advanced). Mirrors AgentNewSessionMessage.cliBinary. */
   cliBinary?: string;
+  /** Re-adopt a live engine execution for this conversation, but do NOT mint one
+   *  if there is none. A surfaced-but-unfocused chat restored at app start uses
+   *  this: adoption is free (the engine already owns the execution), while
+   *  minting is a full boundary admission for a pane nobody has touched. On a
+   *  miss the engine answers `session-expired` without preparing anything and
+   *  the renderer keeps the persisted transcript on screen, re-asking without
+   *  the flag on focus / keystroke / send. Older engines ignore the field and
+   *  simply behave as before (they mint). */
+  adoptOnly?: boolean;
 }
 
 /** Fork a durable provider conversation into a Zeros-owned destination
@@ -766,6 +926,39 @@ export interface AgentSessionUpdateMessage extends BaseMessage {
    *  emits before the renderer has stored the executionId). Optional so older
    *  engines / clients still interoperate. */
   chatId?: string;
+}
+
+/** Owner-routed, redacted health for one live execution. This is diagnostic
+ * state only and cannot grant or replay a boundary capability. */
+export interface AgentBoundaryStatusChangedMessage extends BaseMessage {
+  type: "AGENT_BOUNDARY_STATUS_CHANGED";
+  agentId: string;
+  executionId: ExecutionId;
+  chatId?: ConversationId;
+  status: ExecutionBoundaryStatus;
+}
+
+/** Owner-routed, redacted listener state for one live execution. It is not an
+ * authority grant and intentionally carries no host endpoint or broker token. */
+export interface AgentBoundaryPortsChangedMessage extends BaseMessage {
+  type: "AGENT_BOUNDARY_PORTS_CHANGED";
+  agentId: string;
+  executionId: ExecutionId;
+  chatId?: ConversationId;
+  snapshot: ExecutionBoundaryPortsSnapshot;
+}
+
+export interface AgentBoundaryPortOpenedMessage extends BaseMessage {
+  type: "AGENT_BOUNDARY_PORT_OPENED";
+  requestId: string;
+  executionId: ExecutionId;
+  portId: string;
+  /** Safe URL retained by the Browser tab after admission. */
+  url: string;
+  /** One-use, short-lived URL. Renderer code must never persist it. */
+  admissionUrl: string;
+  /** Absolute deadline for renewing the volatile browser admission. */
+  expiresAt: number;
 }
 
 export interface AgentPermissionRequestMessage extends BaseMessage {
@@ -871,6 +1064,7 @@ export interface BridgeAgentFailure {
      *  not evidence that the provider-side conversation expired. */
     | "lifecycle-superseded"
     | "rate-limited"
+    | "design-protection-failed"
     /** Mirrors AgentFailureKind in apps/desktop/src/engine/agents/types.ts.
      *  The persisted session is gone — most
      *  often Codex "no rollout found", Claude "session not found". */
@@ -1107,6 +1301,7 @@ export type BridgeMessage =
   // Agent (browser → engine)
   | AgentListAgentsMessage
   | AgentNewSessionMessage
+  | AgentOpenBoundaryPortMessage
   | AgentInitAgentMessage
   | AgentAuthenticateMessage
   | AgentPromptMessage
@@ -1120,6 +1315,14 @@ export type BridgeMessage =
   | AgentSetModelMessage
   | AgentCompactMessage
   | AgentUpdateConfigMessage
+  | AgentMemorySettingsReadMessage
+  | AgentMemorySettingsUpdateMessage
+  | AgentMemoryResetMessage
+  | AgentConfigurationProvenanceReadMessage
+  | AgentProviderQuotaReadMessage
+  | AgentGoalSetMessage
+  | AgentGoalClearMessage
+  | AgentRetrySafetyReviewMessage
   | AgentListSessionsMessage
   | AgentLoadSessionMessage
   | AgentForkConversationMessage
@@ -1134,11 +1337,21 @@ export type BridgeMessage =
   | AgentAgentInitializedMessage
   | AgentAuthCompletedMessage
   | AgentSessionUpdateMessage
+  | AgentBoundaryStatusChangedMessage
+  | AgentBoundaryPortsChangedMessage
+  | AgentBoundaryPortOpenedMessage
   | AgentPermissionRequestMessage
   | AgentPermissionSettledMessage
   | AgentQuestionRequestMessage
   | AgentQuestionSettledMessage
   | AgentModeChangedMessage
+  | AgentMemorySettingsMessage
+  | AgentMemoryResetCompleteMessage
+  | AgentConfigurationProvenanceMessage
+  | AgentProviderQuotaMessage
+  | AgentProviderQuotaUpdatedMessage
+  | AgentGoalChangedMessage
+  | AgentSafetyReviewRetriedMessage
   | AgentSteeredMessage
   | AgentSessionsListMessage
   | AgentSessionLoadedMessage

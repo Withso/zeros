@@ -5,6 +5,12 @@ import { describe, expect, it } from "vitest";
 
 const read = (path: string) => readFileSync(path, "utf8");
 
+// The Linux host prerequisites the contained-execution suites need. These used
+// to be inline shell duplicated across preflight.yml's jobs, which is how the
+// three release workflows came to be missing them entirely.
+const CONTAINMENT_ACTION =
+  ".github/actions/contained-execution-runtime/action.yml";
+
 function sourceFiles(root: string): string[] {
   return readdirSync(root, { withFileTypes: true }).flatMap((entry) => {
     const path = join(root, entry.name);
@@ -21,6 +27,150 @@ describe("repository layout contracts", () => {
 
     expect(workflowLint).toContain("  pull_request:");
     expect(workflowLint).not.toMatch(/\n  pull_request:\s*\n\s+paths:/);
+  });
+
+  it("runs the required CodeQL check for pull requests and merge queues", () => {
+    const codeql = read(".github/workflows/codeql.yml");
+
+    expect(codeql).toContain("  pull_request:");
+    expect(codeql).toContain("  merge_group:");
+    expect(codeql).toContain("    name: codeql");
+  });
+
+  it("keeps the reviewed WorkOS Gitleaks false positive exact", () => {
+    const fingerprint =
+      "8bf0f9e959046859c835fc2938b07e7c7afb7c7a:apps/desktop/electron/workos-desktop-client.ts:linkedin-client-id:30";
+    const ignore = read(".gitleaksignore");
+    const desktopClient = read(
+      "apps/desktop/electron/workos-desktop-client.ts",
+    );
+
+    expect(ignore).toContain(fingerprint);
+    expect(desktopClient).toContain(
+      '"LinkedInOAuth", // gitleaks:allow — WorkOS authentication method name, not a client identifier',
+    );
+  });
+
+  it("keeps required source-sync red until every ZSR architecture qualifies", () => {
+    const preflight = read(".github/workflows/preflight.yml");
+
+    expect(preflight).toContain("  source-sync-workload:");
+    expect(preflight).toMatch(
+      /  source-sync:\n(?:.|\n)*?    name: source-sync \(macOS\)\n(?:.|\n)*?    needs:\n(?:.|\n)*?      - source-sync-workload\n(?:.|\n)*?      - zsr-macos-intel\n(?:.|\n)*?      - zsr-linux-arm64/,
+    );
+    expect(preflight).toContain("SOURCE_SYNC_RESULT:");
+    expect(preflight).toContain("ZSR_MACOS_INTEL_RESULT:");
+    expect(preflight).toContain("ZSR_LINUX_ARM64_RESULT:");
+  });
+
+  it("uses the HTTPS Ubuntu archive before the amd64 containment install", () => {
+    const action = read(CONTAINMENT_ACTION);
+    const archive = action.indexOf("https://archive.ubuntu.com/ubuntu");
+    const update = action.indexOf("sudo apt-get update");
+
+    expect(archive).toBeGreaterThanOrEqual(0);
+    expect(archive).toBeLessThan(update);
+    // archive.ubuntu.com serves no arm64 packages — those live on
+    // ports.ubuntu.com — so rewriting an arm64 runner's mirror list to it would
+    // break `apt-get update` outright. The arm64 ZSR job used to avoid that
+    // only by omitting the rewrite; one shared action makes the guard explicit.
+    expect(action).toContain('[ "$(uname -m)" = "x86_64" ]');
+  });
+
+  it("smokes the production bubblewrap and seccomp namespace prerequisites", () => {
+    const action = read(CONTAINMENT_ACTION);
+    const usernsEnable = action.indexOf("with-userns.sh");
+    const sandboxSmoke = action.indexOf("--ro-bind / /");
+
+    expect(action).toContain("bubblewrap socat");
+    expect(usernsEnable).toBeGreaterThanOrEqual(0);
+    expect(usernsEnable).toBeLessThan(sandboxSmoke);
+    expect(action).not.toContain("bwrap-userns-restrict");
+    expect(action.slice(sandboxSmoke)).toContain("--unshare-user");
+    expect(action.slice(sandboxSmoke)).toContain("--cap-drop ALL");
+    expect(action.slice(sandboxSmoke)).toContain("--unshare-pid");
+    expect(action.slice(sandboxSmoke)).toContain("--proc /proc");
+    expect(action.slice(sandboxSmoke)).toContain('"$apply_seccomp" /bin/true');
+  });
+
+  it("keeps the userns relaxation scoped to one command and restores it", () => {
+    // A job-wide relaxation would leave every later step — including
+    // third-party actions — running with unprivileged user namespaces
+    // permitted. This helper exists to keep that window one command wide.
+    const helper = read("scripts/ci/with-userns.sh");
+
+    expect(helper).toContain(
+      "KEY=kernel.apparmor_restrict_unprivileged_userns",
+    );
+    expect(helper).toContain("trap restore EXIT");
+    expect(helper).toContain('sudo sysctl -q -w "$KEY=$restriction"');
+    expect(helper).toContain('sudo sysctl -q -w "$KEY=0"');
+    // It must run the caller's command rather than a hard-coded suite, and it
+    // must fail loudly rather than run that command still restricted.
+    expect(helper).toMatch(/^"\$@"$/m);
+    expect(helper).toContain('if [ "$applied" != "0" ]');
+  });
+
+  it("fails closed when an explicit containment test path disappears", () => {
+    const rootPackage = JSON.parse(read("package.json")) as {
+      scripts: Record<string, string>;
+    };
+    const command = rootPackage.scripts["check:design-containment"] ?? "";
+    expect(command).toMatch(/^node scripts\/run-explicit-vitest\.mjs /);
+
+    const files = command
+      .split(/\s+/)
+      .filter((token) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(token));
+    expect(files.length).toBeGreaterThan(0);
+    expect(files.filter((file) => !existsSync(file))).toEqual([]);
+  });
+
+  it("gates every ZSR boundary suite plus interactive init/resume contracts", () => {
+    const rootPackage = JSON.parse(read("package.json")) as {
+      scripts: Record<string, string>;
+    };
+    expect(rootPackage.scripts["check:zsr"]).toBe(
+      "pnpm check:zsr:contracts && pnpm check:zsr:runtime",
+    );
+    expect(rootPackage.scripts["check:zsr:contracts"]).toBe(
+      "pnpm build:zsr-supervisor && node scripts/run-zsr-contract-tests.mjs",
+    );
+    expect(rootPackage.scripts["check:zsr:runtime"]).toContain(
+      "scripts/zsr-qualification/run.mjs --require-secure",
+    );
+
+    const runner = read("scripts/run-zsr-contract-tests.mjs");
+    const automaticallyRequired = [
+      ...readdirSync("apps/desktop/src/engine/agents/containment/__tests__")
+        .filter((name) => name.endsWith(".test.ts"))
+        .map(
+          (name) =>
+            `apps/desktop/src/engine/agents/containment/__tests__/${name}`,
+        ),
+      ...readdirSync("apps/desktop/src/engine/agents/__tests__")
+        .filter((name) => /^gateway-.*\.test\.ts$/.test(name))
+        .map((name) => `apps/desktop/src/engine/agents/__tests__/${name}`),
+    ];
+    const interactiveContracts = [
+      "apps/desktop/src/engine/__tests__/agent-cancel-stop.test.ts",
+      "apps/desktop/src/engine/__tests__/agent-session-reload.test.ts",
+      "apps/desktop/src/engine/agents/__tests__/territory-resolution.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/agent-prewarm-singleflight.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/agent-registry-verification.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/chat-title-scheduler.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/composer-responsive-contract.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/permission-mode-display.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/session-admission-policy.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/session-reload-lifecycle.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/tail-indicators.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/turn-footer.test.ts",
+    ];
+    for (const testFile of [
+      ...automaticallyRequired,
+      ...interactiveContracts,
+    ]) {
+      expect(runner, `${testFile} must be ZSR-gated`).toContain(testFile);
+    }
   });
 
   it("keeps active automation off retired repository roots", () => {
@@ -202,6 +352,8 @@ describe("repository layout contracts", () => {
     const vite = read("vite.config.ts");
     expect(vite).not.toContain('"**/apps/**"');
     expect(vite).not.toContain('"**/website/**"');
+    expect(vite).toContain('"**/Zeros Design"');
+    expect(vite).toContain('"**/Zeros Design/**"');
     for (const app of ["control-plane", "web", "marketing"]) {
       expect(vite).toContain(`"**/apps/${app}/**"`);
     }
@@ -278,16 +430,17 @@ describe("repository layout contracts", () => {
     const generator = read("scripts/generate-third-party-licenses.mjs");
 
     for (const packageName of [
-      "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.221",
-      "@cursor/sdk-darwin-arm64@1.0.26",
+      "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.238",
+      "@cursor/sdk-darwin-arm64@1.0.28",
       "@vscode/ripgrep-darwin-arm64@1.18.0",
       // The staged Codex runtime is redistributed inside Contents/Resources,
       // so its platform package must carry terms — not just the JS wrapper.
       // npm publishes it as an alias, hence the platform-suffixed version.
-      "@openai/codex@0.146.0-darwin-arm64",
+      "@openai/codex@0.149.0-darwin-arm64",
       "@tiptap/extension-bubble-menu@3.26.0",
       "@tiptap/extension-floating-menu@3.26.0",
       "@types/trusted-types@2.0.7",
+      "@workos-inc/node@10.12.0",
     ]) {
       expect(licenses).toContain(packageName);
     }
@@ -295,9 +448,10 @@ describe("repository layout contracts", () => {
     expect(licenses).not.toMatch(
       /@(?:anthropic-ai\/claude-agent-sdk|cursor\/sdk|vscode\/ripgrep)-linux-/,
     );
-    expect(licenses).not.toContain("@openai/codex@0.146.0-linux-x64");
+    expect(licenses).not.toContain("@openai/codex@0.149.0-linux-x64");
     expect(generator).not.toContain('"--no-optional"');
-    expect(generator).toContain("apps/web gained production dependencies");
+    expect(generator).toContain("runNpmLicenseInventory");
+    expect(generator).toContain("web Pages functions");
   });
 
   it("stages the pinned Codex runtime instead of falling back to PATH", () => {
@@ -343,6 +497,8 @@ describe("repository layout contracts", () => {
     const engineSmoke = read("scripts/smoke-engine.mjs");
 
     expect(engineSmoke).toContain('ZEROS_PARENT_PID: ""');
+    expect(engineSmoke).toContain('source: "browser"');
+    expect(engineSmoke).not.toContain('source: "client"');
   });
 
   it("threads the active session's live model capabilities into the unified menu", () => {
@@ -410,19 +566,67 @@ describe("repository layout contracts", () => {
     const image = read("scripts/cloud-workspace-validation/image.ts");
     const lifecycle = read("scripts/cloud-workspace-validation/lifecycle.ts");
     const dockerfile = read("scripts/cloud-workspace-validation/Dockerfile");
+    const launcher = read(
+      "scripts/cloud-workspace-validation/sandbox/start-engine.sh",
+    );
+    const attester = read(
+      "scripts/cloud-workspace-validation/sandbox/attest-cloud-worker.mjs",
+    );
+    const admission = read(
+      "scripts/cloud-workspace-validation/sandbox/consume-cloud-admission.mjs",
+    );
+    const runtime = read("scripts/cloud-workspace-validation/runtime.ts");
 
     expect(config).toContain("mode: 0o700");
     expect(config).toContain("mode: 0o600");
     expect(config).toContain("fs.renameSync(temporary, stateFile)");
     expect(config).toContain('u.searchParams.delete("token")');
-    expect(client).toContain('headers["x-zeros-cloud-token"]');
+    expect(client).toContain('"zeros-v1"');
+    expect(client).toContain("zeros-cloud-token.${Buffer.from");
+    expect(client).toContain('source: "browser" as const');
+    expect(client).not.toContain('source: "client"');
     expect(client).toContain('from "../../../packages/protocol/src/version"');
     expect(client).not.toMatch(/const PROTOCOL_VERSION\s*=\s*\d/);
     expect(lifecycle).toContain("clearState()");
     expect(dockerfile).toContain("&& pnpm rebuild better-sqlite3");
     expect(dockerfile).not.toContain("pnpm rebuild better-sqlite3 || true");
+    expect(dockerfile).toContain(
+      'if [ "${#ZEROS_REPO_COMMIT}" -ne 40 ] && [ "${#ZEROS_REPO_COMMIT}" -ne 64 ]',
+    );
     expect(image).toContain("&& pnpm rebuild better-sqlite3`");
     expect(image).not.toContain("pnpm rebuild better-sqlite3 || true");
+    expect(config).toContain('SANDBOX_ENGINE_DIR = "/opt/zeros"');
+    expect(config).toContain('SANDBOX_REPO_DIR = "/workspace/zeros"');
+    expect(config).toMatch(/node:22[^"\n]+@sha256:[a-f0-9]{64}/);
+    expect(image).toContain("acl bubblewrap busybox-static ca-certificates");
+    expect(image).toContain('"/etc/zeros/cloud-worker.json"');
+    expect(dockerfile).toContain("bubblewrap");
+    expect(dockerfile).toContain("podman");
+    expect(image).toContain("podman");
+    expect(dockerfile).toContain(
+      "COPY sandbox/cloud-worker.json /etc/zeros/cloud-worker.json",
+    );
+    expect(dockerfile).toContain(
+      "COPY sandbox/consume-cloud-admission.mjs /usr/local/lib/zeros/consume-cloud-admission.mjs",
+    );
+    expect(dockerfile).not.toContain("prepare-zsr-cgroups");
+    expect(image).not.toContain("prepare-zsr-cgroups");
+    expect(dockerfile).not.toMatch(/curl[^\n|]*\|\s*(?:ba)?sh/);
+    expect(image).not.toMatch(/curl[^\n|]*\|\s*(?:ba)?sh/);
+    expect(dockerfile).not.toMatch(/mutagen/i);
+    expect(image).not.toMatch(/mutagen/i);
+    expect(attester).toContain("cloud-worker-admission.json");
+    expect(attester).toContain("rootControlledTree(ENGINE)");
+    expect(admission).toContain("renameSync(PROOF, consumed)");
+    expect(admission).toContain("containerInitStartTicks");
+    expect(launcher).toContain("consume-cloud-admission.mjs");
+    expect(runtime).toContain("attestCloudWorker(");
+    expect(runtime).toContain("relaunchQualifiedCloudEngine");
+    expect(lifecycle).toContain("relaunchQualifiedCloudEngine");
+    expect(launcher).toContain(
+      'node "$ENGINE_DIR/dist-engine/cli.js" serve --root "$REPO_DIR"',
+    );
+    expect(launcher).not.toContain('node "$REPO_DIR/dist-engine/cli.js"');
   });
 
   it("keeps private delivery ledgers out of tracked design references", () => {
@@ -515,5 +719,46 @@ describe("repository layout contracts", () => {
       "Production must be dispatched from 'release/X.Y.Z' after Beta validation",
     );
     expect(stable).not.toContain("refs/heads/main|refs/heads/release/*");
+  });
+
+  it("verifies every shipped macOS updater archive before publication", () => {
+    const verifier = "scripts/verify-macos-release-artifacts.mjs";
+    const expectedTeamId = "H8MS56JU2Z";
+    const channels = [
+      {
+        workflow: ".github/workflows/release-alpha.yml",
+        appName: "Zeros Alpha.app",
+        bundleId: "com.zeros.alpha",
+        publishStep: 'name: Publish rolling "alpha" prerelease',
+      },
+      {
+        workflow: ".github/workflows/release-beta.yml",
+        appName: "Zeros Beta.app",
+        bundleId: "com.zeros.beta",
+        publishStep: 'name: Publish rolling "beta" prerelease',
+      },
+      {
+        workflow: ".github/workflows/release.yml",
+        appName: "Zeros.app",
+        bundleId: "com.zeros",
+        publishStep: "name: Submit to Apple notary",
+      },
+    ];
+
+    expect(existsSync(verifier)).toBe(true);
+    for (const channel of channels) {
+      const workflow = read(channel.workflow);
+      const verifierIndex = workflow.indexOf(`node ${verifier}`);
+      const publishIndex = workflow.indexOf(channel.publishStep);
+
+      expect(verifierIndex).toBeGreaterThan(-1);
+      expect(verifierIndex).toBeLessThan(publishIndex);
+      expect(workflow).toContain(`--app-name "${channel.appName}"`);
+      expect(workflow).toContain(`--bundle-id ${channel.bundleId}`);
+      expect(workflow).toContain(`--team-id ${expectedTeamId}`);
+      expect(workflow).toMatch(
+        /node scripts\/verify-macos-release-artifacts\.mjs[\s\S]*?--dmg "\$DMG"[\s\S]*?--zip "\$ZIP"/,
+      );
+    }
   });
 });

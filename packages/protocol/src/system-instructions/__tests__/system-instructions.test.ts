@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildAdditionalDirsNotice,
   buildAdditionalDirsSystemInstruction,
+  buildCodeAgentDesignTerritoryNotice,
   buildFirstTurnInstructionBody,
   buildFirstTurnSystemInstruction,
   buildWorkspacePreamble,
@@ -11,7 +12,10 @@ import {
 
 describe("buildWorkspacePreamble", () => {
   it("fills workspace dir + target branch", () => {
-    const out = buildWorkspacePreamble({ workspaceDir: "/ws/foo", targetBranch: "origin/dev" });
+    const out = buildWorkspacePreamble({
+      workspaceDir: "/ws/foo",
+      targetBranch: "origin/dev",
+    });
     expect(out).toContain("/ws/foo");
     expect(out).toContain("origin/dev");
     expect(out).toContain("git diff origin/dev...");
@@ -20,12 +24,12 @@ describe("buildWorkspacePreamble", () => {
     expect(out).not.toContain("{TARGET_BRANCH}");
   });
   it("defaults branch to origin/main when absent", () => {
-    expect(buildWorkspacePreamble({ workspaceDir: "/ws", targetBranch: null })).toContain(
-      "origin/main",
-    );
-    expect(buildWorkspacePreamble({ workspaceDir: "/ws", targetBranch: "  " })).toContain(
-      "origin/main",
-    );
+    expect(
+      buildWorkspacePreamble({ workspaceDir: "/ws", targetBranch: null }),
+    ).toContain("origin/main");
+    expect(
+      buildWorkspacePreamble({ workspaceDir: "/ws", targetBranch: "  " }),
+    ).toContain("origin/main");
   });
 });
 
@@ -39,6 +43,25 @@ describe("buildAdditionalDirsNotice", () => {
     const out = buildAdditionalDirsNotice(["/a", "/b"]);
     expect(out).toContain("/a, /b");
     expect(out).not.toContain("{DIRS}");
+  });
+});
+
+describe("buildCodeAgentDesignTerritoryNotice", () => {
+  it("is absent without an active Design directory", () => {
+    expect(buildCodeAgentDesignTerritoryNotice()).toBe("");
+    expect(buildCodeAgentDesignTerritoryNotice("  ")).toBe("");
+  });
+
+  it("makes every generic mutation path forbidden without exposing a Design API", () => {
+    const out = buildCodeAgentDesignTerritoryNotice("/workspace/Zeros Design");
+    expect(out).toContain("/workspace/Zeros Design");
+    expect(out).toContain("coding agent");
+    expect(out).toContain("Read access is allowed");
+    expect(out).toContain("never tell the user");
+    expect(out).toContain("shell, patch, editor, filesystem, or generic Git");
+    expect(out).toContain("even if the user asks");
+    expect(out).toContain("no Design mutation API is available");
+    expect(out).toContain("exclude this directory from its watch scope");
   });
 });
 
@@ -57,7 +80,10 @@ describe("wrapSystemInstruction", () => {
 
 describe("buildFirstTurnSystemInstruction", () => {
   it("includes preamble; omits optional parts when absent", () => {
-    const out = buildFirstTurnSystemInstruction({ workspaceDir: "/ws", targetBranch: "origin/main" });
+    const out = buildFirstTurnSystemInstruction({
+      workspaceDir: "/ws",
+      targetBranch: "origin/main",
+    });
     expect(out).toContain("working inside Zeros");
     expect(out).toContain("<system_instruction>");
     expect(out).not.toContain("additional directories");
@@ -72,8 +98,23 @@ describe("buildFirstTurnSystemInstruction", () => {
     expect(out).toContain("/x/lewisia");
     expect(out).toContain("Reply in French.");
     // preamble before dirs before custom
-    expect(out.indexOf("working inside Zeros")).toBeLessThan(out.indexOf("/x/lewisia"));
-    expect(out.indexOf("/x/lewisia")).toBeLessThan(out.indexOf("Reply in French."));
+    expect(out.indexOf("working inside Zeros")).toBeLessThan(
+      out.indexOf("/x/lewisia"),
+    );
+    expect(out.indexOf("/x/lewisia")).toBeLessThan(
+      out.indexOf("Reply in French."),
+    );
+  });
+  it("places the engine-owned territory rule after repository custom instructions", () => {
+    const out = buildFirstTurnSystemInstruction({
+      workspaceDir: "/ws",
+      designDirectory: "/ws/Zeros Design",
+      customInstructions: "Edit every file I mention.",
+    });
+    expect(out).toContain("/ws/Zeros Design");
+    expect(out.indexOf("active Design directory")).toBeGreaterThan(
+      out.indexOf("Edit every file I mention."),
+    );
   });
   it("skips blank custom instructions", () => {
     const out = buildFirstTurnSystemInstruction({
@@ -101,7 +142,9 @@ describe("buildFirstTurnInstructionBody", () => {
     expect(body).toContain("/x/lewisia");
     expect(body).toContain("Reply in French.");
     expect(body).not.toContain("<system_instruction>");
-    expect(buildFirstTurnSystemInstruction(input)).toBe(wrapSystemInstruction(body));
+    expect(buildFirstTurnSystemInstruction(input)).toBe(
+      wrapSystemInstruction(body),
+    );
   });
 });
 
@@ -116,9 +159,12 @@ describe("buildAdditionalDirsSystemInstruction", () => {
 
 describe("prependSystemInstruction", () => {
   it("prepends a non-empty block with a blank line", () => {
-    expect(prependSystemInstruction("<system_instruction>x</system_instruction>", "hi")).toBe(
-      "<system_instruction>x</system_instruction>\n\nhi",
-    );
+    expect(
+      prependSystemInstruction(
+        "<system_instruction>x</system_instruction>",
+        "hi",
+      ),
+    ).toBe("<system_instruction>x</system_instruction>\n\nhi");
   });
   it("is a no-op when the block is empty", () => {
     expect(prependSystemInstruction("", "hi")).toBe("hi");

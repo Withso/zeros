@@ -57,12 +57,24 @@ interface PendingWorkspacesState {
   settlingFolders: Record<string, number>;
   /** Workspace ids whose archive OR permanent-delete is in flight. */
   archivingIds: Record<string, number>;
+  /** Renderer-local presentation intent while workspace.setMode is queued or
+   * initializing its first Design document. Kept separate from confirmed
+   * Workspace rows so server state never becomes optimistic. */
+  modeSwitches: Record<
+    string,
+    {
+      token: string;
+      mode: "code" | "design";
+      startedAt: number;
+    }
+  >;
 }
 
 export const usePendingWorkspacesStore = create<PendingWorkspacesState>(() => ({
   creates: [],
   settlingFolders: {},
   archivingIds: {},
+  modeSwitches: {},
 }));
 
 let tokenCounter = 0;
@@ -187,6 +199,57 @@ export function usePendingWorkspaceKind(
   return usePendingWorkspacesStore(
     (state) =>
       state.creates.find((create) => create.path === folder)?.kind ?? null,
+  );
+}
+
+// ── Code / Design presentation transitions ────────────────────────────────
+
+/** Publish the user's requested view synchronously, before the engine RPC.
+ * The opaque token prevents an older completion from clearing a newer intent. */
+export function beginWorkspaceModeSwitch(
+  workspaceId: string,
+  mode: "code" | "design",
+): string {
+  const token = `pwm-${Date.now().toString(36)}-${++tokenCounter}`;
+  usePendingWorkspacesStore.setState((state) => ({
+    modeSwitches: {
+      ...state.modeSwitches,
+      [workspaceId]: { token, mode, startedAt: Date.now() },
+    },
+  }));
+  return token;
+}
+
+/** Clear only the matching request. Idempotent and stale-completion safe. */
+export function finishWorkspaceModeSwitch(
+  workspaceId: string,
+  token: string,
+): void {
+  usePendingWorkspacesStore.setState((state) => {
+    if (state.modeSwitches[workspaceId]?.token !== token) return state;
+    const modeSwitches = { ...state.modeSwitches };
+    delete modeSwitches[workspaceId];
+    return { modeSwitches };
+  });
+}
+
+export function pendingWorkspaceMode(
+  workspaceId: string | null | undefined,
+): "code" | "design" | null {
+  if (!workspaceId) return null;
+  return (
+    usePendingWorkspacesStore.getState().modeSwitches[workspaceId]?.mode ??
+    null
+  );
+}
+
+export function usePendingWorkspaceMode(
+  workspaceId: string | null | undefined,
+): "code" | "design" | null {
+  return usePendingWorkspacesStore(
+    (state) =>
+      (workspaceId ? state.modeSwitches[workspaceId]?.mode : undefined) ??
+      null,
   );
 }
 

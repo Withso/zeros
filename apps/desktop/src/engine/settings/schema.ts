@@ -297,6 +297,29 @@ export type McpSettingsServer = z.infer<typeof mcpServerSchema>;
  *  (executable_path / base_url) were removed: a committed/clone-borne repo
  *  file must not be able to redirect the spawned agent binary or its
  *  credential-bearing gateway. */
+/** The `[design]` table — design-workspace configuration for a repo.
+ *
+ *  `directory` is the POINTER to the active design folder: repo-relative,
+ *  POSIX separators, nesting allowed (`apps/web/designs`). The folder itself
+ *  is committed repo content (recognizable by its committed
+ *  `.zeros-canvas.json` marker); this key only selects WHICH one is active.
+ *  Layering gives the product's scoping story for free: the committed repo
+ *  file carries the team default, `.zeros/settings.local.toml` a per-machine
+ *  override, and a worktree's own local file pins one workspace to a
+ *  different folder — so two live workspaces can target `Web Design/` and
+ *  `Mobile Design/` at once. Absent = "Zeros Design". */
+const designSchema = z
+  .object({
+    directory: z
+      .string()
+      .describe(
+        "Repo-relative folder the design surface reads and writes " +
+          '(default "Zeros Design"). The folder is committed content; this ' +
+          "key just selects which design folder is active.",
+      ),
+  })
+  .partial();
+
 export const repoSettingsSchema = z.object({
   $schema: z
     .string()
@@ -305,6 +328,7 @@ export const repoSettingsSchema = z.object({
   scripts: scriptsSchema.optional(),
   git: gitSchema.optional(),
   prompts: promptsSchema.optional(),
+  design: designSchema.optional(),
 });
 
 // Per-agent model knobs, one table per agent: [models.claude_code] /
@@ -335,6 +359,9 @@ const claudeModelsSchema = z
       .describe(
         "How long an idle Claude session stays warm (30 minutes to 5 hours).",
       ),
+    auto_memory_enabled: z
+      .boolean()
+      .describe("Allow Claude Code to maintain its native repository memory."),
   })
   .partial();
 const codexModelsSchema = z
@@ -859,6 +886,7 @@ const TABLE_SHAPES: Record<string, Record<string, z.ZodType>> = {
   workspaces: workspacesSchema.shape,
   browser: browserSchema.shape,
   github: githubSchema.shape,
+  design: designSchema.shape,
 };
 
 /** Per-leaf sanitize of one raw layer document. Layer-aware: user-only keys

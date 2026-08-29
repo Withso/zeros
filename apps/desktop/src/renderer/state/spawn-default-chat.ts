@@ -85,7 +85,7 @@ export async function spawnNewChatTab(args: {
   // Never put tab creation behind a native registry read. A cold cache creates
   // an agentless tab synchronously; AutoBindAgent fills it on first render.
   const chat = bornChatThread(cachedDefaultAgent(), folder);
-  dispatch({ type: "ADD_CHAT", chat });
+  dispatch({ type: "ADD_CHAT", chat, recordWorkspaceActivity: true });
   return chat;
 }
 
@@ -102,6 +102,7 @@ export function spawnPreparedDefaultChat(args: {
   args.dispatch({
     type: "ADD_CHAT",
     chat,
+    recordWorkspaceActivity: true,
     openWorkspace: {
       repoRoot: args.repoRoot,
       validationPending: true,

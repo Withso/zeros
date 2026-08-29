@@ -5,8 +5,6 @@ import type { PendingWorkspaceCreate } from "../pending-workspaces";
 import {
   countLiveVisibleBySlug,
   dedupePendingCreates,
-  filterPendingCreatesForDesignAccess,
-  filterWorkspacesForDesignAccess,
   selectLiveVisible,
 } from "../live-workspace-selectors";
 
@@ -67,43 +65,6 @@ describe("selectLiveVisible", () => {
   });
 });
 
-describe("internal design-workspace visibility", () => {
-  it("removes design rows and pending creates while preserving code identity", () => {
-    const code = ws({ id: "code", kind: "code" });
-    const design = ws({ id: "design", kind: "design" });
-    const codePending = pending({ token: "code-pending", kind: "code" });
-    const designPending = pending({
-      token: "design-pending",
-      kind: "design",
-    });
-
-    expect(
-      filterWorkspacesForDesignAccess([code, design], false).map((row) =>
-        row.id,
-      ),
-    ).toEqual(["code"]);
-    expect(
-      filterPendingCreatesForDesignAccess(
-        [codePending, designPending],
-        false,
-      ).map((row) => row.token),
-    ).toEqual(["code-pending"]);
-  });
-
-  it("returns the original references when enabled or when no design rows exist", () => {
-    const rows = [ws({ id: "code", kind: "code" })];
-    const pendingRows = [pending({ token: "code-pending", kind: "code" })];
-    expect(filterWorkspacesForDesignAccess(rows, false)).toBe(rows);
-    expect(filterWorkspacesForDesignAccess(rows, true)).toBe(rows);
-    expect(filterPendingCreatesForDesignAccess(pendingRows, false)).toBe(
-      pendingRows,
-    );
-    expect(filterPendingCreatesForDesignAccess(pendingRows, true)).toBe(
-      pendingRows,
-    );
-  });
-});
-
 describe("dedupePendingCreates", () => {
   it("drops a pending whose branch matches a real row", () => {
     const real = [ws({ branch: "zeros/newbie" })];
@@ -126,6 +87,53 @@ describe("dedupePendingCreates", () => {
     const real = [ws({ branch: "zeros/existing", path: "/x" })];
     const p = pending({ branch: "zeros/newbie", path: "/y" });
     expect(dedupePendingCreates([p], real)).toEqual([p]);
+  });
+
+  // Workspace names come from a per-repository free set of colour words, so the
+  // same branch in two repositories is ordinary — not the pending create's own
+  // row landing. Cross-repository callers (top bar, Dashboard, archive
+  // repoint) pass the live union, and a global branch match silently deleted
+  // the new workspace's "Setting up…" placeholder.
+  it("keeps a pending whose branch matches a row in ANOTHER repository", () => {
+    const otherRepo = [
+      ws({
+        id: "ws_other",
+        repoSlug: "acme/other",
+        repoRoot: "/other",
+        branch: "zeros/newbie",
+        path: "/other/.worktrees/newbie",
+      }),
+    ];
+    const p = pending({ branch: "zeros/newbie" });
+    expect(dedupePendingCreates([p], otherRepo)).toEqual([p]);
+  });
+
+  it("still drops it once the row lands in its OWN repository", () => {
+    const union = [
+      ws({
+        id: "ws_other",
+        repoSlug: "acme/other",
+        repoRoot: "/other",
+        branch: "zeros/newbie",
+        path: "/other/.worktrees/newbie",
+      }),
+      ws({ id: "ws_own", branch: "zeros/newbie", path: "/repo/w/newbie" }),
+    ];
+    expect(
+      dedupePendingCreates([pending({ branch: "zeros/newbie" })], union),
+    ).toEqual([]);
+  });
+
+  it("drops it on an exact path match even across a slug mismatch", () => {
+    const real = [
+      ws({ repoSlug: "acme/renamed", path: "/repo/.worktrees/newbie" }),
+    ];
+    expect(
+      dedupePendingCreates(
+        [pending({ branch: undefined, path: "/repo/.worktrees/newbie" })],
+        real,
+      ),
+    ).toEqual([]);
   });
 
   it("returns a stable empty array for no pending", () => {

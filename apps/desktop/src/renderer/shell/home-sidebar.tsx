@@ -36,11 +36,7 @@ import {
   useLiveWorkspaces,
   useProjects,
 } from "../state/use-projects";
-import {
-  countLiveVisibleBySlug,
-  filterPendingCreatesForDesignAccess,
-  filterWorkspacesForDesignAccess,
-} from "../state/live-workspace-selectors";
+import { countLiveVisibleBySlug } from "../state/live-workspace-selectors";
 import { usePendingCreatesAll } from "../state/pending-workspaces";
 import type { Project } from "../state/projects-store";
 import { useAuth } from "../features/auth";
@@ -63,7 +59,6 @@ import {
 } from "./home-sidebar-width";
 import { useHomeSidebarResizeDrag } from "./use-home-sidebar-drag";
 import { useResizeHint } from "./use-resize-hint";
-import { useInternalFeatureActive } from "../features/settings/internal-features";
 import { OrganizationSwitcher } from "../features/team/organization-switcher";
 import { useActiveOrganization } from "../features/team/team-store";
 import { filterRowsForOrganization } from "../features/team/organization-capabilities";
@@ -168,23 +163,14 @@ export function HomeSidebar() {
   // union), so a repo badge can never disagree with that repo's tab count.
   const { workspaces } = useLiveWorkspaces();
   const rawPending = usePendingCreatesAll();
-  const designWorkspacesActive = useInternalFeatureActive("designWorkspaces");
   const activeOrganization = useActiveOrganization();
   const accessibleWorkspaces = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterWorkspacesForDesignAccess(workspaces, designWorkspacesActive),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, workspaces],
+    () => filterRowsForOrganization(workspaces, activeOrganization),
+    [activeOrganization, workspaces],
   );
   const allPending = useMemo(
-    () =>
-      filterRowsForOrganization(
-        filterPendingCreatesForDesignAccess(rawPending, designWorkspacesActive),
-        activeOrganization,
-      ),
-    [activeOrganization, designWorkspacesActive, rawPending],
+    () => filterRowsForOrganization(rawPending, activeOrganization),
+    [activeOrganization, rawPending],
   );
   const { openProject, openGithubProject, quickStart } = useAddProject();
   const { session, email } = useAuth();

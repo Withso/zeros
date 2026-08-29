@@ -1,15 +1,20 @@
 import { describe, it, expect } from "vitest";
 
 import {
+  ENGINE_LOCAL_AUTHORITY_CONTROL_TYPE,
   MCP_VAULT_ACCOUNT,
   MCP_VAULT_CONTROL_TYPE,
   MCP_VAULT_SEED_TYPE,
+  engineLocalAuthorityControlLine,
+  parseEngineLocalAuthorityControl,
   parseVaultBlob,
   parseVaultControl,
   vaultControlLine,
   vaultSeedLine,
   type VaultSnapshot,
 } from "../vault-persist";
+
+const LOCAL_AUTHORITY = "a".repeat(64);
 
 const SNAP: VaultSnapshot = {
   "https://mcp.api.fabric.so/mcp": {
@@ -70,5 +75,56 @@ describe("vaultSeedLine (host → engine restore)", () => {
     const msg = JSON.parse(line);
     expect(msg.type).toBe(MCP_VAULT_SEED_TYPE);
     expect(msg.data).toEqual(SNAP);
+  });
+});
+
+describe("engine local authority (engine → host)", () => {
+  it("round-trips one exact lowercase 256-bit bearer over the private control pipe", () => {
+    const line = engineLocalAuthorityControlLine(LOCAL_AUTHORITY);
+    expect(line.endsWith("\n")).toBe(true);
+    expect(JSON.parse(line).type).toBe(ENGINE_LOCAL_AUTHORITY_CONTROL_TYPE);
+    expect(parseEngineLocalAuthorityControl(line.trim())).toBe(LOCAL_AUTHORITY);
+  });
+
+  it("rejects malformed, wrong-type, short, uppercase, and non-string authority", () => {
+    expect(parseEngineLocalAuthorityControl("not json")).toBeNull();
+    expect(
+      parseEngineLocalAuthorityControl(
+        JSON.stringify({ type: "something.else", token: LOCAL_AUTHORITY }),
+      ),
+    ).toBeNull();
+    expect(
+      parseEngineLocalAuthorityControl(
+        JSON.stringify({
+          type: ENGINE_LOCAL_AUTHORITY_CONTROL_TYPE,
+          token: "a".repeat(63),
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      parseEngineLocalAuthorityControl(
+        JSON.stringify({
+          type: ENGINE_LOCAL_AUTHORITY_CONTROL_TYPE,
+          token: "A".repeat(64),
+        }),
+      ),
+    ).toBeNull();
+    expect(
+      parseEngineLocalAuthorityControl(
+        JSON.stringify({
+          type: ENGINE_LOCAL_AUTHORITY_CONTROL_TYPE,
+          token: 42,
+        }),
+      ),
+    ).toBeNull();
+  });
+
+  it("refuses to frame anything except an exact lowercase 256-bit bearer", () => {
+    expect(() => engineLocalAuthorityControlLine("a".repeat(63))).toThrow(
+      "invalid engine local authority token",
+    );
+    expect(() => engineLocalAuthorityControlLine("A".repeat(64))).toThrow(
+      "invalid engine local authority token",
+    );
   });
 });

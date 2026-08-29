@@ -35,6 +35,21 @@ import {
   CLAUDE_IDLE_TIMEOUT_ENV_VAR,
 } from "../model-catalog";
 import type { SessionMode } from "../../../platform/bridge/agent-events";
+import type { ExecutionBoundaryStatus } from "@zeros/protocol/containment";
+
+const protectedBoundary: ExecutionBoundaryStatus = {
+  version: 1,
+  actor: "agent-code",
+  state: "ready",
+  backend: "provider-native",
+  designProtection: {
+    required: true,
+    enforced: true,
+    protectedDirectoryCount: 1,
+  },
+  parity: { level: "restricted", restrictions: [] },
+  checkedAt: 1,
+};
 
 describe("agentFamily", () => {
   const cases: Array<[string, string]> = [
@@ -144,6 +159,87 @@ describe("modelsForAgent (curated catalog)", () => {
     expect(
       list.find((m) => m.value === "claude-opus-4-8[1m]")?.supportsFast,
     ).toBe(false);
+  });
+
+  it("shows a live-required Cursor Router only when the harness says it is locally selectable", () => {
+    expect(modelsForAgent("cursor", null).map((m) => m.value)).not.toContain(
+      "default",
+    );
+
+    const advertisedButNotRunnable = {
+      protocolVersion: 1,
+      _meta: {
+        models: [
+          {
+            value: "default",
+            label: "Router",
+            selectable: false,
+          },
+        ],
+      },
+    } as unknown as Parameters<typeof modelsForAgent>[1];
+    expect(
+      modelsForAgent("cursor", advertisedButNotRunnable).map((m) => m.value),
+    ).not.toContain("default");
+
+    const locallyRunnable = {
+      protocolVersion: 1,
+      _meta: {
+        models: [
+          {
+            value: "default",
+            label: "Router",
+            selectable: true,
+            description: "Let Cursor choose the model for this turn.",
+            aliases: ["auto"],
+            parameters: [
+              {
+                id: "speed",
+                displayName: "Speed",
+                values: [{ value: "fast", displayName: "Fast" }],
+              },
+            ],
+            variants: [
+              {
+                displayName: "Balanced",
+                params: [{ id: "speed", value: "balanced" }],
+                isDefault: true,
+              },
+            ],
+          },
+        ],
+      },
+    } as unknown as Parameters<typeof modelsForAgent>[1];
+    const router = modelsForAgent("cursor", locallyRunnable).find(
+      (m) => m.value === "default",
+    );
+    expect(router).toMatchObject({
+      label: "Router",
+      description: "Let Cursor choose the model for this turn.",
+      aliases: ["auto"],
+      selectable: true,
+    });
+    expect(router?.parameters?.[0]?.id).toBe("speed");
+    expect(router?.variants?.[0]?.isDefault).toBe(true);
+  });
+
+  it("hides any curated model that the live provider marks non-selectable", () => {
+    const initialize = {
+      protocolVersion: 1,
+      _meta: {
+        models: [
+          {
+            value: "composer-2.5",
+            label: "Composer 2.5",
+            selectable: false,
+          },
+        ],
+      },
+    } as unknown as Parameters<typeof modelsForAgent>[1];
+
+    expect(
+      modelsForAgent("cursor", initialize).map((m) => m.value),
+    ).not.toContain("composer-2.5");
   });
 });
 
@@ -604,6 +700,40 @@ describe("permissionMenuItems (native permission modes shown in the '+' menu)", 
     const items = permissionMenuItems("cursor", "composer-2.5");
     expect(items.map((i) => i.modeId)).toEqual(["plan", "auto", "agent"]);
     expect(items.map((i) => i.label)).toEqual(["Ask", "Auto", "Full access"]);
+  });
+  it("keeps Design protection implicit in native permission labels", () => {
+    expect(
+      permissionMenuItems("codex", "gpt-5.6-sol", protectedBoundary),
+    ).toContainEqual({
+      modeId: "full-access",
+      label: "Full access",
+    });
+    expect(
+      permissionMenuItems("cursor", "composer-2.5", protectedBoundary),
+    ).toContainEqual({
+      modeId: "agent",
+      label: "Full access",
+    });
+  });
+  it("does not offer provider bypass when the admitted backend cannot preserve it", () => {
+    const restricted: ExecutionBoundaryStatus = {
+      ...protectedBoundary,
+      parity: {
+        level: "restricted",
+        restrictions: ["provider-bypass-mode-disabled"],
+      },
+    };
+    expect(
+      permissionMenuItems("claude", "claude-opus-4-8[1m]", restricted),
+    ).not.toContainEqual(expect.objectContaining({ modeId: "bypass" }));
+    expect(
+      coerceModeIdForModel(
+        "claude",
+        "claude-opus-4-8[1m]",
+        "bypass",
+        restricted,
+      ),
+    ).toBe("accept-edits");
   });
   it("agentHasPermissionMenu is true for every native family, false otherwise", () => {
     expect(agentHasPermissionMenu("claude", "claude-haiku-4-5")).toBe(true);

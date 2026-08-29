@@ -1,5 +1,5 @@
 // ──────────────────────────────────────────────────────────
-// Auth — verify Auth0-issued JWTs locally (JWKS) and JIT-mirror the user.
+// Auth — verify provider-issued JWTs locally (JWKS) and JIT-mirror the user.
 //
 // Sign-in provisions the user row plus the account's permanent Personal
 // organization and its default team. Collaborative organizations remain
@@ -9,28 +9,72 @@
 // jose's createRemoteJWKSet caches keys in memory and re-fetches only
 // when an unknown `kid` appears (key rotation).
 //
-// users.id is an internally-generated uuid, decoupled from Auth0's `sub`
-// (which isn't a uuid — it is `<connection>|<id>`, e.g. "oauth2|000000000").
-// user_identities maps (provider, provider_sub) -> users.id, so a future
-// provider swap only needs a new row shape here, not a schema change.
+// users.id is an internally-generated uuid, decoupled from every provider's
+// `sub`. user_identities maps (provider, provider_sub) -> users.id, so product
+// ownership never depends on an authentication-vendor identifier.
 // ──────────────────────────────────────────────────────────
 
 import { randomBytes } from "node:crypto";
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import {
+  createRemoteJWKSet,
+  jwtVerify,
+  type JWTPayload,
+  type JWTVerifyOptions,
+} from "jose";
 import type { MiddlewareHandler } from "hono";
 import type pg from "pg";
 import type { Config } from "./config.js";
 import { withSystemTx, type Tx } from "./db.js";
 import { HttpError, type StaffRole } from "./authz.js";
+import {
+  AuthTokenContractError,
+  authTokenVerifyOptions,
+  validateAuthTokenClaims,
+  type AuthClientKind,
+  type AuthTokenContractConfig,
+} from "./auth-token-contract.js";
+import { materializeProjectedMemberships } from "./workos-sync-events.js";
+
+export type IdentityProvider = "auth0" | "workos";
+
+export type AuthenticatedSessionInput = {
+  id: string;
+  clientKind: AuthClientKind;
+  authTime: number | null;
+  /** JWT exp in seconds since the Unix epoch. */
+  tokenExpiresAt: number;
+};
+
+export type AuthenticatedIdentityInput = {
+  provider: IdentityProvider;
+  providerSubject: string;
+  email: string;
+  displayName: string | null;
+  avatarUrl?: string | null;
+  session?: AuthenticatedSessionInput;
+};
 
 export type AuthedUser = {
+  /** Canonical Zeros account UUID. Product and integration ownership keys use
+   *  this value, never the provider subject below. */
   id: string;
-  /** Stable identity-provider subject. Kept server-side so integrations can
-   *  preserve their external identity across the feedback-worker migration. */
-  providerSub: string;
+  /** Server-only authentication binding needed for provider lifecycle work. */
+  identity: {
+    provider: IdentityProvider;
+    subject: string;
+  };
   email: string;
   displayName: string | null;
   avatarUrl: string | null;
+  accountRevision: number;
+  /** Server-only verified session context. Never serialize this object as part
+   * of a public account response. */
+  authentication: {
+    sessionId: string | null;
+    clientKind: AuthClientKind | "legacy";
+    authTime: number | null;
+    tokenExpiresAt: number | null;
+  };
   /** Product-wide staff role, or null for the ordinary case. Re-read from
    *  Postgres on every request by ensureUser below — never taken from a claim,
    *  so revoking it needs no token expiry. Gates Settings → Internal in the
@@ -70,7 +114,26 @@ export function createAuthMiddleware(
   config: Config,
   pool: pg.Pool,
 ): MiddlewareHandler {
-  const jwks = createRemoteJWKSet(new URL(config.authJwksUrl));
+  const jwks = createRemoteJWKSet(new URL(config.auth.jwksUrl));
+  const workosContract: AuthTokenContractConfig | null =
+    config.auth.provider === "workos"
+      ? {
+          issuer: config.auth.issuer,
+          audience: config.auth.audience,
+          webClientId: config.auth.webClientId,
+          desktopClientId: config.auth.desktopClientId,
+        }
+      : null;
+  const verifyOptions: JWTVerifyOptions =
+    config.auth.provider === "workos"
+      ? authTokenVerifyOptions(workosContract!)
+      : {
+          issuer: config.auth.issuers,
+          audience: config.auth.audience,
+          // Preserve the released Auth0 contract until its clients move.
+          algorithms: ["RS256"],
+          requiredClaims: ["exp", "sub"],
+        };
 
   return async (c, next) => {
     const header = c.req.header("authorization") ?? "";
@@ -79,18 +142,9 @@ export function createAuthMiddleware(
       return c.json({ error: { code: "unauthorized", message: "Missing bearer token" } }, 401);
     }
 
-    let payload;
+    let payload: JWTPayload;
     try {
-      ({ payload } = await jwtVerify(token, jwks, {
-        issuer: config.authIssuers,
-        audience: config.authAudience,
-        // Belt-and-braces pinning: the remote JWKS already only yields RS256
-        // keys, but an explicit allowlist removes any reliance on JWKS content
-        // (alg-confusion), and requiring `exp` means a signed-but-expiry-less
-        // token can never become immortal. Auth0 always sets both.
-        algorithms: ["RS256"],
-        requiredClaims: ["exp", "sub"],
-      }));
+      ({ payload } = await jwtVerify(token, jwks, verifyOptions));
     } catch (err) {
       // Surface jose's error code (JWKS_NO_MATCHING_KEY = old-key token,
       // JWT_CLAIM_VALIDATION_FAILED = issuer/audience mismatch, JWT_EXPIRED).
@@ -118,50 +172,120 @@ export function createAuthMiddleware(
       );
     }
 
-    const sub = typeof payload.sub === "string" ? payload.sub : null;
-    const email = claimString(payload, "email");
-    if (!sub || !email) {
-      console.warn(
-        `[auth] 401 token missing ${sub ? "email" : "sub"} (sub=${sub ?? "?"}) — ` +
-          `is the Auth0 Post-Login Action deployed and stamping ${CLAIM_NS}email onto the ACCESS token?`,
-      );
-      return c.json({ error: { code: "unauthorized", message: "Token missing sub/email" } }, 401);
-    }
-    // The invitation accept flow binds on `email` as the sole anti-takeover
-    // control (Part F), so an UNVERIFIED email must never authenticate. Fail
-    // CLOSED: require an explicit `email_verified: true`. A MISSING claim is
-    // rejected too — the Auth0 Action that stamps `email` onto this access token
-    // MUST also stamp `email_verified` (both Google and GitHub provide it); an
-    // absent claim means a misconfigured connection, not a trustworthy one, and
-    // silently trusting it would reopen the takeover vector. Mirrors the web
-    // layer (apps/web/lib/session.ts).
-    if (claimBool(payload, "email_verified") !== true) {
-      console.warn(`[auth] 401 email_unverified (sub=${sub})`);
-      return c.json(
-        { error: { code: "email_unverified", message: "Verify your email to continue" } },
-        401,
-      );
-    }
-    const displayName = claimString(payload, "name") || claimString(payload, "nickname") || null;
-    const picture = claimString(payload, "picture");
-    // Provider avatars are presentation metadata only. Keep an untrusted claim
-    // out of data:/javascript: sinks and cap it before mirroring to Postgres.
-    let avatarUrl: string | null = null;
-    if (picture && picture.length <= 2_048) {
+    let identity: {
+      provider: IdentityProvider;
+      providerSubject: string;
+      email: string;
+      displayName: string | null;
+      avatarUrl: string | null;
+      session?: AuthenticatedSessionInput;
+    };
+    if (workosContract) {
       try {
-        const parsed = new URL(picture);
-        if (parsed.protocol === "https:") avatarUrl = parsed.toString();
-      } catch {
-        // Invalid provider claim: omit it; identity still authenticates.
+        const claims = validateAuthTokenClaims(payload, workosContract);
+        identity = {
+          provider: "workos",
+          providerSubject: claims.providerSubject,
+          email: claims.email,
+          displayName: claims.displayName,
+          avatarUrl: claims.avatarUrl,
+          session: {
+            id: claims.sessionId,
+            clientKind: claims.clientKind,
+            authTime: claims.authTime,
+            tokenExpiresAt: claims.expiresAt,
+          },
+        };
+      } catch (error) {
+        const code =
+          error instanceof AuthTokenContractError
+            ? error.code
+            : "AUTH_CONTRACT_INVALID";
+        console.warn(`[auth] 401 WorkOS token contract rejected [${code}]`);
+        if (
+          error instanceof AuthTokenContractError &&
+          error.code === "AUTH_EMAIL_UNVERIFIED"
+        ) {
+          return c.json(
+            {
+              error: {
+                code: "email_unverified",
+                message: "Verify your email to continue",
+              },
+            },
+            401,
+          );
+        }
+        return c.json(
+          {
+            error: {
+              code: "unauthorized",
+              message: `Invalid access token contract [${code}]`,
+            },
+          },
+          401,
+        );
       }
+    } else {
+      const sub = typeof payload.sub === "string" ? payload.sub : null;
+      const email = claimString(payload, "email");
+      if (!sub || !email) {
+        console.warn("[auth] 401 Auth0 token missing required profile claims");
+        return c.json(
+          {
+            error: {
+              code: "unauthorized",
+              message: "Token missing sub/email",
+            },
+          },
+          401,
+        );
+      }
+      // Invitation acceptance binds on verified email, so a missing or false
+      // assertion must fail closed for the legacy provider too.
+      if (claimBool(payload, "email_verified") !== true) {
+        console.warn("[auth] 401 Auth0 token email is unverified");
+        return c.json(
+          {
+            error: {
+              code: "email_unverified",
+              message: "Verify your email to continue",
+            },
+          },
+          401,
+        );
+      }
+      const displayName =
+        claimString(payload, "name") ||
+        claimString(payload, "nickname") ||
+        null;
+      const picture = claimString(payload, "picture");
+      let avatarUrl: string | null = null;
+      if (picture && picture.length <= 2_048) {
+        try {
+          const parsed = new URL(picture);
+          if (
+            parsed.protocol === "https:" &&
+            !parsed.username &&
+            !parsed.password
+          ) {
+            avatarUrl = parsed.toString();
+          }
+        } catch {
+          // Invalid provider claim: omit it; identity still authenticates.
+        }
+      }
+      identity = {
+        provider: "auth0",
+        providerSubject: sub,
+        email,
+        displayName,
+        avatarUrl,
+      };
     }
 
-    const user = await ensureUser(pool, {
-      provider: "auth0",
-      providerSub: sub,
-      email,
-      displayName,
-      avatarUrl,
+    const user = await resolveAuthenticatedUser(pool, {
+      ...identity,
     });
     c.set("user", user);
     await next();
@@ -170,15 +294,29 @@ export function createAuthMiddleware(
 
 // Backstop against just-in-time signup flooding. ensureUser mints a
 // user + identity row for any never-seen (provider, sub), so an
-// attacker holding many Auth0 identities could mass-create rows and bloat the
+// attacker holding many provider identities could mass-create rows and bloat the
 // DB. This caps NEW signups globally per window; RETURNING users are
 // never touched (the guard only fires on the create branch). In-memory and
 // per-instance like ratelimit.ts — abuse control, not a hard security boundary;
-// Auth0's own attack-protection is the first line. Tune SIGNUP_MAX_PER_WINDOW if
+// the provider's own attack protection is the first line. Tune the cap if
 // a real launch spike ever trips it (it logs when it does).
 const SIGNUP_WINDOW_MS = 60 * 60 * 1000; // 1h
 const SIGNUP_MAX_PER_WINDOW = 200;
 let signupWindow = { count: 0, resetAt: 0 };
+
+const RECOVERY_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+
+/** Human-readable support locator. The random value is not authentication;
+ * recovery still requires a fresh WorkOS ceremony plus a fresh staff ceremony.
+ * Excluding ambiguous glyphs keeps verbal handoff reliable. */
+function recoveryPublicCode(): string {
+  const bytes = randomBytes(8);
+  const chars = Array.from(
+    bytes,
+    (byte) => RECOVERY_CODE_ALPHABET[byte % RECOVERY_CODE_ALPHABET.length],
+  ).join("");
+  return `ZR-${chars.slice(0, 4)}-${chars.slice(4)}`;
+}
 
 function chargeSignupBudget(now: number): void {
   if (now >= signupWindow.resetAt) signupWindow = { count: 0, resetAt: now + SIGNUP_WINDOW_MS };
@@ -195,6 +333,208 @@ function chargeSignupBudget(now: number): void {
   }
 }
 
+type AccountAuthStatus =
+  | "active"
+  | "identity_disabled"
+  | "suspended"
+  | "deletion_pending"
+  | "deleted";
+
+type IdentityLifecycleStatus =
+  | "active"
+  | "provider_deleted"
+  | "superseded"
+  | "revoked";
+
+type PrincipalRow = {
+  id: string;
+  email: string;
+  display_name: string | null;
+  avatar_url: string | null;
+  staff_role: StaffRole | null;
+  auth_status: AccountAuthStatus;
+  auth_revision: string | number;
+  deleted_at: Date | null;
+  identity_status: IdentityLifecycleStatus;
+};
+
+function authenticationContext(
+  input: AuthenticatedIdentityInput,
+): AuthedUser["authentication"] {
+  return input.session
+    ? {
+        sessionId: input.session.id,
+        clientKind: input.session.clientKind,
+        authTime: input.session.authTime,
+        tokenExpiresAt: input.session.tokenExpiresAt,
+      }
+    : {
+        sessionId: null,
+        clientKind: "legacy",
+        authTime: null,
+        tokenExpiresAt: null,
+      };
+}
+
+function activePrincipal(
+  row: PrincipalRow,
+  input: AuthenticatedIdentityInput,
+): AuthedUser {
+  if (row.identity_status !== "active") {
+    throw new HttpError(
+      401,
+      row.identity_status === "superseded"
+        ? "identity_superseded"
+        : "account_deleted",
+      "This sign-in identity is no longer active.",
+    );
+  }
+  if (row.deleted_at || row.auth_status !== "active") {
+    throw new HttpError(
+      401,
+      row.auth_status === "suspended"
+        ? "account_suspended"
+        : "account_deleted",
+      row.auth_status === "suspended"
+        ? "This account is suspended."
+        : "This account is no longer active.",
+    );
+  }
+  return {
+    id: row.id,
+    identity: {
+      provider: input.provider,
+      subject: input.providerSubject,
+    },
+    email: row.email,
+    displayName: row.display_name,
+    avatarUrl: row.avatar_url,
+    staffRole: row.staff_role,
+    accountRevision: Number(row.auth_revision),
+    authentication: authenticationContext(input),
+  };
+}
+
+async function registerAuthenticatedSession(
+  tx: Tx,
+  user: AuthedUser,
+  input: AuthenticatedIdentityInput,
+): Promise<void> {
+  const session = input.provider === "workos" ? input.session : undefined;
+  if (!session) return;
+
+  let current = await tx.query<{
+    provider_sub: string;
+    user_id: string | null;
+    client_kind: AuthClientKind | "unknown";
+    status: "active" | "revoked" | "expired";
+  }>(
+    `SELECT provider_sub, user_id, client_kind, status
+     FROM auth_sessions
+     WHERE provider = 'workos' AND provider_session_id = $1
+     FOR UPDATE`,
+    [session.id],
+  );
+  if (!current.rows[0]) {
+    await tx.query(
+      `INSERT INTO auth_sessions (
+         provider, provider_session_id, provider_sub, user_id, client_kind,
+         last_token_expires_at
+       ) VALUES ('workos', $1, $2, $3, $4, to_timestamp($5))
+       ON CONFLICT (provider, provider_session_id) DO NOTHING`,
+      [
+        session.id,
+        input.providerSubject,
+        user.id,
+        session.clientKind,
+        session.tokenExpiresAt,
+      ],
+    );
+    current = await tx.query(
+      `SELECT provider_sub, user_id, client_kind, status
+       FROM auth_sessions
+       WHERE provider = 'workos' AND provider_session_id = $1
+       FOR UPDATE`,
+      [session.id],
+    );
+  }
+  const observed = current.rows[0];
+  if (!observed || observed.status !== "active") {
+    throw new HttpError(401, "session_revoked", "This session was revoked.");
+  }
+  if (
+    observed.provider_sub !== input.providerSubject ||
+    (observed.user_id !== null && observed.user_id !== user.id) ||
+    (observed.client_kind !== "unknown" &&
+      observed.client_kind !== session.clientKind)
+  ) {
+    throw new HttpError(
+      401,
+      "session_identity_mismatch",
+      "This session does not belong to the authenticated account.",
+    );
+  }
+  await tx.query(
+    `UPDATE auth_sessions
+     SET user_id = COALESCE(user_id, $2),
+         client_kind = CASE
+           WHEN client_kind = 'unknown' THEN $4::auth_client_kind
+           ELSE client_kind
+         END,
+         last_token_expires_at = GREATEST(
+           COALESCE(last_token_expires_at, '-infinity'::timestamptz),
+           to_timestamp($3)
+         ),
+         last_seen_at = CASE
+           WHEN last_seen_at < now() - interval '15 minutes' THEN now()
+           ELSE last_seen_at
+         END
+     WHERE provider = 'workos' AND provider_session_id = $1
+       AND status = 'active'`,
+    [session.id, user.id, session.tokenExpiresAt, session.clientKind],
+  );
+  // Browser credentials are independently opaque. Binding the provider sid to
+  // the stable account lets a global account event remove every browser shell
+  // without ever storing its bearer token.
+  await tx.query(
+    `UPDATE workos_browser_sessions
+     SET account_user_id = $2, account_revision = $3
+     WHERE kind = 'session' AND provider_session_id = $1
+       AND (account_user_id IS NULL OR account_user_id = $2)`,
+    [session.id, user.id, user.accountRevision],
+  );
+}
+
+/** Ordinary authentication is a read of the already-bound account. Only a
+ * never-seen identity enters the explicit bootstrap path. */
+export async function resolveAuthenticatedUser(
+  pool: pg.Pool,
+  input: AuthenticatedIdentityInput,
+): Promise<AuthedUser> {
+  const existing = await withSystemTx(pool, async (tx) => {
+    const result = await tx.query<PrincipalRow>(
+      `SELECT u.id, u.email, u.display_name, u.avatar_url, u.staff_role,
+              u.auth_status, u.auth_revision, u.deleted_at,
+              ui.status AS identity_status
+       FROM user_identities ui
+       JOIN users u ON u.id = ui.user_id
+       WHERE ui.provider = $1 AND ui.provider_sub = $2`,
+      [input.provider, input.providerSubject],
+    );
+    if (!result.rows[0]) return null;
+    const user = activePrincipal(result.rows[0], input);
+    await registerAuthenticatedSession(tx, user, input);
+    return user;
+  });
+  if (existing) return existing;
+
+  const created = await ensureUser(pool, input);
+  await withSystemTx(pool, (tx) =>
+    registerAuthenticatedSession(tx, created, input),
+  );
+  return created;
+}
+
 /**
  * JIT provisioning, idempotent under concurrency: identity link → user row →
  * permanent Personal organization → default team. Collaborative organizations
@@ -204,18 +544,19 @@ function chargeSignupBudget(now: number): void {
  */
 export async function ensureUser(
   pool: pg.Pool,
-  input: {
-    provider: string;
-    providerSub: string;
-    email: string;
-    displayName: string | null;
-    avatarUrl?: string | null;
-  },
+  input: AuthenticatedIdentityInput,
 ): Promise<AuthedUser> {
-  return withSystemTx(pool, async (tx) => {
-    let linked = await tx.query<{ user_id: string }>(
-      `SELECT user_id FROM user_identities WHERE provider = $1 AND provider_sub = $2`,
-      [input.provider, input.providerSub],
+  const result = await withSystemTx<
+    | { kind: "active"; user: AuthedUser }
+    | { kind: "recovery_required"; publicCode: string | null }
+  >(pool, async (tx) => {
+    let linked = await tx.query<{
+      user_id: string;
+      status: IdentityLifecycleStatus;
+    }>(
+      `SELECT user_id, status FROM user_identities
+       WHERE provider = $1 AND provider_sub = $2`,
+      [input.provider, input.providerSubject],
     );
     if (!linked.rows[0]) {
       // Serialize only the first-request path for one provider identity, then
@@ -226,13 +567,16 @@ export async function ensureUser(
       await tx.query(
         `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`,
         [
-          `identity:${input.provider.length}:${input.provider}:${input.providerSub}`,
+          `identity:${input.provider.length}:${input.provider}:${input.providerSubject}`,
         ],
       );
-      linked = await tx.query<{ user_id: string }>(
-        `SELECT user_id FROM user_identities
+      linked = await tx.query<{
+        user_id: string;
+        status: IdentityLifecycleStatus;
+      }>(
+        `SELECT user_id, status FROM user_identities
          WHERE provider = $1 AND provider_sub = $2`,
-        [input.provider, input.providerSub],
+        [input.provider, input.providerSubject],
       );
     }
 
@@ -242,8 +586,19 @@ export async function ensureUser(
       display_name: string | null;
       avatar_url: string | null;
       staff_role: StaffRole | null;
+      auth_status: AccountAuthStatus;
+      auth_revision: string | number;
     };
     if (linked.rows[0]) {
+      if (linked.rows[0].status !== "active") {
+        throw new HttpError(
+          401,
+          linked.rows[0].status === "superseded"
+            ? "identity_superseded"
+            : "account_deleted",
+          "This sign-in identity is no longer active.",
+        );
+      }
       // Mirror the IdP's email — UNLESS another user already owns it, in which
       // case the UPDATE would trip the users.email unique constraint and abort
       // the tx as a 500 on every request (locking this user out entirely). An
@@ -258,8 +613,9 @@ export async function ensureUser(
            END,
            display_name = COALESCE(display_name, $3),
            avatar_url = COALESCE($4, avatar_url)
-         WHERE id = $1
-         RETURNING id, email, display_name, avatar_url, staff_role`,
+         WHERE id = $1 AND deleted_at IS NULL AND auth_status = 'active'
+         RETURNING id, email, display_name, avatar_url, staff_role,
+                   auth_status, auth_revision`,
         [
           linked.rows[0].user_id,
           input.email,
@@ -267,7 +623,22 @@ export async function ensureUser(
           input.avatarUrl ?? null,
         ],
       );
-      row = updated.rows[0]!;
+      if (!updated.rows[0]) {
+        const state = await tx.query<{ auth_status: AccountAuthStatus }>(
+          `SELECT auth_status FROM users WHERE id = $1`,
+          [linked.rows[0].user_id],
+        );
+        throw new HttpError(
+          401,
+          state.rows[0]?.auth_status === "suspended"
+            ? "account_suspended"
+            : "account_deleted",
+          state.rows[0]?.auth_status === "suspended"
+            ? "This account is suspended."
+            : "This account is no longer active.",
+        );
+      }
+      row = updated.rows[0];
       if (row.email !== input.email) {
         console.warn(
           `[auth] token email for user ${row.id} conflicts with another account — keeping stored email`,
@@ -275,7 +646,7 @@ export async function ensureUser(
       }
     } else {
       // A brand-new identity → a real signup. Charge the global signup budget
-      // BEFORE creating anything, so a flood of fresh Auth0 subs can't mass-
+      // BEFORE creating anything, so a flood of fresh provider subs can't mass-
       // provision rows. Throws 429 past the window cap.
       chargeSignupBudget(Date.now());
       // Different provider identities can race with the same case-insensitive
@@ -293,11 +664,79 @@ export async function ensureUser(
       // users.email UNIQUE constraint, which aborts the whole tx as an opaque
       // 500 on EVERY future request with that provider (a permanent lockout).
       // Fail with a deliberate, actionable 409 instead.
-      const emailOwner = await tx.query<{ id: string }>(
-        `SELECT id FROM users WHERE email = $1`,
+      const emailOwner = await tx.query<{
+        id: string;
+        auth_status: AccountAuthStatus;
+        recovery_identity_id: string | null;
+      }>(
+        `SELECT u.id, u.auth_status, recovery_identity.id AS recovery_identity_id
+         FROM users u
+         LEFT JOIN LATERAL (
+           SELECT ui.id
+           FROM user_identities ui
+           WHERE ui.user_id = u.id AND ui.provider = 'workos'
+             AND ui.status = 'provider_deleted'
+           ORDER BY ui.disabled_at DESC NULLS LAST, ui.created_at DESC
+           LIMIT 1
+         ) recovery_identity ON true
+         WHERE u.email = $1`,
         [input.email],
       );
       if (emailOwner.rows[0]) {
+        const owner = emailOwner.rows[0];
+        if (
+          input.provider === "workos" &&
+          owner.auth_status === "identity_disabled" &&
+          owner.recovery_identity_id
+        ) {
+          if (!input.session) {
+            return { kind: "recovery_required", publicCode: null };
+          }
+          const nowSeconds = Date.now() / 1_000;
+          if (
+            input.session.authTime === null ||
+            input.session.authTime > nowSeconds + 60 ||
+            nowSeconds - input.session.authTime > 10 * 60
+          ) {
+            throw new HttpError(
+              401,
+              "reauthentication_required",
+              "Sign in again to start account recovery.",
+            );
+          }
+          const publicCode = recoveryPublicCode();
+          const recovery = await tx.query<{ public_code: string }>(
+            `INSERT INTO account_recovery_requests (
+               public_code, candidate_provider_sub, candidate_session_id,
+               candidate_email, candidate_auth_time, target_user_id,
+               target_identity_id
+             ) VALUES ($1, $2, $3, $4, to_timestamp($5), $6, $7)
+             ON CONFLICT (candidate_provider_sub) WHERE state = 'pending'
+             DO UPDATE SET
+               candidate_session_id = EXCLUDED.candidate_session_id,
+               candidate_email = EXCLUDED.candidate_email,
+               candidate_auth_time = EXCLUDED.candidate_auth_time,
+               target_user_id = EXCLUDED.target_user_id,
+               target_identity_id = EXCLUDED.target_identity_id,
+               attempt_count = account_recovery_requests.attempt_count + 1,
+               requested_at = now(),
+               expires_at = now() + interval '24 hours'
+             RETURNING public_code`,
+            [
+              publicCode,
+              input.providerSubject,
+              input.session.id,
+              input.email,
+              input.session.authTime,
+              owner.id,
+              owner.recovery_identity_id,
+            ],
+          );
+          return {
+            kind: "recovery_required",
+            publicCode: recovery.rows[0]!.public_code,
+          };
+        }
         throw new HttpError(
           409,
           "account_exists",
@@ -307,29 +746,58 @@ export async function ensureUser(
       const inserted = await tx.query<typeof row>(
         `INSERT INTO users (email, display_name, avatar_url)
          VALUES ($1, $2, $3)
-         RETURNING id, email, display_name, avatar_url, staff_role`,
+         RETURNING id, email, display_name, avatar_url, staff_role,
+                   auth_status, auth_revision`,
         [input.email, input.displayName, input.avatarUrl ?? null],
       );
       row = inserted.rows[0]!;
       await tx.query(
-        `INSERT INTO user_identities (user_id, provider, provider_sub)
-         VALUES ($1, $2, $3)
+        `INSERT INTO user_identities (
+           user_id, provider, provider_sub, email_at_link,
+           email_verified_at, linked_via
+         ) VALUES ($1, $2, $3, $4, now(), 'jit')
          ON CONFLICT (provider, provider_sub) DO NOTHING`,
-        [row.id, input.provider, input.providerSub],
+        [row.id, input.provider, input.providerSubject, input.email],
       );
+      if (input.provider === "workos") {
+        await materializeProjectedMemberships(
+          tx,
+          row.id,
+          input.providerSubject,
+        );
+      }
     }
 
     await ensurePersonalOrganization(tx, row);
 
     return {
-      id: row.id,
-      providerSub: input.providerSub,
-      email: row.email,
-      displayName: row.display_name,
-      avatarUrl: row.avatar_url,
-      staffRole: row.staff_role,
+      kind: "active",
+      user: {
+        id: row.id,
+        identity: {
+          provider: input.provider,
+          subject: input.providerSubject,
+        },
+        email: row.email,
+        displayName: row.display_name,
+        avatarUrl: row.avatar_url,
+        staffRole: row.staff_role,
+        accountRevision: Number(row.auth_revision),
+        authentication: authenticationContext(input),
+      },
     };
   });
+  if (result.kind === "recovery_required") {
+    throw new HttpError(
+      409,
+      "account_recovery_required",
+      "This verified identity needs reviewed account recovery before it can access Zeros.",
+      result.publicCode
+        ? { recoveryCode: result.publicCode, expiresInSeconds: 24 * 60 * 60 }
+        : undefined,
+    );
+  }
+  return result.user;
 }
 
 /**

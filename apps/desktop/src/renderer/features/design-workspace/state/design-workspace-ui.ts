@@ -8,21 +8,32 @@
 
 import { DESIGN_SELECTION_NODE_LIMIT } from "@zeros/protocol/design-runtime";
 import { create } from "zustand";
+import { normalizeDesignCanvasBackground } from "../design-canvas-background";
 
 const STORAGE_KEY = "zeros:design-workspace-ui-v1";
 const MAX_WORKSPACES = 32;
 const PERSIST_DEBOUNCE_MS = 150;
+export const DESIGN_MIN_ZOOM = 0.01;
+export const DESIGN_MAX_ZOOM = 256;
 
 export type DesignBottomPanel = "layers" | "assets";
 
 export interface DesignWorkspaceViewState {
   selectedFrame: string | null;
+  /** True only when the frame itself is the selection target (label, Layers
+   * row, or Escape from a root child). An active frame whose tree is merely
+   * shown in the panel keeps this false, so empty-canvas clicks read as
+   * deselection instead of re-selecting the frame. */
+  frameSelected: boolean;
   selectedNodeId: string | null;
   /** Primary-first stable identities for additive canvas/layer selection. */
   selectedNodeIds: string[];
   panel: DesignBottomPanel;
   codeView: boolean;
   activeTheme: string | null;
+  /** Null follows the active theme's --bg2; a concrete color is an explicit
+   * workspace-owned override, including its alpha channel. */
+  canvasBackground: string | null;
   zoom: number;
   panX: number;
   panY: number;
@@ -32,11 +43,13 @@ export interface DesignWorkspaceViewState {
 export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
   Object.freeze({
     selectedFrame: null,
+    frameSelected: false,
     selectedNodeId: null,
     selectedNodeIds: [],
     panel: "layers",
     codeView: false,
     activeTheme: null,
+    canvasBackground: null,
     zoom: 0.25,
     panX: 64,
     panY: 64,
@@ -45,7 +58,7 @@ export const DEFAULT_DESIGN_WORKSPACE_VIEW: Readonly<DesignWorkspaceViewState> =
 
 export function clampDesignZoom(value: number): number {
   if (!Number.isFinite(value)) return DEFAULT_DESIGN_WORKSPACE_VIEW.zoom;
-  return Math.min(2, Math.max(0.05, value));
+  return Math.min(DESIGN_MAX_ZOOM, Math.max(DESIGN_MIN_ZOOM, value));
 }
 
 export function isValidDesignNodeId(value: unknown): value is string {
@@ -92,6 +105,12 @@ export function normalizeDesignWorkspaceView(
     : [];
   return {
     selectedFrame,
+    // A remembered node selection owns the selection; the frame flag only
+    // survives when the frame itself was the target.
+    frameSelected:
+      record.frameSelected === true &&
+      selectedFrame !== null &&
+      selectedNodeId === null,
     selectedNodeId,
     selectedNodeIds,
     panel: record.panel === "assets" ? "assets" : "layers",
@@ -101,6 +120,7 @@ export function normalizeDesignWorkspaceView(
       /^[a-z][a-z0-9_-]{0,63}$/.test(record.activeTheme)
         ? record.activeTheme
         : null,
+    canvasBackground: normalizeDesignCanvasBackground(record.canvasBackground),
     zoom: clampDesignZoom(
       typeof record.zoom === "number"
         ? record.zoom
@@ -207,10 +227,12 @@ interface DesignWorkspaceUiStore {
     frame: string,
     nodeId: string | null,
     nodeIds?: readonly string[],
+    options?: { frameSelected?: boolean },
   ): void;
   setPanel(workspaceId: string, panel: DesignBottomPanel): void;
   setCodeView(workspaceId: string, codeView: boolean): void;
   setActiveTheme(workspaceId: string, activeTheme: string | null): void;
+  setCanvasBackground(workspaceId: string, canvasBackground: string): void;
   setViewport(
     workspaceId: string,
     viewport: Pick<DesignWorkspaceViewState, "zoom" | "panX" | "panY">,
@@ -244,6 +266,10 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           selectedFrame,
+          frameSelected:
+            state.byWorkspace[workspaceId]?.selectedFrame === selectedFrame
+              ? state.byWorkspace[workspaceId]?.frameSelected
+              : false,
           selectedNodeId:
             state.byWorkspace[workspaceId]?.selectedFrame === selectedFrame
               ? state.byWorkspace[workspaceId]?.selectedNodeId
@@ -259,10 +285,19 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       }));
     },
 
-    setSelection(workspaceId, selectedFrame, selectedNodeId, selectedNodeIds) {
+    setSelection(
+      workspaceId,
+      selectedFrame,
+      selectedNodeId,
+      selectedNodeIds,
+      options,
+    ) {
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           selectedFrame,
+          frameSelected: selectedNodeId
+            ? false
+            : (options?.frameSelected ?? false),
           selectedNodeId,
           selectedNodeIds: selectedNodeId
             ? [selectedNodeId, ...(selectedNodeIds ?? [])]
@@ -291,6 +326,16 @@ export const useDesignWorkspaceUiStore = create<DesignWorkspaceUiStore>(
       set((state) => ({
         byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
           activeTheme,
+        }),
+      }));
+    },
+
+    setCanvasBackground(workspaceId, canvasBackground) {
+      const normalized = normalizeDesignCanvasBackground(canvasBackground);
+      if (!normalized) return;
+      set((state) => ({
+        byWorkspace: updateWorkspaceView(state.byWorkspace, workspaceId, {
+          canvasBackground: normalized,
         }),
       }));
     },

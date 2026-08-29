@@ -1,6 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { flushPendingSidebarResize } from "../use-sidebar-drag";
+import {
+  flushPendingSidebarResize,
+  sidebarWidthFromPointer,
+} from "../use-sidebar-drag";
+
+describe("sidebarWidthFromPointer", () => {
+  it("measures a left sidebar from the container's left edge", () => {
+    expect(sidebarWidthFromPointer(340, 100, 800, "left")).toBe(240);
+  });
+
+  it("measures a right sidebar from the container's right edge", () => {
+    expect(sidebarWidthFromPointer(660, 100, 800, "right")).toBe(240);
+  });
+});
 
 describe("flushPendingSidebarResize", () => {
   it("cancels and applies a frame that is still queued at pointerup", () => {

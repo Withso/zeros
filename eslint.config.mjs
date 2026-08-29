@@ -17,7 +17,33 @@ import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import reactHooks from "eslint-plugin-react-hooks";
 
+const nodeGlobals = {
+  process: "readonly",
+  Buffer: "readonly",
+  console: "readonly",
+  setTimeout: "readonly",
+  clearTimeout: "readonly",
+  setInterval: "readonly",
+  clearInterval: "readonly",
+  queueMicrotask: "readonly",
+  URL: "readonly",
+  URLSearchParams: "readonly",
+  Headers: "readonly",
+  AbortController: "readonly",
+  fetch: "readonly",
+};
+
 export default [
+  {
+    // Standalone ESM runtime helpers are executed directly by Node rather
+    // than bundled. ESLint's base JavaScript preset does not infer Node's
+    // globals from the .mjs extension.
+    files: ["**/*.mjs"],
+    languageOptions: {
+      sourceType: "module",
+      globals: nodeGlobals,
+    },
+  },
   {
     ignores: [
       "dist/**",
@@ -105,19 +131,13 @@ export default [
     languageOptions: {
       sourceType: "commonjs",
       globals: {
+        ...nodeGlobals,
         process: "readonly",
         require: "readonly",
         module: "writable",
         exports: "writable",
         __dirname: "readonly",
         __filename: "readonly",
-        Buffer: "readonly",
-        console: "readonly",
-        setTimeout: "readonly",
-        clearTimeout: "readonly",
-        setInterval: "readonly",
-        clearInterval: "readonly",
-        queueMicrotask: "readonly",
         global: "readonly",
       },
     },

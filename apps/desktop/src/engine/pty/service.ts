@@ -32,9 +32,13 @@ import {
   PTY_AGENT_AUTH_CWD,
   type PtyExitReason,
 } from "@zeros/protocol/messages";
+import type { CloudWorkerIdentity } from "../agents/containment/types";
 
 export interface PtyHandle {
   readonly pid: number;
+  /** Fires once when the host reports the real PTY process id. The handle is
+   * returned before that asynchronous protocol frame can arrive. */
+  onSpawned(cb: (pid: number) => void): void;
   onData(cb: (data: string) => void): void;
   onExit(
     cb: (
@@ -71,7 +75,30 @@ export interface PtySpawnRequest {
    *  fine for a user-authored run action, NOT for the repo-resident setup
    *  script, whose whole point is a narrow allowlist. See buildOneShotArgs. */
   interactive?: boolean;
+  /** Synchronous, already-prepared process-root wrapper. The PTY host spawns
+   * the returned supervisor command directly, so no repository-controlled
+   * shell or rc file runs at engine authority before containment. */
+  wrapSpawn?: PtySpawnWrapper;
+  /** Observe the actual wrapper pid so an execution boundary can own and
+   * prove retirement of the PTY process group. */
+  onSpawned?: (pid: number) => void;
+  /** Dedicated non-root identity for an explicitly human-controlled cloud
+   * terminal. Wrapped repo/agent tasks retain the coordinator identity only
+   * for the trusted ZSR supervisor, which performs its own mandatory drop. */
+  cloudWorkerIdentity?: CloudWorkerIdentity;
+  /** Root-controlled util-linux helper paired with cloudWorkerIdentity. */
+  cloudWorkerSetprivPath?: string;
 }
+
+export interface PtyLaunchRequest {
+  command: string;
+  args: readonly string[];
+  cwd: string;
+  env: Readonly<Record<string, string>>;
+  stdio: "inherit";
+}
+
+export type PtySpawnWrapper = (request: PtyLaunchRequest) => PtyLaunchRequest;
 export type PtySpawnFn = (req: PtySpawnRequest) => PtyHandle;
 
 export interface PtyCreateOptions {
@@ -91,6 +118,11 @@ export interface PtyCreateOptions {
   env?: Record<string, string>;
   /** Interactive one-shot shell (see PtySpawnRequest.interactive). */
   interactive?: boolean;
+  /** Prepared ZSR wrapper for repository-controlled commands. */
+  wrapSpawn?: PtySpawnWrapper;
+  /** Observe the actual wrapper pid reported by the asynchronous PTY host so
+   * an execution boundary can adopt and retire the complete process group. */
+  onSpawned?: (pid: number, leaderExited: () => boolean) => void;
 }
 export interface PtyInfo {
   sessionId: string;
@@ -121,6 +153,12 @@ export interface PtyMirror {
   dispose(): void;
 }
 export type PtyMirrorFactory = (cols: number, rows: number) => PtyMirror;
+
+export interface PtyServiceOptions {
+  /** Attested non-root identity allowed to traverse the repository-free CLI
+   * authentication cwd. Omitted on a desktop/relay engine. */
+  agentAuthIdentity?: CloudWorkerIdentity;
+}
 
 interface Session {
   proc: PtyHandle;
@@ -165,6 +203,7 @@ export class PtyService {
     /** Optional scrollback-mirror factory. Prod wires the real TerminalMirror;
      *  tests omit it (sessions then have no mirror and snapshot() is empty). */
     private readonly mirrorFactory?: PtyMirrorFactory,
+    private readonly options: PtyServiceOptions = {},
   ) {}
 
   onData(cb: (sessionId: string, data: string) => void): void {
@@ -254,7 +293,37 @@ export class PtyService {
       const authCwd = path.join(zerosStateRoot(), "agent-auth");
       try {
         fs.mkdirSync(authCwd, { recursive: true, mode: 0o700 });
-        fs.chmodSync(authCwd, 0o700);
+        const stat = fs.lstatSync(authCwd);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) {
+          throw new Error("agent sign-in path is not a physical directory");
+        }
+        const identity = this.options.agentAuthIdentity;
+        if (identity) {
+          const ownerUid = process.geteuid?.();
+          const ownerGid = process.getegid?.();
+          if (
+            process.platform !== "linux" ||
+            ownerUid === undefined ||
+            ownerGid === undefined ||
+            !Number.isSafeInteger(identity.uid) ||
+            identity.uid <= 0 ||
+            !Number.isSafeInteger(identity.gid) ||
+            identity.gid <= 0 ||
+            (ownerUid !== 0 &&
+              (identity.uid !== ownerUid ||
+                (identity.gid !== ownerGid &&
+                  !(process.getgroups?.() ?? []).includes(identity.gid))))
+          ) {
+            throw new Error("agent sign-in identity is invalid");
+          }
+          // Root keeps ownership; the image's dedicated worker group receives
+          // read/traverse only. The CLI persists credentials under its worker
+          // HOME, not in this repository-free cwd.
+          fs.chownSync(authCwd, ownerUid, identity.gid);
+          fs.chmodSync(authCwd, 0o750);
+        } else {
+          fs.chmodSync(authCwd, 0o700);
+        }
         return fs.realpathSync(authCwd);
       } catch {
         // Failing closed is safer than silently returning the engine/project
@@ -341,10 +410,16 @@ export class PtyService {
       command: opts.command,
       env: opts.env,
       interactive: opts.interactive === true,
+      wrapSpawn: opts.wrapSpawn,
     });
     const mirror = this.mirrorFactory?.(cols, rows);
     const session: Session = { proc, cwd, cols, rows, mirror };
     this.sessions.set(opts.sessionId, session);
+
+    let leaderExited = false;
+    if (opts.onSpawned) {
+      proc.onSpawned((pid) => opts.onSpawned?.(pid, () => leaderExited));
+    }
 
     proc.onData((data) => {
       // Feed the mirror the EXACT bytes clients get so its resolved grid stays
@@ -353,6 +428,7 @@ export class PtyService {
       this.onDataCb?.(opts.sessionId, data);
     });
     proc.onExit((exitCode, signal, reason) => {
+      leaderExited = true;
       session.mirror?.dispose();
       this.sessions.delete(opts.sessionId);
       const waiters = this.exitWaiters.get(opts.sessionId);

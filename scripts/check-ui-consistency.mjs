@@ -240,8 +240,6 @@ const BG3_SURFACE_FILES = new Set([
   "apps/desktop/src/renderer/features/agent/project-context-chip.tsx",
   // Element-picker floating chip panel (browser tab's in-canvas popover).
   "apps/desktop/src/renderer/shell/workbench/tabs/browser-tab.tsx",
-  // Collapsed File tab's floating tree panel.
-  "apps/desktop/src/renderer/shell/workbench/tabs/files-tree-panel.tsx",
   // PopoverContent panels with internal menu-item hovers (Compact-now /
   // Copy-breakdown buttons rest transparent on the bg3 surface, hover bg3-hover).
   "apps/desktop/src/renderer/features/agent/context-gauge.tsx",
