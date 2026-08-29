@@ -53,17 +53,32 @@ describe("marketing homepage layout", () => {
     expect(hero).not.toMatch(/Design and code/);
   });
 
-  it("cycles builders, developers, and designers with synced tool motion", () => {
+  it("cycles builders, developers, and designers with scramble text", () => {
     const cycle = readFileSync(HERO_CYCLE, "utf8");
     const css = readFileSync(HERO_CYCLE_CSS, "utf8");
+    const scramble = readFileSync(
+      join(ROOT, "apps/marketing/src/components/scramble-text.ts"),
+      "utf8",
+    );
     expect(cycle).toMatch(/'builders', 'developers', 'designers'/);
-    expect(cycle).toMatch(/'smash', 'type', 'paint'/);
+    expect(cycle).toMatch(/playScramble/);
     expect(cycle).toMatch(/prefers-reduced-motion/);
-    expect(cycle).not.toMatch(/playBuildersExit/);
-    expect(cycle).not.toMatch(/hero-letter-chip/);
-    expect(css).toMatch(/hero-laptop/);
-    expect(css).toMatch(/hero-brush/);
+    expect(cycle).not.toMatch(/HammerMark/);
+    expect(cycle).not.toMatch(/LaptopMark/);
+    expect(cycle).not.toMatch(/BrushMark/);
+    expect(cycle).not.toMatch(/'smash', 'type', 'paint'/);
+    expect(css).not.toMatch(/hero-laptop/);
+    expect(css).not.toMatch(/hero-brush/);
     expect(css).toMatch(/prefers-reduced-motion: reduce/);
+    expect(scramble).toMatch(/CODE_SCRAMBLE/);
+    expect(scramble).toMatch(/DESIGN_SCRAMBLE/);
+    expect(scramble).toMatch(/MATRIX_SCRAMBLE/);
+    expect(scramble).toMatch(/align/);
+    expect(scramble).toMatch(/frame/);
+    expect(scramble).toMatch(/components/);
+    expect(scramble).toMatch(/const/);
+    expect(scramble).toMatch(/DESIGN_ICONS/);
+    expect(scramble).toMatch(/CODE_ICONS/);
   });
 
   it("drops the hero download CTA and Dev/Design toggle", () => {

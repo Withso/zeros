@@ -1,8 +1,6 @@
-/* Hero role cycle: smash / type / paint. Durations stay in sync with
-   HOLD_MS / ACT_MS in HeroRoleCycle.tsx. */
+/* Hero role cycle: scramble decode. HOLD_MS / SCRAMBLE_MS live in TS. */
 
 .hero-role {
-  --hero-act: 1.15s;
   position: relative;
   display: inline-grid;
   justify-items: start;
@@ -11,8 +9,7 @@
 }
 
 .hero-role-sizer,
-.hero-role-word,
-.hero-role-tools {
+.hero-role-word {
   grid-area: 1 / 1;
 }
 
@@ -23,299 +20,33 @@
   white-space: nowrap;
 }
 
-.hero-role-tools {
-  position: relative;
-  z-index: 3;
-  justify-self: stretch;
-  align-self: stretch;
-  width: 100%;
-  height: 100%;
-  pointer-events: none;
-}
-
 .hero-role-word {
-  display: inline-flex;
   white-space: nowrap;
 }
 
-.hero-role-word.is-out {
-  z-index: 1;
+.hero-role-word.is-scrambling {
+  color: var(--fg2);
 }
 
-.hero-role-word.is-in {
-  z-index: 2;
-}
-
-.hero-role-letter {
-  display: inline-block;
-  transform-origin: 50% 80%;
-}
-
-.hero-role-tool {
-  position: absolute;
-  z-index: 1;
-  pointer-events: none;
+.hero-role-revealed {
   color: var(--fg1);
-  opacity: 0;
-  filter: drop-shadow(
-    0 0 8px color-mix(in srgb, var(--violet-primary) 70%, transparent)
-  );
 }
 
-.hero-role-svg {
-  display: block;
-  overflow: visible;
+.hero-scramble-icon {
+  display: inline-block;
+  width: 0.62em;
+  height: 0.62em;
+  margin: 0 0.04em;
+  vertical-align: -0.08em;
 }
 
-.hero-role-glow {
-  fill: color-mix(in srgb, var(--violet-primary) 80%, var(--blue-primary));
-  opacity: 0.7;
-  filter: blur(4px);
-}
-
-.hero-role-glass {
-  fill: color-mix(in srgb, var(--fg1) 42%, transparent);
-  stroke: var(--fg1);
-}
-
-.hero-role-spark {
-  position: absolute;
-  width: 3px;
-  height: 3px;
-  border-radius: 999px;
-  background: var(--fg1);
-  box-shadow: 0 0 8px color-mix(in srgb, var(--violet-primary) 80%, transparent);
-  opacity: 0;
-}
-
-/* ── idle ── */
-
-.hero-role[data-phase='idle'] .hero-role-tool,
-.hero-role[data-phase='idle'] .hero-role-spark {
-  opacity: 0;
-}
-
-/* ── smash: quiet swap until builders has a strengthen story ── */
-
-.hero-role-tool[data-kind='hammer'] {
-  top: -0.5em;
-  right: -0.12em;
-  width: 0.78em;
-  height: 0.78em;
-  transform-origin: 32% 86%;
-}
-
-.hero-role[data-act='smash'] .is-out {
-  animation: hero-swap-out 0.35s ease both;
-}
-
-.hero-role[data-act='smash'] .is-in {
-  animation: hero-swap-in 0.4s ease 0.08s both;
-}
-
-@keyframes hero-swap-out {
-  to {
-    opacity: 0;
-  }
-}
-
-@keyframes hero-swap-in {
-  from {
-    opacity: 0;
-  }
-}
-
-/* ── type: laptop + tapping ── */
-
-.hero-role-tool[data-kind='laptop'] {
-  right: -0.92em;
-  bottom: 0.02em;
-  width: 0.82em;
-  height: 0.64em;
-}
-
-.hero-role[data-act='type'] .hero-role-tool[data-kind='laptop'] {
-  animation: hero-laptop var(--hero-act) ease both;
-}
-
-.hero-role[data-act='type'] .hero-key {
-  transform-origin: 50% 100%;
-  animation: hero-key 0.18s ease-in-out infinite;
-}
-
-.hero-role[data-act='type'] .hero-finger {
-  animation: hero-finger 0.18s ease-in-out infinite;
-}
-
-.hero-role[data-act='type'] .is-out .hero-role-letter {
-  animation: hero-type-out 0.28s ease both;
-  animation-delay: calc((var(--n) - var(--i)) * 32ms);
-}
-
-.hero-role[data-act='type'] .is-in .hero-role-letter {
-  animation: hero-type-in 0.28s ease both;
-  animation-delay: calc(0.42s + var(--i) * 36ms);
-}
-
-@keyframes hero-laptop {
-  0% {
-    opacity: 0;
-    transform: translate(0.12em, 0.08em) scale(0.86);
-  }
-  12% {
-    opacity: 1;
-    transform: none;
-  }
-  20%,
-  36%,
-  52%,
-  68% {
-    transform: translateY(0.035em);
-  }
-  28%,
-  44%,
-  60%,
-  84% {
-    transform: none;
-  }
-  100% {
-    opacity: 0;
-    transform: translate(0.1em, 0.06em);
-  }
-}
-
-@keyframes hero-key {
-  50% {
-    transform: scaleY(0.55);
-    opacity: 0.45;
-  }
-}
-
-@keyframes hero-finger {
-  50% {
-    transform: translateY(1.6px);
-  }
-}
-
-@keyframes hero-type-out {
-  to {
-    opacity: 0;
-    transform: translateY(0.12em) scale(0.7);
-  }
-}
-
-@keyframes hero-type-in {
-  from {
-    opacity: 0;
-    transform: translateY(0.18em);
-  }
-}
-
-/* ── paint: brush draws the next word ── */
-
-.hero-role-tool[data-kind='brush'] {
-  top: -0.08em;
-  left: 0;
-  width: 0.68em;
-  height: 0.68em;
-}
-
-.hero-role-trail {
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0.02em;
-  height: 0.38em;
-  width: 100%;
-  overflow: visible;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.hero-role[data-act='paint'] .hero-role-tool[data-kind='brush'] {
-  animation: hero-brush var(--hero-act) cubic-bezier(0.4, 0.1, 0.2, 1) both;
-}
-
-.hero-role[data-act='paint'] .hero-role-trail {
-  opacity: 1;
-}
-
-.hero-role[data-act='paint'] .hero-stroke {
-  stroke-dasharray: 160;
-  stroke-dashoffset: 160;
-  animation: hero-stroke 0.7s ease 0.12s both;
-}
-
-.hero-role[data-act='paint'] .is-out {
-  animation: hero-paint-out 0.7s ease 0.08s both;
-}
-
-.hero-role[data-act='paint'] .is-in {
-  clip-path: inset(0 100% 0 0);
-  animation: hero-paint-in 0.72s cubic-bezier(0.4, 0.1, 0.2, 1) 0.18s both;
-}
-
-@keyframes hero-brush {
-  0% {
-    opacity: 0;
-    left: -0.2em;
-    transform: rotate(-18deg);
-  }
-  14% {
-    opacity: 1;
-    left: 0;
-  }
-  78% {
-    opacity: 1;
-    left: calc(100% - 0.15em);
-    transform: rotate(12deg);
-  }
-  100% {
-    opacity: 0;
-    left: 100%;
-    transform: rotate(16deg);
-  }
-}
-
-@keyframes hero-stroke {
-  to {
-    stroke-dashoffset: 0;
-  }
-}
-
-@keyframes hero-paint-out {
-  to {
-    opacity: 0;
-    filter: blur(2px);
-  }
-}
-
-@keyframes hero-paint-in {
-  from {
-    clip-path: inset(0 100% 0 0);
-  }
-  to {
-    clip-path: inset(0 0 0 0);
-  }
+.hero-role-word.is-scrambling.scramble-builders,
+.hero-role-word.is-scrambling.scramble-designers {
+  font-variant-numeric: tabular-nums;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .hero-role-tool,
-  .hero-role-spark,
-  .hero-role-trail,
-  .hero-role-tools {
-    display: none;
-  }
-
-  .hero-role-word,
-  .hero-role-letter,
-  .hero-role-stroke,
-  .hero-role .is-in,
-  .hero-role .is-out {
-    animation: none !important;
-    clip-path: none !important;
-    filter: none !important;
-    opacity: 1 !important;
-    transform: none !important;
+  .hero-role-word {
+    color: inherit !important;
   }
 }
