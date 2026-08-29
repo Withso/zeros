@@ -103,11 +103,13 @@ const FEATURED_TOKENS = new Set([
   'git',
 ])
 
-function pickToken(tokens: string[], length: number): string | null {
+export function pickScrambleToken(tokens: string[], length: number): string | null {
   const usable = tokens.filter((token) => token.length <= length)
   if (usable.length === 0) return null
   const featured = usable.filter((token) => FEATURED_TOKENS.has(token))
-  return pick(featured.length > 0 ? featured : usable)
+  const pool = featured.length > 0 ? featured : usable
+  const longest = Math.max(...pool.map((token) => token.length))
+  return pick(pool.filter((token) => token.length === longest))
 }
 
 /** HTML tail: icon glyphs mixed with chars/tokens. Each slot is one unit. */
@@ -122,12 +124,12 @@ export function scrambleTail(
 ): string {
   if (length <= 0) return ''
   const slots: string[] = Array.from({ length }, () => {
-    if (set.icons.length > 0 && Math.random() < 0.32) return pick(set.icons)
+    if (set.icons.length > 0 && Math.random() < 0.48) return pick(set.icons)
     return escapeHtml(pickChar(set.chars))
   })
   if (allowTokens) {
     const chosen =
-      token && token.length <= length ? token : pickToken(set.tokens, length)
+      token && token.length <= length ? token : pickScrambleToken(set.tokens, length)
     if (chosen) {
       const maxStart = length - chosen.length
       const start =
@@ -152,8 +154,8 @@ export function playScramble(
     text,
     set,
     duration = SCRAMBLE_MS / 1000,
-    revealDelay = 0.52,
-    speed = 0.55,
+    revealDelay = 0.72,
+    speed = 0.5,
   }: {
     text: string
     set: ScrambleSet
@@ -169,7 +171,7 @@ export function playScramble(
   let lastRefresh = -Infinity
   let lastRevealed = -1
   let tail = ''
-  const lockedToken = pickToken(set.tokens, Math.max(startLen, endLen))
+  const lockedToken = pickScrambleToken(set.tokens, Math.max(startLen, endLen))
   const tokenStart = lockedToken
     ? Math.max(0, Math.floor((Math.max(startLen, endLen) - lockedToken.length) / 2))
     : 0

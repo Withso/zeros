@@ -4,6 +4,7 @@ import {
   DESIGN_SCRAMBLE,
   escapeHtml,
   MATRIX_SCRAMBLE,
+  pickScrambleToken,
   scrambleFill,
   scrambleTail,
 } from "../../components/scramble-text";
@@ -38,5 +39,16 @@ describe("hero scramble fill", () => {
     expect(samples.some((html) => html.includes("hero-scramble-icon"))).toBe(true);
     const joined = samples.join("");
     expect(joined).toMatch(/align|frame|design|components|auto|layer|stack|grid|layout/);
+  });
+
+  it("locks the longest featured design word that fits", () => {
+    expect(pickScrambleToken(DESIGN_SCRAMBLE.tokens, 11)).toBe("components");
+    expect(pickScrambleToken(DESIGN_SCRAMBLE.tokens, 6)).toBe("design");
+    const html = scrambleTail(11, DESIGN_SCRAMBLE, {
+      token: "components",
+      tokenStart: 0,
+    });
+    const visible = html.replace(/<svg[\s\S]*?<\/svg>/g, "");
+    expect(visible).toContain("components");
   });
 });
