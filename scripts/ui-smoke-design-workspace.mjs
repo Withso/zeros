@@ -3982,7 +3982,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   );
   check(
     "cancelling intrinsic-width text restores its exact authored line",
-    (await runtimeAction.textContent()) === actionTextBeforeEdit,
+    await waitFor(
+      async () =>
+        (await runtimeAction.textContent()) === actionTextBeforeEdit,
+      "design-inline-text-intrinsic-cancel-restored",
+    ),
   );
 
   await page.getByRole("button", { name: "Text tool" }).click();
