@@ -329,6 +329,12 @@
 
     if (window.ZerosLogoField) {
       window.ZerosLogoField.init();
+      const params = new URLSearchParams(location.search);
+      const bg = params.get("bg");
+      if (bg) {
+        stage.dataset.bg = bg;
+        bgChips.forEach((c) => c.setAttribute("aria-pressed", String(c.dataset.bg === bg)));
+      }
       setVersion("live");
     }
   </script>

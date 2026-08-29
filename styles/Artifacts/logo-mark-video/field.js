@@ -51,7 +51,7 @@
     var g = sheet.getContext("2d");
     g.textAlign = "center";
     g.textBaseline = "middle";
-    g.font = "600 42px ui-sans-serif, system-ui, sans-serif";
+    g.font = "700 52px ui-sans-serif, system-ui, sans-serif";
     var i;
     for (i = 0; i < CHARS.length; i++) {
       var col = i % ATLAS_COLS;
@@ -176,6 +176,15 @@
     }
 
     map = { cores: cores, rims: rims, field: field, cross: cross };
+    if (canvas) {
+      canvas.dataset.coreSites = String(
+        cores.reduce(function (n, arr) {
+          return n + arr.length / 2;
+        }, 0),
+      );
+      canvas.dataset.rimSites = String(rims.length / 3);
+      canvas.dataset.fieldSites = String(field.length / 2);
+    }
   }
 
   function nearestGlyph(x, y, glyph) {
@@ -229,13 +238,13 @@
         kind: kind,
         layer: hero ? "hero" : "core",
         glyph: id,
-        rx: 0.006 + rng() * 0.018,
-        ry: 0.006 + rng() * 0.016,
+        rx: 0.003 + rng() * 0.007,
+        ry: 0.003 + rng() * 0.006,
         ox: (rng() - 0.5) * 0.008,
         oy: (rng() - 0.5) * 0.008,
         revs: 3 + Math.floor(rng() * 3),
-        size: hero ? 22 + rng() * 16 : 7 + rng() * 11,
-        alpha: hero ? 0.95 : 0.55 + rng() * 0.35,
+        size: hero ? 28 + rng() * 14 : 11 + rng() * 9,
+        alpha: hero ? 0.92 : 0.42 + rng() * 0.28,
       });
     }
 
@@ -248,12 +257,12 @@
         kind: kind,
         layer: "rim",
         glyph: arr[idx * 3 + 2],
-        rx: 0.004 + rng() * 0.012,
-        ry: 0.004 + rng() * 0.012,
+        rx: 0.002 + rng() * 0.006,
+        ry: 0.002 + rng() * 0.006,
         ox: (rng() - 0.5) * 0.01,
         oy: (rng() - 0.5) * 0.01,
         revs: 4 + Math.floor(rng() * 3),
-        size: 6 + rng() * 9,
+        size: 11 + rng() * 10,
         alpha: 0.7 + rng() * 0.28,
       });
     }
@@ -272,7 +281,7 @@
         ox: (rng() - 0.5) * 0.02,
         oy: (rng() - 0.5) * 0.02,
         revs: 1 + Math.floor(rng() * 2),
-        size: 4 + rng() * 8,
+        size: 7 + rng() * 10,
         alpha: 0.16 + rng() * 0.28,
       });
     }
@@ -406,10 +415,10 @@
     var posed = posesAt(cycle);
     var i, a, b, pa, pb, dx, dy, dist;
 
-    ctx.globalCompositeOperation = voidBg ? "lighter" : "source-over";
+    ctx.globalCompositeOperation = "source-over";
     ctx.strokeStyle = LINE;
     ctx.lineWidth = 0.7;
-    ctx.globalAlpha = voidBg ? 0.22 : 0.18;
+    ctx.globalAlpha = 0.16;
     ctx.beginPath();
     for (i = 0; i < pairs.length; i += 2) {
       a = pairs[i];
@@ -419,7 +428,7 @@
       dx = pa.x - pb.x;
       dy = pa.y - pb.y;
       dist = Math.hypot(dx, dy);
-      if (dist > 0.055 || pa.alpha < 0.08 || pb.alpha < 0.08) continue;
+      if (dist > 0.048 || pa.alpha < 0.08 || pb.alpha < 0.08) continue;
       ctx.moveTo(pa.x * w, pa.y * h);
       ctx.lineTo(pb.x * w, pb.y * h);
     }
@@ -433,11 +442,14 @@
     }
 
     pass("field", false);
-    if (voidBg) pass("core", true);
     pass("core", false);
-    if (voidBg) pass("rim", true);
+    if (voidBg) {
+      ctx.globalCompositeOperation = "lighter";
+      pass("rim", true);
+      pass("hero", true);
+      ctx.globalCompositeOperation = "source-over";
+    }
     pass("rim", false);
-    pass("hero", true);
     pass("hero", false);
 
     for (i = 0; i < particles.length; i++) {
@@ -459,7 +471,10 @@
     ctx.globalCompositeOperation = "source-over";
   }
 
+  var freezeCycle = null;
+
   function nowCycle() {
+    if (freezeCycle !== null) return Model.wrap01(freezeCycle);
     if (reduced) return 0;
     var t = (performance.now() - startMs) / LOOP_MS;
     return Model.wrap01(t);
@@ -478,7 +493,10 @@
     if (running) return;
     running = true;
     startMs = performance.now();
-    tick();
+    var stage = document.querySelector(".stage");
+    var bg = stage ? stage.getAttribute("data-bg") || "void" : "void";
+    draw(nowCycle(), bg);
+    raf = requestAnimationFrame(tick);
   }
 
   function stop() {
@@ -497,6 +515,9 @@
     if (!host || !canvas || !canvas.getContext) return;
     ctx = canvas.getContext("2d", { alpha: true });
     reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    var params = new URLSearchParams(location.search);
+    if (params.get("still") === "1") reduced = true;
+    if (params.has("cycle")) freezeCycle = Number(params.get("cycle")) || 0;
     buildAtlas();
     buildOccupancy();
     spawn();
