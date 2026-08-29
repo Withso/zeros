@@ -31,7 +31,10 @@ import {
   enqueueWorkOSCommand,
   workOSInvitationOrderingKey,
 } from "./workos-command-outbox.js";
-import type { WorkOSManagementProvider } from "./workos-provider.js";
+import type {
+  WorkOSInvitationRecord,
+  WorkOSManagementProvider,
+} from "./workos-provider.js";
 
 const DEFAULT_INVITE_LINK_BASE = "https://app.zeros.build/invite";
 
@@ -63,7 +66,7 @@ const InvitationCapabilitySchema = z.string().regex(/^[A-Za-z0-9_-]{20,200}$/);
 
 type WorkOSInvitationResolver = Pick<
   WorkOSManagementProvider,
-  "findInvitationByToken"
+  "findInvitationByToken" | "getInvitation"
 >;
 
 function providerHttpStatus(error: unknown): number | null {
@@ -82,30 +85,11 @@ function invalidInvitation(): HttpError {
   );
 }
 
-async function resolveInvitationId(
-  pool: pg.Pool,
-  rawToken: string,
-  workosProvider?: WorkOSInvitationResolver,
-): Promise<string> {
-  const local = await withSystemTx(pool, (tx) =>
-    tx.query<{ id: string }>(
-      `SELECT i.id
-       FROM invitations i
-       JOIN organizations o
-         ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
-       WHERE i.token_hash = $1
-         AND i.accepted_at IS NULL AND i.revoked_at IS NULL
-         AND i.expires_at > now()
-       LIMIT 1`,
-      [hashInviteToken(rawToken)],
-    ),
-  );
-  if (local.rows[0]) return local.rows[0].id;
-  if (!workosProvider) throw invalidInvitation();
-
-  let providerInvitation;
+async function readProviderInvitation(
+  read: () => Promise<WorkOSInvitationRecord>,
+): Promise<WorkOSInvitationRecord> {
   try {
-    providerInvitation = await workosProvider.findInvitationByToken(rawToken);
+    return await read();
   } catch (error) {
     const status = providerHttpStatus(error);
     if (status === 400 || status === 404 || status === 422) {
@@ -117,6 +101,91 @@ async function resolveInvitationId(
       "Invitation verification is temporarily unavailable",
     );
   }
+}
+
+function invitationMatches(
+  invitation: WorkOSInvitationRecord,
+  expected: {
+    id: string;
+    organizationId: string;
+    email: string;
+    role: Exclude<OrganizationRole, "owner">;
+  },
+): boolean {
+  const role = OrganizationRoleSchema.exclude(["owner"]).safeParse(
+    invitation.roleSlug,
+  );
+  return (
+    invitation.id === expected.id &&
+    invitation.state === "pending" &&
+    invitation.organizationId === expected.organizationId &&
+    invitation.email.toLowerCase() === expected.email.toLowerCase() &&
+    role.success &&
+    role.data === expected.role
+  );
+}
+
+async function resolveInvitationId(
+  pool: pg.Pool,
+  rawToken: string,
+  workosProvider?: WorkOSInvitationResolver,
+): Promise<string> {
+  const local = await withSystemTx(pool, (tx) =>
+    tx.query<{
+      id: string;
+      email: string;
+      role: Exclude<OrganizationRole, "owner">;
+      workos_invitation_id: string | null;
+      workos_organization_id: string | null;
+    }>(
+      `SELECT i.id, i.email, i.role, i.workos_invitation_id,
+              wol.workos_organization_id
+       FROM invitations i
+       JOIN organizations o
+         ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
+       LEFT JOIN workos_organization_links wol
+         ON wol.organization_id = i.org_id AND wol.state = 'active'
+       WHERE i.token_hash = $1
+         AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+         AND i.expires_at > now()
+       LIMIT 1`,
+      [hashInviteToken(rawToken)],
+    ),
+  );
+  const localInvitation = local.rows[0];
+  if (localInvitation) {
+    if (!workosProvider) return localInvitation.id;
+    if (!localInvitation.workos_invitation_id) {
+      // The durable outbox has committed the Zeros invitation but has not yet
+      // received WorkOS's provider object. The copied link must not bypass that
+      // authority during this short window; callers can retry once prepared.
+      throw new HttpError(
+        503,
+        "invite_preparing",
+        "The invitation is still being prepared; try again",
+      );
+    }
+    if (!localInvitation.workos_organization_id) throw invalidInvitation();
+    const providerInvitation = await readProviderInvitation(() =>
+      workosProvider.getInvitation(localInvitation.workos_invitation_id!),
+    );
+    if (
+      !invitationMatches(providerInvitation, {
+        id: localInvitation.workos_invitation_id,
+        organizationId: localInvitation.workos_organization_id,
+        email: localInvitation.email,
+        role: localInvitation.role,
+      })
+    ) {
+      throw invalidInvitation();
+    }
+    return localInvitation.id;
+  }
+  if (!workosProvider) throw invalidInvitation();
+
+  const providerInvitation = await readProviderInvitation(() =>
+    workosProvider.findInvitationByToken(rawToken),
+  );
   const role = OrganizationRoleSchema.exclude(["owner"]).safeParse(
     providerInvitation.roleSlug,
   );

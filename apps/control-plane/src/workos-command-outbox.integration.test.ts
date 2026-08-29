@@ -233,6 +233,12 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
     throw missing;
   }
 
+  async getInvitation(
+    invitationId: string,
+  ): Promise<WorkOSInvitationRecord> {
+    return this.findInvitationByToken(invitationId);
+  }
+
   async listInvitations(options: {
     organizationId: string;
     email: string;

@@ -163,4 +163,21 @@ describe("WorkOS native invitations", () => {
     ).resolves.toEqual(invitation);
     expect(capturedToken).toBe("provider_invitation_token");
   });
+
+  it("revalidates a correlated invitation by provider ID", async () => {
+    let capturedId: unknown;
+    const client = {
+      userManagement: {
+        async getInvitation(invitationId: unknown) {
+          capturedId = invitationId;
+          return invitation;
+        },
+      },
+    } as unknown as WorkOS;
+
+    await expect(
+      provider(client).getInvitation("invitation_example"),
+    ).resolves.toEqual(invitation);
+    expect(capturedId).toBe("invitation_example");
+  });
 });

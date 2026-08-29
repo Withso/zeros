@@ -85,6 +85,9 @@ exact channel app origin plus `/invite`. WorkOS appends `invitation_token` and
 sends the single branded email; Railway resolves that token against the exact
 Zeros invitation before granting product access. Organization invitations must
 be created through Zeros rather than manually in the WorkOS Dashboard.
+The copyable Zeros link is also fail-closed: until its provider ID is prepared it
+returns a retryable error, and acceptance re-fetches that exact WorkOS object so
+a direct provider revoke cannot be bypassed by a still-present local record.
 Zeros intentionally does not pass organization invitation tokens into AuthKit's
 authenticate call because WorkOS permits corporate-domain invitations to be
 accepted by another address on the same domain; the authenticated Railway POST
