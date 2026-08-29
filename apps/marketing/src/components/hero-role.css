@@ -44,11 +44,12 @@
 }
 
 .hero-scramble-symbol {
-  color: color-mix(in srgb, var(--blue-fg) 28%, var(--fg2));
+  color: color-mix(in srgb, var(--blue-fg) 18%, var(--fg1));
+  vertical-align: baseline;
 }
 
 .hero-role-word.is-scrambling.scramble-designers .hero-scramble-symbol {
-  color: color-mix(in srgb, var(--green-fg) 30%, var(--fg2));
+  color: color-mix(in srgb, var(--green-fg) 22%, var(--fg1));
 }
 
 @media (prefers-reduced-motion: reduce) {

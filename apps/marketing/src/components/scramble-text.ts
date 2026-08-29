@@ -1,6 +1,6 @@
 import gsap from 'gsap'
 
-export const SCRAMBLE_MS = 1320
+export const SCRAMBLE_MS = 1500
 
 export type ScrambleSet = {
   chars: string
@@ -18,7 +18,7 @@ export const DESIGN_SCRAMBLE: ScrambleSet = {
 
 /** designers → builders: matrix digits, no CJK. */
 export const MATRIX_SCRAMBLE: ScrambleSet = {
-  chars: '0101010123456789',
+  chars: '01',
 }
 
 export const SCRAMBLE_FROM: Record<string, ScrambleSet> = {
@@ -58,8 +58,8 @@ export function scrambleFill(length: number, chars: string): string {
  */
 export function scrambleGlyphKind(i: number, t: number, count: number): GlyphKind {
   const n = Math.max(1, count)
-  const start = (i / n) * 0.2
-  const lock = 0.3 + (i / n) * 0.62
+  const start = (i / n) * 0.12
+  const lock = 0.42 + (i / n) * 0.5
   if (t <= start) return 'from'
   if (t < lock) return 'scramble'
   return 'to'

@@ -75,7 +75,7 @@ describe("marketing homepage layout", () => {
     expect(css).toMatch(/hero-scramble-text/);
     expect(css).toMatch(/hero-scramble-symbol/);
     expect(css).not.toMatch(/hero-scramble-icon/);
-    expect(css).toMatch(/--fg2/);
+    expect(css).toMatch(/--fg1/);
     expect(css).toMatch(/--blue-fg/);
     expect(css).toMatch(/--green-fg/);
     expect(scramble).toMatch(/CODE_SCRAMBLE/);

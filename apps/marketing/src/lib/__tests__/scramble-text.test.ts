@@ -37,7 +37,7 @@ describe("hero scramble fill", () => {
 
   it("keeps the matrix charset to ASCII digits", () => {
     expect(MATRIX_SCRAMBLE.chars).toMatch(/[01]/);
-    expect(MATRIX_SCRAMBLE.chars).toMatch(/^[0-9]+$/);
+    expect(MATRIX_SCRAMBLE.chars).toMatch(/^[01]+$/);
     expect(MATRIX_SCRAMBLE.chars).not.toMatch(NON_ASCII);
     expect(MATRIX_SCRAMBLE.chars).not.toMatch(CJK_OR_KATAKANA);
     expect(MATRIX_SCRAMBLE.chars).not.toMatch(/ﾊ/);
@@ -64,7 +64,7 @@ describe("hero scramble fill", () => {
   it("renders matrix tails as digit runs at the same glyph role", () => {
     const html = scrambleTail(11, MATRIX_SCRAMBLE);
     expect(html).toMatch(/hero-scramble-symbol/);
-    expect(visibleText(html)).toMatch(/^[0-9]+$/);
+    expect(visibleText(html)).toMatch(/^[01]+$/);
     expect(visibleText(html)).toHaveLength(11);
   });
 
@@ -75,6 +75,7 @@ describe("hero scramble fill", () => {
     expect(scrambleGlyphKind(9, 0.5, 10)).toBe("scramble");
     expect(scrambleGlyphKind(9, 1, 10)).toBe("to");
     for (let i = 0; i < 10; i += 1) {
+      expect(scrambleGlyphKind(i, 0.3, 10)).toBe("scramble");
       expect(scrambleGlyphKind(i, 1, 10)).toBe("to");
     }
   });
