@@ -154,11 +154,13 @@
   <header>
     <div>
       <h1>Zeros mark</h1>
-      <p class="lede" id="lede">Smaller mark, faster field, 10s loop — v4</p>
+      <p class="lede" id="lede">Live canvas field — official mark, 10s loop</p>
     </div>
     <div class="controls">
       <div class="chips" role="group" aria-label="Version">
-        <button class="chip" type="button" data-version="v4" aria-pressed="true">v4 · smaller + faster</button>
+        <button class="chip" type="button" data-version="live" aria-pressed="true">Live</button>
+        <button class="chip" type="button" data-version="v5" aria-pressed="false">v5</button>
+        <button class="chip" type="button" data-version="v4" aria-pressed="false">v4</button>
         <button class="chip" type="button" data-version="v3" aria-pressed="false">v3</button>
         <button class="chip" type="button" data-version="v2" aria-pressed="false">v2</button>
         <button class="chip" type="button" data-version="v1" aria-pressed="false">v1</button>
@@ -172,16 +174,16 @@
     </div>
   </header>
 
-  <main class="stage" data-bg="void" data-version="v4">
+  <main class="stage" data-bg="void" data-version="live">
     <div class="mark" aria-label="Zeros logo formed by a swirling number field">
+      <canvas id="live" width="720" height="720"></canvas>
       <video
         id="play"
+        class="is-hidden"
         muted
         loop
         playsinline
-        autoplay
         poster="zeros-logo-data-v4-poster.jpg"
-        src="zeros-logo-data-v4.mp4"
       ></video>
       <video
         id="native"
@@ -201,22 +203,26 @@
   </main>
 
   <footer>
-    <span id="meta">Seedance 2.5 · 1:1 · 1080p · 10s loop · v4</span>
+    <span id="meta">Canvas · official SVG occupancy · 10s loop</span>
     <span>No logo stroke — form from rim density</span>
   </footer>
 
+  <script src="field-model.js"></script>
+  <script src="field.js"></script>
   <script>
     const stage = document.querySelector(".stage");
     const lede = document.getElementById("lede");
     const meta = document.getElementById("meta");
-    const bgChips = [...document.querySelectorAll("[data-bg]")];
-    const versionChips = [...document.querySelectorAll("[data-version]")];
+    const bgChips = [...document.querySelectorAll(".chips [data-bg]")];
+    const versionChips = [...document.querySelectorAll("[data-version].chip")];
+    const live = document.getElementById("live");
     const play = document.getElementById("play");
     const native = document.getElementById("native");
     const keyed = document.getElementById("keyed");
     const source = document.getElementById("source");
     const files = {
-      v4: { src: "zeros-logo-data-v4.mp4", poster: "zeros-logo-data-v4-poster.jpg", lede: "Smaller mark, faster field, 10s loop — v4", meta: "Seedance 2.5 · 1:1 · 1080p · 10s loop · v4" },
+      v5: { src: "zeros-logo-data-v5.mp4", poster: "zeros-logo-data-v5-poster.jpg", lede: "v1 edit, 10s, edge fade — v5", meta: "Seedance 2.5 · 1:1 · 1080p · 10s · v5" },
+      v4: { src: "zeros-logo-data-v4.mp4", poster: "zeros-logo-data-v4-poster.jpg", lede: "Smaller mark, faster field, 10s — v4", meta: "Seedance 2.5 · 1:1 · 1080p · 10s · v4" },
       v3: { src: "zeros-logo-data-v3.mp4", poster: "zeros-logo-data-v3-poster.jpg", lede: "10s edit of v2 — v3", meta: "Seedance 2.5 · 1:1 · 1080p · 10s · v3" },
       v2: { src: "zeros-logo-data-v2.mp4", poster: "zeros-logo-data-v2-poster.jpg", lede: "Rim light + scatter — v2", meta: "Seedance 2.5 · 1:1 · 1080p · 5s · v2" },
     };
@@ -279,16 +285,33 @@
       }
     }
 
+    function hideVideos() {
+      native.classList.add("is-hidden");
+      keyed.classList.add("is-hidden");
+      play.classList.add("is-hidden");
+      native.pause();
+      source.pause();
+      play.pause();
+    }
+
     function setVersion(version) {
       stage.dataset.version = version;
       versionChips.forEach((c) => {
         c.setAttribute("aria-pressed", String(c.dataset.version === version));
       });
 
-      native.classList.add("is-hidden");
-      keyed.classList.add("is-hidden");
-      native.pause();
-      source.pause();
+      hideVideos();
+
+      if (version === "live") {
+        live.classList.remove("is-hidden");
+        if (window.ZerosLogoField) window.ZerosLogoField.start();
+        lede.textContent = "Live canvas field — official mark, 10s loop";
+        meta.textContent = "Canvas · official SVG occupancy · 10s loop";
+        return;
+      }
+
+      if (window.ZerosLogoField) window.ZerosLogoField.stop();
+      live.classList.add("is-hidden");
 
       if (files[version]) {
         play.classList.remove("is-hidden");
@@ -298,15 +321,16 @@
         lede.textContent = files[version].lede;
         meta.textContent = files[version].meta;
       } else {
-        play.pause();
-        play.classList.add("is-hidden");
         showV1Keyed();
         lede.textContent = "Contained glyphs, keyed alpha — v1";
         meta.textContent = "Seedance 2.5 · 1:1 · 1080p · 5s · v1";
       }
     }
 
-    play.play().catch(() => {});
+    if (window.ZerosLogoField) {
+      window.ZerosLogoField.init();
+      setVersion("live");
+    }
   </script>
 </body>
 </html>
