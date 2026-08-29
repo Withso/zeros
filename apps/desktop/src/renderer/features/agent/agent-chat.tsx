@@ -3578,9 +3578,9 @@ export function AgentChat({
         // The chat's composer env MUST ride along. Without it the rebuilt
         // session is stamped with an empty applied-env key, so sendPrompt's
         // settings-drift reconcile immediately force-respawns it AGAIN — two
-        // cold spawns for one send (and on Cursor, two host boots) before the
-        // prompt goes anywhere. It also runs the provider's default model for
-        // the window in between, contradicting the pill.
+        // provider rebuilds for one send (and on Cursor, two host boots) before
+        // the prompt goes anywhere. It also runs the provider's default model
+        // for the window in between, contradicting the pill.
         await session.startSession(targetAgentId, {
           env: chatThread
             ? envForChat(chatThread, session.initialize)

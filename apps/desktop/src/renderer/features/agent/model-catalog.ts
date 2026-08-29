@@ -1154,8 +1154,8 @@ export const PERMISSION_MODE_ENV_VAR = "ZEROS_PERMISSION_MODE";
  *  live session through its own RPC (AGENT_SET_MODE — implemented by all three
  *  adapters, not an optional hook), so a mode change can never be a reason to
  *  rebuild. Leaving it in the key made every Plan-mode toggle look like drift,
- *  and the reconcile then force-respawned COLD on the next send — dropping the
- *  agent's conversation while the transcript stayed on screen. */
+ *  and the reconcile then needlessly close→resumed the provider execution on
+ *  the next send. */
 export function chatEnvDriftKey(
   env: Record<string, string> | undefined,
 ): string {
@@ -1170,8 +1170,8 @@ export function chatEnvDriftKey(
  *  For a PROVIDER-ORIGINATED effort change (Codex raising its own thread to
  *  Ultra, reported back via `current_effort_update`) the running session is
  *  already at the new tier, so persisting it onto the chat must NOT read as
- *  user drift in sendPrompt's reconcile — that respawns COLD (no resume, so
- *  Codex loses the thread). Re-stamping only the effort slot is what keeps a
+ *  user drift in sendPrompt's reconcile — that would close→resume an already
+ *  correct execution. Re-stamping only the effort slot is what keeps a
  *  genuinely-unapplied model/Fast/add-dir change still visible as drift, which
  *  a full `chatEnvDriftKey(envForChat(chat))` re-stamp would silently swallow.
  *

@@ -189,16 +189,19 @@ export function sharedAdmissionFlightAction(input: {
 
 /** Choose the provider admission route after no shared flight remains.
  * Cancellation deliberately detaches a load flight without discarding its
- * durable provider binding. The next ordinary admission must therefore resume
- * that binding before it is allowed to create a new provider conversation. */
+ * durable provider binding. Both ordinary admission and forced configuration
+ * recovery must therefore resume that binding before either is allowed to
+ * create a new provider conversation. Forced recovery first restarts the
+ * ephemeral execution so the resumed provider receives the new config. */
 export function admissionRouteWithoutFlight(input: {
   force: boolean;
+  replaceProviderConversation: boolean;
   hasProviderBinding: boolean;
   canLoad: boolean;
-}): "resume" | "create" {
-  return !input.force && input.hasProviderBinding && input.canLoad
-    ? "resume"
-    : "create";
+}): "resume" | "restart" | "create" {
+  if (!input.hasProviderBinding || !input.canLoad) return "create";
+  if (input.force && input.replaceProviderConversation) return "create";
+  return input.force ? "restart" : "resume";
 }
 
 /** Map a failure classification to the UI session status. The single

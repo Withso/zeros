@@ -831,6 +831,7 @@ describe("stopping a send that has not gone out yet", () => {
     expect(
       admissionRouteWithoutFlight({
         force: false,
+        replaceProviderConversation: false,
         hasProviderBinding: true,
         canLoad: true,
       }),
@@ -840,6 +841,41 @@ describe("stopping a send that has not gone out yet", () => {
     // The old flight's identity-checked finalizer cannot erase the retry.
     if (flights.get("chat-1") === oldFlight) flights.delete("chat-1");
     expect(flights.get("chat-1")).toBe(nextFlight);
+  });
+
+  it("restarts through a durable provider binding during forced configuration recovery", () => {
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: false,
+        hasProviderBinding: true,
+        canLoad: true,
+      }),
+    ).toBe("restart");
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: false,
+        hasProviderBinding: false,
+        canLoad: true,
+      }),
+    ).toBe("create");
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: false,
+        hasProviderBinding: true,
+        canLoad: false,
+      }),
+    ).toBe("create");
+    expect(
+      admissionRouteWithoutFlight({
+        force: true,
+        replaceProviderConversation: true,
+        hasProviderBinding: true,
+        canLoad: true,
+      }),
+    ).toBe("create");
   });
 
   it("keeps the visible admission prompt as the stopped turn and drops only follow-ups", () => {

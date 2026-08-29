@@ -1529,25 +1529,93 @@ export function AgentSessionsProvider({
       // purpose even though no admission flight remains.
       const providerBinding = existing?.providerBinding;
       const loadIntoChat = loadIntoChatRef.current;
-      if (
-        admissionRouteWithoutFlight({
-          force: options?.force === true,
-          hasProviderBinding: Boolean(providerBinding),
-          canLoad: Boolean(loadIntoChat),
-        }) === "resume" &&
-        providerBinding &&
-        loadIntoChat
-      ) {
-        const adopted = await loadIntoChat(
-          chatId,
-          agentId,
-          providerBinding,
-          {
-            agentName: options?.agentName ?? existing?.agentName ?? agentId,
-            cwd: options?.cwd ?? existing?.cwd ?? undefined,
-            env: options?.env,
-          },
-        );
+      const bindGeneration = cancelGeneration(
+        cancelGenerationsRef.current,
+        chatId,
+      );
+      const bindCancelled = () =>
+        cancelledSince(cancelGenerationsRef.current, chatId, bindGeneration);
+      const admissionRoute = admissionRouteWithoutFlight({
+        force: options?.force === true,
+        replaceProviderConversation:
+          options?.replaceProviderConversation === true,
+        hasProviderBinding: Boolean(providerBinding),
+        canLoad: Boolean(loadIntoChat),
+      });
+      if (admissionRoute !== "create" && providerBinding && loadIntoChat) {
+        // A forced config recovery must replace the ephemeral execution before
+        // loading its durable provider binding. AGENT_LOAD_SESSION deliberately
+        // re-adopts a live execution as-is, so loading without this close would
+        // preserve context but silently keep the stale model/effort config.
+        if (admissionRoute === "restart") {
+          const executionId = existing?.executionId ?? existing?.sessionId;
+          if (executionId) {
+            getStore().patchSession(chatId, {
+              status: "warming",
+              error: null,
+              failure: null,
+            });
+            try {
+              const closed = await bridge.request<
+                AgentSessionClosedMessage | AgentErrorMessage
+              >(
+                {
+                  type: "AGENT_CLOSE_SESSION",
+                  agentId,
+                  chatId,
+                  executionId,
+                  sessionId: executionId,
+                },
+                { timeoutMs: 30_000 },
+              );
+              if (bindCancelled()) return;
+              if (closed.type === "AGENT_ERROR") {
+                const failure = failureFromAgentError(closed, "loadSession");
+                getStore().patchSession(chatId, {
+                  status: statusForFailure(failure),
+                  error: failure.message,
+                  failure,
+                });
+                drainOrDropQueue(chatId);
+                return;
+              }
+            } catch (error) {
+              if (bindCancelled()) return;
+              const failure = classifyRpcError({
+                agentId,
+                stage: "loadSession",
+                error,
+              });
+              if (shouldCancelStalledSessionAdmission(failure.kind)) {
+                cancelStalledAdmission(agentId, chatId);
+              }
+              getStore().patchSession(chatId, {
+                status: statusForFailure(failure),
+                error: failure.message,
+                failure,
+              });
+              drainOrDropQueue(chatId);
+              return;
+            }
+
+            // A replacement lifecycle won the slot while close was pending.
+            // Never resume the old provider binding over its new route.
+            const current = getStore().sessions[chatId];
+            if (
+              !current ||
+              current.agentId !== agentId ||
+              (current.executionId !== executionId &&
+                current.sessionId !== executionId)
+            ) {
+              return;
+            }
+          }
+        }
+        const adopted = await loadIntoChat(chatId, agentId, providerBinding, {
+          agentName: options?.agentName ?? existing?.agentName ?? agentId,
+          cwd: options?.cwd ?? existing?.cwd ?? undefined,
+          env: options?.env,
+        });
         if (adopted) return;
         existing = getStore().sessions[chatId];
       }
@@ -1562,12 +1630,6 @@ export function AgentSessionsProvider({
       // OWN folder / active scope from the store, so a spawn from ANY
       // recovery path lands in the right folder instead of throwing.
       const resolvedCwd = resolveSpawnCwd(chatId, options?.cwd, existing?.cwd);
-      const bindGeneration = cancelGeneration(
-        cancelGenerationsRef.current,
-        chatId,
-      );
-      const bindCancelled = () =>
-        cancelledSince(cancelGenerationsRef.current, chatId, bindGeneration);
 
       let bindWasSuperseded = false;
       const work = (async () => {
@@ -2678,6 +2740,7 @@ export function AgentSessionsProvider({
             // chat first warmed (see ensureSession's setSession block).
             await ensureSessionRef.current?.(chatId, current.agentId!, {
               force: true,
+              replaceProviderConversation: true,
               cwd: current.cwd ?? undefined,
               env: chatComposerEnv(chatId, current.initialize),
             });
@@ -3727,9 +3790,9 @@ export function AgentSessionsProvider({
       // `current.initialize` is passed for the same reason: sendPrompt's
       // reconcile compares against envForChat(chat, initialize), and a stamp
       // built WITHOUT it reads as drift for any agent that overrides its model
-      // env var via _meta — which force-respawns the session COLD on the next
-      // send (no resume, so the agent loses the conversation) for a change
-      // that had already been applied live. The two must be built identically.
+      // env var via _meta — which unnecessarily close→resumes the provider on
+      // the next send for a change that had already been applied live. The two
+      // must be built identically.
       const env = envForChat(chat, current.initialize);
       bridge.send({
         type: "AGENT_UPDATE_CONFIG",
