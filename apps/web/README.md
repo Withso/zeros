@@ -33,7 +33,7 @@ GET  /auth/desktop/callback    → no-store exact-channel app handoff
 POST /auth/workos-webhook      → compatibility pass-through to Railway
 POST /auth/desktop-revoke      → compatibility pass-through for older desktops
 GET  /github/connected         → GitHub App completion + Open Zeros handoff
-GET  /invite?token=[&mode=web] → inert landing page or explicit web acceptance
+GET  /invite?token=[&mode=web|resume] → landing, web acceptance, or post-auth resume
 POST /handoff/{mint,redeem,refresh,revoke} → Auth0 compatibility only
 GET|POST|PATCH|DELETE /api/v1/* → allowlisted same-origin control-plane proxy
 ```
@@ -165,7 +165,9 @@ stores the opaque token only in that tab's `sessionStorage`, immediately strips
 it from the address bar, and posts it only to the same-origin allowlisted JSON
 facade. A 401 starts Railway's ordinary one-time state/PKCE flow with the
 tokenless `/invite?mode=resume` path as the bounded return target, then retries
-from the tab-scoped value. Link scanners cannot accept an invitation because
+from the tab-scoped value. A tab permits one AuthKit attempt per freshly opened
+invitation; a second 401 terminates with a fixed error instead of redirecting
+again. Link scanners cannot accept an invitation because
 the landing GET has no mutation and web mode still requires an authenticated
 same-origin POST. WorkOS's default user-invitation email must remain disabled;
 other WorkOS authentication emails remain enabled.

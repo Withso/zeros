@@ -113,6 +113,7 @@ function webInner(token, nonce) {
   const script = `
     const INITIAL_TOKEN = ${JSON.stringify(initialToken)};
     const STORAGE_KEY = "zeros:invitation:pending";
+    const AUTH_ATTEMPT_KEY = "zeros:invitation:auth-attempted";
     const AUTH_START = ${JSON.stringify(authStart)};
     const message = document.getElementById("message");
     const retry = document.getElementById("retry");
@@ -121,6 +122,7 @@ function webInner(token, nonce) {
     if (INITIAL_TOKEN) {
       try {
         sessionStorage.setItem(STORAGE_KEY, INITIAL_TOKEN);
+        sessionStorage.removeItem(AUTH_ATTEMPT_KEY);
         stored = sessionStorage.getItem(STORAGE_KEY) === INITIAL_TOKEN;
       } catch {}
       history.replaceState(null, "", ${JSON.stringify(returnPath)});
@@ -133,7 +135,10 @@ function webInner(token, nonce) {
       } catch {}
     }
     function forget() {
-      try { sessionStorage.removeItem(STORAGE_KEY); } catch {}
+      try {
+        sessionStorage.removeItem(STORAGE_KEY);
+        sessionStorage.removeItem(AUTH_ATTEMPT_KEY);
+      } catch {}
       TOKEN = null;
     }
     async function accept() {
@@ -141,6 +146,7 @@ function webInner(token, nonce) {
       another.classList.add("hidden");
       message.classList.remove("error");
       if (typeof TOKEN !== "string" || !/^[A-Za-z0-9_-]{20,200}$/.test(TOKEN)) {
+        forget();
         message.classList.add("error");
         message.textContent = "Invitation session expired. Open the original invitation email again.";
         return;
@@ -162,6 +168,25 @@ function webInner(token, nonce) {
       }
       if (response.status === 401) {
         if (!stored) {
+          message.classList.add("error");
+          message.textContent = "This browser blocked the temporary invitation session. Allow tab storage and open the email link again.";
+          return;
+        }
+        let authAttempted = false;
+        try {
+          authAttempted = sessionStorage.getItem(AUTH_ATTEMPT_KEY) === "1";
+        } catch {}
+        if (authAttempted) {
+          message.classList.add("error");
+          message.textContent = "Sign-in did not establish a Zeros session. Open the original invitation email and try again.";
+          return;
+        }
+        try {
+          sessionStorage.setItem(AUTH_ATTEMPT_KEY, "1");
+          if (sessionStorage.getItem(AUTH_ATTEMPT_KEY) !== "1") {
+            throw new Error("auth attempt storage unavailable");
+          }
+        } catch {
           message.classList.add("error");
           message.textContent = "This browser blocked the temporary invitation session. Allow tab storage and open the email link again.";
           return;
@@ -197,6 +222,9 @@ function webInner(token, nonce) {
       }
     }
     retry.addEventListener("click", accept);
+    another.addEventListener("click", () => {
+      try { sessionStorage.removeItem(AUTH_ATTEMPT_KEY); } catch {}
+    });
     accept();`;
   return `<div class="title">Accepting your invitation</div>
           <div class="sub">Zeros will verify your signed-in account before changing organization access.</div>
