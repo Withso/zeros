@@ -107,10 +107,18 @@ describe("marketing homepage layout", () => {
     expect(home).not.toMatch(/radial-gradient\(900px 520px/);
     expect(ascii).toMatch(/paintHeroAsciiField/);
     expect(ascii).toMatch(/data-hero-ascii-clouds/);
+    expect(home).toMatch(/home-ascii-page/);
+    expect(home).toMatch(/isolate/);
+    expect(home).toMatch(/Nav flush/);
+    expect(home).toMatch(/relative z-10/);
     expect(css).toMatch(/background-color: #000000/);
+    expect(css).toMatch(/z-index: 0/);
+    expect(css).not.toMatch(/z-index:\s*-10/);
     expect(css).toMatch(/prefers-reduced-motion: reduce/);
     expect(css).toMatch(/animation:\s*none/);
     expect(css).toMatch(/hero-ascii-drift/);
+    expect(css).toMatch(/prefers-color-scheme: light/);
+    expect(css).toMatch(/--bg0: hsl\(0 0% 5%\)/);
     expect(field).toMatch(/ASCII_CLOUD_RAMP/);
     expect(field).toMatch(/headlineWell/);
     expect(field).toMatch(/#000000/);
@@ -130,6 +138,8 @@ describe("marketing homepage layout", () => {
 
   it("merges the header into the page background", () => {
     expect(nav).toMatch(/bg-bg1/);
+    expect(nav).toMatch(/flush/);
+    expect(home).toMatch(/Nav flush/);
     expect(nav).not.toMatch(/border-b/);
     expect(nav).not.toMatch(/backdrop-blur/);
   });

@@ -6,17 +6,19 @@ import { HeroAsciiClouds } from '../components/HeroAsciiClouds'
 
 export function HomePage() {
   return (
-    <div className="relative flex min-h-screen flex-col overflow-x-hidden">
+    <div className="home-ascii-page relative isolate flex min-h-screen flex-col overflow-x-hidden">
       <HeroAsciiClouds />
-      <Nav />
+      <Nav flush />
 
-      <main className="flex-1">
+      <main className="relative z-10 flex-1">
         <Hero />
         {/* Holding space for the next homepage section. */}
         <div className="h-28 sm:h-36 lg:h-44" aria-hidden />
       </main>
 
-      <Footer />
+      <div className="relative z-10">
+        <Footer />
+      </div>
     </div>
   )
 }
