@@ -5,6 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Zeros — Logo mark · data volume</title>
   <style>
+    @font-face {
+      font-family: "JetBrains Mono";
+      src: local("JetBrains Mono Thin"),
+           local("JetBrainsMono-Thin"),
+           local("JetBrains Mono ExtraLight"),
+           local("JetBrains Mono");
+      font-weight: 100;
+      font-style: normal;
+    }
+
     :root {
       color-scheme: dark;
       --bg1: hsl(0 0% 7%);
@@ -114,7 +124,7 @@
       background: var(--stage-bg, var(--bg1));
     }
 
-    .stage[data-bg="void"] { --stage-bg: hsl(0 0% 7%); }
+    .stage[data-bg="void"] { --stage-bg: #000; }
 
     .stage[data-bg="checker"] {
       --stage-bg: hsl(0 0% 12%);
@@ -151,7 +161,7 @@
   <header>
     <div>
       <h1>Zeros mark</h1>
-      <p class="lede">Live canvas field — official mark, 10s loop</p>
+      <p class="lede">Live canvas field — thin rim-lit glyphs, 10s loop</p>
     </div>
     <div class="controls">
       <div class="chips" role="group" aria-label="Stage background">
@@ -171,7 +181,7 @@
 
   <footer>
     <span>Canvas · official SVG occupancy · 10s loop</span>
-    <span>No logo stroke — form from rim density</span>
+    <span>Hollow rim field — no logo stroke</span>
   </footer>
 
   <script src="field-model.js"></script>

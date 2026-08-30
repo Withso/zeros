@@ -1,5 +1,5 @@
 // Periodic poses for the live Zeros mark field.
-// Integer revolutions per loop keep t = 0 and t = LOOP_SEC identical.
+// Integer revolutions and births per loop keep t = 0 and t = LOOP_SEC identical.
 (function (root, factory) {
   if (typeof module === "object" && module.exports) module.exports = factory();
   else root.ZerosLogoFieldModel = factory();
@@ -61,6 +61,18 @@
     return t * t * (3 - 2 * t);
   }
 
+  // Birth at 0, scale up, hold, scale down to nothing. Continuous at wrap.
+  function lifeEnvelope(u) {
+    u = wrap01(u);
+    if (u < 0.16) {
+      var rise = u / 0.16;
+      return rise * rise * (3 - 2 * rise);
+    }
+    if (u < 0.58) return 1;
+    var fall = (u - 0.58) / 0.42;
+    return 1 - fall * fall * (3 - 2 * fall);
+  }
+
   function poseParticle(particle, cycle) {
     var u = wrap01(cycle);
     var spin = (u * particle.revs + particle.phase) * Math.PI * 2;
@@ -75,13 +87,35 @@
       particle.y +
       particle.ry * Math.sin(spin + particle.skew) +
       particle.oy * Math.cos(wobble);
-    var pulse = 0.82 + 0.18 * Math.sin((u * 2 + particle.phase) * Math.PI * 2);
-    var scale = particle.size * (0.38 + 0.72 * (0.5 + 0.5 * z));
+    var births = particle.births || 0;
+    var env =
+      births > 0
+        ? lifeEnvelope(u * births + (particle.birthPhase || 0))
+        : 1;
+    var pulseRevs = particle.pulseRevs || 2;
+    var pulse =
+      0.78 + 0.22 * Math.sin((u * pulseRevs + particle.phase) * Math.PI * 2);
+    var depthScale = 0.62 + 0.38 * (0.5 + 0.5 * z);
+    var scale = particle.size * env * depthScale;
     var alpha =
-      particle.alpha * pulse * (0.5 + 0.5 * (0.5 + 0.5 * z)) * edgeFade(x, y);
+      particle.alpha *
+      env *
+      pulse *
+      (0.42 + 0.58 * (0.5 + 0.5 * z)) *
+      edgeFade(x, y);
     var vx = -particle.rx * Math.sin(spin);
     var vy = particle.ry * Math.cos(spin + particle.skew);
-    return { x: x, y: y, z: z, scale: scale, alpha: alpha, vx: vx, vy: vy };
+    return {
+      x: x,
+      y: y,
+      z: z,
+      scale: scale,
+      alpha: alpha,
+      vx: vx,
+      vy: vy,
+      env: env,
+      pulse: pulse,
+    };
   }
 
   return {
@@ -94,6 +128,7 @@
     unitToLogo: unitToLogo,
     mulberry32: mulberry32,
     edgeFade: edgeFade,
+    lifeEnvelope: lifeEnvelope,
     poseParticle: poseParticle,
   };
 });

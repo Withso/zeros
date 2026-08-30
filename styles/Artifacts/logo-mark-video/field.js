@@ -9,14 +9,10 @@
 
   var MAP = 192;
   var LOOP_MS = Model.LOOP_SEC * 1000;
-  var CELL = 64;
+  var CELL = 96;
   var ATLAS_COLS = 8;
-  var CHARS = "0123456789()";
-
-  var GOLD = ["#fff8e6", "#f3e2b0", "#e8d9c0", "#f7f1de"];
-  var GREEN = "#7dff9a";
-  var RED = "#ff4a4a";
-  var LINE = "rgba(255,255,255,0.14)";
+  var SYM = "()[]{}<>/|_-=+*#;:,.";
+  var FONT = "100 36px 'JetBrains Mono', ui-monospace, monospace";
 
   var host = null;
   var canvas = null;
@@ -31,6 +27,8 @@
   var startMs = 0;
   var reduced = false;
   var lastBg = "";
+  var ready = false;
+  var wantStart = false;
 
   function fitCanvas() {
     if (!canvas || !host) return;
@@ -44,57 +42,160 @@
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   }
 
+  function tintFor(kind) {
+    if (kind === "gold") {
+      return {
+        fill: "rgba(236, 226, 200, 0.14)",
+        rim: "#fff8ee",
+        bloom: "rgba(255, 236, 210, 0.42)",
+        solid: "#f3ead4",
+      };
+    }
+    if (kind === "mint") {
+      return {
+        fill: "rgba(186, 245, 220, 0.14)",
+        rim: "#eafff6",
+        bloom: "rgba(170, 255, 220, 0.4)",
+        solid: "#d8ffe9",
+      };
+    }
+    return {
+      fill: "rgba(214, 232, 250, 0.12)",
+      rim: "#f4fbff",
+      bloom: "rgba(210, 232, 255, 0.58)",
+      solid: "#e8f2ff",
+    };
+  }
+
+  function paintZero(g, cx, cy, kind) {
+    var t = tintFor(kind);
+    var rx = 13.5;
+    var ry = 16.5;
+    g.save();
+    g.shadowColor = t.bloom;
+    g.shadowBlur = 18;
+    g.strokeStyle = t.rim;
+    g.lineWidth = 1.55;
+    g.lineCap = "round";
+    g.beginPath();
+    g.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    g.stroke();
+    g.restore();
+
+    g.strokeStyle = "#ffffff";
+    g.lineWidth = 1.05;
+    g.shadowColor = "rgba(255, 255, 255, 0.95)";
+    g.shadowBlur = 4;
+    g.beginPath();
+    g.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
+    g.stroke();
+
+    g.shadowBlur = 2;
+    g.lineWidth = 1.35;
+    g.beginPath();
+    g.ellipse(cx, cy, rx, ry, -0.4, -1.05, 0.7);
+    g.stroke();
+    g.shadowBlur = 0;
+  }
+
+  function paintChar(g, ch, cx, cy, kind) {
+    var t = tintFor(kind);
+    g.save();
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.font = FONT;
+    g.lineJoin = "round";
+    g.lineCap = "round";
+    g.shadowColor = t.bloom;
+    g.shadowBlur = 14;
+    g.strokeStyle = t.rim;
+    g.lineWidth = 0.95;
+    g.strokeText(ch, cx, cy);
+    g.restore();
+
+    g.textAlign = "center";
+    g.textBaseline = "middle";
+    g.font = FONT;
+    g.fillStyle = t.fill;
+    g.fillText(ch, cx, cy);
+    g.strokeStyle = "#ffffff";
+    g.lineWidth = 0.7;
+    g.shadowColor = "rgba(255, 255, 255, 0.85)";
+    g.shadowBlur = 3;
+    g.strokeText(ch, cx, cy);
+    g.shadowBlur = 0;
+  }
+
+  function paintSquare(g, cx, cy) {
+    var s = 7;
+    g.shadowColor = "rgba(255, 70, 70, 0.85)";
+    g.shadowBlur = 6;
+    g.fillStyle = "#ff3b3b";
+    g.fillRect(cx - s / 2, cy - s / 2, s, s);
+    g.shadowBlur = 0;
+  }
+
+  function cellCenter(index) {
+    return {
+      x: (index % ATLAS_COLS) * CELL + CELL / 2,
+      y: Math.floor(index / ATLAS_COLS) * CELL + CELL / 2,
+    };
+  }
+
   function buildAtlas() {
     var sheet = document.createElement("canvas");
     sheet.width = ATLAS_COLS * CELL;
-    sheet.height = ATLAS_COLS * CELL;
+    sheet.height = 5 * CELL;
     var g = sheet.getContext("2d");
-    g.textAlign = "center";
-    g.textBaseline = "middle";
-    g.font = "700 52px ui-sans-serif, system-ui, sans-serif";
     var i;
-    for (i = 0; i < CHARS.length; i++) {
-      var col = i % ATLAS_COLS;
-      var row = Math.floor(i / ATLAS_COLS);
-      var cx = col * CELL + CELL / 2;
-      var cy = row * CELL + CELL / 2;
-      g.save();
-      g.shadowColor = "rgba(255, 240, 200, 0.9)";
-      g.shadowBlur = 10;
-      g.fillStyle = GOLD[i % GOLD.length];
-      g.fillText(CHARS[i], cx, cy);
-      g.restore();
+    var c;
+
+    paintZero(g, cellCenter(0).x, cellCenter(0).y, "ice");
+    for (i = 1; i <= 9; i++) {
+      c = cellCenter(i);
+      paintChar(g, String(i), c.x, c.y, "ice");
     }
-    // red square
-    g.fillStyle = RED;
-    g.shadowColor = "rgba(255, 70, 70, 0.9)";
-    g.shadowBlur = 8;
-    roundRect(g, 4 * CELL + 22, 1 * CELL + 22, 20, 20, 3);
-    g.fill();
-    g.shadowBlur = 0;
-    // green arcs
-    g.strokeStyle = GREEN;
-    g.lineWidth = 4;
-    g.lineCap = "round";
-    g.shadowColor = "rgba(125, 255, 154, 0.95)";
-    g.shadowBlur = 8;
-    g.beginPath();
-    g.arc(5 * CELL + 32, 1 * CELL + 32, 16, -0.7, 1.4);
-    g.stroke();
-    g.beginPath();
-    g.arc(6 * CELL + 32, 1 * CELL + 32, 14, 2.2, 4.4);
-    g.stroke();
+    for (i = 0; i < SYM.length; i++) {
+      c = cellCenter(10 + i);
+      paintChar(g, SYM[i], c.x, c.y, "ice");
+    }
+    paintZero(g, cellCenter(30).x, cellCenter(30).y, "gold");
+    paintChar(g, "(", cellCenter(31).x, cellCenter(31).y, "gold");
+    paintChar(g, ")", cellCenter(32).x, cellCenter(32).y, "mint");
+    paintChar(g, "[", cellCenter(33).x, cellCenter(33).y, "mint");
+    paintSquare(g, cellCenter(34).x, cellCenter(34).y);
+    paintZero(g, cellCenter(35).x, cellCenter(35).y, "mint");
+    paintChar(g, "{", cellCenter(36).x, cellCenter(36).y, "ice");
+    paintChar(g, "}", cellCenter(37).x, cellCenter(37).y, "gold");
     atlas = sheet;
   }
 
-  function roundRect(g, x, y, w, h, r) {
-    g.beginPath();
-    g.moveTo(x + r, y);
-    g.arcTo(x + w, y, x + w, y + h, r);
-    g.arcTo(x + w, y + h, x, y + h, r);
-    g.arcTo(x, y + h, x, y, r);
-    g.arcTo(x, y, x + w, y, r);
-    g.closePath();
+  function inBounds(x, y) {
+    return x >= 0 && y >= 0 && x < MAP && y < MAP;
+  }
+
+  function touchesOutside(x, y, inside, radius) {
+    var r, c, xx, yy;
+    for (r = -radius; r <= radius; r++) {
+      for (c = -radius; c <= radius; c++) {
+        xx = x + c;
+        yy = y + r;
+        if (!inBounds(xx, yy) || !inside[yy * MAP + xx]) return true;
+      }
+    }
+    return false;
+  }
+
+  function touchesInside(x, y, inside, radius) {
+    var r, c, xx, yy;
+    for (r = -radius; r <= radius; r++) {
+      for (c = -radius; c <= radius; c++) {
+        xx = x + c;
+        yy = y + r;
+        if (inBounds(xx, yy) && inside[yy * MAP + xx]) return true;
+      }
+    }
+    return false;
   }
 
   function buildOccupancy() {
@@ -121,7 +222,8 @@
       }
     }
 
-    var cores = [[], [], [], []];
+    var shells = [[], [], [], []];
+    var hollows = [[], [], [], []];
     var rims = [];
     var field = [];
     for (y = 0; y < MAP; y++) {
@@ -129,34 +231,30 @@
         i = y * MAP + x;
         var pt = Model.logoToUnit(((x + 0.5) / MAP) * 128, ((y + 0.5) / MAP) * 128);
         var inn = inside[i];
-        var border = false;
-        if (inn) {
-          if (x === 0 || y === 0 || x === MAP - 1 || y === MAP - 1) border = true;
-          else if (
+        var edge =
+          inn &&
+          (x === 0 ||
+            y === 0 ||
+            x === MAP - 1 ||
+            y === MAP - 1 ||
             !inside[i - 1] ||
             !inside[i + 1] ||
             !inside[i - MAP] ||
-            !inside[i + MAP]
-          ) {
-            border = true;
-          }
-        } else if (x > 0 && y > 0 && x < MAP - 1 && y < MAP - 1) {
-          if (inside[i - 1] || inside[i + 1] || inside[i - MAP] || inside[i + MAP]) {
-            border = true;
-          }
-        }
-        if (inn) cores[glyph[i]].push(pt.x, pt.y);
-        if (border) rims.push(pt.x, pt.y, nearestGlyph(x, y, glyph));
-        if (!inn && !border) field.push(pt.x, pt.y);
+            !inside[i + MAP]);
+        var leak = !inn && touchesInside(x, y, inside, 3);
+        var shell = inn && touchesOutside(x, y, inside, 5);
+        if (inn && shell) shells[glyph[i]].push(pt.x, pt.y);
+        else if (inn) hollows[glyph[i]].push(pt.x, pt.y);
+        if (edge || leak) rims.push(pt.x, pt.y, nearestGlyph(x, y, glyph));
+        if (!inn && !leak) field.push(pt.x, pt.y);
       }
     }
 
-    // Extra field sites in the padded frame (outside the scaled mark).
     var fx, fy;
-    for (fy = 0; fy < 48; fy++) {
-      for (fx = 0; fx < 48; fx++) {
-        var ux = (fx + 0.5) / 48;
-        var uy = (fy + 0.5) / 48;
+    for (fy = 0; fy < 28; fy++) {
+      for (fx = 0; fx < 28; fx++) {
+        var ux = (fx + 0.5) / 28;
+        var uy = (fy + 0.5) / 28;
         var logo = Model.unitToLogo(ux, uy);
         var on = logo.x >= 0 && logo.x <= 128 && logo.y >= 0 && logo.y <= 128;
         if (!on) field.push(ux, uy);
@@ -175,10 +273,10 @@
       }
     }
 
-    map = { cores: cores, rims: rims, field: field, cross: cross };
+    map = { shells: shells, hollows: hollows, rims: rims, field: field, cross: cross };
     if (canvas) {
-      canvas.dataset.coreSites = String(
-        cores.reduce(function (n, arr) {
+      canvas.dataset.shellSites = String(
+        shells.reduce(function (n, arr) {
           return n + arr.length / 2;
         }, 0),
       );
@@ -211,40 +309,82 @@
 
   function pickSite(rng, triples, stride) {
     var n = triples.length / stride;
-    var i = Math.floor(rng() * n);
-    return i;
+    if (n < 1) return 0;
+    return Math.floor(rng() * n);
+  }
+
+  function pickSprite(rng, kind) {
+    if (kind === "square") return 34;
+    if (kind === "hero") {
+      var h = rng();
+      if (h < 0.64) return 0;
+      if (h < 0.8) return 30;
+      if (h < 0.9) return 35;
+      return rng() < 0.5 ? 10 : 11;
+    }
+    if (kind === "mint") return rng() < 0.5 ? 32 : 33;
+    var r = rng();
+    if (r < 0.07) return 30;
+    if (r < 0.11) return rng() < 0.5 ? 32 : 33;
+    if (r < 0.4) return 0;
+    if (r < 0.68) return 1 + Math.floor(rng() * 9);
+    return 10 + Math.floor(rng() * SYM.length);
   }
 
   function spawn() {
     var rng = Model.mulberry32(20260829);
     var list = [];
-    var id;
 
     function add(kind, count, siteFn) {
       var n;
       for (n = 0; n < count; n++) list.push(siteFn(kind, n));
     }
 
-    function coreParticle(kind, n) {
-      id = n % 4;
-      var arr = map.cores[id];
+    function fromPair(arr, jitter) {
+      if (!arr || arr.length < 2) return { x: 0.5, y: 0.5 };
       var idx = pickSite(rng, arr, 2);
-      var x = arr[idx * 2] + (rng() - 0.5) * 0.01;
-      var y = arr[idx * 2 + 1] + (rng() - 0.5) * 0.01;
-      var hero = rng() < 0.04;
+      return {
+        x: arr[idx * 2] + (rng() - 0.5) * jitter,
+        y: arr[idx * 2 + 1] + (rng() - 0.5) * jitter,
+      };
+    }
+
+    function shellParticle(kind, n) {
+      var id = n % 4;
+      var pt = fromPair(map.shells[id], 0.012);
       return makeParticle(rng, {
-        x: x,
-        y: y,
+        x: pt.x,
+        y: pt.y,
         kind: kind,
-        layer: hero ? "hero" : "core",
+        layer: "core",
         glyph: id,
-        rx: 0.003 + rng() * 0.007,
-        ry: 0.003 + rng() * 0.006,
-        ox: (rng() - 0.5) * 0.008,
-        oy: (rng() - 0.5) * 0.008,
+        rx: 0.004 + rng() * 0.01,
+        ry: 0.004 + rng() * 0.009,
+        ox: (rng() - 0.5) * 0.01,
+        oy: (rng() - 0.5) * 0.01,
         revs: 3 + Math.floor(rng() * 3),
-        size: hero ? 28 + rng() * 14 : 11 + rng() * 9,
-        alpha: hero ? 0.92 : 0.42 + rng() * 0.28,
+        size: 13 + rng() * 8,
+        alpha: 0.38 + rng() * 0.28,
+      });
+    }
+
+    function hollowParticle(kind, n) {
+      var id = n % 4;
+      var arr = map.hollows[id];
+      var pt = fromPair(arr && arr.length ? arr : map.shells[id], 0.016);
+      return makeParticle(rng, {
+        x: pt.x,
+        y: pt.y,
+        kind: kind,
+        layer: "field",
+        glyph: id,
+        rx: 0.008 + rng() * 0.02,
+        ry: 0.008 + rng() * 0.018,
+        ox: (rng() - 0.5) * 0.012,
+        oy: (rng() - 0.5) * 0.012,
+        revs: 2 + Math.floor(rng() * 3),
+        size: 9 + rng() * 7,
+        alpha: 0.16 + rng() * 0.18,
       });
     }
 
@@ -252,18 +392,37 @@
       var arr = map.rims;
       var idx = pickSite(rng, arr, 3);
       return makeParticle(rng, {
-        x: arr[idx * 3] + (rng() - 0.5) * 0.006,
-        y: arr[idx * 3 + 1] + (rng() - 0.5) * 0.006,
+        x: arr[idx * 3] + (rng() - 0.5) * 0.01,
+        y: arr[idx * 3 + 1] + (rng() - 0.5) * 0.01,
         kind: kind,
         layer: "rim",
         glyph: arr[idx * 3 + 2],
-        rx: 0.002 + rng() * 0.006,
-        ry: 0.002 + rng() * 0.006,
-        ox: (rng() - 0.5) * 0.01,
-        oy: (rng() - 0.5) * 0.01,
+        rx: 0.003 + rng() * 0.008,
+        ry: 0.003 + rng() * 0.008,
+        ox: (rng() - 0.5) * 0.012,
+        oy: (rng() - 0.5) * 0.012,
         revs: 4 + Math.floor(rng() * 3),
-        size: 11 + rng() * 10,
-        alpha: 0.7 + rng() * 0.28,
+        size: 14 + rng() * 9,
+        alpha: 0.62 + rng() * 0.3,
+      });
+    }
+
+    function heroParticle(kind) {
+      var arr = map.rims;
+      var idx = pickSite(rng, arr, 3);
+      return makeParticle(rng, {
+        x: arr[idx * 3] + (rng() - 0.5) * 0.008,
+        y: arr[idx * 3 + 1] + (rng() - 0.5) * 0.008,
+        kind: kind,
+        layer: "hero",
+        glyph: arr[idx * 3 + 2],
+        rx: 0.004 + rng() * 0.007,
+        ry: 0.004 + rng() * 0.007,
+        ox: (rng() - 0.5) * 0.008,
+        oy: (rng() - 0.5) * 0.008,
+        revs: 3 + Math.floor(rng() * 2),
+        size: 28 + rng() * 16,
+        alpha: 0.88 + rng() * 0.1,
       });
     }
 
@@ -271,18 +430,18 @@
       var arr = map.field;
       var idx = pickSite(rng, arr, 2);
       return makeParticle(rng, {
-        x: arr[idx * 2] + (rng() - 0.5) * 0.02,
-        y: arr[idx * 2 + 1] + (rng() - 0.5) * 0.02,
+        x: arr[idx * 2] + (rng() - 0.5) * 0.03,
+        y: arr[idx * 2 + 1] + (rng() - 0.5) * 0.03,
         kind: kind,
         layer: "field",
         glyph: -1,
-        rx: 0.012 + rng() * 0.05,
-        ry: 0.012 + rng() * 0.05,
-        ox: (rng() - 0.5) * 0.02,
-        oy: (rng() - 0.5) * 0.02,
+        rx: 0.016 + rng() * 0.055,
+        ry: 0.016 + rng() * 0.055,
+        ox: (rng() - 0.5) * 0.022,
+        oy: (rng() - 0.5) * 0.022,
         revs: 1 + Math.floor(rng() * 2),
-        size: 7 + rng() * 10,
-        alpha: 0.16 + rng() * 0.28,
+        size: 8 + rng() * 9,
+        alpha: 0.12 + rng() * 0.22,
       });
     }
 
@@ -291,34 +450,30 @@
       if (!arr.length) return fieldParticle(kind);
       var idx = pickSite(rng, arr, 2);
       return makeParticle(rng, {
-        x: arr[idx * 2] + (rng() - 0.5) * 0.012,
-        y: arr[idx * 2 + 1] + (rng() - 0.5) * 0.012,
+        x: arr[idx * 2] + (rng() - 0.5) * 0.014,
+        y: arr[idx * 2 + 1] + (rng() - 0.5) * 0.014,
         kind: kind,
         layer: "field",
         glyph: -1,
-        rx: 0.01 + rng() * 0.03,
-        ry: 0.01 + rng() * 0.03,
-        ox: (rng() - 0.5) * 0.012,
-        oy: (rng() - 0.5) * 0.012,
+        rx: 0.012 + rng() * 0.03,
+        ry: 0.012 + rng() * 0.03,
+        ox: (rng() - 0.5) * 0.014,
+        oy: (rng() - 0.5) * 0.014,
         revs: 2 + Math.floor(rng() * 2),
-        size: 5 + rng() * 9,
-        alpha: 0.22 + rng() * 0.32,
+        size: 7 + rng() * 8,
+        alpha: 0.18 + rng() * 0.24,
       });
     }
 
-    add("digit", 2600, coreParticle);
-    add("paren", 180, coreParticle);
-    add("arc", 110, coreParticle);
-    add("square", 80, coreParticle);
-    add("digit", 640, rimParticle);
-    add("arc", 50, rimParticle);
-    add("square", 40, rimParticle);
-    add("digit", 820, fieldParticle);
-    add("paren", 60, fieldParticle);
-    add("square", 50, fieldParticle);
-    add("arc", 40, fieldParticle);
-    add("digit", 220, crossParticle);
-    add("paren", 24, crossParticle);
+    add("glyph", 190, shellParticle);
+    add("glyph", 42, hollowParticle);
+    add("glyph", 310, rimParticle);
+    add("hero", 18, heroParticle);
+    add("mint", 14, rimParticle);
+    add("square", 10, rimParticle);
+    add("glyph", 96, fieldParticle);
+    add("square", 5, fieldParticle);
+    add("glyph", 32, crossParticle);
 
     particles = list;
     posed = new Array(list.length);
@@ -330,19 +485,13 @@
     });
     byGlyph.forEach(function (group) {
       var k;
-      for (k = 0; k < group.length - 1; k += 7) {
+      for (k = 0; k < group.length - 1; k += 5) {
         pairs.push(group[k], group[k + 1]);
       }
     });
   }
 
   function makeParticle(rng, spec) {
-    var kind = spec.kind;
-    var sprite;
-    if (kind === "square") sprite = 12;
-    else if (kind === "arc") sprite = rng() < 0.5 ? 13 : 14;
-    else if (kind === "paren") sprite = rng() < 0.5 ? 10 : 11;
-    else sprite = Math.floor(rng() * 10);
     return {
       x: spec.x,
       y: spec.y,
@@ -359,11 +508,13 @@
       skew: (rng() - 0.5) * 0.8,
       size: spec.size,
       alpha: spec.alpha,
-      sprite: sprite,
-      kind: kind,
+      sprite: pickSprite(rng, spec.kind),
+      kind: spec.kind,
       layer: spec.layer,
       glyph: spec.glyph,
-      streak: spec.layer === "core" && rng() < 0.18,
+      births: 3 + Math.floor(rng() * 3),
+      birthPhase: rng(),
+      pulseRevs: 2 + Math.floor(rng() * 2),
     };
   }
 
@@ -375,9 +526,10 @@
   }
 
   function drawSprite(p, pose, glow) {
+    if (pose.env < 0.03 || pose.alpha < 0.015) return;
     var cell = spriteCell(p.sprite);
-    var size = pose.scale * (glow ? 1.85 : 1);
-    var alpha = pose.alpha * (glow ? 0.22 : 1);
+    var size = pose.scale * (glow ? 1.7 + 0.2 * pose.pulse : 1);
+    var alpha = pose.alpha * (glow ? 0.2 * pose.pulse : 1);
     if (alpha < 0.02) return;
     ctx.globalAlpha = Math.min(1, alpha);
     ctx.drawImage(
@@ -404,31 +556,39 @@
   function draw(cycle, bg) {
     var w = canvas.clientWidth;
     var h = canvas.clientHeight;
-    ctx.setTransform(Math.min(2, window.devicePixelRatio || 1), 0, 0, Math.min(2, window.devicePixelRatio || 1), 0, 0);
+    ctx.setTransform(
+      Math.min(2, window.devicePixelRatio || 1),
+      0,
+      0,
+      Math.min(2, window.devicePixelRatio || 1),
+      0,
+      0,
+    );
     ctx.clearRect(0, 0, w, h);
     var voidBg = bg === "void";
     if (voidBg) {
-      ctx.fillStyle = "#121212";
+      ctx.fillStyle = "#000000";
       ctx.fillRect(0, 0, w, h);
     }
 
-    var posed = posesAt(cycle);
+    var posedNow = posesAt(cycle);
     var i, a, b, pa, pb, dx, dy, dist;
 
     ctx.globalCompositeOperation = "source-over";
-    ctx.strokeStyle = LINE;
-    ctx.lineWidth = 0.7;
-    ctx.globalAlpha = 0.16;
+    ctx.strokeStyle = "rgba(220, 235, 255, 0.16)";
+    ctx.lineWidth = 0.55;
+    ctx.globalAlpha = 0.22;
     ctx.beginPath();
     for (i = 0; i < pairs.length; i += 2) {
       a = pairs[i];
       b = pairs[i + 1];
-      pa = posed[a];
-      pb = posed[b];
+      pa = posedNow[a];
+      pb = posedNow[b];
+      if (pa.env < 0.22 || pb.env < 0.22) continue;
       dx = pa.x - pb.x;
       dy = pa.y - pb.y;
       dist = Math.hypot(dx, dy);
-      if (dist > 0.048 || pa.alpha < 0.08 || pb.alpha < 0.08) continue;
+      if (dist > 0.055 || pa.alpha < 0.08 || pb.alpha < 0.08) continue;
       ctx.moveTo(pa.x * w, pa.y * h);
       ctx.lineTo(pb.x * w, pb.y * h);
     }
@@ -437,7 +597,7 @@
     function pass(layer, glow) {
       for (i = 0; i < particles.length; i++) {
         if (particles[i].layer !== layer) continue;
-        drawSprite(particles[i], posed[i], glow);
+        drawSprite(particles[i], posedNow[i], glow);
       }
     }
 
@@ -451,21 +611,6 @@
     }
     pass("rim", false);
     pass("hero", false);
-
-    for (i = 0; i < particles.length; i++) {
-      if (!particles[i].streak) continue;
-      pa = posed[i];
-      if (pa.alpha < 0.12) continue;
-      var len = 9 + pa.scale * 0.35;
-      var mag = Math.hypot(pa.vx, pa.vy) || 1;
-      ctx.globalAlpha = pa.alpha * 0.35;
-      ctx.strokeStyle = "rgba(255,248,230,0.5)";
-      ctx.lineWidth = 0.8;
-      ctx.beginPath();
-      ctx.moveTo(pa.x * w - (pa.vx / mag) * len, pa.y * h - (pa.vy / mag) * len);
-      ctx.lineTo(pa.x * w + (pa.vx / mag) * len, pa.y * h + (pa.vy / mag) * len);
-      ctx.stroke();
-    }
 
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = "source-over";
@@ -490,6 +635,10 @@
   }
 
   function start() {
+    if (!ready) {
+      wantStart = true;
+      return;
+    }
     if (running) return;
     running = true;
     startMs = performance.now();
@@ -509,6 +658,15 @@
     }
   }
 
+  function boot() {
+    buildAtlas();
+    buildOccupancy();
+    spawn();
+    fitCanvas();
+    ready = true;
+    if (wantStart) start();
+  }
+
   function init() {
     host = document.querySelector(".mark");
     canvas = document.getElementById("live");
@@ -518,10 +676,6 @@
     var params = new URLSearchParams(location.search);
     if (params.get("still") === "1") reduced = true;
     if (params.has("cycle")) freezeCycle = Number(params.get("cycle")) || 0;
-    buildAtlas();
-    buildOccupancy();
-    spawn();
-    fitCanvas();
     window.addEventListener("resize", fitCanvas);
     if (window.ResizeObserver) {
       new ResizeObserver(fitCanvas).observe(host);
@@ -534,6 +688,11 @@
         tick();
       }
     });
+    var wait =
+      document.fonts && document.fonts.load
+        ? document.fonts.load(FONT)
+        : Promise.resolve();
+    wait.catch(function () {}).then(boot);
   }
 
   window.ZerosLogoField = {
@@ -544,7 +703,7 @@
       return running;
     },
     snapshot: function (cycle) {
-      if (!ctx) return null;
+      if (!ctx || !ready) return null;
       draw(Model.wrap01(cycle), "void");
       return canvas.toDataURL("image/png");
     },
