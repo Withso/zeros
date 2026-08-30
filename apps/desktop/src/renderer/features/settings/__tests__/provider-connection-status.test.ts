@@ -8,13 +8,12 @@ describe("providerConnectionStatus", () => {
       providerConnectionStatus({
         installed: true,
         authenticationUnavailableReason:
-          "Zeros Sandbox Runtime could not verify this CLI's sign-in state.",
+          "Authentication could not be checked right now.",
       }),
     ).toEqual({
       label: "Authentication check unavailable",
       tone: "warning",
-      detail:
-        "Zeros Sandbox Runtime could not verify this CLI's sign-in state.",
+      detail: "Authentication could not be checked right now.",
     });
   });
 

@@ -237,9 +237,9 @@ describe("modelsForAgent (curated catalog)", () => {
       },
     } as unknown as Parameters<typeof modelsForAgent>[1];
 
-    expect(modelsForAgent("cursor", initialize).map((m) => m.value)).not.toContain(
-      "composer-2.5",
-    );
+    expect(
+      modelsForAgent("cursor", initialize).map((m) => m.value),
+    ).not.toContain("composer-2.5");
   });
 });
 
@@ -701,18 +701,18 @@ describe("permissionMenuItems (native permission modes shown in the '+' menu)", 
     expect(items.map((i) => i.modeId)).toEqual(["plan", "auto", "agent"]);
     expect(items.map((i) => i.label)).toEqual(["Ask", "Auto", "Full access"]);
   });
-  it("labels dangerous autonomy truthfully when Design is protected", () => {
+  it("keeps Design protection implicit in native permission labels", () => {
     expect(
       permissionMenuItems("codex", "gpt-5.6-sol", protectedBoundary),
     ).toContainEqual({
       modeId: "full-access",
-      label: "Full Access — Design protected",
+      label: "Full access",
     });
     expect(
       permissionMenuItems("cursor", "composer-2.5", protectedBoundary),
     ).toContainEqual({
       modeId: "agent",
-      label: "Full Access — Design protected",
+      label: "Full access",
     });
   });
   it("does not offer provider bypass when the admitted backend cannot preserve it", () => {

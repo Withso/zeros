@@ -97,7 +97,7 @@ the same generation-scoped retirement. A later wake therefore allocates a fresh
 setup-verification attempt instead of being blocked by an attempt from the old
 runtime.
 
-Migration `0013_cloud_workspace_setup_worker.sql` adds immutable per-generation
+Migration `0018_cloud_workspace_setup_worker.sql` adds immutable per-generation
 repository/settings inputs plus bounded claims, heartbeat/expiry, retry timing,
 cancellation, and an incrementing execution fence. The orchestration in
 `setup-worker.ts` locks workspace before setup rows, commits the claim before
@@ -107,7 +107,7 @@ therefore finish, but its late result cannot mutate durable state. Logs cross a
 required sanitizer and a 256 KiB database ceiling; exception messages are not
 persisted.
 
-Migration `0014_cloud_workspace_setup_authority.sql` binds each new setup grant
+Migration `0019_cloud_workspace_setup_authority.sql` binds each new setup grant
 to one setup-run ID and live execution fence. It retires pre-fence setup grants
 during upgrade, and a database trigger rejects a new unbound or stale-fence
 grant even from system code. Consumption rechecks the token digest, account,
@@ -150,7 +150,7 @@ run/fence, and requires retirement before executor success can be returned.
 Helper error codes are allowlisted, provider details are collapsed, output is
 bounded, and an echoed admission makes the run fail closed.
 
-Migration `0015_cloud_workspace_setup_materials.sql` adds encrypted per-
+Migration `0020_cloud_workspace_setup_materials.sql` adds encrypted per-
 generation setup secrets and durable engine instances whose bridge and
 heartbeat capabilities are stored only as SHA-256 verifiers. The capability-
 authenticated internal routes are mounted only with the setup gate. Redemption
@@ -186,7 +186,7 @@ replacement ten minutes before expiry (or after a credential rejection), and
 the heartbeat returns only an owner-bound replacement document. PostgreSQL and
 audit rows never contain the raw GitHub token.
 
-Migration `0016_cloud_workspace_generation_transitions.sql` binds lifecycle
+Migration `0021_cloud_workspace_generation_transitions.sql` binds lifecycle
 intents to an immutable generation and records a drain-first transition. The
 source is stopped and its client/runtime authority retired before candidate
 creation; only structured candidate readiness can promote it. A permanent
@@ -194,7 +194,7 @@ drain failure restores the source without creating the candidate, while a
 rejected candidate is deleted before a source wake is queued. Provider results
 remain fenced by transition, generation, desired state, lease owner, and intent.
 
-Migration `0017_cloud_workspace_client_access.sql` stores only capability
+Migration `0022_cloud_workspace_client_access.sql` stores only capability
 verifiers and operational provider IDs for SSH, localhost tunnels, and isolated
 preview origins. Access issuance rechecks Organization/Team/current-generation
 authority on both sides of the provider call. Unknown SSH issue outcomes enter
@@ -209,7 +209,7 @@ calls. Valid streaming responses retain a bounded slot through completion or
 cancellation (4 per grant, 32 per process). External provider-edge limits are
 still required for production.
 
-Migration `0018_cloud_workspace_engine_authority.sql` closes authority that is
+Migration `0023_cloud_workspace_engine_authority.sql` closes authority that is
 not represented by an ordinary lifecycle request. Organization/Team membership
 loss retires issuing and active client grants, endpoint grants, and live engine
 instances even when the removal runs under user-context RLS. WorkOS account

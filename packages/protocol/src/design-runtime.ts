@@ -43,6 +43,10 @@ export interface DesignRuntimeTreeNode {
   name: string;
   text: string | null;
   visible: boolean;
+  /** Lean computed layout identity used by Layers icons. Optional for runtime
+   * compatibility with snapshots produced before this metadata existed. */
+  display?: string;
+  flexDirection?: string;
   children: DesignRuntimeTreeNode[];
 }
 
@@ -496,6 +500,12 @@ function isRuntimeTree(value: unknown): value is DesignRuntimeTreeNode[] {
       typeof current.value.name !== "string" ||
       (current.value.text !== null && typeof current.value.text !== "string") ||
       typeof current.value.visible !== "boolean" ||
+      (current.value.display !== undefined &&
+        (typeof current.value.display !== "string" ||
+          current.value.display.length > 64)) ||
+      (current.value.flexDirection !== undefined &&
+        (typeof current.value.flexDirection !== "string" ||
+          current.value.flexDirection.length > 64)) ||
       !Array.isArray(current.value.children)
     ) {
       return false;
@@ -639,6 +649,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
   var MAX_AUDIT_WARNINGS = 128;
   var MAX_MATCHED_DECLARATIONS = 256;
   var MAX_ACTIVE_REQUESTS = 128;
+  var MAX_STYLE_SNAPSHOT_PROPERTIES = 256;
   var MAX_TREE_NODES = 20000;
   // Keep structured-clone payload nesting well below Chromium's IPC depth
   // ceiling; the outer protocol envelope adds several more object levels.
@@ -917,13 +928,15 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       : element.tagName.toLowerCase();
   }
 
-  function visibleOf(element) {
+  function visibleOf(element, elementStyle) {
     for (
       var current = element;
       current && current instanceof Element;
       current = current.parentElement
     ) {
-      var style = getComputedStyle(current);
+      var style = current === element && elementStyle
+        ? elementStyle
+        : getComputedStyle(current);
       if (
         current.hidden ||
         style.display === "none" ||
@@ -946,11 +959,28 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     };
   }
 
-  function stylesOf(computed) {
+  function stylesOf(computed, authoredProperties) {
     var styles = {};
+    var knownProperties = new Set();
+    var styleCount = 0;
     for (var index = 0; index < STYLE_PROPERTIES.length; index += 1) {
       var property = STYLE_PROPERTIES[index];
       styles[property] = computed[property] || "";
+      knownProperties.add(cssPropertyName(property));
+      styleCount += 1;
+    }
+    // The curated catalog keeps pointer/read payloads bounded, while directly
+    // authored declarations may use any browser-supported property or custom
+    // token. Include those computed values as canonical CSS keys so the CSS
+    // inspector can faithfully round-trip them without expanding the snapshot
+    // to every browser default.
+    for (var authoredIndex = 0; authoredIndex < authoredProperties.length; authoredIndex += 1) {
+      var authoredProperty = authoredProperties[authoredIndex];
+      if (knownProperties.has(authoredProperty)) continue;
+      if (styleCount >= MAX_STYLE_SNAPSHOT_PROPERTIES) break;
+      styles[authoredProperty] = computed.getPropertyValue(authoredProperty) || "";
+      knownProperties.add(authoredProperty);
+      styleCount += 1;
     }
     return styles;
   }
@@ -1284,6 +1314,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     }
     budget.count += 1;
     var oid = oidOf(element);
+    var computed = getComputedStyle(element);
     var children = [];
     if (depth >= MAX_TREE_DEPTH) {
       if (element.children.length > 0) budget.truncated = true;
@@ -1300,7 +1331,9 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       tag: element.tagName.toLowerCase(),
       name: nameOf(element),
       text: directText(element),
-      visible: visibleOf(element),
+      visible: visibleOf(element, computed),
+      display: computed.display || "",
+      flexDirection: computed.flexDirection || "",
       children: children
     };
   }
@@ -1325,6 +1358,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       : oid.replace(/["\\]/g, "\\$&");
     var textEditable = textEditableOf(element);
     var computed = getComputedStyle(element);
+    var authoredStyleProperties = authoredStylePropertiesOf(element);
     var rect = rectOf(element);
     var result = {
       sourceVersion: SOURCE_VERSION,
@@ -1334,12 +1368,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       text: textEditable ? editableTextOf(element) : directText(element),
       textEditable: textEditable,
       selector: "[data-oid=\"" + escaped + "\"]",
-      visible: visibleOf(element),
+      visible: visibleOf(element, computed),
       breadcrumb: breadcrumbOf(element),
       rect: rect,
       box: boxOf(element, computed, rect),
-      styles: stylesOf(computed),
-      authoredStyleProperties: authoredStylePropertiesOf(element)
+      styles: stylesOf(computed, authoredStyleProperties),
+      authoredStyleProperties: authoredStyleProperties
     };
     if (textEditable) result.textSizing = textSizingOf(element);
     return result;
@@ -1349,6 +1383,7 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     var oid = oidOf(element);
     if (oid) return detailsOf(element);
     var computed = getComputedStyle(element);
+    var authoredStyleProperties = authoredStylePropertiesOf(element);
     var rect = rectOf(element);
     var result = {
       sourceVersion: SOURCE_VERSION,
@@ -1358,12 +1393,12 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
       text: directText(element),
       textEditable: false,
       selector: element === document.body ? "body" : "html",
-      visible: visibleOf(element),
+      visible: visibleOf(element, computed),
       breadcrumb: [],
       rect: rect,
       box: boxOf(element, computed, rect),
-      styles: stylesOf(computed),
-      authoredStyleProperties: authoredStylePropertiesOf(element)
+      styles: stylesOf(computed, authoredStyleProperties),
+      authoredStyleProperties: authoredStyleProperties
     };
     return result;
   }
@@ -2371,7 +2406,11 @@ export const DESIGN_RUNTIME_SOURCE = String.raw`(function () {
     window.__zerosDesignSourceVersion = SOURCE_VERSION;
     var treeUnchanged = prepared.every(function (update) {
       return update.plans.every(function (plan) {
-        return plan.property !== "display" && plan.property !== "visibility";
+        return plan.property !== "display" &&
+          plan.property !== "visibility" &&
+          plan.property !== "flex-direction" &&
+          plan.property !== "flex-flow" &&
+          plan.property !== "all";
       });
     });
     var nextSnapshot = treeUnchanged ? styleOnlySnapshot() : snapshot();

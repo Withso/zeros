@@ -88,15 +88,6 @@ export function firstLeafId(node: PaneNode): string {
   return node.type === "leaf" ? node.id : firstLeafId(node.first);
 }
 
-/** The visually top-right pane: follow `second` through row splits
- *  (right half) and `first` through column splits (top half). Hosts
- *  workspace-level chrome that must hug the column's top-right corner
- *  (the workbench expand button when the panel is collapsed). */
-export function topRightLeafId(node: PaneNode): string {
-  if (node.type === "leaf") return node.id;
-  return topRightLeafId(node.direction === "row" ? node.second : node.first);
-}
-
 export function hasLeaf(node: PaneNode, paneId: string): boolean {
   if (node.type === "leaf") return node.id === paneId;
   return hasLeaf(node.first, paneId) || hasLeaf(node.second, paneId);

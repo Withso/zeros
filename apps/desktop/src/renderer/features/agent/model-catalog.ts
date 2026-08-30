@@ -152,10 +152,7 @@ function coerceModelOption(x: unknown): ModelOption | null {
       const variant = candidate as Record<string, unknown>;
       const label = variant.label ?? variant.displayName;
       const parameters = variant.parameters ?? variant.params;
-      if (
-        typeof label !== "string" ||
-        !Array.isArray(parameters)
-      ) {
+      if (typeof label !== "string" || !Array.isArray(parameters)) {
         return [];
       }
       return [
@@ -165,10 +162,7 @@ function coerceModelOption(x: unknown): ModelOption | null {
             ? { description: variant.description }
             : {}),
           parameters: parameters.flatMap((candidateParameter) => {
-            if (
-              !candidateParameter ||
-              typeof candidateParameter !== "object"
-            ) {
+            if (!candidateParameter || typeof candidateParameter !== "object") {
               return [];
             }
             const parameter = candidateParameter as Record<string, unknown>;
@@ -859,10 +853,7 @@ export function permissionMenuItems(
     )
     .map((id) => ({
       modeId: id,
-      label:
-        designProtected && ["bypass", "full-access", "agent"].includes(id)
-          ? "Full Access — Design protected"
-          : (labels[id] ?? id),
+      label: labels[id] ?? id,
     }));
 }
 
@@ -1072,27 +1063,29 @@ export function modelsForAgent(
     if (live?.selectable === false) return [];
     if (c.liveRequired && (!live || live.selectable !== true)) return [];
     if (!live) return [c];
-    return [{
-      ...c,
-      label: live.label || c.label,
-      ...(live.description !== undefined
-        ? { description: live.description }
-        : {}),
-      ...(live.aliases !== undefined ? { aliases: live.aliases } : {}),
-      ...(live.parameters !== undefined
-        ? { parameters: live.parameters }
-        : {}),
-      ...(live.variants !== undefined ? { variants: live.variants } : {}),
-      ...(live.selectable !== undefined
-        ? { selectable: live.selectable }
-        : {}),
-      ...(live.effortLevels !== undefined
-        ? { effortLevels: live.effortLevels }
-        : {}),
-      ...(typeof live.supportsFast === "boolean"
-        ? { supportsFast: live.supportsFast }
-        : {}),
-    }];
+    return [
+      {
+        ...c,
+        label: live.label || c.label,
+        ...(live.description !== undefined
+          ? { description: live.description }
+          : {}),
+        ...(live.aliases !== undefined ? { aliases: live.aliases } : {}),
+        ...(live.parameters !== undefined
+          ? { parameters: live.parameters }
+          : {}),
+        ...(live.variants !== undefined ? { variants: live.variants } : {}),
+        ...(live.selectable !== undefined
+          ? { selectable: live.selectable }
+          : {}),
+        ...(live.effortLevels !== undefined
+          ? { effortLevels: live.effortLevels }
+          : {}),
+        ...(typeof live.supportsFast === "boolean"
+          ? { supportsFast: live.supportsFast }
+          : {}),
+      },
+    ];
   });
 }
 
@@ -1161,8 +1154,8 @@ export const PERMISSION_MODE_ENV_VAR = "ZEROS_PERMISSION_MODE";
  *  live session through its own RPC (AGENT_SET_MODE — implemented by all three
  *  adapters, not an optional hook), so a mode change can never be a reason to
  *  rebuild. Leaving it in the key made every Plan-mode toggle look like drift,
- *  and the reconcile then force-respawned COLD on the next send — dropping the
- *  agent's conversation while the transcript stayed on screen. */
+ *  and the reconcile then needlessly close→resumed the provider execution on
+ *  the next send. */
 export function chatEnvDriftKey(
   env: Record<string, string> | undefined,
 ): string {
@@ -1177,8 +1170,8 @@ export function chatEnvDriftKey(
  *  For a PROVIDER-ORIGINATED effort change (Codex raising its own thread to
  *  Ultra, reported back via `current_effort_update`) the running session is
  *  already at the new tier, so persisting it onto the chat must NOT read as
- *  user drift in sendPrompt's reconcile — that respawns COLD (no resume, so
- *  Codex loses the thread). Re-stamping only the effort slot is what keeps a
+ *  user drift in sendPrompt's reconcile — that would close→resume an already
+ *  correct execution. Re-stamping only the effort slot is what keeps a
  *  genuinely-unapplied model/Fast/add-dir change still visible as drift, which
  *  a full `chatEnvDriftKey(envForChat(chat))` re-stamp would silently swallow.
  *

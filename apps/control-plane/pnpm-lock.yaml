@@ -18,8 +18,8 @@ importers:
         specifier: ^2.1.0
         version: 2.1.0(hono@4.13.0)
       '@workos-inc/node':
-        specifier: 10.10.0
-        version: 10.10.0
+        specifier: 10.12.0
+        version: 10.12.0
       hono:
         specifier: ^4.13.0
         version: 4.13.0
@@ -39,6 +39,9 @@ importers:
       '@types/pg':
         specifier: ^8.11.0
         version: 8.20.0
+      '@workos/emulate':
+        specifier: 0.9.0
+        version: 0.9.0
       tsx:
         specifier: ^4.19.0
         version: 4.22.5
@@ -212,6 +215,12 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
+
+  '@hono/node-server@1.19.17':
+    resolution: {integrity: sha512-dSneS5qhiauZWGDCeK4o695Xd9nUNjviSZCMQrj10eetr8Uln1ucn6bbphOM6UynAMMtNIzZNSpL9vnASJwrPQ==}
+    engines: {node: '>=18.14.1'}
+    peerDependencies:
+      hono: ^4
 
   '@hono/node-server@2.1.0':
     resolution: {integrity: sha512-XovyyCCnBzW+zKu+z/zq8hwNs4KOR5rEMAOxo2f40Q5xoOI37IMm6MIg2COOUtUApo0i6850MTBKH2u4QLGIqg==}
@@ -391,9 +400,14 @@ packages:
   '@vitest/utils@3.2.6':
     resolution: {integrity: sha512-lI23nIs4bnT3T8NIoh+vFaz5s2/DdP0Jgt2jxwgWljvwn82cLJtyi/If+fjFyoLMGIOz0U/fKvWE0d4jsNQEfg==}
 
-  '@workos-inc/node@10.10.0':
-    resolution: {integrity: sha512-qAf00a0DaIFD2yX4D11jCnMsk8w5FpE4Oif8EDBxGnPR1WNelqPeQqRrwX4/9xUpQV0asI6SFkdaffEj6IO33Q==}
+  '@workos-inc/node@10.12.0':
+    resolution: {integrity: sha512-ApDXB6gqQBehjobenm4t2bz/yP05l3Rs/N/qkb1lNVHI2Kikk5ec6h9ZY1JiKowesWR+2hliWfQTW/uQUOX6EQ==}
     engines: {node: '>=22.11.0'}
+
+  '@workos/emulate@0.9.0':
+    resolution: {integrity: sha512-VYjBj5YXa7yO96GmF8SVKvjwWl1jn9636vFDB/QUZNWNkzvGWz1u2Wupuwxk4Cl0wyt/3tdt8ATUYAW2DAfC3w==}
+    engines: {node: '>=22.11'}
+    hasBin: true
 
   agent-base@6.0.2:
     resolution: {integrity: sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ==}
@@ -420,6 +434,10 @@ packages:
   chai@5.3.3:
     resolution: {integrity: sha512-4zNhdJD/iOjSH0A05ea+Ke6MU5mmpQcbQsSOkgdaUMJ9zTlDTD/GYlwohmIE2u0gaxHYiVHEn1Fw9mZ/ktJWgw==}
     engines: {node: '>=18'}
+
+  chalk@5.6.2:
+    resolution: {integrity: sha512-7NzBL0rN6fMUW+f7A6Io4h40qQlG+xGmtMxfbnH/K7TAtt8JQWVQK+6g0UXKMeVJoyV5EkkNsErQ8pVD3bLHbA==}
+    engines: {node: ^12.17.0 || ^14.13 || >=16.0.0}
 
   check-error@2.1.3:
     resolution: {integrity: sha512-PAJdDJusoxnwm1VwW07VWwUN1sl7smmC3OKggvndJFadxxDRyFJBX/ggnu/KE4kQAB7a3Dp8f/YXC1FlUprWmA==}
@@ -650,6 +668,11 @@ packages:
   rollup@4.62.2:
     resolution: {integrity: sha512-RFnrW4lhXA3s3eqHDZvN654g8OTjzRfqpIRJYczCGB6HzphckVAi/Qh4tbPUbRuDi7s1Llv8g/NspLkttY3gTA==}
     engines: {node: '>=18.0.0', npm: '>=8.0.0'}
+    hasBin: true
+
+  semver@7.8.5:
+    resolution: {integrity: sha512-Y7/KDsb8LjooZpwaqGyulO6DQlksgCncchHGk+sZIY4SBvUocMBEFH5Ur1fI4dV+Jvl0w6cjvucaIi40puRioA==}
+    engines: {node: '>=10'}
     hasBin: true
 
   siginfo@2.0.0:
@@ -891,6 +914,10 @@ snapshots:
   '@esbuild/win32-x64@0.28.1':
     optional: true
 
+  '@hono/node-server@1.19.17(hono@4.13.0)':
+    dependencies:
+      hono: 4.13.0
+
   '@hono/node-server@2.1.0(hono@4.13.0)':
     dependencies:
       hono: 4.13.0
@@ -1033,7 +1060,15 @@ snapshots:
       loupe: 3.2.1
       tinyrainbow: 2.0.0
 
-  '@workos-inc/node@10.10.0': {}
+  '@workos-inc/node@10.12.0': {}
+
+  '@workos/emulate@0.9.0':
+    dependencies:
+      '@hono/node-server': 1.19.17(hono@4.13.0)
+      chalk: 5.6.2
+      hono: 4.13.0
+      semver: 7.8.5
+      yaml: 2.9.0
 
   agent-base@6.0.2:
     dependencies:
@@ -1069,6 +1104,8 @@ snapshots:
       deep-eql: 5.0.2
       loupe: 3.2.1
       pathval: 2.0.1
+
+  chalk@5.6.2: {}
 
   check-error@2.1.3: {}
 
@@ -1314,6 +1351,8 @@ snapshots:
       '@rollup/rollup-win32-x64-msvc': 4.62.2
       fsevents: 2.3.3
 
+  semver@7.8.5: {}
+
   siginfo@2.0.0: {}
 
   source-map-js@1.2.1: {}
@@ -1436,7 +1475,6 @@ snapshots:
 
   xtend@4.0.2: {}
 
-  yaml@2.9.0:
-    optional: true
+  yaml@2.9.0: {}
 
   zod@3.25.76: {}

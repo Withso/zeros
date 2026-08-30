@@ -31,7 +31,7 @@ vi.mock("../../team/team-store", () => {
 });
 
 /** Point the mocked store at a signed-in user with the given staff role. */
-function signedInAs(staffRole: "developer" | null): void {
+function signedInAs(staffRole: "developer" | "support_admin" | null): void {
   teamStore.me = {
     user: {
       id: "00000000-0000-0000-0000-000000000001",
@@ -70,11 +70,14 @@ beforeEach(() => {
 });
 
 describe("isInternalUser — the staff gate", () => {
-  it("is true only when /v1/me reports a staff role", async () => {
+  it("is true only for the developer role, not an unrelated support capability", async () => {
     const store = await freshStore();
 
     signedInAs("developer");
     expect(store.isInternalUser()).toBe(true);
+
+    signedInAs("support_admin");
+    expect(store.isInternalUser()).toBe(false);
 
     signedInAs(null);
     expect(store.isInternalUser()).toBe(false);
@@ -97,7 +100,6 @@ describe("isInternalUser — the staff gate", () => {
     signedOut();
     expect(store.isInternalUser()).toBe(false);
   });
-
 });
 
 describe("internal feature flags", () => {

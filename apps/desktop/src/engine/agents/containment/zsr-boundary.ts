@@ -16,6 +16,7 @@ import {
 } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
+import { finished as streamFinished } from "node:stream/promises";
 
 import {
   EXECUTION_BOUNDARY_STATUS_VERSION,
@@ -47,6 +48,11 @@ import {
 } from "./macos-process-domain";
 import { boundaryParityRestrictions, newTerritoryGeneration } from "./status";
 import { ZsrGitIntegrationBroker } from "./git-integration-broker";
+import {
+  designWatchIsolationArtifacts,
+  designWatchIsolationEnvironment,
+  prepareDesignWatchIsolation,
+} from "./design-watch-isolation";
 import { AdmissionCancelledError } from "./types";
 import type {
   AdmissionControl,
@@ -89,6 +95,12 @@ const SLOW_ADMISSION_REPORT_MS = 1_500;
  * nothing until now. */
 const SLOW_RETIREMENT_REPORT_MS = 1_500;
 const PORT_DISCOVERY_INTERVAL_MS = 250;
+/** Idle cadence once nothing has changed for the hot window. Discovery spawns
+ * a native helper per poll, so a quiet long-lived session should not pay a
+ * 4 Hz process tax forever; any registration or observed change snaps the
+ * cadence back to the fast interval. */
+const PORT_DISCOVERY_IDLE_INTERVAL_MS = 1_500;
+const PORT_DISCOVERY_HOT_WINDOW_MS = 10_000;
 const PORT_DISCOVERY_MISSING_POLLS = 8;
 const MAX_AUTO_PORT_LEASES = 64;
 const COMMAND_DESCRIPTOR_VERSION = 6 as const;
@@ -194,10 +206,34 @@ export const CA_TRUST_ENV_NAMES = [
   "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
 ] as const;
 
+/** How long a released private OrbStack worker stays warm before its machine
+ * is deleted. Rebuilding the VM costs the user roughly a minute on their next
+ * `docker`/`podman` command, so a short idle window converts session churn in
+ * one workspace into instant container reuse. Idling is refused entirely while
+ * the workspace's Design territory is in transition (see the suspension hooks
+ * below), because an idle machine keeps the mount protections of the boundary
+ * that created it. */
+const SHARED_CONTAINER_WORKER_IDLE_MS_DEFAULT = 300_000;
+
+function sharedContainerWorkerIdleMs(): number {
+  const configured = Number.parseInt(
+    process.env.ZEROS_ZSR_CONTAINER_WORKER_IDLE_MS ?? "",
+    10,
+  );
+  return Number.isInteger(configured) && configured >= 0
+    ? configured
+    : SHARED_CONTAINER_WORKER_IDLE_MS_DEFAULT;
+}
+
 interface SharedMacosContainerEntry {
+  readonly key: string;
+  readonly workspaceRoot: string;
   readonly lease: Promise<MacosContainerWorkerLease>;
   readonly controlExecutionId: string;
   references: number;
+  activationFailed: boolean;
+  activationFailure?: unknown;
+  idleTimer?: NodeJS.Timeout;
   stopping?: Promise<void>;
 }
 
@@ -206,14 +242,126 @@ const sharedMacosContainerWorkers = new Map<
   SharedMacosContainerEntry
 >();
 
+/** Workspace roots whose released workers must stop immediately instead of
+ * idling. A count supports overlapping transitions, mirroring the utility
+ * pool's suspension semantics. The `null` key is the global gate. */
+const suspendedContainerWorkerIdling = new Map<string | null, number>();
+
+/** Canonical key for a workspace root used across shared-container idling.
+ * The shared-worker key derives its roots via realpath (see
+ * localWorkspaceContainerIdentity), so idling suspend/stop must resolve
+ * symlinks the same way or an engine-passed non-canonical path could miss the
+ * realpath'd entry. Falls back to a lexical resolve for a not-yet-existing
+ * path. */
+function containerWorkspaceKey(workspaceRoot: string): string {
+  return physicalPathIfPresent(path.resolve(workspaceRoot));
+}
+
+function containerWorkerIdlingSuspended(workspaceRoot: string): boolean {
+  if (sharedContainerWorkerIdleMs() === 0) return true;
+  if ((suspendedContainerWorkerIdling.get(null) ?? 0) > 0) return true;
+  return (
+    (suspendedContainerWorkerIdling.get(containerWorkspaceKey(workspaceRoot)) ??
+      0) > 0
+  );
+}
+
+/** Close (or reopen) the idle window. While suspended, a release stops the
+ * machine inline and its proof failure surfaces exactly where the pre-idle
+ * design surfaced it: in the releasing boundary's teardown. */
+export function suspendSharedContainerWorkerIdling(
+  workspaceRoot?: string,
+): void {
+  const key =
+    workspaceRoot === undefined ? null : containerWorkspaceKey(workspaceRoot);
+  suspendedContainerWorkerIdling.set(
+    key,
+    (suspendedContainerWorkerIdling.get(key) ?? 0) + 1,
+  );
+}
+
+export function resumeSharedContainerWorkerIdling(
+  workspaceRoot?: string,
+): void {
+  const key =
+    workspaceRoot === undefined ? null : containerWorkspaceKey(workspaceRoot);
+  const count = suspendedContainerWorkerIdling.get(key) ?? 0;
+  if (count <= 1) suspendedContainerWorkerIdling.delete(key);
+  else suspendedContainerWorkerIdling.set(key, count - 1);
+}
+
+function retireSharedContainerEntry(
+  entry: SharedMacosContainerEntry,
+): Promise<void> {
+  if (entry.idleTimer) {
+    clearTimeout(entry.idleTimer);
+    entry.idleTimer = undefined;
+  }
+  if (entry.stopping) return entry.stopping;
+  const flight = (async () => {
+    const lease = await entry.lease.catch(() => null);
+    if (lease) await lease.stopAndProve();
+    await removeSessionDir(entry.controlExecutionId);
+  })();
+  entry.stopping = flight;
+  flight.then(
+    () => {
+      if (sharedMacosContainerWorkers.get(entry.key) === entry) {
+        sharedMacosContainerWorkers.delete(entry.key);
+      }
+    },
+    () => {
+      // Keep the failed entry latched in the map. The machine name is derived
+      // from the shared key, so admitting a fresh worker before this one is
+      // proven gone would collide with the surviving machine; the next acquire
+      // retries this same retirement instead.
+      entry.stopping = undefined;
+    },
+  );
+  return flight;
+}
+
+/** Stop every idle shared worker now (all of them, or one workspace's).
+ * Territory transitions call this before publishing a changed Design map so a
+ * warm machine admitted under the old protections cannot outlive them. */
+export async function stopIdleSharedContainerWorkers(
+  workspaceRoot?: string,
+): Promise<void> {
+  const root =
+    workspaceRoot === undefined ? null : containerWorkspaceKey(workspaceRoot);
+  const failures: unknown[] = [];
+  await Promise.all(
+    [...sharedMacosContainerWorkers.values()]
+      .filter(
+        (entry) =>
+          entry.references === 0 &&
+          (root === null || entry.workspaceRoot === root),
+      )
+      .map(async (entry) => {
+        try {
+          await retireSharedContainerEntry(entry);
+        } catch (error) {
+          failures.push(error);
+        }
+      }),
+  );
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) {
+    throw new AggregateError(
+      failures,
+      "idle shared container workers could not all be proven stopped",
+    );
+  }
+}
+
 class SharedMacosContainerWorkerLease implements MacosContainerWorkerLease {
   readonly hostPort: number;
   readonly machineName: string;
   readonly environment: Readonly<Record<string, string>>;
   private stopPromise: Promise<void> | null = null;
+  private released = false;
 
   constructor(
-    private readonly key: string,
     private readonly entry: SharedMacosContainerEntry,
     private readonly delegate: MacosContainerWorkerLease,
   ) {
@@ -222,31 +370,66 @@ class SharedMacosContainerWorkerLease implements MacosContainerWorkerLease {
     this.environment = delegate.environment;
   }
 
-  start(
+  async start(
     request: Parameters<MacosContainerWorkerLease["start"]>[0],
   ): Promise<void> {
-    return this.delegate.start(request);
+    try {
+      await this.delegate.start(request);
+    } catch (error) {
+      // A lease that could not be armed must never enter the warm pool. It may
+      // own a listening socket or a partially provisioned machine, and handing
+      // that shared entry to a later boundary would replay broken authority.
+      this.entry.activationFailed = true;
+      this.entry.activationFailure = error;
+      throw error;
+    }
   }
 
   stopAndProve(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
-    this.stopPromise = (async () => {
-      this.entry.references -= 1;
-      if (this.entry.references > 0) return;
-      this.entry.stopping = (async () => {
-        await this.delegate.stopAndProve();
-        await removeSessionDir(this.entry.controlExecutionId);
-      })();
-      try {
-        await this.entry.stopping;
-      } finally {
-        if (sharedMacosContainerWorkers.get(this.key) === this.entry) {
-          sharedMacosContainerWorkers.delete(this.key);
-        }
+    const attempt = (async () => {
+      if (!this.released) {
+        this.released = true;
+        this.entry.references -= 1;
       }
+      if (this.entry.references > 0) return;
+      if (
+        this.entry.activationFailed ||
+        containerWorkerIdlingSuspended(this.entry.workspaceRoot)
+      ) {
+        await retireSharedContainerEntry(this.entry);
+        return;
+      }
+      // Keep the machine warm for the idle window. A failed deferred stop
+      // latches the entry (see retireSharedContainerEntry) so the shared
+      // machine name can never be double-allocated.
+      if (this.entry.idleTimer) clearTimeout(this.entry.idleTimer);
+      const timer = setTimeout(() => {
+        entryIdleStop(this.entry);
+      }, sharedContainerWorkerIdleMs());
+      timer.unref?.();
+      this.entry.idleTimer = timer;
     })();
-    return this.stopPromise;
+    // The catch runs asynchronously (after this const initializes), so
+    // referencing `wrapped` inside it is safe.
+    const wrapped: Promise<void> = attempt.catch((error) => {
+      // The release itself is durable; only the stop proof may be retried.
+      if (this.stopPromise === wrapped) this.stopPromise = null;
+      throw error;
+    });
+    this.stopPromise = wrapped;
+    return wrapped;
   }
+}
+
+function entryIdleStop(entry: SharedMacosContainerEntry): void {
+  if (entry.references > 0) return;
+  void retireSharedContainerEntry(entry).catch((error) => {
+    console.error(
+      `[zsr] idle container worker ${entry.controlExecutionId} could not be proven stopped: ` +
+        (error instanceof Error ? error.message : String(error)),
+    );
+  });
 }
 
 function localWorkspaceContainerIdentity(request: BoundaryRequest): {
@@ -301,25 +484,76 @@ function localWorkspaceContainerIdentity(request: BoundaryRequest): {
 
 async function acquireSharedMacosContainerWorker(
   key: string,
+  workspaceRoot: string,
   controlExecutionId: string,
   create: () => Promise<MacosContainerWorkerLease>,
 ): Promise<MacosContainerWorkerLease> {
+  // A territory or grant change produces a different key for the same
+  // workspace. Retire any idle worker still warm under the superseded key
+  // before admitting the new one, so at most one warm machine serves a
+  // workspace and a stale protection map never outlives its replacement.
+  const canonicalWorkspace = containerWorkspaceKey(workspaceRoot);
+  for (const stale of [...sharedMacosContainerWorkers.values()]) {
+    if (
+      stale.key !== key &&
+      stale.workspaceRoot === canonicalWorkspace &&
+      stale.references === 0 &&
+      !stale.stopping
+    ) {
+      await retireSharedContainerEntry(stale);
+    }
+  }
   let entry = sharedMacosContainerWorkers.get(key);
   if (entry?.stopping) {
-    await entry.stopping;
-    return acquireSharedMacosContainerWorker(key, controlExecutionId, create);
+    // A failed retirement keeps the entry latched; retry the stop proof here
+    // rather than colliding with the surviving machine's shared name.
+    await entry.stopping.catch(() => undefined);
+    if (sharedMacosContainerWorkers.get(key) === entry) {
+      await retireSharedContainerEntry(entry);
+    }
+    return acquireSharedMacosContainerWorker(
+      key,
+      workspaceRoot,
+      controlExecutionId,
+      create,
+    );
+  }
+  if (entry?.activationFailed) {
+    // Do not add a new owner to an entry whose activation already failed.
+    // Existing owners release it through their exact cleanup; after the final
+    // release, a later admission can retire it and reserve a fresh worker.
+    if (entry.references > 0) {
+      throw (
+        entry.activationFailure ??
+        new Error("shared container worker activation failed")
+      );
+    }
+    await retireSharedContainerEntry(entry);
+    return acquireSharedMacosContainerWorker(
+      key,
+      workspaceRoot,
+      controlExecutionId,
+      create,
+    );
+  }
+  if (entry?.idleTimer) {
+    clearTimeout(entry.idleTimer);
+    entry.idleTimer = undefined;
   }
   if (!entry) {
     entry = {
+      key,
+      workspaceRoot: canonicalWorkspace,
       lease: Promise.resolve().then(create),
       controlExecutionId,
       references: 0,
+      activationFailed: false,
     };
     sharedMacosContainerWorkers.set(key, entry);
   }
   entry.references += 1;
   try {
-    return new SharedMacosContainerWorkerLease(key, entry, await entry.lease);
+    return new SharedMacosContainerWorkerLease(entry, await entry.lease);
   } catch (error) {
     entry.references -= 1;
     if (
@@ -800,15 +1034,6 @@ function processGroupExists(pid: number): boolean {
   }
 }
 
-async function waitForGroup(pid: number, timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (processGroupExists(pid)) {
-    if (Date.now() >= deadline) return false;
-    await new Promise<void>((resolve) => setTimeout(resolve, POLL_MS));
-  }
-  return true;
-}
-
 /** Host-parity sessions use the workspace repository directly. Legacy status
  * states remain in the protocol, but this backend reports only native or
  * not-applicable. */
@@ -875,15 +1100,32 @@ function statusFor(
   };
 }
 
-class TrackedBoundaryProcess implements BoundaryProcess {
+export interface TrackedProcessGroupOperations {
+  exists(pid: number): boolean;
+  signal(pid: number, signal: NodeJS.Signals): void;
+}
+
+const nativeTrackedProcessGroupOperations: TrackedProcessGroupOperations = {
+  exists: processGroupExists,
+  signal: (pid, signal) => process.kill(-pid, signal),
+};
+
+export class TrackedBoundaryProcess implements BoundaryProcess {
   readonly pid: number;
   readonly stdin;
   readonly stdout;
   readonly stderr;
   private readonly exited: Promise<BoundaryProcessExit>;
   private stopPromise: Promise<void> | null = null;
+  private ownershipRetired = false;
 
-  constructor(readonly child: ChildProcess) {
+  constructor(
+    readonly child: ChildProcess,
+    private readonly matchesProcessDomain: (
+      pid: number,
+    ) => Promise<boolean> = async () => true,
+    private readonly operations: TrackedProcessGroupOperations = nativeTrackedProcessGroupOperations,
+  ) {
     if (!child.pid) throw new Error("boundary supervisor has no pid");
     // A ChildProcess `error` without a listener is process-fatal. Spawn-time
     // failures are awaited by PreparedZsrBoundary.spawn (or owned by the
@@ -903,13 +1145,48 @@ class TrackedBoundaryProcess implements BoundaryProcess {
     return this.exited;
   }
 
+  private groupExists(): boolean {
+    return !this.ownershipRetired && this.operations.exists(this.pid);
+  }
+
+  private async stillOwnsGroup(): Promise<boolean> {
+    // A live ChildProcess object is the spawn identity: it may be stopped in
+    // the narrow interval before the supervisor has installed its immutable
+    // macOS sandbox fingerprint. Only consult that fingerprint after Node has
+    // observed the leader exit, when the numeric PGID can have been recycled.
+    if (this.child.exitCode === null && this.child.signalCode === null) {
+      return true;
+    }
+    if (!(await this.matchesProcessDomain(this.pid))) {
+      this.ownershipRetired = true;
+      return false;
+    }
+    return true;
+  }
+
+  private async waitForOwnedGroup(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.groupExists()) {
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) => setTimeout(resolve, POLL_MS));
+    }
+    return true;
+  }
+
   async signal(signal: NodeJS.Signals): Promise<void> {
     if (process.platform !== "win32") {
+      if (!this.groupExists() || !(await this.stillOwnsGroup())) return;
       try {
-        process.kill(-this.pid, signal);
+        this.operations.signal(this.pid, signal);
         return;
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ESRCH") return;
+        const code = (error as NodeJS.ErrnoException).code;
+        if (code === "ESRCH") {
+          this.ownershipRetired = true;
+          return;
+        }
+        if (code === "EPERM" && !(await this.stillOwnsGroup())) return;
+        throw error;
       }
     }
     this.child.kill(signal);
@@ -917,7 +1194,7 @@ class TrackedBoundaryProcess implements BoundaryProcess {
 
   stopAndProve(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
-    this.stopPromise = (async () => {
+    const attempt = (async () => {
       const startedAt = Date.now();
       if (process.platform === "win32") {
         if (this.child.exitCode === null && this.child.signalCode === null) {
@@ -933,11 +1210,11 @@ class TrackedBoundaryProcess implements BoundaryProcess {
         }
         return;
       }
-      if (!processGroupExists(this.pid)) return;
+      if (!this.groupExists()) return;
       await this.signal("SIGTERM");
-      if (await waitForGroup(this.pid, GRACE_MS)) return;
+      if (await this.waitForOwnedGroup(GRACE_MS)) return;
       await this.signal("SIGKILL");
-      if (!(await waitForGroup(this.pid, FORCE_MS))) {
+      if (!(await this.waitForOwnedGroup(FORCE_MS))) {
         throw new Error(`boundary process group ${this.pid} survived SIGKILL`);
       }
       await this.exited;
@@ -947,7 +1224,15 @@ class TrackedBoundaryProcess implements BoundaryProcess {
         );
       }
     })();
-    return this.stopPromise;
+    // The kill ladder is idempotent, so a failed proof (typically a process
+    // stuck in uninterruptible IO surviving SIGKILL) may be retried by a later
+    // call instead of pinning the first rejection forever.
+    const wrapped: Promise<void> = attempt.catch((error) => {
+      if (this.stopPromise === wrapped) this.stopPromise = null;
+      throw error;
+    });
+    this.stopPromise = wrapped;
+    return wrapped;
   }
 }
 
@@ -956,21 +1241,64 @@ class TrackedBoundaryProcess implements BoundaryProcess {
  * the PTY session/process-group leader. Tracking that group gives boundary
  * revocation the same terminate-and-prove semantics as direct provider
  * spawns. */
-class TrackedBoundaryProcessGroup implements BoundaryProcess {
+export class TrackedBoundaryProcessGroup implements BoundaryProcess {
   readonly child = undefined;
   readonly stdin = null;
   readonly stdout = null;
   readonly stderr = null;
   private stopPromise: Promise<void> | null = null;
+  /** Set when the immutable domain matcher proves this numeric PGID no longer
+   * belongs to the boundary. It also releases the cheap background wait loop,
+   * which otherwise cannot distinguish a recycled foreign group via kill(0). */
+  private ownershipRetired = false;
 
-  constructor(readonly pid: number) {
+  constructor(
+    readonly pid: number,
+    /** Exact immutable macOS domain match for the recorded group leader. A
+     * false result means the PID/PGID was recycled after the PTY exited and is
+     * no longer ours to signal. Non-macOS boundaries pass an always-true
+     * matcher and retain the existing process-group proof. */
+    private readonly matchesProcessDomain: (
+      pid: number,
+    ) => Promise<boolean> = async () => true,
+    private readonly operations: TrackedProcessGroupOperations = nativeTrackedProcessGroupOperations,
+    /** The PTY host's exact exit event for the process that minted this PGID.
+     * Until that event, the freshly spawned numeric group is still ours even
+     * during the few milliseconds before its macOS policy fingerprint appears. */
+    private readonly leaderExited: () => boolean = () => true,
+  ) {
     if (!Number.isInteger(pid) || pid <= 0) {
       throw new Error("boundary PTY process group has an invalid pid");
     }
   }
 
+  private groupExists(): boolean {
+    return !this.ownershipRetired && this.operations.exists(this.pid);
+  }
+
+  private async stillOwnsGroup(): Promise<boolean> {
+    if (!this.leaderExited()) return true;
+    if (!(await this.matchesProcessDomain(this.pid))) {
+      this.ownershipRetired = true;
+      return false;
+    }
+    return true;
+  }
+
+  private async waitForOwnedGroup(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs;
+    while (this.groupExists()) {
+      if (Date.now() >= deadline) return false;
+      await new Promise<void>((resolve) => setTimeout(resolve, POLL_MS));
+    }
+    return true;
+  }
+
   async wait(): Promise<BoundaryProcessExit> {
-    while (processGroupExists(this.pid)) {
+    // Keep the lifetime watcher syscall-only. Consulting the native process-
+    // domain helper here would spawn a helper every POLL_MS for every long-
+    // lived dev server. Ownership is checked only on the stop/signal path.
+    while (this.groupExists()) {
       await new Promise<void>((resolve) => setTimeout(resolve, POLL_MS));
     }
     return { code: null, signal: null };
@@ -981,26 +1309,51 @@ class TrackedBoundaryProcessGroup implements BoundaryProcess {
       throw new Error("PTY process-group tracking is unavailable on Windows");
     }
     try {
-      process.kill(-this.pid, signal);
+      this.operations.signal(this.pid, signal);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
     }
   }
 
+  /** Signal only while the exact process fingerprint still owns this group.
+   * EPERM is ambiguous at the POSIX layer: it also means the numeric PGID now
+   * belongs to another uid. Re-check the immutable macOS domain before either
+   * accepting that the tracked process is gone or failing closed. */
+  private async signalOwned(signal: NodeJS.Signals): Promise<boolean> {
+    if (!(await this.stillOwnsGroup())) return false;
+    try {
+      await this.signal(signal);
+      return true;
+    } catch (error) {
+      if (
+        (error as NodeJS.ErrnoException).code === "EPERM" &&
+        !(await this.stillOwnsGroup())
+      ) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
   stopAndProve(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
-    this.stopPromise = (async () => {
-      if (!processGroupExists(this.pid)) return;
-      await this.signal("SIGTERM");
-      if (await waitForGroup(this.pid, GRACE_MS)) return;
-      await this.signal("SIGKILL");
-      if (!(await waitForGroup(this.pid, FORCE_MS))) {
+    const attempt = (async () => {
+      if (!this.groupExists()) return;
+      if (!(await this.signalOwned("SIGTERM"))) return;
+      if (await this.waitForOwnedGroup(GRACE_MS)) return;
+      if (!(await this.signalOwned("SIGKILL"))) return;
+      if (!(await this.waitForOwnedGroup(FORCE_MS))) {
         throw new Error(
           `boundary PTY process group ${this.pid} survived SIGKILL`,
         );
       }
     })();
-    return this.stopPromise;
+    const wrapped: Promise<void> = attempt.catch((error) => {
+      if (this.stopPromise === wrapped) this.stopPromise = null;
+      throw error;
+    });
+    this.stopPromise = wrapped;
+    return wrapped;
   }
 }
 
@@ -1023,6 +1376,7 @@ class PreparedZsrBoundary implements PreparedBoundary {
   readonly generation;
   readonly status;
   readonly providerHomePath: string;
+  private attestationPromise: Promise<void> = Promise.resolve();
   private readonly processes = new Set<BoundaryProcess>();
   private readonly pendingProcessRetirements = new Set<Promise<void>>();
   private processRegistrationEpoch = 0;
@@ -1036,13 +1390,28 @@ class PreparedZsrBoundary implements PreparedBoundary {
     { lease: PortLease; missingPolls: number }
   >();
   private portDiscoveryTimer: NodeJS.Timeout | null = null;
+  private portDiscoveryLoopActive = false;
   private portDiscoveryInFlight = false;
   private portDiscoveryReady = false;
+  private portDiscoveryHotUntil = 0;
   private portDiscoveryState: PortDiscoveryStatus["state"] = "idle";
   private portDiscoveryIssue: PortDiscoveryIssue | null = null;
   private revoked = false;
   private revokePromise: Promise<void> | null = null;
   private stopPromise: Promise<void> | null = null;
+  /** Per-stage teardown latches. A failed stopAndProve may be retried by the
+   * gateway's recovery loop, but the reclaim stage DELETES the process-domain
+   * marker/policy/metadata that reap()/retireMetadata() consume, and
+   * retireMetadata() is a non-idempotent rename. Re-running an already-proven
+   * stage against deleted state would wedge the retry forever, so each stage
+   * records its success and a retry resumes from the first unproven stage. The
+   * ordering invariant that makes this safe: reclaim (which deletes the inputs)
+   * only runs once `domainRetired` is set, and reap/metadata are skipped once
+   * set — so their inputs still exist on any retry that re-runs them. */
+  private domainReaped = false;
+  private domainRetired = false;
+  private stateReclaimed = false;
+  private sessionDirRemoved = false;
 
   constructor(
     private readonly request: BoundaryRequest,
@@ -1057,6 +1426,7 @@ class PreparedZsrBoundary implements PreparedBoundary {
     generation: ReturnType<typeof newTerritoryGeneration>,
     backend: "zeros-srt" | "cloud-worker",
     private readonly onRetirementFailure: (error: unknown) => void,
+    private readonly onRetirementProven: () => void,
   ) {
     this.generation = generation;
     this.status = statusFor(request, generation, backend);
@@ -1064,9 +1434,25 @@ class PreparedZsrBoundary implements PreparedBoundary {
       request.providerStateEnv?.HOME ?? process.env.HOME ?? policy.paths.home;
   }
 
-  matchesMacosProcessDomain(pid: number): Promise<boolean> {
+  get attestation(): Promise<void> {
+    return this.attestationPromise;
+  }
+
+  /** Installed exactly once by admission before the prepared boundary can be
+   * observed by a caller. Keep a local rejection sink because background mode
+   * intentionally returns before the gateway attaches its exact-execution
+   * observer. */
+  setAttestation(attestation: Promise<void>): void {
+    this.attestationPromise = attestation;
+    void attestation.catch(() => undefined);
+  }
+
+  matchesMacosProcessDomain(
+    pid: number,
+    options: { reportMismatch?: boolean } = {},
+  ): Promise<boolean> {
     if (!this.macosProcessDomain) return Promise.resolve(true);
-    return this.macosProcessDomain.matches(pid);
+    return this.macosProcessDomain.matches(pid, options);
   }
 
   wrapSpawn(request: BoundarySpawnRequest): BoundaryLaunchSpec {
@@ -1084,6 +1470,18 @@ class PreparedZsrBoundary implements PreparedBoundary {
       request.env,
     ).filter((socket) => !allowedUnixSockets.has(socket));
     const childEnvironment = containedChildEnv(request);
+    if (
+      this.request.actor !== "design-agent" &&
+      (this.request.territory?.protectedDesignDirectories.length ?? 0) > 0
+    ) {
+      Object.assign(
+        childEnvironment,
+        designWatchIsolationEnvironment(
+          childEnvironment,
+          designWatchIsolationArtifacts(this.policy.paths.tools),
+        ),
+      );
+    }
     if (this.gitIntegrationBroker) {
       Object.assign(
         childEnvironment,
@@ -1215,15 +1613,40 @@ class PreparedZsrBoundary implements PreparedBoundary {
     return lease;
   }
 
+  /** Snap discovery back to the fast cadence. Called on process registration
+   * and whenever a poll observes the listener set changing, so startup and
+   * teardown transitions stay responsive while a quiet steady state polls at
+   * the idle cadence. */
+  private markPortDiscoveryHot(): void {
+    this.portDiscoveryHotUntil = Date.now() + PORT_DISCOVERY_HOT_WINDOW_MS;
+  }
+
+  private schedulePortDiscoveryPoll(): void {
+    if (this.revoked || !this.portDiscoveryLoopActive) return;
+    const delay =
+      Date.now() < this.portDiscoveryHotUntil
+        ? PORT_DISCOVERY_INTERVAL_MS
+        : PORT_DISCOVERY_IDLE_INTERVAL_MS;
+    const timer = setTimeout(() => {
+      this.portDiscoveryTimer = null;
+      void this.pollPortDiscovery().finally(() =>
+        this.schedulePortDiscoveryPoll(),
+      );
+    }, delay);
+    timer.unref();
+    this.portDiscoveryTimer = timer;
+  }
+
   private startPortDiscovery(): void {
-    if (this.revoked || this.portDiscoveryTimer) return;
+    this.markPortDiscoveryHot();
+    if (this.revoked || this.portDiscoveryLoopActive) return;
+    this.portDiscoveryLoopActive = true;
     this.portDiscoveryState = "discovering";
     this.portDiscoveryIssue = null;
     this.publishPorts();
-    const poll = () => void this.pollPortDiscovery();
-    this.portDiscoveryTimer = setInterval(poll, PORT_DISCOVERY_INTERVAL_MS);
-    this.portDiscoveryTimer.unref();
-    poll();
+    void this.pollPortDiscovery().finally(() =>
+      this.schedulePortDiscoveryPoll(),
+    );
   }
 
   private async listDiscoveredTcpListeners(): Promise<
@@ -1288,6 +1711,7 @@ class PreparedZsrBoundary implements PreparedBoundary {
         }
         failureIssue = "lease-allocation-failed";
         const lease = await this.leaseDiscoveredPort(listener);
+        this.markPortDiscoveryHot();
         if (this.revoked) {
           await lease.revoke();
           return;
@@ -1296,6 +1720,9 @@ class PreparedZsrBoundary implements PreparedBoundary {
       }
       for (const [port, state] of this.discoveredPorts) {
         if (seen.has(port)) continue;
+        // A disappearing listener is a transition too: confirm the drop at the
+        // fast cadence instead of stretching it across idle polls.
+        this.markPortDiscoveryHot();
         state.missingPolls += 1;
         if (state.missingPolls < PORT_DISCOVERY_MISSING_POLLS) continue;
         this.discoveredPorts.delete(port);
@@ -1321,18 +1748,31 @@ class PreparedZsrBoundary implements PreparedBoundary {
     }
   }
 
-  trackProcess(child: ChildProcess): BoundaryProcess {
-    const tracked = new TrackedBoundaryProcess(child);
+  trackProcess(
+    child: ChildProcess,
+    options?: { armPortDiscovery?: boolean },
+  ): BoundaryProcess {
+    const tracked = new TrackedBoundaryProcess(child, (candidate) =>
+      this.matchesMacosProcessDomain(candidate),
+    );
     this.processRegistrationEpoch += 1;
     this.processes.add(tracked);
-    this.startPortDiscovery();
+    if (options?.armPortDiscovery !== false) this.startPortDiscovery();
     void tracked.wait().finally(() => this.processes.delete(tracked));
     if (this.revoked) void this.retireTrackedProcess(tracked);
     return tracked;
   }
 
-  trackProcessGroup(pid: number): BoundaryProcess {
-    const tracked = new TrackedBoundaryProcessGroup(pid);
+  trackProcessGroup(
+    pid: number,
+    options?: { readonly leaderExited?: () => boolean },
+  ): BoundaryProcess {
+    const tracked = new TrackedBoundaryProcessGroup(
+      pid,
+      (candidate) => this.matchesMacosProcessDomain(candidate),
+      nativeTrackedProcessGroupOperations,
+      options?.leaderExited,
+    );
     this.processRegistrationEpoch += 1;
     this.processes.add(tracked);
     this.startPortDiscovery();
@@ -1385,6 +1825,24 @@ class PreparedZsrBoundary implements PreparedBoundary {
   }
 
   async spawn(request: BoundarySpawnRequest): Promise<BoundaryProcess> {
+    return this.spawnTracked(request, { armPortDiscovery: true });
+  }
+
+  /** The admission canary's spawn, minus port-discovery arming. The canary
+   * never listens, so the immediate helper exec plus the 250ms-cadence hot
+   * window it would arm are pure load on the admission critical path. The
+   * fence semantics are identical — same wrap, same tracking, same teardown
+   * proof — and the first provider spawn arms discovery exactly as before. */
+  async spawnAdmissionCanary(
+    request: BoundarySpawnRequest,
+  ): Promise<BoundaryProcess> {
+    return this.spawnTracked(request, { armPortDiscovery: false });
+  }
+
+  private async spawnTracked(
+    request: BoundarySpawnRequest,
+    options: { armPortDiscovery: boolean },
+  ): Promise<BoundaryProcess> {
     const spec = this.wrapSpawn(request);
     const child = spawn(spec.command, spec.args, {
       cwd: spec.cwd,
@@ -1408,7 +1866,7 @@ class PreparedZsrBoundary implements PreparedBoundary {
       child.once("spawn", onSpawn);
       child.once("error", onError);
     });
-    return this.trackProcess(child);
+    return this.trackProcess(child, options);
   }
 
   async requestPort(request: PortRequest): Promise<PortLease> {
@@ -1443,9 +1901,10 @@ class PreparedZsrBoundary implements PreparedBoundary {
     this.revoked = true;
     this.portDiscoveryState = "revoked";
     this.portDiscoveryIssue = null;
-    if (this.portDiscoveryTimer) clearInterval(this.portDiscoveryTimer);
+    this.portDiscoveryLoopActive = false;
+    if (this.portDiscoveryTimer) clearTimeout(this.portDiscoveryTimer);
     this.portDiscoveryTimer = null;
-    this.revokePromise = (async () => {
+    const attempt = (async () => {
       const results = await Promise.allSettled([
         ...[...this.portLeases].map((lease) => lease.revoke()),
         this.macosContainerWorker?.stopAndProve() ?? Promise.resolve(),
@@ -1465,12 +1924,20 @@ class PreparedZsrBoundary implements PreparedBoundary {
         );
       }
     })();
-    return this.revokePromise;
+    // Every revocation step is idempotent (leases self-deactivate, the broker
+    // close latches, the container lease release is durable), so a failed
+    // revoke may be retried; `revoked` itself stays latched either way.
+    const wrapped: Promise<void> = attempt.catch((error) => {
+      if (this.revokePromise === wrapped) this.revokePromise = null;
+      throw error;
+    });
+    this.revokePromise = wrapped;
+    return wrapped;
   }
 
   stopAndProve(): Promise<void> {
     if (this.stopPromise) return this.stopPromise;
-    this.stopPromise = (async () => {
+    const attempt = (async () => {
       const startedAt = Date.now();
       const retirementStages = new Map<string, number>();
       let stageStartedAt = startedAt;
@@ -1489,53 +1956,73 @@ class PreparedZsrBoundary implements PreparedBoundary {
 
       failures.push(...(await this.stopTrackedProcessesAndProve()));
       stage("processes");
-      if (this.macosProcessDomain) {
+      // Reap is best-effort-always (it kills a domain-escaped descendant even
+      // when a tracked group survived), but skipped once proven so a retry
+      // never touches a marker the reclaim stage already deleted.
+      if (this.macosProcessDomain && !this.domainReaped) {
         try {
           await this.macosProcessDomain.reap();
+          this.domainReaped = true;
         } catch (error) {
           failures.push(error);
         }
       }
       stage("domain");
-      if (failures.length === 0 && this.macosProcessDomain) {
+      if (
+        failures.length === 0 &&
+        this.macosProcessDomain &&
+        !this.domainRetired
+      ) {
         try {
           await this.macosProcessDomain.retireMetadata();
+          this.domainRetired = true;
         } catch (error) {
           failures.push(error);
         }
+      } else if (!this.macosProcessDomain) {
+        this.domainRetired = true;
       }
       stage("metadata");
 
-      if (failures.length === 0) {
+      // Reclaim deletes the reap/metadata inputs, so it must run only after
+      // those stages are proven and never before them on a retry.
+      if (failures.length === 0 && this.domainRetired && !this.stateReclaimed) {
         const reclaimed = await Promise.allSettled([
           rm(this.policy.paths.root, { recursive: true, force: true }),
           rm(this.policy.paths.network, { recursive: true, force: true }),
         ]);
-        failures.push(
-          ...reclaimed.flatMap((result) =>
-            result.status === "rejected" ? [result.reason] : [],
-          ),
+        const reclaimFailures = reclaimed.flatMap((result) =>
+          result.status === "rejected" ? [result.reason] : [],
         );
+        failures.push(...reclaimFailures);
+        if (reclaimFailures.length === 0) this.stateReclaimed = true;
       }
       stage("reclaim");
-      if (failures.length === 0) {
+      if (
+        failures.length === 0 &&
+        this.stateReclaimed &&
+        !this.sessionDirRemoved
+      ) {
         try {
           await removeSessionDir(this.request.executionId);
+          this.sessionDirRemoved = true;
         } catch (error) {
           failures.push(error);
         }
       }
       const retirement = Date.now() - startedAt;
       if (retirement >= SLOW_RETIREMENT_REPORT_MS || process.env.SRT_DEBUG) {
-        console.error(
-          `[zsr] retired ${this.request.providerId ?? this.request.actor} in ` +
-            `${retirement}ms (` +
-            [...retirementStages]
-              .filter(([, ms]) => ms > 0)
-              .map(([name, ms]) => `${name}=${ms}ms`)
-              .join(" ") +
-            `)`,
-        );
+        const retirementMessage =
+          `[zsr] ${failures.length > 0 ? "retirement failed for" : "retired"} ` +
+          `${this.request.providerId ?? this.request.actor} in ` +
+          `${retirement}ms (` +
+          [...retirementStages]
+            .filter(([, ms]) => ms > 0)
+            .map(([name, ms]) => `${name}=${ms}ms`)
+            .join(" ") +
+          `)`;
+        if (failures.length > 0) console.error(retirementMessage);
+        else console.log(retirementMessage);
       }
       if (failures.length === 1) throw failures[0];
       if (failures.length > 1) {
@@ -1544,11 +2031,77 @@ class PreparedZsrBoundary implements PreparedBoundary {
           "execution boundary teardown failed",
         );
       }
-    })().catch((error) => {
+      // A previous attempt may have retained a diagnostic for this generation.
+      // Only the complete, ordered proof above may clear that exact record.
+      this.onRetirementProven();
+    })();
+    // A later call may retry a failed proof (the gateway's recovery loop does
+    // exactly that). The per-stage latches above make a retry RESUME from the
+    // first unproven stage rather than re-run stages whose inputs an earlier
+    // stage already deleted. Each failure is still recorded against this exact
+    // generation before its recovery loop retries.
+    const wrapped: Promise<void> = attempt.catch((error) => {
       this.onRetirementFailure(error);
+      if (this.stopPromise === wrapped) this.stopPromise = null;
       throw error;
     });
-    return this.stopPromise;
+    this.stopPromise = wrapped;
+    return wrapped;
+  }
+}
+
+/** Ordered, retry-safe cleanup for an admission that failed before a prepared
+ * boundary could be returned. Successful siblings are latched, and later
+ * stages (notably session-root removal) cannot run until every earlier
+ * authority-bearing resource has been proven retired. */
+class PreparationCleanupProof {
+  private readonly completed: boolean[][];
+  private stageIndex = 0;
+  private stopPromise: Promise<void> | null = null;
+
+  constructor(
+    private readonly stages: readonly (readonly (() => Promise<unknown>)[])[],
+  ) {
+    this.completed = stages.map((stage) => stage.map(() => false));
+  }
+
+  stopAndProve(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    const attempt = (async () => {
+      while (this.stageIndex < this.stages.length) {
+        const stage = this.stages[this.stageIndex]!;
+        const completed = this.completed[this.stageIndex]!;
+        const pending = stage.flatMap((cleanup, index) =>
+          completed[index] ? [] : [{ cleanup, index }],
+        );
+        const results = await Promise.allSettled(
+          pending.map(({ cleanup }) => Promise.resolve().then(cleanup)),
+        );
+        const failures: unknown[] = [];
+        for (let index = 0; index < results.length; index += 1) {
+          const result = results[index]!;
+          if (result.status === "fulfilled") {
+            completed[pending[index]!.index] = true;
+          } else {
+            failures.push(result.reason);
+          }
+        }
+        if (failures.length === 1) throw failures[0];
+        if (failures.length > 1) {
+          throw new AggregateError(
+            failures,
+            "ZSR boundary preparation cleanup failed",
+          );
+        }
+        this.stageIndex += 1;
+      }
+    })();
+    const wrapped = attempt.catch((error) => {
+      if (this.stopPromise === wrapped) this.stopPromise = null;
+      throw error;
+    });
+    this.stopPromise = wrapped;
+    return wrapped;
   }
 }
 
@@ -1564,11 +2117,27 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
   private readonly gitDispatchBinary: string;
   private capabilityProbeResult: CachedProbe | null = null;
   private capabilityProbeInFlight: Promise<CachedProbe> | null = null;
-  /** Any failed proof poisons this process-lifetime boundary factory. A fresh
-   * engine must run durable stale-domain recovery before it may admit more
-   * repository-controlled bytes. Callers are free to report/aggregate the
-   * original error, but cannot accidentally swallow the admission hold. */
+  /** Unproven teardown diagnostics keyed by the exact generation. The old
+   * implementation treated this as a process-wide admission latch, coupling a
+   * stuck agent to every sibling agent, utility, Run/Setup task, and auth probe.
+   * Each generation is already fenced independently, so recovery remains exact
+   * and new boundaries continue under their own immutable kernel policy. */
   private readonly retirementFailures = new Map<TerritoryGeneration, unknown>();
+  /** A blocking admission can fail after its prepared boundary exists but
+   * before any caller can adopt it. Keep that exact object here so teardown is
+   * retried even though the gateway never received a handle. */
+  private readonly retirementRecoveryBoundaries = new Map<
+    TerritoryGeneration,
+    Pick<PreparedBoundary, "stopAndProve">
+  >();
+  private readonly retirementRecoveryAttempts = new Map<
+    TerritoryGeneration,
+    number
+  >();
+  private readonly retirementRecoveryTimers = new Map<
+    TerritoryGeneration,
+    NodeJS.Timeout
+  >();
 
   constructor(private readonly options: ZsrBoundaryOptions) {
     this.backend = options.cloudWorker ? "cloud-worker" : "zeros-srt";
@@ -1639,45 +2208,25 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     );
   }
 
-  private async provePreparationCleanup(
-    generation: TerritoryGeneration,
-    primaryError: unknown,
-    cleanups: readonly (() => Promise<unknown>)[],
-  ): Promise<void> {
-    const results = await Promise.allSettled(
-      cleanups.map((cleanup) => Promise.resolve().then(cleanup)),
-    );
-    const cleanupFailures = results.flatMap((result) =>
-      result.status === "rejected" ? [result.reason] : [],
-    );
-    if (cleanupFailures.length > 0) {
-      const failure = new AggregateError(
-        [primaryError, ...cleanupFailures],
-        "ZSR boundary preparation failed and cleanup could not be proven",
-      );
-      this.retirementFailures.set(generation, failure);
-      throw failure;
-    }
-  }
-
   private async throwAfterPreparationCleanup(
     generation: TerritoryGeneration,
     primaryError: unknown,
     cleanups: readonly (() => Promise<unknown>)[],
     executionId?: string,
   ): Promise<never> {
-    await this.provePreparationCleanup(generation, primaryError, cleanups);
-    if (executionId) {
-      try {
-        await removeSessionDir(executionId);
-      } catch (cleanupError) {
-        const failure = new AggregateError(
-          [primaryError, cleanupError],
-          "ZSR boundary preparation failed and its session root could not be removed",
-        );
-        this.retirementFailures.set(generation, failure);
-        throw failure;
-      }
+    const cleanupProof = new PreparationCleanupProof([
+      cleanups,
+      ...(executionId ? [[() => removeSessionDir(executionId)]] : []),
+    ]);
+    try {
+      await cleanupProof.stopAndProve();
+    } catch (cleanupError) {
+      const failure = new AggregateError(
+        [primaryError, cleanupError],
+        "ZSR boundary preparation failed and cleanup could not be proven",
+      );
+      this.recordBoundaryRetirementFailure(generation, cleanupProof, failure);
+      throw failure;
     }
     throw primaryError;
   }
@@ -1735,6 +2284,60 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         reasons,
       },
     };
+  }
+
+  private recordBoundaryRetirementFailure(
+    generation: TerritoryGeneration,
+    boundary: Pick<PreparedBoundary, "stopAndProve">,
+    error: unknown,
+  ): void {
+    this.retirementFailures.set(generation, error);
+    this.retirementRecoveryBoundaries.set(generation, boundary);
+    this.scheduleBoundaryRetirementRecovery(generation);
+  }
+
+  private scheduleBoundaryRetirementRecovery(
+    generation: TerritoryGeneration,
+  ): void {
+    if (this.retirementRecoveryTimers.has(generation)) return;
+    const attempt = this.retirementRecoveryAttempts.get(generation) ?? 0;
+    const delays = [5_000, 15_000, 60_000] as const;
+    const delay = delays[attempt] ?? 300_000;
+    const timer = setTimeout(() => {
+      if (this.retirementRecoveryTimers.get(generation) !== timer) return;
+      this.retirementRecoveryTimers.delete(generation);
+      this.retirementRecoveryAttempts.set(generation, attempt + 1);
+      const boundary = this.retirementRecoveryBoundaries.get(generation);
+      if (!boundary) return;
+      void boundary.stopAndProve().then(
+        () => {
+          this.clearRetirementFailure(generation);
+          console.log(
+            `[zsr] exact boundary teardown recovered on retry ${attempt + 1}`,
+          );
+        },
+        (error: unknown) => {
+          this.retirementFailures.set(generation, error);
+          // PreparedZsrBoundary reports the same failure through its callback,
+          // but injected/test boundaries do not. Schedule here as a fallback;
+          // the per-generation timer map deduplicates both paths.
+          this.scheduleBoundaryRetirementRecovery(generation);
+        },
+      );
+    }, delay);
+    timer.unref?.();
+    this.retirementRecoveryTimers.set(generation, timer);
+  }
+
+  /** A retried teardown proved this generation stopped after all; discard its
+   * retained diagnostic and recovery ownership. */
+  clearRetirementFailure(generation: TerritoryGeneration): void {
+    const timer = this.retirementRecoveryTimers.get(generation);
+    if (timer) clearTimeout(timer);
+    this.retirementRecoveryTimers.delete(generation);
+    this.retirementRecoveryAttempts.delete(generation);
+    this.retirementRecoveryBoundaries.delete(generation);
+    this.retirementFailures.delete(generation);
   }
 
   async recoverStaleProcesses(): Promise<MacosProcessDomainRecoveryResult> {
@@ -1913,7 +2516,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     };
     let processHandle: BoundaryProcess | null = null;
     try {
-      processHandle = await boundary.spawn({
+      processHandle = await boundary.spawnAdmissionCanary({
         command: this.supervisorRuntime,
         args: [
           "-e",
@@ -1934,10 +2537,8 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       let stdout = "";
       let stderr = "";
       let resolveLine: ((line: string) => void) | null = null;
-      let rejectLine: ((error: Error) => void) | null = null;
-      const firstLine = new Promise<string>((resolve, reject) => {
+      const firstLine = new Promise<string>((resolve) => {
         resolveLine = resolve;
-        rejectLine = reject;
       });
       processHandle.stdout?.setEncoding("utf8");
       processHandle.stderr?.setEncoding("utf8");
@@ -1947,24 +2548,52 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         if (newline >= 0 && resolveLine) {
           resolveLine(stdout.slice(0, newline));
           resolveLine = null;
-          rejectLine = null;
-        }
-      });
-      processHandle.stdout?.on("end", () => {
-        if (processDomain && rejectLine) {
-          rejectLine(new Error("host-parity canary produced no attestation"));
-          resolveLine = null;
-          rejectLine = null;
         }
       });
       processHandle.stderr?.on("data", (chunk: string) => {
         stderr = (stderr + chunk).slice(-4 * 1024);
       });
       const exitPromise = processHandle.wait();
+      const outputCompletion = Promise.all([
+        processHandle.stdout
+          ? streamFinished(processHandle.stdout, { cleanup: true }).catch(
+              () => undefined,
+            )
+          : Promise.resolve(),
+        processHandle.stderr
+          ? streamFinished(processHandle.stderr, { cleanup: true }).catch(
+              () => undefined,
+            )
+          : Promise.resolve(),
+      ]).then(() => undefined);
+      const drainCapturedOutput = async (): Promise<void> => {
+        let drainTimer: NodeJS.Timeout | undefined;
+        try {
+          await Promise.race([
+            outputCompletion,
+            new Promise<void>((resolve) => {
+              drainTimer = setTimeout(resolve, 100);
+              drainTimer.unref?.();
+            }),
+          ]);
+        } finally {
+          if (drainTimer) clearTimeout(drainTimer);
+        }
+      };
+      const canaryExitError = (exit: BoundaryProcessExit): Error => {
+        const diagnostic = finalSupervisorDiagnostic(
+          stderr,
+          Object.values(expectedEnv),
+        );
+        return new Error(
+          `host-parity canary exited ${exit.code ?? exit.signal}${diagnostic ? `: ${diagnostic}` : ""}`,
+        );
+      };
       let lineTimer: NodeJS.Timeout | undefined;
-      const liveText = processDomain
+      const handshake = processDomain
         ? await Promise.race([
-            firstLine,
+            firstLine.then((line) => ({ kind: "line" as const, line })),
+            exitPromise.then((exit) => ({ kind: "exit" as const, exit })),
             new Promise<never>((_, reject) => {
               lineTimer = setTimeout(
                 () => reject(new Error("host-parity canary timed out")),
@@ -1975,13 +2604,21 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
             if (lineTimer) clearTimeout(lineTimer);
           })
         : null;
+      if (handshake?.kind === "exit") {
+        await drainCapturedOutput();
+        throw canaryExitError(handshake.exit);
+      }
+      const liveText = handshake?.kind === "line" ? handshake.line : null;
       const live = liveText
         ? (JSON.parse(liveText) as { sandboxPid?: number })
         : null;
       const processDomainMatched = processDomain
         ? Number.isSafeInteger(live?.sandboxPid) &&
           Number(live?.sandboxPid) > 0 &&
-          (await boundary.matchesMacosProcessDomain(Number(live?.sandboxPid)))
+          (await boundary.matchesMacosProcessDomain(
+            Number(live?.sandboxPid),
+            { reportMismatch: true },
+          ))
         : true;
       if (processDomain) {
         await writeFile(releaseFile, "release\n", { mode: 0o600, flag: "wx" });
@@ -1998,14 +2635,9 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       ]).finally(() => {
         if (exitTimer) clearTimeout(exitTimer);
       });
+      await drainCapturedOutput();
       if (exit.code !== 0) {
-        const diagnostic = finalSupervisorDiagnostic(
-          stderr,
-          Object.values(expectedEnv),
-        );
-        throw new Error(
-          `host-parity canary exited ${exit.code ?? exit.signal}${diagnostic ? `: ${diagnostic}` : ""}`,
-        );
+        throw canaryExitError(exit);
       }
       const result = JSON.parse(liveText ?? stdout.trim()) as {
         codeWrite?: boolean;
@@ -2081,16 +2713,6 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
   }
 
   async probe(_request: BoundaryRequest): Promise<BoundaryProbeResult> {
-    if (this.retirementFailures.size > 0) {
-      return {
-        backend: this.backend,
-        available: false,
-        secureNestedIsolation: false,
-        reasons: [
-          "a prior execution boundary could not be proven stopped; restart Zeros to run stale process-domain recovery",
-        ],
-      };
-    }
     return this.cachedCapabilityProbe();
   }
 
@@ -2099,6 +2721,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     generation: TerritoryGeneration,
     admissionStartedAt: number,
     signal?: AbortSignal,
+    attestationMode: "blocking" | "background" = "blocking",
   ): Promise<PreparedBoundary> {
     let request = initialRequest;
     let macosContainerWorker: MacosContainerWorkerLease | null = null;
@@ -2106,6 +2729,35 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     let gitIntegrationBroker: ZsrGitIntegrationBroker | null = null;
     let policy: PreparedZsrPolicy | null = null;
     let designGitRepositories: readonly CanonicalGitRepository[] = [];
+    const admissionStages = new Map<string, number>();
+    const preflightFinishedAt = Date.now();
+    admissionStages.set("preflight", preflightFinishedAt - admissionStartedAt);
+    let stageStartedAt = preflightFinishedAt;
+    const stage = (name: string): void => {
+      const now = Date.now();
+      admissionStages.set(name, now - stageStartedAt);
+      stageStartedAt = now;
+    };
+    // A failed admission previously logged nothing, leaving slow or flaky
+    // stages unattributable exactly when attribution matters most. The
+    // in-flight stage has no name yet (names are recorded at completion), so
+    // `pending` carries its duration; the stage list identifies it by order.
+    const reportFailedAdmission = (error: unknown): void => {
+      if (error instanceof AdmissionCancelledError && !process.env.SRT_DEBUG) {
+        return;
+      }
+      const now = Date.now();
+      const breakdown = [...admissionStages]
+        .map(([name, ms]) => `${name}=${ms}ms`)
+        .join(" ");
+      console.error(
+        `[zsr] admission failed for ${request.providerId ?? request.actor} ` +
+          `after ${now - admissionStartedAt}ms ` +
+          `(${breakdown} pending=${now - stageStartedAt}ms): ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+      );
+    };
     // Checked before each step that acquires something. A cancel between two
     // steps unwinds through the same cleanup path as any other admission
     // failure, so the caller can never observe a half-acquired boundary.
@@ -2115,6 +2767,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
     try {
       abortIfCancelled();
       await this.claimSessionOwnership(request);
+      stage("ownership");
       if (request.containerWorker?.backend === "orbstack-machine") {
         const containerIdentity = localWorkspaceContainerIdentity(request);
         const containerControl = await ensureSessionDir(
@@ -2123,6 +2776,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
         try {
           macosContainerWorker = await acquireSharedMacosContainerWorker(
             containerIdentity.key,
+            request.workspaceRoot,
             containerIdentity.controlExecutionId,
             async () => {
               const controller = this.macosContainerWorker(
@@ -2172,6 +2826,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
           }
         }
       }
+      stage("container-reserve");
 
       abortIfCancelled();
       if (request.actor === "design-agent") {
@@ -2179,6 +2834,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
           includeDesignActor: true,
         });
       }
+      stage("territory");
       abortIfCancelled();
       policy = await prepareZsrPolicy(request, generation, {
         ...(this.options.cloudWorker
@@ -2202,14 +2858,29 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
             }
           : {}),
       });
+      stage("policy");
       const toolWork = (async () => {
-        if (request.containerWorker?.backend !== "embedded-linux") return;
-        const target = path.join(
+        await prepareDesignWatchIsolation(
           policy!.paths.tools,
-          "zsr-container-worker.mjs",
+          request.actor === "design-agent"
+            ? []
+            : (request.territory?.protectedDesignDirectories ?? []),
+          // Watchexec interprets anchored ignore patterns against one project
+          // origin. Supplying sibling Git-integration owners here could make a
+          // relative Design name accidentally hide unrelated code in the
+          // primary workspace. Exact absolute roots remain in the Node guard
+          // and JSON manifest; native ignores are emitted only for this spawn's
+          // repository origin.
+          [request.workspaceRoot],
         );
-        await copyFile(this.containerWorkerSource, target);
-        await chmod(target, 0o500);
+        if (request.containerWorker?.backend === "embedded-linux") {
+          const target = path.join(
+            policy!.paths.tools,
+            "zsr-container-worker.mjs",
+          );
+          await copyFile(this.containerWorkerSource, target);
+          await chmod(target, 0o500);
+        }
       })();
       const processDomainWork =
         process.platform === "darwin"
@@ -2258,6 +2929,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
           result.status === "rejected",
       );
       if (preparationFailure) throw preparationFailure.reason;
+      stage("resources");
       if (this.options.cloudWorker) {
         await prepareCloudWorkerPrivateState(
           policy,
@@ -2267,6 +2939,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
             : [],
         );
       }
+      stage("cloud-state");
       // Deliberately AFTER the await: the process domain must be assigned before
       // any throw, or a cancel that lands here would abandon a live kernel
       // fingerprint instead of retiring it in the cleanup path below.
@@ -2277,7 +2950,9 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
           protectedRoots: request.territory?.protectedDesignDirectories ?? [],
         });
       }
+      stage("activation");
     } catch (error) {
+      reportFailedAdmission(error);
       return this.throwAfterPreparationCleanup(
         generation,
         error,
@@ -2316,38 +2991,53 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       macosProcessDomain,
       generation,
       this.backend,
-      (error) => this.retirementFailures.set(generation, error),
+      (error) =>
+        this.recordBoundaryRetirementFailure(generation, boundary, error),
+      () => this.clearRetirementFailure(generation),
     );
-    try {
-      const reasons = await this.runHostParityAdmissionCanary(
-        boundary,
-        policy!,
-        request,
-      );
-      if (reasons.length > 0) throw new Error(reasons.join("; "));
-      // The canary is the longest single step of a parity admission, so this is
-      // the check most likely to fire. It runs after the verdict rather than
-      // instead of it: a cancelled admission must still leave nothing running,
-      // and `stopAndProve` below is what proves that.
-      abortIfCancelled();
-      const elapsed = Date.now() - admissionStartedAt;
-      if (elapsed >= SLOW_ADMISSION_REPORT_MS || process.env.SRT_DEBUG) {
-        console.log(
-          `[zsr] admitted host-parity ${request.providerId ?? request.actor} in ${elapsed}ms`,
-        );
-      }
-      return boundary;
-    } catch (error) {
+    const attestation = (async (): Promise<void> => {
       try {
-        await boundary.stopAndProve();
-      } catch (teardownError) {
-        throw new AggregateError(
-          [error, teardownError],
-          "host-parity admission failed and teardown could not be proven",
+        const reasons = await this.runHostParityAdmissionCanary(
+          boundary,
+          policy!,
+          request,
         );
+        stage("canary");
+        if (reasons.length > 0) throw new Error(reasons.join("; "));
+        // A cancelled background admission may already have started provider
+        // bytes inside the immutable kernel fence. Treat it exactly like a
+        // failed proof: revoke that one boundary and prove its tree empty.
+        abortIfCancelled();
+        const elapsed = Date.now() - admissionStartedAt;
+        if (elapsed >= SLOW_ADMISSION_REPORT_MS || process.env.SRT_DEBUG) {
+          const breakdown = [...admissionStages]
+            .map(([name, ms]) => `${name}=${ms}ms`)
+            .join(" ");
+          console.log(
+            `[zsr] ${attestationMode === "background" ? "attested" : "admitted"} ` +
+              `host-parity ${request.providerId ?? request.actor} in ` +
+              `${elapsed}ms (${breakdown})`,
+          );
+        }
+      } catch (error) {
+        reportFailedAdmission(error);
+        try {
+          // This promise rejects only after the exact boundary has been
+          // stopped and proven. The gateway can therefore turn the rejection
+          // into UI state without opening a second speculative interval.
+          await boundary.stopAndProve();
+        } catch (teardownError) {
+          throw new AggregateError(
+            [error, teardownError],
+            "host-parity admission failed and teardown could not be proven",
+          );
+        }
+        throw error;
       }
-      throw error;
-    }
+    })();
+    boundary.setAttestation(attestation);
+    if (attestationMode === "blocking") await attestation;
+    return boundary;
   }
 
   /** Host-parity admission performs only immutable filesystem-policy work.
@@ -2408,6 +3098,7 @@ export class ZsrExecutionBoundary implements ExecutionBoundary {
       newTerritoryGeneration(),
       admissionStartedAt,
       control?.signal,
+      control?.attestation ?? "blocking",
     );
   }
 }

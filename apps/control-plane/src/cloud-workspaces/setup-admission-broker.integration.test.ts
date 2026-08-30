@@ -226,9 +226,10 @@ d("cloud workspace setup admission broker", () => {
         tx.query(
           `INSERT INTO cloud_workspace_endpoint_grants (
              workspace_id, generation, org_id, account_user_id, purpose,
-             audience, token_hash, expires_at
+             audience, token_hash, account_revision, authorization_revision,
+             expires_at
            ) VALUES ($1, 1, $2, $3, 'setup', 'https://control.example.test/',
-                     $4, now() + interval '1 minute')`,
+                     $4, 1, 1, now() + interval '1 minute')`,
           [
             setup.workspaceId,
             setup.organizationId,

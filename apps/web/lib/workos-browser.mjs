@@ -1,9 +1,11 @@
 import { fetchWorkOSRailway } from "./workos-railway.mjs";
+import { readBoundedResponseBody } from "./control-plane-policy.mjs";
 
 export const WORKOS_FLOW_COOKIE = "__Host-zeros_auth_flow";
 export const WORKOS_SESSION_COOKIE = "__Host-zeros_session";
 
 const OPAQUE_ID = /^[A-Za-z0-9_-]{43}$/;
+const MAX_RAILWAY_SESSION_BYTES = 256 * 1024;
 
 function cookies(request) {
   const parsed = new Map();
@@ -19,8 +21,17 @@ function cookies(request) {
   return parsed;
 }
 
-function safeJson(response) {
-  return response.json().catch(() => null);
+async function safeJson(response) {
+  const bounded = await readBoundedResponseBody(
+    response,
+    MAX_RAILWAY_SESSION_BYTES,
+  );
+  if (!bounded.ok) return null;
+  try {
+    return JSON.parse(new TextDecoder().decode(bounded.body));
+  } catch {
+    return null;
+  }
 }
 
 function validSessionData(value, { allowEmptyBearer = false } = {}) {
@@ -52,6 +63,40 @@ function failureResponse() {
   );
 }
 
+function setCookieValues(headers) {
+  // Cloudflare Workers retains getAll() specifically for Set-Cookie, while
+  // Node's standards implementation exposes getSetCookie(). Never split the
+  // ordinary get() value on commas: Expires attributes may contain commas.
+  if (typeof headers.getAll === "function") {
+    return headers.getAll("Set-Cookie");
+  }
+  if (typeof headers.getSetCookie === "function") {
+    return headers.getSetCookie();
+  }
+  const single = headers.get("set-cookie");
+  return single ? [single] : [];
+}
+
+function browserFacingResponse(upstream) {
+  // A fetch() response carries an immutable, origin-facing header guard. Pages
+  // must re-home it before returning it to the browser, and Set-Cookie must be
+  // appended as distinct fields (RFC 6265 forbids folding them). This matters
+  // most on the callback, which sets the session cookie and expires several
+  // one-time/compatibility cookies in the same redirect.
+  const headers = new Headers();
+  for (const [name, value] of upstream.headers) {
+    if (name.toLowerCase() !== "set-cookie") headers.append(name, value);
+  }
+  for (const cookie of setCookieValues(upstream.headers)) {
+    headers.append("set-cookie", cookie);
+  }
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers,
+  });
+}
+
 async function proxyBrowserGet(request, env, pathname, options = {}) {
   const url = new URL(request.url);
   const headers = new Headers();
@@ -66,12 +111,13 @@ async function proxyBrowserGet(request, env, pathname, options = {}) {
     headers.set("cookie", `${cookieName}=${cookie}`);
   }
   try {
-    return await fetchWorkOSRailway(
+    const upstream = await fetchWorkOSRailway(
       env,
       `${pathname}${url.search}`,
       { method: "GET", headers },
       options.fetch || fetch,
     );
+    return browserFacingResponse(upstream);
   } catch {
     return failureResponse();
   }
@@ -83,6 +129,26 @@ export function configuredAuthProvider(env) {
   throw new Error("AUTH_PROVIDER must be auth0 or workos");
 }
 
+/** Keep the legacy provider-pinned links only while Auth0 is the selected
+ * rollback path. WorkOS has exactly one application-owned entry point because
+ * Hosted AuthKit owns every authentication-method choice. */
+export function browserAuthStartOptions(env, returnTo) {
+  const returnQuery = `return=${encodeURIComponent(returnTo)}`;
+  if (configuredAuthProvider(env) === "workos") {
+    return [{ label: "Continue", href: `/auth/start?${returnQuery}` }];
+  }
+  return [
+    {
+      label: "Continue with Google",
+      href: `/auth/start?provider=google&${returnQuery}`,
+    },
+    {
+      label: "Continue with GitHub",
+      href: `/auth/start?provider=github&${returnQuery}`,
+    },
+  ];
+}
+
 export function legacyDesktopHandoffEnabled(env) {
   return configuredAuthProvider(env) === "auth0";
 }
@@ -90,7 +156,16 @@ export function legacyDesktopHandoffEnabled(env) {
 /** Cloudflare Pages is a stateless same-origin facade. Railway creates PKCE
  * state and cookies and returns the redirect response unchanged. */
 export function beginWorkOSBrowserAuth(request, env, options = {}) {
-  return proxyBrowserGet(request, env, "/auth/start", options);
+  const source = new URL(request.url);
+  const sanitized = new URL("/auth/start", source.origin);
+  const returnTo = source.searchParams.get("return");
+  if (returnTo !== null) sanitized.searchParams.set("return", returnTo);
+  return proxyBrowserGet(
+    new Request(sanitized, { headers: request.headers }),
+    env,
+    "/auth/start",
+    options,
+  );
 }
 
 export function finishWorkOSBrowserAuth(request, env, options = {}) {

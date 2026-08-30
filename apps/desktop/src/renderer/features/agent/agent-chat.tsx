@@ -43,6 +43,7 @@ import {
   useBrowserPickerSelection,
   usePendingChatSubmission,
   usePendingAutoSend,
+  usePendingAutoSendAt,
   usePendingComposerAppend,
   type ChatThread,
 } from "../../state/store";
@@ -152,7 +153,6 @@ import {
 } from "./composer-pills";
 import { ContextGauge } from "./context-gauge";
 import { BoundaryPortsPill } from "./boundary-ports";
-import { BoundaryStatusPill } from "./boundary-status";
 import type { ExecutionBoundaryPortStatus } from "@zeros/protocol/containment";
 import { createBrowserTab } from "@/renderer/shell/workbench/tab-model";
 import {
@@ -186,8 +186,16 @@ import {
   permissionModeShowsFrame,
   staticModesForAgent,
 } from "./model-catalog";
-import { sendSessionRecoveryMode } from "./session-reload-lifecycle";
+import {
+  composerShowsStopControl,
+  QUEUED_FIRST_TURN_MAX_WAIT_MS,
+  queuedFirstTurnAction,
+  sendSessionRecoveryMode,
+  unreadableTranscriptSendAction,
+} from "./session-reload-lifecycle";
 import { requestAiChatTitle, settledFirstPromptForTitle } from "./chat-title";
+import { noteInteractiveAgentActivity } from "./chat-title-scheduler";
+import { permissionModeIdForDisplay } from "./permission-mode-display";
 import {
   newChatBornDefaults,
   rememberModelConfiguration,
@@ -222,7 +230,7 @@ import { TurnEventList } from "./turn-event-list";
 import { tailTurnInFlight } from "./tail-indicators";
 import { pickActiveWorkflow } from "./workflow-activity";
 import { stabilizeTurns } from "./stable-turns";
-import { TurnFooter } from "./turn-footer";
+import { TurnFooter, turnFooterFailureLabel } from "./turn-footer";
 import { JumpToLatestButton, JumpToPromptPill } from "./jump-pills";
 import {
   CheckpointRail,
@@ -234,6 +242,10 @@ import {
   usePendingLocalTurnId,
   useSessionsStore,
 } from "./sessions-store";
+import {
+  AGENT_REGISTRY_VERIFICATION_DELAY_MS,
+  canVerifyAgentRegistryInBackground,
+} from "./agent-registry-verification";
 import { collectPendingQuestionToolCallIds } from "./pending-question-tools";
 import {
   windowOlderMessages as ipcWindowOlderMessages,
@@ -268,6 +280,8 @@ function labelForFailure(
         return "Disconnected";
       case "rate-limited":
         return "Rate limited";
+      case "design-protection-failed":
+        return "Design protection failed";
       case "subprocess-exited":
         return "Agent exited";
       case "protocol-error":
@@ -281,34 +295,6 @@ function labelForFailure(
   }
   if (status === "auth-required") return "Sign in required";
   return "Agent error";
-}
-
-function footerLabelForFailure(failure: AgentFailure | null): string | null {
-  if (!failure || failure.stage !== "prompt") return null;
-  if (
-    failure.kind === "protocol-error" &&
-    /agent response failure/i.test(failure.message)
-  ) {
-    return "AGENT RESPONSE FAILURE";
-  }
-  switch (failure.kind) {
-    case "auth-required":
-      return "SIGN IN REQUIRED";
-    case "subprocess-exited":
-      return "AGENT EXITED";
-    case "session-expired":
-      return "SESSION EXPIRED";
-    case "timeout":
-      return "AGENT RESPONSE TIMEOUT";
-    case "transport-closed":
-      return "CONNECTION LOST";
-    case "rate-limited":
-      return "RATE LIMITED";
-    case "protocol-error":
-      return "AGENT RESPONSE FAILURE";
-    default:
-      return null;
-  }
 }
 
 interface AgentChatProps {
@@ -350,6 +336,9 @@ export function AgentChat({
   const browserPickerSelection = useBrowserPickerSelection();
   const pendingChatSubmission = usePendingChatSubmission();
   const pendingAutoSend = usePendingAutoSend(chatId);
+  // The stamp, not just the flag: the park's release site bounds its own wait
+  // (see queuedFirstTurnAction).
+  const pendingAutoSendAt = usePendingAutoSendAt(chatId);
   const pendingComposerAppend = usePendingComposerAppend();
   // Chat-owned settings are needed by both the turn lifecycle and composer.
   // In particular, background continuation chrome is an Ultracode-only aid.
@@ -442,10 +431,10 @@ export function AgentChat({
         string,
         import("./use-agent-session").AgentMessage[]
       >();
-      // Still-pending queued sends render in the QueuedMessagesCard docked
-      // above the composer (2026-07-06 queue redesign), NOT as transcript
-      // bubbles — shadow them out of the visible turn stream. Array order is
-      // enqueue order, which is the FIFO send order the card shows.
+      // Follow-ups render in the QueuedMessagesCard, not as transcript
+      // bubbles. The first send waiting only for session admission is the one
+      // exception: it is already the active turn, so it stays in the timeline
+      // with the live timer while the provider session becomes ready.
       const queuedMessages: AgentTextMessage[] = [];
       // Tool calls present in THIS window. A child is only shadowed when its
       // parent SubagentCard is here to render it — the hydrate window (or a
@@ -460,7 +449,11 @@ export function AgentChat({
         }
       }
       for (const m of session.messages) {
-        if (m.kind === "text" && m.queued) {
+        if (
+          m.kind === "text" &&
+          m.queued &&
+          m.queuedPresentation !== "active-turn"
+        ) {
           queuedMessages.push(m);
           shadowed.add(m.id);
           continue;
@@ -505,6 +498,12 @@ export function AgentChat({
   const backgroundContinuationActive = shouldKeepTurnLiveForBackgroundTasks(
     backgroundTaskOptions,
   );
+  // Switching into a chat is interactive intent even before Send. Keep a
+  // queued cosmetic title provider out of the user's typing/startup window;
+  // the Send edge below refreshes the same quiet window once more.
+  useEffect(() => {
+    if (surfaceActive) noteInteractiveAgentActivity();
+  }, [chatId, surfaceActive]);
   useEffect(() => {
     if (
       !chatId ||
@@ -830,10 +829,12 @@ export function AgentChat({
   const agentsList = useAgentsSnapshot();
   const agentSessions = useAgentSessions();
 
-  // Tier 3 — background auth verification on chat mount. Trigger
-  // the cache's normal load path so that Codex's active `login
-  // status` command and Claude's expiry parsing have a
-  // chance to flip the snapshot before the user hits Send.
+  // Tier 3 — background auth verification after interactive startup. Trigger
+  // the cache's normal load path so Codex's active `login status` command and
+  // Claude's expiry parsing can refresh the snapshot, but only after this
+  // session is settled. Those probes run provider subprocesses under their own
+  // boundaries; starting them beside a cold resume or first turn competes for
+  // exactly the disk, CPU, and network work the user is waiting on.
   //
   // Non-blocking by design: composer stays usable, the user can
   // type immediately, and the pre-flight gate in handleSend below
@@ -846,11 +847,26 @@ export function AgentChat({
   // refresh path handles the "credentials silently expired in the
   // last 30s" edge case if it ever matters.
   useEffect(() => {
-    if (!session.agentId) return;
-    void loadAgents((force) => agentSessions.listAgents(force)).catch(() => {
-      /* failures surface via the regular toast pipeline */
-    });
-  }, [session.agentId, agentSessions]);
+    if (
+      !session.agentId ||
+      !surfaceActive ||
+      !canVerifyAgentRegistryInBackground(session.status)
+    ) {
+      return;
+    }
+    const timer = setTimeout(() => {
+      const latestStatus = chatId
+        ? useSessionsStore.getState().sessions[chatId]?.status
+        : session.status;
+      if (!latestStatus || !canVerifyAgentRegistryInBackground(latestStatus)) {
+        return;
+      }
+      void loadAgents((force) => agentSessions.listAgents(force)).catch(() => {
+        /* failures surface via the regular toast pipeline */
+      });
+    }, AGENT_REGISTRY_VERIFICATION_DELAY_MS);
+    return () => clearTimeout(timer);
+  }, [agentSessions, chatId, session.agentId, session.status, surfaceActive]);
 
   // Chat-thread-backed composer settings. When `chatId` is absent
   // (picker/beta flows) this returns null and the pills render stubs.
@@ -1065,17 +1081,21 @@ export function AgentChat({
   // shows a real mode (Accept Edits, auto's classifier-less behavior); the
   // persisted mode is untouched, so switching back to an auto-capable model
   // restores "auto".
+  const fallbackPermissionModeId =
+    agentModeForPermission(
+      chatThread?.permissionMode ?? "auto",
+      effectiveModes,
+      chatAgentId,
+    )?.id ?? null;
   const currentPermissionModeId: string | null = coerceModeIdForModel(
     chatAgentId,
     chatThread?.model ?? null,
-    session.currentModeId ??
-      chatThread?.lastModeId ??
-      agentModeForPermission(
-        chatThread?.permissionMode ?? "auto",
-        effectiveModes,
-        chatAgentId,
-      )?.id ??
-      null,
+    permissionModeIdForDisplay({
+      status: session.status,
+      liveModeId: session.currentModeId,
+      persistedModeId: chatThread?.lastModeId ?? null,
+      fallbackModeId: fallbackPermissionModeId,
+    }),
     session.boundary,
   );
 
@@ -2884,17 +2904,12 @@ export function AgentChat({
           : advice,
       });
     }
-    // Auth probe is a heuristic (file-existence on ~/.codex/auth.json
-    // and friends). When the actual CLI rejects on spawn the engine
-    // throws auth-required and gateway.markAuthFailed flips its
-    // runtimeAuthFailed map — but the renderer's agents-cache won't
-    // see that change until something triggers a re-fetch. Force one
-    // here on any prompt failure: the gateway's gate is also widened
-    // to mark auth-failed on prompt-stage protocol errors (most often
-    // "no events" because the CLI isn't signed in), and we want both
-    // sides to converge on the same authoritative state without
-    // requiring the user to alt-tab away and back.
-    if (session.status === "auth-required" || session.status === "failed") {
+    // Auth probe is a heuristic (file-existence on ~/.codex/auth.json and
+    // friends). When the actual CLI explicitly rejects authentication, refresh
+    // the cached provider state so its connection indicator converges. A
+    // protocol, transport, or Design-protection failure is not authentication
+    // evidence and must not fan out utility probes across every provider.
+    if (isAuth) {
       invalidateAgentsCache();
       void refreshAgents((force) => agentSessions.listAgents(force)).catch(
         () => {
@@ -2960,7 +2975,11 @@ export function AgentChat({
 
   // During plan review the turn is PAUSED on the user, so the composer reads as
   // idle (Send a follow-up / Approve) rather than streaming (Stop).
-  const composerStreaming = session.status === "streaming" && !planReview;
+  const composerStreaming = composerShowsStopControl({
+    status: session.status,
+    hasPendingLocalTurn: pendingLocalTurnId !== null,
+    planReview: Boolean(planReview),
+  });
 
   // Mid-turn steering (queued-card "Send now" while running): advertised by
   // the adapter at session creation. Claude/Codex support it; Cursor doesn't
@@ -3220,6 +3239,61 @@ export function AgentChat({
       agentId: session.agentId ?? chatThread?.agentId ?? null,
     });
 
+  /** The chat whose send is already parked on an unreadable transcript. One
+   *  automatic retry: the drain re-enters runSend, which re-hydrates, and if
+   *  the read fails AGAIN there is no point cycling park → drain → park at
+   *  hydrate-RPC speed. Cleared whenever the transcript reads normally, so a
+   *  later disconnect gets its own retry. */
+  const transcriptParkedChatRef = useRef<string | null>(null);
+
+  /** Park a send that arrived while this chat's transcript could not be read
+   *  (engine respawning, transport dropped, a cold read that failed). Same
+   *  mechanism as the provisioning park: keep the exact TipTap document as the
+   *  chat's draft, arm its one-shot auto-send, and let the readiness drain
+   *  dispatch it. Says so either way — the one thing this must never do again
+   *  is nothing. */
+  const parkUnreadableTranscriptSend = (
+    parkChatId: string,
+    override?: string,
+  ): void => {
+    const snapshot = override === undefined ? serializeComposerState() : null;
+    const action = unreadableTranscriptSendAction({
+      hasPayload: snapshot
+        ? !snapshot.isEmpty
+        : (override ?? "").trim().length > 0,
+      payloadInComposer: snapshot !== null,
+      alreadyRetried: transcriptParkedChatRef.current === parkChatId,
+      status: session.status,
+    });
+    if (action === "ignore") return;
+    const alreadyArmed =
+      useWorkspaceStore.getState().pendingAutoSend[parkChatId] !== undefined;
+    if (action === "report" || !snapshot) {
+      if (!alreadyArmed) {
+        toast.warning("Couldn’t send yet", {
+          description:
+            "This chat is still reconnecting. Your message is in the composer — send it again in a moment.",
+          id: `chat-send-transcript-unavailable-${parkChatId}`,
+        });
+      }
+      return;
+    }
+    transcriptParkedChatRef.current = parkChatId;
+    const draft = {
+      text: snapshot.displayText,
+      attachments: snapshot.attachments,
+      json: snapshot.json,
+    };
+    composerLiveRef.current = draft;
+    dispatch({ type: "SET_CHAT_DRAFT", chatId: parkChatId, draft });
+    if (alreadyArmed) return;
+    dispatch({ type: "REQUEST_AUTO_SEND", chatId: parkChatId });
+    toast.info("Message queued", {
+      description: "It will send as soon as this chat reconnects.",
+      id: `workspace-message-queued-${parkChatId}`,
+    });
+  };
+
   const runSend = async (
     override?: string,
     extras?: {
@@ -3290,7 +3364,15 @@ export function AgentChat({
     // hydrateChat), so bailing here would silently swallow the send BEFORE the
     // provisioning branch below could queue it and say so. Let that one case
     // fall through — the provisioning branch keeps the draft and queues an
-    // auto-send; every other missing/partial state still returns untouched.
+    // auto-send.
+    //
+    // Every OTHER unreadable state used to `return` here and say NOTHING: the
+    // composer kept the text, no bubble appeared, no toast, and pressing Enter
+    // again did the same nothing. That is the second half of the reported
+    // "I sent it before the workspace was ready and it never went" — an engine
+    // respawn or a dropped transport is exactly when the hydrate above fails,
+    // and it is the same pre-ready window the provisioning park already
+    // covers. So park it the same way and let the reconnect drain it.
     {
       const storeTranscriptState = chatId
         ? useSessionsStore.getState().sessions[chatId]?.transcriptState
@@ -3300,8 +3382,11 @@ export function AgentChat({
         storeTranscriptState !== "resident" &&
         !(storeTranscriptState === undefined && workspaceProvisioning)
       ) {
+        parkUnreadableTranscriptSend(chatId, override);
         return;
       }
+      // Readable again — re-arm the single automatic retry above.
+      transcriptParkedChatRef.current = null;
     }
     // Normal send → snapshot the editor (text + inline pills); the hand-off
     // path (override) supplies the text + pre-built blocks directly.
@@ -3370,7 +3455,7 @@ export function AgentChat({
       composerLiveRef.current = draft;
       dispatch({ type: "SET_CHAT_DRAFT", chatId, draft });
       const alreadyQueued =
-        useWorkspaceStore.getState().pendingAutoSend[chatId] === true;
+        useWorkspaceStore.getState().pendingAutoSend[chatId] !== undefined;
       if (!alreadyQueued) {
         dispatch({ type: "REQUEST_AUTO_SEND", chatId });
         toast.info("Message queued", {
@@ -3452,16 +3537,16 @@ export function AgentChat({
     // `warming` is deliberately NOT one of them (see sendNeedsSessionRecovery):
     // a spawn is already in flight, so awaiting it here only held the composer
     // hostage — text intact, no bubble, nothing to read as progress — for the
-    // whole spawn. The provider parks the send instead (visible immediately in
-    // the queued card) and dispatches it when the session lands.
+    // whole spawn. The provider presents the first send immediately as the
+    // active transcript turn and dispatches it when the session lands.
     //
     // 2026-08-17 (§5.0 "a send is always accepted instantly"): only a chat that
     // ENDED BADLY still blocks here. A chat that merely has no session yet
     // (`idle` — first send, engine respawn — or `reconnecting`) starts its
     // session in the BACKGROUND and falls straight through to sendPrompt, which
-    // sees the synchronous `warming` flip and parks the message in the queued
-    // card. Same queue UX the user already knows, but the composer clears at
-    // once and no send ever watches a spinner, whatever admission costs.
+    // sees the synchronous `warming` flip and parks the message as the active
+    // turn. The composer clears and the elapsed timer starts at once; only a
+    // real follow-up uses the queued card.
     const recoveryMode = sendSessionRecoveryMode(session.status);
     if (recoveryMode === "park") {
       const targetAgentId = session.agentId ?? chatThread?.agentId;
@@ -3477,7 +3562,7 @@ export function AgentChat({
             : undefined,
         })
         .catch(() => {
-          /* surfaces via session.error / the queued-card release */
+          /* surfaces via session.error / the parked-turn release */
         });
     } else if (recoveryMode === "await") {
       const targetAgentId = session.agentId ?? chatThread?.agentId;
@@ -3493,9 +3578,9 @@ export function AgentChat({
         // The chat's composer env MUST ride along. Without it the rebuilt
         // session is stamped with an empty applied-env key, so sendPrompt's
         // settings-drift reconcile immediately force-respawns it AGAIN — two
-        // cold spawns for one send (and on Cursor, two host boots) before the
-        // prompt goes anywhere. It also runs the provider's default model for
-        // the window in between, contradicting the pill.
+        // provider rebuilds for one send (and on Cursor, two host boots) before
+        // the prompt goes anywhere. It also runs the provider's default model
+        // for the window in between, contradicting the pill.
         await session.startSession(targetAgentId, {
           env: chatThread
             ? envForChat(chatThread, session.initialize)
@@ -3608,6 +3693,10 @@ export function AgentChat({
   ): Promise<void> => {
     if (sendInFlightRef.current) return;
     sendInFlightRef.current = true;
+    // Title generation is cosmetic and may boot another provider process.
+    // Postpone queued title work before the first await in this send so it
+    // cannot compete with admission, provider startup, or the user's turn.
+    noteInteractiveAgentActivity();
     try {
       await runSend(override, extras, recordActivity);
     } finally {
@@ -3944,22 +4033,72 @@ export function AgentChat({
   // its own rich editor document. This is intentionally independent of current
   // route/surface: rapid create→create navigation still drains every queued
   // chat, while the exact id prevents another mounted pane from consuming it.
+  //
+  // It is also the park's RELEASE site (queuedFirstTurnAction): a spawn that
+  // ends terminally, or a wait that outlasts the bound, hands the message back
+  // and says so instead of holding it silently — the reported "I sent it
+  // before the workspace was ready and it just sat there".
   useEffect(() => {
-    if (!chatId || !pendingAutoSend || workspaceProvisioning) return;
-    if (session.status !== "ready" || session.pendingPermission) return;
-    if (composerEmpty) return;
-    // Don't retire the intent into a send that handleSend would drop because
-    // another one is mid-preparation; this effect re-runs when that clears.
-    if (sendInFlightRef.current) return;
-    // Consume first so React Strict effects and unrelated store notifications
-    // cannot dispatch the same first turn twice while handleSend is awaiting.
-    dispatch({ type: "CONSUME_AUTO_SEND", chatId });
-    // The original click was already recorded when this exact send was queued
-    // during provisioning. Its later automatic drain is not a new action.
-    submitRef.current(false);
+    if (!chatId || pendingAutoSendAt === null) return;
+    const decide = (): "wait" | "send" | "release" =>
+      queuedFirstTurnAction({
+        status: session.status,
+        provisioning: workspaceProvisioning,
+        hasPermissionGate: !!session.pendingPermission,
+        composerEmpty,
+        // Don't retire the intent into a send that handleSend would drop
+        // because another one is mid-preparation; this effect re-runs when
+        // that clears.
+        sendInFlight: sendInFlightRef.current,
+        armedForMs: Date.now() - pendingAutoSendAt,
+      });
+    const apply = (action: "wait" | "send" | "release"): void => {
+      if (action === "wait") return;
+      // Consume first so React Strict effects and unrelated store
+      // notifications cannot dispatch the same first turn twice while
+      // handleSend is awaiting.
+      dispatch({ type: "CONSUME_AUTO_SEND", chatId });
+      if (action === "release") {
+        toast.warning("A queued message wasn’t sent", {
+          description:
+            "This chat couldn’t start, so your message is still in the composer — send it again once the chat is ready.",
+          id: `workspace-message-queued-released-${chatId}`,
+        });
+        return;
+      }
+      // The original click was already recorded when this exact send was
+      // queued during provisioning. Its later automatic drain is not a new
+      // action.
+      submitRef.current(false);
+    };
+    const action = decide();
+    if (action !== "wait") {
+      apply(action);
+      return;
+    }
+    // A session that never settles produces no further status transition, so
+    // re-running on state alone can't notice it. Re-check once the bound
+    // elapses — the only way the wait becomes reportable at all.
+    const remaining =
+      QUEUED_FIRST_TURN_MAX_WAIT_MS - (Date.now() - pendingAutoSendAt) + 250;
+    const timer = window.setTimeout(
+      () => {
+        // Re-read live state: this fires minutes later, and only the store
+        // knows whether the park is still armed by then.
+        if (
+          useWorkspaceStore.getState().pendingAutoSend[chatId] !==
+          pendingAutoSendAt
+        ) {
+          return;
+        }
+        apply(decide());
+      },
+      Math.max(remaining, 0),
+    );
+    return () => window.clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
-    pendingAutoSend,
+    pendingAutoSendAt,
     workspaceProvisioning,
     session.status,
     session.pendingPermission,
@@ -4213,10 +4352,9 @@ export function AgentChat({
               return (
                 <React.Fragment key={turnKey(turn)}>
                   <TurnContainer turn={turn} isActive={isVisualTail}>
-                    {/* Still-pending queued sends do NOT render here — they
-                        live in the QueuedMessagesCard docked above the
-                        composer (2026-07-06 queue redesign), so every
-                        userPrompt reaching this point is a dispatched turn. */}
+                    {/* Follow-up queue rows do not render here. A first prompt
+                        awaiting only provider admission does: it is already
+                        presented as this active turn, before wire dispatch. */}
                     {turn.userPrompt && (
                       // Every turn's user prompt is sticky: as the
                       // user scrolls up through history each turn's prompt
@@ -4248,7 +4386,9 @@ export function AgentChat({
                         // copy-only: their reset boundary is the opening
                         // provider prompt, not the steer message id.
                         onEdit={
-                          turn.userPrompt.autoAction || turn.isSteer
+                          turn.userPrompt.autoAction ||
+                          turn.userPrompt.queued ||
+                          turn.isSteer
                             ? undefined
                             : (editedText, attachments, segments) => {
                                 editAndResubmit(
@@ -4338,7 +4478,7 @@ export function AgentChat({
                             }
                             fallbackStatusLabel={
                               isVisualTail && session.status !== "streaming"
-                                ? footerLabelForFailure(session.failure)
+                                ? turnFooterFailureLabel(session.failure)
                                 : null
                             }
                             // "An auto-rebuild is re-running THIS turn" — which
@@ -4375,7 +4515,7 @@ export function AgentChat({
                               nativeReady &&
                               session.status !== "streaming" &&
                               supportsBackgroundSignIn(signInAgentId) &&
-                              footerLabelForFailure(session.failure) ===
+                              turnFooterFailureLabel(session.failure) ===
                                 "SIGN IN REQUIRED"
                                 ? signInState.phase
                                 : null
@@ -4747,7 +4887,6 @@ export function AgentChat({
                       (also used in the edit composer). Effort/Fast are part of
                       the model label and edited in its popover. */}
                       {editToolbarPills}
-                      <BoundaryStatusPill status={session.boundary} />
                       <BoundaryPortsPill
                         snapshot={session.boundaryPorts}
                         onOpenPort={openBoundaryPreview}
@@ -4783,11 +4922,9 @@ export function AgentChat({
                         label={
                           composerStreaming
                             ? "Stop agent"
-                            : sendPreparing
-                              ? "Starting the agent…"
-                              : editingQueuedId
-                                ? "Save message"
-                                : "Send"
+                            : editingQueuedId
+                              ? "Save message"
+                              : "Send"
                         }
                         shortcut={
                           composerStreaming || sendPreparing ? undefined : "↵"

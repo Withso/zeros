@@ -240,7 +240,10 @@ function WorkspaceSetup({
     if (!visible) return;
     const off = bridge?.on("DB_CHANGED", (msg) => {
       const change = msg as { kinds?: unknown; workspaceIds?: unknown };
-      if (!Array.isArray(change.kinds) || !change.kinds.includes("setup")) {
+      if (
+        !Array.isArray(change.kinds) ||
+        !change.kinds.includes("setup")
+      ) {
         return;
       }
       const changedWorkspaceIds = Array.isArray(change.workspaceIds)

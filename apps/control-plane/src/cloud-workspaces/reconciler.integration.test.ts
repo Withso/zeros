@@ -970,10 +970,11 @@ d("cloud workspace reconciliation", () => {
       await tx.query(
         `INSERT INTO cloud_workspace_endpoint_grants (
            workspace_id, generation, org_id, account_user_id, purpose,
-           audience, token_hash, expires_at, setup_run_id,
+           audience, token_hash, account_revision, authorization_revision,
+           expires_at, setup_run_id,
            setup_execution_fence
          ) VALUES ($1, 1, $2, $3, 'setup', 'https://engine.example.test/', $4,
-                   now() + interval '5 minutes', $5, 1)`,
+                   1, 1, now() + interval '5 minutes', $5, 1)`,
         [
           seeded.workspaceId,
           orgId,
@@ -1043,10 +1044,11 @@ d("cloud workspace reconciliation", () => {
       await tx.query(
         `INSERT INTO cloud_workspace_endpoint_grants (
            workspace_id, generation, org_id, account_user_id, purpose,
-           audience, token_hash, expires_at, setup_run_id,
+           audience, token_hash, account_revision, authorization_revision,
+           expires_at, setup_run_id,
            setup_execution_fence
          ) VALUES ($1, 1, $2, $3, 'setup', 'https://engine.example.test/', $4,
-                   now() + interval '5 minutes', $5, 1)`,
+                   1, 1, now() + interval '5 minutes', $5, 1)`,
         [
           seeded.workspaceId,
           orgId,
@@ -1262,10 +1264,11 @@ d("cloud workspace reconciliation", () => {
       await tx.query(
         `INSERT INTO cloud_workspace_endpoint_grants (
            workspace_id, generation, org_id, account_user_id, purpose,
-           audience, token_hash, expires_at, setup_run_id,
+           audience, token_hash, account_revision, authorization_revision,
+           expires_at, setup_run_id,
            setup_execution_fence
          ) VALUES ($1, 1, $2, $3, 'setup', 'https://engine.example.test/', $4,
-                   now() + interval '5 minutes', $5, 1)`,
+                   1, 1, now() + interval '5 minutes', $5, 1)`,
         [
           seeded.workspaceId,
           orgId,

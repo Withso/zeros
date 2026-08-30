@@ -52,9 +52,27 @@ describe("auth token contract", () => {
       emailVerified: true,
       displayName: "Example User",
       avatarUrl: null,
+      authTime: null,
       issuedAt: 1_700_000_000,
       expiresAt: 1_700_000_300,
     });
+  });
+
+  it("preserves WorkOS active-authentication time for step-up policy", () => {
+    expect(
+      validateAuthTokenClaims(payload({ auth_time: 1_699_999_990 }), config)
+        .authTime,
+    ).toBe(1_699_999_990);
+  });
+
+  it("rejects an active-authentication time after token issue", () => {
+    expect(() =>
+      validateAuthTokenClaims(payload({ auth_time: 1_700_000_061 }), config),
+    ).toThrowError(
+      expect.objectContaining<AuthTokenContractError>({
+        code: "AUTH_TIME_CLAIM_INVALID",
+      }),
+    );
   });
 
   it("classifies an allowed desktop application token", () => {
@@ -96,6 +114,36 @@ describe("auth token contract", () => {
         config,
       ).avatarUrl,
     ).toBe("https://images.example.com/avatar.png");
+  });
+
+  it("rejects malformed or oversized identity claims before database access", () => {
+    expect(() =>
+      validateAuthTokenClaims(
+        payload({ [`${AUTH_CLAIM_NAMESPACE}email`]: "not-an-email" }),
+        config,
+      ),
+    ).toThrowError(
+      expect.objectContaining<AuthTokenContractError>({
+        code: "AUTH_EMAIL_INVALID",
+      }),
+    );
+    expect(() =>
+      validateAuthTokenClaims(payload({ sub: `user_${"x".repeat(512)}` }), config),
+    ).toThrowError(
+      expect.objectContaining<AuthTokenContractError>({
+        code: "AUTH_SUBJECT_INVALID",
+      }),
+    );
+    expect(() =>
+      validateAuthTokenClaims(
+        payload({ [`${AUTH_CLAIM_NAMESPACE}name`]: "x".repeat(501) }),
+        config,
+      ),
+    ).toThrowError(
+      expect.objectContaining<AuthTokenContractError>({
+        code: "AUTH_PROFILE_CLAIM_INVALID",
+      }),
+    );
   });
 
   it("rejects a token from any other application", () => {

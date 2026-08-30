@@ -406,6 +406,16 @@ function fallbackDocuments(record) {
       text: bsd3Terms(holder),
     });
   }
+  if (record.name === "gsap") {
+    const gsapPath = join(ROOT, "third_party/gsap/LICENSE");
+    if (!existsSync(gsapPath)) {
+      throw new Error("The reviewed GSAP Standard License copy is missing");
+    }
+    documents.push({
+      label: `${record.name}@${record.version} — GSAP Standard "No Charge" License (reviewed copy)`,
+      text: normalizeText(readFileSync(gsapPath, "utf8")),
+    });
+  }
 
   if (documents.length === 0) {
     throw new Error(

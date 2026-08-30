@@ -20,7 +20,12 @@ import { EngineCache } from "./cache";
 import { CSSResolver } from "./css-resolver";
 import { CSSFileWriter } from "./css-writer";
 import { FileWatcher } from "./watcher";
-import { seedUserSettingsFromLegacyRoot } from "./settings/files";
+import { SlowOperationReporter } from "./slow-operation-reporter";
+import {
+  repoLocalSettingsPath,
+  repoSettingsPath,
+  seedUserSettingsFromLegacyRoot,
+} from "./settings/files";
 import { startSettingsWatcher, type SettingsWatcher } from "./settings/watch";
 import { startGitWatcher, type GitWatcher } from "./git/watch";
 import { LocalTransport } from "./transport/local";
@@ -49,12 +54,17 @@ import {
 } from "./auth/verify-jwt";
 import { appendSecurityAudit } from "./auth/audit-log";
 import { MessageRouter } from "./transport/router";
-import { WorkspaceService } from "./workspace/service";
+import { LOCAL_MAIN_WORKSPACE_ID, WorkspaceService } from "./workspace/service";
 import { readDesignProtocolResource } from "./design/protocol-resource";
 import {
   DESIGN_CANVAS_FILE,
   designDirectoryNameFor,
 } from "./design/directory-registry";
+import {
+  discoverDesignDirectories,
+  resolveDesignDirectoryPointerState,
+} from "./design/directory";
+import { stickyRecognizedDesignDirectories } from "./design/recognition-store";
 import { withDesignDirectoryWritable } from "./design/workspace-lock";
 import { withDesignWorkspaceMutation } from "./design/document-write-lock";
 import {
@@ -128,6 +138,11 @@ import {
   resolveCodeAgentTerritory,
 } from "./agents/gateway";
 import { ZsrExecutionBoundary } from "./agents/containment/zsr-boundary";
+import {
+  designWatchIsolationEnvironment,
+  prepareReusableDesignWatchIsolation,
+  type DesignWatchIsolationArtifacts,
+} from "./agents/containment/design-watch-isolation";
 import {
   loadCloudWorkerConfiguration,
   type CloudWorkerConfiguration,
@@ -346,12 +361,11 @@ const EXECUTION_ROUTED_AGENT_MESSAGES = new Set([
  *  to true alongside re-enabling the MCP to restore the index. */
 const LEGACY_DESIGN_SELECTOR_INDEX_ENABLED = false;
 
-/** A workspace op slower than this gets one log line naming it and its
- *  duration. Set above every ordinary read (a `git.status` fan-out on a large
- *  repo lands in the low hundreds of ms) so the log stays readable, and well
- *  below the host watchdog's ~15s kill window so anything that could plausibly
- *  cost the engine its life is on the record before it does. */
+/** Slow workspace calls are diagnostically important, but one line per call
+ * turns a request storm into a log storm. The reporter emits one notice and a
+ * bounded aggregate per window. */
 const SLOW_WORKSPACE_OP_MS = 2_000;
+const SLOW_WORKSPACE_REPORT_WINDOW_MS = 10_000;
 
 /** How long after engine construction the login-shell PATH probe waits before
  *  admitting its boundary. Long enough for boot rehydration and the focused
@@ -470,10 +484,11 @@ const DESIGN_DIR_REWRITE_OPS = new Set<string>([
   "workspace.continueOnNewBranch",
 ]);
 
-/** Operations that can change the physical registered-owner union. Every code
- * boundary is compiled from that complete Design-root set, so expansion must
- * close a new-write gap and contraction must remove stale over-restriction.
- * Both require one global drain/re-admission boundary. */
+/** Operations that can change Design-owner registration. An external/main
+ * owner requires a global handoff only when registration adds Design
+ * subtraction; code-only additions and removals do not widen a live process.
+ * Managed create/lifecycle operations are narrowed below after proving that
+ * the stable collection deny or an exact existing row covers the change. */
 const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
   // These keep the physical project registered but can establish or rename
   // the semantic Design roots from which every code boundary is compiled.
@@ -494,9 +509,10 @@ const DESIGN_OWNER_REGISTRY_CHANGE_OPS = new Set<string>([
 /** Generic file/index operations that can alter the repository evidence from
  * which semantic Design roots are compiled. Ordinary source writes stay on the
  * pre-ZSR fast path; only these exact marker/settings mutations close the
- * app-wide admission gate and publish their post-operation authority before it
- * reopens. Native Git remains unrestricted and is reconciled by the filesystem
- * and index watchers below this synchronous bridge boundary. */
+ * affected managed-owner gate (or the app-wide gate for external/main owners)
+ * and publish post-operation authority before it reopens. Native Git remains
+ * unrestricted and is reconciled by the filesystem and index watchers below
+ * this synchronous bridge boundary. */
 const DESIGN_RECOGNITION_PATH_OPS = new Set<string>([
   "file.write",
   "git.stage",
@@ -592,6 +608,29 @@ const LOCAL_REOWN_GRACE_MS = 30_000;
  *  one to declare a turn dead while a client still waits on it. */
 const PROMPT_STALE_AFTER_MS = 45 * 60_000;
 
+/** Bound client-authored elapsed-time metadata before it reaches live state or
+ * persistence. A renderer can legitimately wait through admission, retries,
+ * or a long queue, but a stale/skewed remote clock must not create a
+ * years-long timer or an absurd turn duration. Future values clamp to receipt. */
+const PROMPT_STARTED_AT_MAX_AGE_MS = 24 * 60 * 60_000;
+
+function normalizedPromptStartedAt(
+  candidate: number | undefined,
+  receivedAt: number,
+): number {
+  if (
+    candidate === undefined ||
+    !Number.isSafeInteger(candidate) ||
+    candidate < 0
+  ) {
+    return receivedAt;
+  }
+  return Math.min(
+    receivedAt,
+    Math.max(receivedAt - PROMPT_STARTED_AT_MAX_AGE_MS, candidate),
+  );
+}
+
 /** How long after a cancel the engine waits for the adapter's prompt promise to
  *  settle before it publishes the turn's ending itself.
  *
@@ -679,7 +718,28 @@ function engineErrorSeverity(
   return "major";
 }
 
+/** Transient gate messages for an in-flight Design-territory transition.
+ *  designTransitionInterruptedProcessStart re-enters the bind when it sees
+ *  one instead of surfacing a provider error, so every producer of the gate
+ *  and the matcher must share these exact strings — an edited copy would
+ *  silently convert the transient gate into a user-visible failure. */
+const GLOBAL_DESIGN_TERRITORY_TRANSITION_MESSAGE =
+  "Registered Design territory is being updated.";
+const WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE =
+  "This workspace's Design territory is being updated.";
+
+function isDesignTerritoryTransitionMessage(message: string): boolean {
+  return (
+    message.endsWith(GLOBAL_DESIGN_TERRITORY_TRANSITION_MESSAGE) ||
+    message.endsWith(WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE)
+  );
+}
+
 export class ZerosEngine {
+  private readonly slowWorkspaceOperations = new SlowOperationReporter({
+    thresholdMs: SLOW_WORKSPACE_OP_MS,
+    windowMs: SLOW_WORKSPACE_REPORT_WINDOW_MS,
+  });
   private cache: EngineCache;
   private resolver: CSSResolver;
   private writer: CSSFileWriter;
@@ -829,6 +889,19 @@ export class ZerosEngine {
    * on the global registered owner set, so registry expansion drains this
    * snapshot rather than one workspace bucket. Human terminals stay outside. */
   private readonly globalDesignAuthorityStarts = new Set<Promise<unknown>>();
+  /** One watcher-only artifact set per exact managed Design root. Human
+   * terminals deliberately remain outside ZSR and retain normal write
+   * authority; this cache only prevents supported dev-server watchers from
+   * observing Design churn. */
+  private readonly terminalDesignWatchGuardFlights = new Map<
+    string,
+    Promise<DesignWatchIsolationArtifacts | null>
+  >();
+  /** Qualified cloud terminals drop from the root coordinator to the human
+   * worker uid before Node reads NODE_OPTIONS. Keep their immutable watcher
+   * preload under one unpredictable, root-owned, worker-traversable temp root
+   * instead of the coordinator-private engine runtime directory. */
+  private cloudTerminalDesignWatchGuardsRoot: Promise<string> | null = null;
   /** Workspace ids whose active Design territory is being created or moved.
    * This is a short authority transition, independent of archive/delete
    * lifecycle. New code agents fail closed until old-authority sessions are
@@ -839,10 +912,6 @@ export class ZerosEngine {
   private globalDesignTerritoryTransitionCount = 0;
   private globalDesignTerritoryTransitionTail: Promise<void> =
     Promise.resolve();
-  /** A utility process domain that could not be proven stopped must never be
-   * reopened by a later queued transition. Gateway retirement health remains
-   * the admission-level diagnostic; this latch preserves the outer gate. */
-  private globalUtilityBoundaryRetirementFailed = false;
   /** Agent sessionId → the running coalesced message list — the accumulator the
    *  shared applyUpdate folds chunks into, so the engine upserts only the rows
    *  that changed on each chunk. */
@@ -1041,12 +1110,16 @@ export class ZerosEngine {
     this.workspace.setGatewayHeaderSecretSetter((url, name, value) =>
       this.setMcpHeaderSecret(url, name, value),
     );
-    this.workspace.setDesignTerritoryTransitioner((targets, mutation) =>
-      this.withDesignTerritoryTransition(targets, mutation, {
-        // WorkspaceService may discover the transition only after an async
-        // preview, when its outer request is already in the lifecycle barrier.
-        initiatedByDesignTransitionCaller: true,
-      }),
+    this.workspace.setDesignTerritoryTransitioner(
+      (targets, mutation, options) =>
+        options?.firstDesignCreation
+          ? this.withFirstDesignTerritoryCreation(targets, mutation)
+          : this.withDesignTerritoryTransition(targets, mutation, {
+              // WorkspaceService may discover the transition only after an
+              // async preview, when its outer request is already in the
+              // lifecycle barrier.
+              initiatedByDesignTransitionCaller: true,
+            }),
     );
     this.pty = new PtyService(
       this.root,
@@ -1260,7 +1333,9 @@ export class ZerosEngine {
         // engine boundary too, then dispose every session scoped to this
         // worktree. An idle SDK session can still own a watcher/subprocess even
         // when promptSessions is empty.
-        const agentSessionIds = new Set<string>();
+        const agentSessionIds = new Set<string>(
+          this.agents.workspaceSessionIds(workspaceId, worktreePath),
+        );
         for (const [sessionId, boundWorkspaceId] of this.sessionWorkspace) {
           if (boundWorkspaceId !== workspaceId) continue;
           const chatId = this.sessionChat.get(sessionId);
@@ -2423,10 +2498,21 @@ export class ZerosEngine {
     // paths from the persisted transcript), so the crashed turn's file changes
     // stay visible to "Reset to this point" instead of silently escaping it.
     try {
-      const { settleOrphanRunningTurns } = await import("./git/turn-recovery");
+      const { repairUnattributedFinishedTurns, settleOrphanRunningTurns } =
+        await import("./git/turn-recovery");
       const settled = await settleOrphanRunningTurns(Date.now());
       if (settled > 0) {
         console.log(`[Zeros] settled ${settled} orphaned running turn(s)`);
+      }
+      // Historical attribution repair for older builds. Cursored and
+      // time-bounded (see repairUnattributedFinishedTurns), so a large backlog
+      // costs a slice of one boot and resumes on the next instead of stalling
+      // startup — and it stops looking once it has walked the history.
+      const repaired = await repairUnattributedFinishedTurns();
+      if (repaired > 0) {
+        console.log(
+          `[Zeros] repaired file attribution for ${repaired} finished turn(s)`,
+        );
       }
     } catch {
       /* best-effort — never block startup on crash recovery */
@@ -2541,15 +2627,17 @@ export class ZerosEngine {
     // bun-safe, immune to phantom FSEvents (full metadata-signature guard).
     this.settingsWatcher = startSettingsWatcher(
       () => this.workspace.settingsRepoRoots(),
-      () => {
+      (changedPaths) => {
         // A settings file changed on disk (hand-edit or the Settings UI's
         // write). Re-resolve the global MCP registry so the change reaches each
         // agent's next session live, then tell clients to refetch.
         this.loadMcpRegistry();
         this.reloadGateway();
+        const scoped = this.settingsReconcileScope(changedPaths);
         this.scheduleDesignTerritoryReconcile(
-          listWorkspaces({ archived: false }),
+          scoped ?? listWorkspaces({ archived: false }),
           "settings",
+          scoped ? { skipKnownRepoRootExpansion: true } : {},
         );
         this.broadcast(
           createMessage({
@@ -2680,6 +2768,19 @@ export class ZerosEngine {
       await settle(() => mcpGateway.stop());
     }
     await settle(() => this.pty.killAll());
+    const cloudTerminalDesignWatchGuardsRoot =
+      this.cloudTerminalDesignWatchGuardsRoot;
+    this.cloudTerminalDesignWatchGuardsRoot = null;
+    // Optional access keeps stop safe for a constructor/startup failure that
+    // reaches cleanup before this optimization cache was initialized. The
+    // containment and transport stages below must still all be attempted.
+    this.terminalDesignWatchGuardFlights?.clear();
+    if (cloudTerminalDesignWatchGuardsRoot) {
+      await settle(async () => {
+        const guardsRoot = await cloudTerminalDesignWatchGuardsRoot;
+        await fs.promises.rm(guardsRoot, { recursive: true, force: true });
+      });
+    }
     // Tear down the out-of-process Node hosts (PTY shells + the @cursor/sdk
     // host) so neither lingers as an orphan after the engine stops.
     await settle(() => disposePtyHost());
@@ -2699,6 +2800,10 @@ export class ZerosEngine {
     await settle(() => this.removePortFile());
     await settle(() => this.clearBusy());
 
+    // A failed diagnostic flush must not skip the containment failures already
+    // collected above. Optional access also keeps shutdown safe when startup
+    // was only partially constructed (and in the lifecycle harness).
+    await settle(() => this.slowWorkspaceOperations?.flush());
     console.log("[Zeros] Engine stopped");
     if (failures.length > 0) {
       throw new AggregateError(failures, "Zeros engine teardown failed");
@@ -2730,13 +2835,7 @@ export class ZerosEngine {
     workspaceId: string | null | undefined,
   ): string | null {
     if (this.globalDesignTerritoryTransitionCount > 0) {
-      return "Registered Design territory is being updated.";
-    }
-    if (this.globalUtilityBoundaryRetirementFailed) {
-      return (
-        "A prior provider boundary could not be proven stopped; restart Zeros " +
-        "before starting another code process."
-      );
+      return GLOBAL_DESIGN_TERRITORY_TRANSITION_MESSAGE;
     }
     if (!workspaceId) return null;
     let ws: ReturnType<typeof getWorkspaceById>;
@@ -2768,7 +2867,7 @@ export class ZerosEngine {
       return "This workspace's checkout is not present on disk.";
     }
     if (this.designTerritoryTransitions.has(workspaceId)) {
-      return "This workspace's Design territory is being updated.";
+      return WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE;
     }
     return null;
   }
@@ -2820,24 +2919,12 @@ export class ZerosEngine {
     // Those one-shots do not have a workspace start row, so the pool itself is
     // their gate. Each queued transition closes it again (incrementing its
     // epoch), while only the final transition may reopen it.
-    const utilityRetirement = this.agents
-      .retirePooledUtilityBoundaries({ reopen: false })
-      .catch((error) => {
-        this.globalUtilityBoundaryRetirementFailed = true;
-        throw error;
-      });
+    const utilityRetirement = this.agents.retirePooledUtilityBoundaries({
+      reopen: false,
+    });
     try {
       await utilityRetirement;
       await previous;
-      // A failed retirement removes the pool entry and latches the gateway, so
-      // a later disposeAll can be empty even though the old process domain was
-      // never proven dead. Never let that later transition publish a different
-      // registered-owner map under the surviving authority.
-      if (this.globalUtilityBoundaryRetirementFailed) {
-        throw new Error(
-          "A prior provider boundary could not be proven stopped; restart Zeros before changing registered Design territory.",
-        );
-      }
       await this.waitForWorkspaceProcessStartSnapshot(
         "registered-design-territory",
         admittedStarts,
@@ -2845,21 +2932,23 @@ export class ZerosEngine {
       await this.setup.stopAllAndProve();
       await this.runs.stopAllAndProve();
       await this.retireAllCodeAgentSessionsForTerritoryChange();
+      // A failed exact proof may have come from an already-closed session or
+      // pooled one-shot and therefore no longer appear in the live maps above.
+      // It blocks this owner-map mutation only, never unrelated admissions.
+      this.agents.assertRegisteredDesignAuthorityRetirementsProven();
       return await mutation();
     } finally {
       release();
       this.globalDesignTerritoryTransitionCount -= 1;
-      if (
-        this.globalDesignTerritoryTransitionCount === 0 &&
-        !this.globalUtilityBoundaryRetirementFailed
-      ) {
+      if (this.globalDesignTerritoryTransitionCount === 0) {
         this.agents.reopenPooledUtilityBoundaries();
       }
     }
   }
 
-  /** Freeze process admission, drain starts that crossed the prior gate, then
-   * retire every code-agent session before semantic Design ownership changes.
+  /** Freeze admission for exact managed owners, then retire only boundaries
+   * whose immutable contribution map names one of them before semantic Design
+   * ownership changes. Unrelated managed siblings remain admitted and live.
    * The mutation runs while the block remains published; a failed mutation
    * never resurrects the old process authority. */
   private async withDesignTerritoryTransition<T>(
@@ -2873,6 +2962,8 @@ export class ZerosEngine {
       ).values(),
     ].sort((left, right) => left.workspaceId.localeCompare(right.workspaceId));
     const validated: typeof ordered = [];
+    const workspaceRoots = new Map<string, string>();
+    const suspendedUtilityRoots: string[] = [];
     try {
       for (const target of ordered) {
         const workspace = getWorkspaceById(target.workspaceId);
@@ -2898,18 +2989,162 @@ export class ZerosEngine {
           );
         }
         this.designTerritoryTransitions.add(target.workspaceId);
+        workspaceRoots.set(target.workspaceId, workspace.path);
         validated.push(target);
       }
-      // Host-parity code sessions protect the union of every registered local
-      // owner, so even a one-workspace pointer move changes every session's
-      // immutable map. The global primitive snapshots all rowless/managed
-      // starts and retires them before publication.
-      return await this.withGlobalDesignTerritoryTransition(mutation, options);
+      // Close only matching pooled one-shot admissions synchronously. A title
+      // or provider probe whose immutable map does not name this managed owner
+      // remains warm and usable throughout the handoff.
+      for (const target of ordered) {
+        const workspaceRoot = workspaceRoots.get(target.workspaceId)!;
+        this.agents.suspendPooledUtilityWorkspaceTerritory(workspaceRoot);
+        suspendedUtilityRoots.push(workspaceRoot);
+      }
+
+      // Preserve the first-Design-entry ordering contract shared with global
+      // registry transitions. The outer workspace request may already be in a
+      // lifecycle bucket when WorkspaceService discovers the first territory.
+      if (!options.initiatedByDesignTransitionCaller) {
+        while (this.designTerritoryTransitionCallers.size > 0) {
+          await this.waitForWorkspaceProcessStartSnapshot(
+            "design-mode-transition",
+            [...this.designTerritoryTransitionCallers],
+          );
+        }
+      }
+      let release!: () => void;
+      const turn = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const previous = this.globalDesignTerritoryTransitionTail;
+      this.globalDesignTerritoryTransitionTail = previous.then(() => turn);
+      const admittedStarts = [
+        ...new Set([
+          ...ordered.flatMap((target) => [
+            ...(this.workspaceProcessStarts.get(target.workspaceId) ?? []),
+          ]),
+        ]),
+      ].filter((start) => !this.designTerritoryTransitionCallers.has(start));
+      try {
+        await previous;
+        const retireTargetAuthority = async () => {
+          const utilityRetirement = Promise.all(
+            ordered.map((target) => {
+              const workspaceRoot = workspaceRoots.get(target.workspaceId)!;
+              return this.agents.retirePooledUtilityWorkspaceTerritory(
+                workspaceRoot,
+              );
+            }),
+          );
+          await Promise.all([
+            utilityRetirement,
+            ...ordered.flatMap((target) => {
+              const workspaceRoot = workspaceRoots.get(target.workspaceId)!;
+              return [
+                this.setup.stopForWorkspaceTerritoryAndProve(
+                  target.workspaceId,
+                  workspaceRoot,
+                ),
+                this.runs.stopForWorkspaceTerritoryAndProve(
+                  target.workspaceId,
+                  workspaceRoot,
+                ),
+                this.retireCodeAgentSessionsForTerritoryChange(
+                  target.workspaceId,
+                  { retirePooledUtilities: false },
+                ),
+              ];
+            }),
+          ]);
+        };
+        // Cancel target-owned/adjoined authority before waiting for admissions.
+        // A session already in adapter startup is now interrupted promptly;
+        // one still preparing its boundary reaches the target gate and retires
+        // itself before provider bytes start.
+        await retireTargetAuthority();
+        await this.waitForWorkspaceProcessStartSnapshot(
+          "managed-design-territory",
+          admittedStarts,
+          30_000,
+        );
+        // Catch a boundary that published its target contribution while the
+        // drained admission was settling, and prove its teardown before write.
+        await retireTargetAuthority();
+        for (const target of ordered) {
+          this.agents.assertWorkspaceDesignAuthorityRetirementsProven(
+            workspaceRoots.get(target.workspaceId)!,
+          );
+        }
+        return await mutation();
+      } finally {
+        release();
+      }
     } finally {
+      for (const workspaceRoot of suspendedUtilityRoots) {
+        this.agents.resumePooledUtilityWorkspaceTerritory(workspaceRoot);
+      }
       for (const target of validated) {
         this.designTerritoryTransitions.delete(target.workspaceId);
       }
     }
+  }
+
+  /** First Design publication does not change immutable authority when the
+   * destination was reserved before every live boundary was admitted. Prove
+   * that per contribution (agents, Setup, Run, and pooled utilities) and keep
+   * those processes live. Any absent, stale, or legacy snapshot takes the
+   * ordinary retire-before-publish path. */
+  private async withFirstDesignTerritoryCreation<T>(
+    targets: readonly { workspaceId: string; designDirectory: string }[],
+    mutation: () => Promise<T>,
+  ): Promise<T> {
+    for (const target of targets) {
+      const workspace = getWorkspaceById(target.workspaceId);
+      if (!workspace) {
+        return this.withDesignTerritoryTransition(targets, mutation, {
+          initiatedByDesignTransitionCaller: true,
+        });
+      }
+      let prospective: Awaited<ReturnType<typeof previewCodeAgentTerritory>>;
+      try {
+        prospective = await previewCodeAgentTerritory({
+          cwd: workspace.path,
+          workspaceRoot: workspace.path,
+          repoRoot: workspace.repoRoot,
+        });
+      } catch {
+        return this.withDesignTerritoryTransition(targets, mutation, {
+          initiatedByDesignTransitionCaller: true,
+        });
+      }
+      const normalizedTarget = path.resolve(target.designDirectory);
+      const targetAlreadyProtected =
+        prospective !== undefined &&
+        path.resolve(prospective.designDirectory) === normalizedTarget &&
+        prospective.protectedDesignDirectories.some(
+          (candidate) => path.resolve(candidate) === normalizedTarget,
+        );
+      const identity = agentTerritoryIdentity(prospective);
+      if (
+        !targetAlreadyProtected ||
+        this.agents.pooledUtilityWorkspaceTerritoryChanged(
+          workspace.path,
+          prospective,
+        ) ||
+        this.agents.workspaceTerritoryChanged(
+          workspace.id,
+          workspace.path,
+          prospective,
+        ) ||
+        this.setup.workspaceTerritoryChanged(workspace.path, identity) ||
+        this.runs.workspaceTerritoryChanged(workspace.path, identity)
+      ) {
+        return this.withDesignTerritoryTransition(targets, mutation, {
+          initiatedByDesignTransitionCaller: true,
+        });
+      }
+    }
+    return mutation();
   }
 
   /** A provider sandbox's writable map is creation-time authority. Changing
@@ -2918,6 +3153,7 @@ export class ZerosEngine {
    * the freshly resolved territory on its next send/load. */
   private async retireCodeAgentSessionsForTerritoryChange(
     workspaceId: string,
+    options: { retirePooledUtilities?: boolean } = {},
   ): Promise<void> {
     const workspace = getWorkspaceById(workspaceId);
     const sessionIds = new Set(
@@ -2946,7 +3182,7 @@ export class ZerosEngine {
         sessionIds.add(sessionId);
       }
     }
-    await this.retireCodeAgentSessionSet(sessionIds);
+    await this.retireCodeAgentSessionSet(sessionIds, options);
   }
 
   private async retireAllCodeAgentSessionsForTerritoryChange(): Promise<void> {
@@ -2971,6 +3207,7 @@ export class ZerosEngine {
     if (options.retirePooledUtilities !== false) {
       await this.agents.retirePooledUtilityBoundaries();
     }
+    if (sessionIds.size === 0) return;
     // Publish the semantic cause while the old execution route is still
     // owner-bound. Cancellation/revocation immediately follows; this status is
     // never an authority gate and cannot postpone the transition.
@@ -2978,12 +3215,12 @@ export class ZerosEngine {
       this.agents.markBoundaryDraining(sessionId, "territory-restart");
     }
     // A failed retire must not leave SURVIVORS wearing a `draining` status
-    // that nothing will ever complete or clear — the renderer's boundary pill
-    // would spin forever on a session that is still live and routable. The
-    // sessions endSession already retired publish their own terminal state;
-    // everything still routable gets its pre-drain `ready` back before the
-    // failure propagates. Fail-closed enforcement is untouched: the transition
-    // itself still fails, and admission health still gates new boundaries.
+    // that nothing will ever complete or clear. The sessions endSession
+    // already retired publish their own terminal state; everything still
+    // routable gets its pre-drain `ready` back before the failure propagates.
+    // Fail-closed enforcement is untouched: the exact authority mutation stays
+    // blocked by its retained proof record while unrelated boundaries remain
+    // admissible.
     const undrainSurvivors = () => {
       for (const sessionId of sessionIds) {
         this.agents.markBoundaryDrainingCleared(sessionId);
@@ -3023,9 +3260,61 @@ export class ZerosEngine {
    * settings, Git, or Design-recognition mutation. Pure preview first:
    * ordinary source edits, fetches, commits, and unrelated settings saves do
    * not disturb agents. When authority did change, the existing transition
-   * primitive blocks starts and retires old sandboxes before
+   * primitive blocks matching starts and retires old boundaries before
    * publication/fencing. Any preview or fence failure records unhealthy state,
    * so subsequent process admission fails closed. */
+  /** Reconcile candidates for a settings-file change, or null when the change
+   *  demands the full fan-out. User and managed settings feed every
+   *  workspace's stack, so they keep the app-wide sweep; a repo-scoped
+   *  settings.toml feeds only that repository's stack, so its reconcile — a
+   *  real Design-tree walk per target — stays scoped to that repo's
+   *  workspaces plus the repo root itself. Unrecognized paths fail open to
+   *  the full fan-out. */
+  private settingsReconcileScope(changedPaths: readonly string[]): Array<{
+    id: string;
+    path: string;
+    repoRoot: string;
+    archivedAt?: number | null;
+  }> | null {
+    let repoRoots: string[];
+    try {
+      repoRoots = this.workspace.settingsRepoRoots();
+    } catch {
+      return null;
+    }
+    const rootBySettingsPath = new Map<string, string>();
+    for (const root of repoRoots) {
+      rootBySettingsPath.set(repoSettingsPath(root), root);
+      rootBySettingsPath.set(repoLocalSettingsPath(root), root);
+    }
+    const scopedRoots = new Set<string>();
+    for (const changed of changedPaths) {
+      const root = rootBySettingsPath.get(changed);
+      if (!root) return null;
+      scopedRoots.add(path.resolve(root));
+    }
+    if (scopedRoots.size === 0) return null;
+    const candidates: Array<{
+      id: string;
+      path: string;
+      repoRoot: string;
+      archivedAt?: number | null;
+    }> = listWorkspaces({ archived: false }).filter((workspace) =>
+      scopedRoots.has(path.resolve(workspace.repoRoot)),
+    );
+    // A registered repository without live workspace rows still owns Design
+    // territory; reconcile the root itself so its pointer change is honored.
+    for (const root of scopedRoots) {
+      candidates.push({
+        id: `repo-root:${root}`,
+        path: root,
+        repoRoot: root,
+        archivedAt: null,
+      });
+    }
+    return candidates;
+  }
+
   private scheduleDesignTerritoryReconcile(
     candidates: readonly {
       id: string;
@@ -3034,6 +3323,13 @@ export class ZerosEngine {
       archivedAt?: number | null;
     }[],
     source: "settings" | "git-refs" | "recognition",
+    options: {
+      /** The caller proved the change can only affect these candidates'
+       *  repositories (a repo-scoped settings.toml), so skip the app-wide
+       *  known-repo-root sweep. The global registered-authority preview below
+       *  still runs whenever Setup/Run/pooled authority is live. */
+      skipKnownRepoRootExpansion?: boolean;
+    } = {},
   ): void {
     const targetsByPath = new Map<
       string,
@@ -3080,21 +3376,23 @@ export class ZerosEngine {
         });
       }
     }
-    try {
-      for (const repoRootInput of listKnownRepoRoots()) {
-        const repoRoot = canonical(repoRootInput);
-        addTarget(
-          {
-            id: `repo-root:${repoRoot}`,
-            path: repoRoot,
-            repoRoot,
-            archivedAt: null,
-          },
-          true,
-        );
+    if (!options.skipKnownRepoRootExpansion) {
+      try {
+        for (const repoRootInput of listKnownRepoRoots()) {
+          const repoRoot = canonical(repoRootInput);
+          addTarget(
+            {
+              id: `repo-root:${repoRoot}`,
+              path: repoRoot,
+              repoRoot,
+              archivedAt: null,
+            },
+            true,
+          );
+        }
+      } catch {
+        // Retain the explicit watcher candidates during a transient DB failure.
       }
-    } catch {
-      // Retain the explicit watcher candidates during a transient DB failure.
     }
     const targets = [...targetsByPath.values()];
     this.designTerritoryReconcileChain = this.designTerritoryReconcileChain
@@ -3135,6 +3433,41 @@ export class ZerosEngine {
             workspaceRoot: workspace.path,
             repoRoot: workspace.repoRoot,
           });
+        const registeredAuthorityChanged =
+          (pooledUtilityAuthorityActive &&
+            this.agents.pooledUtilityRegisteredDesignAuthorityChanged(
+              registeredAuthorityIdentity,
+            )) ||
+          (repositoryTasksActive &&
+            (this.setup.registeredDesignAuthorityChanged(
+              registeredAuthorityIdentity,
+            ) ||
+              this.runs.registeredDesignAuthorityChanged(
+                registeredAuthorityIdentity,
+              )));
+        type ReconcileTransition = "none" | "managed" | "global";
+        const managedWorkspaceFor = (workspace: ReconcileTarget) => {
+          try {
+            const managed = getWorkspaceById(workspace.id);
+            return managed &&
+              managed.archivedAt == null &&
+              canonical(managed.path) === canonical(workspace.path)
+              ? managed
+              : null;
+          } catch {
+            return null;
+          }
+        };
+        const publishUnderHeldAuthority = (workspace: ReconcileTarget) =>
+          withDesignWorkspaceMutation(workspace.path, async () => {
+            try {
+              await preview(workspace);
+            } catch (error) {
+              await fenceWorkspaceDesignDirectoryIfPresent(workspace);
+              throw error;
+            }
+            await publish(workspace);
+          });
         const reconcileTargetsFrom = async (
           startIndex: number,
           globalGateHeld: boolean,
@@ -3147,9 +3480,10 @@ export class ZerosEngine {
             ) {
               continue;
             }
+            const managedWorkspace = managedWorkspaceFor(workspace);
             const needsTransition = await withDesignWorkspaceMutation(
               workspace.path,
-              async (): Promise<boolean> => {
+              async (): Promise<ReconcileTransition> => {
                 let prospective: Awaited<
                   ReturnType<typeof previewCodeAgentTerritory>
                 >;
@@ -3157,56 +3491,70 @@ export class ZerosEngine {
                   prospective = await preview(workspace);
                 } catch (error) {
                   // A new invalid pointer, symlink, or hard-link alias is itself
-                  // an authority change. Request the global gate without holding
-                  // this owner-local lock, then re-read and fence the exact state
-                  // under that gate before surfacing a persistent failure.
-                  if (!globalGateHeld) return true;
+                  // an authority change. Managed collection islands keep this
+                  // owner-local; external/main owners still participate in the
+                  // app-wide registered union.
+                  if (!globalGateHeld) {
+                    return managedWorkspace ? "managed" : "global";
+                  }
                   await fenceWorkspaceDesignDirectoryIfPresent(workspace);
                   throw error;
                 }
 
-                const changed =
+                const localAuthorityChanged =
                   !globalGateHeld &&
                   ((pooledUtilityAuthorityActive &&
-                    this.agents.pooledUtilityRegisteredDesignAuthorityChanged(
-                      registeredAuthorityIdentity,
+                    this.agents.pooledUtilityWorkspaceTerritoryChanged(
+                      workspace.path,
+                      prospective,
                     )) ||
-                    (pooledUtilityAuthorityActive &&
-                      this.agents.pooledUtilityWorkspaceTerritoryChanged(
-                        workspace.path,
-                        prospective,
-                      )) ||
                     this.agents.workspaceTerritoryChanged(
                       workspace.id,
                       workspace.path,
                       prospective,
                     ) ||
                     (repositoryTasksActive &&
-                      (this.setup.registeredDesignAuthorityChanged(
-                        registeredAuthorityIdentity,
+                      (this.setup.workspaceTerritoryChanged(
+                        workspace.path,
+                        agentTerritoryIdentity(prospective),
                       ) ||
-                        this.setup.workspaceTerritoryChanged(
-                          workspace.path,
-                          agentTerritoryIdentity(prospective),
-                        ) ||
-                        this.runs.registeredDesignAuthorityChanged(
-                          registeredAuthorityIdentity,
-                        ) ||
                         this.runs.workspaceTerritoryChanged(
                           workspace.path,
                           agentTerritoryIdentity(prospective),
                         ))));
-                if (changed) return true;
+                if (!globalGateHeld && registeredAuthorityChanged) {
+                  return "global";
+                }
+                if (localAuthorityChanged) {
+                  return managedWorkspace ? "managed" : "global";
+                }
                 await publish(workspace);
-                return false;
+                return "none";
               },
             );
-            if (!needsTransition) continue;
+            if (needsTransition === "none") continue;
 
-            // Every registered owner contributes to one immutable app-wide
-            // deny union. Keep the global gate closed through the rest of this
-            // batch: releasing it after each owner lets the same workspace-start
-            // retry enter between owners and exhaust its bounded retry budget.
+            if (needsTransition === "managed" && managedWorkspace) {
+              await this.withDesignTerritoryTransition(
+                [
+                  {
+                    workspaceId: managedWorkspace.id,
+                    designDirectory: path.join(
+                      managedWorkspace.path,
+                      ...designDirectoryNameFor(managedWorkspace.path).split(
+                        "/",
+                      ),
+                    ),
+                  },
+                ],
+                () => publishUnderHeldAuthority(workspace),
+              );
+              continue;
+            }
+
+            // External/main owners contribute to the immutable app-wide deny
+            // union. Keep that global gate closed through the rest of the batch
+            // so one retry cannot enter between two registered-owner updates.
             await this.withGlobalDesignTerritoryTransition(() =>
               reconcileTargetsFrom(index, true),
             );
@@ -3277,7 +3625,7 @@ export class ZerosEngine {
     return (
       isGitError(error) &&
       error.code === "VALIDATION_FAILED" &&
-      /Design territory is being updated\.?$/i.test(error.message)
+      isDesignTerritoryTransitionMessage(error.message)
     );
   }
 
@@ -3591,13 +3939,14 @@ export class ZerosEngine {
   private async waitForWorkspaceProcessStartSnapshot(
     workspaceId: string,
     starts: readonly Promise<unknown>[],
+    timeoutMs = 5_000,
   ): Promise<void> {
     if (starts.length === 0) return;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const settled = await Promise.race([
       Promise.allSettled(starts).then(() => true),
       new Promise<boolean>((resolve) => {
-        timer = setTimeout(() => resolve(false), 5_000);
+        timer = setTimeout(() => resolve(false), timeoutMs);
       }),
     ]);
     if (timer) clearTimeout(timer);
@@ -4096,7 +4445,8 @@ export class ZerosEngine {
                       ) {
                         throw this.staleConversationBindFailure("newSession");
                       }
-                      this.assertAgentWorkspaceProcessStartAllowed(
+                      this.assertAgentSessionProcessStartAllowed(
+                        executionId,
                         lifecycleWorkspaceId,
                       );
                       provisionalExecutionId = executionId;
@@ -4165,7 +4515,8 @@ export class ZerosEngine {
                     : {}),
                 });
                 try {
-                  this.assertAgentWorkspaceProcessStartAllowed(
+                  this.assertAgentSessionProcessStartAllowed(
+                    executionId,
                     lifecycleWorkspaceId,
                   );
                 } catch (err) {
@@ -4194,7 +4545,10 @@ export class ZerosEngine {
                 return { initialize, session };
               })(),
             );
-          this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+          this.assertAgentSessionProcessStartAllowed(
+            session.executionId,
+            lifecycleWorkspaceId,
+          );
           if (!this.conversationBindIsCurrent(msg.chatId, bindToken)) {
             const executionId = session.executionId;
             const stillRegistered =
@@ -4445,7 +4799,10 @@ export class ZerosEngine {
             this.promptSessions.delete(msg.sessionId);
           }
           try {
-            this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+            this.assertAgentSessionProcessStartAllowed(
+              msg.sessionId,
+              lifecycleWorkspaceId,
+            );
           } catch (error) {
             if (!this.designTransitionInterruptedProcessStart(error)) {
               throw error;
@@ -4472,14 +4829,18 @@ export class ZerosEngine {
             return;
           }
           this.router.setOwner(msg.sessionId, client.id);
+          const promptReceivedAt = Date.now();
           const activePrompt: ActivePromptContext = {
             sessionId: msg.sessionId,
             agentId: msg.agentId,
             chatId: this.sessionChat.get(msg.sessionId) ?? null,
             turnId: msg.userMessageId ?? `turn-${msg.id}`,
             promptId: durablePromptId(msg.promptId, `prompt-${msg.id}`),
-            startedAt: Date.now(),
-            lastActivityAt: Date.now(),
+            startedAt: normalizedPromptStartedAt(
+              msg.startedAt,
+              promptReceivedAt,
+            ),
+            lastActivityAt: promptReceivedAt,
           };
           this.activePromptContexts.set(msg.sessionId, activePrompt);
           // Keep a start barrier registered from before the first await until
@@ -4504,18 +4865,26 @@ export class ZerosEngine {
               msg.prompt,
               msg.bubble,
               msg.userMessageId,
+              activePrompt.startedAt,
             );
             // Mark the engine busy for the duration of the turn so the dev
             // HMR watcher defers respawning (a save mid-turn must not kill
             // the in-flight response). Cleared in finally — including on the
             // error path — so a failed turn never leaves a stale marker.
             // Record this turn: snapshot the work tree BEFORE the agent runs.
-            turnCtx = await this.beginTurn(msg.sessionId, msg.userMessageId);
+            turnCtx = await this.beginTurn(
+              msg.sessionId,
+              msg.userMessageId,
+              activePrompt.startedAt,
+            );
             // Publish the snapshot itself on the record so the settle watchdog
             // can recognise THIS turn's row by reference instead of re-deriving
             // a turn id that can disagree with beginTurn's (see turnSnapshot).
             activePrompt.turnSnapshot = turnCtx;
-            this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+            this.assertAgentSessionProcessStartAllowed(
+              msg.sessionId,
+              lifecycleWorkspaceId,
+            );
             this.enterPrompt();
             this.promptSessions.add(msg.sessionId);
             if (turnCtx) {
@@ -4735,7 +5104,8 @@ export class ZerosEngine {
             this.refuseSessionAccess(msg.id, msg.agentId, client);
             return;
           }
-          this.assertAgentWorkspaceProcessStartAllowed(
+          this.assertAgentSessionProcessStartAllowed(
+            msg.sessionId,
             this.workspaceIdForAgentSession(msg.sessionId),
           );
           // Deliver FIRST, persist after: if the adapter refuses (no turn in
@@ -5806,7 +6176,8 @@ export class ZerosEngine {
                       ) {
                         throw this.staleConversationBindFailure("loadSession");
                       }
-                      this.assertAgentWorkspaceProcessStartAllowed(
+                      this.assertAgentSessionProcessStartAllowed(
+                        executionId,
                         lifecycleWorkspaceId,
                       );
                       provisionalExecutionId = executionId;
@@ -5834,9 +6205,18 @@ export class ZerosEngine {
                     workspaceId: lifecycleWorkspaceId,
                   });
                 }
-                this.assertAgentWorkspaceProcessStartAllowed(
-                  lifecycleWorkspaceId,
-                );
+                const loadedExecutionId =
+                  loaded.executionId ?? provisionalExecutionId;
+                if (loadedExecutionId) {
+                  this.assertAgentSessionProcessStartAllowed(
+                    loadedExecutionId,
+                    lifecycleWorkspaceId,
+                  );
+                } else {
+                  this.assertAgentWorkspaceProcessStartAllowed(
+                    lifecycleWorkspaceId,
+                  );
+                }
                 return loaded;
               } catch (err) {
                 if (provisionalExecutionId) {
@@ -5916,7 +6296,10 @@ export class ZerosEngine {
             throw this.staleConversationBindFailure("loadSession");
           }
           try {
-            this.assertAgentWorkspaceProcessStartAllowed(lifecycleWorkspaceId);
+            this.assertAgentSessionProcessStartAllowed(
+              executionId,
+              lifecycleWorkspaceId,
+            );
           } catch (err) {
             this.clearAgentExecutionRoute(executionId);
             await this.agents
@@ -6249,11 +6632,56 @@ export class ZerosEngine {
     if (workspaceId && this.designTerritoryTransitions.has(workspaceId)) {
       throw new GitError({
         code: "VALIDATION_FAILED",
-        message: "This workspace's Design territory is being updated.",
+        message: WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE,
         remediation:
           "Wait for the Design territory transition to finish, then retry the coding agent.",
         context: { workspaceId },
       });
+    }
+  }
+
+  /** A session can depend on a managed sibling through `/add-dir` even though
+   * its chat and cwd belong elsewhere. Prompt/steer admission therefore checks
+   * the gateway's immutable contribution map, not only the primary owner. */
+  private assertAgentSessionProcessStartAllowed(
+    sessionId: string,
+    workspaceId: string | null | undefined,
+  ): void {
+    this.assertAgentWorkspaceProcessStartAllowed(workspaceId);
+    for (const transitioningWorkspaceId of this.designTerritoryTransitions) {
+      if (this.sessionWorkspace.get(sessionId) === transitioningWorkspaceId) {
+        throw new GitError({
+          code: "VALIDATION_FAILED",
+          message: WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE,
+          remediation:
+            "Wait for the Design territory transition to finish, then retry the coding agent.",
+          context: { workspaceId: transitioningWorkspaceId, sessionId },
+        });
+      }
+      let transitioningWorkspace: ReturnType<typeof getWorkspaceById> = null;
+      try {
+        transitioningWorkspace = getWorkspaceById(transitioningWorkspaceId);
+      } catch {
+        // The primary-owner check above remains authoritative when state is
+        // unavailable. A surviving attached route is retired before mutation.
+      }
+      if (
+        transitioningWorkspace &&
+        this.agents
+          .workspaceSessionIds(
+            transitioningWorkspaceId,
+            transitioningWorkspace.path,
+          )
+          .includes(sessionId)
+      ) {
+        throw new GitError({
+          code: "VALIDATION_FAILED",
+          message: WORKSPACE_DESIGN_TERRITORY_TRANSITION_MESSAGE,
+          remediation:
+            "Wait for the Design territory transition to finish, then retry the coding agent.",
+          context: { workspaceId: transitioningWorkspaceId, sessionId },
+        });
+      }
     }
   }
 
@@ -6332,6 +6760,8 @@ export class ZerosEngine {
     /** The renderer's local user-message id (v13). Persist the user message
      *  under it so turn ids align with the renderer without a re-window. */
     userMessageId?: string,
+    /** Original renderer send time, already bounded at the engine boundary. */
+    startedAt?: number,
   ): void {
     const hasRich =
       !!bubble &&
@@ -6370,6 +6800,7 @@ export class ZerosEngine {
                 // Adopt the renderer's id so the persisted msg_id (and turn id)
                 // matches turn.userPrompt.id in the live session.
                 ...(userMessageId ? { id: userMessageId } : {}),
+                ...(startedAt !== undefined ? { createdAt: startedAt } : {}),
                 ...(m.segments == null &&
                 bubble.segments != null &&
                 bubble.segments.length > 0
@@ -6396,10 +6827,16 @@ export class ZerosEngine {
         } as SessionNotification,
         // Stamp the renderer's id onto the freshly-appended user bubble (later
         // blocks coalesce into it, so only the first append is stamped).
-        userMessageId
+        userMessageId || startedAt !== undefined
           ? (m) =>
               m.kind === "text" && m.role === "user"
-                ? { ...m, id: userMessageId }
+                ? {
+                    ...m,
+                    ...(userMessageId ? { id: userMessageId } : {}),
+                    ...(startedAt !== undefined
+                      ? { createdAt: startedAt }
+                      : {}),
+                  }
                 : m
           : undefined,
       );
@@ -6596,6 +7033,7 @@ export class ZerosEngine {
   private async beginTurn(
     sessionId: string,
     userMessageId?: string,
+    startedAt: number = Date.now(),
   ): Promise<TurnSnapshotContext | null> {
     try {
       const chatId = this.sessionChat.get(sessionId);
@@ -6651,7 +7089,7 @@ export class ZerosEngine {
         folder: root,
         agentId,
         summary,
-        startedAt: Date.now(),
+        startedAt,
         preSnapshot: pre,
       });
       return {
@@ -6941,13 +7379,12 @@ export class ZerosEngine {
       // A design write can INITIALIZE the design document on disk (design
       // root + canvas marker, document.ts initializeDesignDocumentUnlocked —
       // reachable from design.frame.create and every design write-back). That
-      // is a territory identity flip for live CODE sessions, but it moves no
-      // git ref and touches no settings file, so neither reconcile trigger
-      // fires until the NEXT unrelated ref move — leaving already-admitted
-      // code sandboxes with write authority over the newborn Design subtree
-      // and, once the late restart finally landed, a composer pill that spun
-      // with no repair. Snapshot existence before dispatch; the first write is
-      // now performed inside the same app-wide drain and post-write recheck.
+      // is a territory identity flip when no admission reservation exists, but
+      // it moves no git ref and touches no settings file, so neither reconcile
+      // trigger fires. Snapshot existence before dispatch; an actually absent
+      // root is created inside the matching owner drain and post-write recheck.
+      // The normal managed path is already an empty, protected vnode and takes
+      // the identity-preserving fast path.
       const designInitTarget =
         op.startsWith("design.") &&
         this.workspace.isWriteOp(op) &&
@@ -7003,51 +7440,102 @@ export class ZerosEngine {
           return false;
         }
       })();
-      const changesDesignOwnerRegistry = (() => {
-        if (!DESIGN_OWNER_REGISTRY_CHANGE_OPS.has(op)) return false;
-        if (stableManagedWorkspaceCreate) return false;
+      const managedLifecycleRegistryTarget = (() => {
         if (
-          op !== "project.upsert" &&
-          op !== "project.bulkUpsert" &&
-          op !== "project.remove"
+          op !== "workspace.archive" &&
+          op !== "workspace.delete" &&
+          op !== "workspace.restore"
         ) {
-          return true;
+          return null;
         }
-        const identity = (candidate: string) => {
-          try {
-            return fs.realpathSync(candidate);
-          } catch {
-            return path.resolve(candidate);
-          }
-        };
-        let known: Set<string>;
+        if (!lifecycleMutationWorkspaceId) return null;
         try {
-          known = new Set(listKnownRepoRoots().map(identity));
+          return getWorkspaceById(lifecycleMutationWorkspaceId);
         } catch {
-          // A DB failure must choose the restrictive path. The service will
-          // surface its own error if the mutation cannot subsequently land.
-          return true;
+          return null;
         }
-        const requested =
-          op === "project.upsert" || op === "project.remove"
-            ? typeof params.repoRoot === "string"
-              ? [params.repoRoot]
-              : []
-            : Array.isArray(params.projects)
-              ? params.projects.flatMap((entry) => {
-                  const candidate = entry as
-                    | Record<string, unknown>
-                    | null
-                    | undefined;
-                  return typeof candidate?.repoRoot === "string"
-                    ? [candidate.repoRoot]
-                    : [];
-                })
-              : [];
-        return op === "project.remove"
-          ? requested.some((candidate) => known.has(identity(candidate)))
-          : requested.some((candidate) => !known.has(identity(candidate)));
       })();
+      let changesDesignOwnerRegistry =
+        DESIGN_OWNER_REGISTRY_CHANGE_OPS.has(op) &&
+        !stableManagedWorkspaceCreate &&
+        !managedLifecycleRegistryTarget;
+      const isProjectRegistryMutation =
+        op === "project.upsert" ||
+        op === "project.bulkUpsert" ||
+        op === "project.remove";
+      if (changesDesignOwnerRegistry && isProjectRegistryMutation) {
+        // Removing an external owner only leaves already-running immutable
+        // boundaries more restrictive than the next admission. There is no
+        // new write capability to revoke, so cancelling live work would serve
+        // no containment purpose.
+        if (op === "project.remove") {
+          changesDesignOwnerRegistry = false;
+        } else {
+          changesDesignOwnerRegistry = await (async () => {
+            const identity = (candidate: string) => {
+              try {
+                return fs.realpathSync(candidate);
+              } catch {
+                return path.resolve(candidate);
+              }
+            };
+            let known: Set<string>;
+            try {
+              known = new Set(listKnownRepoRoots().map(identity));
+            } catch {
+              // A DB failure must choose the restrictive path. The service will
+              // surface its own error if the mutation cannot subsequently land.
+              return true;
+            }
+            const requested =
+              op === "project.upsert"
+                ? typeof params.repoRoot === "string"
+                  ? [params.repoRoot]
+                  : []
+                : Array.isArray(params.projects)
+                  ? params.projects.flatMap((entry) => {
+                      const candidate = entry as
+                        | Record<string, unknown>
+                        | null
+                        | undefined;
+                      return typeof candidate?.repoRoot === "string"
+                        ? [candidate.repoRoot]
+                        : [];
+                    })
+                  : [];
+            let registeredOwners: Set<string>;
+            try {
+              registeredOwners = new Set(
+                registeredCodeTerritorySnapshot().owners.map((owner) =>
+                  identity(owner.path),
+                ),
+              );
+            } catch {
+              return true;
+            }
+            for (const candidate of requested) {
+              const owner = identity(candidate);
+              if (known.has(owner) || registeredOwners.has(owner)) continue;
+              // Every current actor already has the stable managed collection
+              // denied, including paths that do not exist yet.
+              if (isProtectedManagedWorkspacePath(owner)) continue;
+              try {
+                const prospective = await previewCodeAgentTerritory({
+                  cwd: owner,
+                  workspaceRoot: owner,
+                  repoRoot: owner,
+                });
+                if (prospective) return true;
+              } catch {
+                // Invalid/ambiguous Design evidence is an authority change until
+                // proven otherwise. The service will surface its precise error.
+                return true;
+              }
+            }
+            return false;
+          })();
+        }
+      }
       const operation = rewriteTarget
         ? this.withDesignTerritoryTransition(
             [
@@ -7094,7 +7582,7 @@ export class ZerosEngine {
                 } finally {
                   // A failed Design operation may still have created its root
                   // or marker. Publish the actual post-operation authority
-                  // before the app-wide admission block is released.
+                  // before the matching managed-owner block is released.
                   await resolveCodeAgentTerritory({
                     cwd: firstDesignWriteTarget.path,
                     workspaceRoot: firstDesignWriteTarget.path,
@@ -7106,53 +7594,68 @@ export class ZerosEngine {
                 }
               },
             )
-          : changesDesignOwnerRegistry
-            ? this.withGlobalDesignTerritoryTransition(dispatch)
-            : recognitionMutationTarget
-              ? (() => {
-                  const mutation = () =>
-                    withDesignWorkspaceMutation(
-                      recognitionMutationTarget.path,
-                      async () => {
-                        try {
-                          return await dispatch();
-                        } finally {
-                          // A failed discard/clean/editor write can still have
-                          // replaced settings or an index marker. Resolve the
-                          // exact post-operation tree before admission reopens.
-                          await resolveCodeAgentTerritory({
-                            cwd: recognitionMutationTarget.path,
-                            workspaceRoot: recognitionMutationTarget.path,
-                            repoRoot: recognitionMutationTarget.repoRoot,
-                          });
-                          await fenceWorkspaceDesignDirectoryIfPresent(
-                            recognitionMutationTarget,
-                          );
-                        }
-                      },
-                    );
-                  return recognitionMutationTarget.managed
-                    ? this.withDesignTerritoryTransition(
-                        [
-                          {
-                            workspaceId: recognitionMutationTarget.id,
-                            designDirectory: designDirOf(
+          : managedLifecycleRegistryTarget
+            ? this.withDesignTerritoryTransition(
+                [
+                  {
+                    workspaceId: managedLifecycleRegistryTarget.id,
+                    designDirectory: designDirOf(
+                      managedLifecycleRegistryTarget,
+                    ),
+                  },
+                ],
+                dispatch,
+              )
+            : changesDesignOwnerRegistry
+              ? this.withGlobalDesignTerritoryTransition(dispatch)
+              : recognitionMutationTarget
+                ? (() => {
+                    const mutation = () =>
+                      withDesignWorkspaceMutation(
+                        recognitionMutationTarget.path,
+                        async () => {
+                          try {
+                            return await dispatch();
+                          } finally {
+                            // A failed discard/clean/editor write can still have
+                            // replaced settings or an index marker. Resolve the
+                            // exact post-operation tree before admission reopens.
+                            await resolveCodeAgentTerritory({
+                              cwd: recognitionMutationTarget.path,
+                              workspaceRoot: recognitionMutationTarget.path,
+                              repoRoot: recognitionMutationTarget.repoRoot,
+                            });
+                            await fenceWorkspaceDesignDirectoryIfPresent(
                               recognitionMutationTarget,
-                            ),
-                          },
-                        ],
-                        mutation,
-                      )
-                    : this.withGlobalDesignTerritoryTransition(mutation);
-                })()
-              : dispatch();
-      // A registry-changing lifecycle owns the global gate and has already
-      // drained the pre-existing workspace-start snapshot. Registering that
-      // outer promise in the owner-local set would make archive/delete's
-      // process reaper wait on the operation that invoked it. Other mutations
-      // remain tracked so a later lifecycle can drain them normally.
+                            );
+                          }
+                        },
+                      );
+                    return recognitionMutationTarget.managed
+                      ? this.withDesignTerritoryTransition(
+                          [
+                            {
+                              workspaceId: recognitionMutationTarget.id,
+                              designDirectory: designDirOf(
+                                recognitionMutationTarget,
+                              ),
+                            },
+                          ],
+                          mutation,
+                        )
+                      : this.withGlobalDesignTerritoryTransition(mutation);
+                  })()
+                : dispatch();
+      // A registry-changing lifecycle owns either the global gate or its exact
+      // managed-owner gate and has already drained the relevant pre-existing
+      // start snapshot. Registering that outer promise in the owner-local set
+      // would make archive/delete's process reaper wait on the operation that
+      // invoked it. Other mutations remain tracked so a later lifecycle can
+      // drain them normally.
       const result =
-        lifecycleMutationWorkspaceId && !changesDesignOwnerRegistry
+        lifecycleMutationWorkspaceId &&
+        !changesDesignOwnerRegistry &&
+        !managedLifecycleRegistryTarget
           ? await this.trackWorkspaceProcessStart(
               lifecycleMutationWorkspaceId,
               operation,
@@ -7166,17 +7669,8 @@ export class ZerosEngine {
               },
             )
           : await operation;
-      // Leave evidence for the slow ones. Workspace ops log NOTHING today (the
-      // error line below is gated on isWriteOp), so a save that outlived its
-      // RPC budget left main.log with no trace it was ever dispatched — the
-      // only visible artifacts were the watchdog respawning the engine and an
-      // ambiguous "Request timeout" in the renderer, neither naming the op.
-      // One line per genuinely slow op, so this can be diagnosed from a log
-      // next time without turning every `git.status` into noise.
       const elapsedMs = Date.now() - startedAt;
-      if (elapsedMs >= SLOW_WORKSPACE_OP_MS) {
-        console.warn(`[workspace] ${op} took ${elapsedMs}ms`);
-      }
+      this.slowWorkspaceOperations.observe(op, elapsedMs);
       client.send(
         createMessage({
           type: "WORKSPACE_RESPONSE",
@@ -7901,6 +8395,145 @@ export class ZerosEngine {
     );
   }
 
+  private async terminalDesignWatchGuard(
+    workspaceId: string | null,
+  ): Promise<DesignWatchIsolationArtifacts | null> {
+    if (!workspaceId) return null;
+    let workspaceRoot: string;
+    let repoRoot: string;
+    if (workspaceId === LOCAL_MAIN_WORKSPACE_ID) {
+      workspaceRoot = path.resolve(this.root);
+      repoRoot = workspaceRoot;
+    } else {
+      let workspace: ReturnType<typeof getWorkspaceById>;
+      try {
+        workspace = getWorkspaceById(workspaceId);
+      } catch {
+        return null;
+      }
+      if (!workspace || workspace.archivedAt != null) return null;
+      workspaceRoot = path.resolve(workspace.path);
+      repoRoot = path.resolve(workspace.repoRoot);
+    }
+    const activeDesignDirectory = path.join(
+      workspaceRoot,
+      ...designDirectoryNameFor(workspaceRoot).split("/"),
+    );
+    let protectedRoots = [activeDesignDirectory];
+    try {
+      // This is notification isolation, not security admission. Read only the
+      // pointer and recognition evidence needed to enumerate watcher roots;
+      // the full territory/hard-link validation belongs to ZSR and would add
+      // avoidable Git/audit latency to every new human terminal.
+      const [pointer, discovered, sticky] = await Promise.all([
+        resolveDesignDirectoryPointerState({
+          repoRoot,
+          workspacePath: workspaceRoot,
+        }),
+        discoverDesignDirectories(workspaceRoot),
+        stickyRecognizedDesignDirectories(workspaceRoot),
+      ]);
+      protectedRoots = [
+        ...new Set([
+          activeDesignDirectory,
+          ...(pointer.valid
+            ? [path.join(workspaceRoot, ...pointer.directory.split("/"))]
+            : []),
+          ...[...discovered, ...sticky].map((directory) =>
+            path.join(workspaceRoot, ...directory.split("/")),
+          ),
+        ]),
+      ].sort((left, right) => left.localeCompare(right));
+    } catch {
+      // A terminal is human authority, so watcher filtering is best-effort and
+      // must never make the shell unavailable. The active/default destination
+      // still covers first-use Design creation and the ordinary configuration.
+    }
+    const key = protectedRoots.join("\0");
+    const existing = this.terminalDesignWatchGuardFlights.get(key);
+    if (existing) return existing;
+    const flight = (async () => {
+      const guardsRoot = await this.terminalDesignWatchGuardsRoot();
+      const artifacts = await prepareReusableDesignWatchIsolation(
+        guardsRoot,
+        protectedRoots,
+        [workspaceRoot],
+      );
+      if (!artifacts || !this.cloudWorker) return artifacts;
+
+      // The root coordinator creates and owns every component. The worker gets
+      // read/traverse only: enough for runtime preloads/ignore files after
+      // setpriv, never enough to replace the artifacts or their exact roots.
+      const ownerUid =
+        process.geteuid?.() ?? process.getuid?.() ?? this.cloudWorker.uid;
+      const fingerprintRoot = path.dirname(artifacts.nodeGuardPath);
+      for (const artifact of Object.values(artifacts)) {
+        await fs.promises.chown(artifact, ownerUid, this.cloudWorker.gid);
+        await fs.promises.chmod(artifact, 0o440);
+      }
+      await fs.promises.chown(fingerprintRoot, ownerUid, this.cloudWorker.gid);
+      await fs.promises.chmod(fingerprintRoot, 0o750);
+      return artifacts;
+    })();
+    this.terminalDesignWatchGuardFlights.set(key, flight);
+    try {
+      return await flight;
+    } catch {
+      if (this.terminalDesignWatchGuardFlights.get(key) === flight) {
+        this.terminalDesignWatchGuardFlights.delete(key);
+      }
+      // This is a reload-noise optimization, not the write fence. A damaged
+      // runtime cache must never prevent the user from opening a human shell.
+      console.warn(
+        "[terminal] Design watcher isolation could not be prepared; the terminal remains available",
+      );
+      return null;
+    }
+  }
+
+  private async terminalDesignWatchGuardsRoot(): Promise<string> {
+    if (!this.cloudWorker) {
+      return path.join(
+        engineRuntimeDir(this.root),
+        "terminal-design-watch-guards",
+      );
+    }
+    const existing = this.cloudTerminalDesignWatchGuardsRoot;
+    if (existing) return existing;
+    const cloudWorker = this.cloudWorker;
+    const flight = (async () => {
+      let guardsRoot: string | null = null;
+      try {
+        // Qualified cloud mode is Linux-only. Use the system temp root
+        // explicitly: root's TMPDIR may itself be private and therefore
+        // untraversable after the terminal drops to the worker uid.
+        guardsRoot = await fs.promises.mkdtemp(
+          path.join("/tmp", "zeros-terminal-design-watch-"),
+        );
+        const ownerUid = process.geteuid?.() ?? process.getuid?.() ?? 0;
+        await fs.promises.chown(guardsRoot, ownerUid, cloudWorker.gid);
+        await fs.promises.chmod(guardsRoot, 0o710);
+        return guardsRoot;
+      } catch (error) {
+        if (guardsRoot) {
+          await fs.promises
+            .rm(guardsRoot, { recursive: true, force: true })
+            .catch(() => undefined);
+        }
+        throw error;
+      }
+    })();
+    this.cloudTerminalDesignWatchGuardsRoot = flight;
+    try {
+      return await flight;
+    } catch (error) {
+      if (this.cloudTerminalDesignWatchGuardsRoot === flight) {
+        this.cloudTerminalDesignWatchGuardsRoot = null;
+      }
+      throw error;
+    }
+  }
+
   /** Spawn a host PTY for a client. Remote creation is gated by the
    *  remote-restriction list (trusted device; no per-spawn host prompt). */
   private async handlePtyCreate(
@@ -7938,8 +8571,10 @@ export class ZerosEngine {
     // explicit workspaceId if sent, else from the cwd token (which may be a
     // workspace ID or a real host PATH). Drives the restriction gate + the shared
     // registry for both local (cwd is always a path) and remote (id or path).
-    // Terminals run in every workspace regardless of view mode. The strong
-    // Design carve-out is attached only to Zeros-launched code agents.
+    // Terminals run in every workspace regardless of view mode. They are a
+    // human-authority surface, so unlike agents/Run/Setup they are not placed
+    // in ZSR; the watcher-only preload added below changes notifications, not
+    // their ability to edit files.
     const canonicalWsId =
       (reattach ? this.terminals.get(msg.sessionId)?.workspaceId : null) ??
       this.workspace.workspaceIdForCwd(msg.workspaceId) ??
@@ -8043,6 +8678,27 @@ export class ZerosEngine {
     }
     // Local credential setup is asynchronous too. Avoid spawning at all when
     // archive/delete acquired the workspace while it was resolving.
+    if (!this.workspaceAllowsProcessStart(canonicalWsId)) {
+      ptyExit();
+      return;
+    }
+    if (!reattach) {
+      const watchIsolation = await this.terminalDesignWatchGuard(canonicalWsId);
+      if (watchIsolation) {
+        env ??= buildPtyEnv({
+          scrub: !fullHumanEnvironment,
+          cwd: resolvedCwd,
+          workspaceId: canonicalWsId,
+        });
+        Object.assign(
+          env,
+          designWatchIsolationEnvironment(env, watchIsolation),
+        );
+      }
+    }
+    // Watcher preparation is asynchronous. Re-check the lifecycle gate before
+    // spawning so archive/delete cannot race a late human terminal into a
+    // checkout whose process set it already enumerated.
     if (!this.workspaceAllowsProcessStart(canonicalWsId)) {
       ptyExit();
       return;

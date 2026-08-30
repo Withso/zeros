@@ -243,4 +243,54 @@ d("cloud workspace endpoint grants", () => {
       ),
     ).resolves.toBeNull();
   });
+
+  it("rejects a still-unexpired grant after account or membership revision changes", async () => {
+    await pool.query(
+      `INSERT INTO team_members (team_id, org_id, user_id, role)
+       SELECT t.id, t.org_id, $2, 'maintainer'
+       FROM teams t
+       WHERE t.org_id = $1 AND t.is_default AND t.deleted_at IS NULL
+       ON CONFLICT (team_id, user_id) DO NOTHING`,
+      [organizationId, ownerId],
+    );
+    const membershipBound = await issue();
+    await pool.query(
+      `UPDATE organization_members
+       SET authorization_revision = authorization_revision + 1
+       WHERE org_id = $1 AND user_id = $2`,
+      [organizationId, ownerId],
+    );
+    await expect(
+      withSystemTx(pool, (tx) =>
+        consumeCloudWorkspaceGrant(tx, {
+          token: membershipBound.token,
+          workspaceId,
+          generation: 1,
+          organizationId,
+          accountUserId: ownerId,
+          purpose: "engine-connect",
+          audience,
+        }),
+      ),
+    ).resolves.toBeNull();
+
+    const accountBound = await issue();
+    await pool.query(
+      `UPDATE users SET auth_revision = auth_revision + 1 WHERE id = $1`,
+      [ownerId],
+    );
+    await expect(
+      withSystemTx(pool, (tx) =>
+        consumeCloudWorkspaceGrant(tx, {
+          token: accountBound.token,
+          workspaceId,
+          generation: 1,
+          organizationId,
+          accountUserId: ownerId,
+          purpose: "engine-connect",
+          audience,
+        }),
+      ),
+    ).resolves.toBeNull();
+  });
 });

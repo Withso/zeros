@@ -1,13 +1,24 @@
 @import "tailwindcss";
 
 /* ============================================================
-   ZEROS marketing tokens — Zeros Shade (app dark default)
+   ZEROS marketing tokens — cloned from styles/zeros-tokens.css
    ────────────────────────────────────────────────────────────
-   Aligned with styles/zeros-tokens.css `:root` (Zeros Shade).
-   Marketing + the hero product mock use the same warm-gray
-   canvas, radii (4/6/8), and text-xs = 13px as the Mac app.
-   No theme switching on the marketing site.
+   Marketing does not import the desktop token file (that sheet
+   sources the Electron renderer and self-hosted fonts). Values
+   here are a clone of the app primitives:
+
+     :root                         → Neutral Dark (current app default)
+     @media (prefers-color-scheme: light)
+                                   → Light (the app [data-theme="light"] block)
+
+   No in-page theme switcher. Appearance follows the browser /
+   OS color-scheme preference. Orka black is a desktop-only
+   opt-in palette and is not cloned here.
    ============================================================ */
+
+/* Tailwind `dark:` tracks the OS preference — same polarity the
+ * app encodes with [data-theme="dark"], without a marketing toggle. */
+@custom-variant dark (@media (prefers-color-scheme: dark));
 
 @theme inline {
   /* Fonts → font-sans / font-mono */
@@ -37,6 +48,7 @@
   --color-bg3-hover: var(--bg3-hover);
   --color-bg4: var(--bg4);
   --color-bg5: var(--bg5);
+  --color-scrim: var(--scrim);
 
   /* ── FOREGROUNDS ── */
   --color-fg1: var(--fg1);
@@ -65,79 +77,177 @@
   --color-primary-button-hover: var(--primary-button-hover);
   --color-primary-button-fg: var(--primary-button-fg);
 
-  /* ── STATUS + SYNTAX ACCENTS ── */
+  /* ── STATUS + FAMILY ANCHORS ── */
   --color-success: var(--success);
   --color-warning: var(--warning);
   --color-info: var(--info);
   --color-destructive: var(--destructive);
-  --color-yellow-primary: var(--yellow-primary);
-  --color-yellow-fg: var(--yellow-fg);
+  --color-red-primary: var(--red-primary);
+  --color-red-bg: var(--red-bg);
+  --color-red-fg: var(--red-fg);
+  --color-green-primary: var(--green-primary);
   --color-green-fg: var(--green-fg);
   --color-green-bg: var(--green-bg);
-
-  /* ── DIFF ── */
-  --color-diff-fg: var(--diff-fg);
-  --color-diff-add: var(--diff-add);
-  --color-diff-remove: var(--diff-remove);
-  --color-diff-muted: var(--diff-muted);
+  --color-yellow-primary: var(--yellow-primary);
+  --color-yellow-fg: var(--yellow-fg);
+  --color-yellow-bg: var(--yellow-bg);
+  --color-blue-primary: var(--blue-primary);
+  --color-blue-bg: var(--blue-bg);
+  --color-blue-fg: var(--blue-fg);
+  --color-violet-primary: var(--violet-primary);
+  --color-violet-bg: var(--violet-bg);
+  --color-violet-fg: var(--violet-fg);
+  --color-brown-primary: var(--brown-primary);
+  --color-brown-bg: var(--brown-bg);
+  --color-brown-fg: var(--brown-fg);
 }
 
 /* ──────────────────────────────────────────────────────────
-   PRIMITIVE TOKENS — Zeros Shade (verbatim from app :root)
+   PRIMITIVE TOKENS — Neutral Dark (verbatim clone of app :root)
    ────────────────────────────────────────────────────────── */
 :root {
   color-scheme: dark;
 
-  --bg0:           hsl(5 10% 5%);   /* #0E0C0B — inactive chat pane */
-  --bg1:           hsl(25 5% 7%);   /* #0E0C0C — canvas / active pane */
-  --bg1-hover:     hsl(8 5% 12%);  /* #201D1D */
-  --bg1-highlight: hsl(25 5% 9%);  /* #181716 */
-  --bg2:           hsl(25 4% 12%); /* #201E1D — composer */
-  --bg2-hover:     hsl(25 3% 15%); /* #292928 */
-  --bg3:           var(--sidebar-bg);
-  --bg3-hover:     var(--sidebar-bg-hover);
-  --bg4:           hsl(5 1% 24%);
-  --bg5:           hsl(8 0% 37%);
+  --bg0: hsl(0 0% 5%); /* #0D0D0D — INACTIVE chat window fill (below bg1) */
+  --bg1: hsl(0 0% 7%); /* #121212 — default canvas / app backdrop */
+  --pane-bg: var(--bg1);
+  --bg1-hover: hsl(0 0% 12%); /* #1F1F1F */
+  --bg1-highlight: hsl(0 0% 9%); /* #171717 */
+  --bg2: hsl(0 0% 13%); /* #212121 — composer surface */
+  --bg2-hover: hsl(0 0% 15%); /* #262626 */
+  --bg3: var(--sidebar-bg);
+  --bg3-hover: var(--sidebar-bg-hover);
+  --bg4: hsl(0 0% 24%); /* #3D3D3D */
+  --bg5: hsl(0 0% 37%); /* #5E5E5E */
 
-  --fg1:        hsl(0 2% 92%);   /* #EBEAEA */
-  --fg2:        hsl(20 4% 66%);  /* #ACA7A5 */
-  --fg3:        hsl(15 1% 44%);  /* #71706F */
-  --muted-fg:   hsl(15 4% 44%);  /* #756E6C */
+  --fg1: hsl(0 0% 94%); /* #F0F0F0 */
+  --fg2: hsl(0 0% 72%); /* #B8B8B8 */
+  --fg3: hsl(0 0% 60%); /* #999999 */
+  --muted-fg: hsl(0 0% 44%); /* #707070 */
 
-  --sidebar-bg:       hsl(25 5% 9%);   /* #151413 */
-  --sidebar-bg-hover: hsl(25 2% 15%);  /* #272625 */
+  --sidebar-bg: hsl(0 0% 9%); /* #171717 */
+  --sidebar-bg-hover: hsl(0 0% 15%); /* #262626 */
 
-  --border1: hsl(8 3% 14%);   /* #252323 */
-  --border2: hsl(25 1% 18%);  /* #2E2E2D */
-  --border3: hsl(15 0% 24%);  /* #3D3D3D */
-  --border4: hsl(15 0% 30%);  /* #4D4D4D */
+  --border1: hsl(0 0% 14%); /* #242424 */
+  --border2: hsl(0 0% 18%); /* #2E2E2E */
+  --border3: hsl(0 0% 24%); /* #3D3D3D */
+  --border4: hsl(0 0% 30%); /* #4D4D4D */
 
   --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow-product: 0 30px 80px -20px rgba(0, 0, 0, 0.7);
+  --scrim: hsl(0 0% 0% / 0.8);
 
-  --highlighted-bg:     hsl(5 8% 12%);   /* #211D1C — user bubble (mirrors styles/zeros-tokens.css) */
-  --highlighted-bright: hsl(25 5% 65%);  /* #AAA5A1 */
+  --highlighted-bg: var(--bg2);
+  --highlighted-bright: hsl(0 0% 65%); /* #A6A6A6 */
 
-  --inverted-bg: hsl(0 2% 92%);   /* #EBEAEA */
-  --inverted-fg: hsl(5 7% 5%);    /* #0E0C0C */
+  --inverted-bg: hsl(0 0% 92%); /* #EBEBEB */
+  --inverted-fg: hsl(0 0% 5%); /* #0D0D0D */
 
-  --primary-button-bg:    var(--inverted-bg);
-  --primary-button-hover: hsl(25 2% 83%);
-  --primary-button-fg:    var(--inverted-fg);
+  --primary-button-bg: var(--inverted-bg);
+  --primary-button-hover: hsl(0 0% 83%); /* #D4D4D4 */
+  --primary-button-fg: var(--inverted-fg);
 
-  --success:     oklch(0.55 0.18 145);
-  --warning:     oklch(0.68 0.17 75);
-  --info:        oklch(0.65 0.18 240);
-  --destructive: oklch(0.704 0.191 22.216);
+  --red-primary: hsl(0 91% 71%);
+  --red-secondary: hsl(7 83% 39%);
+  --red-secondary-fg: hsl(0 0% 100%);
+  --red-bg: hsl(13 81% 14%);
+  --red-fg: hsl(20 97% 72%);
 
-  --green-bg:  hsl(142 30% 12%);
-  --green-fg:  hsl(142 75% 73%);  /* #87EEAC */
-  --yellow-primary: hsl(37 75% 60%); /* #E6AB4C — Dockerfile keywords */
-  --yellow-fg:      hsl(44 100% 50%);
+  --green-primary: hsl(142 69% 58%);
+  --green-bg: hsl(120 23% 17%);
+  --green-fg: hsl(142 75% 73%);
 
-  --diff-fg:     rgb(230 237 243);
-  --diff-add:    rgb(46 160 67);
-  --diff-remove: rgb(248 81 73);
-  --diff-muted:  rgb(139 148 158);
+  --yellow-primary: hsl(37 75% 60%);
+  --yellow-bg: hsl(38 68% 17%);
+  --yellow-fg: hsl(44 100% 50%);
+
+  --blue-primary: hsl(205 80% 73%);
+  --blue-bg: hsl(226 57% 18%);
+  --blue-fg: hsl(211 96% 78%);
+
+  --violet-primary: hsl(271 80% 73%);
+  --violet-bg: hsl(255 21% 18%);
+  --violet-fg: hsl(265 66% 77%);
+
+  --brown-primary: hsl(9 46% 72%);
+  --brown-bg: hsl(10 15% 15%);
+  --brown-fg: hsl(10 80% 72%);
+
+  --success: var(--green-primary);
+  --warning: var(--yellow-primary);
+  --info: var(--blue-primary);
+  --destructive: var(--red-primary);
+}
+
+/* ──────────────────────────────────────────────────────────
+   LIGHT THEME — clone of app [data-theme="light"]
+   Follows prefers-color-scheme; there is no marketing toggle.
+   ────────────────────────────────────────────────────────── */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+
+    --bg0: hsl(0 0% 98%); /* #FAFAFA */
+    --bg1: hsl(0 0% 100%); /* #FFFFFF */
+    --bg1-hover: hsl(0 4% 95%); /* #F3F2F2 */
+    --bg1-highlight: hsl(0 0% 97%); /* #F7F7F7 */
+    --bg2: hsl(60 4% 95%); /* #F3F3F2 */
+    --bg2-hover: hsl(60 4% 91%); /* #E9E9E7 */
+    --bg3: var(--bg1);
+    --bg3-hover: var(--bg1-hover);
+    --bg4: hsl(0 0% 94%); /* #F0F0F0 */
+    --bg5: hsl(0 0% 88%); /* #E0E0E0 */
+
+    --fg1: hsl(20 7% 16%); /* #2C2826 */
+    --fg2: hsl(20 4% 37%); /* #625D5B */
+    --fg3: hsl(20 4% 44%); /* #756F6C */
+    --muted-fg: hsl(20 4% 56%); /* #938D8A */
+
+    --sidebar-bg: hsl(60 9% 98%); /* #FAFAF9 */
+    --sidebar-bg-hover: hsl(60 2% 92%); /* #EBEBEA */
+
+    --border1: hsl(30 9% 91%); /* #EAE8E6 */
+    --border2: hsl(30 9% 88%); /* #E3E0DE */
+    --border3: hsl(60 3% 85%); /* #DADAD8 */
+    --border4: hsl(0 1% 83%); /* #D5D4D4 */
+
+    --shadow-dropdown: 0 8px 24px rgba(0, 0, 0, 0.12);
+    --shadow-product: 0 24px 64px -20px rgba(0, 0, 0, 0.16);
+    --scrim: hsl(0 0% 0% / 0.4);
+
+    --highlighted-bg: hsl(30 5% 92%); /* #ECEBEA */
+    --highlighted-bright: hsl(25 5% 45%); /* #79726D */
+
+    --inverted-bg: hsl(20 7% 16%); /* #2C2826 */
+    --inverted-fg: hsl(0 0% 100%); /* #FFFFFF */
+
+    --primary-button-hover: hsl(22 6% 25%); /* #433E3B */
+
+    --red-primary: hsl(0 72% 51%);
+    --red-secondary: hsl(0 72% 50%);
+    --red-bg: hsl(18 87% 91%);
+    --red-fg: hsl(18 89% 40%);
+
+    --green-primary: hsl(142 75% 36%);
+    --green-bg: hsl(134 38% 89%);
+    --green-fg: hsl(142 70% 30%);
+
+    --yellow-primary: hsl(37 90% 60%);
+    --yellow-bg: hsl(48 97% 89%);
+    --yellow-fg: hsl(37 100% 51%);
+
+    --blue-primary: hsl(221 83% 53%);
+    --blue-bg: hsl(214 100% 97%);
+    --blue-fg: hsl(224 77% 48%);
+
+    --violet-primary: hsl(271 80% 51%);
+    --violet-bg: hsl(274 93% 94%);
+    --violet-fg: hsl(263 61% 46%);
+
+    --brown-primary: hsl(5 35% 50%);
+    --brown-bg: hsl(5 74% 91%);
+    --brown-fg: hsl(0 20% 40%);
+  }
 }
 
 @layer base {

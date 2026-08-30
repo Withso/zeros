@@ -1,5 +1,11 @@
-import { describe, it, expect } from "vitest";
-import { friendlyAuthError } from "../auth-errors";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import {
+  friendlyAuthError,
+  safeBrowserSignInStartError,
+  workOSSignInFailureMessage,
+} from "../auth-errors";
+
+afterEach(() => vi.restoreAllMocks());
 
 describe("friendlyAuthError", () => {
   it("maps rate-limit errors to calm copy", () => {
@@ -35,9 +41,46 @@ describe("friendlyAuthError", () => {
   });
 
   it("never surfaces raw backend text for an unmapped error", () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
     const secretish = "PostgREST error 42501: permission denied for table users";
     const out = friendlyAuthError(secretish);
     expect(out).toBe("Something went wrong. Please try again.");
     expect(out).not.toContain("PostgREST");
+    expect(debug).toHaveBeenCalledWith("[auth] unmapped auth error");
+    expect(JSON.stringify(debug.mock.calls)).not.toContain(secretish);
+  });
+
+  it("never surfaces native browser-open details", () => {
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => {});
+    const secretish = new Error(
+      "Failed to open https://example.test/?state=private-state",
+    );
+
+    expect(safeBrowserSignInStartError(secretish)).toBe(
+      "Couldn't start sign-in. Please try again.",
+    );
+    expect(debug).toHaveBeenCalledWith("[auth] browser sign-in start failed");
+    expect(JSON.stringify(debug.mock.calls)).not.toContain("private-state");
+  });
+
+  it("explains reviewed recovery without trusting an arbitrary locator", () => {
+    expect(
+      workOSSignInFailureMessage(
+        "account_recovery_required",
+        "ZR-ABCD-2345",
+      ),
+    ).toMatch(/ZR-ABCD-2345/);
+    expect(
+      workOSSignInFailureMessage(
+        "account_recovery_required",
+        "<script>alert(1)</script>",
+      ),
+    ).not.toContain("script");
+    expect(workOSSignInFailureMessage("account_exists", null)).toMatch(
+      /original sign-in method/i,
+    );
+    expect(workOSSignInFailureMessage("browser_open_failed", null)).toBe(
+      "Couldn't open your browser. Click Sign in to try again.",
+    );
   });
 });

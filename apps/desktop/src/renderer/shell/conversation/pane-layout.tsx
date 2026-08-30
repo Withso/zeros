@@ -76,9 +76,7 @@ import {
   leafIds,
   paneForChat,
   resolvePaneActiveChatId,
-  topRightLeafId,
 } from "../../state/chat-panes";
-import { WorkbenchToggleButton } from "../workbench/toggle-button";
 import {
   getPaneLayout,
   useChatPanesStore,
@@ -193,14 +191,10 @@ interface PaneCtx {
   layout: PaneLayout;
   chatsByPane: Map<string, ChatThread[]>;
   focusedPaneId: string;
-  /** Pane hosting workspace-level top-right chrome (workbench expand). */
-  topRightPaneId: string;
   globalActiveChatId: string | null;
   historyChats: ChatThread[];
   workspaceHasChats: boolean;
   paneCount: number;
-  workbenchCollapsed: boolean;
-  onToggleWorkbench?: () => void;
   onSelectChat: (chatId: string) => void;
   onPrefetchChat: (chatId: string) => void;
   onSelectUntitled: () => void;
@@ -215,12 +209,8 @@ const EMPTY_CHATS: ChatThread[] = [];
 // ── Container ────────────────────────────────────────────
 
 export function ConversationPaneLayout({
-  workbenchCollapsed = false,
-  onToggleWorkbench,
   onMinimumSizeChange,
 }: {
-  workbenchCollapsed?: boolean;
-  onToggleWorkbench?: () => void;
   onMinimumSizeChange?: (minimumSize: PaneTreeMinimumSize) => void;
 } = {}) {
   const paneSurfaceRef = useRef<HTMLDivElement | null>(null);
@@ -685,13 +675,10 @@ export function ConversationPaneLayout({
       layout,
       chatsByPane,
       focusedPaneId,
-      topRightPaneId: topRightLeafId(layout.root),
       globalActiveChatId: activeChatId,
       historyChats,
       workspaceHasChats: visibleChats.length > 0,
       paneCount: paneCountValue,
-      workbenchCollapsed,
-      onToggleWorkbench,
       onSelectChat: handleSelectChat,
       onPrefetchChat: handlePrefetchChat,
       onSelectUntitled: handleSelectUntitled,
@@ -709,8 +696,6 @@ export function ConversationPaneLayout({
       historyChats,
       visibleChats.length,
       paneCountValue,
-      workbenchCollapsed,
-      onToggleWorkbench,
       handleSelectChat,
       handlePrefetchChat,
       handleSelectUntitled,
@@ -1229,19 +1214,6 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         onSplit={(dir) => ctx.onSplit(paneId, dir)}
         canSplitRight={splitRightAllowed}
         canSplitDown={splitDownAllowed}
-        extraTrailing={
-          // With the conversation pane topbar hidden, this strip's right end is the
-          // only remaining on-screen home for the workbench expand button —
-          // hosted by the TOP-RIGHT pane so it hugs the panel it opens.
-          ctx.workbenchCollapsed &&
-          ctx.onToggleWorkbench &&
-          paneId === ctx.topRightPaneId ? (
-            <WorkbenchToggleButton
-              workbenchCollapsed
-              onToggle={ctx.onToggleWorkbench}
-            />
-          ) : undefined
-        }
       />
       <div className="relative min-h-0 min-w-0 flex-1">
         {/* Mount point for the store-owned content host. Persistent chat and

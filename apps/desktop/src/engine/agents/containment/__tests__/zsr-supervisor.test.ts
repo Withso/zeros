@@ -74,6 +74,11 @@ describe("ZSR host-parity supervisor", () => {
     expect(source).toContain("hostParity: true");
     expect(source).toContain("linuxPrivilegedWorker");
     expect(source).toContain("allowAppleEvents: false");
+    // The observational violation monitor is gated on SRT_DEBUG: enforcement
+    // is the generated profile, not the monitor, and the supervisor never
+    // reads the violation store — so production spawns must not pay for it.
+    expect(source).toContain("const enableViolationMonitor =");
+    expect(source).not.toContain("SandboxManager.initialize(parsedConfig.data, undefined, true)");
     expect(source).toContain("ZEROS_ZSR_RIPGREP_PATH");
     expect(source).toContain("ripgrep:");
     expect(source).not.toContain("allowAppleEvents: true");
@@ -296,19 +301,22 @@ describe("ZSR supervisor launch contract", () => {
     expect(result.status, result.stderr || result.stdout).toBe(0);
   });
 
-  it("still rejects a container launcher outside immutable private tools", async () => {
-    const result = await rejectCommand({
-      containerWorker: {
-        version: 1,
-        runtime: "podman",
-        node: process.execPath,
-        engine: process.execPath,
-        launcher: path.join(privateRoot, "attacker.mjs"),
-        state: path.join(privateRoot, "container"),
-        socket: path.join(privateRoot, "container", "podman.sock"),
-      },
-    });
-    expect(result.status).toBe(125);
-    expect(result.stderr).toContain("outside private tools");
-  });
+  it.runIf(process.platform === "linux")(
+    "still rejects a container launcher outside immutable private tools",
+    async () => {
+      const result = await rejectCommand({
+        containerWorker: {
+          version: 1,
+          runtime: "podman",
+          node: process.execPath,
+          engine: process.execPath,
+          launcher: path.join(privateRoot, "attacker.mjs"),
+          state: path.join(privateRoot, "container"),
+          socket: path.join(privateRoot, "container", "podman.sock"),
+        },
+      });
+      expect(result.status).toBe(125);
+      expect(result.stderr).toContain("outside private tools");
+    },
+  );
 });

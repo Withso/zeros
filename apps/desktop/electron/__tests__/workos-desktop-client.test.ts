@@ -24,6 +24,7 @@ const claims: WorkOSDesktopTokenClaims = {
   emailVerified: true,
   displayName: "Example Person",
   issuedAt: 1_700_000_000,
+  authTime: 1_700_000_000,
   expiresAt: 4_000_000_000,
 };
 
@@ -51,34 +52,6 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("WorkOS desktop public client", () => {
-  it("builds an AuthKit authorization URL with exact PKCE and callback values", () => {
-    const client = new WorkOSDesktopClient({
-      config,
-      verifyAccessToken: async () => claims,
-    });
-    const url = new URL(
-      client.authorizationUrl({
-        state: "state-example",
-        codeChallenge: "challenge-example",
-        redirectUri: "http://127.0.0.1:43123/auth/callback",
-      }),
-    );
-
-    expect(`${url.origin}${url.pathname}`).toBe(
-      "https://api.workos.com/user_management/authorize",
-    );
-    expect(Object.fromEntries(url.searchParams)).toMatchObject({
-      provider: "authkit",
-      client_id: config.clientId,
-      redirect_uri: "http://127.0.0.1:43123/auth/callback",
-      response_type: "code",
-      state: "state-example",
-      code_challenge: "challenge-example",
-      code_challenge_method: "S256",
-    });
-    expect(url.searchParams.has("client_secret")).toBe(false);
-  });
-
   it("exchanges a code as a public client and verifies identity before returning", async () => {
     const fetchMock = vi.fn(async (_url: string | URL, init?: RequestInit) => {
       const headers = new Headers(init?.headers);
@@ -111,6 +84,129 @@ describe("WorkOS desktop public client", () => {
       authenticationMethod: "GitHubOAuth",
       expiresAt: claims.expiresAt * 1_000,
     });
+  });
+
+  it("names a WorkOS refusal without retaining continuation credentials", async () => {
+    const client = new WorkOSDesktopClient({
+      config,
+      fetch: (async () =>
+        jsonResponse(
+          {
+            code: "email_verification_required",
+            message: "Email ownership must be verified before authentication.",
+            pending_authentication_token: "pending-authentication-token",
+            email_verification_id: "email_verification_01EXAMPLE",
+          },
+          403,
+        )) as unknown as typeof fetch,
+      verifyAccessToken: async () => claims,
+    });
+
+    await expect(
+      client.exchangeCode({
+        code: "authorization-code",
+        codeVerifier: "pkce-verifier",
+      }),
+    ).rejects.toThrowError(
+      expect.objectContaining({
+        code: "exchange_rejected",
+        status: 403,
+        providerCode: "email_verification_required",
+      }),
+    );
+    try {
+      await client.exchangeCode({
+        code: "authorization-code",
+        codeVerifier: "pkce-verifier",
+      });
+    } catch (error) {
+      expect(error).not.toHaveProperty("emailVerification");
+    }
+  });
+
+  it("cancels an oversized provider response before parsing credentials", async () => {
+    let cancelled = false;
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(1_048_577));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const client = new WorkOSDesktopClient({
+      config,
+      fetch: (async () =>
+        new Response(body, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        })) as unknown as typeof fetch,
+      verifyAccessToken: async () => claims,
+    });
+
+    await expect(
+      client.exchangeCode({
+        code: "authorization-code",
+        codeVerifier: "pkce-verifier",
+      }),
+    ).rejects.toThrowError(
+      expect.objectContaining({ code: "exchange_rejected" }),
+    );
+    expect(cancelled).toBe(true);
+  });
+
+  it("rejects an unverified WorkOS user with its own actionable code", async () => {
+    const client = new WorkOSDesktopClient({
+      config,
+      fetch: (async () =>
+        jsonResponse(
+          responseBody({
+            user: {
+              object: "user",
+              id: claims.providerSubject,
+              email: claims.email,
+              email_verified: false,
+              name: claims.displayName,
+            },
+          }),
+        )) as unknown as typeof fetch,
+      verifyAccessToken: async () => claims,
+    });
+
+    await expect(
+      client.exchangeCode({
+        code: "authorization-code",
+        codeVerifier: "pkce-verifier",
+      }),
+    ).rejects.toThrowError(
+      expect.objectContaining({ code: "user_email_unverified" }),
+    );
+  });
+
+  it("treats an empty display name as absent rather than invalid identity data", async () => {
+    const client = new WorkOSDesktopClient({
+      config,
+      fetch: (async () =>
+        jsonResponse(
+          responseBody({
+            user: {
+              object: "user",
+              id: claims.providerSubject,
+              email: claims.email,
+              email_verified: true,
+              name: "",
+            },
+          }),
+        )) as unknown as typeof fetch,
+      verifyAccessToken: async () => ({ ...claims, displayName: null }),
+    });
+
+    await expect(
+      client.exchangeCode({
+        code: "authorization-code",
+        codeVerifier: "pkce-verifier",
+      }),
+    ).resolves.toMatchObject({ providerSubject: claims.providerSubject });
   });
 
   it("refreshes without a client secret and persists even an unchanged token value", async () => {
@@ -245,6 +341,7 @@ describe("WorkOS desktop public client", () => {
       client_id: config.clientId,
       iat: claims.issuedAt,
       exp: claims.expiresAt,
+      auth_time: claims.authTime,
       [`${AUTH_CLAIM_NAMESPACE}email`]: claims.email,
       [`${AUTH_CLAIM_NAMESPACE}email_verified`]: true,
       [`${AUTH_CLAIM_NAMESPACE}name`]: claims.displayName,
@@ -269,6 +366,22 @@ describe("WorkOS desktop public client", () => {
       expect.objectContaining({
         code: "email_unverified",
       }),
+    );
+    expect(() =>
+      validateWorkOSDesktopTokenClaims(
+        { ...payload, [`${AUTH_CLAIM_NAMESPACE}email`]: "not-an-email" },
+        config,
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: "token_email_invalid" }),
+    );
+    expect(() =>
+      validateWorkOSDesktopTokenClaims(
+        { ...payload, sub: `user_${"x".repeat(512)}` },
+        config,
+      ),
+    ).toThrowError(
+      expect.objectContaining({ code: "token_subject_invalid" }),
     );
   });
 });

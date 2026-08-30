@@ -67,6 +67,10 @@ export type AgentFailureKind =
    *  a 429 with an immediate automatic replay), but the composer stays usable
    *  and the UI presents calm retry-later copy. */
   | "rate-limited"
+  /** The kernel fence was installed, but the exact execution's asynchronous
+   * behavioral proof failed. That process tree is stopped; sibling executions
+   * and app-core/auth state remain untouched. */
+  | "design-protection-failed"
   /** The persisted session
    *  identifier is gone from disk — most often because the agent's
    *  CLI deleted/cleaned up its rollout/session JSONL between

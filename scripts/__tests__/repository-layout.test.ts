@@ -125,6 +125,54 @@ describe("repository layout contracts", () => {
     expect(files.filter((file) => !existsSync(file))).toEqual([]);
   });
 
+  it("gates every ZSR boundary suite plus interactive init/resume contracts", () => {
+    const rootPackage = JSON.parse(read("package.json")) as {
+      scripts: Record<string, string>;
+    };
+    expect(rootPackage.scripts["check:zsr"]).toBe(
+      "pnpm check:zsr:contracts && pnpm check:zsr:runtime",
+    );
+    expect(rootPackage.scripts["check:zsr:contracts"]).toBe(
+      "pnpm build:zsr-supervisor && node scripts/run-zsr-contract-tests.mjs",
+    );
+    expect(rootPackage.scripts["check:zsr:runtime"]).toContain(
+      "scripts/zsr-qualification/run.mjs --require-secure",
+    );
+
+    const runner = read("scripts/run-zsr-contract-tests.mjs");
+    const automaticallyRequired = [
+      ...readdirSync("apps/desktop/src/engine/agents/containment/__tests__")
+        .filter((name) => name.endsWith(".test.ts"))
+        .map(
+          (name) =>
+            `apps/desktop/src/engine/agents/containment/__tests__/${name}`,
+        ),
+      ...readdirSync("apps/desktop/src/engine/agents/__tests__")
+        .filter((name) => /^gateway-.*\.test\.ts$/.test(name))
+        .map((name) => `apps/desktop/src/engine/agents/__tests__/${name}`),
+    ];
+    const interactiveContracts = [
+      "apps/desktop/src/engine/__tests__/agent-cancel-stop.test.ts",
+      "apps/desktop/src/engine/__tests__/agent-session-reload.test.ts",
+      "apps/desktop/src/engine/agents/__tests__/territory-resolution.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/agent-prewarm-singleflight.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/agent-registry-verification.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/chat-title-scheduler.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/composer-responsive-contract.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/permission-mode-display.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/session-admission-policy.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/session-reload-lifecycle.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/tail-indicators.test.ts",
+      "apps/desktop/src/renderer/features/agent/__tests__/turn-footer.test.ts",
+    ];
+    for (const testFile of [
+      ...automaticallyRequired,
+      ...interactiveContracts,
+    ]) {
+      expect(runner, `${testFile} must be ZSR-gated`).toContain(testFile);
+    }
+  });
+
   it("keeps active automation off retired repository roots", () => {
     expect(existsSync("backend")).toBe(false);
     expect(existsSync("website")).toBe(false);
@@ -304,6 +352,8 @@ describe("repository layout contracts", () => {
     const vite = read("vite.config.ts");
     expect(vite).not.toContain('"**/apps/**"');
     expect(vite).not.toContain('"**/website/**"');
+    expect(vite).toContain('"**/Zeros Design"');
+    expect(vite).toContain('"**/Zeros Design/**"');
     for (const app of ["control-plane", "web", "marketing"]) {
       expect(vite).toContain(`"**/apps/${app}/**"`);
     }
@@ -390,7 +440,7 @@ describe("repository layout contracts", () => {
       "@tiptap/extension-bubble-menu@3.26.0",
       "@tiptap/extension-floating-menu@3.26.0",
       "@types/trusted-types@2.0.7",
-      "@workos-inc/node@10.10.0",
+      "@workos-inc/node@10.12.0",
     ]) {
       expect(licenses).toContain(packageName);
     }
@@ -670,5 +720,46 @@ describe("repository layout contracts", () => {
       "Production must be dispatched from 'release/X.Y.Z' after Beta validation",
     );
     expect(stable).not.toContain("refs/heads/main|refs/heads/release/*");
+  });
+
+  it("verifies every shipped macOS updater archive before publication", () => {
+    const verifier = "scripts/verify-macos-release-artifacts.mjs";
+    const expectedTeamId = "H8MS56JU2Z";
+    const channels = [
+      {
+        workflow: ".github/workflows/release-alpha.yml",
+        appName: "Zeros Alpha.app",
+        bundleId: "com.zeros.alpha",
+        publishStep: 'name: Publish rolling "alpha" prerelease',
+      },
+      {
+        workflow: ".github/workflows/release-beta.yml",
+        appName: "Zeros Beta.app",
+        bundleId: "com.zeros.beta",
+        publishStep: 'name: Publish rolling "beta" prerelease',
+      },
+      {
+        workflow: ".github/workflows/release.yml",
+        appName: "Zeros.app",
+        bundleId: "com.zeros",
+        publishStep: "name: Submit to Apple notary",
+      },
+    ];
+
+    expect(existsSync(verifier)).toBe(true);
+    for (const channel of channels) {
+      const workflow = read(channel.workflow);
+      const verifierIndex = workflow.indexOf(`node ${verifier}`);
+      const publishIndex = workflow.indexOf(channel.publishStep);
+
+      expect(verifierIndex).toBeGreaterThan(-1);
+      expect(verifierIndex).toBeLessThan(publishIndex);
+      expect(workflow).toContain(`--app-name "${channel.appName}"`);
+      expect(workflow).toContain(`--bundle-id ${channel.bundleId}`);
+      expect(workflow).toContain(`--team-id ${expectedTeamId}`);
+      expect(workflow).toMatch(
+        /node scripts\/verify-macos-release-artifacts\.mjs[\s\S]*?--dmg "\$DMG"[\s\S]*?--zip "\$ZIP"/,
+      );
+    }
   });
 });

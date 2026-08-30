@@ -96,7 +96,7 @@ export const FilesTab = React.memo(function FilesTab({
   // The shared live refresh bus: agent turn-end / git writes / editor
   // saves invalidate the cached listing, then bump — so the sidebar picks up
   // created/deleted files without a manual refresh.
-  const gitRefresh = useGitRefreshKey(cwd, workspaceId);
+  const gitRefresh = useGitRefreshKey(cwd, workspaceId, active);
 
   const filePath = tab.filePath ?? "";
   // Blank tabs start with a full-width tree. A filled tab restores its own
@@ -295,6 +295,7 @@ export const FilesTab = React.memo(function FilesTab({
       {sidebarMode === "tree" ? (
         <div className="min-h-0 flex-1">
           <WorkspaceFileTree
+            active={active}
             cwd={cwd}
             reloadKey={gitRefresh}
             initialSelectedPath={tab.filePath}
@@ -306,6 +307,7 @@ export const FilesTab = React.memo(function FilesTab({
         </div>
       ) : sidebarMode === "search" ? (
         <FilesSearchSidebar
+          active={active}
           cwd={cwd}
           reloadKey={gitRefresh}
           onOpenFile={handleOpenFile}

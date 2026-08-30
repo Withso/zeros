@@ -35,6 +35,7 @@ export {
   useBrowserPickerSelection,
   usePendingChatSubmission,
   usePendingAutoSend,
+  usePendingAutoSendAt,
   usePendingComposerAppend,
   useChats,
   useChatById,
@@ -252,7 +253,14 @@ export type WorkspaceState = {
   // the session is ready, AgentChat serializes its own composer and consumes
   // only that id. A map (rather than the former single slot) lets many workspace
   // creates queue independently without the newest one overwriting the others.
-  pendingAutoSend: Record<string, true>;
+  //
+  // The value is WHEN the turn was parked (epoch ms). It is what bounds the
+  // wait: a park whose session never settles has no status transition to be
+  // noticed by, so without a stamp it could sit armed and unreported forever —
+  // which is precisely what it did. Persisted with the draft that is its
+  // payload (persist-composer-drafts) so a reload inside the setup window
+  // still delivers the message instead of stranding it in the composer.
+  pendingAutoSend: Record<string, number>;
 
   // ⌥+click in the browser-tab element picker
   // appends element context to the active chat's composer WITHOUT

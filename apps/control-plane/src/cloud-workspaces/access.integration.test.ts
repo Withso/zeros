@@ -1096,9 +1096,11 @@ d("cloud workspace client access", () => {
       tx.query(
         `INSERT INTO cloud_workspace_endpoint_grants (
            workspace_id, generation, org_id, account_user_id, purpose,
-           audience, token_hash, expires_at
+           audience, token_hash, account_revision, authorization_revision,
+           expires_at
          ) VALUES ($1, 1, $2, $3, 'engine-connect', $4,
-                   digest($5, 'sha256'), now() + interval '5 minutes')`,
+                   digest($5, 'sha256'), 1, 1,
+                   now() + interval '5 minutes')`,
         [
           workspaceId,
           orgId,

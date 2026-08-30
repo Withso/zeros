@@ -112,7 +112,7 @@ deploy button by itself is not a supported self-hosted product.
 
 ## Controlled migration rollout
 
-`0018_cloud_workspace_engine_authority.sql` is deliberately marked
+`0023_cloud_workspace_engine_authority.sql` is deliberately marked
 `zeros:requires-controlled-downtime`. It takes an `EXCLUSIVE` lock on
 `cloud_workspaces` before altering the engine table so a live workspace-first
 transaction cannot form a schema-lock/row-lock cycle. Reads may continue, but
@@ -125,7 +125,7 @@ For every environment that has not yet applied `0018`:
 2. take and verify a PostgreSQL backup and record the currently deployed commit
    and migration ledger;
 3. set
-   `CONTROL_PLANE_MIGRATION_APPROVALS=0018_cloud_workspace_engine_authority.sql`
+   `CONTROL_PLANE_MIGRATION_APPROVALS=0023_cloud_workspace_engine_authority.sql`
    only on the one migration runner and apply the same reviewed commit that will
    be deployed;
 4. verify `schema_migrations`, the authority-retirement triggers, queued provider

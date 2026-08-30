@@ -4,11 +4,13 @@
 //
 // NOT experimental features. Experimental (experimental-features.ts) is
 // visible to every user as an opt-in; Internal is invisible to everyone
-// except accounts whose database row carries `staff_role`. These features may never
-// ship to users — they exist for maintainers to debug/dogfood the app
+// except accounts whose database row carries the exact `developer` role. These
+// features may never ship to users — they exist for maintainers to debug/dogfood the app
 // (Settings → Internal, gated in settings-page.tsx `availableSections`).
 //
-// Who counts as internal comes from the DATABASE: `users.staff_role`,
+// Who counts as internal comes from the DATABASE: `users.staff_role =
+// 'developer'`. The orthogonal `support_admin` role authorizes reviewed account
+// recovery only and must not expose engineering surfaces.
 // surfaced on `GET /v1/me` and cached by the team store. It used to be a
 // build-time email allowlist (`VITE_INTERNAL_USER_EMAILS`), which was wrong
 // in three ways: Vite inlines VITE_* into the renderer bundle, so the
@@ -26,7 +28,7 @@
 //      ⌘/ shortcuts catalog, menus, tooltips, or any surface a
 //      non-internal user can see.
 //   3. The role is resolved SERVER-side from Postgres against the verified
-//      Auth0 token (apps/control-plane/src/auth.ts `ensureUser` runs per request) and
+//      WorkOS token (apps/control-plane/src/auth.ts `ensureUser` runs per request) and
 //      is never read from a JWT claim, so revoking staff takes effect
 //      immediately rather than at token expiry. Signed out, control plane
 //      unconfigured, or fetch not yet landed ⇒ null ⇒ everything internal
@@ -62,7 +64,7 @@ import { getTeamStoreState, useTeams } from "../team/team-store";
  *  first fetch still in flight — because "not yet known" must behave as
  *  "not internal", never the reverse. */
 export function isInternalUser(): boolean {
-  return getTeamStoreState().me?.user.staffRole != null;
+  return getTeamStoreState().me?.user.staffRole === "developer";
 }
 
 /** Hook: is the signed-in user staff? Gates the Internal settings tab and
@@ -71,7 +73,7 @@ export function isInternalUser(): boolean {
  *  `useTeams` is single-flight, so calling it here costs no extra request. */
 export function useIsInternalUser(): boolean {
   const { me } = useTeams();
-  return me?.user.staffRole != null;
+  return me?.user.staffRole === "developer";
 }
 
 // ── The flags ───────────────────────────────────────────

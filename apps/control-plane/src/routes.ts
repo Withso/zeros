@@ -22,18 +22,28 @@ import {
 import { audit } from "./audit.js";
 import { generateInviteToken, hashInviteToken } from "./invites.js";
 import { randomSuffix, slugify } from "./auth.js";
-import { inviteEmailHtml, sendEmail, type EmailConfig } from "./email.js";
+import type { EmailConfig } from "./email.js";
+import { deliverInvitationEmail } from "./invitation-delivery.js";
 import { rateLimit } from "./ratelimit.js";
 import type { CloudWorkspaceBackendConfig } from "./config.js";
 import { createCloudWorkspaceRoutes } from "./cloud-workspaces/routes.js";
 import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
+import {
+  enqueueWorkOSCommand,
+  workOSInvitationOrderingKey,
+} from "./workos-command-outbox.js";
+import type {
+  WorkOSInvitationRecord,
+  WorkOSManagementProvider,
+} from "./workos-provider.js";
 
-const INVITE_LINK_BASE =
-  process.env.INVITE_LINK_BASE?.trim().replace(/\/+$/, "") ||
-  "https://app.zeros.build/invite";
+const DEFAULT_INVITE_LINK_BASE = "https://app.zeros.build/invite";
 
-export function inviteLink(rawToken: string): string {
-  return `${INVITE_LINK_BASE}?token=${encodeURIComponent(rawToken)}`;
+export function inviteLink(
+  rawToken: string,
+  inviteLinkBase = DEFAULT_INVITE_LINK_BASE,
+): string {
+  return `${inviteLinkBase}?token=${encodeURIComponent(rawToken)}`;
 }
 
 const OrganizationRoleSchema = z.enum(["owner", "admin", "member"]);
@@ -53,6 +63,202 @@ const ScopeSchema = z
   .regex(/^(\*|[\w.-]+(\/[\w.-]+)?)$/, "Scope must be * or a repo slug")
   .default("*");
 const SettingsDocSchema = z.record(z.string(), z.unknown());
+const InvitationCapabilitySchema = z.string().regex(/^[A-Za-z0-9_-]{20,200}$/);
+
+type WorkOSInvitationResolver = Pick<
+  WorkOSManagementProvider,
+  "findInvitationByToken" | "getInvitation"
+>;
+
+function providerHttpStatus(error: unknown): number | null {
+  if (!error || typeof error !== "object" || !("status" in error)) {
+    return null;
+  }
+  const status = Number((error as { status: unknown }).status);
+  return Number.isInteger(status) ? status : null;
+}
+
+function invalidInvitation(): HttpError {
+  return new HttpError(
+    404,
+    "invalid_invite",
+    "This invite link is no longer valid",
+  );
+}
+
+async function readProviderInvitation(
+  read: () => Promise<WorkOSInvitationRecord>,
+): Promise<WorkOSInvitationRecord> {
+  try {
+    return await read();
+  } catch (error) {
+    const status = providerHttpStatus(error);
+    if (status === 400 || status === 404 || status === 422) {
+      throw invalidInvitation();
+    }
+    throw new HttpError(
+      503,
+      "auth_unavailable",
+      "Invitation verification is temporarily unavailable",
+    );
+  }
+}
+
+function invitationMatches(
+  invitation: WorkOSInvitationRecord,
+  expected: {
+    id: string;
+    organizationId: string;
+    email: string;
+    role: Exclude<OrganizationRole, "owner">;
+  },
+): boolean {
+  const role = OrganizationRoleSchema.exclude(["owner"]).safeParse(
+    invitation.roleSlug,
+  );
+  return (
+    invitation.id === expected.id &&
+    invitation.state === "pending" &&
+    invitation.organizationId === expected.organizationId &&
+    invitation.email.toLowerCase() === expected.email.toLowerCase() &&
+    role.success &&
+    role.data === expected.role
+  );
+}
+
+async function resolveInvitationId(
+  pool: pg.Pool,
+  rawToken: string,
+  workosProvider?: WorkOSInvitationResolver,
+): Promise<string> {
+  const local = await withSystemTx(pool, (tx) =>
+    tx.query<{
+      id: string;
+      email: string;
+      role: Exclude<OrganizationRole, "owner">;
+      workos_invitation_id: string | null;
+      workos_organization_id: string | null;
+    }>(
+      `SELECT i.id, i.email, i.role, i.workos_invitation_id,
+              wol.workos_organization_id
+       FROM invitations i
+       JOIN organizations o
+         ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
+       LEFT JOIN workos_organization_links wol
+         ON wol.organization_id = i.org_id AND wol.state = 'active'
+       WHERE i.token_hash = $1
+         AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+         AND i.expires_at > now()
+       LIMIT 1`,
+      [hashInviteToken(rawToken)],
+    ),
+  );
+  const localInvitation = local.rows[0];
+  if (localInvitation) {
+    if (!workosProvider) return localInvitation.id;
+    if (!localInvitation.workos_invitation_id) {
+      // The durable outbox has committed the Zeros invitation but has not yet
+      // received WorkOS's provider object. The copied link must not bypass that
+      // authority during this short window; callers can retry once prepared.
+      throw new HttpError(
+        503,
+        "invite_preparing",
+        "The invitation is still being prepared; try again",
+      );
+    }
+    if (!localInvitation.workos_organization_id) throw invalidInvitation();
+    const providerInvitation = await readProviderInvitation(() =>
+      workosProvider.getInvitation(localInvitation.workos_invitation_id!),
+    );
+    if (
+      !invitationMatches(providerInvitation, {
+        id: localInvitation.workos_invitation_id,
+        organizationId: localInvitation.workos_organization_id,
+        email: localInvitation.email,
+        role: localInvitation.role,
+      })
+    ) {
+      throw invalidInvitation();
+    }
+    return localInvitation.id;
+  }
+  if (!workosProvider) throw invalidInvitation();
+
+  const providerInvitation = await readProviderInvitation(() =>
+    workosProvider.findInvitationByToken(rawToken),
+  );
+  const role = OrganizationRoleSchema.exclude(["owner"]).safeParse(
+    providerInvitation.roleSlug,
+  );
+  if (
+    providerInvitation.state !== "pending" ||
+    !providerInvitation.organizationId ||
+    !role.success
+  ) {
+    throw invalidInvitation();
+  }
+
+  const correlation = await withSystemTx(pool, async (tx) => {
+    const exact = await tx.query<{ id: string }>(
+      `SELECT i.id
+       FROM invitations i
+       JOIN workos_organization_links wol
+         ON wol.organization_id = i.org_id
+        AND wol.workos_organization_id = $2
+        AND wol.state = 'active'
+       JOIN organizations o
+         ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
+       WHERE i.workos_invitation_id = $1
+         AND i.email = $3 AND i.role = $4
+         AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+         AND i.expires_at > now()
+       LIMIT 1`,
+      [
+        providerInvitation.id,
+        providerInvitation.organizationId,
+        providerInvitation.email,
+        role.data,
+      ],
+    );
+    if (exact.rows[0]) return { kind: "exact" as const, id: exact.rows[0].id };
+
+    // WorkOS can deliver the email immediately after accepting the outbox
+    // command, just before the same worker transaction persists its returned
+    // provider ID. Treat only that exact in-flight local command as retryable;
+    // a Dashboard-created WorkOS invitation has no Zeros authorization record
+    // and therefore fails closed instead of being correlated by email.
+    const preparing = await tx.query(
+      `SELECT 1
+       FROM invitations i
+       JOIN workos_organization_links wol
+         ON wol.organization_id = i.org_id
+        AND wol.workos_organization_id = $1
+        AND wol.state = 'active'
+       JOIN workos_command_outbox command
+         ON command.aggregate_key = 'invitation:' || i.id::text
+        AND command.operation = 'invitation.create'
+        AND command.state IN ('queued', 'processing')
+       WHERE i.workos_invitation_id IS NULL
+         AND i.email = $2 AND i.role = $3
+         AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+         AND i.expires_at > now()
+       LIMIT 1`,
+      [providerInvitation.organizationId, providerInvitation.email, role.data],
+    );
+    return preparing.rows[0]
+      ? { kind: "preparing" as const }
+      : { kind: "missing" as const };
+  });
+  if (correlation.kind === "exact") return correlation.id;
+  if (correlation.kind === "preparing") {
+    throw new HttpError(
+      503,
+      "invite_preparing",
+      "The invitation is still being prepared; try again",
+    );
+  }
+  throw invalidInvitation();
+}
 
 function parse<T>(
   schema: z.ZodType<T, z.ZodTypeDef, unknown>,
@@ -75,6 +281,58 @@ function uuidParam(value: string | undefined): string {
   return result.data;
 }
 
+async function recordOrganizationDataChange(
+  tx: Tx,
+  organizationId: string,
+  reason: string,
+): Promise<number> {
+  const revision = await tx.query<{ data_revision: string | number }>(
+    `UPDATE organizations
+     SET data_revision = data_revision + 1
+     WHERE id = $1 AND deleted_at IS NULL
+     RETURNING data_revision`,
+    [organizationId],
+  );
+  const value = Number(revision.rows[0]?.data_revision ?? 1);
+  await tx.query(
+    `INSERT INTO security_events (kind, org_id, data_revision, payload)
+     VALUES (
+       'organization.data_changed', $1, $2,
+       jsonb_build_object('reason', $3::text)
+     )`,
+    [organizationId, value, reason],
+  );
+  return value;
+}
+
+async function recordOrganizationAuthorizationChange(
+  tx: Tx,
+  organizationId: string,
+  userId: string,
+  reason: string,
+): Promise<number> {
+  const revision = await tx.query<{
+    authorization_revision: string | number;
+  }>(
+    `UPDATE organizations
+     SET authorization_revision = authorization_revision + 1
+     WHERE id = $1 AND deleted_at IS NULL
+     RETURNING authorization_revision`,
+    [organizationId],
+  );
+  const value = Number(revision.rows[0]?.authorization_revision ?? 1);
+  await tx.query(
+    `INSERT INTO security_events (
+       kind, user_id, org_id, authorization_revision, payload
+     ) VALUES (
+       'organization.authorization_changed', $1, $2, $3,
+       jsonb_build_object('reason', $4::text)
+     )`,
+    [userId, organizationId, value, reason],
+  );
+  return value;
+}
+
 type OrganizationRow = {
   id: string;
   slug: string;
@@ -84,6 +342,7 @@ type OrganizationRow = {
   is_personal: boolean;
   cloud_workspaces_allowed: boolean;
   default_team_id: string | null;
+  workos_sync_revision?: string | number;
 };
 
 export type OrganizationSummary = {
@@ -139,7 +398,12 @@ export function createRoutes(
   pool: pg.Pool,
   email?: EmailConfig,
   cloudWorkspaces: CloudWorkspaceBackendConfig | null = null,
-  cloudWorkspaceAccessService: CloudWorkspaceAccessService | null = null,
+  options: {
+    cloudWorkspaceAccessService?: CloudWorkspaceAccessService | null;
+    workosEnabled?: boolean;
+    workosProvider?: WorkOSInvitationResolver;
+    inviteLinkBase?: string;
+  } = {},
 ): Hono {
   const app = new Hono();
 
@@ -166,15 +430,32 @@ export function createRoutes(
     return c.json({ user: publicUser, organizations, teams: organizations });
   });
 
-  app.route("/v1/organizations", createOrganizationRouter(pool, email, false));
-  app.route("/v1/teams", createOrganizationRouter(pool, email, true));
+  app.route(
+    "/v1/organizations",
+    createOrganizationRouter(
+      pool,
+      email,
+      false,
+      options.workosEnabled === true,
+      options.inviteLinkBase ?? DEFAULT_INVITE_LINK_BASE,
+    ),
+  );
+  app.route(
+    "/v1/teams",
+    createOrganizationRouter(
+      pool,
+      email,
+      true,
+      options.workosEnabled === true,
+      options.inviteLinkBase ?? DEFAULT_INVITE_LINK_BASE,
+    ),
+  );
   app.route(
     "/",
-    createCloudWorkspaceRoutes(
-      pool,
-      cloudWorkspaces,
-      cloudWorkspaceAccessService,
-    ),
+    createCloudWorkspaceRoutes(pool, cloudWorkspaces, {
+      accessService: options.cloudWorkspaceAccessService ?? null,
+      workosEnabled: options.workosEnabled === true,
+    }),
   );
 
   app.post(
@@ -188,12 +469,50 @@ export function createRoutes(
       unknown
     >;
     const raw = typeof body.token === "string" ? body.token : "";
-    if (!raw || raw.length > 200) {
+    if (!InvitationCapabilitySchema.safeParse(raw).success) {
       throw new HttpError(422, "invalid_input", "Missing invitation token");
     }
-    const hash = hashInviteToken(raw);
+    const invitationId = await resolveInvitationId(
+      pool,
+      raw,
+      options.workosProvider,
+    );
 
     const joined = await withSystemTx(pool, async (tx) => {
+      // Discover the owning organization without taking a row lock, then lock
+      // the organization before revalidating and locking the invitation. Every
+      // organization mutation uses this same parent-before-child order.
+      const candidate = await tx.query<{ org_id: string }>(
+        `SELECT i.org_id
+         FROM invitations i
+         JOIN organizations o
+           ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
+         WHERE i.id = $1
+           AND i.accepted_at IS NULL AND i.revoked_at IS NULL
+           AND i.expires_at > now()`,
+        [invitationId],
+      );
+      const candidateOrganizationId = candidate.rows[0]?.org_id;
+      if (!candidateOrganizationId) {
+        throw new HttpError(
+          404,
+          "invalid_invite",
+          "This invite link is no longer valid",
+        );
+      }
+      const organization = await tx.query(
+        `SELECT 1 FROM organizations
+         WHERE id = $1 AND deleted_at IS NULL AND NOT is_personal
+         FOR UPDATE`,
+        [candidateOrganizationId],
+      );
+      if (!organization.rows[0]) {
+        throw new HttpError(
+          404,
+          "invalid_invite",
+          "This invite link is no longer valid",
+        );
+      }
       const invitationResult = await tx.query<{
         id: string;
         org_id: string;
@@ -202,13 +521,12 @@ export function createRoutes(
       }>(
         `SELECT i.id, i.org_id, i.email, i.role
          FROM invitations i
-         JOIN organizations o
-           ON o.id = i.org_id AND o.deleted_at IS NULL AND NOT o.is_personal
-         WHERE i.token_hash = $1
+         WHERE i.id = $1
+           AND i.org_id = $2
            AND i.accepted_at IS NULL AND i.revoked_at IS NULL
            AND i.expires_at > now()
-         FOR UPDATE OF i, o`,
-        [hash],
+         FOR UPDATE OF i`,
+        [invitationId, candidateOrganizationId],
       );
       const invitation = invitationResult.rows[0];
       if (!invitation) {
@@ -226,14 +544,40 @@ export function createRoutes(
         );
       }
 
-      await tx.query(
-        `INSERT INTO organization_members (org_id, user_id, role)
-         VALUES ($1, $2, $3)
-         ON CONFLICT (org_id, user_id) DO NOTHING`,
-        [invitation.org_id, user.id, invitation.role],
+      const membershipAggregateKey = `membership:${invitation.org_id}:${user.id}`;
+      const insertedMembership = await tx.query(
+        `INSERT INTO organization_members (
+           org_id, user_id, role, workos_sync_revision
+         )
+         VALUES (
+           $1, $2, $3,
+           COALESCE(
+             (
+               SELECT MAX(aggregate_revision) + 1
+               FROM workos_command_outbox
+               WHERE aggregate_key = $4
+             ),
+             1
+           )
+         )
+         ON CONFLICT (org_id, user_id) DO NOTHING
+         RETURNING user_id`,
+        [
+          invitation.org_id,
+          user.id,
+          invitation.role,
+          membershipAggregateKey,
+        ],
       );
-      const effectiveRole = await tx.query<{ role: OrganizationRole }>(
-        `SELECT role FROM organization_members
+      const effectiveRole = await tx.query<{
+        role: OrganizationRole;
+        membership_source: string;
+        workos_sync_revision: string | number;
+        workos_membership_id: string | null;
+      }>(
+        `SELECT role, membership_source, workos_sync_revision,
+                workos_membership_id
+         FROM organization_members
          WHERE org_id = $1 AND user_id = $2`,
         [invitation.org_id, user.id],
       );
@@ -247,10 +591,80 @@ export function createRoutes(
          ON CONFLICT (team_id, user_id) DO NOTHING`,
         [invitation.org_id, user.id, effectiveRole.rows[0]!.role],
       );
-      await tx.query(
-        `UPDATE invitations SET accepted_at = now() WHERE id = $1`,
+      const acceptedInvitation = await tx.query<{
+        workos_invitation_id: string | null;
+        workos_sync_revision: string | number;
+      }>(
+        `UPDATE invitations
+         SET accepted_at = now(),
+             workos_sync_revision = workos_sync_revision + 1
+         WHERE id = $1
+         RETURNING workos_invitation_id, workos_sync_revision`,
         [invitation.id],
       );
+      if (insertedMembership.rowCount) {
+        await recordOrganizationAuthorizationChange(
+          tx,
+          invitation.org_id,
+          user.id,
+          "zeros_member_joined",
+        );
+      } else {
+        // The user was already a member, but consuming the invitation still
+        // changes the pending-invitation view for organization administrators.
+        await recordOrganizationDataChange(
+          tx,
+          invitation.org_id,
+          "zeros_invitation_accepted",
+        );
+      }
+      if (options.workosEnabled) {
+        const invitationState = acceptedInvitation.rows[0]!;
+        const orderingKey = workOSInvitationOrderingKey(
+          invitation.org_id,
+          invitation.email,
+        );
+        // The user consumed a capability through Zeros' exact-recipient
+        // authorization boundary. Retire every provider-side copy before
+        // creating the coarse WorkOS membership so a delayed provider invite
+        // cannot later re-add access.
+        await enqueueWorkOSCommand(tx, {
+          operation: "invitation.revoke",
+          idempotencyKey: `invitation.${invitation.id}.${invitationState.workos_sync_revision}`,
+          aggregateKey: `invitation:${invitation.id}`,
+          orderingKey,
+          aggregateRevision: Number(invitationState.workos_sync_revision),
+          organizationId: invitation.org_id,
+          providerObjectId: invitationState.workos_invitation_id,
+          payload: {
+            localInvitationId: invitation.id,
+            email: invitation.email,
+            role: invitation.role,
+          },
+        });
+        if (
+          user.identity.provider === "workos" &&
+          effectiveRole.rows[0]!.membership_source !== "scim"
+        ) {
+          const member = effectiveRole.rows[0]!;
+          await enqueueWorkOSCommand(tx, {
+            operation: member.workos_membership_id
+              ? "membership.update"
+              : "membership.create",
+            idempotencyKey: `membership.${invitation.org_id}.${user.id}.${member.workos_sync_revision}`,
+            aggregateKey: membershipAggregateKey,
+            orderingKey,
+            aggregateRevision: Number(member.workos_sync_revision),
+            organizationId: invitation.org_id,
+            userId: user.id,
+            providerObjectId: member.workos_membership_id,
+            payload: {
+              workosUserId: user.identity.subject,
+              role: member.role,
+            },
+          });
+        }
+      }
       await audit(tx, invitation.org_id, user.id, "member.joined", {
         invitation: invitation.id,
       });
@@ -271,6 +685,8 @@ function createOrganizationRouter(
   pool: pg.Pool,
   email: EmailConfig | undefined,
   legacy: boolean,
+  workosEnabled: boolean,
+  inviteLinkBase: string,
 ): Hono {
   const app = new Hono();
   const param = (c: { req: { param(name: string): string } }): string =>
@@ -296,7 +712,7 @@ function createOrganizationRouter(
            VALUES ($1, $2, $3, $4, false, true)
            ON CONFLICT (slug) DO NOTHING
            RETURNING id, slug, name, logo, is_personal,
-                     cloud_workspaces_allowed`,
+                     cloud_workspaces_allowed, workos_sync_revision`,
           [slug, name, logo, user.id],
         );
         if (result.rows[0]) created = result;
@@ -326,6 +742,36 @@ function createOrganizationRouter(
          VALUES ($1, $2, $3, 'maintainer')`,
         [team.rows[0]!.id, root.id, user.id],
       );
+      if (workosEnabled && user.identity.provider === "workos") {
+        await tx.query(
+          `INSERT INTO workos_organization_links (
+             organization_id, external_id, state
+           ) VALUES ($1::uuid, $1::text, 'provisioning')`,
+          [root.id],
+        );
+        const syncRevision = Number(root.workos_sync_revision ?? 1);
+        await enqueueWorkOSCommand(tx, {
+          operation: "organization.create",
+          idempotencyKey: `organization.${root.id}.${syncRevision}`,
+          aggregateKey: `organization:${root.id}`,
+          aggregateRevision: syncRevision,
+          organizationId: root.id,
+          payload: { externalId: root.id, name },
+        });
+        await enqueueWorkOSCommand(tx, {
+          operation: "membership.create",
+          idempotencyKey: `membership.${root.id}.${user.id}.1`,
+          aggregateKey: `membership:${root.id}:${user.id}`,
+          orderingKey: workOSInvitationOrderingKey(root.id, user.email),
+          aggregateRevision: 1,
+          organizationId: root.id,
+          userId: user.id,
+          payload: {
+            workosUserId: user.identity.subject,
+            role: "owner",
+          },
+        });
+      }
       await audit(tx, root.id, user.id, "organization.created", {});
       return organizationSummary({
         ...root,
@@ -371,14 +817,22 @@ function createOrganizationRouter(
     if (name === undefined && logo === undefined) {
       throw new HttpError(422, "invalid_input", "Nothing to update");
     }
-    const organization = await withUserTx(pool, user.id, async (tx) => {
+    const organization = await withSystemTx(pool, async (tx) => {
       await requireOrganizationRole(tx, orgId, user.id, "admin");
       await assertCollaborativeOrganization(tx, orgId);
-      await tx.query(
+      const updated = await tx.query<{
+        name: string;
+        data_revision: string | number;
+        workos_sync_revision: string | number;
+      }>(
         `UPDATE organizations
          SET name = COALESCE($2, name),
-             logo = CASE WHEN $3 THEN logo ELSE $4 END
-         WHERE id = $1 AND deleted_at IS NULL`,
+             logo = CASE WHEN $3 THEN logo ELSE $4 END,
+             data_revision = data_revision + 1,
+             workos_sync_revision = workos_sync_revision +
+               CASE WHEN $2::text IS NULL THEN 0 ELSE 1 END
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING name, data_revision, workos_sync_revision`,
         [orgId, name ?? null, logo === undefined, logo ?? null],
       );
       if (name !== undefined) {
@@ -388,6 +842,27 @@ function createOrganizationRouter(
         await audit(tx, orgId, user.id, "organization.logo_updated", {
           cleared: logo === null,
         });
+      }
+      const revision = updated.rows[0];
+      if (revision) {
+        await tx.query(
+          `INSERT INTO security_events (kind, org_id, data_revision, payload)
+           VALUES (
+             'organization.data_changed', $1, $2,
+             jsonb_build_object('reason', 'zeros_organization_updated')
+           )`,
+          [orgId, Number(revision.data_revision)],
+        );
+        if (workosEnabled && name !== undefined) {
+          await enqueueWorkOSCommand(tx, {
+            operation: "organization.update",
+            idempotencyKey: `organization.${orgId}.${revision.workos_sync_revision}`,
+            aggregateKey: `organization:${orgId}`,
+            aggregateRevision: Number(revision.workos_sync_revision),
+            organizationId: orgId,
+            payload: { externalId: orgId, name: revision.name },
+          });
+        }
       }
       const result = await tx.query<OrganizationRow>(
         `${ORGANIZATION_SUMMARY_SQL}
@@ -408,19 +883,94 @@ function createOrganizationRouter(
     await withSystemTx(pool, async (tx) => {
       await requireOrganizationRole(tx, orgId, user.id, "owner");
       await assertCollaborativeOrganization(tx, orgId);
+      const retainedCloudWorkspace = await tx.query(
+        `SELECT 1 FROM cloud_workspaces
+         WHERE org_id = $1 AND status <> 'deleted'
+         LIMIT 1`,
+        [orgId],
+      );
+      if (retainedCloudWorkspace.rows[0]) {
+        throw new HttpError(
+          409,
+          "organization_has_cloud_workspaces",
+          "Delete every cloud workspace before deleting the organization",
+        );
+      }
+      const affected = await tx.query<{ user_id: string }>(
+        `SELECT user_id FROM organization_members WHERE org_id = $1`,
+        [orgId],
+      );
+      const providerLink = await tx.query<{
+        workos_organization_id: string | null;
+      }>(
+        `SELECT workos_organization_id FROM workos_organization_links
+         WHERE organization_id = $1 FOR UPDATE`,
+        [orgId],
+      );
       await tx.query(
         `UPDATE invitations SET revoked_at = now()
          WHERE org_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL`,
         [orgId],
       );
       await audit(tx, orgId, user.id, "organization.deleted", {});
-      const result = await tx.query(
-        `UPDATE organizations SET deleted_at = now()
-         WHERE id = $1 AND deleted_at IS NULL`,
+      const result = await tx.query<{
+        authorization_revision: string | number;
+        data_revision: string | number;
+        workos_sync_revision: string | number;
+      }>(
+        `UPDATE organizations
+         SET deleted_at = now(),
+             authorization_revision = authorization_revision + 1,
+             data_revision = data_revision + 1,
+             workos_sync_revision = workos_sync_revision + 1
+         WHERE id = $1 AND deleted_at IS NULL
+         RETURNING authorization_revision, data_revision, workos_sync_revision`,
         [orgId],
       );
-      if (!result.rowCount) {
+      const revisions = result.rows[0];
+      if (!revisions) {
         throw new HttpError(404, "not_found", "Organization not found");
+      }
+      await tx.query(
+        `UPDATE cloud_workspace_endpoint_grants
+         SET revoked_at = COALESCE(revoked_at, now())
+         WHERE org_id = $1 AND revoked_at IS NULL`,
+        [orgId],
+      );
+      for (const member of affected.rows) {
+        await tx.query(
+          `INSERT INTO security_events (
+             kind, user_id, org_id, authorization_revision,
+             data_revision, payload
+           ) VALUES (
+             'organization.access_revoked', $1, $2, $3, $4,
+             jsonb_build_object('reason', 'zeros_organization_deleted')
+           )`,
+          [
+            member.user_id,
+            orgId,
+            Number(revisions.authorization_revision),
+            Number(revisions.data_revision),
+          ],
+        );
+      }
+      if (workosEnabled && providerLink.rows[0]) {
+        await tx.query(
+          `UPDATE workos_organization_links
+           SET state = 'deleting', updated_at = now()
+           WHERE organization_id = $1`,
+          [orgId],
+        );
+        await enqueueWorkOSCommand(tx, {
+          operation: "organization.delete",
+          idempotencyKey: `organization.${orgId}.${revisions.workos_sync_revision}`,
+          aggregateKey: `organization:${orgId}`,
+          aggregateRevision: Number(revisions.workos_sync_revision),
+          organizationId: orgId,
+          providerObjectId:
+            providerLink.rows[0].workos_organization_id ?? null,
+          payload: {},
+        });
       }
     });
     return c.json({ ok: true });
@@ -433,7 +983,8 @@ function createOrganizationRouter(
       await requireOrganizationMembership(tx, orgId, user.id);
       const result = await tx.query(
         `SELECT u.id, u.email, u.display_name, u.avatar_url, om.role,
-                om.created_at
+                om.created_at,
+                (om.membership_source = 'scim') AS directory_managed
          FROM organization_members om
          JOIN users u ON u.id = om.user_id
          WHERE om.org_id = $1
@@ -454,7 +1005,7 @@ function createOrganizationRouter(
       OrganizationRoleSchema,
       (body as { role?: unknown }).role,
     );
-    await withUserTx(pool, actor.id, async (tx) => {
+    await withSystemTx(pool, async (tx) => {
       const actorRole = await requireOrganizationRole(
         tx,
         orgId,
@@ -462,13 +1013,35 @@ function createOrganizationRouter(
         "admin",
       );
       await assertCollaborativeOrganization(tx, orgId);
-      const target = await tx.query<{ role: OrganizationRole }>(
-        `SELECT role FROM organization_members
-         WHERE org_id = $1 AND user_id = $2 FOR UPDATE`,
+      const target = await tx.query<{
+        role: OrganizationRole;
+        membership_source: string;
+        workos_membership_id: string | null;
+        workos_sync_revision: string | number;
+        workos_user_id: string | null;
+        user_email: string;
+      }>(
+        `SELECT om.role, om.membership_source, om.workos_membership_id,
+                om.workos_sync_revision,
+                ui.provider_sub AS workos_user_id, u.email AS user_email
+         FROM organization_members om
+         JOIN users u ON u.id = om.user_id
+         LEFT JOIN user_identities ui
+           ON ui.user_id = om.user_id AND ui.provider = 'workos'
+          AND ui.status = 'active'
+         WHERE om.org_id = $1 AND om.user_id = $2
+         FOR UPDATE OF om`,
         [orgId, targetId],
       );
       const current = target.rows[0]?.role;
       if (!current) throw new HttpError(404, "not_found", "Member not found");
+      if (target.rows[0]!.membership_source === "scim") {
+        throw new HttpError(
+          409,
+          "directory_managed_membership",
+          "This membership is managed by the organization's identity provider",
+        );
+      }
       if ((current === "owner" || role === "owner") && actorRole !== "owner") {
         throw new HttpError(
           403,
@@ -479,9 +1052,16 @@ function createOrganizationRouter(
       if (current === "owner" && role !== "owner") {
         await assertNotLastOwner(tx, orgId);
       }
-      await tx.query(
-        `UPDATE organization_members SET role = $3
-         WHERE org_id = $1 AND user_id = $2`,
+      const changed = await tx.query<{
+        workos_sync_revision: string | number;
+        authorization_revision: string | number;
+      }>(
+        `UPDATE organization_members
+         SET role = $3,
+             authorization_revision = authorization_revision + 1,
+             workos_sync_revision = workos_sync_revision + 1
+         WHERE org_id = $1 AND user_id = $2
+         RETURNING workos_sync_revision, authorization_revision`,
         [orgId, targetId, role],
       );
       await tx.query(
@@ -496,6 +1076,53 @@ function createOrganizationRouter(
         user: targetId,
         role,
       });
+      const orgRevision = await tx.query<{
+        authorization_revision: string | number;
+      }>(
+        `UPDATE organizations
+         SET authorization_revision = authorization_revision + 1
+         WHERE id = $1 RETURNING authorization_revision`,
+        [orgId],
+      );
+      await tx.query(
+        `UPDATE cloud_workspace_endpoint_grants
+         SET revoked_at = COALESCE(revoked_at, now())
+         WHERE org_id = $1 AND account_user_id = $2 AND revoked_at IS NULL`,
+        [orgId, targetId],
+      );
+      await tx.query(
+        `INSERT INTO security_events (
+           kind, user_id, org_id, authorization_revision, payload
+         ) VALUES (
+           'organization.authorization_changed', $1, $2, $3,
+           jsonb_build_object('reason', 'zeros_member_role_changed')
+         )`,
+        [
+          targetId,
+          orgId,
+          Number(orgRevision.rows[0]?.authorization_revision ?? 1),
+        ],
+      );
+      const targetRow = target.rows[0]!;
+      const memberRevision = changed.rows[0];
+      if (workosEnabled && targetRow.workos_user_id && memberRevision) {
+        await enqueueWorkOSCommand(tx, {
+          operation: targetRow.workos_membership_id
+            ? "membership.update"
+            : "membership.create",
+          idempotencyKey: `membership.${orgId}.${targetId}.${memberRevision.workos_sync_revision}`,
+          aggregateKey: `membership:${orgId}:${targetId}`,
+          orderingKey: workOSInvitationOrderingKey(
+            orgId,
+            targetRow.user_email,
+          ),
+          aggregateRevision: Number(memberRevision.workos_sync_revision),
+          organizationId: orgId,
+          userId: targetId,
+          providerObjectId: targetRow.workos_membership_id,
+          payload: { workosUserId: targetRow.workos_user_id, role },
+        });
+      }
     });
     return c.json({ ok: true });
   });
@@ -504,19 +1131,41 @@ function createOrganizationRouter(
     const actor = c.get("user");
     const orgId = param(c);
     const targetId = uuidParam(c.req.param("user"));
-    await withUserTx(pool, actor.id, async (tx) => {
+    await withSystemTx(pool, async (tx) => {
       const selfLeave = actor.id === targetId;
       const actorRole = selfLeave
         ? await requireOrganizationMembership(tx, orgId, actor.id)
         : await requireOrganizationRole(tx, orgId, actor.id, "admin");
       await assertCollaborativeOrganization(tx, orgId);
-      const target = await tx.query<{ role: OrganizationRole }>(
-        `SELECT role FROM organization_members
-         WHERE org_id = $1 AND user_id = $2 FOR UPDATE`,
+      const target = await tx.query<{
+        role: OrganizationRole;
+        membership_source: string;
+        workos_membership_id: string | null;
+        workos_sync_revision: string | number;
+        workos_user_id: string | null;
+        user_email: string;
+      }>(
+        `SELECT om.role, om.membership_source, om.workos_membership_id,
+                om.workos_sync_revision,
+                ui.provider_sub AS workos_user_id, u.email AS user_email
+         FROM organization_members om
+         JOIN users u ON u.id = om.user_id
+         LEFT JOIN user_identities ui
+           ON ui.user_id = om.user_id AND ui.provider = 'workos'
+          AND ui.status = 'active'
+         WHERE om.org_id = $1 AND om.user_id = $2
+         FOR UPDATE OF om`,
         [orgId, targetId],
       );
       const current = target.rows[0]?.role;
       if (!current) throw new HttpError(404, "not_found", "Member not found");
+      if (target.rows[0]!.membership_source === "scim") {
+        throw new HttpError(
+          409,
+          "directory_managed_membership",
+          "This membership is managed by the organization's identity provider",
+        );
+      }
       if (current === "owner" && !selfLeave && actorRole !== "owner") {
         throw new HttpError(
           403,
@@ -534,10 +1183,96 @@ function createOrganizationRouter(
         selfLeave ? "member.left" : "member.removed",
         { user: targetId },
       );
+      const targetRow = target.rows[0]!;
+      const relatedInvitations = await tx.query<{
+        id: string;
+        email: string;
+        role: OrganizationRole;
+        workos_invitation_id: string | null;
+        workos_sync_revision: string | number;
+      }>(
+        `UPDATE invitations
+         SET revoked_at = CASE
+                            WHEN accepted_at IS NULL THEN now()
+                            ELSE revoked_at
+                          END,
+             workos_sync_revision = workos_sync_revision +
+               CASE WHEN $3::boolean THEN 1 ELSE 0 END
+         WHERE org_id = $1 AND email = $2 AND revoked_at IS NULL
+           AND ($3::boolean OR accepted_at IS NULL)
+         RETURNING id, email, role, workos_invitation_id,
+                   workos_sync_revision`,
+        [orgId, targetRow.user_email, workosEnabled],
+      );
+      if (workosEnabled) {
+        const orderingKey = workOSInvitationOrderingKey(
+          orgId,
+          targetRow.user_email,
+        );
+        for (const invitation of relatedInvitations.rows) {
+          await enqueueWorkOSCommand(tx, {
+            operation: "invitation.revoke",
+            idempotencyKey: `invitation.${invitation.id}.${invitation.workos_sync_revision}`,
+            aggregateKey: `invitation:${invitation.id}`,
+            orderingKey,
+            aggregateRevision: Number(invitation.workos_sync_revision),
+            organizationId: orgId,
+            providerObjectId: invitation.workos_invitation_id,
+            payload: {
+              localInvitationId: invitation.id,
+              email: invitation.email,
+              role: invitation.role,
+            },
+          });
+        }
+        if (targetRow.workos_user_id) {
+          const syncRevision = Number(targetRow.workos_sync_revision) + 1;
+          await enqueueWorkOSCommand(tx, {
+            operation: "membership.delete",
+            idempotencyKey: `membership.${orgId}.${targetId}.${syncRevision}`,
+            aggregateKey: `membership:${orgId}:${targetId}`,
+            orderingKey,
+            aggregateRevision: syncRevision,
+            organizationId: orgId,
+            userId: targetId,
+            providerObjectId: targetRow.workos_membership_id,
+            payload: {
+              workosUserId: targetRow.workos_user_id,
+              role: targetRow.role,
+            },
+          });
+        }
+      }
       await tx.query(
         `DELETE FROM organization_members
          WHERE org_id = $1 AND user_id = $2`,
         [orgId, targetId],
+      );
+      const revision = await tx.query<{ authorization_revision: string | number }>(
+        `UPDATE organizations
+         SET authorization_revision = authorization_revision + 1
+         WHERE id = $1 RETURNING authorization_revision`,
+        [orgId],
+      );
+      await tx.query(
+        `UPDATE cloud_workspace_endpoint_grants
+         SET revoked_at = COALESCE(revoked_at, now())
+         WHERE org_id = $1 AND account_user_id = $2 AND revoked_at IS NULL`,
+        [orgId, targetId],
+      );
+      await tx.query(
+        `INSERT INTO security_events (
+           kind, user_id, org_id, authorization_revision, payload
+         ) VALUES (
+           'organization.access_revoked', $1, $2, $3,
+           jsonb_build_object('reason', $4::text)
+         )`,
+        [
+          targetId,
+          orgId,
+          Number(revision.rows[0]?.authorization_revision ?? 1),
+          selfLeave ? "zeros_member_left" : "zeros_member_removed",
+        ],
       );
     });
     return c.json({ ok: true });
@@ -559,20 +1294,51 @@ function createOrganizationRouter(
       OrganizationRoleSchema.exclude(["owner"]).default("member"),
       body.role ?? "member",
     );
-    const result = await withUserTx(pool, user.id, async (tx) => {
+    const result = await withSystemTx(pool, async (tx) => {
       await requireOrganizationRole(tx, orgId, user.id, "admin");
       await assertCollaborativeOrganization(tx, orgId);
-      await tx.query(
-        `UPDATE invitations SET revoked_at = now()
+      const superseded = await tx.query<{
+        id: string;
+        email: string;
+        role: OrganizationRole;
+        workos_invitation_id: string | null;
+        workos_sync_revision: string | number;
+      }>(
+        `UPDATE invitations
+         SET revoked_at = now(),
+             workos_sync_revision = workos_sync_revision + 1
          WHERE org_id = $1 AND email = $2
-           AND accepted_at IS NULL AND revoked_at IS NULL`,
+           AND accepted_at IS NULL AND revoked_at IS NULL
+         RETURNING id, email, role, workos_invitation_id, workos_sync_revision`,
         [orgId, emailAddress],
       );
+      if (workosEnabled) {
+        for (const invitation of superseded.rows) {
+          await enqueueWorkOSCommand(tx, {
+            operation: "invitation.revoke",
+            idempotencyKey: `invitation.${invitation.id}.${invitation.workos_sync_revision}`,
+            aggregateKey: `invitation:${invitation.id}`,
+            orderingKey: workOSInvitationOrderingKey(orgId, invitation.email),
+            aggregateRevision: Number(invitation.workos_sync_revision),
+            organizationId: orgId,
+            providerObjectId: invitation.workos_invitation_id,
+            payload: {
+              localInvitationId: invitation.id,
+              email: invitation.email,
+              role: invitation.role,
+            },
+          });
+        }
+      }
       const { raw, hash } = generateInviteToken();
-      const created = await tx.query<{ id: string; expires_at: string }>(
+      const created = await tx.query<{
+        id: string;
+        expires_at: string;
+        workos_sync_revision: string | number;
+      }>(
         `INSERT INTO invitations (org_id, email, role, token_hash, invited_by)
          VALUES ($1, $2, $3, $4, $5)
-         RETURNING id, expires_at`,
+         RETURNING id, expires_at, workos_sync_revision`,
         [orgId, emailAddress, role, hash, user.id],
       );
       const organization = await tx.query<{ name: string }>(
@@ -583,31 +1349,52 @@ function createOrganizationRouter(
         email: emailAddress,
         role,
       });
+      await recordOrganizationDataChange(
+        tx,
+        orgId,
+        "zeros_invitation_created",
+      );
+      const invitation = created.rows[0]!;
+      if (workosEnabled) {
+        await enqueueWorkOSCommand(tx, {
+          operation: "invitation.create",
+          idempotencyKey: `invitation.${invitation.id}.${invitation.workos_sync_revision}`,
+          aggregateKey: `invitation:${invitation.id}`,
+          orderingKey: workOSInvitationOrderingKey(orgId, emailAddress),
+          aggregateRevision: Number(invitation.workos_sync_revision),
+          organizationId: orgId,
+          payload: {
+            localInvitationId: invitation.id,
+            email: emailAddress,
+            role,
+            ...(user.identity.provider === "workos"
+              ? { inviterWorkosUserId: user.identity.subject }
+              : {}),
+          },
+        });
+      }
       return {
-        id: created.rows[0]!.id,
-        expiresAt: created.rows[0]!.expires_at,
+        id: invitation.id,
+        expiresAt: invitation.expires_at,
         token: raw,
         organizationName: organization.rows[0]?.name ?? "your organization",
       };
     });
-    if (email) {
-      const message = inviteEmailHtml({
-        organizationName: result.organizationName,
-        inviterName: user.displayName ?? user.email,
-        acceptUrl: inviteLink(result.token),
-        expiresDays: 7,
-      });
-      void sendEmail(email, emailAddress, message.subject, message.html).catch(
-        () => {},
-      );
-    }
+    await deliverInvitationEmail({
+      email,
+      workosEnabled,
+      destination: emailAddress,
+      organizationName: result.organizationName,
+      inviterName: user.displayName ?? user.email,
+      acceptUrl: inviteLink(result.token, inviteLinkBase),
+    });
     return c.json(
       {
         invitation: {
           id: result.id,
           expiresAt: result.expiresAt,
           token: result.token,
-          acceptUrl: inviteLink(result.token),
+          acceptUrl: inviteLink(result.token, inviteLinkBase),
         },
       },
       201,
@@ -637,13 +1424,21 @@ function createOrganizationRouter(
     const user = c.get("user");
     const orgId = param(c);
     const inviteId = uuidParam(c.req.param("id"));
-    await withUserTx(pool, user.id, async (tx) => {
+    await withSystemTx(pool, async (tx) => {
       await requireOrganizationRole(tx, orgId, user.id, "admin");
       await assertCollaborativeOrganization(tx, orgId);
-      const result = await tx.query(
-        `UPDATE invitations SET revoked_at = now()
+      const result = await tx.query<{
+        email: string;
+        role: OrganizationRole;
+        workos_invitation_id: string | null;
+        workos_sync_revision: string | number;
+      }>(
+        `UPDATE invitations
+         SET revoked_at = now(),
+             workos_sync_revision = workos_sync_revision + 1
          WHERE id = $1 AND org_id = $2
-           AND accepted_at IS NULL AND revoked_at IS NULL`,
+           AND accepted_at IS NULL AND revoked_at IS NULL
+         RETURNING email, role, workos_invitation_id, workos_sync_revision`,
         [inviteId, orgId],
       );
       if (!result.rowCount) {
@@ -652,6 +1447,28 @@ function createOrganizationRouter(
       await audit(tx, orgId, user.id, "invitation.revoked", {
         invitation: inviteId,
       });
+      await recordOrganizationDataChange(
+        tx,
+        orgId,
+        "zeros_invitation_revoked",
+      );
+      const invitation = result.rows[0]!;
+      if (workosEnabled) {
+        await enqueueWorkOSCommand(tx, {
+          operation: "invitation.revoke",
+          idempotencyKey: `invitation.${inviteId}.${invitation.workos_sync_revision}`,
+          aggregateKey: `invitation:${inviteId}`,
+          orderingKey: workOSInvitationOrderingKey(orgId, invitation.email),
+          aggregateRevision: Number(invitation.workos_sync_revision),
+          organizationId: orgId,
+          providerObjectId: invitation.workos_invitation_id,
+          payload: {
+            localInvitationId: inviteId,
+            email: invitation.email,
+            role: invitation.role,
+          },
+        });
+      }
     });
     return c.json({ ok: true });
   });
@@ -765,7 +1582,7 @@ function createOrganizationRouter(
     >;
     const scope = parse(ScopeSchema, body.scope ?? "*");
     const doc = parse(SettingsDocSchema, body.doc ?? {});
-    await withUserTx(pool, user.id, async (tx) => {
+    await withSystemTx(pool, async (tx) => {
       await requireOrganizationRole(tx, orgId, user.id, "admin");
       await assertCollaborativeOrganization(tx, orgId);
       await tx.query(
@@ -777,6 +1594,21 @@ function createOrganizationRouter(
         [orgId, scope, JSON.stringify(doc), user.id],
       );
       await audit(tx, orgId, user.id, "settings.updated", { scope });
+      const revision = await tx.query<{ data_revision: string | number }>(
+        `UPDATE organizations
+         SET data_revision = data_revision + 1
+         WHERE id = $1
+         RETURNING data_revision`,
+        [orgId],
+      );
+      await tx.query(
+        `INSERT INTO security_events (kind, org_id, data_revision, payload)
+         VALUES (
+           'organization.data_changed', $1, $2,
+           jsonb_build_object('reason', 'zeros_settings_updated', 'scope', $3::text)
+         )`,
+        [orgId, Number(revision.rows[0]!.data_revision), scope],
+      );
     });
     return c.json({ ok: true });
   });

@@ -12,9 +12,9 @@ const temporaryDirectories: string[] = [];
 
 afterEach(async () => {
   await Promise.all(
-    temporaryDirectories.splice(0).map((directory) =>
-      rm(directory, { recursive: true, force: true }),
-    ),
+    temporaryDirectories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
   );
 });
 
@@ -74,11 +74,7 @@ describe("AgentGateway provider command probes", () => {
     await import("node:fs/promises").then(({ mkdir }) =>
       mkdir(binaryRoot, { recursive: true }),
     );
-    await writeFile(
-      binary,
-      "#!/bin/sh\nprintf 'custom 9.8.7\\n'\n",
-      "utf8",
-    );
+    await writeFile(binary, "#!/bin/sh\nprintf 'custom 9.8.7\\n'\n", "utf8");
     await chmod(binary, 0o755);
 
     const requests: BoundaryRequest[] = [];
@@ -143,9 +139,64 @@ describe("AgentGateway provider command probes", () => {
       expect(codex).toMatchObject({
         installed: true,
         authenticationUnavailableReason:
-          "Zeros Sandbox Runtime could not verify this CLI's sign-in state.",
+          "Authentication could not be checked right now.",
       });
       expect(codex?.authenticated).toBeUndefined();
+    } finally {
+      process.env.PATH = previousPath;
+      await gateway.dispose();
+    }
+  });
+
+  it("retains a confirmed signed-in verdict when a later utility boundary fails", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-probe-retain-"));
+    temporaryDirectories.push(root);
+    const binary = path.join(root, "codex");
+    await writeFile(binary, "#!/bin/sh\nexit 0\n", "utf8");
+    await chmod(binary, 0o755);
+    const previousPath = process.env.PATH;
+    process.env.PATH = `${root}${path.delimiter}${previousPath ?? ""}`;
+    let boundaryUnavailable = false;
+    const healthyBoundary = testExecutionBoundary();
+    const gateway = new AgentGateway({
+      projectRoot: root,
+      executionBoundary: {
+        ...healthyBoundary,
+        prepare: (request, control) => {
+          if (boundaryUnavailable) {
+            throw new Error("utility boundary is temporarily unavailable");
+          }
+          return healthyBoundary.prepare(request, control);
+        },
+      },
+      events: {
+        onSessionUpdate: () => {},
+        onPermissionRequest: () => {},
+        onQuestionRequest: () => {},
+        onAgentStderr: () => {},
+        onAgentExit: () => {},
+      },
+    });
+    const internals = gateway as unknown as {
+      retirePooledUtilityBoundaries(): Promise<void>;
+    };
+
+    try {
+      const confirmed = await gateway.listAgents();
+      expect(confirmed.find((agent) => agent.id === "codex")).toMatchObject({
+        authenticated: true,
+      });
+
+      await internals.retirePooledUtilityBoundaries();
+      boundaryUnavailable = true;
+      const revalidated = await gateway.refreshRegistry();
+      expect(revalidated.find((agent) => agent.id === "codex")).toMatchObject({
+        authenticated: true,
+      });
+      expect(
+        revalidated.find((agent) => agent.id === "codex")
+          ?.authenticationUnavailableReason,
+      ).toBeUndefined();
     } finally {
       process.env.PATH = previousPath;
       await gateway.dispose();

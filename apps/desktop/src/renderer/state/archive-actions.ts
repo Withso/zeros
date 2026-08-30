@@ -204,7 +204,7 @@ function detachWorkspaceRuntimeState(
   for (const chat of state.chats) {
     if (!workspaceOwnsFolder(workspace, chat.folder, projects)) continue;
     sessions.detachSession(chat.id);
-    if (state.pendingAutoSend[chat.id]) {
+    if (state.pendingAutoSend[chat.id] !== undefined) {
       dispatch({ type: "CONSUME_AUTO_SEND", chatId: chat.id });
     }
   }

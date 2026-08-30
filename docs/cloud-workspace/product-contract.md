@@ -17,9 +17,10 @@ its live source, chat, paths, and processes remain private to its device. See
 
 - A workspace has one stable identity independent of its current machine,
   lifecycle state, client device, or sandbox provider.
-- A workspace has exactly one authoritative execution at a time. Syncing a
-  cloud workspace to a Mac creates a replica; it does not create a competing
-  writable engine or change tenant ownership.
+- A workspace has exactly one authoritative execution at a time. A receive-only
+  cloud-to-Mac sync creates a replica, not a competing writable engine or a new
+  owner. Until that replica workflow ships, “open cloud locally” creates a
+  separate local workspace with an optional source link.
 - Opening an existing workspace reconnects or wakes that workspace; it does not
   silently create a replacement.
 - Stop, wake, archive, delete, reconnect, and retry are explicit states with
@@ -33,12 +34,15 @@ its live source, chat, paths, and processes remain private to its device. See
   authorization, and repository checkout are ready for the requested action.
 - A provider or network failure retains the last confirmed state and reports
   that it is stale; it does not replace known state with an empty workspace.
-- Local and cloud target selection changes routing metadata only. Moving work,
-  rebasing, publishing, or deleting a checkout remains a separate explicit
-  action.
-- Moving between local and cloud is a checkpointed, idempotent authority
-  handoff. A copy/fork receives a new workspace identity and is never presented
-  as a move.
+- Changing the Personal/organization or local/cloud target in the UI changes
+  routing metadata for a future explicit creation only; it never retargets an
+  existing workspace. Creating cloud from local, opening cloud locally, or
+  forking cloud are copy-like workflows with separate identities. Transferring
+  uncommitted work, rebasing, publishing, or deleting a checkout remains a
+  separate explicit action.
+- The distinct future Move action is a checkpointed, idempotent authority
+  handoff that preserves workspace identity. A copy/fork always receives a new
+  workspace identity and is never presented as a move.
 
 ## Initial product scope
 

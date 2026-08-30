@@ -397,36 +397,39 @@ describe("ZSR host-parity policy builder", () => {
     );
   });
 
-  it("uses the same parity policy in cloud while hiding root-owned engine state", async () => {
-    const workspace = path.join(temporaryRoot, "cloud-workspace");
-    const design = path.join(workspace, "Zeros Design");
-    await mkdir(design, { recursive: true });
+  it.runIf(process.platform === "linux")(
+    "uses the same parity policy in cloud while hiding root-owned engine state",
+    async () => {
+      const workspace = path.join(temporaryRoot, "cloud-workspace");
+      const design = path.join(workspace, "Zeros Design");
+      await mkdir(design, { recursive: true });
 
-    const prepared = await prepare(
-      {
-        actor: "agent-code",
-        cwd: workspace,
-        workspaceRoot: workspace,
-        territory: territory(workspace, [design]),
-      },
-      { cloudWorker: { uid: 10_001, gid: 10_001 } },
-    );
+      const prepared = await prepare(
+        {
+          actor: "agent-code",
+          cwd: workspace,
+          workspaceRoot: workspace,
+          territory: territory(workspace, [design]),
+        },
+        { cloudWorker: { uid: 10_001, gid: 10_001 } },
+      );
 
-    expect(prepared.document.runtime).toMatchObject({
-      localHostParity: true,
-      cloudWorker: { version: 1, uid: 10_001, gid: 10_001 },
-    });
-    expect(prepared.document.filesystem.allowWrite).toContain(
-      path.parse(workspace).root,
-    );
-    expect(prepared.document.filesystem.denyWrite).toEqual(
-      expect.arrayContaining([design, process.env.ZEROS_DATA_DIR!]),
-    );
-    expect(prepared.document.filesystem.denyRead).toContain(
-      process.env.ZEROS_DATA_DIR,
-    );
-    expect(prepared.document.runtime.deniedLocalPorts).toEqual([]);
-  });
+      expect(prepared.document.runtime).toMatchObject({
+        localHostParity: true,
+        cloudWorker: { version: 1, uid: 10_001, gid: 10_001 },
+      });
+      expect(prepared.document.filesystem.allowWrite).toContain(
+        path.parse(workspace).root,
+      );
+      expect(prepared.document.filesystem.denyWrite).toEqual(
+        expect.arrayContaining([design, process.env.ZEROS_DATA_DIR!]),
+      );
+      expect(prepared.document.filesystem.denyRead).toContain(
+        process.env.ZEROS_DATA_DIR,
+      );
+      expect(prepared.document.runtime.deniedLocalPorts).toEqual([]);
+    },
+  );
 
   it("canonicalizes design-actor additional roots before denying them", async () => {
     const workspace = path.join(temporaryRoot, "workspace");

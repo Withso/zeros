@@ -187,6 +187,23 @@ export function sharedAdmissionFlightAction(input: {
     : "reuse";
 }
 
+/** Choose the provider admission route after no shared flight remains.
+ * Cancellation deliberately detaches a load flight without discarding its
+ * durable provider binding. Both ordinary admission and forced configuration
+ * recovery must therefore resume that binding before either is allowed to
+ * create a new provider conversation. Forced recovery first restarts the
+ * ephemeral execution so the resumed provider receives the new config. */
+export function admissionRouteWithoutFlight(input: {
+  force: boolean;
+  replaceProviderConversation: boolean;
+  hasProviderBinding: boolean;
+  canLoad: boolean;
+}): "resume" | "restart" | "create" {
+  if (!input.hasProviderBinding || !input.canLoad) return "create";
+  if (input.force && input.replaceProviderConversation) return "create";
+  return input.force ? "restart" : "resume";
+}
+
 /** Map a failure classification to the UI session status. The single
  * definition, shared by the RPC paths in <AgentSessionsProvider> and by the
  * store's turn-state settle — those two must not be able to disagree about
@@ -289,6 +306,103 @@ export function shouldQueuePrompt(input: {
     input.status === "streaming" ||
     input.status === "warming"
   );
+}
+
+/** Choose how a parked prompt is presented. The first send waiting only for
+ * session admission is already the user's active turn: it belongs in the
+ * transcript with the live timer, not in the follow-up queue card. Anything
+ * behind another send/turn remains a real queued message. */
+export function queuedPromptPresentation(input: {
+  reason: "admission" | "busy-turn";
+  hasLocalSend: boolean;
+  hasQueuedSends: boolean;
+  queueHeld: boolean;
+  flushing: boolean;
+}): "active-turn" | "queued-card" {
+  if (
+    input.reason === "admission" &&
+    !input.hasLocalSend &&
+    !input.hasQueuedSends &&
+    !input.queueHeld &&
+    !input.flushing
+  ) {
+    return "active-turn";
+  }
+  return "queued-card";
+}
+
+/** A protection failure is the one admission failure that owns a durable turn
+ * footer requested by product: keep its active prompt so the exact stopped
+ * label has an anchor. Ordinary provider/startup failures restore the text to
+ * the composer, and true follow-ups remain disposable queue rows. */
+export function shouldPreserveAdmissionPromptOnFailure(
+  failureKind: string | null | undefined,
+  presentation: "active-turn" | "queued-card" | undefined,
+): boolean {
+  return (
+    failureKind === "design-protection-failed" && presentation === "active-turn"
+  );
+}
+
+/** A first prompt waiting only for admission already owns the visible turn.
+ * Stop must settle that prompt in place so the transcript and STOPPED BY USER
+ * footer agree with what the user saw. True follow-ups are still discarded:
+ * they were queued behind work the user explicitly cancelled. */
+export function cancelledQueuedMessageAction(
+  presentation: "active-turn" | "queued-card" | undefined,
+): "preserve-as-turn" | "drop" {
+  return presentation === "active-turn" ? "preserve-as-turn" : "drop";
+}
+
+/** The first prompt is already a live user turn while its execution boundary
+ * and provider route are being admitted. Give that turn the same Stop control
+ * as a dispatched prompt; a bare warming session opened by focus/prewarm has no
+ * user-owned work and therefore keeps the ordinary Send control. Plan review
+ * owns its own submit actions and must not be replaced by Stop. */
+export function composerShowsStopControl(input: {
+  status: SessionStatus;
+  hasPendingLocalTurn: boolean;
+  planReview: boolean;
+}): boolean {
+  return (
+    !input.planReview &&
+    (input.status === "streaming" || input.hasPendingLocalTurn)
+  );
+}
+
+/** Route Stop to the lifecycle object that actually exists at that instant.
+ * Before the engine publishes an execution id there is no provider turn for
+ * AGENT_CANCEL to address: the chat-scoped bind itself must be invalidated.
+ * Once an execution exists it stays reusable and only its live/pending turn is
+ * cancelled. */
+export function admissionCancellationAction(input: {
+  hasAgent: boolean;
+  hasSession: boolean;
+  status: SessionStatus;
+  admissionInFlight: boolean;
+}): "abort-admission" | "cancel-session" | "local-only" {
+  if (!input.hasAgent) return "local-only";
+  if (input.hasSession) return "cancel-session";
+  if (input.admissionInFlight || input.status === "warming") {
+    return "abort-admission";
+  }
+  return "local-only";
+}
+
+/** Remove renderer ownership of one cancelled create/resume flight. The old
+ * async continuation is still protected by its cancel generation and exact
+ * promise identity; detaching here lets the next prompt install a replacement
+ * immediately instead of waiting behind work the user explicitly stopped. */
+export function detachAdmissionFlight<T>(
+  chatId: string,
+  flights: Map<string, T>,
+  loadKeys: Map<string, string>,
+  adoptOnly: Map<string, boolean>,
+): boolean {
+  const detached = flights.delete(chatId);
+  loadKeys.delete(chatId);
+  adoptOnly.delete(chatId);
+  return detached;
 }
 
 /** Route an explicit "Send now" for a queued row from authoritative session
@@ -404,6 +518,110 @@ export function queueReleaseAction(input: {
   // out from under the user, and a held queue survives an unhealthy settle.
   if (input.queueHeld) return "hold";
   return input.status === "ready" ? "drain" : "drop";
+}
+
+/** What to do with a send that arrived while this chat's transcript could not
+ * be read — a failed cold read, an engine mid-respawn, a dropped transport.
+ *
+ * Appending a user bubble to a partial transcript is not an option (it would
+ * be written into a history Zeros has not finished reading), so this send
+ * cannot go out now. What it MUST NOT do is what it used to: return, in
+ * silence, with the text still in the composer and nothing anywhere saying the
+ * send did not happen — indistinguishable, to the user, from a broken Enter
+ * key. Reported as the other half of "I sent it before the workspace was ready
+ * and it never went".
+ *
+ * `park` — the composer still holds the payload, so keep it as the chat's
+ *   draft and arm the one-shot auto-send: the readiness drain dispatches it
+ *   when the read succeeds. Exactly one automatic retry per disconnect
+ *   (`alreadyRetried`), because the drain re-enters the same send path and a
+ *   second failure would otherwise cycle park → drain → park at hydrate-RPC
+ *   speed.
+ * `report` — cannot be parked usefully: a hand-off payload lives outside the
+ *   composer, the one retry is spent, or the session ended terminally so no
+ *   drain will ever come. Say so instead of promising a delivery.
+ * `ignore` — nothing to send; Enter on an empty composer has nothing to
+ *   report. */
+export function unreadableTranscriptSendAction(input: {
+  /** There is something to send at all. */
+  hasPayload: boolean;
+  /** That payload is the composer's own document (not a hand-off override). */
+  payloadInComposer: boolean;
+  /** This chat already parked one send on an unreadable transcript. */
+  alreadyRetried: boolean;
+  status: SessionStatus;
+}): "park" | "report" | "ignore" {
+  if (!input.hasPayload) return "ignore";
+  if (!input.payloadInComposer || input.alreadyRetried) return "report";
+  // A terminal session has no path to `ready`, so parking would promise a
+  // delivery that queuedFirstTurnAction is about to hand straight back — two
+  // contradictory toasts for one keystroke.
+  return input.status === "failed" || input.status === "auth-required"
+    ? "report"
+    : "park";
+}
+
+/** The longest a parked FIRST turn may wait before Zeros reports that it did
+ * not go out. See queuedFirstTurnAction — deliberately the same span as
+ * PENDING_AUTO_SEND_RECOVERY_MAX_AGE_MS (state/persist-composer-drafts), which
+ * decides whether a park survives a restart at all.
+ *
+ * Sized against what a legitimate pre-ready wait actually costs — a worktree
+ * checkout, a ZSR admission, a cold provider host, an engine respawn — with
+ * room to spare. Anything past it is not slow, it is stuck. */
+export const QUEUED_FIRST_TURN_MAX_WAIT_MS = 10 * 60_000;
+
+/** What to do with a first turn parked BEFORE its chat could run it (the
+ * "Message queued: it will send as soon as this workspace finishes setting up"
+ * park — REQUEST_AUTO_SEND, kept as the chat's own composer draft).
+ *
+ * This is the same doctrine as queueReleaseAction one function up, applied to
+ * the earlier park: every park site needs a release site. It had none. The
+ * only drain condition was `status === "ready"`, so a park whose spawn ended
+ * `failed` / `auth-required` — or whose session never settled at all — stayed
+ * armed with the user's text in the composer, no bubble in the transcript, and
+ * nothing anywhere saying the promise had not been kept.
+ *
+ * `send` — the session is ready and the composer still holds the payload.
+ * `release` — hand it back: retire the intent, keep the text where it is, and
+ *   say so. Terminal statuses qualify immediately; anything else qualifies once
+ *   it has out-waited the bound, which is the only signal a session that never
+ *   settles will ever produce.
+ * `wait` — a real pre-ready state (`idle`, `warming`, `reconnecting`, an
+ *   unfinished checkout). Waiting is what the user was promised.
+ *
+ * Provisioning suppresses `release` for a failed status on purpose: chat-view
+ * refuses to spawn into an announced-but-unchecked-out path, so such a failure
+ * belongs to an earlier attempt and the create is still on its way. The bound
+ * still applies — it has to, or an abandoned create would strand the park. */
+export function queuedFirstTurnAction(input: {
+  status: SessionStatus;
+  /** The chat's workspace is still being created (optimistic create window). */
+  provisioning: boolean;
+  hasPermissionGate: boolean;
+  composerEmpty: boolean;
+  /** A send is already being prepared for this chat. */
+  sendInFlight: boolean;
+  armedForMs: number;
+}): "wait" | "send" | "release" {
+  // Nothing to send and nothing to report: the user cleared the composer, and
+  // the cancel effect retires that intent silently.
+  if (input.composerEmpty) return "wait";
+  if (
+    input.status === "ready" &&
+    !input.provisioning &&
+    !input.hasPermissionGate &&
+    !input.sendInFlight
+  ) {
+    // A slow-but-successful admission delivers. The bound reports a park that
+    // cannot be dispatched; it never cancels one that finally can.
+    return "send";
+  }
+  if (input.armedForMs > QUEUED_FIRST_TURN_MAX_WAIT_MS) return "release";
+  if (input.provisioning) return "wait";
+  return input.status === "failed" || input.status === "auth-required"
+    ? "release"
+    : "wait";
 }
 
 /** Stop is a promise, and a send is not atomic: sendPrompt may await a session

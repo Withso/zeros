@@ -136,16 +136,16 @@ provenance, and usage-deduplication integration tests pass.
 
 ### Image and setup worker
 
-Implemented foundation: migration `0013_cloud_workspace_setup_worker.sql` and
+Implemented foundation: migration `0018_cloud_workspace_setup_worker.sql` and
 `setup-worker.ts` provide immutable generation inputs, workspace-first claims,
 renewable leases, bounded retry, cancellation, and stale-result fencing.
 `daytona-command-runner.ts` adds exact-resource command lookup, mandatory
 provider deadlines, abort handling, strict input bounds, and bounded output.
-Migration `0014_cloud_workspace_setup_authority.sql`,
+Migration `0019_cloud_workspace_setup_authority.sql`,
 `daytona-setup-executor.ts`, and `setup-admission-broker.ts` add an exact fixed
 helper command, one-use setup-run/fence-bound admissions, fail-closed response
 validation, and immutable structured readiness attestations. Migration
-`0015_cloud_workspace_setup_materials.sql`, `setup-materials.ts`, and the
+`0020_cloud_workspace_setup_materials.sql`, `setup-materials.ts`, and the
 capability-only internal routes redeem that admission for an exact settings
 snapshot, encrypted secret values, one repository-scoped read credential, and
 an engine registration grant. The image now owns the strict clone/settings/
@@ -156,10 +156,10 @@ Production boot wiring is protected by the independent
 `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` gate, so provisioning may remain paused
 at `setting_up` while the setup image is unqualified.
 
-Migration `0016_cloud_workspace_generation_transitions.sql` and the lifecycle
+Migration `0021_cloud_workspace_generation_transitions.sql` and the lifecycle
 reconciler now drain the source generation before candidate creation, fence
 late results, promote only a ready candidate, and delete a rejected candidate
-before waking the source. Migration `0017_cloud_workspace_client_access.sql`
+before waking the source. Migration `0022_cloud_workspace_client_access.sql`
 and `access.ts` add account/Team/current-generation-bound SSH, localhost tunnel,
 and isolated preview grants; only SHA-256 verifiers persist, unknown SSH issue
 outcomes enter durable provider-wide revocation, and lifecycle or membership
@@ -168,7 +168,7 @@ contains production-adapter preview, SSH-forward, stop/wake, and rollback-
 primitive checks, but their presence in source is not evidence that a live run
 passed.
 
-Migration `0018_cloud_workspace_engine_authority.sql` makes membership, account,
+Migration `0023_cloud_workspace_engine_authority.sql` makes membership, account,
 Organization, and Team retirement part of the database authority boundary.
 User-context self-leave cannot hide credential rows behind FORCE RLS; issuing
 and active access, endpoint grants, and engines are retired atomically. Scope

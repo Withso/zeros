@@ -347,47 +347,24 @@ jobs:
         # `posix_spawnp failed` regression) before the rolling beta is replaced.
         run: pnpm smoke:packaged-pty
 
-      - name: Verify signature + hardened runtime
-        # This channel had NO signature verification at all, while stable asserts four
-        # things. That mattered more than it looks: electron-updater's macOS
-        # in-place update REQUIRES a valid, matching signature, so a Beta that
-        # silently failed to sign would publish successfully and only surface later
-        # as "auto-update is broken" with no build-time signal.
-        #
-        # Deliberately does NOT run `stapler validate` / `spctl -t exec`: beta is
-        # signed but NOT notarized by design (see the packaging step above), so
-        # those would fail on a correct build. Everything up to notarization IS
-        # asserted.
+      - name: Verify installer + updater signatures
+        # The updater installs the ZIP, not the DMG. Verify both independently,
+        # require the expected Apple team + bundle identity + secure timestamp,
+        # and prove both containers carry the same signed root before publishing.
+        # Beta is intentionally not notarized, so Gatekeeper/stapler checks stay
+        # exclusive to the Production workflow.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          DMG=""
-          for CANDIDATE in release/Zeros-Beta-*-arm64.dmg; do
-            [ -f "$CANDIDATE" ] || continue
-            DMG="$CANDIDATE"
-            break
-          done
-          if [ -z "$DMG" ]; then echo "::error::no versioned Beta .dmg to validate"; exit 1; fi
-          MNT=$(mktemp -d)
-          cleanup() { hdiutil detach "$MNT" -quiet 2>/dev/null || true; }
-          trap cleanup EXIT
-          hdiutil attach "$DMG" -readonly -nobrowse -quiet -mountpoint "$MNT"
-          APP="$MNT/Zeros Beta.app"
-          if [ ! -d "$APP" ]; then
-            echo "::error::No 'Zeros Beta.app' found inside $DMG"
-            ls -la "$MNT" || true
-            exit 1
-          fi
-          echo "Verifying: $APP"
-          # Signature valid + sealed.
-          codesign --verify --deep --strict --verbose=2 "$APP"
-          # Hardened runtime flag proves the entitlements were actually applied.
-          # Without this the four entitlements are inert and library validation /
-          # JIT / keychain-ACL behavior silently differs from what users get.
-          if ! codesign --display --verbose=4 "$APP" 2>&1 | grep -qE 'flags=.*runtime'; then
-            echo "::error::Hardened runtime not applied — signing/entitlements misconfigured"
-            exit 1
-          fi
-          echo "✓ Developer ID signed · hardened runtime applied (notarization intentionally skipped for beta)"
+          DMG="release/Zeros-Beta-${VERSION}-arm64.dmg"
+          ZIP="release/Zeros-Beta-${VERSION}-arm64-mac.zip"
+          node scripts/verify-macos-release-artifacts.mjs \
+            --dmg "$DMG" \
+            --zip "$ZIP" \
+            --app-name "Zeros Beta.app" \
+            --bundle-id com.zeros.beta \
+            --team-id H8MS56JU2Z
 
       - name: Publish rolling "beta" prerelease
         env:

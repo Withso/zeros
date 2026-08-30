@@ -44,6 +44,7 @@ import { isNativeRuntime, nativeInvoke } from "@/renderer/platform/runtime";
 import { cn } from "@/renderer/shared/ui/cn";
 import {
   ancestorDirPrefixes,
+  reconcileTreePathList,
   treeSelectionMirrorIntent,
   treeSelectionOpenTarget,
 } from "./tree-paths";
@@ -248,6 +249,9 @@ function isSafeRelPath(rel: string): boolean {
 }
 
 interface WorkspaceFileTreeProps {
+  /** Hidden retained trees keep their warm model but perform no I/O, focus,
+   * measurement, selection publication, or expansion polling. */
+  active?: boolean;
   /** Workspace/worktree folder whose files to list (the repo root the tree
    *  paths are relative to). Undefined → an empty tree until one resolves. */
   cwd: string | undefined;
@@ -312,6 +316,7 @@ export const WorkspaceFileTree = React.forwardRef<
   WorkspaceFileTreeProps
 >(function WorkspaceFileTree(
   {
+    active = true,
     cwd,
     initialSelectedPath,
     selectedPath,
@@ -331,7 +336,9 @@ export const WorkspaceFileTree = React.forwardRef<
   // `[]` seed guaranteed a visible empty-tree paint followed by row-by-row
   // reconstruction in an effect whenever a File surface remounted.
   const initialPathsRef = useRef(
-    cwd ? (peekWorkspaceFiles(cwd) ?? EMPTY_FILE_PATHS) : EMPTY_FILE_PATHS,
+    reconcileTreePathList(
+      cwd ? (peekWorkspaceFiles(cwd) ?? EMPTY_FILE_PATHS) : EMPTY_FILE_PATHS,
+    ),
   );
   const [pathsSnapshot, setPathsSnapshot] = useState<{
     cwd: string | undefined;
@@ -340,7 +347,7 @@ export const WorkspaceFileTree = React.forwardRef<
   // A reused tree fiber can receive another workspace before its load effect
   // runs. Associate rows with their cwd and synchronously use that cwd's warm
   // snapshot; never expose the prior workspace's paths under the new chrome.
-  const trackedPaths = useMemo(
+  const rawTrackedPaths = useMemo(
     () =>
       pathsSnapshot.cwd === cwd
         ? pathsSnapshot.paths
@@ -348,6 +355,10 @@ export const WorkspaceFileTree = React.forwardRef<
           ? (peekWorkspaceFiles(cwd) ?? EMPTY_FILE_PATHS)
           : EMPTY_FILE_PATHS,
     [cwd, pathsSnapshot],
+  );
+  const trackedPaths = useMemo(
+    () => reconcileTreePathList(rawTrackedPaths),
+    [rawTrackedPaths],
   );
 
   // Captured once: a pre-opened tree starts focused on its file. Read via
@@ -408,12 +419,15 @@ export const WorkspaceFileTree = React.forwardRef<
     cwd,
     reloadKey,
     model,
+    active,
   );
   // The two lists come from different git queries against a worktree that is
   // being written to, so they can disagree — and EVERY form of disagreement is a
   // throw from the tree store, inside a layout effect, which unwinds to the ROOT
-  // error boundary and blanks the whole window (not just this tab). Three shapes,
-  // all reconciled here rather than caught downstream:
+  // error boundary and blanks the whole window (not just this tab). The tracked
+  // list can also contain an indexed symlink/file plus untracked descendants
+  // beneath its directory replacement. All shapes are reconciled before the
+  // model sees them:
   //
   //   • the same path twice          → "Duplicate path"
   //   • ignored `x/` + tracked `x`   → "Path collides with an existing entry"
@@ -436,15 +450,19 @@ export const WorkspaceFileTree = React.forwardRef<
     if (ignoredPaths.length === 0) {
       return { paths: trackedPaths, appliedIgnored: EMPTY_FILE_PATHS };
     }
+    const reconciledIgnored = reconcileTreePathList(ignoredPaths);
     const trackedKinds = new Set<string>();
+    const trackedFiles = new Set<string>();
     for (const p of trackedPaths) {
       trackedKinds.add(p);
+      if (!p.endsWith("/")) trackedFiles.add(p);
       for (const dir of ancestorDirPrefixes(p)) trackedKinds.add(`${dir}/`);
     }
-    const keep = ignoredPaths.filter(
+    const keep = reconciledIgnored.filter(
       (p) =>
         !trackedKinds.has(p) &&
-        !trackedKinds.has(p.endsWith("/") ? p.slice(0, -1) : `${p}/`),
+        !trackedKinds.has(p.endsWith("/") ? p.slice(0, -1) : `${p}/`) &&
+        ancestorDirPrefixes(p).every((dir) => !trackedFiles.has(dir)),
     );
     return {
       paths: keep.length > 0 ? [...trackedPaths, ...keep] : trackedPaths,
@@ -458,6 +476,10 @@ export const WorkspaceFileTree = React.forwardRef<
   const treeRootRef = useRef<HTMLDivElement | null>(null);
   const [treeScrollEl, setTreeScrollEl] = useState<HTMLElement | null>(null);
   useLayoutEffect(() => {
+    if (!active) {
+      setTreeScrollEl(null);
+      return;
+    }
     const host = treeRootRef.current?.querySelector("file-tree-container");
     const shadow = host?.shadowRoot;
     if (!shadow) {
@@ -478,7 +500,7 @@ export const WorkspaceFileTree = React.forwardRef<
     });
     observer.observe(shadow, { childList: true, subtree: true });
     return () => observer.disconnect();
-  }, [model]);
+  }, [active, model]);
   useScrollMemory(treeScrollEl, scrollMemoryKey ?? null);
 
   // Tell the shadow stylesheet an accessory is present, so it reserves the
@@ -486,15 +508,17 @@ export const WorkspaceFileTree = React.forwardRef<
   // our root) is what `:host([data-search-accessory])` can see from inside.
   const hasSearchAccessory = searchRef.current && searchRowAccessory != null;
   useLayoutEffect(() => {
+    if (!active) return;
     const host = treeRootRef.current?.querySelector("file-tree-container");
     if (!host) return;
     if (hasSearchAccessory) host.setAttribute("data-search-accessory", "true");
     else host.removeAttribute("data-search-accessory");
-  }, [hasSearchAccessory, model]);
+  }, [active, hasSearchAccessory, model]);
 
   // Load (and reload) the workspace file list for this cwd. `reloadKey`
   // lets a parent (the Source Refresh button) force a re-list.
   useEffect(() => {
+    if (!active) return;
     if (!cwd) {
       setPathsSnapshot({ cwd: undefined, paths: EMPTY_FILE_PATHS });
       return;
@@ -520,7 +544,7 @@ export const WorkspaceFileTree = React.forwardRef<
     return () => {
       cancelled = true;
     };
-  }, [cwd, reloadKey]);
+  }, [active, cwd, reloadKey]);
 
   // Feed paths into the tree imperatively. TWO paths, because resetPaths
   // rebuilds the store from `initialExpansion: "closed"` and therefore
@@ -565,6 +589,7 @@ export const WorkspaceFileTree = React.forwardRef<
     [model],
   );
   useLayoutEffect(() => {
+    if (!active) return;
     const applied = appliedRef.current;
     const ignoredSet = new Set(appliedIgnored);
     if (applied && applied.tracked === trackedPaths) {
@@ -624,7 +649,7 @@ export const WorkspaceFileTree = React.forwardRef<
         /* path may not exist in this workspace */
       }
     }
-  }, [model, paths, trackedPaths, appliedIgnored, resetPathsSafely]);
+  }, [active, model, paths, trackedPaths, appliedIgnored, resetPathsSafely]);
 
   // Selection → open. Folders are skipped (the tree owns expand/collapse).
   // The latest onOpenFile is read through a ref so this effect fires ONLY
@@ -651,6 +676,7 @@ export const WorkspaceFileTree = React.forwardRef<
   // ones that open nothing) to mirror exactly what the user last saw selected.
   const prevSelectedRef = useRef<readonly string[]>([]);
   useEffect(() => {
+    if (!active) return;
     const prevSelected = prevSelectedRef.current;
     prevSelectedRef.current = selected;
     // Both echo guards (mirror echo + re-publication echo) live in the pure
@@ -678,7 +704,7 @@ export const WorkspaceFileTree = React.forwardRef<
     // workbench tab has been closed. The resulting empty selection re-runs this
     // effect once with no target (a harmless no-op), not a loop.
     if (deselectAfterOpen) item.deselect();
-  }, [selected, model, deselectAfterOpen]);
+  }, [active, selected, model, deselectAfterOpen]);
 
   // Selection MIRROR (sidebar mode): keep the selected row on `selectedPath`.
   // Runs when the target changes (external navigation swapped/cleared the open
@@ -689,6 +715,7 @@ export const WorkspaceFileTree = React.forwardRef<
   // jump. A target absent from the listing (e.g. a deleted file's tab) clears
   // any stale highlight.
   useEffect(() => {
+    if (!active) return;
     // `undefined` means the caller intentionally suspended the mirror (hidden
     // tab / launcher). `null` means the active blank File tab was explicitly
     // cleared, so its old row must be deselected or re-clicking it is deduped by
@@ -727,7 +754,7 @@ export const WorkspaceFileTree = React.forwardRef<
     } catch {
       /* defensive — scrollToPath validates its input */
     }
-  }, [model, selectedPath, paths]);
+  }, [active, model, selectedPath, paths]);
 
   return (
     <div

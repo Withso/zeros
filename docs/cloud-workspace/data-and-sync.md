@@ -466,6 +466,14 @@ Restore must be repeatable into a fresh environment:
 A provider snapshot can accelerate startup, but the product needs a documented
 recovery path when that snapshot is corrupt, expired, or unavailable.
 
+Until the explicit authority-handoff and replica phases described above ship,
+the initial product does not make local and cloud records bidirectionally
+syncable. “Create cloud from local” creates a new organization/team-owned cloud
+workspace from a durable Git revision; “open cloud locally” creates a separate
+device-private checkout with an optional source reference. Neither operation
+deletes, re-owns, or silently uploads the source. Uncommitted work requires a
+separate encrypted checkpoint/patch transfer with explicit confirmation.
+
 - Document retention separately for active, stopped, archived, and deleted
   workspaces.
 - Make export and deletion available at the same semantic workspace boundary.

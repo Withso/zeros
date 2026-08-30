@@ -214,6 +214,7 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
         sessionId: "s",
         prompt: [],
         promptId: "prompt-abc",
+        startedAt: 1_234,
       }).type,
     ).toBe("AGENT_PROMPT");
     expect(() =>
@@ -226,6 +227,18 @@ describe("parseBridgeMessage — trust-boundary validation", () => {
         promptId: 12,
       }),
     ).toThrow(/promptId/);
+    for (const startedAt of [-1, 1.5, "1234", Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        parseBridgeMessage({
+          ...b,
+          type: "AGENT_PROMPT",
+          agentId: "a",
+          sessionId: "s",
+          prompt: [],
+          startedAt,
+        }),
+      ).toThrow(/startedAt/);
+    }
     expect(
       parseBridgeMessage({
         ...b,

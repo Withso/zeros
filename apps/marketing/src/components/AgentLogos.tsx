@@ -26,7 +26,7 @@ export function AgentLogoImg({
       <span
         role="img"
         aria-label={`${name} logo unavailable`}
-        className={`inline-flex items-center justify-center rounded-sm bg-white/10 text-[0.6em] font-semibold ${className}`}
+        className={`inline-flex items-center justify-center rounded-sm bg-bg2 text-[0.6em] font-semibold text-fg1 ${className}`}
       >
         {name.slice(0, 1)}
       </span>
@@ -39,7 +39,7 @@ export function AgentLogoImg({
       alt={`${name} logo`}
       draggable={false}
       onError={() => setFailed(true)}
-      className={`${className} ${name === "Codex" ? "invert" : ""}`}
+      className={`${className} ${name === "Codex" ? "dark:invert" : ""}`}
     />
   );
 }

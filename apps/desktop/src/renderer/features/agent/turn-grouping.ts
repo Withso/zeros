@@ -50,10 +50,33 @@ export function turnKey(turn: Turn): string {
   return "turn-empty";
 }
 
+/** A durable message id names one logical transcript row. Cross-device window
+ * reconciliation and mixed-version provider replay used to be able to surface
+ * the same row twice, sometimes with an updated payload on the later copy.
+ * Keep its original transcript position, adopt the newest payload, and retain
+ * reference equality for the overwhelmingly common already-valid list. */
+function uniqueDurableMessages(messages: AgentMessage[]): AgentMessage[] {
+  const latestById = new Map<string, AgentMessage>();
+  let hasDuplicate = false;
+  for (const message of messages) {
+    if (latestById.has(message.id)) hasDuplicate = true;
+    latestById.set(message.id, message);
+  }
+  if (!hasDuplicate) return messages;
+  const emitted = new Set<string>();
+  const unique: AgentMessage[] = [];
+  for (const message of messages) {
+    if (emitted.has(message.id)) continue;
+    emitted.add(message.id);
+    unique.push(latestById.get(message.id)!);
+  }
+  return unique;
+}
+
 export function groupMessagesIntoTurns(messages: AgentMessage[]): Turn[] {
   const turns: Turn[] = [];
   let current: Turn | null = null;
-  for (const m of messages) {
+  for (const m of uniqueDurableMessages(messages)) {
     if (m.kind === "text" && m.resumeBoundary) {
       // Session-continuity notices are invisible by design (2026-07-06 user
       // spec: no resume/continuation UI, ever). Newer sessions no longer

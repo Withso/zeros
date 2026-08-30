@@ -2,8 +2,8 @@
 // Invite-link plumbing for the team-accept flow.
 //
 // Three entry paths converge on one pending-token slot:
-//   1. zeros://invite?token=…       (deep link; main forwards verbatim)
-//   2. https://app.zeros.build/invite?token=…  (email link, pasted)
+//   1. zeros://invite?token=… or ?invitation_token=… (deep link)
+//   2. https://app[-alpha|-beta].zeros.build/invite?... (email link, pasted)
 //   3. a bare token, pasted
 // The token is held in-memory only (never persisted — it's a join
 // credential) until SettingsPage consumes it into the Join-team
@@ -13,7 +13,17 @@
 // ──────────────────────────────────────────────────────────
 
 import { useEffect } from "react";
+import { CHANNELS, schemeForChannel } from "../../../engine/runtime";
 import { onDeepLink } from "../../platform/app";
+
+const OFFICIAL_INVITE_PROTOCOLS = new Set(
+  CHANNELS.map((releaseChannel) => `${schemeForChannel(releaseChannel)}:`),
+);
+const OFFICIAL_APP_HOSTS = new Set([
+  "app.zeros.build",
+  "app-alpha.zeros.build",
+  "app-beta.zeros.build",
+]);
 
 /** Extract an invite token from a deep link, an https invite URL, or a
  *  bare pasted token. Returns null when `raw` is none of those. */
@@ -28,16 +38,22 @@ export function parseInviteToken(raw: string): string | null {
   } catch {
     return null;
   }
+  if (url.username || url.password) return null;
   const isInviteRoute =
-    // zeros://invite?token=… / zeros-dev://invite?token=… → host "invite"
-    (url.protocol.startsWith("zeros") && url.host === "invite") ||
-    // https://app.zeros.build/invite?token=… — pinned to our own host so a
-    // random webpage's HTTPS link does not parse as an invite.
+    // Channel-specific desktop links put the action in host "invite".
+    (OFFICIAL_INVITE_PROTOCOLS.has(url.protocol) &&
+      url.host === "invite" &&
+      (url.pathname === "" || url.pathname === "/")) ||
+    // Hosted links are pinned to exact official hosts + route so a random
+    // webpage (or a lookalike path such as /redirect/invite) cannot parse.
     (url.protocol === "https:" &&
-      url.host === "app.zeros.build" &&
-      url.pathname.replace(/\/+$/, "").endsWith("/invite"));
+      OFFICIAL_APP_HOSTS.has(url.host) &&
+      url.pathname.replace(/\/+$/, "") === "/invite");
   if (!isInviteRoute) return null;
-  const token = url.searchParams.get("token");
+  const zerosTokens = url.searchParams.getAll("token");
+  const workosTokens = url.searchParams.getAll("invitation_token");
+  if (zerosTokens.length + workosTokens.length !== 1) return null;
+  const token = zerosTokens[0] ?? workosTokens[0] ?? null;
   return token && /^[A-Za-z0-9_-]{20,200}$/.test(token) ? token : null;
 }
 

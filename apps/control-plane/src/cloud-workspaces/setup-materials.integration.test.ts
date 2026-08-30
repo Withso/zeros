@@ -100,6 +100,7 @@ d("cloud workspace setup material redemption", () => {
     await runMigrations(pool);
 
     const accountUserId = randomUUID();
+    const accountEmail = `setup-materials-${accountUserId}@example.test`;
     const organizationId = randomUUID();
     const teamId = randomUUID();
     const workspaceId = randomUUID();
@@ -115,18 +116,20 @@ d("cloud workspace setup material redemption", () => {
       await tx.query(
         `INSERT INTO users (id, email, display_name)
          VALUES ($1, $2, 'Setup Materials Owner')`,
-        [accountUserId, `setup-materials-${accountUserId}@example.test`],
+        [accountUserId, accountEmail],
       );
       await tx.query(
         `INSERT INTO user_identities (
-           user_id, provider, provider_sub, created_at
+           user_id, provider, provider_sub, email_at_link,
+           email_verified_at, created_at
          ) VALUES
-           ($1, 'workos', $2, now()),
-           ($1, 'auth0', $3, now() + interval '1 second')`,
+           ($1, 'workos', $2, $4, now(), now()),
+           ($1, 'auth0', $3, $4, now(), now() + interval '1 second')`,
         [
           accountUserId,
           `identity|${accountUserId}`,
           `auth0-wrong-for-current-authority|${accountUserId}`,
+          accountEmail,
         ],
       );
       await tx.query(

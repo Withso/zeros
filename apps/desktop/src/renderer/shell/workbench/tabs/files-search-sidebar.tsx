@@ -7,6 +7,7 @@ import {
 } from "./workspace-file-tree";
 
 interface FilesSearchSidebarProps {
+  active?: boolean;
   cwd: string | undefined;
   reloadKey: number;
   onOpenFile: (path: string) => void;
@@ -18,6 +19,7 @@ interface FilesSearchSidebarProps {
  * state deliberately paints only the search row; the file tree mounts after
  * the first non-whitespace query and uses the same base sidebar surface. */
 export function FilesSearchSidebar({
+  active = true,
   cwd,
   reloadKey,
   onOpenFile,
@@ -65,7 +67,7 @@ export function FilesSearchSidebar({
       <div className="border-border1 flex h-9 shrink-0 items-center gap-2 border-b px-3">
         <Search className="text-fg3 size-4 shrink-0" />
         <input
-          autoFocus
+          autoFocus={active}
           aria-label="Search workspace files"
           placeholder="Search…"
           value={search}
@@ -78,6 +80,7 @@ export function FilesSearchSidebar({
         <div className="min-h-0 flex-1">
           <WorkspaceFileTree
             ref={treeRef}
+            active={active}
             cwd={cwd}
             reloadKey={reloadKey}
             deselectAfterOpen

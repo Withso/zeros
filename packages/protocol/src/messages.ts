@@ -499,6 +499,11 @@ export interface AgentPromptMessage extends BaseMessage {
   sessionId: string;
   executionId?: ExecutionId;
   prompt: ContentBlock[];
+  /** When the user committed this send in the originating renderer. The
+   *  engine carries this through admission, persistence, and turn-state
+   *  updates so a delayed provider session cannot restart the elapsed timer.
+   *  Older clients omit it; the engine then uses receipt time. */
+  startedAt?: number;
   /** Optional faithful-bubble payload (segments/attachments/displayText).
    *  Older clients omit it; the engine then persists the plain wire text. */
   bubble?: AgentPromptBubble;
@@ -1059,6 +1064,7 @@ export interface BridgeAgentFailure {
      *  not evidence that the provider-side conversation expired. */
     | "lifecycle-superseded"
     | "rate-limited"
+    | "design-protection-failed"
     /** Mirrors AgentFailureKind in apps/desktop/src/engine/agents/types.ts.
      *  The persisted session is gone — most
      *  often Codex "no rollout found", Claude "session not found". */

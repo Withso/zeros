@@ -15,11 +15,6 @@ export const WORKOS_SESSION_TTL_S = 30 * 24 * 60 * 60;
 
 const REFRESH_SKEW_MS = 30_000;
 const OPAQUE_ID = /^[A-Za-z0-9_-]{43}$/;
-const WORKOS_PROVIDERS = new Map([
-  ["google", "GoogleOAuth"],
-  ["github", "GitHubOAuth"],
-]);
-
 export type WorkOSFlowRecord = {
   codeVerifier: string;
   returnPath: string;
@@ -405,7 +400,6 @@ export class WorkOSBrowserSessions {
   ) {}
 
   async start(options: {
-    provider: string;
     returnPath: string;
   }): Promise<{ credential: string; authorizationUrl: string }> {
     const credential = this.token();
@@ -420,7 +414,6 @@ export class WorkOSBrowserSessions {
     }
     const redirectUri = `${this.appOrigin}/auth/callback`;
     const authorizationUrl = this.provider.authorizationUrl({
-      provider: options.provider,
       state,
       codeChallenge: pkceChallenge(codeVerifier),
       redirectUri,
@@ -738,12 +731,21 @@ function cookies(request: Request): Map<string, string> {
   return parsed;
 }
 
-function hostCookie(name: string, value: string, maxAge: number): string {
-  return `${name}=${value}; Path=/; Max-Age=${maxAge}; SameSite=Lax; Secure; HttpOnly`;
+function hostCookie(
+  name: string,
+  value: string,
+  maxAge: number,
+  sameSite: "Lax" | "Strict",
+): string {
+  return `${name}=${value}; Path=/; Max-Age=${maxAge}; SameSite=${sameSite}; Secure; HttpOnly`;
 }
 
-function expireCookie(name: string, domainWide = false): string {
-  return `${name}=; ${domainWide ? "Domain=.zeros.build; " : ""}Path=/; Max-Age=0; SameSite=Lax; Secure; HttpOnly`;
+function expireCookie(
+  name: string,
+  domainWide = false,
+  sameSite: "Lax" | "Strict" = "Lax",
+): string {
+  return `${name}=; ${domainWide ? "Domain=.zeros.build; " : ""}Path=/; Max-Age=0; SameSite=${sameSite}; Secure; HttpOnly`;
 }
 
 function appendFlowCleanup(headers: Headers): void {
@@ -758,7 +760,10 @@ function appendFlowCleanup(headers: Headers): void {
 }
 
 function appendSessionCleanup(headers: Headers): void {
-  headers.append("set-cookie", expireCookie(WORKOS_SESSION_COOKIE));
+  headers.append(
+    "set-cookie",
+    expireCookie(WORKOS_SESSION_COOKIE, false, "Strict"),
+  );
   headers.append("set-cookie", expireCookie("zeros_session"));
   headers.append("set-cookie", expireCookie("zeros_session", true));
 }
@@ -787,6 +792,63 @@ function failureResponse(reason: string): Response {
   );
 }
 
+function htmlAttribute(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+/**
+ * SameSite=Strict deliberately withholds the newly issued session throughout
+ * the cross-site AuthKit redirect chain. Finish that chain on a non-redirect
+ * document, then let this same-site document navigate to the validated return
+ * URL. This keeps the stronger cookie policy without making a successful sign
+ * in look signed out until the user opens a new tab.
+ */
+function completionResponse(returnTo: string): Response {
+  const target = htmlAttribute(returnTo);
+  const headers = new Headers({
+    "cache-control": "no-store",
+    pragma: "no-cache",
+    "content-type": "text/html; charset=utf-8",
+    "content-security-policy":
+      "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
+    "cross-origin-opener-policy": "same-origin",
+    "referrer-policy": "no-referrer",
+    "x-content-type-options": "nosniff",
+    "x-frame-options": "DENY",
+  });
+  return new Response(
+    `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <meta http-equiv="refresh" content="0;url=${target}" />
+    <title>Completing sign in to Zeros</title>
+    <style>
+      :root { color-scheme: dark; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #0c0c0d; color: #e6e6e6; font: 14px -apple-system, system-ui, sans-serif; }
+      main { max-width: 28rem; padding: 2rem; text-align: center; }
+      p { color: #a1a1aa; }
+      a { color: #f4f4f5; }
+    </style>
+  </head>
+  <body>
+    <main aria-live="polite">
+      <h1>Completing sign in</h1>
+      <p>Your secure Zeros session is ready.</p>
+      <a href="${target}">Continue to Zeros</a>
+    </main>
+  </body>
+</html>`,
+    { status: 200, headers },
+  );
+}
+
 function json(value: unknown, status = 200): Response {
   return Response.json(value, {
     status,
@@ -802,18 +864,8 @@ export function createWorkOSBrowserSessionRoutes(
 
   app.get("/auth/start", async (c) => {
     const requestUrl = new URL(c.req.url);
-    const provider = WORKOS_PROVIDERS.get(
-      requestUrl.searchParams.get("provider") ?? "",
-    );
-    if (!provider) {
-      return new Response("Unknown provider", {
-        status: 400,
-        headers: { "cache-control": "no-store" },
-      });
-    }
     try {
       const started = await sessions.start({
-        provider,
         returnPath: safeWorkOSReturnPath(
           requestUrl.searchParams.get("return"),
           appOrigin,
@@ -825,7 +877,12 @@ export function createWorkOSBrowserSessionRoutes(
       });
       headers.append(
         "set-cookie",
-        hostCookie(WORKOS_FLOW_COOKIE, started.credential, WORKOS_FLOW_TTL_S),
+        hostCookie(
+          WORKOS_FLOW_COOKIE,
+          started.credential,
+          WORKOS_FLOW_TTL_S,
+          "Lax",
+        ),
       );
       return new Response(null, { status: 303, headers });
     } catch {
@@ -861,18 +918,25 @@ export function createWorkOSBrowserSessionRoutes(
       return failed;
     }
     const returnPath = safeWorkOSReturnPath(result.returnPath, appOrigin);
-    const headers = new Headers({
-      location: new URL(returnPath, `${appOrigin}/`).toString(),
-      "cache-control": "no-store",
-    });
-    headers.append(
-      "set-cookie",
-      hostCookie(WORKOS_SESSION_COOKIE, credential, WORKOS_SESSION_TTL_S),
+    const completed = completionResponse(
+      new URL(returnPath, `${appOrigin}/`).toString(),
     );
-    appendFlowCleanup(headers);
-    headers.append("set-cookie", expireCookie("zeros_session"));
-    headers.append("set-cookie", expireCookie("zeros_session", true));
-    return new Response(null, { status: 303, headers });
+    completed.headers.append(
+      "set-cookie",
+      hostCookie(
+        WORKOS_SESSION_COOKIE,
+        credential,
+        WORKOS_SESSION_TTL_S,
+        "Strict",
+      ),
+    );
+    appendFlowCleanup(completed.headers);
+    completed.headers.append("set-cookie", expireCookie("zeros_session"));
+    completed.headers.append(
+      "set-cookie",
+      expireCookie("zeros_session", true),
+    );
+    return completed;
   });
 
   app.get("/auth/browser/session", async (c) => {

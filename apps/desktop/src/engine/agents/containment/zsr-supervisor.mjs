@@ -613,7 +613,23 @@ async function run() {
   if (!parsedConfig.success) {
     throw new Error("generated sandbox configuration is invalid");
   }
-  await SandboxManager.initialize(parsedConfig.data, undefined, true);
+  // The third argument is the OBSERVATIONAL violation monitor: on macOS it
+  // spawns a `log stream` child for this supervisor's lifetime, on Linux it
+  // opens a seccomp observe socket. Enforcement is the Seatbelt profile /
+  // bwrap+seccomp FILTER produced by wrapWithSandboxArgv and is independent of
+  // it. This one-shot supervisor spawns the child with inherited stdio and
+  // never reads the violation store (no annotateStderrWithSandboxFailures /
+  // getViolationsForCommand call), so the monitor is pure per-spawn overhead —
+  // paid again for every provider process, MCP server, hook, and subagent.
+  // Keep it available for diagnostics under SRT_DEBUG, off otherwise. Turning
+  // it off does not widen the fence; it only stops collecting deny records that
+  // were being discarded.
+  const enableViolationMonitor = Boolean(process.env.SRT_DEBUG);
+  await SandboxManager.initialize(
+    parsedConfig.data,
+    undefined,
+    enableViolationMonitor,
+  );
   let wrapped;
   try {
     wrapped = await SandboxManager.wrapWithSandboxArgv(

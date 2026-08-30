@@ -391,7 +391,9 @@ describe("RunManager", () => {
     releaseBoundary();
 
     await expect(starting).rejects.toThrow(/cancelled run domain/i);
-    await expect(mgr.stopAllAndProve()).rejects.toThrow(/restart Zeros/i);
+    await expect(mgr.stopAllAndProve()).rejects.toThrow(
+      /automatic recovery is still retrying/i,
+    );
     expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
   });
 
@@ -534,6 +536,43 @@ describe("RunManager", () => {
     );
   });
 
+  it("retries a transient teardown failure and releases the process-wide authority hold", async () => {
+    vi.useFakeTimers();
+    const diagnostic = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { svc, live } = fakePty();
+      const stopAndProve = vi
+        .fn<PreparedBoundary["stopAndProve"]>()
+        .mockRejectedValueOnce(new Error("temporary process-group race"))
+        .mockResolvedValue(undefined);
+      const boundary = {
+        ...preparedTestBoundary(),
+        stopAndProve,
+      } as PreparedBoundary;
+      const mgr = make(svc, [], undefined, async () => boundary);
+      await mgr.start(startArgs());
+      live.delete(SID);
+      mgr.handleExit(SID, 0);
+
+      await expect(mgr.proveWorkspaceBoundariesStopped(WS)).rejects.toThrow(
+        /repository run containment teardown was not proven/i,
+      );
+      expect(stopAndProve).toHaveBeenCalledOnce();
+      expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(stopAndProve).toHaveBeenCalledTimes(2);
+      await expect(
+        mgr.proveWorkspaceBoundariesStopped(WS),
+      ).resolves.toBeUndefined();
+      expect(mgr.hasRepositoryCodeAuthority()).toBe(false);
+    } finally {
+      diagnostic.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("globally revokes and proves rowless run boundaries before an owner-map change", async () => {
     const { svc, killed } = fakePty();
     const revoke = vi.fn(async () => {});
@@ -552,6 +591,99 @@ describe("RunManager", () => {
     expect(revoke).toHaveBeenCalledOnce();
     expect(stopAndProve).toHaveBeenCalledOnce();
     expect(mgr.info([SID], null).dev).toMatchObject({ state: "stopped" });
+  });
+
+  it("keeps sibling runs live while retiring the changed workspace territory", async () => {
+    const targetId = "ws_scoped-run-target";
+    const target = sampleWorkspace(targetId);
+    insertWorkspace(target);
+    const targetSessionId = runSessionId(target.path, "dev");
+    const { svc, killed } = fakePty();
+    const siblingStop = vi.fn(async () => {});
+    const targetStop = vi.fn(async () => {});
+    const mgr = make(
+      svc,
+      [],
+      undefined,
+      async (request) =>
+        ({
+          ...preparedTestBoundary(),
+          territoryContributions: [
+            {
+              workspaceRoot: request.workspaceRoot,
+              grants: [request.workspaceRoot],
+              full: true,
+              identity: null,
+            },
+          ],
+          stopAndProve:
+            request.workspaceRoot === target.path ? targetStop : siblingStop,
+        }) as PreparedBoundary,
+    );
+    await mgr.start(startArgs());
+    await mgr.start(
+      startArgs({
+        sessionId: targetSessionId,
+        workspaceId: targetId,
+        cwd: target.path,
+      }),
+    );
+
+    await mgr.stopForWorkspaceTerritoryAndProve(targetId, target.path);
+
+    expect(killed).toEqual([targetSessionId]);
+    expect(targetStop).toHaveBeenCalledOnce();
+    expect(siblingStop).not.toHaveBeenCalled();
+    expect(mgr.info([SID], WS).dev).toMatchObject({
+      state: "running",
+      live: true,
+    });
+  });
+
+  it("retires a rowless run that explicitly includes the changed workspace", async () => {
+    const targetId = "ws_attached-run-target";
+    const target = sampleWorkspace(targetId);
+    insertWorkspace(target);
+    const rowlessRoot = "/tmp/zeros-attached-rowless-run";
+    const rowlessSessionId = runSessionId(rowlessRoot, "dev");
+    const { svc, killed } = fakePty();
+    const stopAndProve = vi.fn(async () => {});
+    const mgr = make(
+      svc,
+      [],
+      undefined,
+      async () =>
+        ({
+          ...preparedTestBoundary(),
+          territoryContributions: [
+            {
+              workspaceRoot: rowlessRoot,
+              grants: [rowlessRoot],
+              full: true,
+              identity: null,
+            },
+            {
+              workspaceRoot: target.path,
+              grants: [target.path],
+              full: true,
+              identity: null,
+            },
+          ],
+          stopAndProve,
+        }) as PreparedBoundary,
+    );
+    await mgr.start(
+      startArgs({
+        sessionId: rowlessSessionId,
+        workspaceId: null,
+        cwd: rowlessRoot,
+      }),
+    );
+
+    await mgr.stopForWorkspaceTerritoryAndProve(targetId, target.path);
+
+    expect(killed).toEqual([rowlessSessionId]);
+    expect(stopAndProve).toHaveBeenCalledOnce();
   });
 
   it("retains a superseded rowless run teardown failure across replacement", async () => {
@@ -576,7 +708,7 @@ describe("RunManager", () => {
 
       await mgr.start(startArgs({ workspaceId: null }));
       await expect(mgr.stopAllAndProve()).rejects.toThrow(
-        /run boundaries were not globally retired/i,
+        /run boundaries were not all proven stopped/i,
       );
       expect(mgr.hasRepositoryCodeAuthority()).toBe(true);
       expect(mgr.registeredDesignAuthorityChanged(null)).toBe(true);

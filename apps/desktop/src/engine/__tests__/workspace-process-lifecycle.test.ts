@@ -2,7 +2,16 @@
 // boundary where setup, run actions, terminals, and agent sessions are brought
 // to rest before a managed checkout can be moved or removed.
 
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import {
+  access,
+  chown,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -13,15 +22,22 @@ import { PTY_AGENT_AUTH_CWD } from "@zeros/protocol/messages";
 import { ZerosEngine } from "../index";
 import type { TransportClient } from "../transport/types";
 import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
+import {
+  DESIGN_WATCH_IGNORE_FILENAME,
+  DESIGN_WATCH_ROOTS_FILENAME,
+  NODE_DESIGN_WATCH_GUARD_FILENAME,
+} from "../agents/containment/design-watch-isolation";
 import * as agentGateway from "../agents/gateway";
 import * as projectState from "../db/projects";
 import * as gitState from "../git/state";
+import { repoSettingsPath, userSettingsPath } from "../settings/files";
 
 interface ReaperInternals {
   router: {
     register(client: TransportClient): void;
   };
   workspace: {
+    settingsRepoRoots(): string[];
     workspaceProcessReaper: (
       workspaceId: string,
       worktreePath: string,
@@ -94,6 +110,10 @@ interface ReaperInternals {
     cancelPendingStart(workspaceId: string): boolean;
     proveWorkspaceBoundaryStopped(workspaceId: string): Promise<void>;
     stopAllAndProve(): Promise<void>;
+    stopForWorkspaceTerritoryAndProve(
+      workspaceId: string,
+      workspaceRoot: string,
+    ): Promise<void>;
     start(args: unknown): Promise<void>;
     hasRepositoryCodeAuthority(): boolean;
     registeredDesignAuthorityChanged(identity: string | null): boolean;
@@ -107,6 +127,10 @@ interface ReaperInternals {
     cancelPendingStartsForWorkspace(workspaceId: string): void;
     proveWorkspaceBoundariesStopped(workspaceId: string): Promise<void>;
     stopAllAndProve(): Promise<void>;
+    stopForWorkspaceTerritoryAndProve(
+      workspaceId: string,
+      workspaceRoot: string,
+    ): Promise<void>;
     start(args: unknown): Promise<unknown>;
     hasRepositoryCodeAuthority(): boolean;
     registeredDesignAuthorityChanged(identity: string | null): boolean;
@@ -133,10 +157,18 @@ interface ReaperInternals {
       territory: unknown,
     ): boolean;
     workspaceHasSessions(workspaceId: string, workspaceRoot: string): boolean;
+    workspaceSessionIds(workspaceId: string, workspaceRoot: string): string[];
     retirePooledUtilityBoundaries(options?: {
       reopen?: boolean;
     }): Promise<void>;
     reopenPooledUtilityBoundaries(): void;
+    suspendPooledUtilityWorkspaceTerritory(workspaceRoot: string): void;
+    retirePooledUtilityWorkspaceTerritory(workspaceRoot: string): Promise<void>;
+    resumePooledUtilityWorkspaceTerritory(workspaceRoot: string): void;
+    assertRegisteredDesignAuthorityRetirementsProven(): void;
+    assertWorkspaceDesignAuthorityRetirementsProven(
+      workspaceRoot: string,
+    ): void;
     hasPooledUtilityCodeAuthority(): boolean;
     pooledUtilityRegisteredDesignAuthorityChanged(
       identity: string | null,
@@ -156,6 +188,10 @@ interface ReaperInternals {
   cloudWorker: CloudWorkerConfiguration | null;
   cancelLiveAgentSessions(sessionIds: ReadonlySet<string>): Promise<boolean>;
   workspaceAllowsProcessStart(workspaceId: string | null): boolean;
+  assertAgentSessionProcessStartAllowed(
+    sessionId: string,
+    workspaceId: string | null,
+  ): void;
   authorizeRemoteWrite(...args: unknown[]): Promise<boolean>;
   handlePtyCreate(
     msg: Extract<EngineMessage, { type: "PTY_CREATE" }>,
@@ -176,6 +212,10 @@ interface ReaperInternals {
     mutation: () => Promise<T>,
     options?: { initiatedByDesignTransitionCaller?: boolean },
   ): Promise<T>;
+  withFirstDesignTerritoryCreation<T>(
+    targets: readonly { workspaceId: string; designDirectory: string }[],
+    mutation: () => Promise<T>,
+  ): Promise<T>;
   scheduleDesignTerritoryReconcile(
     candidates: readonly {
       id: string;
@@ -184,7 +224,14 @@ interface ReaperInternals {
       archivedAt?: number | null;
     }[],
     source: "settings" | "git-refs" | "recognition",
+    options?: { skipKnownRepoRootExpansion?: boolean },
   ): void;
+  settingsReconcileScope(changedPaths: readonly string[]): Array<{
+    id: string;
+    path: string;
+    repoRoot: string;
+    archivedAt?: number | null;
+  }> | null;
   designTerritoryReconcileChain: Promise<void>;
   handleWorkspaceMessage(
     msg: Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>,
@@ -240,6 +287,24 @@ function qualifiedCloudWorker(): CloudWorkerConfiguration {
       setpriv: "/usr/bin/setpriv",
     },
   };
+}
+
+async function canAssignCloudWorkerOwnership(
+  root: string,
+  worker: CloudWorkerConfiguration,
+): Promise<boolean> {
+  const probe = path.join(root, "cloud-worker-ownership-probe");
+  await writeFile(probe, "", { flag: "wx" });
+  try {
+    await chown(probe, worker.uid, worker.gid);
+    return true;
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EPERM") return false;
+    throw error;
+  } finally {
+    await rm(probe, { force: true });
+  }
 }
 
 describe("workspace process reaper", () => {
@@ -423,6 +488,252 @@ describe("workspace process reaper", () => {
 });
 
 describe("Design territory agent retirement", () => {
+  it("keeps an unrelated workspace agent running when another workspace enters Design", async () => {
+    const state = internals(
+      new ZerosEngine({
+        root: "/tmp/zeros-territory-sibling-isolation",
+        port: 29_945,
+      }),
+    );
+    const firstWorkspace = {
+      id: "ws_isolated_first",
+      path: "/tmp/zeros-territory-sibling-isolation/first",
+      repoRoot: "/tmp/zeros-territory-sibling-isolation/main",
+      archivedAt: null,
+    };
+    const designWorkspace = {
+      id: "ws_isolated_design",
+      path: "/tmp/zeros-territory-sibling-isolation/design",
+      repoRoot: "/tmp/zeros-territory-sibling-isolation/main",
+      archivedAt: null,
+    };
+    await mkdir(firstWorkspace.path, { recursive: true });
+    await mkdir(designWorkspace.path, { recursive: true });
+    const getWorkspace = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockImplementation((workspaceId) => {
+        const workspace =
+          workspaceId === firstWorkspace.id
+            ? firstWorkspace
+            : workspaceId === designWorkspace.id
+              ? designWorkspace
+              : null;
+        return workspace as ReturnType<typeof gitState.getWorkspaceById>;
+      });
+    state.sessionWorkspace.set("first-execution", firstWorkspace.id);
+    state.sessionAgent.set("first-execution", "codex");
+    state.sessionWorkspace.set("design-execution", designWorkspace.id);
+    state.sessionAgent.set("design-execution", "codex");
+    const cancelled: string[][] = [];
+    vi.spyOn(state, "cancelLiveAgentSessions").mockImplementation(
+      async (sessionIds) => {
+        const ids = [...sessionIds].sort();
+        cancelled.push(ids);
+        // This models the reported failure: the unrelated workspace has a
+        // live turn that cannot settle inside the Design handoff deadline.
+        return !sessionIds.has("first-execution");
+      },
+    );
+    vi.spyOn(state.agents, "endSession").mockResolvedValue(undefined);
+    const stopEverySetup = vi
+      .spyOn(state.setup, "stopAllAndProve")
+      .mockResolvedValue();
+    const stopEveryRun = vi
+      .spyOn(state.runs, "stopAllAndProve")
+      .mockResolvedValue();
+
+    try {
+      await expect(
+        state.withDesignTerritoryTransition(
+          [
+            {
+              workspaceId: designWorkspace.id,
+              designDirectory: `${designWorkspace.path}/Zeros Design`,
+            },
+          ],
+          async () => {
+            expect(state.workspaceAllowsProcessStart(firstWorkspace.id)).toBe(
+              true,
+            );
+            expect(state.workspaceAllowsProcessStart(designWorkspace.id)).toBe(
+              false,
+            );
+          },
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(cancelled).toEqual([["design-execution"]]);
+      expect(stopEverySetup).not.toHaveBeenCalled();
+      expect(stopEveryRun).not.toHaveBeenCalled();
+      expect(state.sessionAgent.has("first-execution")).toBe(true);
+      expect(state.sessionAgent.has("design-execution")).toBe(false);
+    } finally {
+      getWorkspace.mockRestore();
+      await rm("/tmp/zeros-territory-sibling-isolation", {
+        recursive: true,
+        force: true,
+      });
+    }
+  });
+
+  it("does not wait for an in-flight agent start owned by another workspace", async () => {
+    const root = "/tmp/zeros-territory-sibling-start-isolation";
+    const state = internals(new ZerosEngine({ root, port: 29_947 }));
+    const sibling = {
+      id: "ws_starting_sibling",
+      path: `${root}/sibling`,
+      repoRoot: `${root}/main`,
+      archivedAt: null,
+    };
+    const target = {
+      id: "ws_starting_target",
+      path: `${root}/target`,
+      repoRoot: `${root}/main`,
+      archivedAt: null,
+    };
+    await mkdir(sibling.path, { recursive: true });
+    await mkdir(target.path, { recursive: true });
+    const getWorkspace = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockImplementation((workspaceId) => {
+        const workspace =
+          workspaceId === sibling.id
+            ? sibling
+            : workspaceId === target.id
+              ? target
+              : null;
+        return workspace as ReturnType<typeof gitState.getWorkspaceById>;
+      });
+    let releaseSiblingStart!: () => void;
+    const siblingStart = new Promise<void>((resolve) => {
+      releaseSiblingStart = resolve;
+    });
+    state.workspaceProcessStarts.set(sibling.id, new Set([siblingStart]));
+    state.globalDesignAuthorityStarts.add(siblingStart);
+
+    try {
+      let mutated = false;
+      const transition = state.withDesignTerritoryTransition(
+        [
+          {
+            workspaceId: target.id,
+            designDirectory: `${target.path}/Zeros Design`,
+          },
+        ],
+        async () => {
+          mutated = true;
+        },
+      );
+      const outcome = await Promise.race([
+        transition.then(() => "transition" as const),
+        new Promise<"timeout">((resolve) => {
+          setTimeout(() => resolve("timeout"), 50);
+        }),
+      ]);
+
+      expect(outcome).toBe("transition");
+      expect(mutated).toBe(true);
+      expect(state.workspaceAllowsProcessStart(sibling.id)).toBe(true);
+      expect(state.workspaceAllowsProcessStart(target.id)).toBe(true);
+      releaseSiblingStart();
+      await transition;
+    } finally {
+      releaseSiblingStart();
+      state.workspaceProcessStarts.delete(sibling.id);
+      state.globalDesignAuthorityStarts.delete(siblingStart);
+      getWorkspace.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("retires an agent that explicitly attached the changing workspace without touching its sibling", async () => {
+    const root = "/tmp/zeros-territory-attached-isolation";
+    const state = internals(new ZerosEngine({ root, port: 29_946 }));
+    const owner = {
+      id: "ws_attached_owner",
+      path: `${root}/owner`,
+      repoRoot: `${root}/main`,
+      archivedAt: null,
+    };
+    const target = {
+      id: "ws_attached_target",
+      path: `${root}/target`,
+      repoRoot: `${root}/main`,
+      archivedAt: null,
+    };
+    await mkdir(owner.path, { recursive: true });
+    await mkdir(target.path, { recursive: true });
+    const getWorkspace = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockImplementation((workspaceId) => {
+        const workspace =
+          workspaceId === owner.id
+            ? owner
+            : workspaceId === target.id
+              ? target
+              : null;
+        return workspace as ReturnType<typeof gitState.getWorkspaceById>;
+      });
+    state.sessionWorkspace.set("attached-execution", owner.id);
+    state.sessionAgent.set("attached-execution", "codex");
+    state.sessionWorkspace.set("sibling-execution", owner.id);
+    state.sessionAgent.set("sibling-execution", "codex");
+    let lateAttachedAdmission = false;
+    vi.spyOn(state.agents, "workspaceSessionIds").mockImplementation(
+      (workspaceId) => {
+        if (workspaceId !== target.id) return [];
+        return [
+          ...(state.sessionAgent.has("attached-execution")
+            ? ["attached-execution"]
+            : []),
+          ...(lateAttachedAdmission ? ["late-attached-execution"] : []),
+        ];
+      },
+    );
+    const cancelled: string[][] = [];
+    vi.spyOn(state, "cancelLiveAgentSessions").mockImplementation(
+      async (sessionIds) => {
+        cancelled.push([...sessionIds].sort());
+        return true;
+      },
+    );
+    vi.spyOn(state.agents, "endSession").mockResolvedValue(undefined);
+
+    try {
+      await state.withDesignTerritoryTransition(
+        [
+          {
+            workspaceId: target.id,
+            designDirectory: `${target.path}/Zeros Design`,
+          },
+        ],
+        async () => {
+          expect(() =>
+            state.assertAgentSessionProcessStartAllowed(
+              "sibling-execution",
+              owner.id,
+            ),
+          ).not.toThrow();
+          lateAttachedAdmission = true;
+          expect(() =>
+            state.assertAgentSessionProcessStartAllowed(
+              "late-attached-execution",
+              owner.id,
+            ),
+          ).toThrow(/Design territory is being updated/i);
+          lateAttachedAdmission = false;
+        },
+      );
+
+      expect(cancelled).toEqual([["attached-execution"]]);
+      expect(state.sessionAgent.has("sibling-execution")).toBe(true);
+      expect(state.sessionAgent.has("attached-execution")).toBe(false);
+    } finally {
+      getWorkspace.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("does not make first Design entry wait on its own workspace barrier", async () => {
     vi.useFakeTimers();
     const state = internals(
@@ -496,6 +807,215 @@ describe("Design territory agent retirement", () => {
     } finally {
       vi.useRealTimers();
       getWorkspace.mockRestore();
+    }
+  });
+
+  it("keeps first Design entry queued while an admitted agent startup settles", async () => {
+    vi.useFakeTimers();
+    const state = internals(
+      new ZerosEngine({
+        root: "/tmp/zeros-territory-agent-start",
+        port: 29_938,
+      }),
+    );
+    const workspace = {
+      id: "ws_agent_start",
+      path: "/tmp/zeros-territory-agent-start/worktree",
+      repoRoot: "/tmp/zeros-territory-agent-start/main",
+      archivedAt: null,
+    };
+    const getWorkspace = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockReturnValue(
+        workspace as ReturnType<typeof gitState.getWorkspaceById>,
+      );
+    vi.spyOn(state.workspace, "isWriteOp").mockReturnValue(false);
+    vi.spyOn(state.workspace, "lifecycleMutationWorkspaceId").mockReturnValue(
+      workspace.id,
+    );
+    vi.spyOn(state.setup, "stopAllAndProve").mockResolvedValue();
+    vi.spyOn(state.runs, "stopAllAndProve").mockResolvedValue();
+    vi.spyOn(
+      state,
+      "retireAllCodeAgentSessionsForTerritoryChange",
+    ).mockResolvedValue();
+    const admittedAgentStart = new Promise<void>((resolve) => {
+      setTimeout(resolve, 6_000);
+    });
+    state.workspaceProcessStarts.set(
+      workspace.id,
+      new Set([admittedAgentStart]),
+    );
+    state.globalDesignAuthorityStarts.add(admittedAgentStart);
+    vi.spyOn(state.workspace, "handle").mockImplementation(async () =>
+      state.withDesignTerritoryTransition(
+        [
+          {
+            workspaceId: workspace.id,
+            designDirectory: `${workspace.path}/Zeros Design`,
+          },
+        ],
+        async () => ({ ok: true, mode: "design" as const }),
+        { initiatedByDesignTransitionCaller: true },
+      ),
+    );
+    const local = client("local");
+
+    try {
+      const request = state.handleWorkspaceMessage(
+        {
+          type: "WORKSPACE_REQUEST",
+          id: "design-entry-during-agent-start",
+          source: "browser",
+          timestamp: 1,
+          op: "workspace.setMode",
+          params: { workspaceId: workspace.id, mode: "design" },
+        } as Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>,
+        local,
+      );
+      await vi.advanceTimersByTimeAsync(6_000);
+      await request;
+
+      expect(local.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "WORKSPACE_RESPONSE",
+          op: "workspace.setMode",
+          result: { ok: true, mode: "design" },
+        }),
+      );
+      expect(local.send).not.toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: "WORKSPACE_ERROR",
+          message: "A workspace operation is still settling.",
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+      getWorkspace.mockRestore();
+    }
+  });
+
+  it("publishes first Design use without retiring contained agents, Setup, or Run", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-contained-entry-"));
+    const workspace = {
+      id: "ws_contained_entry",
+      path: root,
+      repoRoot: root,
+      archivedAt: null,
+    };
+    const state = internals(new ZerosEngine({ root, port: 29_948 }));
+    const designDirectory = path.join(root, "Zeros Design");
+    await mkdir(designDirectory);
+    const prospective = {
+      agentRole: "code" as const,
+      workspaceRoot: root,
+      designDirectory,
+      protectedDesignDirectories: [designDirectory],
+      designRecognitionPaths: [
+        path.join(designDirectory, ".zeros-canvas.json"),
+      ],
+      writeCapabilities: {
+        workspace: "write" as const,
+        deniedPaths: [designDirectory],
+      },
+    };
+    const getWorkspace = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockReturnValue(
+        workspace as ReturnType<typeof gitState.getWorkspaceById>,
+      );
+    const preview = vi
+      .spyOn(agentGateway, "previewCodeAgentTerritory")
+      .mockResolvedValue(prospective);
+    vi.spyOn(state.agents, "workspaceTerritoryChanged").mockReturnValue(false);
+    vi.spyOn(
+      state.agents,
+      "pooledUtilityWorkspaceTerritoryChanged",
+    ).mockReturnValue(false);
+    vi.spyOn(state.setup, "workspaceTerritoryChanged").mockReturnValue(false);
+    vi.spyOn(state.runs, "workspaceTerritoryChanged").mockReturnValue(false);
+    const stopSetup = vi.spyOn(
+      state.setup,
+      "stopForWorkspaceTerritoryAndProve",
+    );
+    const stopRun = vi.spyOn(state.runs, "stopForWorkspaceTerritoryAndProve");
+    const transition = vi.spyOn(state, "withDesignTerritoryTransition");
+    const mutation = vi.fn(async () => "published");
+
+    try {
+      await expect(
+        state.withFirstDesignTerritoryCreation(
+          [{ workspaceId: workspace.id, designDirectory }],
+          mutation,
+        ),
+      ).resolves.toBe("published");
+
+      expect(mutation).toHaveBeenCalledOnce();
+      expect(transition).not.toHaveBeenCalled();
+      expect(stopSetup).not.toHaveBeenCalled();
+      expect(stopRun).not.toHaveBeenCalled();
+    } finally {
+      preview.mockRestore();
+      getWorkspace.mockRestore();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("still retires an old boundary before first Design use changes authority", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-stale-entry-"));
+    const workspace = {
+      id: "ws_stale_entry",
+      path: root,
+      repoRoot: root,
+      archivedAt: null,
+    };
+    const state = internals(new ZerosEngine({ root, port: 29_949 }));
+    const designDirectory = path.join(root, "Zeros Design");
+    await mkdir(designDirectory);
+    const prospective = {
+      agentRole: "code" as const,
+      workspaceRoot: root,
+      designDirectory,
+      protectedDesignDirectories: [designDirectory],
+      designRecognitionPaths: [
+        path.join(designDirectory, ".zeros-canvas.json"),
+      ],
+      writeCapabilities: {
+        workspace: "write" as const,
+        deniedPaths: [designDirectory],
+      },
+    };
+    const getWorkspace = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockReturnValue(
+        workspace as ReturnType<typeof gitState.getWorkspaceById>,
+      );
+    const preview = vi
+      .spyOn(agentGateway, "previewCodeAgentTerritory")
+      .mockResolvedValue(prospective);
+    vi.spyOn(state.agents, "workspaceTerritoryChanged").mockReturnValue(true);
+    const transition = vi
+      .spyOn(state, "withDesignTerritoryTransition")
+      .mockImplementation(async (_targets, mutation) => mutation());
+    const mutation = vi.fn(async () => "published");
+
+    try {
+      await expect(
+        state.withFirstDesignTerritoryCreation(
+          [{ workspaceId: workspace.id, designDirectory }],
+          mutation,
+        ),
+      ).resolves.toBe("published");
+
+      expect(transition).toHaveBeenCalledWith(
+        [{ workspaceId: workspace.id, designDirectory }],
+        mutation,
+        { initiatedByDesignTransitionCaller: true },
+      );
+    } finally {
+      preview.mockRestore();
+      getWorkspace.mockRestore();
+      await rm(root, { recursive: true, force: true });
     }
   });
 
@@ -907,7 +1427,7 @@ describe("Design territory agent retirement", () => {
     expect(reopen).toHaveBeenCalledOnce();
   });
 
-  it("keeps every later owner mutation and code start blocked after utility teardown is unproven", async () => {
+  it("contains a failed utility teardown to its owner transition and keeps code starts live", async () => {
     const state = internals(
       new ZerosEngine({
         root: "/tmp/zeros-territory-utility-failure",
@@ -935,13 +1455,13 @@ describe("Design territory agent retirement", () => {
     ).rejects.toThrow(/utility stop proof rejected/i);
     await expect(
       state.withGlobalDesignTerritoryTransition(laterMutation),
-    ).rejects.toThrow(/restart Zeros/i);
+    ).resolves.toBeUndefined();
 
     expect(firstMutation).not.toHaveBeenCalled();
-    expect(laterMutation).not.toHaveBeenCalled();
+    expect(laterMutation).toHaveBeenCalledOnce();
     expect(close).toHaveBeenCalledTimes(2);
-    expect(reopen).not.toHaveBeenCalled();
-    expect(state.workspaceAllowsProcessStart(null)).toBe(false);
+    expect(reopen).toHaveBeenCalledTimes(2);
+    expect(state.workspaceAllowsProcessStart(null)).toBe(true);
   });
 
   it("serializes overlapping global owner transitions without reopening admission", async () => {
@@ -1349,10 +1869,7 @@ describe("Design territory agent retirement", () => {
       const known = vi
         .spyOn(projectState, "listKnownRepoRoots")
         .mockReturnValue([repoRoot]);
-      const transition = vi.spyOn(
-        state,
-        "withGlobalDesignTerritoryTransition",
-      );
+      const transition = vi.spyOn(state, "withGlobalDesignTerritoryTransition");
 
       try {
         await state.handleWorkspaceMessage(
@@ -1734,6 +2251,71 @@ describe("Design territory agent retirement", () => {
     expect(startsSeenInsideDispatch).toBe(0);
   });
 
+  it.each(["workspace.archive", "workspace.delete", "workspace.restore"])(
+    "keeps managed %s scoped to its own Design territory",
+    async (op) => {
+      const root = "/tmp/zeros-managed-lifecycle-isolation";
+      const workspace = {
+        id: "ws_managed_lifecycle",
+        path: `${root}/worktree`,
+        repoRoot: `${root}/main`,
+        archivedAt: op === "workspace.restore" ? Date.now() : null,
+      };
+      await mkdir(workspace.path, { recursive: true });
+      const state = internals(new ZerosEngine({ root, port: 29_948 }));
+      vi.spyOn(state.workspace, "isWriteOp").mockReturnValue(false);
+      vi.spyOn(state.workspace, "lifecycleMutationWorkspaceId").mockReturnValue(
+        workspace.id,
+      );
+      const getWorkspace = vi
+        .spyOn(gitState, "getWorkspaceById")
+        .mockReturnValue(
+          workspace as ReturnType<typeof gitState.getWorkspaceById>,
+        );
+      let startsSeenInsideDispatch = -1;
+      vi.spyOn(state.workspace, "handle").mockImplementation(async () => {
+        startsSeenInsideDispatch =
+          state.workspaceProcessStarts.get(workspace.id)?.size ?? 0;
+        return { ok: true };
+      });
+      const scoped = vi
+        .spyOn(state, "withDesignTerritoryTransition")
+        .mockImplementation(async (_targets, mutation) => mutation());
+      const global = vi
+        .spyOn(state, "withGlobalDesignTerritoryTransition")
+        .mockImplementation(async (mutation) => mutation());
+
+      try {
+        await state.handleWorkspaceMessage(
+          {
+            type: "WORKSPACE_REQUEST",
+            id: `managed-${op}`,
+            source: "browser",
+            timestamp: 1,
+            op,
+            params: { workspaceId: workspace.id },
+          } as Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>,
+          client("local"),
+        );
+
+        expect(scoped).toHaveBeenCalledWith(
+          [
+            {
+              workspaceId: workspace.id,
+              designDirectory: `${workspace.path}/Zeros Design`,
+            },
+          ],
+          expect.any(Function),
+        );
+        expect(global).not.toHaveBeenCalled();
+        expect(startsSeenInsideDispatch).toBe(0);
+      } finally {
+        getWorkspace.mockRestore();
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
   it("does not restart agents for the renderer's idempotent project resync", async () => {
     const state = internals(
       new ZerosEngine({ root: "/tmp/zeros-territory-project", port: 29_912 }),
@@ -1768,10 +2350,9 @@ describe("Design territory agent retirement", () => {
     }
   });
 
-  it("restarts agents before a newly opened project becomes registered", async () => {
-    const state = internals(
-      new ZerosEngine({ root: "/tmp/zeros-territory-project", port: 29_913 }),
-    );
+  it("does not restart agents when a newly opened project adds no Design authority", async () => {
+    const project = await mkdtemp(path.join(tmpdir(), "zeros-code-project-"));
+    const state = internals(new ZerosEngine({ root: project, port: 29_913 }));
     vi.spyOn(state.workspace, "isWriteOp").mockReturnValue(true);
     vi.spyOn(state.workspace, "lifecycleMutationWorkspaceId").mockReturnValue(
       null,
@@ -1792,17 +2373,70 @@ describe("Design territory agent retirement", () => {
           source: "browser",
           timestamp: 1,
           op: "project.upsert",
-          params: { repoRoot: "/tmp/new-project" },
+          params: { repoRoot: project },
+        } as Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>,
+        client("local"),
+      );
+      expect(transition).not.toHaveBeenCalled();
+    } finally {
+      known.mockRestore();
+      await rm(project, { recursive: true, force: true });
+    }
+  });
+
+  it("restarts agents before a newly opened project adds Design authority", async () => {
+    const project = await mkdtemp(path.join(tmpdir(), "zeros-design-project-"));
+    const designDirectory = path.join(project, "Zeros Design");
+    await mkdir(designDirectory);
+    const state = internals(new ZerosEngine({ root: project, port: 29_950 }));
+    vi.spyOn(state.workspace, "isWriteOp").mockReturnValue(true);
+    vi.spyOn(state.workspace, "lifecycleMutationWorkspaceId").mockReturnValue(
+      null,
+    );
+    vi.spyOn(state.workspace, "handle").mockResolvedValue({ ok: true });
+    const known = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue(["/tmp/existing-project"]);
+    const preview = vi
+      .spyOn(agentGateway, "previewCodeAgentTerritory")
+      .mockResolvedValue({
+        agentRole: "code",
+        workspaceRoot: project,
+        designDirectory,
+        protectedDesignDirectories: [designDirectory],
+        designRecognitionPaths: [
+          path.join(designDirectory, ".zeros-canvas.json"),
+        ],
+        writeCapabilities: {
+          workspace: "write",
+          deniedPaths: [designDirectory],
+        },
+      });
+    const transition = vi
+      .spyOn(state, "withGlobalDesignTerritoryTransition")
+      .mockImplementation(async (mutation) => mutation());
+
+    try {
+      await state.handleWorkspaceMessage(
+        {
+          type: "WORKSPACE_REQUEST",
+          id: "project-new-design",
+          source: "browser",
+          timestamp: 1,
+          op: "project.upsert",
+          params: { repoRoot: project },
         } as Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>,
         client("local"),
       );
       expect(transition).toHaveBeenCalledOnce();
     } finally {
+      preview.mockRestore();
       known.mockRestore();
+      await rm(project, { recursive: true, force: true });
     }
   });
 
-  it("restarts agents before an opened project leaves the registered union", async () => {
+  it("does not restart agents when an opened project leaves the registered union", async () => {
     const state = internals(
       new ZerosEngine({ root: "/tmp/zeros-territory-project", port: 29_914 }),
     );
@@ -1830,7 +2464,7 @@ describe("Design territory agent retirement", () => {
         } as Extract<EngineMessage, { type: "WORKSPACE_REQUEST" }>,
         client("local"),
       );
-      expect(transition).toHaveBeenCalledOnce();
+      expect(transition).not.toHaveBeenCalled();
     } finally {
       known.mockRestore();
     }
@@ -1907,6 +2541,73 @@ describe("Design territory agent retirement", () => {
         expect.arrayContaining([worktree, main]),
       );
     } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the app-wide repo-root sweep when the caller scoped the change", async () => {
+    const base = await mkdtemp(path.join(tmpdir(), "zeros-scoped-settings-"));
+    const worktree = await mkdtemp(path.join(base, "worktree-"));
+    const main = await mkdtemp(path.join(base, "main-"));
+    const unrelated = await mkdtemp(path.join(base, "unrelated-"));
+    const state = internals(new ZerosEngine({ root: base, port: 29_919 }));
+    const known = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue([unrelated]);
+    const changed = vi
+      .spyOn(state.agents, "workspaceTerritoryChanged")
+      .mockReturnValue(false);
+
+    try {
+      state.scheduleDesignTerritoryReconcile(
+        [{ id: "ws_scoped", path: worktree, repoRoot: main }],
+        "settings",
+        { skipKnownRepoRootExpansion: true },
+      );
+      await state.designTerritoryReconcileChain;
+
+      const compared = changed.mock.calls.map((call) => call[1]);
+      expect(compared).toEqual(expect.arrayContaining([worktree, main]));
+      expect(compared).not.toContain(unrelated);
+    } finally {
+      known.mockRestore();
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("scopes a repo-local settings change to that repository's workspaces", async () => {
+    const base = await mkdtemp(path.join(tmpdir(), "zeros-settings-scope-"));
+    const main = await mkdtemp(path.join(base, "main-"));
+    const other = await mkdtemp(path.join(base, "other-"));
+    const state = internals(new ZerosEngine({ root: base, port: 29_921 }));
+    const roots = vi
+      .spyOn(state.workspace, "settingsRepoRoots")
+      .mockReturnValue([main, other]);
+    const rows = [
+      { id: "ws_main", path: path.join(main, "wt"), repoRoot: main },
+      { id: "ws_other", path: path.join(other, "wt"), repoRoot: other },
+    ];
+    const list = vi
+      .spyOn(gitState, "listWorkspaces")
+      .mockReturnValue(rows as ReturnType<typeof gitState.listWorkspaces>);
+
+    try {
+      // User/managed settings feed every workspace's stack: full fan-out.
+      expect(state.settingsReconcileScope([userSettingsPath()])).toBeNull();
+      // An unrecognized path fails open to the full fan-out.
+      expect(
+        state.settingsReconcileScope([path.join(base, "random.toml")]),
+      ).toBeNull();
+      // A repo-scoped settings.toml reconciles only that repository's
+      // workspaces plus the repo root itself.
+      const scoped = state.settingsReconcileScope([repoSettingsPath(main)]);
+      expect(scoped?.map((candidate) => candidate.id)).toEqual([
+        "ws_main",
+        `repo-root:${path.resolve(main)}`,
+      ]);
+    } finally {
+      roots.mockRestore();
+      list.mockRestore();
       await rm(base, { recursive: true, force: true });
     }
   });
@@ -2037,6 +2738,65 @@ describe("Design territory agent retirement", () => {
       expect(localChanged).toHaveBeenCalledOnce();
       expect(transition).toHaveBeenCalledOnce();
     } finally {
+      known.mockRestore();
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("reconciles a managed workspace territory without restarting sibling agents", async () => {
+    const base = await mkdtemp(
+      path.join(tmpdir(), "zeros-managed-reconcile-isolation-"),
+    );
+    const managed = path.join(base, "workspaces");
+    const worktree = path.join(managed, "target");
+    const main = path.join(base, "main");
+    await mkdir(worktree, { recursive: true });
+    await mkdir(main, { recursive: true });
+    const workspace = {
+      id: "ws_managed_reconcile_target",
+      path: worktree,
+      repoRoot: main,
+      archivedAt: null,
+    };
+    const state = internals(new ZerosEngine({ root: main, port: 29_947 }));
+    const getWorkspace = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockImplementation(
+        (workspaceId) =>
+          (workspaceId === workspace.id ? workspace : null) as ReturnType<
+            typeof gitState.getWorkspaceById
+          >,
+      );
+    vi.spyOn(state.agents, "workspaceTerritoryChanged").mockImplementation(
+      (_workspaceId, workspaceRoot) => workspaceRoot === worktree,
+    );
+    const known = vi
+      .spyOn(projectState, "listKnownRepoRoots")
+      .mockReturnValue([main]);
+    const scoped = vi
+      .spyOn(state, "withDesignTerritoryTransition")
+      .mockImplementation(async (_targets, mutation) => mutation());
+    const global = vi
+      .spyOn(state, "withGlobalDesignTerritoryTransition")
+      .mockImplementation(async (mutation) => mutation());
+
+    try {
+      state.scheduleDesignTerritoryReconcile([workspace], "git-refs");
+      await state.designTerritoryReconcileChain;
+
+      expect(scoped).toHaveBeenCalledOnce();
+      expect(scoped).toHaveBeenCalledWith(
+        [
+          {
+            workspaceId: workspace.id,
+            designDirectory: `${worktree}/Zeros Design`,
+          },
+        ],
+        expect.any(Function),
+      );
+      expect(global).not.toHaveBeenCalled();
+    } finally {
+      getWorkspace.mockRestore();
       known.mockRestore();
       await rm(base, { recursive: true, force: true });
     }
@@ -2246,6 +3006,241 @@ describe("Design territory agent retirement", () => {
 });
 
 describe("workspace terminal start barrier", () => {
+  it("installs Design watcher isolation for a synthetic local-main terminal", async () => {
+    const base = await mkdtemp(
+      path.join(tmpdir(), "zeros-main-terminal-watch-"),
+    );
+    await mkdir(path.join(base, "Zeros Design"), { recursive: true });
+    const state = internals(new ZerosEngine({ root: base, port: 29_930 }));
+    vi.spyOn(state.workspace, "workspaceIdForCwd").mockReturnValue(
+      "local-main",
+    );
+    vi.spyOn(state.pty, "resolveCwd").mockReturnValue(base);
+    vi.spyOn(state, "workspaceAllowsProcessStart").mockReturnValue(true);
+    const create = vi.spyOn(state.pty, "create").mockReturnValue({
+      sessionId: "term-main-watch",
+      pid: 123,
+      cwd: base,
+      cols: 80,
+      rows: 24,
+      reattached: false,
+    });
+
+    try {
+      await state.handlePtyCreate(
+        {
+          type: "PTY_CREATE",
+          id: "pty-create-main-watch",
+          source: "browser",
+          timestamp: 1,
+          sessionId: "term-main-watch",
+          workspaceId: "local-main",
+          cwd: base,
+          cols: 80,
+          rows: 24,
+        } as Extract<EngineMessage, { type: "PTY_CREATE" }>,
+        client(),
+      );
+
+      const options = create.mock.calls[0]?.[0] as {
+        env?: Record<string, string>;
+      };
+      const guardPath =
+        options.env?.NODE_OPTIONS?.match(/--require "([^"]+)"/)?.[1];
+      expect(path.basename(guardPath ?? "")).toBe(
+        NODE_DESIGN_WATCH_GUARD_FILENAME,
+      );
+      expect(
+        options.env?.WATCHEXEC_IGNORE_FILES?.split(path.delimiter),
+      ).toContain(options.env?.ZEROS_DESIGN_WATCH_IGNORE_FILE);
+      expect(
+        path.basename(options.env?.ZEROS_DESIGN_WATCH_IGNORE_FILE ?? ""),
+      ).toBe(DESIGN_WATCH_IGNORE_FILENAME);
+      expect(
+        path.basename(options.env?.ZEROS_DESIGN_WATCH_ROOTS_FILE ?? ""),
+      ).toBe(DESIGN_WATCH_ROOTS_FILENAME);
+    } finally {
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("suppresses managed Design watcher events without placing the human terminal in ZSR", async () => {
+    const base = await mkdtemp(path.join(tmpdir(), "zeros-terminal-watch-"));
+    const workspace = {
+      id: "ws_terminal_watch",
+      path: path.join(base, "worktree"),
+      repoRoot: path.join(base, "main"),
+      archivedAt: null,
+    };
+    await Promise.all([
+      mkdir(workspace.path, { recursive: true }),
+      mkdir(workspace.repoRoot, { recursive: true }),
+      mkdir(path.join(workspace.path, "Zeros Design"), { recursive: true }),
+    ]);
+    const state = internals(
+      new ZerosEngine({ root: workspace.repoRoot, port: 29_928 }),
+    );
+    const getWorkspace = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockReturnValue(
+        workspace as ReturnType<typeof gitState.getWorkspaceById>,
+      );
+    vi.spyOn(state.workspace, "workspaceIdForCwd").mockReturnValue(
+      workspace.id,
+    );
+    vi.spyOn(state.pty, "resolveCwd").mockReturnValue(workspace.path);
+    vi.spyOn(state, "workspaceAllowsProcessStart").mockReturnValue(true);
+    const create = vi.spyOn(state.pty, "create").mockReturnValue({
+      sessionId: "term-watch",
+      pid: 123,
+      cwd: workspace.path,
+      cols: 80,
+      rows: 24,
+      reattached: false,
+    });
+
+    try {
+      await state.handlePtyCreate(
+        {
+          type: "PTY_CREATE",
+          id: "pty-create-watch",
+          source: "browser",
+          timestamp: 1,
+          sessionId: "term-watch",
+          workspaceId: workspace.id,
+          cwd: workspace.path,
+          cols: 80,
+          rows: 24,
+        } as Extract<EngineMessage, { type: "PTY_CREATE" }>,
+        client(),
+      );
+
+      const options = create.mock.calls[0]?.[0] as {
+        env?: Record<string, string>;
+        wrapSpawn?: unknown;
+      };
+      expect(options.wrapSpawn).toBeUndefined();
+      const guardPath =
+        options.env?.NODE_OPTIONS?.match(/--require "([^"]+)"/)?.[1];
+      expect(guardPath).toBeTruthy();
+      await expect(access(guardPath!)).resolves.toBeUndefined();
+      const ignorePath = options.env?.ZEROS_DESIGN_WATCH_IGNORE_FILE;
+      const rootsPath = options.env?.ZEROS_DESIGN_WATCH_ROOTS_FILE;
+      expect(path.basename(ignorePath ?? "")).toBe(
+        DESIGN_WATCH_IGNORE_FILENAME,
+      );
+      expect(path.basename(rootsPath ?? "")).toBe(DESIGN_WATCH_ROOTS_FILENAME);
+      expect(
+        options.env?.WATCHEXEC_IGNORE_FILES?.split(path.delimiter),
+      ).toContain(ignorePath);
+      await expect(readFile(ignorePath!, "utf8")).resolves.toContain(
+        "/Zeros\\ Design/**",
+      );
+      await expect(readFile(rootsPath!, "utf8")).resolves.toContain(
+        "Zeros Design",
+      );
+    } finally {
+      getWorkspace.mockRestore();
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
+  it("makes the watcher preload readable after a cloud terminal drops to the human worker", async ({
+    skip,
+  }) => {
+    const base = await mkdtemp(path.join(tmpdir(), "zeros-cloud-watch-"));
+    const cloudWorker = qualifiedCloudWorker();
+    if (!(await canAssignCloudWorkerOwnership(base, cloudWorker))) {
+      await rm(base, { recursive: true, force: true });
+      skip("runner cannot assign the qualified cloud worker ownership");
+      return;
+    }
+    const workspace = {
+      id: "ws_cloud_terminal_watch",
+      path: path.join(base, "worktree"),
+      repoRoot: path.join(base, "main"),
+      archivedAt: null,
+    };
+    await Promise.all([
+      mkdir(workspace.path, { recursive: true }),
+      mkdir(workspace.repoRoot, { recursive: true }),
+      mkdir(path.join(workspace.path, "Zeros Design"), { recursive: true }),
+    ]);
+    const state = internals(
+      new ZerosEngine({ root: workspace.repoRoot, port: 29_929 }),
+    );
+    state.cloudWorker = cloudWorker;
+    const getWorkspace = vi
+      .spyOn(gitState, "getWorkspaceById")
+      .mockReturnValue(
+        workspace as ReturnType<typeof gitState.getWorkspaceById>,
+      );
+    vi.spyOn(state.workspace, "workspaceIdForCwd").mockReturnValue(
+      workspace.id,
+    );
+    vi.spyOn(state.pty, "resolveCwd").mockReturnValue(workspace.path);
+    vi.spyOn(state.pty, "isWithinAllowed").mockReturnValue(true);
+    vi.spyOn(state, "workspaceAllowsProcessStart").mockReturnValue(true);
+    vi.spyOn(state, "authorizeRemoteWrite").mockResolvedValue(true);
+    const create = vi.spyOn(state.pty, "create").mockReturnValue({
+      sessionId: "term-cloud-watch",
+      pid: 123,
+      cwd: workspace.path,
+      cols: 80,
+      rows: 24,
+      reattached: false,
+    });
+    let temporaryGuardRoot: string | null = null;
+
+    try {
+      await state.handlePtyCreate(
+        {
+          type: "PTY_CREATE",
+          id: "pty-create-cloud-watch",
+          source: "browser",
+          timestamp: 1,
+          sessionId: "term-cloud-watch",
+          workspaceId: workspace.id,
+          cwd: workspace.path,
+          cols: 80,
+          rows: 24,
+        } as Extract<EngineMessage, { type: "PTY_CREATE" }>,
+        client("cloud"),
+      );
+
+      const options = create.mock.calls[0]?.[0] as {
+        env?: Record<string, string>;
+        wrapSpawn?: unknown;
+      };
+      expect(options.wrapSpawn).toBeUndefined();
+      const guardPath =
+        options.env?.NODE_OPTIONS?.match(/--require "([^"]+)"/)?.[1];
+      expect(guardPath).toBeTruthy();
+      const fingerprintRoot = path.dirname(guardPath!);
+      temporaryGuardRoot = path.dirname(fingerprintRoot);
+      expect(path.basename(temporaryGuardRoot)).toMatch(
+        /^zeros-terminal-design-watch-/,
+      );
+      const artifactPaths = [
+        guardPath!,
+        options.env?.ZEROS_DESIGN_WATCH_IGNORE_FILE,
+        options.env?.ZEROS_DESIGN_WATCH_ROOTS_FILE,
+      ];
+      expect(artifactPaths.every(Boolean)).toBe(true);
+      for (const artifactPath of artifactPaths) {
+        expect((await stat(artifactPath!)).mode & 0o777).toBe(0o440);
+      }
+      expect((await stat(fingerprintRoot)).mode & 0o777).toBe(0o750);
+      expect((await stat(temporaryGuardRoot)).mode & 0o777).toBe(0o710);
+    } finally {
+      getWorkspace.mockRestore();
+      if (temporaryGuardRoot) {
+        await rm(temporaryGuardRoot, { recursive: true, force: true });
+      }
+      await rm(base, { recursive: true, force: true });
+    }
+  });
+
   it("allows the isolated provider-login PTY only in an attested cloud worker", async () => {
     const state = internals(
       new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_902 }),

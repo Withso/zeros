@@ -4,14 +4,17 @@ export const AUTH_CLAIM_NAMESPACE = "https://zeros.build/";
 
 const WORKOS_API_ORIGIN = "https://api.workos.com";
 const AUTHENTICATE_PATH = "/user_management/authenticate";
-const AUTHORIZE_PATH = "/user_management/authorize";
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_REFRESH_ATTEMPTS = 3;
 const REFRESH_RETRY_BASE_DELAY_MS = 250;
 const MAX_REFRESH_RETRY_DELAY_MS = 2_000;
 const MAX_RESPONSE_BYTES = 1_048_576;
 const MAX_TOKEN_BYTES = 64 * 1024;
+const WORKOS_IDENTIFIER_RE = /^[A-Za-z0-9_-]{1,512}$/;
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
+// Authorization starts on the hosted Zeros app; this client exchanges and
+// refreshes only.
 const RETRYABLE_REFRESH_STATUS = new Set([408, 429, 500, 502, 503, 504]);
 
 const AUTHENTICATION_METHODS = new Set([
@@ -61,6 +64,7 @@ export interface WorkOSDesktopTokenClaims {
   email: string;
   emailVerified: true;
   displayName: string | null;
+  authTime: number | null;
   issuedAt: number;
   expiresAt: number;
 }
@@ -96,6 +100,10 @@ export class WorkOSDesktopClientError extends Error {
     public readonly code: string,
     message: string,
     public readonly status = 0,
+    /** WorkOS's own refusal code (e.g. `email_verification_required`) when the
+     *  API named one. Kept separate from `code` so callers still branch on our
+     *  stable taxonomy while reporting the provider's actual reason. */
+    public readonly providerCode: string | null = null,
   ) {
     super(message);
     this.name = "WorkOSDesktopClientError";
@@ -117,6 +125,33 @@ function requiredString(
   return value.trim();
 }
 
+function requiredIdentifier(
+  payload: Record<string, unknown>,
+  key: string,
+  code: string,
+): string {
+  const value = requiredString(payload, key, code);
+  if (!WORKOS_IDENTIFIER_RE.test(value)) {
+    throw new WorkOSDesktopClientError(code, `Required claim ${key} is invalid`);
+  }
+  return value;
+}
+
+function requiredEmailClaim(
+  payload: Record<string, unknown>,
+  key: string,
+): string {
+  const email = requiredString(payload, key, "token_email_invalid")
+    .toLowerCase();
+  if (email.length > 254 || !EMAIL_RE.test(email)) {
+    throw new WorkOSDesktopClientError(
+      "token_email_invalid",
+      "Access token email is invalid",
+    );
+  }
+  return email;
+}
+
 function requiredTimestamp(
   payload: Record<string, unknown>,
   key: "iat" | "exp",
@@ -126,6 +161,21 @@ function requiredTimestamp(
     throw new WorkOSDesktopClientError(
       "token_time_invalid",
       `Required claim ${key} is missing`,
+    );
+  }
+  return value;
+}
+
+function optionalTimestamp(
+  payload: Record<string, unknown>,
+  key: "auth_time",
+): number | null {
+  const value = payload[key];
+  if (value === undefined || value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new WorkOSDesktopClientError(
+      "token_time_invalid",
+      `Optional claim ${key} is invalid`,
     );
   }
   return value;
@@ -143,7 +193,14 @@ function optionalString(
       `Optional claim ${key} must be a string`,
     );
   }
-  return value.trim() || null;
+  const normalized = value.trim();
+  if (normalized.length > 500) {
+    throw new WorkOSDesktopClientError(
+      "token_profile_invalid",
+      `Optional claim ${key} is too large`,
+    );
+  }
+  return normalized || null;
 }
 
 export function validateWorkOSDesktopTokenClaims(
@@ -166,25 +223,40 @@ export function validateWorkOSDesktopTokenClaims(
   }
   const issuedAt = requiredTimestamp(payload, "iat");
   const expiresAt = requiredTimestamp(payload, "exp");
+  const authTime = optionalTimestamp(payload, "auth_time");
   if (issuedAt <= 0 || expiresAt <= issuedAt) {
     throw new WorkOSDesktopClientError(
       "token_time_invalid",
       "Access token timestamps are invalid",
     );
   }
+  if (authTime !== null && authTime > issuedAt + 60) {
+    throw new WorkOSDesktopClientError(
+      "token_time_invalid",
+      "Access token authentication time is invalid",
+    );
+  }
   return {
-    providerSubject: requiredString(payload, "sub", "token_subject_missing"),
-    sessionId: requiredString(payload, "sid", "token_session_missing"),
-    tokenId: requiredString(payload, "jti", "token_id_missing"),
+    providerSubject: requiredIdentifier(
+      payload,
+      "sub",
+      "token_subject_invalid",
+    ),
+    sessionId: requiredIdentifier(
+      payload,
+      "sid",
+      "token_session_invalid",
+    ),
+    tokenId: requiredIdentifier(payload, "jti", "token_id_invalid"),
     clientId,
     clientKind: "desktop",
-    email: requiredString(
+    email: requiredEmailClaim(
       payload,
       `${AUTH_CLAIM_NAMESPACE}email`,
-      "token_email_missing",
     ),
     emailVerified: true,
     displayName: optionalString(payload, `${AUTH_CLAIM_NAMESPACE}name`),
+    authTime,
     issuedAt,
     expiresAt,
   };
@@ -205,15 +277,40 @@ function record(value: unknown): Record<string, unknown> | null {
 async function responseJson(
   response: Response,
 ): Promise<Record<string, unknown> | null> {
-  let text: string;
-  try {
-    text = await response.text();
-  } catch {
+  const declaredLength = Number(response.headers.get("content-length") ?? "0");
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_RESPONSE_BYTES) {
+    await response.body?.cancel("response too large").catch(() => undefined);
     return null;
   }
-  if (!text || text.length > MAX_RESPONSE_BYTES) return null;
+  if (!response.body) return null;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
   try {
-    return record(JSON.parse(text));
+    while (true) {
+      const part = await reader.read();
+      if (part.done) break;
+      size += part.value.byteLength;
+      if (size > MAX_RESPONSE_BYTES) {
+        await reader.cancel("response too large").catch(() => undefined);
+        return null;
+      }
+      chunks.push(part.value.slice());
+    }
+  } catch {
+    return null;
+  } finally {
+    reader.releaseLock();
+  }
+  if (size === 0) return null;
+  const bytes = new Uint8Array(size);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return record(JSON.parse(new TextDecoder().decode(bytes)));
   } catch {
     return null;
   }
@@ -307,22 +404,6 @@ export class WorkOSDesktopClient {
     };
   }
 
-  authorizationUrl(input: {
-    state: string;
-    codeChallenge: string;
-    redirectUri: string;
-  }): string {
-    const url = new URL(AUTHORIZE_PATH, this.apiOrigin);
-    url.searchParams.set("provider", "authkit");
-    url.searchParams.set("client_id", this.options.config.clientId);
-    url.searchParams.set("redirect_uri", input.redirectUri);
-    url.searchParams.set("response_type", "code");
-    url.searchParams.set("state", input.state);
-    url.searchParams.set("code_challenge", input.codeChallenge);
-    url.searchParams.set("code_challenge_method", "S256");
-    return url.toString();
-  }
-
   private async authenticate(
     body: Record<string, string>,
   ): Promise<{ response: Response; body: Record<string, unknown> | null }> {
@@ -356,19 +437,27 @@ export class WorkOSDesktopClient {
     const userId = boundedString(user.id, 512);
     const email = boundedString(user.email, 1_024);
     const nameValue = user.name;
-    const name =
-      nameValue === null || nameValue === undefined
-        ? null
-        : boundedString(nameValue, 1_024);
-    if (
-      !userId ||
-      !email ||
-      user.email_verified !== true ||
-      (nameValue !== null && nameValue !== undefined && name === null)
-    ) {
+    // An EMPTY display name is absent, not malformed. GitHub accounts commonly
+    // carry none, and `boundedString` rejects "" — so the old check turned a
+    // presentation gap into a failed sign-in, contradicting this contract's own
+    // rule that profile loss must never be an authentication failure. A wrong
+    // TYPE still fails, which is the case that check was really for.
+    const nameAbsent =
+      nameValue === null || nameValue === undefined || nameValue === "";
+    const name = nameAbsent ? null : boundedString(nameValue, 1_024);
+    if (!userId || !email || (!nameAbsent && name === null)) {
       throw new WorkOSDesktopClientError(
         "identity_response_invalid",
         "WorkOS returned invalid verified-user data",
+      );
+    }
+    // Split out of the guard above: an unverified address is a specific,
+    // actionable provider state, not malformed data, and only its own code lets
+    // the sign-in screen say what the user must actually do about it.
+    if (user.email_verified !== true) {
+      throw new WorkOSDesktopClientError(
+        "user_email_unverified",
+        "WorkOS has not verified this account's email address",
       );
     }
 
@@ -423,10 +512,15 @@ export class WorkOSDesktopClient {
       );
     }
     if (!result.response.ok || !result.body) {
+      // Keep only WorkOS's bounded refusal code for diagnostics and calm UI
+      // mapping. Hosted AuthKit owns every verification continuation; pending
+      // credentials must never leave that hosted ceremony or reach app code.
+      const refusal = boundedString(result.body?.code, 128);
       throw new WorkOSDesktopClientError(
         "exchange_rejected",
         "WorkOS did not complete authentication",
         result.response.status,
+        refusal,
       );
     }
     return this.verifiedSession(result.body);

@@ -27,7 +27,6 @@ function boundary(id: string): PreparedBoundary {
 function pool(overrides: {
   prepare?: (r: BoundaryRequest) => Promise<PreparedBoundary>;
   retire?: (id: string, b: PreparedBoundary) => Promise<void>;
-  assertHealthy?: () => void;
   idleMs?: number;
 }) {
   let created = 0;
@@ -46,9 +45,6 @@ function pool(overrides: {
       (async (id) => {
         retired.push(id);
       }),
-    ...(overrides.assertHealthy
-      ? { assertHealthy: overrides.assertHealthy }
-      : {}),
     ...(overrides.idleMs !== undefined ? { idleMs: overrides.idleMs } : {}),
   });
   return { instance, prepared, retired, created: () => created };
@@ -75,9 +71,9 @@ describe("utilityBoundaryKey", () => {
   });
 
   it("treats an absent field and an explicitly-undefined field as the same", () => {
-    expect(utilityBoundaryKey(request({ providerResumeId: undefined }))).toBe(
-      utilityBoundaryKey(request()),
-    );
+    expect(
+      utilityBoundaryKey(request({ containerWorkflowExpected: undefined })),
+    ).toBe(utilityBoundaryKey(request()));
   });
 });
 
@@ -213,6 +209,120 @@ describe("UtilityBoundaryPool", () => {
     expect(instance.size()).toBe(0);
   });
 
+  it("retires only pooled utilities that depend on the changed workspace", async () => {
+    const firstRoot = "/tmp/workspace-first";
+    const designRoot = "/tmp/workspace-design";
+    const contribution = (workspaceRoot: string) => [
+      {
+        workspaceRoot,
+        grants: [workspaceRoot],
+        full: true,
+        identity: null,
+      },
+    ];
+    const { instance, retired } = pool({});
+    const first = await instance.acquire(
+      request({ executionId: "utility-first", cwd: firstRoot }),
+      contribution(firstRoot),
+    );
+    await first.release("ok");
+    const design = await instance.acquire(
+      request({ executionId: "utility-design", cwd: designRoot }),
+      contribution(designRoot),
+    );
+    expect(design.boundary.territoryContributions).toEqual(
+      contribution(designRoot),
+    );
+
+    instance.suspendWorkspaceTerritory(designRoot);
+    await instance.disposeWorkspaceTerritory(designRoot);
+
+    expect(retired).toEqual(["utility-design"]);
+    expect(instance.size()).toBe(1);
+    await expect(
+      instance.acquire(
+        request({ executionId: "blocked-design", cwd: designRoot }),
+        contribution(designRoot),
+      ),
+    ).rejects.toThrow(/workspace territory transition/i);
+    const reusedFirst = await instance.acquire(
+      request({ executionId: "utility-first-again", cwd: firstRoot }),
+      contribution(firstRoot),
+    );
+    expect(reusedFirst.reused).toBe(true);
+    await reusedFirst.release("ok");
+
+    instance.resumeWorkspaceTerritory(designRoot);
+    await design.release("ok");
+    await instance.disposeAll();
+    expect(retired).toEqual(["utility-design", "utility-first"]);
+  });
+
+  it("invalidates only a matching cold admission that crosses a scoped transition", async () => {
+    const designRoot = "/tmp/workspace-design-cold";
+    const contributions = [
+      {
+        workspaceRoot: designRoot,
+        grants: [designRoot],
+        full: true,
+        identity: null,
+      },
+    ];
+    let finishPrepare!: (value: PreparedBoundary) => void;
+    const prepare = vi.fn(
+      () =>
+        new Promise<PreparedBoundary>((resolve) => {
+          finishPrepare = resolve;
+        }),
+    );
+    const retire = vi.fn(async () => undefined);
+    const { instance } = pool({ prepare, retire });
+    const acquiring = instance.acquire(
+      request({ executionId: "scoped-cold", cwd: designRoot }),
+      contributions,
+    );
+    await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce());
+
+    instance.suspendWorkspaceTerritory(designRoot);
+    await instance.disposeWorkspaceTerritory(designRoot);
+    instance.resumeWorkspaceTerritory(designRoot);
+    const prepared = boundary("scoped-cold");
+    finishPrepare(prepared);
+
+    await expect(acquiring).rejects.toThrow(/invalidated.*transition/i);
+    expect(retire).toHaveBeenCalledWith("scoped-cold", prepared);
+  });
+
+  it("invalidates a matching admission queued before a scoped transition", async () => {
+    const designRoot = "/tmp/workspace-design-queued";
+    const contributions = [
+      {
+        workspaceRoot: designRoot,
+        grants: [designRoot],
+        full: true,
+        identity: null,
+      },
+    ];
+    const { instance, created } = pool({});
+    const first = await instance.acquire(
+      request({ executionId: "queued-first", cwd: designRoot }),
+      contributions,
+    );
+    const queued = instance.acquire(
+      request({ executionId: "queued-second", cwd: designRoot }),
+      contributions,
+    );
+    await Promise.resolve();
+
+    instance.suspendWorkspaceTerritory(designRoot);
+    await instance.disposeWorkspaceTerritory(designRoot);
+    instance.resumeWorkspaceTerritory(designRoot);
+    await first.release("ok");
+
+    await expect(queued).rejects.toThrow(/invalidated.*transition/i);
+    expect(created()).toBe(1);
+  });
+
   it("invalidates an admission that finishes after disposeAll and reopen", async () => {
     let finishPrepare!: (value: PreparedBoundary) => void;
     const prepare = vi.fn(
@@ -238,17 +348,34 @@ describe("UtilityBoundaryPool", () => {
     expect(instance.size()).toBe(0);
   });
 
-  it("refuses to admit while boundary retirement is unhealthy", async () => {
-    const { instance } = pool({
-      assertHealthy: () => {
-        throw new Error(
-          "a prior execution boundary could not be proven stopped",
-        );
-      },
+  it("retires a prepared boundary rejected for stale authority metadata", async () => {
+    const prepared = boundary("stale-authority");
+    Object.defineProperty(prepared, "territoryContributions", {
+      value: [
+        {
+          workspaceRoot: "/tmp/other",
+          grants: ["/tmp/other"],
+          full: true,
+          identity: "old",
+        },
+      ],
     });
-    await expect(instance.acquire(request())).rejects.toThrow(
-      /could not be proven stopped/,
+    const retire = vi.fn(async () => undefined);
+    const { instance } = pool({ prepare: async () => prepared, retire });
+    const requested = [
+      {
+        workspaceRoot: "/tmp/workspace",
+        grants: ["/tmp/workspace"],
+        full: true,
+        identity: "current",
+      },
+    ];
+
+    await expect(instance.acquire(request(), requested)).rejects.toThrow(
+      /territory authority is stale/i,
     );
+    expect(retire).toHaveBeenCalledWith("one-shot-1", prepared);
+    expect(instance.size()).toBe(0);
   });
 
   it("drops an entry whose teardown could not be proven instead of reusing it", async () => {

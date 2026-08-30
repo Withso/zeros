@@ -1,759 +1,736 @@
-# WorkOS authentication migration
+# WorkOS Hosted AuthKit architecture and rollout
 
-Status: Phases 1, 2, and 3 repository implementation complete; not deployed.
-The control plane, browser, and desktop repository can use either legacy Auth0
-or the qualified WorkOS contract, but the running product still uses Auth0
-until the coordinated Alpha reset and release gates in this document are
-complete.
+Status: foundation implemented; Alpha qualification in progress. Repository
+implementation, dashboard configuration, deployment, and real Alpha acceptance
+are separate release gates; this document never treats a local test pass as a
+production approval.
 
-Retention: this is an active migration roadmap. Once Auth0 has been removed
-from every release channel, fold the lasting contracts into the deployment and
-architecture guides, then delete this file.
+Retention: keep this document while Auth0 compatibility exists. After every
+supported release uses WorkOS, move the durable contracts into the permanent
+architecture and deployment guides, remove Auth0 code/configuration in a
+separate rollout, then delete this migration document.
 
-## Scope decision
+## Decision
 
-This is a clean-slate identity cutover. Existing identity-provider users,
-browser sessions, desktop sessions, and provider-subject bindings are not a
-compatibility requirement. The operator may reset application identity data,
-but only after selecting one exact deployment environment and taking a tested,
-restorable backup. The repository must not contain an automatic broad database
-wipe command.
+Zeros uses [WorkOS Hosted AuthKit](https://workos.com/docs/authkit/hosted-ui) as
+the only interactive authentication surface. Zeros does not render password,
+one-time-code, email-verification, MFA, social-provider, or account-linking
+forms. Hosted AuthKit owns those ceremonies, including verification,
+localization, and recovery; provider-side bot controls remain subject to the
+explicit policy below.
 
-Cloud workspaces remain deferred. This migration still establishes the stable
-account and resource-server contracts they will consume later. It does not add
-WorkOS Organizations, WorkOS authorization, or a cloud-workspace dependency.
+The intended Alpha methods are Google, GitHub, and WorkOS Magic Auth (the
+hosted six-digit, single-use email code). Email + Password is not part of the
+Zeros launch contract and should remain disabled unless a later product and
+threat-model decision adds it. WorkOS sends the authentication emails; Zeros
+does not retrieve, store, log, proxy, or deliver Magic Auth codes.
 
-## Current deployment inventory
+Radar is explicitly deferred because it is a paid feature. Leave it disabled;
+the foundation must remain secure without it. If it is purchased later, begin
+in observation/log mode, inspect detections and false positives, and approve a
+separate enforcement change. No Zeros authorization decision may depend on
+Radar being present.
 
-| Surface                                      | Current authentication responsibility                                                                                                                       | Migration boundary                                                                                                                              |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
-| Cloudflare Pages (`apps/web`)                | Starts Auth0 code+PKCE, exchanges codes, stores browser access/refresh tokens in Workers KV, proxies bearer requests, and brokers the desktop ticket.       | Becomes a stateless same-origin WorkOS facade. Railway performs exchange and session operations; Pages stops minting desktop credentials.        |
-| Railway control plane (`apps/control-plane`) | Derives Auth0 issuer/JWKS settings, verifies access-token signature/issuer/audience, JIT-provisions the database user, and performs Postgres authorization. | Accepts explicit provider-neutral verification settings and owns WorkOS PKCE, sealed sessions, webhook verification, and management operations. |
-| Railway Postgres                             | Owns `users.id`, `user_identities`, Personal/organization/team membership, invitations, GitHub state, feedback identity, and optional cloud rows.           | Also owns hashed browser credentials/state and serialized sealed-session refresh; migrations/schema remain the product authority.               |
-| Electron main                                | Redeems the web ticket, keeps refresh material in `safeStorage`, refreshes through the web broker, and exposes only bounded session data to the renderer.   | Authenticates the Desktop Application directly with loopback PKCE; continues to keep tokens/verifier out of renderer IPC.                       |
-| Zeros engine                                 | Independently verifies Auth0 JWTs and uses the provider subject for owner/client comparisons and deferred cloud credential binding.                         | Pins the same WorkOS token contract; product/cloud ownership moves to internal account UUIDs or control-plane grants.                           |
-| GitHub App flow                              | Separately authorizes repository access and binds its credential to the Auth0 subject.                                                                      | Remains separate from WorkOS social login and rebinds credential ownership to the internal account UUID.                                        |
+Every authorization URL uses `provider=authkit`. Browser, Pages, desktop, and
+deep-link callers cannot select a WorkOS connection, organization, or social
+provider. Legacy `provider`, `connection`, and `organization` query parameters
+are deliberately ignored during the rolling transition; they never reach the
+WorkOS SDK.
 
-The repository defines three isolated Cloudflare/Railway/Postgres channels and
-guards their deployment variables. The initial Phase 0 repository audit had no
-Railway, Cloudflare, Auth0, or WorkOS dashboard credentials in its cloud
-workspace, so the deployment inventory below is from code/configuration only;
-that audit did not query or change a live service. Later dashboard milestones
-are recorded separately from the still-pending live contract observations.
+This removes the former custom Google/GitHub chooser and the application-owned
+GitHub email-verification continuation. There is no anonymous endpoint that
+accepts pending WorkOS credentials or infers verification from webhook timing.
+If Hosted AuthKit has not completed verification, Zeros receives no usable
+session. A defensive desktop error mapping remains so an unexpected
+`email_verification_required` response fails closed.
 
-Primary implementation traces inspected during the audit:
+WorkOS authenticates people and is authoritative for WorkOS identities,
+credentials, provider sessions, collaborative-organization objects, native
+invitation delivery, and the provider-side membership lifecycle. Zeros
+Postgres remains
+authoritative for durable product account IDs, Personal, billing and
+entitlements, child teams, team membership, workspace/repository access,
+product permissions, audit history, and all cloud resources. Zeros also keeps
+the locally enforced projection and desired state for WorkOS organizations,
+memberships, and invitations, plus every non-SCIM product-access grant. A
+non-directory WorkOS membership can converge an existing locally authorized
+member but cannot create Zeros access by itself; SCIM remains the explicit
+enterprise provisioning exception. Provider objects are never queried on every
+API request; signed events and a durable repair stream converge the projection.
 
-- web authorization and profile/session creation:
-  `apps/web/functions/auth/{start,callback,logout}.ts`,
-  `apps/web/lib/{oauth,session,control-plane-proxy}.ts`;
-- desktop handoff, secure persistence, refresh, and logout:
-  `apps/web/functions/handoff/*`,
-  `apps/desktop/electron/ipc/commands/{auth-handoff,auth-session}.ts`;
-- resource-server verification and JIT identity binding:
-  `apps/control-plane/src/{auth,config}.ts` and
-  `apps/control-plane/migrations/0001_init.sql`;
-- engine admission and owner binding:
-  `apps/desktop/src/engine/auth/verify-jwt.ts` and
-  `apps/desktop/electron/sidecar.ts`; and
-- GitHub, feedback, deployment, and cloud ownership call sites under
-  `apps/control-plane/src/`, `apps/desktop/electron/`, `apps/web/`,
-  `scripts/`, and `.github/workflows/`.
+This split is intentional: WorkOS can revoke authentication or enterprise
+membership, while a WorkOS outage cannot make Zeros forget who owns product
+data. Authorization still fails closed when the local account/session or
+organization membership is inactive.
 
-## Durable boundaries
+## Reviewed implementation phases
 
-- `users.id` is the Zeros account identifier. Product ownership, organization
-  membership, billing, GitHub credentials, feedback contacts, audit data, and
-  future cloud resources use this UUID, never a WorkOS `sub`.
-- `user_identities(provider, provider_sub)` maps the WorkOS user to the internal
-  account. A clean database creates this row just in time on the first verified
-  request.
-- A WorkOS `sub` may remain in verified session/authentication state so a token
-  can be refreshed, revoked, or mapped. It is never the durable owner key of a
-  Zeros product resource. Components that need the internal owner call
-  `/v1/me` or consume a control-plane-minted grant after authentication.
-- WorkOS performs authentication. Zeros Postgres remains authoritative for
-  Personal, organizations, teams, roles, invitations, and row-level access.
-- Railway is both the resource server and the server-side WorkOS broker. Normal
-  `/v1` JWT verification remains local and does not require a WorkOS API key or
-  network call; only explicit `/auth` exchange, refresh, logout, webhook, and
-  management operations use the Railway-only provider credential.
-- Railway/Postgres owns browser sessions. Cloudflare Pages is a stateless
-  same-origin facade. Electron main owns the desktop public-client authorization
-  flow and its PKCE verifier; neither the renderer nor desktop package receives
-  a WorkOS API key.
-- Web and desktop are different WorkOS Applications and must produce different
-  WorkOS session IDs. Refreshing a web session is not a desktop sign-in.
-- Rotating refresh tokens must not use eventually consistent Workers KV as
-  their sole correctness store. If a server-mediated desktop fallback still
-  needs one-time tickets, their consume operation must also be strongly
-  consistent and atomic.
-- Runtime configuration uses explicit issuer, JWKS, audience, and allowed
-  client IDs. The control plane must not derive them from a vendor domain. This
-  keeps the resource-server boundary suitable for a future Railway template.
+The foundation landed as one reviewed PR so schema, server, web, desktop,
+tests, and runbooks could not be promoted in incompatible combinations. Live
+Alpha qualification then found three integration defects that could only be
+fixed after that merge; each corrective patch received its own green review
+and was promoted in order. The phases below remain logical gates, not
+independently supported partial designs:
 
-### Account and credential lifecycle
+1. **Contracts and schema.** Preserve stable Zeros UUID ownership; add identity
+   and session lifecycle, WorkOS organization/membership projections, durable
+   command/event outboxes, authorization/data revisions, reviewed recovery,
+   and security-notification outboxes with forward-only migrations.
+2. **Hosted authentication.** Make Hosted AuthKit the one Web/Desktop entry;
+   implement browser server-side code+PKCE and opaque host-only cookies;
+   implement Electron public-client code+PKCE, exact-channel deep links,
+   pinned JWT verification, and OS-protected persistence.
+3. **Account safety.** Register every WorkOS session, reject email-based
+   ownership transfer, disable a deleted provider identity without deleting
+   product data, and expose a fresh-auth, staff-reviewed recovery flow with
+   immutable audit/security notifications.
+4. **Collaborative identity.** Mirror every non-Personal Zeros organization to
+   one WorkOS organization; serialize organization, membership, invitation,
+   and revocation commands; consume signed WorkOS events; and repair missed
+   webhooks through the cursor-based Events API.
+5. **Immediate authorization changes.** Publish durable security revisions to
+   one authenticated SSE stream per active client. Use launch/reconnect/focus/
+   wake snapshots only after stream silence; never add a universal 30-second
+   authentication poll.
+6. **Product enforcement and UX.** Gate cloud create/wake on an active WorkOS
+   organization link, preserve cleanup during provider incidents, refuse local
+   edits to directory-managed memberships, and give recovery/conflict/outage
+   states distinct bounded UI on web and desktop.
+7. **Qualification and promotion.** Run the complete repository, migration,
+   database, Electron, packaging, security, license, and build suites; deploy
+   the same SHA to Alpha Railway and Pages; configure WorkOS; execute the real
+   web/macOS matrix; observe; then promote unchanged to Beta/Production.
 
-Google and GitHub are credentials of one WorkOS User, not separate Zeros
-accounts. WorkOS links credentials only after it can establish control of the
-email address. Zeros therefore creates one `user_identities` row with
-`provider='workos'` and the WorkOS User `sub`; it does not encode
-`GoogleOAuth`/`GitHubOAuth` in the provider key or auto-link separate WorkOS
-subjects merely because their email strings match.
+Every phase retains its regression tests in the same PR. A failure in any gate
+blocks merge; rollback changes provider/configuration atomically and never
+reinterprets product ownership.
 
-Identity lookup is by verified subject. Email and profile changes may refresh
-presentation/contact fields, subject to the existing case-insensitive email
-uniqueness and collision rules. Deleting a WorkOS User does not cascade-delete
-Zeros projects, organizations, audit history, or future cloud data. If a person
-later appears with a new WorkOS subject but an email already owned in Zeros,
-fail closed with an account-recovery path; do not silently transfer ownership
-on email equality. Phase 1 implements that fail-closed collision behavior.
+## Durable identity boundary
 
-WorkOS publishes `user.updated` and `user.deleted` as server-side events. Phase
-2 verifies their exact raw-body signature on Railway, reduces the payload to a
-bounded lifecycle event, and records idempotent recovery status in Railway
-Postgres. No event auto-links by email or cascade-deletes product data. A
-distinct suspension event is not assumed without a qualified WorkOS contract.
+- `users.id` is the durable Zeros account ID. Product data never uses a WorkOS
+  subject as its owner key.
+- `user_identities(provider, provider_sub)` maps a verified WorkOS `sub` to one
+  Zeros account. The mapping key is `provider='workos'`, not the Google or
+  GitHub credential used at sign-in.
+- Identity lookup and ownership changes are subject-based. Email is profile
+  data, not an ownership key. A new subject colliding with an existing email
+  fails closed for operator-reviewed recovery; it never transfers ownership.
+- Google and GitHub login identities can belong to one WorkOS User through
+  WorkOS identity linking. Zeros does not implement parallel email-based
+  linking. WorkOS documents why unverified identities must never be linked:
+  [Identity linking](https://workos.com/docs/authkit/identity-linking).
+- `user.updated` refreshes bounded profile data. `user.deleted` disables the
+  identity and Zeros account, revokes all known browser/desktop sessions and
+  cloud endpoint grants, and removes collaborative access. Personal and all
+  product data remain preserved for reviewed recovery or retention policy.
+- The independent Zeros GitHub App remains the sole owner of repository
+  authorization. WorkOS login must not request extra GitHub scopes or return
+  provider access/refresh tokens.
 
-References: <https://workos.com/docs/authkit/identity-linking> and
-<https://workos.com/docs/events>
+## Account deletion, replacement, and recovery
 
-## Environment and application topology
+Deleting a WorkOS User is an authentication revocation, not a product-data
+deletion. The signed `user.deleted` event moves the subject mapping to
+`provider_deleted`, moves the Zeros account to `identity_disabled`, tombstones
+its provider memberships, revokes sessions/grants, emits durable security
+events, and queues a bounded notification email. Product rows continue to use
+the unchanged Zeros UUID.
 
-Each Zeros channel receives an isolated WorkOS environment. Alpha and Beta may
-use additional staging environments while they contain only test data;
-Production uses a WorkOS production environment.
+If someone later signs in with a newly created WorkOS User that has the same
+email, Zeros does **not** relink it. A recent provider authentication creates a
+24-hour recovery request and displays only its public `ZR-…` locator. An exact
+`support_admin` operator must reauthenticate within five minutes, verify the
+evidence out of band, and approve the exact request. A `developer` is not a
+recovery operator, and a `support_admin` does not receive developer-only app
+surfaces. Approval supersedes the deleted identity,
+binds the new subject to the original UUID, increments the account revision,
+audits the operation, and sends a notification. It does not silently restore
+collaborative memberships; those must be re-provisioned by the organization or
+enterprise directory.
 
-| Zeros channel | WorkOS environment  | Applications                             | API audience                    |
-| ------------- | ------------------- | ---------------------------------------- | ------------------------------- |
-| Alpha         | isolated staging    | `Zeros Web Alpha`, `Zeros Desktop Alpha` | `https://api-alpha.zeros.build` |
-| Beta          | isolated staging    | `Zeros Web Beta`, `Zeros Desktop Beta`   | `https://api-beta.zeros.build`  |
-| Production    | isolated production | `Zeros Web`, `Zeros Desktop`             | `https://api.zeros.build`       |
+An active account reached through a different WorkOS subject returns
+`account_exists`; email alone is never enough to merge it. Browser and desktop
+render fixed guidance for `account_exists`, `reauthentication_required`,
+inactive accounts, and reviewed recovery. Raw provider/database messages are
+discarded.
 
-An environment's web application is the default application. Its issuer/JWKS
-contract and both applications' `client_id` claims must be captured from real
-tokens rather than inferred from documentation.
+### Recovery-operator bootstrap and revocation
 
-Staging environments are only for test data. Before Alpha or Beta admits real
-external users, move that channel to its own production-class environment and
-repeat every token and deployment gate. WorkOS supports additional staging and
-production environments; if creation is not visible in the dashboard, the
-operator must request it from WorkOS support rather than sharing a user/session
-boundary between channels.
+`users.staff_role` is deliberately not writable by `zeros_app`; neither an API
+route nor compromised application code can grant staff authority. Use the
+database-owner command from a controlled Railway shell or an equivalent
+operator workstation. Never persist these one-shot variables on the service.
 
-### Alpha dashboard setup
+Set `DATABASE_URL` plus these target-bound inputs:
 
-Phase 0 uses the existing Alpha origins and preserves the current Google/GitHub
-sign-in surface:
+- `CONTROL_PLANE_STAFF_CHANNEL` — `development`, `alpha`, `beta`, or
+  `production`; it must match `RAILWAY_ENVIRONMENT_NAME` when Railway supplies
+  one.
+- `CONTROL_PLANE_STAFF_SUBJECT_USER_ID` and
+  `CONTROL_PLANE_STAFF_EXPECTED_EMAIL` — both must resolve to the same exact
+  Zeros account.
+- `CONTROL_PLANE_STAFF_ACTOR_USER_ID` — the accountable human operator's Zeros
+  UUID. A second person is preferred for Production bootstrap.
+- `CONTROL_PLANE_STAFF_ROLE` — `support_admin`, `developer`, or `none` for
+  revocation.
+- `CONTROL_PLANE_STAFF_REASON` — a 16–512 character audit reason.
 
-| Setting                | `Zeros Web Alpha` (default)                                                             | `Zeros Desktop Alpha`                                                |
-| ---------------------- | --------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
-| Redirect URI           | `https://app-alpha.zeros.build/auth/callback` and `http://127.0.0.1:8788/auth/callback` | `zeros-alpha://auth/callback` and `http://127.0.0.1:*/auth/callback` |
-| Default sign-out URI   | `https://app-alpha.zeros.build/`                                                        | `https://app-alpha.zeros.build/`                                     |
-| Access-token duration  | 5 minutes                                                                               | 5 minutes                                                            |
-| Maximum session length | 30 days                                                                                 | 90 days                                                              |
-| Inactivity timeout     | 7 days                                                                                  | 30 days                                                              |
-| Sign-in methods        | Google and GitHub only                                                                  | Google and GitHub only                                               |
+Run the read-only plan first:
 
-The durations are the initial security/UX policy, not hidden code defaults.
-Record the final dashboard values in the channel configuration inventory. Keep
-WorkOS email verification enabled. Staging may use WorkOS's default Google and
-GitHub credentials for contract testing; branded production login requires
-Zeros-owned provider credentials in each production environment.
-
-Do not enable “Return Google OAuth tokens,” “Return GitHub OAuth tokens,” or
-extra provider scopes for authentication. Zeros's separate GitHub App flow
-continues to own repository authorization; an identity login token must never
-become a Git credential.
-
-The web Application's API key and cookie password are server-only secrets. If
-WorkOS requires the desktop Application's credential for session-management
-calls, that credential also exists only in the server-side auth broker. The
-desktop itself uses only its public client ID. The resource server uses only the
-public verification values in the Railway table below. No API key, refresh
-token, or cookie password is committed to Git or pasted into an issue/chat.
-
-### Production domain decision
-
-Zeros will use WorkOS-hosted domains for the initial migration. The operator
-has explicitly declined the optional paid custom-domain service; this is not a
-release blocker in staging or production. WorkOS exposes two separate custom
-choices if that decision changes later:
-
-- an **AuthKit domain**, such as `auth.zeros.build`, changes the hosted sign-in
-  UI hostname; and
-- an **Authentication API domain**, such as `identity-api.zeros.build`, changes
-  the hostname used by the SDK for Authentication API calls. If enabled, set
-  the SDK's API hostname and recapture the exact issuer and JWKS contract from
-  real tokens before release.
-
-If custom domains are adopted later, use new hosts instead of immediately
-reusing Auth0's `login.zeros.build`. Retaining the old DNS route keeps rollback
-independent during the acceptance window. WorkOS requires these CNAME records
-to be DNS-only, not proxied through Cloudflare. Repeat both token probes after
-changing the Authentication API domain. WorkOS-hosted production domains are
-valid and do not change the rest of this architecture.
-
-References:
-
-- <https://workos.com/docs/custom-domains>
-- <https://workos.com/docs/custom-domains/authkit>
-- <https://workos.com/docs/custom-domains/auth-api>
-
-Official references:
-
-- <https://workos.com/docs/authkit/environments>
-- <https://workos.com/docs/authkit/applications>
-- <https://workos.com/docs/authkit/sessions>
-
-## Current-state audit findings
-
-Phase 0 found the following Auth0-era behavior. None of it is silently accepted
-as the WorkOS design:
-
-| Severity | Finding                                                                                                                                                                                                                                                         | Required migration outcome                                                                                                                                                                                              |
-| -------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Critical | The web callback base64-decodes the Auth0 ID-token payload and uses its unverified profile/email claims to create the browser session. It does not verify the token signature, issuer, audience, or nonce.                                                      | Use the trusted `User` returned by the server-side WorkOS code exchange. Independently verify every bearer access token at the resource server.                                                                         |
-| High     | Desktop mint calls the browser session's refresh grant. Under rotation, the returned refresh token replaces the browser token and is also placed in the desktop ticket; that is another token for the same provider session, not an independent device session. | Authenticate the desktop Application independently so web and desktop receive separate `sid` values and revocation boundaries.                                                                                          |
-| High     | Browser session refresh, its best-effort lock, and desktop tickets live in Workers KV. KV can serve stale values for 60 seconds or more, while WorkOS documents a 30-second refresh-token replay grace period.                                                  | Use a WorkOS sealed session or strongly consistent coordinator for rotating browser state. Keep KV only for best-effort caching and abuse controls.                                                                     |
-| High     | Desktop ticket redemption is a KV `get` followed by `delete`, so two requests can redeem the same ticket concurrently.                                                                                                                                          | Prefer direct desktop PKCE, which removes the ticket. Any fallback broker must use an atomic consume primitive such as a Durable Object.                                                                                |
-| High     | Product ownership still leaks the Auth0 subject into desktop/engine owner checks, GitHub credential ownership, Intercom `external_id`, provider presentation, and deferred cloud credential hashes.                                                             | Resolve the verified WorkOS subject to `users.id` once, consume the UUID already returned by `/v1/me`, and use it for every product/integration owner. Provider subjects remain authentication bindings, not owner IDs. |
-| Medium   | The operation named `auth_sign_out_everywhere` revokes one desktop refresh token and clears one local record. It does not enumerate or revoke the user's other sessions.                                                                                        | Make current-device and all-device logout separate operations; the latter lists and revokes every WorkOS session for the internal account's WorkOS identity.                                                            |
-| Medium   | `/healthz` proves only database reachability, and no release check proves a real web or desktop token against the deployed issuer/JWKS/audience/client allowlist.                                                                                               | Keep health local, and add a secret-safe post-deploy synthetic authentication check per channel.                                                                                                                        |
-| Medium   | The web package has route/host/proxy tests but no direct tests for OAuth start/callback, browser session rotation, handoff mint/redeem, or revoke.                                                                                                              | Add deterministic request-level tests before replacing each flow and retain negative/race cases as release gates.                                                                                                       |
-| Medium   | The repository secret scanner recognized many vendor keys and `sk_live_` but had no explicit realistic-length rule for WorkOS staging/current keys.                                                                                                             | Closed in Phase 0 with an end-to-end scanner regression for `sk_test_...` and current `sk_...` forms. Auth SDK errors must still be scrubbed without logging request headers or sealed sessions.                        |
-
-Cloudflare's consistency model and WorkOS's rotation behavior are documented at:
-
-- <https://developers.cloudflare.com/kv/concepts/how-kv-works/>
-- <https://workos.com/docs/authkit/session-resilience>
-
-## Access-token contract
-
-The control plane accepts only RS256 tokens that satisfy all of these checks:
-
-- exact configured issuer;
-- exact channel API audience;
-- signature from the configured environment JWKS;
-- unexpired `exp`, with `iat`, `sub`, `sid`, and `jti` present;
-- `client_id` equal to that channel's web or desktop Application;
-- `https://zeros.build/email` is a non-empty string; and
-- `https://zeros.build/email_verified` is exactly `true`.
-
-Profile strings are trimmed before use. The optional picture claim is retained
-only when it is a bounded HTTPS URL without embedded credentials; an invalid
-avatar is presentation loss, not an authentication failure.
-
-The proposed WorkOS JWT Template is intentionally small:
-
-```json
-{
-  "aud": "<exact channel API origin>",
-  "https://zeros.build/email": {{ user.email }},
-  "https://zeros.build/email_verified": {{ user.email_verified }},
-  "https://zeros.build/name": "{{ user.first_name || '' }} {{ user.last_name || '' }}",
-  "https://zeros.build/picture": {{ user.profile_picture_url }}
-}
+```sh
+pnpm --dir apps/control-plane staff:manage
 ```
 
-The WorkOS dashboard must validate and preview the final template. A real token
-from both Applications must then pass the checked-in contract probe:
+The plan prints no database URL or email. It returns an approval string bound
+to the database fingerprint, deployment channel, actor, subject, current role,
+next role, and a hash of the reason. Copy that exact value into
+`CONTROL_PLANE_STAFF_APPROVAL`, then execute:
 
-```bash
-cd apps/control-plane
-
-(
-  read -r -s -p 'Fresh access token: ' AUTH_PROBE_ACCESS_TOKEN
-  export AUTH_PROBE_ACCESS_TOKEN
-  printf '\n'
-
-  AUTH_PROBE_CLIENT_KIND='web' \
-  AUTH_ISSUER='<exact iss claim, including trailing-slash behavior>' \
-  AUTH_JWKS_URL='<exact environment JWKS URL>' \
-  AUTH_AUDIENCE='https://api-alpha.zeros.build' \
-  AUTH_WEB_CLIENT_ID='<alpha-web-client-id>' \
-  AUTH_DESKTOP_CLIENT_ID='<alpha-desktop-client-id>' \
-  pnpm auth:probe
-)
+```sh
+pnpm --dir apps/control-plane staff:manage --execute
 ```
 
-Run the same command with a desktop token and
-`AUTH_PROBE_CLIENT_KIND=desktop`. The probe prints only contract booleans and
-expiry, never the token, subject, email, session ID, or client ID. Do not store
-the token in a file, shell history, issue, chat, or CI log.
+Production additionally requires
+`CONTROL_PLANE_STAFF_PRODUCTION_CONFIRMED=true`. Execution re-locks and
+revalidates the target, rejects a stale plan, increments `auth_revision`, emits
+`account.authorization_changed`, and appends the owner-only
+`staff_role_changes` record in the same transaction. The ordinary application
+role can neither mutate the staff column nor forge that evidence.
 
-Official token references:
+## Organization management synchronization
 
-- <https://workos.com/docs/reference/authkit/session-tokens>
-- <https://workos.com/docs/authkit/jwt-templates>
-- <https://workos.com/docs/authkit/applications>
+Every collaborative Zeros organization owns exactly one WorkOS Organization,
+correlated by `external_id=<zeros organization UUID>`. Personal deliberately
+has no WorkOS Organization. Zeros-originated changes commit product state and a
+command in the same PostgreSQL transaction; a leased worker then converges the
+provider operation. Commands are at-least-once, aggregate-ordered, retry with
+bounded backoff, recover from provider-accepted/lost responses by listing the
+provider object, and dead-letter rather than guessing after a terminal error.
 
-### Alpha live contract observation (2026-08-23)
+Signed webhooks are the low-latency path. The WorkOS Events API is the durable
+repair path and advances a stored cursor only after an event is applied,
+ignored by policy, or safely quarantined for forward-incompatible payloads.
+Projection timestamps reject stale updates. Successful local removal writes a
+terminal membership tombstone, and an event arriving while a membership
+command is queued/processing may update the provider projection but cannot
+overwrite the locally enforced desired state. Invitation replacement is
+serialized by organization plus a hash of normalized email. If an invitation
+event arrives after WorkOS accepts a command but before the exact provider ID
+is committed locally, it is retained as ignored and replayed immediately after
+that exact ID is correlated; replay never falls back to email matching.
 
-Secret-safe qualification against the Alpha staging environment established
-the following contract without recording tokens, identity fields, session IDs,
-or full client IDs:
+The invitation command asks WorkOS to send one seven-day native branded email,
+including the authenticated inviter when available. Each WorkOS Application's
+custom User Invitation URL points to the exact channel's `/invite`; WorkOS
+appends `invitation_token`. Web and Desktop carry that opaque value only to the
+authenticated Zeros acceptance endpoint. Railway resolves it through the
+WorkOS API, then requires the returned pending object to match the exact stored
+provider invitation ID, linked WorkOS organization, recipient email, and role.
+A WorkOS organization invitation is intentionally not passed into AuthKit's
+authenticate call: WorkOS documents that a corporate-domain invitation may be
+accepted by a different address on the same domain. Hosted AuthKit performs the
+normal identity ceremony, while Zeros' authenticated acceptance endpoint keeps
+the stricter exact-recipient product-authorization boundary. This assumes normal
+AuthKit registration remains available; an invite-only registration rollout
+would require a separately reviewed design that preserves this exact check.
+A command/email race is retryable only while the matching local outbox command
+is queued or leased. A Dashboard-created invitation with no Zeros record fails
+closed. The locally generated token remains a compatibility/copyable-link
+capability: it cannot be consumed until the exact provider ID is correlated,
+and every attempt re-fetches that WorkOS invitation by ID and requires it to
+remain pending with the exact organization, recipient, and role before applying
+the same exact-recipient check. A direct WorkOS revoke therefore fails closed
+even if its webhook or Events API repair has not reached Railway yet.
 
-- The two supplied Application client IDs are distinct. Their public JWKS
-  endpoints each returned one RS256 signing key with identical key material.
-- Both the Web and independently authenticated Desktop access tokens passed
-  `pnpm auth:probe` using the default Web Application's JWKS endpoint.
-- The exact issuer for both Applications is
-  `https://api.workos.com/user_management/<alpha-web-client-id>` with no
-  trailing slash. The shared verification endpoint is
-  `https://api.workos.com/sso/jwks/<alpha-web-client-id>`.
-- Both tokens used the exact Alpha API audience and correct Application
-  `client_id`, were signed with RS256, lived for 300 seconds, and contained
-  non-empty `sub`, `sid`, and `jti` plus numeric `iat` and `exp`.
-- The saved JWT Template rendered the namespaced email and verified-email
-  claims, plus the optional name and picture claims. The trusted code-exchange
-  User also reported a verified email. Neither flow returned Google or GitHub
-  provider OAuth tokens.
-- Desktop authorization and refresh succeeded as a public PKCE client without
-  a Desktop API key. Web and Desktop produced separate sessions for the same
-  WorkOS User. The Sessions API exposed 30-day Web and 90-day Desktop maximum
-  session lengths.
-- The Web Application's server credential listed both sessions, revoked the
-  Desktop session, and then listed and revoked the remaining Web session. No
-  Desktop credential was required. Refreshing the revoked Desktop session
-  returned terminal `invalid_grant`; its already-issued access token continued
-  to pass local cryptographic verification until expiry, as designed. The
-  final active-session list was empty.
-- The Desktop refresh returned a different refresh token and retained the same
-  `sid`. The Web refresh returned the same refresh token; immediate reuse
-  succeeded, and reuse after the documented 30-second grace window did not
-  return `invalid_grant`. WorkOS's current primary references conflict here:
-  Session Resilience describes rotation on every exchange, while Sessions and
-  the emulator guide state that production may return the same token. Phase 1
-  must therefore serialize refreshes and durably store every successful
-  response even when the returned value is unchanged. Known transient failures
-  preserve the existing session; terminal `invalid_grant` clears it.
+Consuming either supported invitation capability retires every pending WorkOS invitation for the
+exact organization/email pair before creating or updating the coarse WorkOS
+membership. Removing a member uses the same ordering key: pending invitations
+are revoked before the membership is deleted. Revoke and delete commands always
+reconcile their captured provider ID with the current provider listing, so a
+duplicate invitation, a lost-response replacement, or a membership created
+after the local transaction cannot escape cleanup. If provider-side invitation
+acceptance wins between listing and revocation, the event invalidates the
+still-pending local invitation rather than marking product access accepted.
+An unsolicited non-SCIM active membership is projected for audit/repair but is
+not materialized into `organization_members`. The serialized membership command
+then enforces Zeros' current desired state. This closes both the old-invite
+re-add race and WorkOS's documented same-corporate-domain invitation allowance.
 
-References for the observed refresh-contract discrepancy:
+For an existing WorkOS user, sending a provider invitation also creates a
+`pending` organization membership. Revoking that invitation does not activate
+the membership, and WorkOS requires a pending membership to be deleted before
+an active membership can be created. The command worker therefore observes the
+provider after a failed create, recovers an already-active membership, or
+deletes non-directory-managed pending memberships and creates the active
+replacement. WorkOS lists only active memberships by default, so every
+reconciliation listing explicitly requests `active`, `inactive`, and `pending`
+statuses. A delayed deletion event for the replaced pending object is keyed
+to that exact WorkOS membership ID and cannot remove the newer active object.
 
-- <https://workos.com/docs/authkit/session-resilience>
-- <https://workos.com/docs/authkit/sessions>
-- <https://workos.com/docs/cli/emulate>
+Directory-managed (`directory_managed=true`) memberships materialize with
+`membership_source='scim'`. Zeros refuses local role changes and removals for
+them because directory group assignment takes precedence and would otherwise
+create split-brain access. Enterprise administrators must make those changes
+in their identity provider.
 
-Application redirects, default sign-out URIs, inactivity timeouts, and the JWT
-Template source are Dashboard-only configuration and were not returned by the
-public API. The successful loopback flows and real token claims qualify the
-registered local redirects and rendered template, but the remaining
-Dashboard-only values still require an operator check.
+The subscribed management event set is:
 
-Operator screenshots on 2026-08-23 confirmed the Web Application's 30-day
-maximum session length, 5-minute access-token duration, and 7-day inactivity
-timeout, plus the Desktop Application's corresponding 90-day, 5-minute, and
-30-day policy. Additional operator screenshots confirmed the configured Web
-and Desktop default sign-out URI matches the Alpha application origin.
+- `user.created`, `user.updated`, `user.deleted`;
+- `session.created`, `session.revoked`;
+- `organization.created`, `organization.updated`, `organization.deleted`;
+- `organization_membership.created`, `.updated`, `.deleted`; and
+- `invitation.created`, `.accepted`, `.revoked`, `.resent`.
 
-## Session architecture
+`user.created` is recorded/ignored for JIT product provisioning: only a
+verified Zeros API request creates the durable product account. Events are
+idempotent by WorkOS event ID.
 
-### Browser
+## Revocation without polling
 
-Use WorkOS authorization code plus PKCE. The code exchange's returned `User`
-object is the trusted profile source; do not decode an unverified ID token.
-Bind a cryptographically random `state`, PKCE verifier, and relative return path
-inside short-lived server-side state; compare and consume it once at callback,
-and never accept an arbitrary return origin. Represent the resulting session to
-the browser with only a random `__Host-`-prefixed, `Secure`, `HttpOnly`,
-`SameSite=Lax`, `Path=/` credential cookie. Keep rotating state in a WorkOS
-sealed session under a strongly consistent server-side coordinator. Workers KV
-may remain an abuse-rate-limit or cache layer, but not the authority for
-refresh-token rotation. State-changing authenticated web routes retain explicit
-same-origin/CSRF defenses; `SameSite` is defense in depth, not the only check.
+Zeros does not call WorkOS every 30 seconds. Railway verifies ordinary access
+tokens locally and checks the Postgres account/session/membership projection.
+Security-relevant transactions increment monotonic revisions, append a durable
+`security_events` row, and wake connected clients through PostgreSQL
+`LISTEN/NOTIFY` (the notification is only a wake-up; rows are replayable).
 
-### Desktop
+The browser maintains one authenticated EventSource and the desktop main
+process maintains one bounded SSE connection. Account revocation broadcasts to
+every session for that account; a session revocation is replayed only to the
+client whose verified `sid` exactly matches the event. This keeps ordinary
+device logout device-scoped, while explicit all-device logout revokes each
+provider session. Organization authorization/data events refresh scoped state.
+Browser section snapshots and in-flight loads are generation-bound by exact
+organization/section key; an invalidation detaches an older request, and every
+waiter follows the replacement request instead of publishing stale member or
+invitation data.
+Launch performs a snapshot. Focus, visibility, macOS wake/unlock, and reconnect
+request another snapshot only when the stream is absent or has been silent for
+at least 60 seconds. A provider/network timeout preserves the last confirmed
+state; a terminal 401/403 clears only the exact expected session using
+compare-and-set. Every protected API request remains the final enforcement
+boundary, so a disconnected client cannot use stale UI to regain access.
 
-Replace the browser-session mint with WorkOS's public-client authorization code
-plus PKCE flow. Electron main binds an ephemeral loopback listener before
-opening the browser, generates and retains state plus the PKCE verifier, and
-uses an exact registered callback such as
-`http://127.0.0.1:*/auth/callback`. WorkOS explicitly allows wildcard loopback
-ports for native clients, including in production. The callback is accepted
-once, only from loopback, only with matching state, and only while the flow is
-pending; Electron then exchanges the code using the desktop Application's
-public client ID and verifier. It stores the new refresh token in safe storage
-without exposing the code, verifier, access token, or refresh token to the
-renderer.
+## Trust boundaries
 
-This direct flow creates an independent WorkOS desktop session and removes the
-Cloudflare ticket/KV consistency boundary entirely. If live Alpha validation
-finds an SDK or dashboard constraint that prevents it, the fallback is a fresh
-desktop-Application authorization through the HTTPS broker and an atomic,
-strongly consistent one-time ticket. Refreshing or copying the browser session
-is never the fallback.
+| Component             | Authentication responsibility                                                                                                              | Secrets permitted                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| WorkOS Hosted AuthKit | Credentials, social login, email verification, MFA, account linking, recovery, bot controls                                                | WorkOS-managed credentials and provider secrets                              |
+| Railway control plane | Browser PKCE exchange, sealed browser sessions, refresh serialization, logout/revocation, webhook verification, JWT/resource-server checks | WorkOS API key, cookie password, webhook secret                              |
+| Railway Postgres      | Single-use browser flow state, serialized sealed sessions, internal identity mapping and authorization                                     | Short-lived PKCE verifier and sealed session; no browser access-token column |
+| Cloudflare Pages      | Stateless same-origin routing and exact-channel HTTPS desktop callback                                                                     | No WorkOS API key, cookie password, refresh token, or client secret          |
+| Electron main         | Public-client PKCE, exact-channel deep-link validation, WorkOS token exchange/verification, OS-protected persistence                       | Public client ID, in-memory verifier, encrypted session material             |
+| Renderer              | Starts/cancels sign-in and receives bounded session/UI state                                                                               | No verifier, authorization code, refresh token, API key, or client secret    |
 
-The stored desktop record evolves additively with internal account ID, WorkOS
-session ID, and client kind. Existing persisted key names are not renamed merely
-because identity data is disposable.
+WorkOS API calls are isolated to explicit authentication and management
+operations. Ordinary `/v1/*` requests verify JWTs locally against pinned JWKS;
+they do not call WorkOS and do not need its API key.
 
-WorkOS may rotate a refresh token, and rotated tokens have a short replay grace
-period. Persist every successful refresh response before another refresh even
-when its token value is unchanged, serialize refreshes per session, retain
-state on network, timeout, rate-limit, and supported server failures, and clear
-state only on a terminal grant rejection.
+## Browser flow
 
-Official native/public-client references:
+1. The signed-out hub links only to `/auth/start?return=<safe-relative-path>`.
+   Pages discards every other authorization selector and forwards the request
+   to the matching Railway channel.
+2. Railway generates 256-bit random browser credential, OAuth state, and PKCE
+   verifier values. Only SHA-256 digests of the browser credential and state
+   are indexed in Postgres. The verifier is retained in the expiring flow row
+   because it is required for code exchange.
+3. Railway sets a `Secure`, `HttpOnly`, host-only, `SameSite=Lax`
+   `__Host-zeros_auth_flow` cookie and redirects to Hosted AuthKit with
+   `provider=authkit`, S256 PKCE, the Web Application client ID, and the exact
+   HTTPS callback. `Lax` is limited to this short-lived cross-site callback
+   ceremony.
+4. Hosted AuthKit completes the entire login, verification, MFA, recovery, and
+   linking ceremony before returning a code.
+5. Railway atomically claims the ten-minute flow using both cookie and state,
+   exchanges the code, requires a verified WorkOS user, authenticates the
+   sealed session, and promotes the same row to a browser session.
+6. Railway rotates to the `Secure`, `HttpOnly`, host-only, `SameSite=Strict`
+   `__Host-zeros_session` cookie on a no-store, no-referrer `200` completion
+   document. That document immediately performs a same-site navigation to the
+   previously bounded relative return path, with a manual-link fallback. A
+   `3xx` is intentionally not used here: browsers retain the cross-site AuthKit
+   context across redirect hops and withhold Strict cookies until a same-site
+   document initiates the next navigation.
+7. Pages obtains a short-lived access token from Railway only while proxying
+   an authenticated request. It never persists provider tokens.
 
-- <https://workos.com/docs/reference/authkit/authentication/get-authorization-url>
-- <https://github.com/workos/workos-node/blob/main/docs/V8_MIGRATION_GUIDE.md>
+Browser refresh is serialized under PostgreSQL advisory and row locks so
+rotating refresh material cannot race across Railway replicas. A transient
+provider/network error retains the last valid sealed-session snapshot for a
+bounded retry; a terminal provider result deletes the local session.
 
-### Logout
+## Desktop flow
 
-Store the verified WorkOS `sid`. Browser logout clears the sealed cookie and
-uses WorkOS's logout endpoint. Desktop current-device logout asks the
-server-side auth broker to revoke the exact verified `sid`, then clears local
-safe storage even if the network is unavailable. An explicit all-device
-operation lists the user's active sessions and revokes each one through that
-broker; revoking one refresh token must not be labelled “sign out everywhere.”
+1. Electron main creates a 256-bit state suffix and PKCE verifier, retains the
+   verifier only in the pending in-memory flow, and opens
+   `${APP_ORIGIN}/auth/desktop` in the system browser.
+   The OS browser-launch acknowledgement is bounded to five seconds because
+   some shell/browser combinations open successfully without settling the
+   promise. The main-owned ten-minute PKCE deadline remains authoritative;
+   a late launch failure closes that exact attempt and surfaces a retryable
+   signed-out state.
+2. Pages immediately forwards the bounded state and S256 challenge to
+   Railway. `/auth/desktop/start` remains as a compatibility entry point for
+   older pages/releases, but no longer honors a provider selector.
+3. Railway validates the exact channel scheme in state, fixes the redirect to
+   `${APP_ORIGIN}/auth/desktop/callback`, selects the Desktop Application
+   client ID, and redirects to Hosted AuthKit.
+4. The HTTPS callback emits only a short-lived authorization code, state, or
+   bounded provider error to the exact installed channel:
+   `zeros-alpha://`, `zeros-beta://`, or `zeros://`.
+5. Electron validates state with a timing-safe comparison and exchanges the
+   code directly with WorkOS using PKCE. It verifies RS256, exact issuer,
+   audience, Desktop Application `client_id`, required token identifiers,
+   namespaced email, and `email_verified=true` before persistence.
+6. Electron resolves the internal Zeros account and stores session material
+   through OS-protected `safeStorage`. If account resolution or persistence
+   fails after WorkOS created a session, it attempts to revoke that session.
 
-Local JWT verification cannot observe a session revocation until an already
-issued access token expires. The five-minute access-token policy deliberately
-bounds that replay window; cookie/local deletion ends the normal client session
-immediately. A future operation that requires stronger immediate revocation or
-step-up assurance must perform an explicit active-session/reauthentication
-check instead of weakening ordinary requests with a WorkOS network dependency.
+The custom scheme is a Zeros handoff after WorkOS returns to HTTPS. It is not a
+new-build WorkOS redirect URI. Authorization codes are short-lived and bound
+to the verifier that never enters the browser, Pages, callback URL, renderer,
+or logs.
 
-Alpha must prove that the web Application's server credential can list and
-revoke sessions created by both Applications. If WorkOS scopes management calls
-per Application, the broker must use the documented environment-wide
-credential or both server-side credentials. Those credentials remain confined
-to Railway's auth routes and are never required by ordinary resource requests.
+The current Electron design applies to macOS, Windows, and Linux. Each packager
+must register only its release channel's scheme and must pass the same hostile
+deep-link regression suite. Platform packaging checks remain mandatory; a
+successful macOS smoke test is not evidence for Windows or Linux registration.
 
-Reference: <https://workos.com/docs/reference/authkit/session>
+## Environment and Application topology
 
-## Railway-template boundary
+Authentication data is isolated by release channel. Never share a Production
+user/session boundary with Alpha or Beta.
 
-A future Railway template should deploy this same control plane and its
-Postgres without embedding a Zeros-owned identity-provider secret. The person
-installing the template supplies credentials for their own WorkOS environment;
-the template may generate the cookie password. Public inputs are:
+| Zeros channel | WorkOS environment                     | Current Applications                               | Audience                        |
+| ------------- | -------------------------------------- | -------------------------------------------------- | ------------------------------- |
+| Alpha         | isolated staging/test-data environment | `Zeros Web Alpha` (default), `Zeros Desktop Alpha` | `https://api-alpha.zeros.build` |
+| Beta          | isolated staging/test-data environment | `Zeros Web Beta` (default), `Zeros Desktop Beta`   | `https://api-beta.zeros.build`  |
+| Production    | isolated production environment        | `Zeros Web` (default), `Zeros Desktop`             | `https://api.zeros.build`       |
 
-| Variable                 | Meaning                                      |
-| ------------------------ | -------------------------------------------- |
-| `AUTH_ISSUER`            | Exact trusted WorkOS issuer                  |
-| `AUTH_JWKS_URL`          | Exact environment JWKS endpoint              |
-| `AUTH_AUDIENCE`          | Public URL/identifier for this control plane |
-| `AUTH_WEB_CLIENT_ID`     | Allowed web Application client ID            |
-| `AUTH_DESKTOP_CLIENT_ID` | Allowed desktop Application client ID        |
+WorkOS Applications share the environment's user base while keeping client
+IDs, redirect URIs, sessions, and credentials separate. See
+[Applications](https://workos.com/docs/authkit/applications). The default Web
+Application establishes the environment issuer/JWKS contract; every token is
+still admitted only when its `client_id` belongs to the configured Zeros
+application allowlist.
 
-`DATABASE_URL` remains a Railway reference to the template-owned Postgres.
-`APP_ORIGIN` identifies the template owner's web origin. `WORKOS_API_KEY` and
-`WORKOS_WEBHOOK_SECRET` are installer-supplied Railway secrets, while
-`WORKOS_COOKIE_PASSWORD` is a unique generated 32-byte-or-longer Railway
-secret. Template variables require descriptions; secrets are sealed or
-generated; service-to-database traffic uses private references. A custom WorkOS
-domain is optional—the WorkOS-hosted AuthKit domain is sufficient. A template
-may use platform-provided HTTPS domains for both frontend and API, so buying a
-custom domain is not a prerequisite. Those must remain separate origins; two
-services in one Railway project can each use a generated Railway domain.
-The template sets `ZEROS_SELF_HOSTED=true`; official Zeros deployments leave
-that variable unset so their exact channel, branch, audience, and app-origin
-assertions remain fail-closed.
+Future clients follow the same rule:
 
-`/healthz` remains a local liveness/readiness check and must not depend on a live
-WorkOS request. A post-deploy synthetic login/token request proves the external
-authentication contract.
+| Platform                | Recommended WorkOS boundary                                                                                                                          | Client treatment                                                                  |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| Browser                 | One Web Application per release channel                                                                                                              | Server-brokered code + PKCE; secret only on Railway                               |
+| macOS / Windows / Linux | Separate Desktop Application when platform policy or callback registration diverges; current Electron releases share the channel Desktop Application | Public client, system browser, PKCE, exact-channel app link                       |
+| iOS                     | One iOS Application per release channel                                                                                                              | Official AuthKit iOS SDK, system authentication session, PKCE, universal/app link |
+| Android                 | One Android Application per release channel                                                                                                          | Official AuthKit Android SDK, system browser/custom tab, PKCE, verified app link  |
 
-The hosted Alpha/Beta/Production audience contract is not, by itself, a safe
-multi-instance self-hosting contract. A template must never accept a generic
-Zeros access token and JIT-provision every valid WorkOS user: the same bearer
-could then be replayed to every customer-owned instance. Before a public
-template ships, add a separate instance-authorization layer with these
-properties:
+Before adding mobile or platform-specific desktop client IDs, extend the
+backend verifier from the current Web/Desktop pair to an explicit
+platform-to-client-ID allowlist. Do not reuse the Web client ID and do not put a
+WorkOS API key or cookie password in any distributed application.
 
-- each deployment generates a non-secret instance ID and a secret one-time
-  bootstrap/pairing credential;
-- an unclaimed deployment is deny-by-default and has no “first caller wins”
+## Redirect matrix
+
+Register these exact HTTPS redirects:
+
+| Channel    | Web Application                               | Desktop Application                                   | Post-callback app handoff     |
+| ---------- | --------------------------------------------- | ----------------------------------------------------- | ----------------------------- |
+| Alpha      | `https://app-alpha.zeros.build/auth/callback` | `https://app-alpha.zeros.build/auth/desktop/callback` | `zeros-alpha://auth/callback` |
+| Beta       | `https://app-beta.zeros.build/auth/callback`  | `https://app-beta.zeros.build/auth/desktop/callback`  | `zeros-beta://auth/callback`  |
+| Production | `https://app.zeros.build/auth/callback`       | `https://app.zeros.build/auth/desktop/callback`       | `zeros://auth/callback`       |
+
+Do not register wildcard production redirects. Localhost redirects belong only
+to disposable development/testing Applications. Retain legacy redirects only
+for the measured support/rollback window, then remove them in a recorded
+dashboard change.
+
+## Token contract
+
+Capture the contract from real tokens in each environment; do not derive it
+from a dashboard domain or assume two Applications emit identical claims.
+
+Zeros currently requires:
+
+- `alg=RS256`;
+- exact `iss` from `AUTH_ISSUER`;
+- exact API `aud` from `AUTH_AUDIENCE`;
+- signature from the exact `AUTH_JWKS_URL`;
+- non-empty `sub`, `sid`, and `jti` plus numeric `iat` and `exp`;
+- `client_id` equal to the configured Web or Desktop Application ID for that
   path;
-- claiming records the centrally resolved Zeros internal account UUID as the
-  bootstrap owner, and later users require explicit membership/invitation;
-- the client obtains a short-lived, signed grant bound to account UUID,
-  instance ID, purpose, `jti`, and expiry; the template verifies a public key
-  and exact instance audience, not a Zeros-owned WorkOS API key; and
-- pairing, owner recovery, grant revocation, key rotation, and instance deletion
-  receive their own threat model and release tests.
+- non-empty `https://zeros.build/email`; and
+- `https://zeros.build/email_verified` equal to boolean `true`.
 
-That grant can be introduced behind the provider-neutral principal boundary
-without changing product ownership keys. Designing and shipping the public
-template is deferred; Phase 0 deliberately records this gate so the current
-hosted JWT audience is not later mistaken for customer-instance isolation.
+Optional presentation claims are
+`https://zeros.build/name` and `https://zeros.build/picture`. Authorization
+never depends on them.
 
-Railway references:
+The Alpha contract previously qualified with a shared environment issuer/JWKS,
+distinct Web/Desktop `client_id` values, RS256, namespaced claims, and
+five-minute access tokens. Re-run the contract probe after every Application,
+JWT-template, session-policy, custom-domain, or WorkOS-environment change.
+Recorded initial session policy was 30-day maximum / 7-day inactivity for web
+and 90-day maximum / 30-day inactivity for desktop; the dashboard remains the
+authority and must be re-audited before deployment.
 
-- <https://docs.railway.com/templates/best-practices>
-- <https://docs.railway.com/variables>
-- <https://docs.railway.com/deployments/healthchecks>
+## WorkOS dashboard checklist
 
-## Estimated migration effort
+Perform this independently for Alpha, Beta, and Production and record the
+result without copying secrets into tickets or repository files.
 
-The clean-slate decision removes user import, account pre-linking, dual-provider
-verification, legacy-session adoption, and a zero-downtime user transition. It
-does not remove the work needed to make web and desktop sessions correct.
+1. Confirm the exact environment and make its Web Application the default.
+2. Create/verify separate Web and Desktop Applications and record their public
+   client IDs.
+3. Register only the channel's exact redirects and default sign-out URI.
+4. Enable Hosted AuthKit, Google, GitHub, and Magic Auth. Keep email
+   verification and WorkOS-managed authentication email enabled. Keep
+   email-and-password authentication disabled unless a later product decision
+   adds it. Configure MFA/recovery policy in Hosted AuthKit, not in Zeros code.
+5. Keep WorkOS's native **user invitation** email enabled. Under the exact
+   channel Application's redirect settings, set **User Invitation URL** to
+   `https://app.zeros.build/invite`,
+   `https://app-beta.zeros.build/invite`, or
+   `https://app-alpha.zeros.build/invite` as appropriate. WorkOS appends
+   `invitation_token`; the page offers the exact Desktop channel or the
+   Railway-owned browser state/PKCE flow, stores the token only in tab-scoped
+   `sessionStorage`, and strips it from the address bar before sign-in. Create
+   organization invitations through Zeros, not manually in the WorkOS
+   Dashboard. Keep Magic Auth, verification, recovery, and other WorkOS
+   authentication emails enabled. See WorkOS
+   [Invitations](https://workos.com/docs/authkit/invitations),
+   [Applications](https://workos.com/docs/authkit/applications), and
+   [Custom Emails](https://workos.com/docs/authkit/custom-emails).
+6. Configure Zeros-owned Google/GitHub OAuth credentials before Production.
+   Provider tokens and extra provider scopes must remain disabled. Follow the
+   WorkOS [GitHub OAuth setup](https://workos.com/docs/integrations/github-oauth)
+   and equivalent provider guidance.
+7. Install the exact JWT template required above. Reject any template that
+   drops the boolean verified-email claim or changes audience.
+8. Set and record Web/Desktop access-token and session durations. Review
+   [Sessions](https://workos.com/docs/authkit/sessions) and
+   [session resilience](https://workos.com/docs/authkit/session-resilience).
+9. Create a webhook endpoint on the channel API origin at
+   `/auth/workos-webhook`, subscribed to the complete management event set in
+   this document. Store its signing secret only in Railway. Confirm the Events
+   API repair worker uses the same event set and environment.
+10. Apply branding, support/contact, legal, and localization settings. Keep the
+   Zeros signed-out page a launch surface, not a second login UI.
+11. Confirm Radar remains disabled and record that state. Do not change its
+    enforcement behavior as part of this rollout.
+12. For Production, evaluate an AuthKit custom domain as a branding and
+    anti-phishing improvement. A separate Auth API custom domain is not needed
+    by this design; keep API/JWKS configuration pinned to the qualified WorkOS
+    endpoints unless a reviewed migration changes it. See
+    [custom domains](https://workos.com/docs/custom-domains) and
+    [Auth API custom domains](https://workos.com/docs/custom-domains/auth-api).
 
-| Workstream                                                    | Engineering effort                    | Main uncertainty                                                               |
-| ------------------------------------------------------------- | ------------------------------------- | ------------------------------------------------------------------------------ |
-| Phase 0 contract/account qualification                        | 1–2 days; repository portion complete | Real token shape, cross-Application session management, Alpha dashboard access |
-| Provider-neutral control plane and identity ownership         | 2–4 days                              | Replacing provider-subject ownership without breaking GitHub/feedback paths    |
-| Railway web login and sealed Postgres session                 | 3–5 days                              | SDK compatibility and multi-replica refresh race tests                         |
-| Electron public-client loopback login                         | 4–7 days                              | App lifecycle, port/state races, secure persistence, logout/revocation         |
-| Alpha reset, deployment, synthetic checks, and failure drills | 2–4 days plus 3–7 elapsed soak days   | External OAuth-provider configuration and real failure behavior                |
-| Beta/Production promotion and Auth0 removal                   | 2–4 days plus channel soak            | Environment drift, production credentials, rollback rehearsal                  |
+## Runtime configuration
 
-Expected total: **14–26 focused engineer-days**, normally **3–5 calendar weeks
-for one senior engineer plus review**, followed by the chosen production soak.
-The deferred cloud-workspace implementation is excluded; only its stable
-internal-account boundary is included. The estimate moves down if the WorkOS
-Node SDK and cross-Application revocation pass unchanged, and up if either
-requires further provider-specific session coordination.
+Railway receives:
 
-The future public Railway template's bootstrap and instance-bound grant system
-is also excluded from the migration estimate. Its seam is defined above, but it
-must be estimated and security-reviewed as a separate deliverable before the
-template is offered to users.
+```text
+AUTH_PROVIDER=workos
+APP_ORIGIN=<exact channel app origin>
+AUTH_ISSUER=<qualified exact issuer>
+AUTH_JWKS_URL=<qualified exact JWKS URL>
+AUTH_AUDIENCE=<exact channel API audience>
+AUTH_WEB_CLIENT_ID=<channel Web Application client ID>
+AUTH_DESKTOP_CLIENT_ID=<channel Desktop Application client ID>
+WORKOS_API_KEY=<channel environment server key>
+WORKOS_COOKIE_PASSWORD=<unique random 32+ character value>
+WORKOS_WEBHOOK_SECRET=<channel endpoint signing secret>
+```
 
-## Clean reset and rollback
+`WORKOS_API_KEY`, `WORKOS_COOKIE_PASSWORD`, and `WORKOS_WEBHOOK_SECRET` are
+Railway-only secrets. Rotate each independently per channel. A cookie-password
+rotation invalidates outstanding browser sealed sessions, so schedule and
+communicate it as a forced browser sign-in.
 
-Before resetting one channel:
+WorkOS mode does not require `ZEPTOMAIL_TOKEN` or `EMAIL_FROM` for organization
+invitations; the WorkOS invitation command owns the one delivery. Those
+variables remain optional for Zeros-specific recovery/account-lifecycle
+security notifications and the Auth0 rollback path. WorkOS custom email
+branding/domain configuration is not a generic transactional email API, so a
+separate provider is still required if those product notifications must be
+delivered. Security notifications use the durable outbox with a stable client
+reference, and operators must monitor failures rather than treating an HTTP
+timeout as proof that a message was not accepted.
 
-1. Resolve and record its exact Railway environment and database service.
-2. Prove the other two `DATABASE_URL` values are different without printing
-   credentials.
-3. Take a volume/PITR backup and a portable logical dump, then perform a restore
-   drill.
-4. Record row counts for users, identities, organizations, memberships, teams,
-   invitations, GitHub authorization data, feedback links, and cloud-workspace
-   records.
-5. Prefer provisioning a fresh channel database and running all migrations. If
-   an in-place reset is necessary, review the exact foreign-key closure first;
-   never improvise a partial user-table delete.
-6. Switch Alpha first. Beta and Production remain unchanged until the prior
-   channel passes its gates.
+Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
+`CONTROL_PLANE_URL`. Electron compiles only public verification/configuration
+values: provider, app origin, desktop client ID, issuer, JWKS URL, and audience.
 
-A Railway deployment rollback restores application image/configuration, not a
-database reset. Keep the pre-reset database available until the channel is
-accepted. Do not automatically delete WorkOS users during an application
-rollback.
+## Rollout and rollback
 
-Railway reset/rollback references:
+1. Snapshot current dashboard/application settings and deployed SHAs.
+2. Configure Hosted AuthKit, Applications, redirects, JWT template, sessions,
+   social credentials, and webhook in Alpha.
+3. Deploy the backward-compatible Railway slice first. Old provider query
+   parameters remain accepted but inert; the old verification endpoint is
+   absent.
+4. Deploy Alpha Pages, then an Alpha desktop build from the same qualified
+   commit. Set `AUTH_PROVIDER=workos` only when all three surfaces have their
+   complete configuration.
+5. Run automated repository/emulator checks and the manual Alpha matrix below.
+6. Hold an observation window, audit provider and Zeros session/revocation
+   events, then repeat in Beta from the exact promoted SHA.
+7. Promote the exact Beta SHA to Production with Production autodeploy still
+   disabled. Do not recreate configuration ad hoc during promotion.
+8. Retain Auth0 code/configuration only for the declared rollback window. Its
+   removal is a later, separately reviewed change.
 
-- <https://docs.railway.com/environments>
-- <https://docs.railway.com/guides/postgres-backups-restores>
-- <https://docs.railway.com/deployments/deployment-actions>
+Rollback is an atomic provider/configuration rollback across Railway, Pages,
+and the desktop release. Do not restore the deleted verification bypass or mix
+WorkOS-issued sessions with Auth0 verification. Existing WorkOS sessions may
+be revoked during rollback; internal product ownership remains safe because it
+uses Zeros account UUIDs.
 
-## Phase 0 gates
+## Verification strategy
 
-Completed in the repository:
+Automated tests cover:
 
-- Current Auth0 call sites, persistent subjects, web/desktop handoff, engine
-  verifier, environment guards, and deployment topology inventoried.
-- Clean-slate migration and deferred cloud-workspace scope recorded.
-- Internal UUID retained as the durable account boundary.
-- Three-environment/two-Application topology selected.
-- Provider-neutral Railway resource-server inputs selected.
-- Checked-in token contract and safe live-token probe added.
-- WorkOS API-key shapes added to the tracked-file secret scanner with an
-  end-to-end regression test.
+- Hosted AuthKit is always selected for Web and Desktop Applications;
+- legacy/hostile provider, connection, and organization selectors are inert;
+- browser flow/state credentials, return-path bounds, one-time claims,
+  promotion, cookie properties, refresh serialization, and logout;
+- desktop state/channel/PKCE/deep-link validation and fail-closed persistence;
+- removal of the anonymous verification endpoint and pending-token handling;
+- JWT signature/issuer/audience/client-ID/verified-email contracts; and
+- WorkOS's official local emulator performing Hosted AuthKit authorization,
+  PKCE exchange, JWT-template rendering, sealed-session authentication, and a
+  wrong-verifier rejection.
 
-Dashboard milestones reported complete by the Alpha operator:
+Use the emulator for deterministic integration and failure tests. WorkOS
+recommends a smaller real-staging suite for final compatibility. Do not automate
+the real Hosted UI as the primary E2E suite: provider UI and WorkOS Radar/bot
+controls are deliberately dynamic. See
+[Testing AuthKit](https://workos.com/docs/authkit/testing).
 
-- Distinct `Zeros Web Alpha` and `Zeros Desktop Alpha` Applications exist in
-  the Alpha staging environment.
-- WorkOS's Google and GitHub demo credentials are enabled.
-- Returning Google/GitHub OAuth tokens and additional provider scopes are
-  disabled.
-- The Alpha JWT Template validated and was saved with the exact Alpha audience.
-- The hosted and local Web callbacks are registered.
-- The desktop custom-scheme redirect `zeros-alpha://auth/callback` and wildcard
-  loopback redirect `http://127.0.0.1:*/auth/callback` are registered.
-- The Web Application session policy is 30 days maximum, 5 minutes per access
-  token, and 7 days of inactivity.
-- The Desktop Application session policy is 90 days maximum, 5 minutes per
-  access token, and 30 days of inactivity.
-- Both Applications use the Alpha application origin as their default sign-out
-  URI.
-- WorkOS-hosted domains were selected; a paid custom domain is not required.
+Manual Alpha acceptance must verify:
 
-Completed live against Alpha staging:
+- first-time and returning sign-in for every enabled method;
+- verification, denied/cancelled login, recovery, and MFA when enabled;
+- one WorkOS User when the same verified person uses Google and GitHub;
+- separate Web/Desktop session IDs and correct `client_id` claims;
+- browser refresh under concurrent requests and provider outage behavior;
+- desktop sign-in, restart restore, refresh, logout, all-session revocation,
+  cancellation, timeout, and malformed/wrong-channel deep links;
+- invalid Magic Auth code rejection, correct code, expiration, replay
+  rejection, persistence, and logout on both browser and desktop;
+- Google and GitHub first/returning login plus WorkOS identity-linking behavior;
+- user profile update/deletion, session revocation, organization/member/invite
+  webhook idempotency, reordering, lost-response recovery, and Events API
+  repair;
+- one and only one native WorkOS invitation email, proving there is no Zepto
+  duplicate and `invitation_token` accepts through exact server-side
+  correlation, strict state/PKCE on web, and the exact release-channel deep
+  link on desktop;
+- WorkOS User deletion while browser and desktop are open, proving both clients
+  terminate and that a recreated same-email identity enters reviewed recovery;
+- organization member removal/role change while both clients are open, proving
+  only organization-scoped access changes and Personal remains usable;
+- directory-managed membership refusal, last-owner safety, and cloud
+  create/wake denial after access or provider-link loss;
+- stream interruption/provider outage, proving last confirmed UI is retained
+  but protected APIs still deny stale access;
+- Pages contains no WorkOS secrets and response headers prevent auth callback
+  caching/referrer leakage; and
+- macOS smoke checks plus separately recorded Windows/Linux packaging checks
+  before claiming those platforms are qualified.
 
-- The supplied client IDs are distinct, and both public JWKS endpoints expose
-  the same RS256 signing key.
-- Real Web and independent Desktop tokens pass `pnpm auth:probe` with the exact
-  issuer, shared JWKS, audience, and per-Application client claim.
-- The JWT Template renders every required claim and both optional profile
-  claims for the test identity.
-- Desktop public-client PKCE, per-Application access/session lifetimes, distinct
-  session IDs, refresh, terminal revocation, cross-Application management, and
-  all-device revocation are qualified as described above.
-- Transient refresh classification is qualified from WorkOS's current Session
-  Resilience guidance. A live ambiguous timeout was deliberately not induced;
-  deterministic network, timeout, `429`, and supported `5xx` tests are in the
-  Phase 2 browser implementation. Phase 3 adds the corresponding desktop
-  network/terminal/rotation state machine and safe-storage clearing. Both
-  clients clear local state even when remote logout is unavailable.
+### Alpha evidence record — 2026-08-28–29 (Asia/Kolkata)
 
-Deferred operator actions required before the first Alpha deployment:
+This record distinguishes real-provider evidence from deterministic automated
+coverage. It is not a Production approval.
 
-- Rotate the Alpha Web API key used during qualification, because it left the
-  approved secret-injection path, then store the replacement only in the
-  secret/configuration system and verify that a fresh workspace receives it.
-  The operator deferred this rotation on 2026-08-23; the exposed credential
-  must not be used for further qualification or deployment while this blocker
-  remains.
-- Record the exact issuer, JWKS URL, both Application IDs, and final session
-  policies in the channel's secret/configuration inventory, not in Git, before
-  deploying the Phase 1 integration.
+Verified against the deployed Alpha Web and signed macOS Alpha application:
 
-With those operator actions explicitly deferred, Phase 0 discovery and live
-contract qualification are complete. Phase 1 repository implementation was
-unblocked to begin, but an Alpha deployment remains blocked until both actions
-are closed.
+- Hosted AuthKit launched from both clients with distinct Web/Desktop
+  applications and exact callbacks.
+- Magic Auth rejected an invalid/stale code, accepted the current Zoho-delivered
+  code, restored the resulting Personal organization, persisted across browser
+  reload and a full desktop quit/relaunch, and logged out correctly.
+- Desktop browser-sign-in cancellation and the ten-minute Zeros handoff expiry
+  returned to a retryable signed-out state; late callbacks were refused.
+- Google and GitHub completed provider authentication. Where a newly created
+  WorkOS identity collided with preserved Zeros ownership, the client entered
+  reviewed recovery instead of silently relinking by email.
+- Web and Desktop registered different WorkOS session IDs. Device logout revoked
+  only the initiating session; global logout revoked both, and an already-open
+  browser consumed the security stream and signed out without reload.
+- A real Alpha organization invitation opened the installed macOS application,
+  prefilled the bounded join credential, accepted successfully, and appeared in
+  the owner's member list. The exact merged-SHA link contained no scheme query;
+  the page selected the Alpha application from its deployment origin. Removing
+  the member updated the owner's open browser through SSE and the desktop kept
+  its authenticated Personal account.
+- The exact merged-SHA retest exposed a provider-lifecycle defect: WorkOS left
+  the existing user's invitation-created membership `pending`, and the active
+  membership command dead-lettered. The corrective convergence and cross-object
+  event-ordering regressions are implemented; a live post-deployment retest is
+  still a promotion gate.
+- A later live email retest exposed a separate entry defect: WorkOS's native
+  invitation authenticated successfully but returned to a callback without
+  Zeros-created state. The callback correctly failed closed. The replacement
+  design keeps WorkOS delivery, points its custom Invitation URL at the bounded
+  Zeros landing, and resolves `invitation_token` server-side against the exact
+  local authorization record. A post-deployment browser/Desktop retest remains
+  a release gate; this historical failure is not relabeled as passing evidence.
+- The deployed control-plane health endpoint, exact release version, Personal
+  bootstrap, secure browser cookie relay, strict same-site completion, and
+  session-revocation persistence were inspected after promotion.
 
-## Phase 1 control-plane implementation
+Deterministic repository/emulator coverage additionally verifies JWT and client
+binding, PKCE and wrong-verifier refusal, callback/deep-link validation,
+concurrent refresh serialization, provider failures, WorkOS event
+idempotency/reordering/repair, account-deletion projection, reviewed recovery,
+organization/member/invite convergence, directory and last-owner safeguards,
+tenant RLS, cloud create/wake denial, SSE replay, and stream-outage behavior.
+The database-backed control-plane suite passes every forward migration path,
+including the owner-only support-operator bootstrap and revocation path.
 
-Implemented in the repository:
+Still required before Alpha can be called fully qualified:
 
-- `AUTH_PROVIDER` selects legacy `auth0` or `workos`. WorkOS mode requires an
-  exact issuer, JWKS URL, audience, and distinct Web/Desktop Application IDs;
-  it does not derive vendor URLs and does not accept a WorkOS API key.
-- The Railway middleware verifies RS256 signature, exact issuer and audience,
-  expiry, issued-at time, provider subject, session ID, token ID, allowed
-  Application ID, and the saved namespaced verified-email JWT Template.
-- A verified WorkOS subject binds to `user_identities(provider='workos',
-provider_sub=...)`; `users.id` remains the canonical account and integration
-  owner. `/v1/me` never exposes the provider binding.
-- A new subject whose verified email is already owned fails with
-  `account_exists`; Phase 1 never auto-links or transfers an account by email.
-- Feedback identity now uses the internal account UUID. GitHub authorization
-  rows already use that UUID. The deferred cloud v1 credential wire field
-  `ownerSubjectSha256` intentionally retains its provider-subject meaning until
-  a separately versioned cloud protocol migration.
-- The clean-cutover reset command is a read-only plan by default, binds an
-  explicit Alpha/Beta approval to a non-secret database fingerprint, requires
-  backup confirmation, resets the whole `public` schema, replays migrations,
-  and refuses Production. A fresh database remains the preferred path.
+- Explicitly approved deletion of the disposable WorkOS test user while Web and
+  Desktop are open, followed by recreated-identity recovery. The destructive
+  provider deletion is intentionally not inferred from general test approval.
+- Selection and owner-mediated bootstrap of a dedicated `support_admin`, then a
+  live two-person recovery approval and immediate revocation of that temporary
+  authority.
+- A clean first-time and returning Google/GitHub identity-linking exercise for
+  the same person; existing preserved identities currently exercise the safer
+  recovery path instead.
+- The corrective merged-SHA native invitation retest proving there is exactly
+  one WorkOS email, browser and Desktop both accept its token, WorkOS reports
+  the member `active`, provider invitation/pending-membership artifacts are
+  retired after acceptance and removal, and no command dead-letters. A live WorkOS/security-
+  stream interruption drill also remains; automated race/outage coverage is not
+  relabeled as live evidence.
+- Windows and Linux release qualification on those operating systems. macOS
+  evidence and CI packaging do not qualify another platform.
 
-No live deployment or database reset is part of Phase 1 repository work. Alpha
-deployment remains blocked on rotating the exposed qualification key and
-recording the final public verification configuration. The deployed browser and
-desktop still produce Auth0 credentials until the coordinated cutover.
+MFA is currently disabled in the Alpha Hosted UI, so the conditional MFA item
+is not applicable to this Alpha configuration. Radar remains disabled by the
+explicit product decision above.
 
-## Phase 2 browser implementation
+## Primary references
 
-Implemented in the repository:
-
-- `AUTH_PROVIDER` selects the legacy Auth0/KV browser path or WorkOS. Hosted
-  Pages builds require an explicit selector and exact channel origins; WorkOS
-  mode rejects retired Durable Object bindings/markers and any provider key,
-  cookie password, signing secret, or client contract copied into Pages.
-- The existing Railway control plane owns WorkOS independently for Alpha,
-  Beta, and Production. Channel-local Postgres stores only SHA-256 digests of
-  opaque browser credentials and OAuth state, plus the server-side PKCE
-  verifier and WorkOS-encrypted sealed session. Access tokens are not database
-  columns, and no WorkOS secret enters Pages or browser JavaScript.
-- The browser receives only random 256-bit `__Host-zeros_auth_flow` and
-  `__Host-zeros_session` cookies with `Secure`, `HttpOnly`, `SameSite=Lax`, and
-  `Path=/`. Authorization state is exact, expires after ten minutes, and is
-  claimed atomically once. Return destinations are stored as relative paths and
-  revalidated against the exact application origin.
-- The callback uses the trusted WorkOS code-exchange User and accepts only an
-  explicitly verified email. Access tokens and sealed sessions are validated
-  server-side before the session becomes active; none enter browser JavaScript.
-- Near-expiry reads serialize refresh under PostgreSQL advisory/row locks and persist every
-  successful rotation. Pre-rotation timeout, network, rate-limit, and supported
-  server failures preserve the exact record. If rotation succeeds but a later
-  local JWT verification is transiently unavailable, the replacement seal is
-  persisted while the bearer is withheld. Terminal grant rejection deletes the
-  database session.
-- The dashboard proxy reuses the exact verified session snapshot, rejects a
-  transient auth state with 503, refreshes once after an upstream 401, and
-  releases unread response bodies before replay. WorkOS logout deletes local
-  durable state before constructing the provider logout URL and always clears
-  the browser cookie.
-- The Auth0 desktop mint/redeem/refresh/revoke endpoints return
-  `desktop_auth_migration_pending` in WorkOS mode. The signed-in browser never
-  copies or refreshes its WorkOS credentials into a desktop ticket; Phase 3
-  supplies the independent Desktop Application flow.
-- `POST /auth/workos-webhook` verifies the exact raw payload with the
-  channel-specific endpoint secret, accepts only `user.updated` and
-  `user.deleted`, directly on Railway. Migration `0011` provides an
-  RLS-protected idempotency/recovery ledger.
-  Updates never transfer an occupied email; deletions soft-delete authentication
-  while preserving organizations, memberships, audit history, and product data.
-- Migration `0012` provides the RLS-protected browser flow/session table. The
-  deployment runbook defines per-channel Railway, Postgres, Pages, and webhook
-  boundaries. WorkOS-hosted AuthKit domains remain the selected path; a paid
-  custom WorkOS domain is not required.
-
-The Phase 2 code is verified locally but not deployed or activated. The exposed
-Alpha qualification API key must be rotated before it enters Railway. Because
-Railway deliberately accepts one issuer at a time, browser activation waits for
-the coordinated Phase 4 Alpha reset.
-
-## Phase 3 desktop implementation
-
-Implemented in the repository:
-
-- Electron main binds an ephemeral `127.0.0.1` callback before opening the
-  browser, generates 256-bit authorization state and a PKCE S256 verifier, and
-  accepts the exact callback path and host once. State mismatch, replay,
-  timeout, cancellation, provider error, and invalid callback inputs fail
-  closed. No authorization code, state, verifier, or refresh token crosses
-  renderer IPC.
-- The Desktop Application authenticates directly against WorkOS as a public
-  client using only its public client ID. It never receives or embeds a WorkOS
-  API key and never copies the browser Application's session. The returned
-  bearer is verified against RS256, exact issuer, JWKS, channel audience,
-  desktop `client_id`, session/token/time claims, and the namespaced verified
-  email contract before installation.
-- The independently authenticated bearer resolves `/v1/me` once, and the
-  durable desktop record additively stores the internal Zeros account UUID,
-  WorkOS session ID, desktop client kind, and authentication method. GitHub
-  integration ownership now uses that internal UUID in WorkOS mode while
-  Auth0-era records remain readable under the existing encrypted storage key.
-- Access and refresh tokens remain together in Electron `safeStorage` and are
-  never renderer-installable. Near-expiry refreshes are single-flight in one
-  process, serialized across shared development worktrees, and committed with
-  compare-and-swap. Network, timeout, `429`, and supported `5xx` failures retry
-  the same refresh token with bounded exponential backoff inside WorkOS's
-  replay grace. Every successful response is persisted, including an unchanged
-  refresh token. A replacement returned before a transient local verification
-  failure is retained while its bearer is withheld; only an explicit
-  `invalid_grant` clears the stored session.
-- A Railway revocation route verifies the desktop bearer before trusting `sub`
-  or `sid`; new desktops call it directly and Pages retains a stateless
-  compatibility pass-through for already-released builds. Current-device logout revokes that
-  exact session. All-device logout paginates the WorkOS User's active sessions
-  across both Applications and revokes each through the server-only Web API
-  key. Local encrypted state clears even when that network operation is
-  unavailable. A session minted but abandoned by cancellation, account lookup,
-  or keychain failure is also best-effort revoked.
-- The local engine consumes the same selected public verification contract and
-  additionally pins the exact desktop client and required Zeros access-token
-  claims. WorkOS management-key environment variables are stripped before the
-  engine starts. Product-facing GitHub ownership uses the internal account UUID;
-  provider-subject engine/cloud protocol fields remain the documented deferred
-  compatibility boundary.
-- Alpha/Beta/Production release jobs require an explicit provider. WorkOS mode
-  bakes only the public Desktop Application ID, exact issuer/JWKS/audience, and
-  rejects any channel-qualified WorkOS API-key variable from the desktop build.
-  Auth0 remains selectable for rollback until Phase 5.
-
-The Phase 3 code is locally verified but not activated. A packaged macOS
-interactive login/keychain/logout drill is a Phase 4 Alpha acceptance gate and
-cannot be claimed from this Linux repository environment. The exposed Alpha
-server API key must still be rotated before Railway WorkOS mode is activated.
-
-## Delivery phases after Phase 0
-
-1. Provider-neutral account principal, WorkOS JWT verifier, internal account
-   bindings, and clean database reset tooling/runbook. **Repository complete.**
-2. WorkOS browser login, sealed/strong session state, proxy refresh, logout,
-   and authenticated account-lifecycle ingestion. **Repository complete; not
-   activated.**
-3. Independent desktop public-client/loopback flow, safe-storage refresh, and
-   session revocation; use an atomic ticket only if the documented fallback is
-   proven necessary. **Repository complete; not activated.**
-4. Alpha reset and qualification, then exact-SHA Beta and Production promotion.
-5. Remove Auth0 code, variables, callbacks, docs, privacy references, tests, and
-   credentials; run every release, license, security, and platform gate.
+- [Hosted AuthKit](https://workos.com/docs/authkit/hosted-ui)
+- [Modeling your app](https://workos.com/docs/authkit/modeling-your-app)
+- [Authorization URL and PKCE](https://workos.com/docs/reference/authkit/authentication/get-authorization-url)
+- [Email verification](https://workos.com/docs/authkit/email-verification)
+- [Identity linking](https://workos.com/docs/authkit/identity-linking)
+- [Applications](https://workos.com/docs/authkit/applications)
+- [Invitations](https://workos.com/docs/authkit/invitations)
+- [Invitation API](https://workos.com/docs/reference/authkit/invitation)
+- [Custom emails](https://workos.com/docs/authkit/custom-emails)
+- [Branding](https://workos.com/docs/authkit/branding)
+- [Sessions](https://workos.com/docs/authkit/sessions)
+- [Session resilience](https://workos.com/docs/authkit/session-resilience)
+- [Events](https://workos.com/docs/events)
+- [Organization memberships](https://workos.com/docs/reference/authkit/organization-membership)
+- [Directory Sync](https://workos.com/docs/directory-sync)
+- [Magic Auth](https://workos.com/docs/authkit/magic-auth)
+- [Radar](https://workos.com/docs/authkit/radar)
+- [Testing AuthKit](https://workos.com/docs/authkit/testing)
+- [WorkOS Node SDK](https://github.com/workos/workos-node)
+- [WorkOS changelog](https://workos.com/changelog)

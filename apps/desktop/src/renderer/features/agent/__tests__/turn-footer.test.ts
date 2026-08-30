@@ -27,6 +27,7 @@ import {
   isInterruptedTurn,
   TurnFilePill,
   TurnFooter,
+  turnFooterFailureLabel,
   turnFooterFiles,
   turnFooterStatusLabel,
 } from "../turn-footer";
@@ -89,9 +90,84 @@ describe("turnFooterFiles", () => {
   });
 });
 
+describe("turnFooterFailureLabel", () => {
+  it("uses the single compact Design-protection failure label", () => {
+    expect(
+      turnFooterFailureLabel({
+        kind: "design-protection-failed",
+        stage: "prompt",
+        message: "internal attestation detail",
+      }),
+    ).toBe("AGENT STOPPED - DESIGN PROTECTION FAILED");
+  });
+});
+
 describe("pickStartedAt", () => {
   it("keeps the original turn clock while a re-adopted turn has no new events", () => {
     expect(pickStartedAt([], 1234)).toBe(1234);
+  });
+
+  it("never restarts the clock when a slow first frame lands late", () => {
+    // Cursor's cold session takes 10s+ to its first frame, and provider events
+    // are stamped on ARRIVAL. Anchoring to events[0] made the live timer count
+    // to 12s, snap to 0s, then settle at ~1s for a 13s turn.
+    const turnStartedAt = 1_000_000;
+    const firstFrame = {
+      kind: "text",
+      role: "assistant",
+      createdAt: turnStartedAt + 11_500,
+    } as unknown as Parameters<typeof pickStartedAt>[0][number];
+    expect(pickStartedAt([firstFrame], turnStartedAt)).toBe(turnStartedAt);
+  });
+
+  it("falls back to the first event when the turn start is unknown", () => {
+    const firstFrame = {
+      kind: "text",
+      role: "assistant",
+      createdAt: 5_000,
+    } as unknown as Parameters<typeof pickStartedAt>[0][number];
+    // 0 is the "no user message yet" sentinel — clamping to it would date the
+    // timer to the epoch.
+    expect(pickStartedAt([firstFrame], 0)).toBe(5_000);
+    expect(pickStartedAt([firstFrame])).toBe(5_000);
+  });
+
+  it("does not re-anchor to a running tool — the turn clock only goes up", () => {
+    // Re-anchoring made the timer read 0s at the start of every tool and jump
+    // back to the real elapsed when it finished, several times per turn, on
+    // every provider. Per-tool elapsed lives on the tool row's own chip.
+    const events = [
+      { kind: "text", role: "assistant", createdAt: 1_000 },
+      { kind: "tool", status: "in_progress", createdAt: 4_000 },
+    ] as unknown as Parameters<typeof pickStartedAt>[0];
+    expect(pickStartedAt(events, 500)).toBe(500);
+    expect(pickStartedAt(events)).toBe(1_000);
+  });
+
+  it("is monotonic as tools start and finish across a turn", () => {
+    const turnStartedAt = 1_000;
+    const events: Parameters<typeof pickStartedAt>[0] = [];
+    const push = (e: Record<string, unknown>) =>
+      events.push(e as unknown as Parameters<typeof pickStartedAt>[0][number]);
+    const seen: number[] = [];
+    push({ kind: "text", role: "thought", createdAt: 2_000 });
+    seen.push(pickStartedAt(events, turnStartedAt));
+    push({ kind: "tool", status: "in_progress", createdAt: 3_000 });
+    seen.push(pickStartedAt(events, turnStartedAt));
+    events[1] = {
+      kind: "tool",
+      status: "completed",
+      createdAt: 3_000,
+    } as unknown as Parameters<typeof pickStartedAt>[0][number];
+    seen.push(pickStartedAt(events, turnStartedAt));
+    push({ kind: "tool", status: "in_progress", createdAt: 7_000 });
+    seen.push(pickStartedAt(events, turnStartedAt));
+    expect(seen).toEqual([
+      turnStartedAt,
+      turnStartedAt,
+      turnStartedAt,
+      turnStartedAt,
+    ]);
   });
 });
 

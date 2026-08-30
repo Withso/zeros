@@ -30,9 +30,6 @@ export interface BoundaryRequest {
   actor: ExecutionBoundaryActor;
   /** Provider namespace for purpose-specific persistent state. */
   providerId?: string;
-  /** Opaque native provider binding for an exact legacy-history import. This
-   * is trusted routing metadata, never interpreted as a filesystem path. */
-  providerResumeId?: string;
   /** Trusted provider path inputs used to report the effective host HOME.
    * This object is never copied wholesale into the child or persisted. */
   providerStateEnv?: Readonly<Record<string, string>>;
@@ -155,9 +152,10 @@ export interface BoundaryAuthoritySnapshot {
 }
 
 /** Synchronous spawn descriptor used by provider APIs (notably Claude's SDK)
- * whose custom-process callback cannot await. Policy preparation and the live
- * canary happen before this point; wrapping only writes an engine-private,
- * mode-0600 argv descriptor and returns the already-qualified supervisor. */
+ * whose custom-process callback cannot await. The immutable kernel policy is
+ * installed before this point. Interactive cold admission may still be
+ * attesting that policy in the background; wrapping always places the provider
+ * under the same already-installed fence and returns its qualified supervisor. */
 export interface BoundaryLaunchSpec extends BoundarySpawnRequest {
   stdio: "pipe" | "inherit";
 }
@@ -259,6 +257,11 @@ export interface CloudWorkerToolchain {
 
 export interface PreparedBoundary {
   readonly generation: TerritoryGeneration;
+  /** Behavioral proof for this exact immutable boundary. The kernel policy is
+   * already installed before `prepare()` returns. In background-attestation
+   * mode this may still be pending while the provider starts; rejection means
+   * the boundary has revoked and proven its exact process tree stopped. */
+  readonly attestation: Promise<void>;
   readonly status: ExecutionBoundaryStatus;
   /** Cwd-independent identity of the registered Design write subtraction used
    * by Setup/Run repository tasks. Ordinary agent boundaries may omit it. */
@@ -275,7 +278,15 @@ export interface PreparedBoundary {
   trackProcess(child: ChildProcess): BoundaryProcess;
   /** Adopt a PTY/supervisor process group spawned by the shared Node PTY host.
    * The asynchronous host protocol reports the pid after create() returns. */
-  trackProcessGroup(pid: number): BoundaryProcess;
+  trackProcessGroup(
+    pid: number,
+    options?: {
+      /** True only after the PTY host observed the original group leader exit.
+       * Before that event the freshly spawned PID is still an exact ownership
+       * token even if macOS policy installation has not become observable. */
+      readonly leaderExited?: () => boolean;
+    },
+  ): BoundaryProcess;
   spawn(request: BoundarySpawnRequest): Promise<BoundaryProcess>;
   requestPort(request: PortRequest): Promise<PortLease>;
   /** Current redacted browser-facing mappings. No token, path, or raw policy
@@ -306,6 +317,10 @@ export interface ExecutionBoundary {
     request: BoundaryRequest,
     control?: AdmissionControl,
   ): Promise<PreparedBoundary>;
+  /** Clear retained diagnostics for one generation after a retried teardown
+   * proved it stopped. Retirement failures are execution-scoped and must not
+   * become a process-wide admission latch. */
+  clearRetirementFailure?(generation: TerritoryGeneration): void;
 }
 
 /** Out-of-band scheduling control for one admission. Deliberately NOT part of
@@ -315,6 +330,11 @@ export interface AdmissionControl {
   /** Checked between acquisitions. A cancellation after preparation starts
    * unwinds through the same proven cleanup path as an admission error. */
   readonly signal?: AbortSignal;
+  /** `blocking` is the conservative default for Run, Setup, utilities, and
+   * pre-warmed boundaries. Interactive agent create/resume may use
+   * `background`: immutable kernel enforcement is still established before
+   * return, while the live behavioral canary completes concurrently. */
+  readonly attestation?: "blocking" | "background";
 }
 
 export interface ExecutionBoundaryRecoveryResult {

@@ -4,20 +4,16 @@
 // USED IN: DesignInspector for the exact selected data-oid
 // ============================================
 
-import React, { useMemo, useState } from "react";
+import React, { useState } from "react";
 import {
   ChevronDown,
-  Code2,
   Diamond,
   Layers3,
   Play,
-  Plus,
   RotateCw,
-  Search,
   Sparkles,
   Square,
   Type,
-  X,
 } from "lucide-react";
 
 import type { DesignRuntimeNodeDetails } from "@zeros/protocol/design-runtime";
@@ -27,14 +23,12 @@ import {
   Collapsible,
   CollapsibleContent,
   CollapsibleTrigger,
-  Input,
   Label,
   Select,
   SelectContent,
   SelectItem,
   SelectTrigger,
   SelectValue,
-  Textarea,
   Tooltip,
   toast,
 } from "../../shared/ui/primitives";
@@ -45,16 +39,7 @@ import {
   DesignTransformControl,
 } from "./design-effect-editor";
 import { DesignFillEditor } from "./design-fill-editor";
-import {
-  parseDesignCssDeclarations,
-  readDesignComputedStyle,
-  serializeDesignCssDeclarations,
-} from "./design-style-values";
-import {
-  designStyleSearchSections,
-  designStyleSearchTerms,
-  matchesDesignStyleSearch,
-} from "./design-style-search";
+import { readDesignComputedStyle } from "./design-style-values";
 import { useDesignLivePreviewValue } from "./state/design-live-preview";
 
 interface DesignLivePreviewOwner {
@@ -123,31 +108,23 @@ function StyleSection({
   icon,
   defaultOpen = false,
   summary,
-  filter = "",
-  keywords = "",
   children,
 }: {
   title: string;
   icon: React.ReactNode;
   defaultOpen?: boolean;
   summary?: string;
-  filter?: string;
-  keywords?: string;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(defaultOpen);
-  if (filter && !matchesDesignStyleSearch(`${title} ${keywords}`, filter)) {
-    return null;
-  }
-  const effectiveOpen = Boolean(filter) || open;
   return (
-    <Collapsible open={effectiveOpen} onOpenChange={setOpen}>
+    <Collapsible open={open} onOpenChange={setOpen}>
       <section className="border-border1 border-b">
         <CollapsibleTrigger asChild>
           <button
             type="button"
             className="hover:bg-bg1-hover flex h-9 w-full items-center gap-2 px-3 text-left"
-            aria-label={`${effectiveOpen ? "Collapse" : "Expand"} ${title}`}
+            aria-label={`${open ? "Collapse" : "Expand"} ${title}`}
           >
             <span className="text-muted-fg [&>svg]:size-3.5">{icon}</span>
             <span className="text-fg1 text-xs font-medium">{title}</span>
@@ -159,7 +136,7 @@ function StyleSection({
             <ChevronDown
               className={cn(
                 "text-muted-fg size-3.5 transition-transform",
-                effectiveOpen ? "rotate-0" : "-rotate-90",
+                open ? "rotate-0" : "-rotate-90",
               )}
             />
           </button>
@@ -373,6 +350,8 @@ function MotionPropertyAction({
   disabled?: boolean;
   onRequest: (property: string, value: string) => void;
 }) {
+  if (!timelineOpen) return null;
+
   return (
     <Tooltip
       label={
@@ -385,11 +364,7 @@ function MotionPropertyAction({
         size="icon-sm"
         className={cn(
           "size-7 shrink-0 transition-opacity",
-          active
-            ? "zd-design-motion-property-active"
-            : timelineOpen
-              ? "opacity-100"
-              : "opacity-0 group-hover/motion:opacity-100 focus-visible:opacity-100",
+          active ? "zd-design-motion-property-active" : "opacity-100",
         )}
         aria-label={
           active ? `Add ${label} keyframe at the playhead` : `Animate ${label}`
@@ -453,111 +428,6 @@ function spacingStyleValue(
   return value === "normal" ? "0px" : value;
 }
 
-const CSS_EXPORT_PROPERTIES = [
-  "position",
-  "left",
-  "top",
-  "right",
-  "bottom",
-  "width",
-  "height",
-  "min-width",
-  "min-height",
-  "max-width",
-  "max-height",
-  "aspect-ratio",
-  "box-sizing",
-  "z-index",
-  "visibility",
-  "float",
-  "clear",
-  "overflow",
-  "overflow-x",
-  "overflow-y",
-  "cursor",
-  "pointer-events",
-  "object-fit",
-  "object-position",
-  "display",
-  "flex-direction",
-  "flex-wrap",
-  "flex-grow",
-  "flex-shrink",
-  "flex-basis",
-  "order",
-  "gap",
-  "row-gap",
-  "column-gap",
-  "align-items",
-  "align-self",
-  "justify-content",
-  "justify-self",
-  "grid-template-columns",
-  "grid-template-rows",
-  "grid-auto-flow",
-  "grid-auto-columns",
-  "grid-auto-rows",
-  "grid-column",
-  "grid-row",
-  "align-content",
-  "justify-items",
-  "padding",
-  "margin",
-  "background-color",
-  "background-image",
-  "background-position",
-  "background-size",
-  "background-repeat",
-  "background-blend-mode",
-  "border",
-  "border-top-width",
-  "border-right-width",
-  "border-bottom-width",
-  "border-left-width",
-  "border-radius",
-  "border-top-left-radius",
-  "border-top-right-radius",
-  "border-bottom-right-radius",
-  "border-bottom-left-radius",
-  "outline",
-  "outline-offset",
-  "color",
-  "font-family",
-  "font-size",
-  "font-weight",
-  "font-style",
-  "font-stretch",
-  "line-height",
-  "letter-spacing",
-  "word-spacing",
-  "text-indent",
-  "text-align",
-  "text-transform",
-  "text-decoration",
-  "text-overflow",
-  "text-wrap",
-  "white-space",
-  "word-break",
-  "overflow-wrap",
-  "vertical-align",
-  "writing-mode",
-  "hyphens",
-  "opacity",
-  "mix-blend-mode",
-  "isolation",
-  "box-shadow",
-  "text-shadow",
-  "filter",
-  "backdrop-filter",
-  "clip-path",
-  "transform",
-  "transform-origin",
-  "perspective",
-  "perspective-origin",
-  "transition",
-  "animation",
-] as const;
-
 const OBJECT_FIT_TAGS = new Set(["img", "video", "canvas", "svg", "iframe"]);
 
 export function DesignStyleEditor({
@@ -572,26 +442,9 @@ export function DesignStyleEditor({
   onOpenMotionTimeline,
   disabled = false,
 }: DesignStyleEditorProps) {
-  const [cssDraft, setCssDraft] = useState("");
-  const [propertyQuery, setPropertyQuery] = useState("");
   const [layoutAdvancedOpen, setLayoutAdvancedOpen] = useState(false);
   const [appearanceAdvancedOpen, setAppearanceAdvancedOpen] = useState(false);
   const [typographyAdvancedOpen, setTypographyAdvancedOpen] = useState(false);
-  const [cssError, setCssError] = useState<string | null>(null);
-  const [cssSaving, setCssSaving] = useState(false);
-
-  const computedCss = useMemo(
-    () =>
-      serializeDesignCssDeclarations(
-        Object.fromEntries(
-          CSS_EXPORT_PROPERTIES.map((property) => [
-            property,
-            styleValue(details, property),
-          ]).filter(([, value]) => Boolean(value)),
-        ),
-      ),
-    [details],
-  );
 
   const commit = (styles: Record<string, string | null>, label: string) => {
     // Selects and segmented controls do not emit a separate drag/change
@@ -605,93 +458,20 @@ export function DesignStyleEditor({
     });
   };
 
-  const applyCss = async () => {
-    setCssError(null);
-    setCssSaving(true);
-    try {
-      const declarations = parseDesignCssDeclarations(cssDraft, 64);
-      if (Object.keys(declarations).length === 0) {
-        throw new Error("Enter at least one CSS declaration.");
-      }
-      void onPreviewStyles?.(declarations).catch(() => {});
-      await onCommitStyles(declarations);
-      setCssDraft("");
-      toast.success("CSS declarations applied");
-    } catch (error) {
-      const message = errorMessage(error);
-      setCssError(message);
-      toast.error("Couldn't apply CSS", { description: message });
-    } finally {
-      setCssSaving(false);
-    }
-  };
-
-  const normalizedQuery = propertyQuery.trim().toLocaleLowerCase();
-  const hasSearchMatch =
-    !normalizedQuery || designStyleSearchSections(normalizedQuery).length > 0;
   const display = styleValue(details, "display", "block");
   const flexLayout = display === "flex" || display === "inline-flex";
   const gridLayout = display === "grid" || display === "inline-grid";
-  const showAdvancedLayout = layoutAdvancedOpen || Boolean(normalizedQuery);
-  const showAdvancedAppearance =
-    appearanceAdvancedOpen || Boolean(normalizedQuery);
-  const showAdvancedTypography =
-    typographyAdvancedOpen || Boolean(normalizedQuery);
+  const showAdvancedLayout = layoutAdvancedOpen;
+  const showAdvancedAppearance = appearanceAdvancedOpen;
+  const showAdvancedTypography = typographyAdvancedOpen;
 
   return (
     <div data-design-style-editor className="flex flex-col">
-      <div className="bg-bg1 border-border1 sticky top-0 z-10 flex h-11 items-center border-b px-3">
-        <div className="relative min-w-0 flex-1">
-          <Search className="text-muted-fg pointer-events-none absolute top-1/2 left-2 size-3 -translate-y-1/2" />
-          <Input
-            value={propertyQuery}
-            className="zd-design-search h-7 pr-7 pl-7 text-[11px]"
-            aria-label="Find a style property"
-            placeholder="Find a property"
-            onChange={(event) => setPropertyQuery(event.currentTarget.value)}
-            onKeyDown={(event) => {
-              if (event.key !== "Escape" || !propertyQuery) return;
-              event.preventDefault();
-              setPropertyQuery("");
-            }}
-          />
-          {propertyQuery ? (
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              className="absolute top-1/2 right-0.5 size-6 -translate-y-1/2"
-              aria-label="Clear property search"
-              onClick={() => setPropertyQuery("")}
-            >
-              <X />
-            </Button>
-          ) : null}
-        </div>
-      </div>
-      {!hasSearchMatch ? (
-        <div className="text-muted-fg flex flex-col items-center gap-3 px-3 py-6 text-center text-xs">
-          <span>
-            No visual control matches “{propertyQuery}”. Use CSS for any valid
-            property.
-          </span>
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            onClick={() => setPropertyQuery("")}
-          >
-            Clear search
-          </Button>
-        </div>
-      ) : null}
       <StyleSection
         title="Layout"
         icon={<Layers3 />}
         defaultOpen
         summary={`${Math.round(details.rect.width)} × ${Math.round(details.rect.height)} · ${display}`}
-        filter={normalizedQuery}
-        keywords={designStyleSearchTerms("layout")}
       >
         <span className="text-muted-fg text-[10px] font-medium tracking-wide uppercase">
           Position &amp; size
@@ -1203,8 +983,6 @@ export function DesignStyleEditor({
         icon={<Square />}
         defaultOpen
         summary={styleValue(details, "background-color", "transparent")}
-        filter={normalizedQuery}
-        keywords={designStyleSearchTerms("appearance")}
       >
         <div className="grid grid-cols-2 gap-2">
           {renderField(
@@ -1447,8 +1225,6 @@ export function DesignStyleEditor({
         icon={<Type />}
         defaultOpen={Boolean(details.text)}
         summary={styleValue(details, "font-size")}
-        filter={normalizedQuery}
-        keywords={designStyleSearchTerms("typography")}
       >
         {renderField("Font", "font-family", styleValue(details, "font-family"))}
         <div className="grid grid-cols-2 gap-2">
@@ -1677,8 +1453,6 @@ export function DesignStyleEditor({
         title="Effects"
         icon={<Sparkles />}
         summary={styleValue(details, "box-shadow", "none")}
-        filter={normalizedQuery}
-        keywords={designStyleSearchTerms("effects")}
       >
         <div className="group/motion flex min-w-0 items-center gap-1">
           <div className="min-w-0 flex-1">
@@ -1748,8 +1522,6 @@ export function DesignStyleEditor({
         title="Transform"
         icon={<RotateCw />}
         summary={styleValue(details, "transform", "none")}
-        filter={normalizedQuery}
-        keywords={designStyleSearchTerms("transform")}
       >
         <div className="group/motion flex min-w-0 items-center gap-1">
           <div className="min-w-0 flex-1">
@@ -1797,8 +1569,6 @@ export function DesignStyleEditor({
         title="Transition"
         icon={<Play />}
         summary={styleValue(details, "transition-duration", "0s")}
-        filter={normalizedQuery}
-        keywords={designStyleSearchTerms("transition")}
       >
         {renderField(
           "Property",
@@ -1838,8 +1608,6 @@ export function DesignStyleEditor({
         title="Motion"
         icon={<Diamond />}
         summary={styleValue(details, "animation-name", "none")}
-        filter={normalizedQuery}
-        keywords={designStyleSearchTerms("motion")}
       >
         <p className="text-muted-fg text-[11px] leading-4">
           Edit property tracks, keyframes, timing, and playback in the canvas
@@ -1855,54 +1623,6 @@ export function DesignStyleEditor({
         >
           <Diamond />
           Open motion timeline
-        </Button>
-      </StyleSection>
-
-      <StyleSection
-        title="CSS"
-        icon={<Code2 />}
-        summary="Declarations"
-        filter={normalizedQuery}
-        keywords={designStyleSearchTerms("css")}
-      >
-        <div className="flex items-center justify-between gap-2">
-          <span className="text-muted-fg text-xs">
-            Paste a declaration list; selectors and nested rules are rejected.
-          </span>
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() => {
-              setCssDraft(computedCss);
-              setCssError(null);
-            }}
-          >
-            Computed
-          </Button>
-        </div>
-        <Textarea
-          value={cssDraft}
-          className="zd-design-control-applied min-h-32 resize-y font-mono text-xs"
-          aria-label="Element CSS declarations"
-          placeholder={"display: flex;\ngap: 16px;\ntransform: translateY(0);"}
-          spellCheck={false}
-          onChange={(event) => {
-            setCssDraft(event.target.value);
-            setCssError(null);
-          }}
-        />
-        {cssError ? (
-          <span className="text-red-primary text-xs">{cssError}</span>
-        ) : null}
-        <Button
-          type="button"
-          size="sm"
-          disabled={disabled || cssSaving || !cssDraft.trim()}
-          onClick={() => void applyCss()}
-        >
-          <Plus />
-          {cssSaving ? "Applying…" : "Apply CSS"}
         </Button>
       </StyleSection>
     </div>

@@ -347,6 +347,24 @@ jobs:
         # native resource + shipped PTY host and require real shell output.
         run: pnpm smoke:packaged-pty
 
+      - name: Verify installer + updater signatures
+        # Notarization submits the DMG, while electron-updater installs the ZIP.
+        # Verify both signed containers before either leaves this build job and
+        # require the exact public Zeros Developer ID identity, hardened runtime,
+        # secure timestamp, matching code directory, and ShipIt-safe modes.
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          DMG="release/Zeros-${VERSION}-arm64.dmg"
+          ZIP="release/Zeros-${VERSION}-arm64-mac.zip"
+          node scripts/verify-macos-release-artifacts.mjs \
+            --dmg "$DMG" \
+            --zip "$ZIP" \
+            --app-name "Zeros.app" \
+            --bundle-id com.zeros \
+            --team-id H8MS56JU2Z
+
       - name: Submit to Apple notary (--no-wait, no poll)
         # Submit the DMG and STOP — do NOT block this job on Apple's analysis. The
         # `--no-wait` submit returns immediately with a submission id, which we
@@ -511,7 +529,20 @@ jobs:
           # submission.
           xcrun stapler validate "$DMG"
           spctl -a -vvv -t exec "$APP"
-          echo "✓ Developer ID signed · hardened · notarized · stapled DMG · Gatekeeper-accepted"
+          # ShipIt updateability: EVERY packaged file/dir must keep owner-write.
+          # Squirrel's ShipIt strips quarantine xattrs from the update payload,
+          # removexattr() requires write permission, and a single read-only file
+          # aborts every in-place update with EPERM after staging — the app
+          # relaunches on the old build with no error in its own log (2026-08-25
+          # field incident on alpha: zsr helpers packaged at 0o555). The
+          # read-only DMG mount still reports the stored mode bits.
+          READ_ONLY=$(find "$APP" \( -type f -o -type d \) ! -perm -200 | head -20)
+          if [ -n "$READ_ONLY" ]; then
+            echo "::error::Packaged entries without owner-write would break Squirrel in-place updates:"
+            echo "$READ_ONLY"
+            exit 1
+          fi
+          echo "✓ Developer ID signed · hardened · notarized · stapled DMG · Gatekeeper-accepted · all entries owner-writable"
 
       - name: Publish GitHub release
         env:

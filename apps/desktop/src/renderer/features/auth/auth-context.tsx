@@ -39,6 +39,10 @@ import { getActiveBridge } from "../../platform/bridge/active-bridge";
 import { CHANNEL } from "../../config/release-channel";
 import { useDismissStartupLoader } from "../../shared/ui/startup-loader";
 import {
+  safeBrowserSignInStartError,
+  workOSSignInFailureMessage,
+} from "./auth-errors";
+import {
   schemeForChannel,
   type Channel,
   type DeepLinkScheme,
@@ -50,6 +54,9 @@ export interface AuthResult {
   ok: boolean;
   /** User-facing message when `ok` is false. */
   error?: string;
+  /** Main-owned deadline for the pending browser ceremony. Presentation only;
+   *  Electron main remains the authority that rejects an expired callback. */
+  expiresAt?: number;
 }
 
 export interface AuthContextValue {
@@ -110,6 +117,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
     let offStoreChanged: (() => void) | undefined;
     let offWorkOSComplete: (() => void) | undefined;
     let offWorkOSError: (() => void) | undefined;
+    let offSecurityRevoked: (() => void) | undefined;
 
     const apply = (next: AuthSessionInfo | null) => {
       if (!active) return;
@@ -225,9 +233,7 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
           console.warn(
             `[auth] sign-in handoff redeem failed: ${redeemed?.error ?? "unknown"}`,
           );
-          setOAuthError(
-            "We couldn't finish signing you in from the browser. Please try again.",
-          );
+          setOAuthError(workOSSignInFailureMessage("exchange_failed", null));
           return;
         }
         // Main already wrote the session; just mirror it into renderer state.
@@ -278,29 +284,51 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
         if (!next) throw new Error("session unavailable");
         setOAuthError(null);
       } catch {
-        setOAuthError(
-          "We couldn't finish signing you in from the browser. Please try again.",
-        );
+        setOAuthError(workOSSignInFailureMessage("exchange_failed", null));
       }
     }).then((off) => {
       if (active) offWorkOSComplete = off;
       else off();
     });
 
-    void nativeListen<{ reason?: string }>(
+    void nativeListen<{ reason?: string; recoveryCode?: string }>(
       "auth-signin-error",
-      ({ reason }) => {
+      ({ reason, recoveryCode }) => {
         if (!active) return;
-        setOAuthError(
-          reason === "expired"
-            ? "That browser sign-in expired before it finished. Click Sign in to try again."
-            : "We couldn't finish signing you in from the browser. Please try again.",
-        );
+        console.warn("[auth] WorkOS sign-in failed:", reason ?? "unknown");
+        setOAuthError(workOSSignInFailureMessage(reason ?? "", recoveryCode));
       },
     ).then((off) => {
       if (active) offWorkOSError = off;
       else off();
     });
+
+    void nativeListen<{ reason?: string }>(
+      "auth-security-revoked",
+      async ({ reason }) => {
+        if (!active) return;
+        try {
+          getActiveBridge()?.signalOwnerSignedOut();
+        } catch {
+          /* bridge already unavailable */
+        }
+        await resync().catch(() => null);
+        if (!active) return;
+        setOAuthError(
+          reason === "account.revoked" || reason === "account_deleted"
+            ? "Your Zeros account is no longer active. Sign in again only if access has been restored."
+            : "This session is no longer active. Sign in again to continue.",
+        );
+      },
+    ).then((off) => {
+      if (active) offSecurityRevoked = off;
+      else off();
+    });
+
+    const onOnline = () => {
+      void nativeInvoke("auth_security_revalidate").catch(() => undefined);
+    };
+    window.addEventListener("online", onOnline);
 
     return () => {
       active = false;
@@ -309,6 +337,8 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
       offStoreChanged?.();
       offWorkOSComplete?.();
       offWorkOSError?.();
+      offSecurityRevoked?.();
+      window.removeEventListener("online", onOnline);
     };
   }, []);
 
@@ -316,13 +346,23 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
     // Clear any stale handoff error from a prior attempt before starting fresh.
     setOAuthError(null);
     try {
-      // In WorkOS mode this command binds an ephemeral loopback listener BEFORE
-      // main opens the browser and retains state + verifier outside renderer JS.
-      // Auth0 mode returns a compatibility marker and continues below.
-      const selected = await nativeInvoke<{ mode?: "auth0" | "workos" }>(
-        "auth_start_signin",
-      );
-      if (selected?.mode === "workos") return { ok: true };
+      // In WorkOS mode this command opens the hosted Zeros provider page and
+      // retains state + verifier in Electron main, outside renderer JS. Auth0
+      // mode returns a compatibility marker and continues below.
+      const selected = await nativeInvoke<{
+        mode?: "auth0" | "workos";
+        expiresAt?: number;
+      }>("auth_start_signin");
+      if (selected?.mode === "workos") {
+        return {
+          ok: true,
+          expiresAt:
+            typeof selected.expiresAt === "number" &&
+            Number.isFinite(selected.expiresAt)
+              ? selected.expiresAt
+              : undefined,
+        };
+      }
       if (selected?.mode !== "auth0") {
         return { ok: false, error: "Couldn't start sign-in." };
       }
@@ -371,11 +411,11 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
         `&nonce=${encodeURIComponent(nonce)}` +
         `&challenge=${encodeURIComponent(begin.challenge)}`;
       await nativeInvoke("shell_open_url", { url });
-      return { ok: true };
+      return { ok: true, expiresAt };
     } catch (err) {
       return {
         ok: false,
-        error: (err as Error)?.message ?? "Couldn't start sign-in.",
+        error: safeBrowserSignInStartError(err),
       };
     }
   }, []);
@@ -513,7 +553,7 @@ function clearPendingNonce(): void {
 
 // The desktop deep-link scheme (zeros:// stable, zeros-beta:// beta, zeros-dev://
 // dev) is constant for the life of the process, so resolve it once and reuse it —
-// avoids an app_info IPC round-trip on every "Continue with Google/GitHub" click.
+// avoids an app_info IPC round-trip on every Hosted AuthKit sign-in click.
 let cachedScheme: DeepLinkScheme | null = null;
 
 async function resolveDesktopScheme(): Promise<DeepLinkScheme> {

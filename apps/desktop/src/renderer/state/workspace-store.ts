@@ -52,6 +52,8 @@ import {
 } from "./persist-ui-state";
 import {
   loadPersistedDrafts,
+  persistDraftsNow,
+  recoverPendingAutoSend,
   schedulePersistDrafts,
 } from "./persist-composer-drafts";
 import { loadProjects } from "./projects-store";
@@ -487,7 +489,12 @@ const initialState: WorkspaceState = {
   chats: bootChats,
   activeChatId: bootActiveChatId,
   pendingChatSubmission: null,
-  pendingAutoSend: {},
+  // Parked first turns the last run did not get to dispatch. Recovery is
+  // filtered (draft still present, arm still fresh) in one place —
+  // recoverPendingAutoSend — so a reload inside a workspace's setup window
+  // resumes the promise the user was shown instead of leaving their text in a
+  // composer that will never send it.
+  pendingAutoSend: recoverPendingAutoSend(persistedDrafts, Date.now()),
   pendingComposerAppend: null,
   // Restored from persist-ui-state so a reload mid-Untitled-tab keeps
   // Repository panel / topbar / tabs / EmptyComposer all agreeing on the same
@@ -1523,16 +1530,20 @@ function reducer(state: WorkspaceState, action: Action): WorkspaceState {
       if (state.pendingChatSubmission?.id !== action.id) return state;
       return { ...state, pendingChatSubmission: null };
     case "REQUEST_AUTO_SEND":
-      if (state.pendingAutoSend[action.chatId]) return state;
+      // Keep the ORIGINAL stamp when a chat is armed twice (a second Send
+      // while still provisioning): the wait the watchdog bounds started at the
+      // first press, and re-stamping would let repeated presses extend it
+      // indefinitely.
+      if (state.pendingAutoSend[action.chatId] !== undefined) return state;
       return {
         ...state,
         pendingAutoSend: {
           ...state.pendingAutoSend,
-          [action.chatId]: true,
+          [action.chatId]: Date.now(),
         },
       };
     case "CONSUME_AUTO_SEND": {
-      if (!state.pendingAutoSend[action.chatId]) return state;
+      if (state.pendingAutoSend[action.chatId] === undefined) return state;
       const next = { ...state.pendingAutoSend };
       delete next[action.chatId];
       return { ...state, pendingAutoSend: next };
@@ -2044,7 +2055,12 @@ useWorkspaceStore.subscribe((s, prev) => {
   if (s.activeChatId !== prev.activeChatId) {
     setSetting(ACTIVE_CHAT_KEY, s.activeChatId);
   }
-  if (
+  if (s.pendingAutoSend !== prev.pendingAutoSend) {
+    // Arming and consuming a parked turn are the two transitions the 500 ms
+    // draft debounce must not swallow — see persistDraftsNow. The draft rides
+    // the same snapshot, so this also flushes whatever the composer had.
+    persistDraftsNow(s);
+  } else if (
     s.chatComposerDrafts !== prev.chatComposerDrafts ||
     s.editComposerDrafts !== prev.editComposerDrafts
   ) {
@@ -2134,7 +2150,17 @@ export function usePendingChatSubmission(): WorkspaceState["pendingChatSubmissio
  * workspace chats from re-rendering this AgentChat. */
 export function usePendingAutoSend(chatId: string | null | undefined): boolean {
   return useWorkspaceStore(
-    (s) => !!chatId && s.pendingAutoSend[chatId] === true,
+    (s) => !!chatId && s.pendingAutoSend[chatId] !== undefined,
+  );
+}
+
+/** When this chat's first turn was parked, or null. The timestamp — not just
+ * the flag — is what lets the drain bound its own wait. */
+export function usePendingAutoSendAt(
+  chatId: string | null | undefined,
+): number | null {
+  return useWorkspaceStore((s) =>
+    chatId ? (s.pendingAutoSend[chatId] ?? null) : null,
   );
 }
 

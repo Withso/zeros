@@ -28,31 +28,27 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function rejectedLater() {
+  let reject!: (error: Error) => void;
+  const promise = new Promise<void>((_resolve, fail) => {
+    reject = fail;
+  });
+  return { promise, reject };
+}
+
 function setup(overrides: Partial<WorkOSDesktopAuthorizationFlowDeps> = {}) {
   const completed = deferred<void>();
-  let authorizationOptions:
-    | { state: string; codeChallenge: string; redirectUri: string }
-    | undefined;
+  let openedUrl: string | null = null;
   const exchangeCode = vi.fn(async () => session);
   const persistSession = vi.fn();
   const revokeSession = vi.fn(async () => {});
   const deps: WorkOSDesktopAuthorizationFlowDeps = {
-    client: {
-      authorizationUrl(options) {
-        authorizationOptions = options;
-        const url = new URL("https://api.workos.com/user_management/authorize");
-        for (const [key, value] of Object.entries({
-          state: options.state,
-          redirect_uri: options.redirectUri,
-          code_challenge: options.codeChallenge,
-        })) {
-          url.searchParams.set(key, value);
-        }
-        return url.toString();
-      },
-      exchangeCode,
+    client: { exchangeCode },
+    appOrigin: "https://app-alpha.zeros.build",
+    deepLinkScheme: "zeros-alpha",
+    openExternal: async (url) => {
+      openedUrl = url;
     },
-    openExternal: async () => {},
     resolveAccountId: async () => "00000000-0000-4000-8000-000000000001",
     persistSession,
     revokeSession,
@@ -70,39 +66,59 @@ function setup(overrides: Partial<WorkOSDesktopAuthorizationFlowDeps> = {}) {
     exchangeCode,
     persistSession,
     revokeSession,
-    get authorizationOptions() {
-      return authorizationOptions;
+    get openedUrl() {
+      return openedUrl;
     },
   };
+}
+
+function callbackState(openedUrl: string): string {
+  return new URL(openedUrl).searchParams.get("state")!;
 }
 
 afterEach(() => {
   for (const flow of controllers.splice(0)) flow.cancel();
 });
 
-describe("WorkOS desktop loopback authorization", () => {
-  it("binds the loopback callback before opening the browser and consumes it once", async () => {
-    const completed = deferred<void>();
-    let callbackStatus = 0;
-    const harness = setup({
-      async openExternal(url) {
-        const authorize = new URL(url);
-        const callback = new URL(authorize.searchParams.get("redirect_uri")!);
-        callback.searchParams.set(
-          "state",
-          authorize.searchParams.get("state")!,
-        );
-        callback.searchParams.set("code", "authorization-code");
-        const response = await fetch(callback);
-        callbackStatus = response.status;
-      },
-      onComplete: () => completed.resolve(),
-    });
+describe("WorkOS desktop hosted authorization", () => {
+  it("rejects an invalid app origin without leaving a pending flow", async () => {
+    const harness = setup({ appOrigin: "http://untrusted.example" });
 
-    await harness.flow.start();
-    await completed.promise;
+    await expect(harness.flow.start()).rejects.toThrow(
+      "Desktop sign-in app origin is invalid",
+    );
+    expect(harness.openedUrl).toBeNull();
+    expect(harness.flow.cancel()).toBe(false);
+  });
 
-    expect(callbackStatus).toBe(200);
+  it("opens the branded app-host page and consumes a matching deep-link callback once", async () => {
+    const harness = setup();
+    const startedAt = Date.now();
+    const attempt = await harness.flow.start();
+    const returnedAt = Date.now();
+
+    expect(attempt.expiresAt).toBeGreaterThanOrEqual(startedAt + 5_000);
+    expect(attempt.expiresAt).toBeLessThanOrEqual(returnedAt + 5_000);
+
+    const opened = new URL(harness.openedUrl!);
+    expect(opened.origin).toBe("https://app-alpha.zeros.build");
+    expect(opened.pathname).toBe("/auth/desktop");
+    expect(opened.searchParams.get("state")).toMatch(
+      /^zeros-alpha\.[A-Za-z0-9_-]{43}$/,
+    );
+    expect(opened.searchParams.get("code_challenge")).toMatch(
+      /^[A-Za-z0-9_-]{43}$/,
+    );
+    expect(opened.toString()).not.toContain("api.workos.com");
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "authorization-code",
+      }),
+    ).toBe(true);
+    await harness.completed.promise;
+
     expect(harness.exchangeCode).toHaveBeenCalledWith({
       code: "authorization-code",
       codeVerifier: expect.any(String),
@@ -111,35 +127,79 @@ describe("WorkOS desktop loopback authorization", () => {
       ...session,
       accountId: "00000000-0000-4000-8000-000000000001",
     });
-    await expect(
-      fetch(harness.authorizationOptions!.redirectUri),
-    ).rejects.toThrow();
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "replayed-code",
+      }),
+    ).toBe(false);
   });
 
-  it("rejects a mismatched state without consuming the legitimate callback", async () => {
-    const completed = deferred<void>();
-    const statuses: number[] = [];
+  it("does not strand the renderer when the OS browser launch never settles", async () => {
     const harness = setup({
-      async openExternal(url) {
-        const authorize = new URL(url);
-        const redirect = authorize.searchParams.get("redirect_uri")!;
-        const bad = new URL(redirect);
-        bad.searchParams.set("state", "attacker-state");
-        bad.searchParams.set("code", "attacker-code");
-        statuses.push((await fetch(bad)).status);
+      openExternal: () => new Promise<void>(() => {}),
+      openExternalTimeoutMs: 10,
+    });
 
-        const good = new URL(redirect);
-        good.searchParams.set("state", authorize.searchParams.get("state")!);
-        good.searchParams.set("code", "real-code");
-        statuses.push((await fetch(good)).status);
+    const outcome = await Promise.race([
+      harness.flow.start().then(() => "started" as const),
+      new Promise<"stuck">((resolve) =>
+        setTimeout(() => resolve("stuck"), 50),
+      ),
+    ]);
+
+    expect(outcome).toBe("started");
+    expect(harness.flow.cancel()).toBe(true);
+  });
+
+  it("cleans up when the OS browser launcher throws synchronously", async () => {
+    const harness = setup({
+      openExternal: () => {
+        throw new Error("browser unavailable");
       },
-      onComplete: () => completed.resolve(),
+    });
+
+    await expect(harness.flow.start()).rejects.toThrow("browser unavailable");
+    expect(harness.flow.cancel()).toBe(false);
+  });
+
+  it("surfaces a browser launch that rejects after its acknowledgement timeout", async () => {
+    const opening = rejectedLater();
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const harness = setup({
+      openExternal: () => opening.promise,
+      openExternalTimeoutMs: 10,
+      onError,
     });
 
     await harness.flow.start();
-    await completed.promise;
+    opening.reject(new Error("browser unavailable"));
+    await error.promise;
 
-    expect(statuses).toEqual([400, 200]);
+    expect(onError).toHaveBeenCalledWith("browser_open_failed");
+    expect(harness.flow.cancel()).toBe(false);
+  });
+
+  it("ignores a mismatched state without consuming the legitimate callback", async () => {
+    const harness = setup();
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: `zeros-alpha.${"x".repeat(43)}`,
+        code: "attacker-code",
+      }),
+    ).toBe(false);
+    expect(harness.exchangeCode).not.toHaveBeenCalled();
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "real-code",
+      }),
+    ).toBe(true);
+    await harness.completed.promise;
+
     expect(harness.exchangeCode).toHaveBeenCalledTimes(1);
     expect(harness.exchangeCode).toHaveBeenCalledWith({
       code: "real-code",
@@ -147,45 +207,224 @@ describe("WorkOS desktop loopback authorization", () => {
     });
   });
 
-  it("cancellation closes the listener and prevents a late session install", async () => {
+  it("turns a matching provider error into a bounded desktop failure", async () => {
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const harness = setup({ onError });
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        error: "provider_error",
+      }),
+    ).toBe(true);
+    await error.promise;
+
+    expect(onError).toHaveBeenCalledWith("provider_error");
+    expect(harness.exchangeCode).not.toHaveBeenCalled();
+  });
+
+  it("fails closed instead of performing an out-of-band verification grant", async () => {
+    const verificationRequired = Object.assign(new Error("rejected"), {
+      code: "exchange_rejected",
+      status: 403,
+      providerCode: "email_verification_required",
+    });
+    const exchangeCode = vi.fn(async () => {
+      throw verificationRequired;
+    });
+    const outOfBandContinuation = vi.fn(async () => session);
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const legacyClient = {
+      exchangeCode,
+      completeGitHubVerification: outOfBandContinuation,
+    };
+    const harness = setup({
+      onError,
+      client: legacyClient,
+    });
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "real-code",
+      }),
+    ).toBe(true);
+    await error.promise;
+
+    expect(exchangeCode).toHaveBeenCalledOnce();
+    expect(exchangeCode).toHaveBeenCalledWith({
+      code: "real-code",
+      codeVerifier: expect.any(String),
+    });
+    expect(onError).toHaveBeenCalledWith("verification_required");
+    expect(outOfBandContinuation).not.toHaveBeenCalled();
+    expect(harness.persistSession).not.toHaveBeenCalled();
+  });
+
+  it("reports an unverified email distinctly from a generic exchange failure", async () => {
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const harness = setup({
+      onError,
+      client: {
+        exchangeCode: vi.fn(async () => {
+          throw Object.assign(new Error("unverified"), {
+            code: "user_email_unverified",
+          });
+        }),
+      },
+    });
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "real-code",
+      }),
+    ).toBe(true);
+    await error.promise;
+
+    expect(onError).toHaveBeenCalledWith("email_unverified");
+  });
+
+  it("surfaces reviewed account recovery with its non-secret support locator", async () => {
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const harness = setup({
+      onError,
+      resolveAccountId: async () => {
+        throw Object.assign(new Error("recovery required"), {
+          code: "account_recovery_required",
+          status: 409,
+          recoveryCode: "ZR-ABCD-2345",
+        });
+      },
+    });
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "real-code",
+      }),
+    ).toBe(true);
+    await error.promise;
+
+    expect(onError).toHaveBeenCalledWith("account_recovery_required", {
+      recoveryCode: "ZR-ABCD-2345",
+    });
+    expect(harness.persistSession).not.toHaveBeenCalled();
+    expect(harness.revokeSession).toHaveBeenCalledWith(session.accessToken);
+  });
+
+  it("still reports an unnamed exchange failure as the generic reason", async () => {
+    const error = deferred<void>();
+    const onError = vi.fn(() => error.resolve());
+    const harness = setup({
+      onError,
+      client: {
+        exchangeCode: vi.fn(async () => {
+          throw new Error("network down");
+        }),
+      },
+    });
+    await harness.flow.start();
+
+    expect(
+      harness.flow.acceptCallback({
+        state: callbackState(harness.openedUrl!),
+        code: "real-code",
+      }),
+    ).toBe(true);
+    await error.promise;
+
+    expect(onError).toHaveBeenCalledWith("exchange_failed");
+  });
+
+  it("cancellation prevents a late callback from installing a session", async () => {
     const harness = setup();
     await harness.flow.start();
-    const redirectUri = harness.authorizationOptions!.redirectUri;
+    const state = callbackState(harness.openedUrl!);
 
     expect(harness.flow.cancel()).toBe(true);
-    await expect(fetch(redirectUri)).rejects.toThrow();
+    expect(
+      harness.flow.acceptCallback({ state, code: "authorization-code" }),
+    ).toBe(false);
     expect(harness.exchangeCode).not.toHaveBeenCalled();
     expect(harness.persistSession).not.toHaveBeenCalled();
+  });
+
+  it("expires the callback window and rejects a callback that arrives later", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_800_000_000_000);
+    try {
+      const error = deferred<void>();
+      const onError = vi.fn(() => error.resolve());
+      const harness = setup({ onError, timeoutMs: 10 * 60_000 });
+      const attempt = await harness.flow.start();
+      const state = callbackState(harness.openedUrl!);
+
+      expect(attempt.expiresAt).toBe(1_800_000_600_000);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      await error.promise;
+
+      expect(onError).toHaveBeenCalledOnce();
+      expect(onError).toHaveBeenCalledWith("expired");
+      expect(
+        harness.flow.acceptCallback({ state, code: "late-code" }),
+      ).toBe(false);
+      expect(harness.exchangeCode).not.toHaveBeenCalled();
+      expect(harness.persistSession).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps a replacement attempt valid when the old browser returns late", async () => {
+    const harness = setup();
+    await harness.flow.start();
+    const replacedState = callbackState(harness.openedUrl!);
+
+    await harness.flow.start();
+    const currentState = callbackState(harness.openedUrl!);
+    expect(currentState).not.toBe(replacedState);
+    expect(
+      harness.flow.acceptCallback({
+        state: replacedState,
+        code: "replaced-attempt-code",
+      }),
+    ).toBe(false);
+    expect(
+      harness.flow.acceptCallback({
+        state: currentState,
+        code: "current-attempt-code",
+      }),
+    ).toBe(true);
+    await harness.completed.promise;
+
+    expect(harness.exchangeCode).toHaveBeenCalledOnce();
+    expect(harness.exchangeCode).toHaveBeenCalledWith({
+      code: "current-attempt-code",
+      codeVerifier: expect.any(String),
+    });
   });
 
   it("revokes a provider session abandoned after code exchange", async () => {
     const exchanged = deferred<WorkOSDesktopSession>();
     const harness = setup({
       client: {
-        authorizationUrl(options) {
-          const url = new URL(
-            "https://api.workos.com/user_management/authorize",
-          );
-          url.searchParams.set("state", options.state);
-          url.searchParams.set("redirect_uri", options.redirectUri);
-          url.searchParams.set("code_challenge", options.codeChallenge);
-          return url.toString();
-        },
         exchangeCode: () => exchanged.promise,
       },
-      async openExternal(url) {
-        const authorize = new URL(url);
-        const callback = new URL(authorize.searchParams.get("redirect_uri")!);
-        callback.searchParams.set(
-          "state",
-          authorize.searchParams.get("state")!,
-        );
-        callback.searchParams.set("code", "authorization-code");
-        await fetch(callback);
-      },
     });
-
     await harness.flow.start();
+    harness.flow.acceptCallback({
+      state: callbackState(harness.openedUrl!),
+      code: "authorization-code",
+    });
     harness.flow.cancel();
     exchanged.resolve(session);
 
@@ -201,20 +440,13 @@ describe("WorkOS desktop loopback authorization", () => {
       resolveAccountId: async () => {
         throw new Error("control plane unavailable");
       },
-      async openExternal(url) {
-        const authorize = new URL(url);
-        const callback = new URL(authorize.searchParams.get("redirect_uri")!);
-        callback.searchParams.set(
-          "state",
-          authorize.searchParams.get("state")!,
-        );
-        callback.searchParams.set("code", "authorization-code");
-        await fetch(callback);
-      },
       onError: () => error.resolve(),
     });
-
     await harness.flow.start();
+    harness.flow.acceptCallback({
+      state: callbackState(harness.openedUrl!),
+      code: "authorization-code",
+    });
     await error.promise;
 
     expect(harness.revokeSession).toHaveBeenCalledWith(session.accessToken);

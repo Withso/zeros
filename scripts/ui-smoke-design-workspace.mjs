@@ -15,21 +15,135 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   const designSidebar = page.getByRole("region", {
     name: "Design workspace sidebar",
   });
+  const workspaceModeHeader = designSidebar.locator(
+    "[data-workspace-mode-header]",
+  );
   await layersPanel.waitFor({ state: "visible", timeout: 10_000 });
   await designSidebar.waitFor({ state: "visible", timeout: 10_000 });
+  await workspaceModeHeader.waitFor({ state: "visible", timeout: 10_000 });
   const initialLayersBox = await layersPanel.boundingBox();
   const initialSidebarBox = await designSidebar.boundingBox();
+  const initialStylePanelBox = await page
+    .locator("[data-design-inspector]")
+    .boundingBox();
+  const workspaceModeHeaderBox = await workspaceModeHeader.boundingBox();
   check(
     "design Layers fill a dedicated native sidebar",
     !!initialLayersBox &&
       initialLayersBox.height > 800 &&
       !!initialSidebarBox &&
-      initialSidebarBox.width >= 240,
+      Math.abs(initialSidebarBox.width - 240) < 0.5,
+  );
+  check(
+    "Style opens at 280px while Layers opens at 240px",
+    !!initialStylePanelBox &&
+      Math.abs(initialStylePanelBox.width - 280) < 0.5 &&
+      !!initialSidebarBox &&
+      Math.abs(initialSidebarBox.width - 240) < 0.5,
+  );
+  check(
+    "workspace name and icon-only mode toggle sit above Layers",
+    !!workspaceModeHeaderBox &&
+      !!initialLayersBox &&
+      workspaceModeHeaderBox.y + workspaceModeHeaderBox.height <=
+        initialLayersBox.y &&
+      (await workspaceModeHeader
+        .locator("[data-workspace-mode-name]")
+        .count()) === 1 &&
+      (await workspaceModeHeader.getByRole("button").count()) === 2 &&
+      (await workspaceModeHeader
+        .getByRole("button", { name: "Code mode" })
+        .count()) === 1 &&
+      (await workspaceModeHeader
+        .getByRole("button", { name: "Design mode" })
+        .getAttribute("aria-pressed")) === "true" &&
+      (await workspaceModeHeader
+        .locator("[data-workspace-mode-toggle]")
+        .innerText()) === "",
+  );
+  const workspaceModeChrome = await workspaceModeHeader.evaluate((header) => {
+    const toggle = header.querySelector("[data-workspace-mode-toggle]");
+    const buttons = [...header.querySelectorAll("[data-workspace-mode]")];
+    const icons = [...header.querySelectorAll("[data-workspace-mode] svg")];
+    const toggleStyle = toggle ? window.getComputedStyle(toggle) : null;
+    const headerStyle = window.getComputedStyle(header);
+    const resolveColor = (token) => {
+      const probe = document.createElement("span");
+      probe.style.color = `var(${token})`;
+      header.appendChild(probe);
+      const color = window.getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    };
+    return {
+      buttonSizes: buttons.map((button) => {
+        const box = button.getBoundingClientRect();
+        return [box.width, box.height];
+      }),
+      buttonStyles: buttons.map((button) => {
+        const style = window.getComputedStyle(button);
+        return {
+          active: button.getAttribute("aria-pressed") === "true",
+          backgroundColor: style.backgroundColor,
+          color: style.color,
+        };
+      }),
+      fg1: resolveColor("--fg1"),
+      fg3: resolveColor("--fg3"),
+      gap: toggleStyle?.columnGap ?? "",
+      iconSizes: icons.map((icon) => {
+        const box = icon.getBoundingClientRect();
+        return [box.width, box.height];
+      }),
+      padding: toggleStyle
+        ? [
+            toggleStyle.paddingTop,
+            toggleStyle.paddingRight,
+            toggleStyle.paddingBottom,
+            toggleStyle.paddingLeft,
+          ]
+        : [],
+      separator: headerStyle.borderBottomWidth,
+    };
+  });
+  check(
+    "workspace mode chrome uses 16px buttons and icons with a 4px inset and 8px gap",
+    workspaceModeChrome.buttonSizes.length === 2 &&
+      workspaceModeChrome.buttonSizes.every(
+        ([width, height]) => width === 16 && height === 16,
+      ) &&
+      workspaceModeChrome.gap === "8px" &&
+      workspaceModeChrome.iconSizes.length === 2 &&
+      workspaceModeChrome.iconSizes.every(
+        ([width, height]) => width === 16 && height === 16,
+      ) &&
+      workspaceModeChrome.padding.every((value) => value === "4px") &&
+      workspaceModeChrome.separator === "1px",
+  );
+  const selectedModeStyle = workspaceModeChrome.buttonStyles.find(
+    ({ active }) => active,
+  );
+  const unselectedModeStyle = workspaceModeChrome.buttonStyles.find(
+    ({ active }) => !active,
+  );
+  check(
+    "workspace mode selection uses fg1 and fg3 without a selected fill",
+    selectedModeStyle?.backgroundColor === "rgba(0, 0, 0, 0)" &&
+      selectedModeStyle.color === workspaceModeChrome.fg1 &&
+      unselectedModeStyle?.color === workspaceModeChrome.fg3,
   );
   check(
     "design workspace mounts no coding-agent chat",
     (await page.getByRole("region", { name: "Agent chat preview" }).count()) ===
       0 && (await page.getByLabel("Agent Workspace").count()) === 0,
+  );
+  check(
+    "design inspector omits the code-column collapse control",
+    (await page.getByRole("button", { name: "Hide design panel" }).count()) ===
+      0 &&
+      (await page
+        .getByRole("button", { name: "Show design panel" })
+        .count()) === 0,
   );
 
   check(
@@ -90,6 +204,45 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   const bodyRowMetrics = await readLayerRow("home-body");
   const mainRowMetrics = await readLayerRow("home-main");
   const headingRowMetrics = await readLayerRow("home-heading");
+  const layerNames = await layersPanel.evaluate((panel) => {
+    const name = (selector) =>
+      panel.querySelector(selector)?.textContent?.trim() ?? null;
+    return {
+      frame: name('[data-design-frame-row="home.html"]'),
+      body: name('[data-design-layer-id="home-body"]'),
+      main: name('[data-design-layer-id="home-main"]'),
+      heading: name('[data-design-layer-id="home-heading"]'),
+    };
+  });
+  check(
+    "Layers uses only designer-facing names instead of HTML tags or content",
+    layerNames.frame === "Frame" &&
+      layerNames.body === "Frame" &&
+      layerNames.main === "Frame" &&
+      layerNames.heading === "Text",
+    JSON.stringify(layerNames),
+  );
+  const homeLayoutIcons = await layersPanel.evaluate((panel) => {
+    const icon = (selector) =>
+      panel
+        .querySelector(selector)
+        ?.querySelector("[data-design-layout-icon]")
+        ?.getAttribute("data-design-layout-icon") ?? null;
+    return {
+      frame: icon('[data-design-frame-row="home.html"]'),
+      body: icon('[data-design-layer-id="home-body"]'),
+      main: icon('[data-design-layer-id="home-main"]'),
+      nav: icon('[data-design-layer-id="home-nav"]'),
+    };
+  });
+  check(
+    "Frame icons describe block, vertical flex, and horizontal flex layouts",
+    homeLayoutIcons.frame === "flex-vertical" &&
+      homeLayoutIcons.body === "frame" &&
+      homeLayoutIcons.main === "flex-vertical" &&
+      homeLayoutIcons.nav === "flex-horizontal",
+    JSON.stringify(homeLayoutIcons),
+  );
   check(
     "layer rows indent their content one step per depth below the frame row",
     !!frameRowMetrics &&
@@ -278,6 +431,39 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       "design-two-frames-open",
     ),
   );
+  for (const target of ["pricing-body", "pricing-main"]) {
+    const row = layersPanel.locator(`[data-design-layer-id="${target}"]`);
+    await row.waitFor({ state: "visible", timeout: 10_000 });
+    if ((await row.getAttribute("aria-expanded")) !== "true") {
+      await layersPanel
+        .locator(`[data-design-layer-row="${target}"] [data-layer-disclosure]`)
+        .click();
+    }
+  }
+  await layersPanel
+    .locator('[data-design-layer-id="pricing-plans"]')
+    .waitFor({ state: "visible", timeout: 10_000 });
+  const pricingLayoutIcons = await layersPanel.evaluate((panel) => {
+    const icon = (selector) =>
+      panel
+        .querySelector(selector)
+        ?.querySelector("[data-design-layout-icon]")
+        ?.getAttribute("data-design-layout-icon") ?? null;
+    return {
+      frame: icon('[data-design-frame-row="pricing.html"]'),
+      body: icon('[data-design-layer-id="pricing-body"]'),
+      main: icon('[data-design-layer-id="pricing-main"]'),
+      plans: icon('[data-design-layer-id="pricing-plans"]'),
+    };
+  });
+  check(
+    "Frame icons use the grid icon for grid layout",
+    pricingLayoutIcons.frame === "flex-vertical" &&
+      pricingLayoutIcons.body === "frame" &&
+      pricingLayoutIcons.main === "flex-vertical" &&
+      pricingLayoutIcons.plans === "grid",
+    JSON.stringify(pricingLayoutIcons),
+  );
   await pricingFrameRow.click();
   check(
     "selecting another frame never folds the frame already open",
@@ -335,7 +521,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   );
 
   const designSplitter = page.getByRole("separator", {
-    name: "Resize design sidebar",
+    name: "Resize Layers panel",
   });
   await designSplitter.focus();
   await page.keyboard.press("ArrowRight");
@@ -360,6 +546,25 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       compactCanvasBox.width >= 455,
   );
   await page.setViewportSize({ width: 1440, height: 900 });
+
+  const styleSplitter = page.getByRole("separator", {
+    name: "Resize Style panel",
+  });
+  const stylePanelBeforeKeyboard = await page
+    .locator("[data-design-inspector]")
+    .boundingBox();
+  await styleSplitter.focus();
+  await page.keyboard.press("ArrowLeft");
+  const stylePanelAfterKeyboard = await page
+    .locator("[data-design-inspector]")
+    .boundingBox();
+  check(
+    "keyboard splitter resizes the Style panel",
+    !!stylePanelBeforeKeyboard &&
+      !!stylePanelAfterKeyboard &&
+      stylePanelAfterKeyboard.width > stylePanelBeforeKeyboard.width,
+  );
+  await page.keyboard.press("ArrowRight");
 
   const designCanvas = page.getByRole("region", {
     name: "Design workspace",
@@ -414,10 +619,15 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       },
     );
   };
-  const fitAllFramesButton = page.getByRole("button", {
-    name: "Fit all frames",
+  const stylePanelHeader = page.locator("[data-design-style-panel-header]");
+  const styleZoomButton = stylePanelHeader.getByRole("button", {
+    name: /^Canvas zoom \d+%$/,
   });
-  await fitAllFramesButton.click();
+  const fitAllFrames = async () => {
+    await canvasViewport.focus();
+    await page.keyboard.press("Shift+1");
+  };
+  await fitAllFrames();
   const readCameraChrome = () =>
     zoomCanvasWorld.evaluate((world) => {
       const matrix = new DOMMatrix(getComputedStyle(world).transform);
@@ -500,7 +710,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     JSON.stringify({ chromeBeforePinch, chromeDuringPinch }),
   );
   await page.waitForTimeout(120);
-  await fitAllFramesButton.click();
+  await fitAllFrames();
   await canvasViewport.evaluate((canvas) => {
     const frame = canvas.querySelector('[data-design-frame="home.html"]');
     const bounds =
@@ -546,7 +756,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       zoomedOutFrameName.truncated,
     JSON.stringify(zoomedOutFrameName),
   );
-  await fitAllFramesButton.click();
+  await fitAllFrames();
   const zoomBeforePinch = await readCanvasTransform();
   const zoomAnchor = await dispatchZoomBurst("ctrl");
   // Chromium encodes pinch as ctrl+wheel with deltaY ≈ -100·ln(scale); the
@@ -585,11 +795,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   );
   await waitFor(
     async () =>
-      (await fitAllFramesButton.textContent()) ===
+      (await styleZoomButton.textContent()) ===
       `${Math.round(expectedBurstZoom * 100)}%`,
     "design-pinch-zoom-store-settle",
   );
-  await fitAllFramesButton.click();
+  await fitAllFrames();
   await waitFor(async () => {
     const current = await readCanvasTransform();
     return Math.abs(current.zoom - zoomBeforePinch.zoom) < 0.0001;
@@ -612,21 +822,21 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   );
   await waitFor(
     async () =>
-      (await fitAllFramesButton.textContent()) ===
+      (await styleZoomButton.textContent()) ===
       `${Math.round(expectedCommandZoom * 100)}%`,
     "design-command-scroll-store-settle",
   );
-  await fitAllFramesButton.click();
+  await fitAllFrames();
   await waitFor(async () => {
     const current = await readCanvasTransform();
     return Math.abs(current.zoom - zoomBeforePinch.zoom) < 0.0001;
   }, "design-command-scroll-fit-reset");
   await dispatchZoomBurst("ctrl");
-  await fitAllFramesButton.click();
+  await fitAllFrames();
   await page.waitForTimeout(120);
   const zoomAfterImmediateFit = await readCanvasTransform();
   check(
-    "Fit overrides an in-flight pinch without a delayed zoom snap-back",
+    "Fit shortcut overrides an in-flight pinch without a delayed zoom snap-back",
     Math.abs(zoomAfterImmediateFit.zoom - zoomBeforePinch.zoom) < 0.0001,
     JSON.stringify({ zoomBeforePinch, zoomAfterImmediateFit }),
   );
@@ -740,7 +950,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       10_000,
     ),
   );
-  await fitAllFramesButton.click();
+  await fitAllFrames();
   await waitFor(async () => {
     const current = await readCanvasTransform();
     return Math.abs(current.zoom - zoomBeforePinch.zoom) < 0.0001;
@@ -760,6 +970,339 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   await page
     .locator('[data-design-element-overlay="home-heading"]')
     .waitFor({ state: "visible", timeout: 10_000 });
+  const inspector = page.locator("[data-design-inspector]");
+  const inspectorHeader = inspector.locator("[data-design-inspector-header]");
+  const expandStyleSection = async (title) => {
+    const trigger = inspector.getByRole("button", {
+      name: `Expand ${title}`,
+      exact: true,
+    });
+    if ((await trigger.count()) > 0) await trigger.click();
+  };
+  const canvasBoxForPageSelection = await canvasViewport.boundingBox();
+  if (canvasBoxForPageSelection) {
+    await canvasViewport.click({
+      position: {
+        x: canvasBoxForPageSelection.width - 12,
+        y: canvasBoxForPageSelection.height - 12,
+      },
+    });
+  }
+  await waitFor(
+    async () => (await inspectorHeader.textContent())?.trim() === "Page",
+    "design-page-background-selection",
+  );
+  const pageBackgroundEditor = inspector.locator(
+    "[data-design-canvas-background]",
+  );
+  const canvasSurface = await canvasViewport.evaluate((canvas) => {
+    const style = getComputedStyle(canvas);
+    const probe = document.createElement("span");
+    probe.style.color = "var(--bg2)";
+    canvas.appendChild(probe);
+    const bg2 = getComputedStyle(probe).color;
+    probe.remove();
+    return {
+      backgroundColor: style.backgroundColor,
+      backgroundImage: style.backgroundImage,
+      bg2,
+    };
+  });
+  check(
+    "empty selection exposes Page color and opacity on a solid --bg2 canvas",
+    (await pageBackgroundEditor.isVisible()) &&
+      (await pageBackgroundEditor.textContent())?.includes("100 %") &&
+      canvasSurface.backgroundImage === "none" &&
+      canvasSurface.backgroundColor === canvasSurface.bg2,
+    JSON.stringify(canvasSurface),
+  );
+  await pageBackgroundEditor
+    .getByRole("button", { name: "Edit canvas background" })
+    .click();
+  check(
+    "Page background uses the shared color picker with opacity",
+    await page.getByLabel("Canvas background opacity value").isVisible(),
+  );
+  await page.keyboard.press("Escape");
+  await layersPanel.locator('[data-design-layer-id="home-heading"]').click();
+  await waitFor(
+    async () => (await inspectorHeader.textContent())?.trim() === "Text",
+    "design-page-background-return-to-layer",
+  );
+  check(
+    "Style panel has one icon-free zoom menu and no property search",
+    (await stylePanelHeader.getByText("Style", { exact: true }).count()) ===
+      1 &&
+      (await styleZoomButton.locator("svg").count()) === 0 &&
+      (await page.getByLabel("Find a style property").count()) === 0,
+  );
+  await styleZoomButton.click();
+  const styleZoomMenu = page.getByRole("menu");
+  check(
+    "Style zoom menu contains only Zoom in and Zoom out",
+    (await styleZoomMenu.getByRole("menuitem").count()) === 2 &&
+      (await styleZoomMenu
+        .getByRole("menuitem", { name: "Zoom in", exact: true })
+        .count()) === 1 &&
+      (await styleZoomMenu
+        .getByRole("menuitem", { name: "Zoom out", exact: true })
+        .count()) === 1,
+  );
+  await page.keyboard.press("Escape");
+  const inspectorScrollViewport = inspector
+    .locator("[data-radix-scroll-area-viewport]")
+    .first();
+  const stylePanelFooter = inspector.locator(
+    "[data-design-style-panel-footer]",
+  );
+  const cssModeButton = stylePanelFooter.getByRole("button", {
+    name: "CSS",
+    exact: true,
+  });
+  const styleHeaderTopBeforeScroll = (await stylePanelHeader.boundingBox())?.y;
+  const styleFooterTopBeforeScroll = (await stylePanelFooter.boundingBox())?.y;
+  await inspectorScrollViewport.evaluate((element) => {
+    element.scrollTop = 320;
+  });
+  const styleHeaderTopAfterScroll = (await stylePanelHeader.boundingBox())?.y;
+  const styleFooterTopAfterScroll = (await stylePanelFooter.boundingBox())?.y;
+  check(
+    "Style header and CSS footer stay fixed while inspector contents scroll",
+    (await inspectorScrollViewport.evaluate((element) => element.scrollTop)) >
+      0 &&
+      styleHeaderTopBeforeScroll !== undefined &&
+      styleHeaderTopAfterScroll !== undefined &&
+      styleFooterTopBeforeScroll !== undefined &&
+      styleFooterTopAfterScroll !== undefined &&
+      Math.abs(styleHeaderTopAfterScroll - styleHeaderTopBeforeScroll) < 0.5 &&
+      Math.abs(styleFooterTopAfterScroll - styleFooterTopBeforeScroll) < 0.5,
+  );
+  await inspectorScrollViewport.evaluate((element) => {
+    element.scrollTop = 0;
+  });
+  const styleFooterButtonCount = await stylePanelFooter
+    .locator("button")
+    .count();
+  const initialCssPressed = await cssModeButton.getAttribute("aria-pressed");
+  check(
+    "Style footer contains only the CSS toggle",
+    styleFooterButtonCount === 1 && initialCssPressed === "false",
+    JSON.stringify({ styleFooterButtonCount, initialCssPressed }),
+  );
+  await cssModeButton.click();
+  const computedCssEditor = page.getByLabel("Computed CSS declarations");
+  const computedCssLines = computedCssEditor.locator(".cm-line");
+  const originalComputedCss = (await computedCssLines.allTextContents()).join(
+    "\n",
+  );
+  check(
+    "CSS mode keeps the Style and selection rows above one-line computed declarations",
+    (await stylePanelHeader.isVisible()) &&
+      (await inspectorHeader.textContent())?.trim() === "Text" &&
+      (await computedCssEditor.isVisible()) &&
+      (await computedCssLines.count()) > 0 &&
+      (await computedCssLines.allTextContents()).every(
+        (line) => !line.includes("\n"),
+      ) &&
+      (await page.getByText("Apply CSS", { exact: true }).count()) === 0 &&
+      (await cssModeButton.getAttribute("aria-pressed")) === "true",
+  );
+  const cssStyleOperationStart = await page.evaluate(
+    () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
+  );
+  await computedCssEditor.click();
+  await page.keyboard.press("End");
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("justi");
+  await page.keyboard.press("Control+Space");
+  const cssPropertyCompletion = page
+    .locator(".cm-tooltip-autocomplete .cm-completionLabel")
+    .filter({ hasText: /^justify-content$/ });
+  await waitFor(
+    () => cssPropertyCompletion.isVisible().catch(() => false),
+    "design-css-property-completion",
+  );
+  const propertySuggestionVisible = await cssPropertyCompletion.isVisible();
+  if (propertySuggestionVisible) await cssPropertyCompletion.click();
+  await page.keyboard.type("c");
+  await page.keyboard.press("Control+Space");
+  const centerValueCompletion = page
+    .locator(".cm-tooltip-autocomplete .cm-completionLabel")
+    .filter({ hasText: /^center$/ });
+  const spacedValueCompletion = page
+    .locator(".cm-tooltip-autocomplete .cm-completionLabel")
+    .filter({ hasText: /^space-between$/ });
+  await waitFor(
+    () => centerValueCompletion.isVisible().catch(() => false),
+    "design-css-value-completion",
+  );
+  const centerSuggestionVisible = await centerValueCompletion.isVisible();
+  const spacedSuggestionVisible = await spacedValueCompletion.isVisible();
+  check(
+    "CSS editor recommends both properties and property-aware values",
+    propertySuggestionVisible &&
+      centerSuggestionVisible &&
+      spacedSuggestionVisible,
+    JSON.stringify({
+      propertySuggestionVisible,
+      centerSuggestionVisible,
+      spacedSuggestionVisible,
+    }),
+  );
+  if (centerSuggestionVisible) await centerValueCompletion.click();
+  await page.keyboard.type(";");
+  const cssEditCommitted = await waitFor(async () => {
+    const operations = await page.evaluate(
+      () => window.__zerosHarnessDesignShortcutOperations ?? [],
+    );
+    const justifyContent = await homeRuntime
+      .locator('[data-oid="home-heading"]')
+      .evaluate((heading) => getComputedStyle(heading).justifyContent)
+      .catch(() => null);
+    return (
+      operations.length >= cssStyleOperationStart + 2 &&
+      operations.at(-2) === "style:start" &&
+      operations.at(-1) === "style:end" &&
+      justifyContent === "center"
+    );
+  }, "design-css-autosave");
+  check(
+    "valid CSS previews and persists without a save or add action",
+    cssEditCommitted,
+  );
+  await page.keyboard.press("ControlOrMeta+A");
+  await page.keyboard.insertText(originalComputedCss);
+  const cssEditRestored = await waitFor(async () => {
+    const operations = await page.evaluate(
+      () => window.__zerosHarnessDesignShortcutOperations ?? [],
+    );
+    const justifyContent = await homeRuntime
+      .locator('[data-oid="home-heading"]')
+      .evaluate((heading) => getComputedStyle(heading).justifyContent)
+      .catch(() => null);
+    return (
+      operations.length >= cssStyleOperationStart + 4 &&
+      operations.at(-2) === "style:start" &&
+      operations.at(-1) === "style:end" &&
+      justifyContent !== "center"
+    );
+  }, "design-css-autosave-restore");
+  check("removing a CSS line also persists automatically", cssEditRestored);
+  await cssModeButton.click();
+  check(
+    "CSS toggle returns to the visual Style controls without a save or add action",
+    (await page.locator("[data-design-style-editor]").isVisible()) &&
+      (await computedCssEditor.count()) === 0 &&
+      (await cssModeButton.getAttribute("aria-pressed")) === "false",
+  );
+  await homeFrameRow.click();
+  const frameStyleReady = await waitFor(
+    async () =>
+      (await inspectorHeader.textContent())?.trim() === "Frame" &&
+      (await inspector.locator("[data-design-style-editor]").isVisible()) &&
+      (await inspector.getByLabel("Opacity", { exact: true }).count()) === 1,
+    "design-frame-complete-style-editor",
+  );
+  const frameStyleGeometry = frameStyleReady
+    ? {
+        x: await inspector.getByLabel("X", { exact: true }).inputValue(),
+        y: await inspector.getByLabel("Y", { exact: true }).inputValue(),
+        width: await inspector.getByLabel("W", { exact: true }).inputValue(),
+        height: await inspector.getByLabel("H", { exact: true }).inputValue(),
+      }
+    : null;
+  check(
+    "a selected canvas Frame exposes the complete Style editor and canvas geometry",
+    frameStyleReady &&
+      frameStyleGeometry?.x === "0" &&
+      frameStyleGeometry.y === "0" &&
+      frameStyleGeometry.width === "1440" &&
+      frameStyleGeometry.height === "900" &&
+      (await inspector
+        .getByRole("button", { name: "Collapse Layout", exact: true })
+        .count()) === 1 &&
+      (await inspector
+        .getByRole("button", { name: "Collapse Appearance", exact: true })
+        .count()) === 1 &&
+      (await inspector.getByText("Frame position & size").count()) === 0,
+    JSON.stringify(frameStyleGeometry),
+  );
+  const readHomeFlexIcons = () =>
+    layersPanel.evaluate((panel) => ({
+      frame:
+        panel
+          .querySelector('[data-design-frame-row="home.html"]')
+          ?.querySelector("[data-design-layout-icon]")
+          ?.getAttribute("data-design-layout-icon") ?? null,
+      main:
+        panel
+          .querySelector('[data-design-layer-id="home-main"]')
+          ?.querySelector("[data-design-layout-icon]")
+          ?.getAttribute("data-design-layout-icon") ?? null,
+    }));
+  await inspector.getByRole("button", { name: "Row", exact: true }).click();
+  const horizontalFrameIcons = await waitFor(async () => {
+    const icons = await readHomeFlexIcons();
+    return (
+      icons.frame === "flex-horizontal" && icons.main === "flex-horizontal"
+    );
+  }, "design-frame-horizontal-icon-update");
+  check(
+    "changing Frame flow updates both canvas-frame and layer icons immediately",
+    horizontalFrameIcons,
+    JSON.stringify(await readHomeFlexIcons()),
+  );
+  await inspector.getByRole("button", { name: "Column", exact: true }).click();
+  await waitFor(async () => {
+    const icons = await readHomeFlexIcons();
+    return icons.frame === "flex-vertical" && icons.main === "flex-vertical";
+  }, "design-frame-vertical-icon-restore");
+  const frameOpacity = inspector.getByLabel("Opacity", { exact: true });
+  await frameOpacity.fill("0.92");
+  await page.keyboard.press("Enter");
+  check(
+    "normal Frame style edits apply to the live frame root",
+    await waitFor(
+      () =>
+        homeRuntime
+          .locator('[data-oid="home-main"]')
+          .evaluate(
+            (element) => element.style.getPropertyValue("opacity") === "0.92",
+          )
+          .catch(() => false),
+      "design-frame-style-commit",
+    ),
+  );
+  await frameOpacity.fill("");
+  await page.keyboard.press("Enter");
+  await waitFor(
+    () =>
+      homeRuntime
+        .locator('[data-oid="home-main"]')
+        .evaluate((element) => element.style.getPropertyValue("opacity") === "")
+        .catch(() => false),
+    "design-frame-style-restore",
+  );
+  await layersPanel.locator('[data-design-layer-id="home-heading"]').click();
+  await waitFor(
+    async () =>
+      (await inspectorHeader.textContent())?.trim() === "Text" &&
+      (await inspector.locator("[data-design-style-editor]").isVisible()),
+    "design-heading-style-editor-restored",
+  );
+  check(
+    "design inspector shows one name row without tags, metadata, or frame actions",
+    (await inspectorHeader.textContent())?.trim() === "Text" &&
+      (await inspectorHeader.evaluate(
+        (header) => header.parentElement?.children.length,
+      )) === 1 &&
+      (await inspector
+        .getByRole("button", { name: "Duplicate frame" })
+        .count()) === 0 &&
+      (await inspector
+        .getByRole("button", { name: "Delete frame" })
+        .count()) === 0,
+  );
   check(
     "design inspector exposes the custom fill editor",
     await page.getByRole("button", { name: "Edit fill" }).isEnabled(),
@@ -777,7 +1320,6 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     (await page.getByRole("combobox", { name: "Box sizing" }).isVisible()) &&
       (await page.getByRole("group", { name: "Display" }).isVisible()),
   );
-  const propertySearch = page.getByLabel("Find a style property");
   const quietInspectorField = page
     .locator("[data-design-inspector-field]")
     .first();
@@ -1871,27 +2413,6 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       ].every((element) => element.scrollWidth === element.clientWidth),
     ),
   );
-  await propertySearch.fill("shadow");
-  check(
-    "property search reveals matching controls without another expand click",
-    await page
-      .getByText("Box shadow", { exact: true })
-      .isVisible()
-      .catch(() => false),
-  );
-  await propertySearch.fill("box-sizing");
-  check(
-    "property search accepts exact CSS property names",
-    await page
-      .getByText("Box sizing", { exact: true })
-      .isVisible()
-      .catch(() => false),
-  );
-  await propertySearch.press("Escape");
-  check(
-    "Escape clears property search",
-    (await propertySearch.inputValue()) === "",
-  );
   const elementResizeLabels = await homeFrame
     .locator(
       '.zd-design-selection-handle[aria-label^="Resize Make the next move unmistakable. from "]',
@@ -2011,13 +2532,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       themeMovedBox.x + themeMovedBox.width <= 1440 &&
       themeMovedBox.y + themeMovedBox.height <= 900,
   );
-  await page.getByRole("tab", { name: "Data" }).click();
   check(
     "inspector remains interactive while the theme editor stays open",
     (await page.getByRole("button", { name: "Export PNG" }).isEnabled()) &&
       (await themeDialog.isVisible()),
   );
-  await page.getByRole("tab", { name: "Style" }).click();
   await page.locator('[data-design-layer-id="home-copy"]').click();
   check(
     "Layers remain interactive while the theme editor stays open",
@@ -2042,18 +2561,24 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         .catch(() => false),
     "design-theme-restore-heading",
   );
-  const zoomLabel = page.getByRole("button", { name: "Fit all frames" });
-  const zoomBeforeThemeInteraction = await zoomLabel.textContent();
-  await page.getByRole("button", { name: "Zoom in" }).click();
+  const zoomBeforeThemeInteraction = await styleZoomButton.textContent();
+  await styleZoomButton.click();
+  await page.getByRole("menuitem", { name: "Zoom in", exact: true }).click();
   check(
     "canvas tooling remains interactive while the theme editor stays open",
     (await waitFor(
       async () =>
-        (await zoomLabel.textContent()) !== zoomBeforeThemeInteraction,
+        (await styleZoomButton.textContent()) !== zoomBeforeThemeInteraction &&
+        (await styleZoomMenu.count()) === 0,
       "design-theme-nonmodal-canvas",
     )) && (await themeDialog.isVisible()),
   );
-  await page.getByRole("button", { name: "Zoom out" }).click();
+  await styleZoomButton.click();
+  await page.getByRole("menuitem", { name: "Zoom out", exact: true }).click();
+  await waitFor(
+    async () => (await styleZoomMenu.count()) === 0,
+    "design-style-zoom-menu-close",
+  );
   check(
     "theme editor exposes a Base and named-mode matrix",
     (await themeDialog.getByText("Base", { exact: true }).count()) >= 2 &&
@@ -2157,18 +2682,27 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       "design-theme-focus-return",
     ),
   );
-  await page.getByRole("tab", { name: "Data" }).click();
   check(
-    "design inspector exposes PNG export",
+    "Style inspector exposes PNG export",
     await page.getByRole("button", { name: "Export PNG" }).isEnabled(),
   );
   check(
-    "design inspector reuses the pull request affordance",
-    (await page
-      .getByRole("button", { name: "Open PR #42", exact: true })
-      .count()) === 1,
+    "stage, undo, and redo are keyboard-only in the Style inspector",
+    (await page.getByRole("button", { name: "Save designs" }).count()) === 0 &&
+      (await page.getByRole("button", { name: "Undo design edit" }).count()) ===
+        0 &&
+      (await page.getByRole("button", { name: "Redo design edit" }).count()) ===
+        0,
   );
-  await page.getByRole("tab", { name: "Style" }).click();
+  check(
+    "design inspector has no Data or pull request surface",
+    (await page.locator("[data-design-inspector]").getByRole("tab").count()) ===
+      0 &&
+      (await page
+        .getByRole("button", { name: "Open PR #42", exact: true })
+        .count()) === 0 &&
+      (await page.getByRole("button", { name: "Create PR" }).count()) === 0,
+  );
 
   // One Enter is one source write. The colour picker used to commit from its
   // own key handler and then blur — and blur commits too — so a single keypress
@@ -2315,7 +2849,131 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       "design-static-offset-removal",
     ),
   );
-  await propertySearch.fill("transform");
+  await waitFor(
+    () =>
+      page.evaluate(() => {
+        const operations = window.__zerosHarnessDesignShortcutOperations ?? [];
+        const starts = operations.filter(
+          (operation) => operation === "style:start",
+        ).length;
+        const ends = operations.filter(
+          (operation) => operation === "style:end",
+        ).length;
+        return starts === ends;
+      }),
+    "design-static-offset-removal-settled",
+  );
+  const beforeStageShortcut = await page.evaluate(
+    () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
+  );
+  await xField.fill("16px");
+  await xField.press("ControlOrMeta+S");
+  const stageShortcutSettled = await waitFor(
+    async () =>
+      (await page.evaluate(
+        (start) =>
+          (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
+          start + 4,
+        beforeStageShortcut,
+      )) === true,
+    "design-command-stage",
+  );
+  const stageShortcutOperations = await page.evaluate(
+    (start) =>
+      (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
+    beforeStageShortcut,
+  );
+  check(
+    "Command-S stages a focused inspector draft without creating a commit",
+    stageShortcutSettled &&
+      stageShortcutOperations.slice(0, 4).join(",") ===
+        "style:start,style:end,stage:start,stage:end" &&
+      (await selectedHeading.evaluate(
+        (element) => element.style.getPropertyValue("left") === "16px",
+      )),
+    JSON.stringify(stageShortcutOperations),
+  );
+  const beforeRapidStageShortcuts = await page.evaluate(
+    () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
+  );
+  await xField.fill("20px");
+  await xField.press("ControlOrMeta+S");
+  await xField.fill("24px");
+  await xField.press("ControlOrMeta+S");
+  const rapidStageShortcutsSettled = await waitFor(
+    async () =>
+      (await page.evaluate(
+        (start) =>
+          (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
+          start + 8,
+        beforeRapidStageShortcuts,
+      )) === true,
+    "design-rapid-command-stage",
+  );
+  const rapidStageShortcutOperations = await page.evaluate(
+    (start) =>
+      (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
+    beforeRapidStageShortcuts,
+  );
+  check(
+    "rapid Command-S requests stage every newly published inspector draft",
+    rapidStageShortcutsSettled &&
+      rapidStageShortcutOperations.slice(0, 8).join(",") ===
+        "style:start,style:end,stage:start,stage:end,style:start,style:end,stage:start,stage:end" &&
+      (await selectedHeading.evaluate(
+        (element) => element.style.getPropertyValue("left") === "24px",
+      )),
+    JSON.stringify(rapidStageShortcutOperations),
+  );
+  const beforeStageShortcutReset = await page.evaluate(
+    () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
+  );
+  await xField.fill("");
+  await xField.press("Enter");
+  await waitFor(
+    async () =>
+      (await selectedHeading
+        .evaluate((element) => element.style.getPropertyValue("left") === "")
+        .catch(() => false)) &&
+      (await page.evaluate(
+        (start) =>
+          (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
+          start + 2,
+        beforeStageShortcutReset,
+      )),
+    "design-command-stage-reset",
+  );
+
+  const beforeHistoryShortcuts = await page.evaluate(
+    () => window.__zerosHarnessDesignShortcutOperations?.length ?? 0,
+  );
+  await page.getByLabel("Design canvas").focus();
+  await page.keyboard.press("ControlOrMeta+Z");
+  await page.keyboard.press("ControlOrMeta+Z");
+  await page.keyboard.press("ControlOrMeta+Shift+Z");
+  const historyShortcutsSettled = await waitFor(
+    async () =>
+      (await page.evaluate(
+        (start) =>
+          (window.__zerosHarnessDesignShortcutOperations?.length ?? 0) >=
+          start + 6,
+        beforeHistoryShortcuts,
+      )) === true,
+    "design-rapid-history-shortcuts",
+  );
+  const historyShortcutOperations = await page.evaluate(
+    (start) =>
+      (window.__zerosHarnessDesignShortcutOperations ?? []).slice(start),
+    beforeHistoryShortcuts,
+  );
+  check(
+    "rapid undo and redo keypresses execute once each in input order",
+    historyShortcutsSettled &&
+      historyShortcutOperations.slice(0, 6).join(",") ===
+        "undo:start,undo:end,undo:start,undo:end,redo:start,redo:end",
+    JSON.stringify(historyShortcutOperations),
+  );
+  await expandStyleSection("Transform");
   await page.getByRole("button", { name: "Edit transform" }).click();
   const transformInput = page.getByLabel("Transform CSS value");
   await transformInput.press("ControlOrMeta+A");
@@ -2361,12 +3019,18 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       "design-transform-clear",
     ),
   );
-  await propertySearch.fill("");
   check(
     "design advisories are compact and explicitly non-blocking",
     (await page
       .getByText("Review 1 rule · non-blocking", { exact: true })
       .count()) === 1,
+  );
+  check(
+    "style keyframe actions stay unavailable until Motion mode opens",
+    (await page
+      .locator("[data-design-inspector]")
+      .getByRole("button", { name: /^Animate /i })
+      .count()) === 0,
   );
 
   await page.getByRole("button", { name: "Toggle motion timeline" }).click();
@@ -2813,11 +3477,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
       "design-motion-inspector-keyframe",
     ),
   );
-  const expandTransform = page.getByRole("button", {
-    name: "Expand Transform",
-    exact: true,
-  });
-  if ((await expandTransform.count()) > 0) await expandTransform.click();
+  await expandStyleSection("Transform");
   await page
     .getByRole("button", {
       name: /^(Animate transform|Add transform keyframe at the playhead)$/,
@@ -3322,7 +3982,11 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   );
   check(
     "cancelling intrinsic-width text restores its exact authored line",
-    (await runtimeAction.textContent()) === actionTextBeforeEdit,
+    await waitFor(
+      async () =>
+        (await runtimeAction.textContent()) === actionTextBeforeEdit,
+      "design-inline-text-intrinsic-cancel-restored",
+    ),
   );
 
   await page.getByRole("button", { name: "Text tool" }).click();
@@ -3422,17 +4086,36 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
   );
   await page.getByLabel("Design canvas").focus();
   await page.keyboard.press("Delete");
-  const looseTextDeleteDialog = page.getByRole("dialog", {
-    name: "Delete Canvas label?",
-  });
   check(
-    "Delete routes top-level text through recoverable source deletion",
+    "Delete removes top-level text immediately without a confirmation",
     await waitFor(
-      () => looseTextDeleteDialog.isVisible().catch(() => false),
+      async () => (await looseTextFrame.count()) === 0,
       "design-loose-text-delete",
     ),
   );
-  await page.keyboard.press("Escape");
+  check(
+    "top-level text deletion emits no success toast or dialog",
+    (await page.getByRole("dialog").count()) === 0 &&
+      (await page
+        .getByText("Design frame deleted", { exact: true })
+        .count()) === 0,
+  );
+  await page.keyboard.press("ControlOrMeta+Z");
+  check(
+    "Command-Z restores deleted top-level text immediately",
+    await waitFor(
+      async () => (await looseTextFrame.count()) === 1,
+      "design-loose-text-undo",
+    ),
+  );
+  await page.keyboard.press("ControlOrMeta+Shift+Z");
+  check(
+    "Command-Shift-Z redoes top-level text deletion",
+    await waitFor(
+      async () => (await looseTextFrame.count()) === 0,
+      "design-loose-text-redo",
+    ),
+  );
   await homeFrame.getByRole("button", { name: /^Launch home/ }).click();
   await page.locator('[data-design-layer-id="home-heading"]').click();
 
@@ -3977,7 +4660,7 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
         .count()) === 0,
   );
 
-  await propertySearch.fill("transform");
+  await expandStyleSection("Transform");
   await page
     .getByRole("button", { name: "Edit transform" })
     .waitFor({ state: "visible" });
@@ -4363,7 +5046,6 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     ),
   );
   await zoomAboutSelection(originZoomAnchor, 40, originZoomSteps);
-  await propertySearch.fill("");
 
   // A constraint reaches only the parent edges the element's CSS pins it to. A
   // static box in flow is pinned to the start edges, and the run measures the
@@ -4580,50 +5262,44 @@ export async function runDesignWorkspaceSmoke({ page, waitFor, check }) {
     ),
   );
 
-  // Frame-level actions intentionally appear only when the frame itself is
-  // selected. Selecting its canvas label mirrors the production workflow and
-  // keeps this check independent from how many nested levels Escape must climb.
+  // Frame deletion is keyboard-only and intentionally frictionless. Selecting
+  // its canvas label mirrors the production workflow and proves the deletion
+  // itself—not a confirmation UI—is the history entry.
   await homeFrame.getByRole("button", { name: /^Launch home/ }).click();
-  const deleteFrameTrigger = page.getByRole("button", {
-    name: "Delete frame",
-  });
-  await deleteFrameTrigger.click();
-  const deleteFrameDialog = page.getByRole("dialog", {
-    name: "Delete Launch home?",
-  });
+  await canvasViewport.focus();
+  await page.keyboard.press("Delete");
   check(
-    "frame delete requires confirmation",
+    "frame delete is immediate and confirmation-free",
     await waitFor(
-      () => deleteFrameDialog.isVisible().catch(() => false),
-      "design-delete-dialog",
+      async () => (await homeFrame.count()) === 0,
+      "design-delete-frame",
     ),
   );
+  check(
+    "frame deletion emits no success toast",
+    (await page.getByText("Design frame deleted", { exact: true }).count()) ===
+      0,
+  );
+  await page.keyboard.press("ControlOrMeta+Z");
+  check(
+    "Command-Z restores the deleted frame",
+    await waitFor(
+      async () => (await homeFrame.count()) === 1,
+      "design-delete-frame-undo",
+    ),
+  );
+  await page.keyboard.press("ControlOrMeta+Shift+Z");
+  check(
+    "Command-Shift-Z deletes the restored frame again",
+    await waitFor(
+      async () => (await homeFrame.count()) === 0,
+      "design-delete-frame-redo",
+    ),
+  );
+  await page.keyboard.press("ControlOrMeta+Z");
   await waitFor(
-    () =>
-      page.evaluate(
-        () => document.activeElement?.textContent?.trim() === "Cancel",
-      ),
-    "design-delete-cancel-focus",
-  );
-  await page.keyboard.press("Escape");
-  check(
-    "Escape closes frame delete confirmation",
-    await waitFor(
-      async () => !(await deleteFrameDialog.isVisible().catch(() => false)),
-      "design-delete-escape",
-    ),
-  );
-  check(
-    "frame delete dialog returns focus",
-    await waitFor(
-      () =>
-        page.evaluate(
-          () =>
-            document.activeElement?.getAttribute("aria-label") ===
-            "Delete frame",
-        ),
-      "design-delete-focus-return",
-    ),
+    async () => (await homeFrame.count()) === 1,
+    "design-delete-frame-final-restore",
   );
 
   // A separate dense fixture keeps the ordinary visual harness readable while

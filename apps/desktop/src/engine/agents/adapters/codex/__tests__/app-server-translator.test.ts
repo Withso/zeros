@@ -139,6 +139,72 @@ describe("CodexAppServerTranslator", () => {
   });
 
   describe("agent message streaming", () => {
+    it("preserves commentary and final-answer phases across delta notifications", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "agentMessage",
+          id: "commentary-1",
+          text: "",
+          phase: "commentary",
+        },
+      });
+      env.t.handle("item/agentMessage/delta", {
+        itemId: "commentary-1",
+        delta: "I will inspect it.",
+      });
+      env.t.handle("item/started", {
+        item: {
+          type: "agentMessage",
+          id: "final-1",
+          text: "",
+          phase: "final_answer",
+        },
+      });
+      env.t.handle("item/agentMessage/delta", {
+        itemId: "final-1",
+        delta: "The inspection is complete.",
+      });
+
+      const chunks = env.out.emitted
+        .filter((n) => n.update.sessionUpdate === "agent_message_chunk")
+        .map((n) => n.update as { phase?: string });
+      expect(chunks.map((chunk) => chunk.phase)).toEqual([
+        "commentary",
+        "final_answer",
+      ]);
+    });
+
+    it("publishes a late phase declared only by item/completed", () => {
+      env.t.handle("item/started", {
+        item: { type: "agentMessage", id: "late-phase", text: "" },
+      });
+      env.t.handle("item/agentMessage/delta", {
+        itemId: "late-phase",
+        delta: "I am still checking.",
+      });
+      env.t.handle("item/completed", {
+        item: {
+          type: "agentMessage",
+          id: "late-phase",
+          text: "I am still checking.",
+          phase: "commentary",
+        },
+      });
+
+      const chunks = env.out.emitted
+        .filter((n) => n.update.sessionUpdate === "agent_message_chunk")
+        .map((n) => n.update as { content: { text: string }; phase?: string });
+      expect(chunks).toHaveLength(2);
+      expect(chunks[0]).toMatchObject({
+        content: { text: "I am still checking." },
+      });
+      expect(chunks[0]?.phase).toBeUndefined();
+      expect(chunks[1]).toMatchObject({
+        content: { text: "" },
+        phase: "commentary",
+      });
+    });
+
     it("agentMessage delta emits chunks with accumulated text", () => {
       env.t.handle("item/started", {
         item: { type: "agentMessage", id: "msg-1", text: "" },
@@ -750,7 +816,7 @@ describe("CodexAppServerTranslator", () => {
       });
     });
 
-    it("fileChange emits tool_call(edit) with mergeKey when path is present", () => {
+    it("fileChange describes every path in a batched edit without merging it as one file", () => {
       env.t.handle("item/started", {
         item: {
           type: "fileChange",
@@ -771,10 +837,29 @@ describe("CodexAppServerTranslator", () => {
         title: string;
       };
       expect(u.kind).toBe("edit");
-      // mergeKey uses the first changed path so consecutive edits to
-      // the same file collapse into one card.
-      expect(u.mergeKey).toBe("edit:src/app.ts");
-      expect(u.title).toMatch(/src\/app\.ts/);
+      expect(u.mergeKey).toBeUndefined();
+      expect(u.title).toBe("Editing 2 files");
+    });
+
+    it("keeps the path and merge key for a single-file edit", () => {
+      env.t.handle("item/started", {
+        item: {
+          type: "fileChange",
+          id: "fc-single",
+          changes: [{ path: "src/app.ts" }],
+        },
+        threadId: "t1",
+        turnId: "u1",
+        startedAtMs: 0,
+      });
+      const call = env.out.emitted.find(
+        (n) => n.update.sessionUpdate === "tool_call",
+      );
+      expect(call?.update).toMatchObject({
+        kind: "edit",
+        mergeKey: "edit:src/app.ts",
+        title: "Editing src/app.ts",
+      });
     });
 
     it("mcpToolCall with error completes as failed", () => {

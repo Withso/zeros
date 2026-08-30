@@ -27,10 +27,13 @@ for project/domain/branch mappings and the promotion runbook.
 GET  /                         → signed-in management dashboard; signed-out hub
 GET  /launch                   → session-aware desktop handoff
 GET  /auth/start|callback|logout → WorkOS mode forwards to Railway unchanged
+GET  /auth/desktop             → bounded desktop PKCE redirect to Hosted AuthKit
+GET  /auth/desktop/start       → compatibility alias; provider selectors are inert
+GET  /auth/desktop/callback    → no-store exact-channel app handoff
 POST /auth/workos-webhook      → compatibility pass-through to Railway
 POST /auth/desktop-revoke      → compatibility pass-through for older desktops
 GET  /github/connected         → GitHub App completion + Open Zeros handoff
-GET  /invite?token=
+GET  /invite?token=[&mode=web|resume] → landing, web acceptance, or post-auth resume
 POST /handoff/{mint,redeem,refresh,revoke} → Auth0 compatibility only
 GET|POST|PATCH|DELETE /api/v1/* → allowlisted same-origin control-plane proxy
 ```
@@ -112,9 +115,9 @@ in each project's Production environment:
 
 Provider-specific Pages configuration:
 
-| Mode                | Variables and runtime secrets                                                                             |
-| ------------------- | --------------------------------------------------------------------------------------------------------- |
-| Auth0 compatibility | `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, secret `AUTH0_CLIENT_SECRET`, and channel `AUTH0_AUDIENCE`             |
+| Mode                | Variables and runtime secrets                                                                                |
+| ------------------- | ------------------------------------------------------------------------------------------------------------ |
+| Auth0 compatibility | `AUTH0_DOMAIN`, `AUTH0_CLIENT_ID`, secret `AUTH0_CLIENT_SECRET`, and channel `AUTH0_AUDIENCE`                |
 | WorkOS              | No provider-specific Pages values. `APP_ORIGIN` and `CONTROL_PLANE_URL` select the matching Railway service. |
 
 `ASSETS` is provided automatically by Pages (static output). Do not add it manually.
@@ -123,13 +126,14 @@ Provider-specific Pages configuration:
 same-origin requests through `functions/api/[[path]].ts`; that proxy reads the
 verified server-side session, keeps bearer and refresh material out of browser
 JavaScript, permits only the organization-management route set, bounds request
-bodies, and returns JSON with `no-store` caching. Mutations require a
+and upstream JSON bodies, and returns JSON with `no-store` caching. Mutations require a
 same-origin `Origin`, JSON content type, and `X-Zeros-Request: dashboard`.
 
 ### Authentication modes
 
-Auth0 remains selectable for rollback until Phase 5. Use a separate Regular Web
-Application per channel with that environment's callback and logout origin.
+Auth0 remains selectable only for the declared migration rollback window. Use a
+separate Regular Web Application per channel with that environment's callback
+and logout origin.
 
 WorkOS browser sessions use authorization code plus PKCE. The browser cookie
 contains only a random 256-bit lookup ID. Railway stores only its SHA-256
@@ -146,18 +150,77 @@ WorkOS client/verification values, and `APP_ORIGIN` only on the matching
 Railway service. Remove any retired `AUTH_SESSIONS` binding,
 `WORKOS_SESSION_WORKER`, or `AUTH_BROKER_SECRET` from Pages.
 
-Register `https://<channel-api-host>/auth/workos-webhook` for only
-`user.updated` and `user.deleted`. The old app-host webhook URL remains a
-byte-preserving compatibility pass-through during cutover, but holds no signing
-secret.
+The successful callback is a no-store, no-referrer `200` completion document,
+not another cross-site HTTP redirect. It sets the host-only
+`SameSite=Strict` session cookie and immediately performs a same-site navigation
+to the already validated return URL, with a visible link as a no-script
+fallback. This document boundary is required because browsers correctly
+withhold Strict cookies throughout the original AuthKit redirect chain. Pages
+must preserve its body and append every `Set-Cookie` field separately.
 
-WorkOS-hosted AuthKit domains are the Phase 2 choice. A paid custom WorkOS
-domain is optional and is not a release requirement.
+WorkOS's native invitation email uses the channel's configured custom
+invitation URL and lands on `/invite?invitation_token=…`; the legacy Zeros
+capability remains available as `/invite?token=…` for rollback and copyable
+link compatibility. The response is no-store/no-referrer and nonce-CSP
+bounded. It offers the exact channel's desktop deep link or an explicit
+browser continuation. Browser acceptance
+stores the opaque token only in that tab's `sessionStorage`, immediately strips
+it from the address bar, and posts it only to the same-origin allowlisted JSON
+facade. A 401 starts Railway's ordinary one-time state/PKCE flow with the
+tokenless `/invite?mode=resume` path as the bounded return target, then retries
+from the tab-scoped value. A tab permits one AuthKit attempt per freshly opened
+invitation; a second 401 terminates with a fixed error instead of redirecting
+again. Link scanners cannot accept an invitation because
+the landing GET has no mutation and web mode still requires an authenticated
+same-origin POST. Railway resolves a WorkOS token server-side and requires its
+exact provider invitation ID, organization, recipient email, role, and pending
+state to match an active Zeros invitation. WorkOS invitation email stays
+enabled; create invitations through Zeros rather than manually in the WorkOS
+Dashboard.
 
-Do not switch `AUTH_PROVIDER=workos` yet. The control plane intentionally
-accepts one issuer at a time. The provider switch, clean database, web
-deployment, and matching Phase 3 desktop build are one coordinated Alpha
-cutover in Phase 4.
+Register `https://<channel-api-host>/auth/workos-webhook` for the user,
+session, organization, organization-membership, and invitation event set in
+[`docs/workos-authentication-migration.md`](../../docs/workos-authentication-migration.md).
+The old app-host webhook URL remains a byte-preserving compatibility
+pass-through during cutover, but holds no signing secret.
+
+Desktop WorkOS login also starts and returns on the channel's own app host. The
+desktop keeps the PKCE verifier in Electron main and opens `/auth/desktop`.
+Pages forwards only bounded state/challenge values; provider, connection, and
+organization selectors are discarded. Railway creates a Desktop Application
+authorization URL that always selects Hosted AuthKit and fixes the redirect to
+`${APP_ORIGIN}/auth/desktop/callback`.
+
+Hosted AuthKit owns provider choice, credentials, email verification, MFA,
+recovery, and identity linking. Zeros has no verification continuation
+endpoint and neither Pages nor Electron receives a pending authentication
+token or verification ID. The callback never server-renders the authorization
+code, strips it from browser history, and opens only the allow-listed
+exact-channel scheme. Its no-store/no-referrer/nonce CSP is preserved by the
+global host middleware.
+
+The signed-in dashboard opens one authenticated EventSource through
+`/api/v1/auth/events`; account/session revocation signs out, while organization
+authorization/data changes revalidate scoped state. Focus, visibility,
+`pageshow`, and reconnect use `/api/v1/auth/snapshot` only when the stream has
+been silent for at least 60 seconds. There is no 30-second auth poll. A
+transient outage retains the last confirmed dashboard snapshot, but every API
+request still reauthorizes on Railway.
+
+A successful Hosted AuthKit ceremony can still be refused by Zeros account
+resolution. Reviewed recovery, a conflicting active identity, a fresh-auth
+requirement, and an inactive account render separate fixed pages with sign-out
+and support actions; none is labeled as an organization/network outage and raw
+upstream messages never enter HTML.
+
+A custom AuthKit domain is optional for the initial cutover and should be
+evaluated independently for Production branding and anti-phishing. The
+qualified issuer/JWKS contract must change only through a reviewed migration.
+
+Do not switch `AUTH_PROVIDER=workos` until the WorkOS dashboard, Railway,
+Pages, and matching desktop build are configured from the same qualified
+commit. The control plane intentionally accepts one issuer at a time, so the
+provider switch and channel deployment are coordinated.
 
 ## Manual cutover checklist (dashboard)
 
@@ -201,6 +264,7 @@ apps/web/
   functions/invite.ts          → /invite
   functions/github/connected.ts → /github/connected
   functions/auth/*             → selectable Auth0/WorkOS browser auth + webhook
+  functions/auth/desktop/*     → Hosted AuthKit desktop redirect/start/callback
   functions/auth/desktop-revoke.ts → older-desktop Railway pass-through
   functions/handoff/*          → Auth0 desktop ticket compatibility APIs
   lib/hosts.ts                 → host classification + CSP
@@ -210,6 +274,7 @@ apps/web/
   lib/oauth.ts                 → legacy Auth0 + cookies (APP_ORIGIN-aware)
   lib/session.ts               → provider-neutral browser-session facade
   lib/workos-browser.mjs       → stateless Railway auth/session facade
+  lib/workos-desktop-authorization.mjs → branded desktop PKCE handoff
   lib/workos-railway.mjs       → exact control-plane origin boundary
   lib/workos-webhook.mjs       → byte-preserving Railway pass-through
   public/_headers              → app CSP defaults (source; copied into dist/)
@@ -236,7 +301,9 @@ apps/web/
 | Session cookies            | Still host-only on app; never widened for marketing                                                                                                               |
 | Dashboard credentials      | Auth0 grants stay in compatibility KV; WorkOS sealed/refresh state stays in Railway/Postgres; browser boot data contains identity and organization summaries only |
 | WorkOS refresh outage      | Pre-rotation transient failures preserve the exact record; a post-rotation verification outage persists the replacement seal but withholds the bearer             |
-| WorkOS lifecycle event     | Pages preserves exact bytes; Railway verifies the signature before reducing `user.updated`/`user.deleted`; retries are idempotent                               |
+| WorkOS lifecycle event     | Pages preserves exact bytes; Railway verifies the signature before reducing the complete management event set; webhooks are idempotent and Events API repairs misses |
+| Account resolution         | Recovery/conflict/fresh-auth/inactive states have dedicated fixed UI; provider text and bearer/refresh material never render                                  |
+| Authorization freshness    | One SSE connection plus durable revisions; lifecycle snapshots are silence/reconnect backstops, not periodic polling                                            |
 | Dashboard mutations        | Same-origin JSON plus custom-header gate; route and body allowlists reject ambient-cookie form attacks                                                            |
 | Personal                   | Name follows provider identity, local-only, permanent, and collaboration/billing sections are disabled                                                            |
 | Schema URLs                | Still served at `zeros.build/schemas/*` after cutover                                                                                                             |

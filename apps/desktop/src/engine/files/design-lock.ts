@@ -365,10 +365,21 @@ export async function designDirAliasHazards(
 ): Promise<DesignDirAliasHazard[]> {
   const { files } = await designDirFenceEntries(cwd, designDir);
   const hazards: DesignDirAliasHazard[] = [];
-  for (const file of files) {
-    const info = await fs.lstat(path.join(cwd, ...file.split("/")));
-    if (info.isFile() && info.nlink > 1) {
-      hazards.push({ path: file, links: info.nlink });
+  // One lstat per file is the dominant cost of this sweep on large Design
+  // trees and each probe is independent, so batch them like the policy
+  // builder's alias audit. A failed lstat still rejects the whole sweep, and
+  // hazards keep the sorted file order because batches slice it in place.
+  const batchSize = 256;
+  for (let start = 0; start < files.length; start += batchSize) {
+    const batch = files.slice(start, start + batchSize);
+    const infos = await Promise.all(
+      batch.map((file) => fs.lstat(path.join(cwd, ...file.split("/")))),
+    );
+    for (let index = 0; index < batch.length; index += 1) {
+      const info = infos[index]!;
+      if (info.isFile() && info.nlink > 1) {
+        hazards.push({ path: batch[index]!, links: info.nlink });
+      }
     }
   }
   return hazards;

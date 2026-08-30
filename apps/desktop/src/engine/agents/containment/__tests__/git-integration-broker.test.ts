@@ -1,4 +1,11 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -48,7 +55,9 @@ describe("host-parity Git integration classification", () => {
   });
 
   it("does not treat an unregistered nested repository as its outer owner", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "zeros-git-owner-"));
+    const root = await realpath(
+      await mkdtemp(path.join(tmpdir(), "zeros-git-owner-")),
+    );
     const workspace = path.join(root, "workspace");
     const subdirectory = path.join(workspace, "subdirectory");
     const nested = path.join(workspace, "nested");

@@ -28,6 +28,7 @@ const nodeGlobals = {
   queueMicrotask: "readonly",
   URL: "readonly",
   URLSearchParams: "readonly",
+  Headers: "readonly",
   AbortController: "readonly",
   fetch: "readonly",
 };

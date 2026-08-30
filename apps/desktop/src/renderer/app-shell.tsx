@@ -47,7 +47,11 @@ import {
 } from "./features/settings/migrate-legacy";
 import { AgentSessionsProvider } from "./features/agent/sessions-provider";
 import { useAgentSessions } from "./features/agent/sessions-hooks";
-import { loadAgents } from "./features/agent/agents-cache";
+import {
+  getAgentsSnapshot,
+  hasConfirmedAgents,
+  loadAgents,
+} from "./features/agent/agents-cache";
 import { migrateDefaultModelSelection } from "./features/agent/model-favorites";
 import { UpdateNotifications } from "./features/update/update-notifications";
 import { useCopyLogsHotkey } from "./shell/use-copy-logs-hotkey";
@@ -100,9 +104,13 @@ import {
   useInviteDeepLink,
   clearPendingInviteToken,
 } from "./features/team/invite-link";
-import { useTeamEngineSync } from "./features/team/team-sync";
-import { clearTeamStore } from "./features/team/team-store";
+import {
+  requestTeamResync,
+  useTeamEngineSync,
+} from "./features/team/team-sync";
+import { clearTeamStore, refreshTeams } from "./features/team/team-store";
 import { useAuth } from "./features/auth";
+import { nativeListen } from "./platform/runtime";
 import { rememberProject } from "./platform/recent-projects";
 import {
   dbChatSnapshot,
@@ -120,6 +128,11 @@ import {
   pruneScrollPositions,
 } from "./features/agent/device-local";
 import { useSessionsStore } from "./features/agent/sessions-store";
+import {
+  claimAgentPrewarmForEngineSession,
+  prewarmAgentOnce,
+  resetAgentPrewarmForEngineSession,
+} from "./features/agent/agent-prewarm-singleflight";
 import { AnalyticsBoot } from "./platform/observability/analytics/boot";
 import { AppearanceProvider } from "./shared/theme/provider";
 import { getVariant, setPrefs } from "./shared/theme/store";
@@ -150,21 +163,12 @@ import {
   CHATS_TOMBSTONE_KEY,
 } from "./state/chats-local-cache";
 
-/** Module-level prewarm sentinel.
+/** Engine-session prewarm claim.
  *
- *  Why module-scope (not useRef): Vite Fast Refresh remounts the
- *  PreWarmAgents component on every renderer-side HMR. A React ref
- *  resets to its initial value on each remount, so the prewarm effect
- *  re-fired the AGENT_INIT_AGENT calls for all enabled agents every
- *  time the user saved a file. The engine's event loop got overwhelmed processing the
- *  avalanche, the sidecar watchdog failed its TCP probes, and the
- *  engine was force-respawned mid-session — the exact pattern the
- *  user pasted in their log.
- *
- *  This sentinel lives outside the component, so it survives HMR.
- *  Reset only when `engineReady` drops to false (engine actually died
- *  / restarted) — then the next ENGINE_READY rearms a fresh prewarm. */
-let prewarmedForEngineSession = false;
+ *  This lives in agent-prewarm-singleflight's renderer-global state—not merely
+ *  at module scope, because a directly edited module is re-evaluated by Vite.
+ *  It resets only when `engineReady` drops false (the engine actually died),
+ *  then the next ENGINE_READY transition can claim one fresh warmup. */
 
 // Device-local scroll positions must exist before the first chat layout effect;
 // a passive ChatsPersistence effect is already too late and causes a visible
@@ -197,13 +201,17 @@ function PreWarmAgents() {
 
   const warmAll = React.useCallback(async () => {
     try {
-      // Route the list through loadAgents so this boot-time warm ALSO fills
-      // the shared agents-cache snapshot (a raw sessions.listAgents() reply
-      // never lands in the cache). Every agent-resolution surface — the
-      // AutoBindAgent binder, spawn-default-chat's synchronous born path,
-      // the dispatcher — reads that snapshot, and on a fresh data dir this
-      // is the first (often only) boot-path call that can populate it.
-      const registry = await loadAgents((force) => sessions.listAgents(force));
+      // A confirmed stale-while-revalidate snapshot is enough to choose which
+      // providers to initialize. Do not turn every engine reconnect into a
+      // synchronous auth/version probe sweep: those provider subprocesses and
+      // utility canaries otherwise compete with the active chat's cold resume.
+      // A genuinely fresh data dir still loads the registry here; settled chat
+      // and Settings surfaces refresh an existing snapshot later.
+      const snapshot = getAgentsSnapshot();
+      const registry =
+        snapshot && hasConfirmedAgents()
+          ? snapshot
+          : await loadAgents((force) => sessions.listAgents(force));
       const persisted = readEnabledAgentIds();
       // Mirror useEnabledAgents.isEnabled — first-run defaults exclude
       // beta agents so the warmup loop doesn't fire AGENT_INIT_AGENT
@@ -250,7 +258,7 @@ function PreWarmAgents() {
 
       await Promise.all(
         needsWarm.map((id) =>
-          sessions.initAgent(id).catch((err) => {
+          prewarmAgentOnce(id, sessions.initAgent).catch((err) => {
             // Log at debug so a genuine init bug isn't invisible. Don't
             // re-throw — pre-warm is best-effort by design and the next
             // user prompt will surface a real failure via ensureSession.
@@ -274,11 +282,10 @@ function PreWarmAgents() {
   //     Clear the sentinel so the next ENGINE_READY arms a re-warm.
   useEffect(() => {
     if (!engineReady) {
-      prewarmedForEngineSession = false;
+      resetAgentPrewarmForEngineSession();
       return;
     }
-    if (prewarmedForEngineSession) return;
-    prewarmedForEngineSession = true;
+    if (!claimAgentPrewarmForEngineSession()) return;
     void warmAll();
   }, [engineReady, warmAll]);
 
@@ -1221,20 +1228,18 @@ function MainShellBody({
                           : "pointer-events-none invisible",
                       ].join(" ")}
                     >
+                      {/* Design owns an always-present canvas/inspector pair;
+                          the persisted code Workbench collapse applies only to
+                          ordinary coding workspaces. */}
                       <DesignWorkspaceSidebar
                         workspace={entry.workspace}
                         folder={entry.folder}
                         surfaceActive={entryActive && !isHome}
-                        canvasCollapsed={workbenchCollapsed}
                       />
                       <DesignWorkspaceColumn
                         workspace={entry.workspace}
                         folder={entry.folder}
-                        surfaceActive={
-                          entryActive && !isHome && !workbenchCollapsed
-                        }
-                        collapsed={workbenchCollapsed}
-                        onToggleWorkbench={toggleWorkbench}
+                        surfaceActive={entryActive && !isHome}
                       />
                     </div>
                   );
@@ -1244,6 +1249,7 @@ function MainShellBody({
                     <ConversationPane
                       workbenchCollapsed={workbenchCollapsed}
                       onToggleWorkbench={toggleWorkbench}
+                      workspace={activeWorkspace}
                     />
                     <WorkbenchPane
                       onToggleWorkbench={toggleWorkbench}
@@ -1429,6 +1435,29 @@ function InviteDeepLinkHandler() {
   return null;
 }
 
+/** WorkOS/organization events invalidate the shared exact `/v1/me` snapshot;
+ * the store retains its last confirmed value while the refresh is in flight. */
+function AuthSecurityEventHandler() {
+  const { status } = useAuth();
+  React.useEffect(() => {
+    if (status !== "authenticated") return;
+    let active = true;
+    let off: (() => void) | undefined;
+    void nativeListen("auth-security-event", () => {
+      if (!active) return;
+      void refreshTeams().finally(() => requestTeamResync());
+    }).then((unsubscribe) => {
+      if (active) off = unsubscribe;
+      else unsubscribe();
+    });
+    return () => {
+      active = false;
+      off?.();
+    };
+  }, [status]);
+  return null;
+}
+
 export function AppShell() {
   return (
     <AppearanceProvider>
@@ -1450,6 +1479,7 @@ export function AppShell() {
             provider below the gate is required. */}
         <UpdateNotifications />
         <InviteDeepLinkHandler />
+        <AuthSecurityEventHandler />
         <AuthGate>
           <AppShellBody />
         </AuthGate>

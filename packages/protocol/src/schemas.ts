@@ -425,6 +425,12 @@ function assertInboundPayload(env: Record<string, unknown>): void {
     case "AGENT_STEER":
       if (!isNonEmptyStr(executionRoute(env))) bad("executionId");
       if (!Array.isArray(env.prompt)) bad("prompt");
+      if (
+        env.type === "AGENT_PROMPT" &&
+        env.startedAt !== undefined &&
+        (!isUint(env.startedAt) || !Number.isSafeInteger(env.startedAt))
+      )
+        bad("startedAt");
       // Optional correlation id — metadata only. Reject non-strings so a remote
       // client cannot smuggle structured payload into the active-turn record.
       if (env.promptId !== undefined && !isStr(env.promptId)) bad("promptId");

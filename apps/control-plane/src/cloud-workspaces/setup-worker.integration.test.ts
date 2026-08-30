@@ -337,10 +337,11 @@ d("cloud workspace setup worker", () => {
       const grant = await tx.query<{ id: string }>(
         `INSERT INTO cloud_workspace_endpoint_grants (
            workspace_id, generation, org_id, account_user_id, purpose,
-           audience, token_hash, expires_at, consumed_at, setup_run_id,
+           audience, token_hash, account_revision, authorization_revision,
+           expires_at, consumed_at, setup_run_id,
            setup_execution_fence
          ) VALUES ($1, $2, $3, $4, 'setup', $5, $6,
-                   now() + interval '5 minutes', now(), $7, $8)
+                   1, 1, now() + interval '5 minutes', now(), $7, $8)
          RETURNING id`,
         [
           execution.workspaceId,

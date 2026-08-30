@@ -1,14 +1,14 @@
 // ──────────────────────────────────────────────────────────
 // Outbound email — ZeptoMail (Zoho) HTTP API.
 //
-// Zeros already uses ZeptoMail for transactional auth email; the
-// control plane reuses the same account via its REST API for invitation
-// mail. Config:
+// Hosted AuthKit owns authentication and native organization-invitation
+// emails in WorkOS mode. This independent sender remains for Zeros-specific
+// security/account-lifecycle notifications and the Auth0 invitation rollback
+// path. Config:
 //   ZEPTOMAIL_TOKEN  — "Send Mail Token" from the ZeptoMail Mail Agent
 //   EMAIL_FROM       — verified sender, e.g. "Zeros <hello@zeros.build>"
 // Unset → dev fallback: the message is logged, never sent, and the API
-// still succeeds (the invite link is returned to the inviting admin, so
-// manual sharing keeps working before credentials land).
+// still succeeds; callers decide whether an unsent message is acceptable.
 // ──────────────────────────────────────────────────────────
 
 // ZeptoMail Send Mail Tokens are bound to the data centre the account was
@@ -21,6 +21,24 @@ export type EmailConfig = {
   token: string | null;
   from: { address: string; name: string } | null;
 };
+
+export type EmailSendOptions = {
+  /** ZeptoMail documents this as a transaction-tracking locator. It is not
+   * treated as a provider idempotency guarantee. */
+  clientReference?: string;
+  fetch?: typeof fetch;
+};
+
+export class EmailDeliveryError extends Error {
+  constructor(
+    readonly code: string,
+    readonly retryable: boolean,
+    readonly status: number | null = null,
+  ) {
+    super(code);
+    this.name = "EmailDeliveryError";
+  }
+}
 
 export function loadEmailConfig(env: NodeJS.ProcessEnv = process.env): EmailConfig {
   // ZeptoMail's UI copies the Send Mail Token WITH the "Zoho-enczapikey "
@@ -43,6 +61,7 @@ export async function sendEmail(
   to: string,
   subject: string,
   htmlBody: string,
+  options: EmailSendOptions = {},
 ): Promise<void> {
   if (!config.token || !config.from) {
     console.log(
@@ -50,25 +69,76 @@ export async function sendEmail(
     );
     return;
   }
-  const res = await fetch(ZEPTOMAIL_API, {
-    method: "POST",
-    headers: {
-      authorization: `Zoho-enczapikey ${config.token}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      from: config.from,
-      to: [{ email_address: { address: to } }],
-      subject,
-      htmlbody: htmlBody,
-    }),
-  });
-  if (!res.ok) {
-    const detail = await res.text().catch(() => "");
-    // Deliberately NOT thrown to the caller as a request failure — the
-    // invitation row exists and the admin got the copyable link; a mail
-    // outage shouldn't roll that back. Logged for ops.
-    console.error(`[email] zeptomail ${res.status}: ${detail.slice(0, 500)}`);
+  try {
+    await sendEmailStrict(config, to, subject, htmlBody, options);
+  } catch (error) {
+    // Deliberately NOT thrown to the invitation request — the invitation row
+    // exists and the admin got the copyable link. Security notifications use
+    // sendEmailStrict through their durable outbox instead.
+    const delivery =
+      error instanceof EmailDeliveryError
+        ? `${error.code}${error.status ? ` status=${error.status}` : ""}`
+        : error instanceof Error
+          ? error.name
+          : "unknown";
+    console.error(`[email] delivery failed: ${delivery}`);
+  }
+}
+
+export async function sendEmailStrict(
+  config: EmailConfig,
+  to: string,
+  subject: string,
+  htmlBody: string,
+  options: EmailSendOptions = {},
+): Promise<void> {
+  if (!config.token || !config.from) {
+    throw new EmailDeliveryError("email_not_configured", true);
+  }
+  if (
+    options.clientReference !== undefined &&
+    !/^[A-Za-z0-9._:-]{1,200}$/.test(options.clientReference)
+  ) {
+    throw new EmailDeliveryError("email_reference_invalid", false);
+  }
+  let response: Response;
+  try {
+    response = await (options.fetch ?? fetch)(ZEPTOMAIL_API, {
+      method: "POST",
+      headers: {
+        authorization: `Zoho-enczapikey ${config.token}`,
+        accept: "application/json",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        from: config.from,
+        to: [{ email_address: { address: to } }],
+        subject,
+        htmlbody: htmlBody,
+        track_clicks: false,
+        track_opens: false,
+        ...(options.clientReference
+          ? { client_reference: options.clientReference }
+          : {}),
+      }),
+      signal: AbortSignal.timeout(15_000),
+    });
+  } catch (error) {
+    if (error instanceof EmailDeliveryError) throw error;
+    throw new EmailDeliveryError(
+      error instanceof Error && error.name === "TimeoutError"
+        ? "email_timeout"
+        : "email_network_error",
+      true,
+    );
+  }
+  await response.body?.cancel().catch(() => undefined);
+  if (!response.ok) {
+    throw new EmailDeliveryError(
+      `zeptomail_${response.status}`,
+      response.status === 408 || response.status === 429 || response.status >= 500,
+      response.status,
+    );
   }
 }
 

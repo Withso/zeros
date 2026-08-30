@@ -26,6 +26,9 @@ import type { PaneTreeMinimumSize } from "./pane-portal-store";
 import { cn } from "../../shared/ui/cn";
 import { useResizeHint } from "../use-resize-hint";
 import { beginContinuousLayoutResize } from "../terminal/continuous-layout-resize";
+import { WorkbenchToggleButton } from "../workbench/toggle-button";
+import type { Workspace } from "../../platform/git";
+import { WorkspaceModeHeader } from "../../shared/ui/workspace-mode-header";
 
 // ── Conversation pane className constants ───────────────────────────
 // Wave 1.5 finalize (2026-05-16): the .zeros-conversation pane family
@@ -163,9 +166,11 @@ function useConversationRatio(sectionRef: React.RefObject<HTMLElement | null>) {
 export function ConversationPane({
   workbenchCollapsed = false,
   onToggleWorkbench,
+  workspace = null,
 }: {
   workbenchCollapsed?: boolean;
   onToggleWorkbench?: () => void;
+  workspace?: Workspace | null;
 } = {}) {
   // User-resizable Conversation pane. Drag from the right edge updates conversation pane's
   // share of the row; localStorage persists across reload.
@@ -365,6 +370,18 @@ export function ConversationPane({
       }}
       aria-label="Agent Workspace"
     >
+      <WorkspaceModeHeader
+        workspace={workspace}
+        separator
+        trailing={
+          workbenchCollapsed && onToggleWorkbench ? (
+            <WorkbenchToggleButton
+              workbenchCollapsed
+              onToggle={onToggleWorkbench}
+            />
+          ) : undefined
+        }
+      />
       {/* The per-workspace bar (project › workspace breadcrumb +
           "Open in" dropdown) is HIDDEN — the global TopBar already
           carries the breadcrumb, so a second one was pure noise. It
@@ -372,15 +389,11 @@ export function ConversationPane({
           the ⌘O (open in default app) and ⌘C (copy path) window-level
           shortcuts it registers keep working. Window dragging is
           unaffected (the global TopBar above the columns owns the drag
-          region), and the workbench expand button this row used to host
-          when the panel is collapsed now renders at the right end of
-          the top-right pane's tab strip (see ConversationPaneLayout). Remove the
-          `hidden` wrapper to bring the row back. */}
+          region). The visible workspace row above now owns the workbench
+          expand button while the panel is collapsed. Remove the `hidden`
+          wrapper to bring this legacy row back. */}
       <div className="hidden">
-        <ConversationHeader
-          workbenchCollapsed={workbenchCollapsed}
-          onToggleWorkbench={onToggleWorkbench}
-        />
+        <ConversationHeader />
       </div>
 
       <div className={BODY_BASE_CLS}>
@@ -390,11 +403,7 @@ export function ConversationPane({
             never tears down xterm; its layers portal into pane hosts. */}
         <div className={BODY_STACK_CLS}>
           <div className={PANE_TREE_ROOT_CLS}>
-            <ConversationPaneLayout
-              workbenchCollapsed={workbenchCollapsed}
-              onToggleWorkbench={onToggleWorkbench}
-              onMinimumSizeChange={setPaneMinimumSize}
-            />
+            <ConversationPaneLayout onMinimumSizeChange={setPaneMinimumSize} />
           </div>
           <ChatDeck />
           {/* Terminal-agent deck — every `kind: "terminal"` chat lives

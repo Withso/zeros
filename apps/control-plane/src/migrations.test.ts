@@ -287,9 +287,10 @@ d("migration ladder", () => {
       await pool.query(
         `INSERT INTO cloud_workspace_endpoint_grants (
            id, workspace_id, generation, org_id, account_user_id, purpose,
-           audience, token_hash, expires_at
+           audience, token_hash, account_revision, authorization_revision,
+           expires_at
          ) VALUES ($1, $2, 1, $3, $4, 'setup',
-                   'https://control.example.test/', digest('legacy-token', 'sha256'),
+                   'https://control.example.test/', digest('legacy-token', 'sha256'), 1, 1,
                    now() + interval '5 minutes')`,
         [grantId, workspaceId, orgId, userId],
       );
@@ -416,7 +417,7 @@ d("migration ladder", () => {
              WHERE datname = current_database()
                AND pid <> pg_backend_pid()
                AND wait_event_type = 'Lock'
-               AND query LIKE '%0018 — Engine membership retirement%'`,
+               AND query LIKE '%0023 — Engine membership retirement%'`,
           );
           expect(waiting.rows[0]!.count).toBeGreaterThan(0);
         },

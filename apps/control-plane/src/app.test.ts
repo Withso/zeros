@@ -47,6 +47,7 @@ function config(github: GithubBackendConfig | null): Config {
       audience: "https://api.example.test",
     },
     workos: null,
+    inviteLinkBase: "https://app.example.test/invite",
     port: 8080,
     isProduction: true,
     github,
@@ -82,6 +83,7 @@ describe("app assembly — Railway WorkOS boundary", () => {
     const cases = [
       ["GET", "/auth/start?provider=unknown", 400],
       ["GET", "/auth/browser/session", 401],
+      ["GET", "/auth/desktop/start?provider=unknown", 400],
       ["POST", "/auth/desktop-revoke", 400],
       ["POST", "/auth/workos-webhook", 401],
     ] as const;
@@ -90,6 +92,14 @@ describe("app assembly — Railway WorkOS boundary", () => {
       expect({ path, status: response.status }).toEqual({ path, status });
       expect(response.headers.get("cache-control")).toBe("no-store");
     }
+  });
+
+  it("does not expose an anonymous verification-continuation endpoint", async () => {
+    const response = await app.request(
+      "/auth/desktop/complete-github-verification",
+      { method: "POST" },
+    );
+    expect(response.status).toBe(404);
   });
 });
 

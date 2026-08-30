@@ -17,6 +17,8 @@
 //   DeepLinkScheme union in apps/desktop/src/engine/runtime.ts
 //     ===
 //   SCHEMES in apps/web/lib/schemes.mjs
+//     ===
+//   DESKTOP_SCHEMES in apps/control-plane/src/workos-desktop-authorization.ts
 //
 // Textual on purpose: the web hub is a standalone npm package outside the pnpm
 // workspace, so this script cannot import across that boundary.
@@ -26,6 +28,8 @@ import { readFileSync } from "node:fs";
 
 const DESKTOP = "apps/desktop/src/engine/runtime.ts";
 const WEB = "apps/web/lib/schemes.mjs";
+const CONTROL_PLANE =
+  "apps/control-plane/src/workos-desktop-authorization.ts";
 
 function fail(msg) {
   console.error(`✗ check:deep-link-schemes — ${msg}`);
@@ -50,26 +54,39 @@ if (!union)
   );
 const desktop = [...union.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
 
-// export const SCHEMES = new Set([ "zeros", … ]);
-const setBody = read(WEB).match(
-  /export const SCHEMES\s*=\s*new Set\(\[([\s\S]*?)\]\)/,
-)?.[1];
-if (!setBody)
-  fail(
-    `could not find the SCHEMES Set in ${WEB} — did it get renamed? Update this guard.`,
-  );
-const web = [...setBody.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+function parseSet(file, name, exported = false) {
+  const prefix = exported ? "export\\s+" : "";
+  const body = read(file).match(
+    new RegExp(`${prefix}const\\s+${name}\\s*=\\s*new Set\\(\\[([\\s\\S]*?)\\]\\)`),
+  )?.[1];
+  if (!body)
+    fail(
+      `could not find the ${name} Set in ${file} — did it get renamed? Update this guard.`,
+    );
+  return [...body.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
+}
 
-if (desktop.length === 0 || web.length === 0)
+const web = parseSet(WEB, "SCHEMES", true);
+const controlPlane = parseSet(CONTROL_PLANE, "DESKTOP_SCHEMES");
+
+if (desktop.length === 0 || web.length === 0 || controlPlane.length === 0)
   fail("parsed an empty scheme list — the guard would pass vacuously");
 
 const missingOnWeb = desktop.filter((s) => !web.includes(s));
 const extraOnWeb = web.filter((s) => !desktop.includes(s));
+const missingOnControlPlane = desktop.filter((s) => !controlPlane.includes(s));
+const extraOnControlPlane = controlPlane.filter((s) => !desktop.includes(s));
 
-if (missingOnWeb.length || extraOnWeb.length) {
+if (
+  missingOnWeb.length ||
+  extraOnWeb.length ||
+  missingOnControlPlane.length ||
+  extraOnControlPlane.length
+) {
   console.error(`✗ check:deep-link-schemes — allow-lists have drifted:\n`);
   console.error(`  ${DESKTOP}  → ${desktop.join(", ")}`);
   console.error(`  ${WEB}      → ${web.join(", ")}\n`);
+  console.error(`  ${CONTROL_PLANE} → ${controlPlane.join(", ")}\n`);
   for (const s of missingOnWeb)
     console.error(
       `  • "${s}" ships in the desktop but is NOT allow-listed on the web — that channel gets no "Launch Zeros" button and its invites open the wrong app.`,
@@ -78,12 +95,20 @@ if (missingOnWeb.length || extraOnWeb.length) {
     console.error(
       `  • "${s}" is allow-listed on the web but no desktop channel emits it — dead entry, or a channel that was removed.`,
     );
+  for (const s of missingOnControlPlane)
+    console.error(
+      `  • "${s}" ships in the desktop but is NOT allow-listed by Railway — that channel cannot start desktop authentication.`,
+    );
+  for (const s of extraOnControlPlane)
+    console.error(
+      `  • "${s}" is allow-listed by Railway but no desktop channel emits it — dead entry, or a channel that was removed.`,
+    );
   console.error(
-    `\nAdd it to ${WEB} (single source of truth for the web side).`,
+    `\nKeep ${WEB} and ${CONTROL_PLANE} aligned with ${DESKTOP}.`,
   );
   process.exit(1);
 }
 
 console.log(
-  `✓ check:deep-link-schemes — ${desktop.length} schemes match across desktop and web (${desktop.join(", ")}).`,
+  `✓ check:deep-link-schemes — ${desktop.length} schemes match across desktop, web, and control plane (${desktop.join(", ")}).`,
 );

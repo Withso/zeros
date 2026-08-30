@@ -157,10 +157,18 @@ async function resolveRepoTaskTerritory(options: {
   const resolveTerritory = options.persistRecognition
     ? resolveCodeAgentTerritory
     : previewCodeAgentTerritory;
+  const registered = registeredCodeTerritorySnapshot();
+  const managedWorkspacePaths = new Set(
+    registered.workspaces.map((workspace) => workspace.path),
+  );
   const workspaceTerritory = await resolveTerritory({
     cwd: options.cwd,
     workspaceRoot: options.workspaceRoot,
     repoRoot: options.repoRoot,
+    ...(options.persistRecognition &&
+    managedWorkspacePaths.has(options.workspaceRoot)
+      ? { reserveDefaultDesignDirectory: true }
+      : {}),
   });
   const repoTerritory =
     options.repoRoot === options.workspaceRoot
@@ -175,7 +183,7 @@ async function resolveRepoTaskTerritory(options: {
     workspaceTerritory,
     repoTerritory ? [repoTerritory] : [],
   );
-  const registeredOwners = registeredCodeTerritorySnapshot().owners;
+  const registeredOwners = registered.owners;
   const protectedWorkspaceDirectories = protectedManagedWorkspaceDirectories();
   const exactRegisteredOwners = registeredOwners.filter(
     (owner) =>

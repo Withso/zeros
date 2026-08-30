@@ -41,6 +41,7 @@ const ALLOWED_COMMANDS = new Set<string>([
   "auth_clear_session",
   "auth_get_access_token",
   "auth_get_session_user",
+  "auth_security_revalidate",
   "auth_peek_handoff",
   "auth_redeem_handoff",
   "auth_sign_out_everywhere",

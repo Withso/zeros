@@ -122,7 +122,7 @@ export interface PtyCreateOptions {
   wrapSpawn?: PtySpawnWrapper;
   /** Observe the actual wrapper pid reported by the asynchronous PTY host so
    * an execution boundary can adopt and retire the complete process group. */
-  onSpawned?: (pid: number) => void;
+  onSpawned?: (pid: number, leaderExited: () => boolean) => void;
 }
 export interface PtyInfo {
   sessionId: string;
@@ -416,7 +416,10 @@ export class PtyService {
     const session: Session = { proc, cwd, cols, rows, mirror };
     this.sessions.set(opts.sessionId, session);
 
-    if (opts.onSpawned) proc.onSpawned(opts.onSpawned);
+    let leaderExited = false;
+    if (opts.onSpawned) {
+      proc.onSpawned((pid) => opts.onSpawned?.(pid, () => leaderExited));
+    }
 
     proc.onData((data) => {
       // Feed the mirror the EXACT bytes clients get so its resolved grid stays
@@ -425,6 +428,7 @@ export class PtyService {
       this.onDataCb?.(opts.sessionId, data);
     });
     proc.onExit((exitCode, signal, reason) => {
+      leaderExited = true;
       session.mirror?.dispose();
       this.sessions.delete(opts.sessionId);
       const waiters = this.exitWaiters.get(opts.sessionId);

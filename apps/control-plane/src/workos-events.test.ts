@@ -121,4 +121,29 @@ describe("Railway WorkOS identity-event boundary", () => {
     const response = await app.request(signedRequest("x".repeat(65 * 1024)));
     expect(response.status).toBe(413);
   });
+
+  it("acknowledges user.created without mutating WorkOS or Postgres", async () => {
+    const apply = vi.fn();
+    const app = createWorkOSIdentityEventRoutes(pool, SECRET, {
+      now: () => NOW,
+      apply,
+    });
+    const response = await app.request(
+      signedRequest(
+        event({
+          event: "user.created",
+          data: {
+            id: "user_01CREATED",
+            email: "person@example.com",
+            email_verified: false,
+            name: null,
+            profile_picture_url: null,
+          },
+        }),
+      ),
+    );
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({ accepted: true, ignored: true });
+    expect(apply).not.toHaveBeenCalled();
+  });
 });

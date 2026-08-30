@@ -20,6 +20,10 @@ export interface TestExecutionBoundaryOptions {
   probeResult?: BoundaryProbeResult;
   prepareError?: Error;
   stopError?: Error;
+  /** Optional behavioral-attestation result exposed by the prepared test
+   * boundary. Production boundaries own the same promise; tests can hold it
+   * pending to prove provider startup does not wait for the canary. */
+  attestation?: Promise<void> | ((request: BoundaryRequest) => Promise<void>);
   onProbe?: (request: BoundaryRequest) => void;
   onPrepare?: (request: BoundaryRequest, control?: AdmissionControl) => void;
   onStop?: (request: BoundaryRequest) => void;
@@ -167,6 +171,14 @@ export function testExecutionBoundary(
         for (const observer of portObservers) observer(snapshot);
       };
       let revoked = false;
+      const attestation =
+        typeof options.attestation === "function"
+          ? options.attestation(request)
+          : (options.attestation ?? Promise.resolve());
+      // The production boundary owns a rejection sink until the gateway
+      // subscribes. Mirror that contract so a deliberately rejected deferred
+      // does not become a test-runner-level unhandled rejection.
+      void attestation.catch(() => undefined);
       const trackProcess = (child: ChildProcess): BoundaryProcess => {
         const process = trackedProcess(child);
         processes.add(process);
@@ -182,6 +194,7 @@ export function testExecutionBoundary(
       };
       return {
         generation,
+        attestation,
         status: {
           version: 1,
           actor: request.actor,

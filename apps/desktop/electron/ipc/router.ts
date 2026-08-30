@@ -76,7 +76,7 @@ const commandTable: Record<string, CommandHandler> = {
   cloud_workspace_tunnel_start: notImpl("cloud_workspace_tunnel_start", 3),
   cloud_workspace_access_revoke: notImpl("cloud_workspace_access_revoke", 3),
 
-  // ── Auth0 session @ rest — main owns the full token pair; the renderer only
+  // ── WorkOS session at rest — main owns the full token pair; the renderer only
   // ever gets a live access token or decoded identity claims. The pair is written
   // to the keychain by auth_redeem_handoff itself (no renderer-reachable install
   // command), so an XSS can't plant forged tokens. See
@@ -89,6 +89,7 @@ const commandTable: Record<string, CommandHandler> = {
   auth_sign_out_everywhere: notImpl("auth_sign_out_everywhere", 5),
   auth_start_signin: notImpl("auth_start_signin", 5),
   auth_cancel_signin: notImpl("auth_cancel_signin", 5),
+  auth_security_revalidate: notImpl("auth_security_revalidate", 5),
 
   // ── Web sign-in handoff — the website owns OAuth; the desktop redeems an
   // opaque single-use ticket for a session. Verifier stays in main safeStorage.

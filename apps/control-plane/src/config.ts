@@ -34,6 +34,8 @@ const EnvSchema = z.object({
   AUTH_DESKTOP_CLIENT_ID: z.string().trim().min(1).optional(),
   /** Canonical browser application origin used for callbacks and cookies. */
   APP_ORIGIN: z.string().trim().min(1).optional(),
+  /** Exact browser landing page used in organization invitations. */
+  INVITE_LINK_BASE: z.string().trim().min(1).optional(),
   /** Railway-only WorkOS browser-session credentials. */
   WORKOS_API_KEY: z.string().trim().min(1).optional(),
   WORKOS_COOKIE_PASSWORD: z.string().trim().min(32).optional(),
@@ -204,6 +206,8 @@ export type Config = {
   auth: AuthBackendConfig;
   /** Null in legacy Auth0 mode. WorkOS secrets live only on Railway. */
   workos: WorkOSBackendConfig | null;
+  /** Exact, environment-bound invitation landing page (without a query). */
+  inviteLinkBase: string;
   port: number;
   isProduction: boolean;
   /** Null when no GitHub App is registered for this environment. */
@@ -444,15 +448,56 @@ function validatedAppOrigin(value: string, nodeEnv: string): string {
   return url.origin;
 }
 
+function loadInviteLinkBase(
+  raw: string | undefined,
+  appOrigin: string | null,
+  nodeEnv: string,
+): string {
+  const candidate = raw?.trim() || `${appOrigin ?? "https://app.zeros.build"}/invite`;
+  let url: URL;
+  try {
+    url = new URL(candidate);
+  } catch {
+    throw new Error(
+      "Invalid environment: INVITE_LINK_BASE must be an exact /invite URL",
+    );
+  }
+  const devLoopback =
+    nodeEnv !== "production" &&
+    url.protocol === "http:" &&
+    (url.hostname === "127.0.0.1" ||
+      url.hostname === "[::1]" ||
+      url.hostname === "localhost");
+  if (
+    (url.protocol !== "https:" && !devLoopback) ||
+    url.username ||
+    url.password ||
+    url.pathname.replace(/\/+$/, "") !== "/invite" ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      "Invalid environment: INVITE_LINK_BASE must use HTTPS (or dev loopback HTTP) and be an exact, credential-free /invite URL with no query or fragment",
+    );
+  }
+  if (appOrigin !== null && url.origin !== appOrigin) {
+    throw new Error(
+      "Invalid environment: INVITE_LINK_BASE must use the exact APP_ORIGIN",
+    );
+  }
+  return `${url.origin}/invite`;
+}
+
 function loadWorkOSBackendConfig(
   env: z.infer<typeof EnvSchema>,
+  appOrigin: string | null,
 ): WorkOSBackendConfig | null {
   if (env.AUTH_PROVIDER !== "workos") return null;
+  if (appOrigin === null) {
+    throw new Error("Invalid environment: APP_ORIGIN is required");
+  }
   return {
-    appOrigin: validatedAppOrigin(
-      requiredAuthValue(env.APP_ORIGIN, "APP_ORIGIN"),
-      env.NODE_ENV,
-    ),
+    appOrigin,
     apiKey: requiredAuthValue(env.WORKOS_API_KEY, "WORKOS_API_KEY"),
     cookiePassword: requiredAuthValue(
       env.WORKOS_COOKIE_PASSWORD,
@@ -936,6 +981,7 @@ function validateRailwayEnvironment(
   env: NodeJS.ProcessEnv,
   audience: string,
   appOrigin: string | null,
+  inviteLinkBase: string,
   selfHosted: boolean,
 ): void {
   // Railway injects these values. Local processes and non-Railway hosts have no
@@ -961,6 +1007,12 @@ function validateRailwayEnvironment(
   if (appOrigin !== null && appOrigin !== expected.appOrigin) {
     throw new Error(
       `Invalid environment: APP_ORIGIN must be ${expected.appOrigin} in Railway ${name}`,
+    );
+  }
+  const expectedInviteLinkBase = `${expected.appOrigin}/invite`;
+  if (inviteLinkBase !== expectedInviteLinkBase) {
+    throw new Error(
+      `Invalid environment: INVITE_LINK_BASE must be ${expectedInviteLinkBase} in Railway ${name}`,
     );
   }
   const branch = (env.RAILWAY_GIT_BRANCH ?? "").trim();
@@ -989,14 +1041,23 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   }
   const e = parsed.data;
   const auth = loadAuthConfig(e);
-  const workos = loadWorkOSBackendConfig(e);
+  const appOrigin = e.APP_ORIGIN
+    ? validatedAppOrigin(e.APP_ORIGIN, e.NODE_ENV)
+    : null;
+  const workos = loadWorkOSBackendConfig(e, appOrigin);
+  const inviteLinkBase = loadInviteLinkBase(
+    e.INVITE_LINK_BASE,
+    appOrigin,
+    e.NODE_ENV,
+  );
   if (auth.provider === "workos" && workos) {
     validateWorkOSOriginSeparation(auth, workos);
   }
   validateRailwayEnvironment(
     env,
     e.AUTH_AUDIENCE,
-    workos?.appOrigin ?? null,
+    appOrigin,
+    inviteLinkBase,
     e.ZEROS_SELF_HOSTED === "true",
   );
 
@@ -1026,6 +1087,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     databaseUrl: e.DATABASE_URL,
     auth,
     workos,
+    inviteLinkBase,
     port: e.PORT,
     isProduction: e.NODE_ENV === "production",
     github,

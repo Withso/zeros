@@ -19,13 +19,33 @@ import {
   type CloudWorkspaceInternalSetupService,
 } from "./cloud-workspaces/internal-routes.js";
 import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
+import { PostgresSecurityEventBroker } from "./security-events.js";
+import { RailwayWorkOSProvider } from "./workos-provider.js";
+import { startWorkOSSyncRuntime } from "./workos-sync-runtime.js";
 
 const config = loadConfig();
 const pool = createPool(config.databaseUrl);
 const emailConfig = loadEmailConfig();
 
+const securityEventBroker = new PostgresSecurityEventBroker(pool);
+const workosProvider =
+  config.auth.provider === "workos" && config.workos
+    ? new RailwayWorkOSProvider(config.auth, config.workos)
+    : undefined;
 await runMigrations(pool);
 if (config.github) startGithubOauthCleanup(pool);
+const workosSync = workosProvider
+  ? startWorkOSSyncRuntime({
+      pool,
+      provider: workosProvider,
+      email: emailConfig,
+    })
+  : null;
+if (workosSync) {
+  console.log(
+    "[control-plane] WorkOS reconciliation and security outboxes enabled",
+  );
+}
 let stopCloudReconciler = async () => {};
 let stopCloudSetupWorker = async () => {};
 let stopCloudAccessRevocationWorker = async () => {};
@@ -171,6 +191,8 @@ if (config.cloudWorkspaces) {
 }
 
 const app = createApp(config, pool, emailConfig, {
+  securityEventBroker,
+  ...(workosProvider ? { workosProvider } : {}),
   ...(cloudWorkspaceInternalSetupService
     ? { cloudWorkspaceInternalSetupService }
     : {}),
@@ -192,6 +214,8 @@ function shutdown(signal: string): void {
     stopCloudSetupWorker(),
     stopCloudAccessRevocationWorker(),
     stopCloudReconciler(),
+    workosSync?.stop() ?? Promise.resolve(),
+    securityEventBroker.stop(),
   ]);
   const deadline = setTimeout(() => process.exit(1), 15_000);
   deadline.unref();

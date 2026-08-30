@@ -15,7 +15,11 @@ import type { ChildProcess } from "node:child_process";
 const { spawnSpy } = vi.hoisted(() => ({ spawnSpy: vi.fn() }));
 vi.mock("node:child_process", () => ({ spawn: spawnSpy }));
 
-import { resolveHostCwd, spawnSubprocessTransport } from "../host-client";
+import {
+  formatHostStderrLines,
+  resolveHostCwd,
+  spawnSubprocessTransport,
+} from "../host-client";
 import type {
   BoundaryProcess,
   PreparedBoundary,
@@ -149,5 +153,29 @@ describe("spawnSubprocessTransport — host cwd safety", () => {
 
     transport?.dispose();
     expect(stopAndProve).toHaveBeenCalledOnce();
+  });
+});
+
+describe("formatHostStderrLines", () => {
+  it("tags every line of a chunk exactly once", () => {
+    // The host prefixes its own diagnostics; @cursor/sdk's arrive bare. A
+    // chunk-level prefix doubled the first and left the rest untagged.
+    expect(
+      formatHostStderrLines(
+        "[cursor-host] ready in 132ms\n" +
+          "shell-parser: tree-sitter natives are unavailable\n",
+      ),
+    ).toEqual([
+      "[cursor-host] ready in 132ms",
+      "[cursor-host] shell-parser: tree-sitter natives are unavailable",
+    ]);
+  });
+
+  it("collapses an already-doubled prefix and drops blank lines", () => {
+    expect(
+      formatHostStderrLines(
+        "[cursor-host] [cursor-host] workspace prewarmed in 9670ms\n\n",
+      ),
+    ).toEqual(["[cursor-host] workspace prewarmed in 9670ms"]);
   });
 });

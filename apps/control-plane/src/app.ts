@@ -29,23 +29,31 @@ import {
   createGithubUnconfiguredRoutes,
 } from "./github.js";
 import { createFeedbackRoutes } from "./feedback.js";
-import { createWorkOSIdentityEventRoutes } from "./workos-events.js";
 import {
   PostgresWorkOSBrowserSessionRepository,
   WorkOSBrowserSessions,
   createWorkOSBrowserSessionRoutes,
 } from "./workos-browser-sessions.js";
 import { createWorkOSDesktopRevocationRoutes } from "./workos-desktop-revocation.js";
+import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import {
   createCloudWorkspaceInternalRoutes,
   type CloudWorkspaceInternalSetupService,
 } from "./cloud-workspaces/internal-routes.js";
 import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
+import { createAccountRecoveryRoutes } from "./account-recovery.js";
+import {
+  PostgresSecurityEventBroker,
+  createSecurityEventRoutes,
+} from "./security-events.js";
+import { createWorkOSManagementEventRoutes } from "./workos-sync-events.js";
 
 export type CreateAppDependencies = {
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
   cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
+  securityEventBroker?: PostgresSecurityEventBroker;
+  workosProvider?: RailwayWorkOSProvider;
 };
 
 export function createApp(
@@ -55,6 +63,11 @@ export function createApp(
   dependencies: CreateAppDependencies = {},
 ): Hono {
   const app = new Hono();
+  const workosProvider =
+    config.auth.provider === "workos" && config.workos
+      ? (dependencies.workosProvider ??
+        new RailwayWorkOSProvider(config.auth, config.workos))
+      : undefined;
 
   // Preview capabilities use an isolated wildcard origin and a dedicated
   // header, not an interactive account JWT. Let the access service recognize
@@ -102,26 +115,37 @@ export function createApp(
   });
 
   // Railway owns the complete WorkOS browser/desktop authentication boundary:
-  // authorization-code exchange, encrypted session state, serialized refresh,
-  // provider-signed lifecycle events, and desktop session revocation. These
+  // Hosted AuthKit authorization, authorization-code exchange, encrypted
+  // session state, serialized refresh, provider-signed lifecycle events, and
+  // desktop session revocation. These
   // endpoints are intentionally mounted before /v1 bearer authentication;
   // each carries its own stronger credential (PKCE state, opaque HttpOnly
   // cookie, webhook signature, or a verified Desktop Application bearer).
-  if (config.auth.provider === "workos" && config.workos) {
-    const provider = new RailwayWorkOSProvider(config.auth, config.workos);
+  if (config.auth.provider === "workos" && config.workos && workosProvider) {
     const sessions = new WorkOSBrowserSessions(
       new PostgresWorkOSBrowserSessionRepository(pool),
-      provider,
+      workosProvider,
       config.workos.appOrigin,
     );
     app.route(
       "/",
       createWorkOSBrowserSessionRoutes(sessions, config.workos.appOrigin),
     );
-    app.route("/", createWorkOSDesktopRevocationRoutes(provider));
     app.route(
       "/",
-      createWorkOSIdentityEventRoutes(pool, config.workos.webhookSecret),
+      createWorkOSDesktopAuthorizationRoutes(
+        workosProvider,
+        config.workos.appOrigin,
+      ),
+    );
+    app.route("/", createWorkOSDesktopRevocationRoutes(workosProvider));
+    app.route(
+      "/",
+      createWorkOSManagementEventRoutes(
+        pool,
+        workosProvider,
+        config.workos.webhookSecret,
+      ),
     );
   }
 
@@ -250,14 +274,23 @@ export function createApp(
   app.use("/v1/feedback", feedbackBodyLimit);
 
   app.route("/", createFeedbackRoutes(config.feedback));
+  app.route("/", createAccountRecoveryRoutes(pool));
   app.route(
     "/",
-    createRoutes(
+    createSecurityEventRoutes(
       pool,
-      emailConfig,
-      config.cloudWorkspaces,
-      dependencies.cloudWorkspaceAccessService ?? null,
+      dependencies.securityEventBroker ?? new PostgresSecurityEventBroker(pool),
     ),
+  );
+  app.route(
+    "/",
+    createRoutes(pool, emailConfig, config.cloudWorkspaces, {
+      cloudWorkspaceAccessService:
+        dependencies.cloudWorkspaceAccessService ?? null,
+      workosEnabled: config.auth.provider === "workos",
+      ...(workosProvider ? { workosProvider } : {}),
+      inviteLinkBase: config.inviteLinkBase,
+    }),
   );
   if (config.github) app.route("/", createGithubRoutes(pool, config.github));
 
@@ -268,7 +301,13 @@ export function createApp(
     if (err instanceof HTTPException) return err.getResponse();
     if (err instanceof HttpError) {
       return c.json(
-        { error: { code: err.code, message: err.message } },
+        {
+          error: {
+            code: err.code,
+            message: err.message,
+            ...(err.details ? { details: err.details } : {}),
+          },
+        },
         err.status,
       );
     }
