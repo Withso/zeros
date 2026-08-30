@@ -137,7 +137,6 @@
       aspect-ratio: 1;
     }
 
-    .mark video,
     .mark canvas {
       position: absolute;
       inset: 0;
@@ -146,25 +145,15 @@
       display: block;
       background: transparent;
     }
-
-    .is-hidden { display: none !important; }
   </style>
 </head>
 <body>
   <header>
     <div>
       <h1>Zeros mark</h1>
-      <p class="lede" id="lede">Live canvas field — official mark, 10s loop</p>
+      <p class="lede">Live canvas field — official mark, 10s loop</p>
     </div>
     <div class="controls">
-      <div class="chips" role="group" aria-label="Version">
-        <button class="chip" type="button" data-version="live" aria-pressed="true">Live</button>
-        <button class="chip" type="button" data-version="v5" aria-pressed="false">v5</button>
-        <button class="chip" type="button" data-version="v4" aria-pressed="false">v4</button>
-        <button class="chip" type="button" data-version="v3" aria-pressed="false">v3</button>
-        <button class="chip" type="button" data-version="v2" aria-pressed="false">v2</button>
-        <button class="chip" type="button" data-version="v1" aria-pressed="false">v1</button>
-      </div>
       <div class="chips" role="group" aria-label="Stage background">
         <button class="chip" type="button" data-bg="void" aria-pressed="true">Void</button>
         <button class="chip" type="button" data-bg="checker" aria-pressed="false">Checker</button>
@@ -174,36 +163,14 @@
     </div>
   </header>
 
-  <main class="stage" data-bg="void" data-version="live">
+  <main class="stage" data-bg="void">
     <div class="mark" aria-label="Zeros logo formed by a swirling number field">
       <canvas id="live" width="720" height="720"></canvas>
-      <video
-        id="play"
-        class="is-hidden"
-        muted
-        loop
-        playsinline
-        poster="zeros-logo-data-v4-poster.jpg"
-      ></video>
-      <video
-        id="native"
-        class="is-hidden"
-        muted
-        loop
-        playsinline
-        poster="zeros-logo-data-poster.png"
-      >
-        <source src="zeros-logo-data.webm" type="video/webm" />
-      </video>
-      <canvas id="keyed" class="is-hidden" width="720" height="720"></canvas>
-      <video id="source" muted loop playsinline hidden preload="auto">
-        <source src="zeros-logo-data-source.mp4" type="video/mp4" />
-      </video>
     </div>
   </main>
 
   <footer>
-    <span id="meta">Canvas · official SVG occupancy · 10s loop</span>
+    <span>Canvas · official SVG occupancy · 10s loop</span>
     <span>No logo stroke — form from rim density</span>
   </footer>
 
@@ -211,23 +178,7 @@
   <script src="field.js"></script>
   <script>
     const stage = document.querySelector(".stage");
-    const lede = document.getElementById("lede");
-    const meta = document.getElementById("meta");
     const bgChips = [...document.querySelectorAll(".chips [data-bg]")];
-    const versionChips = [...document.querySelectorAll("[data-version].chip")];
-    const live = document.getElementById("live");
-    const play = document.getElementById("play");
-    const native = document.getElementById("native");
-    const keyed = document.getElementById("keyed");
-    const source = document.getElementById("source");
-    const files = {
-      v5: { src: "zeros-logo-data-v5.mp4", poster: "zeros-logo-data-v5-poster.jpg", lede: "v1 edit, 10s, edge fade — v5", meta: "Seedance 2.5 · 1:1 · 1080p · 10s · v5" },
-      v4: { src: "zeros-logo-data-v4.mp4", poster: "zeros-logo-data-v4-poster.jpg", lede: "Smaller mark, faster field, 10s — v4", meta: "Seedance 2.5 · 1:1 · 1080p · 10s · v4" },
-      v3: { src: "zeros-logo-data-v3.mp4", poster: "zeros-logo-data-v3-poster.jpg", lede: "10s edit of v2 — v3", meta: "Seedance 2.5 · 1:1 · 1080p · 10s · v3" },
-      v2: { src: "zeros-logo-data-v2.mp4", poster: "zeros-logo-data-v2-poster.jpg", lede: "Rim light + scatter — v2", meta: "Seedance 2.5 · 1:1 · 1080p · 5s · v2" },
-    };
-
-    let keyRunning = false;
 
     bgChips.forEach((chip) => {
       chip.addEventListener("click", () => {
@@ -235,97 +186,6 @@
         bgChips.forEach((c) => c.setAttribute("aria-pressed", String(c === chip)));
       });
     });
-
-    versionChips.forEach((chip) => {
-      chip.addEventListener("click", () => setVersion(chip.dataset.version));
-    });
-
-    function lumaKeyFrame(ctx, w, h) {
-      const img = ctx.getImageData(0, 0, w, h);
-      const d = img.data;
-      for (let i = 0; i < d.length; i += 4) {
-        const l = d[i] * 0.2126 + d[i + 1] * 0.7152 + d[i + 2] * 0.0722;
-        d[i + 3] = Math.max(0, Math.min(255, (l - 10) * 3.4));
-      }
-      ctx.putImageData(img, 0, 0);
-    }
-
-    function startCanvasKey() {
-      keyed.classList.remove("is-hidden");
-      const ctx = keyed.getContext("2d", { willReadFrequently: true });
-      const w = keyed.width;
-      const h = keyed.height;
-      if (keyRunning) return;
-      keyRunning = true;
-      const tick = () => {
-        if (stage.dataset.version !== "v1") {
-          keyRunning = false;
-          return;
-        }
-        if (source.readyState >= 2) {
-          ctx.clearRect(0, 0, w, h);
-          ctx.drawImage(source, 0, 0, w, h);
-          lumaKeyFrame(ctx, w, h);
-        }
-        requestAnimationFrame(tick);
-      };
-      source.play().catch(() => {});
-      tick();
-    }
-
-    function showV1Keyed() {
-      const safari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
-      const webm = native.canPlayType('video/webm; codecs="vp9"');
-      if (!safari && webm) {
-        native.classList.remove("is-hidden");
-        native.play().catch(() => startCanvasKey());
-        native.addEventListener("error", startCanvasKey, { once: true });
-      } else {
-        startCanvasKey();
-      }
-    }
-
-    function hideVideos() {
-      native.classList.add("is-hidden");
-      keyed.classList.add("is-hidden");
-      play.classList.add("is-hidden");
-      native.pause();
-      source.pause();
-      play.pause();
-    }
-
-    function setVersion(version) {
-      stage.dataset.version = version;
-      versionChips.forEach((c) => {
-        c.setAttribute("aria-pressed", String(c.dataset.version === version));
-      });
-
-      hideVideos();
-
-      if (version === "live") {
-        live.classList.remove("is-hidden");
-        if (window.ZerosLogoField) window.ZerosLogoField.start();
-        lede.textContent = "Live canvas field — official mark, 10s loop";
-        meta.textContent = "Canvas · official SVG occupancy · 10s loop";
-        return;
-      }
-
-      if (window.ZerosLogoField) window.ZerosLogoField.stop();
-      live.classList.add("is-hidden");
-
-      if (files[version]) {
-        play.classList.remove("is-hidden");
-        play.poster = files[version].poster;
-        play.src = files[version].src;
-        play.play().catch(() => {});
-        lede.textContent = files[version].lede;
-        meta.textContent = files[version].meta;
-      } else {
-        showV1Keyed();
-        lede.textContent = "Contained glyphs, keyed alpha — v1";
-        meta.textContent = "Seedance 2.5 · 1:1 · 1080p · 5s · v1";
-      }
-    }
 
     if (window.ZerosLogoField) {
       window.ZerosLogoField.init();
@@ -335,7 +195,7 @@
         stage.dataset.bg = bg;
         bgChips.forEach((c) => c.setAttribute("aria-pressed", String(c.dataset.bg === bg)));
       }
-      setVersion("live");
+      window.ZerosLogoField.start();
     }
   </script>
 </body>
