@@ -12,7 +12,7 @@
   var CELL = 96;
   var ATLAS_COLS = 8;
   var SYM = "()[]{}<>/|_-=+*#;:,.";
-  var FONT = "100 36px 'JetBrains Mono', ui-monospace, monospace";
+  var FONT = "100 52px 'JetBrains Mono', ui-monospace, monospace";
 
   var host = null;
   var canvas = null;
@@ -69,13 +69,13 @@
 
   function paintZero(g, cx, cy, kind) {
     var t = tintFor(kind);
-    var rx = 13.5;
-    var ry = 16.5;
+    var rx = 18;
+    var ry = 22;
     g.save();
     g.shadowColor = t.bloom;
-    g.shadowBlur = 18;
+    g.shadowBlur = 20;
     g.strokeStyle = t.rim;
-    g.lineWidth = 1.55;
+    g.lineWidth = 1.7;
     g.lineCap = "round";
     g.beginPath();
     g.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
@@ -83,15 +83,15 @@
     g.restore();
 
     g.strokeStyle = "#ffffff";
-    g.lineWidth = 1.05;
+    g.lineWidth = 1.15;
     g.shadowColor = "rgba(255, 255, 255, 0.95)";
-    g.shadowBlur = 4;
+    g.shadowBlur = 5;
     g.beginPath();
     g.ellipse(cx, cy, rx, ry, 0, 0, Math.PI * 2);
     g.stroke();
 
-    g.shadowBlur = 2;
-    g.lineWidth = 1.35;
+    g.shadowBlur = 3;
+    g.lineWidth = 1.55;
     g.beginPath();
     g.ellipse(cx, cy, rx, ry, -0.4, -1.05, 0.7);
     g.stroke();
@@ -107,9 +107,9 @@
     g.lineJoin = "round";
     g.lineCap = "round";
     g.shadowColor = t.bloom;
-    g.shadowBlur = 14;
+    g.shadowBlur = 16;
     g.strokeStyle = t.rim;
-    g.lineWidth = 0.95;
+    g.lineWidth = 1.05;
     g.strokeText(ch, cx, cy);
     g.restore();
 
@@ -119,15 +119,15 @@
     g.fillStyle = t.fill;
     g.fillText(ch, cx, cy);
     g.strokeStyle = "#ffffff";
-    g.lineWidth = 0.7;
-    g.shadowColor = "rgba(255, 255, 255, 0.85)";
-    g.shadowBlur = 3;
+    g.lineWidth = 0.85;
+    g.shadowColor = "rgba(255, 255, 255, 0.9)";
+    g.shadowBlur = 4;
     g.strokeText(ch, cx, cy);
     g.shadowBlur = 0;
   }
 
   function paintSquare(g, cx, cy) {
-    var s = 7;
+    var s = 11;
     g.shadowColor = "rgba(255, 70, 70, 0.85)";
     g.shadowBlur = 6;
     g.fillStyle = "#ff3b3b";
@@ -363,8 +363,8 @@
         ox: (rng() - 0.5) * 0.01,
         oy: (rng() - 0.5) * 0.01,
         revs: 3 + Math.floor(rng() * 3),
-        size: 13 + rng() * 8,
-        alpha: 0.38 + rng() * 0.28,
+        size: 36 + rng() * 16,
+        alpha: 0.42 + rng() * 0.3,
       });
     }
 
@@ -383,8 +383,8 @@
         ox: (rng() - 0.5) * 0.012,
         oy: (rng() - 0.5) * 0.012,
         revs: 2 + Math.floor(rng() * 3),
-        size: 9 + rng() * 7,
-        alpha: 0.16 + rng() * 0.18,
+        size: 26 + rng() * 12,
+        alpha: 0.18 + rng() * 0.2,
       });
     }
 
@@ -402,8 +402,8 @@
         ox: (rng() - 0.5) * 0.012,
         oy: (rng() - 0.5) * 0.012,
         revs: 4 + Math.floor(rng() * 3),
-        size: 14 + rng() * 9,
-        alpha: 0.62 + rng() * 0.3,
+        size: 42 + rng() * 18,
+        alpha: 0.7 + rng() * 0.28,
       });
     }
 
@@ -421,8 +421,8 @@
         ox: (rng() - 0.5) * 0.008,
         oy: (rng() - 0.5) * 0.008,
         revs: 3 + Math.floor(rng() * 2),
-        size: 28 + rng() * 16,
-        alpha: 0.88 + rng() * 0.1,
+        size: 78 + rng() * 36,
+        alpha: 0.9 + rng() * 0.08,
       });
     }
 
@@ -440,8 +440,8 @@
         ox: (rng() - 0.5) * 0.022,
         oy: (rng() - 0.5) * 0.022,
         revs: 1 + Math.floor(rng() * 2),
-        size: 8 + rng() * 9,
-        alpha: 0.12 + rng() * 0.22,
+        size: 24 + rng() * 14,
+        alpha: 0.16 + rng() * 0.24,
       });
     }
 
@@ -460,20 +460,20 @@
         ox: (rng() - 0.5) * 0.014,
         oy: (rng() - 0.5) * 0.014,
         revs: 2 + Math.floor(rng() * 2),
-        size: 7 + rng() * 8,
-        alpha: 0.18 + rng() * 0.24,
+        size: 22 + rng() * 12,
+        alpha: 0.2 + rng() * 0.26,
       });
     }
 
-    add("glyph", 190, shellParticle);
-    add("glyph", 42, hollowParticle);
-    add("glyph", 310, rimParticle);
-    add("hero", 18, heroParticle);
-    add("mint", 14, rimParticle);
-    add("square", 10, rimParticle);
-    add("glyph", 96, fieldParticle);
-    add("square", 5, fieldParticle);
-    add("glyph", 32, crossParticle);
+    add("glyph", 260, shellParticle);
+    add("glyph", 52, hollowParticle);
+    add("glyph", 460, rimParticle);
+    add("hero", 26, heroParticle);
+    add("mint", 22, rimParticle);
+    add("square", 16, rimParticle);
+    add("glyph", 140, fieldParticle);
+    add("square", 8, fieldParticle);
+    add("glyph", 48, crossParticle);
 
     particles = list;
     posed = new Array(list.length);
@@ -485,7 +485,7 @@
     });
     byGlyph.forEach(function (group) {
       var k;
-      for (k = 0; k < group.length - 1; k += 5) {
+      for (k = 0; k < group.length - 1; k += 4) {
         pairs.push(group[k], group[k + 1]);
       }
     });
@@ -512,7 +512,7 @@
       kind: spec.kind,
       layer: spec.layer,
       glyph: spec.glyph,
-      births: 3 + Math.floor(rng() * 3),
+      births: 2 + Math.floor(rng() * 3),
       birthPhase: rng(),
       pulseRevs: 2 + Math.floor(rng() * 2),
     };
@@ -605,6 +605,7 @@
     pass("core", false);
     if (voidBg) {
       ctx.globalCompositeOperation = "lighter";
+      pass("core", true);
       pass("rim", true);
       pass("hero", true);
       ctx.globalCompositeOperation = "source-over";
@@ -688,11 +689,13 @@
         tick();
       }
     });
-    var wait =
-      document.fonts && document.fonts.load
-        ? document.fonts.load(FONT)
-        : Promise.resolve();
-    wait.catch(function () {}).then(boot);
+    boot();
+    if (document.fonts && document.fonts.load) {
+      document.fonts.load(FONT).then(function () {
+        if (!atlas) return;
+        buildAtlas();
+      }).catch(function () {});
+    }
   }
 
   window.ZerosLogoField = {
