@@ -100,7 +100,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).not.toMatch(/ﾊ/);
   });
 
-  it("leaves space above a left-aligned tagline and peeks 30% of the full product UI", () => {
+  it("pins the tagline to the product mock and peeks 50% of the full UI", () => {
     const css = readFileSync(HOME_PAGE_CSS, "utf8");
     expect(home).not.toMatch(/HeroAsciiClouds/);
     expect(home).not.toMatch(/AgentsStrip/);
@@ -123,12 +123,15 @@ describe("marketing homepage layout", () => {
     expect(css).toMatch(/--bg0: hsl\(0 0% 5%\)/);
     expect(css).toMatch(/prefers-color-scheme: light/);
     expect(css).toMatch(/hero-copy/);
-    expect(css).toMatch(/0\.3 \* var\(--hero-product-height\)/);
+    expect(css).toMatch(/0\.5 \* var\(--hero-product-height\)/);
+    expect(css).not.toMatch(/0\.3 \* var\(--hero-product-height\)/);
+    expect(css).toMatch(/justify-content: flex-end/);
+    expect(css).toMatch(/padding-bottom: 2\.5rem/);
     expect(css).toMatch(/\.home-page \{/);
     expect(css).not.toMatch(/home-ascii-page/);
     expect(css).toMatch(/--hero-product-height: 720px/);
-    expect(css).toMatch(/padding-top: 22vh/);
-    expect(css).toMatch(/padding-top: 8rem/);
+    expect(css).not.toMatch(/padding-top: 22vh/);
+    expect(css).not.toMatch(/padding-top: 8rem/);
     expect(css).not.toMatch(/hero-ascii-atmosphere/);
     expect(css).not.toMatch(/hero-product-peek/);
     expect(css).not.toMatch(/mask-image/);

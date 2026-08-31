@@ -89,24 +89,22 @@
 }
 
 /*
- * Space above the tagline is reserved for a future field. The copy
- * block is tall enough that the first viewport shows only 30% of the
- * product mock; the rest is in normal document flow and appears on scroll.
- * 4rem is the sticky nav (h-16).
+ * First viewport shows 50% of the product mock. Copy is packed to the
+ * bottom of the reserved band so the tagline sits close to the UI;
+ * space above the tagline stays empty for a future field. 4rem is the
+ * sticky nav (h-16).
  */
 .hero-copy {
-  padding-top: 8rem;
-  min-height: calc(100svh - 4rem - (0.3 * var(--hero-product-height)));
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  min-height: calc(100svh - 4rem - (0.5 * var(--hero-product-height)));
+  padding-top: 1.5rem;
+  padding-bottom: 2.5rem;
 }
 
 @media (min-width: 640px) {
   .hero-copy {
-    padding-top: 10rem;
-  }
-}
-
-@media (min-width: 1024px) {
-  .hero-copy {
-    padding-top: 22vh;
+    padding-bottom: 3rem;
   }
 }
