@@ -102,34 +102,44 @@ describe("marketing homepage layout", () => {
     expect(scramble).not.toMatch(/ﾊ/);
   });
 
-  it("paints a pure-dark ASCII cloud void behind the hero", () => {
+  it("paints a dark ASCII horizon behind a spacious tagline and product peek", () => {
     const ascii = readFileSync(HERO_ASCII, "utf8");
     const css = readFileSync(HERO_ASCII_CSS, "utf8");
     const field = readFileSync(HERO_ASCII_FIELD, "utf8");
     expect(home).toMatch(/HeroAsciiClouds/);
+    expect(home).toMatch(/hero-stage/);
     expect(home).not.toMatch(/BackgroundGlow/);
     expect(home).not.toMatch(/radial-gradient\(900px 520px/);
     expect(ascii).toMatch(/paintHeroAsciiField/);
     expect(ascii).toMatch(/data-hero-ascii-clouds/);
+    expect(ascii).toMatch(/hero-ascii-atmosphere/);
     expect(home).toMatch(/home-ascii-page/);
     expect(home).toMatch(/isolate/);
     expect(home).toMatch(/Nav flush/);
     expect(home).toMatch(/relative z-10/);
+    expect(home).toMatch(/data-hero-product-peek/);
+    expect(hero).toMatch(/pt-32/);
+    expect(hero).toMatch(/lg:pt-\[22vh\]/);
     expect(css).toMatch(/background-color: #000000/);
     expect(css).toMatch(/z-index: 0/);
     expect(css).not.toMatch(/z-index:\s*-10/);
     expect(css).toMatch(/prefers-reduced-motion: reduce/);
     expect(css).toMatch(/animation:\s*none/);
     expect(css).toMatch(/hero-ascii-drift/);
+    expect(css).toMatch(/hero-ascii-atmosphere/);
+    expect(css).toMatch(/hero-product-peek/);
+    expect(css).toMatch(/32vh/);
+    expect(css).toMatch(/min-height: 100svh/);
     expect(css).toMatch(/prefers-color-scheme: light/);
     expect(css).toMatch(/--bg0: hsl\(0 0% 5%\)/);
-    expect(css).toMatch(/transparent 82%/);
-    expect(css).toMatch(/min\(58vh, 540px\)/);
+    expect(css).not.toMatch(/min\(58vh, 540px\)/);
     expect(css).not.toMatch(/min\(120vh, 1100px\)/);
     expect(field).toMatch(/ASCII_CLOUD_RAMP/);
     expect(field).toMatch(/headlineWell/);
+    expect(field).toMatch(/horizonGate/);
     expect(field).toMatch(/skyGate/);
     expect(field).toMatch(/productSkyline/);
+    expect(field).toMatch(/streakField/);
     expect(field).toMatch(/#000000/);
     expect(field).toMatch(/"\."/);
     expect(field).toMatch(/"@"/);
@@ -181,6 +191,7 @@ describe("marketing homepage layout", () => {
     expect(home).not.toMatch(/FinalCTA/);
     expect(home).not.toMatch(/Bring your own agents/);
     expect(home).not.toMatch(/Start shipping in parallel/);
+    expect(home).not.toMatch(/h-28 sm:h-36 lg:h-44/);
     expect(home).toMatch(/aria-hidden/);
   });
 

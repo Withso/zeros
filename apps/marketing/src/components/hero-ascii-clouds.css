@@ -1,8 +1,16 @@
-/* Pure-dark ASCII cloud void behind the homepage hero. */
+/* Dark void + horizon ASCII atmosphere behind the homepage hero. */
 
 .home-ascii-page {
   color-scheme: dark;
   background-color: #000000;
+}
+
+.hero-stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 100svh;
+  isolation: isolate;
 }
 
 /*
@@ -77,37 +85,93 @@
 .hero-ascii-clouds {
   pointer-events: none;
   position: absolute;
-  inset: 0 0 auto 0;
+  inset: 0;
   z-index: 0;
   width: 100%;
-  height: min(58vh, 540px);
+  height: 100%;
   overflow: hidden;
   background-color: #000000;
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    #000 0%,
-    #000 42%,
-    transparent 82%
-  );
-  mask-image: linear-gradient(to bottom, #000 0%, #000 42%, transparent 82%);
+}
+
+.hero-ascii-atmosphere {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  background:
+    radial-gradient(
+      28% 26% at 12% 64%,
+      color-mix(in srgb, var(--blue-fg) 16%, transparent),
+      transparent 72%
+    ),
+    radial-gradient(
+      32% 28% at 88% 56%,
+      color-mix(in srgb, var(--blue-primary) 20%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      40% 16% at 50% 76%,
+      color-mix(in srgb, var(--blue-fg) 10%, transparent),
+      transparent 70%
+    ),
+    radial-gradient(
+      42% 22% at 50% 100%,
+      color-mix(in srgb, var(--yellow-fg) 8%, transparent),
+      transparent 74%
+    );
+  mix-blend-mode: screen;
 }
 
 .hero-ascii-clouds-canvas {
   position: absolute;
   inset: -6%;
+  z-index: 1;
   display: block;
   width: 112%;
   height: 112%;
+}
+
+.hero-product-peek {
+  position: relative;
+  z-index: 1;
+  margin-top: auto;
+  height: clamp(196px, 32vh, 252px);
+  overflow: hidden;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    #000 0%,
+    #000 55%,
+    transparent 100%
+  );
+  mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
+}
+
+.hero-product-peek::after {
+  content: "";
+  pointer-events: none;
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(
+    to bottom,
+    transparent 0%,
+    transparent 38%,
+    color-mix(in srgb, var(--bg0) 55%, transparent) 72%,
+    var(--bg0) 100%
+  );
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .hero-ascii-clouds-canvas {
     animation: hero-ascii-drift 120s ease-in-out infinite alternate;
   }
+
+  .hero-ascii-atmosphere {
+    animation: hero-ascii-breathe 16s ease-in-out infinite alternate;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .hero-ascii-clouds-canvas {
+  .hero-ascii-clouds-canvas,
+  .hero-ascii-atmosphere {
     animation: none;
   }
 }
@@ -118,5 +182,14 @@
   }
   to {
     transform: translate3d(1.3%, 0.2%, 0);
+  }
+}
+
+@keyframes hero-ascii-breathe {
+  from {
+    opacity: 0.72;
+  }
+  to {
+    opacity: 1;
   }
 }
