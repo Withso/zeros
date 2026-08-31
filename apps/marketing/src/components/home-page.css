@@ -102,5 +102,5 @@
   justify-content: flex-end;
   min-height: calc(100dvh - 4rem - (0.5 * var(--hero-product-height)));
   padding-top: 1.5rem;
-  padding-bottom: 2rem;
+  padding-bottom: 1.25rem;
 }

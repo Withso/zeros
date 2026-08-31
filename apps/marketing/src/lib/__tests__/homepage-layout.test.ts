@@ -132,7 +132,7 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/0\.3 \* var\(--hero-product-height\)/);
     expect(css).toMatch(/justify-content: flex-end/);
     expect(css).toMatch(/\.home-page \.hero-copy/);
-    expect(css).toMatch(/padding-bottom: 2rem/);
+    expect(css).toMatch(/padding-bottom: 1\.25rem/);
     expect(css).toMatch(/100dvh/);
     expect(css).toMatch(/0\.5 \* var\(--hero-product-height\)/);
     expect(css).toMatch(/\.home-page \{/);
