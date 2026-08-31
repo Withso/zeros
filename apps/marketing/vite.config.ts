@@ -22,5 +22,8 @@ export default defineConfig({
     host: true,
     // Cloud-agent / tunnel previews hit this via *.trycloudflare.com etc.
     allowedHosts: true,
+    headers: {
+      "Cache-Control": "no-store",
+    },
   },
 });

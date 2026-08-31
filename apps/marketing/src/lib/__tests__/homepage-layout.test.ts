@@ -11,9 +11,9 @@ const PREVIEW = join(ROOT, "apps/marketing/src/components/ProductPreview.tsx");
 const WORDMARK = join(ROOT, "apps/marketing/public/zeros-wordmark.svg");
 const HERO_CYCLE = join(ROOT, "apps/marketing/src/components/HeroRoleCycle.tsx");
 const HERO_CYCLE_CSS = join(ROOT, "apps/marketing/src/components/hero-role.css");
-const HERO_ASCII_CSS = join(
+const HOME_PAGE_CSS = join(
   ROOT,
-  "apps/marketing/src/components/hero-ascii-clouds.css",
+  "apps/marketing/src/components/home-page.css",
 );
 
 function sliceFunction(source: string, name: string): string {
@@ -101,7 +101,7 @@ describe("marketing homepage layout", () => {
   });
 
   it("leaves space above a left-aligned tagline and peeks 30% of the full product UI", () => {
-    const css = readFileSync(HERO_ASCII_CSS, "utf8");
+    const css = readFileSync(HOME_PAGE_CSS, "utf8");
     expect(home).not.toMatch(/HeroAsciiClouds/);
     expect(home).not.toMatch(/AgentsStrip/);
     expect(home).not.toMatch(/FinalCTA/);
@@ -109,6 +109,7 @@ describe("marketing homepage layout", () => {
     expect(home).not.toMatch(/BackgroundGlow/);
     expect(home).not.toMatch(/radial-gradient\(900px 520px/);
     expect(home).not.toMatch(/hero-ascii-atmosphere/);
+    expect(home).toMatch(/home-page\.css/);
     expect(home).toMatch(/home-ascii-page/);
     expect(home).toMatch(/Nav flush/);
     expect(home).toMatch(/data-hero-product/);

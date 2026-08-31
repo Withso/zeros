@@ -2,7 +2,7 @@ import { Nav } from '../components/Nav'
 import { ProductPreview } from '../components/ProductPreview'
 import { HeroRoleCycle } from '../components/HeroRoleCycle'
 import { BrandLockup } from '../components/BrandLockup'
-import '../components/hero-ascii-clouds.css'
+import '../components/home-page.css'
 
 export function HomePage() {
   return (
