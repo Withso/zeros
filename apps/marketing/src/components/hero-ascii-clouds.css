@@ -88,25 +88,4 @@
   filter: none;
 }
 
-/*
- * Space above the tagline is reserved for a future field. The copy
- * block is tall enough that the first viewport shows only 30% of the
- * product mock; the rest is in normal document flow and appears on scroll.
- * 4rem is the sticky nav (h-16).
- */
-.hero-copy {
-  padding-top: 8rem;
-  min-height: calc(100svh - 4rem - (0.3 * var(--hero-product-height)));
-}
-
-@media (min-width: 640px) {
-  .hero-copy {
-    padding-top: 10rem;
-  }
-}
-
-@media (min-width: 1024px) {
-  .hero-copy {
-    padding-top: 22vh;
-  }
-}
+/* Unused. Homepage layout lives in home-page.css (.home-page .hero-copy). */

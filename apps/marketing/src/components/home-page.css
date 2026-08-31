@@ -5,6 +5,7 @@
   background-color: var(--bg1);
   /* KEEP IN SYNC with ProductPreview: top bar 40px + pane h-[560/620/680]. */
   --hero-product-height: 600px;
+  --hero-peek: 0.5;
 }
 
 @media (min-width: 640px) {
@@ -92,19 +93,14 @@
  * First viewport shows 50% of the product mock. Copy is packed to the
  * bottom of the reserved band so the tagline sits close to the UI;
  * space above the tagline stays empty for a future field. 4rem is the
- * sticky nav (h-16).
+ * sticky nav (h-16). Scoped under .home-page so a leftover .hero-copy
+ * sheet cannot restore the 30% peek.
  */
-.hero-copy {
+.home-page .hero-copy {
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  min-height: calc(100svh - 4rem - (0.5 * var(--hero-product-height)));
+  min-height: calc(100dvh - 4rem - (var(--hero-peek) * var(--hero-product-height)));
   padding-top: 1.5rem;
-  padding-bottom: 2.5rem;
-}
-
-@media (min-width: 640px) {
-  .hero-copy {
-    padding-bottom: 3rem;
-  }
+  padding-bottom: 2rem;
 }

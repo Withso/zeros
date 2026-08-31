@@ -123,10 +123,13 @@ describe("marketing homepage layout", () => {
     expect(css).toMatch(/--bg0: hsl\(0 0% 5%\)/);
     expect(css).toMatch(/prefers-color-scheme: light/);
     expect(css).toMatch(/hero-copy/);
-    expect(css).toMatch(/0\.5 \* var\(--hero-product-height\)/);
+    expect(css).toMatch(/--hero-peek: 0\.5/);
+    expect(css).toMatch(/var\(--hero-peek\) \* var\(--hero-product-height\)/);
     expect(css).not.toMatch(/0\.3 \* var\(--hero-product-height\)/);
     expect(css).toMatch(/justify-content: flex-end/);
-    expect(css).toMatch(/padding-bottom: 2\.5rem/);
+    expect(css).toMatch(/\.home-page \.hero-copy/);
+    expect(css).toMatch(/padding-bottom: 2rem/);
+    expect(css).toMatch(/100dvh/);
     expect(css).toMatch(/\.home-page \{/);
     expect(css).not.toMatch(/home-ascii-page/);
     expect(css).toMatch(/--hero-product-height: 720px/);
