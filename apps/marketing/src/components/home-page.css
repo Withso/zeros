@@ -3,20 +3,30 @@
 .home-page {
   color-scheme: dark;
   background-color: var(--bg1);
-  /* KEEP IN SYNC with ProductPreview: top bar 40px + pane h-[560/620/680]. */
-  --hero-product-height: 600px;
-  --hero-peek: 0.5;
+  --nav-h: 4rem;
+  /* First-fold product slice, as a fraction of the viewport (Linear). */
+  --hero-peek: 0.42;
+  --hero-air: 10dvh;
+  --hero-copy-gap: 2rem;
+  /* Mock is taller than the peek so scroll reveals the rest. */
+  --hero-product-height: max(36rem, 96dvh);
 }
 
 @media (min-width: 640px) {
   .home-page {
-    --hero-product-height: 660px;
+    --hero-peek: 0.48;
+    --hero-air: 14dvh;
+    --hero-copy-gap: 2.75rem;
+    --hero-product-height: max(40rem, 102dvh);
   }
 }
 
 @media (min-width: 1024px) {
   .home-page {
-    --hero-product-height: 720px;
+    --hero-peek: 0.52;
+    --hero-air: 18dvh;
+    --hero-copy-gap: 3.25rem;
+    --hero-product-height: max(44rem, 110dvh);
   }
 }
 
@@ -90,17 +100,32 @@
 }
 
 /*
- * First viewport shows 50% of the product mock. Copy is packed to the
- * bottom of the reserved band so the tagline sits close to the UI;
- * space above the tagline stays empty for a future field. 4rem is the
- * sticky nav (h-16). Scoped under .home-page so a leftover .hero-copy
- * sheet cannot restore the 30% peek.
+ * Linear-like first fold: air under the nav, copy packed to the mock,
+ * then ~half the viewport of product. 4rem is the sticky nav (h-16).
+ * The mock itself is taller than --hero-peek so scrolling reveals it.
  */
 .home-page .hero-copy {
   display: flex;
   flex-direction: column;
   justify-content: flex-end;
-  min-height: calc(100dvh - 4rem - (0.5 * var(--hero-product-height)));
-  padding-top: 1.5rem;
-  padding-bottom: 1.25rem;
+  min-height: calc(100dvh - var(--nav-h) - (var(--hero-peek) * 100dvh));
+  padding-top: var(--hero-air);
+  padding-bottom: var(--hero-copy-gap);
+}
+
+.home-page .hero-product {
+  position: relative;
+}
+
+.home-page .hero-horizon {
+  pointer-events: none;
+  position: absolute;
+  inset: -12% -18% auto;
+  height: 70%;
+  z-index: 0;
+  background: radial-gradient(
+    70% 80% at 50% 100%,
+    color-mix(in srgb, var(--fg1) 8%, transparent),
+    transparent 72%
+  );
 }

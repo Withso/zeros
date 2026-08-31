@@ -50,9 +50,9 @@ describe("marketing homepage layout", () => {
     expect(hero).toMatch(/builders, developers, and designers/);
     expect(hero).toMatch(/Run a team of coding & design agents/);
     expect(hero).toMatch(/text-left/);
-    expect(hero).toMatch(/text-\[36px\]/);
-    expect(hero).toMatch(/sm:text-\[52px\]/);
-    expect(hero).toMatch(/lg:text-\[60px\]/);
+    expect(hero).toMatch(/text-\[40px\]/);
+    expect(hero).toMatch(/sm:text-\[54px\]/);
+    expect(hero).toMatch(/lg:text-\[64px\]/);
     expect(hero).not.toMatch(/text-center/);
     expect(hero).not.toMatch(/Design and code/);
   });
@@ -100,7 +100,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).not.toMatch(/ﾊ/);
   });
 
-  it("pins the tagline to the product mock and peeks 50% of the full UI", () => {
+  it("composes a Linear-like first fold: air, packed copy, and a viewport peek", () => {
     const css = readFileSync(HOME_PAGE_CSS, "utf8");
     expect(home).not.toMatch(/HeroAsciiClouds/);
     expect(home).not.toMatch(/AgentsStrip/);
@@ -109,7 +109,7 @@ describe("marketing homepage layout", () => {
     expect(home).not.toMatch(/BackgroundGlow/);
     expect(home).not.toMatch(/radial-gradient\(900px 520px/);
     expect(home).not.toMatch(/hero-ascii-atmosphere/);
-    expect(home).toMatch(/home-page\.css\?v=peek50js/);
+    expect(home).toMatch(/home-page\.css\?v=linear-fold/);
     expect(home).toMatch(/className="home-page /);
     expect(home).not.toMatch(/home-ascii-page/);
     expect(home).toMatch(/Nav flush/);
@@ -119,25 +119,33 @@ describe("marketing homepage layout", () => {
     expect(home).not.toMatch(/<Footer/);
     expect(hero).toMatch(/hero-copy/);
     expect(hero).toMatch(/data-hero-copy/);
-    expect(hero).toMatch(/0\.5 \* productPx/);
+    expect(hero).toMatch(/data-hero-fold/);
+    expect(hero).toMatch(/--hero-peek/);
+    expect(hero).toMatch(/peek \* viewport/);
     expect(hero).toMatch(/setCopyMinHeight/);
     expect(hero).toMatch(/visualViewport/);
     expect(hero).toMatch(/hero-product/);
     expect(hero).toMatch(/ProductPreview/);
+    expect(hero).not.toMatch(/0\.5 \* productPx/);
     expect(css).toMatch(/--bg0: hsl\(0 0% 5%\)/);
     expect(css).toMatch(/prefers-color-scheme: light/);
     expect(css).toMatch(/hero-copy/);
-    expect(css).toMatch(/--hero-peek: 0\.5/);
-    expect(css).toMatch(/0\.5 \* var\(--hero-product-height\)/);
+    expect(css).toMatch(/--hero-peek: 0\.52/);
+    expect(css).toMatch(/--hero-peek: 0\.48/);
+    expect(css).toMatch(/--hero-peek: 0\.42/);
+    expect(css).toMatch(/--hero-air: 18dvh/);
+    expect(css).toMatch(/--hero-copy-gap: 3\.25rem/);
+    expect(css).toMatch(/--hero-product-height: max\(/);
+    expect(css).toMatch(/110dvh/);
     expect(css).not.toMatch(/0\.3 \* var\(--hero-product-height\)/);
     expect(css).toMatch(/justify-content: flex-end/);
     expect(css).toMatch(/\.home-page \.hero-copy/);
-    expect(css).toMatch(/padding-bottom: 1\.25rem/);
+    expect(css).toMatch(/padding-top: var\(--hero-air\)/);
+    expect(css).toMatch(/padding-bottom: var\(--hero-copy-gap\)/);
     expect(css).toMatch(/100dvh/);
-    expect(css).toMatch(/0\.5 \* var\(--hero-product-height\)/);
     expect(css).toMatch(/\.home-page \{/);
     expect(css).not.toMatch(/home-ascii-page/);
-    expect(css).toMatch(/--hero-product-height: 720px/);
+    expect(css).not.toMatch(/--hero-product-height: 720px/);
     expect(css).not.toMatch(/padding-top: 22vh/);
     expect(css).not.toMatch(/padding-top: 8rem/);
     expect(css).not.toMatch(/hero-ascii-atmosphere/);
@@ -146,6 +154,9 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/hero-ascii-drift/);
     expect(css).not.toMatch(/min\(58vh, 540px\)/);
     expect(css).not.toMatch(/min\(120vh, 1100px\)/);
+    expect(preview).toMatch(/--hero-product-height/);
+    expect(preview).toMatch(/rounded-xl/);
+    expect(preview).not.toMatch(/h-\[560px\]/);
   });
 
   it("drops the hero download CTA and Dev/Design toggle", () => {

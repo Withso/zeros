@@ -3,7 +3,7 @@ import { Nav } from '../components/Nav'
 import { ProductPreview } from '../components/ProductPreview'
 import { HeroRoleCycle } from '../components/HeroRoleCycle'
 import { BrandLockup } from '../components/BrandLockup'
-import '../components/home-page.css?v=peek50js'
+import '../components/home-page.css?v=linear-fold'
 
 export function HomePage() {
   return (
@@ -15,7 +15,7 @@ export function HomePage() {
       </main>
 
       <footer
-        className="flex justify-center px-5 py-16 sm:px-8 sm:py-20 lg:px-10"
+        className="flex justify-center px-5 py-16 sm:px-8 sm:py-20 lg:px-12"
         aria-label="Zeros"
         data-home-mark=""
       >
@@ -33,13 +33,15 @@ function Hero() {
   useLayoutEffect(() => {
     const apply = () => {
       const page = document.querySelector('.home-page')
-      const productPx = page
-        ? parseFloat(
-            getComputedStyle(page).getPropertyValue('--hero-product-height'),
-          ) || 720
-        : 720
+      const styles = page ? getComputedStyle(page) : null
+      const peek = styles
+        ? Number.parseFloat(styles.getPropertyValue('--hero-peek')) || 0.52
+        : 0.52
       const viewport = window.visualViewport?.height ?? window.innerHeight
-      setCopyMinHeight(`${Math.max(0, viewport - 64 - 0.5 * productPx)}px`)
+      const copyFloor = 13 * 16
+      setCopyMinHeight(
+        `${Math.max(copyFloor, viewport - 64 - peek * viewport)}px`,
+      )
     }
 
     apply()
@@ -52,28 +54,32 @@ function Hero() {
   }, [])
 
   return (
-    <section className="mx-auto w-full max-w-[1240px] px-5 sm:px-8 lg:px-10">
+    <section
+      className="hero-fold mx-auto w-full max-w-[1320px] px-5 sm:px-8 lg:px-12"
+      data-hero-fold=""
+    >
       <div
         className="hero-copy"
         data-hero-copy=""
         style={copyMinHeight ? { minHeight: copyMinHeight } : undefined}
       >
         <h1
-          className="text-left text-[36px] leading-[1.08] font-medium tracking-[-0.03em] text-fg1 sm:text-[52px] lg:text-[60px]"
+          className="text-left text-[40px] leading-[1.08] font-medium tracking-[-0.03em] text-fg1 sm:text-[54px] lg:text-[64px]"
           aria-label="Human-agent interaction for builders, developers, and designers"
         >
           <span className="block" aria-hidden>
             Human-agent interaction
           </span>
-          <span className="mt-[0.12em] block whitespace-nowrap" aria-hidden>
+          <span className="mt-[0.08em] block whitespace-nowrap" aria-hidden>
             for <HeroRoleCycle />
           </span>
         </h1>
-        <p className="mt-5 max-w-[42ch] text-left text-[15px] leading-relaxed text-fg2 sm:text-[17px]">
+        <p className="mt-3.5 max-w-[42ch] text-left text-[15px] leading-relaxed text-fg2 sm:mt-4 sm:text-[17px]">
           Run a team of coding & design agents
         </p>
       </div>
       <div className="hero-product" data-hero-product="">
+        <div className="hero-horizon" aria-hidden />
         <ProductPreview />
       </div>
     </section>
