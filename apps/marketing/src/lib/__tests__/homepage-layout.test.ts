@@ -110,7 +110,8 @@ describe("marketing homepage layout", () => {
     expect(home).not.toMatch(/radial-gradient\(900px 520px/);
     expect(home).not.toMatch(/hero-ascii-atmosphere/);
     expect(home).toMatch(/home-page\.css/);
-    expect(home).toMatch(/home-ascii-page/);
+    expect(home).toMatch(/className="home-page /);
+    expect(home).not.toMatch(/home-ascii-page/);
     expect(home).toMatch(/Nav flush/);
     expect(home).toMatch(/data-hero-product/);
     expect(home).toMatch(/data-home-mark/);
@@ -123,6 +124,8 @@ describe("marketing homepage layout", () => {
     expect(css).toMatch(/prefers-color-scheme: light/);
     expect(css).toMatch(/hero-copy/);
     expect(css).toMatch(/0\.3 \* var\(--hero-product-height\)/);
+    expect(css).toMatch(/\.home-page \{/);
+    expect(css).not.toMatch(/home-ascii-page/);
     expect(css).toMatch(/--hero-product-height: 720px/);
     expect(css).toMatch(/padding-top: 22vh/);
     expect(css).toMatch(/padding-top: 8rem/);
@@ -192,5 +195,18 @@ describe("marketing homepage layout", () => {
     expect(preview).not.toMatch(/WorkbenchPreview/);
     expect(preview).not.toMatch(/FileTree/);
     expect(preview).not.toMatch(/function ModeToggle/);
+  });
+
+  it("busts the Vite preview module graph without changing the production entry", () => {
+    const html = readFileSync(join(ROOT, "apps/marketing/index.html"), "utf8");
+    const vite = readFileSync(join(ROOT, "apps/marketing/vite.config.ts"), "utf8");
+    const boot = readFileSync(join(ROOT, "apps/marketing/src/boot.tsx"), "utf8");
+    expect(html).toMatch(/src="\/src\/main\.tsx"/);
+    expect(html).not.toMatch(/boot\.tsx/);
+    expect(vite).toMatch(/apply: "serve"/);
+    expect(vite).toMatch(/boot\.tsx/);
+    expect(vite).toMatch(/searchParams\.set\("v","plain"\)/);
+    expect(boot).toMatch(/MarketingRouter/);
+    expect(boot).not.toMatch(/HeroAsciiClouds/);
   });
 });

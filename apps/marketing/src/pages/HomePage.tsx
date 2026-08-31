@@ -6,7 +6,7 @@ import '../components/home-page.css'
 
 export function HomePage() {
   return (
-    <div className="home-ascii-page relative flex min-h-screen flex-col overflow-x-hidden">
+    <div className="home-page relative flex min-h-screen flex-col overflow-x-hidden">
       <Nav flush />
 
       <main className="flex flex-1 flex-col">

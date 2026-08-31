@@ -1,6 +1,6 @@
 /* Homepage canvas: Neutral Dark, no decorative field. */
 
-.home-ascii-page {
+.home-page {
   color-scheme: dark;
   background-color: var(--bg1);
   /* KEEP IN SYNC with ProductPreview: top bar 40px + pane h-[560/620/680]. */
@@ -8,13 +8,13 @@
 }
 
 @media (min-width: 640px) {
-  .home-ascii-page {
+  .home-page {
     --hero-product-height: 660px;
   }
 }
 
 @media (min-width: 1024px) {
-  .home-ascii-page {
+  .home-page {
     --hero-product-height: 720px;
   }
 }
@@ -25,7 +25,7 @@
  * apps/marketing/src/index.css :root.
  */
 @media (prefers-color-scheme: light) {
-  .home-ascii-page {
+  .home-page {
     --bg0: hsl(0 0% 5%);
     --bg1: hsl(0 0% 7%);
     --pane-bg: var(--bg1);
@@ -83,7 +83,7 @@
 }
 
 /* Lockup uses Tailwind `invert` for light OS; keep the white mark on black. */
-.home-ascii-page .invert {
+.home-page .invert {
   --tw-invert: invert(0);
   filter: none;
 }
