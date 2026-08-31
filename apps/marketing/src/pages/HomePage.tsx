@@ -3,7 +3,7 @@ import { Nav } from '../components/Nav'
 import { ProductPreview } from '../components/ProductPreview'
 import { HeroRoleCycle } from '../components/HeroRoleCycle'
 import { BrandLockup } from '../components/BrandLockup'
-import '../components/home-page.css?v=peek50'
+import '../components/home-page.css?v=peek50js'
 
 export function HomePage() {
   return (
@@ -42,7 +42,12 @@ function Hero() {
           ) || 720
         : 720
       const viewport = window.visualViewport?.height ?? window.innerHeight
-      el.style.minHeight = `${Math.max(0, viewport - 64 - 0.5 * productPx)}px`
+      el.style.setProperty(
+        'min-height',
+        `${Math.max(0, viewport - 64 - 0.5 * productPx)}px`,
+        'important',
+      )
+      el.dataset.heroPeekPx = el.style.minHeight
     }
 
     apply()
