@@ -1,22 +1,28 @@
-/* Dark void + horizon ASCII atmosphere behind the homepage hero. */
+/* Homepage canvas: Neutral Dark, no decorative field. */
 
 .home-ascii-page {
   color-scheme: dark;
-  background-color: #000000;
+  background-color: var(--bg1);
+  /* KEEP IN SYNC with ProductPreview: top bar 40px + pane h-[560/620/680]. */
+  --hero-product-height: 600px;
 }
 
-.hero-stage {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  min-height: 100svh;
-  isolation: isolate;
+@media (min-width: 640px) {
+  .home-ascii-page {
+    --hero-product-height: 660px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .home-ascii-page {
+    --hero-product-height: 720px;
+  }
 }
 
 /*
- * The ASCII field is always a black void with light glyphs. Pin Neutral
- * Dark on this page when the OS is light so the headline, lockup, and
- * preview keep contrast. Values match apps/marketing/src/index.css :root.
+ * Pin Neutral Dark on this page when the OS is light so the headline,
+ * lockup, and preview keep contrast. Values match
+ * apps/marketing/src/index.css :root.
  */
 @media (prefers-color-scheme: light) {
   .home-ascii-page {
@@ -82,114 +88,25 @@
   filter: none;
 }
 
-.hero-ascii-clouds {
-  pointer-events: none;
-  position: absolute;
-  inset: 0;
-  z-index: 0;
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-  background-color: #000000;
+/*
+ * Space above the tagline is reserved for a future field. The copy
+ * block is tall enough that the first viewport shows only 30% of the
+ * product mock; the rest is in normal document flow and appears on scroll.
+ * 4rem is the sticky nav (h-16).
+ */
+.hero-copy {
+  padding-top: 8rem;
+  min-height: calc(100svh - 4rem - (0.3 * var(--hero-product-height)));
 }
 
-.hero-ascii-atmosphere {
-  position: absolute;
-  inset: 0;
-  z-index: 3;
-  background:
-    radial-gradient(
-      28% 26% at 12% 64%,
-      color-mix(in srgb, var(--blue-fg) 16%, transparent),
-      transparent 72%
-    ),
-    radial-gradient(
-      32% 28% at 88% 56%,
-      color-mix(in srgb, var(--blue-primary) 20%, transparent),
-      transparent 70%
-    ),
-    radial-gradient(
-      40% 16% at 50% 76%,
-      color-mix(in srgb, var(--blue-fg) 10%, transparent),
-      transparent 70%
-    ),
-    radial-gradient(
-      42% 22% at 50% 100%,
-      color-mix(in srgb, var(--yellow-fg) 8%, transparent),
-      transparent 74%
-    );
-  mix-blend-mode: screen;
-}
-
-.hero-ascii-clouds-canvas {
-  position: absolute;
-  inset: -6%;
-  z-index: 1;
-  display: block;
-  width: 112%;
-  height: 112%;
-}
-
-.hero-product-peek {
-  position: relative;
-  z-index: 1;
-  margin-top: auto;
-  height: clamp(196px, 32vh, 252px);
-  overflow: hidden;
-  -webkit-mask-image: linear-gradient(
-    to bottom,
-    #000 0%,
-    #000 55%,
-    transparent 100%
-  );
-  mask-image: linear-gradient(to bottom, #000 0%, #000 55%, transparent 100%);
-}
-
-.hero-product-peek::after {
-  content: "";
-  pointer-events: none;
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(
-    to bottom,
-    transparent 0%,
-    transparent 38%,
-    color-mix(in srgb, var(--bg0) 55%, transparent) 72%,
-    var(--bg0) 100%
-  );
-}
-
-@media (prefers-reduced-motion: no-preference) {
-  .hero-ascii-clouds-canvas {
-    animation: hero-ascii-drift 120s ease-in-out infinite alternate;
-  }
-
-  .hero-ascii-atmosphere {
-    animation: hero-ascii-breathe 16s ease-in-out infinite alternate;
+@media (min-width: 640px) {
+  .hero-copy {
+    padding-top: 10rem;
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .hero-ascii-clouds-canvas,
-  .hero-ascii-atmosphere {
-    animation: none;
-  }
-}
-
-@keyframes hero-ascii-drift {
-  from {
-    transform: translate3d(-1.2%, -0.4%, 0);
-  }
-  to {
-    transform: translate3d(1.3%, 0.2%, 0);
-  }
-}
-
-@keyframes hero-ascii-breathe {
-  from {
-    opacity: 0.72;
-  }
-  to {
-    opacity: 1;
+@media (min-width: 1024px) {
+  .hero-copy {
+    padding-top: 22vh;
   }
 }

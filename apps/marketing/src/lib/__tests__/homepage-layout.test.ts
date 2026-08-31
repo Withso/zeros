@@ -11,12 +11,10 @@ const PREVIEW = join(ROOT, "apps/marketing/src/components/ProductPreview.tsx");
 const WORDMARK = join(ROOT, "apps/marketing/public/zeros-wordmark.svg");
 const HERO_CYCLE = join(ROOT, "apps/marketing/src/components/HeroRoleCycle.tsx");
 const HERO_CYCLE_CSS = join(ROOT, "apps/marketing/src/components/hero-role.css");
-const HERO_ASCII = join(ROOT, "apps/marketing/src/components/HeroAsciiClouds.tsx");
 const HERO_ASCII_CSS = join(
   ROOT,
   "apps/marketing/src/components/hero-ascii-clouds.css",
 );
-const HERO_ASCII_FIELD = join(ROOT, "apps/marketing/src/lib/hero-ascii-field.ts");
 
 function sliceFunction(source: string, name: string): string {
   const start = source.indexOf(`function ${name}(`);
@@ -102,49 +100,37 @@ describe("marketing homepage layout", () => {
     expect(scramble).not.toMatch(/ﾊ/);
   });
 
-  it("paints a dark ASCII horizon behind a spacious tagline and product peek", () => {
-    const ascii = readFileSync(HERO_ASCII, "utf8");
+  it("leaves space above a left-aligned tagline and peeks 30% of the full product UI", () => {
     const css = readFileSync(HERO_ASCII_CSS, "utf8");
-    const field = readFileSync(HERO_ASCII_FIELD, "utf8");
-    expect(home).toMatch(/HeroAsciiClouds/);
-    expect(home).toMatch(/hero-stage/);
+    expect(home).not.toMatch(/HeroAsciiClouds/);
+    expect(home).not.toMatch(/AgentsStrip/);
+    expect(home).not.toMatch(/FinalCTA/);
+    expect(home).not.toMatch(/Bring your own agents/);
     expect(home).not.toMatch(/BackgroundGlow/);
     expect(home).not.toMatch(/radial-gradient\(900px 520px/);
-    expect(ascii).toMatch(/paintHeroAsciiField/);
-    expect(ascii).toMatch(/data-hero-ascii-clouds/);
-    expect(ascii).toMatch(/hero-ascii-atmosphere/);
+    expect(home).not.toMatch(/hero-ascii-atmosphere/);
     expect(home).toMatch(/home-ascii-page/);
-    expect(home).toMatch(/isolate/);
     expect(home).toMatch(/Nav flush/);
-    expect(home).toMatch(/relative z-10/);
-    expect(home).toMatch(/data-hero-product-peek/);
-    expect(hero).toMatch(/pt-32/);
-    expect(hero).toMatch(/lg:pt-\[22vh\]/);
-    expect(css).toMatch(/background-color: #000000/);
-    expect(css).toMatch(/z-index: 0/);
-    expect(css).not.toMatch(/z-index:\s*-10/);
-    expect(css).toMatch(/prefers-reduced-motion: reduce/);
-    expect(css).toMatch(/animation:\s*none/);
-    expect(css).toMatch(/hero-ascii-drift/);
-    expect(css).toMatch(/hero-ascii-atmosphere/);
-    expect(css).toMatch(/hero-product-peek/);
-    expect(css).toMatch(/32vh/);
-    expect(css).toMatch(/min-height: 100svh/);
-    expect(css).toMatch(/prefers-color-scheme: light/);
+    expect(home).toMatch(/data-hero-product/);
+    expect(home).toMatch(/data-home-mark/);
+    expect(home).toMatch(/wordmark=\{false\}/);
+    expect(home).not.toMatch(/<Footer/);
+    expect(hero).toMatch(/hero-copy/);
+    expect(hero).toMatch(/hero-product/);
+    expect(hero).toMatch(/ProductPreview/);
     expect(css).toMatch(/--bg0: hsl\(0 0% 5%\)/);
+    expect(css).toMatch(/prefers-color-scheme: light/);
+    expect(css).toMatch(/hero-copy/);
+    expect(css).toMatch(/0\.3 \* var\(--hero-product-height\)/);
+    expect(css).toMatch(/--hero-product-height: 720px/);
+    expect(css).toMatch(/padding-top: 22vh/);
+    expect(css).toMatch(/padding-top: 8rem/);
+    expect(css).not.toMatch(/hero-ascii-atmosphere/);
+    expect(css).not.toMatch(/hero-product-peek/);
+    expect(css).not.toMatch(/mask-image/);
+    expect(css).not.toMatch(/hero-ascii-drift/);
     expect(css).not.toMatch(/min\(58vh, 540px\)/);
     expect(css).not.toMatch(/min\(120vh, 1100px\)/);
-    expect(field).toMatch(/ASCII_CLOUD_RAMP/);
-    expect(field).toMatch(/headlineWell/);
-    expect(field).toMatch(/horizonGate/);
-    expect(field).toMatch(/skyGate/);
-    expect(field).toMatch(/productSkyline/);
-    expect(field).toMatch(/streakField/);
-    expect(field).toMatch(/#000000/);
-    expect(field).toMatch(/"\."/);
-    expect(field).toMatch(/"@"/);
-    expect(field).toMatch(/"0"/);
-    expect(field).toMatch(/"1"/);
   });
 
   it("drops the hero download CTA and Dev/Design toggle", () => {
@@ -186,13 +172,14 @@ describe("marketing homepage layout", () => {
     expect(wordmark).not.toMatch(/<text/i);
   });
 
-  it("leaves empty space instead of the agents strip and final CTA", () => {
-    expect(home).not.toMatch(/AgentsStrip/);
-    expect(home).not.toMatch(/FinalCTA/);
-    expect(home).not.toMatch(/Bring your own agents/);
-    expect(home).not.toMatch(/Start shipping in parallel/);
-    expect(home).not.toMatch(/h-28 sm:h-36 lg:h-44/);
-    expect(home).toMatch(/aria-hidden/);
+  it("ends the homepage with a centered mark and no link columns", () => {
+    expect(home).toMatch(/data-home-mark/);
+    expect(home).toMatch(/wordmark=\{false\}/);
+    expect(home).toMatch(/BrandLockup size="md"/);
+    expect(home).not.toMatch(/Download for Mac/);
+    expect(home).not.toMatch(/Send feedback/);
+    expect(home).not.toMatch(/© /);
+    expect(home).not.toMatch(/across isolated worktrees/);
   });
 
   it("shows Zeros chat streaming and a right floating inspector", () => {
