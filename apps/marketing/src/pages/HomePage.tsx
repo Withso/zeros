@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef } from 'react'
+import { useLayoutEffect, useState } from 'react'
 import { Nav } from '../components/Nav'
 import { ProductPreview } from '../components/ProductPreview'
 import { HeroRoleCycle } from '../components/HeroRoleCycle'
@@ -28,26 +28,18 @@ export function HomePage() {
 /* ─────────────────────────── Hero ─────────────────────────── */
 
 function Hero() {
-  const copyRef = useRef<HTMLDivElement>(null)
+  const [copyMinHeight, setCopyMinHeight] = useState<string>()
 
   useLayoutEffect(() => {
-    const el = copyRef.current
-    if (!el) return
-
     const apply = () => {
-      const page = el.closest('.home-page')
+      const page = document.querySelector('.home-page')
       const productPx = page
         ? parseFloat(
             getComputedStyle(page).getPropertyValue('--hero-product-height'),
           ) || 720
         : 720
       const viewport = window.visualViewport?.height ?? window.innerHeight
-      el.style.setProperty(
-        'min-height',
-        `${Math.max(0, viewport - 64 - 0.5 * productPx)}px`,
-        'important',
-      )
-      el.dataset.heroPeekPx = el.style.minHeight
+      setCopyMinHeight(`${Math.max(0, viewport - 64 - 0.5 * productPx)}px`)
     }
 
     apply()
@@ -61,7 +53,11 @@ function Hero() {
 
   return (
     <section className="mx-auto w-full max-w-[1240px] px-5 sm:px-8 lg:px-10">
-      <div ref={copyRef} className="hero-copy" data-hero-copy="">
+      <div
+        className="hero-copy"
+        data-hero-copy=""
+        style={copyMinHeight ? { minHeight: copyMinHeight } : undefined}
+      >
         <h1
           className="text-left text-[36px] leading-[1.08] font-medium tracking-[-0.03em] text-fg1 sm:text-[52px] lg:text-[60px]"
           aria-label="Human-agent interaction for builders, developers, and designers"

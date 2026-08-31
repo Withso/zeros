@@ -120,7 +120,8 @@ describe("marketing homepage layout", () => {
     expect(hero).toMatch(/hero-copy/);
     expect(hero).toMatch(/data-hero-copy/);
     expect(hero).toMatch(/0\.5 \* productPx/);
-    expect(hero).toMatch(/setProperty/);
+    expect(hero).toMatch(/setCopyMinHeight/);
+    expect(hero).toMatch(/visualViewport/);
     expect(hero).toMatch(/hero-product/);
     expect(hero).toMatch(/ProductPreview/);
     expect(css).toMatch(/--bg0: hsl\(0 0% 5%\)/);
