@@ -109,7 +109,7 @@ describe("marketing homepage layout", () => {
     expect(home).not.toMatch(/BackgroundGlow/);
     expect(home).not.toMatch(/radial-gradient\(900px 520px/);
     expect(home).not.toMatch(/hero-ascii-atmosphere/);
-    expect(home).toMatch(/home-page\.css/);
+    expect(home).toMatch(/home-page\.css\?v=peek50/);
     expect(home).toMatch(/className="home-page /);
     expect(home).not.toMatch(/home-ascii-page/);
     expect(home).toMatch(/Nav flush/);
@@ -118,6 +118,8 @@ describe("marketing homepage layout", () => {
     expect(home).toMatch(/wordmark=\{false\}/);
     expect(home).not.toMatch(/<Footer/);
     expect(hero).toMatch(/hero-copy/);
+    expect(hero).toMatch(/data-hero-copy/);
+    expect(hero).toMatch(/0\.5 \* var\(--hero-product-height\)/);
     expect(hero).toMatch(/hero-product/);
     expect(hero).toMatch(/ProductPreview/);
     expect(css).toMatch(/--bg0: hsl\(0 0% 5%\)/);
@@ -130,6 +132,7 @@ describe("marketing homepage layout", () => {
     expect(css).toMatch(/\.home-page \.hero-copy/);
     expect(css).toMatch(/padding-bottom: 2rem/);
     expect(css).toMatch(/100dvh/);
+    expect(css).toMatch(/!important/);
     expect(css).toMatch(/\.home-page \{/);
     expect(css).not.toMatch(/home-ascii-page/);
     expect(css).toMatch(/--hero-product-height: 720px/);

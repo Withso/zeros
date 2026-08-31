@@ -2,7 +2,7 @@ import { Nav } from '../components/Nav'
 import { ProductPreview } from '../components/ProductPreview'
 import { HeroRoleCycle } from '../components/HeroRoleCycle'
 import { BrandLockup } from '../components/BrandLockup'
-import '../components/home-page.css'
+import '../components/home-page.css?v=peek50'
 
 export function HomePage() {
   return (
@@ -29,7 +29,14 @@ export function HomePage() {
 function Hero() {
   return (
     <section className="mx-auto w-full max-w-[1240px] px-5 sm:px-8 lg:px-10">
-      <div className="hero-copy">
+      <div
+        className="hero-copy"
+        data-hero-copy=""
+        style={{
+          minHeight:
+            'calc(100dvh - 4rem - (0.5 * var(--hero-product-height)))',
+        }}
+      >
         <h1
           className="text-left text-[36px] leading-[1.08] font-medium tracking-[-0.03em] text-fg1 sm:text-[52px] lg:text-[60px]"
           aria-label="Human-agent interaction for builders, developers, and designers"
