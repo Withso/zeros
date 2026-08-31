@@ -6,11 +6,13 @@ import {
   chmodSync,
   chownSync,
   closeSync,
+  copyFileSync,
   constants as fsConstants,
   existsSync,
   fstatSync,
   fsyncSync,
   lstatSync,
+  lchownSync,
   mkdirSync,
   mkdtempSync,
   openSync,
@@ -18,6 +20,8 @@ import {
   realpathSync,
   renameSync,
   rmSync,
+  symlinkSync,
+  writeSync,
   writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -45,6 +49,8 @@ export const CLOUD_WORKSPACE_SETUP_RESULT_AUDIENCE =
 const SETUP_ADMISSION_PATH = "/internal/v1/cloud-workspaces/setup/admission";
 const ENGINE_REGISTRATION_PATH =
   "/internal/v1/cloud-workspaces/engine/register";
+const SETUP_RECOVERY_PATH =
+  "/internal/v1/cloud-workspaces/setup/recovery";
 const TARGET_REPOSITORY = "/workspace/zeros";
 const SEEDED_REPOSITORY_BACKUP = "/workspace/.zeros-image-seed";
 const SETUP_STATE_DIRECTORY = "/var/lib/zeros/setup";
@@ -74,6 +80,7 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const SETUP_TOKEN_PATTERN = /^zws_[A-Za-z0-9_-]{43}$/;
 const BRIDGE_TOKEN_PATTERN = /^zwb_[A-Za-z0-9_-]{43}$/;
 const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
+const RECOVERY_TOKEN_PATTERN = /^zrc_[A-Za-z0-9_-]{43}$/;
 const SESSION_PATTERN = /^zsp_[A-Za-z0-9_-]{43}$/;
 const ENV_NAME_PATTERN = /^[A-Z_][A-Z0-9_]{0,127}$/;
 const GITHUB_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
@@ -336,6 +343,7 @@ export function parseCloudWorkspaceSetupMaterials(
       "engine",
       "execution",
       "image",
+      ...(raw.recovery === undefined ? [] : ["recovery"]),
       "repository",
       "settings",
       "version",
@@ -383,6 +391,34 @@ export function parseCloudWorkspaceSetupMaterials(
     !Number.isSafeInteger(raw.repository.credential.expiresAtMs) ||
     raw.repository.credential.expiresAtMs - now < 5 * 60_000 ||
     raw.repository.credential.expiresAtMs - now > 70 * 60_000 ||
+    !(
+      raw.recovery === undefined ||
+      raw.recovery === null ||
+      (isRecord(raw.recovery) &&
+        exactKeys(raw.recovery, [
+          "audience",
+          "checkpointId",
+          "contentRevision",
+          "endpoint",
+          "expiresAtMs",
+          "recordRevision",
+          "token",
+          "version",
+        ]) &&
+        raw.recovery.version === 1 &&
+        raw.recovery.audience === "zeros-cloud-workspace-recovery-v1" &&
+        UUID_PATTERN.test(raw.recovery.checkpointId ?? "") &&
+        positiveInteger(raw.recovery.contentRevision) &&
+        Number.isSafeInteger(raw.recovery.recordRevision) &&
+        raw.recovery.recordRevision >= 0 &&
+        exactHttpsUrl(raw.recovery.endpoint, SETUP_RECOVERY_PATH) !== null &&
+        new URL(raw.recovery.endpoint).origin ===
+          new URL(request.admission.endpoint).origin &&
+        RECOVERY_TOKEN_PATTERN.test(raw.recovery.token ?? "") &&
+        Number.isSafeInteger(raw.recovery.expiresAtMs) &&
+        raw.recovery.expiresAtMs - now >= 60_000 &&
+        raw.recovery.expiresAtMs - now <= 2 * 60 * 60_000)
+    ) ||
     !isRecord(raw.settings) ||
     !exactKeys(raw.settings, [
       "documentB64",
@@ -571,6 +607,467 @@ async function boundedResponseJson(response, maximumBytes) {
     return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(joined));
   } finally {
     joined.fill(0);
+  }
+}
+
+function normalizedRecoveryPath(value) {
+  if (
+    typeof value !== "string" ||
+    value.length < 1 ||
+    Buffer.byteLength(value, "utf8") > 4_096 ||
+    value !== value.normalize("NFC") ||
+    value.startsWith("/") ||
+    value.endsWith("/") ||
+    value.includes("\\") ||
+    /[\u0000-\u001f\u007f]/u.test(value) ||
+    path.posix.normalize(value) !== value
+  ) {
+    throw failure("checkpoint_restore_invalid");
+  }
+  const components = value.split("/");
+  if (
+    components.some(
+      (component) =>
+        component.length < 1 ||
+        component === "." ||
+        component === ".." ||
+        component.toLocaleLowerCase("en-US") === ".git",
+    )
+  ) {
+    throw failure("checkpoint_restore_invalid");
+  }
+  return value;
+}
+
+/** PostgreSQL recovery pages use COLLATE "C", which orders UTF-8 bytes. Do
+ * not substitute locale collation or JavaScript UTF-16 relational ordering:
+ * either can reject a valid cursor (or accept a regressing one) for Unicode
+ * paths. */
+export function compareCloudWorkspaceRecoveryPath(left, right) {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"));
+}
+
+function parseRecoveryManifestPage(raw, recovery, afterPath) {
+  if (
+    !isRecord(raw) ||
+    !exactKeys(raw, [
+      "audience",
+      "checkpointId",
+      "contentRevision",
+      "entries",
+      "fileCount",
+      "gitBaseCommit",
+      "gitHeadRef",
+      "nextAfterPath",
+      "totalBytes",
+      "version",
+    ]) ||
+    raw.version !== 1 ||
+    raw.audience !== "zeros-cloud-workspace-recovery-manifest-v1" ||
+    raw.checkpointId !== recovery.checkpointId ||
+    raw.contentRevision !== recovery.contentRevision ||
+    !(raw.gitBaseCommit === null || COMMIT_PATTERN.test(raw.gitBaseCommit)) ||
+    !(raw.gitHeadRef === null || safeString(raw.gitHeadRef, 512)) ||
+    !Number.isSafeInteger(raw.fileCount) ||
+    raw.fileCount < 0 ||
+    raw.fileCount > 1_000_000 ||
+    !Number.isSafeInteger(raw.totalBytes) ||
+    raw.totalBytes < 0 ||
+    raw.totalBytes > 10 * 1024 * 1024 * 1024 ||
+    !Array.isArray(raw.entries) ||
+    raw.entries.length > 500 ||
+    !(raw.nextAfterPath === null || typeof raw.nextAfterPath === "string")
+  ) {
+    throw failure("checkpoint_restore_invalid");
+  }
+  const entries = raw.entries.map((entry) => {
+    if (
+      !isRecord(entry) ||
+      typeof entry.operation !== "string" ||
+      !["upsert", "delete"].includes(entry.operation)
+    ) {
+      throw failure("checkpoint_restore_invalid");
+    }
+    const entryPath = normalizedRecoveryPath(entry.path);
+    if (
+      afterPath !== null &&
+      compareCloudWorkspaceRecoveryPath(entryPath, afterPath) <= 0
+    ) {
+      throw failure("checkpoint_restore_invalid");
+    }
+    if (entry.operation === "delete") {
+      if (!exactKeys(entry, ["operation", "path"])) {
+        throw failure("checkpoint_restore_invalid");
+      }
+      return { operation: "delete", path: entryPath };
+    }
+    if (
+      !exactKeys(entry, [
+        "blobId",
+        "contentSha256",
+        "entryType",
+        "mode",
+        "operation",
+        "path",
+        "sizeBytes",
+      ]) ||
+      !["file", "symlink"].includes(entry.entryType) ||
+      ![33188, 33261, 40960].includes(entry.mode) ||
+      (entry.entryType === "symlink" && entry.mode !== 40960) ||
+      (entry.entryType === "file" && entry.mode === 40960) ||
+      !UUID_PATTERN.test(entry.blobId ?? "") ||
+      !SHA256_PATTERN.test(entry.contentSha256 ?? "") ||
+      !Number.isSafeInteger(entry.sizeBytes) ||
+      entry.sizeBytes < 0 ||
+      entry.sizeBytes > 1024 * 1024 * 1024 ||
+      (entry.entryType === "symlink" && entry.sizeBytes > 4_096)
+    ) {
+      throw failure("checkpoint_restore_invalid");
+    }
+    return { ...entry, path: entryPath };
+  });
+  for (let index = 1; index < entries.length; index += 1) {
+    if (
+      compareCloudWorkspaceRecoveryPath(
+        entries[index - 1].path,
+        entries[index].path,
+      ) >= 0
+    ) {
+      throw failure("checkpoint_restore_invalid");
+    }
+  }
+  const nextAfterPath =
+    raw.nextAfterPath === null
+      ? null
+      : normalizedRecoveryPath(raw.nextAfterPath);
+  if (
+    nextAfterPath !== null &&
+    (entries.length < 1 || nextAfterPath !== entries.at(-1).path)
+  ) {
+    throw failure("checkpoint_restore_invalid");
+  }
+  return {
+    ...raw,
+    entries,
+    nextAfterPath,
+  };
+}
+
+async function recoveryFetch(url, token) {
+  try {
+    return await fetch(url, {
+      method: "GET",
+      redirect: "error",
+      cache: "no-store",
+      signal: AbortSignal.timeout(HTTP_TIMEOUT_MS),
+      headers: {
+        Accept: "application/json, application/octet-stream",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+  } catch {
+    throw failure("checkpoint_restore_unavailable");
+  }
+}
+
+async function loadRecoveryManifest(recovery) {
+  const entries = [];
+  const collisionKeys = new Set();
+  let afterPath = null;
+  let metadata = null;
+  for (;;) {
+    const endpoint = new URL(`${recovery.endpoint}/manifest`);
+    endpoint.searchParams.set("limit", "500");
+    if (afterPath !== null) {
+      endpoint.searchParams.set(
+        "after",
+        Buffer.from(afterPath, "utf8").toString("base64url"),
+      );
+    }
+    const response = await recoveryFetch(endpoint.toString(), recovery.token);
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw failure(
+        response.status >= 500
+          ? "checkpoint_restore_unavailable"
+          : "checkpoint_restore_invalid",
+      );
+    }
+    if (
+      response.headers.get("content-type")?.split(";", 1)[0]?.trim() !==
+      "application/json"
+    ) {
+      await response.body?.cancel().catch(() => undefined);
+      throw failure("checkpoint_restore_invalid");
+    }
+    const page = parseRecoveryManifestPage(
+      await boundedResponseJson(response, 2 * 1024 * 1024),
+      recovery,
+      afterPath,
+    );
+    const pageMetadata = JSON.stringify({
+      checkpointId: page.checkpointId,
+      contentRevision: page.contentRevision,
+      gitBaseCommit: page.gitBaseCommit,
+      gitHeadRef: page.gitHeadRef,
+      fileCount: page.fileCount,
+      totalBytes: page.totalBytes,
+    });
+    if (metadata === null) metadata = pageMetadata;
+    else if (metadata !== pageMetadata) throw failure("checkpoint_restore_invalid");
+    for (const entry of page.entries) {
+      const collision = entry.path.normalize("NFKC").toLocaleLowerCase("en-US");
+      if (collisionKeys.has(collision)) {
+        throw failure("checkpoint_restore_invalid");
+      }
+      collisionKeys.add(collision);
+      entries.push(entry);
+      if (entries.length > 1_000_000) {
+        throw failure("checkpoint_restore_invalid");
+      }
+    }
+    if (page.nextAfterPath === null) {
+      const parsedMetadata = JSON.parse(metadata);
+      const upserts = entries.filter((entry) => entry.operation === "upsert");
+      if (
+        upserts.length !== parsedMetadata.fileCount ||
+        upserts.reduce((total, entry) => total + entry.sizeBytes, 0) !==
+          parsedMetadata.totalBytes
+      ) {
+        throw failure("checkpoint_restore_invalid");
+      }
+      const upsertPaths = new Set(upserts.map((entry) => entry.path));
+      for (const entry of upserts) {
+        const components = entry.path.split("/");
+        for (let index = 1; index < components.length; index += 1) {
+          if (upsertPaths.has(components.slice(0, index).join("/"))) {
+            throw failure("checkpoint_restore_invalid");
+          }
+        }
+      }
+      return { ...parsedMetadata, entries };
+    }
+    if (page.entries.length < 1 || page.nextAfterPath === afterPath) {
+      throw failure("checkpoint_restore_invalid");
+    }
+    afterPath = page.nextAfterPath;
+  }
+}
+
+function safeRepositoryTarget(repositoryDirectory, relativePath) {
+  const target = path.join(repositoryDirectory, ...relativePath.split("/"));
+  const relative = path.relative(repositoryDirectory, target);
+  if (
+    relative.length < 1 ||
+    relative.startsWith("..") ||
+    path.isAbsolute(relative)
+  ) {
+    throw failure("checkpoint_restore_invalid");
+  }
+  return target;
+}
+
+function ensureRecoveryParents(repositoryDirectory, relativePath) {
+  const components = relativePath.split("/").slice(0, -1);
+  let current = repositoryDirectory;
+  for (const component of components) {
+    current = path.join(current, component);
+    try {
+      const stat = lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) {
+        throw failure("checkpoint_restore_invalid");
+      }
+    } catch (error) {
+      if (error instanceof SetupFailure) throw error;
+      if (error?.code !== "ENOENT") throw error;
+      mkdirSync(current, { mode: 0o755 });
+      chownSync(current, WORKER_UID, WORKER_GID);
+    }
+    const resolved = realpathSync(current);
+    if (
+      resolved !== repositoryDirectory &&
+      !resolved.startsWith(`${repositoryDirectory}${path.sep}`)
+    ) {
+      throw failure("checkpoint_restore_invalid");
+    }
+  }
+}
+
+function recoveryParentsExistSafely(repositoryDirectory, relativePath) {
+  const components = relativePath.split("/").slice(0, -1);
+  let current = repositoryDirectory;
+  for (const component of components) {
+    current = path.join(current, component);
+    let stat;
+    try {
+      stat = lstatSync(current);
+    } catch (error) {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    }
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw failure("checkpoint_restore_invalid");
+    }
+  }
+  return true;
+}
+
+async function downloadRecoveryBlob(recovery, entry, destination) {
+  const response = await recoveryFetch(
+    `${recovery.endpoint}/blobs/${entry.blobId}`,
+    recovery.token,
+  );
+  if (!response.ok) {
+    await response.body?.cancel().catch(() => undefined);
+    throw failure(
+      response.status >= 500
+        ? "checkpoint_restore_unavailable"
+        : "checkpoint_restore_invalid",
+    );
+  }
+  if (
+    response.headers.get("content-type")?.split(";", 1)[0]?.trim() !==
+      "application/octet-stream" ||
+    !response.body
+  ) {
+    await response.body?.cancel().catch(() => undefined);
+    throw failure("checkpoint_restore_invalid");
+  }
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared !== entry.sizeBytes) {
+    await response.body.cancel().catch(() => undefined);
+    throw failure("checkpoint_restore_invalid");
+  }
+  const descriptor = openSync(destination, "wx", 0o600);
+  const digest = createHash("sha256");
+  const reader = response.body.getReader();
+  let size = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      size += value.byteLength;
+      if (size > entry.sizeBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw failure("checkpoint_restore_invalid");
+      }
+      digest.update(value);
+      writeSync(descriptor, value);
+    }
+    fsyncSync(descriptor);
+  } finally {
+    reader.releaseLock();
+    closeSync(descriptor);
+  }
+  if (size !== entry.sizeBytes || digest.digest("hex") !== entry.contentSha256) {
+    rmSync(destination, { force: true });
+    throw failure("checkpoint_restore_invalid");
+  }
+}
+
+function safeSymlinkTarget(repositoryDirectory, entryPath, bytes) {
+  let target;
+  try {
+    target = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw failure("checkpoint_restore_invalid");
+  }
+  if (
+    target.length < 1 ||
+    target !== target.normalize("NFC") ||
+    path.posix.isAbsolute(target) ||
+    target.includes("\\") ||
+    /[\u0000-\u001f\u007f]/u.test(target)
+  ) {
+    throw failure("checkpoint_restore_invalid");
+  }
+  const resolved = path.resolve(
+    path.dirname(safeRepositoryTarget(repositoryDirectory, entryPath)),
+    target,
+  );
+  if (
+    resolved === repositoryDirectory ||
+    !resolved.startsWith(`${repositoryDirectory}${path.sep}`) ||
+    path
+      .relative(repositoryDirectory, resolved)
+      .split(path.sep)
+      .some((component) => component.toLocaleLowerCase("en-US") === ".git")
+  ) {
+    throw failure("checkpoint_restore_invalid");
+  }
+  return target;
+}
+
+export async function restoreCloudWorkspaceCheckpoint(
+  material,
+  repositoryDirectory,
+) {
+  if (!material.recovery) return false;
+  if (
+    !path.isAbsolute(repositoryDirectory) ||
+    realpathSync(repositoryDirectory) !== repositoryDirectory
+  ) {
+    throw failure("checkpoint_restore_invalid");
+  }
+  const manifest = await loadRecoveryManifest(material.recovery);
+  if (
+    manifest.gitBaseCommit !== null &&
+    manifest.gitBaseCommit !==
+      (await repositoryIdentity(
+        repositoryDirectory,
+        path.join(path.dirname(repositoryDirectory), "home"),
+        material.repository.cloneUrl,
+      ))
+  ) {
+    throw failure("checkpoint_restore_invalid");
+  }
+  const payloadDirectory = mkdtempSync(
+    path.join(path.dirname(repositoryDirectory), ".zeros-recovery-"),
+  );
+  try {
+    const cached = new Map();
+    for (const entry of manifest.entries) {
+      if (entry.operation !== "upsert" || cached.has(entry.blobId)) continue;
+      const destination = path.join(payloadDirectory, entry.blobId);
+      await downloadRecoveryBlob(material.recovery, entry, destination);
+      cached.set(entry.blobId, destination);
+    }
+    for (const entry of [...manifest.entries]
+      .filter((candidate) => candidate.operation === "delete")
+      .sort((left, right) => right.path.length - left.path.length)) {
+      const target = safeRepositoryTarget(repositoryDirectory, entry.path);
+      if (recoveryParentsExistSafely(repositoryDirectory, entry.path)) {
+        rmSync(target, { recursive: true, force: true });
+      }
+    }
+    for (const entry of manifest.entries.filter(
+      (candidate) => candidate.operation === "upsert",
+    )) {
+      const target = safeRepositoryTarget(repositoryDirectory, entry.path);
+      ensureRecoveryParents(repositoryDirectory, entry.path);
+      rmSync(target, { recursive: true, force: true });
+      const source = cached.get(entry.blobId);
+      if (!source) throw failure("checkpoint_restore_invalid");
+      if (entry.entryType === "symlink") {
+        const bytes = readFileSync(source);
+        try {
+          symlinkSync(
+            safeSymlinkTarget(repositoryDirectory, entry.path, bytes),
+            target,
+          );
+          lchownSync(target, WORKER_UID, WORKER_GID);
+        } finally {
+          bytes.fill(0);
+        }
+      } else {
+        copyFileSync(source, target, fsConstants.COPYFILE_EXCL);
+        chownSync(target, WORKER_UID, WORKER_GID);
+        chmodSync(target, entry.mode === 33261 ? 0o755 : 0o644);
+      }
+    }
+    return true;
+  } finally {
+    rmSync(payloadDirectory, { recursive: true, force: true });
   }
 }
 
@@ -1109,6 +1606,7 @@ async function cloneRepository(material) {
     if (checkedOut.code !== 0 || checkedOut.timedOut || checkedOut.overflow) {
       throw failure("repository_revision_invalid");
     }
+    await restoreCloudWorkspaceCheckpoint(material, repositoryDirectory);
     const commit = await repositoryIdentity(
       repositoryDirectory,
       homeDirectory,

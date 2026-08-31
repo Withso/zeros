@@ -74,7 +74,7 @@ identity, cleanup, and fail-closed verdict regressions.
 ```bash
 export DAYTONA_API_KEY=dtn_... # required
 export DAYTONA_TARGET=eu       # optional: us | eu; default eu
-export ZEROS_CLOUD_OWNER_SUB='auth0|owner-id'
+export ZEROS_CLOUD_OWNER_SUB='user_workos-owner-id'
 export ZEROS_ACCOUNT_ACCESS_TOKEN='eyJ...' # client-only JWT; sub must equal owner
 export ZEROS_ACCOUNT_JWT_JWKS_URL='https://tenant/.well-known/jwks.json'
 # Or configure ZEROS_ACCOUNT_JWT_ISSUER / ZEROS_ACCOUNT_JWT_PUBLIC_KEY.

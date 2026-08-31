@@ -38,18 +38,17 @@ unless a future network design explicitly requires it.
 ## Identity and placement boundary
 
 The stable workspace identity is not the provider resource and is not inferred
-from a local worktree path. For a never-cloud workspace, device SQLite owns the
-UUID and local record. Cloud, moved, and policy-registered workspaces have a
-control-plane record with the same UUID, tenant/team/repository, creator,
-billing owner, assignee, visibility, authority epoch, and current placement.
-Append-only execution generations describe where they run. Provider bindings
-describe only the current disposable cloud resource. Per-user/per-device
-replica bindings describe optional local mirrors.
+from a local worktree path. Device SQLite owns local-workspace UUIDs and paths;
+the control plane owns cloud-workspace UUIDs, tenant/team/repository, creator,
+billing owner, assignee, visibility, authority epoch, and generation history.
+A local↔cloud copy creates a different destination UUID and records immutable
+fork provenance. It never reuses the source identity or changes its authority.
+Provider bindings describe only a disposable cloud resource.
+Per-user/per-device replica bindings describe optional local mirrors and never
+store the absolute device path in the cloud.
 
-The current desktop uses human-readable workspace IDs and path-derived
-repository IDs, while the current control plane uses cloud-only UUIDs. Phase 1
-adds global UUIDs and keeps the released local IDs as compatibility aliases.
-No move operation may silently replace an ID or infer identity from a path.
+Released human-readable and path-derived local IDs remain compatibility
+aliases. They must not be silently reinterpreted as cloud identities.
 
 ## Repository ownership
 
@@ -57,7 +56,7 @@ No move operation may silently replace an ID or infer identity from a path.
 | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
 | Remote engine transport and desktop connection state                      | `apps/desktop/src/engine/transport/` and desktop-owned client modules                             |
 | SSH launch, preview admission, and localhost forward broker               | `apps/desktop/electron/cloud-workspace-access-*`; never renderer-owned process or credential code |
-| Local replica and authority handoff                                       | Future desktop engine/Electron boundaries; never renderer-only code                               |
+| Local forks and receive-only replicas                                     | Desktop engine/Electron boundaries; never renderer-only code                                      |
 | Shared bridge schemas, protocol version, crypto primitives, and redaction | `packages/protocol/`                                                                              |
 | Workspace APIs, authorization, registry, audit, quotas, and orchestration | `apps/control-plane/`                                                                             |
 | Browser management and authentication handoff                             | `apps/web/`                                                                                       |
@@ -83,16 +82,18 @@ deployables consume the same stable contract.
 6. Reconnect resumes from acknowledged revisions rather than replaying an
    unbounded transcript or assuming the client is current.
 
-The desktop connection registry must be keyed by engine/execution identity. A
+The desktop connection registry is keyed by engine/execution identity. A
 cloud-authoritative workspace may need the cloud bridge for chat/Git/Design and
 a local-engine bridge for a Local terminal or replica broker at the same time.
-A process-global `active bridge` is not the target architecture.
+Compatibility helpers may expose an active selection, but do not own connection
+identity or collapse independently keyed runtimes.
 
-The present `CloudTransport` proves only a token-gated remote bridge. The
-pre-production control plane now has lifecycle records, fenced setup admission,
-and an internal workspace/generation-bound engine registration/heartbeat lease.
-It does not yet issue the desktop's account/workspace-bound bridge connection
-grant; client routing and resume semantics also remain roadmap work.
+The pre-production control plane has lifecycle records, fenced setup admission,
+an internal workspace/generation-bound engine lease, and a short-lived desktop
+runtime admission. The renderer connection registry is keyed by exact runtime
+identity and refreshes generation-bound connections without exposing provider
+credentials. Product-level cloud workspace discovery and selection remain
+deferred UI work.
 
 The separate Phase-2 access broker is implemented in Electron main without
 pretending that bridge routing is complete. It obtains a current account token
@@ -111,9 +112,8 @@ wide SSH revocation invalidates only sibling local leases for the same workspace
 generation.
 
 This is a native service boundary, not the cloud-workspace product flow. The
-workspace catalog/details UI, current-execution selection, engine bridge grant,
-port discovery and collision-free selection, and signed macOS/provider E2E are
-still required before users can rely on it.
+workspace catalog/details UI, automated port selection, and signed
+macOS/provider E2E are still required before users can rely on it.
 
 ## Provider boundary
 
@@ -125,19 +125,21 @@ Organization and references encrypted credentials; a workspace never points at
 one deployment-wide API key implicitly. Provider-specific state must never leak
 into public API identity or serialized client preferences.
 
-## Placement and replica sequence
+## Fork and replica sequence
 
-An authority move records a placement intent before quiescing either engine,
-creates an exact checkpoint, prepares and verifies the target execution, then
-atomically advances the workspace authority epoch. Old engine and endpoint
-grants are revoked at cutover. Reconciliation decides an unknown result from
-the recorded source/target epochs; it never permits both to write.
+A local-to-cloud fork records the destination identity and expected source
+snapshot before upload, reserves bounded encrypted objects before publication,
+stages an integrity-checked file/chat projection, then creates the destination
+checkpoint. A cloud-to-local fork pins a durable checkpoint and exposes it
+through a short-lived device-bound export grant. Either direction is resumable
+and idempotent. The source workspace is never stopped, re-owned, deleted, or
+given the destination ID.
 
 A local replica is different: the control plane authorizes a specific
 user/device, and the desktop broker bootstraps from an exact manifest before
 consuming ordered file events. Replica paths stay device-local. Pausing one
 binding cannot mutate workspace authority or another member's binding. The full
-contract is in [data, placement, migration, and local sync](data-and-sync.md).
+contract is in [data, copies, and local sync](data-and-sync.md).
 
 ## Failure model
 

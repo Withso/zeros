@@ -11,6 +11,10 @@ const GRANT_ID = "33333333-3333-4333-8333-333333333333";
 const NOW = 1_800_000_000_000;
 const SSH_CREDENTIAL = `ssh_${"a".repeat(40)}`;
 const PREVIEW_CAPABILITY = `zwp_${"b".repeat(43)}`;
+const ENGINE_INSTANCE_ID = "44444444-4444-4444-8444-444444444444";
+const ENGINE_GRANT = `zws_${"c".repeat(43)}`;
+const DEVICE_ID = "55555555-5555-4555-8555-555555555555";
+const TUNNEL_SESSION_ID = "66666666-6666-4666-8666-666666666666";
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -164,6 +168,11 @@ describe("CloudWorkspaceAccessClient", () => {
             sshHost: "ssh.app.daytona.io",
             remoteHost: "127.0.0.1",
             remotePort: 4173,
+            session: {
+              id: TUNNEL_SESSION_ID,
+              deviceId: DEVICE_ID,
+              state: "starting",
+            },
           },
         },
         201,
@@ -180,6 +189,8 @@ describe("CloudWorkspaceAccessClient", () => {
         organizationId: ORGANIZATION_ID,
         workspaceId: WORKSPACE_ID,
         remotePort: 4173,
+        deviceId: DEVICE_ID,
+        requestedLocalPort: 54173,
         expiresInMinutes: 30,
         idempotencyKey: "desktop:tunnel:request-1",
       }),
@@ -187,6 +198,127 @@ describe("CloudWorkspaceAccessClient", () => {
       grant: { kind: "tunnel", remotePort: 4173 },
       tunnel: { remoteHost: "127.0.0.1", remotePort: 4173 },
     });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.stringContaining("/access/tunnels"),
+      expect.objectContaining({
+        body: JSON.stringify({
+          remotePort: 4173,
+          deviceId: DEVICE_ID,
+          requestedLocalPort: 54173,
+          expiresInMinutes: 30,
+        }),
+      }),
+    );
+  });
+
+  it("activates only the exact device tunnel and observed loopback port", async () => {
+    const fetchImpl = vi.fn(async () =>
+      json({
+        id: TUNNEL_SESSION_ID,
+        deviceId: DEVICE_ID,
+        state: "active",
+        bindAddress: "127.0.0.1",
+        observedLocalPort: 54173,
+      }),
+    );
+    const client = new CloudWorkspaceAccessClient({
+      baseUrl: "https://api.zeros.test",
+      fetch: fetchImpl as typeof fetch,
+      now: () => NOW,
+    });
+
+    await expect(
+      client.activateTunnel("account-access-token", {
+        organizationId: ORGANIZATION_ID,
+        workspaceId: WORKSPACE_ID,
+        sessionId: TUNNEL_SESSION_ID,
+        deviceId: DEVICE_ID,
+        observedLocalPort: 54173,
+      }),
+    ).resolves.toMatchObject({ state: "active", observedLocalPort: 54173 });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      expect.stringContaining(`/access/tunnels/${TUNNEL_SESSION_ID}`),
+      expect.objectContaining({ method: "PATCH" }),
+    );
+  });
+
+  it("accepts only an exact generation-bound engine admission", async () => {
+    const fetchImpl = vi.fn(async () =>
+      json(
+        {
+          version: 1,
+          audience: "zeros-cloud-workspace-engine-client-admission-v1",
+          workspaceId: WORKSPACE_ID,
+          organizationId: ORGANIZATION_ID,
+          generation: 7,
+          authorityEpoch: 11,
+          engineInstanceId: ENGINE_INSTANCE_ID,
+          remotePort: 47891,
+          grantToken: ENGINE_GRANT,
+          expiresAt: new Date(NOW + 120_000).toISOString(),
+        },
+        201,
+      ),
+    );
+    const client = new CloudWorkspaceAccessClient({
+      baseUrl: "https://api.zeros.test",
+      fetch: fetchImpl as typeof fetch,
+      now: () => NOW,
+    });
+
+    await expect(
+      client.issueEngineAdmission("account-access-token", {
+        organizationId: ORGANIZATION_ID,
+        workspaceId: WORKSPACE_ID,
+      }),
+    ).resolves.toMatchObject({
+      generation: 7,
+      authorityEpoch: 11,
+      engineInstanceId: ENGINE_INSTANCE_ID,
+      grantToken: ENGINE_GRANT,
+    });
+    expect(fetchImpl).toHaveBeenCalledWith(
+      `https://api.zeros.test/v1/organizations/${ORGANIZATION_ID}/cloud-workspaces/${WORKSPACE_ID}/runtime/admission`,
+      expect.objectContaining({
+        method: "POST",
+        body: "{}",
+        headers: expect.objectContaining({
+          authorization: "Bearer account-access-token",
+        }),
+      }),
+    );
+  });
+
+  it("fails closed on an ambiguous engine-admission response", async () => {
+    const client = new CloudWorkspaceAccessClient({
+      baseUrl: "https://api.zeros.test",
+      fetch: vi.fn(async () =>
+        json(
+          {
+            version: 1,
+            audience: "zeros-cloud-workspace-engine-client-admission-v1",
+            workspaceId: WORKSPACE_ID,
+            organizationId: ORGANIZATION_ID,
+            generation: 7,
+            authorityEpoch: 11,
+            engineInstanceId: ENGINE_INSTANCE_ID,
+            remotePort: 47891,
+            grantToken: ENGINE_GRANT,
+            expiresAt: new Date(NOW + 120_000).toISOString(),
+            providerCredential: "must-not-be-accepted",
+          },
+          201,
+        ),
+      ) as typeof fetch,
+      now: () => NOW,
+    });
+
+    await expect(
+      client.issueEngineAdmission("account-access-token", {
+        organizationId: ORGANIZATION_ID,
+        workspaceId: WORKSPACE_ID,
+      }),
+    ).rejects.toMatchObject({ code: "bad_response" });
   });
 
   it("issues an isolated preview capability with an exact HTTPS origin", async () => {

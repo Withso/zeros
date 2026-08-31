@@ -1236,7 +1236,7 @@ describe("Design territory agent retirement", () => {
       expect(handle).toHaveBeenCalledWith(
         "messages.window",
         { chatId: "chat-1" },
-        { remote: false },
+        { hostLocalResources: true, remote: false },
       );
       expect(local.send).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1314,7 +1314,7 @@ describe("Design territory agent retirement", () => {
     expect(handle).toHaveBeenCalledWith(
       "workspace.setMode",
       { workspaceId: "ws_mode_switch_queue", mode: "code" },
-      { remote: false },
+      { hostLocalResources: true, remote: false },
     );
     expect(local.send).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -1623,7 +1623,10 @@ describe("Design territory agent retirement", () => {
       releaseSecondTransition();
       await Promise.all([secondTransition, request]);
 
-      expect(write).toHaveBeenCalledWith(op, params, { remote: false });
+      expect(write).toHaveBeenCalledWith(op, params, {
+        hostLocalResources: true,
+        remote: false,
+      });
       expect(receiver.send).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "WORKSPACE_RESPONSE",
@@ -3487,7 +3490,7 @@ describe("qualified cloud workspace authority", () => {
     expect(handle).toHaveBeenCalledWith(
       "design.frames",
       { workspaceId: "ws_outer" },
-      { remote: false },
+      { hostLocalResources: false, remote: false },
     );
     expect(remote.send).toHaveBeenCalledWith(
       expect.objectContaining({

@@ -42,16 +42,26 @@ import {
   type CloudWorkspaceInternalSetupService,
 } from "./cloud-workspaces/internal-routes.js";
 import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
+import type { CloudWorkspaceRepositoryResolver } from "./cloud-workspaces/github-repositories.js";
+import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks.js";
+import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
+import type { DatabaseCloudWorkspaceEngineClientAdmissionService } from "./cloud-workspaces/engine-client-admission.js";
 import { createAccountRecoveryRoutes } from "./account-recovery.js";
 import {
   PostgresSecurityEventBroker,
   createSecurityEventRoutes,
 } from "./security-events.js";
 import { createWorkOSManagementEventRoutes } from "./workos-sync-events.js";
+import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
 
 export type CreateAppDependencies = {
   cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
   cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
+  cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver;
+  cloudWorkspaceForkService?: DatabaseCloudWorkspaceForkService;
+  cloudWorkspaceReplicaService?: DatabaseCloudWorkspaceReplicaService;
+  cloudWorkspaceEngineClientAdmissionService?: DatabaseCloudWorkspaceEngineClientAdmissionService;
+  cloudWorkspaceHealthService?: { read(): Promise<CloudWorkspaceHealth> };
   securityEventBroker?: PostgresSecurityEventBroker;
   workosProvider?: RailwayWorkOSProvider;
 };
@@ -108,7 +118,28 @@ export function createApp(
   app.get("/healthz", async (c) => {
     try {
       await pool.query("SELECT 1");
-      return c.json({ ok: true });
+      if (!dependencies.cloudWorkspaceHealthService) {
+        return c.json({ ok: true });
+      }
+      try {
+        return c.json({
+          ok: true,
+          cloudWorkspaces:
+            await dependencies.cloudWorkspaceHealthService.read(),
+        });
+      } catch {
+        // Cloud workspaces are an independently gated subsystem. A failed
+        // aggregate query must be visible without crash-looping unrelated
+        // WorkOS, team, invitation, GitHub, and settings APIs.
+        return c.json({
+          ok: true,
+          cloudWorkspaces: {
+            enabled: true,
+            operationalState: "unknown",
+            reasons: ["health_query_failed"],
+          },
+        });
+      }
     } catch {
       return c.json({ ok: false }, 503);
     }
@@ -188,12 +219,19 @@ export function createApp(
     "/v1/*",
     cors({
       origin: "*",
-      allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+      allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       allowHeaders: [
         "authorization",
         "content-type",
         "idempotency-key",
         "x-zeros-access-credential",
+        "x-zeros-device-id",
+        "x-zeros-device-key-version",
+        "x-zeros-device-timestamp",
+        "x-zeros-device-nonce",
+        "x-zeros-device-signature",
+        "x-zeros-export-grant",
+        "x-zeros-replica-grant",
       ],
       maxAge: 86400,
     }),
@@ -249,9 +287,54 @@ export function createApp(
   // an anonymous caller must not make the service buffer a multi-MiB body.
   const defaultBodyLimit = bodyLimit({ maxSize: 256 * 1024 });
   const feedbackBodyLimit = bodyLimit({ maxSize: 2 * 1024 * 1024 });
-  app.use("/v1/*", (c, next) =>
-    c.req.path === "/v1/feedback" ? next() : defaultBodyLimit(c, next),
-  );
+  const forkImportBodyLimits = {
+    blob: 64 * 1024 * 1024,
+    entries: 8 * 1024 * 1024,
+    records: 16 * 1024 * 1024,
+  } as const;
+  const forkBlobUploadPath =
+    /^\/v1\/organizations\/[0-9a-f-]{36}\/cloud-workspaces\/[0-9a-f-]{36}\/forks\/[0-9a-f-]{36}\/import\/blobs$/i;
+  const forkEntryImportPath =
+    /^\/v1\/organizations\/[0-9a-f-]{36}\/cloud-workspaces\/[0-9a-f-]{36}\/forks\/[0-9a-f-]{36}\/import\/entries$/i;
+  const forkRecordImportPath =
+    /^\/v1\/organizations\/[0-9a-f-]{36}\/cloud-workspaces\/[0-9a-f-]{36}\/forks\/[0-9a-f-]{36}\/import\/records$/i;
+  const forkImportBodyMaximum = (
+    method: string,
+    path: string,
+  ): number | null =>
+    method === "POST" && forkBlobUploadPath.test(path)
+      ? forkImportBodyLimits.blob
+      : method === "PUT" && forkEntryImportPath.test(path)
+        ? forkImportBodyLimits.entries
+        : method === "PUT" && forkRecordImportPath.test(path)
+          ? forkImportBodyLimits.records
+          : null;
+  app.use("/v1/*", async (c, next) => {
+    const forkImportMaximum = forkImportBodyMaximum(c.req.method, c.req.path);
+    if (forkImportMaximum !== null) {
+      // Do not grant an anonymous chunked request a multi-MiB buffering budget.
+      // Desktop callers know the exact body size and bind it in a canonical
+      // Content-Length before authentication or body consumption.
+      const rawLength = c.req.header("content-length") ?? "";
+      if (!/^(?:0|[1-9][0-9]{0,8})$/.test(rawLength)) {
+        throw new HttpError(
+          411,
+          "content_length_required",
+          "Fork imports require an exact Content-Length",
+        );
+      }
+      if (Number(rawLength) > forkImportMaximum) {
+        throw new HttpError(413, "body_too_large", "Request body is too large");
+      }
+      await next();
+      return;
+    }
+    if (c.req.path === "/v1/feedback") {
+      await next();
+      return;
+    }
+    await defaultBodyLimit(c, next);
+  });
 
   // Everything under /v1 requires a verified JWT from the selected provider.
   app.use("/v1/*", createAuthMiddleware(config, pool));
@@ -262,6 +345,14 @@ export function createApp(
   // spam mutations or flood the audit log. Runs AFTER auth so it keys on the
   // verified user id, not the IP.
   app.use("/v1/*", rateLimit("global", 240, 60_000));
+
+  // The larger fork-blob budget is available only after bearer verification
+  // and the global per-user rate limit. The route rechecks exact fork
+  // authority before durable publication.
+  app.use("/v1/*", (c, next) => {
+    const maximum = forkImportBodyMaximum(c.req.method, c.req.path);
+    return maximum === null ? next() : bodyLimit({ maxSize: maximum })(c, next);
+  });
 
   // Feedback can fan out to two paid third-party APIs and accept a larger
   // body, so keep a much tighter per-user ceiling in addition to the blanket
@@ -287,6 +378,13 @@ export function createApp(
     createRoutes(pool, emailConfig, config.cloudWorkspaces, {
       cloudWorkspaceAccessService:
         dependencies.cloudWorkspaceAccessService ?? null,
+      cloudWorkspaceRepositoryResolver:
+        dependencies.cloudWorkspaceRepositoryResolver ?? null,
+      cloudWorkspaceForkService: dependencies.cloudWorkspaceForkService ?? null,
+      cloudWorkspaceReplicaService:
+        dependencies.cloudWorkspaceReplicaService ?? null,
+      cloudWorkspaceEngineClientAdmissionService:
+        dependencies.cloudWorkspaceEngineClientAdmissionService ?? null,
       workosEnabled: config.auth.provider === "workos",
       ...(workosProvider ? { workosProvider } : {}),
       inviteLinkBase: config.inviteLinkBase,

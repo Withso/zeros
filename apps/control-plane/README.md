@@ -59,8 +59,8 @@ Core environment variables:
 | `DATABASE_URL`           | PostgreSQL connection string; use Railway's private-network URL in production                                                                    |
 | `AUTH_PROVIDER`          | `auth0` during compatibility rollout, or `workos` after client cutover                                                                           |
 | `AUTH_AUDIENCE`          | Expected access-token audience                                                                                                                   |
-| `AUTH_ISSUER`            | Exact issuer; required in WorkOS mode, optionally comma-separated only for legacy Auth0                                                          |
-| `AUTH_JWKS_URL`          | Exact public JWKS endpoint; required in WorkOS mode                                                                                              |
+| `AUTH_ISSUER`            | Exact WorkOS environment/default-Application issuer; required in WorkOS mode, optionally comma-separated only for legacy Auth0                 |
+| `AUTH_JWKS_URL`          | Exact public signing JWKS for that WorkOS environment/default Application; required in WorkOS mode                                               |
 | `AUTH_WEB_CLIENT_ID`     | Allowed WorkOS Web Application client ID                                                                                                         |
 | `AUTH_DESKTOP_CLIENT_ID` | Allowed WorkOS Desktop Application client ID                                                                                                     |
 | `APP_ORIGIN`             | Exact channel app origin used for the browser callback and safe returns in WorkOS mode                                                           |
@@ -228,6 +228,14 @@ Both Web and Desktop authorization URLs always select `provider=authkit`.
 Hosted AuthKit owns provider choice, credentials, verification, MFA, recovery,
 and identity linking. Caller-supplied provider, connection, or organization
 selectors are ignored and never reach the WorkOS SDK.
+
+WorkOS Multiple Applications deliberately use one issuer for every application
+in an environment: the issuer references the default Application, while the
+signed `client_id` identifies the current web or desktop Application. Configure
+`AUTH_ISSUER` and `AUTH_JWKS_URL` from that environment/default Application,
+then allowlist both distinct client IDs. Do not point desktop builds or cloud
+engine verification at a second issuer/JWKS; all three surfaces enforce the
+same exact issuer and distinguish desktop tokens by `client_id`.
 
 `GET /auth/desktop/start` is a public, stateless compatibility entry point for
 Pages and older releases. It accepts only bounded exact-channel state and an

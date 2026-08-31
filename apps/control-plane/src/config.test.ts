@@ -37,6 +37,20 @@ function cloudEnv(): NodeJS.ProcessEnv {
   };
 }
 
+function cloudSetupEnv(): NodeJS.ProcessEnv {
+  const setupKey = randomBytes(32).toString("base64url");
+  return {
+    ...cloudEnv(),
+    CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
+    CLOUD_WORKSPACE_CONTROL_PLANE_URL: "https://api.example.test",
+    DAYTONA_TOOLBOX_ORIGINS: "https://proxy.example.test",
+    CLOUD_WORKSPACE_SECRET_KEY_V1: setupKey,
+    CLOUD_WORKSPACE_OBJECT_KEY_V1: setupKey,
+    CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: "/var/lib/zeros/workspace-objects",
+    CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: "11",
+  };
+}
+
 function workosEnv(): NodeJS.ProcessEnv {
   return {
     DATABASE_URL: "postgres://user:pass@localhost:5432/zeros",
@@ -489,8 +503,50 @@ describe("cloud workspace backend configuration", () => {
         allowedPreviewHostSuffixes: ["proxy.daytona.work"],
         previewBaseDomain: null,
       },
+      providerCredentialKeys: {},
+      settingsSecretKeyV1: null,
+      durability: null,
+      outbox: null,
       setupExecution: null,
     });
+  });
+
+  it("loads only a complete HTTPS cloud event outbox sink", () => {
+    expect(
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_OUTBOX_URL:
+          "https://events.example.test/v1/cloud-workspaces",
+        CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET: "s".repeat(32),
+        CLOUD_WORKSPACE_OUTBOX_TIMEOUT_MS: "12000",
+      }).cloudWorkspaces?.outbox,
+    ).toEqual({
+      endpoint: "https://events.example.test/v1/cloud-workspaces",
+      signingSecret: "s".repeat(32),
+      timeoutMs: 12_000,
+    });
+
+    for (const override of [
+      {
+        CLOUD_WORKSPACE_OUTBOX_URL:
+          "https://events.example.test/v1/cloud-workspaces",
+      },
+      { CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET: "s".repeat(32) },
+      {
+        CLOUD_WORKSPACE_OUTBOX_URL:
+          "http://events.example.test/v1/cloud-workspaces",
+        CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET: "s".repeat(32),
+      },
+      {
+        CLOUD_WORKSPACE_OUTBOX_URL:
+          "https://user:secret@events.example.test/v1/cloud-workspaces",
+        CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET: "s".repeat(32),
+      },
+    ]) {
+      expect(() => loadConfig({ ...cloudEnv(), ...override })).toThrow(
+        /cloud workspace outbox/i,
+      );
+    }
   });
 
   it("pins provider access hosts and an isolated wildcard preview domain", () => {
@@ -532,55 +588,124 @@ describe("cloud workspace backend configuration", () => {
     const setupKey = randomBytes(32).toString("base64url");
     expect(
       loadConfig({
-        ...cloudEnv(),
-        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
-        CLOUD_WORKSPACE_CONTROL_PLANE_URL: "https://api.example.test",
+        ...cloudSetupEnv(),
         DAYTONA_TOOLBOX_ORIGINS:
           "https://proxy-a.example.test,https://proxy-b.example.test",
         CLOUD_WORKSPACE_SECRET_KEY_V1: setupKey,
-        CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: "11",
-      }).cloudWorkspaces?.setupExecution,
+        CLOUD_WORKSPACE_OBJECT_KEY_V1: setupKey,
+      }).cloudWorkspaces,
     ).toEqual({
-      controlPlaneOrigin: "https://api.example.test",
-      allowedToolboxOrigins: [
-        "https://proxy-a.example.test",
-        "https://proxy-b.example.test",
-      ],
-      setupSecretKeyV1: setupKey,
-      engineProtocolVersion: 11,
-      enginePort: 39_393,
-      intervalMs: 1_000,
-      timeoutSeconds: 1_800,
-      leaseMs: 60_000,
-      admissionTtlSeconds: 120,
+      ...loadConfig(cloudEnv()).cloudWorkspaces,
+      settingsSecretKeyV1: setupKey,
+      durability: {
+        objectEncryptionKeys: { 1: setupKey },
+        currentObjectEncryptionKeyVersion: 1,
+        objectStoreDirectory: "/var/lib/zeros/workspace-objects",
+      },
+      setupExecution: {
+        controlPlaneOrigin: "https://api.example.test",
+        allowedToolboxOrigins: [
+          "https://proxy-a.example.test",
+          "https://proxy-b.example.test",
+        ],
+        setupSecretKeyV1: setupKey,
+        engineProtocolVersion: 11,
+        enginePort: 39_393,
+        intervalMs: 1_000,
+        timeoutSeconds: 1_800,
+        leaseMs: 60_000,
+        admissionTtlSeconds: 120,
+      },
     });
+  });
+
+  it("keeps durable fork and recovery storage available while setup stays paused", () => {
+    const objectKey = randomBytes(32).toString("base64url");
+    const cloud = loadConfig({
+      ...cloudEnv(),
+      CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false",
+      CLOUD_WORKSPACE_OBJECT_KEY_V1: objectKey,
+      CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY:
+        "/var/lib/zeros/workspace-objects",
+    }).cloudWorkspaces;
+    expect(cloud?.setupExecution).toBeNull();
+    expect(cloud?.durability).toEqual({
+      objectEncryptionKeys: { 1: objectKey },
+      currentObjectEncryptionKeyVersion: 1,
+      objectStoreDirectory: "/var/lib/zeros/workspace-objects",
+    });
+  });
+
+  it("keeps encrypted cloud settings available while setup stays paused", () => {
+    const settingsKey = randomBytes(32).toString("base64url");
+    const cloud = loadConfig({
+      ...cloudEnv(),
+      CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "false",
+      CLOUD_WORKSPACE_SECRET_KEY_V1: settingsKey,
+    }).cloudWorkspaces;
+
+    expect(cloud?.settingsSecretKeyV1).toBe(settingsKey);
+    expect(cloud?.setupExecution).toBeNull();
+  });
+
+  it("loads an explicit object-key rotation keyring without dropping V1", () => {
+    const oldKey = randomBytes(32).toString("base64url");
+    const newKey = randomBytes(32).toString("base64url");
+    expect(
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_OBJECT_KEY_V1: oldKey,
+        CLOUD_WORKSPACE_OBJECT_KEYS_JSON: JSON.stringify({
+          1: oldKey,
+          2: newKey,
+        }),
+        CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION: "2",
+        CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY:
+          "/var/lib/zeros/workspace-objects",
+      }).cloudWorkspaces?.durability,
+    ).toEqual({
+      objectEncryptionKeys: { 1: oldKey, 2: newKey },
+      currentObjectEncryptionKeyVersion: 2,
+      objectStoreDirectory: "/var/lib/zeros/workspace-objects",
+    });
+  });
+
+  it("rejects partial durability and missing rotation keys", () => {
+    const objectKey = randomBytes(32).toString("base64url");
+    expect(() =>
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_OBJECT_KEY_V1: objectKey,
+      }),
+    ).toThrow(/CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY/);
+    expect(() =>
+      loadConfig({
+        ...cloudEnv(),
+        CLOUD_WORKSPACE_OBJECT_KEYS_JSON: JSON.stringify({ 1: objectKey }),
+        CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION: "2",
+        CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY:
+          "/var/lib/zeros/workspace-objects",
+      }),
+    ).toThrow(/current object key version/i);
   });
 
   it("rejects partial or unsafe setup execution configuration", () => {
     expect(() =>
       loadConfig({
-        ...cloudEnv(),
-        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
+        ...cloudSetupEnv(),
+        CLOUD_WORKSPACE_CONTROL_PLANE_URL: undefined,
       }),
     ).toThrow(/CLOUD_WORKSPACE_CONTROL_PLANE_URL/);
     expect(() =>
       loadConfig({
-        ...cloudEnv(),
-        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
-        CLOUD_WORKSPACE_CONTROL_PLANE_URL: "https://api.example.test",
+        ...cloudSetupEnv(),
         DAYTONA_TOOLBOX_ORIGINS: "https://proxy.example.test/path",
-        CLOUD_WORKSPACE_SECRET_KEY_V1: randomBytes(32).toString("base64url"),
-        CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: "11",
       }),
     ).toThrow(/DAYTONA_TOOLBOX_ORIGINS/);
     expect(() =>
       loadConfig({
-        ...cloudEnv(),
-        CLOUD_WORKSPACE_SETUP_WORKER_ENABLED: "true",
-        CLOUD_WORKSPACE_CONTROL_PLANE_URL: "https://api.example.test",
-        DAYTONA_TOOLBOX_ORIGINS: "https://proxy.example.test",
+        ...cloudSetupEnv(),
         CLOUD_WORKSPACE_SECRET_KEY_V1: "not-a-32-byte-key",
-        CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: "11",
       }),
     ).toThrow(/exactly 32 bytes/);
     expect(() =>

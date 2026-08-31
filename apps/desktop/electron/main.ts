@@ -129,6 +129,7 @@ import {
   startEngineCodeWatcher,
   startWatchdog,
   pushGithubCredentialToEngine,
+  pushCloudReplicaSessionToEngine,
 } from "./sidecar";
 import { installAppMenu } from "./menu";
 import { appendLogRecord, flushLogStore, initLogStore } from "./log-store";
@@ -1520,10 +1521,19 @@ app.whenReady().then(async () => {
     emitEvent("auth-store-changed", {});
     void authSecurityMonitor.revalidate("session_changed", true);
     await pushGithubCredentialToEngine();
+    await pushCloudReplicaSessionToEngine();
     await scheduleGithubAppRefresh();
     emitEvent("github-credential-store-changed", {});
   });
+  // Token refresh is intentionally not a semantic sign-in event. Periodically
+  // renew the engine's in-memory bearer so background replica convergence does
+  // not stall after the original WorkOS access token expires.
+  const cloudReplicaSessionRefresh = setInterval(() => {
+    void pushCloudReplicaSessionToEngine();
+  }, 45_000);
+  cloudReplicaSessionRefresh.unref?.();
   app.on("will-quit", () => {
+    clearInterval(cloudReplicaSessionRefresh);
     disposeGithubSessionSync();
     app.off("browser-window-focus", onAuthWindowFocus);
     powerMonitor.off("resume", onAuthResume);
@@ -1583,6 +1593,7 @@ app.whenReady().then(async () => {
       if (changedAccounts.includes("auth-session:tokens")) {
         emitEvent("auth-store-changed", {});
         void pushGithubCredentialToEngine();
+        void pushCloudReplicaSessionToEngine();
         void scheduleGithubAppRefresh();
       }
       if (

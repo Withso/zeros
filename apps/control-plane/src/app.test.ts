@@ -175,6 +175,38 @@ describe("app assembly — healthz", () => {
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ ok: true });
   });
+
+  it("reports aggregate cloud posture without making a degraded subsystem a crash loop", async () => {
+    const cloud = createApp(
+      config(null),
+      {
+        query: async () => ({ rows: [] }),
+      } as unknown as pg.Pool,
+      emailConfig as never,
+      {
+        cloudWorkspaceHealthService: {
+          read: async () => ({
+            enabled: true,
+            setupExecution: "paused",
+            durability: "enabled",
+            outboxDelivery: "retained",
+            operationalState: "degraded",
+            reasons: ["deletion_jobs_failed"],
+          }),
+        },
+      },
+    );
+    const response = await cloud.request("/healthz");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      ok: true,
+      cloudWorkspaces: {
+        setupExecution: "paused",
+        operationalState: "degraded",
+        reasons: ["deletion_jobs_failed"],
+      },
+    });
+  });
 });
 
 describe("app assembly — cloud workspace internal capabilities", () => {

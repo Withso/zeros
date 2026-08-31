@@ -126,6 +126,7 @@ export type CloudWorkspaceSetupWorkerOptions = {
   maxClaims?: number;
   workerId?: string;
   logger?: SetupWorkerLogger;
+  workosEnabled?: boolean;
 };
 
 type ClaimedSetup = CloudWorkspaceSetupExecution & {
@@ -284,6 +285,7 @@ export class CloudWorkspaceSetupWorker {
   private readonly maxClaims: number;
   private readonly workerId: string;
   private readonly logger: SetupWorkerLogger;
+  private readonly workosEnabled: boolean;
   private readonly activeControllers = new Set<AbortController>();
   private timer: NodeJS.Timeout | null = null;
   private activeTick: Promise<void> | null = null;
@@ -303,6 +305,7 @@ export class CloudWorkspaceSetupWorker {
     this.maxClaims = options.maxClaims ?? 5;
     this.workerId = options.workerId ?? `setup:${randomUUID()}`;
     this.logger = options.logger ?? console;
+    this.workosEnabled = options.workosEnabled === true;
 
     safeInteger(this.intervalMs, "intervalMs", 100, 60_000);
     safeInteger(this.leaseMs, "leaseMs", 1_000, 60 * 60_000);
@@ -372,10 +375,10 @@ export class CloudWorkspaceSetupWorker {
       const candidate = await tx.query<{
         id: string;
         org_id: string;
-        created_by: string;
+        owner_user_id: string;
         current_generation: number;
       }>(
-        `SELECT cw.id, cw.org_id, cw.created_by, cw.current_generation
+        `SELECT cw.id, cw.org_id, cw.owner_user_id, cw.current_generation
          FROM cloud_workspaces cw
          JOIN organizations organization
            ON organization.id = cw.org_id
@@ -384,12 +387,13 @@ export class CloudWorkspaceSetupWorker {
            ON team.id = cw.team_id AND team.org_id = cw.org_id
           AND team.deleted_at IS NULL
          JOIN organization_members om
-           ON om.org_id = cw.org_id AND om.user_id = cw.created_by
+           ON om.org_id = cw.org_id AND om.user_id = cw.owner_user_id
          JOIN team_members tm
            ON tm.team_id = cw.team_id AND tm.org_id = cw.org_id
-          AND tm.user_id = cw.created_by
+          AND tm.user_id = cw.owner_user_id
          JOIN users account
-           ON account.id = cw.created_by AND account.deleted_at IS NULL
+           ON account.id = cw.owner_user_id AND account.deleted_at IS NULL
+          AND account.auth_status = 'active'
          JOIN cloud_workspace_provider_bindings pb
            ON pb.workspace_id = cw.id
           AND pb.generation = cw.current_generation
@@ -398,6 +402,12 @@ export class CloudWorkspaceSetupWorker {
            AND cw.deleted_at IS NULL
            AND pb.observed_state = 'running'
            AND pb.provider_resource_id IS NOT NULL
+           AND cloud_workspace_generation_policy_current(
+             cw.id, cw.current_generation, cw.org_id
+           )
+           AND cloud_workspace_runtime_authority_live(
+             cw.id, cw.current_generation, cw.owner_user_id, $1
+           )
            AND EXISTS (
              SELECT 1 FROM cloud_workspace_setup_runs sr
              WHERE sr.workspace_id = cw.id
@@ -422,6 +432,7 @@ export class CloudWorkspaceSetupWorker {
          ), cw.id
          FOR UPDATE OF cw SKIP LOCKED
          LIMIT 1`,
+        [this.workosEnabled],
       );
       const workspace = candidate.rows[0];
       if (!workspace) return { kind: "none" };
@@ -594,7 +605,7 @@ export class CloudWorkspaceSetupWorker {
           setupRunId: row.id,
           workspaceId: workspace.id,
           organizationId: workspace.org_id,
-          authority: { accountUserId: workspace.created_by },
+          authority: { accountUserId: workspace.owner_user_id },
           generation: workspace.current_generation,
           attempt: row.attempt,
           claimCount: lease.claim_count,
@@ -650,8 +661,15 @@ export class CloudWorkspaceSetupWorker {
                    AND tm.user_id = $3
                   JOIN users account
                     ON account.id = $3 AND account.deleted_at IS NULL
+                   AND account.auth_status = 'active'
                   WHERE organization.id = cw.org_id
                     AND organization.deleted_at IS NULL
+                    AND cloud_workspace_generation_policy_current(
+                      cw.id, cw.current_generation, cw.org_id
+                    )
+                    AND cloud_workspace_runtime_authority_live(
+                      cw.id, cw.current_generation, $3, $4
+                    )
                 ) AS authority_live
          FROM cloud_workspaces cw
          LEFT JOIN cloud_workspace_provider_bindings pb
@@ -659,7 +677,12 @@ export class CloudWorkspaceSetupWorker {
           AND pb.generation = cw.current_generation
          WHERE cw.id = $1 AND cw.org_id = $2
          FOR UPDATE OF cw`,
-        [setup.workspaceId, setup.organizationId, setup.authority.accountUserId],
+        [
+          setup.workspaceId,
+          setup.organizationId,
+          setup.authority.accountUserId,
+          this.workosEnabled,
+        ],
       );
       const row = workspace.rows[0];
       if (
@@ -715,8 +738,15 @@ export class CloudWorkspaceSetupWorker {
                    AND tm.user_id = $3
                   JOIN users account
                     ON account.id = $3 AND account.deleted_at IS NULL
+                   AND account.auth_status = 'active'
                   WHERE organization.id = cw.org_id
                     AND organization.deleted_at IS NULL
+                    AND cloud_workspace_generation_policy_current(
+                      cw.id, cw.current_generation, cw.org_id
+                    )
+                    AND cloud_workspace_runtime_authority_live(
+                      cw.id, cw.current_generation, $3, $4
+                    )
                 ) AS authority_live
          FROM cloud_workspaces cw
          LEFT JOIN cloud_workspace_provider_bindings pb
@@ -724,7 +754,12 @@ export class CloudWorkspaceSetupWorker {
           AND pb.generation = cw.current_generation
          WHERE cw.id = $1 AND cw.org_id = $2
          FOR UPDATE OF cw`,
-        [setup.workspaceId, setup.organizationId, setup.authority.accountUserId],
+        [
+          setup.workspaceId,
+          setup.organizationId,
+          setup.authority.accountUserId,
+          this.workosEnabled,
+        ],
       );
       const current = workspace.rows[0];
       const owned = await tx.query(
@@ -916,8 +951,15 @@ export class CloudWorkspaceSetupWorker {
                    AND tm.user_id = $3
                   JOIN users account
                     ON account.id = $3 AND account.deleted_at IS NULL
+                   AND account.auth_status = 'active'
                   WHERE organization.id = cw.org_id
                     AND organization.deleted_at IS NULL
+                    AND cloud_workspace_generation_policy_current(
+                      cw.id, cw.current_generation, cw.org_id
+                    )
+                    AND cloud_workspace_runtime_authority_live(
+                      cw.id, cw.current_generation, $3, $4
+                    )
                 ) AS authority_live
          FROM cloud_workspaces cw
          LEFT JOIN cloud_workspace_provider_bindings pb
@@ -925,7 +967,12 @@ export class CloudWorkspaceSetupWorker {
           AND pb.generation = cw.current_generation
          WHERE cw.id = $1 AND cw.org_id = $2
          FOR UPDATE OF cw`,
-        [setup.workspaceId, setup.organizationId, setup.authority.accountUserId],
+        [
+          setup.workspaceId,
+          setup.organizationId,
+          setup.authority.accountUserId,
+          this.workosEnabled,
+        ],
       );
       const current = workspace.rows[0];
       const owned = await tx.query<{ claim_count: number }>(

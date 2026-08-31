@@ -12,6 +12,7 @@ import {
   CLOUD_WORKSPACE_SETUP_AUDIENCE,
   CLOUD_WORKSPACE_SETUP_MATERIALS_AUDIENCE,
   CLOUD_WORKSPACE_UNPRIVILEGED_SET_PRIV_ARGS,
+  compareCloudWorkspaceRecoveryPath,
   parseCloudWorkspaceEngineReadiness,
   parseCloudWorkspaceSetupMaterials,
   parseCloudWorkspaceSetupRequest,
@@ -151,6 +152,15 @@ function runtimeB64() {
 }
 
 describe("cloud workspace image setup protocol", () => {
+  it("uses the server's UTF-8 byte order for recovery manifest cursors", () => {
+    const bmpPrivateUse = "\ue000.txt";
+    const supplementary = "\u{10000}.txt";
+    expect(Buffer.compare(Buffer.from(bmpPrivateUse), Buffer.from(supplementary))).toBeLessThan(0);
+    expect(compareCloudWorkspaceRecoveryPath(bmpPrivateUse, supplementary)).toBeLessThan(0);
+    expect(compareCloudWorkspaceRecoveryPath(supplementary, bmpPrivateUse)).toBeGreaterThan(0);
+    expect(compareCloudWorkspaceRecoveryPath(bmpPrivateUse, bmpPrivateUse)).toBe(0);
+  });
+
   it("prevents setup and Git subprocesses from regaining image privileges", () => {
     expect(CLOUD_WORKSPACE_UNPRIVILEGED_SET_PRIV_ARGS).toEqual(
       expect.arrayContaining([

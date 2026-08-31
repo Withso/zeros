@@ -28,6 +28,10 @@ import { rateLimit } from "./ratelimit.js";
 import type { CloudWorkspaceBackendConfig } from "./config.js";
 import { createCloudWorkspaceRoutes } from "./cloud-workspaces/routes.js";
 import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
+import type { CloudWorkspaceRepositoryResolver } from "./cloud-workspaces/github-repositories.js";
+import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks.js";
+import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
+import type { DatabaseCloudWorkspaceEngineClientAdmissionService } from "./cloud-workspaces/engine-client-admission.js";
 import {
   enqueueWorkOSCommand,
   workOSInvitationOrderingKey,
@@ -400,6 +404,10 @@ export function createRoutes(
   cloudWorkspaces: CloudWorkspaceBackendConfig | null = null,
   options: {
     cloudWorkspaceAccessService?: CloudWorkspaceAccessService | null;
+    cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver | null;
+    cloudWorkspaceForkService?: DatabaseCloudWorkspaceForkService | null;
+    cloudWorkspaceReplicaService?: DatabaseCloudWorkspaceReplicaService | null;
+    cloudWorkspaceEngineClientAdmissionService?: DatabaseCloudWorkspaceEngineClientAdmissionService | null;
     workosEnabled?: boolean;
     workosProvider?: WorkOSInvitationResolver;
     inviteLinkBase?: string;
@@ -454,6 +462,11 @@ export function createRoutes(
     "/",
     createCloudWorkspaceRoutes(pool, cloudWorkspaces, {
       accessService: options.cloudWorkspaceAccessService ?? null,
+      repositoryResolver: options.cloudWorkspaceRepositoryResolver ?? null,
+      forkService: options.cloudWorkspaceForkService ?? null,
+      replicaService: options.cloudWorkspaceReplicaService ?? null,
+      engineClientAdmissionService:
+        options.cloudWorkspaceEngineClientAdmissionService ?? null,
       workosEnabled: options.workosEnabled === true,
     }),
   );
@@ -562,12 +575,7 @@ export function createRoutes(
          )
          ON CONFLICT (org_id, user_id) DO NOTHING
          RETURNING user_id`,
-        [
-          invitation.org_id,
-          user.id,
-          invitation.role,
-          membershipAggregateKey,
-        ],
+        [invitation.org_id, user.id, invitation.role, membershipAggregateKey],
       );
       const effectiveRole = await tx.query<{
         role: OrganizationRole;
@@ -967,8 +975,7 @@ function createOrganizationRouter(
           aggregateKey: `organization:${orgId}`,
           aggregateRevision: Number(revisions.workos_sync_revision),
           organizationId: orgId,
-          providerObjectId:
-            providerLink.rows[0].workos_organization_id ?? null,
+          providerObjectId: providerLink.rows[0].workos_organization_id ?? null,
           payload: {},
         });
       }
@@ -1112,10 +1119,7 @@ function createOrganizationRouter(
             : "membership.create",
           idempotencyKey: `membership.${orgId}.${targetId}.${memberRevision.workos_sync_revision}`,
           aggregateKey: `membership:${orgId}:${targetId}`,
-          orderingKey: workOSInvitationOrderingKey(
-            orgId,
-            targetRow.user_email,
-          ),
+          orderingKey: workOSInvitationOrderingKey(orgId, targetRow.user_email),
           aggregateRevision: Number(memberRevision.workos_sync_revision),
           organizationId: orgId,
           userId: targetId,
@@ -1248,7 +1252,9 @@ function createOrganizationRouter(
          WHERE org_id = $1 AND user_id = $2`,
         [orgId, targetId],
       );
-      const revision = await tx.query<{ authorization_revision: string | number }>(
+      const revision = await tx.query<{
+        authorization_revision: string | number;
+      }>(
         `UPDATE organizations
          SET authorization_revision = authorization_revision + 1
          WHERE id = $1 RETURNING authorization_revision`,
@@ -1349,11 +1355,7 @@ function createOrganizationRouter(
         email: emailAddress,
         role,
       });
-      await recordOrganizationDataChange(
-        tx,
-        orgId,
-        "zeros_invitation_created",
-      );
+      await recordOrganizationDataChange(tx, orgId, "zeros_invitation_created");
       const invitation = created.rows[0]!;
       if (workosEnabled) {
         await enqueueWorkOSCommand(tx, {
@@ -1447,11 +1449,7 @@ function createOrganizationRouter(
       await audit(tx, orgId, user.id, "invitation.revoked", {
         invitation: inviteId,
       });
-      await recordOrganizationDataChange(
-        tx,
-        orgId,
-        "zeros_invitation_revoked",
-      );
+      await recordOrganizationDataChange(tx, orgId, "zeros_invitation_revoked");
       const invitation = result.rows[0]!;
       if (workosEnabled) {
         await enqueueWorkOSCommand(tx, {

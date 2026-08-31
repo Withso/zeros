@@ -7,16 +7,18 @@ copy run in an isolated remote execution environment. The client controls it
 through the same versioned bridge concepts used locally. Remote placement must
 not create a second, incompatible workspace model.
 
-Tenant ownership, authoritative execution placement, and an optional local
-replica are independent. Personal and Organization workspaces may run locally
-or in cloud. A local Organization workspace remains Organization-governed but
-its live source, chat, paths, and processes remain private to its device. See
-[data, placement, migration, and local sync](data-and-sync.md).
+Tenant ownership, the workspace's immutable execution placement, and an
+optional local replica are independent. Personal and Organization workspaces
+may be created locally or in cloud. A local Organization workspace remains
+Organization-governed but its live source, chat, paths, and processes remain
+private to its device. See
+[data, copies, and local sync](data-and-sync.md).
 
 ## User-visible guarantees
 
-- A workspace has one stable identity independent of its current machine,
-  lifecycle state, client device, or sandbox provider.
+- A workspace has one stable identity for its lifetime. Creating a local
+  workspace from cloud, or a cloud workspace from local, is a fork with a new
+  identity; placement is never changed in place.
 - A workspace has exactly one authoritative execution at a time. A receive-only
   cloud-to-Mac sync creates a replica, not a competing writable engine or a new
   owner. Until that replica workflow ships, “open cloud locally” creates a
@@ -34,15 +36,11 @@ its live source, chat, paths, and processes remain private to its device. See
   authorization, and repository checkout are ready for the requested action.
 - A provider or network failure retains the last confirmed state and reports
   that it is stale; it does not replace known state with an empty workspace.
-- Changing the Personal/organization or local/cloud target in the UI changes
-  routing metadata for a future explicit creation only; it never retargets an
-  existing workspace. Creating cloud from local, opening cloud locally, or
-  forking cloud are copy-like workflows with separate identities. Transferring
-  uncommitted work, rebasing, publishing, or deleting a checkout remains a
-  separate explicit action.
-- The distinct future Move action is a checkpointed, idempotent authority
-  handoff that preserves workspace identity. A copy/fork always receives a new
-  workspace identity and is never presented as a move.
+- Changing the Personal/Organization or local/cloud target changes a future
+  creation only; it never retargets an existing workspace. **Create cloud copy**
+  and **Create local copy** carry selected files and optional chats/settings
+  through an integrity-checked fork record. The source is retained, and
+  archive/delete is always a separate owner action.
 
 ## Initial product scope
 
@@ -51,11 +49,14 @@ Personal is single-member and cannot enable multiplayer. Organization
 capability metadata is necessary but never replaces server-side membership,
 role, plan, quota, repository, provider-connection, and policy authorization.
 
-The current migration `0009_organization_team_hierarchy.sql` deliberately marks
-Personal as local-only, and the current cloud create route enforces that
-constraint. Enabling Personal cloud therefore requires a reviewed forward
-migration, route/RLS changes, quota ownership, and mixed-version tests; this
-document does not claim it already works.
+Migration `0024_cloud_workspace_identity_and_entitlements.sql` removes the
+legacy Personal-local-only constraint. Personal cloud still fails closed unless
+the deployment gate is enabled, the Personal tenant has exactly one member, and
+its owner has a current Pro account entitlement. Organization paid admission is
+separate: Pro Organizations are limited to five collaborators and require every
+collaborator to have Pro; Business/Enterprise Organizations require current
+seat assignments within the purchased limit. WorkOS membership alone never
+authorizes paid compute.
 
 The first supported release should provide:
 
@@ -66,15 +67,16 @@ The first supported release should provide:
 5. durable workspace metadata and transcript/session restoration;
 6. desktop status, recovery, SSH, authenticated preview/forwarding, and Design
    parity;
-7. explicit local-to-cloud and eligible cloud-to-local authority handoff;
+7. explicit local-to-cloud and cloud-to-local copy/fork with fresh identities;
 8. an optional per-user/per-device receive-only local replica; and
 9. quotas, audit records, and owner-visible cost/lifecycle information.
 
-Phase 5 is the seamless single-member release for Personal and Organization
-ownership. Phase 6A adds Organization multiplayer, presence, shared live chats,
-per-member replicas, assignment, and ownership transfer. Native iOS/Android,
-automatic bidirectional file sync, and collaborative source/Design editing are
-deferred and do not block either release.
+The Phase 0–5 non-UI foundations support single-member Personal and
+Organization ownership. “Seamless” remains a release claim only after the
+deferred UI and protected live-provider/macOS qualification pass. Phase 6A adds
+Organization multiplayer, presence, shared live chats, assignment, and
+ownership transfer execution. Native iOS/Android, automatic bidirectional file
+sync, and collaborative source/Design editing remain deferred.
 
 ## Compatibility
 
@@ -94,6 +96,6 @@ guess around a version mismatch.
   transparent migration between providers.
 - A cloud-to-Mac replica is not an automatic bidirectional merge and is not a
   second place to commit Git history.
-- Moving a shared cloud workspace onto one member's Mac does not preserve live
-  multiplayer; the UI offers a policy-checked copy when an authority handoff is
-  unsafe.
+- A local fork of a shared cloud workspace is a private, independently
+  identified workspace. It never removes, relocates, or takes authority from
+  the shared cloud source.

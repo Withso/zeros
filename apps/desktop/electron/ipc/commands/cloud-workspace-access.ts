@@ -37,6 +37,14 @@ function port(args: Record<string, unknown>, key: string): number {
   return Number(value);
 }
 
+function positiveInteger(args: Record<string, unknown>, key: string): number {
+  const value = args[key];
+  if (!Number.isSafeInteger(value) || Number(value) < 1) {
+    throw new Error(`cloud workspace access: invalid ${key}`);
+  }
+  return Number(value);
+}
+
 export const cloudWorkspaceSshCopy: CommandHandler = (args) =>
   getCloudWorkspaceAccessBroker().copySshCommand(target(args));
 
@@ -63,3 +71,21 @@ export const cloudWorkspaceTunnelStart: CommandHandler = (args) =>
 
 export const cloudWorkspaceAccessRevoke: CommandHandler = (args) =>
   getCloudWorkspaceAccessBroker().revoke(requiredString(args, "accessId"));
+
+export const cloudWorkspaceRuntimeOpen: CommandHandler = (args) =>
+  getCloudWorkspaceAccessBroker().openRuntime(target(args));
+
+export const cloudWorkspaceRuntimeRefresh: CommandHandler = (args) =>
+  getCloudWorkspaceAccessBroker().refreshRuntime({
+    ...target(args),
+    runtimeId: requiredString(args, "runtimeId"),
+    generation: positiveInteger(args, "generation"),
+    authorityEpoch: positiveInteger(args, "authorityEpoch"),
+    engineInstanceId: requiredString(args, "engineInstanceId"),
+    connectionSequence: positiveInteger(args, "connectionSequence"),
+  });
+
+export const cloudWorkspaceRuntimeClose: CommandHandler = (args) =>
+  getCloudWorkspaceAccessBroker().closeRuntime(
+    requiredString(args, "runtimeId"),
+  );

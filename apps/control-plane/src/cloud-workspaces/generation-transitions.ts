@@ -84,9 +84,9 @@ export async function rollbackCloudWorkspaceGenerationTransition(
      WHERE gt.workspace_id = $1 AND gt.org_id = $2
        AND gt.candidate_generation = $3
        AND gt.state IN ('draining', 'provisioning', 'setting_up')
-       AND cw.current_generation = gt.candidate_generation
+       AND cw.current_generation IN (gt.source_generation, gt.candidate_generation)
        AND cw.desired_state = 'running' AND cw.deleted_at IS NULL
-     FOR UPDATE OF gt`,
+     FOR UPDATE OF gt, cw`,
     [input.workspaceId, input.organizationId, input.candidateGeneration],
   );
   const transition = selected.rows[0];
@@ -118,9 +118,11 @@ export async function rollbackCloudWorkspaceGenerationTransition(
   await tx.query(
     `UPDATE cloud_workspaces
      SET current_generation = $2, status = 'waking',
+         authority_epoch = authority_epoch + 1,
          last_error_code = NULL, last_error_message = NULL,
          version = version + 1, updated_at = now()
-     WHERE id = $1 AND org_id = $3 AND current_generation = $4`,
+     WHERE id = $1 AND org_id = $3
+       AND current_generation IN ($2, $4)`,
     [
       input.workspaceId,
       transition.source_generation,
@@ -186,16 +188,25 @@ export async function advanceCloudWorkspaceGenerationTransitionAfterDrain(
     transitionId: string;
   },
 ): Promise<boolean> {
-  const selected = await tx.query<TransitionRow>(
-    `SELECT gt.id, gt.source_generation, gt.candidate_generation, gt.state
+  const selected = await tx.query<
+    TransitionRow & { checkpoint_id: string }
+  >(
+    `SELECT gt.id, gt.source_generation, gt.candidate_generation, gt.state,
+            checkpoint_request.checkpoint_id
      FROM cloud_workspace_generation_transitions gt
      JOIN cloud_workspaces cw
        ON cw.id = gt.workspace_id AND cw.org_id = gt.org_id
+     JOIN workspace_checkpoint_requests checkpoint_request
+       ON checkpoint_request.lifecycle_intent_id = gt.drain_intent_id
+      AND checkpoint_request.workspace_id = gt.workspace_id
+      AND checkpoint_request.org_id = gt.org_id
+      AND checkpoint_request.generation = gt.source_generation
+      AND checkpoint_request.state = 'succeeded'
      WHERE gt.id = $1 AND gt.workspace_id = $2 AND gt.org_id = $3
        AND gt.source_generation = $4 AND gt.state = 'draining'
-       AND cw.current_generation = gt.candidate_generation
+       AND cw.current_generation = gt.source_generation
        AND cw.desired_state = 'running' AND cw.deleted_at IS NULL
-     FOR UPDATE OF gt`,
+     FOR UPDATE OF gt, cw`,
     [
       input.transitionId,
       input.workspaceId,
@@ -205,6 +216,37 @@ export async function advanceCloudWorkspaceGenerationTransitionAfterDrain(
   );
   const transition = selected.rows[0];
   if (!transition) return false;
+  await retireCloudWorkspaceRuntimeAccess(tx, {
+    workspaceId: input.workspaceId,
+    organizationId: input.organizationId,
+    generation: transition.source_generation,
+    reason: "generation_replaced",
+  });
+  await tx.query(
+    `UPDATE cloud_workspace_generations
+     SET recovery_checkpoint_id = $4
+     WHERE workspace_id = $1 AND generation = $2 AND org_id = $3`,
+    [
+      input.workspaceId,
+      transition.candidate_generation,
+      input.organizationId,
+      transition.checkpoint_id,
+    ],
+  );
+  await tx.query(
+    `UPDATE cloud_workspaces
+     SET current_generation = $2, status = 'provisioning',
+         authority_epoch = authority_epoch + 1,
+         version = version + 1, last_error_code = NULL,
+         last_error_message = NULL, updated_at = now()
+     WHERE id = $1 AND org_id = $3 AND current_generation = $4`,
+    [
+      input.workspaceId,
+      transition.candidate_generation,
+      input.organizationId,
+      transition.source_generation,
+    ],
+  );
   const provisionIntentId = await queueTransitionIntent(tx, {
     workspaceId: input.workspaceId,
     organizationId: input.organizationId,
@@ -230,6 +272,7 @@ export async function advanceCloudWorkspaceGenerationTransitionAfterDrain(
       transitionId: transition.id,
       sourceGeneration: transition.source_generation,
       candidateGeneration: transition.candidate_generation,
+      recoveryCheckpointId: transition.checkpoint_id,
       provisionIntentId,
     },
   );
@@ -414,7 +457,9 @@ export async function cancelCloudWorkspaceGenerationTransition(
     reason:
       | "workspace_stop_requested"
       | "workspace_archive_requested"
-      | "workspace_delete_requested";
+      | "workspace_delete_requested"
+      | "paid_authority_revoked"
+      | "provider_authority_revoked";
   },
 ): Promise<number | null> {
   const selected = await tx.query<
@@ -448,7 +493,8 @@ export async function cancelCloudWorkspaceGenerationTransition(
   if (transition.current_generation === transition.candidate_generation) {
     await tx.query(
       `UPDATE cloud_workspaces
-       SET current_generation = $2, version = version + 1, updated_at = now()
+       SET current_generation = $2, authority_epoch = authority_epoch + 1,
+           version = version + 1, updated_at = now()
        WHERE id = $1 AND org_id = $3 AND current_generation = $4`,
       [
         input.workspaceId,

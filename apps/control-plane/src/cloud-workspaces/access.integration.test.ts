@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   afterAll,
   beforeAll,
@@ -23,6 +23,10 @@ import {
   DatabaseCloudWorkspaceAccessService,
 } from "./access.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
+import {
+  seedCanonicalWorkspaceSettingsVersion,
+  seedHostedCloudWorkspaceProviderConnection,
+} from "./test-fixtures.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -88,14 +92,33 @@ describe("cloud preview endpoint cache", () => {
     });
     const cache = service as unknown as {
       cachedPreviewEndpoint(
+        workspaceId: string,
+        organizationId: string,
+        generation: number,
         resourceId: string,
         port: number,
         bindingVersion: string,
       ): Promise<CloudProviderPreviewEndpoint>;
     };
 
-    const first = cache.cachedPreviewEndpoint("sandbox-1", 3_000, "v1");
-    const second = cache.cachedPreviewEndpoint("sandbox-1", 3_000, "v1");
+    const cacheWorkspaceId = randomUUID();
+    const cacheOrganizationId = randomUUID();
+    const first = cache.cachedPreviewEndpoint(
+      cacheWorkspaceId,
+      cacheOrganizationId,
+      1,
+      "sandbox-1",
+      3_000,
+      "v1",
+    );
+    const second = cache.cachedPreviewEndpoint(
+      cacheWorkspaceId,
+      cacheOrganizationId,
+      1,
+      "sandbox-1",
+      3_000,
+      "v1",
+    );
     release();
     await expect(Promise.all([first, second])).resolves.toHaveLength(2);
 
@@ -108,8 +131,11 @@ d("cloud workspace client access", () => {
   let actor: AuthedUser;
   let orgId: string;
   let teamId: string;
+  let repositoryId: string;
   let workspaceId: string;
   let providerResourceId: string;
+  let providerConnectionId: string;
+  let deviceId: string;
 
   beforeAll(() => {
     pool = new pg.Pool({ connectionString: url, max: 4 });
@@ -141,6 +167,17 @@ d("cloud workspace client access", () => {
          VALUES ($1, $2, 'member')`,
         [organizationId, actor.id],
       );
+      await tx.query(
+        `INSERT INTO organization_entitlements (
+           org_id, plan, status, cloud_workspaces_allowed, seat_limit, source
+         ) VALUES ($1, 'business', 'active', true, 1, 'operator')`,
+        [organizationId],
+      );
+      await tx.query(
+        `INSERT INTO organization_seat_assignments (org_id, user_id, state)
+         VALUES ($1, $2, 'active')`,
+        [organizationId, actor.id],
+      );
       const team = await tx.query<{ id: string }>(
         `INSERT INTO teams (
            org_id, slug, name, is_default, created_by
@@ -153,24 +190,59 @@ d("cloud workspace client access", () => {
          VALUES ($1, $2, $3, 'member')`,
         [childTeamId, organizationId, actor.id],
       );
+      const repository = await tx.query<{ id: string }>(
+        `INSERT INTO repositories (
+           org_id, forge, forge_repository_id, owner_name, repository_name,
+           created_by
+         ) VALUES ($1, 'github.com', 'access-repository', 'withso', 'zeros', $2)
+         RETURNING id`,
+        [organizationId, actor.id],
+      );
+      const childRepositoryId = repository.rows[0]!.id;
+      const childProviderConnectionId =
+        await seedHostedCloudWorkspaceProviderConnection(tx, {
+          organizationId,
+          createdBy: actor.id,
+        });
       const workspace = await tx.query<{ id: string }>(
         `INSERT INTO cloud_workspaces (
            org_id, team_id, created_by, display_name, repository_forge,
            repository_owner, repository_name, repository_revision,
+           repository_id, owner_user_id, assignee_user_id,
            status, desired_state
          ) VALUES ($1, $2, $3, 'Access', 'github.com', 'withso', 'zeros',
-                   'main', 'ready', 'running') RETURNING id`,
-        [organizationId, childTeamId, actor.id],
+                   'main', $4, $3, $3, 'ready', 'running') RETURNING id`,
+        [organizationId, childTeamId, actor.id, childRepositoryId],
       );
       const childWorkspaceId = workspace.rows[0]!.id;
       await tx.query(
-        `INSERT INTO cloud_workspace_generations (
-           workspace_id, generation, org_id, provider, image_ref,
-           architecture, cpu_millicores, memory_mib, storage_mib, created_by
-         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
-                   2000, 4096, 20480, $3)`,
+        `INSERT INTO cloud_workspace_members (workspace_id, org_id, user_id, role)
+         VALUES ($1, $2, $3, 'owner')`,
         [childWorkspaceId, organizationId, actor.id],
       );
+      await tx.query(
+        `INSERT INTO workspace_billing_epochs (
+           workspace_id, billing_epoch, org_id, billing_owner_user_id,
+           entitlement_scope, entitlement_plan, entitlement_revision, created_by
+         ) VALUES ($1, 1, $2, $3, 'organization', 'business', 1, $3)`,
+        [childWorkspaceId, organizationId, actor.id],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_generations (
+           workspace_id, generation, org_id, provider, image_ref,
+           architecture, cpu_millicores, memory_mib, storage_mib, created_by,
+           provider_connection_id
+         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+                   2000, 4096, 20480, $3, $4)`,
+        [childWorkspaceId, organizationId, actor.id, childProviderConnectionId],
+      );
+      await seedCanonicalWorkspaceSettingsVersion(tx, {
+        workspaceId: childWorkspaceId,
+        organizationId,
+        generation: 1,
+        createdBy: actor.id,
+        effectiveDocument: { schemaVersion: 1, values: {} },
+      });
       const resourceId = `sandbox-${childWorkspaceId}`;
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
@@ -179,17 +251,31 @@ d("cloud workspace client access", () => {
          ) VALUES ($1, 1, $2, 'daytona', $3, 'running', now())`,
         [childWorkspaceId, organizationId, resourceId],
       );
+      const publicKey = randomBytes(32);
+      const device = await tx.query<{ id: string }>(
+        `INSERT INTO devices (
+           user_id, label, platform, public_key, key_fingerprint
+         ) VALUES ($1, 'Access test device', 'macos', $2, $3)
+         RETURNING id`,
+        [actor.id, publicKey, createHash("sha256").update(publicKey).digest()],
+      );
       return {
         organizationId,
         childTeamId,
+        childRepositoryId,
         childWorkspaceId,
         resourceId,
+        childProviderConnectionId,
+        deviceId: device.rows[0]!.id,
       };
     });
     orgId = seeded.organizationId;
     teamId = seeded.childTeamId;
+    repositoryId = seeded.childRepositoryId;
     workspaceId = seeded.childWorkspaceId;
     providerResourceId = seeded.resourceId;
+    providerConnectionId = seeded.childProviderConnectionId;
+    deviceId = seeded.deviceId;
   });
 
   it("returns an SSH bearer once and persists only its verifier", async () => {
@@ -198,6 +284,7 @@ d("cloud workspace client access", () => {
       pool,
       provider,
       previewBaseDomain: "cloud-preview.example.test",
+      runtimeEnginePort: 39_393,
     });
     const key = randomUUID();
     const issued = await service.issue({
@@ -246,26 +333,79 @@ d("cloud workspace client access", () => {
     ).rejects.toMatchObject({ code: "cloud_access_response_not_replayable" });
   });
 
+  it("refuses new access after the WorkOS-backed account is suspended", async () => {
+    await withSystemTx(pool, (tx) =>
+      tx.query(
+        `UPDATE users
+         SET auth_status = 'suspended', auth_revision = auth_revision + 1,
+             auth_status_changed_at = now()
+         WHERE id = $1`,
+        [actor.id],
+      ),
+    );
+    const { provider } = fakeAccessProvider();
+    const service = new DatabaseCloudWorkspaceAccessService({
+      pool,
+      provider,
+      previewBaseDomain: "cloud-preview.example.test",
+      runtimeEnginePort: 39_393,
+    });
+
+    await expect(
+      service.issue({
+        organizationId: orgId,
+        workspaceId,
+        accountUserId: actor.id,
+        kind: "ssh",
+        expiresInMinutes: 15,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: "not_found" });
+    expect(provider.createSshAccess).not.toHaveBeenCalled();
+  });
+
   it("serializes one account idempotency key across different workspaces", async () => {
     const second = await withSystemTx(pool, async (tx) => {
       const workspace = await tx.query<{ id: string }>(
         `INSERT INTO cloud_workspaces (
            org_id, team_id, created_by, display_name, repository_forge,
            repository_owner, repository_name, repository_revision,
+           repository_id, owner_user_id, assignee_user_id,
            status, desired_state
          ) VALUES ($1, $2, $3, 'Second access', 'github.com', 'withso',
-                   'zeros-two', 'main', 'ready', 'running') RETURNING id`,
-        [orgId, teamId, actor.id],
+                   'zeros-two', 'main', $4, $3, $3, 'ready', 'running')
+         RETURNING id`,
+        [orgId, teamId, actor.id, repositoryId],
       );
       const id = workspace.rows[0]!.id;
       await tx.query(
-        `INSERT INTO cloud_workspace_generations (
-           workspace_id, generation, org_id, provider, image_ref,
-           architecture, cpu_millicores, memory_mib, storage_mib, created_by
-         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
-                   2000, 4096, 20480, $3)`,
+        `INSERT INTO cloud_workspace_members (workspace_id, org_id, user_id, role)
+         VALUES ($1, $2, $3, 'owner')`,
         [id, orgId, actor.id],
       );
+      await tx.query(
+        `INSERT INTO workspace_billing_epochs (
+           workspace_id, billing_epoch, org_id, billing_owner_user_id,
+           entitlement_scope, entitlement_plan, entitlement_revision, created_by
+         ) VALUES ($1, 1, $2, $3, 'organization', 'business', 1, $3)`,
+        [id, orgId, actor.id],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_generations (
+           workspace_id, generation, org_id, provider, image_ref,
+           architecture, cpu_millicores, memory_mib, storage_mib, created_by,
+           provider_connection_id
+         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+                   2000, 4096, 20480, $3, $4)`,
+        [id, orgId, actor.id, providerConnectionId],
+      );
+      await seedCanonicalWorkspaceSettingsVersion(tx, {
+        workspaceId: id,
+        organizationId: orgId,
+        generation: 1,
+        createdBy: actor.id,
+        effectiveDocument: { schemaVersion: 1, values: {} },
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
            workspace_id, generation, org_id, provider, provider_resource_id,
@@ -346,13 +486,16 @@ d("cloud workspace client access", () => {
       pool,
       provider,
       previewBaseDomain: "cloud-preview.example.test",
+      runtimeEnginePort: 39_393,
     });
     const issued = await service.issue({
       organizationId: orgId,
       workspaceId,
       accountUserId: actor.id,
       kind: "tunnel",
+      deviceId,
       remotePort: 4_173,
+      requestedLocalPort: 54_173,
       expiresInMinutes: 15,
       idempotencyKey: randomUUID(),
     });
@@ -363,9 +506,52 @@ d("cloud workspace client access", () => {
         sshHost: "ssh.app.daytona.io",
         remoteHost: "127.0.0.1",
         remotePort: 4_173,
+        session: { deviceId, state: "starting" },
       },
     });
     expect(JSON.stringify(issued)).not.toContain("0.0.0.0");
+    const tunnelSession = await withSystemTx(pool, (tx) =>
+      tx.query<{
+        state: string;
+        requested_local_port: number | null;
+        observed_local_port: number | null;
+      }>(
+        `SELECT state, requested_local_port, observed_local_port
+         FROM port_forward_sessions WHERE id = $1`,
+        [issued.tunnel!.session.id],
+      ),
+    );
+    expect(tunnelSession.rows[0]).toEqual({
+      state: "starting",
+      requested_local_port: 54_173,
+      observed_local_port: null,
+    });
+    await expect(
+      service.activateTunnel({
+        organizationId: orgId,
+        workspaceId,
+        accountUserId: actor.id,
+        sessionId: issued.tunnel!.session.id,
+        deviceId,
+        observedLocalPort: 54_173,
+      }),
+    ).resolves.toEqual({
+      id: issued.tunnel!.session.id,
+      deviceId,
+      state: "active",
+      bindAddress: "127.0.0.1",
+      observedLocalPort: 54_173,
+    });
+    await expect(
+      service.activateTunnel({
+        organizationId: orgId,
+        workspaceId,
+        accountUserId: actor.id,
+        sessionId: issued.tunnel!.session.id,
+        deviceId,
+        observedLocalPort: 54_173,
+      }),
+    ).rejects.toMatchObject({ code: "cloud_access_not_active" });
 
     await expect(
       service.issue({
@@ -373,11 +559,159 @@ d("cloud workspace client access", () => {
         workspaceId,
         accountUserId: actor.id,
         kind: "tunnel",
+        deviceId,
         remotePort: 22_222,
         expiresInMinutes: 15,
         idempotencyKey: randomUUID(),
       }),
     ).rejects.toMatchObject({ code: "cloud_access_port_forbidden" });
+
+    await expect(
+      service.issue({
+        organizationId: orgId,
+        workspaceId,
+        accountUserId: actor.id,
+        kind: "tunnel",
+        deviceId,
+        remotePort: 39_393,
+        purpose: "engine-runtime",
+        expectedGeneration: 1,
+        expiresInMinutes: 15,
+        idempotencyKey: randomUUID(),
+      }),
+    ).resolves.toMatchObject({
+      grant: { kind: "tunnel", generation: 1, remotePort: 39_393 },
+      tunnel: { remoteHost: "127.0.0.1", remotePort: 39_393 },
+    });
+  });
+
+  it("fences a live localhost forward when its desktop device is revoked", async () => {
+    const { provider } = fakeAccessProvider();
+    const service = new DatabaseCloudWorkspaceAccessService({
+      pool,
+      provider,
+      previewBaseDomain: "cloud-preview.example.test",
+    });
+    const issued = await service.issue({
+      organizationId: orgId,
+      workspaceId,
+      accountUserId: actor.id,
+      kind: "tunnel",
+      deviceId,
+      remotePort: 4_173,
+      expiresInMinutes: 15,
+      idempotencyKey: randomUUID(),
+    });
+    await service.activateTunnel({
+      organizationId: orgId,
+      workspaceId,
+      accountUserId: actor.id,
+      sessionId: issued.tunnel!.session.id,
+      deviceId,
+      observedLocalPort: 54_173,
+    });
+
+    await withSystemTx(pool, (tx) =>
+      tx.query(
+        `UPDATE devices SET trust_state = 'revoked', revoked_at = now()
+         WHERE id = $1`,
+        [deviceId],
+      ),
+    );
+    const state = await withSystemTx(pool, (tx) =>
+      tx.query<{ grant_state: string; session_state: string }>(
+        `SELECT access.state AS grant_state, session.state AS session_state
+         FROM cloud_workspace_client_access_grants access
+         JOIN port_forward_sessions session
+           ON session.access_grant_id = access.id
+         WHERE access.id = $1`,
+        [issued.grant.id],
+      ),
+    );
+    expect(state.rows[0]).toEqual({
+      grant_state: "revocation_pending",
+      session_state: "stopped",
+    });
+  });
+
+  it("atomically fences issued authority when the generation provider connection is revoked", async () => {
+    const { provider } = fakeAccessProvider();
+    const service = new DatabaseCloudWorkspaceAccessService({
+      pool,
+      provider,
+      previewBaseDomain: "cloud-preview.example.test",
+    });
+    const issued = await service.issue({
+      organizationId: orgId,
+      workspaceId,
+      accountUserId: actor.id,
+      kind: "preview",
+      remotePort: 3_000,
+      expiresInMinutes: 15,
+      idempotencyKey: randomUUID(),
+    });
+    const endpointGrantId = randomUUID();
+    await withSystemTx(pool, (tx) =>
+      tx.query(
+        `INSERT INTO cloud_workspace_endpoint_grants (
+           id, workspace_id, generation, org_id, account_user_id, purpose,
+           audience, token_hash, expires_at, account_revision,
+           authorization_revision, authority_epoch
+         )
+         SELECT $1, workspace.id, workspace.current_generation,
+                workspace.org_id, $2, 'engine-connect',
+                'https://engine.example.test/connect', $3, now() + interval '5 minutes',
+                account.auth_revision, member.authorization_revision,
+                workspace.authority_epoch
+         FROM cloud_workspaces workspace
+         JOIN users account ON account.id = $2
+         JOIN organization_members member
+           ON member.org_id = workspace.org_id AND member.user_id = $2
+         WHERE workspace.id = $4 AND workspace.org_id = $5`,
+        [endpointGrantId, actor.id, randomBytes(32), workspaceId, orgId],
+      ),
+    );
+
+    await withSystemTx(pool, (tx) =>
+      tx.query(
+        `UPDATE provider_connections
+         SET state = 'revoked', revoked_at = now(), updated_at = now()
+         WHERE id = $1`,
+        [providerConnectionId],
+      ),
+    );
+
+    const fenced = await withSystemTx(pool, (tx) =>
+      tx.query<{
+        access_state: string;
+        endpoint_revoked: boolean;
+      }>(
+        `SELECT access.state AS access_state,
+                endpoint.revoked_at IS NOT NULL AS endpoint_revoked
+         FROM cloud_workspace_client_access_grants access
+         JOIN cloud_workspace_endpoint_grants endpoint ON endpoint.id = $2
+         WHERE access.id = $1`,
+        [issued.grant.id, endpointGrantId],
+      ),
+    );
+    expect(fenced.rows[0]).toEqual({
+      access_state: "revocation_pending",
+      endpoint_revoked: true,
+    });
+
+    vi.mocked(provider.getPreviewEndpoint).mockClear();
+    await expect(
+      service.issue({
+        organizationId: orgId,
+        workspaceId,
+        accountUserId: actor.id,
+        kind: "preview",
+        remotePort: 3_001,
+        expiresInMinutes: 15,
+        idempotencyKey: randomUUID(),
+      }),
+    ).rejects.toMatchObject({ code: "not_found" });
+    expect(provider.getPreviewEndpoint).not.toHaveBeenCalled();
   });
 
   it("proxies preview HTTP with a Zeros verifier and keeps Daytona's token server-side", async () => {
@@ -494,6 +828,45 @@ d("cloud workspace client access", () => {
       }),
     );
     expect(denied?.status).toBe(401);
+  });
+
+  it("stops an already-issued preview when paid account authority is suspended", async () => {
+    const { provider } = fakeAccessProvider();
+    const upstream = vi.fn(async () => new Response("must-not-run"));
+    const service = new DatabaseCloudWorkspaceAccessService({
+      pool,
+      provider,
+      previewBaseDomain: "cloud-preview.example.test",
+      fetcher: upstream,
+    });
+    const issued = await service.issue({
+      organizationId: orgId,
+      workspaceId,
+      accountUserId: actor.id,
+      kind: "preview",
+      remotePort: 3_000,
+      expiresInMinutes: 15,
+      idempotencyKey: randomUUID(),
+    });
+    await withSystemTx(pool, (tx) =>
+      tx.query(
+        `UPDATE users
+         SET auth_status = 'suspended', auth_revision = auth_revision + 1,
+             auth_status_changed_at = now()
+         WHERE id = $1`,
+        [actor.id],
+      ),
+    );
+
+    const denied = await service.handlePreviewRequest(
+      new Request(`${issued.preview!.origin}/`, {
+        headers: {
+          "x-zeros-preview-capability": issued.preview!.capability,
+        },
+      }),
+    );
+    expect(denied?.status).toBe(401);
+    expect(upstream).not.toHaveBeenCalled();
   });
 
   it("bounds concurrent streaming preview requests per grant", async () => {
@@ -645,6 +1018,7 @@ d("cloud workspace client access", () => {
       workspaceId,
       accountUserId: actor.id,
       kind: "tunnel",
+      deviceId,
       remotePort: 4_173,
       expiresInMinutes: 15,
       idempotencyKey: randomUUID(),
@@ -668,6 +1042,15 @@ d("cloud workspace client access", () => {
     expect(explicitlyRevoked.rows.every((row) => row.state === "revoked")).toBe(
       true,
     );
+    const stoppedTunnel = await withSystemTx(pool, (tx) =>
+      tx.query<{ state: string; stopped_at: Date | null }>(
+        `SELECT state, stopped_at FROM port_forward_sessions
+         WHERE access_grant_id = $1`,
+        [peer.grant.id],
+      ),
+    );
+    expect(stoppedTunnel.rows[0]).toMatchObject({ state: "stopped" });
+    expect(stoppedTunnel.rows[0]!.stopped_at).not.toBeNull();
 
     const second = await service.issue({
       organizationId: orgId,
@@ -748,6 +1131,7 @@ d("cloud workspace client access", () => {
       workspaceId,
       accountUserId: actor.id,
       kind: "tunnel",
+      deviceId,
       remotePort: 4_173,
       expiresInMinutes: 15,
       idempotencyKey: randomUUID(),
@@ -860,6 +1244,7 @@ d("cloud workspace client access", () => {
       workspaceId,
       accountUserId: actor.id,
       kind: "tunnel",
+      deviceId,
       remotePort: 4_173,
       expiresInMinutes: 15,
       idempotencyKey: randomUUID(),

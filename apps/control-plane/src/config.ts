@@ -9,6 +9,7 @@
 import { z } from "zod";
 import { createPrivateKey } from "node:crypto";
 import { isIP } from "node:net";
+import path from "node:path";
 
 import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 
@@ -157,12 +158,35 @@ export type CloudWorkspaceBackendConfig = {
   operationTimeoutSeconds: number;
   autoArchiveMinutes: number;
   reconcileIntervalMs: number;
+  /** Envelope keys used only by the coordinator for delegated provider
+   * credentials. An empty keyring keeps hosted-provider mode available. */
+  providerCredentialKeys: Readonly<Record<number, string>>;
+  /** Coordinator-only envelope key for versioned environment secret bindings.
+   * It is independent from setup execution so settings can be prepared while
+   * the unqualified image worker remains disabled. */
+  settingsSecretKeyV1: string | null;
   access: {
     allowedSshHosts: readonly string[];
     allowedPreviewHostSuffixes: readonly string[];
     /** Wildcard DNS/TLS boundary; each preview gets a unique subdomain. */
     previewBaseDomain: string | null;
   };
+  /** Durable workspace records are independent from sandbox setup execution.
+   * Keeping this block available while the setup worker is paused lets fork,
+   * export, recovery, retention, and key-rotation workflows run without
+   * accidentally admitting an unqualified image. */
+  durability: {
+    objectEncryptionKeys: Readonly<Record<number, string>>;
+    currentObjectEncryptionKeyVersion: number;
+    objectStoreDirectory: string;
+  } | null;
+  /** Optional signed event sink. The database outbox remains authoritative
+   * while this is absent; events are never silently acknowledged. */
+  outbox: {
+    endpoint: string;
+    signingSecret: string;
+    timeoutMs: number;
+  } | null;
   /** A second operator gate. Provisioning may be enabled while production
    * setup remains paused at `setting_up` until the image is qualified. */
   setupExecution: {
@@ -290,6 +314,13 @@ const CloudWorkspaceEnvSchema = z.object({
     .min(1)
     .max(253)
     .optional(),
+  CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1: z
+    .string()
+    .trim()
+    .min(1)
+    .max(256)
+    .optional(),
+  CLOUD_WORKSPACE_SECRET_KEY_V1: z.string().trim().min(1).max(256).optional(),
 });
 
 const CloudWorkspaceSetupEnvSchema = z.object({
@@ -336,6 +367,40 @@ const CloudWorkspaceSetupEnvSchema = z.object({
     .min(15)
     .max(900)
     .default(120),
+});
+
+const CloudWorkspaceDurabilityEnvSchema = z.object({
+  CLOUD_WORKSPACE_OBJECT_KEY_V1: z.string().trim().min(1).max(256).optional(),
+  /** JSON object keyed by positive integer key version. This extends, rather
+   * than replaces, V1 so existing installations retain decrypt capability. */
+  CLOUD_WORKSPACE_OBJECT_KEYS_JSON: z
+    .string()
+    .trim()
+    .min(2)
+    .max(16 * 1024)
+    .optional(),
+  CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(65_535)
+    .default(1),
+  CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: z
+    .string()
+    .trim()
+    .min(2)
+    .max(4096),
+});
+
+const CloudWorkspaceOutboxEnvSchema = z.object({
+  CLOUD_WORKSPACE_OUTBOX_URL: z.string().trim().url(),
+  CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET: z.string().trim().min(32).max(4_096),
+  CLOUD_WORKSPACE_OUTBOX_TIMEOUT_MS: z.coerce
+    .number()
+    .int()
+    .min(1_000)
+    .max(60_000)
+    .default(10_000),
 });
 
 function validatedServiceUrl(
@@ -865,6 +930,168 @@ function loadCloudWorkspaceConfig(
         "CLOUD_WORKSPACE_PREVIEW_BASE_DOMAIN",
       )
     : null;
+  const providerCredentialKeys: Record<number, string> = {};
+  if (value.CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1) {
+    const key = Buffer.from(
+      value.CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1,
+      "base64url",
+    );
+    try {
+      if (
+        key.length !== 32 ||
+        key.toString("base64url") !==
+          value.CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1
+      ) {
+        throw new Error("invalid key");
+      }
+      providerCredentialKeys[1] =
+        value.CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1;
+    } catch {
+      throw new Error(
+        "Invalid cloud workspace environment: CLOUD_WORKSPACE_PROVIDER_CREDENTIAL_KEY_V1 must be canonical base64url for exactly 32 bytes",
+      );
+    } finally {
+      key.fill(0);
+    }
+  }
+  let settingsSecretKeyV1: string | null = null;
+  if (value.CLOUD_WORKSPACE_SECRET_KEY_V1) {
+    const key = Buffer.from(value.CLOUD_WORKSPACE_SECRET_KEY_V1, "base64url");
+    try {
+      if (
+        key.length !== 32 ||
+        key.toString("base64url") !== value.CLOUD_WORKSPACE_SECRET_KEY_V1
+      ) {
+        throw new Error("invalid key");
+      }
+      settingsSecretKeyV1 = value.CLOUD_WORKSPACE_SECRET_KEY_V1;
+    } catch {
+      throw new Error(
+        "Invalid cloud workspace environment: CLOUD_WORKSPACE_SECRET_KEY_V1 must be canonical base64url for exactly 32 bytes",
+      );
+    } finally {
+      key.fill(0);
+    }
+  }
+  const durabilityRequested =
+    setupEnabled === "true" ||
+    [
+      env.CLOUD_WORKSPACE_OBJECT_KEY_V1,
+      env.CLOUD_WORKSPACE_OBJECT_KEYS_JSON,
+      env.CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION,
+      env.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY,
+    ].some((entry) => typeof entry === "string" && entry.trim().length > 0);
+  let durability: CloudWorkspaceBackendConfig["durability"] = null;
+  if (durabilityRequested) {
+    const parsedDurability = CloudWorkspaceDurabilityEnvSchema.safeParse(env);
+    if (!parsedDurability.success) {
+      throw new Error(
+        "Invalid cloud workspace durability environment: " +
+          parsedDurability.error.issues
+            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+            .join("; "),
+      );
+    }
+    const objectEncryptionKeys: Record<number, string> = {};
+    const addObjectKey = (version: number, encoded: unknown, name: string) => {
+      if (
+        !Number.isSafeInteger(version) ||
+        version < 1 ||
+        version > 65_535 ||
+        typeof encoded !== "string" ||
+        !/^[A-Za-z0-9_-]{43}$/.test(encoded)
+      ) {
+        throw new Error(
+          `Invalid cloud workspace durability environment: ${name} must be canonical base64url for exactly 32 bytes`,
+        );
+      }
+      const key = Buffer.from(encoded, "base64url");
+      try {
+        if (key.length !== 32 || key.toString("base64url") !== encoded) {
+          throw new Error("invalid key");
+        }
+      } catch {
+        throw new Error(
+          `Invalid cloud workspace durability environment: ${name} must be canonical base64url for exactly 32 bytes`,
+        );
+      } finally {
+        key.fill(0);
+      }
+      const current = objectEncryptionKeys[version];
+      if (current && current !== encoded) {
+        throw new Error(
+          `Invalid cloud workspace durability environment: conflicting object key version ${version}`,
+        );
+      }
+      objectEncryptionKeys[version] = encoded;
+    };
+    if (parsedDurability.data.CLOUD_WORKSPACE_OBJECT_KEYS_JSON) {
+      let document: unknown;
+      try {
+        document = JSON.parse(
+          parsedDurability.data.CLOUD_WORKSPACE_OBJECT_KEYS_JSON,
+        );
+      } catch {
+        throw new Error(
+          "Invalid cloud workspace durability environment: CLOUD_WORKSPACE_OBJECT_KEYS_JSON must be a JSON object",
+        );
+      }
+      if (
+        !document ||
+        typeof document !== "object" ||
+        Array.isArray(document) ||
+        Object.keys(document).length < 1 ||
+        Object.keys(document).length > 32
+      ) {
+        throw new Error(
+          "Invalid cloud workspace durability environment: CLOUD_WORKSPACE_OBJECT_KEYS_JSON must contain 1-32 key versions",
+        );
+      }
+      for (const [rawVersion, encoded] of Object.entries(document)) {
+        if (!/^[1-9][0-9]{0,4}$/.test(rawVersion)) {
+          throw new Error(
+            "Invalid cloud workspace durability environment: object key versions must be integers from 1 through 65535",
+          );
+        }
+        addObjectKey(
+          Number(rawVersion),
+          encoded,
+          `CLOUD_WORKSPACE_OBJECT_KEYS_JSON.${rawVersion}`,
+        );
+      }
+    }
+    if (parsedDurability.data.CLOUD_WORKSPACE_OBJECT_KEY_V1) {
+      addObjectKey(
+        1,
+        parsedDurability.data.CLOUD_WORKSPACE_OBJECT_KEY_V1,
+        "CLOUD_WORKSPACE_OBJECT_KEY_V1",
+      );
+    }
+    const currentObjectEncryptionKeyVersion =
+      parsedDurability.data.CLOUD_WORKSPACE_OBJECT_CURRENT_KEY_VERSION;
+    if (!objectEncryptionKeys[currentObjectEncryptionKeyVersion]) {
+      throw new Error(
+        "Invalid cloud workspace durability environment: the current object key version is not present in the keyring",
+      );
+    }
+    const rawObjectStoreDirectory =
+      parsedDurability.data.CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY;
+    const objectStoreDirectory = path.resolve(rawObjectStoreDirectory);
+    if (
+      !path.isAbsolute(rawObjectStoreDirectory) ||
+      objectStoreDirectory === path.parse(objectStoreDirectory).root ||
+      /[\u0000-\u001f\u007f]/u.test(rawObjectStoreDirectory)
+    ) {
+      throw new Error(
+        "Invalid cloud workspace durability environment: CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY must be a bounded absolute volume path",
+      );
+    }
+    durability = {
+      objectEncryptionKeys,
+      currentObjectEncryptionKeyVersion,
+      objectStoreDirectory,
+    };
+  }
   let setupExecution: CloudWorkspaceBackendConfig["setupExecution"] = null;
   if (setupEnabled === "true") {
     const setup = CloudWorkspaceSetupEnvSchema.safeParse({
@@ -902,28 +1129,15 @@ function loadCloudWorkspaceConfig(
         "Invalid cloud workspace setup environment: toolbox origins or engine port are invalid",
       );
     }
-    const key = Buffer.from(
-      setup.data.CLOUD_WORKSPACE_SECRET_KEY_V1,
-      "base64url",
-    );
-    try {
-      if (
-        key.length !== 32 ||
-        key.toString("base64url") !== setup.data.CLOUD_WORKSPACE_SECRET_KEY_V1
-      ) {
-        throw new Error("invalid key");
-      }
-    } catch {
+    if (settingsSecretKeyV1 === null) {
       throw new Error(
-        "Invalid cloud workspace setup environment: CLOUD_WORKSPACE_SECRET_KEY_V1 must be canonical base64url for exactly 32 bytes",
+        "Invalid cloud workspace setup environment: CLOUD_WORKSPACE_SECRET_KEY_V1 is required",
       );
-    } finally {
-      key.fill(0);
     }
     setupExecution = {
       controlPlaneOrigin,
       allowedToolboxOrigins,
-      setupSecretKeyV1: setup.data.CLOUD_WORKSPACE_SECRET_KEY_V1,
+      setupSecretKeyV1: settingsSecretKeyV1,
       engineProtocolVersion: setup.data.CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
       enginePort: setup.data.CLOUD_WORKSPACE_ENGINE_PORT,
       intervalMs: setup.data.CLOUD_WORKSPACE_SETUP_INTERVAL_MS,
@@ -931,6 +1145,43 @@ function loadCloudWorkspaceConfig(
       leaseMs: setup.data.CLOUD_WORKSPACE_SETUP_LEASE_MS,
       admissionTtlSeconds:
         setup.data.CLOUD_WORKSPACE_SETUP_ADMISSION_TTL_SECONDS,
+    };
+  }
+  const outboxRequested = [
+    env.CLOUD_WORKSPACE_OUTBOX_URL,
+    env.CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET,
+    env.CLOUD_WORKSPACE_OUTBOX_TIMEOUT_MS,
+  ].some((entry) => typeof entry === "string" && entry.trim().length > 0);
+  let outbox: CloudWorkspaceBackendConfig["outbox"] = null;
+  if (outboxRequested) {
+    const parsedOutbox = CloudWorkspaceOutboxEnvSchema.safeParse(env);
+    if (!parsedOutbox.success) {
+      throw new Error(
+        "Invalid cloud workspace outbox environment: " +
+          parsedOutbox.error.issues
+            .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+            .join("; "),
+      );
+    }
+    let endpoint: string;
+    try {
+      endpoint = validatedServiceUrl(
+        parsedOutbox.data.CLOUD_WORKSPACE_OUTBOX_URL,
+        "CLOUD_WORKSPACE_OUTBOX_URL",
+        { allowPath: true },
+      );
+    } catch (error) {
+      throw new Error(
+        `Invalid cloud workspace outbox environment: ${
+          error instanceof Error ? error.message : "invalid endpoint"
+        }`,
+      );
+    }
+    outbox = {
+      endpoint,
+      signingSecret:
+        parsedOutbox.data.CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET,
+      timeoutMs: parsedOutbox.data.CLOUD_WORKSPACE_OUTBOX_TIMEOUT_MS,
     };
   }
   return {
@@ -950,11 +1201,15 @@ function loadCloudWorkspaceConfig(
     operationTimeoutSeconds: value.CLOUD_WORKSPACE_OPERATION_TIMEOUT_SECONDS,
     autoArchiveMinutes: value.CLOUD_WORKSPACE_AUTO_ARCHIVE_MINUTES,
     reconcileIntervalMs: value.CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS,
+    providerCredentialKeys,
+    settingsSecretKeyV1,
     access: {
       allowedSshHosts,
       allowedPreviewHostSuffixes,
       previewBaseDomain,
     },
+    durability,
+    outbox,
     setupExecution,
   };
 }

@@ -195,20 +195,80 @@ function resolveEngineToken(): Promise<string> {
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
+const CLOUD_RUNTIME_UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const CLOUD_RUNTIME_TOKEN_PATTERN = /^zws_[A-Za-z0-9_-]{43}$/;
+
+export type CloudRuntimeConnectionTarget = {
+  readonly kind: "cloud";
+  readonly channel: "electron-ssh-tunnel";
+  readonly runtimeId: string;
+  readonly organizationId: string;
+  readonly workspaceId: string;
+  readonly generation: number;
+  readonly authorityEpoch: number;
+  readonly engineInstanceId: string;
+  readonly connectionSequence: number;
+  /** Exact desktop-owned loopback proxy; never a public or provider URL. */
+  readonly url: string;
+  /** One-use, generation-bound engine admission. Never persisted. */
+  readonly cloudToken: string;
+  readonly expiresAt: number;
+};
+
 export type RuntimeConnectionTarget =
   | { readonly kind: "local" }
+  | CloudRuntimeConnectionTarget;
+
+/** Secret-free execution identity. Credentials, loopback ports, expiry, and
+ * reconnect sequence are deliberately excluded from keyed renderer state. */
+export type RuntimeExecutionIdentity =
+  | { readonly kind: "local"; readonly sidecar: "active" }
   | {
       readonly kind: "cloud";
-      /** Signed/private ingress endpoint. Bearers must never be in query/hash. */
-      readonly url: string;
-      readonly cloudToken: string;
-      readonly expiresAt: number;
+      readonly organizationId: string;
+      readonly workspaceId: string;
+      readonly generation: number;
+      readonly authorityEpoch: number;
+      readonly engineInstanceId: string;
     };
+
+export function runtimeExecutionIdentity(
+  target: RuntimeConnectionTarget,
+): RuntimeExecutionIdentity {
+  return target.kind === "local"
+    ? { kind: "local", sidecar: "active" }
+    : {
+        kind: "cloud",
+        organizationId: target.organizationId,
+        workspaceId: target.workspaceId,
+        generation: target.generation,
+        authorityEpoch: target.authorityEpoch,
+        engineInstanceId: target.engineInstanceId,
+      };
+}
+
+export function runtimeExecutionKey(identity: RuntimeExecutionIdentity): string {
+  return identity.kind === "local"
+    ? "local:sidecar"
+    : [
+        "cloud",
+        identity.organizationId,
+        identity.workspaceId,
+        identity.generation,
+        identity.authorityEpoch,
+        identity.engineInstanceId,
+      ].join(":");
+}
 
 export interface ConnectionTargetExpiredEvent {
   readonly kind: "cloud";
   readonly expiresAt: number;
 }
+
+export type CloudRuntimeConnectionTargetRefresher = (
+  target: CloudRuntimeConnectionTarget,
+) => Promise<RuntimeConnectionTarget>;
 
 export function parseRuntimeConnectionTarget(
   raw: unknown,
@@ -224,15 +284,43 @@ export function parseRuntimeConnectionTarget(
   if (
     value.kind !== "cloud" ||
     Object.keys(value).sort().join("\0") !==
-      ["cloudToken", "expiresAt", "kind", "url"].sort().join("\0") ||
+      [
+        "authorityEpoch",
+        "channel",
+        "cloudToken",
+        "connectionSequence",
+        "engineInstanceId",
+        "expiresAt",
+        "generation",
+        "kind",
+        "organizationId",
+        "runtimeId",
+        "url",
+        "workspaceId",
+      ]
+        .sort()
+        .join("\0") ||
+    value.channel !== "electron-ssh-tunnel" ||
+    typeof value.runtimeId !== "string" ||
+    !CLOUD_RUNTIME_UUID_PATTERN.test(value.runtimeId) ||
+    typeof value.organizationId !== "string" ||
+    !CLOUD_RUNTIME_UUID_PATTERN.test(value.organizationId) ||
+    typeof value.workspaceId !== "string" ||
+    !CLOUD_RUNTIME_UUID_PATTERN.test(value.workspaceId) ||
+    typeof value.engineInstanceId !== "string" ||
+    !CLOUD_RUNTIME_UUID_PATTERN.test(value.engineInstanceId) ||
+    !Number.isSafeInteger(value.generation) ||
+    Number(value.generation) < 1 ||
+    !Number.isSafeInteger(value.authorityEpoch) ||
+    Number(value.authorityEpoch) < 1 ||
+    !Number.isSafeInteger(value.connectionSequence) ||
+    Number(value.connectionSequence) < 1 ||
     typeof value.url !== "string" ||
     typeof value.cloudToken !== "string" ||
-    value.cloudToken.length < 16 ||
-    new TextEncoder().encode(value.cloudToken).length > 4_096 ||
-    /[\0\r\n]/.test(value.cloudToken) ||
+    !CLOUD_RUNTIME_TOKEN_PATTERN.test(value.cloudToken) ||
     !Number.isSafeInteger(value.expiresAt) ||
     Number(value.expiresAt) - now < 5_000 ||
-    Number(value.expiresAt) - now > 24 * 60 * 60_000 + 60_000 ||
+    Number(value.expiresAt) - now > 16 * 60_000 ||
     !Number.isSafeInteger(now)
   ) {
     throw new Error("cloud runtime connection target is invalid");
@@ -244,7 +332,11 @@ export function parseRuntimeConnectionTarget(
     throw new Error("cloud runtime connection URL is invalid");
   }
   if (
-    url.protocol !== "wss:" ||
+    url.protocol !== "ws:" ||
+    url.hostname !== "127.0.0.1" ||
+    !url.port ||
+    Number(url.port) < 1_024 ||
+    Number(url.port) > 65_535 ||
     url.username ||
     url.password ||
     url.pathname !== "/ws" ||
@@ -255,6 +347,14 @@ export function parseRuntimeConnectionTarget(
   }
   return {
     kind: "cloud",
+    channel: "electron-ssh-tunnel",
+    runtimeId: value.runtimeId,
+    organizationId: value.organizationId,
+    workspaceId: value.workspaceId,
+    generation: Number(value.generation),
+    authorityEpoch: Number(value.authorityEpoch),
+    engineInstanceId: value.engineInstanceId,
+    connectionSequence: Number(value.connectionSequence),
     url: url.toString(),
     cloudToken: value.cloudToken,
     expiresAt: Number(value.expiresAt),
@@ -274,11 +374,7 @@ function base64urlUtf8(value: string): string {
 }
 
 export function cloudRuntimeWebSocketProtocols(cloudToken: string): string[] {
-  if (
-    cloudToken.length < 16 ||
-    new TextEncoder().encode(cloudToken).length > 4_096 ||
-    /[\0\r\n]/.test(cloudToken)
-  ) {
+  if (!CLOUD_RUNTIME_TOKEN_PATTERN.test(cloudToken)) {
     throw new Error("cloud runtime connection token is invalid");
   }
   return ["zeros-v1", `zeros-cloud-token.${base64urlUtf8(cloudToken)}`];
@@ -458,14 +554,30 @@ export class RuntimeClient {
   private connectionTargetExpiryListeners = new Set<
     (event: ConnectionTargetExpiredEvent) => void
   >();
+  private executionIdentityListeners = new Set<
+    (identity: RuntimeExecutionIdentity) => void
+  >();
+  private readonly refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
+  private cloudTargetNeedsRefresh = false;
+  private cloudTargetRefreshPromise: Promise<boolean> | null = null;
 
-  constructor(target: RuntimeConnectionTarget = { kind: "local" }) {
+  constructor(
+    target: RuntimeConnectionTarget = { kind: "local" },
+    options: {
+      refreshCloudConnectionTarget?: CloudRuntimeConnectionTargetRefresher;
+    } = {},
+  ) {
     this.connectionTarget = parseRuntimeConnectionTarget(target);
+    this.refreshCloudConnectionTarget = options.refreshCloudConnectionTarget;
     this.armConnectionTargetExpiry();
   }
 
   get status(): ConnectionStatus {
     return this._status;
+  }
+
+  get executionIdentity(): RuntimeExecutionIdentity {
+    return runtimeExecutionIdentity(this.connectionTarget);
   }
 
   /** Whether the engine is connected and ready */
@@ -484,6 +596,24 @@ export class RuntimeClient {
     // broadcasts to every connected client, so the renderer sees every
     // chunk multiplied by the orphan count.
     if (this.pendingWs) return;
+
+    if (
+      this.connectionTarget.kind === "cloud" &&
+      this.connectionTarget.expiresAt <= Date.now()
+    ) {
+      this.cloudTargetNeedsRefresh = true;
+    }
+    if (
+      this.connectionTarget.kind === "cloud" &&
+      this.cloudTargetNeedsRefresh
+    ) {
+      const refreshed = await this.refreshCurrentCloudTarget();
+      if (!refreshed) {
+        this.setStatus("disconnected");
+        this.scheduleReconnect();
+        return;
+      }
+    }
 
     let wsUrl: string;
     let protocols: string[] | undefined;
@@ -599,11 +729,34 @@ export class RuntimeClient {
   /** Switch this stable bridge client between its local sidecar and a freshly
    * minted cloud descriptor. The descriptor remains memory-only. */
   async setConnectionTarget(target: RuntimeConnectionTarget): Promise<void> {
+    const previousKey = runtimeExecutionKey(this.executionIdentity);
     this.connectionTarget = parseRuntimeConnectionTarget(target);
+    this.cloudTargetNeedsRefresh = false;
     this.armConnectionTargetExpiry();
     this._rejected = false;
     this.lastRejection = null;
-    await this.forceReconnect();
+    if (runtimeExecutionKey(this.executionIdentity) !== previousKey) {
+      this.notifyExecutionIdentityChanged();
+    }
+    await this.forceReconnect({ refreshCloudTarget: false });
+  }
+
+  onExecutionIdentityChange(
+    listener: (identity: RuntimeExecutionIdentity) => void,
+  ): () => void {
+    this.executionIdentityListeners.add(listener);
+    return () => this.executionIdentityListeners.delete(listener);
+  }
+
+  private notifyExecutionIdentityChanged(): void {
+    const identity = this.executionIdentity;
+    for (const listener of this.executionIdentityListeners) {
+      try {
+        listener(identity);
+      } catch (error) {
+        console.error("[Zeros] runtime execution identity listener failed:", error);
+      }
+    }
   }
 
   /** Subscribe to expiry of the exact cloud descriptor currently installed.
@@ -775,13 +928,21 @@ export class RuntimeClient {
    *  in-flight state are reset. Pending RPCs and queued requests are
    *  rejected immediately so callers don't wait on a server that no
    *  longer knows about them. */
-  async forceReconnect(): Promise<void> {
+  async forceReconnect(
+    options: { refreshCloudTarget?: boolean } = {},
+  ): Promise<void> {
     if (this._disposed) return;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
     this.reconnectAttempts = 0;
+    if (
+      this.connectionTarget.kind === "cloud" &&
+      options.refreshCloudTarget !== false
+    ) {
+      this.cloudTargetNeedsRefresh = true;
+    }
     // Reject anything in flight — those request ids are bound to a
     // server process that's about to die. Soft-fail so upstream retry
     // loops can decide to resend; we don't requeue silently because
@@ -854,6 +1015,7 @@ export class RuntimeClient {
     this.handlers.clear();
     this.statusListeners.clear();
     this.connectionTargetExpiryListeners.clear();
+    this.executionIdentityListeners.clear();
     // Close BOTH the active socket and any in-flight pending one — an
     // un-disposed pendingWs would keep its TCP connection to the engine
     // open even though this client is gone, and on next mount the new
@@ -901,11 +1063,14 @@ export class RuntimeClient {
     //   • LOCAL (desktop renderer): the token ESTABLISHES the engine's owner
     //     account (the account signed into this Mac). Local clients are never
     //     gated; this just records who owns the desktop.
-    //   • RELAY (an optional remote client): the engine requires the token to
-    //     match the owner — a leaked pairing offer used by a different account
-    //     is rejected. It rides INSIDE the E2EE channel (the relay stays blind).
+    //   • CLOUD: the control plane already admitted the exact account and
+    //     authority epoch, so no reusable account bearer crosses into sandbox.
     // Read synchronously from the auth bridge (AuthProvider keeps it fresh).
-    const authToken = getAuthAccessToken();
+    // Local sidecars use the desktop session to seed their owner binding. A
+    // cloud engine was already admitted through the control plane and must
+    // never receive the reusable WorkOS bearer inside its sandbox.
+    const authToken =
+      this.connectionTarget.kind === "local" ? getAuthAccessToken() : "";
     this.send({
       type: "CONNECTED",
       source: "browser",
@@ -987,6 +1152,9 @@ export class RuntimeClient {
     // server lost our request id); reject with the soft-fail shape so the
     // sessions-provider retry loop re-sends at the application level.
     this.rejectInFlightSoftFail();
+    if (this.connectionTarget.kind === "cloud") {
+      this.cloudTargetNeedsRefresh = true;
+    }
     this.scheduleReconnect();
     // Reject any queue entries whose deadlines have elapsed.
     this.expireQueue(now);
@@ -1118,9 +1286,17 @@ export class RuntimeClient {
     if (this._disposed) return;
     if (
       this.connectionTarget.kind === "cloud" &&
-      this.connectionTarget.expiresAt <= Date.now()
+      this.connectionTarget.expiresAt <= Date.now() &&
+      !this.cloudTargetNeedsRefresh
     ) {
       this.expireConnectionTarget(this.connectionTargetEpoch);
+      return;
+    }
+    if (
+      this.connectionTarget.kind === "cloud" &&
+      this.cloudTargetNeedsRefresh &&
+      !this.refreshCloudConnectionTarget
+    ) {
       return;
     }
     // Engine refused us — don't hammer it; wait for clearRejection() to retry.
@@ -1189,6 +1365,7 @@ export class RuntimeClient {
       /* already dead */
     }
     this.rejectInFlightSoftFail();
+    this.cloudTargetNeedsRefresh = true;
     this._engineConnected = false;
     this.setStatus("disconnected");
     const event: ConnectionTargetExpiredEvent = {
@@ -1205,5 +1382,48 @@ export class RuntimeClient {
         );
       }
     }
+    this.scheduleReconnect();
+  }
+
+  private refreshCurrentCloudTarget(): Promise<boolean> {
+    if (this.cloudTargetRefreshPromise) return this.cloudTargetRefreshPromise;
+    const current = this.connectionTarget;
+    const refresh = this.refreshCloudConnectionTarget;
+    if (current.kind !== "cloud" || !refresh) return Promise.resolve(false);
+    const epoch = this.connectionTargetEpoch;
+    this.cloudTargetRefreshPromise = (async () => {
+      try {
+        const candidate = parseRuntimeConnectionTarget(await refresh(current));
+        if (
+          candidate.kind !== "cloud" ||
+          candidate.runtimeId !== current.runtimeId ||
+          candidate.organizationId !== current.organizationId ||
+          candidate.workspaceId !== current.workspaceId ||
+          candidate.connectionSequence !== current.connectionSequence + 1
+        ) {
+          return false;
+        }
+        if (
+          this._disposed ||
+          epoch !== this.connectionTargetEpoch ||
+          this.connectionTarget !== current
+        ) {
+          return true;
+        }
+        const previousKey = runtimeExecutionKey(this.executionIdentity);
+        this.connectionTarget = candidate;
+        this.cloudTargetNeedsRefresh = false;
+        this.armConnectionTargetExpiry();
+        if (runtimeExecutionKey(this.executionIdentity) !== previousKey) {
+          this.notifyExecutionIdentityChanged();
+        }
+        return true;
+      } catch {
+        return false;
+      } finally {
+        this.cloudTargetRefreshPromise = null;
+      }
+    })();
+    return this.cloudTargetRefreshPromise;
   }
 }

@@ -2,6 +2,10 @@ const RUNTIME_AUDIENCE = "zeros-cloud-engine-runtime-v1" as const;
 const REGISTRATION_AUDIENCE =
   "zeros-cloud-workspace-engine-registration-v1" as const;
 const HEARTBEAT_AUDIENCE = "zeros-cloud-workspace-engine-heartbeat-v1" as const;
+const ENGINE_CLIENT_ADMISSION_AUDIENCE =
+  "zeros-cloud-workspace-engine-client-admission-v1" as const;
+const ENGINE_CLIENT_ADMISSION_PATH =
+  "/internal/v1/cloud-workspaces/engine/client-admission" as const;
 export const CLOUD_RUNTIME_ENV = "ZEROS_CLOUD_RUNTIME_B64" as const;
 
 const UUID_PATTERN =
@@ -12,6 +16,27 @@ const READINESS_TOKEN_PATTERN = /^zwr_[A-Za-z0-9_-]{43}$/;
 const MAX_RUNTIME_BYTES = 64 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const REQUEST_TIMEOUT_MS = 15_000;
+
+export type CloudRuntimeAuthority = {
+  heartbeatEndpoint: string;
+  heartbeatToken: string;
+  workspaceId: string;
+  organizationId: string;
+  generation: number;
+  engineInstanceId: string;
+};
+
+export type CloudCheckpointDirective = {
+  id: string;
+  reason:
+    | "before_stop"
+    | "before_archive"
+    | "before_delete"
+    | "before_fork"
+    | "before_rebuild"
+    | "manual";
+  deadlineAtMs: number;
+};
 
 export type CloudRuntimeConfig = {
   version: 1;
@@ -43,12 +68,18 @@ export type CloudRuntimeReadiness = {
   durableRecordConnected: true;
 };
 
+export type CloudRuntimeClientAdmission = {
+  accountUserId: string;
+  authorityEpoch: number;
+};
+
 type FetchLike = typeof fetch;
 
 export type CloudRuntimeRegistrationDependencies = {
   fetch?: FetchLike;
   now?: () => number;
   onAuthorityLost: () => void;
+  onDurableRecordSync: (authority: CloudRuntimeAuthority) => Promise<void>;
   readRepositoryCredentialRefresh?: () => {
     version: 1;
     audience: "zeros-cloud-github-refresh-v1";
@@ -60,6 +91,16 @@ export type CloudRuntimeRegistrationDependencies = {
   } | null;
   installRepositoryCredential?: (document: unknown) => void;
   acknowledgeRepositoryCredentialRefresh?: (generation: string) => boolean;
+  onCheckpointRequested?: (
+    directive: CloudCheckpointDirective,
+    authority: CloudRuntimeAuthority,
+  ) => Promise<void>;
+  /** `undefined` means observation was unavailable; `[]` is an authoritative
+   * empty listener scan. Only ports/protocols cross the control-plane boundary. */
+  readObservedPorts?: () => Promise<
+    | readonly { port: number; protocol: "tcp" }[]
+    | undefined
+  >;
 };
 
 type RegistrationDocument = {
@@ -277,6 +318,7 @@ export class CloudRuntimeRegistration {
   private readonly fetch: FetchLike;
   private readonly now: () => number;
   private readonly onAuthorityLost: () => void;
+  private readonly onDurableRecordSync: CloudRuntimeRegistrationDependencies["onDurableRecordSync"];
   private readonly readRepositoryCredentialRefresh:
     | NonNullable<
         CloudRuntimeRegistrationDependencies["readRepositoryCredentialRefresh"]
@@ -292,12 +334,21 @@ export class CloudRuntimeRegistration {
         CloudRuntimeRegistrationDependencies["acknowledgeRepositoryCredentialRefresh"]
       >
     | undefined;
+  private readonly onCheckpointRequested:
+    | NonNullable<CloudRuntimeRegistrationDependencies["onCheckpointRequested"]>
+    | undefined;
+  private readonly readObservedPorts:
+    | NonNullable<CloudRuntimeRegistrationDependencies["readObservedPorts"]>
+    | undefined;
   private readonly abortController = new AbortController();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private document: RegistrationDocument | null = null;
   private started = false;
   private stopped = false;
   private authorityLost = false;
+  private durableRecordConnected = false;
+  private durableRecordSyncInFlight: Promise<void> | null = null;
+  private checkpointInFlight: string | null = null;
 
   constructor(
     readonly config: CloudRuntimeConfig,
@@ -306,15 +357,25 @@ export class CloudRuntimeRegistration {
     this.fetch = dependencies.fetch ?? globalThis.fetch;
     this.now = dependencies.now ?? Date.now;
     this.onAuthorityLost = dependencies.onAuthorityLost;
+    this.onDurableRecordSync = dependencies.onDurableRecordSync;
     this.readRepositoryCredentialRefresh =
       dependencies.readRepositoryCredentialRefresh;
     this.installRepositoryCredential = dependencies.installRepositoryCredential;
     this.acknowledgeRepositoryCredentialRefresh =
       dependencies.acknowledgeRepositoryCredentialRefresh;
+    this.onCheckpointRequested = dependencies.onCheckpointRequested;
+    this.readObservedPorts = dependencies.readObservedPorts;
   }
 
   readiness(): CloudRuntimeReadiness | null {
-    if (!this.document || this.stopped || this.authorityLost) return null;
+    if (
+      !this.document ||
+      !this.durableRecordConnected ||
+      this.stopped ||
+      this.authorityLost
+    ) {
+      return null;
+    }
     return {
       version: 1,
       instanceId: this.config.engine.instanceId,
@@ -348,14 +409,81 @@ export class CloudRuntimeRegistration {
     const document = this.parseRegistration(raw);
     this.document = document;
     this.scheduleHeartbeat(document.heartbeat.intervalMs);
+    try {
+      await this.synchronizeDurableRecord(document);
+    } catch (error) {
+      if (this.timer) clearTimeout(this.timer);
+      this.timer = null;
+      this.document = null;
+      this.durableRecordConnected = false;
+      throw error;
+    }
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    this.durableRecordConnected = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.abortController.abort();
     this.document = null;
+    await this.durableRecordSyncInFlight?.catch(() => undefined);
+  }
+
+  /** Redeem one desktop connection capability through this engine's current
+   * heartbeat authority. A failed admission is deliberately local to the
+   * connecting socket; ordinary network failure does not surrender the engine
+   * lease or disclose why a bearer was rejected. */
+  async verifyClientAdmission(
+    grantToken: string,
+  ): Promise<CloudRuntimeClientAdmission | null> {
+    const document = this.document;
+    if (
+      !SETUP_TOKEN_PATTERN.test(grantToken) ||
+      !document ||
+      !this.durableRecordConnected ||
+      this.stopped ||
+      this.authorityLost
+    ) {
+      return null;
+    }
+    const endpoint = new URL(
+      ENGINE_CLIENT_ADMISSION_PATH,
+      document.heartbeat.endpoint,
+    ).toString();
+    try {
+      const raw = await this.post(endpoint, document.heartbeat.token, {
+        workspaceId: this.config.execution.workspaceId,
+        organizationId: this.config.execution.organizationId,
+        generation: this.config.execution.generation,
+        engineInstanceId: this.config.engine.instanceId,
+        grantToken,
+      });
+      if (
+        isRecord(raw) &&
+        exactKeys(raw, [
+          "accountUserId",
+          "admitted",
+          "audience",
+          "authorityEpoch",
+          "version",
+        ]) &&
+        raw.version === 1 &&
+        raw.audience === ENGINE_CLIENT_ADMISSION_AUDIENCE &&
+        raw.admitted === true &&
+        positiveInteger(raw.authorityEpoch) &&
+        typeof raw.accountUserId === "string" &&
+        UUID_PATTERN.test(raw.accountUserId)
+      ) {
+        return {
+          accountUserId: raw.accountUserId,
+          authorityEpoch: Number(raw.authorityEpoch),
+        };
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   private parseRegistration(raw: unknown): RegistrationDocument {
@@ -410,6 +538,7 @@ export class CloudRuntimeRegistration {
     if (!document || this.stopped || this.authorityLost) return;
     try {
       const credentialRefresh = this.readCredentialRefresh();
+      const observedPorts = await this.observedPorts();
       const raw = await this.post(
         document.heartbeat.endpoint,
         document.heartbeat.token,
@@ -421,6 +550,7 @@ export class CloudRuntimeRegistration {
           ...(credentialRefresh
             ? { repositoryCredentialRefresh: credentialRefresh }
             : {}),
+          ...(observedPorts === undefined ? {} : { observedPorts }),
         },
       );
       const now = this.now();
@@ -431,6 +561,9 @@ export class CloudRuntimeRegistration {
         "leaseExpiresAtMs",
         ...(isRecord(raw) && raw.repositoryCredential !== undefined
           ? ["repositoryCredential"]
+          : []),
+        ...(isRecord(raw) && raw.checkpointRequest !== undefined
+          ? ["checkpointRequest"]
           : []),
         "version",
       ];
@@ -454,8 +587,16 @@ export class CloudRuntimeRegistration {
         credentialRefresh,
         raw.repositoryCredential,
       );
+      const checkpointRequest = this.parseCheckpointRequest(
+        raw.checkpointRequest,
+        now,
+      );
       document.leaseExpiresAtMs = Number(raw.leaseExpiresAtMs);
       this.scheduleHeartbeat(document.heartbeat.intervalMs);
+      void this.synchronizeDurableRecord(document).catch(() => undefined);
+      if (checkpointRequest) {
+        this.dispatchCheckpointRequest(checkpointRequest, document);
+      }
     } catch (error) {
       const terminal =
         error instanceof CloudRuntimeRequestError && error.terminal;
@@ -470,6 +611,84 @@ export class CloudRuntimeRegistration {
         ),
       );
     }
+  }
+
+  private async observedPorts(): Promise<
+    readonly { port: number; protocol: "tcp" }[] | undefined
+  > {
+    if (!this.readObservedPorts) return undefined;
+    let raw: readonly { port: number; protocol: "tcp" }[] | undefined;
+    try {
+      raw = await this.readObservedPorts();
+    } catch {
+      return undefined;
+    }
+    if (raw === undefined || raw.length > 128) return undefined;
+    const ports = new Set<number>();
+    for (const item of raw) {
+      if (
+        !item ||
+        item.protocol !== "tcp" ||
+        !Number.isSafeInteger(item.port) ||
+        item.port < 1_024 ||
+        item.port > 65_535 ||
+        ports.has(item.port)
+      ) {
+        return undefined;
+      }
+      ports.add(item.port);
+    }
+    return [...ports]
+      .sort((left, right) => left - right)
+      .map((port) => ({ port, protocol: "tcp" as const }));
+  }
+
+  private parseCheckpointRequest(
+    raw: unknown,
+    now: number,
+  ): CloudCheckpointDirective | null {
+    if (raw === undefined || raw === null) return null;
+    if (
+      !isRecord(raw) ||
+      !exactKeys(raw, ["deadlineAtMs", "id", "reason"]) ||
+      !UUID_PATTERN.test(String(raw.id ?? "")) ||
+      ![
+        "before_stop",
+        "before_archive",
+        "before_delete",
+        "before_fork",
+        "before_rebuild",
+        "manual",
+      ].includes(String(raw.reason)) ||
+      !Number.isSafeInteger(raw.deadlineAtMs) ||
+      Number(raw.deadlineAtMs) < now - 30_000 ||
+      Number(raw.deadlineAtMs) > now + 30 * 60_000
+    ) {
+      throw new CloudRuntimeRequestError(
+        "cloud checkpoint directive is invalid",
+        true,
+      );
+    }
+    return {
+      id: String(raw.id),
+      reason: raw.reason as CloudCheckpointDirective["reason"],
+      deadlineAtMs: Number(raw.deadlineAtMs),
+    };
+  }
+
+  private dispatchCheckpointRequest(
+    directive: CloudCheckpointDirective,
+    document: RegistrationDocument,
+  ): void {
+    if (!this.onCheckpointRequested || this.checkpointInFlight !== null) return;
+    this.checkpointInFlight = directive.id;
+    void this.onCheckpointRequested(directive, this.authority(document))
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.checkpointInFlight === directive.id) {
+          this.checkpointInFlight = null;
+        }
+      });
   }
 
   private readCredentialRefresh(): {
@@ -564,10 +783,50 @@ export class CloudRuntimeRegistration {
   private loseAuthority(): void {
     if (this.authorityLost || this.stopped) return;
     this.authorityLost = true;
+    this.durableRecordConnected = false;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     this.document = null;
     this.onAuthorityLost();
+  }
+
+  private authority(document: RegistrationDocument): CloudRuntimeAuthority {
+    return {
+      heartbeatEndpoint: document.heartbeat.endpoint,
+      heartbeatToken: document.heartbeat.token,
+      workspaceId: this.config.execution.workspaceId,
+      organizationId: this.config.execution.organizationId,
+      generation: this.config.execution.generation,
+      engineInstanceId: this.config.engine.instanceId,
+    };
+  }
+
+  private synchronizeDurableRecord(
+    document: RegistrationDocument,
+  ): Promise<void> {
+    if (this.durableRecordSyncInFlight) return this.durableRecordSyncInFlight;
+    const task = Promise.resolve()
+      .then(() => this.onDurableRecordSync(this.authority(document)))
+      .then(() => {
+        if (
+          this.document === document &&
+          !this.stopped &&
+          !this.authorityLost
+        ) {
+          this.durableRecordConnected = true;
+        }
+      })
+      .catch((error) => {
+        this.durableRecordConnected = false;
+        throw error;
+      })
+      .finally(() => {
+        if (this.durableRecordSyncInFlight === task) {
+          this.durableRecordSyncInFlight = null;
+        }
+      });
+    this.durableRecordSyncInFlight = task;
+    return task;
   }
 
   private async post(

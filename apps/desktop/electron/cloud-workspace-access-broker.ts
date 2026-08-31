@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import {
   CloudWorkspaceAccessClientError,
+  type CloudWorkspaceEngineAdmission,
   type CloudWorkspacePreviewAccess,
   type CloudWorkspaceSshAccess,
   type CloudWorkspaceTunnelAccess,
@@ -11,6 +12,10 @@ const ACCESS_TTL_MINUTES = 30;
 const MAX_ACTIVE_ACCESS = 64;
 
 export interface CloudWorkspaceAccessBrokerApi {
+  issueEngineAdmission(
+    accessToken: string,
+    input: { organizationId: string; workspaceId: string },
+  ): Promise<CloudWorkspaceEngineAdmission>;
   issueSsh(
     accessToken: string,
     input: {
@@ -26,10 +31,29 @@ export interface CloudWorkspaceAccessBrokerApi {
       organizationId: string;
       workspaceId: string;
       remotePort: number;
+      deviceId: string;
+      requestedLocalPort?: number;
+      runtimeGeneration?: number;
       expiresInMinutes: number;
       idempotencyKey: string;
     },
   ): Promise<CloudWorkspaceTunnelAccess>;
+  activateTunnel(
+    accessToken: string,
+    input: {
+      organizationId: string;
+      workspaceId: string;
+      sessionId: string;
+      deviceId: string;
+      observedLocalPort: number;
+    },
+  ): Promise<{
+    id: string;
+    deviceId: string;
+    state: "active";
+    bindAddress: "127.0.0.1";
+    observedLocalPort: number;
+  }>;
   issuePreview(
     accessToken: string,
     input: {
@@ -68,6 +92,18 @@ type TunnelLaunch = SshLaunch & {
   remoteHost: "127.0.0.1";
   remotePort: number;
 };
+type DynamicTunnelLaunch = SshLaunch & {
+  localHost: "127.0.0.1";
+  remoteHost: "127.0.0.1";
+  remotePort: number;
+};
+type RuntimeLease = {
+  id: string;
+  sequence: number;
+  authorityEpoch: number;
+  engineInstanceId: string;
+  remotePort: number;
+};
 type AccessLease = AccessTarget & {
   grantId: string;
   generation: number;
@@ -77,6 +113,22 @@ type AccessLease = AccessTarget & {
   frameName?: string;
   previewAuthorizationCleanup?: () => void;
   tunnel?: CloudWorkspaceTunnelHandle;
+  runtime?: RuntimeLease;
+};
+
+export type CloudWorkspaceRuntimeConnectionTarget = {
+  kind: "cloud";
+  channel: "electron-ssh-tunnel";
+  runtimeId: string;
+  organizationId: string;
+  workspaceId: string;
+  generation: number;
+  authorityEpoch: number;
+  engineInstanceId: string;
+  connectionSequence: number;
+  url: string;
+  cloudToken: string;
+  expiresAt: number;
 };
 
 type PreviewAuthorizer = (input: {
@@ -117,6 +169,7 @@ function safeFrameName(value: string): string {
 export class CloudWorkspaceAccessBroker {
   private readonly api: CloudWorkspaceAccessBrokerApi;
   private readonly getAccessToken: () => Promise<string | null>;
+  private readonly getDeviceId: () => Promise<string>;
   private readonly randomId: () => string;
   private readonly now: () => number;
   private readonly writeClipboard: (value: string) => void | Promise<void>;
@@ -127,10 +180,14 @@ export class CloudWorkspaceAccessBroker {
   private readonly startTunnelProcess: (
     input: TunnelLaunch,
   ) => Promise<CloudWorkspaceTunnelHandle>;
+  private readonly startDynamicTunnelProcess: (
+    input: DynamicTunnelLaunch,
+  ) => Promise<CloudWorkspaceTunnelHandle>;
   private readonly disposeLocalAccess: () => Promise<void>;
   private readonly leases = new Map<string, AccessLease>();
   private readonly previewByFrame = new Map<string, string>();
   private readonly previewFrameTails = new Map<string, Promise<void>>();
+  private readonly runtimeById = new Map<string, string>();
   private pendingAccess = 0;
   // The auth store is cleared before its session-change listeners run. Keep
   // the most recent token that actually issued/revoked one of this broker's
@@ -142,6 +199,7 @@ export class CloudWorkspaceAccessBroker {
   constructor(input: {
     api: CloudWorkspaceAccessBrokerApi;
     getAccessToken: () => Promise<string | null>;
+    getDeviceId?: () => Promise<string>;
     randomId?: () => string;
     now?: () => number;
     writeClipboard?: (value: string) => void | Promise<void>;
@@ -150,10 +208,22 @@ export class CloudWorkspaceAccessBroker {
       input: SshLaunch & { appId: "cursor" | "vscode" },
     ) => Promise<void>;
     startTunnel?: (input: TunnelLaunch) => Promise<CloudWorkspaceTunnelHandle>;
+    startDynamicTunnel?: (
+      input: DynamicTunnelLaunch,
+    ) => Promise<CloudWorkspaceTunnelHandle>;
     disposeLocalAccess?: () => Promise<void>;
   }) {
     this.api = input.api;
     this.getAccessToken = input.getAccessToken;
+    this.getDeviceId =
+      input.getDeviceId ??
+      (async () => {
+        throw new CloudWorkspaceAccessClientError(
+          401,
+          "signed_out",
+          "A trusted desktop device is required for cloud forwarding",
+        );
+      });
     this.randomId = input.randomId ?? randomUUID;
     this.now = input.now ?? Date.now;
     this.writeClipboard =
@@ -176,6 +246,11 @@ export class CloudWorkspaceAccessBroker {
       (async () => {
         throw new Error("SSH forwarding is unavailable");
       });
+    this.startDynamicTunnelProcess =
+      input.startDynamicTunnel ??
+      (async () => {
+        throw new Error("Collision-free SSH forwarding is unavailable");
+      });
     this.disposeLocalAccess =
       input.disposeLocalAccess ?? (async () => undefined);
   }
@@ -184,15 +259,19 @@ export class CloudWorkspaceAccessBroker {
     const now = this.now();
     for (const [id, lease] of this.leases) {
       if (Date.parse(lease.expiresAt) > now) continue;
-      this.leases.delete(id);
-      if (
-        lease.frameName &&
-        this.previewByFrame.get(lease.frameName) === id
-      ) {
+      this.forgetLease(id, lease);
+      if (lease.frameName && this.previewByFrame.get(lease.frameName) === id) {
         this.previewByFrame.delete(lease.frameName);
       }
       lease.previewAuthorizationCleanup?.();
       if (lease.tunnel) void lease.tunnel.stop().catch(() => undefined);
+    }
+  }
+
+  private forgetLease(id: string, lease: AccessLease): void {
+    this.leases.delete(id);
+    if (lease.runtime && this.runtimeById.get(lease.runtime.id) === id) {
+      this.runtimeById.delete(lease.runtime.id);
     }
   }
 
@@ -262,6 +341,7 @@ export class CloudWorkspaceAccessBroker {
     this.leases.set(lease.grantId, lease);
     if (lease.frameName)
       this.previewByFrame.set(lease.frameName, lease.grantId);
+    if (lease.runtime) this.runtimeById.set(lease.runtime.id, lease.grantId);
   }
 
   private async cleanup(
@@ -274,6 +354,34 @@ export class CloudWorkspaceAccessBroker {
       grantId: lease.grantId,
       credential: lease.credential,
     });
+  }
+
+  private async cleanupSsh(
+    accessToken: string,
+    lease: AccessTarget & {
+      grantId: string;
+      generation: number;
+      credential: string;
+    },
+  ): Promise<void> {
+    try {
+      await this.cleanup(accessToken, lease);
+    } finally {
+      // Daytona revocation retires the sandbox's complete SSH token set. A
+      // timeout is an unknown result, so fail closed locally in that case too.
+      for (const [id, candidate] of this.leases) {
+        if (
+          candidate.kind === "preview" ||
+          candidate.organizationId !== lease.organizationId ||
+          candidate.workspaceId !== lease.workspaceId ||
+          candidate.generation !== lease.generation
+        ) {
+          continue;
+        }
+        this.forgetLease(id, candidate);
+        await candidate.tunnel?.stop().catch(() => undefined);
+      }
+    }
   }
 
   private async issueSsh(target: AccessTarget): Promise<{
@@ -290,9 +398,10 @@ export class CloudWorkspaceAccessBroker {
         idempotencyKey: this.key("ssh"),
       });
       if (this.disposed) {
-        await this.cleanup(token, {
+        await this.cleanupSsh(token, {
           ...target,
           grantId: response.grant.id,
+          generation: response.grant.generation,
           credential: response.ssh.username,
         });
         throw new CloudWorkspaceAccessClientError(
@@ -422,17 +531,19 @@ export class CloudWorkspaceAccessBroker {
       try {
         await this.writeClipboard(response.ssh.command);
       } catch (error) {
-        await this.cleanup(token, {
+        await this.cleanupSsh(token, {
           ...input,
           grantId: response.grant.id,
+          generation: response.grant.generation,
           credential: response.ssh.username,
         }).catch(() => undefined);
         throw error;
       }
       if (this.disposed) {
-        await this.cleanup(token, {
+        await this.cleanupSsh(token, {
           ...input,
           grantId: response.grant.id,
+          generation: response.grant.generation,
           credential: response.ssh.username,
         });
         throw new CloudWorkspaceAccessClientError(
@@ -470,17 +581,19 @@ export class CloudWorkspaceAccessBroker {
           expiresAt: response.grant.expiresAt,
         });
       } catch (error) {
-        await this.cleanup(token, {
+        await this.cleanupSsh(token, {
           ...input,
           grantId: response.grant.id,
+          generation: response.grant.generation,
           credential: response.ssh.username,
         }).catch(() => undefined);
         throw error;
       }
       if (this.disposed) {
-        await this.cleanup(token, {
+        await this.cleanupSsh(token, {
           ...input,
           grantId: response.grant.id,
+          generation: response.grant.generation,
           credential: response.ssh.username,
         });
         throw new CloudWorkspaceAccessClientError(
@@ -519,18 +632,20 @@ export class CloudWorkspaceAccessBroker {
           expiresAt: response.grant.expiresAt,
         });
       } catch (error) {
-        await this.cleanup(token, {
+        await this.cleanupSsh(token, {
           ...input,
           grantId: response.grant.id,
+          generation: response.grant.generation,
           credential: response.ssh.username,
         }).catch(() => undefined);
         throw error;
       }
       if (this.disposed) {
-        await this.cleanup(token, {
+        await this.cleanupSsh(token, {
           organizationId: input.organizationId,
           workspaceId: input.workspaceId,
           grantId: response.grant.id,
+          generation: response.grant.generation,
           credential: response.ssh.username,
         });
         throw new CloudWorkspaceAccessClientError(
@@ -574,18 +689,22 @@ export class CloudWorkspaceAccessBroker {
       const remotePort = applicationPort(input.remotePort, "Remote port");
       const localPort = applicationPort(input.localPort, "Local port");
       const token = await this.token();
+      const deviceId = await this.getDeviceId();
       const response = await this.api.issueTunnel(token, {
         organizationId: input.organizationId,
         workspaceId: input.workspaceId,
         remotePort,
+        deviceId,
+        requestedLocalPort: localPort,
         expiresInMinutes: ACCESS_TTL_MINUTES,
         idempotencyKey: this.key("tunnel"),
       });
       if (this.disposed) {
-        await this.cleanup(token, {
+        await this.cleanupSsh(token, {
           organizationId: input.organizationId,
           workspaceId: input.workspaceId,
           grantId: response.grant.id,
+          generation: response.grant.generation,
           credential: response.tunnel.sshUsername,
         });
         throw new CloudWorkspaceAccessClientError(
@@ -610,22 +729,58 @@ export class CloudWorkspaceAccessBroker {
           throw new Error("SSH tunnel bound an unexpected local port");
         }
       } catch (error) {
-        await this.cleanup(token, {
+        await this.cleanupSsh(token, {
           organizationId: input.organizationId,
           workspaceId: input.workspaceId,
           grantId: response.grant.id,
+          generation: response.grant.generation,
           credential: response.tunnel.sshUsername,
         }).catch(() => undefined);
         throw error;
       }
       if (this.disposed) {
         await tunnel.stop().catch(() => undefined);
-        await this.cleanup(token, {
+        await this.cleanupSsh(token, {
           organizationId: input.organizationId,
           workspaceId: input.workspaceId,
           grantId: response.grant.id,
+          generation: response.grant.generation,
           credential: response.tunnel.sshUsername,
         });
+        throw new CloudWorkspaceAccessClientError(
+          401,
+          "signed_out",
+          "Cloud workspace access authority has ended",
+        );
+      }
+      try {
+        await this.api.activateTunnel(token, {
+          organizationId: input.organizationId,
+          workspaceId: input.workspaceId,
+          sessionId: response.tunnel.session.id,
+          deviceId,
+          observedLocalPort: tunnel.localPort,
+        });
+      } catch (error) {
+        await tunnel.stop().catch(() => undefined);
+        await this.cleanupSsh(token, {
+          organizationId: input.organizationId,
+          workspaceId: input.workspaceId,
+          grantId: response.grant.id,
+          generation: response.grant.generation,
+          credential: response.tunnel.sshUsername,
+        }).catch(() => undefined);
+        throw error;
+      }
+      if (this.disposed) {
+        await tunnel.stop().catch(() => undefined);
+        await this.cleanupSsh(token, {
+          organizationId: input.organizationId,
+          workspaceId: input.workspaceId,
+          grantId: response.grant.id,
+          generation: response.grant.generation,
+          credential: response.tunnel.sshUsername,
+        }).catch(() => undefined);
         throw new CloudWorkspaceAccessClientError(
           401,
           "signed_out",
@@ -654,6 +809,276 @@ export class CloudWorkspaceAccessBroker {
     }
   }
 
+  private runtimeTarget(
+    lease: AccessLease & { runtime: RuntimeLease },
+    admission: CloudWorkspaceEngineAdmission,
+  ): CloudWorkspaceRuntimeConnectionTarget {
+    const expiresAt = Math.min(
+      Date.parse(admission.expiresAt),
+      Date.parse(lease.expiresAt),
+    );
+    if (
+      admission.organizationId !== lease.organizationId ||
+      admission.workspaceId !== lease.workspaceId ||
+      admission.generation !== lease.generation ||
+      admission.authorityEpoch !== lease.runtime.authorityEpoch ||
+      admission.engineInstanceId !== lease.runtime.engineInstanceId ||
+      admission.remotePort !== lease.runtime.remotePort ||
+      !Number.isFinite(expiresAt) ||
+      expiresAt - this.now() < 5_000
+    ) {
+      throw new CloudWorkspaceAccessClientError(
+        409,
+        "cloud_workspace_access_superseded",
+        "The cloud workspace changed while runtime access was being issued",
+      );
+    }
+    return {
+      kind: "cloud",
+      channel: "electron-ssh-tunnel",
+      runtimeId: lease.runtime.id,
+      organizationId: lease.organizationId,
+      workspaceId: lease.workspaceId,
+      generation: lease.generation,
+      authorityEpoch: lease.runtime.authorityEpoch,
+      engineInstanceId: lease.runtime.engineInstanceId,
+      connectionSequence: lease.runtime.sequence,
+      url: `ws://127.0.0.1:${lease.tunnel!.localPort}/ws`,
+      cloudToken: admission.grantToken,
+      expiresAt,
+    };
+  }
+
+  private async createRuntimeLease(input: {
+    token: string;
+    target: AccessTarget;
+    admission: CloudWorkspaceEngineAdmission;
+    runtimeId: string;
+    sequence: number;
+  }): Promise<
+    AccessLease & { runtime: RuntimeLease; tunnel: CloudWorkspaceTunnelHandle }
+  > {
+    const deviceId = await this.getDeviceId();
+    const response = await this.api.issueTunnel(input.token, {
+      ...input.target,
+      remotePort: input.admission.remotePort,
+      deviceId,
+      runtimeGeneration: input.admission.generation,
+      expiresInMinutes: ACCESS_TTL_MINUTES,
+      idempotencyKey: this.key("tunnel"),
+    });
+    const provisional: AccessLease = {
+      ...input.target,
+      grantId: response.grant.id,
+      generation: response.grant.generation,
+      kind: "tunnel",
+      credential: response.tunnel.sshUsername,
+      expiresAt: response.grant.expiresAt,
+    };
+    if (
+      response.grant.generation !== input.admission.generation ||
+      response.tunnel.remotePort !== input.admission.remotePort ||
+      this.leases.has(response.grant.id)
+    ) {
+      await this.cleanupSsh(input.token, provisional).catch(() => undefined);
+      throw new CloudWorkspaceAccessClientError(
+        409,
+        "cloud_workspace_access_superseded",
+        "The cloud workspace changed while runtime access was being issued",
+      );
+    }
+    let tunnel: CloudWorkspaceTunnelHandle;
+    try {
+      tunnel = await this.startDynamicTunnelProcess({
+        localHost: "127.0.0.1",
+        remoteHost: "127.0.0.1",
+        remotePort: input.admission.remotePort,
+        sshUsername: response.tunnel.sshUsername,
+        sshHost: response.tunnel.sshHost,
+        expiresAt: response.grant.expiresAt,
+      });
+      applicationPort(tunnel.localPort, "Local port");
+    } catch (error) {
+      await this.cleanupSsh(input.token, provisional).catch(() => undefined);
+      throw error;
+    }
+    try {
+      await this.api.activateTunnel(input.token, {
+        ...input.target,
+        sessionId: response.tunnel.session.id,
+        deviceId,
+        observedLocalPort: tunnel.localPort,
+      });
+    } catch (error) {
+      await tunnel.stop().catch(() => undefined);
+      await this.cleanupSsh(input.token, provisional).catch(() => undefined);
+      throw error;
+    }
+    const lease: AccessLease & {
+      runtime: RuntimeLease;
+      tunnel: CloudWorkspaceTunnelHandle;
+    } = {
+      ...provisional,
+      tunnel,
+      runtime: {
+        id: input.runtimeId,
+        sequence: input.sequence,
+        authorityEpoch: input.admission.authorityEpoch,
+        engineInstanceId: input.admission.engineInstanceId,
+        remotePort: input.admission.remotePort,
+      },
+    };
+    if (this.disposed) {
+      await tunnel.stop().catch(() => undefined);
+      await this.cleanupSsh(input.token, provisional).catch(() => undefined);
+      throw new CloudWorkspaceAccessClientError(
+        401,
+        "signed_out",
+        "Cloud workspace access authority has ended",
+      );
+    }
+    return lease;
+  }
+
+  /** Open the engine bridge through a desktop-owned, collision-free loopback
+   * proxy. Only the short-lived one-use engine admission crosses IPC. */
+  async openRuntime(
+    input: AccessTarget,
+  ): Promise<CloudWorkspaceRuntimeConnectionTarget> {
+    const releaseCapacity = this.reserveCapacity();
+    try {
+      const token = await this.token();
+      const admission = await this.api.issueEngineAdmission(token, input);
+      const lease = await this.createRuntimeLease({
+        token,
+        target: input,
+        admission,
+        runtimeId: this.randomId(),
+        sequence: 1,
+      });
+      try {
+        const target = this.runtimeTarget(lease, admission);
+        this.remember(lease);
+        return target;
+      } catch (error) {
+        await lease.tunnel.stop().catch(() => undefined);
+        await this.cleanupSsh(token, lease).catch(() => undefined);
+        throw error;
+      }
+    } finally {
+      releaseCapacity();
+    }
+  }
+
+  /** Mint a fresh one-use admission for the exact active runtime session. A
+   * sequence compare-and-swap prevents concurrent refreshes from publishing
+   * two descriptors for one reconnect boundary. */
+  async refreshRuntime(input: {
+    runtimeId: string;
+    organizationId: string;
+    workspaceId: string;
+    generation: number;
+    authorityEpoch: number;
+    engineInstanceId: string;
+    connectionSequence: number;
+  }): Promise<CloudWorkspaceRuntimeConnectionTarget> {
+    this.pruneExpired();
+    const accessId = this.runtimeById.get(input.runtimeId);
+    const current = accessId ? this.leases.get(accessId) : null;
+    if (
+      !current?.runtime ||
+      !current.tunnel ||
+      current.organizationId !== input.organizationId ||
+      current.workspaceId !== input.workspaceId ||
+      current.generation !== input.generation ||
+      current.runtime.authorityEpoch !== input.authorityEpoch ||
+      current.runtime.engineInstanceId !== input.engineInstanceId ||
+      current.runtime.sequence !== input.connectionSequence
+    ) {
+      throw new CloudWorkspaceAccessClientError(
+        409,
+        "cloud_workspace_access_superseded",
+        "The cloud workspace runtime session has been superseded",
+      );
+    }
+    const token = await this.token();
+    const admission = await this.api.issueEngineAdmission(token, {
+      organizationId: input.organizationId,
+      workspaceId: input.workspaceId,
+    });
+    const stillCurrent = this.runtimeById.get(input.runtimeId);
+    if (
+      stillCurrent !== accessId ||
+      this.leases.get(accessId!) !== current ||
+      current.runtime.sequence !== input.connectionSequence
+    ) {
+      throw new CloudWorkspaceAccessClientError(
+        409,
+        "cloud_workspace_access_superseded",
+        "The cloud workspace runtime session has been superseded",
+      );
+    }
+
+    const rotateTunnel =
+      admission.generation !== current.generation ||
+      admission.remotePort !== current.runtime.remotePort ||
+      Date.parse(current.expiresAt) - this.now() < 2 * 60_000;
+    if (!rotateTunnel) {
+      current.runtime = {
+        ...current.runtime,
+        sequence: current.runtime.sequence + 1,
+        authorityEpoch: admission.authorityEpoch,
+        engineInstanceId: admission.engineInstanceId,
+      };
+      return this.runtimeTarget(
+        current as AccessLease & {
+          runtime: RuntimeLease;
+          tunnel: CloudWorkspaceTunnelHandle;
+        },
+        admission,
+      );
+    }
+
+    const releaseCapacity = this.reserveCapacity();
+    try {
+      const replacement = await this.createRuntimeLease({
+        token,
+        target: {
+          organizationId: input.organizationId,
+          workspaceId: input.workspaceId,
+        },
+        admission,
+        runtimeId: input.runtimeId,
+        sequence: input.connectionSequence + 1,
+      });
+      if (
+        this.runtimeById.get(input.runtimeId) !== accessId ||
+        current.runtime.sequence !== input.connectionSequence
+      ) {
+        await replacement.tunnel.stop().catch(() => undefined);
+        await this.cleanupSsh(token, replacement).catch(() => undefined);
+        throw new CloudWorkspaceAccessClientError(
+          409,
+          "cloud_workspace_access_superseded",
+          "The cloud workspace runtime session has been superseded",
+        );
+      }
+      current.runtime = undefined;
+      this.remember(replacement);
+      await current.tunnel.stop().catch(() => undefined);
+      current.tunnel = undefined;
+      return this.runtimeTarget(replacement, admission);
+    } finally {
+      releaseCapacity();
+    }
+  }
+
+  async closeRuntime(runtimeId: string): Promise<boolean> {
+    this.pruneExpired();
+    const accessId = this.runtimeById.get(runtimeId);
+    return accessId ? this.revoke(accessId) : false;
+  }
+
   async revoke(accessId: string): Promise<boolean> {
     this.pruneExpired();
     const lease = this.leases.get(accessId);
@@ -678,7 +1103,7 @@ export class CloudWorkspaceAccessBroker {
       credential: lease.credential,
     });
     if (lease.kind === "preview") {
-      this.leases.delete(accessId);
+      this.forgetLease(accessId, lease);
       if (
         lease.frameName &&
         this.previewByFrame.get(lease.frameName) === accessId
@@ -699,7 +1124,7 @@ export class CloudWorkspaceAccessBroker {
       ) {
         continue;
       }
-      this.leases.delete(id);
+      this.forgetLease(id, candidate);
       if (id !== accessId && candidate.tunnel) {
         await candidate.tunnel.stop().catch(() => undefined);
       }
@@ -720,6 +1145,7 @@ export class CloudWorkspaceAccessBroker {
     const leases = [...this.leases.values()];
     this.leases.clear();
     this.previewByFrame.clear();
+    this.runtimeById.clear();
     for (const lease of leases) lease.previewAuthorizationCleanup?.();
     const localCleanup = Promise.resolve().then(() =>
       this.disposeLocalAccess(),

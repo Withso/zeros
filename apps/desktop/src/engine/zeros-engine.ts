@@ -30,6 +30,7 @@ import { startSettingsWatcher, type SettingsWatcher } from "./settings/watch";
 import { startGitWatcher, type GitWatcher } from "./git/watch";
 import { LocalTransport } from "./transport/local";
 import { CloudTransport, parseCloudTransportPort } from "./transport/cloud";
+import { readObservedCloudWorkspacePorts } from "./cloud-observed-ports";
 import { CloudPreviewGatewayFactory } from "./agents/containment/cloud-preview-links";
 import type { Transport, TransportClient } from "./transport/types";
 import {
@@ -40,6 +41,7 @@ import {
 } from "./runtime";
 import { shouldLogAgentDispatch } from "./agent-dispatch-logging";
 import { engineRuntimeDir, zerosDataDir } from "./db/paths";
+import { openZerosDb } from "./db";
 import {
   buildAccountAuthFromEnv,
   assertQualifiedCloudAccountBinding,
@@ -168,6 +170,12 @@ import {
   vaultControlLine,
   type VaultSnapshot,
 } from "./agents/gateway/vault-persist";
+import { CloudReplicaRuntime } from "./cloud-replica-runtime";
+import { CloudWorkspaceForkRuntime } from "./cloud-workspace-fork-runtime";
+import {
+  parseCloudReplicaHostSessionMessage,
+  parseCloudReplicaProofResponse,
+} from "./cloud-replica-host-control";
 import { canonicalResourceUri } from "./agents/gateway/oauth-url";
 import { resolveClaudeBinary } from "./agents/claude-binary";
 import { AgentFailureError, type AgentGatewayOptions } from "./agents/types";
@@ -186,8 +194,14 @@ import {
 import {
   CloudRuntimeRegistration,
   consumeCloudRuntimeEnvironment,
+  type CloudCheckpointDirective,
   type CloudRuntimeConfig,
 } from "./cloud-runtime-registration";
+import {
+  CloudWorkspaceDurabilityRuntime,
+  type CloudDurabilityAuthority,
+} from "./cloud-durability-runtime";
+import { CloudWorkspaceRecordRuntime } from "./cloud-record-runtime";
 import type {
   SessionNotification,
   RequestPermissionRequest,
@@ -974,7 +988,17 @@ export class ZerosEngine {
   private ownerAccountSub: string | null = null;
   private readonly cloudRuntimeConfig: CloudRuntimeConfig | null;
   private readonly cloudRuntimeRegistration: CloudRuntimeRegistration | null;
+  private readonly cloudDurabilityRuntime: CloudWorkspaceDurabilityRuntime | null;
+  private readonly cloudRecordRuntime: CloudWorkspaceRecordRuntime | null;
+  /** Device-private receive-only cloud replicas exist only in a desktop-hosted
+   * engine. The host retains the signing key; this runtime owns SQLite,
+   * filesystem apply, convergence, and short-lived bearer use. */
+  private readonly cloudReplicaRuntime: CloudReplicaRuntime | null;
+  /** Desktop-only, restart-safe local↔cloud copy coordinator. Sources remain
+   * untouched and every destination receives a distinct canonical UUID. */
+  private readonly cloudWorkspaceForkRuntime: CloudWorkspaceForkRuntime | null;
   private cloudRuntimeAuthorityStopping = false;
+  private cloudRuntimeCheckpointQuiescing = false;
   // Native per-CLI adapter runtime — multiplexes the per-agent
   // adapter implementations behind a single gateway surface.
   private agents: AgentGateway;
@@ -992,6 +1016,12 @@ export class ZerosEngine {
     this.root = options?.root
       ? path.resolve(options.root)
       : findProjectRoot(process.cwd());
+    this.cloudDurabilityRuntime = this.cloudRuntimeConfig
+      ? new CloudWorkspaceDurabilityRuntime(this.root)
+      : null;
+    this.cloudRecordRuntime = this.cloudRuntimeConfig
+      ? new CloudWorkspaceRecordRuntime(this.root)
+      : null;
     this.port = options?.port ?? engineBasePort();
     const requestedPortStart = options?.portStart ?? this.port;
     this.portStart =
@@ -1103,6 +1133,18 @@ export class ZerosEngine {
     // Initialize components
     this.cache = new EngineCache(this.root);
     this.workspace = new WorkspaceService(this.root);
+    this.cloudReplicaRuntime = cloudWorker
+      ? null
+      : new CloudReplicaRuntime(openZerosDb(), {
+          emitHostControl: (line) => this.publishPrivateHostControl(line),
+          logger: console,
+        });
+    this.cloudWorkspaceForkRuntime = this.cloudReplicaRuntime
+      ? new CloudWorkspaceForkRuntime(openZerosDb(), {
+          context: () => this.cloudReplicaRuntime!.cloudWorkspaceContext(),
+          logger: console,
+        })
+      : null;
     this.workspace.setRepoTaskBoundaryFactory(repoTaskBoundaryFactory);
     // Let the mcp.gateway.* ops reach the (lazily-created) gateway instance.
     this.workspace.setGatewayAccessor(() => this.mcpGateway);
@@ -1603,14 +1645,12 @@ export class ZerosEngine {
     });
     this.transports = [this.local];
 
-    // Cloud transport: when the engine runs inside a remote
-    // sandbox the bootstrap sets ZEROS_CLOUD_PORT, and we add a SECOND transport
-    // that binds 0.0.0.0 on that port so the Mac renderer can reach it over the
-    // sandbox's public preview-URL WSS. It is a separate transport — LocalTransport's
-    // loopback gate is untouched (do NOT relax it; see transport/cloud.ts). Inert
-    // in the local desktop build (the env var is unset). The worker-minted
-    // bridge token is mandatory; account binding adds a second gate when it is
-    // configured.
+    // Cloud transport: when the engine runs inside a remote sandbox the
+    // bootstrap sets ZEROS_CLOUD_PORT, and we add a SECOND transport that binds
+    // 0.0.0.0 on that port. Electron main reaches it through an exact-generation
+    // SSH loopback tunnel. LocalTransport's loopback/origin gate remains
+    // untouched. Production upgrades require one-use control-plane admission;
+    // the static token exists only for the qualification profile.
     const cloudPort = parseCloudTransportPort(process.env.ZEROS_CLOUD_PORT);
     if (
       this.cloudRuntimeConfig &&
@@ -1623,6 +1663,14 @@ export class ZerosEngine {
     this.cloudRuntimeRegistration = this.cloudRuntimeConfig
       ? new CloudRuntimeRegistration(this.cloudRuntimeConfig, {
           onAuthorityLost: () => this.handleCloudRuntimeAuthorityLoss(),
+          onDurableRecordSync: (authority) => {
+            if (!this.cloudRecordRuntime) {
+              throw new Error("cloud durable record runtime is unavailable");
+            }
+            return this.cloudRecordRuntime.synchronize(authority);
+          },
+          onCheckpointRequested: (directive, authority) =>
+            this.handleCloudCheckpointRequest(directive, authority),
           readRepositoryCredentialRefresh: () =>
             readCloudGithubCredentialRefreshRequest(),
           installRepositoryCredential: (document) => {
@@ -1636,6 +1684,10 @@ export class ZerosEngine {
           },
           acknowledgeRepositoryCredentialRefresh: (generation) =>
             acknowledgeCloudGithubCredentialRefreshRequest({ generation }),
+          readObservedPorts: () =>
+            readObservedCloudWorkspacePorts({
+              excludedPorts: [22_222, cloudPort!],
+            }),
         })
       : null;
     if (cloudPort !== null) {
@@ -1648,6 +1700,8 @@ export class ZerosEngine {
                 token: this.cloudRuntimeConfig.engine.readinessProbeToken,
                 read: () => this.cloudRuntimeRegistration!.readiness(),
               },
+              verifyToken: (token: string) =>
+                this.cloudRuntimeRegistration!.verifyClientAdmission(token),
             }
           : {}),
       });
@@ -2200,13 +2254,19 @@ export class ZerosEngine {
   }
 
   private publishLocalAuthorityToHost(): void {
+    this.publishPrivateHostControl(
+      engineLocalAuthorityControlLine(this.localToken),
+    );
+  }
+
+  private publishPrivateHostControl(line: string): void {
     const fd = Number(process.env.ZEROS_CONTROL_FD);
     if (!Number.isInteger(fd) || fd <= 2) return;
     try {
-      fs.writeSync(fd, engineLocalAuthorityControlLine(this.localToken));
+      fs.writeSync(fd, line);
     } catch {
       // Without the sidecar control pipe the parent cannot authenticate the
-      // renderer and therefore never publishes this child as ready.
+      // renderer or service private host-owned credential requests.
     }
   }
 
@@ -2741,6 +2801,12 @@ export class ZerosEngine {
     if (this.cloudRuntimeRegistration) {
       await settle(() => this.cloudRuntimeRegistration!.stop());
     }
+    if (this.cloudWorkspaceForkRuntime) {
+      await settle(() => this.cloudWorkspaceForkRuntime!.dispose());
+    }
+    if (this.cloudReplicaRuntime) {
+      await settle(() => this.cloudReplicaRuntime!.dispose());
+    }
 
     if (this.bindingSweep) {
       clearInterval(this.bindingSweep);
@@ -2821,6 +2887,42 @@ export class ZerosEngine {
       });
   }
 
+  private async handleCloudCheckpointRequest(
+    directive: CloudCheckpointDirective,
+    authority: CloudDurabilityAuthority,
+  ): Promise<void> {
+    if (
+      !this.cloudDurabilityRuntime ||
+      !this.cloudRecordRuntime ||
+      this.cloudRuntimeCheckpointQuiescing
+    ) {
+      throw new Error("cloud checkpoint runtime is unavailable");
+    }
+    this.cloudRuntimeCheckpointQuiescing = true;
+    const retainQuiescence = [
+      "before_stop",
+      "before_archive",
+      "before_delete",
+      "before_rebuild",
+    ].includes(directive.reason);
+    try {
+      await this.waitForWorkspaceProcessStartSnapshot(
+        "cloud-final-checkpoint",
+        [...this.globalDesignAuthorityStarts],
+      );
+      await this.setup.stopAllAndProve();
+      await this.runs.stopAllAndProve();
+      await this.retireAllCodeAgentSessionsForTerritoryChange();
+      await this.terminals.clear();
+      await this.cloudRecordRuntime.synchronize(authority);
+      await this.cloudDurabilityRuntime.checkpoint(directive, authority);
+      if (!retainQuiescence) this.cloudRuntimeCheckpointQuiescing = false;
+    } catch (error) {
+      this.cloudRuntimeCheckpointQuiescing = false;
+      throw error;
+    }
+  }
+
   /** Fan a message out to every connected client (across all transports). */
   private broadcast(msg: EngineMessage): void {
     this.router.broadcast(msg);
@@ -2834,6 +2936,9 @@ export class ZerosEngine {
   private workspaceProcessStartBlock(
     workspaceId: string | null | undefined,
   ): string | null {
+    if (this.cloudRuntimeCheckpointQuiescing) {
+      return "This cloud workspace is creating a final durable checkpoint.";
+    }
     if (this.globalDesignTerritoryTransitionCount > 0) {
       return GLOBAL_DESIGN_TERRITORY_TRANSITION_MESSAGE;
     }
@@ -7245,6 +7350,113 @@ export class ZerosEngine {
 
   // ── Remote Workspace API ───────────────────────────────
 
+  /** Non-UI desktop foundation for per-device receive-only replicas. These
+   * operations are intentionally absent from the remote allowlist: the local
+   * filesystem path and device binding are meaningful only to this Mac. */
+  private handleCloudReplicaOperation(
+    op: string,
+    params: Record<string, unknown>,
+  ): unknown | Promise<unknown> {
+    const runtime = this.cloudReplicaRuntime;
+    if (!runtime) throw new Error("Cloud replicas require a desktop host");
+    const required = (key: string): string => {
+      const value = params[key];
+      if (typeof value !== "string" || value.length < 1) {
+        throw new Error(`${key} is required`);
+      }
+      return value;
+    };
+    switch (op) {
+      case "cloudReplica.list":
+        return runtime.list();
+      case "cloudReplica.divergences":
+        return runtime.divergences(required("replicaId"));
+      case "cloudReplica.create":
+        return runtime.create({
+          organizationId: required("organizationId"),
+          workspaceId: required("workspaceId"),
+          rootPath: required("rootPath"),
+          pathLabel:
+            params.pathLabel === null || typeof params.pathLabel === "string"
+              ? params.pathLabel
+              : null,
+          ignorePolicy:
+            params.ignorePolicy && typeof params.ignorePolicy === "object"
+              ? (params.ignorePolicy as never)
+              : undefined,
+          idempotencyKey: required("idempotencyKey"),
+        });
+      case "cloudReplica.pause":
+        return runtime.pause(required("replicaId"), required("idempotencyKey"));
+      case "cloudReplica.resume":
+        return runtime.resume(
+          required("replicaId"),
+          required("idempotencyKey"),
+          params.replaceDiverged === true,
+        );
+      case "cloudReplica.remove":
+        return runtime.remove(
+          required("replicaId"),
+          required("idempotencyKey"),
+        );
+      case "cloudReplica.relocate":
+        return runtime.relocate(required("replicaId"), required("rootPath"));
+      case "cloudReplica.sync":
+        return runtime.syncNow(required("replicaId"));
+      default:
+        throw new Error("Unknown cloud replica operation");
+    }
+  }
+
+  /** Non-UI desktop foundation for copy-like local↔cloud workflows. These are
+   * local-only operations: a relay cannot choose a Mac path or initiate a copy
+   * through the desktop engine. */
+  private handleCloudForkOperation(
+    op: string,
+    params: Record<string, unknown>,
+  ): unknown | Promise<unknown> {
+    const runtime = this.cloudWorkspaceForkRuntime;
+    if (!runtime)
+      throw new Error("Cloud workspace copies require a desktop host");
+    const required = (key: string): string => {
+      const value = params[key];
+      if (typeof value !== "string" || value.length < 1) {
+        throw new Error(`${key} is required`);
+      }
+      return value;
+    };
+    switch (op) {
+      case "cloudFork.list":
+        return runtime.list();
+      case "cloudFork.resume":
+        return runtime.run(required("jobId"));
+      case "cloudFork.localToCloud":
+        if (!params.repository || typeof params.repository !== "object") {
+          throw new Error("repository is required");
+        }
+        return runtime.copyLocalToCloud({
+          sourceWorkspaceAlias: required("sourceWorkspaceAlias"),
+          organizationId: required("organizationId"),
+          ...(typeof params.name === "string" ? { name: params.name } : {}),
+          ...(typeof params.teamId === "string"
+            ? { teamId: params.teamId }
+            : {}),
+          repository: params.repository as never,
+          includeChats: params.includeChats !== false,
+          includeSettings: params.includeSettings !== false,
+        });
+      case "cloudFork.cloudToLocal":
+        return runtime.copyCloudToLocal({
+          organizationId: required("organizationId"),
+          sourceWorkspaceId: required("sourceWorkspaceId"),
+          repoRoot: required("repoRoot"),
+          includeChats: params.includeChats !== false,
+        });
+      default:
+        throw new Error("Unknown cloud workspace copy operation");
+    }
+  }
+
   /** Dispatch a WORKSPACE_REQUEST (files / git read+write) to the workspace
    *  service. Writes from a remote (relay) client are gated by the
    *  remote-restriction list (authorizeRemoteWrite), not a per-op host prompt. */
@@ -7322,10 +7534,15 @@ export class ZerosEngine {
       // process admission is closed, so the already-safe transcript itself
       // stays readable during a Design territory transition.
       const startedAt = Date.now();
-      const dispatch = () =>
-        this.workspace.handle(op, params, {
-          remote: hostRelay,
-        });
+      const dispatch = async () =>
+        op.startsWith("cloudReplica.")
+          ? await this.handleCloudReplicaOperation(op, params)
+          : op.startsWith("cloudFork.")
+            ? await this.handleCloudForkOperation(op, params)
+            : this.workspace.handle(op, params, {
+                hostLocalResources: client.kind === "local",
+                remote: hostRelay,
+              });
       // Every worktree-rewriting Git op can introduce, remove, rename, or
       // retarget Design territory (including when the current tree has none).
       // Freeze process admission and retire live code sandboxes before Git
@@ -8114,6 +8331,19 @@ export class ZerosEngine {
     msg: Extract<EngineMessage, { type: "CONNECTED" }>,
     client: TransportClient,
   ): Promise<void> {
+    // A qualified cloud connection was already authenticated by the control
+    // plane through the exact engine heartbeat channel. Bind that server-owned
+    // account identity directly; never require (or receive) a reusable WorkOS
+    // access token inside the customer sandbox.
+    if (client.kind === "cloud" && client.accountUserId) {
+      this.clientAccount.set(client.id, client.accountUserId);
+      appendSecurityAudit({
+        type: "account-bound",
+        clientId: client.id,
+        accountSub: client.accountUserId,
+      });
+      return;
+    }
     if (!this.accountAuth) return;
     const token = typeof msg.authToken === "string" ? msg.authToken : "";
 
@@ -9043,6 +9273,26 @@ export class ZerosEngine {
     try {
       msg = JSON.parse(line);
     } catch {
+      return;
+    }
+    if (msg.type === "host.cloudReplicaSession") {
+      const session = parseCloudReplicaHostSessionMessage(msg);
+      // A malformed authority refresh clears the prior bearer instead of
+      // leaving stale access active. Other host-control message types return
+      // `undefined` but cannot reach this branch.
+      void this.cloudReplicaRuntime
+        ?.updateSession(session ?? null)
+        .then(() => this.cloudWorkspaceForkRuntime?.wake())
+        .catch((error) =>
+          console.warn(
+            `[cloud-replica] host session rejected (${error instanceof Error ? error.name : "unknown"})`,
+          ),
+        );
+      return;
+    }
+    if (msg.type === "host.cloudReplicaProofResponse") {
+      const response = parseCloudReplicaProofResponse(msg);
+      if (response) this.cloudReplicaRuntime?.handleProofResponse(response);
       return;
     }
     if (msg.type === "host.githubToken") {

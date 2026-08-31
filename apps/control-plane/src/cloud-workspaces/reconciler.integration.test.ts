@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import pg from "pg";
 
@@ -13,6 +13,11 @@ import {
   type CloudWorkspaceProvider,
 } from "./provider.js";
 import { CloudWorkspaceReconciler } from "./reconciler.js";
+import {
+  seedCanonicalCloudWorkspaceAuthority,
+  seedCanonicalCloudWorkspacePrerequisites,
+  seedCanonicalWorkspaceSettingsVersion,
+} from "./test-fixtures.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -221,34 +226,64 @@ d("cloud workspace reconciliation", () => {
     const desiredState = input?.desiredState ?? "running";
     const status = input?.status ?? "requested";
     const operation = input?.operation ?? "create";
+    let providerConnectionId = "";
     await withSystemTx(pool, async (tx) => {
+      const canonical = await seedCanonicalCloudWorkspacePrerequisites(tx, {
+        organizationId: orgId,
+        ownerUserId: ownerId,
+      });
+      providerConnectionId = canonical.providerConnectionId;
       await tx.query(
         `INSERT INTO cloud_workspaces (
            id, org_id, team_id, created_by, display_name,
            repository_forge, repository_owner, repository_name,
-           repository_revision, status, desired_state
+           repository_revision, repository_id, owner_user_id,
+           assignee_user_id, status, desired_state
          ) VALUES ($1, $2, $3, $4, 'Test', 'github.com', 'withso',
-                   'zeros', 'main', $5::cloud_workspace_status,
-                   $6::cloud_workspace_desired_state)`,
-        [workspaceId, orgId, teamId, ownerId, status, desiredState],
+                   'zeros', 'main', $5, $4, $4,
+                   $6::cloud_workspace_status,
+                   $7::cloud_workspace_desired_state)`,
+        [
+          workspaceId,
+          orgId,
+          teamId,
+          ownerId,
+          canonical.repositoryId,
+          status,
+          desiredState,
+        ],
       );
+      await seedCanonicalCloudWorkspaceAuthority(tx, {
+        workspaceId,
+        organizationId: orgId,
+        ownerUserId: ownerId,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by
+           source_commit, created_by, provider_connection_id
          ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
-                   2000, 4096, 20480, $3, $4)`,
-        [workspaceId, orgId, "a".repeat(40), ownerId],
+                   2000, 4096, 20480, $3, $4, $5)`,
+        [workspaceId, orgId, "a".repeat(40), ownerId, providerConnectionId],
       );
+      const settingsDocument = { schemaVersion: 1, values: {} };
+      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(tx, {
+        workspaceId,
+        organizationId: orgId,
+        generation: 1,
+        createdBy: ownerId,
+        effectiveDocument: settingsDocument,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_setup_specs (
            workspace_id, generation, org_id, repository_forge,
            repository_owner, repository_name, repository_revision,
-           settings_snapshot, settings_snapshot_sha256
+           settings_snapshot, settings_snapshot_sha256,
+           workspace_settings_version_id
          ) VALUES ($1, 1, $2, 'github.com', 'withso', 'zeros', 'main',
-                   $3::jsonb, digest($3::jsonb::text, 'sha256'))`,
-        [workspaceId, orgId, JSON.stringify({ schemaVersion: 1, values: {} })],
+                   $3::jsonb, digest($3::jsonb::text, 'sha256'), $4)`,
+        [workspaceId, orgId, JSON.stringify(settingsDocument), settingsVersionId],
       );
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
@@ -282,7 +317,7 @@ d("cloud workspace reconciliation", () => {
         ],
       );
     });
-    return { workspaceId, intentId };
+    return { workspaceId, intentId, providerConnectionId };
   };
 
   const seedGenerationTransition = async () => {
@@ -299,22 +334,38 @@ d("cloud workspace reconciliation", () => {
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by
+           source_commit, created_by, provider_connection_id
          ) VALUES ($1, 2, $2, 'daytona', 'snap-next', 'linux/amd64',
-                   2000, 4096, 20480, $3, $4)`,
-        [seeded.workspaceId, orgId, "b".repeat(40), ownerId],
+                   2000, 4096, 20480, $3, $4, $5)`,
+        [
+          seeded.workspaceId,
+          orgId,
+          "b".repeat(40),
+          ownerId,
+          seeded.providerConnectionId,
+        ],
       );
+      const settingsDocument = { schemaVersion: 1, values: {} };
+      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(tx, {
+        workspaceId: seeded.workspaceId,
+        organizationId: orgId,
+        generation: 2,
+        createdBy: ownerId,
+        effectiveDocument: settingsDocument,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_setup_specs (
            workspace_id, generation, org_id, repository_forge,
            repository_owner, repository_name, repository_revision,
-           settings_snapshot, settings_snapshot_sha256
+           settings_snapshot, settings_snapshot_sha256,
+           workspace_settings_version_id
          ) VALUES ($1, 2, $2, 'github.com', 'withso', 'zeros', 'main',
-                   $3::jsonb, digest($3::jsonb::text, 'sha256'))`,
+                   $3::jsonb, digest($3::jsonb::text, 'sha256'), $4)`,
         [
           seeded.workspaceId,
           orgId,
-          JSON.stringify({ schemaVersion: 1, values: {} }),
+          JSON.stringify(settingsDocument),
+          settingsVersionId,
         ],
       );
       await tx.query(
@@ -372,26 +423,50 @@ d("cloud workspace reconciliation", () => {
     const transitionId = randomUUID();
     const drainIntentId = randomUUID();
     await withSystemTx(pool, async (tx) => {
+      const setupRunId = randomUUID();
+      const registrationGrantId = randomUUID();
+      const engineInstanceId = randomUUID();
+      const checkpointId = randomUUID();
+      const manifestBlobId = randomUUID();
+      const contentDigest = createHash("sha256")
+        .update(`checkpoint:${checkpointId}`)
+        .digest();
       await tx.query(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by
+           source_commit, created_by, provider_connection_id
          ) VALUES ($1, 2, $2, 'daytona', 'snap-next', 'linux/amd64',
-                   2000, 4096, 20480, $3, $4)`,
-        [seeded.workspaceId, orgId, "b".repeat(40), ownerId],
+                   2000, 4096, 20480, $3, $4, $5)`,
+        [
+          seeded.workspaceId,
+          orgId,
+          "b".repeat(40),
+          ownerId,
+          seeded.providerConnectionId,
+        ],
       );
+      const settingsDocument = { schemaVersion: 1, values: {} };
+      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(tx, {
+        workspaceId: seeded.workspaceId,
+        organizationId: orgId,
+        generation: 2,
+        createdBy: ownerId,
+        effectiveDocument: settingsDocument,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_setup_specs (
            workspace_id, generation, org_id, repository_forge,
            repository_owner, repository_name, repository_revision,
-           settings_snapshot, settings_snapshot_sha256
+           settings_snapshot, settings_snapshot_sha256,
+           workspace_settings_version_id
          ) VALUES ($1, 2, $2, 'github.com', 'withso', 'zeros', 'main',
-                   $3::jsonb, digest($3::jsonb::text, 'sha256'))`,
+                   $3::jsonb, digest($3::jsonb::text, 'sha256'), $4)`,
         [
           seeded.workspaceId,
           orgId,
-          JSON.stringify({ schemaVersion: 1, values: {} }),
+          JSON.stringify(settingsDocument),
+          settingsVersionId,
         ],
       );
       await tx.query(
@@ -429,11 +504,123 @@ d("cloud workspace reconciliation", () => {
         [drainIntentId, transitionId],
       );
       await tx.query(
-        `UPDATE cloud_workspaces
-         SET current_generation = 2, status = 'provisioning',
-             version = version + 1, updated_at = now()
-         WHERE id = $1`,
-        [seeded.workspaceId],
+        `INSERT INTO cloud_workspace_setup_runs (
+           id, workspace_id, generation, org_id, attempt, state, claim_count,
+           execution_fence, lease_owner, lease_expires_at, last_heartbeat_at,
+           started_at
+         ) VALUES ($1, $2, 1, $3, 1, 'running', 1, 1, 'fixture',
+                   now() + interval '10 minutes', now(), now())`,
+        [setupRunId, seeded.workspaceId, orgId],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_endpoint_grants (
+           id, workspace_id, generation, org_id, account_user_id, purpose,
+           audience, token_hash, account_revision, authorization_revision,
+           expires_at, consumed_at
+         ) VALUES ($1, $2, 1, $3, $4, 'engine-connect', 'fixture', $5,
+                   1, 1, now() + interval '10 minutes', now())`,
+        [
+          registrationGrantId,
+          seeded.workspaceId,
+          orgId,
+          ownerId,
+          randomBytes(32),
+        ],
+      );
+      await tx.query(
+        `INSERT INTO cloud_workspace_engine_instances (
+           id, workspace_id, generation, org_id, account_user_id, setup_run_id,
+           setup_execution_fence, registration_grant_id, protocol_version,
+           state, bridge_token_hash, heartbeat_token_hash, registered_at,
+           last_heartbeat_at, lease_expires_at
+         ) VALUES ($1, $2, 1, $3, $4, $5, 1, $6, 11, 'ready', $7, $8,
+                   now(), now(), now() + interval '10 minutes')`,
+        [
+          engineInstanceId,
+          seeded.workspaceId,
+          orgId,
+          ownerId,
+          setupRunId,
+          registrationGrantId,
+          randomBytes(32),
+          randomBytes(32),
+        ],
+      );
+      await tx.query(
+        `INSERT INTO workspace_content_heads (
+           workspace_id, org_id, current_revision, durable_revision,
+           last_durable_at
+         ) VALUES ($1, $2, 1, 1, now())`,
+        [seeded.workspaceId, orgId],
+      );
+      await tx.query(
+        `INSERT INTO workspace_content_revisions (
+           workspace_id, org_id, revision, parent_revision, authority_epoch,
+           generation, engine_instance_id, idempotency_key, request_sha256,
+           changed_entry_count
+         ) VALUES ($1, $2, 1, 0, 1, 1, $3, $4, $5, 1)`,
+        [
+          seeded.workspaceId,
+          orgId,
+          engineInstanceId,
+          `checkpoint-content-${randomUUID()}`,
+          contentDigest,
+        ],
+      );
+      await tx.query(
+        `INSERT INTO workspace_blobs (
+           id, org_id, plaintext_sha256, ciphertext_sha256,
+           plaintext_bytes, ciphertext_bytes, object_key,
+           encryption_key_version, nonce, auth_tag, state, available_at
+         ) VALUES ($1, $2, $3, $3, 2, 2, $4, 1, $5, $6,
+                   'available', now())`,
+        [
+          manifestBlobId,
+          orgId,
+          contentDigest,
+          `fixture/checkpoint/${checkpointId}`,
+          randomBytes(12),
+          randomBytes(16),
+        ],
+      );
+      await tx.query(
+        `INSERT INTO workspace_checkpoints (
+           id, workspace_id, org_id, idempotency_key, request_sha256,
+           content_revision, record_revision, authority_epoch, generation,
+           reason, manifest_blob_id, inclusion_policy, file_count, total_bytes,
+           state, integrity_sha256, durable_at
+         ) VALUES ($1, $2, $3, $4, $5, 1, 0, 1, 1, 'before_rebuild',
+                   $6, '{}', 0, 0, 'durable', $5, now())`,
+        [
+          checkpointId,
+          seeded.workspaceId,
+          orgId,
+          `checkpoint-${randomUUID()}`,
+          contentDigest,
+          manifestBlobId,
+        ],
+      );
+      await tx.query(
+        `UPDATE workspace_content_heads
+         SET current_checkpoint_id = $2
+         WHERE workspace_id = $1`,
+        [seeded.workspaceId, checkpointId],
+      );
+      await tx.query(
+        `INSERT INTO workspace_checkpoint_requests (
+           workspace_id, generation, org_id, requested_by,
+           lifecycle_intent_id, reason, state, idempotency_key,
+           checkpoint_id, deadline_at, completed_at
+         ) VALUES ($1, 1, $2, $3, $4, 'before_rebuild', 'succeeded', $5,
+                   $6, now() + interval '10 minutes', now())`,
+        [
+          seeded.workspaceId,
+          orgId,
+          ownerId,
+          drainIntentId,
+          `generation.${transitionId}`,
+          checkpointId,
+        ],
       );
     });
     return { ...seeded, transitionId, drainIntentId };
@@ -482,6 +669,43 @@ d("cloud workspace reconciliation", () => {
       observed_state: "running",
       setup_state: "queued",
     });
+  });
+
+  it("allows delete to bypass an unfinished local-copy upload gate", async () => {
+    const seeded = await seedWorkspace({
+      desiredState: "deleted",
+      status: "deleting",
+      operation: "delete",
+      providerResourceId: "bound-resource",
+      observedState: "running",
+    });
+    await pool.query(
+      `INSERT INTO workspace_fork_intents (
+         org_id, requested_by, operation, source_local_workspace_id,
+         target_cloud_workspace_id, source_revision, idempotency_key,
+         request_sha256
+       ) VALUES ($1, $2, 'local_to_cloud', $3, $4, 0, $5, $6)`,
+      [
+        orgId,
+        ownerId,
+        randomUUID(),
+        seeded.workspaceId,
+        `fork-${randomUUID()}`,
+        createHash("sha256").update("unfinished-fork").digest(),
+      ],
+    );
+    const provider = new FakeProvider();
+    provider.resources.set(
+      "bound-resource",
+      provider.make(
+        { workspaceId: seeded.workspaceId, generation: 1 },
+        "running",
+        "bound-resource",
+      ),
+    );
+
+    await expect(reconciler(provider).runOnce()).resolves.toBe(true);
+    expect(provider.deleteCount).toBe(1);
   });
 
   it("recovers a timeout after provider dispatch without creating a duplicate", async () => {
@@ -864,10 +1088,16 @@ d("cloud workspace reconciliation", () => {
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by
+           source_commit, created_by, provider_connection_id
          ) VALUES ($1, 2, $2, 'daytona', 'snap-pinned', 'linux/amd64',
-                   2000, 4096, 20480, $3, $4)`,
-        [seeded.workspaceId, orgId, "b".repeat(40), ownerId],
+                   2000, 4096, 20480, $3, $4, $5)`,
+        [
+          seeded.workspaceId,
+          orgId,
+          "b".repeat(40),
+          ownerId,
+          seeded.providerConnectionId,
+        ],
       );
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
@@ -917,10 +1147,16 @@ d("cloud workspace reconciliation", () => {
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by
+           source_commit, created_by, provider_connection_id
          ) VALUES ($1, 2, $2, 'daytona', 'snap-next', 'linux/amd64',
-                   2000, 4096, 20480, $3, $4)`,
-        [seeded.workspaceId, orgId, "b".repeat(40), ownerId],
+                   2000, 4096, 20480, $3, $4, $5)`,
+        [
+          seeded.workspaceId,
+          orgId,
+          "b".repeat(40),
+          ownerId,
+          seeded.providerConnectionId,
+        ],
       );
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (

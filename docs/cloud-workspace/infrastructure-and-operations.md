@@ -53,9 +53,10 @@ wire values become compatibility contracts when introduced.
   interactive terminal, or an in-flight durable write.
 - Delete revokes grants first and completes only after provider inspection says
   the execution resource is gone.
-- A placement move has its own record-before-dispatch intent and source/target
-  authority epochs. It is complete only after the target is verified and the
-  old mutation grants are revoked.
+- A local↔cloud fork has a record-before-upload intent, distinct source/target
+  UUIDs, an expected snapshot/checkpoint, bounded staging, and a deadline. It
+  completes only after the destination is integrity-verified; it never revokes
+  or changes the source.
 
 ## Readiness and health
 
@@ -80,8 +81,9 @@ At minimum, record:
 - resource allocation, active/idle time, and quota decisions;
 - durable-write lag and restore results;
 - reconciliation drift and orphan cleanup; and
-- authority-move phase/rollback results, checkpoint integrity, replica lag and
-  divergence, SSH/preview/forward grant outcomes, and per-device tunnel health.
+- generation-replacement rollback and fork results, checkpoint integrity,
+  replica lag and divergence, SSH/preview/forward grant outcomes, and
+  per-device tunnel health.
 
 Do not set public reliability or latency promises until measurements exist from
 representative regions, repositories, agents, stop/wake cycles, and long-lived
@@ -99,8 +101,12 @@ only recovery or public identity mechanism.
 ## Durable services
 
 PostgreSQL owns structured tenant identity, authorization, lifecycle, settings
-versions, cursors, audit, usage, and ordering. An encrypted S3-compatible object
-store owns file blobs, checkpoints, transcript artifacts, and full bounded logs.
+versions, cursors, audit, usage, and ordering. The
+`CloudWorkspaceObjectStore` boundary owns encrypted file blobs, checkpoints,
+transcript artifacts, and full bounded logs. The hosted implementation can use
+a private mounted Railway volume through the hardened filesystem adapter; a
+future S3-compatible or customer-owned adapter must preserve conditional
+publication, strong read-back, integrity, deletion, and tenant-key contracts.
 An optional queue/cache may accelerate workers but cannot be the sole durable
 record. Use a transactional outbox so database commits and asynchronous work do
 not diverge.

@@ -2034,11 +2034,15 @@ export class WorkspaceService {
     return workspace;
   }
 
-  private async readDesignSnapshot(workspace: Workspace, remote: boolean) {
+  private async readDesignSnapshot(
+    workspace: Workspace,
+    remote: boolean,
+    hostLocalResources: boolean,
+  ) {
     // Restore keeps a workspace id but may adapt its checkout path. Include
     // that semantic owner in the flight key so an overlapping pre-archive read
     // can never satisfy the restored workspace from the old filesystem root.
-    const key = `${workspace.id}\u0000${nodePath.resolve(workspace.path)}\u0000${remote ? "remote" : "local"}`;
+    const key = `${workspace.id}\u0000${nodePath.resolve(workspace.path)}\u0000${remote ? "remote" : "local"}\u0000${hostLocalResources ? "host-resources" : "bridge-resources"}`;
     const current = this.designSnapshotFlights.get(key);
     if (current) return current;
     const request = (async () => {
@@ -2047,9 +2051,9 @@ export class WorkspaceService {
       });
       return {
         ...snapshot,
-        protocolCapability: remote
-          ? null
-          : (this.designProtocolCapabilityProvider?.(workspace.id) ?? null),
+        protocolCapability: hostLocalResources
+          ? (this.designProtocolCapabilityProvider?.(workspace.id) ?? null)
+          : null,
       };
     })();
     this.designSnapshotFlights.set(key, request);
@@ -2264,9 +2268,15 @@ export class WorkspaceService {
   async handle(
     op: string,
     params: Params = {},
-    opts: { remote?: boolean } = {},
+    opts: { remote?: boolean; hostLocalResources?: boolean } = {},
   ): Promise<unknown> {
     const remote = opts.remote === true;
+    // A qualified cloud worker grants its authenticated desktop client normal
+    // workspace authority, but its files do not live behind that Mac's local
+    // `zeros-design:` protocol handler. Keep those independent: remote relay
+    // policy controls operations, while this bit controls only host-local
+    // resource capabilities.
+    const hostLocalResources = opts.hostLocalResources ?? !remote;
     const lifecycleMutationWorkspaceId = this.lifecycleMutationWorkspaceId(
       op,
       params,
@@ -2514,7 +2524,7 @@ export class WorkspaceService {
         }
         return {
           result,
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
         };
       }
       case "design.history.undo":
@@ -2557,7 +2567,7 @@ export class WorkspaceService {
               throw error;
             }
             destination.push(entry);
-            const snapshot = await this.readDesignSnapshot(workspace, remote);
+            const snapshot = await this.readDesignSnapshot(workspace, remote, hostLocalResources);
             return {
               result: null,
               snapshot,
@@ -2582,7 +2592,7 @@ export class WorkspaceService {
           else history.bytes = Math.max(0, history.bytes - entry.bytes);
           return {
             result,
-            snapshot: await this.readDesignSnapshot(workspace, remote),
+            snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
             ...(result ? { historyFrame: entry.frame } : {}),
           };
         }
@@ -2594,7 +2604,7 @@ export class WorkspaceService {
         if (!frame) {
           return {
             result: null,
-            snapshot: await this.readDesignSnapshot(workspace, remote),
+            snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
           };
         }
         const documentId = designDocumentIdForFrame(frame);
@@ -2605,7 +2615,7 @@ export class WorkspaceService {
             : await api.redo(documentId);
         return {
           result,
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
         };
       }
       case "design.frames": {
@@ -2639,7 +2649,7 @@ export class WorkspaceService {
           remote,
         );
         return {
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
         };
       }
       case "design.tokens": {
@@ -2724,7 +2734,7 @@ export class WorkspaceService {
         }
         return {
           mutation,
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
           foundationRevision: {
             before: applied.receipt.beforeRevision,
             after: applied.receipt.afterRevision,
@@ -3046,7 +3056,7 @@ export class WorkspaceService {
         );
         return {
           frame,
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
         };
       }
       case "design.frame.rename": {
@@ -3076,7 +3086,7 @@ export class WorkspaceService {
         }
         return {
           frame,
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
         };
       }
       case "design.frame.duplicate": {
@@ -3097,7 +3107,7 @@ export class WorkspaceService {
         );
         return {
           frame,
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
         };
       }
       case "design.frame.delete": {
@@ -3115,7 +3125,7 @@ export class WorkspaceService {
         );
         return {
           deleted: { file: restorePoint.file },
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
         };
       }
       case "design.canvas.update": {
@@ -3158,7 +3168,7 @@ export class WorkspaceService {
         }
         return {
           geometry,
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
           foundationRevision: {
             before: applied.receipt.beforeRevision,
             after: applied.receipt.afterRevision,
@@ -3220,7 +3230,7 @@ export class WorkspaceService {
         }
         return {
           mutation,
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
           foundationRevision: {
             before: applied.receipt.beforeRevision,
             after: applied.receipt.afterRevision,
@@ -3285,7 +3295,7 @@ export class WorkspaceService {
         }
         return {
           mutation,
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
           foundationRevision: {
             before: applied.receipt.beforeRevision,
             after: applied.receipt.afterRevision,
@@ -3356,7 +3366,7 @@ export class WorkspaceService {
         }
         return {
           mutation,
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
           foundationRevision: {
             before: applied.receipt.beforeRevision,
             after: applied.receipt.afterRevision,
@@ -3418,7 +3428,7 @@ export class WorkspaceService {
         }
         return {
           mutation,
-          snapshot: await this.readDesignSnapshot(workspace, remote),
+          snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
           foundationRevision: {
             before: applied.receipt.beforeRevision,
             after: applied.receipt.afterRevision,
@@ -5678,7 +5688,7 @@ export class WorkspaceService {
           return {
             ok: true,
             mode,
-            snapshot: await this.readDesignSnapshot(workspace, remote),
+            snapshot: await this.readDesignSnapshot(workspace, remote, hostLocalResources),
           };
         } else {
           await exitDesignMode(workspace);

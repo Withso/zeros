@@ -24,6 +24,11 @@ import {
 import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import {
+  createServer,
+  type Server as NetServer,
+  type Socket as NetSocket,
+} from "node:net";
 
 import type { CloudWorkspaceTunnelHandle } from "./cloud-workspace-access-broker";
 
@@ -34,6 +39,7 @@ const DEFAULT_SSH_HOSTS = ["ssh.app.daytona.io"] as const;
 const MAX_SSH_STDERR_BYTES = 64 * 1024;
 const TUNNEL_CHECK_TIMEOUT_MS = 10_000;
 const NATIVE_LAUNCH_ACCEPTANCE_TIMEOUT_MS = 3_000;
+const MAX_DYNAMIC_TUNNEL_CONNECTIONS = 32;
 const SSH_HOST_KEY_TYPE_PATTERN = /^[A-Za-z0-9@._+-]{1,128}$/;
 const SSH_HOST_KEY_BLOB_PATTERN = /^[A-Za-z0-9+/]{16,21844}={0,2}$/;
 
@@ -46,6 +52,12 @@ type SshInput = {
 type TunnelInput = SshInput & {
   localHost: "127.0.0.1";
   localPort: number;
+  remoteHost: "127.0.0.1";
+  remotePort: number;
+};
+
+type DynamicTunnelInput = SshInput & {
+  localHost: "127.0.0.1";
   remoteHost: "127.0.0.1";
   remotePort: number;
 };
@@ -201,6 +213,48 @@ function waitForClose(child: ChildProcess, timeoutMs: number): Promise<void> {
       child.off("close", onClose);
     };
     child.once("close", onClose);
+  });
+}
+
+function listenOnLoopback(server: NetServer): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const onError = (error: Error) => {
+      cleanup();
+      reject(error);
+    };
+    const onListening = () => {
+      cleanup();
+      const address = server.address();
+      if (
+        !address ||
+        typeof address === "string" ||
+        address.address !== "127.0.0.1" ||
+        !appPort(address.port)
+      ) {
+        reject(new Error("Cloud workspace loopback proxy bound unsafely"));
+        return;
+      }
+      resolve(address.port);
+    };
+    const cleanup = () => {
+      server.off("error", onError);
+      server.off("listening", onListening);
+    };
+    server.once("error", onError);
+    server.once("listening", onListening);
+    server.listen({
+      host: "127.0.0.1",
+      port: 0,
+      exclusive: true,
+      ipv6Only: false,
+    });
+  });
+}
+
+function closeServer(server: NetServer): Promise<void> {
+  if (!server.listening) return Promise.resolve();
+  return new Promise((resolve) => {
+    server.close(() => resolve());
   });
 }
 
@@ -602,6 +656,154 @@ export class CloudWorkspaceSshRuntime {
       await this.removePreparedDirectory(prepared.directory);
       throw error;
     }
+  }
+
+  /** Bind an operating-system-selected loopback port atomically, then bridge
+   * each accepted TCP stream through a fixed OpenSSH stdio forward. This avoids
+   * the check-then-bind race inherent in probing a free port before `ssh -L`.
+   * Provider credentials stay in the owner-private config file. */
+  async startDynamicTunnel(
+    input: DynamicTunnelInput,
+  ): Promise<CloudWorkspaceTunnelHandle> {
+    if (
+      input.localHost !== "127.0.0.1" ||
+      input.remoteHost !== "127.0.0.1" ||
+      !appPort(input.remotePort)
+    ) {
+      throw new Error("Cloud workspace dynamic tunnel input is invalid");
+    }
+    const prepared = this.prepare(input);
+    const sockets = new Set<NetSocket>();
+    const children = new Set<ChildProcess>();
+    let stopping = false;
+    let stopPromise: Promise<void> | null = null;
+    const server = createServer({ pauseOnConnect: true });
+    server.maxConnections = MAX_DYNAMIC_TUNNEL_CONNECTIONS;
+
+    const stopChild = async (child: ChildProcess): Promise<void> => {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGTERM");
+        await waitForClose(child, 1_000);
+      }
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+        await waitForClose(child, 1_000);
+      }
+    };
+
+    const stop = (): Promise<void> => {
+      if (stopPromise) return stopPromise;
+      stopping = true;
+      stopPromise = (async () => {
+        for (const socket of sockets) socket.destroy();
+        await closeServer(server);
+        await Promise.allSettled([...children].map(stopChild));
+        await this.removePreparedDirectory(prepared.directory);
+      })();
+      return stopPromise;
+    };
+
+    server.on("connection", (socket) => {
+      if (
+        stopping ||
+        this.disposed ||
+        sockets.size >= MAX_DYNAMIC_TUNNEL_CONNECTIONS
+      ) {
+        socket.destroy();
+        return;
+      }
+      sockets.add(socket);
+      socket.setNoDelay(true);
+      let child: ChildProcess;
+      try {
+        child = this.spawn(
+          this.sshBinary,
+          [
+            "-F",
+            prepared.configPath,
+            "-T",
+            "-o",
+            "ConnectTimeout=10",
+            "-o",
+            "ServerAliveInterval=15",
+            "-o",
+            "ServerAliveCountMax=3",
+            "-W",
+            `${input.remoteHost}:${input.remotePort}`,
+            prepared.alias,
+          ],
+          {
+            stdio: ["pipe", "pipe", "pipe"],
+            detached: false,
+            shell: false,
+          },
+        );
+      } catch {
+        sockets.delete(socket);
+        socket.destroy();
+        return;
+      }
+      children.add(child);
+      let stderrBytes = 0;
+      let closed = false;
+      const closePair = (killChild = true) => {
+        if (closed) return;
+        closed = true;
+        sockets.delete(socket);
+        socket.destroy();
+        if (killChild && child.exitCode === null && child.signalCode === null) {
+          child.kill("SIGTERM");
+        }
+      };
+      child.stderr?.on("data", (chunk: Buffer | string) => {
+        stderrBytes += Buffer.byteLength(chunk);
+        if (stderrBytes > MAX_SSH_STDERR_BYTES) closePair();
+      });
+      child.once("error", () => closePair());
+      child.once("close", () => {
+        children.delete(child);
+        closePair(false);
+      });
+      socket.once("error", () => closePair());
+      socket.once("close", () => closePair());
+      if (!child.stdin || !child.stdout) {
+        closePair();
+        return;
+      }
+      child.stdin.once("error", () => closePair());
+      child.stdout.once("error", () => closePair());
+      void waitForSpawn(child)
+        .then(() => {
+          if (closed || stopping) return closePair();
+          socket.pipe(child.stdin!);
+          child.stdout!.pipe(socket);
+          socket.resume();
+        })
+        .catch(closePair);
+    });
+    server.on("error", () => {
+      if (!stopping) void stop();
+    });
+
+    let localPort: number;
+    try {
+      localPort = await listenOnLoopback(server);
+    } catch (error) {
+      await stop();
+      throw error;
+    }
+    const expiryTimer = setTimeout(
+      () => void stop(),
+      Math.max(1_000, Date.parse(input.expiresAt) - Date.now()),
+    );
+    expiryTimer.unref?.();
+    return {
+      localPort,
+      stop: async () => {
+        clearTimeout(expiryTimer);
+        await stop();
+      },
+    };
   }
 
   async startTunnel(input: TunnelInput): Promise<CloudWorkspaceTunnelHandle> {

@@ -20,6 +20,11 @@ import {
   sealCloudWorkspaceSetupSecret,
   type CloudWorkspaceRepositoryCredentialBroker,
 } from "./setup-materials.js";
+import {
+  seedCanonicalCloudWorkspaceAuthority,
+  seedCanonicalCloudWorkspacePrerequisites,
+  seedCanonicalWorkspaceSettingsVersion,
+} from "./test-fixtures.js";
 import type { CloudWorkspaceSetupExecution } from "./setup-worker.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -144,6 +149,12 @@ d("cloud workspace setup material redemption", () => {
         [organizationId, accountUserId],
       );
       await tx.query(
+        `INSERT INTO workos_organization_links (
+           organization_id, workos_organization_id, external_id, state
+         ) VALUES ($1, $2, $3, 'active')`,
+        [organizationId, `org_${organizationId}`, organizationId],
+      );
+      await tx.query(
         `INSERT INTO teams (
            id, org_id, slug, name, is_default, created_by
          ) VALUES ($1, $2, 'default', 'Default', true, $3)`,
@@ -168,24 +179,48 @@ d("cloud workspace setup material redemption", () => {
                    'withso', 'User', 'User')`,
         [installationId, accountUserId],
       );
+      const canonical = await seedCanonicalCloudWorkspacePrerequisites(tx, {
+        organizationId,
+        ownerUserId: accountUserId,
+        githubInstallationId: installationId,
+      });
       await tx.query(
         `INSERT INTO cloud_workspaces (
            id, org_id, team_id, created_by, display_name,
            repository_forge, repository_owner, repository_name,
-           repository_revision, github_installation_id, status, desired_state
+           repository_revision, github_installation_id, repository_id,
+           owner_user_id, assignee_user_id, status, desired_state
          ) VALUES ($1, $2, $3, $4, 'Setup Materials Workspace',
                    'github.com', 'withso', 'zeros', 'refs/heads/main', $5,
-                   'setting_up', 'running')`,
-        [workspaceId, organizationId, teamId, accountUserId, installationId],
+                   $6, $4, $4, 'setting_up', 'running')`,
+        [
+          workspaceId,
+          organizationId,
+          teamId,
+          accountUserId,
+          installationId,
+          canonical.repositoryId,
+        ],
       );
+      await seedCanonicalCloudWorkspaceAuthority(tx, {
+        workspaceId,
+        organizationId,
+        ownerUserId: accountUserId,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by
+           source_commit, created_by, provider_connection_id
          ) VALUES ($1, 1, $2, 'daytona', 'snapshot-pinned-id',
-                   'linux/amd64', 2000, 4096, 20480, $3, $4)`,
-        [workspaceId, organizationId, "a".repeat(40), accountUserId],
+                   'linux/amd64', 2000, 4096, 20480, $3, $4, $5)`,
+        [
+          workspaceId,
+          organizationId,
+          "a".repeat(40),
+          accountUserId,
+          canonical.providerConnectionId,
+        ],
       );
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
@@ -194,16 +229,29 @@ d("cloud workspace setup material redemption", () => {
          ) VALUES ($1, 1, $2, 'daytona', $3, 'running')`,
         [workspaceId, organizationId, `sandbox-${workspaceId}`],
       );
+      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(tx, {
+        workspaceId,
+        organizationId,
+        generation: 1,
+        createdBy: accountUserId,
+        effectiveDocument: settings,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_setup_specs (
            workspace_id, generation, org_id, repository_forge,
            repository_owner, repository_name, repository_revision,
            github_installation_id, settings_snapshot,
-           settings_snapshot_sha256
+           settings_snapshot_sha256, workspace_settings_version_id
          ) VALUES ($1, 1, $2, 'github.com', 'withso', 'zeros',
                    'refs/heads/main', $3, $4::jsonb,
-                   digest($4::jsonb::text, 'sha256'))`,
-        [workspaceId, organizationId, installationId, JSON.stringify(settings)],
+                   digest($4::jsonb::text, 'sha256'), $5)`,
+        [
+          workspaceId,
+          organizationId,
+          installationId,
+          JSON.stringify(settings),
+          settingsVersionId,
+        ],
       );
       const sealed = sealCloudWorkspaceSetupSecret(
         "registry-secret-value",
@@ -573,6 +621,10 @@ d("cloud workspace setup material redemption", () => {
         organizationId: seed.execution.organizationId,
         generation: seed.execution.generation,
         engineInstanceId: materials.engine.instanceId,
+        observedPorts: [
+          { port: 3_000, protocol: "tcp" },
+          { port: 8_080, protocol: "tcp" },
+        ],
       }),
     ).resolves.toEqual({
       version: 1,
@@ -580,6 +632,20 @@ d("cloud workspace setup material redemption", () => {
       accepted: true,
       engineInstanceId: materials.engine.instanceId,
       leaseExpiresAtMs: expect.any(Number),
+    });
+    await expect(
+      pool.query(
+        `SELECT port, protocol, health, closed_at
+         FROM workspace_ports
+         WHERE workspace_id = $1 AND generation = $2
+         ORDER BY port`,
+        [seed.execution.workspaceId, seed.execution.generation],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        { port: 3_000, protocol: "tcp", health: "observed", closed_at: null },
+        { port: 8_080, protocol: "tcp", health: "observed", closed_at: null },
+      ],
     });
 
     vi.mocked(github.mint).mockResolvedValueOnce({
@@ -693,6 +759,27 @@ d("cloud workspace setup material redemption", () => {
       },
     });
     expect(github.mint).toHaveBeenCalledTimes(mintCount);
+
+    await service.heartbeat({
+      token: registration.heartbeat.token,
+      workspaceId: seed.execution.workspaceId,
+      organizationId: seed.execution.organizationId,
+      generation: seed.execution.generation,
+      engineInstanceId: materials.engine.instanceId,
+      observedPorts: [],
+    });
+    await expect(
+      pool.query<{ health: string; closed_at: Date | null }>(
+        `SELECT health, closed_at FROM workspace_ports
+         WHERE workspace_id = $1 AND generation = $2 ORDER BY port`,
+        [seed.execution.workspaceId, seed.execution.generation],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        { health: "closed", closed_at: expect.any(Date) },
+        { health: "closed", closed_at: expect.any(Date) },
+      ],
+    });
 
     await withSystemTx(pool, async (tx) => {
       await tx.query(

@@ -2,33 +2,25 @@
 
 ## Current implementation status
 
-| Capability                                           | Status                                                                                             | Current anchor                                                                                                        |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| Remote engine HTTP/WebSocket transport               | Implemented, opt-in and non-production                                                             | `apps/desktop/src/engine/transport/cloud.ts`                                                                          |
-| Engine activation                                    | Implemented when `ZEROS_CLOUD_PORT` is a positive integer                                          | `apps/desktop/src/engine/zeros-engine.ts`                                                                             |
-| Transport unit tests                                 | Implemented                                                                                        | `apps/desktop/src/engine/transport/__tests__/cloud-transport.test.ts`                                                 |
-| Provider image/lifecycle validation                  | Implemented as an operator harness + protected manual CI                                           | `scripts/cloud-workspace-validation/`, `.github/workflows/zsr-cloud-qualification.yml`                                |
-| Shared bridge protocol/version                       | Implemented                                                                                        | `packages/protocol/`                                                                                                  |
-| Team identity and authorization foundation           | Implemented for existing product APIs                                                              | `apps/control-plane/`                                                                                                 |
-| Production workspace registry and lifecycle API      | Implemented, gated, and pre-production                                                             | `apps/control-plane/migrations/0010_cloud_workspace_control_plane.sql`, `apps/control-plane/src/cloud-workspaces/`    |
-| Provider reconciliation and orphan recovery          | Implemented; live provider qualification still required                                            | `apps/control-plane/src/cloud-workspaces/reconciler.ts`, `daytona-provider.ts`                                        |
-| Production setup worker and workspace engine grant   | Implemented behind a second operator gate; live image/provider qualification remains required      | migrations `0013`–`0015`, setup worker/material service/internal routes, image helper/supervisor, engine registration |
-| Drain-first generation replacement and rollback      | Implemented and database-tested; protected provider-adapter run has not yet supplied live evidence | migration `0016`, generation transitions, lifecycle routes, reconciler                                                |
-| Coordinator SSH, preview, and localhost tunnel APIs  | Implemented and database-tested; live provider/edge qualification remains required                 | migration `0017`, `access.ts`, access routes and revocation worker                                                    |
-| Account/scope authority retirement                   | Implemented and database-tested; live deletion/revocation qualification remains required           | migration `0018`, membership/account/scope triggers, engine heartbeat and durable delete intents                     |
-| Production desktop remote client and management UI   | Native access client implemented; engine bridge, catalog, and management UI not implemented        | Electron access broker plus future desktop cloud-workspace feature ownership                                          |
-| Durable cloud-workspace record/write-through         | Not implemented                                                                                    | Future control-plane/data-plane work                                                                                  |
-| Renderer execution routing                           | One process-global active bridge; not multi-execution                                              | `apps/desktop/src/renderer/platform/bridge/active-bridge.ts`                                                          |
-| Organization settings routing                        | One engine-global in-memory Team context                                                           | `apps/desktop/src/engine/settings/team-context.ts`                                                                    |
-| Local settings layers                                | Implemented for current local engine                                                               | `apps/desktop/src/engine/settings/resolve.ts`, `files.ts`                                                             |
-| Global local/cloud repository and workspace identity | Not implemented                                                                                    | Current desktop IDs remain local/path-derived compatibility identities                                                |
-| Personal cloud eligibility                           | Not implemented; current schema fails closed                                                       | `0009_organization_team_hierarchy.sql`, cloud create authorization                                                    |
-| Placement authority epochs and local/cloud moves     | Not implemented                                                                                    | Target `data-and-sync.md` contract                                                                                    |
-| Per-user/per-device receive-only local replicas      | Not implemented                                                                                    | Target desktop replica broker + durable file stream                                                                   |
-| Desktop SSH/preview/localhost-forward product flow   | Main/preload/native boundary implemented and unit-tested; product UI and macOS/live E2E remain     | `cloud-workspace-access-*`, frame authorizations, IPC/platform adapters                                               |
-| Remote-authoritative Design workspace                | Not implemented                                                                                    | Current Design service/protocol remains local-engine routed                                                           |
-| Web management                                       | Not implemented                                                                                    | Future `apps/web` management surface                                                                                  |
-| Native mobile clients                                | Deferred                                                                                           | No `apps/ios` or `apps/android` boundary should be created yet                                                        |
+| Capability | Repository status | Current anchor |
+| --- | --- | --- |
+| Remote engine transport and exact runtime registry | Implemented, gated; signed macOS/live E2E open | `apps/desktop/src/engine/transport/cloud.ts`, `bridge/connection-registry.ts`, Electron access broker |
+| Provider image/lifecycle qualification | Harness and protected workflow implemented; live evidence open | `scripts/cloud-workspace-validation/`, `.github/workflows/zsr-cloud-qualification.yml` |
+| WorkOS identity and membership projection | Implemented with Auth0 rollback compatibility | control-plane auth migrations/services and web WorkOS session/event handlers |
+| Personal/Pro/Business/Enterprise paid authority | Implemented and database-tested | migration `0024`, `authorization.ts`, `paid-authority.ts` |
+| Repository/settings/environment/secret/provider model | Implemented and database-tested | migrations `0024`–`0025`, `0039`–`0045` |
+| Lifecycle, setup worker, admission, and engine lease | Implemented behind disabled setup-worker gate; live qualification open | migrations `0018`–`0023`, setup and engine services |
+| Generation replacement and provider reconciliation | Implemented and database-tested; live rollback/delete evidence open | `generation-transitions.ts`, `reconciler.ts`, `daytona-provider.ts` |
+| SSH, authenticated preview, and localhost forward | Control plane and native desktop boundary implemented; UI/macOS qualification open | `access.ts`, `runtime-access.ts`, Electron access/SSH services |
+| Ordered durable record and content/checkpoints | Implemented and database-tested | migrations `0026`–`0029`, durable/content/recovery services |
+| Encrypted object storage, retention, export, deletion | Implemented; production restore/DR drills open | `object-store.ts`, `object-maintenance.ts`, migration `0035` |
+| Local→cloud and cloud→local immutable forks | Implemented with fresh destination UUIDs | `forks.ts`, desktop cloud-workspace-fork services, migrations `0030`, `0036`, `0046`, `0049` |
+| Per-user/per-device receive-only replicas | Implemented owner-only for Phase 5 | `replicas.ts`, desktop cloud-replica services, migrations `0031`–`0033`, `0047`–`0050` |
+| Remote-authoritative Design routing | Implemented through the normal exact runtime bridge; product UI E2E open | runtime connection registry and existing Design protocol/service |
+| Management, usage, outbox, health, and self-host seams | Implemented as APIs/services; dashboards/drills/template publication open | `management*.ts`, `usage.ts`, `outbox.ts`, `health.ts` |
+| Cloud creation/catalog/details/onboarding UI | Deliberately deferred | final UI phase |
+| Organization multiplayer and ownership-transfer execution | Deferred to Phase 6A | persisted roles/transfer model only |
+| Native mobile clients | Deferred | no `apps/ios` or `apps/android` boundary |
 
 ## Existing environment contract
 
@@ -45,8 +37,8 @@ The validation foundation recognizes:
 
 These names are externally observable bootstrap contracts. Do not rename them
 without compatibility handling. The bridge capability remains defense in
-depth; a production desktop bridge connection grant must add workspace/tenant/
-purpose binding, and that transition must be explicit and tested.
+depth; production desktop runtime admission additionally binds account, tenant,
+workspace, generation, purpose, and expiry.
 When the control plane uses WorkOS, setup material and the engine launch must
 also carry `ZEROS_ACCOUNT_JWT_CONTRACT=zeros-access-v1`, the exact desktop
 client ID, and one exact issuer. Auth0 compatibility leaves the contract and
@@ -71,8 +63,8 @@ credentials.
 The configured image, architecture, source commit, CPU, memory, and storage are
 recorded per generation and passed through the provider boundary. Public API
 documents use the stable Zeros workspace id and never expose provider resource
-ids. A system operator must provision an Organization quota before any create
-request can succeed.
+ids. Creation also requires the appropriate Personal account entitlement or
+Organization entitlement/seat policy and an available workspace quota.
 
 Provider observations are accepted only when their immutable workspace and
 generation labels match the requested identity. Lifecycle results and failures
@@ -275,27 +267,23 @@ currently keeps the supervisor and engine coordinator root-owned while Git,
 setup commands, and agents run as UID/GID 10001; that exception requires threat-
 model approval or removal before the non-root Phase-2 item can close. Sandbox
 commands continue to run outside database transactions. The execution account
-is temporarily the immutable workspace creator; Phase 1 ownership and billing
-authority must replace that compatibility binding before reassignment ships.
-Until then, deleting that account fails closed by queuing provider-verified
-deletion of every workspace it created. Organization or Team soft deletion
+is the immutable workspace owner for Phase 5 and is bound to a billing epoch.
+Deleting or deauthorizing that account fails closed by retiring its paid
+runtime and queuing provider-verified cleanup. Organization or Team soft deletion
 similarly cancels setup/replacement work, revokes runtime/client grants, and
 queues every provider generation for deletion. Membership triggers cross FORCE
 RLS only through a narrowly privileged fixed-search-path function, so a normal
 user-context self-leave cannot retain a provider bearer.
-WorkOS identity lifecycle and browser-session migrations own `0011` and
-`0012`; the still-unreleased cloud workspace additions are the contiguous
-`0013` through `0018` sequence.
+WorkOS identity lifecycle and browser-session migrations own `0011` through
+`0017`; cloud workspace additions continue forward through `0050`.
 Never rename a migration after deployment and never edit
 `0010_cloud_workspace_control_plane.sql` in place.
 
-The current cloud API models only Organization-owned cloud rows and the desktop
-stores local workspaces in SQLite with human-readable IDs. The target product
-does not reinterpret either silently: a forward migration adds stable global
-UUIDs and preserves released IDs as aliases, then maps the existing cloud UUID
-onto the same canonical identity. Current `.zeros/settings.toml` and
-`.zeros/settings.local.toml` precedence remains authoritative until the
-placement-aware resolver and compatibility tests ship.
+The cloud API models Personal and Organization-owned cloud rows. Desktop local
+workspaces remain in SQLite; fork jobs allocate fresh UUID destinations and
+preserve released local identifiers as compatibility data. The placement-aware
+resolver preserves `.zeros/settings.toml` as optional shared input and always
+excludes `.zeros/settings.local.toml` and secret material from copies.
 
 ## Protocol contract
 

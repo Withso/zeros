@@ -10,9 +10,8 @@ boundaries.
 1. The client authenticates to the control plane.
 2. Every workspace API authorizes the actor against the workspace's current
    tenant, Organization membership and role when applicable, workspace role,
-   and any narrower Team grant. Personal permits only its sole owner after the
-   Phase-1 eligibility migration; the current pre-production route still fails
-   closed for Personal cloud placement.
+   and any narrower Team grant. Personal permits only its sole owner, requires
+   exactly one tenant member, and requires a current Pro entitlement.
 3. Provisioning credentials remain server-side and are never returned to a
    renderer or placed in a sandbox.
 4. A remote engine connection uses a short-lived grant bound to account,
@@ -20,19 +19,17 @@ boundaries.
 5. The engine validates that binding before accepting privileged bridge
    messages.
 6. Every mutation also validates the current workspace authority epoch. A
-   retired local engine, cloud generation, device replica, or ownership epoch
-   cannot continue writing with an otherwise well-formed request.
+   retired cloud generation, device replica, or ownership epoch cannot continue
+   writing with an otherwise well-formed request.
 
 The current validation harness uses a revocable provider preview capability, a
 separate mandatory Zeros bridge token, and a required asymmetric account JWT
 whose subject must match the immutable worker owner. A privileged cloud-worker
 cannot start with HS256, optional binding, or malformed verifier material. The
 JWT remains in the client `CONNECTED` frame and never enters image/sandbox
-creation state. This is adequate for provider qualification, but its operator
-owner binding is not the desktop's production bridge grant bound to tenant,
-workspace, purpose, and revocable lifecycle. The internal setup/engine grant
-now has those narrower bindings, but the desktop connection binding remains a
-release blocker.
+creation state. The production desktop runtime admission adds tenant,
+workspace, generation, purpose, account, and revocable-lifecycle binding. The
+operator-owner validation identity remains only for protected qualification.
 
 The production lifecycle foundation stores only a SHA-256 digest for each
 endpoint grant, revokes every endpoint grant and cancels active setup before
@@ -50,19 +47,19 @@ gate off, a provisioned provider resource is still never reported as ready.
 The setup material also carries the control plane's exact account-verifier
 contract. WorkOS mode requires `zeros-access-v1`, the desktop client ID, and one
 exact HTTPS issuer together; the image and worker supervisor preserve those
-fields through engine launch. Auth0 compatibility mode carries no WorkOS
-contract or client ID. Either shape fails closed when partially configured, so
-the WorkOS migration cannot silently degrade cloud workers to issuer/audience-
-only verification.
+fields through engine launch. The explicitly selected Auth0 rollback mode
+carries no WorkOS contract or client ID. Either shape fails closed when
+partially configured, so a WorkOS deployment cannot silently degrade to
+issuer/audience-only verification.
 
 Authorization loss is database-enforced rather than dependent on one HTTP
 route. Membership removal retires issuing/active client grants, endpoint grants,
 and engine leases even when a self-leave runs under user-context FORCE RLS.
 Organization or Team soft deletion additionally cancels setup and generation
-replacement and queues provider-verified deletion for every generation. Until
-the explicit owner/billing epoch model replaces the temporary `created_by`
-binding, a WorkOS account deletion also deletes that account's workspaces so
-paid compute cannot remain ownerless. These transitions block new authority
+replacement and queues provider-verified deletion for every generation.
+Workspace authority is bound to `owner_user_id` and an immutable billing
+epoch. Account deletion or membership loss retires owner-funded work so paid
+compute cannot remain ownerless. These transitions block new authority
 immediately; provider deletion and provider-wide SSH revocation remain durable
 work whose completion must be observed.
 
@@ -136,7 +133,7 @@ requires replacement provider/agent/secret bindings before accepting new paid
 work. When the provider account changes, checkpoint and reprovision; a database
 owner update is not a security boundary.
 
-## Local replica and migration boundary
+## Local replica and copy boundary
 
 - Register every trusted device with a revocable user-bound public identity.
 - Issue a short-lived grant for one workspace/user/device/replica/authority
@@ -151,9 +148,9 @@ owner update is not a security boundary.
 - Exclude `.git`, Zeros databases, credential material, sockets/devices, and
   configured generated/cache paths. Do not synchronize executable Git hooks
   from an untrusted remote checkout.
-- A move requires a durable checkpoint and an authority-epoch cutover. Stale
-  grants fail closed, and reconciliation must prove one authority before
-  resuming mutation.
+- A local↔cloud copy requires a fresh destination UUID and an integrity-checked
+  snapshot/checkpoint. It cannot stop, re-own, delete, or reuse the identity of
+  its source.
 - Copying Organization work to Personal is an export subject to role, policy,
   audit, and data-loss-prevention checks. Local placement alone never performs
   that export.
@@ -293,14 +290,14 @@ are never readiness evidence.
 - the native SSH/preview/tunnel broker is not yet bound to a shipped
   cloud-workspace catalog/details UI, and no protected live provider/edge plus
   signed-macOS qualification is green for that boundary;
-- no authoritative-execution epoch or stale-engine revocation for placement
-  movement;
+- the setup-worker gate is enabled before exact-image, provider lifecycle, and
+  root-coordinator qualification is complete;
 - unverified tenant isolation or deletion behavior;
 - secrets appearing in images, snapshots, URLs, logs, or transcripts;
 - an unqualified provider lifecycle or unresolved reconciliation/orphan race;
 - missing backup restoration and disaster-recovery exercise;
-- unverified replica path/symlink/case handling, divergence preservation, or
-  per-device revocation;
+- no signed-macOS qualification of replica path/symlink/case handling,
+  divergence preservation, device sleep/resume, or per-device revocation;
 - SSH/preview/forward tokens in client-facing URLs, renderer persistence,
   analytics, or logs;
 - unsupported agent/runtime redistribution or authentication;

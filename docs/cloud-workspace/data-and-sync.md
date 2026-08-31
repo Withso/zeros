@@ -1,26 +1,27 @@
-# Cloud workspace data, placement, migration, and sync
+# Cloud workspace data, copies, and sync
 
-This document defines the target product and engineering contract for running a
-Zeros workspace locally or in the cloud, moving its authoritative execution,
-and keeping private device replicas. It is a target contract: the current
-desktop and control-plane schemas require the forward migrations listed in the
-roadmap before these behaviors are available.
+This document defines the product and engineering contract for creating a
+Zeros workspace locally or in cloud, making integrity-checked copies between
+those placements, and keeping private device replicas. Migrations `0024`
+through `0050` and the desktop engine services implement the non-UI
+foundation. End-user wiring and protected live qualification remain separate
+release work.
 
 ## The three independent dimensions
 
-Do not encode ownership, execution placement, and replication in one `location`
-field. They answer different questions:
+Do not encode ownership, immutable workspace placement, and replication in one
+`location` field. They answer different questions:
 
 | Dimension               | Values                                            | Meaning                                                                                   |
 | ----------------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------------- |
 | Tenant ownership        | Personal or Organization/Team                     | Who owns policy, repository access, retention, and the workspace record                   |
-| Authoritative execution | This Mac or Cloud                                 | Which single engine may sequence source, Git, chat, terminal, and Design writes           |
+| Workspace placement     | This Mac or Cloud                                 | Where this workspace's single authoritative engine is created; it does not change in place |
 | Device replica          | Off, Syncing, In sync, Paused, Diverged, or Error | Whether one member's device has a private local mirror of a cloud-authoritative workspace |
 
 Local placement does **not** imply Personal ownership. An Organization workspace
-may run on one member's Mac and inherit Organization repository policy while its
-files, chats, paths, processes, and terminals remain private to that device.
-Likewise, a Personal workspace may run in the cloud without becoming
+may be created on one member's Mac and inherit Organization repository policy
+while its files, chats, paths, processes, and terminals remain private to that
+device. Likewise, a Personal workspace may run in cloud without becoming
 collaborative.
 
 This separation produces four valid creation combinations:
@@ -36,7 +37,7 @@ This separation produces four valid creation combinations:
 | ------------------------------------------------------------------------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------------------------------- |
 | Repository content                                                                                                  | Authoritative engine/working tree   | Configured Git remote plus explicit encrypted checkpoints for uncommitted recovery |
 | Never-cloud local workspace identity and runtime metadata                                                           | Local engine                        | Device SQLite                                                                      |
-| Cloud/moved/registered workspace identity, tenant/team, creator, billing owner, assignee, placement/authority epoch | Control plane                       | Control-plane database                                                             |
+| Cloud workspace identity, tenant/team, creator, billing owner, assignee, generation/authority epoch                | Control plane                       | Control-plane database                                                             |
 | Local replica path and device-only overrides                                                                        | Desktop replica broker/local engine | Device SQLite/OS credential store; never the cloud record                          |
 | Replica desired state, health, and cursors                                                                          | Desktop broker + cloud engine       | Tenant-scoped control-plane record                                                 |
 | Chat, turns, agent sessions, run state, and recoverable workspace metadata                                          | Running engine while active         | Durable cloud record                                                               |
@@ -63,25 +64,22 @@ status. Do not use a single ambiguous `Local` status for both.
 
 The workspace-details actions use verbs that state their consequence:
 
-- **Move to Cloud** changes authoritative execution and preserves workspace
-  identity.
-- **Move to this Mac** changes authoritative execution and preserves tenant
-  ownership and workspace identity.
+- **Create cloud copy** forks a new cloud workspace and retains the local
+  source.
+- **Create local copy** forks a new private local workspace and retains the
+  cloud source.
 - **Sync to this Mac** creates or resumes this member's receive-only local
   replica; cloud remains authoritative.
 - **Pause sync on this Mac** affects only that replica and leaves its files on
   disk.
 - **Remove local copy** affects only that replica and requires explicit
   confirmation before deleting its directory.
-- **Make a local copy** forks a new workspace with a new identity. The user
-  chooses Personal or an Organization they may create in.
-- **Make personal copy** is the only action that changes Organization-owned
-  work into Personal ownership. It is a policy-checked fork, never an implicit
-  side effect of local placement.
+- The destination tenant is selected explicitly. Copying Organization-owned
+  work to Personal is a policy-checked export, never an implicit side effect of
+  choosing a Mac path.
 
-Routine remote editing uses **Open via SSH**. Moving authority is for users who
-need the workspace to continue as a local workspace, not merely for opening a
-local IDE.
+Routine remote editing uses **Open via SSH**. A local copy is an independent
+workspace, not a way to make one Mac authoritative for the cloud source.
 
 ## Ownership and collaboration rules
 
@@ -106,14 +104,12 @@ local IDE.
   metadata.
 - An Organization cloud workspace is the only initial multiplayer execution
   mode. Every member sees the same cloud engine state according to role.
-- Moving a shared Organization cloud workspace to one Mac suspends
-  multiplayer. The action requires owner/manager authority, no active agent or
-  Design write, no other active member, a completed durable checkpoint, and an
-  explicit warning. Otherwise the UI offers **Make a local copy**.
-- Moving an Organization workspace to a Mac does not move it to Personal. Its
-  Organization metadata and policy remain; runtime data produced after the
-  move stays private until the workspace moves back to cloud through an
-  explicit checkpoint.
+- Forking a shared Organization cloud workspace to one Mac does not suspend or
+  modify the source. The destination is a new local workspace in Personal or an
+  authorized Organization, subject to export and destination-creation policy.
+- A local Organization copy remains Organization-owned. Its new source, chats,
+  paths, and processes are private to that device unless a later explicit
+  cloud-copy operation exports selected state into another new workspace.
 
 ## Repository and settings model
 
@@ -165,7 +161,7 @@ control plane, sandbox, checkpoint, or another member. Cloud-only private
 settings live in the cloud settings service rather than pretending to be the
 same local file.
 
-Cloud creation and every explicit rebuild record an immutable, redacted
+Cloud creation, fork import, and every explicit rebuild record an immutable, redacted
 settings snapshot and environment-profile version. Editing Organization or
 repository Cloud settings affects new generations; an existing workspace shows
 `Update available` and changes only after **Apply and rebuild**. Current managed
@@ -194,16 +190,17 @@ value into an Organization document.
 - User-delegated MCP identity is resolved per actor when the MCP protocol
   supports it. Workspace service credentials are resolved from an approved
   Organization or billing-owner binding and are never revealed to members.
-- Ownership transfer invalidates owner-scoped bindings. The new owner must
-  approve replacements before a new cloud generation can become ready.
+- Ownership transfer is deferred to Phase 6A. Its persisted model already
+  identifies owner-scoped bindings; the accepted workflow must invalidate and
+  replace them before a new cloud generation can become ready.
 
 ## Authority and revision model
 
 A workspace has exactly one current authoritative execution lease. The lease is
 identified by workspace, placement generation, engine instance, epoch, and
 expiry. Every source, Git, chat, terminal-control, and Design mutation carries
-that epoch and an idempotency key. A stale local engine or cloud generation
-fails closed after a move, delete, membership revocation, or ownership transfer.
+that epoch and an idempotency key. A stale cloud generation fails closed after
+replacement, delete, membership revocation, or ownership transfer.
 
 The running authoritative engine is the live sequencer. The durable record
 stores acknowledged revisions, checkpoints, and events for recovery. A client
@@ -231,9 +228,10 @@ Git and file synchronization are different layers:
 
 The first production sync mode is **cloud-to-device, receive-only, safe**:
 
-1. Each member/device pair has its own replica identity, grant, desired state,
-   cursor, local path, and health. No Organization-wide `sync_enabled` boolean
-   exists.
+1. Each authorized user/device pair has its own replica identity, grant,
+   desired state, cursor, local path, and health. Phase 5 authorizes only the
+   owner; Phase 6A may admit additional members. No Organization-wide
+   `sync_enabled` boolean exists.
 2. Initial sync downloads an exact checkpoint manifest, then applies ordered
    file events after that manifest revision.
 3. Files are staged to a private temporary path, verified by content hash, and
@@ -254,12 +252,13 @@ The first production sync mode is **cloud-to-device, receive-only, safe**:
 8. Pausing one replica revokes only that replica's live grant. Other members,
    devices, cloud agents, terminals, previews, and replicas continue normally.
 
-A Local terminal is offered only when that device has an `In sync` or
-`Diverged` replica. Its tab is visibly marked `Local`; a Cloud terminal is
-marked `Cloud`. The local terminal is useful for Mac-only tools and local dev
-servers, but source writes do not flow back in Phase 5. Use Cloud terminal/SSH
-to change authoritative files, or perform **Move to this Mac**. This limitation
-must be stated in the terminal tooltip and first-run explanation.
+The deferred UI may offer a Local terminal only when that device has an
+`In sync` or `Diverged` replica. Its tab must be visibly marked `Local`; a
+Cloud terminal is marked `Cloud`. The local terminal is useful for Mac-only
+tools and local dev servers, but source writes do not flow back. Use the Cloud
+terminal/SSH to change authoritative files, or create an independent local
+copy. This limitation must be stated in the terminal tooltip and first-run
+explanation.
 
 Automatic bidirectional synchronization is not part of Phase 5 or Phase 6A.
 If added later, it requires a separately reviewed three-way reconciliation
@@ -267,74 +266,72 @@ protocol based on a last-agreed manifest, per-file base revisions, durable
 conflicts, deletion tombstones, and multi-device tests. Timestamp-based
 last-writer-wins is prohibited.
 
-## Migration workflows
+## Copy and sync workflows
 
-### Move a local workspace to cloud
+### Create a cloud workspace from local
 
-1. **Preflight:** resolve the stable tenant/repository identities; authorize
-   repository and cloud creation; validate provider connection, quota, settings,
-   paths, case/symlink compatibility, checkpoint size, and excluded secrets.
-2. **Prepare:** allocate a global workspace UUID if the legacy local row does not
-   have one. Keep its current human/local ID as a compatibility alias.
-3. **Quiesce:** acquire the local authority lease and finish, stop, or explicitly
-   cancel active agent turns, Git mutations, Design transactions, and PTYs.
-4. **Checkpoint:** record base remote/commit, branch, working-tree manifest,
-   staged/unstaged state, untracked files selected by the user, modes, and
-   content hashes. Secret-like or ignored files default to excluded and require
-   an explicit reviewed inclusion policy.
-5. **Provision:** create an idempotent placement intent, clone the repository in
-   a new cloud generation, apply the checkpoint, run setup, and verify the
-   resulting manifest and engine handshake.
-6. **Cut over:** atomically advance the authority epoch and route the workspace
-   to cloud only after readiness. The existing local checkout becomes a
-   receive-only replica when `Keep synced on this Mac` is selected.
-7. **Recover:** before cutover, every failure leaves local authoritative. After
-   cutover, reconciliation either completes cloud authority or rolls back using
-   the recorded checkpoint; it never creates a second writable authority.
+1. **Preflight:** choose the destination Personal/Organization tenant, resolve a
+   verified repository identity, authorize cloud creation, and validate
+   provider connection, paid entitlement, quota, settings, paths, exclusions,
+   symlink/case portability, and bounded snapshot size.
+2. **Identify:** allocate a new target cloud UUID. The source local UUID and
+   checkout remain unchanged.
+3. **Capture:** scan a stable Git base plus the selected working-tree overlay.
+   Stage file blobs and optional portable chat records locally; never include
+   `.git`, device settings, credentials, sockets, or secret-like files.
+4. **Reserve and upload:** create an idempotent fork intent bound to the
+   expected source snapshot. Reserve each deduplicated encrypted blob and the
+   aggregate quota transactionally before object publication.
+5. **Seal:** stage bounded entries/records, recompute the canonical snapshot,
+   and create the destination's first durable checkpoint only when the expected
+   digest matches.
+6. **Start:** the normal cloud setup worker restores that checkpoint, applies
+   the selected cloud settings snapshot, starts the engine, and verifies
+   readiness.
+7. **Recover:** every step is replayable. A mismatch or expired 24-hour staging
+   deadline fails the destination fork and releases staging references. It
+   never deletes, archives, stops, or mutates the local source.
 
-Personal stays Personal and Organization stays Organization during this move.
+The destination tenant is explicit. A Personal source may fork to an
+Organization when the actor may create there; an Organization source may fork
+to Personal only when export policy permits it.
 
 ### Sync or download a cloud workspace
 
 **Sync to this Mac** creates a device replica and does not change authority.
-Every Organization member may create their own replica when their role and
-Organization policy allow it. The local absolute path remains only in that
-device's SQLite database; the server stores at most a user-chosen device/path
-label and the sync state needed for authorization and recovery.
+Phase 5 permits the workspace owner; Phase 6A may let each Organization member
+create a separate replica when their role and policy allow it. The local
+absolute path remains only in that device's SQLite database; the server stores
+at most a user-chosen label and the state needed for authorization and
+recovery.
 
 **Make a local copy** bootstraps the same code/checkpoint into a new workspace
 ID. Chat/history copying is a separate, policy-controlled option. Copying
 Organization data into Personal requires explicit confirmation and may be
 disabled by Organization export policy.
 
-### Move a cloud workspace to this Mac
+### Create a local workspace from cloud
 
-This is an authority handoff, not file sync:
+This is a copy, not an authority handoff:
 
-1. Require workspace owner/manager permission, a trusted target device, and a
-   healthy full replica or enough disk to create one.
-2. Reject or defer while another member is active, an agent/PTY/Design/Git write
-   is running, the durable record is degraded, or any source conflict exists.
-3. Quiesce the cloud engine, commit a final durable checkpoint, and pin its
-   authority epoch.
-4. Bootstrap and verify the local Git checkout plus uncommitted checkpoint
-   without copying cloud `.git` metadata.
-5. Atomically grant the target local engine the next authority epoch, revoke
-   cloud mutation/SSH/preview grants, and stop or archive the sandbox.
-6. Retain Organization ownership when applicable. Teammates see that it is
-   running privately on the owner's Mac and cannot open its live chat/files
-   until it moves back to cloud.
-7. If cutover fails, keep cloud authoritative and remove only the incomplete
-   local replica after user confirmation.
+1. The owner requests an idempotent cloud-to-local fork with a fresh target
+   local UUID and optional chat-history selection.
+2. The control plane requires current account, tenant, Team, workspace-owner,
+   and device proof. Existing durable data remains exportable after paid
+   compute cancellation, but membership and owner authority remain mandatory.
+3. The checkpoint worker pins the last durable file manifest and record
+   revision without stopping the source cloud engine.
+4. A short-lived, one-use, device-key-version-bound export grant pages the
+   canonical manifest/records and fetches only referenced encrypted blobs.
+5. The desktop stages bytes beneath a private job root, verifies every hash,
+   path, type, size, Git identity, and snapshot digest, then atomically
+   materializes the new local workspace and imports selected portable records.
+6. Replay resumes from durable local job state. Any partial target is preserved
+   for diagnosis or removed by an explicit cleanup; the cloud source and its
+   collaborators are unaffected.
 
-Cloud history remains Organization-governed and available according to its
-retention policy. New local chats and runtime events remain device-private.
-Moving back to cloud publishes a verified code checkpoint; publishing selected
-local chat history is a separate, explicit, policy-controlled choice.
-
-The UI recommends **Make a local copy** instead when a shared cloud workspace
-has collaborators. A future product may support an owner-hosted shared local
-engine, but it is not implied by this contract.
+The cloud owner may later archive or delete the source through its normal
+lifecycle controls. That decision is not part of the copy transaction.
 
 ## Multiplayer replica behavior
 
@@ -395,13 +392,13 @@ performs the sandbox filesystem CAS/write lock and returns a receipt. The local
 replica updates only after that authoritative write appears in the file stream.
 
 The canvas never writes directly into the synced folder. A future Design agent
-uses the same cloud Design API. When authority moves to the Mac, the existing
-local engine/Design API becomes authoritative after the placement epoch changes.
+uses the same cloud Design API. An independently forked local workspace uses its
+own local engine/Design API and does not share the cloud workspace identity.
 
-## Target durable data model
+## Durable data model
 
-Names below are conceptual. Exact SQL names are fixed in a reviewed forward-only
-migration and then become compatibility contracts.
+The main implemented relations are below. Exact SQL names in migrations
+`0024`–`0050` are compatibility contracts.
 
 | Relation                                                | Purpose and important constraints                                                                                                                                                                                                                                            |
 | ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -411,10 +408,10 @@ migration and then become compatibility contracts.
 | `environment_profiles` / `environment_profile_versions` | Named Personal or Organization placement profiles and immutable build inputs                                                                                                                                                                                                 |
 | `provider_connections`                                  | User/Organization-owned encrypted Daytona or future provider binding; no raw credential in workspace rows                                                                                                                                                                    |
 | `secret_bindings`                                       | Opaque secret-store references scoped by tenant, owner, purpose, placement, and rotation version                                                                                                                                                                             |
-| `workspaces`                                            | Server record for cloud, moved, or policy-registered workspaces: global UUID, tenant/team/repository, legacy alias, creator, owner, assignee, visibility, authority placement/epoch, optimistic version; local SQLite retains equivalent identity for never-cloud workspaces |
+| `cloud_workspaces`                                      | Cloud UUID, tenant/team/repository, creator, owner, assignee, visibility, single-member flag, authority/billing epochs, lifecycle, and optimistic version                                                                                                                |
 | `workspace_members`                                     | Explicit workspace role/following/presence eligibility; membership is always bounded by Organization/Team membership                                                                                                                                                         |
 | `workspace_settings_versions`                           | Redacted effective snapshot, source versions, environment profile, and policy version used by one workspace generation                                                                                                                                                       |
-| `workspace_executions`                                  | Append-only local/cloud authority generations; at most one current authoritative execution per workspace                                                                                                                                                                     |
+| `workspace_executions`                                  | Append-only cloud execution projections; at most one current execution for an authority epoch                                                                                                                                                                                  |
 | `cloud_workspace_generations`                           | Pinned image/resources/source commit/settings snapshot for cloud execution; extends the existing generation contract                                                                                                                                                         |
 | `cloud_workspace_provider_bindings`                     | Opaque provider resource observed state keyed by provider connection and generation                                                                                                                                                                                          |
 | `devices`                                               | Per-user public-key identity, trust/revocation state, platform, and last-seen metadata                                                                                                                                                                                       |
@@ -425,10 +422,11 @@ migration and then become compatibility contracts.
 | `workspace_file_events`                                 | Idempotent ordered changes used for catch-up; payload refers to encrypted object blobs                                                                                                                                                                                       |
 | `workspace_checkpoints`                                 | Git base/ref plus encrypted manifest/artifact reference, reason, author, integrity state, and retention                                                                                                                                                                      |
 | `workspace_blobs`                                       | Tenant-scoped content-addressed encrypted objects with reference accounting and deletion state                                                                                                                                                                               |
-| `workspace_placement_intents`                           | Idempotent record-before-dispatch move/copy operations, phases, lease, source/target epochs, and recovery outcome                                                                                                                                                            |
+| `workspace_fork_intents`                                | Idempotent local→cloud/cloud→local copy identity, source/target UUIDs, selection flags, deadline, snapshot/checkpoint provenance, and outcome                                                                                                                                |
+| `workspace_fork_import_entries` / `workspace_fork_import_records` | Bounded immutable staging for file overlays and optional portable chat records; blob reservations use `workspace_blob_references`                                                                                                                           |
 | `workspace_ports`                                       | Engine-observed sandbox listeners and health, never an unauthenticated public endpoint                                                                                                                                                                                       |
 | `port_forward_sessions`                                 | Actor/device/remote/local mapping, bind address, grant, expiry, and observed status                                                                                                                                                                                          |
-| `ownership_transfers`                                   | Offered/accepted/cancelled transfer, old/new owner, cutover checkpoint, provider rebind, and billing epoch                                                                                                                                                                   |
+| `cloud_workspace_ownership_transfers`                   | Deferred Phase 6A offer/accept/cancel state; old/new owner and optimistic workspace version                                                                                                                                                                                   |
 | `usage_events`                                          | Immutable provider/agent usage with actor, billing-owner snapshot, billing epoch, source idempotency key, quantity, and timestamps                                                                                                                                           |
 | `outbox_events`                                         | Transactional publication of lifecycle, sync, audit, usage, and notification events                                                                                                                                                                                          |
 
@@ -445,11 +443,10 @@ checks or row leases, idempotency keys, and a transactional outbox. Large file,
 checkpoint, transcript artifact, and log payloads live in encrypted object
 storage rather than PostgreSQL rows.
 
-The current desktop's human-readable workspace ID and path-derived repository
-ID are not safe global identities. A forward migration adds UUID global IDs and
-preserves current IDs as local compatibility aliases. The existing control-plane
-cloud workspace UUID becomes that same global workspace ID; public API routes
-do not expose provider resource IDs.
+Human-readable workspace IDs and path-derived repository IDs are not safe cloud
+identities. Desktop fork state allocates UUID destinations and preserves
+released local IDs only as local compatibility data. Public API routes never
+expose provider resource IDs.
 
 ## Restore and data lifecycle
 
@@ -466,13 +463,11 @@ Restore must be repeatable into a fresh environment:
 A provider snapshot can accelerate startup, but the product needs a documented
 recovery path when that snapshot is corrupt, expired, or unavailable.
 
-Until the explicit authority-handoff and replica phases described above ship,
-the initial product does not make local and cloud records bidirectionally
-syncable. “Create cloud from local” creates a new organization/team-owned cloud
-workspace from a durable Git revision; “open cloud locally” creates a separate
-device-private checkout with an optional source reference. Neither operation
-deletes, re-owns, or silently uploads the source. Uncommitted work requires a
-separate encrypted checkpoint/patch transfer with explicit confirmation.
+Local and cloud workspaces are not bidirectionally merged. “Create cloud from
+local” and “create local from cloud” produce new identities through the fork
+protocol. Neither operation deletes, re-owns, stops, or silently retargets the
+source. A receive-only replica is the only continuous cloud-to-device file
+flow, and it never uploads local source changes.
 
 - Document retention separately for active, stopped, archived, and deleted
   workspaces.
@@ -506,11 +501,11 @@ separate encrypted checkpoint/patch transfer with explicit confirmation.
   replica, and disclose that already-downloaded local bytes cannot be recalled.
 - A workspace is deleted while a replica is offline: deletion tombstone outranks
   late events; the returning device becomes `Detached`, never authoritative.
-- Ownership transfers across provider accounts: checkpoint and reprovision;
-  changing an owner column alone is forbidden.
-- A move times out after dispatch: reconcile source and target epochs before
-  retrying. Never start a second provider resource or writable engine merely
-  because the client timed out.
+- Ownership transfers across provider accounts are Phase 6A work: checkpoint
+  and reprovision; changing an owner column alone is forbidden.
+- A fork request times out: replay the same idempotency key and source snapshot.
+  Never reuse the source UUID, delete the source, or create another destination
+  merely because the client timed out.
 - Cloud is unreachable: retain the last confirmed files and Git snapshot, mark
   them stale/read-only, and never promote the local replica automatically.
 
@@ -520,12 +515,12 @@ Before Phase 5 can be called seamless for a single member, automated and
 end-to-end tests cover:
 
 - Personal/Organization × local/cloud creation and exact settings provenance;
-- local-to-cloud move with clean, staged, unstaged, untracked, ignored,
+- local-to-cloud fork with clean, staged, unstaged, untracked, ignored,
   secret-like, large, symlink, executable, Unicode, and case-collision trees;
-- failure before and after authority cutover, including process crash and
-  duplicate request replay;
-- cloud-to-local move with active collaborators, turns, terminals, Design
-  transactions, degraded durability, and ownership/policy restrictions;
+- snapshot mismatch, deadline expiry, over-quota object publication, process
+  crash, and duplicate request replay;
+- cloud-to-local fork while the source remains active, with degraded
+  durability, device/grant replay, and ownership/policy restrictions;
 - one member syncing separate trusted devices, independent
   pause/remove/reconnect, device revocation, and offline deletion tombstones;
 - local divergence preservation and explicit replace/export resolution;
@@ -533,12 +528,13 @@ end-to-end tests cover:
 - SSH expiry/revocation, Cursor/terminal launch, localhost-only port forwarding,
   mapping collisions, workspace sleep/wake, and membership loss;
 - RLS and composite-FK cross-tenant attacks, stale authority epochs, grant
-  replay, idempotency, outbox replay, usage deduplication, and ownership cutover;
+  replay, idempotency, outbox replay, usage deduplication, and paid-authority
+  revocation;
   and
 - backup/restore into a fresh provider environment without relying on the old
   sandbox or a Mac replica.
 
 Before Phase 6A multiplayer can ship, extend the same matrix to two or more
 members and prove independent device paths/cursors, role and membership
-revocation, owner transfer, billing-epoch cutover, active-collaborator move
-blocking, and the absence of cross-member replica side effects.
+revocation, owner transfer, billing-epoch cutover, and the absence of
+cross-member replica side effects.

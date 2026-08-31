@@ -2,13 +2,19 @@ import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  CLOUD_WORKSPACE_BLOB_PATH,
+  CLOUD_WORKSPACE_CHECKPOINT_COMMIT_PATH,
+  CLOUD_WORKSPACE_CONTENT_APPEND_PATH,
   CLOUD_WORKSPACE_ENGINE_HEARTBEAT_PATH,
   CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,
+  CLOUD_WORKSPACE_RECORD_APPEND_PATH,
   CLOUD_WORKSPACE_SETUP_ADMISSION_PATH,
   createCloudWorkspaceInternalRoutes,
   type CloudWorkspaceInternalSetupService,
 } from "./internal-routes.js";
+import { WorkspaceContentError } from "./content-record.js";
 import { CloudWorkspaceSetupMaterialError } from "./setup-materials.js";
+import { CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH } from "./engine-client-admission.js";
 
 const SETUP_TOKEN = `zws_${"A".repeat(43)}`;
 const HEARTBEAT_TOKEN = `zwh_${"B".repeat(43)}`;
@@ -120,6 +126,44 @@ describe("cloud workspace internal setup routes", () => {
     });
   });
 
+  it("keeps engine proof in the bearer while redeeming a separate client grant", async () => {
+    const admitEngineClient = vi.fn(async () => ({
+      version: 1 as const,
+      audience: "zeros-cloud-workspace-engine-client-admission-v1" as const,
+      admitted: true as const,
+      authorityEpoch: 3,
+      accountUserId: "55555555-5555-4555-8555-555555555555",
+    }));
+    const { app } = harness({ admitEngineClient });
+    const grantToken = `zws_${"C".repeat(43)}`;
+    const engineScope = {
+      workspaceId: body.workspaceId,
+      organizationId: body.organizationId,
+      generation: 1,
+      engineInstanceId: "44444444-4444-4444-8444-444444444444",
+    };
+    const response = await app.request(
+      CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${HEARTBEAT_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ ...engineScope, grantToken }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(admitEngineClient).toHaveBeenCalledWith({
+      ...engineScope,
+      token: grantToken,
+      heartbeatToken: HEARTBEAT_TOKEN,
+    });
+    const responseText = await response.text();
+    expect(responseText).not.toContain(grantToken);
+    expect(responseText).not.toContain(HEARTBEAT_TOKEN);
+  });
+
   it("rejects missing, wrong-kind, body-carried, and malformed credentials before service I/O", async () => {
     const { app, service } = harness();
     for (const [path, authorization, requestBody] of [
@@ -198,5 +242,183 @@ describe("cloud workspace internal setup routes", () => {
     expect(await response.json()).toEqual({
       error: { code: "setup_repository_unavailable", retryable: true },
     });
+  });
+
+  it("keeps durable engine capabilities in the header and forwards binary blobs byte-for-byte", async () => {
+    const putBlob = vi.fn(async () => ({
+      blobId: "55555555-5555-4555-8555-555555555555",
+      replayed: false,
+    }));
+    const getBlob = vi.fn(async () => new Uint8Array([0, 255, 1, 2, 3]));
+    const appendRecord = vi.fn(async () => ({ revision: 1, replayed: false }));
+    const appendContent = vi.fn(async () => ({ revision: 1, replayed: false }));
+    const commitCheckpoint = vi.fn(async () => ({
+      checkpointId: "66666666-6666-4666-8666-666666666666",
+      replayed: false,
+    }));
+    const { app } = harness({
+      putBlob,
+      getBlob,
+      appendRecord,
+      appendContent,
+      commitCheckpoint,
+    });
+    const engineScope = {
+      workspaceId: body.workspaceId,
+      organizationId: body.organizationId,
+      generation: 1,
+      engineInstanceId: "44444444-4444-4444-8444-444444444444",
+    };
+    const bytes = new Uint8Array([0, 255, 1, 2, 3]);
+    const blobQuery = new URLSearchParams({
+      ...engineScope,
+      generation: String(engineScope.generation),
+    });
+    const uploaded = await app.request(
+      `${CLOUD_WORKSPACE_BLOB_PATH}?${blobQuery.toString()}`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${HEARTBEAT_TOKEN}`,
+          "content-type": "application/octet-stream",
+        },
+        body: bytes,
+      },
+    );
+    expect(uploaded.status).toBe(200);
+    expect(putBlob).toHaveBeenCalledOnce();
+    expect(putBlob.mock.calls[0]![0]).toMatchObject({
+      ...engineScope,
+      heartbeatToken: HEARTBEAT_TOKEN,
+    });
+    expect([...putBlob.mock.calls[0]![0].bytes]).toEqual([...bytes]);
+
+    const downloaded = await app.request(
+      `${CLOUD_WORKSPACE_BLOB_PATH}/55555555-5555-4555-8555-555555555555?${blobQuery.toString()}`,
+      { headers: { authorization: `Bearer ${HEARTBEAT_TOKEN}` } },
+    );
+    expect(downloaded.status).toBe(200);
+    expect(downloaded.headers.get("content-type")).toBe(
+      "application/octet-stream",
+    );
+    expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(bytes);
+
+    const record = await app.request(CLOUD_WORKSPACE_RECORD_APPEND_PATH, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${HEARTBEAT_TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        ...engineScope,
+        expectedRevision: 0,
+        idempotencyKey: "record:00000001",
+        mutations: [
+          {
+            entityKind: "chat",
+            entityId: "chat-1",
+            operation: "upsert",
+            schemaVersion: 1,
+            document: { title: "Hello" },
+            occurredAt: "2026-08-30T00:00:00.000Z",
+          },
+        ],
+      }),
+    });
+    expect(record.status).toBe(200);
+    expect(appendRecord).toHaveBeenCalledWith(
+      expect.objectContaining({ heartbeatToken: HEARTBEAT_TOKEN }),
+    );
+
+    const content = await app.request(CLOUD_WORKSPACE_CONTENT_APPEND_PATH, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${HEARTBEAT_TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        ...engineScope,
+        expectedRevision: 0,
+        idempotencyKey: "content:00000001",
+        gitBaseCommit: null,
+        gitHeadRef: null,
+        mutations: [{ operation: "delete", path: "src/old.ts" }],
+      }),
+    });
+    expect(content.status).toBe(200);
+    expect(appendContent).toHaveBeenCalledWith(
+      expect.objectContaining({ heartbeatToken: HEARTBEAT_TOKEN }),
+    );
+
+    const checkpoint = await app.request(
+      CLOUD_WORKSPACE_CHECKPOINT_COMMIT_PATH,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${HEARTBEAT_TOKEN}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          ...engineScope,
+          idempotencyKey: "checkpoint:00000001",
+          contentRevision: 1,
+          reason: "periodic",
+          manifestBlobId: "77777777-7777-4777-8777-777777777777",
+          artifactBlobId: null,
+          inclusionPolicy: {},
+          fileCount: 0,
+          totalBytes: 0,
+          integritySha256: "a".repeat(64),
+        }),
+      },
+    );
+    expect(checkpoint.status).toBe(200);
+    expect(commitCheckpoint).toHaveBeenCalledWith(
+      expect.objectContaining({ heartbeatToken: HEARTBEAT_TOKEN }),
+    );
+  });
+
+  it("sanitizes durable failures and rejects body-carried heartbeat capabilities", async () => {
+    const appendContent = vi.fn(async () => {
+      throw new WorkspaceContentError(
+        "revision_conflict",
+        "sensitive current manifest details",
+      );
+    });
+    const { app } = harness({ appendContent });
+    const requestBody = {
+      workspaceId: body.workspaceId,
+      organizationId: body.organizationId,
+      generation: 1,
+      engineInstanceId: "44444444-4444-4444-8444-444444444444",
+      expectedRevision: 0,
+      idempotencyKey: "content:00000002",
+      gitBaseCommit: null,
+      gitHeadRef: null,
+      mutations: [{ operation: "delete", path: "src/old.ts" }],
+    };
+    const conflicted = await app.request(CLOUD_WORKSPACE_CONTENT_APPEND_PATH, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${HEARTBEAT_TOKEN}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+    });
+    expect(conflicted.status).toBe(409);
+    expect(await conflicted.json()).toEqual({
+      error: { code: "revision_conflict" },
+    });
+
+    const bodyCarried = await app.request(CLOUD_WORKSPACE_CONTENT_APPEND_PATH, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...requestBody,
+        heartbeatToken: HEARTBEAT_TOKEN,
+      }),
+    });
+    expect(bodyCarried.status).toBe(401);
+    expect(appendContent).toHaveBeenCalledOnce();
   });
 });

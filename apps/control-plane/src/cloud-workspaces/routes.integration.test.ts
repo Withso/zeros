@@ -17,10 +17,13 @@ import type { CloudWorkspaceBackendConfig } from "../config.js";
 import { withSystemTx, withUserTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
 import type { CloudWorkspaceAccessService } from "./access.js";
+import type { CloudWorkspaceRepositoryResolver } from "./github-repositories.js";
 import { createCloudWorkspaceRoutes } from "./routes.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
+const DEVICE_ID = "11111111-1111-4111-8111-111111111111";
+const TUNNEL_SESSION_ID = "22222222-2222-4222-8222-222222222222";
 
 const cloudConfig: CloudWorkspaceBackendConfig = {
   provider: "daytona",
@@ -37,11 +40,15 @@ const cloudConfig: CloudWorkspaceBackendConfig = {
   operationTimeoutSeconds: 30,
   autoArchiveMinutes: 10_080,
   reconcileIntervalMs: 1_000,
+  providerCredentialKeys: {},
+  settingsSecretKeyV1: null,
   access: {
     allowedSshHosts: ["ssh.app.daytona.io"],
     allowedPreviewHostSuffixes: ["proxy.daytona.work"],
     previewBaseDomain: "cloud-preview.example.test",
   },
+  durability: null,
+  outbox: null,
   setupExecution: null,
 };
 
@@ -55,6 +62,7 @@ d("cloud workspace API contracts", () => {
   let installationId: string;
   let app: Hono;
   let accessService: CloudWorkspaceAccessService;
+  let repositoryResolver: CloudWorkspaceRepositoryResolver;
 
   const configureApp = (workosEnabled = false) => {
     app = new Hono();
@@ -66,6 +74,7 @@ d("cloud workspace API contracts", () => {
       "/",
       createCloudWorkspaceRoutes(pool, cloudConfig, {
         accessService,
+        repositoryResolver,
         workosEnabled,
       }),
     );
@@ -183,6 +192,17 @@ d("cloud workspace API contracts", () => {
         [organizationId],
       );
       await tx.query(
+        `INSERT INTO organization_entitlements (
+           org_id, plan, status, cloud_workspaces_allowed, seat_limit, source
+         ) VALUES ($1, 'business', 'active', true, 1, 'operator')`,
+        [organizationId],
+      );
+      await tx.query(
+        `INSERT INTO organization_seat_assignments (org_id, user_id, state)
+         VALUES ($1, $2, 'active')`,
+        [organizationId, owner.id],
+      );
+      await tx.query(
         `INSERT INTO github_authorizations (
            owner_user_id, app_variant, github_login
          ) VALUES ($1, 'github.com', 'owner')`,
@@ -232,6 +252,11 @@ d("cloud workspace API contracts", () => {
                   sshHost: "ssh.app.daytona.io",
                   remoteHost: "127.0.0.1" as const,
                   remotePort: input.remotePort!,
+                  session: {
+                    id: TUNNEL_SESSION_ID,
+                    deviceId: input.deviceId!,
+                    state: "starting" as const,
+                  },
                 },
               }
             : {
@@ -244,9 +269,37 @@ d("cloud workspace API contracts", () => {
                 },
               }),
       })),
+      activateTunnel: vi.fn(async (input) => ({
+        id: input.sessionId,
+        deviceId: input.deviceId,
+        state: "active" as const,
+        bindAddress: "127.0.0.1" as const,
+        observedLocalPort: input.observedLocalPort,
+      })),
       revoke: vi.fn(async () => undefined),
       recognizesPreviewRequest: vi.fn(() => false),
       handlePreviewRequest: vi.fn(async () => null),
+    };
+    repositoryResolver = {
+      resolve: vi.fn(async (input) => {
+        if (
+          input.installationId !== 123456 ||
+          input.owner.toLowerCase() !== "withso" ||
+          input.repository.toLowerCase() !== "zeros"
+        ) {
+          throw new Error("repository unavailable");
+        }
+        return {
+          forge: "github.com" as const,
+          forgeRepositoryId: "123456789",
+          owner: "withso",
+          name: "zeros",
+          cloneUrl: "https://github.com/withso/zeros.git",
+          webUrl: "https://github.com/withso/zeros",
+          defaultBranch: "main",
+          visibility: "private" as const,
+        };
+      }),
     };
     configureApp();
   });
@@ -270,12 +323,19 @@ d("cloud workspace API contracts", () => {
     expect(JSON.stringify(created.body)).not.toContain("providerResourceId");
 
     const records = await pool.query(
-      `SELECT cw.id, g.generation, i.operation, a.action,
+      `SELECT cw.id, cw.owner_user_id, cw.repository_id,
+              repository.forge_repository_id,
+              g.generation, i.operation, a.action,
               ss.repository_revision, ss.github_installation_id,
               ss.settings_snapshot,
+              (SELECT count(*)::integer
+               FROM workspace_retention_policies retention
+               WHERE retention.workspace_id = cw.id
+                 AND retention.org_id = cw.org_id) AS retention_policies,
               ss.settings_snapshot_sha256 =
                 digest(ss.settings_snapshot::text, 'sha256') AS valid_hash
        FROM cloud_workspaces cw
+       JOIN repositories repository ON repository.id = cw.repository_id
        JOIN cloud_workspace_generations g ON g.workspace_id = cw.id
        JOIN cloud_workspace_setup_specs ss
          ON ss.workspace_id = g.workspace_id AND ss.generation = g.generation
@@ -287,15 +347,92 @@ d("cloud workspace API contracts", () => {
     expect(records.rows).toEqual([
       expect.objectContaining({
         id: created.body.workspace.id,
+        owner_user_id: owner.id,
+        repository_id: expect.any(String),
+        forge_repository_id: "123456789",
         generation: 1,
         operation: "create",
         action: "cloud_workspace.create_requested",
         repository_revision: "main",
         github_installation_id: installationId,
         settings_snapshot: { schemaVersion: 1, values: {} },
+        retention_policies: 1,
         valid_hash: true,
       }),
     ]);
+  });
+
+  it("reauthorizes an idempotent create replay instead of lending it to another admin", async () => {
+    const key = randomUUID();
+    expect((await createWorkspace(key)).response.status).toBe(202);
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `INSERT INTO organization_members (org_id, user_id, role)
+         VALUES ($1, $2, 'admin')`,
+        [orgId, outsider.id],
+      );
+      await tx.query(
+        `INSERT INTO team_members (team_id, org_id, user_id, role)
+         VALUES ($1, $2, $3, 'maintainer')`,
+        [teamId, orgId, outsider.id],
+      );
+    });
+    actor = outsider;
+
+    const replay = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces`,
+      { method: "POST", key, body: createBody() },
+    );
+    expect(replay.status).toBe(403);
+    await expect(replay.json()).resolves.toMatchObject({
+      error: { code: "cloud_workspace_owner_required" },
+    });
+  });
+
+  it("exposes owner-only Phase 5 management APIs without returning secret or provider material", async () => {
+    const created = await createWorkspace();
+    const workspaceId = created.body.workspace.id;
+    const repository = await withSystemTx(pool, (tx) =>
+      tx.query<{ repository_id: string }>(
+        `SELECT repository_id FROM cloud_workspaces WHERE id = $1`,
+        [workspaceId],
+      ),
+    );
+    const repositoryId = repository.rows[0]!.repository_id;
+    const saved = await request(
+      `/v1/organizations/${orgId}/cloud-workspace-management/repositories/${repositoryId}/settings/cloud`,
+      {
+        method: "PUT",
+        body: {
+          expectedVersion: 0,
+          document: { values: { RUNTIME_MODE: "cloud" } },
+        },
+      },
+    );
+    expect(saved.status).toBe(200);
+    await expect(saved.json()).resolves.toMatchObject({
+      version: 1,
+      replayed: false,
+    });
+
+    const overview = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/management`,
+    );
+    expect(overview.status).toBe(200);
+    const overviewBody = await overview.json();
+    expect(overviewBody).toMatchObject({
+      workspace: { id: workspaceId, repositoryId },
+      settings: { effective: { secretNames: [] } },
+      provider: { credentialSource: "hosted" },
+    });
+    expect(JSON.stringify(overviewBody)).not.toContain("providerResourceId");
+    expect(JSON.stringify(overviewBody)).not.toContain(cloudConfig.apiKey);
+
+    actor = outsider;
+    const hidden = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/management`,
+    );
+    expect(hidden.status).toBe(404);
   });
 
   it("issues SSH, preview, and localhost-tunnel access through the coordinator", async () => {
@@ -330,13 +467,37 @@ d("cloud workspace API contracts", () => {
       {
         method: "POST",
         key: randomUUID(),
-        body: { remotePort: 4_173, expiresInMinutes: 20 },
+        body: {
+          remotePort: 4_173,
+          deviceId: DEVICE_ID,
+          requestedLocalPort: 54_173,
+          expiresInMinutes: 20,
+        },
       },
     );
     expect(tunnel.status).toBe(201);
-    await expect(tunnel.json()).resolves.toMatchObject({
+    const tunnelBody = await tunnel.json();
+    expect(tunnelBody).toMatchObject({
       grant: { kind: "tunnel", remotePort: 4_173 },
-      tunnel: { remoteHost: "127.0.0.1", remotePort: 4_173 },
+      tunnel: {
+        remoteHost: "127.0.0.1",
+        remotePort: 4_173,
+        session: { id: TUNNEL_SESSION_ID, deviceId: DEVICE_ID },
+      },
+    });
+    const activated = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/access/tunnels/${TUNNEL_SESSION_ID}`,
+      {
+        method: "PATCH",
+        body: { deviceId: DEVICE_ID, observedLocalPort: 54_173 },
+      },
+    );
+    expect(activated.status).toBe(200);
+    await expect(activated.json()).resolves.toMatchObject({
+      id: TUNNEL_SESSION_ID,
+      deviceId: DEVICE_ID,
+      state: "active",
+      observedLocalPort: 54_173,
     });
 
     const preview = await request(
@@ -506,7 +667,7 @@ d("cloud workspace API contracts", () => {
     expect(count.rows[0]).toEqual({ workspaces: 1, intents: 1 });
   });
 
-  it("fails closed on Personal, missing quota, foreign repository grants, and exhausted quota", async () => {
+  it("fails closed on an unentitled Personal account, missing quota, foreign repository grants, and exhausted quota", async () => {
     const personal = await pool.query<{ id: string }>(
       `SELECT id FROM organizations
        WHERE created_by = $1 AND is_personal AND deleted_at IS NULL`,
@@ -516,9 +677,9 @@ d("cloud workspace API contracts", () => {
       `/v1/organizations/${personal.rows[0]!.id}/cloud-workspaces`,
       { method: "POST", key: randomUUID(), body: createBody() },
     );
-    expect(personalResponse.status).toBe(409);
+    expect(personalResponse.status).toBe(403);
     await expect(personalResponse.json()).resolves.toMatchObject({
-      error: { code: "personal_organization" },
+      error: { code: "cloud_account_entitlement_required" },
     });
 
     await pool.query(`DELETE FROM cloud_workspace_quotas WHERE org_id = $1`, [
@@ -659,6 +820,8 @@ d("cloud workspace API contracts", () => {
     });
     const state = await pool.query(
       `SELECT i.operation, i.state,
+              (SELECT state FROM workspace_deletion_jobs deletion
+               WHERE deletion.workspace_id = i.workspace_id) AS deletion_state,
               (SELECT bool_and(eg.revoked_at IS NOT NULL)
                FROM cloud_workspace_endpoint_grants eg
                WHERE eg.workspace_id = i.workspace_id) AS revoked
@@ -667,10 +830,117 @@ d("cloud workspace API contracts", () => {
       [workspaceId],
     );
     expect(state.rows).toEqual([
-      { operation: "create", state: "superseded", revoked: true },
-      { operation: "stop", state: "superseded", revoked: true },
-      { operation: "delete", state: "queued", revoked: true },
+      {
+        operation: "create",
+        state: "superseded",
+        deletion_state: "waiting_for_provider",
+        revoked: true,
+      },
+      {
+        operation: "stop",
+        state: "superseded",
+        deletion_state: "waiting_for_provider",
+        revoked: true,
+      },
+      {
+        operation: "delete",
+        state: "queued",
+        deletion_state: "waiting_for_provider",
+        revoked: true,
+      },
     ]);
+  });
+
+  it("does not let another Organization admin stop, archive, or delete an owner-only workspace", async () => {
+    const created = await createWorkspace();
+    const workspaceId = created.body.workspace.id;
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `INSERT INTO organization_members (org_id, user_id, role)
+         VALUES ($1, $2, 'admin')`,
+        [orgId, outsider.id],
+      );
+      await tx.query(
+        `INSERT INTO team_members (team_id, org_id, user_id, role)
+         VALUES ($1, $2, $3, 'maintainer')`,
+        [teamId, orgId, outsider.id],
+      );
+    });
+    actor = outsider;
+
+    for (const action of [
+      { method: "POST", suffix: "/stop" },
+      { method: "POST", suffix: "/archive" },
+      { method: "DELETE", suffix: "" },
+    ]) {
+      const response = await request(
+        `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}${action.suffix}`,
+        { method: action.method, key: randomUUID() },
+      );
+      expect(response.status).toBe(403);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: "cloud_workspace_owner_required" },
+      });
+    }
+  });
+
+  it("rebinds a renewed entitlement before waking a stopped generation", async () => {
+    const created = await createWorkspace();
+    const workspaceId = created.body.workspace.id;
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `UPDATE cloud_workspace_lifecycle_intents
+         SET state = 'succeeded', completed_at = now()
+         WHERE workspace_id = $1 AND operation = 'create'`,
+        [workspaceId],
+      );
+      await tx.query(
+        `UPDATE cloud_workspaces
+         SET desired_state = 'stopped', status = 'stopped',
+             authority_epoch = authority_epoch + 1
+         WHERE id = $1`,
+        [workspaceId],
+      );
+      await tx.query(
+        `UPDATE organization_entitlements
+         SET revision = revision + 1, updated_at = now()
+         WHERE org_id = $1`,
+        [orgId],
+      );
+    });
+
+    const response = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/wake`,
+      { method: "POST", key: randomUUID() },
+    );
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toMatchObject({
+      workspace: { status: "waking", desiredState: "running" },
+      intent: { operation: "wake", state: "queued" },
+    });
+    const authority = (
+      await pool.query<{
+        current_billing_epoch: string;
+        paid: boolean;
+        live_epoch_count: number;
+      }>(
+        `SELECT workspace.current_billing_epoch::text,
+                cloud_workspace_paid_authority_live(
+                  workspace.id, workspace.owner_user_id, false
+                ) AS paid,
+                (SELECT count(*)::integer
+                 FROM workspace_billing_epochs billing
+                 WHERE billing.workspace_id = workspace.id
+                   AND billing.ended_at IS NULL) AS live_epoch_count
+         FROM cloud_workspaces workspace WHERE workspace.id = $1`,
+        [workspaceId],
+      )
+    ).rows[0];
+    expect(authority).toEqual({
+      current_billing_epoch: "2",
+      paid: true,
+      live_epoch_count: 1,
+    });
   });
 
   it("starts an idempotent generation replacement without mutating its source generation", async () => {
@@ -719,7 +989,7 @@ d("cloud workspace API contracts", () => {
       intent: { operation: string; state: string };
     };
     expect(firstBody).toMatchObject({
-      workspace: { generation: { number: 2 }, status: "provisioning" },
+      workspace: { generation: { number: 1 }, status: "ready" },
       transition: {
         operation: "upgrade",
         sourceGeneration: 1,
@@ -741,6 +1011,33 @@ d("cloud workspace API contracts", () => {
     expect(replay.headers.get("idempotency-replayed")).toBe("true");
     await expect(replay.json()).resolves.toMatchObject(firstBody);
 
+    await withSystemTx(pool, async (tx) => {
+      await tx.query(
+        `INSERT INTO organization_members (org_id, user_id, role)
+         VALUES ($1, $2, 'admin')`,
+        [orgId, outsider.id],
+      );
+      await tx.query(
+        `INSERT INTO team_members (team_id, org_id, user_id, role)
+         VALUES ($1, $2, $3, 'maintainer')`,
+        [teamId, orgId, outsider.id],
+      );
+    });
+    actor = outsider;
+    const foreignReplay = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/generations`,
+      {
+        method: "POST",
+        key,
+        body: { operation: "upgrade" },
+      },
+    );
+    expect(foreignReplay.status).toBe(403);
+    await expect(foreignReplay.json()).resolves.toMatchObject({
+      error: { code: "cloud_workspace_owner_required" },
+    });
+    actor = owner;
+
     const stored = await pool.query(
       `SELECT cw.current_generation, source.retired_at AS source_retired_at,
               candidate.image_ref AS candidate_image_ref,
@@ -748,7 +1045,9 @@ d("cloud workspace API contracts", () => {
                 AS settings_copied,
               i.generation AS intent_generation,
               i.affects_workspace,
-              gt.state AS transition_state
+              gt.state AS transition_state,
+              checkpoint_request.reason AS checkpoint_reason,
+              checkpoint_request.state AS checkpoint_state
        FROM cloud_workspaces cw
        JOIN cloud_workspace_generations source
          ON source.workspace_id = cw.id AND source.generation = 1
@@ -764,17 +1063,21 @@ d("cloud workspace API contracts", () => {
          ON gt.workspace_id = cw.id AND gt.candidate_generation = 2
        JOIN cloud_workspace_lifecycle_intents i
          ON i.id = gt.drain_intent_id
+       JOIN workspace_checkpoint_requests checkpoint_request
+         ON checkpoint_request.lifecycle_intent_id = i.id
        WHERE cw.id = $1`,
       [workspaceId],
     );
     expect(stored.rows[0]).toEqual({
-      current_generation: 2,
+      current_generation: 1,
       source_retired_at: null,
       candidate_image_ref: "snap-pinned",
       settings_copied: true,
       intent_generation: 1,
       affects_workspace: false,
       transition_state: "draining",
+      checkpoint_reason: "before_rebuild",
+      checkpoint_state: "queued",
     });
   });
 
@@ -819,8 +1122,10 @@ d("cloud workspace API contracts", () => {
     await expect(stopped.json()).resolves.toMatchObject({
       workspace: {
         generation: { number: 1 },
-        status: "stopping",
-        desiredState: "stopped",
+        // The source remains authoritative until its final checkpoint is
+        // durable; the queued intent records the accepted stop request.
+        status: "ready",
+        desiredState: "running",
       },
       intent: { operation: "stop", state: "queued" },
     });
@@ -957,24 +1262,42 @@ d("cloud workspace API contracts", () => {
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by
-         ) VALUES ($1, 2, $2, 'daytona', 'snap-newer', 'linux/amd64',
-                   2000, 4096, 20480, $3, $4)`,
+           source_commit, created_by, provider_connection_id
+         ) SELECT $1, 2, $2, 'daytona', 'snap-newer', 'linux/amd64',
+                  2000, 4096, 20480, $3, $4, provider_connection_id
+           FROM cloud_workspace_generations
+           WHERE workspace_id = $1 AND generation = 1`,
         [workspaceId, orgId, "b".repeat(40), owner.id],
+      );
+      const generationSettings = await tx.query<{ id: string }>(
+        `INSERT INTO workspace_settings_versions (
+           workspace_id, generation, org_id, schema_version,
+           effective_document, provenance, source_versions,
+           environment_profile_id, environment_profile_version,
+           managed_policy_version, created_by
+         ) SELECT workspace_id, 2, org_id, schema_version,
+                  effective_document, provenance,
+                  source_versions || '{"testCopy":true}'::jsonb,
+                  environment_profile_id, environment_profile_version,
+                  managed_policy_version, $2
+           FROM workspace_settings_versions
+           WHERE workspace_id = $1 AND generation = 1
+         RETURNING id`,
+        [workspaceId, owner.id],
       );
       await tx.query(
         `INSERT INTO cloud_workspace_setup_specs (
            workspace_id, generation, org_id, repository_forge,
            repository_owner, repository_name, repository_revision,
            github_installation_id, settings_snapshot,
-           settings_snapshot_sha256
+           settings_snapshot_sha256, workspace_settings_version_id
          ) SELECT workspace_id, 2, org_id, repository_forge,
                   repository_owner, repository_name, repository_revision,
                   github_installation_id, settings_snapshot,
-                  settings_snapshot_sha256
+                  settings_snapshot_sha256, $2
            FROM cloud_workspace_setup_specs
            WHERE workspace_id = $1 AND generation = 1`,
-        [workspaceId],
+        [workspaceId, generationSettings.rows[0]!.id],
       );
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
@@ -1015,11 +1338,13 @@ d("cloud workspace API contracts", () => {
     await expect(response.json()).resolves.toMatchObject({
       workspace: {
         generation: {
-          number: 3,
-          imageRef: "snap-pinned",
-          sourceCommit: "a".repeat(40),
+          // Rollback is a fresh candidate, but the current source remains
+          // authoritative throughout the checkpoint + drain barrier.
+          number: 2,
+          imageRef: "snap-newer",
+          sourceCommit: "b".repeat(40),
         },
-        status: "provisioning",
+        status: "ready",
       },
       transition: {
         operation: "rollback",
@@ -1327,6 +1652,20 @@ d("cloud workspace API contracts", () => {
     await expect(wake.json()).resolves.toMatchObject({
       error: { code: "organization_identity_not_ready" },
     });
+
+    const replacement = await request(
+      `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}/generations`,
+      {
+        method: "POST",
+        key: randomUUID(),
+        body: { operation: "upgrade" },
+      },
+    );
+    expect(replacement.status).toBe(409);
+    await expect(replacement.json()).resolves.toMatchObject({
+      error: { code: "organization_identity_not_ready" },
+    });
+
     const deleted = await request(
       `/v1/organizations/${orgId}/cloud-workspaces/${workspaceId}`,
       { method: "DELETE", key: randomUUID() },

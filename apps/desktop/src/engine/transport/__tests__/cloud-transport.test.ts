@@ -22,8 +22,14 @@ import { WebSocket } from "ws";
 import { CloudTransport, parseCloudTransportPort } from "../cloud";
 import type { EngineMessage } from "../../types";
 import type { TransportClient } from "../types";
+import type { CloudRuntimeClientAdmission } from "../../cloud-runtime-registration";
 
 const TOKEN = "worker-minted-conn-token";
+const ACCOUNT_USER_ID = "11111111-1111-4111-8111-111111111111";
+const ADMISSION: CloudRuntimeClientAdmission = {
+  accountUserId: ACCOUNT_USER_ID,
+  authorityEpoch: 7,
+};
 
 let transports: CloudTransport[] = [];
 
@@ -41,6 +47,9 @@ afterEach(async () => {
 async function startTransport(
   opts: {
     token: string;
+    verifyToken?: (
+      token: string,
+    ) => Promise<CloudRuntimeClientAdmission | null>;
     maxConnections?: number;
     handshakeTimeoutMs?: number;
     maxBufferedBytes?: number;
@@ -301,6 +310,62 @@ describe("CloudTransport — /ws token gate (preview proxy is the boundary)", ()
     expect(reordered.protocol).toBe("zeros-v1");
     expect(reordered.protocol).not.toContain(encoded);
     reordered.close();
+  });
+
+  it("redeems a one-use desktop token asynchronously without exposing the bootstrap token", async () => {
+    const desktopToken = `zws_${"D".repeat(43)}`;
+    const verifyToken = vi.fn(async (token: string) =>
+      token === desktopToken ? ADMISSION : null,
+    );
+    const { t, port } = await startTransport({ token: TOKEN, verifyToken });
+    let connected: TransportClient | null = null;
+    t.onConnect((client) => {
+      connected = client;
+    });
+    const encoded = Buffer.from(desktopToken, "utf8").toString("base64url");
+
+    await expect(
+      attemptUpgrade(port, {
+        path: "/ws",
+        protocols: `zeros-v1, zeros-cloud-token.${encoded}`,
+      }),
+    ).resolves.toBe("accepted");
+    expect(verifyToken).toHaveBeenCalledWith(desktopToken);
+    expect(connected).toMatchObject({
+      kind: "cloud",
+      accountUserId: ACCOUNT_USER_ID,
+      authorityEpoch: 7,
+    });
+
+    await expect(
+      attemptUpgrade(port, {
+        path: "/ws",
+        protocols: `zeros-v1, zeros-cloud-token.${Buffer.from(`zws_${"E".repeat(43)}`).toString("base64url")}`,
+      }),
+    ).resolves.toBe("rejected");
+    expect(verifyToken).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds pending asynchronous admissions inside the connection limit", async () => {
+    let release!: (value: CloudRuntimeClientAdmission | null) => void;
+    const held = new Promise<CloudRuntimeClientAdmission | null>((resolve) => {
+      release = resolve;
+    });
+    const desktopToken = `zws_${"F".repeat(43)}`;
+    const { port } = await startTransport({
+      token: TOKEN,
+      maxConnections: 1,
+      verifyToken: async () => held,
+    });
+    const first = attemptUpgrade(port, {
+      protocols: `zeros-v1, zeros-cloud-token.${Buffer.from(desktopToken).toString("base64url")}`,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await expect(
+      attemptUpgrade(port, { cloudTokenHeader: desktopToken }),
+    ).resolves.toBe("rejected");
+    release(ADMISSION);
+    await expect(first).resolves.toBe("accepted");
   });
 
   it("rejects a non-canonical UTF-8 token subprotocol", async () => {
@@ -676,10 +741,7 @@ describe("CloudTransport — connected peer is kind:cloud and messages round-tri
       await held;
     });
 
-    const peers = [
-      openCloudWebSocket(port),
-      openCloudWebSocket(port),
-    ];
+    const peers = [openCloudWebSocket(port), openCloudWebSocket(port)];
     await Promise.all(
       peers.map(
         (ws) =>
@@ -805,10 +867,7 @@ describe("CloudTransport — connected peer is kind:cloud and messages round-tri
       }
     });
 
-    const peers = Array.from(
-      { length: 4 },
-      () => openCloudWebSocket(port),
-    );
+    const peers = Array.from({ length: 4 }, () => openCloudWebSocket(port));
     await Promise.all(
       peers.map(
         (ws) =>

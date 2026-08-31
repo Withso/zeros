@@ -7,6 +7,11 @@ import { withSystemTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
 import { consumeCloudWorkspaceGrant } from "./grants.js";
 import { DatabaseCloudWorkspaceSetupAdmissionBroker } from "./setup-admission-broker.js";
+import {
+  seedCanonicalCloudWorkspaceAuthority,
+  seedCanonicalCloudWorkspacePrerequisites,
+  seedCanonicalWorkspaceSettingsVersion,
+} from "./test-fixtures.js";
 import type { CloudWorkspaceSetupExecution } from "./setup-worker.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -59,34 +64,65 @@ d("cloud workspace setup admission broker", () => {
          VALUES ($1, $2, $3, 'maintainer')`,
         [teamId, organizationId, userId],
       );
+      const canonical = await seedCanonicalCloudWorkspacePrerequisites(tx, {
+        organizationId,
+        ownerUserId: userId,
+      });
       await tx.query(
         `INSERT INTO cloud_workspaces (
            id, org_id, team_id, created_by, display_name,
            repository_forge, repository_owner, repository_name,
-           repository_revision, status, desired_state
+           repository_revision, repository_id, owner_user_id,
+           assignee_user_id, status, desired_state
          ) VALUES ($1, $2, $3, $4, 'Setup Admission Workspace',
                    'github.com', 'withso', 'zeros', 'main',
-                   'setting_up', 'running')`,
-        [workspaceId, organizationId, teamId, userId],
+                   $5, $4, $4, 'setting_up', 'running')`,
+        [
+          workspaceId,
+          organizationId,
+          teamId,
+          userId,
+          canonical.repositoryId,
+        ],
       );
+      await seedCanonicalCloudWorkspaceAuthority(tx, {
+        workspaceId,
+        organizationId,
+        ownerUserId: userId,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by
+           source_commit, created_by, provider_connection_id
          ) VALUES ($1, 1, $2, 'daytona', 'snapshot-pinned-id',
-                   'linux/amd64', 2000, 4096, 20480, $3, $4)`,
-        [workspaceId, organizationId, "a".repeat(40), userId],
+                   'linux/amd64', 2000, 4096, 20480, $3, $4, $5)`,
+        [
+          workspaceId,
+          organizationId,
+          "a".repeat(40),
+          userId,
+          canonical.providerConnectionId,
+        ],
       );
-      const settings = JSON.stringify({ schemaVersion: 1, values: {} });
+      const settingsDocument = { schemaVersion: 1, values: {} };
+      const settings = JSON.stringify(settingsDocument);
+      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(tx, {
+        workspaceId,
+        organizationId,
+        generation: 1,
+        createdBy: userId,
+        effectiveDocument: settingsDocument,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_setup_specs (
            workspace_id, generation, org_id, repository_forge,
            repository_owner, repository_name, repository_revision,
-           settings_snapshot, settings_snapshot_sha256
+           settings_snapshot, settings_snapshot_sha256,
+           workspace_settings_version_id
          ) VALUES ($1, 1, $2, 'github.com', 'withso', 'zeros', 'main',
-                   $3::jsonb, digest($3::jsonb::text, 'sha256'))`,
-        [workspaceId, organizationId, settings],
+                   $3::jsonb, digest($3::jsonb::text, 'sha256'), $4)`,
+        [workspaceId, organizationId, settings, settingsVersionId],
       );
       const run = await tx.query<{ id: string }>(
         `INSERT INTO cloud_workspace_setup_runs (

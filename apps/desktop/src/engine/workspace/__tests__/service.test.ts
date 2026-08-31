@@ -2693,6 +2693,12 @@ describe("WorkspaceService", () => {
       };
     };
     expect(before.snapshot.protocolCapability).toBe(protocolCapability);
+    const cloudSnapshot = (await svc.handle(
+      "design.snapshot",
+      { workspaceId: workspace.workspaceId },
+      { hostLocalResources: false },
+    )) as { snapshot: { protocolCapability: string | null } };
+    expect(cloudSnapshot.snapshot.protocolCapability).toBeNull();
     const frame = before.snapshot.frames[0]!;
     expect(frame).not.toHaveProperty("tree");
     const hydrated = (await svc.handle("design.frame", {

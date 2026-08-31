@@ -14,9 +14,25 @@ const NOW = 1_800_000_000_000;
 const EXPIRES_AT = new Date(NOW + 30 * 60_000).toISOString();
 const SSH_CREDENTIAL = `ssh_${"a".repeat(40)}`;
 const PREVIEW_CAPABILITY = `zwp_${"b".repeat(43)}`;
+const ENGINE_INSTANCE_ID = "66666666-6666-4666-8666-666666666666";
+const DEVICE_ID = "77777777-7777-4777-8777-777777777777";
+const TUNNEL_SESSION_ID = "88888888-8888-4888-8888-888888888888";
+const ENGINE_GRANT = `zws_${"c".repeat(43)}`;
 
 function api(): CloudWorkspaceAccessBrokerApi {
   return {
+    issueEngineAdmission: vi.fn(async () => ({
+      version: 1 as const,
+      audience: "zeros-cloud-workspace-engine-client-admission-v1" as const,
+      workspaceId: WORKSPACE_ID,
+      organizationId: ORGANIZATION_ID,
+      generation: 7,
+      authorityEpoch: 9,
+      engineInstanceId: ENGINE_INSTANCE_ID,
+      remotePort: 47891,
+      grantToken: ENGINE_GRANT,
+      expiresAt: new Date(NOW + 120_000).toISOString(),
+    })),
     issuePreview: vi.fn(async () => ({
       grant: {
         id: GRANT_ID,
@@ -48,21 +64,33 @@ function api(): CloudWorkspaceAccessBrokerApi {
         command: `ssh ${SSH_CREDENTIAL}@ssh.app.daytona.io`,
       },
     })),
-    issueTunnel: vi.fn(async () => ({
+    issueTunnel: vi.fn(async (_accessToken, input) => ({
       grant: {
         id: GRANT_ID,
         kind: "tunnel" as const,
         workspaceId: WORKSPACE_ID,
         generation: 7,
-        remotePort: 4173,
+        remotePort: input.remotePort,
         expiresAt: EXPIRES_AT,
       },
       tunnel: {
         sshUsername: SSH_CREDENTIAL,
         sshHost: "ssh.app.daytona.io",
         remoteHost: "127.0.0.1" as const,
-        remotePort: 4173,
+        remotePort: input.remotePort,
+        session: {
+          id: TUNNEL_SESSION_ID,
+          deviceId: input.deviceId,
+          state: "starting" as const,
+        },
       },
+    })),
+    activateTunnel: vi.fn(async (_accessToken, input) => ({
+      id: input.sessionId,
+      deviceId: input.deviceId,
+      state: "active" as const,
+      bindAddress: "127.0.0.1" as const,
+      observedLocalPort: input.observedLocalPort,
     })),
     revoke: vi.fn(async () => undefined),
   };
@@ -77,6 +105,7 @@ function broker(
   return new CloudWorkspaceAccessBroker({
     api: accessApi,
     getAccessToken: vi.fn(async () => "account-access-token"),
+    getDeviceId: vi.fn(async () => DEVICE_ID),
     randomId: () => "55555555-5555-4555-8555-555555555555",
     now: () => NOW,
     ...overrides,
@@ -307,6 +336,23 @@ describe("CloudWorkspaceAccessBroker", () => {
       sshHost: "ssh.app.daytona.io",
       expiresAt: EXPIRES_AT,
     });
+    expect(accessApi.issueTunnel).toHaveBeenCalledWith(
+      "account-access-token",
+      expect.objectContaining({
+        deviceId: DEVICE_ID,
+        requestedLocalPort: 54_173,
+      }),
+    );
+    expect(accessApi.activateTunnel).toHaveBeenCalledWith(
+      "account-access-token",
+      {
+        organizationId: ORGANIZATION_ID,
+        workspaceId: WORKSPACE_ID,
+        sessionId: TUNNEL_SESSION_ID,
+        deviceId: DEVICE_ID,
+        observedLocalPort: 54_173,
+      },
+    );
     expect(opened).toEqual({
       accessId: GRANT_ID,
       localHost: "127.0.0.1",
@@ -317,6 +363,31 @@ describe("CloudWorkspaceAccessBroker", () => {
 
     await accessBroker.revoke(GRANT_ID);
     expect(order).toEqual(["stop", "revoke"]);
+  });
+
+  it("stops and revokes a tunnel whose server activation fails", async () => {
+    const accessApi = api();
+    vi.mocked(accessApi.activateTunnel).mockRejectedValueOnce(
+      new Error("activation rejected"),
+    );
+    const handle: CloudWorkspaceTunnelHandle = {
+      localPort: 54_173,
+      stop: vi.fn(async () => undefined),
+    };
+    const accessBroker = broker(accessApi, {
+      startTunnel: vi.fn(async () => handle),
+    });
+
+    await expect(
+      accessBroker.startTunnel({
+        organizationId: ORGANIZATION_ID,
+        workspaceId: WORKSPACE_ID,
+        remotePort: 4_173,
+        localPort: 54_173,
+      }),
+    ).rejects.toThrow("activation rejected");
+    expect(handle.stop).toHaveBeenCalledOnce();
+    expect(accessApi.revoke).toHaveBeenCalledOnce();
   });
 
   it("still revokes provider authority when local tunnel cleanup fails", async () => {
@@ -495,6 +566,39 @@ describe("CloudWorkspaceAccessBroker", () => {
     await expect(accessBroker.revoke(second.accessId)).resolves.toBe(false);
   });
 
+  it("fails sibling SSH handles closed when cleanup has an unknown provider result", async () => {
+    const accessApi = api();
+    const firstResponse = await accessApi.issueSsh("", {} as never);
+    vi.mocked(accessApi.issueSsh)
+      .mockReset()
+      .mockResolvedValueOnce(firstResponse)
+      .mockResolvedValueOnce({
+        ...firstResponse,
+        grant: { ...firstResponse.grant, id: SECOND_GRANT_ID },
+      });
+    const accessBroker = broker(accessApi, {
+      writeClipboard: vi.fn(),
+      launchTerminal: vi.fn(async () => {
+        throw new Error("terminal refused");
+      }),
+    });
+    const first = await accessBroker.copySshCommand({
+      organizationId: ORGANIZATION_ID,
+      workspaceId: WORKSPACE_ID,
+    });
+    vi.mocked(accessApi.revoke).mockRejectedValueOnce(
+      new Error("revocation result unknown"),
+    );
+
+    await expect(
+      accessBroker.openSshTerminal({
+        organizationId: ORGANIZATION_ID,
+        workspaceId: WORKSPACE_ID,
+      }),
+    ).rejects.toThrow(/terminal refused/i);
+    await expect(accessBroker.revoke(first.accessId)).resolves.toBe(false);
+  });
+
   it("does not invalidate SSH access issued for a newer workspace generation", async () => {
     const accessApi = api();
     const firstResponse = await accessApi.issueSsh("", {} as never);
@@ -522,6 +626,92 @@ describe("CloudWorkspaceAccessBroker", () => {
     await accessBroker.revoke(first.accessId);
     await expect(accessBroker.revoke(second.accessId)).resolves.toBe(true);
     expect(accessApi.revoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("opens and compare-and-swap refreshes an exact engine runtime tunnel", async () => {
+    const accessApi = api();
+    const tunnel: CloudWorkspaceTunnelHandle = {
+      localPort: 55123,
+      stop: vi.fn(async () => undefined),
+    };
+    const accessBroker = broker(accessApi, {
+      startDynamicTunnel: vi.fn(async () => tunnel),
+    });
+
+    const first = await accessBroker.openRuntime({
+      organizationId: ORGANIZATION_ID,
+      workspaceId: WORKSPACE_ID,
+    });
+    expect(first).toEqual({
+      kind: "cloud",
+      channel: "electron-ssh-tunnel",
+      runtimeId: "55555555-5555-4555-8555-555555555555",
+      organizationId: ORGANIZATION_ID,
+      workspaceId: WORKSPACE_ID,
+      generation: 7,
+      authorityEpoch: 9,
+      engineInstanceId: ENGINE_INSTANCE_ID,
+      connectionSequence: 1,
+      url: "ws://127.0.0.1:55123/ws",
+      cloudToken: ENGINE_GRANT,
+      expiresAt: NOW + 120_000,
+    });
+    expect(JSON.stringify(first)).not.toContain(SSH_CREDENTIAL);
+    expect(accessApi.issueTunnel).toHaveBeenCalledWith(expect.any(String), {
+      organizationId: ORGANIZATION_ID,
+      workspaceId: WORKSPACE_ID,
+      remotePort: 47_891,
+      deviceId: DEVICE_ID,
+      runtimeGeneration: 7,
+      expiresInMinutes: 30,
+      idempotencyKey: expect.stringContaining("desktop:tunnel:"),
+    });
+
+    const refreshed = await accessBroker.refreshRuntime(first);
+    expect(refreshed).toMatchObject({
+      runtimeId: first.runtimeId,
+      connectionSequence: 2,
+      generation: 7,
+      engineInstanceId: ENGINE_INSTANCE_ID,
+    });
+    await expect(accessBroker.refreshRuntime(first)).rejects.toMatchObject({
+      code: "cloud_workspace_access_superseded",
+    });
+    expect(accessApi.issueTunnel).toHaveBeenCalledOnce();
+
+    await expect(accessBroker.closeRuntime(first.runtimeId)).resolves.toBe(
+      true,
+    );
+    expect(tunnel.stop).toHaveBeenCalledOnce();
+  });
+
+  it("revokes a mismatched runtime tunnel before it can cross IPC", async () => {
+    const accessApi = api();
+    const issued = await accessApi.issueTunnel("", {
+      organizationId: ORGANIZATION_ID,
+      workspaceId: WORKSPACE_ID,
+      remotePort: 47891,
+      deviceId: DEVICE_ID,
+      expiresInMinutes: 30,
+      idempotencyKey: "test:mismatch",
+    });
+    vi.mocked(accessApi.issueTunnel)
+      .mockReset()
+      .mockResolvedValue({
+        ...issued,
+        grant: { ...issued.grant, generation: 8 },
+      });
+    const startDynamicTunnel = vi.fn();
+    const accessBroker = broker(accessApi, { startDynamicTunnel });
+
+    await expect(
+      accessBroker.openRuntime({
+        organizationId: ORGANIZATION_ID,
+        workspaceId: WORKSPACE_ID,
+      }),
+    ).rejects.toMatchObject({ code: "cloud_workspace_access_superseded" });
+    expect(startDynamicTunnel).not.toHaveBeenCalled();
+    expect(accessApi.revoke).toHaveBeenCalledOnce();
   });
 
   it("coalesces provider-wide SSH revocation while disposing sibling access", async () => {

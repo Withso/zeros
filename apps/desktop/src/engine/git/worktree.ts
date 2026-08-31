@@ -33,6 +33,7 @@ import {
   clearWorkspaceLifecycle,
   deleteWorkspaceRow,
   finishWorkspaceLifecycle,
+  getWorkspaceByCanonicalId,
   getWorkspaceById,
   getWorkspaceByBranch,
   listWorkspaceBranches,
@@ -318,7 +319,22 @@ async function currentBranchName(repoRoot: string): Promise<string> {
  *  plain branch name, NEVER "origin/main"). */
 async function resolveWorktreeBase(
   input: CreateWorkspaceInput,
+  internal?: InternalCreateWorkspaceOptions,
 ): Promise<{ baseRef: string; baseBranch: string }> {
+  if (internal?.exactBaseCommit) {
+    const commit = internal.exactBaseCommit.toLowerCase();
+    if (
+      !/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(commit) ||
+      !(await refExists(input.repoRoot, `${commit}^{commit}`))
+    ) {
+      throw new GitError({
+        code: "VALIDATION_FAILED",
+        message: "Cloud workspace copy Git base is unavailable locally",
+      });
+    }
+    // A mutable branch could advance between export and materialization.
+    return { baseRef: commit, baseBranch: commit };
+  }
   // Explicit caller base wins (relay contract / future picker) — verbatim, no fetch.
   if (input.baseBranch) {
     return { baseRef: input.baseBranch, baseBranch: input.baseBranch };
@@ -563,6 +579,24 @@ export interface CreateWorkspaceInput extends CreateWorkspaceOptions {
   optimisticChatId?: string;
 }
 
+export type InternalWorkspaceProvisionContext = {
+  workspaceId: string;
+  canonicalId: string;
+  repoRoot: string;
+  workspacePath: string;
+  baseCommit: string | null;
+};
+
+/** Engine-internal extension used by crash-safe cloud→local copies. It is a
+ * second function argument, so WorkspaceService's JSON operation cannot
+ * forward a callback or select a canonical identity/base commit. */
+export type InternalCreateWorkspaceOptions = {
+  canonicalId: string;
+  exactBaseCommit?: string;
+  provision?: (context: InternalWorkspaceProvisionContext) => Promise<void>;
+  beforePublish?: (context: InternalWorkspaceProvisionContext) => void;
+};
+
 /** The shape a prepared/generated workspace id must match — the exact output
  *  of generateWorkspaceId. Anything else is rejected before it can reach a
  *  path join. */
@@ -612,6 +646,23 @@ function isPreparedBranch(branch: string): boolean {
   if (!head.endsWith("/")) return false;
   const namespace = head.slice(0, -1);
   return normalizeBranchPrefix(namespace) === namespace;
+}
+
+/** Validate the complete opaque reservation returned by
+ * prepareWorkspaceCreate before a crash-resumed coordinator trusts it. The
+ * branch and slug are later used in Git ref/path operations, so persisted
+ * state receives the same shape gate as a live renderer request. */
+export function isPreparedWorkspaceCreateIdentity(input: {
+  workspaceId: string;
+  branch: string;
+  repoSlug: string;
+}): boolean {
+  return (
+    WORKSPACE_ID_RE.test(input.workspaceId) &&
+    /^[a-z0-9][a-z0-9-]*$/.test(input.repoSlug) &&
+    !input.repoSlug.includes("..") &&
+    isPreparedBranch(input.branch)
+  );
 }
 
 /** Filesystem-safe, human-readable directory component. Git branch names may
@@ -1281,6 +1332,7 @@ export async function prepareWorkspaceCreate(input: {
 
 export function createWorkspace(
   input: CreateWorkspaceInput,
+  internal?: InternalCreateWorkspaceOptions,
 ): Promise<CreatedWorkspace> {
   // Prepared creates have a stable renderer-announced id. Register the flight
   // before the first async repo/fetch read so timeout recovery can prove that a
@@ -1288,13 +1340,14 @@ export function createWorkspace(
   // same operation instead of racing on the announced branch/path.
   return input.preparedId
     ? withWorkspaceLifecycleFlight(input.preparedId, "create", () =>
-        createWorkspaceInner(input),
+        createWorkspaceInner(input, internal),
       )
-    : createWorkspaceInner(input);
+    : createWorkspaceInner(input, internal);
 }
 
 async function createWorkspaceInner(
   input: CreateWorkspaceInput,
+  internal?: InternalCreateWorkspaceOptions,
 ): Promise<CreatedWorkspace> {
   if (!(await isRepo(input.repoRoot))) {
     throw new GitError({
@@ -1307,6 +1360,25 @@ async function createWorkspaceInner(
       code: "VALIDATION_FAILED",
       message:
         "createWorkspace: preparedId and preparedBranch must be supplied together",
+    });
+  }
+  const canonicalId = internal?.canonicalId.toLowerCase() ?? null;
+  if (
+    canonicalId !== null &&
+    (canonicalId !== internal!.canonicalId ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(
+        canonicalId,
+      ))
+  ) {
+    throw new GitError({
+      code: "VALIDATION_FAILED",
+      message: "Cloud workspace copy identity is invalid",
+    });
+  }
+  if (canonicalId && getWorkspaceByCanonicalId(canonicalId)) {
+    throw new GitError({
+      code: "WORKSPACE_ALREADY_EXISTS",
+      message: "Cloud workspace copy identity already exists on this device",
     });
   }
   // prepareWorkspaceCreate already rejects an unborn HEAD, so a prepared create
@@ -1356,7 +1428,7 @@ async function createWorkspaceInner(
   // Resolve where the new worktree forks from. `baseRef` is the start point
   // (e.g. "origin/main" when a remote exists); `baseBranch` is the plain branch
   // name we persist + export. See resolveWorktreeBase.
-  const { baseRef, baseBranch } = await resolveWorktreeBase(input);
+  const { baseRef, baseBranch } = await resolveWorktreeBase(input, internal);
   const tBase = Date.now();
   // baseRef is a bare positional to `git worktree add`. A value starting
   // with "-" would be parsed as a flag (option injection); a NUL is rejected too.
@@ -1457,6 +1529,12 @@ async function createWorkspaceInner(
       message: `Workspace ${workspaceId} was created concurrently. Create again for a fresh name.`,
     });
   }
+  if (canonicalId && getWorkspaceByCanonicalId(canonicalId)) {
+    throw new GitError({
+      code: "WORKSPACE_ALREADY_EXISTS",
+      message: "Cloud workspace copy identity was created concurrently",
+    });
+  }
   if (getWorkspaceByBranch(repoSlug, branch)) {
     throw new GitError({
       code: "WORKSPACE_ALREADY_EXISTS",
@@ -1475,6 +1553,7 @@ async function createWorkspaceInner(
   const now = Date.now();
   const workspace: Workspace = {
     id: workspaceId,
+    ...(canonicalId ? { canonicalId } : {}),
     kind,
     organizationId,
     placement,
@@ -1626,6 +1705,18 @@ async function createWorkspaceInner(
     // the branch checkout, or a vanished source) is simply one more entry for
     // `git add -f`, which no-ops when the file isn't there.
     addProvisionPaths(workspaceId, seedPaths);
+    const provisionContext: InternalWorkspaceProvisionContext | null = internal
+      ? {
+          workspaceId,
+          canonicalId: canonicalId!,
+          repoRoot: input.repoRoot,
+          workspacePath,
+          baseCommit: internal.exactBaseCommit ?? null,
+        }
+      : null;
+    if (internal?.provision) {
+      await internal.provision(provisionContext!);
+    }
     // Every workspace gets a `.context-graph/` skeleton (Context tab canvas +
     // composer-attachment store). Best-effort and quiet: the scaffold is
     // self-gitignoring, and a failure here must never roll back the worktree —
@@ -1659,7 +1750,16 @@ async function createWorkspaceInner(
         repoRoot: input.repoRoot,
       });
     }
-    updateWorkspaceLifecyclePhase(workspaceId, "work-applied");
+    if (internal?.beforePublish) {
+      // Keep recovery below work-applied until the portable record import and
+      // journal removal commit atomically. A crash before this transaction
+      // rolls the hidden checkout back instead of exposing a file-only copy.
+      finishWorkspaceLifecycle(workspaceId, {}, () =>
+        internal.beforePublish!(provisionContext!),
+      );
+    } else {
+      updateWorkspaceLifecyclePhase(workspaceId, "work-applied");
+    }
   } catch (err) {
     if (existsSync(workspacePath)) {
       // Remove ACLs that may remain from an older build before rollback.
@@ -1717,7 +1817,7 @@ async function createWorkspaceInner(
   // Publish the row only after checkout + required synchronous provisioning
   // completed. The row and create journal transition atomically in SQLite.
   writeWorktreeSeed(workspace);
-  finishWorkspaceLifecycle(workspaceId, {});
+  if (!internal?.beforePublish) finishWorkspaceLifecycle(workspaceId, {});
   await clearWorkspaceBranchOwnershipMarker(input.repoRoot, workspaceId);
 
   const tEnd = Date.now();

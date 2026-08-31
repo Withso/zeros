@@ -69,7 +69,10 @@ export interface DaytonaSetupCommandRunner {
 
 export type DaytonaCloudWorkspaceSetupExecutorOptions = {
   admissionBroker: CloudWorkspaceSetupAdmissionBroker;
-  commandRunner: DaytonaSetupCommandRunner;
+  commandRunner?: DaytonaSetupCommandRunner;
+  commandRunnerResolver?: (
+    execution: CloudWorkspaceSetupExecution,
+  ) => Promise<DaytonaSetupCommandRunner>;
   engineProtocolVersion: number;
   timeoutSeconds: number;
   now?: () => number;
@@ -397,13 +400,19 @@ function normalizeExecutionError(error: unknown): CloudWorkspaceSetupError {
 
 export class DaytonaCloudWorkspaceSetupExecutor implements CloudWorkspaceSetupExecutor {
   private readonly admissionBroker: CloudWorkspaceSetupAdmissionBroker;
-  private readonly commandRunner: DaytonaSetupCommandRunner;
+  private readonly commandRunner: DaytonaSetupCommandRunner | null;
+  private readonly commandRunnerResolver:
+    | ((execution: CloudWorkspaceSetupExecution) => Promise<DaytonaSetupCommandRunner>)
+    | null;
   private readonly engineProtocolVersion: number;
   private readonly timeoutSeconds: number;
   private readonly now: () => number;
 
   constructor(options: DaytonaCloudWorkspaceSetupExecutorOptions) {
     if (
+      (options.commandRunner ? 1 : 0) +
+          (options.commandRunnerResolver ? 1 : 0) !==
+        1 ||
       !Number.isSafeInteger(options.engineProtocolVersion) ||
       options.engineProtocolVersion < 1 ||
       options.engineProtocolVersion > 65_535 ||
@@ -414,7 +423,8 @@ export class DaytonaCloudWorkspaceSetupExecutor implements CloudWorkspaceSetupEx
       throw new Error("Daytona setup executor options are invalid");
     }
     this.admissionBroker = options.admissionBroker;
-    this.commandRunner = options.commandRunner;
+    this.commandRunner = options.commandRunner ?? null;
+    this.commandRunnerResolver = options.commandRunnerResolver ?? null;
     this.engineProtocolVersion = options.engineProtocolVersion;
     this.timeoutSeconds = options.timeoutSeconds;
     this.now = options.now ?? Date.now;
@@ -432,6 +442,15 @@ export class DaytonaCloudWorkspaceSetupExecutor implements CloudWorkspaceSetupEx
       );
     }
     validateExecution(execution);
+
+    let commandRunner: DaytonaSetupCommandRunner;
+    try {
+      commandRunner = this.commandRunnerResolver
+        ? await this.commandRunnerResolver(execution)
+        : this.commandRunner!;
+    } catch (error) {
+      throw normalizeExecutionError(error);
+    }
 
     let admission: CloudWorkspaceSetupAdmission;
     try {
@@ -459,7 +478,7 @@ export class DaytonaCloudWorkspaceSetupExecutor implements CloudWorkspaceSetupEx
         );
       }
       const request = encodeRequest(execution, admission, endpoint, now);
-      const response = await this.commandRunner.execute(
+      const response = await commandRunner.execute(
         {
           resourceId: execution.provider.resourceId,
           command: DAYTONA_SETUP_HELPER_COMMAND,

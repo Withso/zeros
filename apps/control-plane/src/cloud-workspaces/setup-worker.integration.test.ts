@@ -7,6 +7,11 @@ import { withSystemTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
 import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 import {
+  seedCanonicalCloudWorkspaceAuthority,
+  seedCanonicalCloudWorkspacePrerequisites,
+  seedCanonicalWorkspaceSettingsVersion,
+} from "./test-fixtures.js";
+import {
   CloudWorkspaceSetupError,
   CloudWorkspaceSetupWorker,
   type CloudWorkspaceSetupExecution,
@@ -152,32 +157,62 @@ d("cloud workspace setup worker", () => {
     const workspaceId = randomUUID();
     const settingsSnapshot = { schemaVersion: 1, values: {} };
     const result = await withSystemTx(pool, async (tx) => {
+      const canonical = await seedCanonicalCloudWorkspacePrerequisites(tx, {
+        organizationId,
+        ownerUserId: ownerId,
+      });
       await tx.query(
         `INSERT INTO cloud_workspaces (
            id, org_id, team_id, created_by, display_name,
            repository_forge, repository_owner, repository_name,
-           repository_revision, status, desired_state
+           repository_revision, repository_id, owner_user_id,
+           assignee_user_id, status, desired_state
          ) VALUES ($1, $2, $3, $4, 'Setup Workspace', 'github.com',
-                   'withso', 'zeros', 'main', 'setting_up', 'running')`,
-        [workspaceId, organizationId, teamId, ownerId],
+                   'withso', 'zeros', 'main', $5, $4, $4,
+                   'setting_up', 'running')`,
+        [workspaceId, organizationId, teamId, ownerId, canonical.repositoryId],
       );
+      await seedCanonicalCloudWorkspaceAuthority(tx, {
+        workspaceId,
+        organizationId,
+        ownerUserId: ownerId,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by
+           source_commit, created_by, provider_connection_id
          ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
-                   2000, 4096, 20480, $3, $4)`,
-        [workspaceId, organizationId, "a".repeat(40), ownerId],
+                   2000, 4096, 20480, $3, $4, $5)`,
+        [
+          workspaceId,
+          organizationId,
+          "a".repeat(40),
+          ownerId,
+          canonical.providerConnectionId,
+        ],
       );
+      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(tx, {
+        workspaceId,
+        organizationId,
+        generation: 1,
+        createdBy: ownerId,
+        effectiveDocument: settingsSnapshot,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_setup_specs (
            workspace_id, generation, org_id, repository_forge,
            repository_owner, repository_name, repository_revision,
-           settings_snapshot, settings_snapshot_sha256
+           settings_snapshot, settings_snapshot_sha256,
+           workspace_settings_version_id
          ) VALUES ($1, 1, $2, 'github.com', 'withso', 'zeros', 'main',
-                   $3::jsonb, digest($3::jsonb::text, 'sha256'))`,
-        [workspaceId, organizationId, JSON.stringify(settingsSnapshot)],
+                   $3::jsonb, digest($3::jsonb::text, 'sha256'), $4)`,
+        [
+          workspaceId,
+          organizationId,
+          JSON.stringify(settingsSnapshot),
+          settingsVersionId,
+        ],
       );
       await tx.query(
         `INSERT INTO cloud_workspace_provider_bindings (
@@ -209,9 +244,17 @@ d("cloud workspace setup worker", () => {
           running && (input?.leaseExpired ?? false),
         ],
       );
-      return setup.rows[0]!.id;
+      return {
+        setupRunId: setup.rows[0]!.id,
+        providerConnectionId: canonical.providerConnectionId,
+      };
     });
-    return { workspaceId, setupRunId: result, settingsSnapshot };
+    return {
+      workspaceId,
+      setupRunId: result.setupRunId,
+      providerConnectionId: result.providerConnectionId,
+      settingsSnapshot,
+    };
   };
 
   const seedReplacementSetup = async () => {
@@ -223,22 +266,37 @@ d("cloud workspace setup worker", () => {
         `INSERT INTO cloud_workspace_generations (
            workspace_id, generation, org_id, provider, image_ref,
            architecture, cpu_millicores, memory_mib, storage_mib,
-           source_commit, created_by
+           source_commit, created_by, provider_connection_id
          ) VALUES ($1, 2, $2, 'daytona', 'snap-next', 'linux/amd64',
-                   2000, 4096, 20480, $3, $4)`,
-        [seeded.workspaceId, organizationId, "b".repeat(40), ownerId],
+                   2000, 4096, 20480, $3, $4, $5)`,
+        [
+          seeded.workspaceId,
+          organizationId,
+          "b".repeat(40),
+          ownerId,
+          seeded.providerConnectionId,
+        ],
       );
+      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(tx, {
+        workspaceId: seeded.workspaceId,
+        organizationId,
+        generation: 2,
+        createdBy: ownerId,
+        effectiveDocument: seeded.settingsSnapshot,
+      });
       await tx.query(
         `INSERT INTO cloud_workspace_setup_specs (
            workspace_id, generation, org_id, repository_forge,
            repository_owner, repository_name, repository_revision,
-           settings_snapshot, settings_snapshot_sha256
+           settings_snapshot, settings_snapshot_sha256,
+           workspace_settings_version_id
          ) VALUES ($1, 2, $2, 'github.com', 'withso', 'zeros', 'main',
-                   $3::jsonb, digest($3::jsonb::text, 'sha256'))`,
+                   $3::jsonb, digest($3::jsonb::text, 'sha256'), $4)`,
         [
           seeded.workspaceId,
           organizationId,
           JSON.stringify(seeded.settingsSnapshot),
+          settingsVersionId,
         ],
       );
       await tx.query(

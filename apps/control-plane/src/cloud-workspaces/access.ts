@@ -10,11 +10,19 @@ import { audit } from "../audit.js";
 import { HttpError } from "../authz.js";
 import { withSystemTx, type Tx } from "../db.js";
 import {
+  authorizeCloudWorkspaceOperation,
+  CloudWorkspaceAuthorizationError,
+} from "./authorization.js";
+import {
   CloudProviderError,
   type CloudProviderPreviewEndpoint,
   type CloudProviderSshAccess,
   type CloudWorkspaceAccessProvider,
 } from "./provider.js";
+import type {
+  CloudWorkspaceProviderPurpose,
+  CloudWorkspaceProviderResolver,
+} from "./provider-resolver.js";
 
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -31,6 +39,7 @@ const MAX_CONCURRENT_PREVIEW_REQUESTS = 32;
 const MAX_CONCURRENT_PREVIEW_REQUESTS_PER_GRANT = 4;
 
 export type CloudWorkspaceClientAccessKind = "ssh" | "tunnel" | "preview";
+export type CloudWorkspaceAccessPurpose = "user" | "engine-runtime";
 
 export type CloudWorkspaceAccessDocument = {
   grant: {
@@ -51,6 +60,11 @@ export type CloudWorkspaceAccessDocument = {
     sshHost: string;
     remoteHost: "127.0.0.1";
     remotePort: number;
+    session: {
+      id: string;
+      deviceId: string;
+      state: "starting";
+    };
   };
   preview?: {
     logicalUrl: string;
@@ -66,10 +80,28 @@ export type CloudWorkspaceAccessService = {
     workspaceId: string;
     accountUserId: string;
     kind: CloudWorkspaceClientAccessKind;
+    purpose?: CloudWorkspaceAccessPurpose;
+    expectedGeneration?: number;
+    deviceId?: string;
+    requestedLocalPort?: number;
     remotePort?: number;
     expiresInMinutes: number;
     idempotencyKey: string;
   }): Promise<CloudWorkspaceAccessDocument>;
+  activateTunnel(input: {
+    organizationId: string;
+    workspaceId: string;
+    accountUserId: string;
+    sessionId: string;
+    deviceId: string;
+    observedLocalPort: number;
+  }): Promise<{
+    id: string;
+    deviceId: string;
+    state: "active";
+    bindAddress: "127.0.0.1";
+    observedLocalPort: number;
+  }>;
   revoke(input: {
     organizationId: string;
     workspaceId: string;
@@ -83,6 +115,8 @@ export type CloudWorkspaceAccessService = {
 };
 
 type AuthorizedWorkspace = {
+  team_id: string;
+  owner_user_id: string;
   generation: number;
   status: string;
   desired_state: string;
@@ -160,10 +194,40 @@ async function authorizedWorkspace(
     organizationId: string;
     workspaceId: string;
     accountUserId: string;
+    workosEnabled: boolean;
   },
 ): Promise<AuthorizedWorkspace> {
+  const scope = await tx.query<{ team_id: string; owner_user_id: string }>(
+    `SELECT cw.team_id, cw.owner_user_id
+     FROM cloud_workspaces cw
+     WHERE cw.org_id = $1 AND cw.id = $2 AND cw.deleted_at IS NULL`,
+    [input.organizationId, input.workspaceId],
+  );
+  const identity = scope.rows[0];
+  if (!identity) {
+    throw new HttpError(404, "not_found", "Cloud workspace not found");
+  }
+  try {
+    await authorizeCloudWorkspaceOperation(tx, {
+      organizationId: input.organizationId,
+      teamId: identity.team_id,
+      actorUserId: input.accountUserId,
+      billingOwnerUserId: identity.owner_user_id,
+      workosEnabled: input.workosEnabled,
+      requireWorkspaceOwner: true,
+    });
+  } catch (error) {
+    if (
+      error instanceof CloudWorkspaceAuthorizationError &&
+      error.status === 404
+    ) {
+      throw new HttpError(404, "not_found", "Cloud workspace not found");
+    }
+    throw error;
+  }
   const selected = await tx.query<AuthorizedWorkspace>(
-    `SELECT cw.current_generation AS generation, cw.status, cw.desired_state,
+    `SELECT cw.team_id, cw.owner_user_id,
+            cw.current_generation AS generation, cw.status, cw.desired_state,
             pb.provider_resource_id, pb.updated_at AS provider_binding_updated_at
      FROM cloud_workspaces cw
      JOIN organizations organization
@@ -178,12 +242,36 @@ async function authorizedWorkspace(
       AND tm.user_id = $3
      JOIN users account
        ON account.id = $3 AND account.deleted_at IS NULL
+      AND account.auth_status = 'active'
+     JOIN cloud_workspace_generations generation
+       ON generation.workspace_id = cw.id
+      AND generation.generation = cw.current_generation
+      AND generation.org_id = cw.org_id
+     JOIN provider_connections provider_connection
+       ON provider_connection.id = generation.provider_connection_id
+      AND provider_connection.org_id = generation.org_id
+      AND provider_connection.state = 'active'
      JOIN cloud_workspace_provider_bindings pb
        ON pb.workspace_id = cw.id AND pb.org_id = cw.org_id
       AND pb.generation = cw.current_generation
      WHERE cw.org_id = $1 AND cw.id = $2 AND cw.deleted_at IS NULL
+       AND cw.owner_user_id = $3 AND cw.single_member_mode
        AND pb.provider_resource_id IS NOT NULL
        AND pb.observed_state = 'running'
+       AND cloud_workspace_generation_policy_current(
+         cw.id, cw.current_generation, cw.org_id
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM cloud_workspace_generation_secret_bindings secret_link
+         JOIN secret_bindings secret
+           ON secret.id = secret_link.binding_id
+          AND secret.org_id = secret_link.org_id
+         WHERE secret_link.workspace_id = cw.id
+           AND secret_link.generation = cw.current_generation
+           AND secret_link.org_id = cw.org_id
+           AND secret.state <> 'active'
+       )
      FOR UPDATE OF cw`,
     [input.organizationId, input.workspaceId, input.accountUserId],
   );
@@ -208,7 +296,19 @@ function normalizedPort(
   kind: CloudWorkspaceClientAccessKind,
   value: number | undefined,
   forbiddenPorts: ReadonlySet<number>,
+  purpose: CloudWorkspaceAccessPurpose,
+  runtimeEnginePort: number | null,
 ): number | null {
+  if (
+    purpose === "engine-runtime" &&
+    (kind !== "tunnel" || runtimeEnginePort === null || value !== runtimeEnginePort)
+  ) {
+    throw new HttpError(
+      422,
+      "cloud_access_port_forbidden",
+      "Cloud runtime tunnels require the configured engine port",
+    );
+  }
   if (kind === "ssh") {
     if (value !== undefined) {
       throw new HttpError(
@@ -224,7 +324,7 @@ function normalizedPort(
     value === undefined ||
     value < 1_024 ||
     value > 65_535 ||
-    forbiddenPorts.has(value)
+    (forbiddenPorts.has(value) && purpose !== "engine-runtime")
   ) {
     throw new HttpError(
       422,
@@ -244,6 +344,46 @@ function normalizedTtl(value: number): number {
     );
   }
   return value;
+}
+
+function normalizedOptionalPort(value: number | undefined): number | null {
+  if (value === undefined) return null;
+  if (!Number.isSafeInteger(value) || value < 1_024 || value > 65_535) {
+    throw new HttpError(
+      422,
+      "cloud_access_port_forbidden",
+      "Local forwarding requires an application port",
+    );
+  }
+  return value;
+}
+
+function normalizedRequiredPort(value: number): number {
+  const normalized = normalizedOptionalPort(value);
+  if (normalized === null) {
+    throw new HttpError(
+      422,
+      "cloud_access_port_forbidden",
+      "Local forwarding requires an application port",
+    );
+  }
+  return normalized;
+}
+
+async function assertActiveDevice(
+  tx: Tx,
+  input: { deviceId: string; accountUserId: string },
+): Promise<void> {
+  const device = await tx.query(
+    `SELECT 1 FROM devices
+     WHERE id = $1 AND user_id = $2 AND trust_state = 'trusted'
+       AND revoked_at IS NULL
+     FOR UPDATE`,
+    [input.deviceId, input.accountUserId],
+  );
+  if ((device.rowCount ?? 0) !== 1) {
+    throw new HttpError(404, "not_found", "Cloud device not found");
+  }
 }
 
 function normalizedCredential(value: string): string {
@@ -318,10 +458,13 @@ async function fenceProviderWideSshRevocation(
 
 export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccessService {
   private readonly pool: pg.Pool;
-  private readonly provider: CloudWorkspaceAccessProvider;
+  private readonly provider: CloudWorkspaceAccessProvider | null;
+  private readonly providerResolver: CloudWorkspaceProviderResolver | null;
   private readonly previewBaseDomain: string | null;
   private readonly fetcher: Fetcher;
   private readonly forbiddenPorts: ReadonlySet<number>;
+  private readonly runtimeEnginePort: number | null;
+  private readonly workosEnabled: boolean;
   private readonly previewEndpoints = new Map<
     string,
     { endpoint: CloudProviderPreviewEndpoint; expiresAt: number }
@@ -335,16 +478,48 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
 
   constructor(input: {
     pool: pg.Pool;
-    provider: CloudWorkspaceAccessProvider;
+    provider?: CloudWorkspaceAccessProvider;
+    providerResolver?: CloudWorkspaceProviderResolver;
     previewBaseDomain: string | null;
     fetcher?: Fetcher;
     forbiddenPorts?: readonly number[];
+    runtimeEnginePort?: number;
+    workosEnabled?: boolean;
   }) {
+    if ((input.provider ? 1 : 0) + (input.providerResolver ? 1 : 0) !== 1) {
+      throw new Error(
+        "Cloud workspace access requires exactly one provider boundary",
+      );
+    }
     this.pool = input.pool;
-    this.provider = input.provider;
+    this.provider = input.provider ?? null;
+    this.providerResolver = input.providerResolver ?? null;
     this.previewBaseDomain = input.previewBaseDomain;
     this.fetcher = input.fetcher ?? fetch;
     this.forbiddenPorts = new Set(input.forbiddenPorts ?? [22_222, 39_393]);
+    this.runtimeEnginePort = input.runtimeEnginePort ?? null;
+    if (
+      this.runtimeEnginePort !== null &&
+      (!Number.isSafeInteger(this.runtimeEnginePort) ||
+        this.runtimeEnginePort < 1_024 ||
+        this.runtimeEnginePort > 65_535 ||
+        this.runtimeEnginePort === 22_222)
+    ) {
+      throw new Error("Cloud workspace runtime engine port is invalid");
+    }
+    this.workosEnabled = input.workosEnabled === true;
+  }
+
+  private async providerFor(input: {
+    workspaceId: string;
+    organizationId: string;
+    generation: number;
+    purpose: CloudWorkspaceProviderPurpose;
+  }): Promise<CloudWorkspaceAccessProvider> {
+    if (this.providerResolver) {
+      return (await this.providerResolver.resolve(input)).provider;
+    }
+    return this.provider!;
   }
 
   async issue(input: {
@@ -352,6 +527,10 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     workspaceId: string;
     accountUserId: string;
     kind: CloudWorkspaceClientAccessKind;
+    purpose?: CloudWorkspaceAccessPurpose;
+    expectedGeneration?: number;
+    deviceId?: string;
+    requestedLocalPort?: number;
     remotePort?: number;
     expiresInMinutes: number;
     idempotencyKey: string;
@@ -366,11 +545,41 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         "Idempotency-Key must contain 8-128 safe ASCII characters",
       );
     }
+    const purpose = input.purpose ?? "user";
+    if (
+      !["user", "engine-runtime"].includes(purpose) ||
+      (input.expectedGeneration !== undefined &&
+        (!Number.isSafeInteger(input.expectedGeneration) ||
+          input.expectedGeneration < 1)) ||
+      (purpose === "engine-runtime" && input.expectedGeneration === undefined)
+    ) {
+      throw new HttpError(
+        422,
+        "invalid_input",
+        "Cloud workspace access scope is invalid",
+      );
+    }
+    const deviceId = input.kind === "tunnel" ? input.deviceId : undefined;
+    if (
+      (input.kind === "tunnel" &&
+        (typeof deviceId !== "string" || !UUID_PATTERN.test(deviceId))) ||
+      (input.kind !== "tunnel" &&
+        (input.deviceId !== undefined || input.requestedLocalPort !== undefined))
+    ) {
+      throw new HttpError(
+        422,
+        "invalid_input",
+        "Cloud tunnel device scope is invalid",
+      );
+    }
+    const requestedLocalPort = normalizedOptionalPort(input.requestedLocalPort);
     const expiresInMinutes = normalizedTtl(input.expiresInMinutes);
     const remotePort = normalizedPort(
       input.kind,
       input.remotePort,
       this.forbiddenPorts,
+      purpose,
+      this.runtimeEnginePort,
     );
     if (input.kind === "preview" && !this.previewBaseDomain) {
       throw new HttpError(
@@ -385,16 +594,40 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
       workspaceId: input.workspaceId,
       accountUserId: input.accountUserId,
       kind: input.kind,
+      purpose,
+      expectedGeneration: input.expectedGeneration ?? null,
+      deviceId: deviceId ?? null,
+      requestedLocalPort,
       remotePort,
       expiresInMinutes,
     });
     const requestedExpiresAt = new Date(Date.now() + expiresInMinutes * 60_000);
     const grantId = randomUUID();
+    const forwardSessionId = input.kind === "tunnel" ? randomUUID() : null;
     const previewProxyLabel =
       input.kind === "preview" ? randomBytes(16).toString("hex") : null;
 
     const prepared = await withSystemTx(this.pool, async (tx) => {
-      const workspace = await authorizedWorkspace(tx, input);
+      const workspace = await authorizedWorkspace(tx, {
+        ...input,
+        workosEnabled: this.workosEnabled,
+      });
+      if (
+        input.expectedGeneration !== undefined &&
+        workspace.generation !== input.expectedGeneration
+      ) {
+        throw new HttpError(
+          409,
+          "cloud_workspace_access_superseded",
+          "Cloud workspace changed before access could be issued",
+        );
+      }
+      if (deviceId) {
+        await assertActiveDevice(tx, {
+          deviceId,
+          accountUserId: input.accountUserId,
+        });
+      }
       // The account-scoped key spans workspaces, while the workspace row lock
       // above only serializes requests for one workspace. Let the unique index
       // arbitrate cross-workspace races instead of leaking a raw 23505 when
@@ -480,6 +713,12 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     let expiresAt: Date;
     let ssh: CloudProviderSshAccess | null = null;
     try {
+      const provider = await this.providerFor({
+        workspaceId: input.workspaceId,
+        organizationId: input.organizationId,
+        generation: prepared.generation,
+        purpose: input.kind === "preview" ? "preview" : "ssh",
+      });
       if (input.kind === "preview") {
         credential = `zwp_${randomBytes(32).toString("base64url")}`;
         if (!PREVIEW_CAPABILITY_PATTERN.test(credential)) {
@@ -489,12 +728,12 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         // Prove the exact private provider endpoint now; the raw provider
         // token is intentionally discarded and resolved again only in proxy
         // memory while a request is authorized.
-        await this.provider.getPreviewEndpoint(
+        await provider.getPreviewEndpoint(
           prepared.provider_resource_id,
           remotePort!,
         );
       } else {
-        ssh = await this.provider.createSshAccess(
+        ssh = await provider.createSshAccess(
           prepared.provider_resource_id,
           expiresInMinutes,
         );
@@ -543,6 +782,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
             workspaceId: input.workspaceId,
             grantId,
             kind: input.kind,
+            purpose,
             generation: prepared.generation,
           },
         );
@@ -553,7 +793,10 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     let published = false;
     try {
       published = await withSystemTx(this.pool, async (tx) => {
-        const current = await authorizedWorkspace(tx, input);
+        const current = await authorizedWorkspace(tx, {
+          ...input,
+          workosEnabled: this.workosEnabled,
+        });
         const grant = await tx.query<{ state: string }>(
           `SELECT state FROM cloud_workspace_client_access_grants
            WHERE id = $1 FOR UPDATE`,
@@ -579,6 +822,30 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           ],
         );
         if ((updated.rowCount ?? 0) !== 1) return false;
+        if (deviceId && forwardSessionId) {
+          await assertActiveDevice(tx, {
+            deviceId,
+            accountUserId: input.accountUserId,
+          });
+          await tx.query(
+            `INSERT INTO port_forward_sessions (
+               id, workspace_id, generation, org_id, user_id, device_id,
+               access_grant_id, remote_port, requested_local_port, expires_at
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+            [
+              forwardSessionId,
+              input.workspaceId,
+              prepared.generation,
+              input.organizationId,
+              input.accountUserId,
+              deviceId,
+              grantId,
+              remotePort,
+              requestedLocalPort,
+              expiresAt,
+            ],
+          );
+        }
         await audit(
           tx,
           input.organizationId,
@@ -588,6 +855,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
             workspaceId: input.workspaceId,
             grantId,
             kind: input.kind,
+            purpose,
             generation: prepared.generation,
             remotePort,
             expiresAt: expiresAt.toISOString(),
@@ -600,6 +868,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         grantId,
         workspaceId: input.workspaceId,
         organizationId: input.organizationId,
+        generation: prepared.generation,
         providerResourceId: prepared.provider_resource_id,
         credential,
         expiresAt,
@@ -613,6 +882,7 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         grantId,
         workspaceId: input.workspaceId,
         organizationId: input.organizationId,
+        generation: prepared.generation,
         providerResourceId: prepared.provider_resource_id,
         credential,
         expiresAt,
@@ -652,6 +922,11 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           sshHost: ssh!.host,
           remoteHost: "127.0.0.1",
           remotePort: remotePort!,
+          session: {
+            id: forwardSessionId!,
+            deviceId: deviceId!,
+            state: "starting",
+          },
         },
       };
     }
@@ -666,10 +941,98 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     };
   }
 
+  async activateTunnel(input: {
+    organizationId: string;
+    workspaceId: string;
+    accountUserId: string;
+    sessionId: string;
+    deviceId: string;
+    observedLocalPort: number;
+  }): Promise<{
+    id: string;
+    deviceId: string;
+    state: "active";
+    bindAddress: "127.0.0.1";
+    observedLocalPort: number;
+  }> {
+    assertUuid(input.organizationId, "Organization");
+    assertUuid(input.workspaceId, "Cloud workspace");
+    assertUuid(input.accountUserId, "Account");
+    assertUuid(input.sessionId, "Port forward session");
+    assertUuid(input.deviceId, "Device");
+    const observedLocalPort = normalizedRequiredPort(input.observedLocalPort);
+    return withSystemTx(this.pool, async (tx) => {
+      const workspace = await authorizedWorkspace(tx, {
+        organizationId: input.organizationId,
+        workspaceId: input.workspaceId,
+        accountUserId: input.accountUserId,
+        workosEnabled: this.workosEnabled,
+      });
+      await assertActiveDevice(tx, {
+        deviceId: input.deviceId,
+        accountUserId: input.accountUserId,
+      });
+      const updated = await tx.query<{ id: string }>(
+        `UPDATE port_forward_sessions session
+         SET state = 'active', observed_local_port = $6, updated_at = now()
+         FROM cloud_workspace_client_access_grants access
+         WHERE session.id = $1 AND session.workspace_id = $2
+           AND session.org_id = $3 AND session.user_id = $4
+           AND session.device_id = $5 AND session.state = 'starting'
+           AND session.generation = $7
+           AND session.expires_at > now()
+           AND access.id = session.access_grant_id
+           AND access.workspace_id = session.workspace_id
+           AND access.generation = session.generation
+           AND access.org_id = session.org_id
+           AND access.kind = 'tunnel' AND access.state = 'active'
+           AND access.expires_at > now()
+         RETURNING session.id`,
+        [
+          input.sessionId,
+          input.workspaceId,
+          input.organizationId,
+          input.accountUserId,
+          input.deviceId,
+          observedLocalPort,
+          workspace.generation,
+        ],
+      );
+      if ((updated.rowCount ?? 0) !== 1) {
+        throw new HttpError(
+          409,
+          "cloud_access_not_active",
+          "Cloud tunnel is no longer eligible for activation",
+        );
+      }
+      await audit(
+        tx,
+        input.organizationId,
+        input.accountUserId,
+        "cloud_workspace.tunnel_activated",
+        {
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          deviceId: input.deviceId,
+          generation: workspace.generation,
+          observedLocalPort,
+        },
+      );
+      return {
+        id: input.sessionId,
+        deviceId: input.deviceId,
+        state: "active" as const,
+        bindAddress: "127.0.0.1" as const,
+        observedLocalPort,
+      };
+    });
+  }
+
   private async cleanupUnpublishedGrant(input: {
     grantId: string;
     workspaceId: string;
     organizationId: string;
+    generation: number;
     providerResourceId: string;
     credential: string;
     expiresAt: Date;
@@ -713,7 +1076,13 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         providerResourceId: input.providerResourceId,
         reason: "access_issue_superseded",
       });
-      await this.provider.revokeSshAccess(input.providerResourceId);
+      const provider = await this.providerFor({
+        workspaceId: input.workspaceId,
+        organizationId: input.organizationId,
+        generation: input.generation,
+        purpose: "cleanup",
+      });
+      await provider.revokeSshAccess(input.providerResourceId);
       await withSystemTx(this.pool, (tx) =>
         tx.query(
           `UPDATE cloud_workspace_client_access_grants
@@ -801,7 +1170,13 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
         // The submitted bearer proved possession against our verifier. Do not
         // forward it to Daytona's exact-revoke query parameter: revoke every
         // sandbox SSH token and reflect that broader provider fact below.
-        await this.provider.revokeSshAccess(selected.provider_resource_id);
+        const provider = await this.providerFor({
+          workspaceId: selected.workspace_id,
+          organizationId: selected.org_id,
+          generation: selected.generation,
+          purpose: "cleanup",
+        });
+        await provider.revokeSshAccess(selected.provider_resource_id);
       }
     } catch (error) {
       throw providerHttpError(error, "access revocation");
@@ -882,7 +1257,15 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
           AND tm.user_id = access.account_user_id
          JOIN users account
            ON account.id = access.account_user_id
-          AND account.deleted_at IS NULL
+          AND account.deleted_at IS NULL AND account.auth_status = 'active'
+         JOIN cloud_workspace_generations generation
+           ON generation.workspace_id = access.workspace_id
+          AND generation.generation = access.generation
+          AND generation.org_id = access.org_id
+         JOIN provider_connections provider_connection
+           ON provider_connection.id = generation.provider_connection_id
+          AND provider_connection.org_id = generation.org_id
+          AND provider_connection.state = 'active'
          JOIN cloud_workspace_provider_bindings pb
            ON pb.workspace_id = access.workspace_id
           AND pb.generation = access.generation AND pb.org_id = access.org_id
@@ -890,9 +1273,28 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
          WHERE access.preview_proxy_label = $1 AND access.kind = 'preview'
            AND access.state = 'active' AND access.expires_at > now()
            AND cw.deleted_at IS NULL AND cw.desired_state = 'running'
+           AND cw.single_member_mode
+           AND cw.owner_user_id = access.account_user_id
            AND cw.status IN ('ready', 'busy')
-           AND pb.observed_state = 'running'`,
-        [identity.label],
+           AND pb.observed_state = 'running'
+           AND cloud_workspace_generation_policy_current(
+             cw.id, cw.current_generation, cw.org_id
+           )
+           AND NOT EXISTS (
+             SELECT 1
+             FROM cloud_workspace_generation_secret_bindings secret_link
+             JOIN secret_bindings secret
+               ON secret.id = secret_link.binding_id
+              AND secret.org_id = secret_link.org_id
+             WHERE secret_link.workspace_id = access.workspace_id
+               AND secret_link.generation = access.generation
+               AND secret_link.org_id = access.org_id
+               AND secret.state <> 'active'
+           )
+           AND cloud_workspace_runtime_authority_live(
+             cw.id, access.generation, access.account_user_id, $2
+           )`,
+        [identity.label, this.workosEnabled],
       );
       return result.rows[0] ?? null;
     });
@@ -912,6 +1314,9 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
     try {
       const inputUrl = new URL(request.url);
       const endpoint = await this.cachedPreviewEndpoint(
+        grant.workspace_id,
+        grant.org_id,
+        grant.generation,
         grant.provider_resource_id,
         grant.remote_port!,
         iso(grant.provider_binding_updated_at),
@@ -1027,11 +1432,14 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
   }
 
   private async cachedPreviewEndpoint(
+    workspaceId: string,
+    organizationId: string,
+    generation: number,
     resourceId: string,
     port: number,
     bindingVersion: string,
   ): Promise<CloudProviderPreviewEndpoint> {
-    const key = `${resourceId}\0${port}\0${bindingVersion}`;
+    const key = `${workspaceId}\0${organizationId}\0${generation}\0${resourceId}\0${port}\0${bindingVersion}`;
     const now = Date.now();
     const cached = this.previewEndpoints.get(key);
     if (cached && cached.expiresAt > now) return cached.endpoint;
@@ -1042,7 +1450,13 @@ export class DatabaseCloudWorkspaceAccessService implements CloudWorkspaceAccess
       throw new Error("cloud preview endpoint lookup capacity exceeded");
     }
     const request = (async () => {
-      const endpoint = await this.provider.getPreviewEndpoint(resourceId, port);
+      const provider = await this.providerFor({
+        workspaceId,
+        organizationId,
+        generation,
+        purpose: "preview",
+      });
+      const endpoint = await provider.getPreviewEndpoint(resourceId, port);
       this.previewEndpoints.set(key, {
         endpoint,
         expiresAt: Date.now() + PREVIEW_ENDPOINT_CACHE_MS,
@@ -1239,7 +1653,8 @@ function retryDelayMs(attempt: number): number {
 export class CloudWorkspaceAccessRevocationWorker {
   private readonly workerId = `access-revoker:${randomUUID()}`;
   private readonly pool: pg.Pool;
-  private readonly provider: CloudWorkspaceAccessProvider;
+  private readonly provider: CloudWorkspaceAccessProvider | null;
+  private readonly providerResolver: CloudWorkspaceProviderResolver | null;
   private readonly leaseMs: number;
   private readonly intervalMs: number;
   private readonly maxBatch: number;
@@ -1250,14 +1665,21 @@ export class CloudWorkspaceAccessRevocationWorker {
 
   constructor(input: {
     pool: pg.Pool;
-    provider: CloudWorkspaceAccessProvider;
+    provider?: CloudWorkspaceAccessProvider;
+    providerResolver?: CloudWorkspaceProviderResolver;
     leaseMs: number;
     intervalMs?: number;
     maxBatch?: number;
     logger?: Pick<Console, "error">;
   }) {
+    if ((input.provider ? 1 : 0) + (input.providerResolver ? 1 : 0) !== 1) {
+      throw new Error(
+        "Cloud access revocation requires exactly one provider boundary",
+      );
+    }
     this.pool = input.pool;
-    this.provider = input.provider;
+    this.provider = input.provider ?? null;
+    this.providerResolver = input.providerResolver ?? null;
     this.leaseMs = input.leaseMs;
     this.intervalMs = input.intervalMs ?? 1_000;
     this.maxBatch = input.maxBatch ?? 100;
@@ -1288,7 +1710,17 @@ export class CloudWorkspaceAccessRevocationWorker {
           providerResourceId: claim.provider_resource_id,
           reason: "provider_wide_revocation",
         });
-        await this.provider.revokeSshAccess(claim.provider_resource_id);
+        const provider = this.providerResolver
+          ? (
+              await this.providerResolver.resolve({
+                workspaceId: claim.workspace_id,
+                organizationId: claim.org_id,
+                generation: claim.generation,
+                purpose: "cleanup",
+              })
+            ).provider
+          : this.provider!;
+        await provider.revokeSshAccess(claim.provider_resource_id);
       }
       await this.complete(claim);
     } catch (error) {

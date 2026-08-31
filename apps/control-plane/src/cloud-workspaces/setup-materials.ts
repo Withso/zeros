@@ -15,6 +15,8 @@ import {
   issueCloudWorkspaceGrant,
   normalizeCloudWorkspaceGrantAudience,
 } from "./grants.js";
+import { deliverWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
+import { issueWorkspaceSetupRecoveryGrant } from "./setup-recovery.js";
 
 const SETUP_MATERIALS_AUDIENCE =
   "zeros-cloud-workspace-setup-materials-v1" as const;
@@ -40,6 +42,8 @@ const DEFAULT_ENGINE_REGISTRATION_TTL_SECONDS = 3_660;
 const ENGINE_HEARTBEAT_LEASE_MS = 90_000;
 const ENGINE_HEARTBEAT_INTERVAL_MS = 30_000;
 const REPOSITORY_REFRESH_CLAIM_INTERVAL_MS = 5 * 60_000;
+const SETUP_RECOVERY_PATH =
+  "/internal/v1/cloud-workspaces/setup/recovery" as const;
 
 export class CloudWorkspaceSetupMaterialError extends Error {
   constructor(
@@ -88,6 +92,7 @@ export type CloudWorkspaceSetupMaterialServiceOptions = {
   setupAudience: string;
   engineRegistrationAudience: string;
   engineHeartbeatAudience: string;
+  setupRecoveryEndpoint?: string;
   engineProtocolVersion: number;
   enginePort: number;
   /** Must outlive the bounded provider setup command. Live setup authority is
@@ -136,6 +141,7 @@ export type CloudWorkspaceEngineHeartbeatInput = {
   organizationId: string;
   generation: number;
   engineInstanceId: string;
+  observedPorts?: readonly { port: number; protocol: "tcp" }[];
   repositoryCredentialRefresh?: {
     generation: string;
     requestedAtMs: number;
@@ -229,6 +235,28 @@ function validPositiveInteger(
   );
 }
 
+function canonicalObservedPorts(
+  value: CloudWorkspaceEngineHeartbeatInput["observedPorts"],
+): readonly { port: number; protocol: "tcp" }[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 128) return undefined;
+  let previous = 0;
+  for (const item of value) {
+    if (
+      !item ||
+      item.protocol !== "tcp" ||
+      !Number.isSafeInteger(item.port) ||
+      item.port < 1_024 ||
+      item.port > 65_535 ||
+      item.port <= previous
+    ) {
+      return undefined;
+    }
+    previous = item.port;
+  }
+  return value;
+}
+
 function tokenHash(token: string): Buffer {
   return createHash("sha256").update(token, "utf8").digest();
 }
@@ -312,7 +340,7 @@ export function sealCloudWorkspaceSetupSecret(
   }
 }
 
-function openSetupSecret(
+export function openCloudWorkspaceSetupSecret(
   row: RedemptionContract["secretRows"][number],
   binding: {
     workspaceId: string;
@@ -576,6 +604,7 @@ async function lockLiveSetupAuthority(
     setupRunId: string;
     executionFence: number;
     accountUserId: string;
+    workosEnabled: boolean;
   },
 ): Promise<boolean> {
   const workspace = await tx.query(
@@ -593,6 +622,7 @@ async function lockLiveSetupAuthority(
       AND tm.user_id = $4
      JOIN users account
        ON account.id = $4 AND account.deleted_at IS NULL
+      AND account.auth_status = 'active'
      JOIN cloud_workspace_provider_bindings pb
        ON pb.workspace_id = cw.id AND pb.generation = cw.current_generation
       AND pb.org_id = cw.org_id
@@ -600,12 +630,15 @@ async function lockLiveSetupAuthority(
        AND cw.desired_state = 'running' AND cw.status = 'setting_up'
        AND cw.deleted_at IS NULL AND pb.observed_state = 'running'
        AND pb.provider_resource_id IS NOT NULL
+       AND cloud_workspace_generation_policy_current(cw.id, $3, cw.org_id)
+       AND cloud_workspace_runtime_authority_live(cw.id, $3, $4, $5)
      FOR UPDATE OF cw`,
     [
       input.workspaceId,
       input.organizationId,
       input.generation,
       input.accountUserId,
+      input.workosEnabled,
     ],
   );
   if ((workspace.rowCount ?? 0) !== 1) return false;
@@ -652,6 +685,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
   private readonly setupAudience: string;
   private readonly engineRegistrationAudience: string;
   private readonly engineHeartbeatAudience: string;
+  private readonly setupRecoveryEndpoint: string;
   private readonly engineProtocolVersion: number;
   private readonly enginePort: number;
   private readonly engineRegistrationTtlSeconds: number;
@@ -672,6 +706,22 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
     this.engineHeartbeatAudience = normalizeCloudWorkspaceGrantAudience(
       options.engineHeartbeatAudience,
     );
+    const setupOrigin = new URL(this.setupAudience).origin;
+    const setupRecoveryEndpoint =
+      options.setupRecoveryEndpoint ?? `${setupOrigin}${SETUP_RECOVERY_PATH}`;
+    const parsedRecoveryEndpoint = new URL(setupRecoveryEndpoint);
+    if (
+      parsedRecoveryEndpoint.protocol !== "https:" ||
+      parsedRecoveryEndpoint.origin !== setupOrigin ||
+      parsedRecoveryEndpoint.pathname !== SETUP_RECOVERY_PATH ||
+      parsedRecoveryEndpoint.username ||
+      parsedRecoveryEndpoint.password ||
+      parsedRecoveryEndpoint.search ||
+      parsedRecoveryEndpoint.hash
+    ) {
+      throw new Error("cloud workspace recovery endpoint is invalid");
+    }
+    this.setupRecoveryEndpoint = parsedRecoveryEndpoint.toString();
     if (
       !validPositiveInteger(options.engineProtocolVersion, 65_535) ||
       !validPositiveInteger(options.enginePort, 65_535) ||
@@ -760,6 +810,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         !(await lockLiveSetupAuthority(tx, {
           ...input,
           accountUserId,
+          workosEnabled: this.accountIdentityProvider === "workos",
         }))
       ) {
         throw materialError("setup_admission_rejected", false);
@@ -886,6 +937,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           executionFence: input.executionFence,
         },
         audience: this.setupAudience,
+        workosEnabled: this.accountIdentityProvider === "workos",
       });
       if (!consumed) throw materialError("setup_admission_rejected", false);
 
@@ -912,6 +964,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         audience: this.engineRegistrationAudience,
         ttlSeconds: this.engineRegistrationTtlSeconds,
         issuedBy: null,
+        workosEnabled: this.accountIdentityProvider === "workos",
       });
       await tx.query(
         `UPDATE cloud_workspace_engine_instances
@@ -1005,7 +1058,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         if (!row) throw materialError("setup_settings_invalid", false);
         return {
           name: reference.name,
-          value: openSetupSecret(
+          value: openCloudWorkspaceSetupSecret(
             row,
             {
               workspaceId: input.workspaceId,
@@ -1070,6 +1123,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           !(await lockLiveSetupAuthority(tx, {
             ...input,
             accountUserId: contract.accountUserId,
+            workosEnabled: this.accountIdentityProvider === "workos",
           }))
         ) {
           return false;
@@ -1116,6 +1170,34 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       throw materialError("setup_authority_changed", false);
     }
 
+    let recovery;
+    try {
+      recovery = await withSystemTx(this.pool, async (tx) => {
+        if (
+          !(await lockLiveSetupAuthority(tx, {
+            ...input,
+            accountUserId: contract.accountUserId,
+            workosEnabled: this.accountIdentityProvider === "workos",
+          }))
+        ) {
+          throw materialError("setup_authority_changed", false);
+        }
+        return issueWorkspaceSetupRecoveryGrant(tx, {
+          workspaceId: input.workspaceId,
+          organizationId: input.organizationId,
+          generation: input.generation,
+          setupRunId: input.setupRunId,
+          executionFence: input.executionFence,
+          endpoint: this.setupRecoveryEndpoint,
+          ttlSeconds: this.engineRegistrationTtlSeconds,
+        });
+      });
+    } catch (error) {
+      await retireMintedCredential(repositoryCredential.token);
+      if (error instanceof CloudWorkspaceSetupMaterialError) throw error;
+      throw materialError("setup_authority_changed", false);
+    }
+
     const settingsBytes = Buffer.from(
       JSON.stringify(settings.document),
       "utf8",
@@ -1156,6 +1238,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         setupEnvironment,
         setupCommands: settings.setupCommands,
       },
+      recovery,
       engine: {
         instanceId: engineInstanceId,
         protocolVersion: this.engineProtocolVersion,
@@ -1195,7 +1278,11 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       );
       if (
         !accountUserId ||
-        !(await lockLiveSetupAuthority(tx, { ...input, accountUserId }))
+        !(await lockLiveSetupAuthority(tx, {
+          ...input,
+          accountUserId,
+          workosEnabled: this.accountIdentityProvider === "workos",
+        }))
       ) {
         throw materialError("engine_registration_rejected", false);
       }
@@ -1211,6 +1298,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           executionFence: input.executionFence,
         },
         audience: this.engineRegistrationAudience,
+        workosEnabled: this.accountIdentityProvider === "workos",
       });
       if (!consumed) {
         throw materialError("engine_registration_rejected", false);
@@ -1290,6 +1378,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
 
   async heartbeat(input: CloudWorkspaceEngineHeartbeatInput) {
     const refresh = input.repositoryCredentialRefresh;
+    const observedPorts = canonicalObservedPorts(input.observedPorts);
     const requestNow = this.now();
     if (
       !HEARTBEAT_TOKEN_PATTERN.test(input.token) ||
@@ -1297,6 +1386,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       !UUID_PATTERN.test(input.organizationId) ||
       !UUID_PATTERN.test(input.engineInstanceId) ||
       !validPositiveInteger(input.generation) ||
+      (input.observedPorts !== undefined && observedPorts === undefined) ||
       (refresh !== undefined &&
         (!REFRESH_GENERATION_PATTERN.test(refresh.generation) ||
           !Number.isSafeInteger(refresh.requestedAtMs) ||
@@ -1332,9 +1422,16 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
            AND tm.user_id = ei.account_user_id
            AND account.id = ei.account_user_id
            AND account.deleted_at IS NULL
+           AND account.auth_status = 'active'
            AND cw.current_generation = ei.generation
            AND cw.desired_state = 'running' AND cw.deleted_at IS NULL
            AND cw.status IN ('setting_up', 'ready', 'busy')
+           AND cloud_workspace_generation_policy_current(
+             cw.id, ei.generation, cw.org_id
+           )
+           AND cloud_workspace_runtime_authority_live(
+             cw.id, ei.generation, ei.account_user_id, $7
+           )
          RETURNING ei.lease_expires_at, ei.account_user_id`,
         [
           input.engineInstanceId,
@@ -1343,15 +1440,58 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
           input.organizationId,
           tokenHash(input.token),
           ENGINE_HEARTBEAT_LEASE_MS,
+          this.accountIdentityProvider === "workos",
         ],
       );
       if ((renewed.rowCount ?? 0) !== 1) {
         throw materialError("engine_heartbeat_rejected", false);
       }
+      if (observedPorts !== undefined) {
+        await tx.query(
+          `WITH observed AS (
+             SELECT observed.port, observed.protocol
+             FROM jsonb_to_recordset($4::jsonb)
+               AS observed(port integer, protocol text)
+           ), upserted AS (
+             INSERT INTO workspace_ports (
+               workspace_id, generation, org_id, port, protocol, health,
+               observed_at, closed_at
+             )
+             SELECT $1, $2, $3, observed.port, observed.protocol,
+                    'observed', now(), NULL
+             FROM observed
+             ON CONFLICT (workspace_id, generation, port) DO UPDATE
+             SET protocol = EXCLUDED.protocol, health = 'observed',
+                 observed_at = now(), closed_at = NULL
+             RETURNING port
+           )
+           UPDATE workspace_ports existing
+           SET health = 'closed', observed_at = now(),
+               closed_at = coalesce(existing.closed_at, now())
+           WHERE existing.workspace_id = $1
+             AND existing.generation = $2 AND existing.org_id = $3
+             AND existing.health <> 'closed'
+             AND NOT EXISTS (
+               SELECT 1 FROM upserted WHERE upserted.port = existing.port
+             )`,
+          [
+            input.workspaceId,
+            input.generation,
+            input.organizationId,
+            JSON.stringify(observedPorts),
+          ],
+        );
+      }
+      const checkpointRequest = await deliverWorkspaceCheckpointRequest(tx, {
+        workspaceId: input.workspaceId,
+        organizationId: input.organizationId,
+        generation: input.generation,
+      });
       if (!refresh) {
         return {
           leaseExpiresAtMs: renewed.rows[0]!.lease_expires_at.getTime(),
           repository: null,
+          checkpointRequest,
         };
       }
       const repository = await tx.query<{
@@ -1413,6 +1553,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         return {
           leaseExpiresAtMs: renewed.rows[0]!.lease_expires_at.getTime(),
           repository: null,
+          checkpointRequest,
         };
       }
       const claimed = await tx.query(
@@ -1436,10 +1577,12 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         return {
           leaseExpiresAtMs: renewed.rows[0]!.lease_expires_at.getTime(),
           repository: null,
+          checkpointRequest,
         };
       }
       return {
         leaseExpiresAtMs: renewed.rows[0]!.lease_expires_at.getTime(),
+        checkpointRequest,
         repository: {
           accountUserId: renewed.rows[0]!.account_user_id,
           owner: scope.repository_owner,
@@ -1508,6 +1651,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
                JOIN users account
                  ON account.id = ei.account_user_id
                 AND account.deleted_at IS NULL
+                AND account.auth_status = 'active'
                JOIN cloud_workspace_setup_specs ss
                  ON ss.workspace_id = ei.workspace_id
                 AND ss.generation = ei.generation AND ss.org_id = ei.org_id
@@ -1520,6 +1664,12 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
                  AND cw.desired_state = 'running' AND cw.deleted_at IS NULL
                  AND cw.status IN ('setting_up', 'ready', 'busy')
                  AND gi.github_installation_id = $6
+                 AND cloud_workspace_generation_policy_current(
+                   cw.id, ei.generation, cw.org_id
+                 )
+                 AND cloud_workspace_runtime_authority_live(
+                   cw.id, ei.generation, ei.account_user_id, $7
+                 )
                  AND gi.app_variant = 'github.com'
                  AND gi.suspended_at IS NULL
                  AND lower(gi.account_login) = lower(ss.repository_owner)
@@ -1542,6 +1692,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
                 input.organizationId,
                 renewed.repository!.accountUserId,
                 renewed.repository!.installationId,
+                this.accountIdentityProvider === "workos",
               ],
             );
             if ((current.rowCount ?? 0) !== 1) return false;
@@ -1599,6 +1750,9 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
       accepted: true as const,
       engineInstanceId: input.engineInstanceId,
       leaseExpiresAtMs: renewed.leaseExpiresAtMs,
+      ...(renewed.checkpointRequest
+        ? { checkpointRequest: renewed.checkpointRequest }
+        : {}),
       ...(repositoryCredential ? { repositoryCredential } : {}),
     };
   }

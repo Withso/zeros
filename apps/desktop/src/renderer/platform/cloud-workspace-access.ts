@@ -1,4 +1,8 @@
 import { nativeInvoke } from "./runtime";
+import type {
+  CloudRuntimeConnectionTarget,
+  RuntimeConnectionTarget,
+} from "./bridge/ws-client";
 
 export type CloudWorkspaceAccessTarget = {
   organizationId: string;
@@ -46,6 +50,32 @@ export function startCloudWorkspaceTunnel(
 
 export function revokeCloudWorkspaceAccess(accessId: string): Promise<boolean> {
   return nativeInvoke("cloud_workspace_access_revoke", { accessId });
+}
+
+export function openCloudWorkspaceRuntime(
+  target: CloudWorkspaceAccessTarget,
+): Promise<CloudRuntimeConnectionTarget> {
+  return nativeInvoke("cloud_workspace_runtime_open", target);
+}
+
+export function refreshCloudWorkspaceRuntime(
+  target: CloudRuntimeConnectionTarget,
+): Promise<RuntimeConnectionTarget> {
+  return nativeInvoke("cloud_workspace_runtime_refresh", {
+    runtimeId: target.runtimeId,
+    organizationId: target.organizationId,
+    workspaceId: target.workspaceId,
+    generation: target.generation,
+    authorityEpoch: target.authorityEpoch,
+    engineInstanceId: target.engineInstanceId,
+    connectionSequence: target.connectionSequence,
+  });
+}
+
+export function closeCloudWorkspaceRuntime(
+  runtimeId: string,
+): Promise<boolean> {
+  return nativeInvoke("cloud_workspace_runtime_close", { runtimeId });
 }
 
 /** Mint and install an authenticated preview directly into one Browser iframe.

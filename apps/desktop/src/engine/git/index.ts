@@ -111,6 +111,8 @@ export {
 } from "./worktree";
 export type {
   CreateWorkspaceInput,
+  InternalCreateWorkspaceOptions,
+  InternalWorkspaceProvisionContext,
   ListWorkspacesOptions,
   PreparedWorkspaceCreate,
   WorkspaceLifecycleStatus,

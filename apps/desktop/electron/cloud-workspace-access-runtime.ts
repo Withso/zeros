@@ -4,6 +4,7 @@ import path from "node:path";
 import { CloudWorkspaceAccessBroker } from "./cloud-workspace-access-broker";
 import { CloudWorkspaceAccessClient } from "./cloud-workspace-access-client";
 import { CloudWorkspaceSshRuntime } from "./cloud-workspace-ssh-runtime";
+import { ensureCloudAccessDeviceForMain } from "./cloud-replica-host-runtime";
 import { previewFrameAuthorizations } from "./preview-frame-authorizations";
 import {
   getValidAccessTokenForMain,
@@ -118,10 +119,13 @@ export function getCloudWorkspaceAccessBroker(): CloudWorkspaceAccessBroker {
         : {}),
     }),
     getAccessToken: getValidAccessTokenForMain,
+    getDeviceId: async () =>
+      (await ensureCloudAccessDeviceForMain()).deviceId,
     writeClipboard: (value) => clipboard.writeText(value),
     launchTerminal: (input) => ssh.launchTerminal(input),
     launchIde: (input) => ssh.launchIde(input),
     startTunnel: (input) => ssh.startTunnel(input),
+    startDynamicTunnel: (input) => ssh.startDynamicTunnel(input),
     disposeLocalAccess: () => ssh.dispose(),
   });
   return broker;

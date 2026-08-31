@@ -20,17 +20,20 @@ export type DatabaseCloudWorkspaceSetupAdmissionBrokerOptions = {
   pool: pg.Pool;
   endpoint: string;
   ttlSeconds?: number;
+  workosEnabled?: boolean;
 };
 
 export class DatabaseCloudWorkspaceSetupAdmissionBroker implements CloudWorkspaceSetupAdmissionBroker {
   private readonly pool: pg.Pool;
   private readonly endpoint: string;
   private readonly ttlSeconds: number;
+  private readonly workosEnabled: boolean;
 
   constructor(options: DatabaseCloudWorkspaceSetupAdmissionBrokerOptions) {
     this.pool = options.pool;
     this.endpoint = normalizeCloudWorkspaceGrantAudience(options.endpoint);
     this.ttlSeconds = options.ttlSeconds ?? 120;
+    this.workosEnabled = options.workosEnabled === true;
     if (
       !Number.isSafeInteger(this.ttlSeconds) ||
       this.ttlSeconds < 15 ||
@@ -66,6 +69,7 @@ export class DatabaseCloudWorkspaceSetupAdmissionBroker implements CloudWorkspac
           audience: this.endpoint,
           ttlSeconds: this.ttlSeconds,
           issuedBy: null,
+          workosEnabled: this.workosEnabled,
         }),
       );
       if (signal.aborted) {

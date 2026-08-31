@@ -75,6 +75,12 @@ const commandTable: Record<string, CommandHandler> = {
   cloud_workspace_ssh_ide: notImpl("cloud_workspace_ssh_ide", 3),
   cloud_workspace_tunnel_start: notImpl("cloud_workspace_tunnel_start", 3),
   cloud_workspace_access_revoke: notImpl("cloud_workspace_access_revoke", 3),
+  cloud_workspace_runtime_open: notImpl("cloud_workspace_runtime_open", 3),
+  cloud_workspace_runtime_refresh: notImpl(
+    "cloud_workspace_runtime_refresh",
+    3,
+  ),
+  cloud_workspace_runtime_close: notImpl("cloud_workspace_runtime_close", 3),
 
   // ── WorkOS session at rest — main owns the full token pair; the renderer only
   // ever gets a live access token or decoded identity claims. The pair is written

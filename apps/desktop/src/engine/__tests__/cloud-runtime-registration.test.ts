@@ -11,6 +11,13 @@ const registrationEndpoint =
   "https://control.example.test/internal/v1/cloud-workspaces/engine/register";
 const heartbeatEndpoint =
   "https://control.example.test/internal/v1/cloud-workspaces/engine/heartbeat";
+const clientAdmissionEndpoint =
+  "https://control.example.test/internal/v1/cloud-workspaces/engine/client-admission";
+const ACCOUNT_USER_ID = "55555555-5555-4555-8555-555555555555";
+
+function completedDurableRecordSync() {
+  return vi.fn(async () => undefined);
+}
 
 function encodedRuntime(overrides: Record<string, unknown> = {}): string {
   return Buffer.from(
@@ -91,6 +98,7 @@ describe("cloud runtime registration", () => {
       fetch: fetch as typeof globalThis.fetch,
       now: () => NOW,
       onAuthorityLost: vi.fn(),
+      onDurableRecordSync: completedDurableRecordSync(),
     });
 
     await registration.start();
@@ -143,6 +151,7 @@ describe("cloud runtime registration", () => {
       fetch: fetch as typeof globalThis.fetch,
       now: Date.now,
       onAuthorityLost,
+      onDurableRecordSync: completedDurableRecordSync(),
     });
     await registration.start();
 
@@ -151,6 +160,101 @@ describe("cloud runtime registration", () => {
     expect(fetch.mock.calls[1]![0]).toBe(heartbeatEndpoint);
     expect(onAuthorityLost).toHaveBeenCalledTimes(1);
     expect(registration.readiness()).toBeNull();
+    await registration.stop();
+  });
+
+  it("publishes only a canonical listener snapshot when the Linux view is available", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment(
+      { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
+      Date.now,
+    )!;
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(registrationResponse()))
+      .mockResolvedValueOnce(
+        Response.json({
+          version: 1,
+          audience: "zeros-cloud-workspace-engine-heartbeat-v1",
+          accepted: true,
+          engineInstanceId: runtime.engine.instanceId,
+          leaseExpiresAtMs: NOW + 120_000,
+        }),
+      );
+    const registration = new CloudRuntimeRegistration(runtime, {
+      fetch: fetch as typeof globalThis.fetch,
+      now: Date.now,
+      onAuthorityLost: vi.fn(),
+      onDurableRecordSync: completedDurableRecordSync(),
+      readObservedPorts: vi.fn(async () => [
+        { port: 3_000, protocol: "tcp" as const },
+        { port: 8_080, protocol: "tcp" as const },
+      ]),
+    });
+    await registration.start();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(JSON.parse(String(fetch.mock.calls[1]![1]?.body))).toMatchObject({
+      observedPorts: [
+        { port: 3_000, protocol: "tcp" },
+        { port: 8_080, protocol: "tcp" },
+      ],
+    });
+    await registration.stop();
+  });
+
+  it("redeems a desktop grant with heartbeat authority and rejects malformed responses", async () => {
+    const runtime = consumeCloudRuntimeEnvironment(
+      { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
+      () => NOW,
+    )!;
+    const grantToken = `zws_${"G".repeat(43)}`;
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(registrationResponse()))
+      .mockResolvedValueOnce(
+        Response.json({
+          version: 1,
+          audience: "zeros-cloud-workspace-engine-client-admission-v1",
+          admitted: true,
+          authorityEpoch: 9,
+          accountUserId: ACCOUNT_USER_ID,
+        }),
+      )
+      .mockResolvedValueOnce(Response.json({ admitted: true }));
+    const registration = new CloudRuntimeRegistration(runtime, {
+      fetch: fetch as typeof globalThis.fetch,
+      now: () => NOW,
+      onAuthorityLost: vi.fn(),
+      onDurableRecordSync: completedDurableRecordSync(),
+    });
+    await registration.start();
+
+    await expect(
+      registration.verifyClientAdmission(grantToken),
+    ).resolves.toEqual({
+      accountUserId: ACCOUNT_USER_ID,
+      authorityEpoch: 9,
+    });
+    const [url, init] = fetch.mock.calls[1]!;
+    expect(url).toBe(clientAdmissionEndpoint);
+    expect(init?.headers).toMatchObject({
+      authorization: `Bearer ${registrationResponse().heartbeat.token}`,
+    });
+    expect(JSON.parse(String(init?.body))).toEqual({
+      workspaceId: runtime.execution.workspaceId,
+      organizationId: runtime.execution.organizationId,
+      generation: runtime.execution.generation,
+      engineInstanceId: runtime.engine.instanceId,
+      grantToken,
+    });
+    expect(String(init?.body)).not.toContain(
+      registrationResponse().heartbeat.token,
+    );
+    await expect(
+      registration.verifyClientAdmission(grantToken),
+    ).resolves.toBeNull();
     await registration.stop();
   });
 
@@ -209,6 +313,7 @@ describe("cloud runtime registration", () => {
       fetch: fetch as typeof globalThis.fetch,
       now: Date.now,
       onAuthorityLost: vi.fn(),
+      onDurableRecordSync: completedDurableRecordSync(),
       readRepositoryCredentialRefresh: () => refresh,
       installRepositoryCredential,
       acknowledgeRepositoryCredentialRefresh,
@@ -231,6 +336,62 @@ describe("cloud runtime registration", () => {
     expect(acknowledgeRepositoryCredentialRefresh).toHaveBeenCalledWith(
       refresh.generation,
     );
+    await registration.stop();
+  });
+
+  it("delivers one exact checkpoint directive while heartbeats continue", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment(
+      { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
+      Date.now,
+    )!;
+    const directive = {
+      id: "55555555-5555-4555-8555-555555555555",
+      reason: "before_stop",
+      deadlineAtMs: NOW + 5 * 60_000,
+    };
+    const heartbeat = (leaseExpiresAtMs: number) =>
+      Response.json({
+        version: 1,
+        audience: "zeros-cloud-workspace-engine-heartbeat-v1",
+        accepted: true,
+        engineInstanceId: runtime.engine.instanceId,
+        leaseExpiresAtMs,
+        checkpointRequest: directive,
+      });
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(registrationResponse()))
+      .mockResolvedValueOnce(heartbeat(NOW + 120_000))
+      .mockResolvedValueOnce(heartbeat(NOW + 150_000));
+    let finish!: () => void;
+    const checkpoint = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const onCheckpointRequested = vi.fn(() => checkpoint);
+    const registration = new CloudRuntimeRegistration(runtime, {
+      fetch: fetch as typeof globalThis.fetch,
+      now: Date.now,
+      onAuthorityLost: vi.fn(),
+      onDurableRecordSync: completedDurableRecordSync(),
+      onCheckpointRequested,
+    });
+    await registration.start();
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(onCheckpointRequested).toHaveBeenCalledWith(directive, {
+      heartbeatEndpoint,
+      heartbeatToken: `zwh_${"H".repeat(43)}`,
+      workspaceId: runtime.execution.workspaceId,
+      organizationId: runtime.execution.organizationId,
+      generation: runtime.execution.generation,
+      engineInstanceId: runtime.engine.instanceId,
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(onCheckpointRequested).toHaveBeenCalledTimes(1);
+    finish();
+    await Promise.resolve();
     await registration.stop();
   });
 
@@ -259,9 +420,49 @@ describe("cloud runtime registration", () => {
         ) as typeof globalThis.fetch,
         now: () => NOW,
         onAuthorityLost: vi.fn(),
+        onDurableRecordSync: completedDurableRecordSync(),
       });
       await expect(registration.start()).rejects.toThrow("registration");
       expect(registration.readiness()).toBeNull();
     }
+  });
+
+  it("withholds readiness until the durable record projection has converged", async () => {
+    const runtime = consumeCloudRuntimeEnvironment(
+      { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
+      () => NOW,
+    )!;
+    let complete!: () => void;
+    const durableRecordSync = new Promise<void>((resolve) => {
+      complete = resolve;
+    });
+    const onDurableRecordSync = vi.fn(() => durableRecordSync);
+    const registration = new CloudRuntimeRegistration(runtime, {
+      fetch: vi.fn(async () =>
+        Response.json(registrationResponse()),
+      ) as typeof globalThis.fetch,
+      now: () => NOW,
+      onAuthorityLost: vi.fn(),
+      onDurableRecordSync,
+    });
+
+    const starting = registration.start();
+    await vi.waitFor(() =>
+      expect(onDurableRecordSync).toHaveBeenCalledTimes(1),
+    );
+    expect(registration.readiness()).toBeNull();
+    expect(onDurableRecordSync).toHaveBeenCalledWith({
+      heartbeatEndpoint,
+      heartbeatToken: `zwh_${"H".repeat(43)}`,
+      workspaceId: runtime.execution.workspaceId,
+      organizationId: runtime.execution.organizationId,
+      generation: runtime.execution.generation,
+      engineInstanceId: runtime.engine.instanceId,
+    });
+
+    complete();
+    await starting;
+    expect(registration.readiness()?.durableRecordConnected).toBe(true);
+    await registration.stop();
   });
 });

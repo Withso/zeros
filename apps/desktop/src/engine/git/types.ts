@@ -77,6 +77,9 @@ export type DetectedTool =
 
 export interface Workspace {
   id: string;
+  /** Immutable global UUID used by cloud fork/sync protocols. `id` remains the
+   * human-readable local compatibility alias and is never rewritten. */
+  canonicalId?: string;
   /** Explicit presentation state. Absent only on legacy wire objects and
    * recovery seeds. It never participates in mutation authorization. */
   viewMode?: WorkspaceViewMode;

@@ -869,10 +869,10 @@ export async function ensurePersonalOrganization(
       // squatter that commits between attempts. The follow-up owner read
       // distinguishes a concurrent same-user winner from a slug collision.
       const created = await tx.query<{ id: string }>(
-        `INSERT INTO organizations (
+         `INSERT INTO organizations (
            slug, name, created_by, is_personal, cloud_workspaces_allowed
          )
-         VALUES ($1, $2, $3, true, false)
+         VALUES ($1, $2, $3, true, true)
          ON CONFLICT DO NOTHING
          RETURNING id`,
         [slug, displayName, user.id],

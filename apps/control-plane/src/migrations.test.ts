@@ -93,6 +93,150 @@ d("migration ladder", () => {
     expect(await ledger()).toEqual(LADDER);
   });
 
+  it("enforces the same 64 MiB file ceiling at every durable storage layer", async () => {
+    await runMigrations(pool);
+    const constraints = await pool.query<{
+      table_name: string;
+      definition: string;
+    }>(
+      `SELECT conrelid::regclass::text AS table_name,
+              pg_get_constraintdef(oid) AS definition
+       FROM pg_constraint
+       WHERE conname IN (
+         'workspace_blobs_plaintext_bytes_check',
+         'workspace_blobs_ciphertext_bytes_check',
+         'workspace_file_events_size_bytes_check',
+         'workspace_file_entries_size_bytes_check',
+         'workspace_checkpoint_entries_size_bytes_check',
+         'workspace_fork_import_entries_size_bytes_check'
+       )
+       ORDER BY conname`,
+    );
+    expect(constraints.rows).toHaveLength(6);
+    for (const row of constraints.rows) {
+      expect(row.definition, row.table_name).toContain("67108864");
+      expect(row.definition, row.table_name).not.toContain("1073741824");
+    }
+  });
+
+  it("enforces file modes and bounded symlink targets in every durable projection", async () => {
+    await runMigrations(pool);
+    const constraints = await pool.query<{
+      constraint_name: string;
+      definition: string;
+    }>(
+      `SELECT conname AS constraint_name,
+              pg_get_constraintdef(oid) AS definition
+       FROM pg_constraint
+       WHERE conname IN (
+         'workspace_file_events_descriptor_check',
+         'workspace_file_entries_descriptor_check',
+         'workspace_checkpoint_entries_symlink_size_check',
+         'workspace_fork_import_entries_symlink_size_check'
+       )
+       ORDER BY conname`,
+    );
+    expect(constraints.rows.map((row) => row.constraint_name)).toEqual([
+      "workspace_checkpoint_entries_symlink_size_check",
+      "workspace_file_entries_descriptor_check",
+      "workspace_file_events_descriptor_check",
+      "workspace_fork_import_entries_symlink_size_check",
+    ]);
+    for (const row of constraints.rows) {
+      expect(row.definition, row.constraint_name).toContain("4096");
+      expect(row.definition, row.constraint_name).toContain("symlink");
+    }
+    for (const row of constraints.rows.filter((row) =>
+      row.constraint_name.includes("file_e"),
+    )) {
+      expect(row.definition, row.constraint_name).toContain("40960");
+      expect(row.definition, row.constraint_name).toContain("33188");
+      expect(row.definition, row.constraint_name).toContain("33261");
+    }
+  });
+
+  it("indexes durable path pagination with database-independent byte ordering", async () => {
+    await runMigrations(pool);
+    const indexes = await pool.query<{ indexname: string; indexdef: string }>(
+      `SELECT indexname, indexdef
+       FROM pg_indexes
+       WHERE schemaname = 'public' AND indexname IN (
+         'workspace_file_entries_canonical_path_idx',
+         'workspace_checkpoint_entries_canonical_path_idx',
+         'workspace_fork_import_entries_canonical_path_idx'
+       )
+       ORDER BY indexname`,
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toEqual([
+      "workspace_checkpoint_entries_canonical_path_idx",
+      "workspace_file_entries_canonical_path_idx",
+      "workspace_fork_import_entries_canonical_path_idx",
+    ]);
+    for (const row of indexes.rows) {
+      expect(row.indexdef).toContain('COLLATE "C"');
+    }
+  });
+
+  it("lets retained projections outlive compacted journals without leaving export pins", async () => {
+    await runMigrations(pool);
+    const columns = await pool.query<{
+      table_name: string;
+      column_name: string;
+      is_nullable: string;
+    }>(
+      `SELECT table_name, column_name, is_nullable
+       FROM information_schema.columns
+       WHERE table_schema = 'public' AND (
+         (table_name = 'cloud_workspaces' AND column_name = 'data_deleted_at')
+         OR (table_name = 'workspace_retention_policies'
+             AND column_name = 'last_applied_at')
+         OR (table_name = 'workspace_deletion_jobs'
+             AND column_name = 'next_attempt_at')
+         OR (table_name = 'workspace_exports' AND column_name = 'checkpoint_id')
+       )
+       ORDER BY table_name, column_name`,
+    );
+    expect(columns.rows).toEqual([
+      {
+        table_name: "cloud_workspaces",
+        column_name: "data_deleted_at",
+        is_nullable: "YES",
+      },
+      {
+        table_name: "workspace_deletion_jobs",
+        column_name: "next_attempt_at",
+        is_nullable: "NO",
+      },
+      {
+        table_name: "workspace_exports",
+        column_name: "checkpoint_id",
+        is_nullable: "YES",
+      },
+      {
+        table_name: "workspace_retention_policies",
+        column_name: "last_applied_at",
+        is_nullable: "YES",
+      },
+    ]);
+    const projectionLinks = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM pg_constraint
+       WHERE conname IN (
+         'workspace_record_entities_workspace_id_revision_fkey',
+         'workspace_file_entries_workspace_id_revision_org_id_fkey'
+       )`,
+    );
+    expect(projectionLinks.rows[0]).toEqual({ count: "0" });
+    const defaults = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+       FROM cloud_workspaces workspace
+       LEFT JOIN workspace_retention_policies policy
+         ON policy.workspace_id = workspace.id AND policy.org_id = workspace.org_id
+       WHERE policy.workspace_id IS NULL`,
+    );
+    expect(defaults.rows[0]).toEqual({ count: "0" });
+  });
+
   it("is idempotent — a redeploy re-runs nothing", async () => {
     await runMigrations(pool);
     // Railway restarts the container on every deploy, health-check retry, and
@@ -124,7 +268,11 @@ d("migration ladder", () => {
       const ran = await runMigrations(pool);
       expect(ran, `applying from revision ${k}`).toEqual(LADDER.slice(k));
     }
-  }, 30_000); // ceiling for a genuine hang while allowing for shared-runner I/O variance. // This matrix executes O(n²) real DDL as the ladder grows. Keep a scoped
+  // This is O(n²) real DDL: every possible deployed prefix is upgraded through
+  // the full suffix. Forty-plus migrations exceed Vitest's generic 30-second
+  // unit-test ceiling on shared CI even while PostgreSQL is making progress.
+  // Keep the larger budget scoped to this exhaustive compatibility matrix.
+  }, 180_000);
 
   it("backfills immutable setup inputs and safely requeues pre-lease running work", async () => {
     const setupMigrationIndex = LADDER.findIndex((file) =>
@@ -443,7 +591,9 @@ d("migration ladder", () => {
         ),
       ).resolves.toMatchObject({ rowCount: 1 });
       await workspaceOwner.query("COMMIT");
-      await expect(migration).resolves.toEqual([LADDER[engineAuthorityIndex]]);
+      await expect(migration).resolves.toEqual(
+        LADDER.slice(engineAuthorityIndex),
+      );
     } finally {
       await workspaceOwner.query("ROLLBACK").catch(() => undefined);
       if (migration) await migration.catch(() => undefined);
@@ -805,15 +955,15 @@ d("0009 organization→team hierarchy preserves flat-Team data", () => {
     }
   });
 
-  it("backfills one permanent, local-only Personal organization per user", async () => {
+  it("backfills one permanent, cloud-eligible Personal organization per user", async () => {
     const personal = await pool.query(
       `SELECT created_by, name, cloud_workspaces_allowed
        FROM organizations WHERE is_personal ORDER BY created_by`,
     );
     expect(personal.rows).toEqual([
-      { created_by: OWNER, name: "Ada", cloud_workspaces_allowed: false },
-      { created_by: MEMBER, name: "Personal", cloud_workspaces_allowed: false },
-      { created_by: STRANGER, name: "Lin", cloud_workspaces_allowed: false },
+      { created_by: OWNER, name: "Ada", cloud_workspaces_allowed: true },
+      { created_by: MEMBER, name: "Personal", cloud_workspaces_allowed: true },
+      { created_by: STRANGER, name: "Lin", cloud_workspaces_allowed: true },
     ]);
     const shells = await pool.query<{ n: number }>(`
       SELECT count(*)::int AS n

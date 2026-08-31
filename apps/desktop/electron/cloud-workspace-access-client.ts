@@ -3,6 +3,7 @@ const UUID_PATTERN =
 const IDEMPOTENCY_PATTERN = /^[A-Za-z0-9._:-]{8,128}$/;
 const SSH_CREDENTIAL_PATTERN = /^[A-Za-z0-9._~-]{16,4096}$/;
 const PREVIEW_CAPABILITY_PATTERN = /^zwp_[A-Za-z0-9_-]{43}$/;
+const ENGINE_ADMISSION_TOKEN_PATTERN = /^zws_[A-Za-z0-9_-]{43}$/;
 const HOST_PATTERN =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$/;
 const DEFAULT_SSH_HOSTS = ["ssh.app.daytona.io"] as const;
@@ -32,6 +33,12 @@ const SAFE_ERROR_MESSAGES: Readonly<Record<string, string>> = {
     "The cloud workspace changed while access was being issued",
   cloud_workspace_access_unavailable:
     "Cloud workspace access is available only while the workspace is ready",
+  cloud_workspace_runtime_not_configured:
+    "Cloud workspace runtime access is not configured",
+  engine_client_admission_ineligible:
+    "The current cloud workspace engine is not ready for a connection",
+  engine_client_admission_invalid:
+    "The cloud workspace runtime request is invalid",
   forbidden: "Cloud workspace access is not permitted",
   idempotency_key_required:
     "Cloud workspace access request identity is required",
@@ -68,7 +75,20 @@ export type CloudWorkspaceTunnelAccess = {
     sshHost: string;
     remoteHost: "127.0.0.1";
     remotePort: number;
+    session: {
+      id: string;
+      deviceId: string;
+      state: "starting";
+    };
   };
+};
+
+export type CloudWorkspaceTunnelActivation = {
+  id: string;
+  deviceId: string;
+  state: "active";
+  bindAddress: "127.0.0.1";
+  observedLocalPort: number;
 };
 
 export type CloudWorkspacePreviewAccess = {
@@ -82,6 +102,19 @@ export type CloudWorkspacePreviewAccess = {
     capability: string;
     headerName: "x-zeros-preview-capability";
   };
+};
+
+export type CloudWorkspaceEngineAdmission = {
+  version: 1;
+  audience: "zeros-cloud-workspace-engine-client-admission-v1";
+  workspaceId: string;
+  organizationId: string;
+  generation: number;
+  authorityEpoch: number;
+  engineInstanceId: string;
+  remotePort: number;
+  grantToken: string;
+  expiresAt: string;
 };
 
 type Fetch = typeof fetch;
@@ -346,10 +379,14 @@ export class CloudWorkspaceAccessClient {
     return `/v1/organizations/${uuid(organizationId, "Organization")}/cloud-workspaces/${uuid(workspaceId, "Cloud workspace")}/access`;
   }
 
+  private runtimePath(organizationId: string, workspaceId: string): string {
+    return `/v1/organizations/${uuid(organizationId, "Organization")}/cloud-workspaces/${uuid(workspaceId, "Cloud workspace")}/runtime/admission`;
+  }
+
   private async request(
     accessToken: string,
     input: {
-      method: "POST" | "DELETE";
+      method: "POST" | "PATCH" | "DELETE";
       path: string;
       expectedStatus: number;
       body?: unknown;
@@ -524,17 +561,44 @@ export class CloudWorkspaceAccessClient {
       organizationId: string;
       workspaceId: string;
       remotePort: number;
+      deviceId: string;
+      requestedLocalPort?: number;
+      runtimeGeneration?: number;
       expiresInMinutes: number;
       idempotencyKey: string;
     },
   ): Promise<CloudWorkspaceTunnelAccess> {
     const remotePort = port(input.remotePort, "Remote port");
+    const deviceId = uuid(input.deviceId, "Device");
+    const requestedLocalPort =
+      input.requestedLocalPort === undefined
+        ? undefined
+        : port(input.requestedLocalPort, "Local port");
     const expiresInMinutes = ttl(input.expiresInMinutes);
+    if (
+      input.runtimeGeneration !== undefined &&
+      (!Number.isSafeInteger(input.runtimeGeneration) ||
+        input.runtimeGeneration < 1)
+    ) {
+      throw new CloudWorkspaceAccessClientError(
+        0,
+        "invalid_request",
+        "Cloud runtime generation is invalid",
+      );
+    }
     const body = await this.request(accessToken, {
       method: "POST",
       path: `${this.path(input.organizationId, input.workspaceId)}/tunnels`,
       expectedStatus: 201,
-      body: { remotePort, expiresInMinutes },
+      body: {
+        remotePort,
+        deviceId,
+        ...(requestedLocalPort === undefined ? {} : { requestedLocalPort }),
+        expiresInMinutes,
+        ...(input.runtimeGeneration === undefined
+          ? {}
+          : { runtimeGeneration: input.runtimeGeneration }),
+      },
       idempotencyKey: input.idempotencyKey,
     });
     const record = isRecord(body) ? body : null;
@@ -546,6 +610,7 @@ export class CloudWorkspaceAccessClient {
       now: this.now(),
     });
     const tunnel = isRecord(record?.tunnel) ? record.tunnel : null;
+    const session = isRecord(tunnel?.session) ? tunnel.session : null;
     const ssh = this.validateSshFields(
       tunnel
         ? {
@@ -560,7 +625,12 @@ export class CloudWorkspaceAccessClient {
       !tunnel ||
       !ssh ||
       tunnel.remoteHost !== "127.0.0.1" ||
-      tunnel.remotePort !== remotePort
+      tunnel.remotePort !== remotePort ||
+      !session ||
+      typeof session.id !== "string" ||
+      !UUID_PATTERN.test(session.id) ||
+      session.deviceId !== deviceId ||
+      session.state !== "starting"
     ) {
       return await this.rejectInvalidPublishedAccess({
         accessToken,
@@ -579,7 +649,54 @@ export class CloudWorkspaceAccessClient {
         sshHost: ssh.host,
         remoteHost: "127.0.0.1",
         remotePort,
+        session: {
+          id: session.id as string,
+          deviceId,
+          state: "starting",
+        },
       },
+    };
+  }
+
+  async activateTunnel(
+    accessToken: string,
+    input: {
+      organizationId: string;
+      workspaceId: string;
+      sessionId: string;
+      deviceId: string;
+      observedLocalPort: number;
+    },
+  ): Promise<CloudWorkspaceTunnelActivation> {
+    const sessionId = uuid(input.sessionId, "Port forward session");
+    const deviceId = uuid(input.deviceId, "Device");
+    const observedLocalPort = port(input.observedLocalPort, "Local port");
+    const body = await this.request(accessToken, {
+      method: "PATCH",
+      path: `${this.path(input.organizationId, input.workspaceId)}/tunnels/${sessionId}`,
+      expectedStatus: 200,
+      body: { deviceId, observedLocalPort },
+    });
+    if (
+      !isRecord(body) ||
+      body.id !== sessionId ||
+      body.deviceId !== deviceId ||
+      body.state !== "active" ||
+      body.bindAddress !== "127.0.0.1" ||
+      body.observedLocalPort !== observedLocalPort
+    ) {
+      throw new CloudWorkspaceAccessClientError(
+        200,
+        "bad_response",
+        "The cloud workspace control plane returned invalid tunnel state",
+      );
+    }
+    return {
+      id: sessionId,
+      deviceId,
+      state: "active",
+      bindAddress: "127.0.0.1",
+      observedLocalPort,
     };
   }
 
@@ -666,6 +783,71 @@ export class CloudWorkspaceAccessClient {
         capability: preview.capability as string,
         headerName: "x-zeros-preview-capability",
       },
+    };
+  }
+
+  async issueEngineAdmission(
+    accessToken: string,
+    input: { organizationId: string; workspaceId: string },
+  ): Promise<CloudWorkspaceEngineAdmission> {
+    const now = this.now();
+    const body = await this.request(accessToken, {
+      method: "POST",
+      path: this.runtimePath(input.organizationId, input.workspaceId),
+      expectedStatus: 201,
+      body: {},
+    });
+    const record = isRecord(body) ? body : null;
+    const expectedKeys = [
+      "audience",
+      "authorityEpoch",
+      "engineInstanceId",
+      "expiresAt",
+      "generation",
+      "grantToken",
+      "organizationId",
+      "remotePort",
+      "version",
+      "workspaceId",
+    ].sort();
+    const expiresAt = validExpiry(record?.expiresAt, now, 15);
+    if (
+      !record ||
+      Object.keys(record).sort().join("\0") !== expectedKeys.join("\0") ||
+      record.version !== 1 ||
+      record.audience !== "zeros-cloud-workspace-engine-client-admission-v1" ||
+      record.organizationId !== input.organizationId ||
+      record.workspaceId !== input.workspaceId ||
+      !Number.isSafeInteger(record.generation) ||
+      Number(record.generation) < 1 ||
+      !Number.isSafeInteger(record.authorityEpoch) ||
+      Number(record.authorityEpoch) < 1 ||
+      typeof record.engineInstanceId !== "string" ||
+      !UUID_PATTERN.test(record.engineInstanceId) ||
+      !Number.isSafeInteger(record.remotePort) ||
+      Number(record.remotePort) < 1_024 ||
+      Number(record.remotePort) > 65_535 ||
+      typeof record.grantToken !== "string" ||
+      !ENGINE_ADMISSION_TOKEN_PATTERN.test(record.grantToken) ||
+      !expiresAt
+    ) {
+      throw new CloudWorkspaceAccessClientError(
+        201,
+        "bad_response",
+        "The cloud workspace control plane returned invalid runtime access",
+      );
+    }
+    return {
+      version: 1,
+      audience: "zeros-cloud-workspace-engine-client-admission-v1",
+      workspaceId: input.workspaceId,
+      organizationId: input.organizationId,
+      generation: Number(record.generation),
+      authorityEpoch: Number(record.authorityEpoch),
+      engineInstanceId: record.engineInstanceId,
+      remotePort: Number(record.remotePort),
+      grantToken: record.grantToken,
+      expiresAt,
     };
   }
 

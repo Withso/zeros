@@ -1,4 +1,4 @@
-import { EventEmitter } from "node:events";
+import { EventEmitter, once } from "node:events";
 import {
   mkdir,
   mkdtemp,
@@ -10,6 +10,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { connect } from "node:net";
+import { PassThrough } from "node:stream";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -29,6 +31,8 @@ type FakeChild = EventEmitter & {
   kill: ReturnType<typeof vi.fn>;
   unref: ReturnType<typeof vi.fn>;
   stderr: EventEmitter;
+  stdin: PassThrough;
+  stdout: PassThrough;
 };
 
 function child(): FakeChild {
@@ -47,6 +51,8 @@ function child(): FakeChild {
   });
   value.unref = vi.fn();
   value.stderr = new EventEmitter();
+  value.stdin = new PassThrough();
+  value.stdout = new PassThrough();
   return value;
 }
 
@@ -234,6 +240,48 @@ describe("CloudWorkspaceSshRuntime", () => {
     expect(checkTunnel).toHaveBeenCalled();
     await handle.stop();
     expect(tunnelChild.kill).toHaveBeenCalledWith("SIGTERM");
+  });
+
+  it("atomically selects a loopback port and proxies it through fixed ssh stdio forwarding", async () => {
+    const { runtimeRoot, knownHostsPath } = await fixture();
+    const proxyChild = child();
+    const spawnProcess = vi.fn((..._args: Parameters<SpawnCloudProcess>) => {
+      queueMicrotask(() => proxyChild.emit("spawn"));
+      return proxyChild;
+    }) as unknown as SpawnCloudProcess;
+    const runtime = new CloudWorkspaceSshRuntime({
+      runtimeRoot,
+      knownHostsPath,
+      spawn: spawnProcess,
+      allowTrustOnFirstUse: true,
+    });
+
+    const handle = await runtime.startDynamicTunnel({
+      localHost: "127.0.0.1",
+      remoteHost: "127.0.0.1",
+      remotePort: 47891,
+      sshUsername: SSH_CREDENTIAL,
+      sshHost: "ssh.app.daytona.io",
+      expiresAt: EXPIRES_AT,
+    });
+    expect(handle.localPort).toBeGreaterThanOrEqual(1_024);
+    expect(spawnProcess).not.toHaveBeenCalled();
+
+    const socket = connect({ host: "127.0.0.1", port: handle.localPort });
+    await once(socket, "connect");
+    await new Promise((resolve) => setImmediate(resolve));
+    const [command, args, options] = vi.mocked(spawnProcess).mock.calls[0]!;
+    expect(command).toBe("/usr/bin/ssh");
+    expect(args).toContain("-W");
+    expect(args).toContain("127.0.0.1:47891");
+    expect(JSON.stringify(args)).not.toContain(SSH_CREDENTIAL);
+    expect(options).toEqual(
+      expect.objectContaining({ shell: false, detached: false }),
+    );
+
+    socket.destroy();
+    await handle.stop();
+    expect(proxyChild.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
   it("launches a supported IDE through a private SSH alias without a bearer argv", async () => {

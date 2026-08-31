@@ -10,6 +10,8 @@ export type CloudWorkspaceRuntimeRetirementReason =
   | "generation_replacement_requested"
   | "generation_candidate_rejected"
   | "generation_replaced"
+  | "paid_authority_revoked"
+  | "provider_authority_revoked"
   | "provider_operation_failed"
   | "setup_failed";
 
