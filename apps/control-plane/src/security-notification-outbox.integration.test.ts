@@ -9,6 +9,7 @@ import {
   SecurityNotificationProcessor,
   securityNotificationContent,
 } from "./security-notification-outbox.js";
+import { enqueueSessionsRevokedNotification } from "./workos-desktop-revocation.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -16,6 +17,7 @@ const d = url ? describe : describe.skip;
 d("security notification outbox", () => {
   let pool: pg.Pool;
   let userId: string;
+  let workosSubject: string;
 
   beforeAll(() => {
     pool = new pg.Pool({ connectionString: url, max: 5 });
@@ -28,13 +30,37 @@ d("security notification outbox", () => {
   beforeEach(async () => {
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
     await runMigrations(pool);
+    workosSubject = `user_${randomUUID()}`;
     const user = await ensureUser(pool, {
       provider: "workos",
-      providerSubject: `user_${randomUUID()}`,
+      providerSubject: workosSubject,
       email: `security-${randomUUID()}@example.com`,
       displayName: "Security Recipient",
     });
     userId = user.id;
+  });
+
+  it("resolves a verified WorkOS subject to a durable Resend notification", async () => {
+    expect(
+      await enqueueSessionsRevokedNotification(pool, workosSubject),
+    ).toBe(true);
+    expect(
+      await enqueueSessionsRevokedNotification(pool, "user_not_linked"),
+    ).toBe(false);
+
+    const row = await pool.query(
+      `SELECT user_id, template, delivery_provider, state, payload
+       FROM security_notification_outbox`,
+    );
+    expect(row.rows).toEqual([
+      {
+        user_id: userId,
+        template: "sessions_revoked",
+        delivery_provider: "resend",
+        state: "queued",
+        payload: { reason: "user_requested_global_signout" },
+      },
+    ]);
   });
 
   async function enqueue(
