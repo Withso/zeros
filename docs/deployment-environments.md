@@ -269,10 +269,10 @@ management event set in `docs/workos-authentication-migration.md`. Zeros uses
 Hosted AuthKit and does not render provider,
 credential, email-verification, MFA, recovery, or account-linking forms. A
 custom AuthKit domain is optional for the initial rollout and should be
-evaluated separately for Production branding and anti-phishing. Do not
-subscribe to `user.created`; first authenticated requests provision the
-subject-to-Zeros-account mapping and the webhook handler deliberately ignores
-creation events.
+evaluated separately for Production branding and anti-phishing. Subscribe to
+`user.created`, but do not provision a product account from it; first
+authenticated requests create the subject-to-Zeros-account mapping and the
+webhook handler records then deliberately ignores creation events.
 A self-hosted template can use platform-provided HTTPS domains instead of
 buying domains. Keep the frontend `APP_ORIGIN` separate from the API origin so
 server-only session responses are never same-origin browser endpoints; two
@@ -302,8 +302,8 @@ order:
    are interchangeable. Remove `AUTH_BROKER_SECRET` and leave
    `ZEROS_SELF_HOSTED` unset for official Alpha.
 4. Point the WorkOS webhook directly to
-   `https://api-alpha.zeros.build/auth/workos-webhook`, subscribing only to
-   `user.updated` and `user.deleted`.
+   `https://api-alpha.zeros.build/auth/workos-webhook` and subscribe to the
+   complete management event set in `docs/workos-authentication-migration.md`.
 5. Deploy Railway first. Confirm migrations complete and
    `https://api-alpha.zeros.build/healthz` succeeds before changing Pages.
 6. In Cloudflare Pages `zeros-web-alpha`, set `ZEROS_DEPLOY_ENV=alpha`,

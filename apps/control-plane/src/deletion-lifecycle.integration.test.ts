@@ -406,6 +406,41 @@ d("account, organization, and operator deletion lifecycle", () => {
     }
   });
 
+  it("keeps organization Personal classification immutable", async () => {
+    const customer = await signup("PersonalClassification");
+    const personal = await pool.query<{ id: string }>(
+      `SELECT id FROM organizations
+       WHERE created_by = $1 AND is_personal`,
+      [customer.id],
+    );
+    const collaborativeId = await createOrganization(
+      customer,
+      "Classification Company",
+    );
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await expect(
+        client.query(
+          `UPDATE organizations SET is_personal = false WHERE id = $1`,
+          [personal.rows[0]!.id],
+        ),
+      ).rejects.toThrow(/Personal classification is immutable/i);
+      await client.query("ROLLBACK");
+
+      await client.query("BEGIN");
+      await expect(
+        client.query(
+          `UPDATE organizations SET is_personal = true WHERE id = $1`,
+          [collaborativeId],
+        ),
+      ).rejects.toThrow(/Personal classification is immutable/i);
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+  });
+
   it("fails closed before WorkOS erasure when a legacy Personal cloud-workspace invariant is violated", async () => {
     const customer = await signup("LegacyPersonalInvariant");
     const personal = await pool.query<{ org_id: string; team_id: string }>(
@@ -416,61 +451,41 @@ d("account, organization, and operator deletion lifecycle", () => {
       [customer.id],
     );
     const workspaceId = randomUUID();
-    // Model data that predates the database invariant. This is test-only DDL
-    // on a disposable PostgreSQL schema and is restored before continuing.
-    await pool.query(`DO $$ BEGIN
-      IF EXISTS (
-        SELECT 1 FROM pg_trigger
-        WHERE tgrelid = 'cloud_workspaces'::regclass
-          AND tgname = 'cloud_workspaces_reject_personal'
-      ) THEN
-        ALTER TABLE cloud_workspaces
-          DISABLE TRIGGER cloud_workspaces_reject_personal;
-      END IF;
-    END $$`);
+    // Model data that predates the database invariant. The bypass is local to
+    // this transaction/session, so concurrent integration workers can never
+    // observe a table-wide disabled trigger.
+    const client = await pool.connect();
     try {
-      const client = await pool.connect();
-      try {
-        await client.query("BEGIN");
-        await client.query(
-          `INSERT INTO cloud_workspaces (
-             id, org_id, team_id, created_by, display_name,
-             repository_forge, repository_owner, repository_name,
-             repository_revision, status, desired_state
-           ) VALUES ($1, $2, $3, $4, 'Legacy Personal Cloud',
-                     'github.com', 'withso', 'zeros', 'main',
-                     'requested', 'running')`,
-          [
-            workspaceId,
-            personal.rows[0]!.org_id,
-            personal.rows[0]!.team_id,
-            customer.id,
-          ],
-        );
-        await client.query(
-          `INSERT INTO cloud_workspace_generations (
-             workspace_id, generation, org_id, provider, image_ref,
-             architecture, cpu_millicores, memory_mib, storage_mib,
-             source_commit, created_by
-           ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
-                     2000, 4096, 20480, $3, $4)`,
-          [workspaceId, personal.rows[0]!.org_id, "a".repeat(40), customer.id],
-        );
-        await client.query("COMMIT");
-      } finally {
-        client.release();
-      }
+      await client.query("BEGIN");
+      await client.query("SET LOCAL session_replication_role = replica");
+      await client.query(
+        `INSERT INTO cloud_workspaces (
+           id, org_id, team_id, created_by, display_name,
+           repository_forge, repository_owner, repository_name,
+           repository_revision, status, desired_state
+         ) VALUES ($1, $2, $3, $4, 'Legacy Personal Cloud',
+                   'github.com', 'withso', 'zeros', 'main',
+                   'requested', 'running')`,
+        [
+          workspaceId,
+          personal.rows[0]!.org_id,
+          personal.rows[0]!.team_id,
+          customer.id,
+        ],
+      );
+      await client.query(
+        `INSERT INTO cloud_workspace_generations (
+           workspace_id, generation, org_id, provider, image_ref,
+           architecture, cpu_millicores, memory_mib, storage_mib,
+           source_commit, created_by
+         ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+                   2000, 4096, 20480, $3, $4)`,
+        [workspaceId, personal.rows[0]!.org_id, "a".repeat(40), customer.id],
+      );
+      await client.query("COMMIT");
     } finally {
-      await pool.query(`DO $$ BEGIN
-        IF EXISTS (
-          SELECT 1 FROM pg_trigger
-          WHERE tgrelid = 'cloud_workspaces'::regclass
-            AND tgname = 'cloud_workspaces_reject_personal'
-        ) THEN
-          ALTER TABLE cloud_workspaces
-            ENABLE TRIGGER cloud_workspaces_reject_personal;
-        END IF;
-      END $$`);
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
     }
 
     const scheduled = await scheduleAccount(customer);

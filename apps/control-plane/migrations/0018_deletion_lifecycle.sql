@@ -112,10 +112,30 @@ ALTER TABLE organizations
   ADD COLUMN deletion_scheduled_at timestamptz,
   ADD COLUMN purge_after timestamptz;
 
--- Personal is a permanent device-local shell. The application already denies
--- cloud creation there; enforce the same ownership invariant at the database
--- boundary so a future route or maintenance script cannot create server-owned
--- cloud data whose account-deletion semantics would be ambiguous.
+-- Personal is a permanent device-local shell, not a mutable organization mode.
+-- Making the classification immutable closes both update-orderings of the
+-- ownership race: an organization can never be personalized before or after a
+-- concurrent cloud-workspace insert.
+CREATE FUNCTION reject_organization_personal_reclassification()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.is_personal IS DISTINCT FROM OLD.is_personal THEN
+    RAISE EXCEPTION 'Organization Personal classification is immutable'
+      USING ERRCODE = '23514',
+            CONSTRAINT = 'organizations_personal_classification_immutable';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER organizations_personal_classification_immutable
+  BEFORE UPDATE OF is_personal ON organizations
+  FOR EACH ROW EXECUTE FUNCTION reject_organization_personal_reclassification();
+REVOKE ALL ON FUNCTION reject_organization_personal_reclassification() FROM PUBLIC;
+
+-- The application already denies cloud creation under Personal; enforce the
+-- same ownership invariant at the database boundary so a future route or
+-- maintenance script cannot create server-owned cloud data whose
+-- account-deletion semantics would be ambiguous.
 CREATE FUNCTION reject_personal_cloud_workspace()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE
