@@ -361,7 +361,6 @@ export function playScramble(
   let slots = fillScrambleCells(maxLen, set)
   let lastRefresh = -Infinity
   let lastHtml = ''
-  let tick = 0
   const state = { t: 0 }
 
   return gsap.to(state, {
@@ -374,15 +373,12 @@ export function playScramble(
       const now = performance.now()
       if (now - lastRefresh >= refreshMs) {
         lastRefresh = now
-        tick += 1
-        const next =
-          set.icons && slots.length >= len && tick % 3 !== 0
-            ? rotateScrambleIcons(slots.slice(0, len), 1)
-            : fillScrambleCells(len, set)
-        for (let i = 0; i < len; i += 1) {
-          if (scrambleGlyphKind(i, visualT, maxLen) === 'scramble') {
-            slots[i] = next[i] ?? pickScrambleCell(set)
-          }
+        if (set.icons) {
+          const row = slots.slice(0, len)
+          while (row.length < len) row.push(pickScrambleCell(set))
+          slots = rotateScrambleIcons(row, 1)
+        } else {
+          slots = fillScrambleCells(len, set)
         }
       }
       const glyphs: Glyph[] = []

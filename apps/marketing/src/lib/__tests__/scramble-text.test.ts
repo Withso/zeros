@@ -167,6 +167,8 @@ describe("hero scramble fill", () => {
       const to = names(rotated);
       expect(from.length).toBeGreaterThanOrEqual(3);
       expect(from.length).toBeLessThanOrEqual(4);
+      expect(new Set(from).size).toBe(from.length);
+      expect(new Set(to).size).toBe(to.length);
       expect(to).toHaveLength(from.length);
       expect([...to].sort()).toEqual([...from].sort());
       if (to.join() !== from.join()) changed += 1;
