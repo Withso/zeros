@@ -30,7 +30,7 @@ export const DESIGN_MARKS = [
 
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
-/** developers → designers: one unique Lucide mark per character, no repeats. */
+/** developers → designers: 10 unique marks, one per character of "developers". */
 export const DESIGN_VISIBLE = 10
 
 const ICON_COLORS = [
@@ -115,7 +115,7 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers — 10 unique Lucide marks, no ghost layer. */
+/** developers → designers — 10 unique Lucide marks, one per character slot. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
   chars: '',
   icons: DESIGN_ICONS,
@@ -383,7 +383,9 @@ export function playScramble(
   const maxLen = Math.max(startLen, endLen)
   const refreshMs = Math.max(28, 40 / Math.max(0.4, speed))
   let slots = fillScrambleCells(
-    set.icons && set.icons.length > 0 ? DESIGN_VISIBLE : maxLen,
+    set.icons && set.icons.length > 0
+      ? Math.min(DESIGN_VISIBLE, maxLen, set.icons.length)
+      : maxLen,
     set,
   )
   let lastRefresh = -Infinity
@@ -401,37 +403,23 @@ export function playScramble(
       if (now - lastRefresh >= refreshMs) {
         lastRefresh = now
         if (set.icons && set.icons.length > 0) {
-          if (slots.length !== DESIGN_VISIBLE) {
-            slots = fillScrambleCells(DESIGN_VISIBLE, set)
-          }
-          slots = rotateScrambleIcons(slots, 1)
+          const n = Math.min(DESIGN_VISIBLE, len, set.icons.length)
+          if (slots.length !== n) slots = fillScrambleCells(n, set)
+          else slots = rotateScrambleIcons(slots, 1)
         } else {
           slots = fillScrambleCells(len, set)
         }
       }
-      const kinds = Array.from({ length: len }, (_, i) =>
-        scrambleGlyphKind(i, visualT, maxLen),
-      )
-      const scrambleCount = kinds.filter((kind) => kind === 'scramble').length
-      const iconBudget =
-        set.icons && set.icons.length > 0
-          ? Math.min(DESIGN_VISIBLE, slots.length, scrambleCount)
-          : 0
       const glyphs: Glyph[] = []
-      let iconsEmitted = 0
       for (let i = 0; i < len; i += 1) {
-        const kind = kinds[i]!
+        const kind = scrambleGlyphKind(i, visualT, maxLen)
         if (kind === 'from' && i < from.length) {
           glyphs.push({ kind: 'from', ch: from[i]! })
         } else if (kind === 'to' && i < text.length) {
           glyphs.push({ kind: 'to', ch: text[i]! })
-        } else if (iconBudget > 0) {
-          if (iconsEmitted < iconBudget) {
-            glyphs.push(cellToGlyph(slots[iconsEmitted]!))
-            iconsEmitted += 1
-          }
         } else {
-          glyphs.push(cellToGlyph(slots[i] ?? pickScrambleCell(set)))
+          const cell = slots[i]
+          if (cell) glyphs.push(cellToGlyph(cell))
         }
       }
       const html = renderGlyphRun(glyphs)
