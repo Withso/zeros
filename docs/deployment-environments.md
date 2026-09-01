@@ -208,13 +208,13 @@ plus `zeros-ops-alpha` and `zeros-ops` from the same source. All five use:
 
 Configure each project:
 
-| Project           | Production branch                 | Automatic Production deploys      | Custom domain(s)                                    |
-| ----------------- | --------------------------------- | --------------------------------- | --------------------------------------------------- |
-| `zeros-web-alpha` | `main`                            | on                                | `app-alpha.zeros.build`                             |
-| `zeros-ops-alpha` | `main`                            | on                                | `ops-alpha.zeros.build`                             |
-| `zeros-web-beta`  | current `release/X.Y.Z`           | on while stabilizing that release | `app-beta.zeros.build`                              |
-| `zeros-web`       | current validated `release/X.Y.Z` | **off**                           | `app.zeros.build` plus Production marketing domains |
-| `zeros-ops`       | current validated `release/X.Y.Z` | **off**                           | `ops.zeros.build`                                   |
+| Project           | Production branch                 | Automatic Production deploys      | Automatic Preview deploys | Custom domain(s)                                    |
+| ----------------- | --------------------------------- | --------------------------------- | ------------------------- | --------------------------------------------------- |
+| `zeros-web-alpha` | `main`                            | on                                | **off**                   | `app-alpha.zeros.build`                             |
+| `zeros-ops-alpha` | `main`                            | on                                | **off**                   | `ops-alpha.zeros.build`                             |
+| `zeros-web-beta`  | current `release/X.Y.Z`           | on while stabilizing that release | **off**                   | `app-beta.zeros.build`                              |
+| `zeros-web`       | current validated `release/X.Y.Z` | **off**                           | **off**                   | `app.zeros.build` plus Production marketing domains |
+| `zeros-ops`       | current validated `release/X.Y.Z` | **off**                           | **off**                   | `ops.zeros.build`                                   |
 
 Disable Preview deployments for these release projects. If PR previews are
 needed later, create a sixth preview-only project with preview-only credentials

@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  realpath,
   rm,
   symlink,
   writeFile,
@@ -96,6 +97,8 @@ describe("live agent smoke ZSR assets", () => {
   it("does not require Darwin-only helpers after a Linux asset build", async () => {
     const fixture = await mkdtemp(path.join(tmpdir(), "agent-smoke-linux-"));
     const runtime = path.join(fixture, "node");
+    const claudeRuntime = path.join(fixture, "claude");
+    const codexRuntime = path.join(fixture, "codex.js");
     const cursorHost = path.join(
       fixture,
       "apps/desktop/src/engine/agents/adapters/cursor-sdk/host/cursor-host.cjs",
@@ -112,6 +115,8 @@ describe("live agent smoke ZSR assets", () => {
       await mkdir(path.join(fixture, "binaries"), { recursive: true });
       await Promise.all([
         writeFile(runtime, ""),
+        writeFile(claudeRuntime, ""),
+        writeFile(codexRuntime, ""),
         writeFile(cursorHost, ""),
         ...commonAssets.map((leaf) =>
           writeFile(path.join(fixture, "binaries", leaf), ""),
@@ -122,7 +127,10 @@ describe("live agent smoke ZSR assets", () => {
         installAgentSmokeZsrEnvironment(
           fixture,
           runtime,
-          {},
+          {
+            ZEROS_CLAUDE_CLI_PATH: claudeRuntime,
+            ZEROS_CODEX_CLI_PATH: codexRuntime,
+          },
           "linux",
         ),
       ).not.toThrow();
@@ -159,7 +167,9 @@ describe("live agent smoke ZSR assets", () => {
     await mkdir(physical);
     await symlink(physical, alias, "dir");
     try {
-      expect(canonicalAgentSmokeWorkspace(alias)).toBe(physical);
+      expect(canonicalAgentSmokeWorkspace(alias)).toBe(
+        await realpath(physical),
+      );
     } finally {
       await rm(fixture, { recursive: true, force: true });
     }

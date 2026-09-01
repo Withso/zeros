@@ -7,7 +7,10 @@ import type { AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
 import { audit } from "./audit.js";
 import { withSystemTx, type Tx } from "./db.js";
-import { enqueueWorkOSCommand } from "./workos-command-outbox.js";
+import {
+  enqueueWorkOSCommand,
+  workOSInvitationOrderingKey,
+} from "./workos-command-outbox.js";
 
 export const DELETION_GRACE_DAYS = 30;
 export const SENSITIVE_ACTION_MAX_AGE_SECONDS = 5 * 60;
@@ -730,6 +733,49 @@ async function restoreAccountRecordInTransaction(
       ...(input.supportCaseReference
         ? { supportCaseReference: input.supportCaseReference }
         : {}),
+    });
+  }
+  const membershipsToProject = await tx.query<{
+    org_id: string;
+    role: "owner" | "admin" | "member";
+    workos_sync_revision: string | number;
+    provider_sub: string;
+    email: string;
+  }>(
+    `SELECT om.org_id, om.role, om.workos_sync_revision,
+            identity.provider_sub, u.email
+     FROM organization_members om
+     JOIN organizations o ON o.id = om.org_id
+     JOIN users u ON u.id = om.user_id
+     JOIN user_identities identity
+       ON identity.user_id = om.user_id
+      AND identity.provider = 'workos' AND identity.status = 'active'
+     JOIN workos_organization_links provider_org
+       ON provider_org.organization_id = om.org_id
+      AND provider_org.state IN ('active', 'provisioning')
+     WHERE om.user_id = $1 AND NOT o.is_personal
+       AND o.deleted_at IS NULL AND o.lifecycle_status = 'active'
+       AND om.membership_source <> 'scim'
+       AND om.workos_membership_id IS NULL
+     ORDER BY om.org_id`,
+    [input.accountId],
+  );
+  for (const membership of membershipsToProject.rows) {
+    await enqueueWorkOSCommand(tx, {
+      operation: "membership.create",
+      idempotencyKey: `membership.${membership.org_id}.${input.accountId}.${membership.workos_sync_revision}`,
+      aggregateKey: `membership:${membership.org_id}:${input.accountId}`,
+      orderingKey: workOSInvitationOrderingKey(
+        membership.org_id,
+        membership.email,
+      ),
+      aggregateRevision: Number(membership.workos_sync_revision),
+      organizationId: membership.org_id,
+      userId: input.accountId,
+      payload: {
+        workosUserId: membership.provider_sub,
+        role: membership.role,
+      },
     });
   }
   await tx.query(
