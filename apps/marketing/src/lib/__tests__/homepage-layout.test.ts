@@ -88,7 +88,8 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/width: 0\.9em/);
     expect(css).not.toMatch(/width: 0\.72em/);
     expect(css).not.toMatch(/width: 0\.8em/);
-    expect(css).toMatch(/width: 60px/);
+    expect(css).toMatch(/width: 50px/);
+    expect(css).not.toMatch(/width: 60px/);
     expect(css).toMatch(/overflow: hidden/);
     expect(css).not.toMatch(/--violet-fg/);
     expect(css).not.toMatch(/--blue-fg/);
@@ -105,7 +106,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/chars: ''/);
     expect(scramble).not.toMatch(/chars: '#\|\+'/);
     expect(scramble).toMatch(/DESIGN_VISIBLE = 10/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-60/);
+    expect(cycle).toMatch(/hero-role\.css\?v=scramble-50/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);
     expect(scramble).not.toMatch(/data-hero-scramble-icon="arrow"/);
