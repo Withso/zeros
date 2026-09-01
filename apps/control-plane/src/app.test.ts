@@ -50,6 +50,7 @@ function config(github: GithubBackendConfig | null): Config {
     inviteLinkBase: "https://app.example.test/invite",
     port: 8080,
     isProduction: true,
+    deploymentChannel: "production",
     github,
     feedback: null,
     cloudWorkspaces: null,
@@ -69,6 +70,7 @@ function workosConfig(): Config {
     },
     workos: {
       appOrigin: "https://app.example.test",
+      opsOrigin: null,
       apiKey: "workos-api-key-for-tests",
       cookiePassword: "cookie-password-for-tests".repeat(2),
       webhookSecret: "webhook-secret-for-tests",
@@ -100,6 +102,21 @@ describe("app assembly — Railway WorkOS boundary", () => {
       { method: "POST" },
     );
     expect(response.status).toBe(404);
+  });
+});
+
+describe("app assembly — isolated Ops browser namespace", () => {
+  const configured = workosConfig();
+  configured.deploymentChannel = "alpha";
+  configured.workos!.opsOrigin = "https://ops-alpha.example.test";
+  const app = createApp(configured, pool, emailConfig as never);
+
+  it("mounts the Ops WorkOS ceremony before bearer auth without widening app callbacks", async () => {
+    const ops = await app.request("/ops/auth/start");
+    expect(ops.status).toBe(400);
+    expect(ops.headers.get("cache-control")).toBe("no-store");
+    const invented = await app.request("/ops-auth/start");
+    expect(invented.status).toBe(404);
   });
 });
 

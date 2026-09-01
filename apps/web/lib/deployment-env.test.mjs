@@ -41,6 +41,33 @@ test("accepts stateless WorkOS Pages wiring with Railway as the authority", () =
   }
 });
 
+test("accepts isolated Alpha and Production Ops projects and rejects Beta Ops", () => {
+  for (const channel of ["alpha", "production"]) {
+    const env = cloudflareEnv(channel);
+    env.AUTH_PROVIDER = "workos";
+    env.ZEROS_SURFACE = "ops";
+    env.WORKOS_BROWSER_ROUTE_PREFIX = "/ops";
+    env.APP_ORIGIN =
+      channel === "alpha"
+        ? "https://ops-alpha.zeros.build"
+        : "https://ops.zeros.build";
+    delete env.AUTH0_DOMAIN;
+    delete env.AUTH0_CLIENT_ID;
+    delete env.AUTH0_CLIENT_SECRET;
+    delete env.AUTH0_AUDIENCE;
+    assert.deepEqual(deploymentEnvironmentErrors(env), []);
+  }
+
+  const beta = cloudflareEnv("beta");
+  beta.ZEROS_SURFACE = "ops";
+  beta.WORKOS_BROWSER_ROUTE_PREFIX = "/ops";
+  assert.ok(
+    deploymentEnvironmentErrors(beta).some((error) =>
+      error.includes("not deployed to Beta"),
+    ),
+  );
+});
+
 test("WorkOS Pages rejects retired bindings and misplaced Railway secrets", () => {
   const env = cloudflareEnv("alpha");
   env.AUTH_PROVIDER = "workos";

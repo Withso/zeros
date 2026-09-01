@@ -30,6 +30,11 @@ function request(
 }
 
 describe("staff-role owner command", () => {
+  it("accepts the platform-owner role used by the Ops trust boundary", () => {
+    expect(request({ nextRole: "platform_owner" }).nextRole).toBe(
+      "platform_owner",
+    );
+  });
   it("binds approval to the database, channel, actors, transition, and reason", () => {
     const validated = request();
     const approval = staffRoleApprovalText(validated, null);

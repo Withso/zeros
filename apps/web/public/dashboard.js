@@ -222,6 +222,7 @@ function bootDashboard() {
     activeOrganizationId: boot.activeOrganizationId,
     section: boot.section || "profile",
     loadError: boot.loadError || null,
+    deletions: [],
   };
   const snapshots = new Map();
   const inflight = new Map();
@@ -379,6 +380,14 @@ function bootDashboard() {
     return body;
   }
 
+  function beginStepUp(action) {
+    const returnTo = new URL(window.location.href);
+    returnTo.searchParams.set("action", action);
+    window.location.assign(
+      `/auth/start?max_age=300&return=${encodeURIComponent(returnTo.toString())}`,
+    );
+  }
+
   function updateUrl() {
     const url = new URL(window.location.href);
     if (state.activeOrganizationId) url.searchParams.set("organization", state.activeOrganizationId);
@@ -416,9 +425,16 @@ function bootDashboard() {
 
   function profileHtml() {
     const displayName = state.user.displayName || "Zeros user";
+    const recoverable = state.deletions
+      .map(
+        (deletion) => `<div class="settings-row"><span class="settings-copy"><strong>Recoverable organization</strong><p>Scheduled for final deletion on ${escapeHtml(new Date(deletion.purgeAfter).toLocaleDateString())}. Recovery code ${escapeHtml(deletion.recoveryCode)}.</p></span><span class="settings-value"><button class="button secondary" type="button" data-restore-organization="${escapeHtml(deletion.targetId)}" data-deletion-request="${escapeHtml(deletion.id)}">Restore</button></span></div>`,
+      )
+      .join("");
     return `<section class="section-stack">${heading("Profile", "Your browser account and sign-in identity.")}
       <div class="card"><div class="identity-row"><span class="avatar avatar-large">${escapeHtml(initials(displayName || state.user.email))}</span><div><strong>${escapeHtml(displayName)}</strong><p>${escapeHtml(state.user.email)}</p></div></div></div>
-      <div class="card"><div class="card-title"><div><strong>Account identity</strong><p>Name and avatar are currently provided by Google or GitHub. Profile editing will be available here later.</p></div><span class="badge">Provider-managed</span></div></div>
+      <div class="card"><div class="card-title"><div><strong>Account identity</strong><p>Name and avatar are currently provided by Hosted AuthKit. Profile editing will be available here later.</p></div><span class="badge">Provider-managed</span></div></div>
+      ${recoverable ? `<div class="card settings-card"><div class="card-title"><div><strong>Recoverable organizations</strong><p>An owner can restore these during the 30-day grace period.</p></div></div>${recoverable}</div>` : ""}
+      <div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete account</strong><p>Signs out every device immediately and keeps cloud account data recoverable for 30 days. Local Personal workspaces stay on each device.</p></div><button class="button danger" type="button" data-action="delete-account">Delete account</button></div></div>
     </section>`;
   }
 
@@ -440,7 +456,7 @@ function bootDashboard() {
         <div class="settings-row"><span class="settings-copy"><strong>Your role</strong><p>What you can do in this organization.</p></span><span class="settings-value"><span class="badge">${escapeHtml(organization.role)}</span></span></div>
       </div>
       <div class="card"><div class="card-title"><div><strong>Workspace access</strong><p>Capability metadata; cloud provisioning will still enforce plan and quota.</p></div></div><div class="capability-grid"><div class="capability"><span class="status-dot success"></span><div><strong>Local workspaces</strong><p>Available on your Mac</p></div></div><div class="capability ${organization.workspaceCapabilities?.cloud ? "" : "disabled"}"><span class="status-dot ${organization.workspaceCapabilities?.cloud ? "success" : ""}"></span><div><strong>Cloud workspaces</strong><p>${organization.workspaceCapabilities?.cloud ? "Organization eligible" : "Not available in Personal"}</p></div></div></div></div>
-      ${organization.isPersonal ? `<div class="notice"><strong>Personal is permanent</strong><p>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</p></div>` : canOwn(organization) ? `<div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete organization</strong><p>Revokes pending invitations and removes the organization from Zeros. Every cloud workspace must be deleted and provider cleanup verified first.</p></div><button class="button danger" type="button" data-action="delete-organization">Delete organization</button></div></div>` : ""}
+      ${organization.isPersonal ? `<div class="notice"><strong>Personal is permanent</strong><p>Personal cannot be removed. It cannot invite members and stores workspace configuration locally.</p></div>` : canOwn(organization) ? `<div class="subsection-label">Danger zone</div><div class="card danger-card"><div class="card-title"><div><strong>Delete organization</strong><p>Revokes access immediately and keeps the organization recoverable for 30 days. Provider deletion begins only after the grace period.</p></div><button class="button danger" type="button" data-action="delete-organization">Delete organization</button></div></div>` : ""}
     </section>`;
   }
 
@@ -523,6 +539,17 @@ function bootDashboard() {
     }
     if (state.section === "profile") {
       content.innerHTML = profileHtml();
+      try {
+        const value = await loadExact("account:deletions", () =>
+          api("/v1/deletions"),
+        );
+        state.deletions = Array.isArray(value.deletions)
+          ? value.deletions
+          : [];
+        if (state.section === "profile") content.innerHTML = profileHtml();
+      } catch (error) {
+        toast(error.message, true);
+      }
       return;
     }
     if (!organization) {
@@ -866,19 +893,41 @@ function bootDashboard() {
     } else if (action === "delete-organization") {
       const organization = activeOrganization();
       if (!organization || organization.isPersonal) return;
-      if (!window.confirm(`Delete ${organization.name}? This cannot be undone.`)) return;
+      const dialog = document.getElementById("delete-organization-dialog");
+      const input = dialog?.querySelector('input[name="confirmation"]');
+      if (input) input.value = "";
+      const errorNode = document.getElementById("delete-organization-error");
+      if (errorNode) errorNode.textContent = "";
+      dialog?.showModal();
+    } else if (action === "delete-account") {
+      const dialog = document.getElementById("delete-account-dialog");
+      const input = dialog?.querySelector('input[name="confirmation"]');
+      if (input) input.value = "";
+      const errorNode = document.getElementById("delete-account-error");
+      if (errorNode) errorNode.textContent = "";
+      dialog?.showModal();
+    } else if (target.dataset.restoreOrganization) {
+      const organizationId = target.dataset.restoreOrganization;
+      const requestId = target.dataset.deletionRequest;
+      if (!requestId) return;
+      target.disabled = true;
       try {
-        await api(`/v1/organizations/${organization.id}`, { method: "DELETE", body: {} });
-        invalidateOrganizationSnapshots(snapshots, organization.id, {
+        await api(`/v1/organizations/${organizationId}/restore`, {
+          method: "POST",
+          body: { requestId },
+        });
+        invalidateExactSnapshot(snapshots, "account:deletions", {
           inflight,
           generations: snapshotGenerations,
         });
-        state.organizations = state.organizations.filter((item) => item.id !== organization.id);
-        state.activeOrganizationId = state.organizations.find((item) => item.isPersonal)?.id || null;
-        state.section = "profile";
-        toast("Organization deleted");
-        await render();
+        toast("Organization restored");
+        await reloadMe();
       } catch (error) {
+        if (error.code === "reauthentication_required") {
+          beginStepUp("restore-organization");
+          return;
+        }
+        target.disabled = false;
         toast(error.message, true);
       }
     } else if (target.dataset.removeMember) {
@@ -983,11 +1032,8 @@ function bootDashboard() {
     const form = event.target;
     if (!(form instanceof HTMLFormElement)) return;
     event.preventDefault();
-    if (
-      form.id === "create-organization-form" &&
-      event.submitter?.value === "cancel"
-    ) {
-      document.getElementById("create-organization-dialog")?.close();
+    if (event.submitter?.value === "cancel") {
+      form.closest("dialog")?.close();
       return;
     }
     if (!submissions.enter(form)) return;
@@ -1011,6 +1057,71 @@ function bootDashboard() {
         document.getElementById("create-organization-dialog")?.close();
         toast("Organization created");
         await render();
+      } else if (form.id === "delete-organization-form" && organization) {
+        const confirmation = new FormData(form)
+          .get("confirmation")
+          ?.toString()
+          .trim();
+        const errorNode = document.getElementById(
+          "delete-organization-error",
+        );
+        if (!confirmation) return;
+        if (errorNode) errorNode.textContent = "";
+        try {
+          const result = await api(`/v1/organizations/${organization.id}`, {
+            method: "DELETE",
+            body: { confirmation },
+          });
+          invalidateOrganizationSnapshots(snapshots, organization.id, {
+            inflight,
+            generations: snapshotGenerations,
+          });
+          invalidateExactSnapshot(snapshots, "account:deletions", {
+            inflight,
+            generations: snapshotGenerations,
+          });
+          state.organizations = state.organizations.filter(
+            (item) => item.id !== organization.id,
+          );
+          if (result.deletion) state.deletions.unshift(result.deletion);
+          state.activeOrganizationId =
+            state.organizations.find((item) => item.isPersonal)?.id || null;
+          state.section = "profile";
+          form.reset();
+          form.closest("dialog")?.close();
+          toast("Organization deletion scheduled for 30 days");
+          await render();
+        } catch (error) {
+          if (error.code === "reauthentication_required") {
+            beginStepUp("delete-organization");
+            return;
+          }
+          if (errorNode) errorNode.textContent = error.message;
+        }
+      } else if (form.id === "delete-account-form") {
+        const confirmation = new FormData(form)
+          .get("confirmation")
+          ?.toString()
+          .trim();
+        const errorNode = document.getElementById("delete-account-error");
+        if (!confirmation) return;
+        if (errorNode) errorNode.textContent = "";
+        try {
+          await api("/v1/account/deletion", {
+            method: "POST",
+            body: { confirmation },
+          });
+          window.location.replace(
+            `/auth/logout?return=${encodeURIComponent(`${window.location.origin}/`)}`,
+          );
+          return;
+        } catch (error) {
+          if (error.code === "reauthentication_required") {
+            beginStepUp("delete-account");
+            return;
+          }
+          if (errorNode) errorNode.textContent = error.message;
+        }
       } else if (form.dataset.form === "rename-organization" && organization) {
         const name = new FormData(form).get("name")?.toString().trim();
         if (!name) return;
@@ -1036,9 +1147,15 @@ function bootDashboard() {
         await render();
       }
     } catch (error) {
-      if (form.id === "create-organization-form") {
+      if (
+        form.id === "create-organization-form" ||
+        form.id === "delete-organization-form" ||
+        form.id === "delete-account-form"
+      ) {
         const errorNode = document.getElementById("create-organization-error");
-        if (errorNode) errorNode.textContent = error.message;
+        if (form.id === "create-organization-form" && errorNode) {
+          errorNode.textContent = error.message;
+        }
       } else {
         toast(error.message, true);
       }
@@ -1051,6 +1168,10 @@ function bootDashboard() {
 
   if (boot.action === "create-organization") {
     document.getElementById("create-organization-dialog")?.showModal();
+  } else if (boot.action === "delete-account") {
+    document.getElementById("delete-account-dialog")?.showModal();
+  } else if (boot.action === "delete-organization") {
+    document.getElementById("delete-organization-dialog")?.showModal();
   }
   window.addEventListener("focus", onSecurityLifecycleHint);
   window.addEventListener("online", onSecurityLifecycleHint);

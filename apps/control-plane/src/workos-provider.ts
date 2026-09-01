@@ -41,6 +41,7 @@ export interface WorkOSBrowserProvider {
     state: string;
     codeChallenge: string;
     redirectUri: string;
+    maxAge?: number;
   }): string;
   exchange(options: {
     code: string;
@@ -62,7 +63,7 @@ export interface WorkOSDesktopProvider {
     subject: string,
     options: { limit: number; after?: string },
   ): Promise<{
-    data: Array<{ id: string; status: string }>;
+    data: Array<{ id: string; status: string; createdAt: string }>;
     listMetadata: { after: string | null };
   }>;
   revokeSession(sessionId: string): Promise<void>;
@@ -162,7 +163,15 @@ export interface WorkOSManagementProvider {
     email: string;
   }): Promise<WorkOSInvitationRecord[]>;
   revokeInvitation(invitationId: string): Promise<WorkOSInvitationRecord>;
+  listSessions(
+    subject: string,
+    options: { limit: number; after?: string },
+  ): Promise<{
+    data: Array<{ id: string; status: string; createdAt: string }>;
+    listMetadata: { after: string | null };
+  }>;
   revokeSession(sessionId: string): Promise<void>;
+  deleteUser(userId: string): Promise<void>;
 }
 
 type WorkOSAuthConfig = Extract<AuthBackendConfig, { provider: "workos" }>;
@@ -207,6 +216,7 @@ export class RailwayWorkOSProvider
     state: string;
     codeChallenge: string;
     redirectUri: string;
+    maxAge?: number;
   }): string {
     return this.client.userManagement.getAuthorizationUrl({
       provider: "authkit",
@@ -214,6 +224,7 @@ export class RailwayWorkOSProvider
       codeChallenge: options.codeChallenge,
       codeChallengeMethod: "S256",
       redirectUri: options.redirectUri,
+      ...(options.maxAge !== undefined ? { maxAge: options.maxAge } : {}),
     });
   }
 
@@ -375,7 +386,7 @@ export class RailwayWorkOSProvider
     subject: string,
     options: { limit: number; after?: string },
   ): Promise<{
-    data: Array<{ id: string; status: string }>;
+    data: Array<{ id: string; status: string; createdAt: string }>;
     listMetadata: { after: string | null };
   }> {
     const page = await this.client.userManagement.listSessions(
@@ -386,6 +397,7 @@ export class RailwayWorkOSProvider
       data: page.data.map((session) => ({
         id: session.id,
         status: session.status,
+        createdAt: session.createdAt,
       })),
       listMetadata: { after: page.listMetadata.after ?? null },
     };
@@ -393,6 +405,10 @@ export class RailwayWorkOSProvider
 
   async revokeSession(sessionId: string): Promise<void> {
     await this.client.userManagement.revokeSession({ sessionId });
+  }
+
+  async deleteUser(userId: string): Promise<void> {
+    await this.client.userManagement.deleteUser(userId);
   }
 
   private managementEvent(event: Event): WorkOSManagementEvent {

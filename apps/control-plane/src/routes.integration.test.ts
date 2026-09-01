@@ -6,6 +6,7 @@ import { ensureUser, type AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
 import { runMigrations } from "./migrate.js";
 import { createRoutes } from "./routes.js";
+import { createDeletionLifecycleRoutes } from "./deletion-lifecycle.js";
 import type { WorkOSInvitationRecord } from "./workos-provider.js";
 
 const url = process.env.TEST_DATABASE_URL;
@@ -21,10 +22,16 @@ d("organization routes", () => {
   const signup = (name: string) => {
     const sub = randomUUID();
     return ensureUser(pool, {
-      provider: "auth0",
+      provider: "workos",
       providerSubject: sub,
       email: `${name.toLowerCase()}-${sub}@example.com`,
       displayName: name,
+      session: {
+        id: `session_${sub}`,
+        clientKind: "web",
+        authTime: Math.floor(Date.now() / 1_000),
+        tokenExpiresAt: Math.floor(Date.now() / 1_000) + 3_600,
+      },
     });
   };
 
@@ -51,6 +58,7 @@ d("organization routes", () => {
       c.set("user", actor);
       await next();
     });
+    app.route("/", createDeletionLifecycleRoutes(pool));
     app.route(
       "/",
       createRoutes(pool, undefined, null, {
@@ -1027,7 +1035,7 @@ d("organization routes", () => {
 
     const deleted = await request(
       `/v1/organizations/${body.organization.id}`,
-      { method: "DELETE" },
+      { method: "DELETE", body: { confirmation: "Cloud Retention" } },
     );
     expect(deleted.status).toBe(409);
     await expect(deleted.json()).resolves.toMatchObject({
@@ -1040,7 +1048,7 @@ d("organization routes", () => {
     expect(organization.rows[0]?.deleted_at).toBeNull();
   });
 
-  it("soft-deletes a collaborative organization atomically without exposing it through RLS", async () => {
+  it("schedules and restores a collaborative organization without deleting it in WorkOS", async () => {
     const created = await request("/v1/organizations", {
       method: "POST",
       body: { name: "Temporary" },
@@ -1048,8 +1056,13 @@ d("organization routes", () => {
     const body = (await created.json()) as { organization: { id: string } };
     const deleted = await request(`/v1/organizations/${body.organization.id}`, {
       method: "DELETE",
+      body: { confirmation: "Temporary" },
     });
-    expect(deleted.status).toBe(200);
+    expect(deleted.status).toBe(202);
+    const scheduled = (await deleted.json()) as {
+      deletion: { id: string; state: string; purgeAfter: string };
+    };
+    expect(scheduled.deletion.state).toBe("scheduled");
 
     const me = (await (await request("/v1/me")).json()) as {
       organizations: Array<{ id: string }>;
@@ -1059,9 +1072,33 @@ d("organization routes", () => {
     );
     const audit = await pool.query(
       `SELECT 1 FROM audit_log
-       WHERE org_id = $1 AND action = 'organization.deleted'`,
+       WHERE org_id = $1 AND action = 'organization.deletion_scheduled'`,
       [body.organization.id],
     );
     expect(audit.rowCount).toBe(1);
+
+    const providerDelete = await pool.query(
+      `SELECT 1 FROM workos_command_outbox
+       WHERE organization_id = $1 AND operation = 'organization.delete'`,
+      [body.organization.id],
+    );
+    expect(providerDelete.rowCount).toBe(0);
+
+    const restored = await request(
+      `/v1/organizations/${body.organization.id}/restore`,
+      {
+        method: "POST",
+        body: { requestId: scheduled.deletion.id },
+      },
+    );
+    expect(restored.status).toBe(200);
+    const meAfterRestore = (await (await request("/v1/me")).json()) as {
+      organizations: Array<{ id: string }>;
+    };
+    expect(
+      meAfterRestore.organizations.some(
+        (item) => item.id === body.organization.id,
+      ),
+    ).toBe(true);
   });
 });

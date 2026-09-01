@@ -3,7 +3,7 @@ import type pg from "pg";
 import { z } from "zod";
 
 import type { AuthedUser } from "./auth.js";
-import { HttpError, requireStaffRole } from "./authz.js";
+import { HttpError } from "./authz.js";
 import { audit } from "./audit.js";
 import { withSystemTx } from "./db.js";
 
@@ -13,9 +13,26 @@ const RecoveryCodeSchema = z
   .toUpperCase()
   .regex(/^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/);
 const OPERATOR_REAUTH_SECONDS = 5 * 60;
+const RecoveryReviewSchema = z.object({
+  supportCaseReference: z
+    .string()
+    .trim()
+    .min(6)
+    .max(128)
+    .regex(/^[A-Za-z0-9][A-Za-z0-9 ._:/#-]*$/),
+  ownershipVerification: z.literal("confirmed_out_of_band"),
+});
 
 function requireFreshOperator(operator: AuthedUser): void {
-  requireStaffRole(operator.staffRole, "support_admin");
+  // `support_admin` remains readable for already-persisted installations, but
+  // Zeros grants new standing authority only to platform owners. Developers
+  // perform sensitive operations through exact-request grants in Ops.
+  if (
+    operator.staffRole !== "platform_owner" &&
+    operator.staffRole !== "support_admin"
+  ) {
+    throw new HttpError(404, "not_found", "Not found");
+  }
   const authTime = operator.authentication.authTime;
   const now = Date.now() / 1_000;
   if (
@@ -35,6 +52,7 @@ function requireFreshOperator(operator: AuthedUser): void {
 export async function approveAccountRecovery(
   pool: pg.Pool,
   input: { operator: AuthedUser; publicCode: string },
+  review?: { supportCaseReference: string },
 ): Promise<{ accountId: string; state: "consumed" }> {
   requireFreshOperator(input.operator);
   const publicCode = RecoveryCodeSchema.safeParse(input.publicCode);
@@ -153,9 +171,11 @@ export async function approveAccountRecovery(
     await tx.query(
       `UPDATE account_recovery_requests
        SET state = 'consumed', reviewed_by = $2, reviewed_at = now(),
-           consumed_at = now()
+           consumed_at = now(), support_case_reference = COALESCE($3, support_case_reference),
+           ownership_verified_at = CASE WHEN $3 IS NULL
+             THEN ownership_verified_at ELSE now() END
        WHERE id = $1`,
-      [recovery.id, input.operator.id],
+      [recovery.id, input.operator.id, review?.supportCaseReference ?? null],
     );
     await tx.query(
       `UPDATE account_recovery_requests
@@ -213,9 +233,17 @@ export async function approveAccountRecovery(
 export function createAccountRecoveryRoutes(pool: pg.Pool): Hono {
   const app = new Hono();
   app.post("/v1/internal/account-recoveries/:code/approve", async (c) => {
+    const review = RecoveryReviewSchema.safeParse(
+      await c.req.json().catch(() => ({})),
+    );
+    if (!review.success) {
+      throw new HttpError(422, "invalid_input", "Invalid recovery review");
+    }
     const result = await approveAccountRecovery(pool, {
       operator: c.get("user"),
       publicCode: c.req.param("code"),
+    }, {
+      supportCaseReference: review.data.supportCaseReference,
     });
     return c.json(result);
   });

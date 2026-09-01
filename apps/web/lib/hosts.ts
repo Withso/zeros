@@ -20,7 +20,7 @@ const DEFAULT_MARKETING_HOSTS = [
   "zeros.design",
 ];
 
-export type HostKind = "app" | "marketing";
+export type HostKind = "app" | "marketing" | "ops";
 
 export function appOrigin(env: Pick<Env, "APP_ORIGIN"> | Env): string {
   const raw = (env.APP_ORIGIN || DEFAULT_APP_ORIGIN).trim();
@@ -81,6 +81,7 @@ export function isAppHost(hostname: string, env: Env): boolean {
  * hosts, set MARKETING_HOSTS to include them (e.g. `127.0.0.1,localhost`).
  */
 export function classifyHost(hostname: string, env: Env): HostKind {
+  if (env.ZEROS_SURFACE === "ops") return "ops";
   const host = hostname.toLowerCase();
   if (isMarketingHost(host, env)) return "marketing";
   if (isAppHost(host, env)) return "app";
@@ -113,6 +114,10 @@ export function isAppOnlyPath(pathname: string): boolean {
 export const APP_CSP =
   "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
 
+/** Ops has no inline script or third-party asset allowance. */
+export const OPS_CSP =
+  "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
+
 /** Marketing CSP — allows Google Fonts used by apps/marketing/index.html. */
 export const MARKETING_CSP =
   "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; img-src 'self' data: https:; connect-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'";
@@ -134,7 +139,11 @@ export function applyHostHeaders(res: Response, kind: HostKind): Response {
   if (!headers.has("Content-Security-Policy")) {
     headers.set(
       "Content-Security-Policy",
-      kind === "marketing" ? MARKETING_CSP : APP_CSP,
+      kind === "marketing"
+        ? MARKETING_CSP
+        : kind === "ops"
+          ? OPS_CSP
+          : APP_CSP,
     );
   }
   return new Response(res.body, {

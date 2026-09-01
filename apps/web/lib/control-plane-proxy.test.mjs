@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   acceptedControlPlaneResponseType,
   allowedControlPlaneRoute,
+  allowedOpsControlPlaneRoute,
   cancelUnusedResponseBody,
   jsonContentTypeOrCancel,
   readBoundedBody,
@@ -18,6 +19,17 @@ test("proxy allow-list exposes only dashboard organization operations", () => {
   assert.equal(allowedControlPlaneRoute("GET", "/v1/auth/snapshot"), true);
   assert.equal(allowedControlPlaneRoute("GET", "/v1/auth/events"), true);
   assert.equal(allowedControlPlaneRoute("POST", "/v1/organizations"), true);
+  assert.equal(allowedControlPlaneRoute("GET", "/v1/account/deletion"), true);
+  assert.equal(allowedControlPlaneRoute("POST", "/v1/account/deletion"), true);
+  assert.equal(
+    allowedControlPlaneRoute("POST", "/v1/account/deletion/restore"),
+    true,
+  );
+  assert.equal(allowedControlPlaneRoute("GET", "/v1/deletions"), true);
+  assert.equal(
+    allowedControlPlaneRoute("POST", `/v1/organizations/${ORG}/restore`),
+    true,
+  );
   assert.equal(
     allowedControlPlaneRoute("PATCH", `/v1/organizations/${ORG}/members/${USER}`),
     true,
@@ -25,6 +37,33 @@ test("proxy allow-list exposes only dashboard organization operations", () => {
   assert.equal(allowedControlPlaneRoute("GET", "/v1/github/installations"), false);
   assert.equal(allowedControlPlaneRoute("DELETE", "/v1/organizations/not-a-uuid"), false);
   assert.equal(allowedControlPlaneRoute("GET", `/v1/organizations/${ORG}/../me`), false);
+});
+
+test("Ops proxy exposes only exact-code staff lifecycle routes", () => {
+  assert.equal(allowedOpsControlPlaneRoute("GET", "/v1/ops/session"), true);
+  assert.equal(
+    allowedOpsControlPlaneRoute(
+      "POST",
+      "/v1/ops/deletions/ZD-ABCD-2345/lookup",
+    ),
+    true,
+  );
+  assert.equal(
+    allowedOpsControlPlaneRoute(
+      "POST",
+      "/v1/internal/account-recoveries/ZR-ABCD-2345/approve",
+    ),
+    true,
+  );
+  assert.equal(allowedOpsControlPlaneRoute("GET", "/v1/me"), false);
+  assert.equal(
+    allowedOpsControlPlaneRoute(
+      "POST",
+      "/v1/ops/deletions/not-a-code/restore",
+    ),
+    false,
+  );
+  assert.equal(allowedOpsControlPlaneRoute("GET", "/v1/ops/users"), false);
 });
 
 test("proxy accepts JSON snapshots and SSE streams only on their exact routes", () => {

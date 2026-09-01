@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   accountAccessPage,
+  accountDeletionPage,
   accountRecoveryPage,
   dashboardPage,
   dashboardReturnUrl,
@@ -118,6 +119,26 @@ test("server Profile uses the same control-plane identity as hydration", () => {
     page,
     /avatar avatar-large">SN<\/span><div><strong>Stored Name<\/strong>/,
   );
+  assert.match(page, /Delete account/);
+  assert.match(page, /30 days/);
+  assert.match(page, /id="delete-account-dialog"/);
+});
+
+test("a deletion-pending account gets an exact self-service restore page", () => {
+  const page = accountDeletionPage({
+    session,
+    deletion: {
+      id: "44444444-4444-4444-8444-444444444444",
+      recoveryCode: "ZD-ABCD-2345",
+      purgeAfter: "2026-10-01T00:00:00.000Z",
+      state: "scheduled",
+    },
+    signOutHref: "/auth/logout",
+  });
+  assert.match(page, /Restore account/);
+  assert.match(page, /ZD-ABCD-2345/);
+  assert.match(page, /44444444-4444-4444-8444-444444444444/);
+  assert.doesNotMatch(page, /secret-token-must-not-render/);
 });
 
 test("mobile navigation exposes a controlled sidebar and dismissing scrim", () => {
@@ -152,7 +173,7 @@ test("server-rendered organization identity uses safe raster logos only", () => 
   assert.match(page, /data-copy-organization-id/);
   assert.match(page, /Delete organization/);
   assert.match(page, /Capability metadata; cloud provisioning will still enforce plan and quota/);
-  assert.match(page, /provider cleanup verified first/);
+  assert.match(page, /deleted only after the grace period/);
 
   const unsafe = dashboardPage({
     session,

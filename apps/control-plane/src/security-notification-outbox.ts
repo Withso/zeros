@@ -7,7 +7,13 @@ export type SecurityNotificationTemplate =
   | "account_identity_disabled"
   | "account_recovered"
   | "sessions_revoked"
-  | "organization_access_revoked";
+  | "organization_access_revoked"
+  | "account_deletion_scheduled"
+  | "account_deletion_restored"
+  | "account_deletion_completed"
+  | "organization_deletion_scheduled"
+  | "organization_deletion_restored"
+  | "organization_deletion_completed";
 
 export type SecurityNotificationDelivery = {
   id: string;
@@ -23,6 +29,7 @@ export type SecurityNotificationSender = (
 ) => Promise<void>;
 
 const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
+const DELETION_CODE_RE = /^ZD-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const MAX_ATTEMPTS = 12;
 
 export class SecurityNotificationDeliveryError extends Error {
@@ -58,6 +65,12 @@ export function securityNotificationContent(
   template: SecurityNotificationTemplate,
   payload: Record<string, unknown>,
 ): { subject: string; html: string } {
+  const deletionCodeCandidate = payload.recovery_code;
+  const deletionCode =
+    typeof deletionCodeCandidate === "string" &&
+    DELETION_CODE_RE.test(deletionCodeCandidate)
+      ? deletionCodeCandidate
+      : undefined;
   switch (template) {
     case "account_identity_disabled":
       return {
@@ -100,6 +113,64 @@ export function securityNotificationContent(
           "Your access to a collaborative Zeros organization was removed.",
           "Local Personal workspaces are unaffected.",
         ]),
+      };
+    case "account_deletion_scheduled":
+      return {
+        subject: "Your Zeros account is scheduled for deletion",
+        html: securityEmailHtml(
+          "Your Zeros account is scheduled for deletion",
+          [
+            "Access was revoked immediately. Your Zeros cloud account data is retained in a recoverable state for 30 days.",
+            "Sign in again and choose Restore account before the grace period ends if you change your mind. Local Personal workspaces on your devices are unaffected.",
+          ],
+          deletionCode,
+        ),
+      };
+    case "account_deletion_restored":
+      return {
+        subject: "Your Zeros account was restored",
+        html: securityEmailHtml("Your Zeros account was restored", [
+          "The pending deletion was cancelled after a recent WorkOS authentication.",
+          "Your Zeros cloud account and eligible organization data are active again. Previously revoked sessions remain signed out for safety.",
+        ]),
+      };
+    case "account_deletion_completed":
+      return {
+        subject: "Your Zeros account deletion is complete",
+        html: securityEmailHtml("Your Zeros account deletion is complete", [
+          "The 30-day recovery period ended and Zeros completed provider and product-data erasure under the deletion policy.",
+          "Local Personal workspaces on devices you control were never uploaded or removed by this process.",
+        ]),
+      };
+    case "organization_deletion_scheduled":
+      return {
+        subject: "A Zeros organization is scheduled for deletion",
+        html: securityEmailHtml(
+          "A Zeros organization is scheduled for deletion",
+          [
+            "Organization access was revoked immediately. The organization remains recoverable by an owner for 30 days.",
+            "WorkOS organization deletion and final product-data erasure will begin only after the recovery period ends.",
+          ],
+          deletionCode,
+        ),
+      };
+    case "organization_deletion_restored":
+      return {
+        subject: "A Zeros organization was restored",
+        html: securityEmailHtml("A Zeros organization was restored", [
+          "An organization owner cancelled the pending deletion within the 30-day recovery period.",
+          "Membership and organization data are available again. Previously issued cloud endpoint grants remain revoked and will be replaced when needed.",
+        ]),
+      };
+    case "organization_deletion_completed":
+      return {
+        subject: "A Zeros organization deletion is complete",
+        html: securityEmailHtml(
+          "A Zeros organization deletion is complete",
+          [
+            "The 30-day recovery period ended and provider plus product-data deletion completed.",
+          ],
+        ),
       };
   }
 }

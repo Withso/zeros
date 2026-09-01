@@ -14,7 +14,14 @@ import { z } from "zod";
 import type { StaffRole } from "./authz.js";
 
 const CHANNELS = ["development", "alpha", "beta", "production"] as const;
-const StaffRoleInputSchema = z.enum(["developer", "support_admin", "none"]);
+const StaffRoleInputSchema = z.enum([
+  "platform_owner",
+  "developer",
+  // Persisted compatibility only. New operational access uses an owner or an
+  // exact, expiring developer grant rather than a standing support role.
+  "support_admin",
+  "none",
+]);
 const UserIdSchema = z.string().uuid();
 const EmailSchema = z.string().trim().email().max(320);
 const ReasonSchema = z.string().trim().min(16).max(512);
@@ -152,7 +159,7 @@ export function validateStaffRoleRequest(
   }
   if (!nextRole.success) {
     throw new StaffManagementError(
-      "CONTROL_PLANE_STAFF_ROLE must be developer, support_admin, or none",
+      "CONTROL_PLANE_STAFF_ROLE must be platform_owner, developer, support_admin, or none",
     );
   }
   if (!reason.success) {

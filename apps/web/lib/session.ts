@@ -11,6 +11,8 @@ import {
 export interface Env {
   /** Explicit deployment identity. Required by the Cloudflare build guard. */
   ZEROS_DEPLOY_ENV?: "alpha" | "beta" | "production";
+  /** Separate Pages projects use the same code with an isolated host surface. */
+  ZEROS_SURFACE?: "app" | "ops";
   /** Selects the compatibility Auth0 flow or the WorkOS browser flow. */
   AUTH_PROVIDER?: "auth0" | "workos";
   AUTH0_DOMAIN: string;
@@ -25,6 +27,8 @@ export interface Env {
   APP_ORIGIN?: string;
   /** Comma-separated app hostnames. Defaults to hostname of APP_ORIGIN. */
   APP_HOSTS?: string;
+  /** Upstream Railway namespace for the isolated Ops browser session. */
+  WORKOS_BROWSER_ROUTE_PREFIX?: "" | "/ops";
   /**
    * Canonical marketing origin (no trailing slash). Defaults to https://zeros.build.
    * Used when linking off the invite page, etc.

@@ -66,11 +66,26 @@ describe("provider-neutral authentication configuration", () => {
     });
     expect(config.workos).toEqual({
       appOrigin: "https://app.zeros.build",
+      opsOrigin: null,
       apiKey: "workos-api-key-for-tests",
       cookiePassword: "cookie-password-for-testscookie-password-for-tests",
       webhookSecret: "webhook-secret-for-tests",
     });
     expect(config.inviteLinkBase).toBe("https://app.zeros.build/invite");
+  });
+
+  it("validates a separate Ops origin without making it an identity authority", () => {
+    const config = loadConfig({
+      ...workosEnv(),
+      OPS_ORIGIN: "https://ops.zeros.build",
+    });
+    expect(config.workos?.opsOrigin).toBe("https://ops.zeros.build");
+    expect(() =>
+      loadConfig({
+        ...workosEnv(),
+        OPS_ORIGIN: "https://app.zeros.build",
+      }),
+    ).toThrow(/separate origins/);
   });
 
   it("refuses to send WorkOS invitations through another app origin", () => {
@@ -577,6 +592,24 @@ describe("Railway deployment environment isolation", () => {
         RAILWAY_GIT_BRANCH: "main",
       }),
     ).toThrow(/APP_ORIGIN must be https:\/\/app-alpha\.zeros\.build/);
+  });
+
+  it("requires the isolated Ops origin in WorkOS Alpha and Production", () => {
+    const alpha = {
+      ...workosEnv(),
+      AUTH_AUDIENCE: "https://api-alpha.zeros.build",
+      APP_ORIGIN: "https://app-alpha.zeros.build",
+      INVITE_LINK_BASE: "https://app-alpha.zeros.build/invite",
+      RAILWAY_PROJECT_ID: "project-1",
+      RAILWAY_ENVIRONMENT_NAME: "alpha",
+      RAILWAY_GIT_BRANCH: "main",
+    };
+    expect(() => loadConfig(alpha)).toThrow(
+      /OPS_ORIGIN must be https:\/\/ops-alpha\.zeros\.build/,
+    );
+    expect(() =>
+      loadConfig({ ...alpha, OPS_ORIGIN: "https://ops-alpha.zeros.build" }),
+    ).not.toThrow();
   });
 
   it("rejects a cross-channel invitation page during an Auth0 rollback", () => {

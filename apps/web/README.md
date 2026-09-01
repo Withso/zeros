@@ -1,9 +1,11 @@
 # Web hub and edge functions
 
-One frontend codebase is deployed as three isolated Cloudflare Pages projects:
-`zeros-web-alpha`, `zeros-web-beta`, and `zeros-web`. Cloudflare Pages exposes
+One frontend codebase is deployed as five isolated Cloudflare Pages projects:
+`zeros-web-alpha`, `zeros-web-beta`, `zeros-web`, `zeros-ops-alpha`, and
+`zeros-ops`. Cloudflare Pages exposes
 only Production plus one shared Preview configuration per project, so separate
-projects are required for true Alpha/Beta/Production bindings and secrets.
+projects are required for true Alpha/Beta/Production bindings and secrets. Ops
+deliberately has only Alpha and Production; it is never deployed to Beta.
 
 The Production project (**`zeros-web`**) serves **both**:
 
@@ -13,6 +15,11 @@ The Production project (**`zeros-web`**) serves **both**:
 | **`zeros.build`** (+ `www`, `zeros.design`) | Marketing SPA (Vite/React from `apps/marketing`)                   |
 
 Host routing lives in `functions/_middleware.ts` + `lib/hosts.ts`. Marketing traffic is served via `env.ASSETS.fetch()` so `functions/index.ts` never steals `/` on the marketing host. Session cookies stay **host-only** on `app.zeros.build` (never `Domain=.zeros.build`).
+
+The two Ops projects serve only `ops-alpha.zeros.build` and `ops.zeros.build`.
+They build this same source with `ZEROS_SURFACE=ops`, expose no marketing or
+customer dashboard routes, and use the existing channel-matched Railway control
+plane. This is a separate deployment boundary, not a separately maintained app.
 
 See [`docs/deployment-environments.md`](../../docs/deployment-environments.md)
 for project/domain/branch mappings and the promotion runbook.
@@ -53,6 +60,22 @@ GET  /robots.txt               → Allow: /  (middleware; not the app Disallow)
 ```
 
 App-only paths hit on a marketing host (`/auth/*`, `/handoff/*`, `/api/*`, `/github/connected`, `/launch`, `/invite`) **302 → `app.zeros.build`**.
+
+### `ops.zeros.build`
+
+```
+GET  /                         → exact-code deletion recovery workspace
+GET  /auth/start|callback|logout → isolated WorkOS browser session namespace
+GET  /api/v1/ops/session      → current staff role and bounded developer directory
+POST /api/v1/ops/deletions/ZD-.../{lookup,grants,restore,force-purge}
+POST /api/v1/internal/account-recoveries/ZR-.../approve
+```
+
+Ops has no email/user/organization search, no customer data browser, and no
+Beta deployment. The control plane remains the final authorization boundary;
+Cloudflare Access may be added as defense in depth but cannot replace the
+WorkOS reauthentication, exact support case, expiring grant, and two-person
+approval checks.
 
 ## Local development
 
@@ -98,7 +121,7 @@ After changing `apps/marketing/package.json`, regenerate that lockfile:
 | **Root directory**         | `apps/web`                                                          |
 | **Production branch**      | Alpha: `main`; Beta/Production: selected `release/X.Y.Z`            |
 | **KV binding**             | `SESSIONS` — retained per project for Auth0 rollback/abuse controls |
-| **Custom domains**         | Channel app domain; only Production also owns marketing domains     |
+| **Custom domains**         | Channel app or Ops domain; only Production web owns marketing       |
 
 Disable Preview deployments on these release projects. Configure the following
 in each project's Production environment:
@@ -112,6 +135,8 @@ in each project's Production environment:
 | `MARKETING_ORIGIN`  | optional | defaults to `https://zeros.build`                      |
 | `MARKETING_HOSTS`   | optional | defaults to `zeros.build,www.zeros.build,zeros.design` |
 | `CONTROL_PLANE_URL` | yes      | matching channel API origin; server-side only          |
+| `ZEROS_SURFACE`     | Ops only | `ops` on the two Ops projects; omitted/`app` elsewhere |
+| `WORKOS_BROWSER_ROUTE_PREFIX` | Ops only | `/ops`; isolates the upstream auth namespace |
 
 Provider-specific Pages configuration:
 
@@ -121,6 +146,11 @@ Provider-specific Pages configuration:
 | WorkOS              | No provider-specific Pages values. `APP_ORIGIN` and `CONTROL_PLANE_URL` select the matching Railway service. |
 
 `ASSETS` is provided automatically by Pages (static output). Do not add it manually.
+
+The Ops projects always use `AUTH_PROVIDER=workos`, set `APP_ORIGIN` to the
+exact Ops origin, and do not need a separate Railway service or database. The
+matching Railway environment must set `OPS_ORIGIN` to that exact origin. Never
+set either Ops variable in Beta.
 
 `CONTROL_PLANE_URL` is never exposed to browser code. The dashboard sends
 same-origin requests through `functions/api/[[path]].ts`; that proxy reads the

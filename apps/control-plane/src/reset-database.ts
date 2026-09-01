@@ -23,6 +23,7 @@ const COUNT_TABLES = [
   "organization_settings",
   "audit_log",
   "staff_role_changes",
+  "staff_operation_grants",
   "billing_customers",
   "billing_subscriptions",
   "github_oauth_states",
@@ -38,6 +39,19 @@ const COUNT_TABLES = [
   "cloud_workspace_endpoint_grants",
   "cloud_workspace_setup_runs",
   "cloud_workspace_provider_orphans",
+  "identity_provider_events",
+  "auth_sessions",
+  "workos_browser_sessions",
+  "workos_organization_links",
+  "workos_membership_projections",
+  "workos_event_inbox",
+  "workos_event_cursors",
+  "workos_command_outbox",
+  "security_events",
+  "account_recovery_requests",
+  "security_notification_outbox",
+  "deletion_requests",
+  "deletion_request_events",
 ] as const;
 
 export interface ResetRequestInput {
