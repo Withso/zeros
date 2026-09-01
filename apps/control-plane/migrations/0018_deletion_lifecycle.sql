@@ -89,7 +89,20 @@ ALTER TABLE account_recovery_requests
     support_case_reference IS NULL
     OR char_length(support_case_reference) BETWEEN 6 AND 128
   ),
-  ADD COLUMN ownership_verified_at timestamptz;
+  ADD COLUMN ownership_verification_method text CHECK (
+    ownership_verification_method IS NULL
+    OR ownership_verification_method = 'confirmed_out_of_band'
+  ),
+  ADD COLUMN ownership_verified_at timestamptz,
+  ADD CONSTRAINT account_recovery_ownership_evidence_complete CHECK (
+    (support_case_reference IS NULL
+      AND ownership_verification_method IS NULL
+      AND ownership_verified_at IS NULL)
+    OR
+    (support_case_reference IS NOT NULL
+      AND ownership_verification_method IS NOT NULL
+      AND ownership_verified_at IS NOT NULL)
+  );
 
 ALTER TABLE organizations
   ADD COLUMN lifecycle_status organization_lifecycle_status
@@ -98,6 +111,32 @@ ALTER TABLE organizations
     REFERENCES deletion_requests(id) ON DELETE SET NULL,
   ADD COLUMN deletion_scheduled_at timestamptz,
   ADD COLUMN purge_after timestamptz;
+
+-- Personal is a permanent device-local shell. The application already denies
+-- cloud creation there; enforce the same ownership invariant at the database
+-- boundary so a future route or maintenance script cannot create server-owned
+-- cloud data whose account-deletion semantics would be ambiguous.
+CREATE FUNCTION reject_personal_cloud_workspace()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  target_is_personal boolean;
+BEGIN
+  SELECT is_personal INTO target_is_personal
+  FROM organizations
+  WHERE id = NEW.org_id;
+
+  IF target_is_personal THEN
+    RAISE EXCEPTION 'Personal organizations are local-only and cannot own cloud workspaces'
+      USING ERRCODE = '23514',
+            CONSTRAINT = 'cloud_workspaces_non_personal_organization';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER cloud_workspaces_reject_personal
+  BEFORE INSERT OR UPDATE OF org_id ON cloud_workspaces
+  FOR EACH ROW EXECUTE FUNCTION reject_personal_cloud_workspace();
+REVOKE ALL ON FUNCTION reject_personal_cloud_workspace() FROM PUBLIC;
 
 -- Historical soft-deleted rows predate recovery and must never become
 -- unexpectedly recoverable merely because this migration was installed.

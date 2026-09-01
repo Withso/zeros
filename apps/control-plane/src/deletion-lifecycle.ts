@@ -176,6 +176,23 @@ async function notify(
   );
 }
 
+async function assertPersonalHasNoCloudWorkspace(
+  tx: Tx,
+  accountId: string,
+): Promise<void> {
+  const impossible = await tx.query(
+    `SELECT 1
+     FROM cloud_workspaces workspace
+     JOIN organizations organization ON organization.id = workspace.org_id
+     WHERE organization.created_by = $1 AND organization.is_personal
+     LIMIT 1`,
+    [accountId],
+  );
+  if (impossible.rows[0]) {
+    throw new Error("personal_cloud_workspace_invariant_violation");
+  }
+}
+
 async function insertDeletionRequest(
   tx: Tx,
   input: {
@@ -307,12 +324,7 @@ async function scheduleOrganizationInTransaction(
          data_revision = data_revision + 1
      WHERE id = $1
      RETURNING authorization_revision, data_revision`,
-    [
-      organization.id,
-      request.requested_at,
-      request.id,
-      request.purge_after,
-    ],
+    [organization.id, request.requested_at, request.id, request.purge_after],
   );
   await tx.query(
     `UPDATE cloud_workspace_endpoint_grants
@@ -1000,10 +1012,7 @@ export function createDeletionLifecycleRoutes(pool: pg.Pool): Hono {
 
   app.post("/v1/account/deletion", async (c) => {
     const user = c.get("user");
-    parsedBody(
-      AccountConfirmation,
-      await c.req.json().catch(() => ({})),
-    );
+    parsedBody(AccountConfirmation, await c.req.json().catch(() => ({})));
     const request = await scheduleAccount(pool, user);
     return c.json({ deletion: publicDeletionRequest(request) }, 202);
   });
@@ -1082,10 +1091,7 @@ export function createDeletionLifecycleRoutes(pool: pg.Pool): Hono {
     );
     return c.json({ deletion: publicDeletionRequest(request) });
   };
-  app.post(
-    "/v1/organizations/:organization/restore",
-    restoreOrganization,
-  );
+  app.post("/v1/organizations/:organization/restore", restoreOrganization);
   app.post("/v1/teams/:organization/restore", restoreOrganization);
 
   return app;
@@ -1101,9 +1107,7 @@ type ClaimedDeletion = DeletionRequestRow & {
 export function deletionLifecycleErrorCode(error: unknown): string {
   const reason =
     error instanceof Error ? error.message || error.name : "unknown";
-  return (
-    reason.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 128) || "unknown"
-  );
+  return reason.replace(/[^A-Za-z0-9_.-]/g, "_").slice(0, 128) || "unknown";
 }
 
 function lifecycleRetryMs(attempt: number): number {
@@ -1214,6 +1218,9 @@ export class DeletionLifecycleProcessor {
 
       let commandId: string | null = null;
       if (request.target_kind === "account" && request.target_user_id) {
+        // Do not erase the provider identity while an impossible legacy row
+        // would prevent the corresponding Zeros account from finalizing.
+        await assertPersonalHasNoCloudWorkspace(tx, request.target_user_id);
         const identity = await tx.query<{ provider_sub: string }>(
           `SELECT provider_sub FROM user_identities
            WHERE user_id = $1 AND provider = 'workos'
@@ -1281,9 +1288,7 @@ export class DeletionLifecycleProcessor {
             idempotencyKey: `organization.delete.${request.id}`,
             aggregateKey: `organization-delete:${request.target_organization_id}`,
             orderingKey: `organization:${request.target_organization_id}`,
-            aggregateRevision: Number(
-              revision.rows[0]!.workos_sync_revision,
-            ),
+            aggregateRevision: Number(revision.rows[0]!.workos_sync_revision),
             organizationId: request.target_organization_id,
             providerObjectId: link.rows[0].workos_organization_id,
             payload: {},
@@ -1330,6 +1335,9 @@ export class DeletionLifecycleProcessor {
   private async finalizeAccount(request: ClaimedDeletion): Promise<void> {
     if (!request.target_user_id) throw new Error("account_target_missing");
     await withSystemTx(this.pool, async (tx) => {
+      // Defense in depth for a row introduced after provider deletion was
+      // requested through privileged maintenance or restored legacy data.
+      await assertPersonalHasNoCloudWorkspace(tx, request.target_user_id!);
       const account = await tx.query<{ id: string; email: string }>(
         `SELECT id, email FROM users
          WHERE id = $1 AND auth_status = 'deletion_pending'
@@ -1344,9 +1352,10 @@ export class DeletionLifecycleProcessor {
       );
       const subjects = identities.rows.map((row) => row.provider_sub);
 
-      await tx.query(`DELETE FROM github_oauth_states WHERE owner_user_id = $1`, [
-        request.target_user_id,
-      ]);
+      await tx.query(
+        `DELETE FROM github_oauth_states WHERE owner_user_id = $1`,
+        [request.target_user_id],
+      );
       await tx.query(
         `DELETE FROM github_oauth_handoffs WHERE owner_user_id = $1`,
         [request.target_user_id],
@@ -1515,10 +1524,7 @@ export class DeletionLifecycleProcessor {
     });
   }
 
-  private async fail(
-    request: ClaimedDeletion,
-    error: unknown,
-  ): Promise<void> {
+  private async fail(request: ClaimedDeletion, error: unknown): Promise<void> {
     const code = deletionLifecycleErrorCode(error);
     await withSystemTx(this.pool, (tx) =>
       tx.query(
@@ -1527,7 +1533,12 @@ export class DeletionLifecycleProcessor {
              next_attempt_at = now() + ($4::bigint * interval '1 millisecond'),
              lease_owner = NULL, lease_expires_at = NULL, updated_at = now()
          WHERE id = $1 AND lease_owner = $2`,
-        [request.id, this.workerId, code, lifecycleRetryMs(request.attempt_count)],
+        [
+          request.id,
+          this.workerId,
+          code,
+          lifecycleRetryMs(request.attempt_count),
+        ],
       ),
     );
     this.logger.warn(

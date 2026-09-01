@@ -2,6 +2,17 @@ export function organizationDisplayName(organization) {
   return organization?.name?.trim() || "Personal";
 }
 
+export function formatLifecycleDate(value) {
+  const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(timestamp)) return "the scheduled date";
+  return new Date(timestamp).toLocaleDateString("en-US", {
+    timeZone: "UTC",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+}
+
 const ORGANIZATION_LOGO_MAX_CHARS = 200_000;
 const ORGANIZATION_LOGO_RE =
   /^data:image\/(?:png|jpeg|webp);base64,[A-Za-z0-9+/]+=*$/;
@@ -81,7 +92,9 @@ function securitySnapshotSignature(snapshot) {
 }
 
 export function securitySnapshotChanged(previous, next) {
-  return securitySnapshotSignature(previous) !== securitySnapshotSignature(next);
+  return (
+    securitySnapshotSignature(previous) !== securitySnapshotSignature(next)
+  );
 }
 
 /** Drop only retained server state owned by the organization named by an
@@ -195,8 +208,7 @@ export function memberPermissions({
   const adminMayManage = actorRole === "admin" && targetRole !== "owner";
   return {
     canChangeRole: !lastOwner && (ownerMayManage || adminMayManage),
-    canRemove:
-      !lastOwner && (isSelf || ownerMayManage || adminMayManage),
+    canRemove: !lastOwner && (isSelf || ownerMayManage || adminMayManage),
     availableRoles: ownerMayManage
       ? ["owner", "admin", "member"]
       : adminMayManage
@@ -264,7 +276,10 @@ function bootDashboard() {
               : "&#39;",
     );
   const initials = (value) => {
-    const words = String(value || "Personal").trim().split(/\s+/).filter(Boolean);
+    const words = String(value || "Personal")
+      .trim()
+      .split(/\s+/)
+      .filter(Boolean);
     return `${words[0]?.[0] || "P"}${words[1]?.[0] || ""}`.toUpperCase();
   };
   async function fileToOrganizationLogo(file) {
@@ -313,21 +328,20 @@ function bootDashboard() {
     }
   }
   const activeOrganization = () =>
-    state.organizations.find((organization) => organization.id === state.activeOrganizationId) ||
+    state.organizations.find(
+      (organization) => organization.id === state.activeOrganizationId,
+    ) ||
     state.organizations.find((organization) => organization.isPersonal) ||
     state.organizations[0] ||
     null;
   const label = organizationDisplayName;
   const organizationAvatarHtml = (organization, classes = "") => {
     const logo = safeOrganizationLogo(organization?.logo);
-    return `<span class="avatar avatar-square ${classes}" aria-hidden="true">${
-      logo
-        ? `<img class="avatar-image" src="${escapeHtml(logo)}" alt="" />`
-        : escapeHtml(initials(label(organization)))
-    }</span>`;
+    return `<span class="avatar avatar-square ${classes}" aria-hidden="true">${logo ? `<img class="avatar-image" src="${escapeHtml(logo)}" alt="" />` : escapeHtml(initials(label(organization)))}</span>`;
   };
   const canAdmin = (organization) =>
-    organization && (organization.role === "owner" || organization.role === "admin");
+    organization &&
+    (organization.role === "owner" || organization.role === "admin");
   const canOwn = (organization) => organization?.role === "owner";
 
   function toast(message, error = false) {
@@ -371,7 +385,9 @@ function bootDashboard() {
     });
     const body = await response.json().catch(() => null);
     if (!response.ok) {
-      const error = new Error(body?.error?.message || `Request failed (${response.status})`);
+      const error = new Error(
+        body?.error?.message || `Request failed (${response.status})`,
+      );
       error.code = body?.error?.code || "request_failed";
       error.status = response.status;
       error.details = body?.error?.details;
@@ -390,7 +406,8 @@ function bootDashboard() {
 
   function updateUrl() {
     const url = new URL(window.location.href);
-    if (state.activeOrganizationId) url.searchParams.set("organization", state.activeOrganizationId);
+    if (state.activeOrganizationId)
+      url.searchParams.set("organization", state.activeOrganizationId);
     else url.searchParams.delete("organization");
     url.searchParams.set("section", state.section);
     url.searchParams.delete("action");
@@ -401,7 +418,10 @@ function bootDashboard() {
     const organization = activeOrganization();
     document.querySelectorAll("[data-section]").forEach((node) => {
       const section = node.dataset.section;
-      node.setAttribute("aria-current", section === state.section ? "page" : "false");
+      node.setAttribute(
+        "aria-current",
+        section === state.section ? "page" : "false",
+      );
       node.disabled = collaborationSectionDisabled(organization, section);
     });
     const summary = document.querySelector("#org-switcher > summary");
@@ -412,7 +432,8 @@ function bootDashboard() {
     if (options) {
       options.innerHTML = state.organizations
         .map(
-          (item) => `<button class="org-option" type="button" role="option" aria-selected="${item.id === organization?.id}" data-org-id="${escapeHtml(item.id)}">${organizationAvatarHtml(item)}<span class="org-option-copy"><strong>${escapeHtml(label(item))}</strong><small>${item.isPersonal ? "Local workspaces only" : "Local + cloud workspaces"}</small></span><span class="org-check" aria-hidden="true">${item.id === organization?.id ? "✓" : ""}</span></button>`,
+          (item) =>
+            `<button class="org-option" type="button" role="option" aria-selected="${item.id === organization?.id}" data-org-id="${escapeHtml(item.id)}">${organizationAvatarHtml(item)}<span class="org-option-copy"><strong>${escapeHtml(label(item))}</strong><small>${item.isPersonal ? "Local workspaces only" : "Local + cloud workspaces"}</small></span><span class="org-check" aria-hidden="true">${item.id === organization?.id ? "✓" : ""}</span></button>`,
         )
         .join("");
     }
@@ -427,7 +448,8 @@ function bootDashboard() {
     const displayName = state.user.displayName || "Zeros user";
     const recoverable = state.deletions
       .map(
-        (deletion) => `<div class="settings-row"><span class="settings-copy"><strong>Recoverable organization</strong><p>Scheduled for final deletion on ${escapeHtml(new Date(deletion.purgeAfter).toLocaleDateString())}. Recovery code ${escapeHtml(deletion.recoveryCode)}.</p></span><span class="settings-value"><button class="button secondary" type="button" data-restore-organization="${escapeHtml(deletion.targetId)}" data-deletion-request="${escapeHtml(deletion.id)}">Restore</button></span></div>`,
+        (deletion) =>
+          `<div class="settings-row"><span class="settings-copy"><strong>Recoverable organization</strong><p>Scheduled for final deletion on ${escapeHtml(formatLifecycleDate(deletion.purgeAfter))}. Recovery code ${escapeHtml(deletion.recoveryCode)}.</p></span><span class="settings-value"><button class="button secondary" type="button" data-restore-organization="${escapeHtml(deletion.targetId)}" data-deletion-request="${escapeHtml(deletion.id)}">Restore</button></span></div>`,
       )
       .join("");
     return `<section class="section-stack">${heading("Profile", "Your browser account and sign-in identity.")}
@@ -439,7 +461,8 @@ function bootDashboard() {
   }
 
   function generalHtml(organization) {
-    if (!organization) return `<div class="empty-state"><h1>Personal</h1><p>Your account space is being prepared.</p></div>`;
+    if (!organization)
+      return `<div class="empty-state"><h1>Personal</h1><p>Your account space is being prepared.</p></div>`;
     const editable = !organization.isPersonal && canAdmin(organization);
     const logo = safeOrganizationLogo(organization.logo);
     const logoActions = editable
@@ -470,7 +493,9 @@ function bootDashboard() {
   }
 
   function memberRows(members, organization) {
-    const ownerCount = members.filter((member) => member.role === "owner").length;
+    const ownerCount = members.filter(
+      (member) => member.role === "owner",
+    ).length;
     return members
       .map((member) => {
         const name = member.display_name || member.email;
@@ -497,7 +522,10 @@ function bootDashboard() {
       ? `<form class="inline-form" data-form="invite-member"><label class="field"><span>Email address</span><input name="email" type="email" maxlength="254" required placeholder="teammate@example.com" /></label><label class="field"><span>Role</span><select name="role"><option value="member">Member</option><option value="admin">Admin</option></select></label><button class="button primary" type="submit">Send invite</button></form>`
       : "";
     const invitations = (data.invitations || [])
-      .map((invite) => `<div class="member-row"><span class="avatar">✉</span><span class="member-copy"><strong>${escapeHtml(invite.email)}</strong><small>Pending · expires ${escapeHtml(new Date(invite.expires_at).toLocaleDateString())}</small></span><span class="row-actions"><span class="badge">${escapeHtml(invite.role)}</span>${canAdmin(organization) ? `<button class="icon-button" type="button" data-revoke-invite="${escapeHtml(invite.id)}" aria-label="Revoke invitation">×</button>` : ""}</span></div>`)
+      .map(
+        (invite) =>
+          `<div class="member-row"><span class="avatar">✉</span><span class="member-copy"><strong>${escapeHtml(invite.email)}</strong><small>Pending · expires ${escapeHtml(new Date(invite.expires_at).toLocaleDateString())}</small></span><span class="row-actions"><span class="badge">${escapeHtml(invite.role)}</span>${canAdmin(organization) ? `<button class="icon-button" type="button" data-revoke-invite="${escapeHtml(invite.id)}" aria-label="Revoke invitation">×</button>` : ""}</span></div>`,
+      )
       .join("");
     return `<section class="section-stack">${heading("Members", "Organization members are automatically included in the default team.")}
       <div class="card"><div class="card-title"><div><strong>Invite member</strong><p>The recipient must sign in with this exact email address.</p></div></div>${inviteForm || `<div class="notice" style="margin-top:18px">Only organization admins can invite members.</div>`}</div>
@@ -508,7 +536,10 @@ function bootDashboard() {
 
   function teamsHtml(organization, data) {
     const rows = data.teams
-      .map((team) => `<div class="team-row"><span class="avatar avatar-square">D</span><span class="member-copy"><strong>${escapeHtml(team.name)}</strong><small>${escapeHtml(team.slug)} · ${team.is_default ? "Default team" : "Team"}</small></span><span class="row-actions"><span class="badge success">${team.is_default ? "Default" : escapeHtml(team.role)}</span></span></div>`)
+      .map(
+        (team) =>
+          `<div class="team-row"><span class="avatar avatar-square">D</span><span class="member-copy"><strong>${escapeHtml(team.name)}</strong><small>${escapeHtml(team.slug)} · ${team.is_default ? "Default team" : "Team"}</small></span><span class="row-actions"><span class="badge success">${team.is_default ? "Default" : escapeHtml(team.role)}</span></span></div>`,
+      )
       .join("");
     return `<section class="section-stack">${heading("Teams", "Teams group organization members and workspace access.", `<button class="button secondary" type="button" disabled>New team · Coming later</button>`)}
       <div class="notice"><strong>One default team for now</strong><p>The hierarchy and membership metadata are ready. Creating additional teams will be enabled in a future release.</p></div>
@@ -543,9 +574,7 @@ function bootDashboard() {
         const value = await loadExact("account:deletions", () =>
           api("/v1/deletions"),
         );
-        state.deletions = Array.isArray(value.deletions)
-          ? value.deletions
-          : [];
+        state.deletions = Array.isArray(value.deletions) ? value.deletions : [];
         if (state.section === "profile") content.innerHTML = profileHtml();
       } catch (error) {
         toast(error.message, true);
@@ -580,7 +609,10 @@ function bootDashboard() {
               ? api(`/v1/organizations/${organization.id}/invitations`)
               : Promise.resolve({ invitations: [] }),
           ]);
-          return { members: members.members, invitations: invitations.invitations };
+          return {
+            members: members.members,
+            invitations: invitations.invitations,
+          };
         });
         if (
           sectionRequestStillCurrent(
@@ -611,9 +643,13 @@ function bootDashboard() {
       return;
     }
     if (state.section === "teams") {
-      content.innerHTML = prior ? teamsHtml(organization, prior) : loadingHtml("Teams", "Loading teams…");
+      content.innerHTML = prior
+        ? teamsHtml(organization, prior)
+        : loadingHtml("Teams", "Loading teams…");
       try {
-        const value = await loadExact(key, () => api(`/v1/organizations/${organization.id}/teams`));
+        const value = await loadExact(key, () =>
+          api(`/v1/organizations/${organization.id}/teams`),
+        );
         if (
           sectionRequestStillCurrent(
             activeOrganization()?.id,
@@ -643,9 +679,13 @@ function bootDashboard() {
       return;
     }
     if (state.section === "billing") {
-      content.innerHTML = prior ? billingHtml(prior) : loadingHtml("Billing", "Loading billing status…");
+      content.innerHTML = prior
+        ? billingHtml(prior)
+        : loadingHtml("Billing", "Loading billing status…");
       try {
-        const value = await loadExact(key, () => api(`/v1/organizations/${organization.id}/billing`));
+        const value = await loadExact(key, () =>
+          api(`/v1/organizations/${organization.id}/billing`),
+        );
         if (
           sectionRequestStillCurrent(
             activeOrganization()?.id,
@@ -682,8 +722,16 @@ function bootDashboard() {
       state.organizations = (me.organizations || me.teams || []).map(
         normalizeOrganization,
       );
-      if (!state.organizations.some((organization) => organization.id === state.activeOrganizationId)) {
-        state.activeOrganizationId = state.organizations.find((organization) => organization.isPersonal)?.id || state.organizations[0]?.id || null;
+      if (
+        !state.organizations.some(
+          (organization) => organization.id === state.activeOrganizationId,
+        )
+      ) {
+        state.activeOrganizationId =
+          state.organizations.find((organization) => organization.isPersonal)
+            ?.id ||
+          state.organizations[0]?.id ||
+          null;
       }
       state.loadError = null;
       await render();
@@ -730,9 +778,7 @@ function bootDashboard() {
     else if (action.refreshOrganizations) {
       invalidateOrganizationSnapshots(
         snapshots,
-        typeof data?.organizationId === "string"
-          ? data.organizationId
-          : null,
+        typeof data?.organizationId === "string" ? data.organizationId : null,
         { inflight, generations: snapshotGenerations },
       );
       queueSecurityRefresh();
@@ -754,7 +800,9 @@ function bootDashboard() {
       "organization.authorization_changed",
       "organization.data_changed",
     ]) {
-      source.addEventListener(kind, (event) => handleSecurityEvent(kind, event));
+      source.addEventListener(kind, (event) =>
+        handleSecurityEvent(kind, event),
+      );
     }
     source.addEventListener("ready", () => {
       lastSecurityContactAt = Date.now();
@@ -834,8 +882,13 @@ function bootDashboard() {
     if (target.dataset.orgId) {
       state.activeOrganizationId = target.dataset.orgId;
       const organization = activeOrganization();
-      if (organization?.isPersonal && ["members", "teams", "billing"].includes(state.section)) state.section = "profile";
-      else if (state.section === "profile" && !organization?.isPersonal) state.section = "general";
+      if (
+        organization?.isPersonal &&
+        ["members", "teams", "billing"].includes(state.section)
+      )
+        state.section = "profile";
+      else if (state.section === "profile" && !organization?.isPersonal)
+        state.section = "general";
       document.getElementById("org-switcher")?.removeAttribute("open");
       setMobileNavigationOpen(false);
       await render();
@@ -848,7 +901,9 @@ function bootDashboard() {
       if (errorNode) errorNode.textContent = "";
       document.getElementById("create-organization-dialog")?.showModal();
     } else if (action === "toggle-mobile-nav") {
-      setMobileNavigationOpen(!document.body.classList.contains("mobile-nav-open"));
+      setMobileNavigationOpen(
+        !document.body.classList.contains("mobile-nav-open"),
+      );
     } else if (action === "close-mobile-nav") {
       setMobileNavigationOpen(false);
     } else if (action === "retry-me") {
@@ -865,7 +920,8 @@ function bootDashboard() {
       await render();
     } else if (action === "remove-organization-logo") {
       const organization = activeOrganization();
-      if (!organization || organization.isPersonal || !canAdmin(organization)) return;
+      if (!organization || organization.isPersonal || !canAdmin(organization))
+        return;
       target.disabled = true;
       try {
         const result = await api(`/v1/organizations/${organization.id}`, {
@@ -935,9 +991,17 @@ function bootDashboard() {
       if (!organization) return;
       const memberId = target.dataset.removeMember;
       const self = memberId === state.user.id;
-      if (!window.confirm(self ? "Leave this organization?" : "Remove this member?")) return;
+      if (
+        !window.confirm(
+          self ? "Leave this organization?" : "Remove this member?",
+        )
+      )
+        return;
       try {
-        await api(`/v1/organizations/${organization.id}/members/${memberId}`, { method: "DELETE", body: {} });
+        await api(`/v1/organizations/${organization.id}/members/${memberId}`, {
+          method: "DELETE",
+          body: {},
+        });
         invalidateOrganizationSnapshots(snapshots, organization.id, {
           inflight,
           generations: snapshotGenerations,
@@ -951,7 +1015,10 @@ function bootDashboard() {
       const organization = activeOrganization();
       if (!organization) return;
       try {
-        await api(`/v1/organizations/${organization.id}/invitations/${target.dataset.revokeInvite}`, { method: "DELETE", body: {} });
+        await api(
+          `/v1/organizations/${organization.id}/invitations/${target.dataset.revokeInvite}`,
+          { method: "DELETE", body: {} },
+        );
         invalidateExactSnapshot(snapshots, `${organization.id}:members`, {
           inflight,
           generations: snapshotGenerations,
@@ -964,7 +1031,10 @@ function bootDashboard() {
   });
 
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && document.body.classList.contains("mobile-nav-open")) {
+    if (
+      event.key === "Escape" &&
+      document.body.classList.contains("mobile-nav-open")
+    ) {
       setMobileNavigationOpen(false);
       document.querySelector('[data-action="toggle-mobile-nav"]')?.focus();
     }
@@ -1007,10 +1077,13 @@ function bootDashboard() {
     const organization = activeOrganization();
     if (!organization) return;
     try {
-      await api(`/v1/organizations/${organization.id}/members/${select.dataset.memberRole}`, {
-        method: "PATCH",
-        body: { role: select.value },
-      });
+      await api(
+        `/v1/organizations/${organization.id}/members/${select.dataset.memberRole}`,
+        {
+          method: "PATCH",
+          body: { role: select.value },
+        },
+      );
       invalidateOrganizationSnapshots(snapshots, organization.id, {
         inflight,
         generations: snapshotGenerations,
@@ -1048,7 +1121,10 @@ function bootDashboard() {
         const errorNode = document.getElementById("create-organization-error");
         if (!name) return;
         if (errorNode) errorNode.textContent = "";
-        const result = await api("/v1/organizations", { method: "POST", body: { name } });
+        const result = await api("/v1/organizations", {
+          method: "POST",
+          body: { name },
+        });
         const created = normalizeOrganization(result.organization);
         state.organizations.push(created);
         state.activeOrganizationId = created.id;
@@ -1062,9 +1138,7 @@ function bootDashboard() {
           .get("confirmation")
           ?.toString()
           .trim();
-        const errorNode = document.getElementById(
-          "delete-organization-error",
-        );
+        const errorNode = document.getElementById("delete-organization-error");
         if (!confirmation) return;
         if (errorNode) errorNode.textContent = "";
         try {
@@ -1125,23 +1199,29 @@ function bootDashboard() {
       } else if (form.dataset.form === "rename-organization" && organization) {
         const name = new FormData(form).get("name")?.toString().trim();
         if (!name) return;
-        const result = await api(`/v1/organizations/${organization.id}`, { method: "PATCH", body: { name } });
+        const result = await api(`/v1/organizations/${organization.id}`, {
+          method: "PATCH",
+          body: { name },
+        });
         replaceOrganization(result.organization);
         toast("Organization updated");
         await render();
       } else if (form.dataset.form === "invite-member" && organization) {
         const data = new FormData(form);
-        const result = await api(`/v1/organizations/${organization.id}/invitations`, {
-          method: "POST",
-          body: { email: data.get("email"), role: data.get("role") },
-        });
+        const result = await api(
+          `/v1/organizations/${organization.id}/invitations`,
+          {
+            method: "POST",
+            body: { email: data.get("email"), role: data.get("role") },
+          },
+        );
         invalidateExactSnapshot(snapshots, `${organization.id}:members`, {
           inflight,
           generations: snapshotGenerations,
         });
         form.reset();
         const link = result.invitation?.acceptUrl;
-        if (link && await tryWriteClipboard(navigator.clipboard, link)) {
+        if (link && (await tryWriteClipboard(navigator.clipboard, link))) {
           toast("Invitation created and link copied");
         } else toast("Invitation created");
         await render();

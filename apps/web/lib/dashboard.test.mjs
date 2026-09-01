@@ -122,6 +122,10 @@ test("server Profile uses the same control-plane identity as hydration", () => {
   assert.match(page, /Delete account/);
   assert.match(page, /30 days/);
   assert.match(page, /id="delete-account-dialog"/);
+  assert.match(
+    page,
+    /id="delete-account-form"[\s\S]*name="confirmation" maxlength="64"/,
+  );
 });
 
 test("a deletion-pending account gets an exact self-service restore page", () => {

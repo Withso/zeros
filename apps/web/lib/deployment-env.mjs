@@ -95,7 +95,9 @@ export function deploymentEnvironmentErrors(env) {
     }
   }
 
-  const surface = (env.ZEROS_SURFACE || "app").trim().toLowerCase();
+  // Omission means the ordinary app. An explicitly configured value is an
+  // environment identity contract, so whitespace/case drift must fail closed.
+  const surface = env.ZEROS_SURFACE === undefined ? "app" : env.ZEROS_SURFACE;
   if (surface !== "app" && surface !== "ops") {
     errors.push("ZEROS_SURFACE must be app or ops");
   }
@@ -108,7 +110,9 @@ export function deploymentEnvironmentErrors(env) {
     expectedAppOrigin &&
     normalizedHttpsOrigin(env.APP_ORIGIN || "") !== expectedAppOrigin
   ) {
-    errors.push(`APP_ORIGIN must be ${expectedAppOrigin} for ${channel} ${surface}`);
+    errors.push(
+      `APP_ORIGIN must be ${expectedAppOrigin} for ${channel} ${surface}`,
+    );
   }
   if (
     normalizedHttpsOrigin(env.CONTROL_PLANE_URL || "") !==
@@ -123,7 +127,9 @@ export function deploymentEnvironmentErrors(env) {
     errors.push("WORKOS_BROWSER_ROUTE_PREFIX must be /ops for the Ops surface");
   }
   if (surface !== "ops" && browserPrefix !== "") {
-    errors.push("WORKOS_BROWSER_ROUTE_PREFIX must be empty for the app surface");
+    errors.push(
+      "WORKOS_BROWSER_ROUTE_PREFIX must be empty for the app surface",
+    );
   }
   if (
     authProvider === "auth0" &&

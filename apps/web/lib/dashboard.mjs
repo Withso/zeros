@@ -463,7 +463,7 @@ export function dashboardPage({ session, me, requestUrl, signOutHref, loadError 
   <dialog id="delete-account-dialog" class="dialog">
     <form method="dialog" id="delete-account-form">
       <div class="dialog-header"><div><h2>Delete account</h2><p>Every device is signed out now. Cloud account data is recoverable for 30 days; local Personal workspaces remain on your devices.</p></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
-      <label class="field"><span>Enter DELETE MY ACCOUNT</span><input name="confirmation" maxlength="17" required autocomplete="off" /></label>
+      <label class="field"><span>Enter DELETE MY ACCOUNT</span><input name="confirmation" maxlength="64" required autocomplete="off" /></label>
       <div class="dialog-error" id="delete-account-error" role="alert"></div>
       <div class="dialog-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button danger" type="submit" value="default">Schedule deletion</button></div>
     </form>

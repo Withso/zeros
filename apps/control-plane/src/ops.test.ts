@@ -39,9 +39,9 @@ describe("Ops authorization boundary", () => {
   });
 
   it("rejects refresh-only or stale authentication ceremonies", () => {
-    expect(() =>
-      requireFreshOpsUser(operator("platform_owner", null)),
-    ).toThrow(HttpError);
+    expect(() => requireFreshOpsUser(operator("platform_owner", null))).toThrow(
+      HttpError,
+    );
     expect(() =>
       requireFreshOpsUser(
         operator("developer", Math.floor(Date.now() / 1_000) - 301),
@@ -50,7 +50,9 @@ describe("Ops authorization boundary", () => {
   });
 
   it("masks the account local-part and never echoes malformed input", () => {
-    expect(maskEmail("arunrajkumar@withso.com")).toBe("a******@withso.com");
+    expect(maskEmail("account-owner@example.test")).toBe(
+      "a******@example.test",
+    );
     expect(maskEmail("x@example.com")).toBe("x***@example.com");
     expect(maskEmail("not-an-email")).toBe("***");
   });

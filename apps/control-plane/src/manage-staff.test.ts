@@ -21,10 +21,10 @@ function request(
     productionConfirmed: undefined,
     approval: undefined,
     subjectUserId,
-    expectedEmail: "support@example.test",
+    expectedEmail: "developer@example.test",
     actorUserId,
-    nextRole: "support_admin",
-    reason: "Bootstrap the reviewed recovery operator.",
+    nextRole: "developer",
+    reason: "Bootstrap the reviewed developer operator.",
     ...overrides,
   });
 }
@@ -40,9 +40,9 @@ describe("staff-role owner command", () => {
     const approval = staffRoleApprovalText(validated, null);
 
     expect(approval).toMatch(
-      /^staff:alpha:[a-f0-9]{16}:00000000-0000-4000-8000-000000000001:00000000-0000-4000-8000-000000000002:none:support_admin:[a-f0-9]{12}$/,
+      /^staff:alpha:[a-f0-9]{16}:00000000-0000-4000-8000-000000000001:00000000-0000-4000-8000-000000000002:none:developer:[a-f0-9]{12}$/,
     );
-    expect(approval).not.toContain("support@example.test");
+    expect(approval).not.toContain("developer@example.test");
     expect(approval).not.toContain("Bootstrap");
     expect(staffRoleApprovalText(validated, "developer")).not.toBe(approval);
   });
@@ -69,6 +69,9 @@ describe("staff-role owner command", () => {
       StaffManagementError,
     );
     expect(() => request({ nextRole: "owner" })).toThrow(StaffManagementError);
+    expect(() => request({ nextRole: "support_admin" })).toThrow(
+      StaffManagementError,
+    );
     expect(() => request({ reason: "too short" })).toThrow(
       StaffManagementError,
     );

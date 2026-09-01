@@ -196,10 +196,9 @@ d("account, organization, and operator deletion lifecycle", () => {
     const account = await pool.query<{
       auth_status: string;
       deletion_request_id: string;
-    }>(
-      `SELECT auth_status, deletion_request_id FROM users WHERE id = $1`,
-      [customer.id],
-    );
+    }>(`SELECT auth_status, deletion_request_id FROM users WHERE id = $1`, [
+      customer.id,
+    ]);
     expect(account.rows[0]).toEqual({
       auth_status: "deletion_pending",
       deletion_request_id: body.deletion.id,
@@ -315,10 +314,9 @@ d("account, organization, and operator deletion lifecycle", () => {
     });
     expect(await processor.tick(1)).toBe(1);
     await expect(
-      pool.query(
-        `SELECT state FROM deletion_requests WHERE id = $1`,
-        [requestId],
-      ),
+      pool.query(`SELECT state FROM deletion_requests WHERE id = $1`, [
+        requestId,
+      ]),
     ).resolves.toMatchObject({ rows: [{ state: "provider_deleting" }] });
     await expect(
       pool.query(
@@ -336,10 +334,9 @@ d("account, organization, and operator deletion lifecycle", () => {
     await succeedPurgeCommand(requestId);
     expect(await processor.tick(1)).toBe(1);
     await expect(
-      pool.query(
-        `SELECT state FROM deletion_requests WHERE id = $1`,
-        [requestId],
-      ),
+      pool.query(`SELECT state FROM deletion_requests WHERE id = $1`, [
+        requestId,
+      ]),
     ).resolves.toMatchObject({ rows: [{ state: "purged" }] });
     await expect(
       pool.query(
@@ -372,6 +369,140 @@ d("account, organization, and operator deletion lifecycle", () => {
     ).resolves.toMatchObject({
       rows: [{ destination_email: originalEmail, user_id: null }],
     });
+  });
+
+  it("rejects cloud workspace ownership by permanent local-only Personal organizations at the database boundary", async () => {
+    const customer = await signup("PersonalInvariant");
+    const personal = await pool.query<{ org_id: string; team_id: string }>(
+      `SELECT o.id AS org_id, t.id AS team_id
+       FROM organizations o
+       JOIN teams t ON t.org_id = o.id AND t.is_default
+       WHERE o.created_by = $1 AND o.is_personal`,
+      [customer.id],
+    );
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await expect(
+        client.query(
+          `INSERT INTO cloud_workspaces (
+             id, org_id, team_id, created_by, display_name,
+             repository_forge, repository_owner, repository_name,
+             repository_revision, status, desired_state
+           ) VALUES ($1, $2, $3, $4, 'Impossible Personal Cloud',
+                     'github.com', 'withso', 'zeros', 'main',
+                     'requested', 'running')`,
+          [
+            randomUUID(),
+            personal.rows[0]!.org_id,
+            personal.rows[0]!.team_id,
+            customer.id,
+          ],
+        ),
+      ).rejects.toThrow(/Personal organizations are local-only/i);
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      client.release();
+    }
+  });
+
+  it("fails closed before WorkOS erasure when a legacy Personal cloud-workspace invariant is violated", async () => {
+    const customer = await signup("LegacyPersonalInvariant");
+    const personal = await pool.query<{ org_id: string; team_id: string }>(
+      `SELECT o.id AS org_id, t.id AS team_id
+       FROM organizations o
+       JOIN teams t ON t.org_id = o.id AND t.is_default
+       WHERE o.created_by = $1 AND o.is_personal`,
+      [customer.id],
+    );
+    const workspaceId = randomUUID();
+    // Model data that predates the database invariant. This is test-only DDL
+    // on a disposable PostgreSQL schema and is restored before continuing.
+    await pool.query(`DO $$ BEGIN
+      IF EXISTS (
+        SELECT 1 FROM pg_trigger
+        WHERE tgrelid = 'cloud_workspaces'::regclass
+          AND tgname = 'cloud_workspaces_reject_personal'
+      ) THEN
+        ALTER TABLE cloud_workspaces
+          DISABLE TRIGGER cloud_workspaces_reject_personal;
+      END IF;
+    END $$`);
+    try {
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        await client.query(
+          `INSERT INTO cloud_workspaces (
+             id, org_id, team_id, created_by, display_name,
+             repository_forge, repository_owner, repository_name,
+             repository_revision, status, desired_state
+           ) VALUES ($1, $2, $3, $4, 'Legacy Personal Cloud',
+                     'github.com', 'withso', 'zeros', 'main',
+                     'requested', 'running')`,
+          [
+            workspaceId,
+            personal.rows[0]!.org_id,
+            personal.rows[0]!.team_id,
+            customer.id,
+          ],
+        );
+        await client.query(
+          `INSERT INTO cloud_workspace_generations (
+             workspace_id, generation, org_id, provider, image_ref,
+             architecture, cpu_millicores, memory_mib, storage_mib,
+             source_commit, created_by
+           ) VALUES ($1, 1, $2, 'daytona', 'snap-pinned', 'linux/amd64',
+                     2000, 4096, 20480, $3, $4)`,
+          [workspaceId, personal.rows[0]!.org_id, "a".repeat(40), customer.id],
+        );
+        await client.query("COMMIT");
+      } finally {
+        client.release();
+      }
+    } finally {
+      await pool.query(`DO $$ BEGIN
+        IF EXISTS (
+          SELECT 1 FROM pg_trigger
+          WHERE tgrelid = 'cloud_workspaces'::regclass
+            AND tgname = 'cloud_workspaces_reject_personal'
+        ) THEN
+          ALTER TABLE cloud_workspaces
+            ENABLE TRIGGER cloud_workspaces_reject_personal;
+        END IF;
+      END $$`);
+    }
+
+    const scheduled = await scheduleAccount(customer);
+    expect(scheduled.response.status).toBe(202);
+    await makeDue(scheduled.body.deletion.id);
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: "test-personal-cloud-invariant",
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+    expect(await processor.tick(1)).toBe(1);
+    await expect(
+      pool.query(
+        `SELECT state, last_error_code
+         FROM deletion_requests WHERE id = $1`,
+        [scheduled.body.deletion.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          state: "failed",
+          last_error_code: "personal_cloud_workspace_invariant_violation",
+        },
+      ],
+    });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count
+         FROM workos_command_outbox
+         WHERE operation = 'user.delete' AND user_id = $1`,
+        [customer.id],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
   });
 
   it("waits for WorkOS organization deletion before erasing tenant data", async () => {
@@ -434,9 +565,10 @@ d("account, organization, and operator deletion lifecycle", () => {
       `UPDATE users SET staff_role = 'platform_owner' WHERE id = $1`,
       [owner.id],
     );
-    await pool.query(`UPDATE users SET staff_role = 'developer' WHERE id = $1`, [
-      developer.id,
-    ]);
+    await pool.query(
+      `UPDATE users SET staff_role = 'developer' WHERE id = $1`,
+      [developer.id],
+    );
     const organizationId = await createOrganization(customer, "Ops Business");
     await addOrganizationMember(organizationId, coworker, "member");
 
@@ -483,13 +615,10 @@ d("account, organization, and operator deletion lifecycle", () => {
     const grant = (await grantResponse.json()) as { grant: { id: string } };
 
     asActor({ ...developer, staffRole: "developer" });
-    const wrongCaseLookup = await request(
-      `/v1/ops/deletions/${code}/lookup`,
-      {
-        method: "POST",
-        body: { ...verified, supportCaseReference: "CASE-WRONG-1001" },
-      },
-    );
+    const wrongCaseLookup = await request(`/v1/ops/deletions/${code}/lookup`, {
+      method: "POST",
+      body: { ...verified, supportCaseReference: "CASE-WRONG-1001" },
+    });
     expect(wrongCaseLookup.status).toBe(404);
     const restored = await request(`/v1/ops/deletions/${code}/restore`, {
       method: "POST",
@@ -499,6 +628,66 @@ d("account, organization, and operator deletion lifecycle", () => {
     await expect(
       pool.query(`SELECT used_at FROM staff_operation_grants WHERE id = $1`, [
         grant.grant.id,
+      ]),
+    ).resolves.toMatchObject({ rows: [{ used_at: expect.any(Date) }] });
+
+    // A grant is a one-shot approval, including when the downstream state
+    // transition fails after authorization. Burning it first prevents a
+    // partial-success/retry path from replaying destructive authority.
+    const failureOrganizationId = await createOrganization(
+      customer,
+      "Grant Failure",
+    );
+    asActor(customer);
+    const failureScheduled = await request(
+      `/v1/organizations/${failureOrganizationId}`,
+      {
+        method: "DELETE",
+        body: { confirmation: "Grant Failure" },
+      },
+    );
+    const failureBody = (await failureScheduled.json()) as DeletionResponse;
+    const failureVerified = {
+      supportCaseReference: "CASE-OPS-1003",
+      ownershipVerification: "confirmed_out_of_band",
+    };
+    asActor({ ...owner, staffRole: "platform_owner" });
+    const failureGrantResponse = await request(
+      `/v1/ops/deletions/${failureBody.deletion.recoveryCode}/grants`,
+      {
+        method: "POST",
+        body: {
+          ...failureVerified,
+          granteeUserId: developer.id,
+          capability: "deletion.restore",
+          expiresInMinutes: 15,
+        },
+      },
+    );
+    const failureGrant = (await failureGrantResponse.json()) as {
+      grant: { id: string };
+    };
+    await pool.query(
+      `UPDATE deletion_requests
+       SET state = 'failed', purge_started_at = now()
+       WHERE id = $1`,
+      [failureBody.deletion.id],
+    );
+    asActor({ ...developer, staffRole: "developer" });
+    const failedRestore = await request(
+      `/v1/ops/deletions/${failureBody.deletion.recoveryCode}/restore`,
+      {
+        method: "POST",
+        body: { ...failureVerified, grantId: failureGrant.grant.id },
+      },
+    );
+    expect(failedRestore.status).toBe(409);
+    await expect(failedRestore.json()).resolves.toMatchObject({
+      error: { code: "deletion_not_recoverable" },
+    });
+    await expect(
+      pool.query(`SELECT used_at FROM staff_operation_grants WHERE id = $1`, [
+        failureGrant.grant.id,
       ]),
     ).resolves.toMatchObject({ rows: [{ used_at: expect.any(Date) }] });
 

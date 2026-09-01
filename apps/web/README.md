@@ -30,7 +30,7 @@ for project/domain/branch mappings and the promotion runbook.
 
 ### `app.zeros.build`
 
-```
+```text
 GET  /                         → signed-in management dashboard; signed-out hub
 GET  /launch                   → session-aware desktop handoff
 GET  /auth/start|callback|logout → WorkOS mode forwards to Railway unchanged
@@ -47,7 +47,7 @@ GET|POST|PATCH|DELETE /api/v1/* → allowlisted same-origin control-plane proxy
 
 ### `zeros.build` (marketing)
 
-```
+```text
 GET  /                         → marketing HomePage
 GET  /changelog                → SPA fallback → index.html
 GET  /privacy                  → SPA fallback → index.html
@@ -63,7 +63,7 @@ App-only paths hit on a marketing host (`/auth/*`, `/handoff/*`, `/api/*`, `/git
 
 ### `ops.zeros.build`
 
-```
+```text
 GET  /                         → exact-code deletion recovery workspace
 GET  /auth/start|callback|logout → isolated WorkOS browser session namespace
 GET  /api/v1/ops/session      → current staff role and bounded developer directory
@@ -126,17 +126,17 @@ After changing `apps/marketing/package.json`, regenerate that lockfile:
 Disable Preview deployments on these release projects. Configure the following
 in each project's Production environment:
 
-| Name                | Required | Notes                                                  |
-| ------------------- | -------- | ------------------------------------------------------ |
-| `ZEROS_DEPLOY_ENV`  | yes      | `alpha`, `beta`, or `production`; build fails on drift |
-| `AUTH_PROVIDER`     | yes      | `auth0` until coordinated cutover, then `workos`       |
-| `APP_ORIGIN`        | yes      | matching channel app origin                            |
-| `APP_HOSTS`         | optional | comma list; defaults to hostname of `APP_ORIGIN`       |
-| `MARKETING_ORIGIN`  | optional | defaults to `https://zeros.build`                      |
-| `MARKETING_HOSTS`   | optional | defaults to `zeros.build,www.zeros.build,zeros.design` |
-| `CONTROL_PLANE_URL` | yes      | matching channel API origin; server-side only          |
-| `ZEROS_SURFACE`     | Ops only | `ops` on the two Ops projects; omitted/`app` elsewhere |
-| `WORKOS_BROWSER_ROUTE_PREFIX` | Ops only | `/ops`; isolates the upstream auth namespace |
+| Name                          | Required | Notes                                                  |
+| ----------------------------- | -------- | ------------------------------------------------------ |
+| `ZEROS_DEPLOY_ENV`            | yes      | `alpha`, `beta`, or `production`; build fails on drift |
+| `AUTH_PROVIDER`               | yes      | `auth0` until coordinated cutover, then `workos`       |
+| `APP_ORIGIN`                  | yes      | matching channel app origin                            |
+| `APP_HOSTS`                   | optional | comma list; defaults to hostname of `APP_ORIGIN`       |
+| `MARKETING_ORIGIN`            | optional | defaults to `https://zeros.build`                      |
+| `MARKETING_HOSTS`             | optional | defaults to `zeros.build,www.zeros.build,zeros.design` |
+| `CONTROL_PLANE_URL`           | yes      | matching channel API origin; server-side only          |
+| `ZEROS_SURFACE`               | Ops only | `ops` on the two Ops projects; omitted/`app` elsewhere |
+| `WORKOS_BROWSER_ROUTE_PREFIX` | Ops only | `/ops`; isolates the upstream auth namespace           |
 
 Provider-specific Pages configuration:
 
@@ -285,7 +285,7 @@ automatic Production deployments disabled:
 
 ## Structure
 
-```
+```text
 apps/web/
   functions/_middleware.ts     → host gate + per-host CSP/robots
   functions/index.ts           → /        (hub — app host only)
@@ -319,21 +319,21 @@ apps/web/
 
 ## Edge cases covered
 
-| Case                       | Behavior                                                                                                                                                          |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /` on both hosts      | Marketing → SPA via `ASSETS`; app → hub Function                                                                                                                  |
-| Marketing `/auth/*`        | 302 → `app.zeros.build`                                                                                                                                           |
-| Shared `_headers` CSP      | Middleware sets marketing CSP (Google Fonts) vs app CSP                                                                                                           |
-| `robots.txt`               | Host-specific body from middleware                                                                                                                                |
-| SPA `_redirects`           | Explicit paths only (`/changelog`, `/privacy`, `/terms`) — not `/*`; keep in sync with marketing `src/routes.tsx`                                                 |
-| Unknown path (either host) | Static `404.html` with a real 404 status — without that file, Pages' implicit SPA mode would serve the marketing homepage with 200 on `app.zeros.build/<unknown>` |
-| `*.pages.dev` / localhost  | Default to **app** (OAuth/hub); set `MARKETING_HOSTS` to preview marketing                                                                                        |
-| Session cookies            | Still host-only on app; never widened for marketing                                                                                                               |
-| Dashboard credentials      | Auth0 grants stay in compatibility KV; WorkOS sealed/refresh state stays in Railway/Postgres; browser boot data contains identity and organization summaries only |
-| WorkOS refresh outage      | Pre-rotation transient failures preserve the exact record; a post-rotation verification outage persists the replacement seal but withholds the bearer             |
+| Case                       | Behavior                                                                                                                                                             |
+| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /` on both hosts      | Marketing → SPA via `ASSETS`; app → hub Function                                                                                                                     |
+| Marketing `/auth/*`        | 302 → `app.zeros.build`                                                                                                                                              |
+| Shared `_headers` CSP      | Middleware sets marketing CSP (Google Fonts) vs app CSP                                                                                                              |
+| `robots.txt`               | Host-specific body from middleware                                                                                                                                   |
+| SPA `_redirects`           | Explicit paths only (`/changelog`, `/privacy`, `/terms`) — not `/*`; keep in sync with marketing `src/routes.tsx`                                                    |
+| Unknown path (either host) | Static `404.html` with a real 404 status — without that file, Pages' implicit SPA mode would serve the marketing homepage with 200 on `app.zeros.build/<unknown>`    |
+| `*.pages.dev` / localhost  | Default to **app** (OAuth/hub); set `MARKETING_HOSTS` to preview marketing                                                                                           |
+| Session cookies            | Still host-only on app; never widened for marketing                                                                                                                  |
+| Dashboard credentials      | Auth0 grants stay in compatibility KV; WorkOS sealed/refresh state stays in Railway/Postgres; browser boot data contains identity and organization summaries only    |
+| WorkOS refresh outage      | Pre-rotation transient failures preserve the exact record; a post-rotation verification outage persists the replacement seal but withholds the bearer                |
 | WorkOS lifecycle event     | Pages preserves exact bytes; Railway verifies the signature before reducing the complete management event set; webhooks are idempotent and Events API repairs misses |
-| Account resolution         | Recovery/conflict/fresh-auth/inactive states have dedicated fixed UI; provider text and bearer/refresh material never render                                  |
-| Authorization freshness    | One SSE connection plus durable revisions; lifecycle snapshots are silence/reconnect backstops, not periodic polling                                            |
-| Dashboard mutations        | Same-origin JSON plus custom-header gate; route and body allowlists reject ambient-cookie form attacks                                                            |
-| Personal                   | Name follows provider identity, local-only, permanent, and collaboration/billing sections are disabled                                                            |
-| Schema URLs                | Still served at `zeros.build/schemas/*` after cutover                                                                                                             |
+| Account resolution         | Recovery/conflict/fresh-auth/inactive states have dedicated fixed UI; provider text and bearer/refresh material never render                                         |
+| Authorization freshness    | One SSE connection plus durable revisions; lifecycle snapshots are silence/reconnect backstops, not periodic polling                                                 |
+| Dashboard mutations        | Same-origin JSON plus custom-header gate; route and body allowlists reject ambient-cookie form attacks                                                               |
+| Personal                   | Name follows provider identity, local-only, permanent, and collaboration/billing sections are disabled                                                               |
+| Schema URLs                | Still served at `zeros.build/schemas/*` after cutover                                                                                                                |

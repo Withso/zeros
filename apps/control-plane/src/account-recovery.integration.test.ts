@@ -92,7 +92,7 @@ d("reviewed WorkOS account recovery", () => {
     const staff = await ensureUser(pool, {
       provider: "workos",
       providerSubject: `user_staff_${suffix}`,
-      email: `staff-${suffix}@example.com`,
+      email: `staff-${suffix}@example.test`,
       displayName: "Staff",
     });
     await pool.query(
@@ -109,45 +109,78 @@ d("reviewed WorkOS account recovery", () => {
         tokenExpiresAt: now + 300,
       },
     };
-
-    await expect(
-      approveAccountRecovery(pool, {
-        operator,
-        publicCode: recoveryCode,
-      }),
-    ).rejects.toMatchObject({ status: 404, code: "not_found" });
-
-    await pool.query(
-      `UPDATE users SET staff_role = 'support_admin' WHERE id = $1`,
-      [staff.id],
-    );
-    const supportOperator: AuthedUser = {
-      ...operator,
-      staffRole: "support_admin",
+    const review = {
+      supportCaseReference: "CASE-IDENTITY-1001",
+      ownershipVerification: "confirmed_out_of_band" as const,
     };
 
     await expect(
-      approveAccountRecovery(pool, {
-        operator: {
-          ...supportOperator,
-          authentication: {
-            ...supportOperator.authentication,
-            authTime: now - 301,
-          },
+      approveAccountRecovery(
+        pool,
+        {
+          operator,
+          publicCode: recoveryCode,
         },
-        publicCode: recoveryCode,
-      }),
+        review,
+      ),
+    ).rejects.toMatchObject({ status: 404, code: "not_found" });
+
+    await pool.query(
+      `UPDATE users SET staff_role = 'platform_owner' WHERE id = $1`,
+      [staff.id],
+    );
+    const ownerOperator: AuthedUser = {
+      ...operator,
+      staffRole: "platform_owner",
+    };
+
+    await expect(
+      approveAccountRecovery(
+        pool,
+        {
+          operator: {
+            ...ownerOperator,
+            authentication: {
+              ...ownerOperator.authentication,
+              authTime: now - 301,
+            },
+          },
+          publicCode: recoveryCode,
+        },
+        review,
+      ),
     ).rejects.toMatchObject({
       status: 401,
       code: "reauthentication_required",
     });
 
     expect(
-      await approveAccountRecovery(pool, {
-        operator: supportOperator,
-        publicCode: recoveryCode,
-      }),
+      await approveAccountRecovery(
+        pool,
+        {
+          operator: ownerOperator,
+          publicCode: recoveryCode,
+        },
+        review,
+      ),
     ).toEqual({ accountId: original.id, state: "consumed" });
+
+    await expect(
+      pool.query(
+        `SELECT support_case_reference, ownership_verification_method,
+                ownership_verified_at
+         FROM account_recovery_requests WHERE public_code = $1`,
+        [recoveryCode],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          support_case_reference: review.supportCaseReference,
+          ownership_verification_method: review.ownershipVerification,
+          ownership_verified_at: expect.any(Date),
+        },
+      ],
+    });
 
     const resolved = await ensureUser(pool, {
       provider: "workos",

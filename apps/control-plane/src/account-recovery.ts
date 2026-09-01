@@ -22,6 +22,7 @@ const RecoveryReviewSchema = z.object({
     .regex(/^[A-Za-z0-9][A-Za-z0-9 ._:/#-]*$/),
   ownershipVerification: z.literal("confirmed_out_of_band"),
 });
+type RecoveryReview = z.infer<typeof RecoveryReviewSchema>;
 
 function requireFreshOperator(operator: AuthedUser): void {
   // `support_admin` remains readable for already-persisted installations, but
@@ -52,7 +53,7 @@ function requireFreshOperator(operator: AuthedUser): void {
 export async function approveAccountRecovery(
   pool: pg.Pool,
   input: { operator: AuthedUser; publicCode: string },
-  review?: { supportCaseReference: string },
+  review: RecoveryReview,
 ): Promise<{ accountId: string; state: "consumed" }> {
   requireFreshOperator(input.operator);
   const publicCode = RecoveryCodeSchema.safeParse(input.publicCode);
@@ -171,11 +172,16 @@ export async function approveAccountRecovery(
     await tx.query(
       `UPDATE account_recovery_requests
        SET state = 'consumed', reviewed_by = $2, reviewed_at = now(),
-           consumed_at = now(), support_case_reference = COALESCE($3, support_case_reference),
-           ownership_verified_at = CASE WHEN $3 IS NULL
-             THEN ownership_verified_at ELSE now() END
+           consumed_at = now(), support_case_reference = $3,
+           ownership_verification_method = $4,
+           ownership_verified_at = now()
        WHERE id = $1`,
-      [recovery.id, input.operator.id, review?.supportCaseReference ?? null],
+      [
+        recovery.id,
+        input.operator.id,
+        review.supportCaseReference,
+        review.ownershipVerification,
+      ],
     );
     await tx.query(
       `UPDATE account_recovery_requests
@@ -239,12 +245,17 @@ export function createAccountRecoveryRoutes(pool: pg.Pool): Hono {
     if (!review.success) {
       throw new HttpError(422, "invalid_input", "Invalid recovery review");
     }
-    const result = await approveAccountRecovery(pool, {
-      operator: c.get("user"),
-      publicCode: c.req.param("code"),
-    }, {
-      supportCaseReference: review.data.supportCaseReference,
-    });
+    const result = await approveAccountRecovery(
+      pool,
+      {
+        operator: c.get("user"),
+        publicCode: c.req.param("code"),
+      },
+      {
+        supportCaseReference: review.data.supportCaseReference,
+        ownershipVerification: review.data.ownershipVerification,
+      },
+    );
     return c.json(result);
   });
   return app;

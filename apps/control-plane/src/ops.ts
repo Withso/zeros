@@ -48,7 +48,7 @@ const GrantSchema = LookupSchema.extend({
 });
 const ActionSchema = LookupSchema.extend({
   grantId: UuidSchema.optional(),
-  confirmation: z.string().max(64).optional(),
+  confirmation: z.string().trim().max(64).optional(),
 });
 
 type OpsRequestRow = DeletionRequestRow & {
@@ -158,7 +158,8 @@ async function authorizeLookup(
     supportCaseReference: input.supportCaseReference,
     channel: input.channel,
   });
-  if (!grant) throw new HttpError(404, "not_found", "Deletion request not found");
+  if (!grant)
+    throw new HttpError(404, "not_found", "Deletion request not found");
 }
 
 async function consumeGrant(
@@ -173,46 +174,44 @@ async function consumeGrant(
   },
 ): Promise<GrantRow> {
   return withSystemTx(pool, async (tx) => {
-    const grant = await activeGrant(tx, {
-      requestId: input.requestId,
-      granteeUserId: input.granteeUserId,
-      supportCaseReference: input.supportCaseReference,
-      capability: input.capability,
-      channel: input.channel,
-      ...(input.grantId ? { grantId: input.grantId } : {}),
-    });
+    // Consume the exact grant in the authorization transaction. If the
+    // privileged state transition later fails, the one-shot approval remains
+    // burned and the operator must obtain a fresh, auditable grant.
+    const consumed = await tx.query<GrantRow>(
+      `WITH selected AS (
+         SELECT id
+         FROM staff_operation_grants
+         WHERE deletion_request_id = $1 AND grantee_user_id = $2
+           AND support_case_reference = $3 AND deployment_channel = $4
+           AND capability = $5 AND expires_at > now()
+           AND revoked_at IS NULL AND used_at IS NULL
+           AND ($6::uuid IS NULL OR id = $6)
+         ORDER BY expires_at, created_at, id
+         LIMIT 1
+         FOR UPDATE
+       )
+       UPDATE staff_operation_grants target_grant
+       SET used_at = now()
+       FROM selected
+       WHERE target_grant.id = selected.id AND target_grant.used_at IS NULL
+       RETURNING target_grant.id, target_grant.capability,
+                 target_grant.expires_at, target_grant.grantee_user_id,
+                 target_grant.granted_by_user_id`,
+      [
+        input.requestId,
+        input.granteeUserId,
+        input.supportCaseReference,
+        input.channel,
+        input.capability,
+        input.grantId ?? null,
+      ],
+    );
+    const grant = consumed.rows[0];
     if (!grant) {
       throw new HttpError(
         403,
         "staff_grant_required",
         "An exact, unexpired owner approval is required.",
-      );
-    }
-    return grant;
-  });
-}
-
-async function markGrantUsed(
-  pool: pg.Pool,
-  grant: GrantRow,
-  requestId: string,
-  actorId: string,
-  supportCaseReference: string,
-): Promise<void> {
-  await withSystemTx(pool, async (tx) => {
-    const used = await tx.query(
-      `UPDATE staff_operation_grants
-       SET used_at = COALESCE(used_at, now())
-       WHERE id = $1 AND deletion_request_id = $2
-         AND grantee_user_id = $3
-       RETURNING id`,
-      [grant.id, requestId, actorId],
-    );
-    if (!used.rows[0]) {
-      throw new HttpError(
-        409,
-        "staff_grant_consumed",
-        "The approval could not be recorded as used.",
       );
     }
     await tx.query(
@@ -221,12 +220,13 @@ async function markGrantUsed(
          support_case_reference, metadata
        ) VALUES ($1, $2, 'staff.grant.consumed', $3, $4::jsonb)`,
       [
-        requestId,
-        actorId,
-        supportCaseReference,
+        input.requestId,
+        input.granteeUserId,
+        input.supportCaseReference,
         JSON.stringify({ grantId: grant.id, capability: grant.capability }),
       ],
     );
+    return grant;
   });
 }
 
@@ -242,9 +242,7 @@ async function targetSummary(tx: Tx, request: OpsRequestRow) {
       : null;
     return {
       kind: "account" as const,
-      maskedEmail: account?.rows[0]
-        ? maskEmail(account.rows[0].email)
-        : null,
+      maskedEmail: account?.rows[0] ? maskEmail(account.rows[0].email) : null,
       accountStatus: account?.rows[0]?.auth_status ?? "purged",
       businessOrganization: false,
     };
@@ -412,7 +410,11 @@ export function createOpsRoutes(
         [body.granteeUserId],
       );
       if (!grantee.rows[0] || body.granteeUserId === user.id) {
-        throw new HttpError(422, "invalid_grantee", "Select an active developer.");
+        throw new HttpError(
+          422,
+          "invalid_grantee",
+          "Select an active developer.",
+        );
       }
       const grant = await tx.query<GrantRow>(
         `INSERT INTO staff_operation_grants (
@@ -482,10 +484,9 @@ export function createOpsRoutes(
       return { request, target };
     });
 
-    let grant: GrantRow | null = null;
     const twoPersonRequired = found.target.businessOrganization === true;
     if (user.staffRole === "developer") {
-      grant = await consumeGrant(pool, {
+      await consumeGrant(pool, {
         requestId: found.request.id,
         granteeUserId: user.id,
         supportCaseReference: body.supportCaseReference,
@@ -506,15 +507,6 @@ export function createOpsRoutes(
       operatorUserId: user.id,
       supportCaseReference: body.supportCaseReference,
     });
-    if (grant) {
-      await markGrantUsed(
-        pool,
-        grant,
-        found.request.id,
-        user.id,
-        body.supportCaseReference,
-      );
-    }
     return c.json({ deletion: publicDeletionRequest(restored) });
   });
 
@@ -546,7 +538,7 @@ export function createOpsRoutes(
       }
       return result;
     });
-    const grant = await consumeGrant(pool, {
+    await consumeGrant(pool, {
       requestId: request.id,
       granteeUserId: user.id,
       supportCaseReference: body.supportCaseReference,
@@ -559,13 +551,6 @@ export function createOpsRoutes(
       operatorUserId: user.id,
       supportCaseReference: body.supportCaseReference,
     });
-    await markGrantUsed(
-      pool,
-      grant,
-      request.id,
-      user.id,
-      body.supportCaseReference,
-    );
     return c.json({ deletion: publicDeletionRequest(purging) }, 202);
   });
 

@@ -68,6 +68,16 @@ test("accepts isolated Alpha and Production Ops projects and rejects Beta Ops", 
   );
 });
 
+test("rejects noncanonical surface values instead of normalizing deployment drift", () => {
+  const env = cloudflareEnv("alpha");
+  env.ZEROS_SURFACE = " OPS ";
+  assert.ok(
+    deploymentEnvironmentErrors(env).some((error) =>
+      error.includes("ZEROS_SURFACE must be app or ops"),
+    ),
+  );
+});
+
 test("WorkOS Pages rejects retired bindings and misplaced Railway secrets", () => {
   const env = cloudflareEnv("alpha");
   env.AUTH_PROVIDER = "workos";
