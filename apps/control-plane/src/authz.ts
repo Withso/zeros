@@ -27,7 +27,7 @@ export function roleAtLeast(
 /** Staff role — product-wide, NOT team-scoped, and deliberately NOT ranked
  *  against OrganizationRole (see migrations 0007/0009 for why the
  *  two must not share an axis). null ⇒ not staff. */
-export type StaffRole = "developer" | "support_admin";
+export type StaffRole = "platform_owner" | "developer" | "support_admin";
 
 export class HttpError extends Error {
   constructor(

@@ -138,6 +138,9 @@ function assemble() {
     "404.html",
     "dashboard.css",
     "dashboard.js",
+    "account-deletion.js",
+    "ops.css",
+    "ops.js",
   ]) {
     const src = path.join(PUBLIC_SRC, name);
     if (existsSync(src)) {

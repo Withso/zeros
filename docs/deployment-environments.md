@@ -15,11 +15,11 @@ that Beta validated.
 
 ## Deployment topology
 
-| Channel    | Source                                 | Railway                                                    | Cloudflare web          | Public origins                                          |
-| ---------- | -------------------------------------- | ---------------------------------------------------------- | ----------------------- | ------------------------------------------------------- |
-| Alpha      | `main`                                 | `alpha` environment: control plane + its own Postgres      | Pages `zeros-web-alpha` | `api-alpha.zeros.build`, `app-alpha.zeros.build`        |
-| Beta       | current `release/X.Y.Z`                | `beta` environment: control plane + its own Postgres       | Pages `zeros-web-beta`  | `api-beta.zeros.build`, `app-beta.zeros.build`          |
-| Production | the same release commit Beta validated | `production` environment: control plane + its own Postgres | Pages `zeros-web`       | `api.zeros.build`, `app.zeros.build`, marketing domains |
+| Channel    | Source                                 | Railway                                                    | Cloudflare surfaces                     | Public origins                                                             |
+| ---------- | -------------------------------------- | ---------------------------------------------------------- | --------------------------------------- | -------------------------------------------------------------------------- |
+| Alpha      | `main`                                 | `alpha` environment: control plane + its own Postgres      | `zeros-web-alpha`, `zeros-ops-alpha`    | `api-alpha.zeros.build`, `app-alpha.zeros.build`, `ops-alpha.zeros.build`  |
+| Beta       | current `release/X.Y.Z`                | `beta` environment: control plane + its own Postgres       | `zeros-web-beta`; **no Ops deployment** | `api-beta.zeros.build`, `app-beta.zeros.build`                             |
+| Production | the same release commit Beta validated | `production` environment: control plane + its own Postgres | `zeros-web`, `zeros-ops`                | `api.zeros.build`, `app.zeros.build`, `ops.zeros.build`, marketing domains |
 
 This remains one backend codebase and one frontend codebase. Each channel is an
 isolated deployment instance with independent data, credentials, sessions, and
@@ -32,7 +32,8 @@ share `DATABASE_URL` across them.
 Cloudflare Pages exposes only `production` and one shared `preview`
 configuration inside a project. Preview branches share variables and bindings,
 so a single Pages project cannot safely represent independent Alpha and Beta
-environments. Use three Pages projects from the same `apps/web` source. Each
+environments. Use five release Pages projects from the same `apps/web` source:
+three customer-app projects plus the Alpha and Production Ops projects. Each
 channel uses that project's Production configuration; do not treat Pages
 Preview as a Zeros release channel.
 
@@ -115,6 +116,7 @@ Set these independently in every environment:
 | `AUTH_WEB_CLIENT_ID`         | Alpha Web Application in WorkOS mode                     | Beta Web Application in WorkOS mode                     | Production Web Application in WorkOS mode                     |
 | `AUTH_DESKTOP_CLIENT_ID`     | Alpha Desktop Application in WorkOS mode                 | Beta Desktop Application in WorkOS mode                 | Production Desktop Application in WorkOS mode                 |
 | `APP_ORIGIN`                 | `https://app-alpha.zeros.build` in WorkOS mode           | `https://app-beta.zeros.build` in WorkOS mode           | `https://app.zeros.build` in WorkOS mode                      |
+| `OPS_ORIGIN`                 | `https://ops-alpha.zeros.build`                          | unset; startup rejects Ops in Beta                      | `https://ops.zeros.build`                                     |
 | `WORKOS_API_KEY`             | Alpha server key in WorkOS mode                          | Beta server key in WorkOS mode                          | Production server key in WorkOS mode                          |
 | `WORKOS_COOKIE_PASSWORD`     | unique random Alpha 32+ character secret                 | unique random Beta 32+ character secret                 | unique random Production 32+ character secret                 |
 | `WORKOS_WEBHOOK_SECRET`      | Alpha endpoint signing secret                            | Beta endpoint signing secret                            | Production endpoint signing secret                            |
@@ -156,11 +158,11 @@ database service.
 Create separate Web and Desktop Applications inside each channel's WorkOS
 environment. Register these exact HTTPS redirects:
 
-| Channel    | Web Application redirect                      | Desktop Application redirect                          | App handoff after the hosted callback |
-| ---------- | --------------------------------------------- | ----------------------------------------------------- | ------------------------------------- |
-| Alpha      | `https://app-alpha.zeros.build/auth/callback` | `https://app-alpha.zeros.build/auth/desktop/callback` | `zeros-alpha://auth/callback`         |
-| Beta       | `https://app-beta.zeros.build/auth/callback`  | `https://app-beta.zeros.build/auth/desktop/callback`  | `zeros-beta://auth/callback`          |
-| Production | `https://app.zeros.build/auth/callback`       | `https://app.zeros.build/auth/desktop/callback`       | `zeros://auth/callback`               |
+| Channel    | Web Application redirects                                                                    | Desktop Application redirect                          | App handoff after the hosted callback |
+| ---------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------- | ------------------------------------- |
+| Alpha      | `https://app-alpha.zeros.build/auth/callback`, `https://ops-alpha.zeros.build/auth/callback` | `https://app-alpha.zeros.build/auth/desktop/callback` | `zeros-alpha://auth/callback`         |
+| Beta       | `https://app-beta.zeros.build/auth/callback`                                                 | `https://app-beta.zeros.build/auth/desktop/callback`  | `zeros-beta://auth/callback`          |
+| Production | `https://app.zeros.build/auth/callback`, `https://ops.zeros.build/auth/callback`             | `https://app.zeros.build/auth/desktop/callback`       | `zeros://auth/callback`               |
 
 The app handoff is generated by Zeros after WorkOS returns to the HTTPS
 callback; it is not the WorkOS redirect URI for a new desktop build. During the
@@ -194,8 +196,8 @@ Alpha or Beta web project use the Production client secret or audience.
 
 ## Cloudflare Pages setup
 
-Create `zeros-web-alpha` and `zeros-web-beta` beside the existing `zeros-web`.
-All three use:
+Create `zeros-web-alpha` and `zeros-web-beta` beside the existing `zeros-web`,
+plus `zeros-ops-alpha` and `zeros-ops` from the same source. All five use:
 
 | Build setting    | Value           |
 | ---------------- | --------------- |
@@ -206,14 +208,16 @@ All three use:
 
 Configure each project:
 
-| Project           | Production branch                 | Automatic Production deploys      | Custom app domain                                   |
+| Project           | Production branch                 | Automatic Production deploys      | Custom domain(s)                                    |
 | ----------------- | --------------------------------- | --------------------------------- | --------------------------------------------------- |
 | `zeros-web-alpha` | `main`                            | on                                | `app-alpha.zeros.build`                             |
+| `zeros-ops-alpha` | `main`                            | on                                | `ops-alpha.zeros.build`                             |
 | `zeros-web-beta`  | current `release/X.Y.Z`           | on while stabilizing that release | `app-beta.zeros.build`                              |
 | `zeros-web`       | current validated `release/X.Y.Z` | **off**                           | `app.zeros.build` plus Production marketing domains |
+| `zeros-ops`       | current validated `release/X.Y.Z` | **off**                           | `ops.zeros.build`                                   |
 
 Disable Preview deployments for these release projects. If PR previews are
-needed later, create a fourth preview-only project with preview-only credentials
+needed later, create a sixth preview-only project with preview-only credentials
 and data instead of sharing Alpha/Beta state.
 
 For manual Production builds, create a protected Pages deploy hook tied to the
@@ -252,15 +256,23 @@ the Pages projects. Browser credentials are host-only random cookies; their
 digests, PKCE verifier, encrypted sealed session, and serialized refresh state
 live in the channel's Railway Postgres.
 
+For `zeros-ops-alpha` and `zeros-ops`, set `ZEROS_SURFACE=ops`,
+`WORKOS_BROWSER_ROUTE_PREFIX=/ops`, and the Ops hostname as `APP_ORIGIN`.
+Set `AUTH_PROVIDER=workos`; do not configure Auth0 fallback or marketing hosts.
+The corresponding Railway environment uses the same control-plane service and
+database as its customer app, with `OPS_ORIGIN` set to the exact Ops hostname.
+There is intentionally no `zeros-ops-beta` project.
+
 For each WorkOS environment, register the exact channel URL
-`https://<api-host>/auth/workos-webhook` and subscribe only to `user.updated`
-and `user.deleted`. Zeros uses Hosted AuthKit and does not render provider,
+`https://<api-host>/auth/workos-webhook` and subscribe to the complete
+management event set in `docs/workos-authentication-migration.md`. Zeros uses
+Hosted AuthKit and does not render provider,
 credential, email-verification, MFA, recovery, or account-linking forms. A
 custom AuthKit domain is optional for the initial rollout and should be
-evaluated separately for Production branding and anti-phishing. Do not
-subscribe to `user.created`; first authenticated requests provision the
-subject-to-Zeros-account mapping and the webhook handler deliberately ignores
-creation events.
+evaluated separately for Production branding and anti-phishing. Subscribe to
+`user.created`, but do not provision a product account from it; first
+authenticated requests create the subject-to-Zeros-account mapping and the
+webhook handler records then deliberately ignores creation events.
 A self-hosted template can use platform-provided HTTPS domains instead of
 buying domains. Keep the frontend `APP_ORIGIN` separate from the API origin so
 server-only session responses are never same-origin browser endpoints; two
@@ -290,8 +302,8 @@ order:
    are interchangeable. Remove `AUTH_BROKER_SECRET` and leave
    `ZEROS_SELF_HOSTED` unset for official Alpha.
 4. Point the WorkOS webhook directly to
-   `https://api-alpha.zeros.build/auth/workos-webhook`, subscribing only to
-   `user.updated` and `user.deleted`.
+   `https://api-alpha.zeros.build/auth/workos-webhook` and subscribe to the
+   complete management event set in `docs/workos-authentication-migration.md`.
 5. Deploy Railway first. Confirm migrations complete and
    `https://api-alpha.zeros.build/healthz` succeeds before changing Pages.
 6. In Cloudflare Pages `zeros-web-alpha`, set `ZEROS_DEPLOY_ENV=alpha`,

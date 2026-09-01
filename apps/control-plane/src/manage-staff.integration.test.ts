@@ -27,7 +27,7 @@ d("owner-managed staff roles", () => {
     await pool.end();
   });
 
-  it("plans, target-binds, audits, publishes, and revokes support authority", async () => {
+  it("plans, target-binds, audits, publishes, and revokes developer authority", async () => {
     const suffix = randomUUID().replaceAll("-", "");
     const actor = await ensureUser(pool, {
       provider: "workos",
@@ -45,10 +45,9 @@ d("owner-managed staff roles", () => {
 
     await expect(
       withSystemTx(pool, (tx) =>
-        tx.query(
-          `UPDATE users SET staff_role = 'support_admin' WHERE id = $1`,
-          [subject.id],
-        ),
+        tx.query(`UPDATE users SET staff_role = 'developer' WHERE id = $1`, [
+          subject.id,
+        ]),
       ),
     ).rejects.toThrow(/permission denied/i);
     await expect(
@@ -58,7 +57,7 @@ d("owner-managed staff roles", () => {
              subject_user_id, actor_user_id, previous_role, next_role,
              account_revision, deployment_channel, target_fingerprint,
              database_principal, reason
-           ) VALUES ($1, $2, NULL, 'support_admin', 1, 'alpha',
+           ) VALUES ($1, $2, NULL, 'developer', 1, 'alpha',
                      '0000000000000000', 'zeros_app',
                      'Application roles cannot forge this audit record.')`,
           [subject.id, actor.id],
@@ -76,8 +75,8 @@ d("owner-managed staff roles", () => {
       subjectUserId: subject.id,
       expectedEmail: subjectEmail,
       actorUserId: actor.id,
-      nextRole: "support_admin",
-      reason: "Bootstrap reviewed Alpha account recovery.",
+      nextRole: "developer",
+      reason: "Bootstrap reviewed Alpha developer access.",
     } as const;
 
     // Possessing the two obvious SQL grants is still insufficient. Only the
@@ -113,7 +112,7 @@ d("owner-managed staff roles", () => {
     expect(plan).toMatchObject({
       state: "planned",
       previousRole: null,
-      nextRole: "support_admin",
+      nextRole: "developer",
       subjectUserId: subject.id,
       actorUserId: actor.id,
     });
@@ -147,7 +146,7 @@ d("owner-managed staff roles", () => {
     expect(changed).toMatchObject({
       state: "changed",
       previousRole: null,
-      nextRole: "support_admin",
+      nextRole: "developer",
     });
 
     const evidence = await pool.query<{
@@ -166,7 +165,7 @@ d("owner-managed staff roles", () => {
       [subject.id],
     );
     expect(evidence.rows[0]).toMatchObject({
-      staff_role: "support_admin",
+      staff_role: "developer",
       change_count: "1",
       event_count: "1",
     });
@@ -194,7 +193,7 @@ d("owner-managed staff roles", () => {
     } as const;
     const revokeRequest = validateStaffRoleRequest(revokeBase);
     const revokePlan = await manageStaffRole(pool, revokeRequest);
-    expect(revokePlan.previousRole).toBe("support_admin");
+    expect(revokePlan.previousRole).toBe("developer");
     await manageStaffRole(
       pool,
       validateStaffRoleRequest({
@@ -263,7 +262,7 @@ d("owner-managed staff roles", () => {
       subjectUserId: subject.id,
       expectedEmail: subjectEmail,
       actorUserId: actor.id,
-      nextRole: "support_admin",
+      nextRole: "developer",
       reason: "Verify the non-superuser migration-owner RLS path.",
     } as const;
     try {
@@ -308,7 +307,7 @@ d("owner-managed staff roles", () => {
         [subject.id],
       );
       expect(result.rows[0]).toEqual({
-        staff_role: "support_admin",
+        staff_role: "developer",
         event_count: "1",
       });
     } finally {

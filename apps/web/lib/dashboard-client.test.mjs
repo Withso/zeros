@@ -4,6 +4,7 @@ import {
   collaborationSectionDisabled,
   createSubmissionGate,
   dashboardOrganizationDataUnavailable,
+  formatLifecycleDate,
   invalidateOrganizationSnapshots,
   loadExactSnapshot,
   memberPermissions,
@@ -17,12 +18,23 @@ import {
   tryWriteClipboard,
 } from "../public/dashboard.js";
 
+test("formats lifecycle dates deterministically and rejects invalid timestamps", () => {
+  assert.equal(
+    formatLifecycleDate("2026-10-01T00:00:00.000Z"),
+    "October 1, 2026",
+  );
+  assert.equal(formatLifecycleDate("not-a-date"), "the scheduled date");
+});
+
 test("Personal uses the provider-backed name and retains a safe fallback", () => {
   assert.equal(
     organizationDisplayName({ name: "Ada Lovelace", isPersonal: true }),
     "Ada Lovelace",
   );
-  assert.equal(organizationDisplayName({ name: "  ", isPersonal: true }), "Personal");
+  assert.equal(
+    organizationDisplayName({ name: "  ", isPersonal: true }),
+    "Personal",
+  );
 });
 
 test("organization logos accept only bounded raster data URLs", () => {
@@ -59,7 +71,10 @@ test("clipboard feedback reports the actual browser write result", async () => {
   );
   assert.equal(copied, "invite-url");
   assert.equal(
-    await tryWriteClipboard({ writeText: async () => Promise.reject(new Error("denied")) }, "x"),
+    await tryWriteClipboard(
+      { writeText: async () => Promise.reject(new Error("denied")) },
+      "x",
+    ),
     false,
   );
   assert.equal(await tryWriteClipboard(null, "x"), false);
@@ -111,7 +126,11 @@ test("the final owner cannot demote, leave, or be removed", () => {
       isSelf: true,
       ownerCount: 1,
     }),
-    { canChangeRole: false, canRemove: false, availableRoles: ["owner", "admin", "member"] },
+    {
+      canChangeRole: false,
+      canRemove: false,
+      availableRoles: ["owner", "admin", "member"],
+    },
   );
 });
 

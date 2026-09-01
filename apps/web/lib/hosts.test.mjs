@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   APP_CSP,
+  OPS_CSP,
   applyHostHeaders,
   appOrigin,
   classifyHost,
@@ -32,6 +33,12 @@ describe("applyHostHeaders", () => {
     const response = applyHostHeaders(new Response("hub"), "app");
     assert.equal(response.headers.get("content-security-policy"), APP_CSP);
   });
+
+  it("uses a stricter external-asset-only policy for Ops", () => {
+    const response = applyHostHeaders(new Response("ops"), "ops");
+    assert.equal(response.headers.get("content-security-policy"), OPS_CSP);
+    assert.doesNotMatch(OPS_CSP, /unsafe-inline/);
+  });
 });
 
 describe("classifyHost", () => {
@@ -51,6 +58,12 @@ describe("classifyHost", () => {
     assert.equal(classifyHost("abc.pages.dev", env), "app");
     assert.equal(classifyHost("127.0.0.1", env), "app");
     assert.equal(classifyHost("localhost", env), "app");
+  });
+
+  it("pins every host to Ops in the isolated Ops Pages project", () => {
+    const e = { ZEROS_SURFACE: "ops" };
+    assert.equal(classifyHost("ops-alpha.zeros.build", e), "ops");
+    assert.equal(classifyHost("preview.pages.dev", e), "ops");
   });
 
   it("honors MARKETING_HOSTS override for local marketing preview", () => {

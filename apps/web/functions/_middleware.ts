@@ -25,6 +25,7 @@ import type { Env } from "../lib/session";
  *  a bare static hit (observed as 308→/ for /changelog under wrangler pages
  *  dev). Anything NOT listed here gets the static 404.html. */
 const MARKETING_SPA_PATHS = new Set(["/changelog", "/privacy", "/terms"]);
+const OPS_STATIC_PATHS = new Set(["/ops.css", "/ops.js"]);
 
 function withHeaders(res: Response, kind: HostKind): Response {
   return applyHostHeaders(res, kind);
@@ -65,6 +66,20 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     // Do NOT call next() — that would run functions/index.ts on `/`.
     const res = await fetchMarketingAsset(env, request, url);
     return withHeaders(res, kind);
+  }
+
+  if (kind === "ops") {
+    const allowed =
+      url.pathname === "/" ||
+      url.pathname === "/robots.txt" ||
+      url.pathname.startsWith("/auth/") ||
+      url.pathname.startsWith("/api/v1/ops/") ||
+      url.pathname.startsWith("/api/v1/internal/account-recoveries/") ||
+      OPS_STATIC_PATHS.has(url.pathname);
+    if (!allowed) {
+      return withHeaders(new Response("Not found", { status: 404 }), kind);
+    }
+    return withHeaders(await next(), kind);
   }
 
   // App host: run the matching Functions route (or static fallback).

@@ -51,6 +51,16 @@ export declare function accountRecoveryPage(input: {
   recoveryCode: string | null;
   signOutHref: string;
 }): string;
+export declare function accountDeletionPage(input: {
+  session: SessionData;
+  deletion: {
+    id?: unknown;
+    recoveryCode?: unknown;
+    purgeAfter?: unknown;
+    state?: unknown;
+  };
+  signOutHref: string;
+}): string;
 export declare function dashboardPage(input: {
   session: SessionData;
   me: DashboardMe | null;
