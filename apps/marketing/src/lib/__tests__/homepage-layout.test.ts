@@ -92,12 +92,15 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/DESIGN_ICONS/);
     expect(scramble).toMatch(/DESIGN_MARKS/);
     expect(scramble).toMatch(/SCRAMBLE_PALETTE/);
+    expect(scramble).toMatch(/align-horizontal-space-around/);
+    expect(scramble).toMatch(/panels-top-left/);
     expect(scramble).toMatch(/data-hero-scramble-icon/);
+    expect(scramble).not.toMatch(/data-hero-scramble-icon="arrow"/);
+    expect(scramble).not.toMatch(/data-hero-scramble-icon="crop"/);
     expect(scramble).toMatch(/#68E098/);
     expect(scramble).toMatch(/#B838F0/);
     expect(scramble).not.toMatch(/DESIGN_ICON_MAX/);
     expect(scramble).not.toMatch(/DESIGN_TOKENS/);
-    expect(scramble).not.toMatch(/components/);
     expect(scramble).not.toMatch(/CODE_ICONS/);
     expect(scramble).not.toMatch(/ﾊ/);
   });

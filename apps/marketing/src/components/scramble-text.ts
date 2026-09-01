@@ -15,57 +15,90 @@ export const SCRAMBLE_PALETTE = [
 ] as const
 
 export const DESIGN_MARKS = [
-  'arrow',
-  'bars',
-  'layout',
-  'swatch',
-  'sync',
-  'media',
-  'select',
-  'crop',
+  'frame',
+  'component',
+  'pentagon',
+  'tangent',
+  'triangle',
+  'circle',
+  'square',
+  'diamond',
+  'align-horizontal-space-around',
+  'palette',
+  'panels-top-left',
 ] as const
 
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
-const mark = (name: DesignMark, inner: string) =>
-  `<svg class="hero-scramble-icon" data-hero-scramble-icon="${name}" viewBox="0 0 16 16" aria-hidden="true" focusable="false">${inner}</svg>`
+const ICON_COLORS = [
+  ...SCRAMBLE_PALETTE,
+  '#5AA8FF',
+  '#B49030',
+  '#C04040',
+] as const
+
+const lucide = (name: DesignMark, color: string, inner: string) =>
+  `<svg class="hero-scramble-icon" data-hero-scramble-icon="${name}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${inner}</svg>`
 
 /**
- * Eight unique filled marks, one hue family each. Hardcoded on purpose:
- * the marketing scramble is allowed to leave Neutral Dark tokens.
+ * Lucide design marks only (ISC, same drawings as lucide-react).
+ * One hardcoded hue each; marketing scramble is allowed off tokens.
  */
 export const DESIGN_ICONS = [
-  mark(
-    'arrow',
-    '<rect x="0.7" y="6.15" width="5.3" height="3.7" rx="1.85" fill="#246048"/><path d="M7.2 3.15c.18-1.02 1.52-1.18 2.18-.4l5.2 4.42c.72.6.72 1.66 0 2.26l-5.2 4.42c-.66.78-2 .62-2.18-.4V3.15Z" fill="#68E098"/>',
+  lucide(
+    'frame',
+    ICON_COLORS[0],
+    '<line x1="22" x2="2" y1="6" y2="6"/><line x1="22" x2="2" y1="18" y2="18"/><line x1="6" x2="6" y1="2" y2="22"/><line x1="18" x2="18" y1="2" y2="22"/>',
   ),
-  mark(
-    'bars',
-    '<rect x="1.6" y="2.15" width="12.6" height="2.7" rx="1.35" fill="#F0C840"/><rect x="1.6" y="6.65" width="7.4" height="2.7" rx="1.35" fill="#B49030"/><rect x="1.6" y="11.15" width="10.2" height="2.7" rx="1.35" fill="#6C5418"/>',
+  lucide(
+    'component',
+    ICON_COLORS[1],
+    '<path d="M15.536 11.293a1 1 0 0 0 0 1.414l2.376 2.377a1 1 0 0 0 1.414 0l2.377-2.377a1 1 0 0 0 0-1.414l-2.377-2.377a1 1 0 0 0-1.414 0z"/><path d="M2.297 11.293a1 1 0 0 0 0 1.414l2.377 2.377a1 1 0 0 0 1.414 0l2.377-2.377a1 1 0 0 0 0-1.414L6.088 8.916a1 1 0 0 0-1.414 0z"/><path d="M8.916 17.912a1 1 0 0 0 0 1.415l2.377 2.376a1 1 0 0 0 1.414 0l2.377-2.376a1 1 0 0 0 0-1.415l-2.377-2.376a1 1 0 0 0-1.414 0z"/><path d="M8.916 4.674a1 1 0 0 0 0 1.414l2.377 2.376a1 1 0 0 0 1.414 0l2.377-2.376a1 1 0 0 0 0-1.414l-2.377-2.377a1 1 0 0 0-1.414 0z"/>',
   ),
-  mark(
-    'layout',
-    '<rect x="1.45" y="1.45" width="7.5" height="7.5" rx="1.7" fill="#E87038"/><rect x="9.7" y="1.45" width="4.85" height="7.5" rx="1.7" fill="#B44830"/><rect x="1.45" y="9.8" width="13.1" height="4.75" rx="1.7" fill="#6C3024"/>',
+  lucide(
+    'pentagon',
+    ICON_COLORS[2],
+    '<path d="M10.83 2.38a2 2 0 0 1 2.34 0l8 5.74a2 2 0 0 1 .73 2.25l-3.04 9.26a2 2 0 0 1-1.9 1.37H7.04a2 2 0 0 1-1.9-1.37L2.1 10.37a2 2 0 0 1 .73-2.25z"/>',
   ),
-  mark(
-    'swatch',
-    '<rect x="8.35" y="1.7" width="5.1" height="12.1" rx="2.4" transform="rotate(18 10.9 7.75)" fill="#601818"/><rect x="6.55" y="1.55" width="5.1" height="12.1" rx="2.4" transform="rotate(8 9.1 7.6)" fill="#C04040"/><rect x="2.35" y="1.55" width="5.35" height="12.3" rx="2.5" fill="#E84848"/><circle cx="5.05" cy="11.55" r="1.2" fill="#121212"/>',
+  lucide(
+    'tangent',
+    ICON_COLORS[3],
+    '<circle cx="17" cy="4" r="2"/><path d="M15.59 5.41 5.41 15.59"/><circle cx="4" cy="17" r="2"/><path d="M12 22s-4-9-1.5-11.5S22 12 22 12"/>',
   ),
-  mark(
-    'sync',
-    '<rect x="1.15" y="1.2" width="5.15" height="5.15" rx="1.45" fill="#E840A8"/><rect x="9.7" y="9.65" width="5.15" height="5.15" rx="1.45" fill="#E840A8"/><path d="M7.7 2.35h2.55c2.55 0 4.35 2.05 4.35 4.85" fill="none" stroke="#842460" stroke-width="2.45" stroke-linecap="round"/><path d="M8.3 13.65H5.75c-2.55 0-4.35-2.05-4.35-4.85" fill="none" stroke="#842460" stroke-width="2.45" stroke-linecap="round"/>',
+  lucide(
+    'triangle',
+    ICON_COLORS[4],
+    '<path d="M13.73 4a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>',
   ),
-  mark(
-    'media',
-    '<circle cx="4.15" cy="3.85" r="1.65" fill="#54186C"/><rect x="2.2" y="6.15" width="4.35" height="4.35" rx="1.2" fill="#54186C"/><path d="M6.05 13.55h8.05L10.35 3.7Z" fill="#B838F0"/>',
+  lucide(
+    'circle',
+    ICON_COLORS[5],
+    '<circle cx="12" cy="12" r="10"/>',
   ),
-  mark(
-    'select',
-    '<rect x="1.2" y="1.2" width="5.35" height="5.35" rx="1.45" fill="#3888F0"/><rect x="9.45" y="1.2" width="5.35" height="5.35" rx="1.45" fill="#2460B4"/><rect x="1.2" y="9.45" width="5.35" height="5.35" rx="1.45" fill="#183C6C"/><path d="M9.15 14.45V8.55l5.55 5.35Z" fill="#5AA8FF"/>',
+  lucide(
+    'square',
+    ICON_COLORS[6],
+    '<rect width="18" height="18" x="3" y="3" rx="2"/>',
   ),
-  mark(
-    'crop',
-    '<path d="M2.15 2.2h8.7c.8 0 1.4.6 1.4 1.4s-.6 1.4-1.4 1.4H4.95v8.45c0 .8-.6 1.4-1.4 1.4s-1.4-.6-1.4-1.4V2.2Z" fill="#E8E8E8"/><path d="M13.85 13.8H5.15c-.8 0-1.4-.6-1.4-1.4s.6-1.4 1.4-1.4h6.9V3.55c0-.8.6-1.4 1.4-1.4s1.4.6 1.4 1.4v10.25Z" fill="#808088"/>',
+  lucide(
+    'diamond',
+    ICON_COLORS[7],
+    '<path d="M2.7 10.3a2.41 2.41 0 0 0 0 3.41l7.59 7.59a2.41 2.41 0 0 0 3.41 0l7.59-7.59a2.41 2.41 0 0 0 0-3.41l-7.59-7.59a2.41 2.41 0 0 0-3.41 0Z"/>',
+  ),
+  lucide(
+    'align-horizontal-space-around',
+    ICON_COLORS[8],
+    '<rect width="6" height="10" x="9" y="7" rx="2"/><path d="M4 22V2"/><path d="M20 22V2"/>',
+  ),
+  lucide(
+    'palette',
+    ICON_COLORS[9],
+    `<circle cx="13.5" cy="6.5" r=".5" fill="${ICON_COLORS[9]}"/><circle cx="17.5" cy="10.5" r=".5" fill="${ICON_COLORS[9]}"/><circle cx="8.5" cy="7.5" r=".5" fill="${ICON_COLORS[9]}"/><circle cx="6.5" cy="12.5" r=".5" fill="${ICON_COLORS[9]}"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>`,
+  ),
+  lucide(
+    'panels-top-left',
+    ICON_COLORS[10],
+    '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/>',
   ),
 ] as const
 
