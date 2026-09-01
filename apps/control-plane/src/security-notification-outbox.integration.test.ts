@@ -61,7 +61,9 @@ d("security notification outbox", () => {
 
   it("claims each message once across workers and publishes a deterministic reference", async () => {
     const id = await enqueue();
-    const send = vi.fn(async () => {});
+    const send = vi.fn(async () => ({
+      providerMessageId: "resend-message-id",
+    }));
     const first = new SecurityNotificationProcessor(pool, send, {
       workerId: "security:first",
     });
@@ -76,12 +78,13 @@ d("security notification outbox", () => {
       expect.objectContaining({
         id,
         destinationEmail: "recipient@example.com",
-        clientReference: `zeros-security:${id}`,
+        idempotencyKey: `zeros-security:${id}`,
       }),
     );
     const row = await pool.query(
       `SELECT state, attempt_count, sent_at IS NOT NULL AS sent,
-              lease_owner, lease_expires_at
+              lease_owner, lease_expires_at, delivery_provider,
+              provider_message_id
        FROM security_notification_outbox WHERE id = $1`,
       [id],
     );
@@ -91,7 +94,17 @@ d("security notification outbox", () => {
       sent: true,
       lease_owner: null,
       lease_expires_at: null,
+      delivery_provider: "resend",
+      provider_message_id: "resend-message-id",
     });
+    await expect(
+      pool.query(
+        `UPDATE security_notification_outbox
+         SET provider_message_id = 'rewritten-message-id'
+         WHERE id = $1`,
+        [id],
+      ),
+    ).rejects.toThrow(/provider message ID is immutable/i);
   });
 
   it("retries transient delivery and dead-letters a permanent refusal", async () => {
@@ -106,6 +119,7 @@ d("security notification outbox", () => {
             true,
           );
         }
+        return { providerMessageId: "resend-retry-id" };
       },
       { workerId: "security:retry" },
     );
@@ -150,6 +164,33 @@ d("security notification outbox", () => {
         },
       ].sort((left, right) => left.id.localeCompare(right.id)),
     );
+  });
+
+  it("never claims a legacy-provider row even if it is requeued", async () => {
+    const inserted = await pool.query<{ id: string }>(
+      `INSERT INTO security_notification_outbox (
+         user_id, destination_email, template, delivery_provider
+       ) VALUES ($1, 'legacy@example.com', 'sessions_revoked',
+                 'legacy_zeptomail')
+       RETURNING id`,
+      [userId],
+    );
+    const send = vi.fn(async () => ({ providerMessageId: "unexpected" }));
+    const processor = new SecurityNotificationProcessor(pool, send, {
+      workerId: "security:provider-boundary",
+    });
+
+    expect(await processor.tick()).toBe(0);
+    expect(send).not.toHaveBeenCalled();
+    expect(
+      (
+        await pool.query(
+          `SELECT state, attempt_count
+           FROM security_notification_outbox WHERE id = $1`,
+          [inserted.rows[0]!.id],
+        )
+      ).rows[0],
+    ).toEqual({ state: "queued", attempt_count: 0 });
   });
 
   it("renders fixed security copy and never reflects arbitrary payload HTML", () => {

@@ -56,13 +56,14 @@ export function startWorkOSSyncRuntime(options: WorkOSSyncRuntimeOptions): {
     options.pool,
     async (delivery) => {
       try {
-        await sendEmailStrict(
+        const receipt = await sendEmailStrict(
           options.email,
           delivery.destinationEmail,
           delivery.subject,
           delivery.html,
-          { clientReference: delivery.clientReference },
+          { idempotencyKey: delivery.idempotencyKey },
         );
+        return { providerMessageId: receipt.messageId };
       } catch (error) {
         if (error instanceof EmailDeliveryError) {
           throw new SecurityNotificationDeliveryError(
@@ -122,7 +123,10 @@ export function startWorkOSSyncRuntime(options: WorkOSSyncRuntimeOptions): {
     notificationLoop,
     options.notificationIntervalMs ?? 5_000,
     "security notifications",
-    () => notifications.tick(20),
+    // Resend rate-limits at the team boundary across every API key. Keep this
+    // worker's burst deliberately small; durable retries absorb shared-team
+    // contention without delaying authentication requests.
+    () => notifications.tick(4),
   );
   schedule(
     deletionLoop,

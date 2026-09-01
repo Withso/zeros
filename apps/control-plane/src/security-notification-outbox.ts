@@ -21,12 +21,16 @@ export type SecurityNotificationDelivery = {
   template: SecurityNotificationTemplate;
   subject: string;
   html: string;
-  clientReference: string;
+  idempotencyKey: string;
+};
+
+export type SecurityNotificationReceipt = {
+  providerMessageId: string;
 };
 
 export type SecurityNotificationSender = (
   delivery: SecurityNotificationDelivery,
-) => Promise<void>;
+) => Promise<SecurityNotificationReceipt>;
 
 const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const DELETION_CODE_RE = /^ZD-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
@@ -218,11 +222,11 @@ export class SecurityNotificationProcessor {
         `WITH candidate AS (
            SELECT id
            FROM security_notification_outbox
-           WHERE (
-             state = 'queued' AND next_attempt_at <= now()
-           ) OR (
-             state = 'sending' AND lease_expires_at <= now()
-           )
+           WHERE delivery_provider = 'resend'
+             AND (
+               (state = 'queued' AND next_attempt_at <= now())
+               OR (state = 'sending' AND lease_expires_at <= now())
+             )
            ORDER BY next_attempt_at, created_at, id
            LIMIT 1
            FOR UPDATE SKIP LOCKED
@@ -258,21 +262,22 @@ export class SecurityNotificationProcessor {
       notification.payload,
     );
     try {
-      await this.send({
+      const receipt = await this.send({
         id: notification.id,
         destinationEmail: notification.destinationEmail,
         template: notification.template,
         subject: content.subject,
         html: content.html,
-        clientReference: `zeros-security:${notification.id}`,
+        idempotencyKey: `zeros-security:${notification.id}`,
       });
       await withSystemTx(this.pool, (tx) =>
         tx.query(
           `UPDATE security_notification_outbox
            SET state = 'sent', sent_at = now(), lease_owner = NULL,
-               lease_expires_at = NULL, last_error_code = NULL
+               lease_expires_at = NULL, last_error_code = NULL,
+               provider_message_id = $3
            WHERE id = $1 AND state = 'sending' AND lease_owner = $2`,
-          [notification.id, this.workerId],
+          [notification.id, this.workerId, receipt.providerMessageId],
         ),
       );
     } catch (error) {
