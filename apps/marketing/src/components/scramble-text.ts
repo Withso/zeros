@@ -30,6 +30,9 @@ export const DESIGN_MARKS = [
 
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
+/** developers → designers: half the word, never a 10-wide icon ticker. */
+export const DESIGN_VISIBLE = 5
+
 const ICON_COLORS = [
   ...SCRAMBLE_PALETTE,
   '#5AA8FF',
@@ -112,7 +115,7 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers — only the listed Lucide marks, no other glyphs. */
+/** developers → designers — 5 unique Lucide stacks, unused marks ghost on top. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
   chars: '',
   icons: DESIGN_ICONS,
@@ -262,19 +265,28 @@ function dealDistinct(items: readonly string[], count: number): string[] {
   return out
 }
 
-function fillIconCells(length: number, icons: readonly string[]): ScrambleCell[] {
-  if (length <= 0 || icons.length === 0) return []
-  const htmls =
-    length <= icons.length ? shuffle(icons).slice(0, length) : dealDistinct(icons, length)
-  return htmls.map((html) => ({ kind: 'icon' as const, html }))
+function markOverlay(html: string): string {
+  return html.replace(
+    'class="hero-scramble-icon"',
+    'class="hero-scramble-icon is-overlay"',
+  )
 }
 
-function unusedIcons(icons: readonly string[], used: readonly ScrambleCell[]): string[] {
-  const taken = new Set(
-    used.filter((cell) => cell.kind === 'icon').map((cell) => cell.html),
-  )
-  const leftover = icons.filter((html) => !taken.has(html))
-  return leftover.length > 0 ? leftover : [...icons]
+function wrapStack(front: string, overlay?: string): string {
+  const under = overlay ? markOverlay(overlay) : ''
+  return `<span class="hero-scramble-stack">${under}${front}</span>`
+}
+
+function fillIconCells(length: number, icons: readonly string[]): ScrambleCell[] {
+  if (length <= 0 || icons.length === 0) return []
+  const count = Math.min(DESIGN_VISIBLE, length, icons.length)
+  const shuffled = shuffle(icons)
+  const fronts = shuffled.slice(0, count)
+  const rest = shuffled.slice(count)
+  return fronts.map((front, i) => ({
+    kind: 'icon' as const,
+    html: wrapStack(front, rest[i]),
+  }))
 }
 
 export function fillScrambleCells(length: number, set: ScrambleSet): ScrambleCell[] {
@@ -386,7 +398,10 @@ export function playScramble(
   const endLen = text.length
   const maxLen = Math.max(startLen, endLen)
   const refreshMs = Math.max(28, 40 / Math.max(0.4, speed))
-  let slots = fillScrambleCells(maxLen, set)
+  let slots = fillScrambleCells(
+    set.icons && set.icons.length > 0 ? DESIGN_VISIBLE : maxLen,
+    set,
+  )
   let lastRefresh = -Infinity
   let lastHtml = ''
   const state = { t: 0 }
@@ -402,22 +417,35 @@ export function playScramble(
       if (now - lastRefresh >= refreshMs) {
         lastRefresh = now
         if (set.icons && set.icons.length > 0) {
-          let row = slots.slice(0, len)
-          if (row.length < len) {
-            row = [...row, ...fillIconCells(len - row.length, unusedIcons(set.icons, row))]
+          if (slots.length !== DESIGN_VISIBLE) {
+            slots = fillScrambleCells(DESIGN_VISIBLE, set)
           }
-          slots = rotateScrambleIcons(row, 1)
+          slots = rotateScrambleIcons(slots, 1)
         } else {
           slots = fillScrambleCells(len, set)
         }
       }
+      const kinds = Array.from({ length: len }, (_, i) =>
+        scrambleGlyphKind(i, visualT, maxLen),
+      )
+      const scrambleCount = kinds.filter((kind) => kind === 'scramble').length
+      const iconBudget =
+        set.icons && set.icons.length > 0
+          ? Math.min(DESIGN_VISIBLE, slots.length, scrambleCount)
+          : 0
       const glyphs: Glyph[] = []
+      let iconsEmitted = 0
       for (let i = 0; i < len; i += 1) {
-        const kind = scrambleGlyphKind(i, visualT, maxLen)
+        const kind = kinds[i]!
         if (kind === 'from' && i < from.length) {
           glyphs.push({ kind: 'from', ch: from[i]! })
         } else if (kind === 'to' && i < text.length) {
           glyphs.push({ kind: 'to', ch: text[i]! })
+        } else if (iconBudget > 0) {
+          if (iconsEmitted < iconBudget) {
+            glyphs.push(cellToGlyph(slots[iconsEmitted]!))
+            iconsEmitted += 1
+          }
         } else {
           glyphs.push(cellToGlyph(slots[i] ?? pickScrambleCell(set)))
         }

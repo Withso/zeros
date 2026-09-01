@@ -55,6 +55,32 @@
   vertical-align: -0.08em;
 }
 
+/* Five design stacks: unused catalog marks sit ghosted on top of the fronts. */
+.hero-scramble-stack {
+  position: relative;
+  display: inline-block;
+  width: 0.9em;
+  height: 0.9em;
+  margin: 0 0.05em;
+  overflow: visible;
+  vertical-align: -0.12em;
+}
+
+.hero-scramble-stack .hero-scramble-icon {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  vertical-align: 0;
+}
+
+.hero-scramble-stack .hero-scramble-icon.is-overlay {
+  opacity: 0.42;
+  transform: translate(0.2em, -0.16em) rotate(14deg) scale(0.78);
+  transform-origin: center;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hero-role-word {
     color: inherit !important;

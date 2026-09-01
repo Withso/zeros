@@ -4,6 +4,7 @@ import {
   DESIGN_ICONS,
   DESIGN_MARKS,
   DESIGN_SCRAMBLE,
+  DESIGN_VISIBLE,
   escapeHtml,
   fillScrambleCells,
   MATRIX_SCRAMBLE,
@@ -41,8 +42,15 @@ function svgCount(html: string): number {
   return html.match(/<svg/g)?.length ?? 0;
 }
 
+function iconNames(html: string): string[] {
+  return [...html.matchAll(/data-hero-scramble-icon="([^"]+)"/g)].map(
+    (match) => match[1] ?? "",
+  );
+}
+
 function iconName(html: string): string {
-  return html.match(/data-hero-scramble-icon="([^"]+)"/)?.[1] ?? "";
+  const names = iconNames(html);
+  return names[names.length - 1] ?? "";
 }
 
 describe("hero scramble fill", () => {
@@ -91,6 +99,7 @@ describe("hero scramble fill", () => {
       "palette",
       "panels-top-left",
     ]);
+    expect(DESIGN_VISIBLE).toBe(5);
     expect(DESIGN_ICONS.length).toBe(11);
     expect(new Set(DESIGN_ICONS).size).toBe(11);
     expect(DESIGN_SCRAMBLE.icons).toBe(DESIGN_ICONS);
@@ -131,22 +140,30 @@ describe("hero scramble fill", () => {
     expect(catalog.split("<svg ").length - 1).toBe(DESIGN_ICONS.length);
 
     const full = fillScrambleCells(DESIGN_ICONS.length, DESIGN_SCRAMBLE);
+    expect(full).toHaveLength(DESIGN_VISIBLE);
     expect(full.every((cell) => cell.kind === "icon")).toBe(true);
-    expect(full.map((cell) => iconName(cell.html)).sort()).toEqual(
-      [...DESIGN_MARKS].sort(),
-    );
 
-    for (let i = 0; i < 40; i += 1) {
+    const seen = new Set<string>();
+    for (let i = 0; i < 80; i += 1) {
       const cells = fillScrambleCells(10, DESIGN_SCRAMBLE);
-      expect(cells).toHaveLength(10);
+      expect(cells).toHaveLength(DESIGN_VISIBLE);
       expect(cells.every((cell) => cell.kind === "icon")).toBe(true);
-      const icons = cells.filter((cell) => cell.kind === "icon");
-      const names = icons.map((cell) => iconName(cell.html));
-      expect(new Set(icons.map((cell) => cell.html)).size).toBe(icons.length);
-      expect(new Set(names).size).toBe(icons.length);
-      expect(names).toHaveLength(10);
-      for (const name of names) {
+      const fronts = cells.map((cell) => iconName(cell.html));
+      const stacked = cells.flatMap((cell) => iconNames(cell.html));
+      expect(new Set(cells.map((cell) => cell.html)).size).toBe(cells.length);
+      expect(new Set(fronts).size).toBe(DESIGN_VISIBLE);
+      expect(fronts).toHaveLength(DESIGN_VISIBLE);
+      expect(stacked.length).toBe(DESIGN_VISIBLE * 2);
+      expect(new Set(stacked).size).toBe(stacked.length);
+      for (const name of stacked) {
         expect(DESIGN_MARKS).toContain(name);
+      }
+      for (const cell of cells) {
+        const names = iconNames(cell.html);
+        expect(names).toHaveLength(2);
+        expect(names[0]).not.toBe(names[1]);
+        expect(cell.html).toMatch(/hero-scramble-stack/);
+        expect(cell.html).toMatch(/is-overlay/);
       }
       for (let j = 1; j < cells.length; j += 1) {
         const prev = cells[j - 1]!;
@@ -154,8 +171,10 @@ describe("hero scramble fill", () => {
         expect(prev.html).not.toBe(next.html);
         expect(iconName(prev.html)).not.toBe(iconName(next.html));
       }
+      for (const name of stacked) seen.add(name);
       const html = scrambleTail(10, DESIGN_SCRAMBLE);
-      expect(svgCount(html)).toBe(10);
+      expect(html.match(/hero-scramble-stack/g)?.length).toBe(DESIGN_VISIBLE);
+      expect(svgCount(html)).toBe(DESIGN_VISIBLE * 2);
       expect(html).not.toMatch(/hero-scramble-symbol/);
       expect(visibleText(html)).toBe("");
       expect(visibleText(html)).not.toMatch(ROLE_WORDS);
@@ -163,6 +182,7 @@ describe("hero scramble fill", () => {
       expect(visibleText(html)).not.toMatch(CJK_OR_KATAKANA);
       expect(visibleText(html)).not.toMatch(/[\#|+]/);
     }
+    expect(seen.size).toBe(DESIGN_ICONS.length);
   });
 
   it("slides design marks instead of reprinting the same set in place", () => {
@@ -176,7 +196,7 @@ describe("hero scramble fill", () => {
           .map((cell) => iconName(cell.html));
       const from = names(cells);
       const to = names(rotated);
-      expect(from.length).toBe(10);
+      expect(from.length).toBe(DESIGN_VISIBLE);
       expect(cells.every((cell) => cell.kind === "icon")).toBe(true);
       expect(new Set(from).size).toBe(from.length);
       expect(new Set(to).size).toBe(to.length);

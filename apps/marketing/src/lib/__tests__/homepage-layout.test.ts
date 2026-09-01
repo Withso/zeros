@@ -97,7 +97,11 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/data-hero-scramble-icon/);
     expect(scramble).toMatch(/chars: ''/);
     expect(scramble).not.toMatch(/chars: '#\|\+'/);
-    expect(cycle).toMatch(/hero-role\.css\?v=lucide-only/);
+    expect(scramble).toMatch(/DESIGN_VISIBLE = 5/);
+    expect(cycle).toMatch(/hero-role\.css\?v=lucide-five/);
+    expect(css).toMatch(/hero-scramble-stack/);
+    expect(css).toMatch(/is-overlay/);
+    expect(css).toMatch(/width: 0\.9em/);
     expect(scramble).not.toMatch(/data-hero-scramble-icon="arrow"/);
     expect(scramble).not.toMatch(/data-hero-scramble-icon="crop"/);
     expect(scramble).toMatch(/#68E098/);
