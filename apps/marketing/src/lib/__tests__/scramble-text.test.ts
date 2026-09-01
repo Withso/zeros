@@ -9,6 +9,7 @@ import {
   MATRIX_SCRAMBLE,
   renderGlyphRun,
   rotateScrambleIcons,
+  SCRAMBLE_PALETTE,
   scrambleFill,
   scrambleGlyphKind,
   scrambleTail,
@@ -78,27 +79,43 @@ describe("hero scramble fill", () => {
 
   it("varies the designers scramble across distinct design-tool marks", () => {
     expect([...DESIGN_MARKS]).toEqual([
-      "frame",
-      "component",
-      "align",
-      "rect",
-      "circle",
-      "triangle",
+      "arrow",
+      "bars",
+      "layout",
+      "swatch",
+      "sync",
+      "media",
+      "select",
+      "crop",
     ]);
-    expect(DESIGN_ICONS.length).toBe(6);
-    expect(new Set(DESIGN_ICONS).size).toBe(6);
+    expect(DESIGN_ICONS.length).toBe(8);
+    expect(new Set(DESIGN_ICONS).size).toBe(8);
     expect(DESIGN_SCRAMBLE.icons).toBe(DESIGN_ICONS);
     expect(DESIGN_SCRAMBLE.chars).toMatch(/^[\#|+]+$/);
     expect(DESIGN_SCRAMBLE.chars).not.toMatch(ROLE_WORDS);
     expect(DESIGN_SCRAMBLE.chars).not.toMatch(LONG_DESIGN_WORDS);
+    expect([...SCRAMBLE_PALETTE]).toEqual([
+      "#68E098",
+      "#F0C840",
+      "#E87038",
+      "#E84848",
+      "#E840A8",
+      "#B838F0",
+      "#3888F0",
+      "#E8E8E8",
+    ]);
 
     const catalog = DESIGN_ICONS.join("");
     expect(catalog).toMatch(/hero-scramble-icon/);
     expect(catalog).toMatch(/<circle /);
     expect(catalog).toMatch(/<rect /);
     expect(catalog).not.toMatch(/<ellipse /);
+    expect(catalog).not.toMatch(/currentColor/);
     for (const name of DESIGN_MARKS) {
       expect(catalog).toMatch(`data-hero-scramble-icon="${name}"`);
+    }
+    for (const color of SCRAMBLE_PALETTE) {
+      expect(catalog.toUpperCase()).toContain(color);
     }
     expect(catalog.split("<svg ").length - 1).toBe(DESIGN_ICONS.length);
 
@@ -108,14 +125,16 @@ describe("hero scramble fill", () => {
       expect(cells).toHaveLength(10);
       const icons = cells.filter((cell) => cell.kind === "icon");
       const chars = cells.filter((cell) => cell.kind === "char");
-      expect(icons.length).toBeGreaterThan(chars.length);
-      expect(icons.length).toBeGreaterThanOrEqual(6);
-      expect(new Set(icons.map((cell) => cell.html)).size).toBeGreaterThanOrEqual(
-        5,
+      expect(icons.length).toBeLessThan(chars.length);
+      expect(icons.length).toBeGreaterThanOrEqual(3);
+      expect(icons.length).toBeLessThanOrEqual(4);
+      expect(new Set(icons.map((cell) => cell.html)).size).toBe(icons.length);
+      expect(new Set(icons.map((cell) => iconName(cell.html))).size).toBe(
+        icons.length,
       );
-      expect(
-        new Set(icons.map((cell) => iconName(cell.html))).size,
-      ).toBeGreaterThanOrEqual(5);
+      for (const cell of chars) {
+        expect(SCRAMBLE_PALETTE).toContain(cell.color);
+      }
       for (let j = 1; j < cells.length; j += 1) {
         const prev = cells[j - 1]!;
         const next = cells[j]!;
@@ -126,7 +145,8 @@ describe("hero scramble fill", () => {
       }
       for (const cell of icons) seen.add(cell.html);
       const html = scrambleTail(10, DESIGN_SCRAMBLE);
-      expect(svgCount(html)).toBeGreaterThanOrEqual(6);
+      expect(svgCount(html)).toBeGreaterThanOrEqual(3);
+      expect(svgCount(html)).toBeLessThanOrEqual(4);
       expect(visibleText(html)).not.toMatch(ROLE_WORDS);
       expect(visibleText(html)).not.toMatch(LONG_DESIGN_WORDS);
       expect(visibleText(html)).not.toMatch(CJK_OR_KATAKANA);
@@ -145,7 +165,8 @@ describe("hero scramble fill", () => {
           .map((cell) => iconName(cell.html));
       const from = names(cells);
       const to = names(rotated);
-      expect(from.length).toBeGreaterThanOrEqual(6);
+      expect(from.length).toBeGreaterThanOrEqual(3);
+      expect(from.length).toBeLessThanOrEqual(4);
       expect(to).toHaveLength(from.length);
       expect([...to].sort()).toEqual([...from].sort());
       if (to.join() !== from.join()) changed += 1;
@@ -168,6 +189,15 @@ describe("hero scramble fill", () => {
     for (const html of samples) {
       expect(html).not.toMatch(/hero-scramble-icon/);
       expect(html).not.toMatch(/<svg/i);
+      expect(html).toMatch(/style="color:#/);
+      const colors = [
+        ...html.matchAll(/style="color:(#[0-9A-Fa-f]{6})"/g),
+      ].map((match) => match[1]);
+      expect(colors.length).toBeGreaterThan(0);
+      expect(new Set(colors).size).toBeGreaterThan(1);
+      for (const color of colors) {
+        expect(SCRAMBLE_PALETTE).toContain(color);
+      }
       expect(visibleText(html)).not.toMatch(ROLE_WORDS);
       expect(visibleText(html)).not.toMatch(CJK_OR_KATAKANA);
     }
@@ -196,11 +226,11 @@ describe("hero scramble fill", () => {
     const html = renderGlyphRun([
       { kind: "to", ch: "d" },
       { kind: "to", ch: "e" },
-      { kind: "scramble", ch: "#" },
+      { kind: "scramble", ch: "#", color: "#68E098" },
       { kind: "icon", html: '<svg class="hero-scramble-icon"></svg>' },
     ]);
     expect(html).toBe(
-      '<span class="hero-scramble-text hero-role-revealed">de</span><span class="hero-scramble-symbol">#</span><svg class="hero-scramble-icon"></svg>',
+      '<span class="hero-scramble-text hero-role-revealed">de</span><span class="hero-scramble-symbol" style="color:#68E098">#</span><svg class="hero-scramble-icon"></svg>',
     );
   });
 });
