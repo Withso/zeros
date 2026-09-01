@@ -574,10 +574,23 @@ export class WorkOSCommandProcessor {
       const payload = SessionsPayload.parse(command.payload);
       let after: string | undefined;
       for (let pageNumber = 0; pageNumber < 100; pageNumber += 1) {
-        const page = await this.provider.listSessions(payload.workosUserId, {
-          limit: 100,
-          ...(after ? { after } : {}),
-        });
+        let page: Awaited<
+          ReturnType<WorkOSManagementProvider["listSessions"]>
+        >;
+        try {
+          page = await this.provider.listSessions(payload.workosUserId, {
+            limit: 100,
+            ...(after ? { after } : {}),
+          });
+        } catch (error) {
+          // Provider-user deletion can win before this ordered command is
+          // observed (for example, a WorkOS administrator deletes the user
+          // directly). An absent user has no remaining provider sessions, so
+          // that state already satisfies revoke-all and must not poison the
+          // outbox with a permanent dead letter.
+          if (safeError(error).status === 404) return { kind: "void" };
+          throw error;
+        }
         for (const sessionId of sessionsEligibleForRevocation(
           page.data,
           payload.createdBefore,

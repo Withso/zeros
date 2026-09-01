@@ -33,6 +33,7 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
     status: string;
     createdAt: string;
   }> = [];
+  readonly missingSessionUserIds = new Set<string>();
   readonly deletedUsers: string[] = [];
   lastInvitationOptions: {
     organizationId: string;
@@ -289,6 +290,14 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
     listMetadata: { after: string | null };
   }> {
     this.calls.push(`session.list:${subject}`);
+    if (this.missingSessionUserIds.has(subject)) {
+      const missing = new Error("WorkOS user not found") as Error & {
+        status: number;
+      };
+      missing.name = "NotFoundException";
+      missing.status = 404;
+      throw missing;
+    }
     const offset = options.after ? Number(options.after) : 0;
     const rows = this.sessions
       .filter((session) => session.userId === subject)
@@ -425,6 +434,51 @@ d("WorkOS command outbox", () => {
       }),
     ]);
     expect(provider.deletedUsers).toEqual([workosUserId]);
+  });
+
+  it("converges session revocation when the WorkOS user is already absent", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const workosUserId = `user_${suffix}`;
+    const user = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: workosUserId,
+      email: `missing-session-user-${suffix}@example.com`,
+      displayName: "Missing session user",
+    });
+    await withSystemTx(pool, (tx) =>
+      enqueueWorkOSCommand(tx, {
+        operation: "sessions.revoke_all",
+        idempotencyKey: `account.sessions.${user.id}.1`,
+        aggregateKey: `account-sessions:${user.id}`,
+        orderingKey: `account:${user.id}`,
+        aggregateRevision: 1,
+        userId: user.id,
+        providerObjectId: workosUserId,
+        payload: {
+          workosUserId,
+          createdBefore: "2026-09-01T00:00:01.000Z",
+        },
+      }),
+    );
+
+    const provider = new FakeWorkOSProvider();
+    provider.missingSessionUserIds.add(workosUserId);
+
+    expect(await new WorkOSCommandProcessor(pool, provider).tick()).toBe(1);
+    expect(provider.calls).toEqual([`session.list:${workosUserId}`]);
+    const command = await pool.query<{
+      state: string;
+      last_error_code: string | null;
+    }>(
+      `SELECT state, last_error_code
+       FROM workos_command_outbox
+       WHERE idempotency_key = $1`,
+      [`account.sessions.${user.id}.1`],
+    );
+    expect(command.rows[0]).toEqual({
+      state: "succeeded",
+      last_error_code: null,
+    });
   });
 
   it("provisions an organization before its membership and persists provider IDs", async () => {
