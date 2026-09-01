@@ -34,7 +34,10 @@ import {
   WorkOSBrowserSessions,
   createWorkOSBrowserSessionRoutes,
 } from "./workos-browser-sessions.js";
-import { createWorkOSDesktopRevocationRoutes } from "./workos-desktop-revocation.js";
+import {
+  createWorkOSDesktopRevocationRoutes,
+  enqueueSessionsRevokedNotification,
+} from "./workos-desktop-revocation.js";
 import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
 import { createAccountRecoveryRoutes } from "./account-recovery.js";
@@ -115,7 +118,22 @@ export function createApp(
         config.workos.appOrigin,
       ),
     );
-    app.route("/", createWorkOSDesktopRevocationRoutes(workosProvider));
+    app.route(
+      "/",
+      createWorkOSDesktopRevocationRoutes(workosProvider, {
+        onAllSessionsRevoked: async ({ providerSubject }) => {
+          const queued = await enqueueSessionsRevokedNotification(
+            pool,
+            providerSubject,
+          );
+          if (!queued) {
+            console.warn(
+              "[auth] sessions-revoked notification has no linked recipient",
+            );
+          }
+        },
+      }),
+    );
     app.route(
       "/",
       createWorkOSManagementEventRoutes(
