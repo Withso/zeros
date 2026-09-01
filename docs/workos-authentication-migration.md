@@ -569,15 +569,17 @@ Railway-only secrets. Rotate each independently per channel. A cookie-password
 rotation invalidates outstanding browser sealed sessions, so schedule and
 communicate it as a forced browser sign-in.
 
-WorkOS mode does not require `ZEPTOMAIL_TOKEN` or `EMAIL_FROM` for organization
+WorkOS mode does not require `RESEND_API_KEY` or `EMAIL_FROM` for organization
 invitations; the WorkOS invitation command owns the one delivery. Those
 variables remain optional for Zeros-specific recovery/account-lifecycle
 security notifications and the Auth0 rollback path. WorkOS custom email
 branding/domain configuration is not a generic transactional email API, so a
 separate provider is still required if those product notifications must be
-delivered. Security notifications use the durable outbox with a stable client
-reference, and operators must monitor failures rather than treating an HTTP
-timeout as proof that a message was not accepted.
+delivered. Zeros uses a Railway-only, sending-only, domain-restricted Resend key
+for that purpose. Security notifications use the durable outbox with a stable
+Resend idempotency key and persist the accepted provider message ID. Operators
+must monitor failures rather than treating an HTTP timeout as proof that a
+message was not accepted.
 
 Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
 `CONTROL_PLANE_URL`. Electron compiles only public verification/configuration

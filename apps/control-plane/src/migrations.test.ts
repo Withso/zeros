@@ -561,3 +561,114 @@ d("0009 organization→team hierarchy preserves flat-Team data", () => {
     expect(strangerRows.filter((row) => row.is_personal)).toHaveLength(1);
   });
 });
+
+d("0019 retires legacy provider backlog without losing audit rows", () => {
+  let pool: pg.Pool;
+
+  beforeAll(async () => {
+    pool = new pg.Pool({ connectionString: url, max: 3 });
+    await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
+    await pool.query(`
+      CREATE TABLE schema_migrations (
+        name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now()
+      )
+    `);
+    for (const file of LADDER.filter((name) => name < "0019")) {
+      await pool.query("BEGIN");
+      await pool.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
+      await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [file]);
+      await pool.query("COMMIT");
+    }
+    await pool.query(`
+      INSERT INTO security_notification_outbox (
+        destination_email, template, state, lease_owner, lease_expires_at,
+        last_error_code, sent_at
+      ) VALUES
+        ('queued@example.com', 'sessions_revoked', 'queued', NULL, NULL,
+         'zeptomail_429', NULL),
+        ('sending@example.com', 'sessions_revoked', 'sending', 'old-worker',
+         now() + interval '1 minute', NULL, NULL),
+        ('sent@example.com', 'sessions_revoked', 'sent', NULL, NULL,
+         NULL, now()),
+        ('dead@example.com', 'sessions_revoked', 'dead', NULL, NULL,
+         'zeptomail_400', NULL)
+    `);
+    const file = LADDER.find((name) => name.startsWith("0019_"))!;
+    await pool.query("BEGIN");
+    await pool.query(readFileSync(path.join(MIGRATIONS_DIR, file), "utf8"));
+    await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [file]);
+    await pool.query("COMMIT");
+  });
+
+  afterAll(async () => {
+    await pool.end();
+  });
+
+  it("preserves prior rows under an explicit legacy provider", async () => {
+    const rows = await pool.query<{
+      destination_email: string;
+      state: string;
+      delivery_provider: string;
+      last_error_code: string | null;
+      lease_owner: string | null;
+    }>(`
+      SELECT destination_email, state, delivery_provider, last_error_code,
+             lease_owner
+      FROM security_notification_outbox
+      ORDER BY destination_email
+    `);
+    expect(rows.rows).toEqual([
+      {
+        destination_email: "dead@example.com",
+        state: "dead",
+        delivery_provider: "legacy_zeptomail",
+        last_error_code: "zeptomail_400",
+        lease_owner: null,
+      },
+      {
+        destination_email: "queued@example.com",
+        state: "dead",
+        delivery_provider: "legacy_zeptomail",
+        last_error_code: "provider_retired_zeptomail",
+        lease_owner: null,
+      },
+      {
+        destination_email: "sending@example.com",
+        state: "dead",
+        delivery_provider: "legacy_zeptomail",
+        last_error_code: "provider_retired_zeptomail",
+        lease_owner: null,
+      },
+      {
+        destination_email: "sent@example.com",
+        state: "sent",
+        delivery_provider: "legacy_zeptomail",
+        last_error_code: null,
+        lease_owner: null,
+      },
+    ]);
+  });
+
+  it("defaults only newly-created notifications to Resend", async () => {
+    const inserted = await pool.query<{
+      delivery_provider: string;
+      state: string;
+    }>(`
+      INSERT INTO security_notification_outbox (
+        destination_email, template
+      ) VALUES ('new@example.com', 'sessions_revoked')
+      RETURNING delivery_provider, state
+    `);
+    expect(inserted.rows[0]).toEqual({
+      delivery_provider: "resend",
+      state: "queued",
+    });
+    await expect(
+      pool.query(
+        `UPDATE security_notification_outbox
+         SET delivery_provider = 'legacy_zeptomail'
+         WHERE destination_email = 'new@example.com'`,
+      ),
+    ).rejects.toThrow(/delivery provider is immutable/i);
+  });
+});

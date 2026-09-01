@@ -1,32 +1,36 @@
 // ──────────────────────────────────────────────────────────
-// Outbound email — ZeptoMail (Zoho) HTTP API.
+// Outbound product email — Resend HTTPS API.
 //
 // Hosted AuthKit owns authentication and native organization-invitation
 // emails in WorkOS mode. This independent sender remains for Zeros-specific
 // security/account-lifecycle notifications and the Auth0 invitation rollback
 // path. Config:
-//   ZEPTOMAIL_TOKEN  — "Send Mail Token" from the ZeptoMail Mail Agent
-//   EMAIL_FROM       — verified sender, e.g. "Zeros <hello@zeros.build>"
+//   RESEND_API_KEY  — environment-specific, sending-only Resend API key
+//   EMAIL_FROM      — verified sender, e.g.
+//                     "Zeros <notifications@updates.zeros.build>"
 // Unset → dev fallback: the message is logged, never sent, and the API
 // still succeeds; callers decide whether an unsent message is acceptable.
 // ──────────────────────────────────────────────────────────
 
-// ZeptoMail Send Mail Tokens are bound to the data centre the account was
-// created in, so the API host has to match that region or every send 401s.
-// The default below is the region this deployment uses; override for another.
-const ZEPTOMAIL_API =
-  process.env.ZEPTOMAIL_API_URL?.trim() || "https://api.zeptomail.in/v1.1/email";
+// Keep the credential destination pinned. A configurable provider URL could
+// turn one environment-variable mistake into API-key exfiltration.
+const RESEND_EMAIL_API = "https://api.resend.com/emails";
+const RESEND_USER_AGENT = "zeros-control-plane/0.1";
 
 export type EmailConfig = {
-  token: string | null;
-  from: { address: string; name: string } | null;
+  apiKey: string | null;
+  from: string | null;
 };
 
 export type EmailSendOptions = {
-  /** ZeptoMail documents this as a transaction-tracking locator. It is not
-   * treated as a provider idempotency guarantee. */
-  clientReference?: string;
+  /** Resend retains this provider idempotency key for 24 hours. */
+  idempotencyKey?: string;
   fetch?: typeof fetch;
+};
+
+export type EmailDeliveryReceipt = {
+  provider: "resend";
+  messageId: string;
 };
 
 export class EmailDeliveryError extends Error {
@@ -41,19 +45,12 @@ export class EmailDeliveryError extends Error {
 }
 
 export function loadEmailConfig(env: NodeJS.ProcessEnv = process.env): EmailConfig {
-  // ZeptoMail's UI copies the Send Mail Token WITH the "Zoho-enczapikey "
-  // scheme prefix; our request adds the scheme itself. Accept either paste
-  // style — a doubled prefix comes back from their API as an empty 500.
-  const token =
-    env.ZEPTOMAIL_TOKEN?.trim().replace(/^Zoho-enczapikey\s+/i, "") || null;
-  const raw = env.EMAIL_FROM?.trim() || null;
-  if (!raw) return { token, from: null };
-  // "Name <addr@domain>" or bare "addr@domain"
-  const match = raw.match(/^(.*?)\s*<([^>]+)>$/);
-  const from = match
-    ? { name: match[1]?.trim() || "Zeros", address: match[2]!.trim() }
-    : { name: "Zeros", address: raw };
-  return { token, from };
+  const apiKey = env.RESEND_API_KEY?.trim() || null;
+  const rawFrom = env.EMAIL_FROM?.trim() || null;
+  // Resend accepts a formatted mailbox string. Reject newline-bearing values
+  // locally rather than relying on a provider-side header-injection check.
+  const from = rawFrom && !/[\r\n]/.test(rawFrom) ? rawFrom : null;
+  return { apiKey, from };
 }
 
 export async function sendEmail(
@@ -63,9 +60,9 @@ export async function sendEmail(
   htmlBody: string,
   options: EmailSendOptions = {},
 ): Promise<void> {
-  if (!config.token || !config.from) {
+  if (!config.apiKey || !config.from) {
     console.log(
-      `[email:dev-fallback] to=${to} subject=${JSON.stringify(subject)} (ZEPTOMAIL_TOKEN/EMAIL_FROM unset — not sent)`,
+      `[email:dev-fallback] subject=${JSON.stringify(subject)} (RESEND_API_KEY/EMAIL_FROM unset — not sent)`,
     );
     return;
   }
@@ -91,35 +88,34 @@ export async function sendEmailStrict(
   subject: string,
   htmlBody: string,
   options: EmailSendOptions = {},
-): Promise<void> {
-  if (!config.token || !config.from) {
+): Promise<EmailDeliveryReceipt> {
+  if (!config.apiKey || !config.from) {
     throw new EmailDeliveryError("email_not_configured", true);
   }
   if (
-    options.clientReference !== undefined &&
-    !/^[A-Za-z0-9._:-]{1,200}$/.test(options.clientReference)
+    options.idempotencyKey !== undefined &&
+    !/^[A-Za-z0-9._:/-]{1,256}$/.test(options.idempotencyKey)
   ) {
     throw new EmailDeliveryError("email_reference_invalid", false);
   }
   let response: Response;
   try {
-    response = await (options.fetch ?? fetch)(ZEPTOMAIL_API, {
+    response = await (options.fetch ?? fetch)(RESEND_EMAIL_API, {
       method: "POST",
       headers: {
-        authorization: `Zoho-enczapikey ${config.token}`,
+        authorization: `Bearer ${config.apiKey}`,
         accept: "application/json",
         "content-type": "application/json",
+        "user-agent": RESEND_USER_AGENT,
+        ...(options.idempotencyKey
+          ? { "idempotency-key": options.idempotencyKey }
+          : {}),
       },
       body: JSON.stringify({
         from: config.from,
-        to: [{ email_address: { address: to } }],
+        to: [to],
         subject,
-        htmlbody: htmlBody,
-        track_clicks: false,
-        track_opens: false,
-        ...(options.clientReference
-          ? { client_reference: options.clientReference }
-          : {}),
+        html: htmlBody,
       }),
       signal: AbortSignal.timeout(15_000),
     });
@@ -132,14 +128,51 @@ export async function sendEmailStrict(
       true,
     );
   }
-  await response.body?.cancel().catch(() => undefined);
+  const payload: unknown = await response.json().catch(() => null);
+  const rawProviderType =
+    payload && typeof payload === "object"
+      ? "name" in payload && typeof payload.name === "string"
+        ? payload.name
+        : "type" in payload && typeof payload.type === "string"
+          ? payload.type
+          : null
+      : null;
+  const providerType = rawProviderType
+    ? rawProviderType.replace(/[^a-z0-9_-]/gi, "_").slice(0, 64)
+    : null;
   if (!response.ok) {
+    const retryableConflict =
+      response.status === 409 &&
+      (providerType === "concurrent_idempotent_requests" ||
+        providerType === "resource_locked");
     throw new EmailDeliveryError(
-      `zeptomail_${response.status}`,
-      response.status === 408 || response.status === 429 || response.status >= 500,
+      `resend_${response.status}${providerType ? `_${providerType}` : ""}`,
+      retryableConflict ||
+        response.status === 408 ||
+        response.status === 429 ||
+        response.status >= 500,
       response.status,
     );
   }
+  const messageId =
+    payload &&
+    typeof payload === "object" &&
+    "id" in payload &&
+    typeof payload.id === "string" &&
+    /^[A-Za-z0-9_-]{1,128}$/.test(payload.id)
+      ? payload.id
+      : null;
+  if (!messageId) {
+    // The provider may have accepted the request before its response was
+    // corrupted. Retrying with the same key is safe within Resend's 24-hour
+    // idempotency window and returns the original message identifier.
+    throw new EmailDeliveryError(
+      "resend_response_invalid",
+      true,
+      response.status,
+    );
+  }
+  return { provider: "resend", messageId };
 }
 
 /** The invitation email. Plain, robust HTML (no images, no CSS frameworks —
