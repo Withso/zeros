@@ -105,7 +105,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/data-hero-scramble-icon/);
     expect(scramble).toMatch(/chars: ''/);
     expect(scramble).not.toMatch(/chars: '#\|\+'/);
-    expect(scramble).toMatch(/DESIGN_VISIBLE = 10/);
+    expect(scramble).toMatch(/DESIGN_VISIBLE = 6/);
     expect(cycle).toMatch(/hero-role\.css\?v=scramble-50/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);

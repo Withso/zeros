@@ -88,20 +88,15 @@ describe("hero scramble fill", () => {
   it("varies the designers scramble across distinct design-tool marks", () => {
     expect([...DESIGN_MARKS]).toEqual([
       "frame",
-      "component",
       "pentagon",
       "tangent",
-      "triangle",
-      "circle",
-      "square",
-      "diamond",
       "align-horizontal-space-around",
       "palette",
       "panels-top-left",
     ]);
-    expect(DESIGN_VISIBLE).toBe(10);
-    expect(DESIGN_ICONS.length).toBe(11);
-    expect(new Set(DESIGN_ICONS).size).toBe(11);
+    expect(DESIGN_VISIBLE).toBe(6);
+    expect(DESIGN_ICONS.length).toBe(6);
+    expect(new Set(DESIGN_ICONS).size).toBe(6);
     expect(DESIGN_SCRAMBLE.icons).toBe(DESIGN_ICONS);
     expect(DESIGN_SCRAMBLE.chars).toBe("");
     expect(DESIGN_SCRAMBLE.chars).not.toMatch(ROLE_WORDS);
@@ -127,6 +122,11 @@ describe("hero scramble fill", () => {
     expect(catalog).not.toMatch(/data-hero-scramble-icon="arrow"/);
     expect(catalog).not.toMatch(/data-hero-scramble-icon="crop"/);
     expect(catalog).not.toMatch(/data-hero-scramble-icon="swatch"/);
+    expect(catalog).not.toMatch(/data-hero-scramble-icon="component"/);
+    expect(catalog).not.toMatch(/data-hero-scramble-icon="triangle"/);
+    expect(catalog).not.toMatch(/data-hero-scramble-icon="circle"/);
+    expect(catalog).not.toMatch(/data-hero-scramble-icon="square"/);
+    expect(catalog).not.toMatch(/data-hero-scramble-icon="diamond"/);
     const named = [
       ...catalog.matchAll(/data-hero-scramble-icon="([^"]+)"/g),
     ].map((match) => match[1]);
@@ -134,7 +134,7 @@ describe("hero scramble fill", () => {
     for (const name of DESIGN_MARKS) {
       expect(catalog).toMatch(`data-hero-scramble-icon="${name}"`);
     }
-    for (const color of SCRAMBLE_PALETTE) {
+    for (const color of SCRAMBLE_PALETTE.slice(0, DESIGN_ICONS.length)) {
       expect(catalog.toUpperCase()).toContain(color);
     }
     expect(catalog.split("<svg ").length - 1).toBe(DESIGN_ICONS.length);

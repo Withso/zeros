@@ -16,13 +16,8 @@ export const SCRAMBLE_PALETTE = [
 
 export const DESIGN_MARKS = [
   'frame',
-  'component',
   'pentagon',
   'tangent',
-  'triangle',
-  'circle',
-  'square',
-  'diamond',
   'align-horizontal-space-around',
   'palette',
   'panels-top-left',
@@ -30,14 +25,16 @@ export const DESIGN_MARKS = [
 
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
-/** developers → designers: 10 unique marks, one per character of "developers". */
-export const DESIGN_VISIBLE = 10
+/** developers → designers: six unique Lucide marks, no repeats. */
+export const DESIGN_VISIBLE = 6
 
 const ICON_COLORS = [
-  ...SCRAMBLE_PALETTE,
-  '#5AA8FF',
-  '#B49030',
-  '#C04040',
+  SCRAMBLE_PALETTE[0],
+  SCRAMBLE_PALETTE[1],
+  SCRAMBLE_PALETTE[2],
+  SCRAMBLE_PALETTE[3],
+  SCRAMBLE_PALETTE[4],
+  SCRAMBLE_PALETTE[5],
 ] as const
 
 const lucide = (name: DesignMark, color: string, inner: string) =>
@@ -54,53 +51,28 @@ export const DESIGN_ICONS = [
     '<line x1="22" x2="2" y1="6" y2="6"/><line x1="22" x2="2" y1="18" y2="18"/><line x1="6" x2="6" y1="2" y2="22"/><line x1="18" x2="18" y1="2" y2="22"/>',
   ),
   lucide(
-    'component',
-    ICON_COLORS[1],
-    '<path d="M15.536 11.293a1 1 0 0 0 0 1.414l2.376 2.377a1 1 0 0 0 1.414 0l2.377-2.377a1 1 0 0 0 0-1.414l-2.377-2.377a1 1 0 0 0-1.414 0z"/><path d="M2.297 11.293a1 1 0 0 0 0 1.414l2.377 2.377a1 1 0 0 0 1.414 0l2.377-2.377a1 1 0 0 0 0-1.414L6.088 8.916a1 1 0 0 0-1.414 0z"/><path d="M8.916 17.912a1 1 0 0 0 0 1.415l2.377 2.376a1 1 0 0 0 1.414 0l2.377-2.376a1 1 0 0 0 0-1.415l-2.377-2.376a1 1 0 0 0-1.414 0z"/><path d="M8.916 4.674a1 1 0 0 0 0 1.414l2.377 2.376a1 1 0 0 0 1.414 0l2.377-2.376a1 1 0 0 0 0-1.414l-2.377-2.377a1 1 0 0 0-1.414 0z"/>',
-  ),
-  lucide(
     'pentagon',
-    ICON_COLORS[2],
+    ICON_COLORS[1],
     '<path d="M10.83 2.38a2 2 0 0 1 2.34 0l8 5.74a2 2 0 0 1 .73 2.25l-3.04 9.26a2 2 0 0 1-1.9 1.37H7.04a2 2 0 0 1-1.9-1.37L2.1 10.37a2 2 0 0 1 .73-2.25z"/>',
   ),
   lucide(
     'tangent',
-    ICON_COLORS[3],
+    ICON_COLORS[2],
     '<circle cx="17" cy="4" r="2"/><path d="M15.59 5.41 5.41 15.59"/><circle cx="4" cy="17" r="2"/><path d="M12 22s-4-9-1.5-11.5S22 12 22 12"/>',
   ),
   lucide(
-    'triangle',
-    ICON_COLORS[4],
-    '<path d="M13.73 4a2 2 0 0 0-3.46 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3Z"/>',
-  ),
-  lucide(
-    'circle',
-    ICON_COLORS[5],
-    '<circle cx="12" cy="12" r="10"/>',
-  ),
-  lucide(
-    'square',
-    ICON_COLORS[6],
-    '<rect width="18" height="18" x="3" y="3" rx="2"/>',
-  ),
-  lucide(
-    'diamond',
-    ICON_COLORS[7],
-    '<path d="M2.7 10.3a2.41 2.41 0 0 0 0 3.41l7.59 7.59a2.41 2.41 0 0 0 3.41 0l7.59-7.59a2.41 2.41 0 0 0 0-3.41l-7.59-7.59a2.41 2.41 0 0 0-3.41 0Z"/>',
-  ),
-  lucide(
     'align-horizontal-space-around',
-    ICON_COLORS[8],
+    ICON_COLORS[3],
     '<rect width="6" height="10" x="9" y="7" rx="2"/><path d="M4 22V2"/><path d="M20 22V2"/>',
   ),
   lucide(
     'palette',
-    ICON_COLORS[9],
-    `<circle cx="13.5" cy="6.5" r=".5" fill="${ICON_COLORS[9]}"/><circle cx="17.5" cy="10.5" r=".5" fill="${ICON_COLORS[9]}"/><circle cx="8.5" cy="7.5" r=".5" fill="${ICON_COLORS[9]}"/><circle cx="6.5" cy="12.5" r=".5" fill="${ICON_COLORS[9]}"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>`,
+    ICON_COLORS[4],
+    `<circle cx="13.5" cy="6.5" r=".5" fill="${ICON_COLORS[4]}"/><circle cx="17.5" cy="10.5" r=".5" fill="${ICON_COLORS[4]}"/><circle cx="8.5" cy="7.5" r=".5" fill="${ICON_COLORS[4]}"/><circle cx="6.5" cy="12.5" r=".5" fill="${ICON_COLORS[4]}"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/>`,
   ),
   lucide(
     'panels-top-left',
-    ICON_COLORS[10],
+    ICON_COLORS[5],
     '<rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M9 21V9"/>',
   ),
 ] as const
@@ -115,7 +87,7 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers — 10 unique Lucide marks, one per character slot. */
+/** developers → designers — six unique Lucide marks, no repeats. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
   chars: '',
   icons: DESIGN_ICONS,
@@ -403,7 +375,7 @@ export function playScramble(
       if (now - lastRefresh >= refreshMs) {
         lastRefresh = now
         if (set.icons && set.icons.length > 0) {
-          const n = Math.min(DESIGN_VISIBLE, len, set.icons.length)
+          const n = Math.min(DESIGN_VISIBLE, set.icons.length)
           if (slots.length !== n) slots = fillScrambleCells(n, set)
           else slots = rotateScrambleIcons(slots, 1)
         } else {
@@ -411,15 +383,21 @@ export function playScramble(
         }
       }
       const glyphs: Glyph[] = []
+      let iconAt = 0
       for (let i = 0; i < len; i += 1) {
         const kind = scrambleGlyphKind(i, visualT, maxLen)
         if (kind === 'from' && i < from.length) {
           glyphs.push({ kind: 'from', ch: from[i]! })
         } else if (kind === 'to' && i < text.length) {
           glyphs.push({ kind: 'to', ch: text[i]! })
+        } else if (set.icons && set.icons.length > 0) {
+          const cell = slots[iconAt]
+          if (cell) {
+            glyphs.push(cellToGlyph(cell))
+            iconAt += 1
+          }
         } else {
-          const cell = slots[i]
-          if (cell) glyphs.push(cellToGlyph(cell))
+          glyphs.push(cellToGlyph(slots[i] ?? pickScrambleCell(set)))
         }
       }
       const html = renderGlyphRun(glyphs)
