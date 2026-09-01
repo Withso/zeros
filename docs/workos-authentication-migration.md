@@ -141,10 +141,11 @@ the unchanged Zeros UUID.
 If someone later signs in with a newly created WorkOS User that has the same
 email, Zeros does **not** relink it. A recent provider authentication creates a
 24-hour recovery request and displays only its public `ZR-…` locator. An exact
-`support_admin` operator must reauthenticate within five minutes, verify the
-evidence out of band, and approve the exact request. A `developer` is not a
-recovery operator, and a `support_admin` does not receive developer-only app
-surfaces. Approval supersedes the deleted identity,
+`platform_owner` must reauthenticate with WorkOS within five minutes, verify the
+evidence out of band, and approve the exact request. Developers have no standing
+account-recovery authority. The historical `support_admin` enum value remains
+readable only for already-persisted compatibility data and cannot be newly
+granted. Approval supersedes the deleted identity,
 binds the new subject to the original UUID, increments the account revision,
 audits the operation, and sends a notification. It does not silently restore
 collaborative memberships; those must be re-provisioned by the organization or
@@ -178,7 +179,7 @@ retained account. A destructive Alpha reset is a separate, explicitly approved
 operation with its own exact scope; never delete product rows or relink
 identities by email merely to make a sign-in test pass.
 
-### Recovery-operator bootstrap and revocation
+### Staff-role bootstrap and revocation
 
 `users.staff_role` is deliberately not writable by `zeros_app`; neither an API
 route nor compromised application code can grant staff authority. Use the
@@ -195,8 +196,10 @@ Set `DATABASE_URL` plus these target-bound inputs:
   Zeros account.
 - `CONTROL_PLANE_STAFF_ACTOR_USER_ID` — the accountable human operator's Zeros
   UUID. A second person is preferred for Production bootstrap.
-- `CONTROL_PLANE_STAFF_ROLE` — `support_admin`, `developer`, or `none` for
-  revocation.
+- `CONTROL_PLANE_STAFF_ROLE` — `platform_owner`, `developer`, or `none` for
+  revocation. `platform_owner` is the standing accountable owner; a `developer`
+  may perform a sensitive deletion operation only through an exact, expiring,
+  one-shot owner grant in the isolated Ops surface.
 - `CONTROL_PLANE_STAFF_REASON` — a 16–512 character audit reason.
 
 Run the read-only plan first:
@@ -712,16 +715,17 @@ idempotency/reordering/repair, account-deletion projection, reviewed recovery,
 organization/member/invite convergence, directory and last-owner safeguards,
 tenant RLS, cloud create/wake denial, SSE replay, and stream-outage behavior.
 The database-backed control-plane suite passes every forward migration path,
-including the owner-only support-operator bootstrap and revocation path.
+including the database-owner staff-role bootstrap and revocation path.
 
 Still required before Alpha can be called fully qualified:
 
 - Explicitly approved deletion of the disposable WorkOS test user while Web and
   Desktop are open, followed by recreated-identity recovery. The destructive
   provider deletion is intentionally not inferred from general test approval.
-- Selection and owner-mediated bootstrap of a dedicated `support_admin`, then a
-  live two-person recovery approval and immediate revocation of that temporary
-  authority.
+- Owner-mediated bootstrap of the exact `platform_owner` and `developer`
+  identities, then a live two-person Ops grant/recovery exercise proving the
+  developer has no standing authority and the exact temporary grant is consumed
+  or revoked immediately.
 - A clean first-time and returning Google/GitHub identity-linking exercise for
   the same person; existing preserved identities currently exercise the safer
   recovery path instead.
