@@ -109,7 +109,7 @@ describe("marketing homepage layout", () => {
     expect(home).not.toMatch(/BackgroundGlow/);
     expect(home).not.toMatch(/radial-gradient\(900px 520px/);
     expect(home).not.toMatch(/hero-ascii-atmosphere/);
-    expect(home).toMatch(/home-page\.css\?v=linear-fold/);
+    expect(home).toMatch(/home-page\.css\?v=desktop-rect/);
     expect(home).toMatch(/className="home-page /);
     expect(home).not.toMatch(/home-ascii-page/);
     expect(home).toMatch(/Nav flush/);
@@ -157,6 +157,21 @@ describe("marketing homepage layout", () => {
     expect(preview).toMatch(/--hero-product-height/);
     expect(preview).toMatch(/rounded-xl/);
     expect(preview).not.toMatch(/h-\[560px\]/);
+    expect(home).toMatch(/data-hero-fit/);
+    expect(home).toMatch(/data-hero-scale/);
+    expect(home).toMatch(/hero-product-fit/);
+    expect(home).toMatch(/hero-product-scale/);
+    expect(home).toMatch(/--hero-product-scale/);
+    expect(home).toMatch(/fit\.clientWidth \/ native/);
+    expect(css).toMatch(/--hero-preview-w: 1100px/);
+    expect(css).toMatch(/100cqi \/ var\(--hero-preview-w\)/);
+    expect(css).toMatch(/container-type: inline-size/);
+    expect(css).toMatch(/transform: scale\(var\(--hero-product-scale/);
+    expect(css).toMatch(/transform-origin: top left/);
+    expect(preview).not.toMatch(/overflow-x-auto/);
+    expect(preview).not.toMatch(/min-w-\[980px\]/);
+    expect(preview).not.toMatch(/lg:min-w-0/);
+    expect(preview).not.toMatch(/lg:overflow-x-visible/);
   });
 
   it("drops the hero download CTA and Dev/Design toggle", () => {

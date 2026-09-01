@@ -43,24 +43,17 @@ export function ProductPreview() {
       />
 
       <div
-        className="relative overflow-hidden rounded-xl border border-border2 bg-bg1 shadow-[var(--shadow-product)]"
+        className="relative w-full overflow-hidden rounded-xl border border-border2 bg-bg1 shadow-[var(--shadow-product)]"
         aria-label="Zeros workspace preview"
       >
         <TopBar />
 
-        <div className="relative overflow-x-auto lg:overflow-x-visible">
-          <div
-            className="hero-preview-pane relative min-w-[980px] lg:min-w-0"
-            style={{ height: 'calc(var(--hero-product-height, 44rem) - 40px)' }}
-          >
-            <ChatPane />
-            <FloatingInspector />
-          </div>
-
-          <div
-            aria-hidden
-            className="pointer-events-none absolute top-0 right-0 bottom-0 w-10 bg-gradient-to-l from-bg1 to-transparent lg:hidden"
-          />
+        <div
+          className="hero-preview-pane relative w-full"
+          style={{ height: 'calc(var(--hero-product-height, 44rem) - 40px)' }}
+        >
+          <ChatPane />
+          <FloatingInspector />
         </div>
       </div>
     </div>

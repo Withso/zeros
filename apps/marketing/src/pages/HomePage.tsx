@@ -3,7 +3,7 @@ import { Nav } from '../components/Nav'
 import { ProductPreview } from '../components/ProductPreview'
 import { HeroRoleCycle } from '../components/HeroRoleCycle'
 import { BrandLockup } from '../components/BrandLockup'
-import '../components/home-page.css?v=linear-fold'
+import '../components/home-page.css?v=desktop-rect'
 
 export function HomePage() {
   return (
@@ -32,22 +32,44 @@ function Hero() {
 
   useLayoutEffect(() => {
     const apply = () => {
-      const page = document.querySelector('.home-page')
+      const page = document.querySelector('.home-page') as HTMLElement | null
+      const fit = document.querySelector('[data-hero-fit]') as HTMLElement | null
       const styles = page ? getComputedStyle(page) : null
       const peek = styles
         ? Number.parseFloat(styles.getPropertyValue('--hero-peek')) || 0.52
         : 0.52
+      const native =
+        styles
+          ? Number.parseFloat(styles.getPropertyValue('--hero-preview-w')) ||
+            1100
+          : 1100
       const viewport = window.visualViewport?.height ?? window.innerHeight
       const copyFloor = 13 * 16
       setCopyMinHeight(
         `${Math.max(copyFloor, viewport - 64 - peek * viewport)}px`,
       )
+      const scaleEl = document.querySelector(
+        '[data-hero-scale]',
+      ) as HTMLElement | null
+      if (scaleEl && fit && fit.clientWidth > 0) {
+        scaleEl.style.setProperty(
+          '--hero-product-scale',
+          String(Math.min(1, fit.clientWidth / native)),
+        )
+      }
     }
 
     apply()
+    const fitEl = document.querySelector('[data-hero-fit]')
+    const observer =
+      fitEl && typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver(apply)
+        : null
+    if (fitEl && observer) observer.observe(fitEl)
     window.addEventListener('resize', apply)
     window.visualViewport?.addEventListener('resize', apply)
     return () => {
+      observer?.disconnect()
       window.removeEventListener('resize', apply)
       window.visualViewport?.removeEventListener('resize', apply)
     }
@@ -80,7 +102,11 @@ function Hero() {
       </div>
       <div className="hero-product" data-hero-product="">
         <div className="hero-horizon" aria-hidden />
-        <ProductPreview />
+        <div className="hero-product-fit" data-hero-fit="">
+          <div className="hero-product-scale" data-hero-scale="">
+            <ProductPreview />
+          </div>
+        </div>
       </div>
     </section>
   )

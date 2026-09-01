@@ -8,8 +8,11 @@
   --hero-peek: 0.42;
   --hero-air: 10dvh;
   --hero-copy-gap: 2rem;
+  /* Native desktop canvas. Scaled to the column; never reflowed. */
+  --hero-preview-w: 1100px;
+  --hero-product-scale: 1;
   /* Mock is taller than the peek so scroll reveals the rest. */
-  --hero-product-height: max(36rem, 96dvh);
+  --hero-product-height: max(70rem, 120dvh);
 }
 
 @media (min-width: 640px) {
@@ -17,7 +20,7 @@
     --hero-peek: 0.48;
     --hero-air: 14dvh;
     --hero-copy-gap: 2.75rem;
-    --hero-product-height: max(40rem, 102dvh);
+    --hero-product-height: max(70rem, 120dvh);
   }
 }
 
@@ -26,7 +29,7 @@
     --hero-peek: 0.52;
     --hero-air: 18dvh;
     --hero-copy-gap: 3.25rem;
-    --hero-product-height: max(44rem, 110dvh);
+    --hero-product-height: max(70rem, 110dvh);
   }
 }
 
@@ -115,6 +118,30 @@
 
 .home-page .hero-product {
   position: relative;
+}
+
+/*
+ * Linear-style product frame: the desktop mock stays a 1100px rectangle
+ * (chat + inspector side by side) and is scaled to the column width. Do not
+ * clip the bottom — the first fold peeks, scroll reveals the rest.
+ */
+.home-page .hero-product-fit {
+  width: 100%;
+  overflow: visible;
+  container-type: inline-size;
+}
+
+.home-page .hero-product-scale {
+  --hero-product-scale: min(1, 100cqi / var(--hero-preview-w));
+  width: var(--hero-preview-w);
+  transform: scale(var(--hero-product-scale));
+  transform-origin: top left;
+  margin-right: calc(
+    (var(--hero-product-scale) - 1) * var(--hero-preview-w)
+  );
+  margin-bottom: calc(
+    (var(--hero-product-scale) - 1) * var(--hero-product-height)
+  );
 }
 
 .home-page .hero-horizon {
