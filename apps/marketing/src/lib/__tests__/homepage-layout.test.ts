@@ -82,7 +82,8 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/hero-scramble-token/);
     expect(css).not.toMatch(/width: 0\.86em/);
     expect(css).not.toMatch(/width: 0\.62em/);
-    expect(css).toMatch(/width: 0\.7em/);
+    expect(css).not.toMatch(/width: 0\.7em/);
+    expect(css).toMatch(/width: 0\.9em/);
     expect(css).not.toMatch(/--violet-fg/);
     expect(css).not.toMatch(/--blue-fg/);
     expect(css).not.toMatch(/--green-fg/);
@@ -98,10 +99,9 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/chars: ''/);
     expect(scramble).not.toMatch(/chars: '#\|\+'/);
     expect(scramble).toMatch(/DESIGN_VISIBLE = 5/);
-    expect(cycle).toMatch(/hero-role\.css\?v=lucide-five/);
-    expect(css).toMatch(/hero-scramble-stack/);
-    expect(css).toMatch(/is-overlay/);
-    expect(css).toMatch(/width: 0\.9em/);
+    expect(cycle).toMatch(/hero-role\.css\?v=lucide-five-plain/);
+    expect(css).not.toMatch(/hero-scramble-stack/);
+    expect(css).not.toMatch(/is-overlay/);
     expect(scramble).not.toMatch(/data-hero-scramble-icon="arrow"/);
     expect(scramble).not.toMatch(/data-hero-scramble-icon="crop"/);
     expect(scramble).toMatch(/#68E098/);

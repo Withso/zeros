@@ -115,7 +115,7 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers — 5 unique Lucide stacks, unused marks ghost on top. */
+/** developers → designers — five unique Lucide marks, no ghost layer. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
   chars: '',
   icons: DESIGN_ICONS,
@@ -265,28 +265,12 @@ function dealDistinct(items: readonly string[], count: number): string[] {
   return out
 }
 
-function markOverlay(html: string): string {
-  return html.replace(
-    'class="hero-scramble-icon"',
-    'class="hero-scramble-icon is-overlay"',
-  )
-}
-
-function wrapStack(front: string, overlay?: string): string {
-  const under = overlay ? markOverlay(overlay) : ''
-  return `<span class="hero-scramble-stack">${under}${front}</span>`
-}
-
 function fillIconCells(length: number, icons: readonly string[]): ScrambleCell[] {
   if (length <= 0 || icons.length === 0) return []
   const count = Math.min(DESIGN_VISIBLE, length, icons.length)
-  const shuffled = shuffle(icons)
-  const fronts = shuffled.slice(0, count)
-  const rest = shuffled.slice(count)
-  return fronts.map((front, i) => ({
-    kind: 'icon' as const,
-    html: wrapStack(front, rest[i]),
-  }))
+  return shuffle(icons)
+    .slice(0, count)
+    .map((html) => ({ kind: 'icon' as const, html }))
 }
 
 export function fillScrambleCells(length: number, set: ScrambleSet): ScrambleCell[] {

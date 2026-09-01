@@ -148,22 +148,17 @@ describe("hero scramble fill", () => {
       const cells = fillScrambleCells(10, DESIGN_SCRAMBLE);
       expect(cells).toHaveLength(DESIGN_VISIBLE);
       expect(cells.every((cell) => cell.kind === "icon")).toBe(true);
-      const fronts = cells.map((cell) => iconName(cell.html));
-      const stacked = cells.flatMap((cell) => iconNames(cell.html));
+      const names = cells.map((cell) => iconName(cell.html));
       expect(new Set(cells.map((cell) => cell.html)).size).toBe(cells.length);
-      expect(new Set(fronts).size).toBe(DESIGN_VISIBLE);
-      expect(fronts).toHaveLength(DESIGN_VISIBLE);
-      expect(stacked.length).toBe(DESIGN_VISIBLE * 2);
-      expect(new Set(stacked).size).toBe(stacked.length);
-      for (const name of stacked) {
+      expect(new Set(names).size).toBe(DESIGN_VISIBLE);
+      expect(names).toHaveLength(DESIGN_VISIBLE);
+      for (const name of names) {
         expect(DESIGN_MARKS).toContain(name);
       }
       for (const cell of cells) {
-        const names = iconNames(cell.html);
-        expect(names).toHaveLength(2);
-        expect(names[0]).not.toBe(names[1]);
-        expect(cell.html).toMatch(/hero-scramble-stack/);
-        expect(cell.html).toMatch(/is-overlay/);
+        expect(iconNames(cell.html)).toHaveLength(1);
+        expect(cell.html).not.toMatch(/hero-scramble-stack/);
+        expect(cell.html).not.toMatch(/is-overlay/);
       }
       for (let j = 1; j < cells.length; j += 1) {
         const prev = cells[j - 1]!;
@@ -171,10 +166,11 @@ describe("hero scramble fill", () => {
         expect(prev.html).not.toBe(next.html);
         expect(iconName(prev.html)).not.toBe(iconName(next.html));
       }
-      for (const name of stacked) seen.add(name);
+      for (const name of names) seen.add(name);
       const html = scrambleTail(10, DESIGN_SCRAMBLE);
-      expect(html.match(/hero-scramble-stack/g)?.length).toBe(DESIGN_VISIBLE);
-      expect(svgCount(html)).toBe(DESIGN_VISIBLE * 2);
+      expect(svgCount(html)).toBe(DESIGN_VISIBLE);
+      expect(html).not.toMatch(/hero-scramble-stack/);
+      expect(html).not.toMatch(/is-overlay/);
       expect(html).not.toMatch(/hero-scramble-symbol/);
       expect(visibleText(html)).toBe("");
       expect(visibleText(html)).not.toMatch(ROLE_WORDS);
