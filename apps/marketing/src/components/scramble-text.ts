@@ -30,8 +30,8 @@ export const DESIGN_MARKS = [
 
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
-/** developers → designers: half the word, never a 10-wide icon ticker. */
-export const DESIGN_VISIBLE = 5
+/** developers → designers: one unique Lucide mark per character, no repeats. */
+export const DESIGN_VISIBLE = 10
 
 const ICON_COLORS = [
   ...SCRAMBLE_PALETTE,
@@ -115,7 +115,7 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers — five unique Lucide marks, no ghost layer. */
+/** developers → designers — 10 unique Lucide marks, no ghost layer. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
   chars: '',
   icons: DESIGN_ICONS,

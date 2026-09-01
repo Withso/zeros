@@ -99,7 +99,7 @@ describe("hero scramble fill", () => {
       "palette",
       "panels-top-left",
     ]);
-    expect(DESIGN_VISIBLE).toBe(5);
+    expect(DESIGN_VISIBLE).toBe(10);
     expect(DESIGN_ICONS.length).toBe(11);
     expect(new Set(DESIGN_ICONS).size).toBe(11);
     expect(DESIGN_SCRAMBLE.icons).toBe(DESIGN_ICONS);

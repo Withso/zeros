@@ -29,12 +29,19 @@
   font-variant-numeric: tabular-nums;
 }
 
-.hero-scramble-text,
-.hero-scramble-symbol {
+.hero-scramble-text {
   font-size: 1em;
   font-weight: inherit;
   font-family: inherit;
   letter-spacing: inherit;
+}
+
+.hero-scramble-symbol {
+  font-size: 0.72em;
+  font-weight: inherit;
+  font-family: inherit;
+  letter-spacing: inherit;
+  vertical-align: 0.12em;
 }
 
 .hero-scramble-text,
@@ -42,17 +49,13 @@
   color: inherit;
 }
 
-.hero-scramble-symbol {
-  vertical-align: baseline;
-}
-
 .hero-scramble-icon {
   display: inline-block;
-  width: 0.9em;
-  height: 0.9em;
-  margin: 0 0.05em;
+  width: 0.72em;
+  height: 0.72em;
+  margin: 0 0.04em;
   overflow: visible;
-  vertical-align: -0.12em;
+  vertical-align: -0.02em;
 }
 
 @media (prefers-reduced-motion: reduce) {
