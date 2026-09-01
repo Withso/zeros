@@ -433,16 +433,16 @@ export function updateWorkspace(id: string, patch: WorkspacePatch): void {
     .run(...values, id);
 }
 
-/** Move only device-local workspace rows after the signed-in user loses an
- * organization. Cloud rows remain under their server tenant and must be
- * resolved by the future cloud control plane, never silently adopted locally. */
+/** Repair only device-local ownership. Null detaches a legacy Personal/account
+ * or retired-organization ID into device Personal. Cloud rows remain under
+ * their server tenant, never silently adopted locally. */
 export function reassignLocalWorkspaceOrganization(
   fromOrganizationId: string,
-  toOrganizationId: string,
+  toOrganizationId: string | null,
 ): { changes: number; repoSlugs: string[] } {
   if (
     !fromOrganizationId ||
-    !toOrganizationId ||
+    (toOrganizationId !== null && !toOrganizationId) ||
     fromOrganizationId === toOrganizationId
   ) {
     return { changes: 0, repoSlugs: [] };

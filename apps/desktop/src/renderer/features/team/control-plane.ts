@@ -35,6 +35,9 @@ export type OrganizationSummary = {
   logo: string | null;
   role: OrganizationRole;
   isPersonal: boolean;
+  /** Renderer-only compatibility evidence for device Personal. Never sent as
+   * server ownership; changing this snapshot invalidates local list memos. */
+  legacyPersonalOrganizationIds?: readonly string[];
   /** Mixed-version marker for a pre-hierarchy flat Team response. */
   legacyFlat?: boolean;
   defaultTeamId: string | null;
