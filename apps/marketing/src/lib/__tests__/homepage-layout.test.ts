@@ -76,8 +76,9 @@ describe("marketing homepage layout", () => {
     expect(css).toMatch(/prefers-reduced-motion: reduce/);
     expect(css).not.toMatch(/font-size: 0\.86em/);
     expect(css).not.toMatch(/font-size: 0\.72em/);
+    expect(css).not.toMatch(/font-size: 0\.58em/);
     expect(css).toMatch(/font-size: 1em/);
-    expect(css).toMatch(/font-size: 0\.58em/);
+    expect(css).toMatch(/font-size: 60px/);
     expect(css).toMatch(/hero-scramble-text/);
     expect(css).toMatch(/hero-scramble-symbol/);
     expect(css).toMatch(/hero-scramble-icon/);
@@ -86,7 +87,8 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/width: 0\.62em/);
     expect(css).not.toMatch(/width: 0\.9em/);
     expect(css).not.toMatch(/width: 0\.72em/);
-    expect(css).toMatch(/width: 0\.8em/);
+    expect(css).not.toMatch(/width: 0\.8em/);
+    expect(css).toMatch(/width: 60px/);
     expect(css).toMatch(/overflow: hidden/);
     expect(css).not.toMatch(/--violet-fg/);
     expect(css).not.toMatch(/--blue-fg/);
@@ -103,7 +105,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/chars: ''/);
     expect(scramble).not.toMatch(/chars: '#\|\+'/);
     expect(scramble).toMatch(/DESIGN_VISIBLE = 10/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-slot/);
+    expect(cycle).toMatch(/hero-role\.css\?v=scramble-60/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);
     expect(scramble).not.toMatch(/data-hero-scramble-icon="arrow"/);

@@ -24,13 +24,8 @@
   white-space: nowrap;
 }
 
-/*
- * Shrink every scramble glyph (code, icons, matrix) from the word itself.
- * Revealed letters scale back up so the settled word stays headline size.
- */
 .hero-role-word.is-scrambling {
   font-variant-numeric: tabular-nums;
-  font-size: 0.58em;
 }
 
 .hero-scramble-text,
@@ -46,24 +41,21 @@
   font-size: 1em;
 }
 
-.hero-role-word.is-scrambling .hero-scramble-text {
-  font-size: calc(1em / 0.58);
-}
-
-.hero-scramble-symbol {
-  font-size: 1em;
+.hero-role-word.is-scrambling .hero-scramble-symbol {
+  font-size: 60px;
+  line-height: 1;
   vertical-align: baseline;
 }
 
 .hero-scramble-icon {
   display: inline-block;
-  width: 0.8em;
-  height: 0.8em;
+  width: 60px;
+  height: 60px;
+  max-width: 60px;
+  max-height: 60px;
   margin: 0;
   overflow: hidden;
-  max-width: 0.8em;
-  max-height: 0.8em;
-  vertical-align: -0.12em;
+  vertical-align: -6px;
 }
 
 @media (prefers-reduced-motion: reduce) {
