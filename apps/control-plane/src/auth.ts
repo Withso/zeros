@@ -709,7 +709,8 @@ export async function ensureUser(
         const owner = emailOwner.rows[0];
         if (
           input.provider === "workos" &&
-          owner.auth_status === "identity_disabled" &&
+          (owner.auth_status === "identity_disabled" ||
+            owner.auth_status === "deletion_pending") &&
           owner.recovery_identity_id
         ) {
           if (!input.session) {

@@ -67,7 +67,7 @@ organization membership is inactive.
 
 The foundation landed as one reviewed PR so schema, server, web, desktop,
 tests, and runbooks could not be promoted in incompatible combinations. Live
-Alpha qualification then found three integration defects that could only be
+Alpha qualification then found four integration defects that could only be
 fixed after that merge; each corrective patch received its own green review
 and was promoted in order. The phases below remain logical gates, not
 independently supported partial designs:
@@ -717,11 +717,60 @@ tenant RLS, cloud create/wake denial, SSE replay, and stream-outage behavior.
 The database-backed control-plane suite passes every forward migration path,
 including the database-owner staff-role bootstrap and revocation path.
 
+### Disposable-data Alpha qualification — 2026-09-01 (Asia/Kolkata)
+
+The final automation-safe campaign used newly generated addresses under the
+RFC-reserved `.test` domain. WorkOS staging deliberately suppresses delivery to
+that domain, so the campaign could create and delete only its own provider
+users without contacting a person or reusing a real identity. It used WorkOS's
+documented programmatic staging flow; it did not automate or claim evidence for
+the dynamic Hosted AuthKit UI.
+
+Against deployed Alpha baseline
+`b063e6aa9dbb094f01ea95db3b54f6165006787b`, the campaign verified:
+
+- invalid Magic Auth rejection, successful programmatic Magic Auth, the exact
+  Web Application `client_id`, and a provider session identifier;
+- first-account bootstrap with one permanent local-only Personal root;
+- collaborative organization projection, exactly one native WorkOS invitation,
+  local invitation acceptance, active provider membership, role convergence,
+  member removal, and continued Personal access for the removed member;
+- exact 30-day account and organization deletion timestamps, organization and
+  account restore, stable Zeros account/organization identifiers after restore,
+  and immediate denial after provider-user deletion; and
+- cleanup of every newly created WorkOS test identity. The corresponding
+  disposable Zeros accounts remain in their scheduled grace period so the
+  ordinary purge worker, rather than manual database edits, owns final erasure.
+
+The last recreated-identity step exposed a real combined lifecycle defect: if
+the WorkOS User was deleted while the Zeros account was already in its deletion
+grace period, a newly verified same-email identity received `account_exists`
+instead of reviewed recovery, and provider deletion could discard the retained
+collaboration snapshot. The corrective candidate now:
+
+- enters reviewed recovery for both `identity_disabled` and
+  `deletion_pending` accounts;
+- recovers the replacement identity without silently cancelling the customer's
+  pending deletion request;
+- preserves Zeros-managed collaborative memberships while the account remains
+  globally denied, but still removes SCIM-authoritative access; and
+- only after the customer explicitly restores the account, reprojects retained
+  memberships to the replacement WorkOS identity with new durable revisions.
+
+The regression exercises that entire sequence atomically, including the SCIM
+exception and replacement-membership outbox command. The complete
+database-backed control-plane suite is green with 343 tests. A campaign run
+against the final merged and deployed corrective SHA remains a release gate;
+the failed baseline is retained here as evidence and is not relabeled as a
+pass.
+
 Still required before Alpha can be called fully qualified:
 
-- Explicitly approved deletion of the disposable WorkOS test user while Web and
-  Desktop are open, followed by recreated-identity recovery. The destructive
-  provider deletion is intentionally not inferred from general test approval.
+- A provider-user deletion while Web and Desktop are simultaneously open,
+  followed by the real reviewed-recovery UI. The reserved-domain campaign
+  proves server-side revocation and the recovery-required boundary, but it does
+  not substitute for observing both released clients or for a human operator
+  approval ceremony.
 - Owner-mediated bootstrap of the exact `platform_owner` and `developer`
   identities, then a live two-person Ops grant/recovery exercise proving the
   developer has no standing authority and the exact temporary grant is consumed

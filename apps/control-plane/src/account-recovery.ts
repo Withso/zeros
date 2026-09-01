@@ -94,7 +94,7 @@ export async function approveAccountRecovery(
 
     const target = await tx.query<{
       email: string;
-      auth_status: string;
+      auth_status: "identity_disabled" | "deletion_pending";
       identity_status: string;
       provider_sub: string;
     }>(
@@ -109,7 +109,9 @@ export async function approveAccountRecovery(
     const account = target.rows[0];
     if (
       !account ||
-      account.auth_status !== "identity_disabled" ||
+      !["identity_disabled", "deletion_pending"].includes(
+        account.auth_status,
+      ) ||
       account.identity_status !== "provider_deleted" ||
       account.email.toLowerCase() !== recovery.candidate_email.toLowerCase()
     ) {
@@ -154,19 +156,45 @@ export async function approveAccountRecovery(
        WHERE id = $1 AND status = 'provider_deleted'`,
       [recovery.target_identity_id, replacement.rows[0]!.id],
     );
+    const deletionRemainsPending = account.auth_status === "deletion_pending";
     const reactivated = await tx.query<{ auth_revision: string | number }>(
       `UPDATE users
-       SET auth_status = 'active', auth_disabled_at = NULL,
-           auth_status_changed_at = now(), auth_revision = auth_revision + 1
-       WHERE id = $1 AND auth_status = 'identity_disabled'
+       SET auth_status = CASE
+             WHEN auth_status = 'identity_disabled'
+               THEN 'active'::account_auth_status
+             ELSE auth_status
+           END,
+           auth_disabled_at = NULL,
+           auth_status_changed_at = CASE
+             WHEN auth_status = 'identity_disabled' THEN now()
+             ELSE auth_status_changed_at
+           END,
+           auth_revision = auth_revision + 1
+       WHERE id = $1 AND auth_status = $2::account_auth_status
        RETURNING auth_revision`,
-      [recovery.target_user_id],
+      [recovery.target_user_id, account.auth_status],
     );
     if (!reactivated.rows[0]) {
       throw new HttpError(
         409,
         "recovery_state_changed",
         "Account recovery state changed; review it again.",
+      );
+    }
+    if (deletionRemainsPending) {
+      // Provider deletion invalidates every provider membership identifier,
+      // but the 30-day deletion snapshot remains intact. Advance the desired
+      // revision now so the customer's later, explicit account restore can
+      // project these retained Zeros-managed memberships to the replacement
+      // WorkOS identity without reusing stale provider objects.
+      await tx.query(
+        `UPDATE organization_members om
+         SET workos_membership_id = NULL,
+             workos_sync_revision = om.workos_sync_revision + 1
+         FROM organizations o
+         WHERE om.org_id = o.id AND om.user_id = $1
+           AND NOT o.is_personal AND om.membership_source <> 'scim'`,
+        [recovery.target_user_id],
       );
     }
     await tx.query(
