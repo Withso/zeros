@@ -112,9 +112,9 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers — sparse unique marks, not a repeated strip. */
+/** developers → designers — only the listed Lucide marks, no other glyphs. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
-  chars: '#|+',
+  chars: '',
   icons: DESIGN_ICONS,
 }
 
@@ -212,6 +212,9 @@ export function renderGlyphRun(glyphs: readonly Glyph[]): string {
 }
 
 function pickScrambleCell(set: ScrambleSet, color?: string): ScrambleCell {
+  if (set.icons && set.icons.length > 0) {
+    return { kind: 'icon', html: set.icons[Math.floor(Math.random() * set.icons.length)]! }
+  }
   return {
     kind: 'char',
     ch: pickChar(set.chars),
@@ -259,35 +262,27 @@ function dealDistinct(items: readonly string[], count: number): string[] {
   return out
 }
 
-function designIconCount(length: number, catalog: number): number {
-  if (length <= 0 || catalog <= 0) return 0
-  return Math.min(4, catalog, Math.max(1, Math.round(length * 0.36)))
+function fillIconCells(length: number, icons: readonly string[]): ScrambleCell[] {
+  if (length <= 0 || icons.length === 0) return []
+  const htmls =
+    length <= icons.length ? shuffle(icons).slice(0, length) : dealDistinct(icons, length)
+  return htmls.map((html) => ({ kind: 'icon' as const, html }))
+}
+
+function unusedIcons(icons: readonly string[], used: readonly ScrambleCell[]): string[] {
+  const taken = new Set(
+    used.filter((cell) => cell.kind === 'icon').map((cell) => cell.html),
+  )
+  const leftover = icons.filter((html) => !taken.has(html))
+  return leftover.length > 0 ? leftover : [...icons]
 }
 
 export function fillScrambleCells(length: number, set: ScrambleSet): ScrambleCell[] {
   if (length <= 0) return []
-  const colors = dealDistinct(SCRAMBLE_PALETTE, length)
   const icons = set.icons
-  if (!icons || icons.length === 0) {
-    return Array.from({ length }, (_, i) => pickScrambleCell(set, colors[i]))
-  }
-
-  const iconCount = designIconCount(length, icons.length)
-  const uniqueIcons = shuffle(icons).slice(0, iconCount)
-  const iconAt = new Set(
-    shuffle(Array.from({ length }, (_, i) => i)).slice(0, uniqueIcons.length),
-  )
-  const cells: ScrambleCell[] = []
-  let k = 0
-  for (let i = 0; i < length; i += 1) {
-    if (iconAt.has(i)) {
-      cells.push({ kind: 'icon', html: uniqueIcons[k]! })
-      k += 1
-      continue
-    }
-    cells.push(pickScrambleCell(set, colors[i]))
-  }
-  return cells
+  if (icons && icons.length > 0) return fillIconCells(length, icons)
+  const colors = dealDistinct(SCRAMBLE_PALETTE, length)
+  return Array.from({ length }, (_, i) => pickScrambleCell(set, colors[i]))
 }
 
 function hasAdjacentRepeat(htmls: readonly string[]): boolean {
@@ -406,9 +401,11 @@ export function playScramble(
       const now = performance.now()
       if (now - lastRefresh >= refreshMs) {
         lastRefresh = now
-        if (set.icons) {
-          const row = slots.slice(0, len)
-          while (row.length < len) row.push(pickScrambleCell(set))
+        if (set.icons && set.icons.length > 0) {
+          let row = slots.slice(0, len)
+          if (row.length < len) {
+            row = [...row, ...fillIconCells(len - row.length, unusedIcons(set.icons, row))]
+          }
           slots = rotateScrambleIcons(row, 1)
         } else {
           slots = fillScrambleCells(len, set)
