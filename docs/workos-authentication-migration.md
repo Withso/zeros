@@ -107,8 +107,10 @@ reinterprets product ownership.
 
 ## Durable identity boundary
 
-- `users.id` is the durable Zeros account ID. Product data never uses a WorkOS
-  subject as its owner key.
+- `users.id` is the durable Zeros account ID. Server-side product data never
+  uses a WorkOS subject as its owner key. Desktop Personal workspaces are
+  device-local and have no account owner; see
+  [Personal ownership](organizations-and-teams.md#personal).
 - `user_identities(provider, provider_sub)` maps a verified WorkOS `sub` to one
   Zeros account. The mapping key is `provider='workos'`, not the Google or
   GitHub credential used at sign-in.
@@ -153,6 +155,28 @@ An active account reached through a different WorkOS subject returns
 render fixed guidance for `account_exists`, `reauthentication_required`,
 inactive accounts, and reviewed recovery. Raw provider/database messages are
 discarded.
+
+### Preparing a clean Alpha sign-in test
+
+Use a previously unused email address (or a distinct alias delivered to a
+mailbox the tester controls) for a first-time signup. Keep that WorkOS User for
+returning-login, logout, persistence, and additional sign-in-method tests.
+Signing out, clearing a browser session, or reinstalling the desktop client
+does not reset the server-side account.
+
+Do not delete WorkOS Users as setup for ordinary signup tests. Deleting only
+the provider User leaves the durable Zeros account and compatibility Personal
+records in place. It also does not reset the device-local Personal collection.
+Signing in or signing up again with that same email creates a new provider
+identity and must enter reviewed recovery, not a new empty account. Neither
+choice of AuthKit entry screen bypasses this ownership boundary.
+
+Test provider deletion separately, using a disposable account with both clients
+open. Expect access revocation, followed by a recovery-required state on a new
+same-email sign-in. Complete the operator-reviewed recovery to reuse the
+retained account. A destructive Alpha reset is a separate, explicitly approved
+operation with its own exact scope; never delete product rows or relink
+identities by email merely to make a sign-in test pass.
 
 ### Recovery-operator bootstrap and revocation
 

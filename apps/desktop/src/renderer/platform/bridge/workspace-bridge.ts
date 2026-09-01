@@ -1831,7 +1831,7 @@ export async function bridgeWorkspaceSetStatus(
 
 export async function bridgeWorkspaceReassignLocalOrganization(
   bridge: RuntimeClient,
-  args: { fromOrganizationId: string; toOrganizationId: string },
+  args: { fromOrganizationId: string; toOrganizationId: string | null },
 ): Promise<{ changes: number; repoSlugs: string[] }> {
   return (await workspaceOp(
     bridge,

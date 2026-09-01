@@ -3651,7 +3651,8 @@ export class WorkspaceService {
       }
 
       // LOCAL-ONLY ownership repair after a confirmed organization leave or
-      // deletion. Local worktrees remain the user's files and move to Personal;
+      // deletion, or detaching a legacy Personal account ID. Local worktrees
+      // remain the user's files and move to device Personal (null owner);
       // cloud rows stay attached to their server tenant.
       case "workspace.reassignLocalOrganization": {
         if (remote) {
@@ -3662,7 +3663,9 @@ export class WorkspaceService {
         }
         return reassignLocalWorkspaceOrganization(
           reqStr(params, "fromOrganizationId"),
-          reqStr(params, "toOrganizationId"),
+          params.toOrganizationId === null
+            ? null
+            : reqStr(params, "toOrganizationId"),
         );
       }
 

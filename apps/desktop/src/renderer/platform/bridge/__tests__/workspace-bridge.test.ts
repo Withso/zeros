@@ -23,6 +23,7 @@ import {
   bridgeWorkspaceCreateFromBranch,
   bridgeWorkspaceCreateFromBranchStatus,
   bridgeWorkspaceDelete,
+  bridgeWorkspaceReassignLocalOrganization,
   bridgeWorkspaceLifecycleStatus,
   bridgeWorkspaceRestore,
   bridgeWorkspaceSetMode,
@@ -47,6 +48,27 @@ function fakeBridge(resp: unknown, seen: { op?: string; type?: string } = {}) {
 }
 
 describe("requestWorkspaceList", () => {
+  it("sends explicit null when detaching a legacy Personal owner", async () => {
+    let captured: unknown;
+    const bridge = {
+      request: async (message: unknown) => {
+        captured = message;
+        return {
+          type: "WORKSPACE_RESPONSE",
+          op: "workspace.reassignLocalOrganization",
+          result: { changes: 1, repoSlugs: ["example"] },
+        };
+      },
+    } as unknown as RuntimeClient;
+    await bridgeWorkspaceReassignLocalOrganization(bridge, {
+      fromOrganizationId: "personal_old",
+      toOrganizationId: null,
+    });
+    expect(captured).toMatchObject({
+      op: "workspace.reassignLocalOrganization",
+      params: { fromOrganizationId: "personal_old", toOrganizationId: null },
+    });
+  });
   it("sends a workspace.list WORKSPACE_REQUEST and returns the workspaces", async () => {
     const seen: { op?: string; type?: string } = {};
     const workspaces = [

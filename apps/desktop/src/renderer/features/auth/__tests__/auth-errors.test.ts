@@ -83,4 +83,20 @@ describe("friendlyAuthError", () => {
       "Couldn't open your browser. Click Sign in to try again.",
     );
   });
+
+  it("distinguishes deleted-identity recovery from a failed sign-in or fresh signup", () => {
+    const message = workOSSignInFailureMessage(
+      "account_recovery_required",
+      "ZR-ABCD-2345",
+    );
+
+    expect(message).toContain("Your sign-in succeeded");
+    expect(message).toContain("previous login identity");
+    expect(message).toContain("was deleted");
+    expect(message).toContain("Your account data is preserved");
+    expect(message).toContain("Signing up again won't restore access");
+    expect(message).toContain("Contact hello@zeros.build for a reviewed recovery");
+    expect(message).toContain("Recovery code: ZR-ABCD-2345");
+    expect(message).not.toMatch(/check your connection|click sign in to try again/i);
+  });
 });

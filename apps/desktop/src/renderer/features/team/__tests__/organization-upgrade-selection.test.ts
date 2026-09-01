@@ -22,6 +22,7 @@ const {
   acceptOrganizationSnapshot,
   clearTeamStore,
   getActiveOrganizationIdSnapshot,
+  getActiveOrganizationSnapshot,
 } = await import("../team-store");
 const { reconcileOrganizationWorkspaceOwnership } =
   await import("../organization-membership-history");
@@ -49,6 +50,74 @@ describe("first hierarchy-aware organization snapshot", () => {
     clearTeamStore();
   });
 
+  it("has the existing Personal selection before an account or network response exists", () => {
+    expect(getActiveOrganizationSnapshot()).toMatchObject({
+      id: "local-personal",
+      name: "Personal",
+      isPersonal: true,
+      workspaceCapabilities: { local: true, cloud: false },
+    });
+    expect(getActiveOrganizationIdSnapshot()).toBeNull();
+  });
+
+  it("keeps one Personal identity and old local rows across account changes", () => {
+    const account = (id: string): Me => ({
+      user: {
+        id,
+        email: `${id}@example.test`,
+        displayName: id,
+        staffRole: null,
+      },
+      organizations: [
+        organization(`personal_${id}`, true),
+        organization(`org_${id}`, false),
+      ],
+      teams: [],
+    });
+    acceptOrganizationSnapshot(account("a"));
+    const personal = getActiveOrganizationSnapshot();
+    clearTeamStore({ resetSelection: true });
+    expect(getActiveOrganizationSnapshot()).toBe(personal);
+    acceptOrganizationSnapshot(account("b"));
+    expect(getActiveOrganizationSnapshot()?.id).toBe(personal?.id);
+    // Workspace lists memoize by the active scope. Learning B's old Personal
+    // ID must invalidate that memo even before engine migration can run.
+    expect(getActiveOrganizationSnapshot()).not.toBe(personal);
+    expect(getActiveOrganizationIdSnapshot()).toBeNull();
+    expect(
+      filterRowsForOrganization(
+        [
+          { id: "legacy", organizationId: null },
+          { id: "a-local", organizationId: "personal_a" },
+          { id: "b-local", organizationId: "personal_b" },
+          { id: "a-org", organizationId: "org_a" },
+        ],
+        getActiveOrganizationSnapshot(),
+      ).map((row) => row.id),
+    ).toEqual(["legacy", "a-local", "b-local"]);
+  });
+
+  it("retains the Personal scope reference when only account profile data changes", () => {
+    const personal = organization("personal_a", true);
+    const me: Me = {
+      user: {
+        id: "a",
+        email: "a@example.test",
+        displayName: "A",
+        staffRole: null,
+      },
+      organizations: [personal],
+      teams: [personal],
+    };
+    acceptOrganizationSnapshot(me);
+    const before = getActiveOrganizationSnapshot();
+    acceptOrganizationSnapshot({
+      ...me,
+      user: { ...me.user, displayName: "Updated" },
+    });
+    expect(getActiveOrganizationSnapshot()).toBe(before);
+  });
+
   it("normalizes a flat-Team selection to Personal so legacy local rows stay visible", () => {
     const personal = organization("personal_1", true);
     const collaborative = organization("legacy_team_1", false);
@@ -65,7 +134,7 @@ describe("first hierarchy-aware organization snapshot", () => {
     setSetting("team:active-id", collaborative.id);
 
     expect(acceptOrganizationSnapshot(me)).toBe(true);
-    expect(getActiveTeamId()).toBe(personal.id);
+    expect(getActiveTeamId()).toBe("local-personal");
     expect(
       filterRowsForOrganization(
         [{ id: "legacy", organizationId: null }],
@@ -90,7 +159,7 @@ describe("first hierarchy-aware organization snapshot", () => {
     setSetting("team:active-id", collaborative.id);
 
     acceptOrganizationSnapshot(me);
-    expect(getActiveTeamId()).toBe(personal.id);
+    expect(getActiveTeamId()).toBe("local-personal");
 
     setSetting("team:active-id", collaborative.id);
     acceptOrganizationSnapshot(me);

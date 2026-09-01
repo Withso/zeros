@@ -85,7 +85,7 @@ export interface Workspace {
    * Absent means "code" for pre-design rows. */
   kind?: WorkspaceMode;
   /** Organization that semantically owns this workspace. NULL identifies a
-   * pre-v31 local workspace and is interpreted as Personal until claimed. */
+   * device-local Personal workspace, including pre-v31 local workspaces. */
   organizationId?: string | null;
   /** Execution location. Desktop creation currently emits only `local`;
    * `cloud` is reserved for the organization-only provisioner. */
