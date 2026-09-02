@@ -89,3 +89,29 @@ export function requireStaffRole(
   }
   return staffRole;
 }
+
+export type OrganizationCreationStaffRole = Extract<
+  StaffRole,
+  "platform_owner" | "developer"
+>;
+
+/** Initial-launch organization creation is a standing-staff dogfood
+ * capability. It is deliberately independent from tenant membership and from
+ * the deprecated support-only compatibility role. */
+export function canCreateOrganization(
+  staffRole: StaffRole | null,
+): staffRole is OrganizationCreationStaffRole {
+  return staffRole === "platform_owner" || staffRole === "developer";
+}
+
+/** Authoritative API boundary for collaborative organization creation. Use a
+ * 404 so an ordinary account cannot discover an unavailable staff surface by
+ * probing the legacy or current route. */
+export function requireOrganizationCreationCapability(
+  staffRole: StaffRole | null,
+): OrganizationCreationStaffRole {
+  if (!canCreateOrganization(staffRole)) {
+    throw new HttpError(404, "not_found", "Not found");
+  }
+  return staffRole;
+}

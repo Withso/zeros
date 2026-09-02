@@ -49,7 +49,7 @@ d("organization routes", () => {
     pool = new pg.Pool({ connectionString: url, max: 3 });
     await pool.query("DROP SCHEMA public CASCADE; CREATE SCHEMA public;");
     await runMigrations(pool);
-    owner = await signup("Ada");
+    owner = { ...(await signup("Ada")), staffRole: "platform_owner" };
     member = await signup("Grace");
     actor = owner;
 
@@ -85,6 +85,7 @@ d("organization routes", () => {
     expect(response.status).toBe(200);
     const body = (await response.json()) as {
       user: Record<string, unknown>;
+      capabilities: { createOrganization: boolean };
       organizations: Array<{
         name: string;
         isPersonal: boolean;
@@ -97,6 +98,7 @@ d("organization routes", () => {
     expect(body.user).not.toHaveProperty("providerSub");
     expect(body.user).not.toHaveProperty("identity");
     expect(body.teams).toEqual(body.organizations);
+    expect(body.capabilities).toEqual({ createOrganization: true });
     expect(body.organizations[0]).toMatchObject({
       name: "Ada",
       isPersonal: true,
@@ -105,6 +107,28 @@ d("organization routes", () => {
     expect(body.organizations[0]!.defaultTeamId).toMatch(
       /^[0-9a-f-]{36}$/,
     );
+  });
+
+  it("fails closed for ordinary users on both organization-create routes", async () => {
+    actor = member;
+    try {
+      const me = await request("/v1/me");
+      await expect(me.json()).resolves.toMatchObject({
+        capabilities: { createOrganization: false },
+      });
+      for (const path of ["/v1/organizations", "/v1/teams"]) {
+        const response = await request(path, {
+          method: "POST",
+          body: { name: "Must not exist" },
+        });
+        expect(response.status, path).toBe(404);
+        await expect(response.json()).resolves.toMatchObject({
+          error: { code: "not_found" },
+        });
+      }
+    } finally {
+      actor = owner;
+    }
   });
 
   it("creates an organization and its one default team atomically", async () => {
@@ -296,12 +320,15 @@ d("organization routes", () => {
 
   it("accepts only an exact locally-correlated WorkOS native invitation", async () => {
     const suffix = randomUUID().replaceAll("-", "");
-    const nativeOwner = await ensureUser(pool, {
-      provider: "workos",
-      providerSubject: `user_native_owner_${suffix}`,
-      email: `native-owner-${suffix}@example.com`,
-      displayName: "Native Owner",
-    });
+    const nativeOwner = {
+      ...(await ensureUser(pool, {
+        provider: "workos",
+        providerSubject: `user_native_owner_${suffix}`,
+        email: `native-owner-${suffix}@example.com`,
+        displayName: "Native Owner",
+      })),
+      staffRole: "developer" as const,
+    };
     const nativeMember = await ensureUser(pool, {
       provider: "workos",
       providerSubject: `user_native_member_${suffix}`,
@@ -588,12 +615,15 @@ d("organization routes", () => {
 
   it("serializes provider invitation cleanup before membership creation and removal", async () => {
     const suffix = randomUUID().replaceAll("-", "");
-    const workosOwner = await ensureUser(pool, {
-      provider: "workos",
-      providerSubject: `user_owner_${suffix}`,
-      email: `workos-owner-${suffix}@example.com`,
-      displayName: "WorkOS Owner",
-    });
+    const workosOwner = {
+      ...(await ensureUser(pool, {
+        provider: "workos",
+        providerSubject: `user_owner_${suffix}`,
+        email: `workos-owner-${suffix}@example.com`,
+        displayName: "WorkOS Owner",
+      })),
+      staffRole: "developer" as const,
+    };
     const workosMember = await ensureUser(pool, {
       provider: "workos",
       providerSubject: `user_member_${suffix}`,

@@ -38,14 +38,23 @@ function openDashboard(
   void shellOpenUrl(organizationDashboardUrl(APP_BASE_URL, options));
 }
 
-export function organizationSwitcherSessionActions(authStatus: AuthStatus): {
+export function organizationSwitcherSessionActions(
+  authStatus: AuthStatus,
+  canCreateOrganization: boolean,
+): {
   showManagement: boolean;
+  showCreateOrganization: boolean;
   sessionAction: "sign-in" | "log-out" | null;
 } {
   return authStatus === "authenticated"
-    ? { showManagement: true, sessionAction: "log-out" }
+    ? {
+        showManagement: true,
+        showCreateOrganization: canCreateOrganization,
+        sessionAction: "log-out",
+      }
     : {
         showManagement: false,
+        showCreateOrganization: false,
         sessionAction: authStatus === "unauthenticated" ? "sign-in" : null,
       };
 }
@@ -57,11 +66,17 @@ export function OrganizationSwitcher({
   onOpenSettings?: () => void;
   onOrganizationChanged?: () => void;
 }) {
-  const { organizations: availableOrganizations, status: organizationStatus } =
-    useOrganizations();
+  const {
+    organizations: availableOrganizations,
+    me,
+    status: organizationStatus,
+  } = useOrganizations();
   const selected = useActiveOrganization();
   const { email, status: authStatus, startBrowserSignIn, signOut } = useAuth();
-  const sessionActions = organizationSwitcherSessionActions(authStatus);
+  const sessionActions = organizationSwitcherSessionActions(
+    authStatus,
+    me?.capabilities?.createOrganization === true,
+  );
   const active = sessionActions.showManagement
     ? selected
     : PERSONAL_ORGANIZATION;
@@ -121,13 +136,17 @@ export function OrganizationSwitcher({
         {sessionActions.showManagement && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem
-              onSelect={() => openDashboard({ action: "create-organization" })}
-            >
-              <Plus />
-              <span>Create organization</span>
-              <ExternalLink className="text-muted-fg ml-auto" />
-            </DropdownMenuItem>
+            {sessionActions.showCreateOrganization && (
+              <DropdownMenuItem
+                onSelect={() =>
+                  openDashboard({ action: "create-organization" })
+                }
+              >
+                <Plus />
+                <span>Create organization</span>
+                <ExternalLink className="text-muted-fg ml-auto" />
+              </DropdownMenuItem>
+            )}
             <DropdownMenuItem
               onSelect={() =>
                 openDashboard({

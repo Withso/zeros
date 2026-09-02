@@ -9,6 +9,7 @@ import {
   loadExactSnapshot,
   memberPermissions,
   organizationDisplayName,
+  organizationCreationAllowed,
   safeOrganizationLogo,
   sectionLoadErrorNeedsInlineRetry,
   sectionRequestStillCurrent,
@@ -17,6 +18,16 @@ import {
   shouldRevalidateSecurityLifecycle,
   tryWriteClipboard,
 } from "../public/dashboard.js";
+
+test("organization creation fails closed without an explicit server capability", () => {
+  assert.equal(organizationCreationAllowed(undefined), false);
+  assert.equal(organizationCreationAllowed({}), false);
+  assert.equal(
+    organizationCreationAllowed({ createOrganization: false }),
+    false,
+  );
+  assert.equal(organizationCreationAllowed({ createOrganization: true }), true);
+});
 
 test("formats lifecycle dates deterministically and rejects invalid timestamps", () => {
   assert.equal(
