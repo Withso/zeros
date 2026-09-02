@@ -96,6 +96,27 @@ test("ordinary accounts cannot discover or deep-link organization creation", () 
   assert.doesNotMatch(page, /"action":"create-organization"/);
 });
 
+test("dialog cancellation uses explicit non-submitting close controls", () => {
+  const page = dashboardPage({
+    session,
+    me: {
+      user: { id: "u1", email: session.email, displayName: session.name },
+      capabilities: { createOrganization: true },
+      organizations: [personal, org],
+    },
+    requestUrl: "https://app.zeros.build/",
+    signOutHref: "/auth/logout",
+  });
+  const cancelControls = [
+    ...page.matchAll(/<button\b[^>]*\bvalue="cancel"[^>]*>/g),
+  ].map(([control]) => control);
+  assert.equal(cancelControls.length, 6);
+  for (const control of cancelControls) {
+    assert.match(control, /\btype="button"/);
+    assert.match(control, /\bdata-action="close-dialog"/);
+  }
+});
+
 test("Personal disables collaboration navigation and remains local-only", () => {
   const page = dashboardPage({
     session,
