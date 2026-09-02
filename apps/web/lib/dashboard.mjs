@@ -22,10 +22,10 @@ function organizationCreationDialog(allowed) {
   return allowed
     ? `<dialog id="create-organization-dialog" class="dialog">
     <form method="dialog" id="create-organization-form">
-      <div class="dialog-header"><div><h2>Create organization</h2><p>Organizations can own local and cloud workspaces.</p></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
+      <div class="dialog-header"><div><h2>Create organization</h2><p>Organizations can own local and cloud workspaces.</p></div><button class="icon-button" type="button" value="cancel" data-action="close-dialog" aria-label="Close">×</button></div>
       <label class="field"><span>Organization name</span><input name="name" maxlength="80" required autocomplete="organization" placeholder="Acme" /></label>
       <div class="dialog-error" id="create-organization-error" role="alert"></div>
-      <div class="dialog-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button primary" type="submit" value="default">Create organization</button></div>
+      <div class="dialog-actions"><button class="button secondary" type="button" value="cancel" data-action="close-dialog">Cancel</button><button class="button primary" type="submit" value="default">Create organization</button></div>
     </form>
   </dialog>`
     : "";
@@ -476,18 +476,18 @@ export function dashboardPage({ session, me, requestUrl, signOutHref, loadError 
   <div id="create-organization-dialog-slot" data-enabled="${String(canCreateOrganization)}">${organizationCreationDialog(canCreateOrganization)}</div>
   <dialog id="delete-organization-dialog" class="dialog">
     <form method="dialog" id="delete-organization-form">
-      <div class="dialog-header"><div><h2>Delete organization</h2><p>Access stops now. Recovery remains available to an owner for 30 days.</p></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
+      <div class="dialog-header"><div><h2>Delete organization</h2><p>Access stops now. Recovery remains available to an owner for 30 days.</p></div><button class="icon-button" type="button" value="cancel" data-action="close-dialog" aria-label="Close">×</button></div>
       <label class="field"><span>Enter the exact organization name</span><input name="confirmation" maxlength="500" required autocomplete="off" /></label>
       <div class="dialog-error" id="delete-organization-error" role="alert"></div>
-      <div class="dialog-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button danger" type="submit" value="default">Schedule deletion</button></div>
+      <div class="dialog-actions"><button class="button secondary" type="button" value="cancel" data-action="close-dialog">Cancel</button><button class="button danger" type="submit" value="default">Schedule deletion</button></div>
     </form>
   </dialog>
   <dialog id="delete-account-dialog" class="dialog">
     <form method="dialog" id="delete-account-form">
-      <div class="dialog-header"><div><h2>Delete account</h2><p>Every device is signed out now. Cloud account data is recoverable for 30 days; local Personal workspaces remain on your devices.</p></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
+      <div class="dialog-header"><div><h2>Delete account</h2><p>Every device is signed out now. Cloud account data is recoverable for 30 days; local Personal workspaces remain on your devices.</p></div><button class="icon-button" type="button" value="cancel" data-action="close-dialog" aria-label="Close">×</button></div>
       <label class="field"><span>Enter DELETE MY ACCOUNT</span><input name="confirmation" maxlength="64" required autocomplete="off" /></label>
       <div class="dialog-error" id="delete-account-error" role="alert"></div>
-      <div class="dialog-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button danger" type="submit" value="default">Schedule deletion</button></div>
+      <div class="dialog-actions"><button class="button secondary" type="button" value="cancel" data-action="close-dialog">Cancel</button><button class="button danger" type="submit" value="default">Schedule deletion</button></div>
     </form>
   </dialog>
   <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>

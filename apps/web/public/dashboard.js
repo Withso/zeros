@@ -353,10 +353,10 @@ function bootDashboard() {
     '<div class="menu-separator"></div><button class="menu-action" type="button" data-action="create-organization"><span aria-hidden="true">＋</span>Create organization</button>';
   const organizationCreationDialog = `<dialog id="create-organization-dialog" class="dialog">
     <form method="dialog" id="create-organization-form">
-      <div class="dialog-header"><div><h2>Create organization</h2><p>Organizations can own local and cloud workspaces.</p></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
+      <div class="dialog-header"><div><h2>Create organization</h2><p>Organizations can own local and cloud workspaces.</p></div><button class="icon-button" type="button" value="cancel" data-action="close-dialog" aria-label="Close">×</button></div>
       <label class="field"><span>Organization name</span><input name="name" maxlength="80" required autocomplete="organization" placeholder="Acme" /></label>
       <div class="dialog-error" id="create-organization-error" role="alert"></div>
-      <div class="dialog-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button primary" type="submit" value="default">Create organization</button></div>
+      <div class="dialog-actions"><button class="button secondary" type="button" value="cancel" data-action="close-dialog">Cancel</button><button class="button primary" type="submit" value="default">Create organization</button></div>
     </form>
   </dialog>`;
 
@@ -926,7 +926,9 @@ function bootDashboard() {
       return;
     }
     const action = target.dataset.action;
-    if (action === "create-organization") {
+    if (action === "close-dialog") {
+      target.closest("dialog")?.close();
+    } else if (action === "create-organization") {
       if (!organizationCreationAllowed(state.capabilities)) return;
       document.getElementById("org-switcher")?.removeAttribute("open");
       const errorNode = document.getElementById("create-organization-error");
