@@ -4,7 +4,10 @@ import {
   DESIGN_ICONS,
   DESIGN_MARKS,
   DESIGN_SCRAMBLE,
+  DESIGN_SCRAMBLE_ICONS,
   DESIGN_VISIBLE,
+  KEYBOARD_ICONS,
+  KEYBOARD_MARKS,
   buildScrambleGlyphs,
   escapeHtml,
   fillScrambleCells,
@@ -101,7 +104,20 @@ describe("hero scramble fill", () => {
     expect(DESIGN_VISIBLE).toBe(6);
     expect(DESIGN_ICONS.length).toBe(6);
     expect(new Set(DESIGN_ICONS).size).toBe(6);
-    expect(DESIGN_SCRAMBLE.icons).toBe(DESIGN_ICONS);
+    expect([...KEYBOARD_MARKS]).toEqual([
+      "shift",
+      "control",
+      "option",
+      "command",
+      "key-c",
+      "key-v",
+      "enter",
+      "delete",
+    ]);
+    expect(KEYBOARD_ICONS.length).toBe(8);
+    expect(new Set(KEYBOARD_ICONS).size).toBe(8);
+    expect(DESIGN_SCRAMBLE.icons).toBe(DESIGN_SCRAMBLE_ICONS);
+    expect(DESIGN_SCRAMBLE_ICONS).toHaveLength(DESIGN_ICONS.length + KEYBOARD_ICONS.length);
     expect(DESIGN_SCRAMBLE.chars).toBe("");
     expect(DESIGN_SCRAMBLE.chars).not.toMatch(ROLE_WORDS);
     expect(DESIGN_SCRAMBLE.chars).not.toMatch(LONG_DESIGN_WORDS);
@@ -143,6 +159,20 @@ describe("hero scramble fill", () => {
     }
     expect(catalog.split("<svg ").length - 1).toBe(DESIGN_ICONS.length);
 
+    const keys = KEYBOARD_ICONS.join("");
+    expect(keys).toMatch(/is-key/);
+    expect(keys).toMatch(/stroke-width="1.75"/);
+    expect(keys).toMatch(/#E8E8E8/);
+    expect(keys).toMatch(/#3888F0/);
+    const keyNamed = [
+      ...keys.matchAll(/data-hero-scramble-icon="([^"]+)"/g),
+    ].map((match) => match[1]);
+    expect(keyNamed).toEqual([...KEYBOARD_MARKS]);
+    expect(keys).not.toMatch(/hero-scramble-stack/);
+    expect(keys).not.toMatch(/<text/i);
+    expect(visibleText(keys)).toBe("");
+
+    const allowed = new Set([...DESIGN_MARKS, ...KEYBOARD_MARKS]);
     const full = fillScrambleCells(DESIGN_ICONS.length, DESIGN_SCRAMBLE);
     expect(full).toHaveLength(DESIGN_VISIBLE);
     expect(full.every((cell) => cell.kind === "icon")).toBe(true);
@@ -156,8 +186,16 @@ describe("hero scramble fill", () => {
       expect(new Set(cells.map((cell) => cell.html)).size).toBe(cells.length);
       expect(new Set(names).size).toBe(DESIGN_VISIBLE);
       expect(names).toHaveLength(DESIGN_VISIBLE);
+      const designCount = names.filter((name) =>
+        (DESIGN_MARKS as readonly string[]).includes(name),
+      ).length;
+      const keyCount = names.filter((name) =>
+        (KEYBOARD_MARKS as readonly string[]).includes(name),
+      ).length;
+      expect(designCount).toBe(4);
+      expect(keyCount).toBe(2);
       for (const name of names) {
-        expect(DESIGN_MARKS).toContain(name);
+        expect(allowed.has(name)).toBe(true);
       }
       for (const cell of cells) {
         expect(iconNames(cell.html)).toHaveLength(1);
@@ -182,7 +220,9 @@ describe("hero scramble fill", () => {
       expect(visibleText(html)).not.toMatch(CJK_OR_KATAKANA);
       expect(visibleText(html)).not.toMatch(/[\#|+]/);
     }
-    expect(seen.size).toBe(DESIGN_ICONS.length);
+    expect(seen.size).toBe(DESIGN_ICONS.length + KEYBOARD_ICONS.length);
+    for (const name of DESIGN_MARKS) expect(seen.has(name)).toBe(true);
+    for (const name of KEYBOARD_MARKS) expect(seen.has(name)).toBe(true);
   });
 
   it("slides design marks instead of reprinting the same set in place", () => {

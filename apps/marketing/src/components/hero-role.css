@@ -58,6 +58,10 @@
   vertical-align: -4px;
 }
 
+.hero-role-word.scramble-developers .hero-scramble-icon.is-key {
+  opacity: 0.78;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .hero-role-word {
     color: inherit !important;

@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { playScramble, SCRAMBLE_FROM, SCRAMBLE_MS } from './scramble-text'
-import './hero-role.css?v=scramble-53'
+import './hero-role.css?v=scramble-54'
 
 const ROLES = ['builders', 'developers', 'designers'] as const
 
@@ -11,9 +11,10 @@ type Role = (typeof ROLES)[number]
 /**
  * Cycles the hero audience word with a scramble decode: code glyphs,
  * design-tool marks, then matrix digits. Code and matrix follow word length;
- * developers → designers is a compact 6-icon scramble, then a left-to-right
- * decode into the word. Settled letters stay headline size; scramble glyphs
- * are 60px, except design icons at 50px.
+ * developers → designers is a compact 6-slot scramble of design marks
+ * with a quiet keyboard layer, then a left-to-right decode into the word.
+ * Settled letters stay headline size; scramble glyphs are 60px, except
+ * design icons at 50px.
  */
 export function HeroRoleCycle() {
   const textRef = useRef<HTMLSpanElement>(null)

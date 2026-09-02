@@ -41,11 +41,16 @@ const ICON_COLORS = [
   SCRAMBLE_PALETTE[5],
 ] as const
 
-const lucide = (name: DesignMark, color: string, inner: string) =>
-  `<svg class="hero-scramble-icon" data-hero-scramble-icon="${name}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${inner}</svg>`
+const lucide = (
+  name: string,
+  color: string,
+  inner: string,
+  kind: 'tool' | 'key' = 'tool',
+) =>
+  `<svg class="hero-scramble-icon${kind === 'key' ? ' is-key' : ''}" data-hero-scramble-icon="${name}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="${kind === 'key' ? '1.75' : '2'}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${inner}</svg>`
 
 /**
- * Lucide design marks only (ISC, same drawings as lucide-react).
+ * Lucide design marks (ISC, same drawings as lucide-react).
  * One hardcoded hue each; marketing scramble is allowed off tokens.
  */
 export const DESIGN_ICONS = [
@@ -81,6 +86,60 @@ export const DESIGN_ICONS = [
   ),
 ] as const
 
+export const KEYBOARD_MARKS = [
+  'shift',
+  'control',
+  'option',
+  'command',
+  'key-c',
+  'key-v',
+  'enter',
+  'delete',
+] as const
+
+export type KeyboardMark = (typeof KEYBOARD_MARKS)[number]
+
+const KEY_MUTED = SCRAMBLE_PALETTE[7]
+const KEY_COOL = SCRAMBLE_PALETTE[6]
+
+/**
+ * Quiet keyboard layer (Lucide + simple C/V strokes). Same six slots;
+ * these recede beside the design marks.
+ */
+export const KEYBOARD_ICONS = [
+  lucide('shift', KEY_MUTED, '<path d="M9 18v-6H5l7-7 7 7h-4v6H9z"/>', 'key'),
+  lucide('control', KEY_MUTED, '<path d="m18 15-6-6-6 6"/>', 'key'),
+  lucide(
+    'option',
+    KEY_MUTED,
+    '<path d="M3 3h6l6 18h6"/><path d="M14 3h7"/>',
+    'key',
+  ),
+  lucide(
+    'command',
+    KEY_MUTED,
+    '<path d="M15 6v12a3 3 0 1 0 3-3H6a3 3 0 1 0 3 3V6a3 3 0 1 0-3 3h12a3 3 0 1 0-3-3"/>',
+    'key',
+  ),
+  lucide('key-c', KEY_COOL, '<path d="M16.8 7.4a5.8 5.8 0 1 0 0 9.2"/>', 'key'),
+  lucide('key-v', KEY_COOL, '<path d="M7 7.2 12 16.8 17 7.2"/>', 'key'),
+  lucide(
+    'enter',
+    KEY_MUTED,
+    '<polyline points="9 10 4 15 9 20"/><path d="M20 4v7a4 4 0 0 1-4 4H4"/>',
+    'key',
+  ),
+  lucide(
+    'delete',
+    KEY_MUTED,
+    '<path d="M10 5a2 2 0 0 0-1.344.519l-6.328 5.74a1 1 0 0 0 0 1.481l6.328 5.741A2 2 0 0 0 10 19h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2z"/><path d="m12 9 6 6"/><path d="m18 9-6 6"/>',
+    'key',
+  ),
+] as const
+
+/** Six-slot designers pass: design marks plus the keyboard layer. */
+export const DESIGN_SCRAMBLE_ICONS = [...DESIGN_ICONS, ...KEYBOARD_ICONS]
+
 export type ScrambleSet = {
   chars: string
   icons?: readonly string[]
@@ -91,10 +150,10 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers — six unique Lucide marks, no repeats. */
+/** developers → designers — six unique slots; design marks plus keyboard layer. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
   chars: '',
-  icons: DESIGN_ICONS,
+  icons: DESIGN_SCRAMBLE_ICONS,
 }
 
 /** designers → builders: matrix digits, no CJK. */
@@ -241,9 +300,18 @@ function dealDistinct(items: readonly string[], count: number): string[] {
   return out
 }
 
+function mixLayeredIconCells(count: number): ScrambleCell[] {
+  const keySlots = Math.min(2, KEYBOARD_ICONS.length, Math.max(0, count - 3))
+  const designSlots = Math.min(count - keySlots, DESIGN_ICONS.length)
+  const design = shuffle([...DESIGN_ICONS]).slice(0, designSlots)
+  const keys = shuffle([...KEYBOARD_ICONS]).slice(0, keySlots)
+  return shuffle([...design, ...keys]).map((html) => ({ kind: 'icon' as const, html }))
+}
+
 function fillIconCells(length: number, icons: readonly string[]): ScrambleCell[] {
   if (length <= 0 || icons.length === 0) return []
   const count = Math.min(DESIGN_VISIBLE, length, icons.length)
+  if (icons === DESIGN_SCRAMBLE_ICONS) return mixLayeredIconCells(count)
   return shuffle(icons)
     .slice(0, count)
     .map((html) => ({ kind: 'icon' as const, html }))
@@ -467,6 +535,7 @@ export function playScramble(
   let lastRefresh = -Infinity
   let lastHtml = ''
   const state = { t: 0 }
+  let iconTick = 0
 
   return gsap.to(state, {
     t: 1,
@@ -477,8 +546,12 @@ export function playScramble(
       if (now - lastRefresh >= refreshMs) {
         lastRefresh = now
         if (iconCount > 0) {
-          if (slots.length !== iconCount) slots = fillScrambleCells(iconCount, set)
-          else slots = rotateScrambleIcons(slots, 1)
+          iconTick += 1
+          if (slots.length !== iconCount || iconTick % 4 === 0) {
+            slots = fillScrambleCells(iconCount, set)
+          } else {
+            slots = rotateScrambleIcons(slots, 1)
+          }
         } else {
           slots = fillScrambleCells(scrambleSlotCount(from, text, state.t, set), set)
         }
