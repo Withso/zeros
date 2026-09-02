@@ -25,7 +25,11 @@ export const DESIGN_MARKS = [
 
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
-/** developers → designers: six unique Lucide marks, no repeats. */
+/**
+ * developers → designers: compact icon row, independent of word length.
+ * Code and matrix scrambles still follow `builders` / `developers` /
+ * `designers`. This pass uses this many unique Lucide marks instead.
+ */
 export const DESIGN_VISIBLE = 6
 
 const ICON_COLORS = [
@@ -313,19 +317,81 @@ export function rotateScrambleIcons(cells: ScrambleCell[], by = 1): ScrambleCell
   })
 }
 
+function sineInOut(t: number): number {
+  return 0.5 - Math.cos(Math.PI * Math.min(1, Math.max(0, t))) / 2
+}
+
 function cellToGlyph(cell: ScrambleCell): Glyph {
   if (cell.kind === 'icon') return { kind: 'icon', html: cell.html }
   return { kind: 'scramble', ch: cell.ch, color: cell.color }
+}
+
+export function isIconScramble(set: ScrambleSet): boolean {
+  return iconScrambleCount(set) > 0
+}
+
+function iconScrambleCount(set: ScrambleSet): number {
+  const icons = set.icons
+  if (!icons || icons.length === 0) return 0
+  return Math.min(DESIGN_VISIBLE, icons.length)
+}
+
+/** Slot count for one scramble frame. Icon passes ignore from/to length. */
+export function scrambleSlotCount(
+  from: string,
+  to: string,
+  t: number,
+  set: ScrambleSet,
+): number {
+  const icons = iconScrambleCount(set)
+  if (icons > 0) return icons
+  const visualT = sineInOut(Math.min(1, Math.max(0, t)))
+  const startLen = Math.max(1, from.length)
+  const endLen = to.length
+  return Math.max(1, Math.round(startLen + (endLen - startLen) * visualT))
+}
+
+/** One decode frame. Icon passes are icon-only at `DESIGN_VISIBLE`. */
+export function buildScrambleGlyphs(
+  from: string,
+  to: string,
+  t: number,
+  set: ScrambleSet,
+  slots: ScrambleCell[],
+): Glyph[] {
+  const icons = iconScrambleCount(set)
+  if (icons > 0) {
+    const glyphs: Glyph[] = []
+    for (let i = 0; i < icons; i += 1) {
+      const cell = slots[i]
+      if (cell) glyphs.push(cellToGlyph(cell))
+    }
+    return glyphs
+  }
+
+  const visualT = sineInOut(Math.min(1, Math.max(0, t)))
+  const startLen = Math.max(1, from.length)
+  const endLen = to.length
+  const maxLen = Math.max(startLen, endLen)
+  const len = scrambleSlotCount(from, to, t, set)
+  const glyphs: Glyph[] = []
+  for (let i = 0; i < len; i += 1) {
+    const kind = scrambleGlyphKind(i, visualT, maxLen)
+    if (kind === 'from' && i < from.length) {
+      glyphs.push({ kind: 'from', ch: from[i]! })
+    } else if (kind === 'to' && i < to.length) {
+      glyphs.push({ kind: 'to', ch: to[i]! })
+    } else {
+      glyphs.push(cellToGlyph(slots[i] ?? pickScrambleCell(set)))
+    }
+  }
+  return glyphs
 }
 
 /** HTML tail of scramble glyphs. Each slot is one character or icon. */
 export function scrambleTail(length: number, set: ScrambleSet): string {
   if (length <= 0) return ''
   return renderGlyphRun(fillScrambleCells(length, set).map(cellToGlyph))
-}
-
-function sineInOut(t: number): number {
-  return 0.5 - Math.cos(Math.PI * Math.min(1, Math.max(0, t))) / 2
 }
 
 /**
@@ -350,14 +416,12 @@ export function playScramble(
   },
 ): gsap.core.Tween {
   const from = el.textContent ?? ''
+  const iconCount = iconScrambleCount(set)
   const startLen = Math.max(1, from.length)
   const endLen = text.length
-  const maxLen = Math.max(startLen, endLen)
   const refreshMs = Math.max(28, 40 / Math.max(0.4, speed))
   let slots = fillScrambleCells(
-    set.icons && set.icons.length > 0
-      ? Math.min(DESIGN_VISIBLE, maxLen, set.icons.length)
-      : maxLen,
+    iconCount > 0 ? iconCount : Math.max(startLen, endLen),
     set,
   )
   let lastRefresh = -Infinity
@@ -369,38 +433,19 @@ export function playScramble(
     duration,
     ease: 'none',
     onUpdate: () => {
-      const visualT = sineInOut(state.t)
-      const len = Math.max(1, Math.round(startLen + (endLen - startLen) * visualT))
       const now = performance.now()
       if (now - lastRefresh >= refreshMs) {
         lastRefresh = now
-        if (set.icons && set.icons.length > 0) {
-          const n = Math.min(DESIGN_VISIBLE, set.icons.length)
-          if (slots.length !== n) slots = fillScrambleCells(n, set)
+        if (iconCount > 0) {
+          if (slots.length !== iconCount) slots = fillScrambleCells(iconCount, set)
           else slots = rotateScrambleIcons(slots, 1)
         } else {
-          slots = fillScrambleCells(len, set)
+          slots = fillScrambleCells(scrambleSlotCount(from, text, state.t, set), set)
         }
       }
-      const glyphs: Glyph[] = []
-      let iconAt = 0
-      for (let i = 0; i < len; i += 1) {
-        const kind = scrambleGlyphKind(i, visualT, maxLen)
-        if (kind === 'from' && i < from.length) {
-          glyphs.push({ kind: 'from', ch: from[i]! })
-        } else if (kind === 'to' && i < text.length) {
-          glyphs.push({ kind: 'to', ch: text[i]! })
-        } else if (set.icons && set.icons.length > 0) {
-          const cell = slots[iconAt]
-          if (cell) {
-            glyphs.push(cellToGlyph(cell))
-            iconAt += 1
-          }
-        } else {
-          glyphs.push(cellToGlyph(slots[i] ?? pickScrambleCell(set)))
-        }
-      }
-      const html = renderGlyphRun(glyphs)
+      const html = renderGlyphRun(
+        buildScrambleGlyphs(from, text, state.t, set, slots),
+      )
       if (html !== lastHtml) {
         lastHtml = html
         el.innerHTML = html

@@ -5,14 +5,17 @@ import {
   DESIGN_MARKS,
   DESIGN_SCRAMBLE,
   DESIGN_VISIBLE,
+  buildScrambleGlyphs,
   escapeHtml,
   fillScrambleCells,
+  isIconScramble,
   MATRIX_SCRAMBLE,
   renderGlyphRun,
   rotateScrambleIcons,
   SCRAMBLE_PALETTE,
   scrambleFill,
   scrambleGlyphKind,
+  scrambleSlotCount,
   scrambleTail,
 } from "../../components/scramble-text";
 
@@ -249,6 +252,64 @@ describe("hero scramble fill", () => {
       expect(scrambleGlyphKind(i, 0.3, 10)).toBe("scramble");
       expect(scrambleGlyphKind(i, 1, 10)).toBe("to");
     }
+  });
+
+  it("keeps the designers scramble to a compact icon row, not word length", () => {
+    expect(isIconScramble(DESIGN_SCRAMBLE)).toBe(true);
+    expect(isIconScramble(CODE_SCRAMBLE)).toBe(false);
+    expect(isIconScramble(MATRIX_SCRAMBLE)).toBe(false);
+
+    const from = "developers";
+    const to = "designers";
+    expect(from.length).toBe(10);
+    expect(to.length).toBe(9);
+    const slots = fillScrambleCells(DESIGN_VISIBLE, DESIGN_SCRAMBLE);
+    for (const t of [0, 0.12, 0.35, 0.5, 0.72, 0.9, 1]) {
+      expect(scrambleSlotCount(from, to, t, DESIGN_SCRAMBLE)).toBe(
+        DESIGN_VISIBLE,
+      );
+      const glyphs = buildScrambleGlyphs(from, to, t, DESIGN_SCRAMBLE, slots);
+      expect(glyphs).toHaveLength(DESIGN_VISIBLE);
+      expect(glyphs.every((glyph) => glyph.kind === "icon")).toBe(true);
+      const html = renderGlyphRun(glyphs);
+      expect(svgCount(html)).toBe(DESIGN_VISIBLE);
+      expect(html).not.toMatch(/hero-scramble-text/);
+      expect(html).not.toMatch(/hero-scramble-symbol/);
+      expect(visibleText(html)).toBe("");
+      expect(visibleText(html)).not.toMatch(ROLE_WORDS);
+    }
+
+    expect(scrambleSlotCount("builders", "developers", 0, CODE_SCRAMBLE)).toBe(
+      "builders".length,
+    );
+    expect(
+      scrambleSlotCount("builders", "developers", 1, CODE_SCRAMBLE),
+    ).toBe("developers".length);
+    const codeSlots = fillScrambleCells(10, CODE_SCRAMBLE);
+    const codeStart = buildScrambleGlyphs(
+      "builders",
+      "developers",
+      0,
+      CODE_SCRAMBLE,
+      codeSlots,
+    );
+    expect(codeStart).toHaveLength("builders".length);
+    expect(codeStart.every((glyph) => glyph.kind === "from")).toBe(true);
+    const codeEnd = buildScrambleGlyphs(
+      "builders",
+      "developers",
+      1,
+      CODE_SCRAMBLE,
+      codeSlots,
+    );
+    expect(codeEnd).toHaveLength("developers".length);
+    expect(codeEnd.every((glyph) => glyph.kind === "to")).toBe(true);
+    expect(
+      scrambleSlotCount("designers", "builders", 0, MATRIX_SCRAMBLE),
+    ).toBe("designers".length);
+    expect(
+      scrambleSlotCount("designers", "builders", 1, MATRIX_SCRAMBLE),
+    ).toBe("builders".length);
   });
 
   it("wraps settled letters, scramble digits, and icons", () => {
