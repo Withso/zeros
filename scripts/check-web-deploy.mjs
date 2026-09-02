@@ -91,8 +91,13 @@ function sameCommit(actual, expected) {
 }
 
 async function publicManifest(target, sha) {
-  const url = `${target.origin}${MANIFEST_PATH}?expected=${sha}`;
+  const url = new URL(MANIFEST_PATH, `${target.origin}/`);
+  url.searchParams.set("expected", sha);
+  // A pre-deployment probe must never poison the verification URL with a
+  // cached 404 while a Pages deployment is still propagating.
+  url.searchParams.set("probe", crypto.randomUUID());
   let response;
+  let raw;
   let body;
   try {
     response = await fetch(url, {
@@ -100,7 +105,7 @@ async function publicManifest(target, sha) {
       headers: { Accept: "application/json", "Cache-Control": "no-cache" },
       signal: AbortSignal.timeout(20_000),
     });
-    body = await response.json();
+    raw = await response.text();
   } catch (error) {
     return {
       state: "unavailable",
@@ -112,6 +117,14 @@ async function publicManifest(target, sha) {
     return {
       state: "unavailable",
       note: `${target.origin} manifest returned HTTP ${response.status}`,
+    };
+  }
+  try {
+    body = JSON.parse(raw);
+  } catch (error) {
+    return {
+      state: "unavailable",
+      note: `${target.origin} manifest returned invalid JSON: ${error.message}`,
     };
   }
   if (body?.version !== 1 || body?.surface !== target.surface) {
