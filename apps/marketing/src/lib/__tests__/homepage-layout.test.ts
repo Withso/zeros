@@ -79,6 +79,7 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/font-size: 0\.58em/);
     expect(css).toMatch(/font-size: 1em/);
     expect(css).toMatch(/font-size: 60px/);
+    expect(css).toMatch(/font-size: 50px/);
     expect(css).toMatch(/hero-scramble-text/);
     expect(css).toMatch(/hero-scramble-symbol/);
     expect(css).toMatch(/hero-scramble-icon/);
@@ -124,7 +125,9 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/data-hero-scramble-icon/);
     expect(scramble).toMatch(/width="50"/);
     expect(scramble).toMatch(/height="50"/);
-    expect(scramble).toMatch(/chars: ''/);
+    expect(scramble).toMatch(/DESIGN_TEXT_CHARS/);
+    expect(scramble).toMatch(/DESIGN_TEXT_RATIO = 0\.3/);
+    expect(scramble).toMatch(/chars: DESIGN_TEXT_CHARS/);
     expect(scramble).not.toMatch(/chars: '#\|\+'/);
     expect(scramble).toMatch(/el\.classList\.remove\(/);
     expect(scramble).toMatch(/'is-scrambling'/);
@@ -145,7 +148,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-61/);
+    expect(cycle).toMatch(/hero-role\.css\?v=scramble-62/);
     expect(css).toMatch(/is-key/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);

@@ -48,6 +48,16 @@
   vertical-align: baseline;
 }
 
+.hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol {
+  font-size: 50px;
+  margin: 0 2px 0 0;
+  vertical-align: -2px;
+}
+
+.hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol:last-child {
+  margin-right: 0;
+}
+
 .hero-scramble-icon {
   display: inline-block;
   overflow: hidden;

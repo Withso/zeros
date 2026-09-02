@@ -26,13 +26,19 @@ export const DESIGN_MARKS = [
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
 /**
- * developers → designers: five unique marks, then a left-to-right
- * decode into `designers`. Code and matrix still follow word length.
+ * developers → designers: five unique slots (design marks, one keyboard
+ * mark, and ~30% A-Z), then a left-to-right decode into `designers`.
+ * Code and matrix still follow word length.
  */
 export const DESIGN_VISIBLE = 5
 
 /** At most one quiet keyboard mark in the five-slot row. */
 export const DESIGN_KEY_SLOTS = 1
+
+/** Share of designers scramble slots that flicker A-Z. */
+export const DESIGN_TEXT_RATIO = 0.3
+
+export const DESIGN_TEXT_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
 
 const ICON_COLORS = [
   SCRAMBLE_PALETTE[0],
@@ -139,7 +145,7 @@ export const KEYBOARD_ICONS = [
   ),
 ] as const
 
-/** Five-slot designers pass: design marks plus a quiet keyboard layer. */
+/** Five-slot designers pass: design marks, a quiet keyboard layer, and A-Z. */
 export const DESIGN_SCRAMBLE_ICONS = [...DESIGN_ICONS, ...KEYBOARD_ICONS]
 
 export type ScrambleSet = {
@@ -152,9 +158,9 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers — five unique slots; design marks plus keyboard layer. */
+/** developers → designers — five unique slots; marks, keyboard, and A-Z. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
-  chars: '',
+  chars: DESIGN_TEXT_CHARS,
   icons: DESIGN_SCRAMBLE_ICONS,
 }
 
@@ -303,15 +309,50 @@ function dealDistinct(items: readonly string[], count: number): string[] {
 }
 
 function mixLayeredIconCells(count: number): ScrambleCell[] {
+  const textSlots = designTextSlotCount(count)
   const keySlots = Math.min(
     DESIGN_KEY_SLOTS,
     KEYBOARD_ICONS.length,
-    Math.max(0, count - 3),
+    Math.max(0, count - textSlots - 1),
   )
-  const designSlots = Math.min(count - keySlots, DESIGN_ICONS.length)
+  const designSlots = Math.min(
+    Math.max(0, count - keySlots - textSlots),
+    DESIGN_ICONS.length,
+  )
   const design = shuffle([...DESIGN_ICONS]).slice(0, designSlots)
   const keys = shuffle([...KEYBOARD_ICONS]).slice(0, keySlots)
-  return shuffle([...design, ...keys]).map((html) => ({ kind: 'icon' as const, html }))
+  const icons = [...design, ...keys].map((html) => ({
+    kind: 'icon' as const,
+    html,
+  }))
+  return shuffle([...icons, ...fillDesignLetterCells(textSlots)])
+}
+
+export function designTextSlotCount(count: number): number {
+  if (count < 3) return 0
+  return Math.min(
+    count - 2,
+    Math.max(0, Math.round(count * DESIGN_TEXT_RATIO)),
+  )
+}
+
+function fillDesignLetterCells(count: number): ScrambleCell[] {
+  if (count <= 0) return []
+  const letters = dealDistinct([...DESIGN_TEXT_CHARS], count)
+  const colors = dealDistinct(SCRAMBLE_PALETTE, count)
+  return letters.map((ch, i) => ({
+    kind: 'char' as const,
+    ch,
+    color: colors[i] ?? SCRAMBLE_PALETTE[0],
+  }))
+}
+
+function flickerDesignLetters(cells: ScrambleCell[]): ScrambleCell[] {
+  const next = fillDesignLetterCells(
+    cells.filter((cell) => cell.kind === 'char').length,
+  )
+  let i = 0
+  return cells.map((cell) => (cell.kind === 'char' ? next[i++]! : cell))
 }
 
 function fillIconCells(length: number, icons: readonly string[]): ScrambleCell[] {
@@ -412,7 +453,7 @@ function iconScrambleCount(set: ScrambleSet): number {
 
 /**
  * Icon pass: hold a compact unique row, then lock `to` left-to-right.
- * Unrevealed letters stay icons, never leftover `from` text.
+ * Unrevealed slots stay marks or A-Z, never leftover `from` text.
  */
 export function iconDecodeKind(
   i: number,
@@ -556,7 +597,7 @@ export function playScramble(
           if (slots.length !== iconCount || iconTick % 4 === 0) {
             slots = fillScrambleCells(iconCount, set)
           } else {
-            slots = rotateScrambleIcons(slots, 1)
+            slots = flickerDesignLetters(rotateScrambleIcons(slots, 1))
           }
         } else {
           slots = fillScrambleCells(scrambleSlotCount(from, text, state.t, set), set)
