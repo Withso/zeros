@@ -298,6 +298,7 @@ apps/web/
   functions/auth/desktop-revoke.ts → older-desktop Railway pass-through
   functions/handoff/*          → Auth0 desktop ticket compatibility APIs
   lib/hosts.ts                 → host classification + CSP
+  lib/pages-routes.mjs         → surface-specific Pages invocation policy
   lib/hub.ts                   → hub HTML
   lib/dashboard.mjs            → token-based signed-in dashboard HTML
   lib/control-plane-proxy.ts   → server-side API/session boundary
@@ -308,6 +309,7 @@ apps/web/
   lib/workos-railway.mjs       → exact control-plane origin boundary
   lib/workos-webhook.mjs       → byte-preserving Railway pass-through
   public/_headers              → app CSP defaults (source; copied into dist/)
+  dist/_routes.json            → generated invocation manifest (Ops routes every path)
   public/robots.txt            → app Disallow (source; marketing overridden in middleware)
   public/dashboard.{css,js}    → responsive management client
   public/404.html              → static 404 for both hosts (disables Pages' implicit SPA fallback)
@@ -324,6 +326,7 @@ apps/web/
 | `GET /` on both hosts      | Marketing → SPA via `ASSETS`; app → hub Function                                                                                                                     |
 | Marketing `/auth/*`        | 302 → `app.zeros.build`                                                                                                                                              |
 | Shared `_headers` CSP      | Middleware sets marketing CSP (Google Fonts) vs app CSP                                                                                                              |
+| Stable dashboard/Ops assets | `_routes.json` keeps these exact paths inside host middleware so runtime CSP and `no-cache` headers apply; content-hashed marketing assets remain static           |
 | `robots.txt`               | Host-specific body from middleware                                                                                                                                   |
 | SPA `_redirects`           | Explicit paths only (`/changelog`, `/privacy`, `/terms`) — not `/*`; keep in sync with marketing `src/routes.tsx`                                                    |
 | Unknown path (either host) | Static `404.html` with a real 404 status — without that file, Pages' implicit SPA mode would serve the marketing homepage with 200 on `app.zeros.build/<unknown>`    |

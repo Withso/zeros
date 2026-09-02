@@ -35,6 +35,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { pagesFunctionRoutes } from "../lib/pages-routes.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_APP = path.resolve(HERE, "..");
@@ -147,6 +148,16 @@ function assemble() {
       writeFileSync(path.join(OUT, name), readFileSync(src));
     }
   }
+
+  // Cloudflare auto-excludes static files from Functions. Keep stable hosted
+  // UI assets inside host middleware so its runtime cache/CSP policy applies.
+  // The isolated Ops deployment routes every path through its deny-by-default
+  // allowlist; public web deployments retain free delivery for immutable files.
+  const surface = process.env.ZEROS_SURFACE === "ops" ? "ops" : "app";
+  writeFileSync(
+    path.join(OUT, "_routes.json"),
+    `${JSON.stringify(pagesFunctionRoutes(surface), null, 2)}\n`,
+  );
 
   // The dashboard consumes the SAME primitive values as the desktop. Strip
   // Tailwind's build-only setup (`@theme`, package imports, source scanning)
