@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { playScramble, SCRAMBLE_FROM, SCRAMBLE_MS } from './scramble-text'
-import './hero-role.css?v=scramble-63'
+import './hero-role.css?v=scramble-64'
 
 const ROLES = ['builders', 'developers', 'designers'] as const
 

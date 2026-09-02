@@ -98,6 +98,11 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/margin: 0 4px 0 0/);
     expect(css).not.toMatch(/margin: 0 12px 0 0/);
     expect(css).not.toMatch(/letter-spacing: 0/);
+    expect(css).toMatch(/\.hero-role-word::before/);
+    expect(css).toMatch(/height: 100%/);
+    expect(css).toMatch(/vertical-align: top/);
+    expect(css).not.toMatch(/vertical-align: -2px/);
+    expect(css).not.toMatch(/vertical-align: middle/);
     expect(css).toMatch(/letter-spacing: inherit/);
     expect(css).toMatch(/font-variant-numeric: normal/);
     expect(css).toMatch(/position: relative/);
@@ -147,7 +152,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-63/);
+    expect(cycle).toMatch(/hero-role\.css\?v=scramble-64/);
     expect(css).toMatch(/is-key/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);
