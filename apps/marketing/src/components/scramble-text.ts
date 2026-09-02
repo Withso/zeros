@@ -26,9 +26,9 @@ export const DESIGN_MARKS = [
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
 /**
- * developers → designers: compact icon row, independent of word length.
- * Code and matrix scrambles still follow `builders` / `developers` /
- * `designers`. This pass uses this many unique Lucide marks instead.
+ * developers → designers: compact unique Lucide marks while scrambling.
+ * Code and matrix still follow word length. After the compact row, this
+ * pass still left-to-right decodes `designers`.
  */
 export const DESIGN_VISIBLE = 6
 
@@ -336,7 +336,27 @@ function iconScrambleCount(set: ScrambleSet): number {
   return Math.min(DESIGN_VISIBLE, icons.length)
 }
 
-/** Slot count for one scramble frame. Icon passes ignore from/to length. */
+/**
+ * Icon pass: compact unique marks while scrambling, then lock `to`
+ * left-to-right. Unrevealed letters stay icons, never leftover `from` text.
+ */
+function iconRevealCounts(
+  to: string,
+  t: number,
+  iconCount: number,
+): { revealed: number; icons: number } {
+  const visualT = sineInOut(Math.min(1, Math.max(0, t)))
+  const n = Math.max(1, to.length)
+  let revealed = 0
+  let scramble = 0
+  for (let i = 0; i < to.length; i += 1) {
+    if (scrambleGlyphKind(i, visualT, n) === 'to') revealed += 1
+    else scramble += 1
+  }
+  return { revealed, icons: Math.min(iconCount, scramble) }
+}
+
+/** Slot count for one scramble frame. Icon passes stay compact until decode. */
 export function scrambleSlotCount(
   from: string,
   to: string,
@@ -344,14 +364,18 @@ export function scrambleSlotCount(
   set: ScrambleSet,
 ): number {
   const icons = iconScrambleCount(set)
-  if (icons > 0) return icons
+  if (icons > 0) {
+    const plan = iconRevealCounts(to, t, icons)
+    const count = plan.revealed + plan.icons
+    return count > 0 ? count : icons
+  }
   const visualT = sineInOut(Math.min(1, Math.max(0, t)))
   const startLen = Math.max(1, from.length)
   const endLen = to.length
   return Math.max(1, Math.round(startLen + (endLen - startLen) * visualT))
 }
 
-/** One decode frame. Icon passes are icon-only at `DESIGN_VISIBLE`. */
+/** One decode frame. Icon passes: compact marks, then left-to-right `to`. */
 export function buildScrambleGlyphs(
   from: string,
   to: string,
@@ -359,10 +383,14 @@ export function buildScrambleGlyphs(
   set: ScrambleSet,
   slots: ScrambleCell[],
 ): Glyph[] {
-  const icons = iconScrambleCount(set)
-  if (icons > 0) {
+  const iconCount = iconScrambleCount(set)
+  if (iconCount > 0) {
+    const plan = iconRevealCounts(to, t, iconCount)
     const glyphs: Glyph[] = []
-    for (let i = 0; i < icons; i += 1) {
+    for (let i = 0; i < plan.revealed; i += 1) {
+      glyphs.push({ kind: 'to', ch: to[i]! })
+    }
+    for (let i = 0; i < plan.icons; i += 1) {
       const cell = slots[i]
       if (cell) glyphs.push(cellToGlyph(cell))
     }
