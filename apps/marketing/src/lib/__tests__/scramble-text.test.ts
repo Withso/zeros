@@ -78,18 +78,21 @@ describe("hero scramble fill", () => {
     expect(escapeHtml("</>")).toBe("&lt;/&gt;");
   });
 
-  it("keeps the matrix charset to ASCII digits", () => {
-    expect(MATRIX_SCRAMBLE.chars).toMatch(/[01]/);
-    expect(MATRIX_SCRAMBLE.chars).toMatch(/^[01]+$/);
+  it("keeps the designers-to-builders charset to ASCII digits and A-Z", () => {
+    expect(MATRIX_SCRAMBLE.chars).toBe("0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ");
+    expect(new Set(MATRIX_SCRAMBLE.chars).size).toBe(36);
+    expect(MATRIX_SCRAMBLE.chars).toMatch(/^[0-9A-Z]+$/);
+    expect(MATRIX_SCRAMBLE.chars).toMatch(/[0-9]/);
+    expect(MATRIX_SCRAMBLE.chars).toMatch(/[A-Z]/);
+    expect(MATRIX_SCRAMBLE.chars).not.toMatch(/[a-z]/);
     expect(MATRIX_SCRAMBLE.chars).not.toMatch(NON_ASCII);
     expect(MATRIX_SCRAMBLE.chars).not.toMatch(CJK_OR_KATAKANA);
     expect(MATRIX_SCRAMBLE.chars).not.toMatch(/ﾊ/);
   });
 
-  it("keeps the code and matrix charsets unchanged", () => {
+  it("keeps the code charset unchanged", () => {
     expect(CODE_SCRAMBLE.chars).toBe("{}[]</>;:=()*&|#$@!?\\^~`01");
     expect(CODE_SCRAMBLE.icons).toBeUndefined();
-    expect(MATRIX_SCRAMBLE.chars).toBe("01");
     expect(MATRIX_SCRAMBLE.icons).toBeUndefined();
   });
 
@@ -278,11 +281,17 @@ describe("hero scramble fill", () => {
     }
   });
 
-  it("renders matrix tails as digit runs at the same glyph role", () => {
+  it("renders designers-to-builders tails as 0-9 and A-Z at the same glyph role", () => {
     const html = scrambleTail(11, MATRIX_SCRAMBLE);
     expect(html).toMatch(/hero-scramble-symbol/);
-    expect(visibleText(html)).toMatch(/^[01]+$/);
+    expect(visibleText(html)).toMatch(/^[0-9A-Z]+$/);
     expect(visibleText(html)).toHaveLength(11);
+    const samples = Array.from({ length: 40 }, () =>
+      visibleText(scrambleTail(11, MATRIX_SCRAMBLE)),
+    ).join("");
+    expect(samples).toMatch(/[0-9]/);
+    expect(samples).toMatch(/[A-Z]/);
+    expect(samples).not.toMatch(/[a-z]/);
   });
 
   it("decrypts as a left-to-right wave instead of flashing the whole word", () => {

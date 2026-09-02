@@ -158,9 +158,9 @@ export const DESIGN_SCRAMBLE: ScrambleSet = {
   icons: DESIGN_SCRAMBLE_ICONS,
 }
 
-/** designers → builders: matrix digits, no CJK. */
+/** designers → builders: 0-9 and A-Z, no CJK. */
 export const MATRIX_SCRAMBLE: ScrambleSet = {
-  chars: '01',
+  chars: '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ',
 }
 
 export const SCRAMBLE_FROM: Record<string, ScrambleSet> = {

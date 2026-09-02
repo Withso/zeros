@@ -108,6 +108,8 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/CODE_SCRAMBLE/);
     expect(scramble).toMatch(/DESIGN_SCRAMBLE/);
     expect(scramble).toMatch(/MATRIX_SCRAMBLE/);
+    expect(scramble).toMatch(/0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ/);
+    expect(scramble).not.toMatch(/chars: '01'/);
     expect(scramble).toMatch(/DESIGN_ICONS/);
     expect(scramble).toMatch(/DESIGN_MARKS/);
     expect(scramble).toMatch(/SCRAMBLE_PALETTE/);
