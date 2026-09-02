@@ -102,7 +102,7 @@ describe("hero scramble fill", () => {
       "palette",
       "panels-top-left",
     ]);
-    expect(DESIGN_VISIBLE).toBe(4);
+    expect(DESIGN_VISIBLE).toBe(5);
     expect(DESIGN_KEY_SLOTS).toBe(1);
     expect(DESIGN_ICONS.length).toBe(6);
     expect(new Set(DESIGN_ICONS).size).toBe(6);
@@ -194,8 +194,8 @@ describe("hero scramble fill", () => {
       const keyCount = names.filter((name) =>
         (KEYBOARD_MARKS as readonly string[]).includes(name),
       ).length;
-      expect(designCount).toBe(3);
-      expect(keyCount).toBe(1);
+      expect(designCount).toBe(DESIGN_VISIBLE - DESIGN_KEY_SLOTS);
+      expect(keyCount).toBe(DESIGN_KEY_SLOTS);
       for (const name of names) {
         expect(allowed.has(name)).toBe(true);
       }

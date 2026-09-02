@@ -118,7 +118,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).not.toMatch(/chars: '#\|\+'/);
     expect(scramble).toMatch(/el\.classList\.remove\(/);
     expect(scramble).toMatch(/'is-scrambling'/);
-    expect(scramble).toMatch(/DESIGN_VISIBLE = 4/);
+    expect(scramble).toMatch(/DESIGN_VISIBLE = 5/);
     expect(scramble).toMatch(/DESIGN_KEY_SLOTS = 1/);
     expect(scramble).toMatch(/isIconScramble/);
     expect(scramble).toMatch(/buildScrambleGlyphs/);

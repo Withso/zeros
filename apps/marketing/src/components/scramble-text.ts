@@ -26,12 +26,12 @@ export const DESIGN_MARKS = [
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
 /**
- * developers → designers: four unique marks, then a left-to-right
+ * developers → designers: five unique marks, then a left-to-right
  * decode into `designers`. Code and matrix still follow word length.
  */
-export const DESIGN_VISIBLE = 4
+export const DESIGN_VISIBLE = 5
 
-/** At most one quiet keyboard mark in the four-slot row. */
+/** At most one quiet keyboard mark in the five-slot row. */
 export const DESIGN_KEY_SLOTS = 1
 
 const ICON_COLORS = [
@@ -139,7 +139,7 @@ export const KEYBOARD_ICONS = [
   ),
 ] as const
 
-/** Four-slot designers pass: design marks plus a quiet keyboard layer. */
+/** Five-slot designers pass: design marks plus a quiet keyboard layer. */
 export const DESIGN_SCRAMBLE_ICONS = [...DESIGN_ICONS, ...KEYBOARD_ICONS]
 
 export type ScrambleSet = {
@@ -152,7 +152,7 @@ export const CODE_SCRAMBLE: ScrambleSet = {
   chars: '{}[]</>;:=()*&|#$@!?\\^~`01',
 }
 
-/** developers → designers — six unique slots; design marks plus keyboard layer. */
+/** developers → designers — five unique slots; design marks plus keyboard layer. */
 export const DESIGN_SCRAMBLE: ScrambleSet = {
   chars: '',
   icons: DESIGN_SCRAMBLE_ICONS,

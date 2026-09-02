@@ -11,7 +11,7 @@ type Role = (typeof ROLES)[number]
 /**
  * Cycles the hero audience word with a scramble decode: code glyphs,
  * design-tool marks, then matrix digits. Code and matrix follow word length;
- * developers → designers is a four-slot scramble of design marks
+ * developers → designers is a five-slot scramble of design marks
  * with a quiet keyboard layer, then a
  * left-to-right decode into the word. Revealed `designers` letters use
  * the same headline size and tracking as builders and developers;
