@@ -35,3 +35,6 @@
 
 /ops.css
   Cache-Control: no-cache
+
+/zeros-deployment.json
+  Cache-Control: no-store

@@ -455,6 +455,15 @@ stapling.
    desktop workflow from that branch. Confirm all three report the recorded SHA.
 6. Verify `/healthz`, login, dashboard API, feedback, and deployment commit IDs.
 
+`pnpm check:web-deploy` defaults to the two Alpha Pages projects and fails
+closed unless both `app-alpha.zeros.build` and `ops-alpha.zeros.build` publish
+the exact `origin/main` SHA in `/zeros-deployment.json`. Cloudflare Pages
+injects that SHA at build time; the manifest contains only its schema version,
+Git commit, and `app`/`ops` surface, and is served with `Cache-Control: no-store`.
+Use `CF_PAGES_PROJECT` plus `WEB_DEPLOY_REF` for an individual Beta or
+Production qualification. A Cloudflare API token is optional corroboration,
+not a prerequisite for checking the custom domains users actually reach.
+
 Future schema changes should use expand/contract migrations so old and new
 server versions can overlap. Marking another migration for controlled downtime
 is an exceptional, reviewed release decision.

@@ -17,6 +17,7 @@ import {
   type HostKind,
 } from "../lib/hosts";
 import type { Env } from "../lib/session";
+import { DEPLOYMENT_MANIFEST_PATH } from "../lib/deployment-manifest.mjs";
 
 /** Marketing client routes that must fall back to the SPA entrypoint.
  *  KEEP IN SYNC with apps/marketing/src/routes.tsx and the SPA_REDIRECTS
@@ -83,6 +84,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
       url.pathname.startsWith("/auth/") ||
       url.pathname.startsWith("/api/v1/ops/") ||
       url.pathname.startsWith("/api/v1/internal/account-recoveries/") ||
+      url.pathname === DEPLOYMENT_MANIFEST_PATH ||
       OPS_STATIC_PATHS.has(url.pathname);
     if (!allowed) {
       return withHeaders(

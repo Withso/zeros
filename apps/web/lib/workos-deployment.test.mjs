@@ -120,3 +120,42 @@ test("the isolated Ops build cannot bypass its static-path allowlist", async () 
   });
   assert.throws(() => pagesFunctionRoutes("OPS"), /must be app or ops/);
 });
+
+test("every Pages build publishes an authoritative deployment manifest", async () => {
+  const { createDeploymentManifest, DEPLOYMENT_MANIFEST_PATH } =
+    await import("./deployment-manifest.mjs");
+  const commitSha = "548b6c3c4fc53a46ac24cc98193aa4279eddcc82";
+
+  assert.equal(DEPLOYMENT_MANIFEST_PATH, "/zeros-deployment.json");
+  assert.deepEqual(createDeploymentManifest(commitSha, "app"), {
+    version: 1,
+    commitSha,
+    surface: "app",
+  });
+  assert.deepEqual(createDeploymentManifest(commitSha, "ops"), {
+    version: 1,
+    commitSha,
+    surface: "ops",
+  });
+  assert.throws(
+    () => createDeploymentManifest("not-a-commit", "app"),
+    /40-character Git commit SHA/,
+  );
+  assert.throws(
+    () => createDeploymentManifest(commitSha, "OPS"),
+    /surface must be app or ops/,
+  );
+
+  const assembly = await readFile(
+    new URL("scripts/assemble-marketing.mjs", webRoot),
+    "utf8",
+  );
+  assert.match(assembly, /CF_PAGES_COMMIT_SHA/);
+  assert.match(assembly, /DEPLOYMENT_MANIFEST_PATH/);
+
+  const middleware = await readFile(
+    new URL("functions/_middleware.ts", webRoot),
+    "utf8",
+  );
+  assert.match(middleware, /DEPLOYMENT_MANIFEST_PATH/);
+});

@@ -1,44 +1,41 @@
 #!/usr/bin/env node
-// ──────────────────────────────────────────────────────────
-// check-web-deploy — did the selected commit reach the selected Pages project?
-// ──────────────────────────────────────────────────────────
+// Verify that the selected commit is the exact revision served by every
+// selected Cloudflare Pages custom domain. Pages does not publish dependable
+// GitHub check runs for these monorepo projects, so each build emits a small,
+// non-secret manifest from Cloudflare's injected CF_PAGES_COMMIT_SHA.
 //
-// The obvious canary (diff the /assets/index-<hash>.js on zeros.build) is WRONG
-// and has already misled us once: Vite hashes bundle CONTENT, so any commit that
-// touches no file under apps/web or apps/marketing produces a byte-identical bundle — the hash
-// stays put even after a perfect deploy. It also can't distinguish zeros-web from
-// the leftover `zeros` Pages project, which builds the same marketing source.
-//
-// So ask the deploy system instead of the artifact. Two independent signals:
-//
-//   1. GitHub check run "Cloudflare Pages: <project>" on the selected ref.
-//      Needs only `gh` (already authenticated) — NO Cloudflare secret.
-//   2. The Cloudflare canonical_deployment — the deployment actually serving
-//      zeros.build / www.zeros.build / app.zeros.build. Authoritative, but needs
-//      CLOUDFLARE_API_TOKEN. Skipped with a note when the token is absent.
-//
-// Signal 1 alone answers "did it build?". Signal 2 answers "is it live?".
-// Exit 1 only when a signal positively contradicts the selected ref.
-//
+// Defaults qualify both Alpha web surfaces from main:
 //   pnpm check:web-deploy
-//   CF_PAGES_PROJECT=zeros-web-alpha WEB_DEPLOY_REF=origin/main pnpm check:web-deploy
+//
+// Select one project for Beta/Production or an individual investigation:
 //   CF_PAGES_PROJECT=zeros-web-beta WEB_DEPLOY_REF=origin/release/1.2.3 pnpm check:web-deploy
-//   CLOUDFLARE_API_TOKEN=… CLOUDFLARE_ACCOUNT_ID=… pnpm check:web-deploy
-//                                                     # adds the live check
-// ──────────────────────────────────────────────────────────
+//   CF_PAGES_PROJECT=zeros-web WEB_DEPLOY_REF=origin/release/1.2.3 pnpm check:web-deploy
+//
+// Arbitrary projects require an explicit public origin:
+//   CF_PAGES_PROJECT=my-project WEB_DEPLOY_ORIGIN=https://example.com pnpm check:web-deploy
+//
+// CLOUDFLARE_API_TOKEN + CLOUDFLARE_ACCOUNT_ID optionally add a direct
+// canonical-deployment comparison. The public manifest remains the required
+// custom-domain proof and needs no long-lived Cloudflare credential.
 
 import { execFileSync } from "node:child_process";
 
-const PROJECT = process.env.CF_PAGES_PROJECT || "zeros-web";
 const TARGET_REF = process.env.WEB_DEPLOY_REF || "origin/main";
 const ACCOUNT = (process.env.CLOUDFLARE_ACCOUNT_ID || "").trim();
-const CHECK_NAME = `Cloudflare Pages: ${PROJECT}`;
+const MANIFEST_PATH = "/zeros-deployment.json";
+
+const PROJECT_ORIGINS = Object.freeze({
+  "zeros-web-alpha": "https://app-alpha.zeros.build",
+  "zeros-ops-alpha": "https://ops-alpha.zeros.build",
+  "zeros-web-beta": "https://app-beta.zeros.build",
+  "zeros-web": "https://app.zeros.build",
+  "zeros-ops": "https://ops.zeros.build",
+});
 
 function git(...args) {
   return execFileSync("git", args, { encoding: "utf8" }).trim();
 }
 
-/** Selected tip, refreshed when it names an origin branch and network allows. */
 function targetSha() {
   const remoteBranch = /^origin\/(.+)$/.exec(TARGET_REF)?.[1];
   try {
@@ -57,186 +54,164 @@ function targetSha() {
 
 function repoSlug() {
   const url = git("remote", "get-url", "origin");
-  const m = url.match(/github\.com[:/]+(.+?)(?:\.git)?$/);
-  if (!m) throw new Error(`origin is not a GitHub remote: ${url}`);
-  return m[1];
+  const match = url.match(/github\.com[:/]+(.+?)(?:\.git)?$/);
+  if (!match) throw new Error(`origin is not a GitHub remote: ${url}`);
+  return match[1];
 }
 
-// ── Signal 1: the GitHub check run ────────────────────────
-function githubCheck(slug, sha) {
-  let raw;
-  try {
-    raw = execFileSync(
-      "gh",
-      ["api", `repos/${slug}/commits/${sha}/check-runs`],
-      {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-  } catch (e) {
-    const why = String(e.stderr || e.message);
-    if (/not found|command not found|ENOENT/i.test(why))
-      return {
-        state: "unavailable",
-        note: "`gh` CLI not installed — see cli.github.com",
-      };
-    if (/auth|401|403/i.test(why))
-      return {
-        state: "unavailable",
-        note: "`gh` is not authenticated — run `gh auth login`",
-      };
-    return { state: "unavailable", note: why.split("\n")[0] };
-  }
+function selectedTargets() {
+  const explicit = (process.env.CF_PAGES_PROJECT || "").trim();
+  const projects = explicit
+    ? [explicit]
+    : ["zeros-web-alpha", "zeros-ops-alpha"];
+  const originOverride = (process.env.WEB_DEPLOY_ORIGIN || "")
+    .trim()
+    .replace(/\/$/, "");
 
-  let payload;
+  return projects.map((project) => {
+    const origin = originOverride || PROJECT_ORIGINS[project];
+    if (!origin) {
+      throw new Error(
+        `No public origin is known for ${project}; set WEB_DEPLOY_ORIGIN.`,
+      );
+    }
+    return {
+      project,
+      origin,
+      surface: project.includes("ops") ? "ops" : "app",
+    };
+  });
+}
+
+function sameCommit(actual, expected) {
+  if (!/^[a-f0-9]{40}$/i.test(actual) || !/^[a-f0-9]{40}$/i.test(expected)) {
+    return false;
+  }
+  return actual.toLowerCase() === expected.toLowerCase();
+}
+
+async function publicManifest(target, sha) {
+  const url = `${target.origin}${MANIFEST_PATH}?expected=${sha}`;
+  let response;
+  let body;
   try {
-    payload = JSON.parse(raw);
-  } catch {
+    response = await fetch(url, {
+      cache: "no-store",
+      headers: { Accept: "application/json", "Cache-Control": "no-cache" },
+      signal: AbortSignal.timeout(20_000),
+    });
+    body = await response.json();
+  } catch (error) {
     return {
       state: "unavailable",
-      note: "GitHub CLI returned no usable API response — authenticate `gh` and retry",
+      note: `${target.origin} manifest unavailable: ${error.message}`,
     };
   }
 
-  const run = (payload.check_runs || []).find(
-    (r) => r.name === CHECK_NAME,
-  );
-  if (!run)
+  if (!response.ok) {
     return {
-      state: "missing",
-      note: `no "${CHECK_NAME}" check on this commit — Cloudflare may not have picked it up`,
+      state: "unavailable",
+      note: `${target.origin} manifest returned HTTP ${response.status}`,
     };
-  if (run.status !== "completed")
-    return { state: "building", note: `status: ${run.status}` };
+  }
+  if (body?.version !== 1 || body?.surface !== target.surface) {
+    return {
+      state: "failed",
+      note: `${target.origin} returned an invalid ${target.surface} manifest`,
+    };
+  }
   return {
-    state: run.conclusion === "success" ? "ok" : "failed",
-    note: `conclusion: ${run.conclusion}`,
+    state: sameCommit(body.commitSha, sha) ? "ok" : "stale",
+    note: `${target.origin} · ${body.surface} · ${String(body.commitSha).slice(0, 8)}`,
   };
 }
 
-// ── Signal 2: what Cloudflare is actually serving ─────────
-async function cloudflareLive(sha) {
+async function cloudflareCanonical(target, sha) {
   const token = (process.env.CLOUDFLARE_API_TOKEN || "").trim();
-  if (!token)
+  if (!token || !ACCOUNT) {
     return {
       state: "skipped",
-      note: "CLOUDFLARE_API_TOKEN not set — build status checked, live status not.",
+      note: "API check skipped (set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID to enable)",
     };
-  if (!ACCOUNT)
-    return {
-      state: "unavailable",
-      note: "CLOUDFLARE_ACCOUNT_ID not set — live status not checked.",
-    };
+  }
 
   let body;
   try {
-    const res = await fetch(
-      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/pages/projects/${PROJECT}`,
+    const response = await fetch(
+      `https://api.cloudflare.com/client/v4/accounts/${ACCOUNT}/pages/projects/${target.project}`,
       {
         headers: { Authorization: `Bearer ${token}` },
         signal: AbortSignal.timeout(20_000),
       },
     );
-    body = await res.json();
-  } catch (e) {
-    return {
-      state: "unavailable",
-      note: `Cloudflare API unreachable: ${e.message}`,
-    };
+    body = await response.json();
+  } catch (error) {
+    return { state: "unavailable", note: `Cloudflare API: ${error.message}` };
   }
 
   if (!body?.success) {
-    const msg =
-      (body?.errors || []).map((x) => x.message).join("; ") ||
+    const message =
+      (body?.errors || []).map((entry) => entry.message).join("; ") ||
       "unknown API error";
-    // The failure that actually bit us: a shell-expanded token arrives as "Bearer ".
-    const hint = /invalid|authentication|10000/i.test(msg)
-      ? " — token rejected. Check for a stray `$` in front of a pasted token (the shell expands it to nothing)."
-      : "";
-    return { state: "unavailable", note: `${msg}${hint}` };
+    return { state: "unavailable", note: `Cloudflare API: ${message}` };
   }
 
-  const dep = body.result?.canonical_deployment;
-  if (!dep)
+  const deployment = body.result?.canonical_deployment;
+  const live = String(
+    deployment?.deployment_trigger?.metadata?.commit_hash || "",
+  ).trim();
+  if (!deployment || !/^[a-f0-9]{40}$/i.test(live)) {
     return {
       state: "unavailable",
-      note: "project has no canonical deployment yet",
+      note: "Cloudflare canonical deployment carries no full commit SHA",
     };
-
-  const live = (dep.deployment_trigger?.metadata?.commit_hash || "").trim();
-  if (live.length < 8)
-    return {
-      state: "unavailable",
-      note: "deployment carries no commit hash to compare",
-    };
-
-  // Prefix-compare: Cloudflare returns the full hash, git may be abbreviated.
-  // Guarded above on length — "" is a prefix of everything and would false-pass.
-  const n = Math.min(live.length, sha.length);
+  }
   return {
-    state: live.slice(0, n) === sha.slice(0, n) ? "ok" : "stale",
-    note: `${dep.environment} · ${live.slice(0, 8)} · ${dep.created_on}`,
-    aliases: dep.aliases || [],
+    state: sameCommit(live, sha) ? "ok" : "stale",
+    note: `${deployment.environment} · ${live.slice(0, 8)} · ${deployment.created_on}`,
   };
 }
 
-// ── Report ────────────────────────────────────────────────
 const sha = targetSha();
-const slug = repoSlug();
-console.log(`  ${slug}  ${TARGET_REF} @ ${sha.slice(0, 8)}\n`);
+const targets = selectedTargets();
+console.log(`  ${repoSlug()}  ${TARGET_REF} @ ${sha.slice(0, 8)}\n`);
 
-const build = githubCheck(slug, sha);
-const live = await cloudflareLive(sha);
+const results = await Promise.all(
+  targets.map(async (target) => ({
+    target,
+    manifest: await publicManifest(target, sha),
+    canonical: await cloudflareCanonical(target, sha),
+  })),
+);
 
-const ICON = {
+const icon = {
   ok: "✓",
   stale: "✗",
   failed: "✗",
-  missing: "✗",
-  building: "…",
   skipped: "ℹ",
-  unavailable: "ℹ",
+  unavailable: "✗",
 };
-console.log(
-  `  ${ICON[build.state]} build   ${build.state.padEnd(12)} ${build.note}`,
-);
-console.log(
-  `  ${ICON[live.state]} live    ${live.state.padEnd(12)} ${live.note}`,
-);
-if (live.state === "ok" && live.aliases?.length)
-  console.log(`             serving      ${live.aliases.join(", ")}`);
+for (const { target, manifest, canonical } of results) {
+  console.log(`  ${target.project}`);
+  console.log(
+    `    ${icon[manifest.state]} public  ${manifest.state.padEnd(11)} ${manifest.note}`,
+  );
+  console.log(
+    `    ${icon[canonical.state]} api     ${canonical.state.padEnd(11)} ${canonical.note}`,
+  );
+}
 
-const bad = ["stale", "failed", "missing"];
-if (bad.includes(build.state) || bad.includes(live.state)) {
+const manifestFailed = results.some(({ manifest }) => manifest.state !== "ok");
+const apiContradicted = results.some(({ canonical }) =>
+  ["stale", "failed"].includes(canonical.state),
+);
+if (manifestFailed || apiContradicted) {
   console.error(
-    `\n✗ check:web-deploy — ${TARGET_REF} is NOT fully deployed. ` +
-      `Open the project at dash.cloudflare.com → Workers & Pages → ${PROJECT}.`,
+    `\n✗ check:web-deploy — ${TARGET_REF} is not serving from every selected Pages project.`,
   );
   process.exit(1);
 }
-if (build.state === "building") {
-  console.log(
-    `\n…  check:web-deploy — Cloudflare is still building ${sha.slice(0, 8)}. Re-run shortly.`,
-  );
-  process.exit(0);
-}
-// Only claim "serving" when the live signal actually confirmed it. A green build
-// proves Cloudflare compiled the commit, NOT that it is the deployment on the
-// custom domains — overstating that is the exact mistake this script exists to stop.
-if (live.state === "ok") {
-  console.log(
-    `\n✓ check:web-deploy — ${PROJECT} is serving ${TARGET_REF} (${sha.slice(0, 8)}).`,
-  );
-} else if (build.state === "ok") {
-  console.log(
-    `\n✓ check:web-deploy — ${PROJECT} built ${TARGET_REF} (${sha.slice(0, 8)}) successfully.\n` +
-      `   Live status unverified (${live.note}) — set CLOUDFLARE_API_TOKEN to confirm what zeros.build is actually serving.`,
-  );
-} else {
-  console.log(
-    `\nℹ check:web-deploy — deployment status is unverified for ${TARGET_REF} (${sha.slice(0, 8)}).\n` +
-      `   Build signal: ${build.note}\n` +
-      `   Live signal: ${live.note}`,
-  );
-}
+
+console.log(
+  `\n✓ check:web-deploy — ${targets.map(({ project }) => project).join(" and ")} serve ${TARGET_REF} (${sha.slice(0, 8)}).`,
+);
