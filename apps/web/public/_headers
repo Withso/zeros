@@ -13,10 +13,11 @@
   Referrer-Policy: strict-origin-when-cross-origin
   Cross-Origin-Opener-Policy: same-origin
 
-# Dashboard and Ops assets intentionally use stable filenames. Revalidate them
-# on every navigation so a new server-rendered shell cannot execute an older
-# security or lifecycle client. The revisioned URLs below also evict any
-# max-age=14400 response cached before this policy shipped.
+# Dashboard and Ops assets intentionally use stable filenames. This is the
+# static-route fallback; Pages Functions applies the authoritative runtime
+# policy in lib/hosts.ts because Cloudflare does not apply `_headers` to
+# Functions responses. Revisioned URLs also evict responses cached before the
+# runtime policy shipped.
 /account-deletion.js
   Cache-Control: no-cache
 

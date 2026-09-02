@@ -130,8 +130,21 @@ const SHARED_SECURITY_HEADERS: Record<string, string> = {
   "Cross-Origin-Opener-Policy": "same-origin",
 };
 
-/** Apply per-host CSP + shared security headers onto a Response. */
-export function applyHostHeaders(res: Response, kind: HostKind): Response {
+const REVALIDATED_UI_ASSET_PATHS = new Set([
+  "/account-deletion.js",
+  "/dashboard.js",
+  "/dashboard.css",
+  "/dashboard-tokens.css",
+  "/ops.js",
+  "/ops.css",
+]);
+
+/** Apply per-host CSP, shared security headers, and runtime asset policy. */
+export function applyHostHeaders(
+  res: Response,
+  kind: HostKind,
+  pathname: string,
+): Response {
   const headers = new Headers(res.headers);
   for (const [k, v] of Object.entries(SHARED_SECURITY_HEADERS)) {
     if (!headers.has(k)) headers.set(k, v);
@@ -145,6 +158,11 @@ export function applyHostHeaders(res: Response, kind: HostKind): Response {
           ? OPS_CSP
           : APP_CSP,
     );
+  }
+  // `_headers` is not applied to responses that pass through Pages Functions.
+  // Override Pages' four-hour static default here as the authoritative path.
+  if (REVALIDATED_UI_ASSET_PATHS.has(pathname)) {
+    headers.set("Cache-Control", "no-cache");
   }
   return new Response(res.body, {
     status: res.status,

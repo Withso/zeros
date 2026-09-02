@@ -23,6 +23,7 @@ describe("applyHostHeaders", () => {
         headers: { "content-security-policy": strictCsp },
       }),
       "app",
+      "/auth/callback",
     );
 
     assert.equal(response.headers.get("content-security-policy"), strictCsp);
@@ -30,14 +31,48 @@ describe("applyHostHeaders", () => {
   });
 
   it("adds the default app policy when a route does not provide one", () => {
-    const response = applyHostHeaders(new Response("hub"), "app");
+    const response = applyHostHeaders(new Response("hub"), "app", "/");
     assert.equal(response.headers.get("content-security-policy"), APP_CSP);
   });
 
   it("uses a stricter external-asset-only policy for Ops", () => {
-    const response = applyHostHeaders(new Response("ops"), "ops");
+    const response = applyHostHeaders(new Response("ops"), "ops", "/");
     assert.equal(response.headers.get("content-security-policy"), OPS_CSP);
     assert.doesNotMatch(OPS_CSP, /unsafe-inline/);
+  });
+
+  it("revalidates every security-sensitive hosted UI asset at runtime", () => {
+    for (const [kind, pathname] of [
+      ["app", "/account-deletion.js"],
+      ["app", "/dashboard.js"],
+      ["app", "/dashboard.css"],
+      ["app", "/dashboard-tokens.css"],
+      ["ops", "/ops.js"],
+      ["ops", "/ops.css"],
+    ]) {
+      const response = applyHostHeaders(
+        new Response("asset", {
+          headers: { "cache-control": "public, max-age=14400" },
+        }),
+        kind,
+        pathname,
+      );
+      assert.equal(response.headers.get("cache-control"), "no-cache", pathname);
+    }
+  });
+
+  it("preserves the cache policy for unrelated static assets", () => {
+    const response = applyHostHeaders(
+      new Response("logo", {
+        headers: { "cache-control": "public, max-age=14400" },
+      }),
+      "app",
+      "/logo.svg",
+    );
+    assert.equal(
+      response.headers.get("cache-control"),
+      "public, max-age=14400",
+    );
   });
 });
 
