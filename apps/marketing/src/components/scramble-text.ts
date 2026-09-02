@@ -26,9 +26,8 @@ export const DESIGN_MARKS = [
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
 /**
- * developers → designers: four unique marks with air between them.
- * Code and matrix still follow word length. After the compact row, this
- * pass still left-to-right decodes `designers`.
+ * developers → designers: four unique marks, then a left-to-right
+ * decode into `designers`. Code and matrix still follow word length.
  */
 export const DESIGN_VISIBLE = 4
 
