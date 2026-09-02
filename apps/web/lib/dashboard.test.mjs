@@ -117,6 +117,33 @@ test("dialog cancellation uses explicit non-submitting close controls", () => {
   }
 });
 
+test("dashboard shell uses revisioned static assets", () => {
+  const page = dashboardPage({
+    session,
+    me: {
+      user: { id: "u1", email: session.email, displayName: session.name },
+      organizations: [personal],
+    },
+    requestUrl: "https://app.zeros.build/",
+    signOutHref: "/auth/logout",
+  });
+  assert.match(page, /href="\/dashboard\.css\?v=[a-z0-9.-]+"/i);
+  assert.match(page, /src="\/dashboard\.js\?v=[a-z0-9.-]+"/i);
+
+  const deletionPage = accountDeletionPage({
+    session,
+    deletion: {
+      recoveryCode: "ZD-2345-WMGZ",
+      scheduledPurgeAt: "2026-10-01T00:00:00.000Z",
+    },
+    signOutHref: "/auth/logout",
+  });
+  assert.match(
+    deletionPage,
+    /src="\/account-deletion\.js\?v=[a-z0-9.-]+"/i,
+  );
+});
+
 test("Personal disables collaboration navigation and remains local-only", () => {
   const page = dashboardPage({
     session,

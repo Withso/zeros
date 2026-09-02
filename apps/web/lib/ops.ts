@@ -3,6 +3,8 @@ import { appOrigin } from "./hosts";
 import { esc, html } from "./page";
 import { getVerifiedSessionWithId, type Env } from "./session";
 
+const OPS_ASSET_REVISION = "2026-09-02.1";
+
 function opsShell(title: string, inner: string): string {
   return `<!doctype html>
 <html lang="en">
@@ -11,7 +13,7 @@ function opsShell(title: string, inner: string): string {
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="robots" content="noindex, nofollow" />
     <title>${esc(title)} · Zeros Ops</title>
-    <link rel="stylesheet" href="/ops.css" />
+    <link rel="stylesheet" href="/ops.css?v=${OPS_ASSET_REVISION}" />
   </head>
   <body>${inner}</body>
 </html>`;
@@ -167,7 +169,7 @@ function workspace(env: Env, session: OpsSession): Response {
             <p id="identity-result" class="notice"></p>
           </section>
         </main>
-        <script type="module" src="/ops.js"></script>`,
+        <script type="module" src="/ops.js?v=${OPS_ASSET_REVISION}"></script>`,
       ),
     ),
   );
