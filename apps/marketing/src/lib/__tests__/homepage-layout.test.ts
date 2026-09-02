@@ -78,7 +78,7 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/font-size: 0\.72em/);
     expect(css).not.toMatch(/font-size: 0\.58em/);
     expect(css).toMatch(/font-size: 1em/);
-    expect(css).toMatch(/font-size: 60px/);
+    expect(css).toMatch(/font-size: min\(60px, 1em\)/);
     expect(css).toMatch(/hero-scramble-text/);
     expect(css).toMatch(/hero-scramble-symbol/);
     expect(css).toMatch(/hero-scramble-icon/);
@@ -88,7 +88,7 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/width: 0\.9em/);
     expect(css).not.toMatch(/width: 0\.72em/);
     expect(css).not.toMatch(/width: 0\.8em/);
-    expect(css).toMatch(/width: 50px/);
+    expect(css).toMatch(/width: min\(50px, 1em\)/);
     expect(css).not.toMatch(/width: 52px/);
     expect(css).not.toMatch(/width: 42px/);
     expect(css).not.toMatch(/width: 40px/);
@@ -98,11 +98,10 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/margin: 0 4px 0 0/);
     expect(css).not.toMatch(/margin: 0 12px 0 0/);
     expect(css).not.toMatch(/letter-spacing: 0/);
-    expect(css).toMatch(/\.hero-role-word::before/);
-    expect(css).toMatch(/height: 100%/);
-    expect(css).toMatch(/vertical-align: top/);
     expect(css).not.toMatch(/vertical-align: -2px/);
     expect(css).not.toMatch(/vertical-align: middle/);
+    expect(css).toMatch(/vertical-align: text-bottom/);
+    expect(css).not.toMatch(/\.hero-role-word::before/);
     expect(css).toMatch(/letter-spacing: inherit/);
     expect(css).toMatch(/font-variant-numeric: normal/);
     expect(css).toMatch(/position: relative/);
@@ -152,7 +151,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-64/);
+    expect(cycle).toMatch(/hero-role\.css\?v=scramble-65/);
     expect(css).toMatch(/is-key/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);

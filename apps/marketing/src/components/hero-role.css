@@ -22,18 +22,6 @@
   white-space: nowrap;
 }
 
-/* Full-height strut: lock the line box to the sizer. Scramble glyphs
-   align to the top of this line so 60px symbols / 50px icons cannot add
-   ascent and drop the settled word, which then jumps up on complete. */
-.hero-role-word::before {
-  content: "";
-  display: inline-block;
-  width: 0;
-  height: 100%;
-  vertical-align: top;
-  pointer-events: none;
-}
-
 .hero-role-word.is-scrambling {
   font-variant-numeric: tabular-nums;
 }
@@ -54,17 +42,19 @@
   vertical-align: baseline;
 }
 
+/* Never larger than the headline em: 60px / 50px glyphs otherwise add
+   ascent, drop the line, and the settled word jumps up on complete. */
 .hero-role-word.is-scrambling .hero-scramble-symbol {
   display: inline-block;
-  font-size: 60px;
+  font-size: min(60px, 1em);
   line-height: 1;
-  vertical-align: top;
+  vertical-align: baseline;
 }
 
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol {
-  font-size: 60px;
+  font-size: min(60px, 1em);
   margin: 0 2px 0 0;
-  vertical-align: top;
+  vertical-align: baseline;
 }
 
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol:last-child {
@@ -74,16 +64,16 @@
 .hero-scramble-icon {
   display: inline-block;
   overflow: hidden;
-  vertical-align: top;
+  vertical-align: text-bottom;
 }
 
 .hero-role-word.scramble-developers .hero-scramble-icon {
-  width: 50px;
-  height: 50px;
-  max-width: 50px;
-  max-height: 50px;
+  width: min(50px, 1em);
+  height: min(50px, 1em);
+  max-width: min(50px, 1em);
+  max-height: min(50px, 1em);
   margin: 0 2px 0 0;
-  vertical-align: top;
+  vertical-align: text-bottom;
 }
 
 .hero-role-word.scramble-developers .hero-scramble-icon:last-child {
