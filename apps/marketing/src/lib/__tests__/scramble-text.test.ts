@@ -375,6 +375,9 @@ describe("hero scramble fill", () => {
     expect(mixed.filter((glyph) => glyph.kind === "from")).toHaveLength(0);
     expect(visibleText(renderGlyphRun(mixed))).toBe(revealed);
     expect(visibleText(renderGlyphRun(mixed))).not.toMatch(/developers/);
+    expect(renderGlyphRun(mixed)).toMatch(
+      /<span class="hero-scramble-text hero-role-revealed">/,
+    );
     expect(svgCount(renderGlyphRun(mixed))).toBe(icons.length);
 
     const done = buildScrambleGlyphs(from, to, 1, DESIGN_SCRAMBLE, slots);

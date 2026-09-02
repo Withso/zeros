@@ -39,16 +39,14 @@
 .hero-role-revealed {
   color: inherit;
   font-size: 1em;
+  letter-spacing: inherit;
+  font-variant-numeric: normal;
 }
 
 .hero-role-word.is-scrambling .hero-scramble-symbol {
   font-size: 60px;
   line-height: 1;
   vertical-align: baseline;
-}
-
-.hero-role-word.scramble-developers.is-scrambling {
-  letter-spacing: 0;
 }
 
 .hero-role-word.scramble-developers .hero-scramble-icon {

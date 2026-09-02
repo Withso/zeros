@@ -572,6 +572,12 @@ export function playScramble(
     },
     onComplete: () => {
       el.textContent = text
+      el.classList.remove(
+        'is-scrambling',
+        'scramble-builders',
+        'scramble-developers',
+        'scramble-designers',
+      )
     },
   })
 }
