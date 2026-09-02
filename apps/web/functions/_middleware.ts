@@ -27,8 +27,12 @@ import type { Env } from "../lib/session";
 const MARKETING_SPA_PATHS = new Set(["/changelog", "/privacy", "/terms"]);
 const OPS_STATIC_PATHS = new Set(["/ops.css", "/ops.js"]);
 
-function withHeaders(res: Response, kind: HostKind): Response {
-  return applyHostHeaders(res, kind);
+function withHeaders(
+  res: Response,
+  kind: HostKind,
+  pathname: string,
+): Response {
+  return applyHostHeaders(res, kind, pathname);
 }
 
 async function fetchMarketingAsset(
@@ -52,7 +56,7 @@ export const onRequest: PagesFunction<Env> = async (context) => {
   // Host-specific robots.txt (static public/robots.txt is app-only Disallow;
   // marketing must stay crawlable for zeros.build SEO + schema discovery).
   if (url.pathname === "/robots.txt" && request.method === "GET") {
-    return withHeaders(robotsTxt(kind), kind);
+    return withHeaders(robotsTxt(kind), kind, url.pathname);
   }
 
   if (kind === "marketing") {
@@ -60,12 +64,16 @@ export const onRequest: PagesFunction<Env> = async (context) => {
     // host-only cookies on the wrong origin / confuse users).
     if (isAppOnlyPath(url.pathname)) {
       const target = new URL(url.pathname + url.search, appOrigin(env));
-      return withHeaders(Response.redirect(target.toString(), 302), kind);
+      return withHeaders(
+        Response.redirect(target.toString(), 302),
+        kind,
+        url.pathname,
+      );
     }
     // Serve the assembled marketing SPA (and SPA-fallback known client routes).
     // Do NOT call next() — that would run functions/index.ts on `/`.
     const res = await fetchMarketingAsset(env, request, url);
-    return withHeaders(res, kind);
+    return withHeaders(res, kind, url.pathname);
   }
 
   if (kind === "ops") {
@@ -77,12 +85,16 @@ export const onRequest: PagesFunction<Env> = async (context) => {
       url.pathname.startsWith("/api/v1/internal/account-recoveries/") ||
       OPS_STATIC_PATHS.has(url.pathname);
     if (!allowed) {
-      return withHeaders(new Response("Not found", { status: 404 }), kind);
+      return withHeaders(
+        new Response("Not found", { status: 404 }),
+        kind,
+        url.pathname,
+      );
     }
-    return withHeaders(await next(), kind);
+    return withHeaders(await next(), kind, url.pathname);
   }
 
   // App host: run the matching Functions route (or static fallback).
   const res = await next();
-  return withHeaders(res, kind);
+  return withHeaders(res, kind, url.pathname);
 };
