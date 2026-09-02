@@ -1,10 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import {
-  playScramble,
-  scrambleDurationMs,
-  SCRAMBLE_FROM,
-} from './scramble-text'
-import './hero-role.css?v=scramble-55'
+import { playScramble, SCRAMBLE_FROM, SCRAMBLE_MS } from './scramble-text'
+import './hero-role.css?v=scramble-56'
 
 const ROLES = ['builders', 'developers', 'designers'] as const
 
@@ -15,10 +11,10 @@ type Role = (typeof ROLES)[number]
 /**
  * Cycles the hero audience word with a scramble decode: code glyphs,
  * design-tool marks, then matrix digits. Code and matrix follow word length;
- * developers → designers is a compact 6-slot scramble of design marks
- * with a quiet keyboard layer, then a shorter left-to-right decode
- * into the word. Other passes keep the longer scramble. Settled letters
- * stay headline size; scramble glyphs are 60px, except design icons at 50px.
+ * developers → designers is a four-slot scramble of design marks
+ * with a quiet keyboard layer and air between glyphs, then a
+ * left-to-right decode into the word. Settled letters stay headline
+ * size; scramble glyphs are 60px, except design icons at 40px.
  */
 export function HeroRoleCycle() {
   const textRef = useRef<HTMLSpanElement>(null)
@@ -51,13 +47,8 @@ export function HeroRoleCycle() {
           const from = ROLES[i]
           const to = ROLES[(i + 1) % ROLES.length]
           const set = SCRAMBLE_FROM[from] ?? SCRAMBLE_FROM.builders
-          const durationMs = scrambleDurationMs(from)
           el.classList.add('is-scrambling', `scramble-${from}`)
-          tween = playScramble(el, {
-            text: to,
-            set,
-            duration: durationMs / 1000,
-          })
+          tween = playScramble(el, { text: to, set })
           ids.push(
             window.setTimeout(() => {
               if (cancelled) return
@@ -65,7 +56,7 @@ export function HeroRoleCycle() {
               i = (i + 1) % ROLES.length
               setIndex(i)
               loop()
-            }, durationMs),
+            }, SCRAMBLE_MS),
           )
         }, HOLD_MS),
       )

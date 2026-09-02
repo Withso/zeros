@@ -49,17 +49,25 @@
 
 .hero-role-word.scramble-developers .hero-scramble-icon {
   display: inline-block;
-  width: 50px;
-  height: 50px;
-  max-width: 50px;
-  max-height: 50px;
-  margin: 0;
+  width: 40px;
+  height: 40px;
+  max-width: 40px;
+  max-height: 40px;
+  margin: 0 12px 0 0;
   overflow: hidden;
-  vertical-align: -4px;
+  vertical-align: -2px;
+}
+
+.hero-role-word.scramble-developers .hero-scramble-icon:last-child {
+  margin-right: 0;
 }
 
 .hero-role-word.scramble-developers .hero-scramble-icon.is-key {
-  opacity: 0.78;
+  width: 30px;
+  height: 30px;
+  max-width: 30px;
+  max-height: 30px;
+  opacity: 0.55;
 }
 
 @media (prefers-reduced-motion: reduce) {

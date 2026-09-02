@@ -2,17 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   CODE_SCRAMBLE,
   DESIGN_ICONS,
+  DESIGN_KEY_SLOTS,
   DESIGN_MARKS,
   DESIGN_SCRAMBLE,
   DESIGN_SCRAMBLE_ICONS,
-  DESIGN_SCRAMBLE_MS,
   DESIGN_VISIBLE,
-  ICON_DECODE_HOLD,
-  ICON_DECODE_SPAN,
   KEYBOARD_ICONS,
   KEYBOARD_MARKS,
-  SCRAMBLE_MS,
-  scrambleDurationMs,
   buildScrambleGlyphs,
   escapeHtml,
   fillScrambleCells,
@@ -106,7 +102,8 @@ describe("hero scramble fill", () => {
       "palette",
       "panels-top-left",
     ]);
-    expect(DESIGN_VISIBLE).toBe(6);
+    expect(DESIGN_VISIBLE).toBe(4);
+    expect(DESIGN_KEY_SLOTS).toBe(1);
     expect(DESIGN_ICONS.length).toBe(6);
     expect(new Set(DESIGN_ICONS).size).toBe(6);
     expect([...KEYBOARD_MARKS]).toEqual([
@@ -197,8 +194,8 @@ describe("hero scramble fill", () => {
       const keyCount = names.filter((name) =>
         (KEYBOARD_MARKS as readonly string[]).includes(name),
       ).length;
-      expect(designCount).toBe(4);
-      expect(keyCount).toBe(2);
+      expect(designCount).toBe(3);
+      expect(keyCount).toBe(1);
       for (const name of names) {
         expect(allowed.has(name)).toBe(true);
       }
@@ -400,20 +397,10 @@ describe("hero scramble fill", () => {
       expect(glyphs.some((glyph) => glyph.kind === "from")).toBe(false);
     }
 
-    expect(iconDecodeKind(0, ICON_DECODE_HOLD, 9)).toBe("scramble");
-    expect(iconDecodeKind(0, ICON_DECODE_HOLD + 0.01, 9)).toBe("to");
-    expect(
-      iconDecodeKind(8, ICON_DECODE_HOLD + (8 / 9) * ICON_DECODE_SPAN - 0.01, 9),
-    ).toBe("scramble");
+    expect(iconDecodeKind(0, 0.4, 9)).toBe("scramble");
+    expect(iconDecodeKind(0, 0.41, 9)).toBe("to");
+    expect(iconDecodeKind(8, 0.9, 9)).toBe("scramble");
     expect(iconDecodeKind(8, 0.99, 9)).toBe("to");
-  });
-
-  it("shortens only the developers-to-designers scramble", () => {
-    expect(DESIGN_SCRAMBLE_MS).toBeLessThan(SCRAMBLE_MS);
-    expect(scrambleDurationMs("developers")).toBe(DESIGN_SCRAMBLE_MS);
-    expect(scrambleDurationMs("builders")).toBe(SCRAMBLE_MS);
-    expect(scrambleDurationMs("designers")).toBe(SCRAMBLE_MS);
-    expect(ICON_DECODE_SPAN).toBeLessThan(ICON_DECODE_HOLD);
   });
 
   it("wraps settled letters, scramble digits, and icons", () => {

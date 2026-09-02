@@ -2,22 +2,6 @@ import gsap from 'gsap'
 
 export const SCRAMBLE_MS = 1500
 
-/**
- * developers → designers only. Icon scramble keeps a similar beat;
- * the `designers` letter decode is shorter than the other passes.
- */
-export const DESIGN_SCRAMBLE_MS = 1000
-
-/** Visual-T hold before designers letters start locking. */
-export const ICON_DECODE_HOLD = 0.66
-
-/** Visual-T span for the left-to-right designers lock. */
-export const ICON_DECODE_SPAN = 0.32
-
-export function scrambleDurationMs(from: string): number {
-  return from === 'developers' ? DESIGN_SCRAMBLE_MS : SCRAMBLE_MS
-}
-
 /** Bright fills from the marketing design-tool icon sheet. */
 export const SCRAMBLE_PALETTE = [
   '#68E098',
@@ -42,11 +26,14 @@ export const DESIGN_MARKS = [
 export type DesignMark = (typeof DESIGN_MARKS)[number]
 
 /**
- * developers → designers: compact unique Lucide marks while scrambling.
+ * developers → designers: four unique marks with air between them.
  * Code and matrix still follow word length. After the compact row, this
  * pass still left-to-right decodes `designers`.
  */
-export const DESIGN_VISIBLE = 6
+export const DESIGN_VISIBLE = 4
+
+/** At most one quiet keyboard mark in the four-slot row. */
+export const DESIGN_KEY_SLOTS = 1
 
 const ICON_COLORS = [
   SCRAMBLE_PALETTE[0],
@@ -119,7 +106,7 @@ const KEY_MUTED = SCRAMBLE_PALETTE[7]
 const KEY_COOL = SCRAMBLE_PALETTE[6]
 
 /**
- * Quiet keyboard layer (Lucide + simple C/V strokes). Same six slots;
+ * Quiet keyboard layer (Lucide + simple C/V strokes). One of four slots;
  * these recede beside the design marks.
  */
 export const KEYBOARD_ICONS = [
@@ -153,7 +140,7 @@ export const KEYBOARD_ICONS = [
   ),
 ] as const
 
-/** Six-slot designers pass: design marks plus the keyboard layer. */
+/** Four-slot designers pass: design marks plus a quiet keyboard layer. */
 export const DESIGN_SCRAMBLE_ICONS = [...DESIGN_ICONS, ...KEYBOARD_ICONS]
 
 export type ScrambleSet = {
@@ -317,7 +304,11 @@ function dealDistinct(items: readonly string[], count: number): string[] {
 }
 
 function mixLayeredIconCells(count: number): ScrambleCell[] {
-  const keySlots = Math.min(2, KEYBOARD_ICONS.length, Math.max(0, count - 3))
+  const keySlots = Math.min(
+    DESIGN_KEY_SLOTS,
+    KEYBOARD_ICONS.length,
+    Math.max(0, count - 3),
+  )
   const designSlots = Math.min(count - keySlots, DESIGN_ICONS.length)
   const design = shuffle([...DESIGN_ICONS]).slice(0, designSlots)
   const keys = shuffle([...KEYBOARD_ICONS]).slice(0, keySlots)
@@ -430,8 +421,9 @@ export function iconDecodeKind(
   count: number,
 ): 'scramble' | 'to' {
   const n = Math.max(1, count)
-  if (t <= ICON_DECODE_HOLD) return 'scramble'
-  const lock = ICON_DECODE_HOLD + (i / n) * ICON_DECODE_SPAN
+  const hold = 0.4
+  if (t <= hold) return 'scramble'
+  const lock = hold + (i / n) * 0.58
   return t >= lock ? 'to' : 'scramble'
 }
 
