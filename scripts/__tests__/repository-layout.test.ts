@@ -702,6 +702,14 @@ describe("repository layout contracts", () => {
     expect(deployCheck).toContain("zeros-web-alpha");
     expect(deployCheck).toContain("zeros-ops-alpha");
     expect(deployCheck).toContain("/zeros-deployment.json");
+    expect(deployCheck).toContain(
+      'url.searchParams.set("probe", crypto.randomUUID())',
+    );
+    expect(deployCheck).toContain("if (!response.ok)");
+    expect(deployCheck).toContain("JSON.parse(raw)");
+    expect(deployCheck.indexOf("if (!response.ok)")).toBeLessThan(
+      deployCheck.indexOf("JSON.parse(raw)"),
+    );
     expect(deployCheck).not.toContain("Cloudflare Pages:");
     expect(deployCheck).not.toMatch(
       /CLOUDFLARE_ACCOUNT_ID\s*\|\|\s*["'][a-f\d]{16,}["']/i,
