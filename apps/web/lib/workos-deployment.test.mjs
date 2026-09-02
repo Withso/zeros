@@ -66,3 +66,57 @@ test("stable hosted UI assets cannot remain fresh across deployments", async () 
     /@import\s+url\(["']?\/dashboard-tokens\.css["']?\)/,
   );
 });
+
+test("Pages Functions invokes host middleware for every stable hosted UI asset", async () => {
+  const { pagesFunctionRoutes } = await import("./pages-routes.mjs");
+  const routes = pagesFunctionRoutes("app");
+  assert.deepEqual(routes.include, ["/*"]);
+  assert.equal(routes.version, 1);
+  const assembly = await readFile(
+    new URL("scripts/assemble-marketing.mjs", webRoot),
+    "utf8",
+  );
+  assert.match(assembly, /pagesFunctionRoutes\(surface\)/);
+
+  const matches = (pattern, pathname) => {
+    const escaped = pattern
+      .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+      .replaceAll("*", ".*");
+    return new RegExp(`^${escaped}$`).test(pathname);
+  };
+  const invokesFunction = (pathname) =>
+    routes.include.some((pattern) => matches(pattern, pathname)) &&
+    !routes.exclude.some((pattern) => matches(pattern, pathname));
+
+  for (const pathname of [
+    "/account-deletion.js",
+    "/dashboard.js",
+    "/dashboard.css",
+    "/dashboard-tokens.css",
+    "/ops.js",
+    "/ops.css",
+  ]) {
+    assert.equal(invokesFunction(pathname), true, pathname);
+  }
+
+  for (const pathname of [
+    "/assets/index-content-hash.js",
+    "/agents/codex.svg",
+    "/schemas/settings.schema.json",
+    "/zeros-logo.svg",
+    "/LICENSE.txt",
+  ]) {
+    assert.equal(invokesFunction(pathname), false, pathname);
+  }
+});
+
+test("the isolated Ops build cannot bypass its static-path allowlist", async () => {
+  const { pagesFunctionRoutes } = await import("./pages-routes.mjs");
+  const routes = pagesFunctionRoutes("ops");
+  assert.deepEqual(routes, {
+    version: 1,
+    include: ["/*"],
+    exclude: [],
+  });
+  assert.throws(() => pagesFunctionRoutes("OPS"), /must be app or ops/);
+});

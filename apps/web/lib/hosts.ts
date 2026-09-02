@@ -149,14 +149,16 @@ export function applyHostHeaders(
   for (const [k, v] of Object.entries(SHARED_SECURITY_HEADERS)) {
     if (!headers.has(k)) headers.set(k, v);
   }
-  if (!headers.has("Content-Security-Policy")) {
+  const currentCsp = headers.get("Content-Security-Policy");
+  const hostCsp =
+    kind === "marketing" ? MARKETING_CSP : kind === "ops" ? OPS_CSP : APP_CSP;
+  // `_headers` gives bare static responses APP_CSP as a safe fallback. When a
+  // static response traverses host middleware, replace only that known generic
+  // value; preserve any narrower policy explicitly authored by a route.
+  if (!currentCsp || (kind !== "app" && currentCsp === APP_CSP)) {
     headers.set(
       "Content-Security-Policy",
-      kind === "marketing"
-        ? MARKETING_CSP
-        : kind === "ops"
-          ? OPS_CSP
-          : APP_CSP,
+      hostCsp,
     );
   }
   // `_headers` is not applied to responses that pass through Pages Functions.

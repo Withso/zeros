@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   APP_CSP,
+  MARKETING_CSP,
   OPS_CSP,
   applyHostHeaders,
   appOrigin,
@@ -39,6 +40,22 @@ describe("applyHostHeaders", () => {
     const response = applyHostHeaders(new Response("ops"), "ops", "/");
     assert.equal(response.headers.get("content-security-policy"), OPS_CSP);
     assert.doesNotMatch(OPS_CSP, /unsafe-inline/);
+  });
+
+  it("replaces the generic static fallback with the exact host policy", () => {
+    for (const [kind, expected] of [
+      ["marketing", MARKETING_CSP],
+      ["ops", OPS_CSP],
+    ]) {
+      const response = applyHostHeaders(
+        new Response("static asset", {
+          headers: { "content-security-policy": APP_CSP },
+        }),
+        kind,
+        kind === "ops" ? "/ops.js" : "/index.html",
+      );
+      assert.equal(response.headers.get("content-security-policy"), expected);
+    }
   });
 
   it("revalidates every security-sensitive hosted UI asset at runtime", () => {
