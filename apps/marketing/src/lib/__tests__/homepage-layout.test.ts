@@ -121,7 +121,12 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-54/);
+    expect(scramble).toMatch(/DESIGN_SCRAMBLE_MS = 1000/);
+    expect(scramble).toMatch(/scrambleDurationMs/);
+    expect(scramble).toMatch(/ICON_DECODE_HOLD = 0\.66/);
+    expect(scramble).toMatch(/ICON_DECODE_SPAN = 0\.32/);
+    expect(cycle).toMatch(/scrambleDurationMs/);
+    expect(cycle).toMatch(/hero-role\.css\?v=scramble-55/);
     expect(css).toMatch(/is-key/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);

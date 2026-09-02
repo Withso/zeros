@@ -5,9 +5,14 @@ import {
   DESIGN_MARKS,
   DESIGN_SCRAMBLE,
   DESIGN_SCRAMBLE_ICONS,
+  DESIGN_SCRAMBLE_MS,
   DESIGN_VISIBLE,
+  ICON_DECODE_HOLD,
+  ICON_DECODE_SPAN,
   KEYBOARD_ICONS,
   KEYBOARD_MARKS,
+  SCRAMBLE_MS,
+  scrambleDurationMs,
   buildScrambleGlyphs,
   escapeHtml,
   fillScrambleCells,
@@ -395,10 +400,20 @@ describe("hero scramble fill", () => {
       expect(glyphs.some((glyph) => glyph.kind === "from")).toBe(false);
     }
 
-    expect(iconDecodeKind(0, 0.4, 9)).toBe("scramble");
-    expect(iconDecodeKind(0, 0.41, 9)).toBe("to");
-    expect(iconDecodeKind(8, 0.9, 9)).toBe("scramble");
+    expect(iconDecodeKind(0, ICON_DECODE_HOLD, 9)).toBe("scramble");
+    expect(iconDecodeKind(0, ICON_DECODE_HOLD + 0.01, 9)).toBe("to");
+    expect(
+      iconDecodeKind(8, ICON_DECODE_HOLD + (8 / 9) * ICON_DECODE_SPAN - 0.01, 9),
+    ).toBe("scramble");
     expect(iconDecodeKind(8, 0.99, 9)).toBe("to");
+  });
+
+  it("shortens only the developers-to-designers scramble", () => {
+    expect(DESIGN_SCRAMBLE_MS).toBeLessThan(SCRAMBLE_MS);
+    expect(scrambleDurationMs("developers")).toBe(DESIGN_SCRAMBLE_MS);
+    expect(scrambleDurationMs("builders")).toBe(SCRAMBLE_MS);
+    expect(scrambleDurationMs("designers")).toBe(SCRAMBLE_MS);
+    expect(ICON_DECODE_SPAN).toBeLessThan(ICON_DECODE_HOLD);
   });
 
   it("wraps settled letters, scramble digits, and icons", () => {

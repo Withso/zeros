@@ -2,6 +2,22 @@ import gsap from 'gsap'
 
 export const SCRAMBLE_MS = 1500
 
+/**
+ * developers → designers only. Icon scramble keeps a similar beat;
+ * the `designers` letter decode is shorter than the other passes.
+ */
+export const DESIGN_SCRAMBLE_MS = 1000
+
+/** Visual-T hold before designers letters start locking. */
+export const ICON_DECODE_HOLD = 0.66
+
+/** Visual-T span for the left-to-right designers lock. */
+export const ICON_DECODE_SPAN = 0.32
+
+export function scrambleDurationMs(from: string): number {
+  return from === 'developers' ? DESIGN_SCRAMBLE_MS : SCRAMBLE_MS
+}
+
 /** Bright fills from the marketing design-tool icon sheet. */
 export const SCRAMBLE_PALETTE = [
   '#68E098',
@@ -414,9 +430,8 @@ export function iconDecodeKind(
   count: number,
 ): 'scramble' | 'to' {
   const n = Math.max(1, count)
-  const hold = 0.4
-  if (t <= hold) return 'scramble'
-  const lock = hold + (i / n) * 0.58
+  if (t <= ICON_DECODE_HOLD) return 'scramble'
+  const lock = ICON_DECODE_HOLD + (i / n) * ICON_DECODE_SPAN
   return t >= lock ? 'to' : 'scramble'
 }
 
