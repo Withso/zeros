@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { playScramble, SCRAMBLE_FROM, SCRAMBLE_MS } from './scramble-text'
-import './hero-role.css?v=scramble-62'
+import './hero-role.css?v=scramble-63'
 
 const ROLES = ['builders', 'developers', 'designers'] as const
 
@@ -15,7 +15,7 @@ type Role = (typeof ROLES)[number]
  * one keyboard mark, and ~30% A-Z, then a
  * left-to-right decode into the word. Revealed `designers` letters use
  * the same headline size and tracking as builders and developers;
- * scramble glyphs are 60px, except designers marks at 50px.
+ * scramble glyphs and designers A-Z are 60px; designers marks are 50px.
  * The live word is clipped to the hidden `developers` sizer so
  * scramble cannot wrap, leak, or resize the headline.
  */

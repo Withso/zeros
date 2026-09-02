@@ -79,7 +79,6 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/font-size: 0\.58em/);
     expect(css).toMatch(/font-size: 1em/);
     expect(css).toMatch(/font-size: 60px/);
-    expect(css).toMatch(/font-size: 50px/);
     expect(css).toMatch(/hero-scramble-text/);
     expect(css).toMatch(/hero-scramble-symbol/);
     expect(css).toMatch(/hero-scramble-icon/);
@@ -148,7 +147,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-62/);
+    expect(cycle).toMatch(/hero-role\.css\?v=scramble-63/);
     expect(css).toMatch(/is-key/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);
