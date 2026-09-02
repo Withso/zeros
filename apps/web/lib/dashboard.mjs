@@ -7,6 +7,11 @@ const ORGANIZATION_ID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const DELETION_CODE_RE = /^ZD-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
+const DASHBOARD_ASSET_REVISION = "2026-09-02.1";
+
+function dashboardAsset(path) {
+  return `${path}?v=${DASHBOARD_ASSET_REVISION}`;
+}
 
 export function organizationCreationAllowed(capabilities) {
   return capabilities?.createOrganization === true;
@@ -183,7 +188,7 @@ export function accountAccessPage({ session, kind, signOutHref }) {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex" />
   <title>Zeros · ${esc(content.title)}</title>
-  <link rel="stylesheet" href="/dashboard.css" />
+  <link rel="stylesheet" href="${dashboardAsset("/dashboard.css")}" />
 </head>
 <body class="dashboard-page">
   <div class="app-shell">
@@ -221,7 +226,7 @@ export function accountRecoveryPage({ session, recoveryCode, signOutHref }) {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex" />
   <title>Zeros · Account recovery</title>
-  <link rel="stylesheet" href="/dashboard.css" />
+  <link rel="stylesheet" href="${dashboardAsset("/dashboard.css")}" />
 </head>
 <body class="dashboard-page">
   <div class="app-shell">
@@ -280,8 +285,8 @@ export function accountDeletionPage({ session, deletion, signOutHref }) {
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex" />
   <title>Zeros · Restore account</title>
-  <link rel="stylesheet" href="/dashboard.css" />
-  <script type="module" src="/account-deletion.js"></script>
+  <link rel="stylesheet" href="${dashboardAsset("/dashboard.css")}" />
+  <script type="module" src="${dashboardAsset("/account-deletion.js")}"></script>
 </head>
 <body class="dashboard-page">
   <div class="app-shell">
@@ -441,8 +446,8 @@ export function dashboardPage({ session, me, requestUrl, signOutHref, loadError 
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <meta name="robots" content="noindex" />
   <title>Zeros · Organization settings</title>
-  <link rel="stylesheet" href="/dashboard.css" />
-  <script type="module" src="/dashboard.js"></script>
+  <link rel="stylesheet" href="${dashboardAsset("/dashboard.css")}" />
+  <script type="module" src="${dashboardAsset("/dashboard.js")}"></script>
 </head>
 <body class="dashboard-page">
   <div class="app-shell">

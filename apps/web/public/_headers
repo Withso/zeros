@@ -12,3 +12,25 @@
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Cross-Origin-Opener-Policy: same-origin
+
+# Dashboard and Ops assets intentionally use stable filenames. Revalidate them
+# on every navigation so a new server-rendered shell cannot execute an older
+# security or lifecycle client. The revisioned URLs below also evict any
+# max-age=14400 response cached before this policy shipped.
+/account-deletion.js
+  Cache-Control: no-cache
+
+/dashboard.js
+  Cache-Control: no-cache
+
+/dashboard.css
+  Cache-Control: no-cache
+
+/dashboard-tokens.css
+  Cache-Control: no-cache
+
+/ops.js
+  Cache-Control: no-cache
+
+/ops.css
+  Cache-Control: no-cache
