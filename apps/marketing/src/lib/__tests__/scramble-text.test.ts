@@ -8,6 +8,7 @@ import {
   buildScrambleGlyphs,
   escapeHtml,
   fillScrambleCells,
+  iconDecodeKind,
   isIconScramble,
   MATRIX_SCRAMBLE,
   renderGlyphRun,
@@ -353,6 +354,11 @@ describe("hero scramble fill", () => {
       expect(to.startsWith(prefix)).toBe(true);
       expect(glyphs.some((glyph) => glyph.kind === "from")).toBe(false);
     }
+
+    expect(iconDecodeKind(0, 0.4, 9)).toBe("scramble");
+    expect(iconDecodeKind(0, 0.41, 9)).toBe("to");
+    expect(iconDecodeKind(8, 0.9, 9)).toBe("scramble");
+    expect(iconDecodeKind(8, 0.99, 9)).toBe("to");
   });
 
   it("wraps settled letters, scramble digits, and icons", () => {

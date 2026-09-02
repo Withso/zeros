@@ -337,9 +337,21 @@ function iconScrambleCount(set: ScrambleSet): number {
 }
 
 /**
- * Icon pass: compact unique marks while scrambling, then lock `to`
- * left-to-right. Unrevealed letters stay icons, never leftover `from` text.
+ * Icon pass: hold a compact unique row, then lock `to` left-to-right.
+ * Unrevealed letters stay icons, never leftover `from` text.
  */
+export function iconDecodeKind(
+  i: number,
+  t: number,
+  count: number,
+): 'scramble' | 'to' {
+  const n = Math.max(1, count)
+  const hold = 0.4
+  if (t <= hold) return 'scramble'
+  const lock = hold + (i / n) * 0.58
+  return t >= lock ? 'to' : 'scramble'
+}
+
 function iconRevealCounts(
   to: string,
   t: number,
@@ -350,7 +362,7 @@ function iconRevealCounts(
   let revealed = 0
   let scramble = 0
   for (let i = 0; i < to.length; i += 1) {
-    if (scrambleGlyphKind(i, visualT, n) === 'to') revealed += 1
+    if (iconDecodeKind(i, visualT, n) === 'to') revealed += 1
     else scramble += 1
   }
   return { revealed, icons: Math.min(iconCount, scramble) }
