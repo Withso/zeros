@@ -140,6 +140,8 @@ describe("hero scramble fill", () => {
 
     const catalog = DESIGN_ICONS.join("");
     expect(catalog).toMatch(/hero-scramble-icon/);
+    expect(catalog).toMatch(/width="50"/);
+    expect(catalog).toMatch(/height="50"/);
     expect(catalog).toMatch(/<circle /);
     expect(catalog).toMatch(/<rect /);
     expect(catalog).not.toMatch(/<ellipse /);

@@ -100,8 +100,14 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/letter-spacing: 0/);
     expect(css).toMatch(/letter-spacing: inherit/);
     expect(css).toMatch(/font-variant-numeric: normal/);
-    expect(css).toMatch(/opacity: 0\.55/);
+    expect(css).toMatch(/position: relative/);
+    expect(css).toMatch(/position: absolute/);
+    expect(css).toMatch(/inset: 0/);
     expect(css).toMatch(/overflow: hidden/);
+    expect(css).toMatch(/display: inline-block/);
+    expect(css).not.toMatch(/inline-grid/);
+    expect(css).toMatch(/white-space: nowrap/);
+    expect(css).toMatch(/opacity: 0\.55/);
     expect(css).not.toMatch(/--violet-fg/);
     expect(css).not.toMatch(/--blue-fg/);
     expect(css).not.toMatch(/--green-fg/);
@@ -116,6 +122,8 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/align-horizontal-space-around/);
     expect(scramble).toMatch(/panels-top-left/);
     expect(scramble).toMatch(/data-hero-scramble-icon/);
+    expect(scramble).toMatch(/width="50"/);
+    expect(scramble).toMatch(/height="50"/);
     expect(scramble).toMatch(/chars: ''/);
     expect(scramble).not.toMatch(/chars: '#\|\+'/);
     expect(scramble).toMatch(/el\.classList\.remove\(/);
@@ -137,7 +145,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-60/);
+    expect(cycle).toMatch(/hero-role\.css\?v=scramble-61/);
     expect(css).toMatch(/is-key/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);

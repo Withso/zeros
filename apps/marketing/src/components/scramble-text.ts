@@ -49,7 +49,7 @@ const lucide = (
   inner: string,
   kind: 'tool' | 'key' = 'tool',
 ) =>
-  `<svg class="hero-scramble-icon${kind === 'key' ? ' is-key' : ''}" data-hero-scramble-icon="${name}" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="${kind === 'key' ? '1.75' : '2'}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${inner}</svg>`
+  `<svg class="hero-scramble-icon${kind === 'key' ? ' is-key' : ''}" data-hero-scramble-icon="${name}" xmlns="http://www.w3.org/2000/svg" width="50" height="50" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="${kind === 'key' ? '1.75' : '2'}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${inner}</svg>`
 
 /**
  * Lucide design marks (ISC, same drawings as lucide-react).

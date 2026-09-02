@@ -1,16 +1,11 @@
-/* Hero role cycle: scramble decode. HOLD_MS / SCRAMBLE_MS live in TS. */
+/* Hero role cycle: scramble decode. HOLD_MS / SCRAMBLE_MS live in TS.
+ * The hidden sizer is the only in-flow size. The live word paints inside
+ * that box so scramble glyphs cannot grow, wrap, or leak the headline. */
 
 .hero-role {
   position: relative;
-  display: inline-grid;
-  justify-items: start;
-  align-items: end;
+  display: inline-block;
   vertical-align: baseline;
-}
-
-.hero-role-sizer,
-.hero-role-word {
-  grid-area: 1 / 1;
 }
 
 .hero-role-sizer {
@@ -21,6 +16,9 @@
 }
 
 .hero-role-word {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
   white-space: nowrap;
 }
 
@@ -44,19 +42,24 @@
 }
 
 .hero-role-word.is-scrambling .hero-scramble-symbol {
+  display: inline-block;
   font-size: 60px;
   line-height: 1;
   vertical-align: baseline;
 }
 
-.hero-role-word.scramble-developers .hero-scramble-icon {
+.hero-scramble-icon {
   display: inline-block;
+  overflow: hidden;
+  vertical-align: middle;
+}
+
+.hero-role-word.scramble-developers .hero-scramble-icon {
   width: 50px;
   height: 50px;
   max-width: 50px;
   max-height: 50px;
   margin: 0 2px 0 0;
-  overflow: hidden;
   vertical-align: -2px;
 }
 
