@@ -298,6 +298,7 @@ apps/web/
   functions/auth/desktop-revoke.ts → older-desktop Railway pass-through
   functions/handoff/*          → Auth0 desktop ticket compatibility APIs
   lib/hosts.ts                 → host classification + CSP
+  lib/deployment-manifest.mjs  → exact, non-secret Pages source-revision proof
   lib/pages-routes.mjs         → surface-specific Pages invocation policy
   lib/hub.ts                   → hub HTML
   lib/dashboard.mjs            → token-based signed-in dashboard HTML
@@ -321,22 +322,23 @@ apps/web/
 
 ## Edge cases covered
 
-| Case                       | Behavior                                                                                                                                                             |
-| -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET /` on both hosts      | Marketing → SPA via `ASSETS`; app → hub Function                                                                                                                     |
-| Marketing `/auth/*`        | 302 → `app.zeros.build`                                                                                                                                              |
-| Shared `_headers` CSP      | Middleware sets marketing CSP (Google Fonts) vs app CSP                                                                                                              |
-| Stable dashboard/Ops assets | `_routes.json` keeps these exact paths inside host middleware so runtime CSP and `no-cache` headers apply; content-hashed marketing assets remain static           |
-| `robots.txt`               | Host-specific body from middleware                                                                                                                                   |
-| SPA `_redirects`           | Explicit paths only (`/changelog`, `/privacy`, `/terms`) — not `/*`; keep in sync with marketing `src/routes.tsx`                                                    |
-| Unknown path (either host) | Static `404.html` with a real 404 status — without that file, Pages' implicit SPA mode would serve the marketing homepage with 200 on `app.zeros.build/<unknown>`    |
-| `*.pages.dev` / localhost  | Default to **app** (OAuth/hub); set `MARKETING_HOSTS` to preview marketing                                                                                           |
-| Session cookies            | Still host-only on app; never widened for marketing                                                                                                                  |
-| Dashboard credentials      | Auth0 grants stay in compatibility KV; WorkOS sealed/refresh state stays in Railway/Postgres; browser boot data contains identity and organization summaries only    |
-| WorkOS refresh outage      | Pre-rotation transient failures preserve the exact record; a post-rotation verification outage persists the replacement seal but withholds the bearer                |
-| WorkOS lifecycle event     | Pages preserves exact bytes; Railway verifies the signature before reducing the complete management event set; webhooks are idempotent and Events API repairs misses |
-| Account resolution         | Recovery/conflict/fresh-auth/inactive states have dedicated fixed UI; provider text and bearer/refresh material never render                                         |
-| Authorization freshness    | One SSE connection plus durable revisions; lifecycle snapshots are silence/reconnect backstops, not periodic polling                                                 |
-| Dashboard mutations        | Same-origin JSON plus custom-header gate; route and body allowlists reject ambient-cookie form attacks                                                               |
-| Personal                   | Name follows provider identity, local-only, permanent, and collaboration/billing sections are disabled                                                               |
-| Schema URLs                | Still served at `zeros.build/schemas/*` after cutover                                                                                                                |
+| Case                        | Behavior                                                                                                                                                                                                                           |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `GET /` on both hosts       | Marketing → SPA via `ASSETS`; app → hub Function                                                                                                                                                                                   |
+| Marketing `/auth/*`         | 302 → `app.zeros.build`                                                                                                                                                                                                            |
+| Shared `_headers` CSP       | Middleware sets marketing CSP (Google Fonts) vs app CSP                                                                                                                                                                            |
+| Stable dashboard/Ops assets | `_routes.json` keeps these exact paths inside host middleware so runtime CSP and `no-cache` headers apply; content-hashed marketing assets remain static                                                                           |
+| Deployment qualification    | Each build publishes `/zeros-deployment.json` from Pages' injected commit SHA; it is `no-store`, contains only revision + surface, and lets `pnpm check:web-deploy` prove both Alpha custom domains without a long-lived API token |
+| `robots.txt`                | Host-specific body from middleware                                                                                                                                                                                                 |
+| SPA `_redirects`            | Explicit paths only (`/changelog`, `/privacy`, `/terms`) — not `/*`; keep in sync with marketing `src/routes.tsx`                                                                                                                  |
+| Unknown path (either host)  | Static `404.html` with a real 404 status — without that file, Pages' implicit SPA mode would serve the marketing homepage with 200 on `app.zeros.build/<unknown>`                                                                  |
+| `*.pages.dev` / localhost   | Default to **app** (OAuth/hub); set `MARKETING_HOSTS` to preview marketing                                                                                                                                                         |
+| Session cookies             | Still host-only on app; never widened for marketing                                                                                                                                                                                |
+| Dashboard credentials       | Auth0 grants stay in compatibility KV; WorkOS sealed/refresh state stays in Railway/Postgres; browser boot data contains identity and organization summaries only                                                                  |
+| WorkOS refresh outage       | Pre-rotation transient failures preserve the exact record; a post-rotation verification outage persists the replacement seal but withholds the bearer                                                                              |
+| WorkOS lifecycle event      | Pages preserves exact bytes; Railway verifies the signature before reducing the complete management event set; webhooks are idempotent and Events API repairs misses                                                               |
+| Account resolution          | Recovery/conflict/fresh-auth/inactive states have dedicated fixed UI; provider text and bearer/refresh material never render                                                                                                       |
+| Authorization freshness     | One SSE connection plus durable revisions; lifecycle snapshots are silence/reconnect backstops, not periodic polling                                                                                                               |
+| Dashboard mutations         | Same-origin JSON plus custom-header gate; route and body allowlists reject ambient-cookie form attacks                                                                                                                             |
+| Personal                    | Name follows provider identity, local-only, permanent, and collaboration/billing sections are disabled                                                                                                                             |
+| Schema URLs                 | Still served at `zeros.build/schemas/*` after cutover                                                                                                                                                                              |

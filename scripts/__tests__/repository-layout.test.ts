@@ -699,6 +699,10 @@ describe("repository layout contracts", () => {
     expect(webPackage.engines.node).toBe(">=22.18.0");
     expect(readme).toContain("Node.js 22.18 or newer");
     expect(deployCheck).toContain("process.env.CLOUDFLARE_ACCOUNT_ID");
+    expect(deployCheck).toContain("zeros-web-alpha");
+    expect(deployCheck).toContain("zeros-ops-alpha");
+    expect(deployCheck).toContain("/zeros-deployment.json");
+    expect(deployCheck).not.toContain("Cloudflare Pages:");
     expect(deployCheck).not.toMatch(
       /CLOUDFLARE_ACCOUNT_ID\s*\|\|\s*["'][a-f\d]{16,}["']/i,
     );

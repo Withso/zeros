@@ -23,7 +23,7 @@
  *   npm run build:standalone
  */
 
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   copyFileSync,
   cpSync,
@@ -36,6 +36,10 @@ import {
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { pagesFunctionRoutes } from "../lib/pages-routes.mjs";
+import {
+  createDeploymentManifest,
+  DEPLOYMENT_MANIFEST_PATH,
+} from "../lib/deployment-manifest.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_APP = path.resolve(HERE, "..");
@@ -157,6 +161,21 @@ function assemble() {
   writeFileSync(
     path.join(OUT, "_routes.json"),
     `${JSON.stringify(pagesFunctionRoutes(surface), null, 2)}\n`,
+  );
+
+  // Pages injects the source revision into every hosted build. Local builds
+  // use the checked-out commit so the artifact remains inspectable without
+  // inventing a placeholder that could accidentally pass deployment checks.
+  const commitSha =
+    (process.env.CF_PAGES_COMMIT_SHA || "").trim() ||
+    execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    }).trim();
+  const deploymentManifest = createDeploymentManifest(commitSha, surface);
+  writeFileSync(
+    path.join(OUT, DEPLOYMENT_MANIFEST_PATH.slice(1)),
+    `${JSON.stringify(deploymentManifest)}\n`,
   );
 
   // The dashboard consumes the SAME primitive values as the desktop. Strip
