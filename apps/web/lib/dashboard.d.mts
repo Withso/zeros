@@ -17,9 +17,13 @@ export interface DashboardMe {
     displayName: string | null;
     avatarUrl?: string | null;
   };
+  capabilities?: { createOrganization: boolean };
   organizations?: DashboardOrganization[];
   teams?: DashboardOrganization[];
 }
+export declare function organizationCreationAllowed(
+  capabilities: DashboardMe["capabilities"] | null | undefined,
+): boolean;
 export declare function safeOrganizationLogo(value: unknown): string | null;
 export declare function dashboardReturnUrl(
   appBase: string,

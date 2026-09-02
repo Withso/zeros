@@ -14,7 +14,9 @@ import { z } from "zod";
 import type pg from "pg";
 import { withUserTx, withSystemTx, type Tx } from "./db.js";
 import {
+  canCreateOrganization,
   HttpError,
+  requireOrganizationCreationCapability,
   requireOrganizationMembership,
   requireOrganizationRole,
   type OrganizationRole,
@@ -425,7 +427,14 @@ export function createRoutes(
       avatarUrl: user.avatarUrl,
       staffRole: user.staffRole,
     };
-    return c.json({ user: publicUser, organizations, teams: organizations });
+    return c.json({
+      user: publicUser,
+      capabilities: {
+        createOrganization: canCreateOrganization(user.staffRole),
+      },
+      organizations,
+      teams: organizations,
+    });
   });
 
   app.route(
@@ -691,6 +700,7 @@ function createOrganizationRouter(
 
   app.post("/", async (c) => {
     const user = c.get("user");
+    requireOrganizationCreationCapability(user.staffRole);
     const body = (await c.req.json().catch(() => ({}))) as Record<
       string,
       unknown

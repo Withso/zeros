@@ -8,6 +8,29 @@ const ORGANIZATION_ID_RE =
 const RECOVERY_CODE_RE = /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 const DELETION_CODE_RE = /^ZD-[A-Z2-9]{4}-[A-Z2-9]{4}$/;
 
+export function organizationCreationAllowed(capabilities) {
+  return capabilities?.createOrganization === true;
+}
+
+function organizationCreationMenu(allowed) {
+  return allowed
+    ? '<div class="menu-separator"></div><button class="menu-action" type="button" data-action="create-organization"><span aria-hidden="true">＋</span>Create organization</button>'
+    : "";
+}
+
+function organizationCreationDialog(allowed) {
+  return allowed
+    ? `<dialog id="create-organization-dialog" class="dialog">
+    <form method="dialog" id="create-organization-form">
+      <div class="dialog-header"><div><h2>Create organization</h2><p>Organizations can own local and cloud workspaces.</p></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
+      <label class="field"><span>Organization name</span><input name="name" maxlength="80" required autocomplete="organization" placeholder="Acme" /></label>
+      <div class="dialog-error" id="create-organization-error" role="alert"></div>
+      <div class="dialog-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button primary" type="submit" value="default">Create organization</button></div>
+    </form>
+  </dialog>`
+    : "";
+}
+
 /** Preserve only dashboard navigation intent through a browser OAuth round
  * trip. Desktop handoff credentials and arbitrary query parameters must not be
  * copied into the post-login return URL. */
@@ -386,6 +409,12 @@ export function dashboardPage({ session, me, requestUrl, signOutHref, loadError 
       ? "profile"
       : candidateSection;
   const collaborativeDisabled = !active || active.isPersonal;
+  const canCreateOrganization = organizationCreationAllowed(me?.capabilities);
+  const requestedAction = url.searchParams.get("action");
+  const action =
+    requestedAction === "create-organization" && !canCreateOrganization
+      ? null
+      : requestedAction;
   const boot = {
     user: me?.user ?? {
       id: null,
@@ -394,9 +423,10 @@ export function dashboardPage({ session, me, requestUrl, signOutHref, loadError 
       avatarUrl: null,
     },
     organizations,
+    capabilities: me?.capabilities ?? { createOrganization: false },
     activeOrganizationId: active?.id ?? null,
     section,
-    action: url.searchParams.get("action"),
+    action,
     loadError,
   };
   const profileIdentity = {
@@ -423,8 +453,7 @@ export function dashboardPage({ session, me, requestUrl, signOutHref, loadError 
         <div class="popover" role="listbox" aria-label="Organizations">
           <div class="popover-label">Organizations</div>
           <div id="organization-options">${organizationOptions(organizations, active?.id)}</div>
-          <div class="menu-separator"></div>
-          <button class="menu-action" type="button" data-action="create-organization"><span aria-hidden="true">＋</span>Create organization</button>
+          <div id="create-organization-menu-slot" data-enabled="${String(canCreateOrganization)}">${organizationCreationMenu(canCreateOrganization)}</div>
         </div>
       </details>
       <nav class="section-nav" aria-label="Settings sections">
@@ -444,14 +473,7 @@ export function dashboardPage({ session, me, requestUrl, signOutHref, loadError 
       <div class="content-column" id="dashboard-content">${initialSection(section, active, profileIdentity, loadError)}</div>
     </main>
   </div>
-  <dialog id="create-organization-dialog" class="dialog">
-    <form method="dialog" id="create-organization-form">
-      <div class="dialog-header"><div><h2>Create organization</h2><p>Organizations can own local and cloud workspaces.</p></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
-      <label class="field"><span>Organization name</span><input name="name" maxlength="80" required autocomplete="organization" placeholder="Acme" /></label>
-      <div class="dialog-error" id="create-organization-error" role="alert"></div>
-      <div class="dialog-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button primary" type="submit" value="default">Create organization</button></div>
-    </form>
-  </dialog>
+  <div id="create-organization-dialog-slot" data-enabled="${String(canCreateOrganization)}">${organizationCreationDialog(canCreateOrganization)}</div>
   <dialog id="delete-organization-dialog" class="dialog">
     <form method="dialog" id="delete-organization-form">
       <div class="dialog-header"><div><h2>Delete organization</h2><p>Access stops now. Recovery remains available to an owner for 30 days.</p></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>

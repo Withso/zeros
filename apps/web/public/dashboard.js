@@ -2,6 +2,10 @@ export function organizationDisplayName(organization) {
   return organization?.name?.trim() || "Personal";
 }
 
+export function organizationCreationAllowed(capabilities) {
+  return capabilities?.createOrganization === true;
+}
+
 export function formatLifecycleDate(value) {
   const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
   if (!Number.isFinite(timestamp)) return "the scheduled date";
@@ -227,6 +231,7 @@ function bootDashboard() {
   const boot = JSON.parse(bootNode.textContent || "{}");
   const state = {
     user: boot.user,
+    capabilities: boot.capabilities || {},
     organizations: (boot.organizations || []).map((organization) => ({
       ...organization,
       logo: safeOrganizationLogo(organization.logo),
@@ -344,6 +349,30 @@ function bootDashboard() {
     (organization.role === "owner" || organization.role === "admin");
   const canOwn = (organization) => organization?.role === "owner";
 
+  const organizationCreationMenu =
+    '<div class="menu-separator"></div><button class="menu-action" type="button" data-action="create-organization"><span aria-hidden="true">＋</span>Create organization</button>';
+  const organizationCreationDialog = `<dialog id="create-organization-dialog" class="dialog">
+    <form method="dialog" id="create-organization-form">
+      <div class="dialog-header"><div><h2>Create organization</h2><p>Organizations can own local and cloud workspaces.</p></div><button class="icon-button" value="cancel" aria-label="Close">×</button></div>
+      <label class="field"><span>Organization name</span><input name="name" maxlength="80" required autocomplete="organization" placeholder="Acme" /></label>
+      <div class="dialog-error" id="create-organization-error" role="alert"></div>
+      <div class="dialog-actions"><button class="button secondary" value="cancel">Cancel</button><button class="button primary" type="submit" value="default">Create organization</button></div>
+    </form>
+  </dialog>`;
+
+  function syncOrganizationCreationSurface() {
+    const allowed = organizationCreationAllowed(state.capabilities);
+    for (const [id, markup] of [
+      ["create-organization-menu-slot", organizationCreationMenu],
+      ["create-organization-dialog-slot", organizationCreationDialog],
+    ]) {
+      const slot = document.getElementById(id);
+      if (!slot || slot.dataset.enabled === String(allowed)) continue;
+      slot.innerHTML = allowed ? markup : "";
+      slot.dataset.enabled = String(allowed);
+    }
+  }
+
   function toast(message, error = false) {
     const region = document.getElementById("toast-region");
     if (!region) return;
@@ -415,6 +444,7 @@ function bootDashboard() {
   }
 
   function syncChrome() {
+    syncOrganizationCreationSurface();
     const organization = activeOrganization();
     document.querySelectorAll("[data-section]").forEach((node) => {
       const section = node.dataset.section;
@@ -719,6 +749,7 @@ function bootDashboard() {
     try {
       const me = await api("/v1/me");
       state.user = me.user;
+      state.capabilities = me.capabilities || {};
       state.organizations = (me.organizations || me.teams || []).map(
         normalizeOrganization,
       );
@@ -896,6 +927,7 @@ function bootDashboard() {
     }
     const action = target.dataset.action;
     if (action === "create-organization") {
+      if (!organizationCreationAllowed(state.capabilities)) return;
       document.getElementById("org-switcher")?.removeAttribute("open");
       const errorNode = document.getElementById("create-organization-error");
       if (errorNode) errorNode.textContent = "";
@@ -1117,6 +1149,7 @@ function bootDashboard() {
     const organization = activeOrganization();
     try {
       if (form.id === "create-organization-form") {
+        if (!organizationCreationAllowed(state.capabilities)) return;
         const name = new FormData(form).get("name")?.toString().trim();
         const errorNode = document.getElementById("create-organization-error");
         if (!name) return;
@@ -1246,7 +1279,10 @@ function bootDashboard() {
     }
   });
 
-  if (boot.action === "create-organization") {
+  if (
+    boot.action === "create-organization" &&
+    organizationCreationAllowed(state.capabilities)
+  ) {
     document.getElementById("create-organization-dialog")?.showModal();
   } else if (boot.action === "delete-account") {
     document.getElementById("delete-account-dialog")?.showModal();

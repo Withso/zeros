@@ -64,7 +64,11 @@ test("dashboard intent survives sign-in without carrying unrelated query state",
 test("dashboard renders Personal first-class, organization sections, and no bearer tokens", () => {
   const page = dashboardPage({
     session,
-    me: { user: { id: "u1", email: session.email, displayName: session.name }, organizations: [personal, org] },
+    me: {
+      user: { id: "u1", email: session.email, displayName: session.name },
+      capabilities: { createOrganization: true },
+      organizations: [personal, org],
+    },
     requestUrl: `https://app.zeros.build/?organization=${org.id}&section=members`,
     signOutHref: "/auth/logout",
   });
@@ -74,6 +78,22 @@ test("dashboard renders Personal first-class, organization sections, and no bear
   assert.doesNotMatch(page, /<script>Engines/);
   assert.doesNotMatch(page, /secret-token-must-not-render/);
   assert.doesNotMatch(page, /refresh-secret-must-not-render/);
+});
+
+test("ordinary accounts cannot discover or deep-link organization creation", () => {
+  const page = dashboardPage({
+    session,
+    me: {
+      user: { id: "u1", email: session.email, displayName: session.name },
+      capabilities: { createOrganization: false },
+      organizations: [personal],
+    },
+    requestUrl: "https://app.zeros.build/?action=create-organization",
+    signOutHref: "/auth/logout",
+  });
+  assert.doesNotMatch(page, /Create organization/);
+  assert.doesNotMatch(page, /create-organization-form/);
+  assert.doesNotMatch(page, /"action":"create-organization"/);
 });
 
 test("Personal disables collaboration navigation and remains local-only", () => {

@@ -111,6 +111,27 @@ A user-created organization can own local workspaces and is eligible to own
 cloud workspaces. Eligibility metadata is not an entitlement: provisioning
 must still enforce the current plan, quota, repository access, and actor role.
 
+### Initial-launch creation gate
+
+Organization creation is not generally available during the local-only launch.
+Only accounts with the standing Zeros staff role `platform_owner` or
+`developer` may create an organization for internal dogfooding. A staff role
+does not create an organization automatically, and ordinary signed-in accounts
+continue to see only their device-local Personal collection.
+
+The control plane is the authorization boundary. `GET /v1/me` publishes the
+server-derived `capabilities.createOrganization` boolean for client rendering,
+and both `POST /v1/organizations` and the released-client alias
+`POST /v1/teams` enforce the same role check. Unauthorized creation returns the
+non-disclosing `not_found` response. The browser and desktop hide the creation
+surface when the capability is absent or false, including after a role is
+revoked and the account snapshot is refreshed.
+
+PostHog flags may later stage the UI rollout, but they are neither an identity
+source nor an authorization control. Any future rollout flag is an additional
+presentation/eligibility condition; the server must still authorize the current
+account, role, plan, and resource on every mutation.
+
 Organization roles are `owner`, `admin`, and `member`:
 
 | Operation                   | Owner                         | Admin | Member |
@@ -272,10 +293,12 @@ snapshots during revalidation and disables controls the actor cannot use.
 
 ## API and serialized compatibility
 
-`GET /v1/me` returns `organizations` in Personal-first order. During the mixed
-version window it also returns the same array as `teams`. New management routes
-live under `/v1/organizations`; `/v1/teams` remains an organization-resource
-alias for released flat-Team desktop clients.
+`GET /v1/me` returns `organizations` in Personal-first order and current
+server-derived account capabilities. Capability fields are fail-closed when an
+older client does not recognize them or an older server omits them. During the
+mixed version window the endpoint also returns the same organization array as
+`teams`. New management routes live under `/v1/organizations`; `/v1/teams`
+remains an organization-resource alias for released flat-Team desktop clients.
 
 Migration `0009_organization_team_hierarchy.sql` promotes every old flat Team
 ID to an organization ID without changing it. Invitations, settings, billing,

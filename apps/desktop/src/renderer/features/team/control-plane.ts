@@ -61,6 +61,11 @@ export type Me = {
     avatarUrl?: string | null;
     staffRole: StaffRole | null;
   };
+  /** Server-computed product capabilities. Optional only for safe compatibility
+   * with an older control plane; absence always means disabled. */
+  capabilities?: {
+    createOrganization: boolean;
+  };
   organizations?: OrganizationSummary[];
   /** Compatibility mirror returned by the control plane. */
   teams: TeamSummary[];
