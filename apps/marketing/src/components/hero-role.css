@@ -51,11 +51,11 @@
 
 .hero-role-word.scramble-developers .hero-scramble-icon {
   display: inline-block;
-  width: 40px;
-  height: 40px;
-  max-width: 40px;
-  max-height: 40px;
-  margin: 0 4px 0 0;
+  width: 50px;
+  height: 50px;
+  max-width: 50px;
+  max-height: 50px;
+  margin: 0 2px 0 0;
   overflow: hidden;
   vertical-align: -2px;
 }
