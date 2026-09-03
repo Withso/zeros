@@ -140,7 +140,7 @@
     "@radix-ui/react-tabs": "^1.1.13",
     "@radix-ui/react-tooltip": "^1.2.8",
     "@replit/codemirror-indentation-markers": "^6.5.3",
-    "@tiptap/core": "3.26.0",
+    "@tiptap/core": "3.30.4",
     "@tiptap/extension-document": "3.26.0",
     "@tiptap/extension-mention": "3.26.0",
     "@tiptap/extension-paragraph": "3.26.0",
