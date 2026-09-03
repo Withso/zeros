@@ -3,7 +3,7 @@ import { appOrigin } from "./hosts";
 import { esc, html } from "./page";
 import { getVerifiedSessionWithId, type Env } from "./session";
 
-const OPS_ASSET_REVISION = "2026-09-02.1";
+const OPS_ASSET_REVISION = "2026-09-03.1";
 
 function opsShell(title: string, inner: string): string {
   return `<!doctype html>
