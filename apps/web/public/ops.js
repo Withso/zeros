@@ -7,6 +7,12 @@ const actionResult = document.getElementById("action-result");
 const ownerGrant = document.getElementById("owner-grant");
 const grantForm = document.getElementById("grant-form");
 const grantResult = document.getElementById("grant-result");
+const restoreButton = document.getElementById("restore-button");
+const purgeButton = document.getElementById("purge-button");
+const purgeConfirmation = document.getElementById("purge-confirmation");
+const purgeInput = document.getElementById("purge-input");
+const purgePhrase = document.getElementById("purge-phrase");
+const purgeConfirmButton = document.getElementById("purge-confirm-button");
 let current = null;
 
 function value(form, name) {
@@ -46,6 +52,23 @@ function details(entries) {
     description.textContent = value ?? "Unavailable";
     list.append(term, description);
   }
+}
+
+function resetPurgeConfirmation() {
+  purgeConfirmation.hidden = true;
+  purgeInput.value = "";
+  purgePhrase.textContent = "";
+  purgeConfirmButton.disabled = false;
+}
+
+function completeRequestAction(message) {
+  current = null;
+  actionResult.textContent = message;
+  restoreButton.disabled = true;
+  purgeButton.disabled = true;
+  resetPurgeConfirmation();
+  purgeConfirmButton.disabled = true;
+  ownerGrant.hidden = true;
 }
 
 async function loadDevelopers() {
@@ -97,10 +120,11 @@ lookupForm?.addEventListener("submit", async (event) => {
       ["Members", payload.target.memberCount === undefined ? "—" : String(payload.target.memberCount)],
       ["Two-person recovery", payload.target.businessOrganization ? "Required" : "Not required"],
     ]);
+    resetPurgeConfirmation();
+    grantResult.textContent = "";
     ownerGrant.hidden = role !== "platform_owner";
-    document.getElementById("restore-button").disabled = payload.deletion.state !== "scheduled";
-    document.getElementById("purge-button").disabled =
-      payload.deletion.state !== "scheduled" || role !== "developer";
+    restoreButton.disabled = payload.deletion.state !== "scheduled";
+    purgeButton.disabled = payload.deletion.state !== "scheduled" || role !== "developer";
     requestPanel.hidden = false;
   } catch (error) {
     current = null;
@@ -127,7 +151,7 @@ grantForm?.addEventListener("submit", async (event) => {
   }
 });
 
-document.getElementById("restore-button")?.addEventListener("click", async () => {
+restoreButton?.addEventListener("click", async () => {
   if (!current) return;
   actionResult.textContent = "";
   try {
@@ -135,24 +159,25 @@ document.getElementById("restore-button")?.addEventListener("click", async () =>
       supportCaseReference: current.supportCaseReference,
       ownershipVerification: "confirmed_out_of_band",
     });
-    actionResult.textContent = "Restored. All previous sessions and endpoint grants remain revoked.";
-    requestPanel.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+    completeRequestAction(
+      "Restored. All previous sessions and endpoint grants remain revoked.",
+    );
   } catch (error) {
     actionResult.textContent = error instanceof Error ? error.message : "Restore failed";
   }
 });
 
-document.getElementById("purge-button")?.addEventListener("click", () => {
+purgeButton?.addEventListener("click", () => {
   if (!current) return;
   const phrase = `FORCE PURGE ${current.code}`;
-  document.getElementById("purge-phrase").textContent = phrase;
-  document.getElementById("purge-confirmation").hidden = false;
-  document.getElementById("purge-input").focus();
+  purgePhrase.textContent = phrase;
+  purgeConfirmation.hidden = false;
+  purgeInput.focus();
 });
 
-document.getElementById("purge-confirm-button")?.addEventListener("click", async () => {
+purgeConfirmButton?.addEventListener("click", async () => {
   if (!current) return;
-  const confirmation = document.getElementById("purge-input").value;
+  const confirmation = purgeInput.value;
   const expected = `FORCE PURGE ${current.code}`;
   if (confirmation !== expected) {
     actionResult.textContent = "Enter the exact force-purge phrase.";
@@ -164,8 +189,7 @@ document.getElementById("purge-confirm-button")?.addEventListener("click", async
       ownershipVerification: "confirmed_out_of_band",
       confirmation,
     });
-    actionResult.textContent = "Purge queued through the verified WorkOS deletion worker.";
-    requestPanel.querySelectorAll("button").forEach((button) => { button.disabled = true; });
+    completeRequestAction("Purge queued through the verified WorkOS deletion worker.");
   } catch (error) {
     actionResult.textContent = error instanceof Error ? error.message : "Purge failed";
   }
