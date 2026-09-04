@@ -79,12 +79,13 @@ The workspace-details actions use verbs that state their consequence:
   choosing a Mac path.
 
 `Detached` is not another paused state: the local bytes remain on disk, but the
-replica identity has no live authority or grant. A replica paused only for an
-approved destination relocation may obtain fresh authorization and transition
-back through `Syncing`. Detachment caused by workspace deletion, membership or
-device revocation, or a replica tombstone can never reactivate the original
-replica identity; the member may remove the retained local copy or create a
-separately authorized new fork.
+device currently has no live authority or grant. When the server replica
+identity remains live—for example, after an approved destination relocation or
+membership/entitlement access that is later restored—it may transition back
+through `Syncing` only after current authorization succeeds and a fresh grant
+is issued. Workspace deletion, device revocation, or explicit replica
+removal/tombstoning makes the original replica identity terminal; the member
+may remove the retained local copy or create a separately authorized new fork.
 
 Routine remote editing uses **Open via SSH**. A local copy is an independent
 workspace, not a way to make one Mac authoritative for the cloud source.
@@ -557,8 +558,12 @@ flow, and it never uploads local source changes.
   applying that path until the member chooses an outcome.
 - A member disables sync: revoke only that replica; leave other replicas and
   cloud execution untouched.
-- A member leaves or a device is lost: revoke grants immediately, tombstone the
-  replica, and disclose that already-downloaded local bytes cannot be recalled.
+- A member leaves: invalidate replica access immediately and mark the local copy
+  `Detached`. The same live server replica may resume only after current
+  membership/authorization is restored and a fresh grant is issued.
+- A device is lost: revoke the device and its grants, make that device's replica
+  identity terminal, and disclose that already-downloaded bytes cannot be
+  recalled.
 - A workspace is deleted while a replica is offline: deletion tombstone outranks
   late events; the returning device becomes `Detached`, never authoritative.
 - Ownership transfers across provider accounts are Phase 6A work: checkpoint
