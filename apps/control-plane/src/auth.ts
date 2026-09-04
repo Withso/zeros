@@ -691,14 +691,33 @@ export async function ensureUser(
         id: string;
         auth_status: AccountAuthStatus;
         recovery_identity_id: string | null;
+        recovery_identity_provider: IdentityProvider | null;
       }>(
-        `SELECT u.id, u.auth_status, recovery_identity.id AS recovery_identity_id
+        `SELECT u.id, u.auth_status,
+                recovery_identity.id AS recovery_identity_id,
+                recovery_identity.provider AS recovery_identity_provider
          FROM users u
          LEFT JOIN LATERAL (
-           SELECT ui.id
+           SELECT ui.id, ui.provider
            FROM user_identities ui
-           WHERE ui.user_id = u.id AND ui.provider = 'workos'
-             AND ui.status = 'provider_deleted'
+           WHERE ui.user_id = u.id AND (
+             (
+               u.auth_status IN ('identity_disabled', 'deletion_pending')
+               AND ui.provider = 'workos'
+               AND ui.status = 'provider_deleted'
+             ) OR (
+               u.auth_status = 'active'
+               AND ui.provider = 'auth0'
+               AND ui.status = 'active'
+             )
+           )
+             AND NOT EXISTS (
+               SELECT 1
+               FROM user_identities active_workos
+               WHERE active_workos.user_id = u.id
+                 AND active_workos.provider = 'workos'
+                 AND active_workos.status = 'active'
+             )
            ORDER BY ui.disabled_at DESC NULLS LAST, ui.created_at DESC
            LIMIT 1
          ) recovery_identity ON true
@@ -707,11 +726,17 @@ export async function ensureUser(
       );
       if (emailOwner.rows[0]) {
         const owner = emailOwner.rows[0];
+        const providerRecovery =
+          owner.recovery_identity_provider === "workos" &&
+          (owner.auth_status === "identity_disabled" ||
+            owner.auth_status === "deletion_pending");
+        const legacyMigration =
+          owner.recovery_identity_provider === "auth0" &&
+          owner.auth_status === "active";
         if (
           input.provider === "workos" &&
-          (owner.auth_status === "identity_disabled" ||
-            owner.auth_status === "deletion_pending") &&
-          owner.recovery_identity_id
+          owner.recovery_identity_id &&
+          (providerRecovery || legacyMigration)
         ) {
           if (!input.session) {
             return { kind: "recovery_required", publicCode: null };

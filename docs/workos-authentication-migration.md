@@ -151,6 +151,15 @@ audits the operation, and sends a notification. It does not silently restore
 collaborative memberships; those must be re-provisioned by the organization or
 enterprise directory.
 
+During the declared Auth0-to-WorkOS cutover, an active account whose eligible
+sign-in identity is still an active Auth0 mapping uses the same reviewed
+ceremony. A fresh WorkOS authentication creates the bounded `ZR-…` request;
+email alone still cannot transfer ownership. Exact owner approval supersedes
+the reviewed Auth0 identity, preserves the Zeros UUID and active account state,
+and projects retained Zeros-managed collaborative memberships to the new
+WorkOS subject through the durable command outbox. Directory-managed SCIM
+memberships remain authoritative and are never converted by this migration.
+
 An active account reached through a different WorkOS subject returns
 `account_exists`; email alone is never enough to merge it. Browser and desktop
 render fixed guidance for `account_exists`, `reauthentication_required`,
@@ -758,13 +767,15 @@ collaboration snapshot. The corrective candidate now:
   memberships to the replacement WorkOS identity with new durable revisions.
 
 The regression exercises that entire sequence atomically, including the SCIM
-exception and replacement-membership outbox command. The complete
-database-backed control-plane suite is green with 343 tests. A campaign run
-against the final merged and deployed corrective SHA remains a release gate;
-the failed baseline is retained here as evidence and is not relabeled as a
-pass.
+exception and replacement-membership outbox command. That campaign's complete
+database-backed control-plane suite was green with 343 tests; the current
+post-cutover suite is green with 348, including reviewed migration of an active
+Auth0 identity and fail-closed active-WorkOS-identity conflict handling. A
+campaign run against the final merged and deployed corrective
+SHA remains a release gate; the failed baseline is retained here as evidence
+and is not relabeled as a pass.
 
-Still required before Alpha can be called fully qualified:
+At that historical snapshot, the remaining Alpha requirements were:
 
 - A provider-user deletion while Web and Desktop are simultaneously open,
   followed by the real reviewed-recovery UI. The reserved-domain campaign
