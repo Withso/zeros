@@ -22,6 +22,16 @@ function sourceFiles(root: string): string[] {
 }
 
 describe("repository layout contracts", () => {
+  it("loads the ignored public Dev auth profile before launching Electron", () => {
+    const launcher = read("scripts/dev-instance.mjs");
+
+    expect(launcher).toContain('import { loadEnv } from "vite"');
+    expect(launcher).toContain("DEV_AUTH_ENV_KEYS");
+    expect(launcher).toMatch(
+      /const env = \{\s+\.\.\.localDevAuthEnv,\s+\.\.\.process\.env,/,
+    );
+  });
+
   it("runs the required actionlint check for every pull request", () => {
     const workflowLint = read(".github/workflows/lint-ci.yml");
 
