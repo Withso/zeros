@@ -434,8 +434,8 @@ d("cloud workspace setup worker", () => {
            protocol_version, state, bridge_token_hash,
            heartbeat_token_hash, registered_at, last_heartbeat_at,
            lease_expires_at
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 11, 'ready',
-                   $9, $10, now(), now(), now() + interval '2 minutes')`,
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'ready',
+                   $10, $11, now(), now(), now() + interval '2 minutes')`,
         [
           result.readiness.engine.instanceId,
           execution.workspaceId,
@@ -445,6 +445,7 @@ d("cloud workspace setup worker", () => {
           execution.setupRunId,
           execution.executionFence,
           grant.rows[0]!.id,
+          CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
           createHash("sha256").update(randomUUID()).digest(),
           createHash("sha256").update(randomUUID()).digest(),
         ],
