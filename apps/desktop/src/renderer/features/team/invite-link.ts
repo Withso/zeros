@@ -24,14 +24,17 @@ const OFFICIAL_APP_HOSTS = new Set([
   "app-alpha.zeros.build",
   "app-beta.zeros.build",
 ]);
+const INVITE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{20,200}$/;
 
 /** Extract an invite token from a deep link, an https invite URL, or a
  *  bare pasted token. Returns null when `raw` is none of those. */
 export function parseInviteToken(raw: string): string | null {
   const trimmed = raw.trim();
   if (!trimmed) return null;
-  // Bare token: 32 bytes base64url = 43 chars of [A-Za-z0-9_-].
-  if (/^[A-Za-z0-9_-]{43}$/.test(trimmed)) return trimmed;
+  // Zeros tokens are 43 characters; WorkOS invitation tokens are shorter.
+  // The server still validates that the capability is authentic, single-use,
+  // unexpired, and belongs to the signed-in email address.
+  if (INVITE_TOKEN_PATTERN.test(trimmed)) return trimmed;
   let url: URL;
   try {
     url = new URL(trimmed);
@@ -54,7 +57,7 @@ export function parseInviteToken(raw: string): string | null {
   const workosTokens = url.searchParams.getAll("invitation_token");
   if (zerosTokens.length + workosTokens.length !== 1) return null;
   const token = zerosTokens[0] ?? workosTokens[0] ?? null;
-  return token && /^[A-Za-z0-9_-]{20,200}$/.test(token) ? token : null;
+  return token && INVITE_TOKEN_PATTERN.test(token) ? token : null;
 }
 
 // ── Pending-token slot (module singleton, in-memory only) ──

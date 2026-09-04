@@ -6,6 +6,10 @@ import type { AuthedUser } from "./auth.js";
 import { HttpError } from "./authz.js";
 import { audit } from "./audit.js";
 import { withSystemTx } from "./db.js";
+import {
+  enqueueWorkOSCommand,
+  workOSInvitationOrderingKey,
+} from "./workos-command-outbox.js";
 
 const RecoveryCodeSchema = z
   .string()
@@ -94,12 +98,20 @@ export async function approveAccountRecovery(
 
     const target = await tx.query<{
       email: string;
-      auth_status: "identity_disabled" | "deletion_pending";
+      auth_status: "active" | "identity_disabled" | "deletion_pending";
+      identity_provider: "auth0" | "workos";
       identity_status: string;
       provider_sub: string;
+      active_workos_identity_exists: boolean;
     }>(
-      `SELECT u.email, u.auth_status, ui.status AS identity_status,
-              ui.provider_sub
+      `SELECT u.email, u.auth_status, ui.provider AS identity_provider,
+              ui.status AS identity_status, ui.provider_sub,
+              EXISTS (
+                SELECT 1 FROM user_identities active_workos
+                WHERE active_workos.user_id = u.id
+                  AND active_workos.provider = 'workos'
+                  AND active_workos.status = 'active'
+              ) AS active_workos_identity_exists
        FROM users u
        JOIN user_identities ui ON ui.id = $2 AND ui.user_id = u.id
        WHERE u.id = $1
@@ -107,12 +119,19 @@ export async function approveAccountRecovery(
       [recovery.target_user_id, recovery.target_identity_id],
     );
     const account = target.rows[0];
+    const providerRecovery =
+      account?.identity_provider === "workos" &&
+      account.identity_status === "provider_deleted" &&
+      !account.active_workos_identity_exists &&
+      ["identity_disabled", "deletion_pending"].includes(account.auth_status);
+    const legacyMigration =
+      account?.identity_provider === "auth0" &&
+      account.identity_status === "active" &&
+      !account.active_workos_identity_exists &&
+      account.auth_status === "active";
     if (
       !account ||
-      !["identity_disabled", "deletion_pending"].includes(
-        account.auth_status,
-      ) ||
-      account.identity_status !== "provider_deleted" ||
+      (!providerRecovery && !legacyMigration) ||
       account.email.toLowerCase() !== recovery.candidate_email.toLowerCase()
     ) {
       throw new HttpError(
@@ -153,8 +172,12 @@ export async function approveAccountRecovery(
        SET status = 'superseded',
            superseded_by_identity_id = $2,
            disabled_at = COALESCE(disabled_at, now())
-       WHERE id = $1 AND status = 'provider_deleted'`,
-      [recovery.target_identity_id, replacement.rows[0]!.id],
+       WHERE id = $1 AND status = $3::identity_lifecycle_status`,
+      [
+        recovery.target_identity_id,
+        replacement.rows[0]!.id,
+        legacyMigration ? "active" : "provider_deleted",
+      ],
     );
     const deletionRemainsPending = account.auth_status === "deletion_pending";
     const reactivated = await tx.query<{ auth_revision: string | number }>(
@@ -196,6 +219,45 @@ export async function approveAccountRecovery(
            AND NOT o.is_personal AND om.membership_source <> 'scim'`,
         [recovery.target_user_id],
       );
+    }
+    if (legacyMigration) {
+      const membershipsToProject = await tx.query<{
+        org_id: string;
+        role: "owner" | "admin" | "member";
+        workos_sync_revision: string | number;
+      }>(
+        `UPDATE organization_members om
+         SET workos_membership_id = NULL,
+             workos_sync_revision = om.workos_sync_revision + 1
+         FROM organizations o
+         JOIN workos_organization_links provider_org
+           ON provider_org.organization_id = o.id
+          AND provider_org.state IN ('active', 'provisioning')
+         WHERE om.org_id = o.id AND om.user_id = $1
+           AND NOT o.is_personal AND o.deleted_at IS NULL
+           AND o.lifecycle_status = 'active'
+           AND om.membership_source <> 'scim'
+         RETURNING om.org_id, om.role, om.workos_sync_revision`,
+        [recovery.target_user_id],
+      );
+      for (const membership of membershipsToProject.rows) {
+        await enqueueWorkOSCommand(tx, {
+          operation: "membership.create",
+          idempotencyKey: `membership.${membership.org_id}.${recovery.target_user_id}.${membership.workos_sync_revision}`,
+          aggregateKey: `membership:${membership.org_id}:${recovery.target_user_id}`,
+          orderingKey: workOSInvitationOrderingKey(
+            membership.org_id,
+            recovery.candidate_email,
+          ),
+          aggregateRevision: Number(membership.workos_sync_revision),
+          organizationId: membership.org_id,
+          userId: recovery.target_user_id,
+          payload: {
+            workosUserId: recovery.candidate_provider_sub,
+            role: membership.role,
+          },
+        });
+      }
     }
     await tx.query(
       `UPDATE account_recovery_requests
