@@ -367,6 +367,15 @@ export async function seedReadyCloudWorkspace(
       ],
     );
   });
+  // Storage limits are database-owner operational state, so the production
+  // application role cannot provision them. Integration fixtures use their
+  // disposable database owner to establish an intentionally generous limit.
+  await pool.query(
+    `INSERT INTO cloud_workspace_object_storage_limits (
+       org_id, max_organization_bytes, max_workspace_bytes, updated_by
+     ) VALUES ($1, 107374182400, 10737418240, $2)`,
+    [organizationId, userId],
+  );
   return {
     userId,
     organizationId,

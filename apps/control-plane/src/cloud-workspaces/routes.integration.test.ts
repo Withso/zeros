@@ -41,6 +41,8 @@ const cloudConfig: CloudWorkspaceBackendConfig = {
   autoArchiveMinutes: 10_080,
   reconcileIntervalMs: 1_000,
   providerCredentialKeys: {},
+  settingsSecretEncryptionKeys: {},
+  currentSettingsSecretEncryptionKeyVersion: null,
   settingsSecretKeyV1: null,
   access: {
     allowedSshHosts: ["ssh.app.daytona.io"],

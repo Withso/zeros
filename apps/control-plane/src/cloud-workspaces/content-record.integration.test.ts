@@ -104,6 +104,144 @@ d("cloud workspace content durability", () => {
     };
   }
 
+  it("fails closed when durable object-storage limits are not configured", async () => {
+    await pool.query(
+      `DELETE FROM cloud_workspace_object_storage_limits WHERE org_id = $1`,
+      [fixture.organizationId],
+    );
+    await expect(
+      blobs.put({
+        ...engineAuthority(),
+        bytes: Buffer.from("unadmitted", "utf8"),
+      }),
+    ).rejects.toMatchObject({ code: "object_storage_limit_not_configured" });
+    await expect(
+      pool.query(`SELECT count(*)::integer AS count FROM workspace_blobs`),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
+
+  it("serializes cumulative organization admission without double-charging retries", async () => {
+    await pool.query(
+      `UPDATE cloud_workspace_object_storage_limits
+       SET max_organization_bytes = 9, max_workspace_bytes = 64,
+           updated_by = $2, updated_at = now()
+       WHERE org_id = $1`,
+      [fixture.organizationId, fixture.userId],
+    );
+
+    const results = await Promise.allSettled([
+      blobs.put({ ...engineAuthority(), bytes: Buffer.from("first!", "utf8") }),
+      blobs.put({ ...engineAuthority(), bytes: Buffer.from("second", "utf8") }),
+    ]);
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === "rejected"),
+    ).toMatchObject([
+      { reason: { code: "organization_object_storage_limit_exceeded" } },
+    ]);
+
+    const admitted = results.find(
+      (
+        result,
+      ): result is PromiseFulfilledResult<
+        Awaited<ReturnType<typeof blobs.put>>
+      > => result.status === "fulfilled",
+    )!.value;
+    const admittedBytes =
+      Buffer.from("first!", "utf8").length === admitted.sizeBytes
+        ? Buffer.from("first!", "utf8")
+        : Buffer.from("second", "utf8");
+    await expect(
+      blobs.put({ ...engineAuthority(), bytes: admittedBytes }),
+    ).resolves.toMatchObject({ id: admitted.id, reused: true });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count,
+                coalesce(sum(reserved_bytes), 0)::integer AS bytes
+         FROM workspace_blob_storage_reservations
+         WHERE workspace_id = $1`,
+        [fixture.workspaceId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ count: 1, bytes: admitted.sizeBytes }],
+    });
+  });
+
+  it("enforces the workspace durable-storage limit independently", async () => {
+    await pool.query(
+      `UPDATE cloud_workspace_object_storage_limits
+       SET max_organization_bytes = 64, max_workspace_bytes = 9,
+           updated_by = $2, updated_at = now()
+       WHERE org_id = $1`,
+      [fixture.organizationId, fixture.userId],
+    );
+
+    const results = await Promise.allSettled([
+      blobs.put({ ...engineAuthority(), bytes: Buffer.from("first!", "utf8") }),
+      blobs.put({ ...engineAuthority(), bytes: Buffer.from("second", "utf8") }),
+    ]);
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === "rejected"),
+    ).toMatchObject([
+      { reason: { code: "workspace_object_storage_limit_exceeded" } },
+    ]);
+  });
+
+  it("does not release workspace capacity until an abandoned blob is collected", async () => {
+    await pool.query(
+      `UPDATE cloud_workspace_object_storage_limits
+       SET max_organization_bytes = 64, max_workspace_bytes = 9,
+           updated_by = $2, updated_at = now()
+       WHERE org_id = $1`,
+      [fixture.organizationId, fixture.userId],
+    );
+    await blobs.put({
+      ...engineAuthority(),
+      bytes: Buffer.from("first!", "utf8"),
+    });
+    await pool.query(
+      `UPDATE workspace_blob_storage_reservations
+       SET expires_at = now() - interval '1 second'
+       WHERE workspace_id = $1 AND state = 'uploading'`,
+      [fixture.workspaceId],
+    );
+
+    await expect(
+      blobs.put({
+        ...engineAuthority(),
+        bytes: Buffer.from("second", "utf8"),
+      }),
+    ).rejects.toMatchObject({
+      code: "workspace_object_storage_limit_exceeded",
+    });
+    await expect(
+      pool.query(
+        `SELECT count(*)::integer AS count
+         FROM workspace_blob_storage_reservations WHERE workspace_id = $1`,
+        [fixture.workspaceId],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 1 }] });
+
+    await pool.query(
+      `UPDATE workspace_blobs
+       SET created_at = now() - interval '2 hours'
+       WHERE org_id = $1`,
+      [fixture.organizationId],
+    );
+    await expect(blobs.collectGarbageOnce(60_000)).resolves.toBe(true);
+    await expect(
+      blobs.put({
+        ...engineAuthority(),
+        bytes: Buffer.from("second", "utf8"),
+      }),
+    ).resolves.toMatchObject({ sizeBytes: 6 });
+  });
+
   it("resumes an interrupted upload, deduplicates exact bytes, and supports empty objects", async () => {
     const bytes = Buffer.from("durable working tree\n", "utf8");
     objectStore.failNextPut = true;

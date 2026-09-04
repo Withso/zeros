@@ -133,6 +133,32 @@ requires replacement provider/agent/secret bindings before accepting new paid
 work. When the provider account changes, checkpoint and reprovision; a database
 owner update is not a security boundary.
 
+## Secret binding verification and key rotation
+
+Secret binding values are AES-GCM encrypted with binding identity, tenant,
+version, and name in the authenticated context. New versions also store a
+domain-separated HMAC-SHA-256 verifier derived from the corresponding envelope
+key and bound to that same context. They never store a raw value hash: possession
+of a database copy alone must not provide an offline dictionary oracle for
+low-entropy environment values.
+
+Rows migrated from the former raw-digest schema use verifier scheme 0 and a
+null verifier. Equality checks for those rows authenticate and decrypt the
+ciphertext, then compare in constant time inside the coordinator. A normal
+secret rotation writes a new version under the configured current key and
+scheme 1. Persisted `key_version` remains a compatibility contract for both
+binding ciphertext and one-use setup material.
+
+`CLOUD_WORKSPACE_SECRET_KEY_V1` is the single-key compatibility form. A rotated
+deployment supplies every still-readable version in
+`CLOUD_WORKSPACE_SECRET_KEYS_JSON` and chooses new-write authority with
+`CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION`. Add the new key before selecting
+it; remove an old key only after retained binding versions, outstanding setup
+material, affected generations, and restorable backups no longer require it.
+Fail startup or secret resolution when a referenced version is missing. Never
+reuse this keyring for object blobs, provider credentials, endpoint grants, or
+other digest domains.
+
 ## Local replica and copy boundary
 
 - Register every trusted device with a revocable user-bound public identity.

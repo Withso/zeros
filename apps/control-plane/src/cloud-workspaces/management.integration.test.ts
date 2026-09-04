@@ -37,6 +37,8 @@ const config: CloudWorkspaceBackendConfig = {
   autoArchiveMinutes: 10_080,
   reconcileIntervalMs: 1_000,
   providerCredentialKeys: { 1: providerKey },
+  settingsSecretEncryptionKeys: { 1: settingsKey },
+  currentSettingsSecretEncryptionKeyVersion: 1,
   settingsSecretKeyV1: settingsKey,
   access: {
     allowedSshHosts: ["ssh.app.daytona.io"],
@@ -554,6 +556,102 @@ d("cloud workspace Phase 5 management", () => {
       desired_state: "stopped",
       access_state: "revocation_pending",
       endpoint_revoked: true,
+    });
+  });
+
+  it("stores only keyed secret verifiers and rekeys legacy binding material through rotation", async () => {
+    const bindingId = randomUUID();
+    const value = "low-entropy-but-valid-secret";
+    await management.createSecretBinding({
+      id: bindingId,
+      organizationId: orgId,
+      actorUserId: actor.id,
+      name: "DATABASE_URL",
+      purpose: "environment",
+      placement: "cloud",
+      value,
+    });
+
+    const stored = await pool.query<{
+      key_version: number;
+      verifier_scheme: number;
+      value_verifier: Buffer;
+    }>(
+      `SELECT key_version, verifier_scheme, value_verifier
+       FROM secret_binding_versions
+       WHERE binding_id = $1 AND version = 1`,
+      [bindingId],
+    );
+    expect(stored.rows[0]).toMatchObject({
+      key_version: 1,
+      verifier_scheme: 1,
+    });
+    expect(stored.rows[0]!.value_verifier).not.toEqual(
+      createHash("sha256").update(value, "utf8").digest(),
+    );
+    await expect(
+      pool.query(
+        `SELECT column_name FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name = 'secret_binding_versions'
+           AND column_name = 'value_sha256'`,
+      ),
+    ).resolves.toMatchObject({ rows: [] });
+
+    // Migration 0056 intentionally leaves legacy ciphertext without a raw
+    // digest. Authenticated decryption remains the compatibility check.
+    await pool.query(
+      `UPDATE secret_binding_versions
+       SET verifier_scheme = 0, value_verifier = NULL
+       WHERE binding_id = $1 AND version = 1`,
+      [bindingId],
+    );
+    await expect(
+      management.createSecretBinding({
+        id: bindingId,
+        organizationId: orgId,
+        actorUserId: actor.id,
+        name: "DATABASE_URL",
+        purpose: "environment",
+        placement: "cloud",
+        value,
+      }),
+    ).resolves.toMatchObject({ replayed: true });
+
+    const nextKey = randomBytes(32).toString("base64url");
+    const rotatedManagement = new DatabaseCloudWorkspaceManagementService(
+      pool,
+      {
+        ...config,
+        settingsSecretEncryptionKeys: { 1: settingsKey, 2: nextKey },
+        currentSettingsSecretEncryptionKeyVersion: 2,
+      },
+      { workosEnabled: false },
+    );
+    await expect(
+      rotatedManagement.rotateSecretBinding({
+        id: bindingId,
+        organizationId: orgId,
+        actorUserId: actor.id,
+        expectedVersion: 1,
+        value,
+      }),
+    ).resolves.toMatchObject({
+      binding: { version: 2 },
+      replayed: false,
+    });
+    await expect(
+      pool.query(
+        `SELECT version, key_version, verifier_scheme
+         FROM secret_binding_versions
+         WHERE binding_id = $1 ORDER BY version`,
+        [bindingId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        { version: expect.anything(), key_version: 1, verifier_scheme: 0 },
+        { version: expect.anything(), key_version: 2, verifier_scheme: 1 },
+      ],
     });
   });
 

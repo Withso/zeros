@@ -185,6 +185,46 @@ d("migration ladder", () => {
     }
   });
 
+  it("indexes object deletion foreign keys and previously uncovered worker claims", async () => {
+    await runMigrations(pool);
+    const uncoveredBlobForeignKeys = await pool.query<{ conname: string }>(
+      `SELECT constraint_row.conname
+       FROM pg_constraint constraint_row
+       WHERE constraint_row.contype = 'f'
+         AND constraint_row.confrelid = 'workspace_blobs'::regclass
+         AND NOT EXISTS (
+           SELECT 1 FROM pg_index index_row
+           WHERE index_row.indrelid = constraint_row.conrelid
+             AND index_row.indisvalid AND index_row.indisready
+             AND (index_row.indkey::smallint[])[0] = constraint_row.conkey[1]
+         )
+       ORDER BY constraint_row.conname`,
+    );
+    expect(uncoveredBlobForeignKeys.rows).toEqual([]);
+
+    const indexes = await pool.query<{ indexname: string }>(
+      `SELECT indexname FROM pg_indexes
+       WHERE schemaname = 'public' AND indexname IN (
+         'workspace_fork_intents_result_blob_fk_idx',
+         'workspace_file_events_blob_fk_idx',
+         'workspace_file_entries_blob_fk_idx',
+         'workspace_checkpoints_artifact_blob_fk_idx',
+         'workspace_checkpoints_manifest_blob_fk_idx',
+         'workspace_exports_export_blob_fk_idx',
+         'workspace_setup_recovery_artifact_blob_fk_idx',
+         'workspace_setup_recovery_manifest_blob_fk_idx',
+         'workspace_checkpoint_entries_blob_fk_idx',
+         'workspace_fork_import_entries_blob_fk_idx',
+         'workspace_deletion_blob_targets_blob_fk_idx',
+         'workspace_blob_storage_reservations_blob_fk_idx',
+         'workspace_blob_references_workspace_fk_idx',
+         'workspace_blob_rotation_jobs_claim_idx',
+         'workspace_blobs_pending_gc_claim_idx'
+       ) ORDER BY indexname`,
+    );
+    expect(indexes.rows.map((row) => row.indexname)).toHaveLength(15);
+  });
+
   it("lets retained projections outlive compacted journals without leaving export pins", async () => {
     await runMigrations(pool);
     const columns = await pool.query<{
@@ -312,6 +352,9 @@ d("migration ladder", () => {
       "0019_resend_product_notifications.sql",
       "0053_cloud_workspace_personal_organization_invariant.sql",
       "0054_cloud_workspace_quota_operations.sql",
+      "0055_cloud_workspace_object_storage_admission.sql",
+      "0056_cloud_workspace_secret_verifiers.sql",
+      "0057_cloud_workspace_storage_worker_indexes.sql",
     ]);
     await expect(
       pool.query(
@@ -334,6 +377,88 @@ d("migration ladder", () => {
     await applyThrough(LADDER.length - 1);
     const ran = await runMigrations(pool);
     expect(ran).toEqual([LADDER[LADDER.length - 1]]);
+  });
+
+  it("removes legacy raw secret digests without invalidating encrypted rows", async () => {
+    const verifierMigrationIndex = LADDER.indexOf(
+      "0056_cloud_workspace_secret_verifiers.sql",
+    );
+    expect(verifierMigrationIndex).toBeGreaterThan(0);
+    await applyThrough(verifierMigrationIndex);
+
+    const userId = "10101010-1010-4010-8010-101010101010";
+    const orgId = "20202020-2020-4020-8020-202020202020";
+    const bindingId = "30303030-3030-4030-8030-303030303030";
+    await pool.query("BEGIN");
+    try {
+      await pool.query(
+        `INSERT INTO users (id, email)
+         VALUES ($1, 'legacy-secret-upgrade@example.test')`,
+        [userId],
+      );
+      await pool.query(
+        `INSERT INTO organizations (
+           id, slug, name, created_by, is_personal, cloud_workspaces_allowed
+         ) VALUES ($1, 'legacy-secret-upgrade', 'Legacy Secret Upgrade',
+                   $2, false, true)`,
+        [orgId, userId],
+      );
+      await pool.query(
+        `INSERT INTO secret_bindings (
+           id, org_id, owner_kind, name, purpose, placement, created_at
+         ) VALUES ($1, $2, 'organization', 'LEGACY_TOKEN', 'environment',
+                   'cloud', now())`,
+        [bindingId, orgId],
+      );
+      await pool.query(
+        `INSERT INTO secret_binding_versions (
+           binding_id, org_id, version, key_version, nonce, ciphertext,
+           auth_tag, value_sha256, created_by
+         ) VALUES (
+           $1, $2, 1, 1, decode(repeat('11', 12), 'hex'),
+           decode('aabbcc', 'hex'), decode(repeat('22', 16), 'hex'),
+           decode(repeat('33', 32), 'hex'), $3
+         )`,
+        [bindingId, orgId, userId],
+      );
+      await pool.query("COMMIT");
+    } catch (error) {
+      await pool.query("ROLLBACK");
+      throw error;
+    }
+
+    await runMigrations(pool);
+    const columns = await pool.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'secret_binding_versions'
+         AND column_name IN ('value_sha256', 'value_verifier', 'verifier_scheme')
+       ORDER BY column_name`,
+    );
+    expect(columns.rows.map((row) => row.column_name)).toEqual([
+      "value_verifier",
+      "verifier_scheme",
+    ]);
+    await expect(
+      pool.query(
+        `SELECT key_version, encode(nonce, 'hex') AS nonce,
+                encode(ciphertext, 'hex') AS ciphertext,
+                encode(auth_tag, 'hex') AS auth_tag,
+                verifier_scheme, value_verifier
+         FROM secret_binding_versions WHERE binding_id = $1`,
+        [bindingId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          key_version: 1,
+          nonce: "111111111111111111111111",
+          ciphertext: "aabbcc",
+          auth_tag: "22222222222222222222222222222222",
+          verifier_scheme: 0,
+          value_verifier: null,
+        },
+      ],
+    });
   });
 
   it("replays from every intermediate revision", async () => {

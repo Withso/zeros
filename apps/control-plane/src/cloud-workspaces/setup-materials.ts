@@ -98,7 +98,9 @@ export type CloudWorkspaceSetupMaterialServiceOptions = {
   /** Must outlive the bounded provider setup command. Live setup authority is
    * still rechecked at redemption, so this is only a coarse outer ceiling. */
   engineRegistrationTtlSeconds?: number;
-  setupSecretKeyV1: string;
+  setupSecretKeyV1?: string;
+  setupSecretEncryptionKeys?: Readonly<Record<number, string>>;
+  currentSetupSecretEncryptionKeyVersion?: number;
   github: CloudWorkspaceRepositoryCredentialBroker;
   /** Selects the provider subject that the configured engine JWT verifier can
    * actually authenticate. A Zeros account may retain both Auth0 and WorkOS
@@ -347,10 +349,18 @@ export function openCloudWorkspaceSetupSecret(
     organizationId: string;
     generation: number;
   },
-  encodedKey: string,
+  encodedKeys: string | Readonly<Record<number, string>>,
 ): string {
+  const encodedKey =
+    typeof encodedKeys === "string"
+      ? row.key_version === 1
+        ? encodedKeys
+        : null
+      : (encodedKeys[row.key_version] ?? null);
   if (
-    row.key_version !== 1 ||
+    !Number.isSafeInteger(row.key_version) ||
+    row.key_version < 1 ||
+    !encodedKey ||
     row.nonce.length !== 12 ||
     row.auth_tag.length !== 16 ||
     row.ciphertext.length < 1 ||
@@ -689,7 +699,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
   private readonly engineProtocolVersion: number;
   private readonly enginePort: number;
   private readonly engineRegistrationTtlSeconds: number;
-  private readonly setupSecretKeyV1: string;
+  private readonly setupSecretEncryptionKeys: Readonly<Record<number, string>>;
   private readonly github: CloudWorkspaceRepositoryCredentialBroker;
   private readonly accountIdentityProvider: "auth0" | "workos";
   private readonly accountAuth: CloudWorkspaceSetupMaterialServiceOptions["accountAuth"];
@@ -766,14 +776,34 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
         throw new Error("cloud workspace account authority must use HTTPS");
       }
     }
-    const parsedKey = secretKey(options.setupSecretKeyV1);
-    parsedKey.fill(0);
+    const setupSecretEncryptionKeys: Record<number, string> = {
+      ...(options.setupSecretEncryptionKeys ?? {}),
+    };
+    if (options.setupSecretKeyV1) {
+      setupSecretEncryptionKeys[1] = options.setupSecretKeyV1;
+    }
+    const currentSetupSecretEncryptionKeyVersion =
+      options.currentSetupSecretEncryptionKeyVersion ??
+      (options.setupSecretKeyV1 ? 1 : 0);
+    if (
+      !Number.isSafeInteger(currentSetupSecretEncryptionKeyVersion) ||
+      currentSetupSecretEncryptionKeyVersion < 1 ||
+      !setupSecretEncryptionKeys[currentSetupSecretEncryptionKeyVersion]
+    ) {
+      throw new Error(
+        "cloud workspace current setup secret key is unavailable",
+      );
+    }
+    for (const encodedKey of Object.values(setupSecretEncryptionKeys)) {
+      const parsedKey = secretKey(encodedKey);
+      parsedKey.fill(0);
+    }
     this.engineProtocolVersion = options.engineProtocolVersion;
     this.enginePort = options.enginePort;
     this.engineRegistrationTtlSeconds =
       options.engineRegistrationTtlSeconds ??
       DEFAULT_ENGINE_REGISTRATION_TTL_SECONDS;
-    this.setupSecretKeyV1 = options.setupSecretKeyV1;
+    this.setupSecretEncryptionKeys = setupSecretEncryptionKeys;
     this.github = options.github;
     this.accountIdentityProvider = options.accountIdentityProvider;
     const accountAuthBase = {
@@ -1065,7 +1095,7 @@ export class DatabaseCloudWorkspaceSetupMaterialService {
               organizationId: input.organizationId,
               generation: input.generation,
             },
-            this.setupSecretKeyV1,
+            this.setupSecretEncryptionKeys,
           ),
         };
       });

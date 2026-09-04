@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
@@ -196,7 +196,26 @@ describe("cloud workspace settings resolution", () => {
     );
     expect(sealed.nonce).toHaveLength(12);
     expect(sealed.authTag).toHaveLength(16);
-    expect(sealed.valueSha256).toHaveLength(32);
+    expect(sealed.valueVerifier).toHaveLength(32);
+    expect(sealed.valueVerifier).not.toEqual(
+      createHash("sha256")
+        .update("postgresql://private.example/db", "utf8")
+        .digest(),
+    );
+    expect(
+      sealCloudWorkspaceSecretBinding(
+        "postgresql://private.example/db",
+        { ...binding, bindingId: "33333333-3333-4333-8333-333333333333" },
+        key,
+      ).valueVerifier,
+    ).not.toEqual(sealed.valueVerifier);
+    expect(
+      sealCloudWorkspaceSecretBinding(
+        "postgresql://private.example/db",
+        binding,
+        key,
+      ).valueVerifier,
+    ).toEqual(sealed.valueVerifier);
     expect(sealed.ciphertext.toString("utf8")).not.toContain("private.example");
     expect(() =>
       sealCloudWorkspaceSecretBinding(

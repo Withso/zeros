@@ -78,7 +78,8 @@ At minimum, record:
 - lifecycle transition latency and failures;
 - setup step timings and bounded sanitized logs;
 - engine reconnects, protocol mismatches, and revision-gap recovery;
-- resource allocation, active/idle time, and quota decisions;
+- resource allocation, active/idle time, compute-quota decisions, durable
+  object-storage admission/rejection, and rotation-reservation backlog;
 - durable-write lag and restore results;
 - reconciliation drift and orphan cleanup; and
 - generation-replacement rollback and fork results, checkpoint integrity,
@@ -121,6 +122,30 @@ the same transaction writes append-only owner evidence. Quota provisioning is
 independent of `CLOUD_WORKSPACES_ENABLED` and
 `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED`.
 
+Durable object-storage limits are a second, independent owner-managed boundary.
+Provision or change them with
+`pnpm --dir apps/control-plane cloud-object-storage:manage`, using the same
+read-only-plan/exact-approval pattern and active platform-owner attribution.
+The Organization byte limit covers physical tenant blobs plus copy-on-write
+rotation reservations; the workspace byte limit covers logical unique blob
+reservations. The command rejects a limit below either current measure and
+writes append-only evidence. It does not change provider sandbox
+`storage_mib`, resize the Railway volume, or enable either cloud feature gate.
+
+The physical object-store quota remains an infrastructure backstop. Keep it
+above the aggregate application limits with reviewed allowance for filesystem
+metadata, atomic-publication temporaries, backups, and incident response.
+Alert before that headroom is consumed; application rejection is not a
+substitute for provider capacity monitoring.
+
+Secret bindings and one-use setup material share a versioned coordinator
+keyring, but their persisted rows retain the exact encryption-key version used.
+During rotation, deploy every readable old key plus the new key, select the new
+current version, rotate bindings and replace affected generations, then prove
+that no live/retained row or restorable backup requires the old key before
+removing it. The object-storage keyring is separate and follows its own
+copy-on-write rotation workflow.
+
 The hosted Railway deployment keeps database, object-storage, worker, and
 encryption endpoints configurable. A future template must ship health,
 migration, upgrade, backup/restore, key-rotation, and deletion procedures; a
@@ -134,6 +159,17 @@ names as aliases for `0020`–`0052` instead of replaying their DDL. Migration
 `0053` then restores the permanent Personal local-only constraint. If it finds
 a legacy Personal-owned cloud workspace, it stops without deleting or
 reassigning data; move that workspace to an Organization before retrying.
+
+Migration `0055` backfills logical reservations for existing blob references
+but deliberately creates no Organization limit. After applying it, configure a
+reviewed limit for every active cloud Organization before resuming object
+writes or key-rotation workers. Existing bytes remain readable and count toward
+the first plan. Migration `0056` removes the legacy raw secret-value digest;
+existing AES-GCM rows remain at verifier scheme 0 until a normal binding
+rotation writes a keyed verifier. Keep version 1 in the deployment keyring while
+those ciphertexts or backups remain readable. Migration `0057` adds only the
+blob-deletion foreign-key and previously uncovered `SKIP LOCKED` claim indexes
+identified by the catalog/query audit; it changes no serialized state.
 
 `0025_cloud_workspace_engine_authority.sql` is deliberately marked
 `zeros:requires-controlled-downtime`. It takes an `EXCLUSIVE` lock on

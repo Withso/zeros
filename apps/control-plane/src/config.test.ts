@@ -519,6 +519,8 @@ describe("cloud workspace backend configuration", () => {
         previewBaseDomain: null,
       },
       providerCredentialKeys: {},
+      settingsSecretEncryptionKeys: {},
+      currentSettingsSecretEncryptionKeyVersion: null,
       settingsSecretKeyV1: null,
       durability: null,
       outbox: null,
@@ -611,6 +613,8 @@ describe("cloud workspace backend configuration", () => {
       }).cloudWorkspaces,
     ).toEqual({
       ...loadConfig(cloudEnv()).cloudWorkspaces,
+      settingsSecretEncryptionKeys: { 1: setupKey },
+      currentSettingsSecretEncryptionKeyVersion: 1,
       settingsSecretKeyV1: setupKey,
       durability: {
         objectEncryptionKeys: { 1: setupKey },
@@ -623,6 +627,8 @@ describe("cloud workspace backend configuration", () => {
           "https://proxy-a.example.test",
           "https://proxy-b.example.test",
         ],
+        setupSecretEncryptionKeys: { 1: setupKey },
+        currentSetupSecretEncryptionKeyVersion: 1,
         setupSecretKeyV1: setupKey,
         engineProtocolVersion: 11,
         enginePort: 39_393,
@@ -683,6 +689,26 @@ describe("cloud workspace backend configuration", () => {
       currentObjectEncryptionKeyVersion: 2,
       objectStoreDirectory: "/var/lib/zeros/workspace-objects",
     });
+  });
+
+  it("loads a versioned secret keyring and selects an explicit current key", () => {
+    const oldKey = randomBytes(32).toString("base64url");
+    const newKey = randomBytes(32).toString("base64url");
+    const cloud = loadConfig({
+      ...cloudEnv(),
+      CLOUD_WORKSPACE_SECRET_KEY_V1: oldKey,
+      CLOUD_WORKSPACE_SECRET_KEYS_JSON: JSON.stringify({
+        1: oldKey,
+        2: newKey,
+      }),
+      CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION: "2",
+    }).cloudWorkspaces;
+
+    expect(cloud?.settingsSecretEncryptionKeys).toEqual({
+      1: oldKey,
+      2: newKey,
+    });
+    expect(cloud?.currentSettingsSecretEncryptionKeyVersion).toBe(2);
   });
 
   it("rejects partial durability and missing rotation keys", () => {
