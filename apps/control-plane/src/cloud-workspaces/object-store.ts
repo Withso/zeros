@@ -25,6 +25,9 @@ export class WorkspaceBlobError extends Error {
     public readonly code:
       | "invalid_input"
       | "engine_authority_rejected"
+      | "object_storage_limit_not_configured"
+      | "organization_object_storage_limit_exceeded"
+      | "workspace_object_storage_limit_exceeded"
       | "object_unavailable"
       | "object_store_unavailable"
       | "object_integrity_failed",
@@ -464,6 +467,7 @@ export class DatabaseCloudWorkspaceBlobService {
   }
 
   private async putAuthorized(input: {
+    workspaceId: string;
     organizationId: string;
     bytes: Uint8Array;
     assertAuthority: (tx: Tx) => Promise<void>;
@@ -478,6 +482,7 @@ export class DatabaseCloudWorkspaceBlobService {
     reused: boolean;
   }> {
     if (
+      !UUID_PATTERN.test(input.workspaceId) ||
       !UUID_PATTERN.test(input.organizationId) ||
       input.bytes.byteLength > MAX_INLINE_BLOB_BYTES
     ) {
@@ -489,6 +494,16 @@ export class DatabaseCloudWorkspaceBlobService {
     const plaintextSha256 = createHash("sha256").update(input.bytes).digest();
     const reservation = await withSystemTx(this.pool, async (tx) => {
       await input.assertAuthority(tx);
+      // Acquire the Organization boundary before looking up or inserting the
+      // physical blob row. Besides making the cumulative sum deterministic,
+      // this keeps a just-inserted pending row from sitting outside admission
+      // while another unique upload evaluates the same limit.
+      await tx.query(
+        `SELECT pg_advisory_xact_lock(
+           hashtextextended('workspace-object-storage:' || $1::text, 0)
+         )`,
+        [input.organizationId],
+      );
       const load = () =>
         tx.query<{
           id: string;
@@ -502,10 +517,15 @@ export class DatabaseCloudWorkspaceBlobService {
                   encryption_key_version, state
            FROM workspace_blobs
            WHERE org_id = $1 AND plaintext_sha256 = $2
-           FOR UPDATE`,
+           -- Blob lifecycle and key-version changes need a write-strength row
+           -- lock, but neither changes this row's FK identity. NO KEY UPDATE
+           -- remains compatible with a reference INSERT's FK KEY SHARE while
+           -- still fencing GC and concurrent upload/key-version mutation.
+           FOR NO KEY UPDATE`,
           [input.organizationId, plaintextSha256],
         );
       let row = (await load()).rows[0];
+      let reservePhysical = false;
       if (!row) {
         const blobId = randomUUID();
         const objectKey =
@@ -538,6 +558,7 @@ export class DatabaseCloudWorkspaceBlobService {
                 state: "pending_upload",
               }
             : (await load()).rows[0];
+        reservePhysical = (inserted.rowCount ?? 0) === 1;
       }
       if (
         !row ||
@@ -565,6 +586,28 @@ export class DatabaseCloudWorkspaceBlobService {
         row.object_key = objectKey;
         row.encryption_key_version = this.keyVersion;
         row.nonce = nonce;
+      }
+      const admission = await tx.query<{ rejection_code: string | null }>(
+        `SELECT reserve_workspace_blob_storage(
+           $1, $2, $3, $4, 'uploading'
+         ) AS rejection_code`,
+        [input.workspaceId, input.organizationId, row.id, reservePhysical],
+      );
+      const rejection = admission.rows[0]?.rejection_code;
+      if (
+        rejection === "object_storage_limit_not_configured" ||
+        rejection === "organization_object_storage_limit_exceeded" ||
+        rejection === "workspace_object_storage_limit_exceeded"
+      ) {
+        throw new WorkspaceBlobError(
+          rejection,
+          rejection === "object_storage_limit_not_configured"
+            ? "Durable workspace object-storage limits are not configured"
+            : "Durable workspace object-storage limit was exceeded",
+        );
+      }
+      if (rejection) {
+        throw new Error("workspace object storage reservation is invalid");
       }
       await input.reserve?.(tx, {
         id: row.id,
@@ -703,6 +746,7 @@ export class DatabaseCloudWorkspaceBlobService {
     }
     try {
       return await this.putAuthorized({
+        workspaceId: input.workspaceId,
         organizationId: input.organizationId,
         bytes: input.bytes,
         assertAuthority: (tx) =>
@@ -796,6 +840,7 @@ export class DatabaseCloudWorkspaceBlobService {
       }
     };
     return this.putAuthorized({
+      workspaceId: input.workspaceId,
       organizationId: input.organizationId,
       bytes: input.bytes,
       assertAuthority,
@@ -806,6 +851,7 @@ export class DatabaseCloudWorkspaceBlobService {
   /** Coordinator-only object publication. Callers must bind the returned blob
    * to an immutable tenant/workspace reference in the same workflow. */
   async putCoordinator(input: {
+    workspaceId: string;
     organizationId: string;
     bytes: Uint8Array;
   }): Promise<{
@@ -1059,6 +1105,21 @@ export class DatabaseCloudWorkspaceBlobService {
     );
     if (!job) return false;
     try {
+      const rotationAdmission = await withSystemTx(
+        this.pool,
+        async (tx) =>
+          (
+            await tx.query<{ rejection_code: string | null }>(
+              `SELECT reserve_workspace_blob_rotation_storage(
+               $1, $2, $3
+             ) AS rejection_code`,
+              [job.blob_id, job.org_id, job.target_key_version],
+            )
+          ).rows[0]?.rejection_code ?? null,
+      );
+      if (rotationAdmission) {
+        throw new Error(`rotation_${rotationAdmission}`);
+      }
       if (job.previous_state !== "cleanup_pending") {
         const blob = await withSystemTx(this.pool, async (tx) =>
           (
@@ -1221,7 +1282,8 @@ export class DatabaseCloudWorkspaceBlobService {
         tx.query(
           `UPDATE workspace_blob_rotation_jobs
            SET state = 'succeeded', completed_at = now(),
-               lease_owner = NULL, lease_expires_at = NULL
+               lease_owner = NULL, lease_expires_at = NULL,
+               reserved_bytes = 0
            WHERE blob_id = $1 AND target_key_version = $2
              AND state IN ('processing', 'cleanup_pending')`,
           [job.blob_id, job.target_key_version],
@@ -1258,6 +1320,47 @@ export class DatabaseCloudWorkspaceBlobService {
    * operational signal, but the reference rows—not the cached count—win. */
   async reconcileReferenceCounts(): Promise<number> {
     return withSystemTx(this.pool, async (tx) => {
+      const reservations = await tx.query(
+        `DELETE FROM workspace_blob_storage_reservations reservation
+         WHERE (
+             reservation.state = 'uploading'
+             AND (
+               EXISTS (
+                 SELECT 1 FROM workspace_blobs blob
+                 WHERE blob.id = reservation.blob_id
+                   AND blob.org_id = reservation.org_id
+                   AND blob.state = 'deleted'
+               )
+               OR (
+                 reservation.expires_at <= now()
+                 AND EXISTS (
+                   SELECT 1
+                   FROM workspace_blobs blob
+                   JOIN workspace_blob_references physical_reference
+                     ON physical_reference.blob_id = blob.id
+                    AND physical_reference.org_id = blob.org_id
+                   WHERE blob.id = reservation.blob_id
+                     AND blob.org_id = reservation.org_id
+                     AND blob.state = 'available'
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM workspace_blob_references logical_reference
+                   WHERE logical_reference.workspace_id =
+                           reservation.workspace_id
+                     AND logical_reference.org_id = reservation.org_id
+                     AND logical_reference.blob_id = reservation.blob_id
+                 )
+               )
+             )
+           ) OR (
+             reservation.state = 'referenced'
+             AND NOT EXISTS (
+               SELECT 1 FROM workspace_blob_references reference
+               WHERE reference.workspace_id = reservation.workspace_id
+                 AND reference.blob_id = reservation.blob_id
+             )
+           )`,
+      );
       const result = await tx.query(
         `WITH actual AS (
            SELECT blob.id,
@@ -1272,7 +1375,7 @@ export class DatabaseCloudWorkspaceBlobService {
          WHERE blob.id = actual.id
            AND blob.reference_count <> actual.reference_count`,
       );
-      return result.rowCount ?? 0;
+      return (result.rowCount ?? 0) + (reservations.rowCount ?? 0);
     });
   }
 
@@ -1378,7 +1481,7 @@ export class DatabaseCloudWorkspaceBlobService {
           [input.blobId, input.organizationId],
         );
       } else {
-        await tx.query(
+        const deleted = await tx.query(
           `UPDATE workspace_blobs
            SET state = 'deleted', deleted_at = now(), reference_count = 0
            WHERE id = $1 AND org_id = $2 AND state = 'deleting'
@@ -1389,6 +1492,13 @@ export class DatabaseCloudWorkspaceBlobService {
              )`,
           [input.blobId, input.organizationId],
         );
+        if ((deleted.rowCount ?? 0) === 1) {
+          await tx.query(
+            `DELETE FROM workspace_blob_storage_reservations
+             WHERE blob_id = $1 AND org_id = $2 AND state = 'uploading'`,
+            [input.blobId, input.organizationId],
+          );
+        }
       }
     });
     return "deleted";
@@ -1405,10 +1515,18 @@ export class DatabaseCloudWorkspaceBlobService {
     const candidate = await withSystemTx(this.pool, async (tx) => {
       const pending = (
         await tx.query<{ id: string; org_id: string; object_key: string }>(
-          `SELECT id, org_id, object_key FROM workspace_blobs
-           WHERE state = 'pending_upload' AND reference_count = 0
-             AND created_at <= now() - ($1::bigint * interval '1 millisecond')
-           ORDER BY created_at, id
+          `SELECT blob.id, blob.org_id, blob.object_key FROM workspace_blobs blob
+           WHERE blob.state = 'pending_upload' AND blob.reference_count = 0
+             AND blob.created_at <=
+                 now() - ($1::bigint * interval '1 millisecond')
+             AND NOT EXISTS (
+               SELECT 1 FROM workspace_blob_storage_reservations reservation
+               WHERE reservation.blob_id = blob.id
+                 AND reservation.org_id = blob.org_id
+                 AND reservation.state = 'uploading'
+                 AND reservation.expires_at > now()
+             )
+           ORDER BY blob.created_at, blob.id
            FOR UPDATE SKIP LOCKED LIMIT 1`,
           [graceMs],
         )
@@ -1420,12 +1538,20 @@ export class DatabaseCloudWorkspaceBlobService {
         await tx.query<{ id: string; org_id: string; object_key: string }>(
           `UPDATE workspace_blobs SET state = 'deleting'
            WHERE id = (
-             SELECT id FROM workspace_blobs
-             WHERE state IN ('available', 'quarantined', 'deleting')
-               AND reference_count = 0 AND NOT legal_hold
-               AND (retention_until IS NULL OR retention_until <= now())
-               AND created_at <= now() - ($1::bigint * interval '1 millisecond')
-             ORDER BY created_at, id
+             SELECT blob.id FROM workspace_blobs blob
+             WHERE blob.state IN ('available', 'quarantined', 'deleting')
+               AND blob.reference_count = 0 AND NOT blob.legal_hold
+               AND (blob.retention_until IS NULL OR blob.retention_until <= now())
+               AND blob.created_at <=
+                   now() - ($1::bigint * interval '1 millisecond')
+               AND NOT EXISTS (
+                 SELECT 1 FROM workspace_blob_storage_reservations reservation
+                 WHERE reservation.blob_id = blob.id
+                   AND reservation.org_id = blob.org_id
+                   AND reservation.state = 'uploading'
+                   AND reservation.expires_at > now()
+               )
+             ORDER BY blob.created_at, blob.id
              FOR UPDATE SKIP LOCKED LIMIT 1
            )
            RETURNING id, org_id, object_key`,
@@ -1447,14 +1573,21 @@ export class DatabaseCloudWorkspaceBlobService {
           ),
         );
       } else {
-        await withSystemTx(this.pool, (tx) =>
-          tx.query(
+        await withSystemTx(this.pool, async (tx) => {
+          const deleted = await tx.query(
             `UPDATE workspace_blobs SET state = 'deleted', deleted_at = now()
              WHERE id = $1 AND org_id = $2 AND state = 'deleting'
                AND reference_count = 0 AND NOT legal_hold`,
             [candidate.id, candidate.org_id],
-          ),
-        );
+          );
+          if ((deleted.rowCount ?? 0) === 1) {
+            await tx.query(
+              `DELETE FROM workspace_blob_storage_reservations
+               WHERE blob_id = $1 AND org_id = $2 AND state = 'uploading'`,
+              [candidate.id, candidate.org_id],
+            );
+          }
+        });
       }
     } catch {
       if (!candidate.pending) {

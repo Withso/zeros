@@ -380,6 +380,15 @@ function durableErrorResponse(
   if (error.code === "object_store_unavailable") {
     return { status: 503, code: error.code };
   }
+  if (error.code === "object_storage_limit_not_configured") {
+    return { status: 503, code: error.code };
+  }
+  if (
+    error.code === "organization_object_storage_limit_exceeded" ||
+    error.code === "workspace_object_storage_limit_exceeded"
+  ) {
+    return { status: 409, code: error.code };
+  }
   if (error.code === "billing_authority_unavailable") {
     return { status: 409, code: error.code };
   }

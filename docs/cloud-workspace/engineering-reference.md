@@ -8,13 +8,13 @@
 | Provider image/lifecycle qualification                    | Harness and protected workflow implemented; live evidence open                     | `scripts/cloud-workspace-validation/`, `.github/workflows/zsr-cloud-qualification.yml`                |
 | WorkOS identity and membership projection                 | Implemented with Auth0 rollback compatibility                                      | control-plane auth migrations/services and web WorkOS session/event handlers                          |
 | Organization Pro/Business/Enterprise paid authority       | Implemented and database-tested                                                    | migration `0026`, `authorization.ts`, `paid-authority.ts`                                             |
-| Reviewed Organization quota provisioning                  | Implemented and database-tested                                                    | migration `0054`, `manage-cloud-workspace-quota.ts`                                                   |
-| Repository/settings/environment/secret/provider model     | Implemented and database-tested                                                    | migrations `0026`–`0027`, `0041`–`0047`                                                               |
+| Reviewed compute and durable-storage provisioning         | Implemented and database-tested                                                    | migrations `0054`–`0055`, owner management commands                                                   |
+| Repository/settings/environment/secret/provider model     | Implemented and database-tested                                                    | migrations `0026`–`0027`, `0041`–`0047`, `0056`                                                       |
 | Lifecycle, setup worker, admission, and engine lease      | Implemented behind disabled setup-worker gate; live qualification open             | migrations `0020`–`0025`, setup and engine services                                                   |
 | Generation replacement and provider reconciliation        | Implemented and database-tested; live rollback/delete evidence open                | `generation-transitions.ts`, `reconciler.ts`, `daytona-provider.ts`                                   |
 | SSH, authenticated preview, and localhost forward         | Control plane and native desktop boundary implemented; UI/macOS qualification open | `access.ts`, `runtime-access.ts`, Electron access/SSH services                                        |
 | Ordered durable record and content/checkpoints            | Implemented and database-tested                                                    | migrations `0028`–`0031`, durable/content/recovery services                                           |
-| Encrypted object storage, retention, export, deletion     | Implemented; production restore/DR drills open                                     | `object-store.ts`, `object-maintenance.ts`, migration `0037`                                          |
+| Encrypted object storage, admission, rotation, deletion   | Implemented; production restore/DR drills open                                     | `object-store.ts`, `object-maintenance.ts`, migrations `0037`, `0055`, `0057`, `0058`                 |
 | Local→cloud and cloud→local immutable forks               | Implemented with fresh destination UUIDs                                           | `forks.ts`, desktop cloud-workspace-fork services, migrations `0032`, `0038`, `0048`, `0051`          |
 | Per-user/per-device receive-only replicas                 | Implemented owner-only for Phase 5                                                 | `replicas.ts`, desktop cloud-replica services, migrations `0033`–`0035`, `0049`–`0052`                |
 | Remote-authoritative Design routing                       | Implemented through the normal exact runtime bridge; product UI E2E open           | runtime connection registry and existing Design protocol/service                                      |
@@ -65,8 +65,8 @@ The configured image, architecture, source commit, CPU, memory, and storage are
 recorded per generation and passed through the provider boundary. Public API
 documents use the stable Zeros workspace id and never expose provider resource
 ids. Creation also requires the appropriate Organization entitlement/seat
-policy and an available workspace quota. Personal workspaces remain
-device-local.
+policy plus available compute and durable object-storage limits. Personal
+workspaces remain device-local.
 
 Provider observations are accepted only when their immutable workspace and
 generation labels match the requested identity. Lifecycle results and failures

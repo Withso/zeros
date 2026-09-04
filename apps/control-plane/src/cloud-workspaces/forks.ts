@@ -1307,6 +1307,7 @@ export class DatabaseCloudWorkspaceForkService {
     >;
     try {
       manifest = await this.blobs.putCoordinator({
+        workspaceId: input.workspaceId,
         organizationId: input.organizationId,
         bytes: Buffer.from(canonicalJson(checkpointManifest), "utf8"),
       });
@@ -2663,6 +2664,7 @@ export class CloudWorkspaceForkWorker {
     };
     try {
       const manifest = await this.blobs.putCoordinator({
+        workspaceId: row.source_cloud_workspace_id,
         organizationId: row.org_id,
         bytes: Buffer.from(canonicalJson(descriptor), "utf8"),
       });

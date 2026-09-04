@@ -15,8 +15,10 @@ import {
   DaytonaProviderConnectionQualifier,
 } from "./provider-qualification.js";
 import {
+  cloudWorkspaceSecretValueVerifier,
   filterCloudWorkspaceSettingsByAllowedPaths,
   normalizeCloudWorkspaceSettingsDocument,
+  openCloudWorkspaceSecretBinding,
   sealCloudWorkspaceSecretBinding,
   type CloudWorkspaceSettingsDocument,
 } from "./settings.js";
@@ -71,6 +73,86 @@ function credentialKey(config: CloudWorkspaceBackendConfig): {
     );
   }
   return { version, key };
+}
+
+function currentSecretKey(config: CloudWorkspaceBackendConfig): {
+  version: number;
+  key: string;
+} {
+  const keys =
+    config.settingsSecretEncryptionKeys ??
+    (config.settingsSecretKeyV1 ? { 1: config.settingsSecretKeyV1 } : {});
+  const version =
+    config.currentSettingsSecretEncryptionKeyVersion ??
+    (config.settingsSecretKeyV1 ? 1 : null);
+  const key = version === null ? undefined : keys[version];
+  if (!version || !key) {
+    throw new HttpError(
+      503,
+      "cloud_secret_material_not_configured",
+      "Cloud workspace secret material is not configured",
+    );
+  }
+  return { version, key };
+}
+
+type StoredSecretValue = {
+  key_version: number;
+  nonce: Buffer;
+  ciphertext: Buffer;
+  auth_tag: Buffer;
+  verifier_scheme: number;
+  value_verifier: Buffer | null;
+};
+
+function storedSecretMatches(
+  value: string,
+  row: StoredSecretValue,
+  binding: {
+    bindingId: string;
+    organizationId: string;
+    version: number;
+    name: string;
+  },
+  config: CloudWorkspaceBackendConfig,
+): boolean {
+  const keys =
+    config.settingsSecretEncryptionKeys ??
+    (config.settingsSecretKeyV1 ? { 1: config.settingsSecretKeyV1 } : {});
+  const key = keys[row.key_version];
+  if (!key) {
+    throw new HttpError(
+      503,
+      "cloud_secret_key_version_unavailable",
+      "A persisted cloud secret key version is unavailable",
+    );
+  }
+  if (row.verifier_scheme === 1 && row.value_verifier) {
+    return same(
+      row.value_verifier,
+      cloudWorkspaceSecretValueVerifier(value, binding, key),
+    );
+  }
+  const plaintext = openCloudWorkspaceSecretBinding(
+    {
+      keyVersion: row.key_version,
+      nonce: row.nonce,
+      ciphertext: row.ciphertext,
+      authTag: row.auth_tag,
+      verifierScheme: row.verifier_scheme,
+      valueVerifier: row.value_verifier,
+    },
+    binding,
+    keys,
+  );
+  const expected = Buffer.from(value, "utf8");
+  const actual = Buffer.from(plaintext, "utf8");
+  try {
+    return same(actual, expected);
+  } finally {
+    actual.fill(0);
+    expected.fill(0);
+  }
 }
 
 type OrganizationAuthority = {
@@ -1478,20 +1560,13 @@ export class DatabaseCloudWorkspaceManagementService {
     placement: "cloud" | "both";
     value: string;
   }): Promise<{ binding: unknown; replayed: boolean }> {
-    const valueSha256 = createHash("sha256").update(input.value, "utf8").digest();
     return withSystemTx(this.pool, async (tx) => {
       const authority = await organizationAuthority(tx, {
         ...input,
         workosEnabled: this.options.workosEnabled,
         paid: false,
       });
-      if (!this.config.settingsSecretKeyV1) {
-        throw new HttpError(
-          503,
-          "cloud_secret_material_not_configured",
-          "Cloud workspace secret material is not configured",
-        );
-      }
+      const secretKey = currentSecretKey(this.config);
       const ownerKind = authority.isPersonal ? "user" : "organization";
       const ownerUserId = authority.isPersonal ? input.actorUserId : null;
       const existing = (
@@ -1504,11 +1579,18 @@ export class DatabaseCloudWorkspaceManagementService {
           placement: string;
           current_version: string | number;
           state: string;
-          value_sha256: Buffer;
+          key_version: number;
+          nonce: Buffer;
+          ciphertext: Buffer;
+          auth_tag: Buffer;
+          verifier_scheme: number;
+          value_verifier: Buffer | null;
         }>(
           `SELECT binding.org_id, binding.owner_kind, binding.owner_user_id,
                   binding.name, binding.purpose, binding.placement,
-                  binding.current_version, binding.state, version.value_sha256
+                  binding.current_version, binding.state, version.key_version,
+                  version.nonce, version.ciphertext, version.auth_tag,
+                  version.verifier_scheme, version.value_verifier
            FROM secret_bindings binding
            JOIN secret_binding_versions version
              ON version.binding_id = binding.id
@@ -1527,7 +1609,17 @@ export class DatabaseCloudWorkspaceManagementService {
           existing.purpose === input.purpose &&
           existing.placement === input.placement &&
           existing.state === "active" &&
-          same(existing.value_sha256, valueSha256);
+          storedSecretMatches(
+            input.value,
+            existing,
+            {
+              bindingId: input.id,
+              organizationId: input.organizationId,
+              version: safeVersion(existing.current_version, "secret binding"),
+              name: input.name,
+            },
+            this.config,
+          );
         if (!exact) {
           throw new HttpError(409, "cloud_secret_identity_conflict", "Secret binding identity is already in use");
         }
@@ -1553,7 +1645,7 @@ export class DatabaseCloudWorkspaceManagementService {
             version: 1,
             name: input.name,
           },
-          this.config.settingsSecretKeyV1,
+          secretKey.key,
         );
       } catch {
         throw new HttpError(422, "cloud_secret_invalid", "Secret binding input is invalid");
@@ -1576,15 +1668,16 @@ export class DatabaseCloudWorkspaceManagementService {
       await tx.query(
         `INSERT INTO secret_binding_versions (
            binding_id, org_id, version, key_version, nonce, ciphertext,
-           auth_tag, value_sha256, created_by
-         ) VALUES ($1, $2, 1, 1, $3, $4, $5, $6, $7)`,
+           auth_tag, verifier_scheme, value_verifier, created_by
+         ) VALUES ($1, $2, 1, $3, $4, $5, $6, 1, $7, $8)`,
         [
           input.id,
           input.organizationId,
+          secretKey.version,
           sealed.nonce,
           sealed.ciphertext,
           sealed.authTag,
-          sealed.valueSha256,
+          sealed.valueVerifier,
           input.actorUserId,
         ],
       );
@@ -1629,20 +1722,13 @@ export class DatabaseCloudWorkspaceManagementService {
     replayed: boolean;
     generationsUsingPreviousVersion: number;
   }> {
-    const valueSha256 = createHash("sha256").update(input.value, "utf8").digest();
     return withSystemTx(this.pool, async (tx) => {
       const authority = await organizationAuthority(tx, {
         ...input,
         workosEnabled: this.options.workosEnabled,
         paid: false,
       });
-      if (!this.config.settingsSecretKeyV1) {
-        throw new HttpError(
-          503,
-          "cloud_secret_material_not_configured",
-          "Cloud workspace secret material is not configured",
-        );
-      }
+      const secretKey = currentSecretKey(this.config);
       const ownerKind = authority.isPersonal ? "user" : "organization";
       const ownerUserId = authority.isPersonal ? input.actorUserId : null;
       const row = (
@@ -1652,10 +1738,17 @@ export class DatabaseCloudWorkspaceManagementService {
           placement: string;
           current_version: string | number;
           state: string;
-          value_sha256: Buffer;
+          key_version: number;
+          nonce: Buffer;
+          ciphertext: Buffer;
+          auth_tag: Buffer;
+          verifier_scheme: number;
+          value_verifier: Buffer | null;
         }>(
           `SELECT binding.name, binding.purpose, binding.placement,
-                  binding.current_version, binding.state, version.value_sha256
+                  binding.current_version, binding.state, version.key_version,
+                  version.nonce, version.ciphertext, version.auth_tag,
+                  version.verifier_scheme, version.value_verifier
            FROM secret_bindings binding
            JOIN secret_binding_versions version
              ON version.binding_id = binding.id
@@ -1688,7 +1781,20 @@ export class DatabaseCloudWorkspaceManagementService {
           )
         ).rows[0]?.count ?? 0,
       );
-      if (same(row.value_sha256, valueSha256)) {
+      if (
+        row.key_version === secretKey.version &&
+        storedSecretMatches(
+          input.value,
+          row,
+          {
+            bindingId: input.id,
+            organizationId: input.organizationId,
+            version: currentVersion,
+            name: row.name,
+          },
+          this.config,
+        )
+      ) {
         return {
           binding: {
             id: input.id,
@@ -1721,7 +1827,7 @@ export class DatabaseCloudWorkspaceManagementService {
             version,
             name: row.name,
           },
-          this.config.settingsSecretKeyV1,
+          secretKey.key,
         );
       } catch {
         throw new HttpError(422, "cloud_secret_invalid", "Secret binding input is invalid");
@@ -1729,16 +1835,17 @@ export class DatabaseCloudWorkspaceManagementService {
       await tx.query(
         `INSERT INTO secret_binding_versions (
            binding_id, org_id, version, key_version, nonce, ciphertext,
-           auth_tag, value_sha256, created_by
-         ) VALUES ($1, $2, $3, 1, $4, $5, $6, $7, $8)`,
+           auth_tag, verifier_scheme, value_verifier, created_by
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $9)`,
         [
           input.id,
           input.organizationId,
           version,
+          secretKey.version,
           sealed.nonce,
           sealed.ciphertext,
           sealed.authTag,
-          sealed.valueSha256,
+          sealed.valueVerifier,
           input.actorUserId,
         ],
       );

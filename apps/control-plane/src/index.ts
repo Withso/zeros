@@ -324,7 +324,12 @@ if (config.cloudWorkspaces) {
       engineProtocolVersion: setup.engineProtocolVersion,
       enginePort: setup.enginePort,
       engineRegistrationTtlSeconds: setup.timeoutSeconds + 60,
-      setupSecretKeyV1: setup.setupSecretKeyV1,
+      setupSecretEncryptionKeys: setup.setupSecretEncryptionKeys,
+      currentSetupSecretEncryptionKeyVersion:
+        setup.currentSetupSecretEncryptionKeyVersion,
+      ...(setup.setupSecretKeyV1
+        ? { setupSecretKeyV1: setup.setupSecretKeyV1 }
+        : {}),
       github,
       accountIdentityProvider: config.auth.provider,
       accountAuth:

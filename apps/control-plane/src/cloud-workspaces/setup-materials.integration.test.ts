@@ -17,6 +17,7 @@ import { retireCloudWorkspaceRuntimeAccess } from "./runtime-access.js";
 import { DatabaseCloudWorkspaceSetupAdmissionBroker } from "./setup-admission-broker.js";
 import {
   DatabaseCloudWorkspaceSetupMaterialService,
+  openCloudWorkspaceSetupSecret,
   sealCloudWorkspaceSetupSecret,
   type CloudWorkspaceRepositoryCredentialBroker,
 } from "./setup-materials.js";
@@ -84,6 +85,36 @@ describe("cloud workspace setup material configuration", () => {
     expect(() =>
       construct("https://identity.example.test/.well-known/jwks.json#leak"),
     ).toThrow(/account authority/i);
+  });
+
+  it("opens setup material with its persisted key version", () => {
+    const nextKey = randomBytes(32).toString("base64url");
+    const binding = {
+      id: "11111111-1111-4111-8111-111111111111",
+      workspaceId: "22222222-2222-4222-8222-222222222222",
+      organizationId: "33333333-3333-4333-8333-333333333333",
+      generation: 2,
+      name: "DATABASE_URL",
+    };
+    const sealed = sealCloudWorkspaceSetupSecret(
+      "rotated-secret",
+      binding,
+      nextKey,
+    );
+    expect(
+      openCloudWorkspaceSetupSecret(
+        {
+          id: binding.id,
+          name: binding.name,
+          key_version: 2,
+          nonce: sealed.nonce,
+          ciphertext: sealed.ciphertext,
+          auth_tag: sealed.authTag,
+        },
+        binding,
+        { 1: SECRET_KEY, 2: nextKey },
+      ),
+    ).toBe("rotated-secret");
   });
 });
 

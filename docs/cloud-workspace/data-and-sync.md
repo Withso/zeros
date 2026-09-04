@@ -184,6 +184,8 @@ value into an Organization document.
 - Store secret values only in an approved OS or server-side secret store.
 - Persist opaque `secret_binding_id` references with scope, purpose, owner, and
   rotation metadata; never persist a secret in a settings snapshot or event.
+  Persisted equality verifiers are domain-separated HMACs tied to the binding
+  identity and encryption-key version, never raw value hashes.
 - Organization MCP definitions may share names, commands/URLs, capabilities,
   and policy. Authentication headers, OAuth tokens, and environment values use
   separate bindings.
@@ -223,6 +225,43 @@ Git and file synchronization are different layers:
   commit.
 - Git index/worktree mutations are serialized through the authoritative engine
   with a workspace-scoped lease.
+
+## Durable object-storage admission
+
+The 64 MiB per-object ceiling is not a cumulative capacity control. Before
+publishing any object, the coordinator therefore reserves durable bytes in the
+same PostgreSQL transaction that establishes the tenant blob identity. One
+Organization-scoped advisory boundary serializes uploads, reference accounting,
+copy-on-write key rotation, and owner limit changes.
+
+Two independent counters apply:
+
+- the Organization counter measures physical tenant-deduplicated blobs in
+  `pending_upload`, `available`, `quarantined`, or `deleting` state, plus bytes
+  reserved for a second ciphertext during key rotation; and
+- the workspace counter measures logical unique `(workspace_id, blob_id)`
+  reservations, regardless of whether another workspace reuses the same
+  tenant blob.
+
+A retry or duplicate upload of the same tenant/workspace/hash refreshes the
+existing reservation instead of charging again. A successful immutable
+reference promotes the upload reservation to a non-expiring referenced row;
+the last reference deletion releases it. Interrupted uploads receive a
+24-hour recovery lease that a retry refreshes. If another workspace still has
+an immutable reference to an available deduplicated blob, maintenance can
+expire only the abandoned workspace's logical reservation; the shared physical
+blob remains charged to the Organization. A unique abandoned blob keeps both
+its logical reservation and Organization physical charge until physical
+collection succeeds. Maintenance also repairs stale reference reservations,
+reconciles reference counts, and applies the existing
+age/retention/legal-hold garbage-collection rules.
+
+Key rotation reserves one additional physical object before writing the target
+ciphertext. A failed or crashed attempt keeps that reservation for a safe retry;
+success deletes the source and releases the duplicate-byte allowance. Missing
+Organization limits fail closed, and limits are never inferred from sandbox
+disk allocation or the object-store provider's volume size. The per-workspace
+logical ceiling cannot exceed the Organization physical ceiling.
 
 ## Phase-5 local replica contract
 
@@ -398,7 +437,7 @@ own local engine/Design API and does not share the cloud workspace identity.
 ## Durable data model
 
 The main implemented relations are below. Exact SQL names in migrations
-`0026`–`0053` are compatibility contracts.
+`0026`–`0057` are compatibility contracts.
 
 | Relation                                                          | Purpose and important constraints                                                                                                                                            |
 | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -422,6 +461,9 @@ The main implemented relations are below. Exact SQL names in migrations
 | `workspace_file_events`                                           | Idempotent ordered changes used for catch-up; payload refers to encrypted object blobs                                                                                       |
 | `workspace_checkpoints`                                           | Git base/ref plus encrypted manifest/artifact reference, reason, author, integrity state, and retention                                                                      |
 | `workspace_blobs`                                                 | Tenant-scoped content-addressed encrypted objects with reference accounting and deletion state                                                                               |
+| `cloud_workspace_object_storage_limits`                           | Owner-managed Organization physical-byte and per-workspace logical-byte admission limits, separate from provider disk quota                                                  |
+| `cloud_workspace_object_storage_limit_changes`                    | Immutable database-owner evidence for target-bound durable-storage limit changes                                                                                             |
+| `workspace_blob_storage_reservations`                             | Deduplicated workspace/blob upload or referenced-byte ledger used for cumulative admission and crash recovery                                                                |
 | `workspace_fork_intents`                                          | Idempotent local→cloud/cloud→local copy identity, source/target UUIDs, selection flags, deadline, snapshot/checkpoint provenance, and outcome                                |
 | `workspace_fork_import_entries` / `workspace_fork_import_records` | Bounded immutable staging for file overlays and optional portable chat records; blob reservations use `workspace_blob_references`                                            |
 | `workspace_ports`                                                 | Engine-observed sandbox listeners and health, never an unauthenticated public endpoint                                                                                       |

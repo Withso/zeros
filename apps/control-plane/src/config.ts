@@ -170,6 +170,9 @@ export type CloudWorkspaceBackendConfig = {
   /** Coordinator-only envelope key for versioned environment secret bindings.
    * It is independent from setup execution so settings can be prepared while
    * the unqualified image worker remains disabled. */
+  settingsSecretEncryptionKeys: Readonly<Record<number, string>>;
+  currentSettingsSecretEncryptionKeyVersion: number | null;
+  /** Legacy V1 alias retained while deployments move to the keyring vars. */
   settingsSecretKeyV1: string | null;
   access: {
     allowedSshHosts: readonly string[];
@@ -198,7 +201,9 @@ export type CloudWorkspaceBackendConfig = {
   setupExecution: {
     controlPlaneOrigin: string;
     allowedToolboxOrigins: readonly string[];
-    setupSecretKeyV1: string;
+    setupSecretEncryptionKeys: Readonly<Record<number, string>>;
+    currentSetupSecretEncryptionKeyVersion: number;
+    setupSecretKeyV1: string | null;
     engineProtocolVersion: number;
     enginePort: number;
     intervalMs: number;
@@ -329,6 +334,18 @@ const CloudWorkspaceEnvSchema = z.object({
     .max(256)
     .optional(),
   CLOUD_WORKSPACE_SECRET_KEY_V1: z.string().trim().min(1).max(256).optional(),
+  CLOUD_WORKSPACE_SECRET_KEYS_JSON: z
+    .string()
+    .trim()
+    .min(2)
+    .max(16_384)
+    .optional(),
+  CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(65_535)
+    .optional(),
 });
 
 const CloudWorkspaceSetupEnvSchema = z.object({
@@ -339,7 +356,7 @@ const CloudWorkspaceSetupEnvSchema = z.object({
     .trim()
     .min(1)
     .max(8 * 4_096),
-  CLOUD_WORKSPACE_SECRET_KEY_V1: z.string().trim().min(1).max(256),
+  CLOUD_WORKSPACE_SECRET_KEY_V1: z.string().trim().min(1).max(256).optional(),
   CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: z.coerce
     .number()
     .int()
@@ -981,25 +998,102 @@ function loadCloudWorkspaceConfig(
       key.fill(0);
     }
   }
-  let settingsSecretKeyV1: string | null = null;
-  if (value.CLOUD_WORKSPACE_SECRET_KEY_V1) {
-    const key = Buffer.from(value.CLOUD_WORKSPACE_SECRET_KEY_V1, "base64url");
+  const settingsSecretEncryptionKeys: Record<number, string> = {};
+  const addSecretKey = (version: number, encoded: unknown, name: string) => {
+    if (
+      !Number.isSafeInteger(version) ||
+      version < 1 ||
+      version > 65_535 ||
+      typeof encoded !== "string" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(encoded)
+    ) {
+      throw new Error(
+        `Invalid cloud workspace environment: ${name} must be canonical base64url for exactly 32 bytes`,
+      );
+    }
+    const key = Buffer.from(encoded, "base64url");
     try {
-      if (
-        key.length !== 32 ||
-        key.toString("base64url") !== value.CLOUD_WORKSPACE_SECRET_KEY_V1
-      ) {
+      if (key.length !== 32 || key.toString("base64url") !== encoded) {
         throw new Error("invalid key");
       }
-      settingsSecretKeyV1 = value.CLOUD_WORKSPACE_SECRET_KEY_V1;
     } catch {
       throw new Error(
-        "Invalid cloud workspace environment: CLOUD_WORKSPACE_SECRET_KEY_V1 must be canonical base64url for exactly 32 bytes",
+        `Invalid cloud workspace environment: ${name} must be canonical base64url for exactly 32 bytes`,
       );
     } finally {
       key.fill(0);
     }
+    const current = settingsSecretEncryptionKeys[version];
+    if (current && current !== encoded) {
+      throw new Error(
+        `Invalid cloud workspace environment: conflicting secret key version ${version}`,
+      );
+    }
+    settingsSecretEncryptionKeys[version] = encoded;
+  };
+  if (value.CLOUD_WORKSPACE_SECRET_KEYS_JSON) {
+    let document: unknown;
+    try {
+      document = JSON.parse(value.CLOUD_WORKSPACE_SECRET_KEYS_JSON);
+    } catch {
+      throw new Error(
+        "Invalid cloud workspace environment: CLOUD_WORKSPACE_SECRET_KEYS_JSON must be a JSON object",
+      );
+    }
+    if (
+      !document ||
+      typeof document !== "object" ||
+      Array.isArray(document) ||
+      Object.keys(document).length < 1 ||
+      Object.keys(document).length > 32
+    ) {
+      throw new Error(
+        "Invalid cloud workspace environment: CLOUD_WORKSPACE_SECRET_KEYS_JSON must contain 1-32 key versions",
+      );
+    }
+    for (const [rawVersion, encoded] of Object.entries(document)) {
+      if (!/^[1-9][0-9]{0,4}$/.test(rawVersion)) {
+        throw new Error(
+          "Invalid cloud workspace environment: secret key versions must be integers from 1 through 65535",
+        );
+      }
+      addSecretKey(
+        Number(rawVersion),
+        encoded,
+        `CLOUD_WORKSPACE_SECRET_KEYS_JSON.${rawVersion}`,
+      );
+    }
   }
+  if (value.CLOUD_WORKSPACE_SECRET_KEY_V1) {
+    addSecretKey(
+      1,
+      value.CLOUD_WORKSPACE_SECRET_KEY_V1,
+      "CLOUD_WORKSPACE_SECRET_KEY_V1",
+    );
+  }
+  const secretKeyVersions = Object.keys(settingsSecretEncryptionKeys).map(
+    Number,
+  );
+  const currentSettingsSecretEncryptionKeyVersion =
+    value.CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION ??
+    (secretKeyVersions.length === 1 && secretKeyVersions[0] === 1 ? 1 : null);
+  if (
+    currentSettingsSecretEncryptionKeyVersion !== null &&
+    !settingsSecretEncryptionKeys[currentSettingsSecretEncryptionKeyVersion]
+  ) {
+    throw new Error(
+      "Invalid cloud workspace environment: the current secret key version is not present in the keyring",
+    );
+  }
+  if (
+    secretKeyVersions.length > 0 &&
+    currentSettingsSecretEncryptionKeyVersion === null
+  ) {
+    throw new Error(
+      "Invalid cloud workspace environment: CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION is required for a multi-version secret keyring",
+    );
+  }
+  const settingsSecretKeyV1 = settingsSecretEncryptionKeys[1] ?? null;
   const durabilityRequested =
     setupEnabled === "true" ||
     [
@@ -1156,14 +1250,17 @@ function loadCloudWorkspaceConfig(
         "Invalid cloud workspace setup environment: toolbox origins or engine port are invalid",
       );
     }
-    if (settingsSecretKeyV1 === null) {
+    if (currentSettingsSecretEncryptionKeyVersion === null) {
       throw new Error(
-        "Invalid cloud workspace setup environment: CLOUD_WORKSPACE_SECRET_KEY_V1 is required",
+        "Invalid cloud workspace setup environment: a current cloud workspace secret key is required",
       );
     }
     setupExecution = {
       controlPlaneOrigin,
       allowedToolboxOrigins,
+      setupSecretEncryptionKeys: settingsSecretEncryptionKeys,
+      currentSetupSecretEncryptionKeyVersion:
+        currentSettingsSecretEncryptionKeyVersion,
       setupSecretKeyV1: settingsSecretKeyV1,
       engineProtocolVersion: setup.data.CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
       enginePort: setup.data.CLOUD_WORKSPACE_ENGINE_PORT,
@@ -1228,6 +1325,8 @@ function loadCloudWorkspaceConfig(
     autoArchiveMinutes: value.CLOUD_WORKSPACE_AUTO_ARCHIVE_MINUTES,
     reconcileIntervalMs: value.CLOUD_WORKSPACE_RECONCILE_INTERVAL_MS,
     providerCredentialKeys,
+    settingsSecretEncryptionKeys,
+    currentSettingsSecretEncryptionKeyVersion,
     settingsSecretKeyV1,
     access: {
       allowedSshHosts,

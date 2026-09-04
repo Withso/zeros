@@ -2126,10 +2126,18 @@ export function createCloudWorkspaceRoutes(
         generation: 1,
         actorUserId: user.id,
         isPersonal: authorization.isPersonal,
-        setupSecretKeyV1:
-          options.setupSecretKeyV1 ??
-          config.settingsSecretKeyV1 ??
-          null,
+        secretEncryptionKeys:
+          options.setupSecretKeyV1 !== undefined
+            ? options.setupSecretKeyV1
+              ? { 1: options.setupSecretKeyV1 }
+              : {}
+            : config.settingsSecretEncryptionKeys,
+        currentSecretEncryptionKeyVersion:
+          options.setupSecretKeyV1 !== undefined
+            ? options.setupSecretKeyV1
+              ? 1
+              : null
+            : config.currentSettingsSecretEncryptionKeyVersion,
       });
       const settings = await persistDatabaseCloudWorkspaceSettings(tx, {
         workspaceId,
@@ -2573,10 +2581,18 @@ export function createCloudWorkspaceRoutes(
               organizationId: orgId,
               sourceGeneration: templateGeneration,
               targetGeneration: candidateGeneration,
-              setupSecretKeyV1:
-                options.setupSecretKeyV1 ??
-                config.settingsSecretKeyV1 ??
-                null,
+              secretEncryptionKeys:
+                options.setupSecretKeyV1 !== undefined
+                  ? options.setupSecretKeyV1
+                    ? { 1: options.setupSecretKeyV1 }
+                    : {}
+                  : config.settingsSecretEncryptionKeys,
+              currentSecretEncryptionKeyVersion:
+                options.setupSecretKeyV1 !== undefined
+                  ? options.setupSecretKeyV1
+                    ? 1
+                    : null
+                  : config.currentSettingsSecretEncryptionKeyVersion,
             })
           : await resolveDatabaseCloudWorkspaceSettings(tx, {
               organizationId: orgId,
@@ -2585,10 +2601,18 @@ export function createCloudWorkspaceRoutes(
               generation: candidateGeneration,
               actorUserId: user.id,
               isPersonal: authorization.isPersonal,
-              setupSecretKeyV1:
-                options.setupSecretKeyV1 ??
-                config.settingsSecretKeyV1 ??
-                null,
+              secretEncryptionKeys:
+                options.setupSecretKeyV1 !== undefined
+                  ? options.setupSecretKeyV1
+                    ? { 1: options.setupSecretKeyV1 }
+                    : {}
+                  : config.settingsSecretEncryptionKeys,
+              currentSecretEncryptionKeyVersion:
+                options.setupSecretKeyV1 !== undefined
+                  ? options.setupSecretKeyV1
+                    ? 1
+                    : null
+                  : config.currentSettingsSecretEncryptionKeyVersion,
             });
       const settings = await persistDatabaseCloudWorkspaceSettings(tx, {
         workspaceId,

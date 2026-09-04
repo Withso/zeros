@@ -400,7 +400,8 @@ Cloud workspace lifecycle is a disabled-by-default, pre-production surface.
 Setting a provider key does not enable it: `CLOUD_WORKSPACES_ENABLED=true`, a
 complete exact-pinned cloud block, and a valid GitHub App RSA private key are
 all required at boot. Each approved Organization additionally needs a quota row
-created under system authority; there is deliberately no permissive default.
+and a durable object-storage limit row created through their respective owner
+commands; neither has a permissive default.
 
 The authenticated Organization surface is:
 
@@ -478,6 +479,71 @@ revalidates every fact, rejects a stale plan or a quota below current usage,
 and appends an immutable `cloud_workspace_quota_changes` record in the same
 transaction. Creating a quota does not enable cloud routes or setup execution;
 the two feature gates remain separate release decisions.
+
+### Durable object-storage limit provisioning
+
+`cloud_workspace_object_storage_limits` bounds the coordinator-owned encrypted
+object volume. It is deliberately separate from both
+`cloud_workspace_quotas.max_storage_mib` (sandbox disks) and the storage
+provider's physical volume quota. A missing row rejects new object publication;
+there is no default derived from either provider setting.
+
+The Organization limit counts tenant-deduplicated physical blobs in upload,
+available, quarantine, and deletion states, plus copy-on-write key-rotation
+headroom. The workspace limit counts each unique blob reserved by that
+workspace. Retrying one hash does not charge it twice, while two workspaces that
+share one tenant blob each consume their own logical workspace allowance.
+
+Use the database-owner command from a controlled shell. Set `DATABASE_URL` and:
+
+- `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_CHANNEL` — the exact deployment channel,
+  matching `RAILWAY_ENVIRONMENT_NAME` when present;
+- `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_ORGANIZATION_ID` and
+  `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_EXPECTED_ORGANIZATION_SLUG` — the same
+  active, non-Personal, cloud-enabled Organization;
+- `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_ACTOR_USER_ID` — an active
+  `platform_owner` UUID;
+- `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_MAX_ORGANIZATION_BYTES` and
+  `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_MAX_WORKSPACE_BYTES` — positive exact
+  byte counts, not MiB values; the workspace ceiling must not exceed the
+  Organization ceiling; and
+- `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_REASON` — a 16–512 character audit
+  reason.
+
+Generate a target-bound read-only plan, copy its approval value into
+`CONTROL_PLANE_CLOUD_OBJECT_STORAGE_APPROVAL`, then execute the same request:
+
+```sh
+pnpm --dir apps/control-plane cloud-object-storage:manage
+pnpm --dir apps/control-plane cloud-object-storage:manage --execute
+```
+
+Production execution additionally requires
+`CONTROL_PLANE_CLOUD_OBJECT_STORAGE_PRODUCTION_CONFIRMED=true`. Execution locks
+and revalidates the current target, refuses limits below physical or logical
+usage, and appends immutable owner evidence to
+`cloud_workspace_object_storage_limit_changes`. Migration `0055` intentionally
+does not invent rows for existing Organizations: provision reviewed limits
+before re-enabling object-writing clients or the rotation worker. Size the
+provider volume above the aggregate application limits for filesystem metadata,
+temporary publication files, backups, and operational response headroom.
+
+### Secret keyring rotation
+
+`CLOUD_WORKSPACE_SECRET_KEY_V1` remains a compatible single-key deployment.
+For rotation, set `CLOUD_WORKSPACE_SECRET_KEYS_JSON` to every version still
+needed for decryption and set `CLOUD_WORKSPACE_SECRET_CURRENT_KEY_VERSION` to
+the version used for new secret-binding versions and setup material. The
+binding verifier is a contextual HMAC derived from that version's envelope key;
+the database no longer stores a raw value digest that could act as an offline
+dictionary oracle. Migrated bindings have no verifier and are compared only
+after authenticated decryption.
+
+Deploy old and new keys together first, select the new current version, rotate
+bindings, and replace generations so newly emitted setup material uses it.
+Retire an old key only after no retained binding or setup-material row—and no
+backup that must remain restorable—depends on that version. The secret keyring
+and `CLOUD_WORKSPACE_OBJECT_KEYS_JSON` are independent cryptographic domains.
 
 Provider creation queues a setup run and leaves the workspace in `setting_up`
 while `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`. The setup worker,

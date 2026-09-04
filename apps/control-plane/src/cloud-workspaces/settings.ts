@@ -2,6 +2,7 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  createHmac,
   randomBytes,
   randomUUID,
   timingSafeEqual,
@@ -61,7 +62,7 @@ export type NormalizedCloudWorkspaceSettingsDocument = {
 export type CloudWorkspaceSetupSecretMaterial = {
   id: string;
   name: string;
-  keyVersion: 1;
+  keyVersion: number;
   nonce: Buffer;
   ciphertext: Buffer;
   authTag: Buffer;
@@ -518,7 +519,7 @@ export function sealCloudWorkspaceSecretBinding(
   nonce: Buffer;
   ciphertext: Buffer;
   authTag: Buffer;
-  valueSha256: Buffer;
+  valueVerifier: Buffer;
 } {
   if (
     typeof value !== "string" ||
@@ -542,21 +543,19 @@ export function sealCloudWorkspaceSecretBinding(
       nonce,
       ciphertext,
       authTag: cipher.getAuthTag(),
-      valueSha256: createHash("sha256").update(value, "utf8").digest(),
+      valueVerifier: cloudWorkspaceSecretValueVerifier(
+        value,
+        binding,
+        encodedKey,
+      ),
     };
   } finally {
     key.fill(0);
   }
 }
 
-function openCloudWorkspaceSecretBinding(
-  sealed: {
-    keyVersion: number;
-    nonce: Buffer;
-    ciphertext: Buffer;
-    authTag: Buffer;
-    valueSha256: Buffer;
-  },
+export function cloudWorkspaceSecretValueVerifier(
+  value: string,
   binding: {
     bindingId: string;
     organizationId: string;
@@ -564,12 +563,67 @@ function openCloudWorkspaceSecretBinding(
     name: string;
   },
   encodedKey: string,
-): string {
+): Buffer {
   if (
-    sealed.keyVersion !== 1 ||
+    typeof value !== "string" ||
+    Buffer.byteLength(value, "utf8") < 1 ||
+    Buffer.byteLength(value, "utf8") > MAX_SECRET_BYTES ||
+    value.includes("\0") ||
+    !validSecretBinding(binding)
+  ) {
+    throw new Error("cloud workspace secret binding input is invalid");
+  }
+  const envelopeKey = secretEnvelopeKey(encodedKey);
+  const verifierKey = createHmac("sha256", envelopeKey)
+    .update("zeros-cloud-secret-verifier-key-v1", "utf8")
+    .digest();
+  envelopeKey.fill(0);
+  try {
+    return createHmac("sha256", verifierKey)
+      .update(secretBindingAad(binding))
+      .update(Buffer.from([0]))
+      .update(value, "utf8")
+      .digest();
+  } finally {
+    verifierKey.fill(0);
+  }
+}
+
+function secretKeyVersion(
+  keys: string | Readonly<Record<number, string>>,
+  version: number,
+): string | null {
+  if (!Number.isSafeInteger(version) || version < 1) return null;
+  if (typeof keys === "string") return version === 1 ? keys : null;
+  return keys[version] ?? null;
+}
+
+export function openCloudWorkspaceSecretBinding(
+  sealed: {
+    keyVersion: number;
+    nonce: Buffer;
+    ciphertext: Buffer;
+    authTag: Buffer;
+    verifierScheme: number;
+    valueVerifier: Buffer | null;
+  },
+  binding: {
+    bindingId: string;
+    organizationId: string;
+    version: number;
+    name: string;
+  },
+  encodedKeys: string | Readonly<Record<number, string>>,
+): string {
+  const encodedKey = secretKeyVersion(encodedKeys, sealed.keyVersion);
+  if (
+    !encodedKey ||
     sealed.nonce.length !== 12 ||
     sealed.authTag.length !== 16 ||
-    sealed.valueSha256.length !== 32 ||
+    !(
+      (sealed.verifierScheme === 0 && sealed.valueVerifier === null) ||
+      (sealed.verifierScheme === 1 && sealed.valueVerifier?.length === 32)
+    ) ||
     sealed.ciphertext.length < 1 ||
     sealed.ciphertext.length > MAX_SECRET_BYTES ||
     !validSecretBinding(binding)
@@ -585,12 +639,17 @@ function openCloudWorkspaceSecretBinding(
       decipher.update(sealed.ciphertext),
       decipher.final(),
     ]).toString("utf8");
-    const digest = createHash("sha256").update(value, "utf8").digest();
+    const verifier =
+      sealed.verifierScheme === 1
+        ? cloudWorkspaceSecretValueVerifier(value, binding, encodedKey)
+        : null;
     if (
       Buffer.byteLength(value, "utf8") < 1 ||
       Buffer.byteLength(value, "utf8") > MAX_SECRET_BYTES ||
       value.includes("\0") ||
-      !timingSafeEqual(digest, sealed.valueSha256)
+      (verifier !== null &&
+        (!sealed.valueVerifier ||
+          !timingSafeEqual(verifier, sealed.valueVerifier)))
     ) {
       throw new Error("cloud workspace secret binding is invalid");
     }
@@ -683,8 +742,37 @@ type SecretBindingRow = {
   nonce: Buffer;
   ciphertext: Buffer;
   auth_tag: Buffer;
-  value_sha256: Buffer;
+  verifier_scheme: number;
+  value_verifier: Buffer | null;
 };
+
+type SecretEncryptionConfiguration = {
+  setupSecretKeyV1?: string | null;
+  secretEncryptionKeys?: Readonly<Record<number, string>>;
+  currentSecretEncryptionKeyVersion?: number | null;
+};
+
+function configuredSecretEncryption(input: SecretEncryptionConfiguration): {
+  keys: Readonly<Record<number, string>>;
+  currentVersion: number | null;
+} {
+  const keys: Record<number, string> = {
+    ...(input.secretEncryptionKeys ?? {}),
+  };
+  if (input.setupSecretKeyV1) keys[1] = input.setupSecretKeyV1;
+  const currentVersion =
+    input.currentSecretEncryptionKeyVersion ??
+    (input.setupSecretKeyV1 ? 1 : null);
+  if (
+    currentVersion !== null &&
+    (!Number.isSafeInteger(currentVersion) ||
+      currentVersion < 1 ||
+      !keys[currentVersion])
+  ) {
+    throw new Error("cloud workspace current secret key is unavailable");
+  }
+  return { keys, currentVersion };
+}
 
 export async function resolveDatabaseCloudWorkspaceSettings(
   tx: Tx,
@@ -695,7 +783,9 @@ export async function resolveDatabaseCloudWorkspaceSettings(
     generation: number;
     actorUserId: string;
     isPersonal: boolean;
-    setupSecretKeyV1: string | null;
+    setupSecretKeyV1?: string | null;
+    secretEncryptionKeys?: Readonly<Record<number, string>>;
+    currentSecretEncryptionKeyVersion?: number | null;
   },
 ): Promise<DatabaseResolvedCloudWorkspaceSettings> {
   const layers: CloudWorkspaceSettingsLayer[] = [
@@ -826,7 +916,8 @@ export async function resolveDatabaseCloudWorkspaceSettings(
   const setupSecrets: CloudWorkspaceSetupSecretMaterial[] = [];
   let resolved = merged;
   if (references.length > 0) {
-    if (!input.setupSecretKeyV1) {
+    const secretEncryption = configuredSecretEncryption(input);
+    if (secretEncryption.currentVersion === null) {
       throw new HttpError(
         503,
         "cloud_secret_material_not_configured",
@@ -836,7 +927,8 @@ export async function resolveDatabaseCloudWorkspaceSettings(
     const bindings = await tx.query<SecretBindingRow>(
       `SELECT binding.id, binding.name, binding.current_version,
               version.key_version, version.nonce, version.ciphertext,
-              version.auth_tag, version.value_sha256
+              version.auth_tag, version.verifier_scheme,
+              version.value_verifier
        FROM secret_bindings binding
        JOIN secret_binding_versions version
          ON version.binding_id = binding.id
@@ -884,7 +976,8 @@ export async function resolveDatabaseCloudWorkspaceSettings(
           nonce: binding.nonce,
           ciphertext: binding.ciphertext,
           authTag: binding.auth_tag,
-          valueSha256: binding.value_sha256,
+          verifierScheme: binding.verifier_scheme,
+          valueVerifier: binding.value_verifier,
         },
         {
           bindingId: binding.id,
@@ -892,7 +985,7 @@ export async function resolveDatabaseCloudWorkspaceSettings(
           version,
           name: binding.name,
         },
-        input.setupSecretKeyV1,
+        secretEncryption.keys,
       );
       try {
         const setupId = randomUUID();
@@ -905,13 +998,13 @@ export async function resolveDatabaseCloudWorkspaceSettings(
             generation: input.generation,
             name: binding.name,
           },
-          input.setupSecretKeyV1,
+          secretEncryption.keys[secretEncryption.currentVersion]!,
         );
         setupReferences.push({ id: setupId, name: binding.name });
         setupSecrets.push({
           id: setupId,
           name: binding.name,
-          keyVersion: 1,
+          keyVersion: secretEncryption.currentVersion,
           nonce: sealed.nonce,
           ciphertext: sealed.ciphertext,
           authTag: sealed.authTag,
@@ -955,7 +1048,9 @@ export async function cloneDatabaseCloudWorkspaceSettingsForRollback(
     organizationId: string;
     sourceGeneration: number;
     targetGeneration: number;
-    setupSecretKeyV1: string | null;
+    setupSecretKeyV1?: string | null;
+    secretEncryptionKeys?: Readonly<Record<number, string>>;
+    currentSecretEncryptionKeyVersion?: number | null;
   },
 ): Promise<DatabaseResolvedCloudWorkspaceSettings> {
   const source = await tx.query<{
@@ -1041,7 +1136,8 @@ export async function cloneDatabaseCloudWorkspaceSettingsForRollback(
   const setupSecrets: CloudWorkspaceSetupSecretMaterial[] = [];
   let resolved = { ...parsed, provenance };
   if (sourceReferences.length > 0) {
-    if (!input.setupSecretKeyV1) {
+    const secretEncryption = configuredSecretEncryption(input);
+    if (secretEncryption.currentVersion === null) {
       throw new HttpError(
         503,
         "cloud_secret_material_not_configured",
@@ -1090,7 +1186,7 @@ export async function cloneDatabaseCloudWorkspaceSettingsForRollback(
           organizationId: input.organizationId,
           generation: input.sourceGeneration,
         },
-        input.setupSecretKeyV1,
+        secretEncryption.keys,
       );
       const id = randomUUID();
       const sealed = sealCloudWorkspaceSetupSecret(
@@ -1102,13 +1198,13 @@ export async function cloneDatabaseCloudWorkspaceSettingsForRollback(
           generation: input.targetGeneration,
           name: reference.name,
         },
-        input.setupSecretKeyV1,
+        secretEncryption.keys[secretEncryption.currentVersion]!,
       );
       targetReferences.push({ id, name: reference.name });
       setupSecrets.push({
         id,
         name: reference.name,
-        keyVersion: 1,
+        keyVersion: secretEncryption.currentVersion,
         nonce: sealed.nonce,
         ciphertext: sealed.ciphertext,
         authTag: sealed.authTag,
