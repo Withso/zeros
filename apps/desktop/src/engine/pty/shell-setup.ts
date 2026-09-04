@@ -266,6 +266,21 @@ const REMOTE_ENV_ALLOW = new Set<string>([
   ...TOOLCHAIN_ENV_NAMES,
 ]);
 
+// Public, but still identity-bearing: these describe the desktop app that
+// spawned the engine. A nested `pnpm electron:dev` must load the current shared
+// Alpha profile itself instead of treating a parent Alpha/Beta/Production
+// app's values as an intentional one-run override.
+const DESKTOP_AUTH_SELECTOR_ENV_NAMES = [
+  "AUTH_PROVIDER",
+  "AUTH_DESKTOP_CLIENT_ID",
+  "AUTH_ISSUER",
+  "AUTH_JWKS_URL",
+  "AUTH_AUDIENCE",
+  "VITE_APP_BASE_URL",
+  "VITE_CONTROL_PLANE_URL",
+  "ZEROS_AUTH_PROVIDER",
+] as const;
+
 /** The child env for a PTY: truecolor, Apple-Terminal session noise off, and
  *  ZDOTDIR pointed at the Zeros wrapper. When `scrub` is set (an explicitly
  *  untrusted relay surface), the env is rebuilt from the allowlist so NO host
@@ -352,6 +367,7 @@ export function buildPtyEnv(opts?: {
   delete env.ZEROS_VITE_PORT;
   delete env.ZEROS_ENGINE_BASE_PORT;
   delete env.ELECTRON_RENDERER_URL;
+  for (const name of DESKTOP_AUTH_SELECTOR_ENV_NAMES) delete env[name];
   // Engine-owned auth/control channels are never part of desktop parity. A
   // legacy launch or a parent-process override must not turn them into terminal
   // environment variables, where shell commands and coding agents can inspect
