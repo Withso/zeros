@@ -9,12 +9,52 @@ import {
   resolveAuthenticatedUser,
   type AuthedUser,
 } from "./auth.js";
-import { createDeletionLifecycleRoutes } from "./deletion-lifecycle.js";
+import {
+  createDeletionLifecycleRoutes,
+  DeletionLifecycleProcessor,
+} from "./deletion-lifecycle.js";
 import { runMigrations } from "./migrate.js";
 import { applyWorkOSIdentityEvent } from "./workos-events.js";
+import {
+  workOSProviderSubjectHash,
+  workOSProviderSubjectLockKey,
+} from "./workos-provider-locks.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
+
+async function waitForDeletionState(
+  pool: pg.Pool,
+  requestId: string,
+  expected: string,
+): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const state = await pool.query<{ state: string }>(
+      `SELECT state FROM deletion_requests WHERE id = $1`,
+      [requestId],
+    );
+    if (state.rows[0]?.state === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Deletion request did not reach ${expected}`);
+}
+
+async function waitForBlockedOutboxDelete(pool: pg.Pool): Promise<void> {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const blocked = await pool.query<{ blocked: boolean }>(
+      `SELECT EXISTS (
+         SELECT 1 FROM pg_stat_activity
+         WHERE datname = current_database()
+           AND pid <> pg_backend_pid()
+           AND wait_event_type = 'Lock'
+           AND query LIKE '%DELETE FROM workos_command_outbox command%'
+       ) AS blocked`,
+    );
+    if (blocked.rows[0]?.blocked) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("Deletion finalizer did not block on its outbox cleanup");
+}
 
 d("reviewed WorkOS account recovery", () => {
   let pool: pg.Pool;
@@ -667,14 +707,11 @@ d("reviewed WorkOS account recovery", () => {
       allowDeletionPending: true,
     });
     expect(actor.accountStatus).toBe("deletion_pending");
-    const restored = await lifecycle.request(
-      "/v1/account/deletion/restore",
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ requestId: deletion.deletion.id }),
-      },
-    );
+    const restored = await lifecycle.request("/v1/account/deletion/restore", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ requestId: deletion.deletion.id }),
+    });
     expect(restored.status).toBe(200);
     await expect(restored.json()).resolves.toMatchObject({
       deletion: { id: deletion.deletion.id, state: "restored" },
@@ -725,5 +762,373 @@ d("reviewed WorkOS account recovery", () => {
         [directoryOrganizationId, original.id],
       ),
     ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
+
+  it("lets purge win a concurrent recovery review and fences the late candidate token", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const oldSubject = `user_purge_race_old_${suffix}`;
+    const candidateSubject = `user_purge_race_candidate_${suffix}`;
+    const email = `purge-race-${suffix}@example.test`;
+    const now = Math.floor(Date.now() / 1_000);
+    const target = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: oldSubject,
+      email,
+      displayName: "Purge Race Target",
+      session: {
+        id: `session_purge_race_old_${suffix}`,
+        clientKind: "web",
+        authTime: now,
+        tokenExpiresAt: now + 3_600,
+      },
+    });
+
+    const lifecycle = new Hono();
+    lifecycle.use("/v1/*", async (c, next) => {
+      c.set("user", target);
+      await next();
+    });
+    lifecycle.route("/", createDeletionLifecycleRoutes(pool));
+    const scheduled = await lifecycle.request("/v1/account/deletion", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirmation: "DELETE MY ACCOUNT" }),
+    });
+    expect(scheduled.status).toBe(202);
+    const deletion = (await scheduled.json()) as {
+      deletion: { id: string };
+    };
+
+    await applyWorkOSIdentityEvent(pool, {
+      eventId: `event_purge_race_delete_${suffix}`,
+      eventType: "user.deleted",
+      createdAt: new Date().toISOString(),
+      user: {
+        id: oldSubject,
+        email,
+        emailVerified: true,
+        name: "Purge Race Target",
+        profilePictureUrl: null,
+      },
+    });
+    const candidateInput = {
+      provider: "workos" as const,
+      providerSubject: candidateSubject,
+      email,
+      displayName: "Purge Race Target",
+      session: {
+        id: `session_purge_race_candidate_${suffix}`,
+        clientKind: "web" as const,
+        authTime: now,
+        tokenExpiresAt: now + 3_600,
+      },
+    };
+    let recoveryCode = "";
+    await expect(
+      resolveAuthenticatedUser(pool, candidateInput),
+    ).rejects.toSatisfy((error: unknown) => {
+      const candidate = error as {
+        code?: string;
+        details?: { recoveryCode?: string };
+      };
+      recoveryCode = candidate.details?.recoveryCode ?? "";
+      return (
+        candidate.code === "account_recovery_required" &&
+        /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(recoveryCode)
+      );
+    });
+
+    const owner = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_purge_race_owner_${suffix}`,
+      email: `purge-race-owner-${suffix}@example.test`,
+      displayName: "Purge Race Owner",
+    });
+    await pool.query(
+      `UPDATE users SET staff_role = 'platform_owner' WHERE id = $1`,
+      [owner.id],
+    );
+    const operator: AuthedUser = {
+      ...owner,
+      staffRole: "platform_owner",
+      authentication: {
+        sessionId: `session_purge_race_owner_${suffix}`,
+        clientKind: "web",
+        authTime: now,
+        tokenExpiresAt: now + 3_600,
+      },
+    };
+
+    await pool.query(
+      `UPDATE workos_command_outbox
+       SET state = 'succeeded', completed_at = now(), updated_at = now()
+       WHERE user_id = $1 AND operation = 'sessions.revoke_all'
+         AND state = 'queued'`,
+      [target.id],
+    );
+    await pool.query(
+      `UPDATE deletion_requests
+       SET requested_at = requested_at - interval '31 days',
+           purge_after = purge_after - interval '31 days',
+           next_attempt_at = now()
+       WHERE id = $1`,
+      [deletion.deletion.id],
+    );
+
+    const blocker = await pool.connect();
+    const oldSubjectLock = workOSProviderSubjectLockKey({
+      kind: "user",
+      id: oldSubject,
+    });
+    await blocker.query(
+      `SELECT pg_advisory_lock(hashtextextended($1::text, 0))`,
+      [oldSubjectLock],
+    );
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: `recovery-race-${suffix}`,
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+    const processing = processor.tick(1);
+    await waitForDeletionState(pool, deletion.deletion.id, "purging");
+
+    const recoveryPool = new pg.Pool({ connectionString: url, max: 3 });
+    const reviewOutcome = await approveAccountRecovery(
+      recoveryPool,
+      { operator, publicCode: recoveryCode },
+      {
+        supportCaseReference: "CASE-PURGE-RACE-1001",
+        ownershipVerification: "confirmed_out_of_band",
+      },
+    ).then(
+      (value) => ({ value }),
+      (error: unknown) => ({ error }),
+    );
+    await blocker.query(
+      `SELECT pg_advisory_unlock(hashtextextended($1::text, 0))`,
+      [oldSubjectLock],
+    );
+    blocker.release();
+    await recoveryPool.end();
+    await expect(processing).resolves.toBe(1);
+    expect(reviewOutcome).toMatchObject({
+      error: { status: 409, code: "recovery_state_changed" },
+    });
+
+    const command = await pool.query<{ purge_command_id: string }>(
+      `SELECT purge_command_id FROM deletion_requests WHERE id = $1`,
+      [deletion.deletion.id],
+    );
+    await pool.query(
+      `UPDATE workos_command_outbox
+       SET state = 'succeeded', completed_at = now(), updated_at = now(),
+           lease_owner = NULL, lease_expires_at = NULL
+       WHERE id = $1 OR payload->>'deletionRequestId' = $2::text`,
+      [command.rows[0]!.purge_command_id, deletion.deletion.id],
+    );
+    await pool.query(
+      `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
+      [deletion.deletion.id],
+    );
+    expect(await processor.tick(1)).toBe(1);
+
+    await expect(
+      resolveAuthenticatedUser(pool, candidateInput),
+    ).rejects.toMatchObject({ status: 401, code: "account_deleted" });
+    await expect(
+      pool.query(
+        `SELECT
+           (SELECT count(*)::int FROM user_identities
+            WHERE provider = 'workos' AND provider_sub = $1) AS identities,
+           (SELECT count(*)::int FROM account_recovery_requests
+            WHERE candidate_provider_sub = $1) AS recoveries,
+           (SELECT count(*)::int FROM workos_provider_erasure_fences
+            WHERE provider = 'workos' AND subject_kind = 'user'
+              AND subject_hash = $2) AS fences`,
+        [
+          candidateSubject,
+          workOSProviderSubjectHash({ kind: "user", id: candidateSubject }),
+        ],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ identities: 0, recoveries: 0, fences: 1 }],
+    });
+  });
+
+  it("lets a never-seen direct bearer subject sign up when final erasure wins", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const oldSubject = `user_direct_race_old_${suffix}`;
+    const candidateSubject = `user_direct_race_candidate_${suffix}`;
+    const email = `direct-race-${suffix}@example.test`;
+    const now = Math.floor(Date.now() / 1_000);
+    const target = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: oldSubject,
+      email,
+      displayName: "Direct Bearer Race Target",
+      session: {
+        id: `session_direct_race_old_${suffix}`,
+        clientKind: "web",
+        authTime: now,
+        tokenExpiresAt: now + 3_600,
+      },
+    });
+
+    const lifecycle = new Hono();
+    lifecycle.use("/v1/*", async (c, next) => {
+      c.set("user", target);
+      await next();
+    });
+    lifecycle.route("/", createDeletionLifecycleRoutes(pool));
+    const scheduled = await lifecycle.request("/v1/account/deletion", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ confirmation: "DELETE MY ACCOUNT" }),
+    });
+    expect(scheduled.status).toBe(202);
+    const deletion = (await scheduled.json()) as {
+      deletion: { id: string };
+    };
+
+    await applyWorkOSIdentityEvent(pool, {
+      eventId: `event_direct_race_delete_${suffix}`,
+      eventType: "user.deleted",
+      createdAt: new Date().toISOString(),
+      user: {
+        id: oldSubject,
+        email,
+        emailVerified: true,
+        name: "Direct Bearer Race Target",
+        profilePictureUrl: null,
+      },
+    });
+    await pool.query(
+      `UPDATE workos_command_outbox
+       SET state = 'succeeded', completed_at = now(), updated_at = now()
+       WHERE user_id = $1 AND operation = 'sessions.revoke_all'
+         AND state = 'queued'`,
+      [target.id],
+    );
+    await pool.query(
+      `UPDATE deletion_requests
+       SET requested_at = requested_at - interval '31 days',
+           purge_after = purge_after - interval '31 days',
+           next_attempt_at = now()
+       WHERE id = $1`,
+      [deletion.deletion.id],
+    );
+
+    const processor = new DeletionLifecycleProcessor(pool, {
+      workerId: `direct-auth-race-${suffix}`,
+      logger: { warn: () => undefined, error: () => undefined },
+    });
+    expect(await processor.tick(1)).toBe(1);
+    const command = await pool.query<{ purge_command_id: string }>(
+      `SELECT purge_command_id FROM deletion_requests WHERE id = $1`,
+      [deletion.deletion.id],
+    );
+    await pool.query(
+      `UPDATE workos_command_outbox
+       SET state = 'succeeded', completed_at = now(), updated_at = now(),
+           lease_owner = NULL, lease_expires_at = NULL
+       WHERE id = $1 OR payload->>'deletionRequestId' = $2::text`,
+      [command.rows[0]!.purge_command_id, deletion.deletion.id],
+    );
+    await pool.query(
+      `UPDATE deletion_requests SET next_attempt_at = now() WHERE id = $1`,
+      [deletion.deletion.id],
+    );
+
+    const blocker = await pool.connect();
+    await blocker.query("BEGIN");
+    await blocker.query(
+      `SELECT 1 FROM workos_command_outbox WHERE id = $1 FOR UPDATE`,
+      [command.rows[0]!.purge_command_id],
+    );
+    const finalizing = processor.tick(1);
+    const authenticationPool = new pg.Pool({ connectionString: url, max: 3 });
+    await waitForBlockedOutboxDelete(authenticationPool);
+
+    let authenticationSettled = false;
+    const authentication = resolveAuthenticatedUser(authenticationPool, {
+      provider: "workos",
+      providerSubject: candidateSubject,
+      email,
+      displayName: "Direct Bearer Race Target",
+      session: {
+        id: `session_direct_race_candidate_${suffix}`,
+        clientKind: "desktop",
+        authTime: now,
+        tokenExpiresAt: now + 3_600,
+      },
+    })
+      .then(
+        (value) => ({ value }),
+        (error: unknown) => ({ error }),
+      )
+      .finally(() => {
+        authenticationSettled = true;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 75));
+    expect(authenticationSettled).toBe(false);
+
+    await blocker.query("ROLLBACK");
+    blocker.release();
+    await expect(finalizing).resolves.toBe(1);
+    const authenticationOutcome = await authentication;
+    expect(authenticationOutcome).toMatchObject({
+      value: {
+        accountStatus: "active",
+        identity: { provider: "workos", subject: candidateSubject },
+      },
+    });
+    if (!("value" in authenticationOutcome)) {
+      throw new Error("Expected finalizer-winning authentication to sign up");
+    }
+    expect(authenticationOutcome.value.id).not.toBe(target.id);
+    await authenticationPool.end();
+
+    await expect(
+      pool.query(
+        `SELECT
+           (SELECT count(*)::int FROM user_identities
+            WHERE provider = 'workos' AND provider_sub = $1) AS identities,
+           (SELECT count(*)::int FROM account_recovery_requests
+            WHERE candidate_provider_sub = $1) AS recoveries,
+           (SELECT count(*)::int FROM workos_provider_erasure_fences
+            WHERE provider = 'workos' AND subject_kind = 'user'
+              AND subject_hash = $2) AS fences,
+           (SELECT count(*)::int FROM workos_command_outbox
+            WHERE operation = 'user.delete' AND user_id = $3
+              AND provider_object_id = $1
+              AND payload->>'workosUserId' = $1
+              AND payload->>'deletionRequestId' = $4::text
+              AND state = 'queued') AS delete_commands`,
+        [
+          candidateSubject,
+          workOSProviderSubjectHash({ kind: "user", id: candidateSubject }),
+          target.id,
+          deletion.deletion.id,
+        ],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        { identities: 1, recoveries: 0, fences: 0, delete_commands: 0 },
+      ],
+    });
+
+    await expect(
+      resolveAuthenticatedUser(pool, {
+        provider: "workos",
+        providerSubject: candidateSubject,
+        email,
+        displayName: "Direct Bearer Race Target",
+        session: {
+          id: `session_direct_race_retry_${suffix}`,
+          clientKind: "desktop",
+          authTime: now,
+          tokenExpiresAt: now + 3_600,
+        },
+      }),
+    ).resolves.toMatchObject({ id: authenticationOutcome.value.id });
   });
 });

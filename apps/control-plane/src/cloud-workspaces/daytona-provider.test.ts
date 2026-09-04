@@ -21,7 +21,9 @@ const config: DaytonaWorkspaceProviderConfig = {
   memoryMiB: 4_096,
   storageMiB: 20_480,
   operationTimeoutSeconds: 30,
+  autoStopMinutes: 0,
   autoArchiveMinutes: 10_080,
+  autoDeleteMinutes: -1,
 };
 
 type FakeSandbox = Awaited<ReturnType<DaytonaClientLike["get"]>>;
@@ -101,6 +103,28 @@ function fakeClient(resources: FakeSandbox[]): DaytonaClientLike {
         throw new DaytonaTransportError("missing", { statusCode: 404 });
       }
       resources.splice(index, 1);
+    },
+    async createSshAccess(resourceId, expiresInMinutes) {
+      return {
+        id: "ssh-access-1",
+        sandboxId: resourceId,
+        token: "ssh-token-abcdefghijklmnopqrstuvwxyz",
+        expiresAt: new Date(Date.now() + expiresInMinutes * 60_000),
+        createdAt: new Date(),
+        updatedAt: new Date(),
+        sshCommand:
+          "ssh ssh-token-abcdefghijklmnopqrstuvwxyz@ssh.app.daytona.io",
+      };
+    },
+    async revokeSshAccess(resourceId) {
+      return this.get(resourceId);
+    },
+    async getPreviewUrl(resourceId, port) {
+      return {
+        sandboxId: resourceId,
+        url: `https://${port}-${resourceId}.proxy.daytona.work`,
+        token: "preview-token-abcdefghijklmnopqrstuvwxyz",
+      };
     },
   };
 }
@@ -196,6 +220,25 @@ describe("DaytonaWorkspaceProvider", () => {
     expect(resources).toHaveLength(1);
   });
 
+  it("propagates a rate-limit delay without immediately probing again", async () => {
+    const client = fakeClient([]);
+    const list = vi.spyOn(client, "list");
+    client.create = vi.fn(async () => {
+      throw new DaytonaTransportError("rate limited", {
+        statusCode: 429,
+        headers: { "retry-after-sandbox-create": "7" },
+      });
+    });
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await expect(provider.create(createInput())).rejects.toMatchObject({
+      code: "provider_temporarily_unavailable",
+      retryable: true,
+      retryAfterMs: 7_000,
+    });
+    expect(list).toHaveBeenCalledTimes(1);
+  });
+
   it("fails closed when provider identity labels resolve to duplicates", async () => {
     const workspaceId = randomUUID();
     const first = sandbox(workspaceId);
@@ -212,6 +255,46 @@ describe("DaytonaWorkspaceProvider", () => {
       retryable: false,
     });
     expect(create).not.toHaveBeenCalled();
+  });
+
+  it("rejects a create response for a different immutable workspace generation", async () => {
+    const input = createInput();
+    const client = fakeClient([]);
+    client.create = vi.fn(async () => sandbox(randomUUID(), 2));
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await expect(provider.create(input)).rejects.toMatchObject({
+      code: "provider_identity_mismatch",
+      retryable: false,
+    });
+  });
+
+  it("rejects a list result that violates the immutable-label filter", async () => {
+    const input = createInput();
+    const client = fakeClient([]);
+    client.list = async function* () {
+      yield sandbox(randomUUID(), 2);
+    };
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await expect(provider.find(input)).rejects.toMatchObject({
+      code: "provider_identity_mismatch",
+      retryable: false,
+    });
+  });
+
+  it("rejects a detail response for a different exact sandbox id", async () => {
+    const workspaceId = randomUUID();
+    const requested = sandbox(workspaceId);
+    const different = { ...sandbox(workspaceId), id: `${requested.id}-other` };
+    const client = fakeClient([requested]);
+    client.get = vi.fn(async () => different);
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await expect(provider.inspect(requested.id)).rejects.toMatchObject({
+      code: "provider_resource_mismatch",
+      retryable: false,
+    });
   });
 
   it("does not let a database generation select an unconfigured image", async () => {
@@ -256,6 +339,195 @@ describe("DaytonaWorkspaceProvider", () => {
     });
     await expect(provider.delete(item.id)).resolves.toBeUndefined();
     await expect(provider.inspect(item.id)).resolves.toBeNull();
+  });
+
+  it("mints and revokes bounded SSH access without trusting the provider command", async () => {
+    const workspaceId = randomUUID();
+    const item = sandbox(workspaceId);
+    const client = fakeClient([item]);
+    const createSshAccess = vi.spyOn(client, "createSshAccess");
+    const revokeSshAccess = vi.spyOn(client, "revokeSshAccess");
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await expect(provider.createSshAccess(item.id, 15)).resolves.toMatchObject({
+      providerAccessId: "ssh-access-1",
+      credential: "ssh-token-abcdefghijklmnopqrstuvwxyz",
+      host: "ssh.app.daytona.io",
+      command: "ssh ssh-token-abcdefghijklmnopqrstuvwxyz@ssh.app.daytona.io",
+    });
+    expect(createSshAccess).toHaveBeenCalledWith(item.id, 15);
+
+    await expect(provider.revokeSshAccess(item.id)).resolves.toBeUndefined();
+    expect(revokeSshAccess).toHaveBeenCalledWith(item.id, undefined);
+  });
+
+  it("fails closed on an SSH response for another sandbox or executable command text", async () => {
+    const item = sandbox(randomUUID());
+    const client = fakeClient([item]);
+    const revokeSshAccess = vi.spyOn(client, "revokeSshAccess");
+    client.createSshAccess = vi.fn(async () => ({
+      id: "ssh-access-1",
+      sandboxId: "another-sandbox",
+      token: "ssh-token-abcdefghijklmnopqrstuvwxyz",
+      expiresAt: new Date(Date.now() + 15 * 60_000),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      sshCommand:
+        "ssh ssh-token-abcdefghijklmnopqrstuvwxyz@ssh.app.daytona.io; touch /tmp/no",
+    }));
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await expect(provider.createSshAccess(item.id, 15)).rejects.toMatchObject({
+      code: "provider_access_response_invalid",
+      retryable: false,
+    });
+    expect(revokeSshAccess).toHaveBeenCalledWith(item.id, undefined);
+  });
+
+  it("returns only a validated private preview endpoint contract", async () => {
+    const item = sandbox(randomUUID());
+    const client = fakeClient([item]);
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await expect(provider.getPreviewEndpoint(item.id, 4_173)).resolves.toEqual({
+      url: `https://4173-${item.id}.proxy.daytona.work/`,
+      headerName: "x-daytona-preview-token",
+      headerValue: "preview-token-abcdefghijklmnopqrstuvwxyz",
+    });
+  });
+
+  it("rejects preview endpoints outside the pinned Daytona proxy suffix", async () => {
+    const item = sandbox(randomUUID());
+    const client = fakeClient([item]);
+    client.getPreviewUrl = vi.fn(async () => ({
+      sandboxId: item.id,
+      url: "https://169.254.169.254/latest/meta-data",
+      token: "preview-token-abcdefghijklmnopqrstuvwxyz",
+    }));
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await expect(
+      provider.getPreviewEndpoint(item.id, 4_173),
+    ).rejects.toMatchObject({
+      code: "provider_access_response_invalid",
+      retryable: false,
+    });
+  });
+
+  it("revokes all SSH access before stop, archive, or delete can proceed", async () => {
+    const workspaceId = randomUUID();
+    const item = sandbox(workspaceId);
+    const resources = [item];
+    const client = fakeClient(resources);
+    const calls: string[] = [];
+    client.revokeSshAccess = vi.fn(async (resourceId) => {
+      calls.push(`revoke:${resourceId}`);
+      return client.get(resourceId);
+    });
+    client.stop = vi.fn(async (resourceId) => {
+      calls.push(`stop:${resourceId}`);
+      const found = await client.get(resourceId);
+      found.state = "stopped";
+      return found;
+    });
+    client.archive = vi.fn(async (resourceId) => {
+      calls.push(`archive:${resourceId}`);
+      const found = await client.get(resourceId);
+      found.state = "archived";
+      return found;
+    });
+    client.delete = vi.fn(async (resourceId) => {
+      calls.push(`delete:${resourceId}`);
+      resources.splice(0, resources.length);
+    });
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await provider.stop(item.id);
+    await provider.archive(item.id);
+    await provider.delete(item.id);
+
+    expect(calls).toEqual([
+      `revoke:${item.id}`,
+      `stop:${item.id}`,
+      `revoke:${item.id}`,
+      `archive:${item.id}`,
+      `revoke:${item.id}`,
+      `delete:${item.id}`,
+    ]);
+  });
+
+  it("revokes SSH but does not redispatch stop for an already-stopped sandbox", async () => {
+    const item = sandbox(randomUUID(), 1, "stopped");
+    const client = fakeClient([item]);
+    const revokeSshAccess = vi.spyOn(client, "revokeSshAccess");
+    const stop = vi.spyOn(client, "stop");
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await expect(provider.stop(item.id)).resolves.toMatchObject({
+      resourceId: item.id,
+      state: "stopped",
+    });
+    expect(revokeSshAccess).toHaveBeenCalledWith(item.id, undefined);
+    expect(stop).not.toHaveBeenCalled();
+  });
+
+  it("revokes SSH but does not move an already-archived sandbox backwards", async () => {
+    const item = sandbox(randomUUID(), 1, "archived");
+    const client = fakeClient([item]);
+    const revokeSshAccess = vi.spyOn(client, "revokeSshAccess");
+    const stop = vi.spyOn(client, "stop");
+    const archive = vi.spyOn(client, "archive");
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await expect(provider.archive(item.id)).resolves.toMatchObject({
+      resourceId: item.id,
+      state: "archived",
+    });
+    expect(revokeSshAccess).toHaveBeenCalledWith(item.id, undefined);
+    expect(stop).not.toHaveBeenCalled();
+    expect(archive).not.toHaveBeenCalled();
+  });
+
+  it("does not redispatch lifecycle mutations while Daytona is already converging", async () => {
+    const cases = [
+      { operation: "start" as const, state: "starting" },
+      { operation: "stop" as const, state: "stopping" },
+      { operation: "archive" as const, state: "archiving" },
+    ];
+
+    for (const itemCase of cases) {
+      const item = sandbox(randomUUID(), 1, itemCase.state);
+      const client = fakeClient([item]);
+      const start = vi.spyOn(client, "start");
+      const stop = vi.spyOn(client, "stop");
+      const archive = vi.spyOn(client, "archive");
+      const provider = new DaytonaWorkspaceProvider(config, client);
+
+      await expect(
+        provider[itemCase.operation](item.id),
+      ).resolves.toMatchObject({
+        resourceId: item.id,
+      });
+      expect(start).not.toHaveBeenCalled();
+      expect(stop).not.toHaveBeenCalled();
+      expect(archive).not.toHaveBeenCalled();
+    }
+  });
+
+  it("keeps an eventually deleting sandbox retryable after a repeated delete conflict", async () => {
+    const item = sandbox(randomUUID(), 1, "destroying");
+    const client = fakeClient([item]);
+    client.delete = vi.fn(async () => {
+      throw new DaytonaTransportError("delete already in progress", {
+        statusCode: 409,
+      });
+    });
+    const provider = new DaytonaWorkspaceProvider(config, client);
+
+    await expect(provider.delete(item.id)).rejects.toMatchObject({
+      code: "provider_delete_unverified",
+      retryable: true,
+    });
   });
 
   it("normalizes a conflict that cannot be recovered as a provider failure", async () => {
@@ -354,6 +626,134 @@ describe("DaytonaWorkspaceProvider", () => {
           autoDeleteInterval: -1,
         },
       });
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it("sends bounded SSH and private-preview calls through the pinned generated client", async () => {
+    const requests: Array<{
+      method: string | undefined;
+      url: string | undefined;
+      headers: IncomingHttpHeaders;
+    }> = [];
+    const resourceId = "provider-contract-test";
+    const credential = "ssh-token-abcdefghijklmnopqrstuvwxyz";
+    const server = createServer((request, response) => {
+      requests.push({
+        method: request.method,
+        url: request.url,
+        headers: request.headers,
+      });
+      response.setHeader("content-type", "application/json");
+      const url = new URL(request.url!, "http://test.invalid");
+      if (
+        request.method === "POST" &&
+        url.pathname === `/sandbox/${resourceId}/ssh-access`
+      ) {
+        response.statusCode = 201;
+        response.end(
+          JSON.stringify({
+            id: "ssh-access-1",
+            sandboxId: resourceId,
+            token: credential,
+            expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+            sshCommand: `ssh ${credential}@ssh.app.daytona.io`,
+          }),
+        );
+        return;
+      }
+      if (
+        request.method === "GET" &&
+        url.pathname === `/sandbox/${resourceId}/ports/4173/preview-url`
+      ) {
+        response.end(
+          JSON.stringify({
+            sandboxId: resourceId,
+            url: `https://4173-${resourceId}.proxy.daytona.work`,
+            token: "preview-token-abcdefghijklmnopqrstuvwxyz",
+          }),
+        );
+        return;
+      }
+      if (
+        request.method === "DELETE" &&
+        url.pathname === `/sandbox/${resourceId}/ssh-access`
+      ) {
+        response.end(JSON.stringify({ id: resourceId }));
+        return;
+      }
+      response.statusCode = 404;
+      response.end(JSON.stringify({ message: "unexpected contract request" }));
+    });
+    await new Promise<void>((resolve) =>
+      server.listen(0, "127.0.0.1", resolve),
+    );
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const provider = new DaytonaWorkspaceProvider({
+        ...config,
+        apiUrl: `http://127.0.0.1:${port}`,
+      });
+      await expect(
+        provider.createSshAccess(resourceId, 15),
+      ).resolves.toMatchObject({
+        credential,
+        host: "ssh.app.daytona.io",
+      });
+      await expect(
+        provider.getPreviewEndpoint(resourceId, 4_173),
+      ).resolves.toEqual({
+        url: `https://4173-${resourceId}.proxy.daytona.work/`,
+        headerName: "x-daytona-preview-token",
+        headerValue: "preview-token-abcdefghijklmnopqrstuvwxyz",
+      });
+      await expect(
+        provider.revokeSshAccess(resourceId),
+      ).resolves.toBeUndefined();
+
+      expect(
+        requests.map((request) => {
+          const url = new URL(request.url!, "http://test.invalid");
+          return {
+            method: request.method,
+            path: url.pathname,
+            query: Object.fromEntries(url.searchParams),
+            authorization: request.headers.authorization,
+            source: request.headers["x-daytona-source"],
+            sdkVersion: request.headers["x-daytona-sdk-version"],
+          };
+        }),
+      ).toEqual([
+        {
+          method: "POST",
+          path: `/sandbox/${resourceId}/ssh-access`,
+          query: { expiresInMinutes: "15" },
+          authorization: "Bearer test-key-do-not-use",
+          source: "zeros-control-plane",
+          sdkVersion: "0.190.1",
+        },
+        {
+          method: "GET",
+          path: `/sandbox/${resourceId}/ports/4173/preview-url`,
+          query: {},
+          authorization: "Bearer test-key-do-not-use",
+          source: "zeros-control-plane",
+          sdkVersion: "0.190.1",
+        },
+        {
+          method: "DELETE",
+          path: `/sandbox/${resourceId}/ssh-access`,
+          query: {},
+          authorization: "Bearer test-key-do-not-use",
+          source: "zeros-control-plane",
+          sdkVersion: "0.190.1",
+        },
+      ]);
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),

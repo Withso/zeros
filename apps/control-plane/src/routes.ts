@@ -29,6 +29,11 @@ import { deliverInvitationEmail } from "./invitation-delivery.js";
 import { rateLimit } from "./ratelimit.js";
 import type { CloudWorkspaceBackendConfig } from "./config.js";
 import { createCloudWorkspaceRoutes } from "./cloud-workspaces/routes.js";
+import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
+import type { CloudWorkspaceRepositoryResolver } from "./cloud-workspaces/github-repositories.js";
+import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks.js";
+import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
+import type { DatabaseCloudWorkspaceEngineClientAdmissionService } from "./cloud-workspaces/engine-client-admission.js";
 import {
   enqueueWorkOSCommand,
   workOSInvitationOrderingKey,
@@ -400,6 +405,11 @@ export function createRoutes(
   email?: EmailConfig,
   cloudWorkspaces: CloudWorkspaceBackendConfig | null = null,
   options: {
+    cloudWorkspaceAccessService?: CloudWorkspaceAccessService | null;
+    cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver | null;
+    cloudWorkspaceForkService?: DatabaseCloudWorkspaceForkService | null;
+    cloudWorkspaceReplicaService?: DatabaseCloudWorkspaceReplicaService | null;
+    cloudWorkspaceEngineClientAdmissionService?: DatabaseCloudWorkspaceEngineClientAdmissionService | null;
     workosEnabled?: boolean;
     workosProvider?: WorkOSInvitationResolver;
     inviteLinkBase?: string;
@@ -460,6 +470,12 @@ export function createRoutes(
   app.route(
     "/",
     createCloudWorkspaceRoutes(pool, cloudWorkspaces, {
+      accessService: options.cloudWorkspaceAccessService ?? null,
+      repositoryResolver: options.cloudWorkspaceRepositoryResolver ?? null,
+      forkService: options.cloudWorkspaceForkService ?? null,
+      replicaService: options.cloudWorkspaceReplicaService ?? null,
+      engineClientAdmissionService:
+        options.cloudWorkspaceEngineClientAdmissionService ?? null,
       workosEnabled: options.workosEnabled === true,
     }),
   );
@@ -568,12 +584,7 @@ export function createRoutes(
          )
          ON CONFLICT (org_id, user_id) DO NOTHING
          RETURNING user_id`,
-        [
-          invitation.org_id,
-          user.id,
-          invitation.role,
-          membershipAggregateKey,
-        ],
+        [invitation.org_id, user.id, invitation.role, membershipAggregateKey],
       );
       const effectiveRole = await tx.query<{
         role: OrganizationRole;
@@ -803,9 +814,7 @@ function createOrganizationRouter(
       );
       return requiredOrganizationSummary(result.rows[0]);
     });
-    return legacy
-      ? c.json({ team: organization })
-      : c.json({ organization });
+    return legacy ? c.json({ team: organization }) : c.json({ organization });
   });
 
   app.patch("/:organization", async (c) => {
@@ -880,9 +889,7 @@ function createOrganizationRouter(
       );
       return requiredOrganizationSummary(result.rows[0]);
     });
-    return legacy
-      ? c.json({ team: organization })
-      : c.json({ organization });
+    return legacy ? c.json({ team: organization }) : c.json({ organization });
   });
 
   app.get("/:organization/members", async (c) => {
@@ -1021,10 +1028,7 @@ function createOrganizationRouter(
             : "membership.create",
           idempotencyKey: `membership.${orgId}.${targetId}.${memberRevision.workos_sync_revision}`,
           aggregateKey: `membership:${orgId}:${targetId}`,
-          orderingKey: workOSInvitationOrderingKey(
-            orgId,
-            targetRow.user_email,
-          ),
+          orderingKey: workOSInvitationOrderingKey(orgId, targetRow.user_email),
           aggregateRevision: Number(memberRevision.workos_sync_revision),
           organizationId: orgId,
           userId: targetId,
@@ -1157,7 +1161,9 @@ function createOrganizationRouter(
          WHERE org_id = $1 AND user_id = $2`,
         [orgId, targetId],
       );
-      const revision = await tx.query<{ authorization_revision: string | number }>(
+      const revision = await tx.query<{
+        authorization_revision: string | number;
+      }>(
         `UPDATE organizations
          SET authorization_revision = authorization_revision + 1
          WHERE id = $1 RETURNING authorization_revision`,
@@ -1258,11 +1264,7 @@ function createOrganizationRouter(
         email: emailAddress,
         role,
       });
-      await recordOrganizationDataChange(
-        tx,
-        orgId,
-        "zeros_invitation_created",
-      );
+      await recordOrganizationDataChange(tx, orgId, "zeros_invitation_created");
       const invitation = created.rows[0]!;
       if (workosEnabled) {
         await enqueueWorkOSCommand(tx, {
@@ -1286,8 +1288,7 @@ function createOrganizationRouter(
         id: invitation.id,
         expiresAt: invitation.expires_at,
         token: raw,
-        organizationName:
-          organization.rows[0]?.name ?? "your organization",
+        organizationName: organization.rows[0]?.name ?? "your organization",
       };
     });
     await deliverInvitationEmail({
@@ -1357,11 +1358,7 @@ function createOrganizationRouter(
       await audit(tx, orgId, user.id, "invitation.revoked", {
         invitation: inviteId,
       });
-      await recordOrganizationDataChange(
-        tx,
-        orgId,
-        "zeros_invitation_revoked",
-      );
+      await recordOrganizationDataChange(tx, orgId, "zeros_invitation_revoked");
       const invitation = result.rows[0]!;
       if (workosEnabled) {
         await enqueueWorkOSCommand(tx, {
@@ -1400,7 +1397,10 @@ function createOrganizationRouter(
       );
       return result.rows;
     });
-    return c.json({ teams, capabilities: { multiple: false, canCreate: false } });
+    return c.json({
+      teams,
+      capabilities: { multiple: false, canCreate: false },
+    });
   });
 
   app.post("/:organization/teams", async (c) => {
@@ -1428,7 +1428,10 @@ function createOrganizationRouter(
         [orgId],
       );
       if (org.rows[0]!.is_personal) {
-        return { applicable: false as const, managementAvailable: false as const };
+        return {
+          applicable: false as const,
+          managementAvailable: false as const,
+        };
       }
       const subscription = await tx.query(
         `SELECT status, plan, seats, current_period_end, updated_at

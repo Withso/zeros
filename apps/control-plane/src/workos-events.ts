@@ -4,6 +4,12 @@ import type pg from "pg";
 import { z } from "zod";
 
 import { withSystemTx, type Tx } from "./db.js";
+import { HttpError } from "./authz.js";
+import {
+  resolveWorkOSProviderLockKeys,
+  withWorkOSProviderLocks,
+  workOSProviderErasureFenceStatus,
+} from "./workos-provider-locks.js";
 
 const EventIdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,512}$/);
 const MAX_WEBHOOK_BYTES = 64 * 1024;
@@ -325,8 +331,26 @@ export async function applyWorkOSIdentityEvent(
   input: WorkOSIdentityEvent,
 ): Promise<{ status: WorkOSIdentityEventStatus }> {
   const event = WorkOSIdentityEventSchema.parse(input);
-  return withSystemTx(pool, (tx) =>
-    applyWorkOSIdentityEventInTransaction(tx, event),
+  const lockKeys = await resolveWorkOSProviderLockKeys(pool, {
+    userIds: [event.user.id],
+  });
+  return withWorkOSProviderLocks(pool, lockKeys, () =>
+    withSystemTx(pool, async (tx) => {
+      const fenceStatus = await workOSProviderErasureFenceStatus(tx, [
+        { kind: "user", id: event.user.id },
+      ]);
+      if (fenceStatus === "not_ready") {
+        throw new HttpError(
+          503,
+          "workos_provider_erasure_reconciliation_pending",
+          "WorkOS event ingestion is temporarily unavailable.",
+        );
+      }
+      if (fenceStatus === "fenced") {
+        return { status: "ignored_deleted" as const };
+      }
+      return applyWorkOSIdentityEventInTransaction(tx, event);
+    }),
   );
 }
 
@@ -467,9 +491,20 @@ export function createWorkOSIdentityEventRoutes(
     }
     const event = lifecycleEvent(raw);
     if (!event) return json({ error: "invalid_event" }, 400);
-    const result = await (
-      options.apply ?? ((input) => applyWorkOSIdentityEvent(pool, input))
-    )(event);
+    let result: { status: WorkOSIdentityEventStatus };
+    try {
+      result = await (
+        options.apply ?? ((input) => applyWorkOSIdentityEvent(pool, input))
+      )(event);
+    } catch (error) {
+      if (
+        error instanceof HttpError &&
+        error.code === "workos_provider_erasure_reconciliation_pending"
+      ) {
+        return json({ error: error.code }, 503);
+      }
+      throw error;
+    }
     return json({ accepted: true, status: result.status }, 202);
   });
   return app;

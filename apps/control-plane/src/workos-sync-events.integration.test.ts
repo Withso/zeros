@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -27,6 +27,15 @@ function managementEvent(
     createdAt,
     data,
   };
+}
+
+function providerSubjectHash(
+  kind: "user" | "organization",
+  providerId: string,
+): string {
+  return createHash("sha256")
+    .update(`workos:${kind}:${providerId}`, "utf8")
+    .digest("hex");
 }
 
 d("WorkOS normalized event synchronization", () => {
@@ -582,5 +591,454 @@ d("WorkOS normalized event synchronization", () => {
       display_name: "Safe profile",
       avatar_url: null,
     });
+  });
+
+  it("keeps delayed events behind durable provider-erasure fences", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const subject = `user_erased_${suffix}`;
+    const email = `erased-${suffix}@example.com`;
+    const user = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: subject,
+      email,
+      displayName: "Erased User",
+    });
+    const owner = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_erased_org_owner_${suffix}`,
+      email: `erased-org-owner-${suffix}@example.com`,
+      displayName: "Erased Organization Owner",
+    });
+    const organization = await pool.query<{ id: string }>(
+      `INSERT INTO organizations (slug, name, created_by, is_personal)
+       VALUES ($1, 'Erased Organization', $2, false) RETURNING id`,
+      [`erased-org-${suffix}`, owner.id],
+    );
+    const organizationId = organization.rows[0]!.id;
+    const workosOrganizationId = `org_erased_${suffix}`;
+    await pool.query(
+      `INSERT INTO workos_organization_links (
+         organization_id, workos_organization_id, external_id, state
+       ) VALUES ($1::uuid, $2, $1::text, 'active')`,
+      [organizationId, workosOrganizationId],
+    );
+    const survivingOrganization = await pool.query<{ id: string }>(
+      `INSERT INTO organizations (slug, name, created_by, is_personal)
+       VALUES ($1, 'Surviving Organization', $2, false) RETURNING id`,
+      [`surviving-org-${suffix}`, owner.id],
+    );
+    const survivingWorkosOrganizationId = `org_surviving_${suffix}`;
+    await pool.query(
+      `INSERT INTO workos_organization_links (
+         organization_id, workos_organization_id, external_id, state
+       ) VALUES ($1::uuid, $2, $1::text, 'active')`,
+      [survivingOrganization.rows[0]!.id, survivingWorkosOrganizationId],
+    );
+
+    const accountRequest = await pool.query<{ id: string }>(
+      `INSERT INTO deletion_requests (
+         public_code, target_kind, target_id, target_user_id, state,
+         purge_started_at, next_attempt_at
+       ) VALUES ($1, 'account', $2, $2, 'provider_deleting', now(), now())
+       RETURNING id`,
+      [`ZD-ERAS-USER`, user.id],
+    );
+    const organizationRequest = await pool.query<{ id: string }>(
+      `INSERT INTO deletion_requests (
+         public_code, target_kind, target_id, target_organization_id, state,
+         purge_started_at, next_attempt_at
+       ) VALUES ($1, 'organization', $2, $2, 'provider_deleting', now(), now())
+       RETURNING id`,
+      [`ZD-ERAS-ORGN`, organizationId],
+    );
+    await pool.query(
+      `INSERT INTO deletion_request_events (
+         deletion_request_id, action, metadata
+       ) VALUES
+         ($1, 'purge.provider_erasure_fenced', $3::jsonb),
+         ($2, 'purge.provider_erasure_fenced', $4::jsonb)`,
+      [
+        accountRequest.rows[0]!.id,
+        organizationRequest.rows[0]!.id,
+        JSON.stringify({
+          provider: "workos",
+          workosSubjectHashes: [providerSubjectHash("user", subject)],
+        }),
+        JSON.stringify({
+          provider: "workos",
+          workosSubjectHashes: [
+            providerSubjectHash("organization", workosOrganizationId),
+          ],
+        }),
+      ],
+    );
+    await pool.query(
+      `DELETE FROM user_identities
+       WHERE provider = 'workos' AND provider_sub = $1`,
+      [subject],
+    );
+    await pool.query(
+      `DELETE FROM workos_organization_links WHERE organization_id = $1`,
+      [organizationId],
+    );
+
+    const userEvent = managementEvent("user.updated", {
+      id: subject,
+      email,
+      emailVerified: true,
+      name: "Must Not Return",
+      profilePictureUrl: "https://images.example.com/must-not-return.png",
+      updatedAt: new Date().toISOString(),
+    });
+    const organizationEvent = managementEvent("organization.updated", {
+      id: workosOrganizationId,
+      name: "Must Not Return Organization",
+      externalId: organizationId,
+      updatedAt: new Date().toISOString(),
+    });
+    const sessionId = `session_erased_${suffix}`;
+    const sessionEvent = managementEvent("session.created", {
+      id: sessionId,
+      userId: subject,
+      status: "active",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
+    const accountMembershipId = `membership_erased_user_${suffix}`;
+    const accountMembershipEvent = managementEvent(
+      "organization_membership.created",
+      {
+        id: accountMembershipId,
+        organizationId: survivingWorkosOrganizationId,
+        userId: subject,
+        status: "active",
+        directoryManaged: true,
+        role: { slug: "member" },
+        updatedAt: new Date().toISOString(),
+      },
+    );
+    const organizationMembershipId = `membership_erased_org_${suffix}`;
+    const organizationMembershipEvent = managementEvent(
+      "organization_membership.created",
+      {
+        id: organizationMembershipId,
+        organizationId: workosOrganizationId,
+        userId: owner.identity.subject,
+        status: "active",
+        directoryManaged: true,
+        role: { slug: "member" },
+        updatedAt: new Date().toISOString(),
+      },
+    );
+    const invitationEvent = managementEvent("invitation.created", {
+      id: `invitation_erased_org_${suffix}`,
+      organizationId: workosOrganizationId,
+      email: `invitee-${suffix}@example.com`,
+      state: "pending",
+      roleSlug: "member",
+      acceptedAt: null,
+      revokedAt: null,
+      updatedAt: new Date().toISOString(),
+    });
+    const fencedEvents = [
+      userEvent,
+      sessionEvent,
+      accountMembershipEvent,
+      organizationEvent,
+      organizationMembershipEvent,
+      invitationEvent,
+    ];
+    for (const [index, delayedEvent] of fencedEvents.entries()) {
+      await expect(
+        ingestWorkOSManagementEvent(
+          pool,
+          delayedEvent,
+          index % 2 === 0 ? "webhook" : "events_api",
+        ),
+      ).resolves.toEqual({ status: "ignored" });
+    }
+
+    const inbox = await pool.query(
+      `SELECT event_id, object_id, workos_organization_id, workos_user_id,
+              data, state, last_error_code
+       FROM workos_event_inbox WHERE event_id = ANY($1::text[])
+       ORDER BY event_id`,
+      [fencedEvents.map((event) => event.id)],
+    );
+    expect(inbox.rows).toHaveLength(fencedEvents.length);
+    for (const row of inbox.rows) {
+      expect(row).toMatchObject({
+        object_id: null,
+        workos_organization_id: null,
+        workos_user_id: null,
+        data: {},
+        state: "ignored",
+        last_error_code: "target_erasure_fenced",
+      });
+    }
+    await expect(
+      pool.query(`SELECT 1 FROM identity_provider_events WHERE event_id = $1`, [
+        userEvent.id,
+      ]),
+    ).resolves.toMatchObject({ rowCount: 0 });
+    await expect(
+      pool.query(`SELECT 1 FROM auth_sessions WHERE provider_session_id = $1`, [
+        sessionId,
+      ]),
+    ).resolves.toMatchObject({ rowCount: 0 });
+    await expect(
+      pool.query(
+        `SELECT 1 FROM workos_membership_projections
+         WHERE workos_membership_id = ANY($1::text[])`,
+        [[accountMembershipId, organizationMembershipId]],
+      ),
+    ).resolves.toMatchObject({ rowCount: 0 });
+
+    const unrelatedSubject = `user_unrelated_${suffix}`;
+    const unrelatedSessionId = `session_unrelated_${suffix}`;
+    const unrelated = managementEvent("session.revoked", {
+      id: unrelatedSessionId,
+      userId: unrelatedSubject,
+      status: "revoked",
+      updatedAt: new Date().toISOString(),
+    });
+    await expect(
+      ingestWorkOSManagementEvent(pool, unrelated, "webhook"),
+    ).resolves.toEqual({ status: "applied" });
+    await expect(
+      pool.query(
+        `SELECT provider_sub, status FROM auth_sessions
+         WHERE provider_session_id = $1`,
+        [unrelatedSessionId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ provider_sub: unrelatedSubject, status: "revoked" }],
+    });
+  });
+
+  it("rechecks the erasure fence after waiting for an account purge lock", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const subject = `user_purge_race_${suffix}`;
+    const email = `purge-race-${suffix}@example.com`;
+    const user = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: subject,
+      email,
+      displayName: "Purge Race User",
+    });
+    const event = managementEvent("user.updated", {
+      id: subject,
+      email,
+      emailVerified: true,
+      name: "Must Not Reappear",
+      profilePictureUrl: null,
+      updatedAt: new Date().toISOString(),
+    });
+    const purge = await pool.connect();
+    let ingestion: Promise<{ status: string }> | null = null;
+    let settled = false;
+    try {
+      await purge.query(
+        `SELECT pg_advisory_lock(
+           hashtextextended('workos-provider-user:' || $1::text, 0)
+         )`,
+        [user.id],
+      );
+      ingestion = ingestWorkOSManagementEvent(pool, event, "webhook").finally(
+        () => {
+          settled = true;
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 75));
+      expect(settled).toBe(false);
+
+      await purge.query("BEGIN");
+      const request = await purge.query<{ id: string }>(
+        `INSERT INTO deletion_requests (
+           public_code, target_kind, target_id, target_user_id, state,
+           purge_started_at, next_attempt_at
+         ) VALUES ('ZD-RACE-USER', 'account', $1, $1,
+                   'provider_deleting', now(), now())
+         RETURNING id`,
+        [user.id],
+      );
+      await purge.query(
+        `INSERT INTO deletion_request_events (
+           deletion_request_id, action, metadata
+         ) VALUES ($1, 'purge.provider_erasure_fenced', $2::jsonb)`,
+        [
+          request.rows[0]!.id,
+          JSON.stringify({
+            provider: "workos",
+            workosSubjectHashes: [providerSubjectHash("user", subject)],
+          }),
+        ],
+      );
+      await purge.query(
+        `DELETE FROM identity_provider_events WHERE provider_sub = $1`,
+        [subject],
+      );
+      await purge.query(
+        `DELETE FROM workos_event_inbox WHERE workos_user_id = $1`,
+        [subject],
+      );
+      await purge.query(
+        `DELETE FROM user_identities
+         WHERE provider = 'workos' AND provider_sub = $1`,
+        [subject],
+      );
+      await purge.query("COMMIT");
+    } finally {
+      await purge.query("ROLLBACK").catch(() => undefined);
+      await purge
+        .query(
+          `SELECT pg_advisory_unlock(
+             hashtextextended('workos-provider-user:' || $1::text, 0)
+           )`,
+          [user.id],
+        )
+        .catch(() => undefined);
+      purge.release();
+    }
+    await expect(ingestion).resolves.toEqual({ status: "ignored" });
+    await expect(
+      pool.query(
+        `SELECT object_id, workos_user_id, data, state, last_error_code
+         FROM workos_event_inbox WHERE event_id = $1`,
+        [event.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          object_id: null,
+          workos_user_id: null,
+          data: {},
+          state: "ignored",
+          last_error_code: "target_erasure_fenced",
+        },
+      ],
+    });
+    await expect(
+      pool.query(`SELECT 1 FROM identity_provider_events WHERE event_id = $1`, [
+        event.id,
+      ]),
+    ).resolves.toMatchObject({ rowCount: 0 });
+  });
+
+  it("locks the Organization before its WorkOS link so purge cannot deadlock an event", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const owner = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_lock_order_${suffix}`,
+      email: `lock-order-${suffix}@example.com`,
+      displayName: "Lock Order Owner",
+    });
+    const organization = await pool.query<{ id: string }>(
+      `INSERT INTO organizations (slug, name, created_by, is_personal)
+       VALUES ($1, 'Before Event', $2, false) RETURNING id`,
+      [`lock-order-${suffix}`, owner.id],
+    );
+    const organizationId = organization.rows[0]!.id;
+    const workosOrganizationId = `org_${suffix}`;
+    await pool.query(
+      `INSERT INTO workos_organization_links (
+         organization_id, workos_organization_id, external_id, state
+       ) VALUES ($1::uuid, $2, $1::text, 'active')`,
+      [organizationId, workosOrganizationId],
+    );
+    const event = managementEvent("organization.updated", {
+      id: workosOrganizationId,
+      name: "After Event",
+      externalId: organizationId,
+      updatedAt: new Date(Date.now() + 1_000).toISOString(),
+    });
+
+    const purge = await pool.connect();
+    let ingestion: Promise<unknown> | null = null;
+    try {
+      await purge.query("BEGIN");
+      await purge.query("SET LOCAL statement_timeout = '3s'");
+      await purge.query(
+        `SELECT id FROM organizations WHERE id = $1 FOR UPDATE`,
+        [organizationId],
+      );
+      ingestion = ingestWorkOSManagementEvent(pool, event, "webhook");
+      void ingestion.catch(() => undefined);
+
+      let organizationWaitObserved = false;
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const waiting = await pool.query(
+          `SELECT 1 FROM pg_stat_activity
+           WHERE pid <> pg_backend_pid() AND wait_event_type = 'Lock'
+             AND query LIKE '%SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE%'`,
+        );
+        if ((waiting.rowCount ?? 0) > 0) {
+          organizationWaitObserved = true;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      expect(organizationWaitObserved).toBe(true);
+
+      await expect(
+        purge.query(
+          `SELECT organization_id FROM workos_organization_links
+           WHERE organization_id = $1 FOR UPDATE`,
+          [organizationId],
+        ),
+      ).resolves.toMatchObject({ rowCount: 1 });
+      await purge.query("ROLLBACK");
+      await expect(ingestion).resolves.toEqual({ status: "applied" });
+    } finally {
+      await purge.query("ROLLBACK").catch(() => undefined);
+      await ingestion?.catch(() => undefined);
+      purge.release();
+    }
+    await expect(
+      pool.query(`SELECT name FROM organizations WHERE id = $1`, [
+        organizationId,
+      ]),
+    ).resolves.toMatchObject({ rows: [{ name: "After Event" }] });
+  });
+
+  it("retries an unknown management event without persisting its raw payload while purge evidence is unresolved", async () => {
+    const requestId = randomUUID();
+    const workosOrganizationId = `org_pending_${randomUUID().replaceAll("-", "")}`;
+    const event = managementEvent("organization.created", {
+      id: workosOrganizationId,
+      name: "Must Not Persist",
+      externalId: null,
+      updatedAt: new Date().toISOString(),
+    });
+    await pool.query(
+      `INSERT INTO deletion_requests (
+         id, public_code, target_kind, target_id, state, requested_at,
+         purge_after, purge_started_at, purged_at
+       ) VALUES ($1, 'ZD-MGMT-PEND', 'account', $1, 'purged',
+                 '2025-01-01T00:00:00Z', '2025-01-31T00:00:00Z',
+                 '2025-01-31T00:00:00Z', '2025-01-31T00:01:00Z')`,
+      [requestId],
+    );
+
+    await expect(
+      ingestWorkOSManagementEvent(pool, event, "webhook"),
+    ).rejects.toMatchObject({
+      status: 503,
+      code: "workos_provider_erasure_reconciliation_pending",
+    });
+    await expect(
+      pool.query(`SELECT 1 FROM workos_event_inbox WHERE event_id = $1`, [
+        event.id,
+      ]),
+    ).resolves.toMatchObject({ rowCount: 0 });
+
+    await pool.query(
+      `INSERT INTO workos_provider_erasure_reconciliations (
+         deletion_request_id, disposition, evidence_source,
+         evidence_reference
+       ) VALUES ($1, 'no_workos_subject', 'operator_reconciliation',
+                 'test:provider-audit-confirmed-local-only')`,
+      [requestId],
+    );
   });
 });

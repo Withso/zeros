@@ -192,7 +192,7 @@ describe("auth token contract", () => {
     );
   });
 
-  it("verifies a signed token end to end before accepting its application claims", async () => {
+  it("verifies a desktop token under WorkOS's shared default-Application issuer", async () => {
     const { privateKey, publicKey } = await generateKeyPair("RS256");
     const token = await new SignJWT({
       sid: "session_example",

@@ -26,6 +26,12 @@ export type WorkOSSyncRuntimeOptions = {
   eventIntervalMs?: number;
   notificationIntervalMs?: number;
   deletionIntervalMs?: number;
+  /**
+   * Keep false while the schema needed by the deletion lifecycle is behind a
+   * controlled migration boundary. The other WorkOS repair loops remain safe
+   * and continue running in that state.
+   */
+  deletionLifecycleEnabled?: boolean;
   logger?: SyncLogger;
 };
 
@@ -76,7 +82,10 @@ export function startWorkOSSyncRuntime(options: WorkOSSyncRuntimeOptions): {
     },
     { logger },
   );
-  const deletions = new DeletionLifecycleProcessor(options.pool, { logger });
+  const deletions =
+    options.deletionLifecycleEnabled === false
+      ? null
+      : new DeletionLifecycleProcessor(options.pool, { logger });
   const commandLoop: Loop = { timer: null, active: null };
   const eventLoop: Loop = { timer: null, active: null };
   const notificationLoop: Loop = { timer: null, active: null };
@@ -128,12 +137,14 @@ export function startWorkOSSyncRuntime(options: WorkOSSyncRuntimeOptions): {
     // contention without delaying authentication requests.
     () => notifications.tick(4),
   );
-  schedule(
-    deletionLoop,
-    options.deletionIntervalMs ?? 15_000,
-    "deletion lifecycle",
-    () => deletions.tick(10),
-  );
+  if (deletions) {
+    schedule(
+      deletionLoop,
+      options.deletionIntervalMs ?? 15_000,
+      "deletion lifecycle",
+      () => deletions.tick(10),
+    );
+  }
 
   return {
     async stop(): Promise<void> {

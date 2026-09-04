@@ -40,6 +40,15 @@ import {
 } from "./workos-desktop-revocation.js";
 import { createWorkOSDesktopAuthorizationRoutes } from "./workos-desktop-authorization.js";
 import { RailwayWorkOSProvider } from "./workos-provider.js";
+import {
+  createCloudWorkspaceInternalRoutes,
+  type CloudWorkspaceInternalSetupService,
+} from "./cloud-workspaces/internal-routes.js";
+import type { CloudWorkspaceAccessService } from "./cloud-workspaces/access.js";
+import type { CloudWorkspaceRepositoryResolver } from "./cloud-workspaces/github-repositories.js";
+import type { DatabaseCloudWorkspaceForkService } from "./cloud-workspaces/forks.js";
+import type { DatabaseCloudWorkspaceReplicaService } from "./cloud-workspaces/replicas.js";
+import type { DatabaseCloudWorkspaceEngineClientAdmissionService } from "./cloud-workspaces/engine-client-admission.js";
 import { createAccountRecoveryRoutes } from "./account-recovery.js";
 import { createDeletionLifecycleRoutes } from "./deletion-lifecycle.js";
 import { createOpsRoutes } from "./ops.js";
@@ -48,28 +57,144 @@ import {
   createSecurityEventRoutes,
 } from "./security-events.js";
 import { createWorkOSManagementEventRoutes } from "./workos-sync-events.js";
+import type { CloudWorkspaceHealth } from "./cloud-workspaces/health.js";
+import type { MigrationStatus } from "./migrate.js";
+
+export type CreateAppDependencies = {
+  cloudWorkspaceInternalSetupService?: CloudWorkspaceInternalSetupService;
+  cloudWorkspaceAccessService?: CloudWorkspaceAccessService;
+  cloudWorkspaceRepositoryResolver?: CloudWorkspaceRepositoryResolver;
+  cloudWorkspaceForkService?: DatabaseCloudWorkspaceForkService;
+  cloudWorkspaceReplicaService?: DatabaseCloudWorkspaceReplicaService;
+  cloudWorkspaceEngineClientAdmissionService?: DatabaseCloudWorkspaceEngineClientAdmissionService;
+  cloudWorkspaceHealthService?: { read(): Promise<CloudWorkspaceHealth> };
+  securityEventBroker?: PostgresSecurityEventBroker;
+  workosProvider?: RailwayWorkOSProvider;
+  migrationStatus?: MigrationStatus;
+};
+
+function isCloudWorkspaceApiPath(requestPath: string): boolean {
+  return (
+    requestPath === "/v1/devices" ||
+    requestPath.startsWith("/v1/devices/") ||
+    requestPath === "/internal/v1/cloud-workspaces" ||
+    requestPath.startsWith("/internal/v1/cloud-workspaces/") ||
+    /^\/v1\/organizations\/[^/]+\/(?:cloud-workspaces|cloud-workspace-management)(?:\/|$)/u.test(
+      requestPath,
+    )
+  );
+}
 
 export function createApp(
   config: Config,
   pool: pg.Pool,
   emailConfig: EmailConfig,
-  runtime: {
-    securityEventBroker?: PostgresSecurityEventBroker;
-    workosProvider?: RailwayWorkOSProvider;
-  } = {},
+  dependencies: CreateAppDependencies = {},
 ): Hono {
   const app = new Hono();
+  const pendingMigration =
+    dependencies.migrationStatus?.state === "controlled_migration_pending"
+      ? dependencies.migrationStatus
+      : null;
+
+  // A deferred 0025 means later cloud columns (starting in 0026) do not exist.
+  // Keep the complete public and internal cloud surface behind one first-in-
+  // chain barrier so neither auth nor a router can touch that partial schema.
+  // Unrelated control-plane APIs remain available for the safe boot mode.
+  if (pendingMigration) {
+    app.use("*", async (c, next) => {
+      if (!isCloudWorkspaceApiPath(c.req.path)) {
+        await next();
+        return;
+      }
+      c.header("Cache-Control", "no-store");
+      c.header("Pragma", "no-cache");
+      return c.json(
+        {
+          error: {
+            code: "controlled_migration_pending",
+            message:
+              "Cloud workspaces are disabled until the pending controlled migration is applied",
+            migration: pendingMigration.migration,
+          },
+        },
+        503,
+      );
+    });
+  }
   const workosProvider =
     config.auth.provider === "workos" && config.workos
-      ? (runtime.workosProvider ??
+      ? (dependencies.workosProvider ??
         new RailwayWorkOSProvider(config.auth, config.workos))
       : undefined;
+
+  // Preview capabilities use an isolated wildcard origin and a dedicated
+  // header, not an interactive account JWT. Let the access service recognize
+  // only its exact host before ordinary API middleware runs; every non-preview
+  // request falls through unchanged.
+  if (dependencies.cloudWorkspaceAccessService) {
+    const previewPreAuthLimit = rateLimit(
+      "cloud-preview-preauth",
+      600,
+      60_000,
+      (c) => {
+        // Railway supplies X-Real-IP. A direct Cloudflare Tunnel strips that
+        // header and supplies CF-Connecting-IP instead, so do not collapse all
+        // protected preview clients into the shared anonymous bucket.
+        const clientIp =
+          c.req.header("X-Real-IP")?.trim() ??
+          c.req.header("CF-Connecting-IP")?.trim() ??
+          "";
+        return isIP(clientIp) ? clientIp : "unknown";
+      },
+    );
+    app.use("*", async (c, next) => {
+      const access = dependencies.cloudWorkspaceAccessService!;
+      if (!access.recognizesPreviewRequest(c.req.raw)) {
+        await next();
+        return;
+      }
+      // Run a no-op continuation through the shared limiter before capability
+      // parsing, PostgreSQL, provider lookup, or upstream body buffering.
+      await previewPreAuthLimit(c, async () => undefined);
+      const proxied = await access.handlePreviewRequest(c.req.raw);
+      if (proxied) return proxied;
+      await next();
+    });
+  }
 
   // Health: no auth (Railway healthcheck), proves DB reachability.
   app.get("/healthz", async (c) => {
     try {
       await pool.query("SELECT 1");
-      return c.json({ ok: true });
+      const migrationState =
+        dependencies.migrationStatus?.state === "controlled_migration_pending"
+          ? { migrations: dependencies.migrationStatus }
+          : {};
+      if (!dependencies.cloudWorkspaceHealthService) {
+        return c.json({ ok: true, ...migrationState });
+      }
+      try {
+        return c.json({
+          ok: true,
+          ...migrationState,
+          cloudWorkspaces:
+            await dependencies.cloudWorkspaceHealthService.read(),
+        });
+      } catch {
+        // Cloud workspaces are an independently gated subsystem. A failed
+        // aggregate query must be visible without crash-looping unrelated
+        // WorkOS, team, invitation, GitHub, and settings APIs.
+        return c.json({
+          ok: true,
+          ...migrationState,
+          cloudWorkspaces: {
+            enabled: true,
+            operationalState: "unknown",
+            reasons: ["health_query_failed"],
+          },
+        });
+      }
     } catch {
       return c.json({ ok: false }, 503);
     }
@@ -92,10 +217,7 @@ export function createApp(
       "/",
       createWorkOSBrowserSessionRoutes(sessions, config.workos.appOrigin),
     );
-    if (
-      config.workos.opsOrigin &&
-      config.deploymentChannel !== "beta"
-    ) {
+    if (config.workos.opsOrigin && config.deploymentChannel !== "beta") {
       const opsSessions = new WorkOSBrowserSessions(
         new PostgresWorkOSBrowserSessionRepository(pool),
         workosProvider,
@@ -105,10 +227,7 @@ export function createApp(
       // its Pages facade forwards only to this separate upstream namespace.
       app.route(
         "/ops",
-        createWorkOSBrowserSessionRoutes(
-          opsSessions,
-          config.workos.opsOrigin,
-        ),
+        createWorkOSBrowserSessionRoutes(opsSessions, config.workos.opsOrigin),
       );
     }
     app.route(
@@ -144,6 +263,37 @@ export function createApp(
     );
   }
 
+  // The sandbox helper and cloud engine authenticate with narrow one-use or
+  // heartbeat capabilities, not an interactive account JWT. Mount this
+  // non-browser surface before `/v1/*` middleware and only when the guarded
+  // setup worker has been configured at boot.
+  if (dependencies.cloudWorkspaceInternalSetupService) {
+    // Reject anonymous capability guessing before JSON buffering, token
+    // parsing, or PostgreSQL work. Railway supplies X-Real-IP; the protected
+    // qualification tunnel supplies CF-Connecting-IP. Prefer Railway's header
+    // when both are present, validate either value, and collapse missing or
+    // attacker-controlled garbage into one bounded bucket.
+    const internalPreAuthLimit = rateLimit(
+      "cloud-workspace-internal-preauth",
+      600,
+      60_000,
+      (c) => {
+        const clientIp =
+          c.req.header("X-Real-IP")?.trim() ??
+          c.req.header("CF-Connecting-IP")?.trim() ??
+          "";
+        return isIP(clientIp) ? clientIp : "unknown";
+      },
+    );
+    app.use("/internal/v1/cloud-workspaces/*", internalPreAuthLimit);
+    app.route(
+      "/",
+      createCloudWorkspaceInternalRoutes(
+        dependencies.cloudWorkspaceInternalSetupService,
+      ),
+    );
+  }
+
   // CORS: the callers are the Electron renderer (localhost dev origin /
   // packaged origin) and later app.zeros.build. Auth is a bearer token —
   // no cookies, nothing ambient — so a wildcard origin with credentials
@@ -152,8 +302,20 @@ export function createApp(
     "/v1/*",
     cors({
       origin: "*",
-      allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-      allowHeaders: ["authorization", "content-type", "idempotency-key"],
+      allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+      allowHeaders: [
+        "authorization",
+        "content-type",
+        "idempotency-key",
+        "x-zeros-access-credential",
+        "x-zeros-device-id",
+        "x-zeros-device-key-version",
+        "x-zeros-device-timestamp",
+        "x-zeros-device-nonce",
+        "x-zeros-device-signature",
+        "x-zeros-export-grant",
+        "x-zeros-replica-grant",
+      ],
       maxAge: 86400,
     }),
   );
@@ -208,9 +370,54 @@ export function createApp(
   // an anonymous caller must not make the service buffer a multi-MiB body.
   const defaultBodyLimit = bodyLimit({ maxSize: 256 * 1024 });
   const feedbackBodyLimit = bodyLimit({ maxSize: 2 * 1024 * 1024 });
-  app.use("/v1/*", (c, next) =>
-    c.req.path === "/v1/feedback" ? next() : defaultBodyLimit(c, next),
-  );
+  const forkImportBodyLimits = {
+    blob: 64 * 1024 * 1024,
+    entries: 8 * 1024 * 1024,
+    records: 16 * 1024 * 1024,
+  } as const;
+  const forkBlobUploadPath =
+    /^\/v1\/organizations\/[0-9a-f-]{36}\/cloud-workspaces\/[0-9a-f-]{36}\/forks\/[0-9a-f-]{36}\/import\/blobs$/i;
+  const forkEntryImportPath =
+    /^\/v1\/organizations\/[0-9a-f-]{36}\/cloud-workspaces\/[0-9a-f-]{36}\/forks\/[0-9a-f-]{36}\/import\/entries$/i;
+  const forkRecordImportPath =
+    /^\/v1\/organizations\/[0-9a-f-]{36}\/cloud-workspaces\/[0-9a-f-]{36}\/forks\/[0-9a-f-]{36}\/import\/records$/i;
+  const forkImportBodyMaximum = (
+    method: string,
+    path: string,
+  ): number | null =>
+    method === "POST" && forkBlobUploadPath.test(path)
+      ? forkImportBodyLimits.blob
+      : method === "PUT" && forkEntryImportPath.test(path)
+        ? forkImportBodyLimits.entries
+        : method === "PUT" && forkRecordImportPath.test(path)
+          ? forkImportBodyLimits.records
+          : null;
+  app.use("/v1/*", async (c, next) => {
+    const forkImportMaximum = forkImportBodyMaximum(c.req.method, c.req.path);
+    if (forkImportMaximum !== null) {
+      // Do not grant an anonymous chunked request a multi-MiB buffering budget.
+      // Desktop callers know the exact body size and bind it in a canonical
+      // Content-Length before authentication or body consumption.
+      const rawLength = c.req.header("content-length") ?? "";
+      if (!/^(?:0|[1-9][0-9]{0,8})$/.test(rawLength)) {
+        throw new HttpError(
+          411,
+          "content_length_required",
+          "Fork imports require an exact Content-Length",
+        );
+      }
+      if (Number(rawLength) > forkImportMaximum) {
+        throw new HttpError(413, "body_too_large", "Request body is too large");
+      }
+      await next();
+      return;
+    }
+    if (c.req.path === "/v1/feedback") {
+      await next();
+      return;
+    }
+    await defaultBodyLimit(c, next);
+  });
 
   // Everything under /v1 requires a verified JWT from the selected provider.
   app.use("/v1/*", createAuthMiddleware(config, pool));
@@ -221,6 +428,14 @@ export function createApp(
   // spam mutations or flood the audit log. Runs AFTER auth so it keys on the
   // verified user id, not the IP.
   app.use("/v1/*", rateLimit("global", 240, 60_000));
+
+  // The larger fork-blob budget is available only after bearer verification
+  // and the global per-user rate limit. The route rechecks exact fork
+  // authority before durable publication.
+  app.use("/v1/*", (c, next) => {
+    const maximum = forkImportBodyMaximum(c.req.method, c.req.path);
+    return maximum === null ? next() : bodyLimit({ maxSize: maximum })(c, next);
+  });
 
   // Feedback can fan out to two paid third-party APIs and accept a larger
   // body, so keep a much tighter per-user ceiling in addition to the blanket
@@ -235,10 +450,7 @@ export function createApp(
   app.route("/", createFeedbackRoutes(config.feedback));
   app.route("/", createAccountRecoveryRoutes(pool));
   app.route("/", createDeletionLifecycleRoutes(pool));
-  if (
-    config.workos?.opsOrigin &&
-    config.deploymentChannel !== "beta"
-  ) {
+  if (config.workos?.opsOrigin && config.deploymentChannel !== "beta") {
     app.route(
       "/",
       createOpsRoutes(
@@ -253,12 +465,21 @@ export function createApp(
     "/",
     createSecurityEventRoutes(
       pool,
-      runtime.securityEventBroker ?? new PostgresSecurityEventBroker(pool),
+      dependencies.securityEventBroker ?? new PostgresSecurityEventBroker(pool),
     ),
   );
   app.route(
     "/",
     createRoutes(pool, emailConfig, config.cloudWorkspaces, {
+      cloudWorkspaceAccessService:
+        dependencies.cloudWorkspaceAccessService ?? null,
+      cloudWorkspaceRepositoryResolver:
+        dependencies.cloudWorkspaceRepositoryResolver ?? null,
+      cloudWorkspaceForkService: dependencies.cloudWorkspaceForkService ?? null,
+      cloudWorkspaceReplicaService:
+        dependencies.cloudWorkspaceReplicaService ?? null,
+      cloudWorkspaceEngineClientAdmissionService:
+        dependencies.cloudWorkspaceEngineClientAdmissionService ?? null,
       workosEnabled: config.auth.provider === "workos",
       ...(workosProvider ? { workosProvider } : {}),
       inviteLinkBase: config.inviteLinkBase,

@@ -7,6 +7,14 @@ import type {
   WorkOSBrowserProvider,
   WorkOSExchange,
 } from "./workos-provider.js";
+import {
+  withWorkOSProviderLocks,
+  WorkOSProviderLockAbortedError,
+  WorkOSProviderLockTimeoutError,
+  workOSProviderErasureFenceStatus,
+  workOSProviderSubjectLockKey,
+  workOSUserProviderLockKey,
+} from "./workos-provider-locks.js";
 
 export const WORKOS_FLOW_COOKIE = "__Host-zeros_auth_flow";
 export const WORKOS_SESSION_COOKIE = "__Host-zeros_session";
@@ -54,7 +62,7 @@ export interface WorkOSBrowserSessionRepository {
   promoteFlow(
     credentialHash: Buffer,
     record: WorkOSSessionRecord,
-  ): Promise<boolean>;
+  ): Promise<WorkOSFlowPromotionResult>;
   deleteFlow(credentialHash: Buffer): Promise<void>;
   readSession(credentialHash: Buffer): Promise<WorkOSSessionRecord | null>;
   withLockedSession<T>(
@@ -62,6 +70,12 @@ export interface WorkOSBrowserSessionRepository {
     operation: (session: LockedWorkOSSession) => Promise<T>,
   ): Promise<T>;
 }
+
+export type WorkOSFlowPromotionResult =
+  | "promoted"
+  | "missing"
+  | "account_deleted"
+  | "authentication_temporarily_unavailable";
 
 type SessionRow = {
   sealed_session: string;
@@ -87,6 +101,77 @@ function sessionFromRow(row: SessionRow): WorkOSSessionRecord {
     revision: Number(row.revision),
     updatedAt: row.updated_at.getTime(),
   };
+}
+
+async function promotionTargetUserIds(
+  tx: Tx,
+  record: WorkOSSessionRecord,
+): Promise<string[]> {
+  const targets = await tx.query<{ user_id: string }>(
+    `SELECT user_id FROM user_identities
+     WHERE provider = 'workos' AND provider_sub = $1
+     UNION
+     SELECT id AS user_id FROM users WHERE email = $2::citext
+     UNION
+     SELECT target_user_id AS user_id FROM account_recovery_requests
+     WHERE candidate_provider_sub = $1 AND state = 'pending'
+     UNION
+     SELECT user_id FROM auth_sessions
+     WHERE provider = 'workos' AND provider_sub = $1
+       AND user_id IS NOT NULL
+     UNION
+     SELECT account_user_id AS user_id FROM workos_browser_sessions
+     WHERE kind = 'session' AND provider_sub = $1
+       AND account_user_id IS NOT NULL`,
+    [record.providerSubject, record.email],
+  );
+  return targets.rows.map((row) => row.user_id).sort();
+}
+
+async function promotionAccountBinding(
+  tx: Tx,
+  record: WorkOSSessionRecord,
+): Promise<{ userId: string; revision: number } | null> {
+  const binding = await tx.query<{
+    user_id: string;
+    auth_revision: string | number;
+  }>(
+    `WITH candidates AS (
+       SELECT identity.user_id, 0 AS priority
+       FROM user_identities identity
+       WHERE identity.provider = 'workos' AND identity.provider_sub = $1
+       UNION ALL
+       SELECT recovery.target_user_id, 1 AS priority
+       FROM account_recovery_requests recovery
+       WHERE recovery.candidate_provider_sub = $1
+         AND recovery.state = 'pending'
+       UNION ALL
+       SELECT account.id, 2 AS priority
+       FROM users account WHERE account.email = $2::citext
+     )
+     SELECT candidate.user_id, account.auth_revision
+     FROM candidates candidate
+     JOIN users account ON account.id = candidate.user_id
+     ORDER BY candidate.priority, candidate.user_id
+     LIMIT 1`,
+    [record.providerSubject, record.email],
+  );
+  return binding.rows[0]
+    ? {
+        userId: binding.rows[0].user_id,
+        revision: Number(binding.rows[0].auth_revision),
+      }
+    : null;
+}
+
+async function eraseBrowserCredential(
+  tx: Tx,
+  credentialHash: Buffer,
+): Promise<void> {
+  await tx.query(
+    `DELETE FROM workos_browser_sessions WHERE credential_hash = $1`,
+    [credentialHash],
+  );
 }
 
 async function replaceSession(
@@ -191,34 +276,148 @@ export class PostgresWorkOSBrowserSessionRepository implements WorkOSBrowserSess
   async promoteFlow(
     credentialHash: Buffer,
     record: WorkOSSessionRecord,
-  ): Promise<boolean> {
-    return withSystemTx(this.pool, async (tx) => {
-      const promoted = await tx.query(
-        `UPDATE workos_browser_sessions
-         SET kind = 'session', oauth_state_hash = NULL, pkce_verifier = NULL,
-             return_path = NULL, redirect_uri = NULL, claimed_at = NULL,
-             sealed_session = $2, provider_session_id = $3,
-             provider_sub = $4, email = $5, display_name = $6,
-             access_token_expires_at = to_timestamp($7 / 1000.0),
-             expires_at = to_timestamp($8 / 1000.0), revision = $9,
-             updated_at = to_timestamp($10 / 1000.0)
-         WHERE credential_hash = $1 AND kind = 'flow'
-           AND claimed_at IS NOT NULL`,
-        [
-          credentialHash,
-          record.sealedSession,
-          record.providerSessionId,
-          record.providerSubject,
-          record.email,
-          record.displayName,
-          record.accessTokenExpiresAt,
-          record.expiresAt,
-          record.revision,
-          record.updatedAt,
-        ],
+  ): Promise<WorkOSFlowPromotionResult> {
+    let targetUserIds = await withSystemTx(this.pool, (tx) =>
+      promotionTargetUserIds(tx, record),
+    );
+    for (;;) {
+      const lockKeys = [
+        workOSProviderSubjectLockKey({
+          kind: "user",
+          id: record.providerSubject,
+        }),
+        ...targetUserIds.map(workOSUserProviderLockKey),
+      ];
+      const result = await withWorkOSProviderLocks(this.pool, lockKeys, () =>
+        withSystemTx(this.pool, async (tx) => {
+          const currentTargetUserIds = await promotionTargetUserIds(tx, record);
+          const missingTargetUserIds = currentTargetUserIds.filter(
+            (userId) => !targetUserIds.includes(userId),
+          );
+          if (missingTargetUserIds.length > 0) {
+            return {
+              kind: "retry" as const,
+              targetUserIds: missingTargetUserIds,
+            };
+          }
+
+          const fenceStatus = await workOSProviderErasureFenceStatus(tx, [
+            { kind: "user", id: record.providerSubject },
+          ]);
+          if (fenceStatus === "fenced") {
+            await eraseBrowserCredential(tx, credentialHash);
+            return {
+              kind: "done" as const,
+              status: "account_deleted" as const,
+            };
+          }
+          if (fenceStatus === "not_ready") {
+            await eraseBrowserCredential(tx, credentialHash);
+            return {
+              kind: "done" as const,
+              status: "authentication_temporarily_unavailable" as const,
+            };
+          }
+
+          if (targetUserIds.length > 0) {
+            const targets = await tx.query<{
+              auth_status: string;
+              deletion_request_id: string | null;
+            }>(
+              `SELECT account.auth_status, account.deletion_request_id
+                 FROM users account
+                 WHERE account.id = ANY($1::uuid[])
+                 FOR UPDATE`,
+              [targetUserIds],
+            );
+            const deletionRequestIds = targets.rows.flatMap((target) =>
+              target.deletion_request_id ? [target.deletion_request_id] : [],
+            );
+            const deletionRequests =
+              deletionRequestIds.length > 0
+                ? await tx.query<{ id: string; state: string }>(
+                    `SELECT id, state FROM deletion_requests
+                       WHERE id = ANY($1::uuid[])
+                       FOR UPDATE`,
+                    [deletionRequestIds],
+                  )
+                : { rows: [] };
+            const deletionStates = new Map(
+              deletionRequests.rows.map((request) => [
+                request.id,
+                request.state,
+              ]),
+            );
+            const deleting = targets.rows.some(
+              (target) =>
+                target.auth_status === "deleted" ||
+                (target.auth_status === "deletion_pending" &&
+                  (!target.deletion_request_id ||
+                    deletionStates.get(target.deletion_request_id) !==
+                      "scheduled")),
+            );
+            if (deleting) {
+              await eraseBrowserCredential(tx, credentialHash);
+              return {
+                kind: "done" as const,
+                status: "account_deleted" as const,
+              };
+            }
+          }
+
+          const accountBinding = await promotionAccountBinding(tx, record);
+          if (
+            accountBinding &&
+            !targetUserIds.includes(accountBinding.userId)
+          ) {
+            return {
+              kind: "retry" as const,
+              targetUserIds: [accountBinding.userId],
+            };
+          }
+
+          const promoted = await tx.query(
+            `UPDATE workos_browser_sessions
+               SET kind = 'session', oauth_state_hash = NULL,
+                   pkce_verifier = NULL, return_path = NULL,
+                   redirect_uri = NULL, claimed_at = NULL,
+                   sealed_session = $2, provider_session_id = $3,
+                   provider_sub = $4, email = $5, display_name = $6,
+                   access_token_expires_at = to_timestamp($7 / 1000.0),
+                   expires_at = to_timestamp($8 / 1000.0), revision = $9,
+                   updated_at = to_timestamp($10 / 1000.0),
+                   account_user_id = $11, account_revision = $12
+               WHERE credential_hash = $1 AND kind = 'flow'
+                 AND claimed_at IS NOT NULL`,
+            [
+              credentialHash,
+              record.sealedSession,
+              record.providerSessionId,
+              record.providerSubject,
+              record.email,
+              record.displayName,
+              record.accessTokenExpiresAt,
+              record.expiresAt,
+              record.revision,
+              record.updatedAt,
+              accountBinding?.userId ?? null,
+              accountBinding?.revision ?? null,
+            ],
+          );
+          return {
+            kind: "done" as const,
+            status:
+              (promoted.rowCount ?? 0) === 1
+                ? ("promoted" as const)
+                : ("missing" as const),
+          };
+        }),
       );
-      return (promoted.rowCount ?? 0) === 1;
-    });
+      if (result.kind === "done") return result.status;
+      targetUserIds = Array.from(
+        new Set([...targetUserIds, ...result.targetUserIds]),
+      ).sort();
+    }
   }
 
   async deleteFlow(credentialHash: Buffer): Promise<void> {
@@ -476,20 +675,41 @@ export class WorkOSBrowserSessions {
       await this.provider.revokeSession(exchange.sessionId).catch(() => {});
       return { ok: false, reason: "email_unverified" };
     }
-    const promoted = await this.repository.promoteFlow(credentialHash, {
-      sealedSession: exchange.sealedSession,
-      providerSessionId: exchange.sessionId,
-      providerSubject: exchange.user.id,
-      email: exchange.user.email.toLowerCase(),
-      displayName: exchange.user.name,
-      accessTokenExpiresAt: exchange.accessTokenExpiresAt,
-      expiresAt: now + WORKOS_SESSION_TTL_S * 1_000,
-      revision: 1,
-      updatedAt: now,
-    });
-    if (!promoted) {
+    let promotion: WorkOSFlowPromotionResult;
+    try {
+      promotion = await this.repository.promoteFlow(credentialHash, {
+        sealedSession: exchange.sealedSession,
+        providerSessionId: exchange.sessionId,
+        providerSubject: exchange.user.id,
+        email: exchange.user.email.toLowerCase(),
+        displayName: exchange.user.name,
+        accessTokenExpiresAt: exchange.accessTokenExpiresAt,
+        expiresAt: now + WORKOS_SESSION_TTL_S * 1_000,
+        revision: 1,
+        updatedAt: now,
+      });
+    } catch (error) {
+      if (
+        !(
+          error instanceof WorkOSProviderLockTimeoutError ||
+          error instanceof WorkOSProviderLockAbortedError
+        )
+      ) {
+        throw error;
+      }
+      await this.repository.deleteFlow(credentialHash);
       await this.provider.revokeSession(exchange.sessionId).catch(() => {});
-      return { ok: false, reason: "exchange_failed" };
+      return {
+        ok: false,
+        reason: "authentication_temporarily_unavailable",
+      };
+    }
+    if (promotion !== "promoted") {
+      await this.provider.revokeSession(exchange.sessionId).catch(() => {});
+      return {
+        ok: false,
+        reason: promotion === "missing" ? "exchange_failed" : promotion,
+      };
     }
     return { ok: true, returnPath: flow.returnPath };
   }
@@ -937,10 +1157,7 @@ export function createWorkOSBrowserSessionRoutes(
     );
     appendFlowCleanup(completed.headers);
     completed.headers.append("set-cookie", expireCookie("zeros_session"));
-    completed.headers.append(
-      "set-cookie",
-      expireCookie("zeros_session", true),
-    );
+    completed.headers.append("set-cookie", expireCookie("zeros_session", true));
     return completed;
   });
 
