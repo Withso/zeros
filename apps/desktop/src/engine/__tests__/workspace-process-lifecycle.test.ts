@@ -1310,7 +1310,7 @@ describe("qualified cloud workspace authority", () => {
     expect(handle).toHaveBeenCalledWith(
       "design.frames",
       { workspaceId: "ws_outer" },
-      { remote: false },
+      { hostLocalResources: false, remote: false },
     );
     expect(remote.send).toHaveBeenCalledWith(
       expect.objectContaining({
