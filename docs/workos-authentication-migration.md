@@ -663,14 +663,26 @@ Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
 values: provider, app origin, desktop client ID, issuer, JWKS URL, and audience.
 
 Local `pnpm electron:dev` is a fourth desktop scheme, not a fourth data
-environment. It loads the reviewed public values from the gitignored
-`.env.development.local` and must use the Alpha app origin, API/audience,
+environment. Every checkout loads the same user-level public profile from
+`~/.zeros-dev/auth/alpha.env`. The launcher ignores checkout-local auth files
+and injects the shared values with process-level precedence, which prevents an
+old worktree from pinning a stale client ID after rotation; explicit shell
+values may override one run and have final precedence. Provision the profile
+owner-only (`0600`). Its effective values must use the Alpha app origin,
+API/audience,
 Desktop Application client ID, and Web Application issuer/JWKS pair atomically.
-Alpha Pages alone accepts both `zeros-alpha://` and `zeros-dev://` returns;
-Beta and Production continue to accept only their exact release scheme. A
-missing, partial, legacy-Auth0, or non-Alpha Dev profile fails before opening a
-browser and never falls back to the retired ticket handoff. Never place
-`WORKOS_API_KEY` or any WorkOS management credential in the local profile.
+Zeros terminals remove the parent app's public auth selectors from their child
+environment, so a nested Dev launch reloads this profile instead of inheriting
+stale Alpha or release-channel values; an operator can still export an explicit
+override after the terminal starts.
+
+The launcher validates that boundary before starting the stack and Electron
+main validates it again before any browser handoff. Alpha Pages alone accepts
+both `zeros-alpha://` and `zeros-dev://` returns; Beta and Production continue
+to accept only their exact release scheme. A missing profile disables sign-in;
+a partial, legacy-Auth0, or non-Alpha profile is rejected and never falls back
+to the retired ticket handoff. Never place `WORKOS_API_KEY` or any WorkOS
+management credential in the profile or a desktop launch environment.
 
 ## Rollout and rollback
 

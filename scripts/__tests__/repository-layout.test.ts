@@ -22,13 +22,18 @@ function sourceFiles(root: string): string[] {
 }
 
 describe("repository layout contracts", () => {
-  it("loads the ignored public Dev auth profile before launching Electron", () => {
+  it("loads one shared public Dev auth profile before launching Electron", () => {
     const launcher = read("scripts/dev-instance.mjs");
+    const profile = read("scripts/dev-auth-profile.mjs");
 
-    expect(launcher).toContain('import { loadEnv } from "vite"');
-    expect(launcher).toContain("DEV_AUTH_ENV_KEYS");
+    expect(launcher).toContain(
+      'import { loadDevAuthEnvironment } from "./dev-auth-profile.mjs"',
+    );
+    expect(profile).toContain('".zeros-dev", "auth", "alpha.env"');
+    expect(profile).toContain("DEV_AUTH_ENV_KEYS");
+    expect(profile).not.toContain('".env.development.local"');
     expect(launcher).toMatch(
-      /const env = \{\s+\.\.\.localDevAuthEnv,\s+\.\.\.process\.env,/,
+      /const env = \{\s+\.\.\.process\.env,(?:.|\n)*?\.\.\.devAuth\.env,/,
     );
   });
 

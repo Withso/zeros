@@ -174,6 +174,38 @@ describe("buildPtyEnv sheds the dev-instance identity", () => {
     expect(env.ZEROS_TERMINAL).toBe("1");
   });
 
+  it("drops inherited desktop auth selectors so nested Dev reloads the shared profile", () => {
+    const parentAuth = {
+      AUTH_PROVIDER: "workos",
+      AUTH_DESKTOP_CLIENT_ID: "client_parent_desktop",
+      AUTH_ISSUER: "https://api.workos.com/user_management/client_parent_web",
+      AUTH_JWKS_URL: "https://api.workos.com/sso/jwks/client_parent_web",
+      AUTH_AUDIENCE: "https://api.zeros.build",
+      VITE_APP_BASE_URL: "https://app.zeros.build",
+      VITE_CONTROL_PLANE_URL: "https://api.zeros.build",
+      ZEROS_AUTH_PROVIDER: "workos",
+    };
+    const previousAuth = Object.fromEntries(
+      Object.keys(parentAuth).map((key) => [key, process.env[key]]),
+    );
+    Object.assign(process.env, parentAuth);
+    try {
+      for (const env of [buildPtyEnv(), buildPtyEnv({ scrub: true })]) {
+        for (const key of Object.keys(parentAuth)) {
+          expect(
+            env[key],
+            `${key} belongs to the parent app — nested Dev must reload ~/.zeros-dev/auth/alpha.env`,
+          ).toBeUndefined();
+        }
+      }
+    } finally {
+      for (const [key, value] of Object.entries(previousAuth)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
+
   // The channel is the COARSER half of the same identity, and it leaks from a
   // build the instance vars never touch: apps/desktop/electron/main.ts seeds ZEROS_CHANNEL at
   // boot on every channel, so a PACKAGED app hands every terminal it opens
