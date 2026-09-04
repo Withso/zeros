@@ -29,7 +29,10 @@ export function exportedIntegerConstant(source, name) {
   const normalized = protocolSourceSignature(source);
   return (
     normalized.match(
-      new RegExp(`^export const ${name}\\s*=\\s*(\\d+)\\b`, "mu"),
+      new RegExp(
+        `^export const ${name}\\s*=\\s*(\\d+)\\s*(?:as\\s+const\\s*)?;`,
+        "mu",
+      ),
     )?.[1] ?? null
   );
 }

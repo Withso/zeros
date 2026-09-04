@@ -363,6 +363,9 @@ d("schema + signup transaction", () => {
 
     const first = ensureUser(authPool, firstInput);
     let second: ReturnType<typeof ensureUser> | null = null;
+    let settlements: PromiseSettledResult<
+      Awaited<ReturnType<typeof ensureUser>>
+    >[] = [];
     try {
       let observedBlockedTransaction = false;
       for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -396,9 +399,15 @@ d("schema + signup transaction", () => {
         [`email:${firstInput.email.toLowerCase()}`],
       );
       blocker.release();
-      await Promise.allSettled(second ? [first, second] : [first]);
+      settlements = await Promise.allSettled(
+        second ? [first, second] : [first],
+      );
       await authPool.end();
     }
+    expect(settlements).toHaveLength(2);
+    expect(settlements.every(({ status }) => status === "fulfilled")).toBe(
+      true,
+    );
   });
 
   it("stores and returns the organization logo data URL", async () => {

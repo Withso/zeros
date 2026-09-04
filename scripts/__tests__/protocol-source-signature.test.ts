@@ -59,4 +59,13 @@ describe("protocolSourceSignature", () => {
       ),
     ).toBe("14");
   });
+
+  it("rejects a fractional protocol version instead of truncating it", () => {
+    expect(
+      exportedIntegerConstant(
+        "export const CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION = 14.5 as const;",
+        "CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION",
+      ),
+    ).toBeNull();
+  });
 });

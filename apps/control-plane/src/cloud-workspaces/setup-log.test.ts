@@ -17,15 +17,17 @@ describe("cloud workspace setup log boundary", () => {
     const maximum = 256 * 1024;
     const input = `${"a".repeat(maximum - 20)}${"é".repeat(30)}`;
     const from = vi.spyOn(Buffer, "from");
+    try {
+      const result = boundedCloudWorkspaceSetupLog(input);
 
-    const result = boundedCloudWorkspaceSetupLog(input);
-
-    expect(from).toHaveBeenCalledTimes(1);
-    from.mockRestore();
-    expect(Buffer.byteLength(result.value, "utf8")).toBeLessThanOrEqual(
-      maximum,
-    );
-    expect(result.value.endsWith("é")).toBe(true);
-    expect(result.truncated).toBe(true);
+      expect(from).toHaveBeenCalledTimes(1);
+      expect(Buffer.byteLength(result.value, "utf8")).toBeLessThanOrEqual(
+        maximum,
+      );
+      expect(result.value.endsWith("é")).toBe(true);
+      expect(result.truncated).toBe(true);
+    } finally {
+      from.mockRestore();
+    }
   });
 });

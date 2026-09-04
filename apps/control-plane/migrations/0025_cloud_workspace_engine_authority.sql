@@ -17,6 +17,12 @@
 -- the duration of this forward migration.
 LOCK TABLE cloud_workspaces IN EXCLUSIVE MODE;
 
+-- Service boot may install 0023 before it reaches this controlled boundary.
+-- New lifecycle intents were enforced immediately there, while the potentially
+-- blocking scan of existing rows is deliberately deferred to this downtime.
+ALTER TABLE cloud_workspace_lifecycle_intents
+  VALIDATE CONSTRAINT cloud_workspace_lifecycle_intents_transition_fkey;
+
 ALTER TABLE cloud_workspace_engine_instances
   ADD COLUMN repository_refresh_generation text CHECK (
     repository_refresh_generation IS NULL

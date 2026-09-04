@@ -354,6 +354,33 @@ d("migration ladder", () => {
     }
   });
 
+  it("defers the 0023 lifecycle-intent foreign-key scan to controlled 0025", async () => {
+    const boundaryIndex = LADDER.indexOf(
+      "0025_cloud_workspace_engine_authority.sql",
+    );
+    expect(boundaryIndex).toBeGreaterThan(0);
+    await applyThrough(boundaryIndex);
+
+    await expect(
+      pool.query<{ validated: boolean }>(
+        `SELECT convalidated AS validated
+         FROM pg_constraint
+         WHERE conname =
+           'cloud_workspace_lifecycle_intents_transition_fkey'`,
+      ),
+    ).resolves.toMatchObject({ rows: [{ validated: false }] });
+
+    await applyAndRecord(LADDER[boundaryIndex]!);
+    await expect(
+      pool.query<{ validated: boolean }>(
+        `SELECT convalidated AS validated
+         FROM pg_constraint
+         WHERE conname =
+           'cloud_workspace_lifecycle_intents_transition_fkey'`,
+      ),
+    ).resolves.toMatchObject({ rows: [{ validated: true }] });
+  });
+
   it("upgrades case-aliased repository identities without leaving an unmatched workspace", async () => {
     const identityIndex = LADDER.indexOf(
       "0026_cloud_workspace_identity_and_entitlements.sql",

@@ -148,7 +148,7 @@ ALTER TABLE cloud_workspace_lifecycle_intents
   ADD CONSTRAINT cloud_workspace_lifecycle_intents_transition_fkey
     FOREIGN KEY (generation_transition_id, workspace_id, org_id)
     REFERENCES cloud_workspace_generation_transitions(id, workspace_id, org_id)
-    ON DELETE NO ACTION;
+    ON DELETE NO ACTION NOT VALID;
 
 ALTER TABLE cloud_workspace_generation_transitions ENABLE ROW LEVEL SECURITY;
 
