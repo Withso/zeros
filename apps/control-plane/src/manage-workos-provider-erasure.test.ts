@@ -16,7 +16,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
 
 const baseInput = (overrides: Record<string, unknown> = {}) => ({
-  databaseUrl: "postgres://operator:secret@db.example.test:5432/zeros",
+  databaseUrl: "postgres://operator:secret@127.0.0.1:5432/zeros",
   channel: "alpha",
   railwayEnvironmentName: "alpha",
   execute: false,
