@@ -29,6 +29,241 @@ d("reviewed WorkOS account recovery", () => {
     await pool.end();
   });
 
+  it("requires reviewed migration from an active Auth0 identity to WorkOS and projects retained memberships", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const legacySubject = `github|${suffix}`;
+    const workosSubject = `user_migrated_${suffix}`;
+    const email = `legacy-migration-${suffix}@example.test`;
+    const now = Math.floor(Date.now() / 1_000);
+    const original = await ensureUser(pool, {
+      provider: "auth0",
+      providerSubject: legacySubject,
+      email,
+      displayName: "Legacy Migration Target",
+    });
+    const organization = await pool.query<{ id: string }>(
+      `INSERT INTO organizations (
+         slug, name, created_by, is_personal, cloud_workspaces_allowed
+       ) VALUES ($1, 'Legacy Organization', $2, false, true)
+       RETURNING id`,
+      [`legacy-migration-${suffix}`, original.id],
+    );
+    const organizationId = organization.rows[0]!.id;
+    await pool.query(
+      `INSERT INTO organization_members (org_id, user_id, role)
+       VALUES ($1, $2, 'owner')`,
+      [organizationId, original.id],
+    );
+    await pool.query(
+      `INSERT INTO workos_organization_links (
+         organization_id, workos_organization_id, external_id, state
+       ) VALUES ($1::uuid, $2, $1::uuid::text, 'active')`,
+      [organizationId, `org_legacy_${suffix}`],
+    );
+
+    const candidateInput = {
+      provider: "workos" as const,
+      providerSubject: workosSubject,
+      email,
+      displayName: "Legacy Migration Target",
+      session: {
+        id: `session_legacy_candidate_${suffix}`,
+        clientKind: "web" as const,
+        authTime: now,
+        tokenExpiresAt: now + 300,
+      },
+    };
+    let recoveryCode = "";
+    await expect(ensureUser(pool, candidateInput)).rejects.toSatisfy(
+      (error: unknown) => {
+        const candidate = error as {
+          status?: number;
+          code?: string;
+          details?: { recoveryCode?: string };
+        };
+        recoveryCode = candidate.details?.recoveryCode ?? "";
+        return (
+          candidate.status === 409 &&
+          candidate.code === "account_recovery_required" &&
+          /^ZR-[A-Z2-9]{4}-[A-Z2-9]{4}$/.test(recoveryCode)
+        );
+      },
+    );
+
+    const owner = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_legacy_owner_${suffix}`,
+      email: `legacy-owner-${suffix}@example.test`,
+      displayName: "Platform Owner",
+    });
+    await pool.query(
+      `UPDATE users SET staff_role = 'platform_owner' WHERE id = $1`,
+      [owner.id],
+    );
+    const interveningWorkOSSubject = `user_intervening_${suffix}`;
+    const interveningIdentity = await pool.query<{ id: string }>(
+      `INSERT INTO user_identities (
+         user_id, provider, provider_sub, status, email_at_link,
+         email_verified_at, linked_via
+       ) VALUES ($1, 'workos', $2, 'active', $3, now(), 'operator_recovery')
+       RETURNING id`,
+      [original.id, interveningWorkOSSubject, email],
+    );
+    await expect(
+      approveAccountRecovery(
+        pool,
+        {
+          operator: {
+            ...owner,
+            staffRole: "platform_owner",
+            authentication: {
+              sessionId: `session_legacy_owner_${suffix}`,
+              clientKind: "web",
+              authTime: now,
+              tokenExpiresAt: now + 300,
+            },
+          },
+          publicCode: recoveryCode,
+        },
+        {
+          supportCaseReference: "CASE-LEGACY-MIGRATION-CONFLICT",
+          ownershipVerification: "confirmed_out_of_band",
+        },
+      ),
+    ).rejects.toMatchObject({
+      status: 409,
+      code: "recovery_state_changed",
+    });
+    await pool.query(`DELETE FROM user_identities WHERE id = $1`, [
+      interveningIdentity.rows[0]!.id,
+    ]);
+    await expect(
+      approveAccountRecovery(
+        pool,
+        {
+          operator: {
+            ...owner,
+            staffRole: "platform_owner",
+            authentication: {
+              sessionId: `session_legacy_owner_${suffix}`,
+              clientKind: "web",
+              authTime: now,
+              tokenExpiresAt: now + 300,
+            },
+          },
+          publicCode: recoveryCode,
+        },
+        {
+          supportCaseReference: "CASE-LEGACY-MIGRATION-1001",
+          ownershipVerification: "confirmed_out_of_band",
+        },
+      ),
+    ).resolves.toEqual({ accountId: original.id, state: "consumed" });
+
+    const resolved = await ensureUser(pool, candidateInput);
+    expect(resolved.id).toBe(original.id);
+    await expect(
+      pool.query(
+        `SELECT u.auth_status, u.auth_revision,
+                om.workos_membership_id, om.workos_sync_revision
+         FROM users u
+         JOIN organization_members om
+           ON om.user_id = u.id AND om.org_id = $2
+         WHERE u.id = $1`,
+        [original.id, organizationId],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          auth_status: "active",
+          auth_revision: "2",
+          workos_membership_id: null,
+          workos_sync_revision: "2",
+        },
+      ],
+    });
+    await expect(
+      pool.query(
+        `SELECT provider, provider_sub, status, linked_via
+         FROM user_identities WHERE user_id = $1 ORDER BY created_at, id`,
+        [original.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          provider: "auth0",
+          provider_sub: legacySubject,
+          status: "superseded",
+          linked_via: "jit",
+        },
+        {
+          provider: "workos",
+          provider_sub: workosSubject,
+          status: "active",
+          linked_via: "operator_recovery",
+        },
+      ],
+    });
+    await expect(
+      pool.query(
+        `SELECT operation, payload->>'workosUserId' AS workos_user_id
+         FROM workos_command_outbox
+         WHERE operation = 'membership.create'
+           AND organization_id = $1 AND user_id = $2`,
+        [organizationId, original.id],
+      ),
+    ).resolves.toMatchObject({
+      rows: [
+        {
+          operation: "membership.create",
+          workos_user_id: workosSubject,
+        },
+      ],
+    });
+  });
+
+  it("does not offer legacy migration when an active WorkOS identity already exists", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const email = `already-migrated-${suffix}@example.test`;
+    const original = await ensureUser(pool, {
+      provider: "auth0",
+      providerSubject: `github|${suffix}`,
+      email,
+      displayName: "Already Migrated",
+    });
+    await pool.query(
+      `INSERT INTO user_identities (
+         user_id, provider, provider_sub, status, email_at_link,
+         email_verified_at, linked_via
+       ) VALUES ($1, 'workos', $2, 'active', $3, now(), 'operator_recovery')`,
+      [original.id, `user_existing_${suffix}`, email],
+    );
+
+    const now = Math.floor(Date.now() / 1_000);
+    await expect(
+      ensureUser(pool, {
+        provider: "workos",
+        providerSubject: `user_different_${suffix}`,
+        email,
+        displayName: "Already Migrated",
+        session: {
+          id: `session_already_migrated_${suffix}`,
+          clientKind: "web",
+          authTime: now,
+          tokenExpiresAt: now + 300,
+        },
+      }),
+    ).rejects.toMatchObject({ status: 409, code: "account_exists" });
+    await expect(
+      pool.query(
+        `SELECT count(*)::int AS count
+         FROM account_recovery_requests
+         WHERE target_user_id = $1 AND state = 'pending'`,
+        [original.id],
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 0 }] });
+  });
+
   it("requires fresh candidate and operator authentication, then atomically supersedes identity without restoring collaboration", async () => {
     const suffix = randomUUID().replaceAll("-", "");
     const oldSubject = `user_old_${suffix}`;
