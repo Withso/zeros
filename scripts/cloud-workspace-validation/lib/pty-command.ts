@@ -7,6 +7,11 @@ export type PtyCommandClient = Pick<
   "onPtyData" | "ptyCreate" | "ptyWrite"
 >;
 
+function markerPrintCommand(marker: string): string {
+  const split = Math.ceil(marker.length / 2);
+  return `printf '\\n%s%s\\n' '${marker.slice(0, split)}' '${marker.slice(split)}'`;
+}
+
 export async function runPtyCommand(
   client: PtyCommandClient,
   workspaceId: string,
@@ -15,6 +20,8 @@ export async function runPtyCommand(
   const sessionId = `validation-command-${randomUUID().slice(0, 8)}`;
   const success = `ZEROS_COMMAND_OK_${randomUUID().replaceAll("-", "")}`;
   const failed = `ZEROS_COMMAND_FAILED_${randomUUID().replaceAll("-", "")}`;
+  const printSuccess = markerPrintCommand(success);
+  const printFailure = markerPrintCommand(failed);
   await client.ptyCreate({ sessionId, cwd: workspaceId, ephemeral: true });
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(
@@ -36,7 +43,7 @@ export async function runPtyCommand(
     try {
       client.ptyWrite(
         sessionId,
-        `${command} && printf '\\n${success}\\n' || printf '\\n${failed}\\n'\n`,
+        `${command} && ${printSuccess} || ${printFailure}\n`,
       );
     } catch (error) {
       clearTimeout(timer);
