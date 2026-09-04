@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -755,6 +755,113 @@ describe("WorkspaceService", () => {
       // lint / render-identity pass owned this concurrent cold generation.
       expect(first.snapshot).toBe(second.snapshot);
     } finally {
+      await svc.handle("workspace.delete", {
+        workspaceId: design.workspaceId,
+        includeBranch: true,
+      });
+    }
+  });
+
+  it("does not share an in-flight snapshot across an active Design directory change", async () => {
+    execFileSync("git", ["config", "user.email", "t@t"], { cwd: dir });
+    execFileSync("git", ["config", "user.name", "t"], { cwd: dir });
+    execFileSync("git", ["add", "hello.txt"], { cwd: dir });
+    execFileSync("git", ["commit", "-q", "-m", "init"], { cwd: dir });
+    const design = await createWorkspace({
+      repoRoot: dir,
+      repoSlug: "design-snapshot-directory-flight",
+      kind: "design",
+    });
+    const originalDirectory = designDirectoryNameFor(design.path);
+    const alternateDirectory = "Alternate Design";
+    const setDirectory = (directory: string) =>
+      svc.handle("settings.write", {
+        layer: "workspace-local",
+        repoRoot: design.path,
+        patch: { design: { directory } },
+        confirmDesignDirectoryChange: true,
+      });
+
+    try {
+      const originalFrame = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "Original directory frame",
+      })) as { frame: { file: string } };
+      fs.cpSync(
+        path.join(design.path, originalDirectory),
+        path.join(design.path, alternateDirectory),
+        { recursive: true },
+      );
+      execFileSync(
+        "git",
+        ["add", "-f", "--", originalDirectory, alternateDirectory],
+        { cwd: design.path },
+      );
+      execFileSync("git", ["commit", "-q", "-m", "add alternate design"], {
+        cwd: design.path,
+      });
+
+      await setDirectory(alternateDirectory);
+      const alternateFrame = (await svc.handle("design.frame.create", {
+        workspaceId: design.workspaceId,
+        title: "Alternate directory frame",
+      })) as { frame: { file: string } };
+      await setDirectory(originalDirectory);
+
+      const original = (await svc.handle("design.snapshot", {
+        workspaceId: design.workspaceId,
+      })) as { snapshot: { frames: Array<{ file: string }> } };
+      const internals = svc as unknown as {
+        designSnapshotFlights: Map<string, Promise<typeof original.snapshot>>;
+      };
+      let releaseOriginal!: () => void;
+      const blockedOriginal = new Promise<typeof original.snapshot>(
+        (resolve) => {
+          releaseOriginal = () => resolve(original.snapshot);
+        },
+      );
+      const baseKey = `${design.workspaceId}\u0000${path.resolve(design.path)}\u0000write`;
+      // Seed both the historical key and the directory-aware key so this test
+      // exercises the same blocked lower flight before and after the fix.
+      internals.designSnapshotFlights.set(baseKey, blockedOriginal);
+      internals.designSnapshotFlights.set(
+        `${baseKey}\u0000${originalDirectory}`,
+        blockedOriginal,
+      );
+      const getFlight = vi.spyOn(internals.designSnapshotFlights, "get");
+
+      const oldRequest = svc.handle("design.snapshot", {
+        workspaceId: design.workspaceId,
+      }) as Promise<typeof original>;
+      await vi.waitFor(() => expect(getFlight).toHaveBeenCalledTimes(1));
+
+      await setDirectory(alternateDirectory);
+      const newRequest = svc.handle("design.snapshot", {
+        workspaceId: design.workspaceId,
+      }) as Promise<typeof original>;
+      await vi.waitFor(() =>
+        expect(getFlight.mock.calls.length).toBeGreaterThanOrEqual(2),
+      );
+      releaseOriginal();
+
+      const [oldResult, newResult] = await Promise.all([
+        oldRequest,
+        newRequest,
+      ]);
+      expect(oldResult.snapshot.frames.map((frame) => frame.file)).toContain(
+        originalFrame.frame.file,
+      );
+      expect(
+        oldResult.snapshot.frames.map((frame) => frame.file),
+      ).not.toContain(alternateFrame.frame.file);
+      expect(newResult.snapshot.frames.map((frame) => frame.file)).toContain(
+        alternateFrame.frame.file,
+      );
+    } finally {
+      const flights = (
+        svc as unknown as { designSnapshotFlights: Map<string, unknown> }
+      ).designSnapshotFlights;
+      flights.clear();
       await svc.handle("workspace.delete", {
         workspaceId: design.workspaceId,
         includeBranch: true,

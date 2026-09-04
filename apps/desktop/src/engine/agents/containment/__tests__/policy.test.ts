@@ -232,31 +232,34 @@ describe("ZSR host-parity policy builder", () => {
     await expect(stat(futureContext)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
-  it("allocates private Podman state only for the qualified cloud worker", async () => {
-    const workspace = path.join(temporaryRoot, "cloud-container-workspace");
-    await mkdir(workspace, { recursive: true });
+  it.runIf(process.platform === "linux")(
+    "allocates private Podman state only for the qualified cloud worker",
+    async () => {
+      const workspace = path.join(temporaryRoot, "cloud-container-workspace");
+      await mkdir(workspace, { recursive: true });
 
-    const prepared = await prepare(
-      {
-        actor: "agent-code",
-        cwd: workspace,
-        workspaceRoot: workspace,
-      },
-      {
-        cloudWorker: { uid: 10_001, gid: 10_001 },
-        cloudContainerWorker: true,
-      },
-    );
+      const prepared = await prepare(
+        {
+          actor: "agent-code",
+          cwd: workspace,
+          workspaceRoot: workspace,
+        },
+        {
+          cloudWorker: { uid: 10_001, gid: 10_001 },
+          cloudContainerWorker: true,
+        },
+      );
 
-    const state = prepared.paths.containerState;
-    expect(state).toBeDefined();
-    expect((await stat(state!)).isDirectory()).toBe(true);
-    expect(prepared.document.filesystem.allowRead).toContain(state);
-    expect(prepared.document.filesystem.allowWrite).toContain(state);
-    expect(prepared.document.runtime.allowedUnixSockets).toContain(
-      path.join(state!, "podman.sock"),
-    );
-  });
+      const state = prepared.paths.containerState;
+      expect(state).toBeDefined();
+      expect((await stat(state!)).isDirectory()).toBe(true);
+      expect(prepared.document.filesystem.allowRead).toContain(state);
+      expect(prepared.document.filesystem.allowWrite).toContain(state);
+      expect(prepared.document.runtime.allowedUnixSockets).toContain(
+        path.join(state!, "podman.sock"),
+      );
+    },
+  );
 
   it("pre-denies future managed siblings while reopening the current workspace", async () => {
     const managed = path.join(temporaryRoot, "workspaces");

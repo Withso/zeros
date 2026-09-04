@@ -1540,6 +1540,7 @@ interface DesignReadWorkspace {
   workspace: Workspace;
   root: string;
   writeBack: boolean;
+  designDirectory: string;
 }
 
 export class WorkspaceService {
@@ -2188,6 +2189,7 @@ export class WorkspaceService {
         workspace,
         root: workspace.path,
         writeBack: workspace.kind === "design" && !remote,
+        designDirectory,
       }),
     );
   }
@@ -2195,14 +2197,23 @@ export class WorkspaceService {
   private async readDesignSnapshot(
     workspace: Workspace,
     remote: boolean,
-    options: { root?: string; writeBack?: boolean } = {},
+    options: {
+      root?: string;
+      writeBack?: boolean;
+      designDirectory?: string;
+    } = {},
   ) {
     const root = options.root ?? workspace.path;
     const writeBack = options.writeBack ?? !remote;
+    const designDirectory =
+      options.designDirectory ?? designDirectoryNameFor(workspace.path);
     // Restore keeps a workspace id but may adapt its checkout path. Include
     // that semantic owner in the flight key so an overlapping pre-archive read
     // can never satisfy the restored workspace from the old filesystem root.
-    const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}`;
+    // The resolved directory is equally load-bearing: two concurrent leases
+    // can point synchronous document readers at different Design documents
+    // under the same workspace root.
+    const key = `${workspace.id}\u0000${nodePath.resolve(root)}\u0000${writeBack ? "write" : "read"}\u0000${designDirectory}`;
     const current = this.designSnapshotFlights.get(key);
     if (current) return current;
     const request = (async () => {
@@ -2240,8 +2251,12 @@ export class WorkspaceService {
     const request = this.withDesignReadWorkspace(
       workspaceId,
       remote,
-      ({ workspace: target, root, writeBack }) =>
-        this.readDesignSnapshot(target, remote, { root, writeBack }),
+      ({ workspace: target, root, writeBack, designDirectory }) =>
+        this.readDesignSnapshot(target, remote, {
+          root,
+          writeBack,
+          designDirectory,
+        }),
     );
     this.designSnapshotRequestFlights.set(key, request);
     try {

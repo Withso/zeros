@@ -51,7 +51,7 @@ describe("repository layout contracts", () => {
     );
   });
 
-  it("keeps required source-sync red until every ZSR architecture qualifies", () => {
+  it("keeps required source-sync red until every ZSR runtime architecture qualifies", () => {
     const preflight = read(".github/workflows/preflight.yml");
 
     expect(preflight).toContain("  source-sync-workload:");
@@ -61,6 +61,20 @@ describe("repository layout contracts", () => {
     expect(preflight).toContain("SOURCE_SYNC_RESULT:");
     expect(preflight).toContain("ZSR_MACOS_INTEL_RESULT:");
     expect(preflight).toContain("ZSR_LINUX_ARM64_RESULT:");
+    // The broad test job already owns every source-level ZSR contract. These
+    // architecture jobs must exercise only the real target kernel/runtime so a
+    // host-specific unit fixture cannot mask or duplicate that evidence.
+    expect(preflight.match(/pnpm check:zsr:runtime/g)).toHaveLength(3);
+    expect(preflight).not.toMatch(/run: .*pnpm check:zsr$/m);
+  });
+
+  it("retries only transient control-plane audit transport failures", () => {
+    const preflight = read(".github/workflows/preflight.yml");
+
+    expect(preflight).toContain('CONTROL_PLANE_AUDIT_ATTEMPTS: "3"');
+    expect(preflight).toContain("ERR_SOCKET_TIMEOUT");
+    expect(preflight).toContain("pnpm audit:prod");
+    expect(preflight).toContain('exit "$status"');
   });
 
   it("uses the HTTPS Ubuntu archive before the amd64 containment install", () => {

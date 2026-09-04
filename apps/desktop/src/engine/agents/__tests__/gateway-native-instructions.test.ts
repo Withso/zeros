@@ -295,11 +295,7 @@ describe("gateway native system-instruction routing", () => {
     expect(c.newSessionOpts[0]!.systemInstruction).toContain(firstDesign);
 
     expect(
-      gw.refreshNativeCodeTerritoryContext(
-        "workspace-1",
-        CWD,
-        nextTerritory,
-      ),
+      gw.refreshNativeCodeTerritoryContext("workspace-1", CWD, nextTerritory),
     ).toBe(1);
 
     await gw.prompt("codex", session.executionId, [text("continue")]);
@@ -783,6 +779,17 @@ describe("gateway native system-instruction routing", () => {
 
     const loaded = await gw.loadSession("codex", "s-contained-resume", {
       cwd: CWD,
+      // This routing test asserts the no-container parity shape. Do not let a
+      // Docker/Podman binary installed on the test runner change its meaning;
+      // boundary status tests cover the advertised-container restriction.
+      env: {
+        PATH: "",
+        DOCKER_HOST: "",
+        CONTAINER_HOST: "",
+        DOCKER_CONTEXT: "",
+        PODMAN_HOST: "",
+        CONTAINER_CONNECTION: "",
+      },
     });
 
     expect(resolveMcp).toHaveBeenCalledOnce();
