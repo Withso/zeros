@@ -436,6 +436,9 @@ describe("ZSR host-parity policy builder", () => {
     expect(designPolicy.document.filesystem.denyRead).toContain(
       process.env.ZEROS_DATA_DIR,
     );
+    expect(designPolicy.document.filesystem.allowRead).toContain(
+      designPolicy.paths.processIdentityMarker,
+    );
     expect(designPolicy.document.filesystem.allowRead).toEqual(
       expect.arrayContaining([
         workspace,

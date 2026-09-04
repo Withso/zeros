@@ -695,6 +695,11 @@ export async function prepareZsrPolicy(
     options.cloudWorker !== undefined || request.actor === "design-agent";
   const allowRead = uniqueSorted([
     hostFilesystemRoot,
+    // macOS identifies the exact sandboxed process domain by asking Seatbelt
+    // about one readable-but-unwritable generation marker. Design actors deny
+    // the surrounding engine-state root below, so retain this single opaque
+    // read carve-out; the tools-root write deny keeps the marker immutable.
+    paths.processIdentityMarker,
     ...additionalReadOnly,
     ...(request.actor === "design-agent"
       ? [workspaceRoot, ...additional, paths.providerState, paths.scratch]
