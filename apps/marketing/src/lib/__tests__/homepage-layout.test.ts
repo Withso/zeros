@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -57,6 +57,12 @@ describe("marketing homepage layout", () => {
     expect(hero).not.toMatch(/Design and code/);
   });
 
+  it("self-hosts the settled role-word pixel script", () => {
+    expect(
+      existsSync(join(ROOT, "apps/marketing/public/fonts/zeros-role-script.woff2")),
+    ).toBe(true);
+  });
+
   it("cycles builders, developers, and designers with scramble text", () => {
     const cycle = readFileSync(HERO_CYCLE, "utf8");
     const css = readFileSync(HERO_CYCLE_CSS, "utf8");
@@ -97,7 +103,24 @@ describe("marketing homepage layout", () => {
     expect(css).toMatch(/margin: 0 2px 0 0/);
     expect(css).not.toMatch(/margin: 0 4px 0 0/);
     expect(css).not.toMatch(/margin: 0 12px 0 0/);
-    expect(css).not.toMatch(/letter-spacing: 0/);
+    expect(css).toMatch(
+      /\.hero-role-sizer,\n\.hero-role-word:not\(\.is-scrambling\) \{/,
+    );
+    expect(css).toMatch(/font-family: "PF Pixelscript"/);
+    expect(css).toMatch(/"Zeros Role Script"/);
+    expect(css).toMatch(/@font-face \{\n  font-family: "Zeros Role Script"/);
+    expect(css).toMatch(/url\("\/fonts\/zeros-role-script\.woff2"\)/);
+    expect(css).toMatch(
+      /\.hero-role-word\.is-scrambling \.hero-scramble-text/,
+    );
+    expect(css).toMatch(
+      /\.hero-role-word\.is-scrambling,\n\.hero-role-word\.is-scrambling \.hero-scramble-text/,
+    );
+    expect(css).toMatch(
+      /font-family: "Geist", ui-sans-serif, system-ui, sans-serif/,
+    );
+    expect(css).toMatch(/letter-spacing: 0/);
+    expect(css).not.toMatch(/\.hero-role-word \{\n  letter-spacing: 0/);
     expect(css).not.toMatch(/vertical-align: -2px/);
     expect(css).not.toMatch(/vertical-align: middle/);
     expect(css).not.toMatch(/vertical-align: text-bottom/);
@@ -162,7 +185,9 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-72/);
+    expect(cycle).toMatch(/hero-role\.css\?v=role-pixelscript-1/);
+    expect(cycle).toMatch(/PF Pixelscript/);
+    expect(cycle).toMatch(/scramble[\s\S]*Geist/);
     expect(css).toMatch(/is-key/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);
@@ -314,6 +339,8 @@ describe("marketing homepage layout", () => {
     const html = readFileSync(join(ROOT, "apps/marketing/index.html"), "utf8");
     const vite = readFileSync(join(ROOT, "apps/marketing/vite.config.ts"), "utf8");
     const boot = readFileSync(join(ROOT, "apps/marketing/src/boot.tsx"), "utf8");
+    expect(html).toMatch(/href="\/fonts\/zeros-role-script\.woff2"/);
+    expect(html).toMatch(/rel="preload"/);
     expect(html).toMatch(/src="\/src\/main\.tsx"/);
     expect(html).not.toMatch(/boot\.tsx/);
     expect(vite).toMatch(/apply: "serve"/);
