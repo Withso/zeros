@@ -91,15 +91,24 @@ function checkpointFetchHarness(options: {
   initialRevision: number;
   projectionEntries: ReadonlyArray<Record<string, unknown>>;
   afterFirstAppend?: () => Promise<void>;
+  afterBlobUpload?: (uploadCount: number) => void;
   firstAppendFailure?: "before_commit" | "after_commit";
+  afterRevisionConflict?: () => void;
+  rejectedAppendCode?: string;
+  revisionConflicts?: number;
 }): {
   fetch: typeof fetch;
   appendBodies: Array<Record<string, unknown>>;
+  getHeadReadCount: () => number;
+  getUploadCount: () => number;
 } {
   const blobId = "77777777-7777-4777-8777-777777777777";
   const checkpointId = "88888888-8888-4888-8888-888888888888";
   let currentRevision = options.initialRevision;
   let firstFailure = options.firstAppendFailure;
+  let revisionConflicts = options.revisionConflicts ?? 0;
+  let headReadCount = 0;
+  let uploadCount = 0;
   const appendBodies: Array<Record<string, unknown>> = [];
   const committedRequests = new Map<
     string,
@@ -108,6 +117,7 @@ function checkpointFetchHarness(options: {
   const fetchImpl = (async (input, init) => {
     const pathname = new URL(String(input)).pathname;
     if (pathname.endsWith("/content/head")) {
+      headReadCount += 1;
       return Response.json({
         checkpointId: null,
         currentRevision,
@@ -117,10 +127,12 @@ function checkpointFetchHarness(options: {
       });
     }
     if (pathname.endsWith("/blobs")) {
+      uploadCount += 1;
       const bytes = init?.body;
       if (!(bytes instanceof Uint8Array)) {
         throw new Error("expected binary upload");
       }
+      options.afterBlobUpload?.(uploadCount);
       return Response.json({
         id: blobId,
         plaintextSha256: createHash("sha256").update(bytes).digest("hex"),
@@ -147,6 +159,21 @@ function checkpointFetchHarness(options: {
         return Response.json({ revision: prior.revision });
       }
       const revision = Number(body.expectedRevision) + 1;
+      if (options.rejectedAppendCode) {
+        return Response.json(
+          { error: { code: options.rejectedAppendCode } },
+          { status: 409 },
+        );
+      }
+      if (revisionConflicts > 0) {
+        revisionConflicts -= 1;
+        currentRevision = revision;
+        options.afterRevisionConflict?.();
+        return Response.json(
+          { error: { code: "revision_conflict" } },
+          { status: 409 },
+        );
+      }
       const commit = (): void => {
         committedRequests.set(key, { body: serializedBody, revision });
         currentRevision = revision;
@@ -166,7 +193,12 @@ function checkpointFetchHarness(options: {
     }
     throw new Error(`unexpected durability request: ${pathname}`);
   }) as typeof fetch;
-  return { fetch: fetchImpl, appendBodies };
+  return {
+    fetch: fetchImpl,
+    appendBodies,
+    getHeadReadCount: () => headReadCount,
+    getUploadCount: () => uploadCount,
+  };
 }
 
 async function expectUnsafeCheckpointWithoutWrites(
@@ -898,6 +930,245 @@ describe("cloud durability checkpoint coordination", () => {
       );
     },
   );
+
+  checkpointIt.each(["mutation", "metadata"] as const)(
+    "reloads the projection after a %s append revision conflict",
+    async (kind) => {
+      const root = await checkpointRepository();
+      const directiveId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
+      const readme = Buffer.from("checkpoint\n");
+      const projectionEntries =
+        kind === "metadata"
+          ? [
+              {
+                operation: "upsert",
+                path: "README.md",
+                entryType: "file",
+                mode: 33188,
+                blobId: "77777777-7777-4777-8777-777777777777",
+                contentSha256: createHash("sha256")
+                  .update(readme)
+                  .digest("hex"),
+                sizeBytes: readme.length,
+              },
+            ]
+          : [];
+      const initialRevision = kind === "metadata" ? 7 : 0;
+      const { fetch, appendBodies } = checkpointFetchHarness({
+        initialRevision,
+        projectionEntries,
+        revisionConflicts: 1,
+      });
+      const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+
+      await expect(
+        runtime.checkpoint(
+          {
+            id: directiveId,
+            reason: "before_stop",
+            deadlineAtMs: Date.now() + 60_000,
+          },
+          authority,
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(appendBodies.map((body) => body.expectedRevision)).toEqual([
+        initialRevision,
+        initialRevision + 1,
+      ]);
+      expect(appendBodies.map((body) => body.idempotencyKey)).toEqual(
+        kind === "metadata"
+          ? [
+              `checkpoint.${directiveId}.revision.7.metadata`,
+              `checkpoint.${directiveId}.revision.8.metadata`,
+            ]
+          : [
+              `checkpoint.${directiveId}.revision.0.chunk.0`,
+              `checkpoint.${directiveId}.revision.1.chunk.0`,
+            ],
+      );
+    },
+  );
+
+  checkpointIt("bounds repeated append revision conflicts", async () => {
+    const root = await checkpointRepository();
+    const directiveId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+    const readme = Buffer.from("checkpoint\n");
+    const { fetch, appendBodies, getHeadReadCount } = checkpointFetchHarness({
+      initialRevision: 7,
+      projectionEntries: [
+        {
+          operation: "upsert",
+          path: "README.md",
+          entryType: "file",
+          mode: 33188,
+          blobId: "77777777-7777-4777-8777-777777777777",
+          contentSha256: createHash("sha256").update(readme).digest("hex"),
+          sizeBytes: readme.length,
+        },
+      ],
+      revisionConflicts: 3,
+    });
+    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+
+    await expect(
+      runtime.checkpoint(
+        {
+          id: directiveId,
+          reason: "before_delete",
+          deadlineAtMs: Date.now() + 60_000,
+        },
+        authority,
+      ),
+    ).rejects.toThrow("cloud checkpoint append revision conflicts exhausted");
+    expect(appendBodies.map((body) => body.expectedRevision)).toEqual([
+      7, 8, 9,
+    ]);
+    expect(getHeadReadCount()).toBe(3);
+  });
+
+  checkpointIt(
+    "does not reload the projection after a conflict at the directive deadline",
+    async () => {
+      const root = await checkpointRepository();
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-09-04T12:00:00.000Z"));
+        const deadlineAtMs = Date.now() + 1_000;
+        const readme = Buffer.from("checkpoint\n");
+        const { fetch, appendBodies, getHeadReadCount } =
+          checkpointFetchHarness({
+            initialRevision: 7,
+            projectionEntries: [
+              {
+                operation: "upsert",
+                path: "README.md",
+                entryType: "file",
+                mode: 33188,
+                blobId: "77777777-7777-4777-8777-777777777777",
+                contentSha256: createHash("sha256")
+                  .update(readme)
+                  .digest("hex"),
+                sizeBytes: readme.length,
+              },
+            ],
+            revisionConflicts: 1,
+            afterRevisionConflict: () => vi.setSystemTime(deadlineAtMs),
+          });
+        const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+
+        await expect(
+          runtime.checkpoint(
+            {
+              id: "12121212-1212-4121-8121-121212121212",
+              reason: "before_stop",
+              deadlineAtMs,
+            },
+            authority,
+          ),
+        ).rejects.toThrow("cloud checkpoint deadline expired");
+        expect(appendBodies).toHaveLength(1);
+        expect(getHeadReadCount()).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  checkpointIt(
+    "does not append when a retry upload reaches the directive deadline",
+    async () => {
+      const root = await checkpointRepository();
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-09-04T12:00:00.000Z"));
+        const deadlineAtMs = Date.now() + 1_000;
+        const { fetch, appendBodies, getHeadReadCount } =
+          checkpointFetchHarness({
+            initialRevision: 0,
+            projectionEntries: [],
+            revisionConflicts: 1,
+            afterBlobUpload: (uploadCount) => {
+              if (uploadCount === 2) vi.setSystemTime(deadlineAtMs);
+            },
+          });
+        const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+
+        await expect(
+          runtime.checkpoint(
+            {
+              id: "13131313-1313-4131-8131-131313131313",
+              reason: "before_stop",
+              deadlineAtMs,
+            },
+            authority,
+          ),
+        ).rejects.toThrow("cloud checkpoint deadline expired");
+        expect(appendBodies).toHaveLength(1);
+        expect(getHeadReadCount()).toBe(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  checkpointIt(
+    "does not start a second file upload after the directive deadline",
+    async () => {
+      const root = await checkpointRepository();
+      await writeFile(path.join(root, "second.txt"), "second file\n");
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-09-04T12:00:00.000Z"));
+        const deadlineAtMs = Date.now() + 1_000;
+        const { fetch, appendBodies, getUploadCount } = checkpointFetchHarness({
+          initialRevision: 0,
+          projectionEntries: [],
+          afterBlobUpload: (uploadCount) => {
+            if (uploadCount === 1) vi.setSystemTime(deadlineAtMs);
+          },
+        });
+        const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+
+        await expect(
+          runtime.checkpoint(
+            {
+              id: "14141414-1414-4141-8141-141414141414",
+              reason: "before_stop",
+              deadlineAtMs,
+            },
+            authority,
+          ),
+        ).rejects.toThrow("cloud checkpoint deadline expired");
+        expect(getUploadCount()).toBe(1);
+        expect(appendBodies).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  checkpointIt("does not retry a different append conflict", async () => {
+    const root = await checkpointRepository();
+    const { fetch, appendBodies } = checkpointFetchHarness({
+      initialRevision: 0,
+      projectionEntries: [],
+      rejectedAppendCode: "idempotency_conflict",
+    });
+    const runtime = new CloudWorkspaceDurabilityRuntime(root, { fetch });
+
+    await expect(
+      runtime.checkpoint(
+        {
+          id: "ffffffff-ffff-4fff-8fff-ffffffffffff",
+          reason: "before_stop",
+          deadlineAtMs: Date.now() + 60_000,
+        },
+        authority,
+      ),
+    ).rejects.toThrow("cloud durability request was rejected");
+    expect(appendBodies).toHaveLength(1);
+  });
 });
 
 describe("cloud durability projection validation", () => {
@@ -1001,6 +1272,55 @@ describe("cloud durability projection validation", () => {
       ).rejects.toThrow("cloud durability response is too large");
       expect(cancelled).toBe(true);
       expect(pulls).toBeLessThan(8);
+    },
+  );
+
+  checkpointIt.each(["before", "during"] as const)(
+    "cancels a projection response when its deadline expires %s body reads",
+    async (phase) => {
+      vi.useFakeTimers();
+      try {
+        vi.setSystemTime(new Date("2026-09-04T12:00:00.000Z"));
+        const deadlineAtMs = Date.now() + 1_000;
+        let cancelled = false;
+        let pulls = 0;
+        const encoder = new TextEncoder();
+        const runtime = new CloudWorkspaceDurabilityRuntime("/unused", {
+          fetch: (async () => {
+            const response = new Response(
+              new ReadableStream<Uint8Array>({
+                pull(controller) {
+                  pulls += 1;
+                  if (phase === "during" && pulls === 2) {
+                    vi.setSystemTime(deadlineAtMs);
+                  }
+                  controller.enqueue(encoder.encode(pulls === 1 ? "{" : "}"));
+                },
+                cancel() {
+                  cancelled = true;
+                },
+              }),
+              { headers: { "content-type": "application/json" } },
+            );
+            if (phase === "before") vi.setSystemTime(deadlineAtMs);
+            return response;
+          }) as typeof fetch,
+        });
+
+        await expect(
+          runtime.checkpoint(
+            {
+              id: "15151515-1515-4151-8151-151515151515",
+              reason: "manual",
+              deadlineAtMs,
+            },
+            authority,
+          ),
+        ).rejects.toThrow("cloud checkpoint deadline expired");
+        expect(cancelled).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     },
   );
 

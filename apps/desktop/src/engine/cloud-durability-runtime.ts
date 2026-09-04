@@ -874,12 +874,33 @@ export async function scanCloudWorkspaceChanges(
   }
 }
 
-async function boundedJson(response: Response): Promise<unknown> {
+class CloudCheckpointDeadlineError extends Error {
+  constructor() {
+    super("cloud checkpoint deadline expired");
+    this.name = "CloudCheckpointDeadlineError";
+  }
+}
+
+function assertCheckpointBeforeDeadline(deadlineAtMs: number): void {
+  if (Date.now() >= deadlineAtMs) {
+    throw new CloudCheckpointDeadlineError();
+  }
+}
+
+async function boundedJson(
+  response: Response,
+  deadlineAtMs: number,
+): Promise<unknown> {
+  if (Date.now() >= deadlineAtMs) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new CloudCheckpointDeadlineError();
+  }
   if (
     response.headers.get("content-type")?.split(";", 1)[0]?.trim() !==
     "application/json"
   ) {
     await response.body?.cancel().catch(() => undefined);
+    assertCheckpointBeforeDeadline(deadlineAtMs);
     throw new Error("cloud durability response is invalid");
   }
   const declared = Number(response.headers.get("content-length"));
@@ -888,6 +909,7 @@ async function boundedJson(response: Response): Promise<unknown> {
     (declared < 0 || declared > MAX_JSON_BYTES)
   ) {
     await response.body?.cancel().catch(() => undefined);
+    assertCheckpointBeforeDeadline(deadlineAtMs);
     throw new Error("cloud durability response is too large");
   }
   if (!response.body) {
@@ -898,12 +920,18 @@ async function boundedJson(response: Response): Promise<unknown> {
   let total = 0;
   try {
     while (true) {
+      assertCheckpointBeforeDeadline(deadlineAtMs);
       const chunk = await reader.read();
+      if (Date.now() >= deadlineAtMs) {
+        if (!chunk.done) chunk.value.fill(0);
+        throw new CloudCheckpointDeadlineError();
+      }
       if (chunk.done) break;
       total += chunk.value.byteLength;
       if (total > MAX_JSON_BYTES) {
         chunk.value.fill(0);
         await reader.cancel().catch(() => undefined);
+        assertCheckpointBeforeDeadline(deadlineAtMs);
         throw new Error("cloud durability response is too large");
       }
       chunks.push(
@@ -916,16 +944,56 @@ async function boundedJson(response: Response): Promise<unknown> {
     }
     const bytes = Buffer.concat(chunks, total);
     try {
-      return JSON.parse(
+      assertCheckpointBeforeDeadline(deadlineAtMs);
+      const raw: unknown = JSON.parse(
         new TextDecoder("utf-8", { fatal: true }).decode(bytes),
       );
+      assertCheckpointBeforeDeadline(deadlineAtMs);
+      return raw;
     } finally {
       bytes.fill(0);
     }
+  } catch (error) {
+    if (
+      error instanceof CloudCheckpointDeadlineError ||
+      Date.now() >= deadlineAtMs
+    ) {
+      await reader.cancel().catch(() => undefined);
+      if (error instanceof CloudCheckpointDeadlineError) throw error;
+      throw new CloudCheckpointDeadlineError();
+    }
+    throw error;
   } finally {
     for (const chunk of chunks) chunk.fill(0);
     reader.releaseLock();
   }
+}
+
+class CloudDurabilityAppendRevisionConflictError extends Error {
+  constructor() {
+    super("cloud durability content revision changed");
+    this.name = "CloudDurabilityAppendRevisionConflictError";
+  }
+}
+
+async function isAppendRevisionConflict(
+  response: Response,
+  deadlineAtMs: number,
+): Promise<boolean> {
+  let raw: unknown;
+  try {
+    raw = await boundedJson(response, deadlineAtMs);
+  } catch (error) {
+    if (error instanceof CloudCheckpointDeadlineError) throw error;
+    return false;
+  }
+  return (
+    isRecord(raw) &&
+    exactKeys(raw, ["error"]) &&
+    isRecord(raw.error) &&
+    exactKeys(raw.error, ["code"]) &&
+    raw.error.code === "revision_conflict"
+  );
 }
 
 export class CloudWorkspaceDurabilityRuntime {
@@ -976,27 +1044,48 @@ export class CloudWorkspaceDurabilityRuntime {
     authority: CloudDurabilityAuthority,
     url: string,
     init: RequestInit,
+    deadlineAtMs: number,
   ): Promise<Response> {
-    const response = await this.fetch(url, {
-      ...init,
-      redirect: "error",
-      cache: "no-store",
-      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${authority.heartbeatToken}`,
-        "user-agent": "zeros-cloud-engine",
-        ...init.headers,
-      },
-    });
+    const remainingMs = deadlineAtMs - Date.now();
+    if (remainingMs <= 0) throw new CloudCheckpointDeadlineError();
+    const timeoutMs = Math.min(REQUEST_TIMEOUT_MS, remainingMs);
+    let response: Response;
+    try {
+      response = await this.fetch(url, {
+        ...init,
+        redirect: "error",
+        cache: "no-store",
+        signal: AbortSignal.timeout(timeoutMs),
+        headers: {
+          accept: "application/json",
+          authorization: `Bearer ${authority.heartbeatToken}`,
+          "user-agent": "zeros-cloud-engine",
+          ...init.headers,
+        },
+      });
+    } catch (error) {
+      assertCheckpointBeforeDeadline(deadlineAtMs);
+      throw error;
+    }
     if (!response.ok) {
+      if (
+        response.status === 409 &&
+        new URL(url).pathname === CONTENT_APPEND_PATH &&
+        (await isAppendRevisionConflict(response, deadlineAtMs))
+      ) {
+        throw new CloudDurabilityAppendRevisionConflictError();
+      }
       await response.body?.cancel().catch(() => undefined);
+      assertCheckpointBeforeDeadline(deadlineAtMs);
       throw new Error("cloud durability request was rejected");
     }
     return response;
   }
 
-  private async loadProjection(authority: CloudDurabilityAuthority): Promise<{
+  private async loadProjection(
+    authority: CloudDurabilityAuthority,
+    deadlineAtMs: number,
+  ): Promise<{
     currentRevision: number;
     entries: Map<string, ProjectionEntry>;
   }> {
@@ -1017,7 +1106,13 @@ export class CloudWorkspaceDurabilityRuntime {
         );
       }
       const raw = await boundedJson(
-        await this.request(authority, url.toString(), { method: "GET" }),
+        await this.request(
+          authority,
+          url.toString(),
+          { method: "GET" },
+          deadlineAtMs,
+        ),
+        deadlineAtMs,
       );
       if (
         !isRecord(raw) ||
@@ -1129,17 +1224,25 @@ export class CloudWorkspaceDurabilityRuntime {
   private async upload(
     authority: CloudDurabilityAuthority,
     entry: ScannedEntry,
+    deadlineAtMs: number,
   ): Promise<ProjectionEntry> {
+    assertCheckpointBeforeDeadline(deadlineAtMs);
     const url = new URL(this.endpoint(authority, BLOB_PATH));
     for (const [key, value] of Object.entries(this.scope(authority))) {
       url.searchParams.set(key, value);
     }
     const raw = await boundedJson(
-      await this.request(authority, url.toString(), {
-        method: "POST",
-        headers: { "content-type": "application/octet-stream" },
-        body: new Uint8Array(entry.bytes),
-      }),
+      await this.request(
+        authority,
+        url.toString(),
+        {
+          method: "POST",
+          headers: { "content-type": "application/octet-stream" },
+          body: new Uint8Array(entry.bytes),
+        },
+        deadlineAtMs,
+      ),
+      deadlineAtMs,
     );
     const blobId = isRecord(raw) ? raw.id : null;
     if (
@@ -1166,13 +1269,20 @@ export class CloudWorkspaceDurabilityRuntime {
     authority: CloudDurabilityAuthority,
     pathname: string,
     body: Record<string, unknown>,
+    deadlineAtMs: number,
   ): Promise<unknown> {
     return boundedJson(
-      await this.request(authority, this.endpoint(authority, pathname), {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(body),
-      }),
+      await this.request(
+        authority,
+        this.endpoint(authority, pathname),
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(body),
+        },
+        deadlineAtMs,
+      ),
+      deadlineAtMs,
     );
   }
 
@@ -1195,13 +1305,23 @@ export class CloudWorkspaceDurabilityRuntime {
         "privileged cloud checkpoint capture requires Linux descriptor safety",
       );
     }
-    let projection = await this.loadProjection(authority);
+    let projection = await this.loadProjection(
+      authority,
+      directive.deadlineAtMs,
+    );
     let finalScan: CloudWorkspaceChangeScan | null = null;
     try {
       for (let attempt = 0; attempt < 3; attempt += 1) {
+        if (Date.now() >= directive.deadlineAtMs) {
+          throw new Error("cloud checkpoint deadline expired");
+        }
         const scan = await scanCloudWorkspaceChanges(this.repositoryRoot, {
           requireDescriptorSafety: true,
         });
+        if (Date.now() >= directive.deadlineAtMs) {
+          for (const entry of scan.entries.values()) entry.bytes.fill(0);
+          throw new CloudCheckpointDeadlineError();
+        }
         const mutations: Array<Record<string, unknown>> = [];
         const deletedPaths = new Set<string>();
         for (const [entryPath, prior] of projection.entries) {
@@ -1225,26 +1345,40 @@ export class CloudWorkspaceDurabilityRuntime {
             deletedPaths.add(entryPath);
           }
         }
-        for (const entry of scan.entries.values()) {
-          const prior = projection.entries.get(entry.path);
-          if (
-            prior &&
-            prior.operation === "upsert" &&
-            prior.entryType === entry.entryType &&
-            prior.mode === entry.mode &&
-            prior.contentSha256 === entry.contentSha256 &&
-            prior.sizeBytes === entry.sizeBytes
-          ) {
-            continue;
+        try {
+          for (const entry of scan.entries.values()) {
+            const prior = projection.entries.get(entry.path);
+            if (
+              prior &&
+              prior.operation === "upsert" &&
+              prior.entryType === entry.entryType &&
+              prior.mode === entry.mode &&
+              prior.contentSha256 === entry.contentSha256 &&
+              prior.sizeBytes === entry.sizeBytes
+            ) {
+              continue;
+            }
+            assertCheckpointBeforeDeadline(directive.deadlineAtMs);
+            const uploaded = await this.upload(
+              authority,
+              entry,
+              directive.deadlineAtMs,
+            );
+            mutations.push(uploaded);
           }
-          const uploaded = await this.upload(authority, entry);
-          mutations.push(uploaded);
+        } finally {
+          for (const entry of scan.entries.values()) entry.bytes.fill(0);
         }
+        assertCheckpointBeforeDeadline(directive.deadlineAtMs);
         const confirmation = await scanCloudWorkspaceChanges(
           this.repositoryRoot,
           { requireDescriptorSafety: true },
         );
-        for (const entry of scan.entries.values()) entry.bytes.fill(0);
+        if (Date.now() >= directive.deadlineAtMs) {
+          for (const entry of confirmation.entries.values())
+            entry.bytes.fill(0);
+          throw new CloudCheckpointDeadlineError();
+        }
         if (confirmation.fingerprint !== scan.fingerprint) {
           for (const entry of confirmation.entries.values())
             entry.bytes.fill(0);
@@ -1256,47 +1390,116 @@ export class CloudWorkspaceDurabilityRuntime {
             path: ".zeros-empty-baseline",
           });
         }
-        // A directive may be redelivered after an ambiguous response. Binding
-        // the key to its exact revision keeps only the same request replayable.
-        for (let offset = 0; offset < mutations.length; offset += 10_000) {
-          const chunk = mutations.slice(offset, offset + 10_000);
-          const expectedRevision = projection.currentRevision;
-          const raw = await this.postJson(authority, CONTENT_APPEND_PATH, {
-            ...this.scope(authority),
-            expectedRevision,
-            idempotencyKey: `checkpoint.${directive.id}.revision.${expectedRevision}.chunk.${offset / 10_000}`,
-            gitBaseCommit: confirmation.gitBaseCommit,
-            gitHeadRef: confirmation.gitHeadRef,
-            mutations: chunk,
-          });
-          if (!isRecord(raw) || !Number.isSafeInteger(raw.revision)) {
-            throw new Error("cloud durability append response is invalid");
+        try {
+          // A directive may be redelivered after an ambiguous response. Binding
+          // the key to its exact revision keeps only the same request replayable.
+          for (let offset = 0; offset < mutations.length; offset += 10_000) {
+            assertCheckpointBeforeDeadline(directive.deadlineAtMs);
+            const chunk = mutations.slice(offset, offset + 10_000);
+            const expectedRevision = projection.currentRevision;
+            const raw = await this.postJson(
+              authority,
+              CONTENT_APPEND_PATH,
+              {
+                ...this.scope(authority),
+                expectedRevision,
+                idempotencyKey: `checkpoint.${directive.id}.revision.${expectedRevision}.chunk.${offset / 10_000}`,
+                gitBaseCommit: confirmation.gitBaseCommit,
+                gitHeadRef: confirmation.gitHeadRef,
+                mutations: chunk,
+              },
+              directive.deadlineAtMs,
+            );
+            if (!isRecord(raw) || !Number.isSafeInteger(raw.revision)) {
+              throw new Error("cloud durability append response is invalid");
+            }
+            projection.currentRevision = Number(raw.revision);
           }
-          projection.currentRevision = Number(raw.revision);
-        }
-        if (mutations.length === 0) {
-          const expectedRevision = projection.currentRevision;
-          const raw = await this.postJson(authority, CONTENT_APPEND_PATH, {
-            ...this.scope(authority),
-            expectedRevision,
-            idempotencyKey: `checkpoint.${directive.id}.revision.${expectedRevision}.metadata`,
-            gitBaseCommit: confirmation.gitBaseCommit,
-            gitHeadRef: confirmation.gitHeadRef,
-            mutations: [],
-          });
-          if (!isRecord(raw) || !Number.isSafeInteger(raw.revision)) {
-            throw new Error("cloud durability append response is invalid");
+          if (mutations.length === 0) {
+            assertCheckpointBeforeDeadline(directive.deadlineAtMs);
+            const expectedRevision = projection.currentRevision;
+            const raw = await this.postJson(
+              authority,
+              CONTENT_APPEND_PATH,
+              {
+                ...this.scope(authority),
+                expectedRevision,
+                idempotencyKey: `checkpoint.${directive.id}.revision.${expectedRevision}.metadata`,
+                gitBaseCommit: confirmation.gitBaseCommit,
+                gitHeadRef: confirmation.gitHeadRef,
+                mutations: [],
+              },
+              directive.deadlineAtMs,
+            );
+            if (!isRecord(raw) || !Number.isSafeInteger(raw.revision)) {
+              throw new Error("cloud durability append response is invalid");
+            }
+            projection.currentRevision = Number(raw.revision);
           }
-          projection.currentRevision = Number(raw.revision);
+        } catch (error) {
+          for (const entry of confirmation.entries.values())
+            entry.bytes.fill(0);
+          if (error instanceof CloudDurabilityAppendRevisionConflictError) {
+            if (Date.now() >= directive.deadlineAtMs) {
+              throw new Error(
+                "cloud checkpoint deadline expired after revision conflict",
+              );
+            }
+            if (attempt === 2) {
+              throw new Error(
+                "cloud checkpoint append revision conflicts exhausted",
+              );
+            }
+            try {
+              projection = await this.loadProjection(
+                authority,
+                directive.deadlineAtMs,
+              );
+            } catch (loadError) {
+              if (Date.now() >= directive.deadlineAtMs) {
+                throw new Error(
+                  "cloud checkpoint deadline expired after revision conflict",
+                );
+              }
+              throw loadError;
+            }
+            if (Date.now() >= directive.deadlineAtMs) {
+              throw new Error(
+                "cloud checkpoint deadline expired after revision conflict",
+              );
+            }
+            continue;
+          }
+          throw error;
         }
-        const settled = await scanCloudWorkspaceChanges(this.repositoryRoot, {
-          requireDescriptorSafety: true,
-        });
+        let settled: CloudWorkspaceChangeScan;
+        try {
+          assertCheckpointBeforeDeadline(directive.deadlineAtMs);
+          settled = await scanCloudWorkspaceChanges(this.repositoryRoot, {
+            requireDescriptorSafety: true,
+          });
+        } catch (error) {
+          for (const entry of confirmation.entries.values())
+            entry.bytes.fill(0);
+          throw error;
+        }
+        if (Date.now() >= directive.deadlineAtMs) {
+          for (const entry of confirmation.entries.values())
+            entry.bytes.fill(0);
+          for (const entry of settled.entries.values()) entry.bytes.fill(0);
+          throw new CloudCheckpointDeadlineError();
+        }
         if (settled.fingerprint !== confirmation.fingerprint) {
           for (const entry of confirmation.entries.values())
             entry.bytes.fill(0);
           for (const entry of settled.entries.values()) entry.bytes.fill(0);
-          projection = await this.loadProjection(authority);
+          if (Date.now() >= directive.deadlineAtMs) {
+            throw new Error("cloud checkpoint deadline expired");
+          }
+          projection = await this.loadProjection(
+            authority,
+            directive.deadlineAtMs,
+          );
           continue;
         }
         for (const entry of confirmation.entries.values()) entry.bytes.fill(0);
@@ -1305,6 +1508,7 @@ export class CloudWorkspaceDurabilityRuntime {
       }
       if (!finalScan)
         throw new Error("cloud checkpoint could not quiesce the working tree");
+      assertCheckpointBeforeDeadline(directive.deadlineAtMs);
       const manifestBytes = Buffer.from(
         JSON.stringify({
           version: 1,
@@ -1318,39 +1522,55 @@ export class CloudWorkspaceDurabilityRuntime {
         }),
         "utf8",
       );
-      if (manifestBytes.length > MAX_FILE_BYTES) {
-        throw new Error("cloud checkpoint manifest is too large");
+      let manifest: ProjectionEntry;
+      try {
+        if (manifestBytes.length > MAX_FILE_BYTES) {
+          throw new Error("cloud checkpoint manifest is too large");
+        }
+        const manifestEntry: ScannedEntry = {
+          path: "checkpoint-manifest.json",
+          entryType: "file",
+          mode: 33188,
+          contentSha256: createHash("sha256")
+            .update(manifestBytes)
+            .digest("hex"),
+          sizeBytes: manifestBytes.length,
+          bytes: manifestBytes,
+        };
+        assertCheckpointBeforeDeadline(directive.deadlineAtMs);
+        manifest = await this.upload(
+          authority,
+          manifestEntry,
+          directive.deadlineAtMs,
+        );
+      } finally {
+        manifestBytes.fill(0);
       }
-      const manifestEntry: ScannedEntry = {
-        path: "checkpoint-manifest.json",
-        entryType: "file",
-        mode: 33188,
-        contentSha256: createHash("sha256").update(manifestBytes).digest("hex"),
-        sizeBytes: manifestBytes.length,
-        bytes: manifestBytes,
-      };
-      const manifest = await this.upload(authority, manifestEntry);
-      manifestBytes.fill(0);
-      const committed = await this.postJson(authority, CHECKPOINT_PATH, {
-        ...this.scope(authority),
-        requestId: directive.id,
-        idempotencyKey: `checkpoint.${directive.id}.commit`,
-        contentRevision: projection.currentRevision,
-        reason: directive.reason,
-        manifestBlobId: manifest.blobId,
-        artifactBlobId: null,
-        inclusionPolicy: {
-          version: 1,
-          basis: "complete-safe-working-tree",
-          ignored: "excluded",
-          secretLike: "excluded",
-          maxFileBytes: MAX_FILE_BYTES,
-          maxTotalBytes: MAX_TOTAL_BYTES,
+      const committed = await this.postJson(
+        authority,
+        CHECKPOINT_PATH,
+        {
+          ...this.scope(authority),
+          requestId: directive.id,
+          idempotencyKey: `checkpoint.${directive.id}.commit`,
+          contentRevision: projection.currentRevision,
+          reason: directive.reason,
+          manifestBlobId: manifest.blobId,
+          artifactBlobId: null,
+          inclusionPolicy: {
+            version: 1,
+            basis: "complete-safe-working-tree",
+            ignored: "excluded",
+            secretLike: "excluded",
+            maxFileBytes: MAX_FILE_BYTES,
+            maxTotalBytes: MAX_TOTAL_BYTES,
+          },
+          fileCount: finalScan.entries.size,
+          totalBytes: finalScan.totalBytes,
+          integritySha256: manifest.contentSha256,
         },
-        fileCount: finalScan.entries.size,
-        totalBytes: finalScan.totalBytes,
-        integritySha256: manifest.contentSha256,
-      });
+        directive.deadlineAtMs,
+      );
       if (
         !isRecord(committed) ||
         typeof committed.checkpointId !== "string" ||
