@@ -120,6 +120,7 @@ describe("marketing homepage layout", () => {
       /font-family: "Geist", ui-sans-serif, system-ui, sans-serif/,
     );
     expect(css).toMatch(/letter-spacing: 0/);
+    expect(css).toMatch(/line-height: 1/);
     expect(css).not.toMatch(/\.hero-role-word \{\n  letter-spacing: 0/);
     expect(css).not.toMatch(/vertical-align: -2px/);
     expect(css).not.toMatch(/vertical-align: middle/);
@@ -185,7 +186,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=role-pixelscript-1/);
+    expect(cycle).toMatch(/hero-role\.css\?v=role-pixelscript-2/);
     expect(cycle).toMatch(/PF Pixelscript/);
     expect(cycle).toMatch(/scramble[\s\S]*Geist/);
     expect(css).toMatch(/is-key/);
