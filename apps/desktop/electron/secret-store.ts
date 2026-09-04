@@ -15,8 +15,9 @@
 //   }
 //
 // File is written atomically (.tmp + rename) so a mid-write crash
-// leaves the previous copy intact. Reads tolerate a missing or
-// malformed file by returning null.
+// leaves the previous copy intact. Only a genuinely missing file is treated
+// as empty; an unreadable or malformed whole store fails closed so a later
+// read-modify-write can never erase credentials we could not parse.
 // ──────────────────────────────────────────────────────────
 
 import { app, safeStorage } from "electron";
@@ -38,6 +39,13 @@ function filePath(): string {
   return path.join(secretsDir(), "secrets.json");
 }
 
+export class SecretStoreReadError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "SecretStoreReadError";
+  }
+}
+
 /** Absolute path to the on-disk secret store (`<userData>/secrets.json`).
  *  Exported so the engine sidecar can pass it to the child engine — which
  *  can't call Electron safeStorage — via the ZEROS_SECRETS_FILE env var,
@@ -54,18 +62,33 @@ function readAll(): Record<string, string> {
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") return {};
     console.warn(`[secret-store] read failed: ${(err as Error).message}`);
-    return {};
+    throw new SecretStoreReadError("Encrypted secret store is unreadable", {
+      cause: err,
+    });
   }
   try {
     const parsed = JSON.parse(raw) as unknown;
-    if (parsed && typeof parsed === "object") {
-      return parsed as Record<string, string>;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error("secrets.json must be an object");
     }
-  } catch {
-    /* fall through */
+    const data = Object.create(null) as Record<string, string>;
+    for (const [account, encrypted] of Object.entries(parsed)) {
+      if (typeof encrypted !== "string" || encrypted.length === 0) {
+        throw new Error(
+          `secrets.json entry for ${JSON.stringify(account)} is invalid`,
+        );
+      }
+      data[account] = encrypted;
+    }
+    return data;
+  } catch (err) {
+    console.warn(
+      `[secret-store] secrets.json malformed: ${(err as Error).message}`,
+    );
+    throw new SecretStoreReadError("Encrypted secret store is malformed", {
+      cause: err,
+    });
   }
-  console.warn(`[secret-store] secrets.json malformed — ignoring`);
-  return {};
 }
 
 function writeAll(data: Record<string, string>): void {
@@ -116,7 +139,9 @@ function withSecretsLock<T>(fn: () => T): T {
         // Never perform a whole-file read/modify/write without the lock. With
         // shared dev worktrees, "best effort" here means silently deleting a
         // sibling process's newly-written credential.
-        throw new Error("timed out waiting for the encrypted secret-store lock");
+        throw new Error(
+          "timed out waiting for the encrypted secret-store lock",
+        );
       }
       Atomics.wait(waiter, 0, 0, 25); // sleep ~25ms with no CPU spin
     }
@@ -201,10 +226,7 @@ export function replaceSecretIfUnchanged(
   return withSecretsLock(() => {
     const data = readAll();
     const currentEncrypted = data[account];
-    if (
-      typeof currentEncrypted !== "string" ||
-      currentEncrypted.length === 0
-    ) {
+    if (typeof currentEncrypted !== "string" || currentEncrypted.length === 0) {
       return false;
     }
     let current: string;
@@ -249,15 +271,33 @@ export function watchSecrets(
   const file = filePath();
   const dir = path.dirname(file);
   const base = path.basename(file); // "secrets.json"
-  let previous = readAll();
+  let previous: Record<string, string>;
+  try {
+    previous = readAll();
+  } catch (err) {
+    // Keep watching so a repaired shared file can still notify this process,
+    // but never pretend its unreadable contents were an empty store.
+    previous = {};
+    console.warn(
+      `[secret-store] initial watch read failed: ${(err as Error).message}`,
+    );
+  }
   let timer: ReturnType<typeof setTimeout> | null = null;
   let watcher: fs.FSWatcher | null = null;
   const fire = () => {
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = null;
+      let next: Record<string, string>;
       try {
-        const next = readAll();
+        next = readAll();
+      } catch (err) {
+        console.warn(
+          `[secret-store] watch read failed: ${(err as Error).message}`,
+        );
+        return;
+      }
+      try {
         const changedAccounts = new Set([
           ...Object.keys(previous),
           ...Object.keys(next),

@@ -99,6 +99,16 @@ import {
 } from "./window";
 import { appInfo, appSettingGet, appSettingSet, engineRestart } from "./app";
 import { logSubmit, logsExportOpen, logsRecent } from "./logs";
+import {
+  cloudWorkspaceAccessRevoke,
+  cloudWorkspaceRuntimeClose,
+  cloudWorkspaceRuntimeOpen,
+  cloudWorkspaceRuntimeRefresh,
+  cloudWorkspaceSshCopy,
+  cloudWorkspaceSshIde,
+  cloudWorkspaceSshTerminal,
+  cloudWorkspaceTunnelStart,
+} from "./cloud-workspace-access";
 export function registerAllCommands(): void {
   // App info (runtime mode / version / platform) — consumed by the
   // renderer analytics layer to route events to the right PostHog
@@ -139,6 +149,17 @@ export function registerAllCommands(): void {
   // open-a-worktree-in-a-detected-IDE launcher. See commands/open-apps.ts.
   setCommand("detect_open_apps", detectOpenApps);
   setCommand("open_in_app", openInApp);
+
+  // Cloud access is brokered entirely in Electron main. Provider SSH and
+  // preview bearers never cross this command boundary into renderer code.
+  setCommand("cloud_workspace_ssh_copy", cloudWorkspaceSshCopy);
+  setCommand("cloud_workspace_ssh_terminal", cloudWorkspaceSshTerminal);
+  setCommand("cloud_workspace_ssh_ide", cloudWorkspaceSshIde);
+  setCommand("cloud_workspace_tunnel_start", cloudWorkspaceTunnelStart);
+  setCommand("cloud_workspace_access_revoke", cloudWorkspaceAccessRevoke);
+  setCommand("cloud_workspace_runtime_open", cloudWorkspaceRuntimeOpen);
+  setCommand("cloud_workspace_runtime_refresh", cloudWorkspaceRuntimeRefresh);
+  setCommand("cloud_workspace_runtime_close", cloudWorkspaceRuntimeClose);
 
   // Auth (browser sign-in flow via app.zeros.build/auth.zeros.build)
   // Auth0 session @ rest — main owns the full token pair (auth-session.ts); the

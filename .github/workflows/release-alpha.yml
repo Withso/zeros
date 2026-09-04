@@ -139,6 +139,9 @@ jobs:
       # electron-builder wrapper (applies the alpha appId/productName/artifact
       # overrides). One job-level value keeps them in lockstep.
       ZEROS_CHANNEL: alpha
+      # Protected release capability, baked into both Electron main and the
+      # packaged engine. Unset environments remain explicitly fail-closed.
+      ZEROS_CLOUD_WORKSPACES_ENABLED: ${{ vars.ZEROS_CLOUD_WORKSPACES_ENABLED || 'false' }}
 
     steps:
       - name: Require signing credentials
@@ -265,6 +268,8 @@ jobs:
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+          VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: ${{ vars.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES }}
+          VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: ${{ vars.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 }}
           AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
           AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
           AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}
@@ -276,6 +281,8 @@ jobs:
         env:
           VITE_APP_BASE_URL: ${{ vars.VITE_APP_BASE_URL || secrets.VITE_APP_BASE_URL }}
           VITE_CONTROL_PLANE_URL: ${{ vars.VITE_CONTROL_PLANE_URL || secrets.VITE_CONTROL_PLANE_URL }}
+          VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES: ${{ vars.VITE_CLOUD_WORKSPACE_PREVIEW_HOST_SUFFIXES }}
+          VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64: ${{ vars.VITE_CLOUD_WORKSPACE_SSH_KNOWN_HOSTS_B64 }}
           AUTH_PROVIDER: ${{ vars.AUTH_PROVIDER }}
           AUTH_DESKTOP_CLIENT_ID: ${{ vars.AUTH_DESKTOP_CLIENT_ID }}
           AUTH_ISSUER: ${{ vars.AUTH_ISSUER }}

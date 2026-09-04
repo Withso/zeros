@@ -129,7 +129,10 @@ import {
   startEngineCodeWatcher,
   startWatchdog,
   pushGithubCredentialToEngine,
+  pushCloudReplicaSessionToEngine,
 } from "./sidecar";
+import { startCloudReplicaSessionRefresh } from "./cloud-replica-session-lifecycle";
+import { seedCloudWorkspaceDesktopCapabilityEnvironment } from "../src/engine/cloud-workspace-capability";
 import { installAppMenu } from "./menu";
 import { appendLogRecord, flushLogStore, initLogStore } from "./log-store";
 import { setupContextMenu } from "./context-menu";
@@ -285,6 +288,12 @@ if (runningDev) process.env.ZEROS_DEV = "1";
         : "stable";
   }
 }
+
+// Cloud workspaces are a release/build capability, not a user preference. A
+// packaged compile replaces the shared resolver's baked constant, then this
+// pins the inherited engine environment so an arbitrary launch environment
+// cannot enable a release that shipped with the capability off.
+seedCloudWorkspaceDesktopCapabilityEnvironment();
 
 // (3) One identity for EVERY channel. app.getName() is pinned to the CHANNEL name
 // only — NEVER the per-worktree slug — so macOS safeStorage derives ONE keychain
@@ -1520,10 +1529,23 @@ app.whenReady().then(async () => {
     emitEvent("auth-store-changed", {});
     void authSecurityMonitor.revalidate("session_changed", true);
     await pushGithubCredentialToEngine();
+    await pushCloudReplicaSessionToEngine();
     await scheduleGithubAppRefresh();
     emitEvent("github-credential-store-changed", {});
   });
+  // Token refresh is intentionally not a semantic sign-in event. Periodically
+  // renew the engine's in-memory bearer so background replica convergence does
+  // not stall after the original WorkOS access token expires.
+  const disposeCloudReplicaSessionRefresh = startCloudReplicaSessionRefresh({
+    refresh: pushCloudReplicaSessionToEngine,
+    onError: (error: unknown) => {
+      console.warn(
+        `[cloud-replica] periodic session refresh failed (${error instanceof Error ? error.name : "unknown"})`,
+      );
+    },
+  });
   app.on("will-quit", () => {
+    disposeCloudReplicaSessionRefresh();
     disposeGithubSessionSync();
     app.off("browser-window-focus", onAuthWindowFocus);
     powerMonitor.off("resume", onAuthResume);
@@ -1583,6 +1605,7 @@ app.whenReady().then(async () => {
       if (changedAccounts.includes("auth-session:tokens")) {
         emitEvent("auth-store-changed", {});
         void pushGithubCredentialToEngine();
+        void pushCloudReplicaSessionToEngine();
         void scheduleGithubAppRefresh();
       }
       if (
