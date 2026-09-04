@@ -549,7 +549,7 @@ result without copying secrets into tickets or repository files.
    this document. Store its signing secret only in Railway. Confirm the Events
    API repair worker uses the same event set and environment.
 10. Apply branding, support/contact, legal, and localization settings. Keep the
-   Zeros signed-out page a launch surface, not a second login UI.
+    Zeros signed-out page a launch surface, not a second login UI.
 11. Confirm Radar remains disabled and record that state. Do not change its
     enforcement behavior as part of this rollout.
 12. For Production, evaluate an AuthKit custom domain as a branding and
@@ -596,6 +596,16 @@ message was not accepted.
 Pages receives only `AUTH_PROVIDER=workos`, `APP_ORIGIN`, and the matching
 `CONTROL_PLANE_URL`. Electron compiles only public verification/configuration
 values: provider, app origin, desktop client ID, issuer, JWKS URL, and audience.
+
+Local `pnpm electron:dev` is a fourth desktop scheme, not a fourth data
+environment. It loads the reviewed public values from the gitignored
+`.env.development.local` and must use the Alpha app origin, API/audience,
+Desktop Application client ID, and Web Application issuer/JWKS pair atomically.
+Alpha Pages alone accepts both `zeros-alpha://` and `zeros-dev://` returns;
+Beta and Production continue to accept only their exact release scheme. A
+missing, partial, legacy-Auth0, or non-Alpha Dev profile fails before opening a
+browser and never falls back to the retired ticket handoff. Never place a
+`WORKOS_*_API_KEY` in the local profile.
 
 ## Rollout and rollback
 
