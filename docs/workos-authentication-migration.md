@@ -604,8 +604,8 @@ Desktop Application client ID, and Web Application issuer/JWKS pair atomically.
 Alpha Pages alone accepts both `zeros-alpha://` and `zeros-dev://` returns;
 Beta and Production continue to accept only their exact release scheme. A
 missing, partial, legacy-Auth0, or non-Alpha Dev profile fails before opening a
-browser and never falls back to the retired ticket handoff. Never place a
-`WORKOS_*_API_KEY` in the local profile.
+browser and never falls back to the retired ticket handoff. Never place
+`WORKOS_API_KEY` or any WorkOS management credential in the local profile.
 
 ## Rollout and rollback
 
