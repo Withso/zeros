@@ -58,10 +58,12 @@ export const DAYTONA_API_URL = optEnv(
 const DAYTONA_PREVIEW_SUFFIX_PATTERN =
   /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 
-export function parseDaytonaPreviewHostSuffixes(
+function parseDaytonaHostList(
   raw: string | undefined,
+  fallback: string,
+  name: "DAYTONA_PREVIEW_HOST_SUFFIXES" | "DAYTONA_SSH_HOSTS",
 ): readonly string[] {
-  const values = (raw?.trim() || "proxy.daytona.work")
+  const values = (raw?.trim() || fallback)
     .split(",")
     .map((value) => value.trim());
   if (
@@ -75,11 +77,30 @@ export function parseDaytonaPreviewHostSuffixes(
         !DAYTONA_PREVIEW_SUFFIX_PATTERN.test(value),
     )
   ) {
-    throw new Error("DAYTONA_PREVIEW_HOST_SUFFIXES is invalid");
+    throw new Error(`${name} is invalid`);
   }
   return Object.freeze([...new Set(values)]);
 }
 
+export function parseDaytonaPreviewHostSuffixes(
+  raw: string | undefined,
+): readonly string[] {
+  return parseDaytonaHostList(
+    raw,
+    "proxy.daytona.work",
+    "DAYTONA_PREVIEW_HOST_SUFFIXES",
+  );
+}
+
+export function parseDaytonaSshHosts(
+  raw: string | undefined,
+): readonly string[] {
+  return parseDaytonaHostList(raw, "ssh.app.daytona.io", "DAYTONA_SSH_HOSTS");
+}
+
+export const DAYTONA_SSH_HOSTS = parseDaytonaSshHosts(
+  process.env.DAYTONA_SSH_HOSTS,
+);
 export const DAYTONA_PREVIEW_HOST_SUFFIXES = parseDaytonaPreviewHostSuffixes(
   process.env.DAYTONA_PREVIEW_HOST_SUFFIXES,
 );

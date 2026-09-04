@@ -29,6 +29,7 @@ import {
 } from "./config";
 import { relaunchQualifiedCloudEngine } from "./runtime";
 import { selectCloudPrimaryWorkspaceId } from "./lib/workspace-target";
+import { runPtyCommand } from "./lib/pty-command";
 
 const MARKER = `zeros-cloud-validation-${randomUUID().slice(0, 8)}`;
 const PRIVATE_REMOTE = "zeros-private-qualification";
@@ -73,39 +74,6 @@ function privateRepository(): string | null {
     throw new Error("private qualification repository is invalid");
   }
   return parts.join("/");
-}
-
-async function runPtyCommand(
-  client: BridgeClient,
-  workspaceId: string,
-  command: string,
-): Promise<void> {
-  const sessionId = `validation-command-${randomUUID().slice(0, 8)}`;
-  const success = `ZEROS_COMMAND_OK_${randomUUID().replaceAll("-", "")}`;
-  const failed = `ZEROS_COMMAND_FAILED_${randomUUID().replaceAll("-", "")}`;
-  await client.ptyCreate({ sessionId, cwd: workspaceId, ephemeral: true });
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error("PTY qualification command timed out")),
-      20_000,
-    );
-    let output = "";
-    client.onPtyData((candidate, data) => {
-      if (candidate !== sessionId) return;
-      output = `${output}${data}`.slice(-8_192);
-      if (output.includes(success)) {
-        clearTimeout(timer);
-        resolve();
-      } else if (output.includes(failed)) {
-        clearTimeout(timer);
-        reject(new Error("PTY qualification command failed"));
-      }
-    });
-    client.ptyWrite(
-      sessionId,
-      `${command} && printf '\\n${success}\\n' || printf '\\n${failed}\\n'\n`,
-    );
-  });
 }
 
 async function verifyPrivateRepositoryCredential(

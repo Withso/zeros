@@ -29,6 +29,8 @@ import {
   loadState,
   loadSnapshotAttestation,
   NODE_BASE_IMAGE,
+  parseDaytonaPreviewHostSuffixes,
+  parseDaytonaSshHosts,
   parseCloudValidationPort,
   parseCloudValidationResources,
   parseCloudValidationState,
@@ -55,6 +57,23 @@ afterEach(() => {
   for (const root of tempRoots.splice(0)) {
     rmSync(root, { force: true, recursive: true });
   }
+});
+
+describe("Daytona access host allowlists", () => {
+  it("keeps the production SSH default and parses explicit exact hosts", () => {
+    expect(parseDaytonaSshHosts(undefined)).toEqual(["ssh.app.daytona.io"]);
+    expect(parseDaytonaPreviewHostSuffixes(undefined)).toEqual([
+      "proxy.daytona.work",
+    ]);
+    expect(
+      parseDaytonaSshHosts(
+        "ssh.eu.example.test,ssh.us.example.test,ssh.eu.example.test",
+      ),
+    ).toEqual(["ssh.eu.example.test", "ssh.us.example.test"]);
+    expect(() => parseDaytonaSshHosts("*.example.test")).toThrow(
+      /DAYTONA_SSH_HOSTS/,
+    );
+  });
 });
 
 describe("collectAgentCredEnv", () => {

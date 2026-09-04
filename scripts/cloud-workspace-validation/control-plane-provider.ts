@@ -4,6 +4,8 @@ import {
 } from "../../apps/control-plane/src/cloud-workspaces/daytona-provider";
 import {
   DAYTONA_API_URL,
+  DAYTONA_PREVIEW_HOST_SUFFIXES,
+  DAYTONA_SSH_HOSTS,
   DAYTONA_TARGET,
   RESOURCES,
   VALIDATION_AUTO_DELETE_MINUTES,
@@ -32,6 +34,8 @@ export function makeQualifiedControlPlaneProvider(
     autoStopMinutes: 60,
     autoArchiveMinutes: 7 * 24 * 60,
     autoDeleteMinutes: VALIDATION_AUTO_DELETE_MINUTES ?? 12 * 60,
+    allowedSshHosts: DAYTONA_SSH_HOSTS,
+    allowedPreviewHostSuffixes: DAYTONA_PREVIEW_HOST_SUFFIXES,
     ...overrides,
   });
 }
