@@ -350,9 +350,16 @@ function AuthProviderInner({ children }: { children: React.ReactNode }) {
       // retains state + verifier in Electron main, outside renderer JS. Auth0
       // mode returns a compatibility marker and continues below.
       const selected = await nativeInvoke<{
-        mode?: "auth0" | "workos";
+        mode?: "auth0" | "workos" | "unconfigured";
         expiresAt?: number;
       }>("auth_start_signin");
+      if (selected?.mode === "unconfigured") {
+        return {
+          ok: false,
+          error:
+            "Zeros Dev sign-in is not configured for Alpha WorkOS. Add the local development auth profile and restart Zeros Dev.",
+        };
+      }
       if (selected?.mode === "workos") {
         return {
           ok: true,

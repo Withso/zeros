@@ -27,6 +27,7 @@ import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { loadEnv } from "vite";
 
 import { portFree } from "./dev-ports.mjs";
 import { pruneStaleDevCaches } from "./dev-cache-prune.mjs";
@@ -48,6 +49,29 @@ const RUN_ONLY =
   process.env.ZEROS_RUN_ONLY === "1" || process.argv.includes("--run-only");
 // pnpm runs package scripts from the repo root, so cwd is the worktree root.
 const REPO_ROOT = process.cwd();
+
+// Vite loads these files for the renderer, but Electron main is launched by
+// this script and otherwise never sees them. Import only the reviewed PUBLIC
+// desktop-auth values from the ignored development profile; never forward an
+// arbitrary .env (which could contain management credentials) into Electron or
+// its spawned shells. Explicit command environment values remain authoritative.
+const DEV_AUTH_ENV_KEYS = new Set([
+  "AUTH_PROVIDER",
+  "AUTH_DESKTOP_CLIENT_ID",
+  "AUTH_ISSUER",
+  "AUTH_JWKS_URL",
+  "AUTH_AUDIENCE",
+  "VITE_APP_BASE_URL",
+  "VITE_CONTROL_PLANE_URL",
+]);
+const loadedDevEnv = loadEnv("development", REPO_ROOT, [
+  "AUTH_",
+  "VITE_APP_BASE_URL",
+  "VITE_CONTROL_PLANE_URL",
+]);
+const localDevAuthEnv = Object.fromEntries(
+  Object.entries(loadedDevEnv).filter(([key]) => DEV_AUTH_ENV_KEYS.has(key)),
+);
 
 // Engine port grid — must match apps/desktop/src/engine/runtime.ts. Instance blocks are laid
 // on a stride wider than the walk span so the walk range AND the MCP gateway
@@ -218,6 +242,7 @@ const binPath = prepareBundle();
 // (ports, data dir, single-instance lock) wholesale. ADD ANY NEW INSTANCE-SCOPED
 // VAR TO THAT DROP LIST TOO.
 const env = {
+  ...localDevAuthEnv,
   ...process.env,
   ZEROS_DEV: "1",
   ZEROS_VITE_PORT: String(vitePort),
