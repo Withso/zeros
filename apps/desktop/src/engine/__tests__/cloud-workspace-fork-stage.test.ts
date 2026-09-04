@@ -1,11 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  collectCloudWorkspaceForkStages,
   cloudWorkspaceForkStageRoot,
   materializeCloudWorkspaceFork,
   readCloudWorkspaceForkBlob,
@@ -48,6 +56,23 @@ afterEach(async () => {
 });
 
 describe("cloud workspace copy staging", () => {
+  it("removes orphaned plaintext stages while retaining resumable job stages", async () => {
+    const resumable = randomUUID();
+    const orphan = randomUUID();
+    const bytes = Buffer.from("plaintext overlay");
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    await stageCloudWorkspaceForkBlob({ jobId: resumable, sha256, bytes });
+    await stageCloudWorkspaceForkBlob({ jobId: orphan, sha256, bytes });
+
+    await expect(
+      collectCloudWorkspaceForkStages({ retainJobIds: new Set([resumable]) }),
+    ).resolves.toEqual([orphan]);
+    await expect(cloudWorkspaceForkStageRoot(resumable)).resolves.toBeTruthy();
+    await expect(cloudWorkspaceForkStageRoot(orphan)).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("stages verified content and materializes file/directory transitions", async () => {
     const jobId = randomUUID();
     const workspace = path.join(root, "workspace");
@@ -94,10 +119,12 @@ describe("cloud workspace copy staging", () => {
     expect(await readFile(path.join(workspace, "replace-dir"), "utf8")).toBe(
       "directory became file\n",
     );
-    expect(await readFile(path.join(workspace, "replace-file", "child"), "utf8")).toBe(
-      "file became directory\n",
-    );
-    await expect(lstat(path.join(workspace, "gone", "file"))).rejects.toMatchObject({
+    expect(
+      await readFile(path.join(workspace, "replace-file", "child"), "utf8"),
+    ).toBe("file became directory\n");
+    await expect(
+      lstat(path.join(workspace, "gone", "file")),
+    ).rejects.toMatchObject({
       code: "ENOENT",
     });
     const staged = await readCloudWorkspaceForkBlob({
@@ -125,14 +152,22 @@ describe("cloud workspace copy staging", () => {
       bytes: target,
     });
     await expect(
-      materializeCloudWorkspaceFork({ jobId, workspaceRoot: workspace, entries: [link] }),
+      materializeCloudWorkspaceFork({
+        jobId,
+        workspaceRoot: workspace,
+        entries: [link],
+      }),
     ).rejects.toThrow(/escapes/);
 
     const a = descriptor(0, "Readme.md", Buffer.from("a"));
     const b = descriptor(1, "README.md", Buffer.from("b"));
     b.portablePathKey = a.portablePathKey;
     await expect(
-      materializeCloudWorkspaceFork({ jobId, workspaceRoot: workspace, entries: [a, b] }),
+      materializeCloudWorkspaceFork({
+        jobId,
+        workspaceRoot: workspace,
+        entries: [a, b],
+      }),
     ).rejects.toThrow(/collide/);
   });
 });

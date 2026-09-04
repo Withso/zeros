@@ -1,7 +1,15 @@
 import { createHash, randomUUID } from "node:crypto";
 
 import pg from "pg";
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  afterAll,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vitest";
 
 import { withSystemTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
@@ -19,6 +27,7 @@ import {
   type CloudWorkspaceSetupReadiness,
   type CloudWorkspaceSetupResult,
 } from "./setup-worker.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -86,7 +95,7 @@ function successfulSetup(
     },
     engine: {
       instanceId: randomUUID(),
-      protocolVersion: 11,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
       health: "ready",
       durableRecordConnected: true,
     },
@@ -192,13 +201,16 @@ d("cloud workspace setup worker", () => {
           canonical.providerConnectionId,
         ],
       );
-      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(tx, {
-        workspaceId,
-        organizationId,
-        generation: 1,
-        createdBy: ownerId,
-        effectiveDocument: settingsSnapshot,
-      });
+      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(
+        tx,
+        {
+          workspaceId,
+          organizationId,
+          generation: 1,
+          createdBy: ownerId,
+          effectiveDocument: settingsSnapshot,
+        },
+      );
       await tx.query(
         `INSERT INTO cloud_workspace_setup_specs (
            workspace_id, generation, org_id, repository_forge,
@@ -277,13 +289,16 @@ d("cloud workspace setup worker", () => {
           seeded.providerConnectionId,
         ],
       );
-      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(tx, {
-        workspaceId: seeded.workspaceId,
-        organizationId,
-        generation: 2,
-        createdBy: ownerId,
-        effectiveDocument: seeded.settingsSnapshot,
-      });
+      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(
+        tx,
+        {
+          workspaceId: seeded.workspaceId,
+          organizationId,
+          generation: 2,
+          createdBy: ownerId,
+          effectiveDocument: seeded.settingsSnapshot,
+        },
+      );
       await tx.query(
         `INSERT INTO cloud_workspace_setup_specs (
            workspace_id, generation, org_id, repository_forge,
@@ -587,7 +602,7 @@ d("cloud workspace setup worker", () => {
       lease_expires_at: null,
       log_excerpt: "setup complete [redacted]",
       repository_commit: "c".repeat(40),
-      engine_protocol_version: 11,
+      engine_protocol_version: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
       durable_record_connected: true,
     });
   });

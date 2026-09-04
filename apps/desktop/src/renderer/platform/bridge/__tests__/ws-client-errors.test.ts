@@ -5,6 +5,7 @@ import {
   cloudRuntimeWebSocketProtocols,
   describeConnectionRejection,
   isRejectionRetryableAfterEngineRestart,
+  parseInboundBridgeWebSocketFrame,
   parseRuntimeConnectionTarget,
 } from "../ws-client";
 import { setAuthAccessToken } from "../../../features/auth/auth-token";
@@ -213,6 +214,45 @@ describe("RuntimeClient correlated domain errors", () => {
 
     await expect(response).resolves.toBe(message);
     expect(internals.pendingRequests.has("request-1")).toBe(false);
+  });
+});
+
+describe("untrusted WebSocket frame validation", () => {
+  it("accepts a compatible engine envelope while dropping malformed or wrong-direction frames", () => {
+    const compatible = JSON.stringify({
+      id: "engine-ready-1",
+      source: "engine",
+      timestamp: Date.now(),
+      type: "ENGINE_READY",
+      futureEngineField: { tolerated: true },
+    });
+    expect(parseInboundBridgeWebSocketFrame(compatible)).toMatchObject({
+      source: "engine",
+      type: "ENGINE_READY",
+    });
+    expect(parseInboundBridgeWebSocketFrame("{not json")).toBeNull();
+    expect(
+      parseInboundBridgeWebSocketFrame(
+        JSON.stringify({
+          id: "browser-spoof",
+          source: "browser",
+          timestamp: Date.now(),
+          type: "ENGINE_READY",
+        }),
+      ),
+    ).toBeNull();
+    // A newer engine's unrecognised type is deliberately ignored, matching
+    // the old dispatch behavior rather than disconnecting mixed versions.
+    expect(
+      parseInboundBridgeWebSocketFrame(
+        JSON.stringify({
+          id: "future-engine-message",
+          source: "engine",
+          timestamp: Date.now(),
+          type: "FUTURE_ENGINE_MESSAGE",
+        }),
+      ),
+    ).toBeNull();
   });
 });
 

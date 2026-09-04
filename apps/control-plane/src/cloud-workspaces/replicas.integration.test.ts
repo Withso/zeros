@@ -255,6 +255,22 @@ d("cloud workspace receive-only replicas", () => {
       }),
     ).resolves.toEqual(firstBytes);
 
+    // Bootstrap advertises this immutable checkpoint projection. It must be
+    // readable through the same grant capability as an entry blob; otherwise
+    // desktop cannot verify the advertised integrity before publication.
+    const manifestBlobPayload = { blobId: bootstrap.manifestBlobId };
+    await expect(
+      replicas.readBlob({
+        organizationId: fixture.organizationId,
+        workspaceId: fixture.workspaceId,
+        replicaId: createdA.replica.id,
+        accountUserId: fixture.userId,
+        grantToken: grantA.token,
+        blobId: bootstrap.manifestBlobId,
+        proof: proof(deviceA, "replica.blob.read", manifestBlobPayload),
+      }),
+    ).resolves.toEqual(Buffer.from('{"kind":"replica-bootstrap"}', "utf8"));
+
     const bootstrapReceipt = {
       fromRevision: 0,
       toRevision: 1,

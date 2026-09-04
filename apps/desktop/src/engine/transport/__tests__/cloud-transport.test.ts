@@ -19,6 +19,7 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import net from "node:net";
 import http from "node:http";
 import { WebSocket } from "ws";
+import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import { CloudTransport, parseCloudTransportPort } from "../cloud";
 import type { EngineMessage } from "../../types";
 import type { TransportClient } from "../types";
@@ -1227,7 +1228,7 @@ describe("CloudTransport — image-helper readiness", () => {
     const readiness = {
       version: 1 as const,
       instanceId: "44444444-4444-4444-8444-444444444444",
-      protocolVersion: 11,
+      protocolVersion: PROTOCOL_VERSION,
       health: "ready" as const,
       durableRecordConnected: true as const,
     };

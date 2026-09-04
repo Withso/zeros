@@ -1529,7 +1529,11 @@ app.whenReady().then(async () => {
   // renew the engine's in-memory bearer so background replica convergence does
   // not stall after the original WorkOS access token expires.
   const cloudReplicaSessionRefresh = setInterval(() => {
-    void pushCloudReplicaSessionToEngine();
+    void pushCloudReplicaSessionToEngine().catch((error: unknown) => {
+      console.warn(
+        `[cloud-replica] periodic session refresh failed (${error instanceof Error ? error.name : "unknown"})`,
+      );
+    });
   }, 45_000);
   cloudReplicaSessionRefresh.unref?.();
   app.on("will-quit", () => {

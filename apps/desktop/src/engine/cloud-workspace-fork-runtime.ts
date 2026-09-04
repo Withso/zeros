@@ -1,10 +1,15 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
 import path from "node:path";
 
 import type Database from "better-sqlite3";
 
 import { scanCloudWorkspaceChanges } from "./cloud-durability-runtime";
+import {
+  assertBootstrapEntryMatchesManifest,
+  parseBootstrapManifest,
+  type BootstrapManifestBinding,
+} from "./cloud-replica-broker";
 import {
   CloudReplicaClientError,
   type CloudWorkspaceDesktopApi,
@@ -18,6 +23,7 @@ import {
 } from "./cloud-workspace-fork-state";
 import {
   materializeCloudWorkspaceFork,
+  collectCloudWorkspaceForkStages,
   readCloudWorkspaceForkBlob,
   removeCloudWorkspaceForkStage,
   stageCloudWorkspaceForkBlob,
@@ -47,6 +53,15 @@ const MAX_RECORDS = 250_000;
 const MAX_TOTAL_BYTES = 512 * 1024 * 1024;
 const SCHEDULER_INTERVAL_MS = 15_000;
 const MAX_RETRY_MS = 5 * 60_000;
+const SHA256_PATTERN = /^[a-f0-9]{64}$/;
+const EXPORT_MANIFEST_AUDIENCE = "zeros-cloud-to-local-fork-v1";
+
+class CloudWorkspaceForkCancelledError extends Error {
+  constructor() {
+    super("Cloud workspace copy was cancelled");
+    this.name = "CloudWorkspaceForkCancelledError";
+  }
+}
 
 type DesktopContext = {
   accountUserId: string;
@@ -225,6 +240,110 @@ function sameManifest(left: ExportManifest, right: ExportManifest): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
 }
 
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object)
+    .sort()
+    .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+    .join(",")}}`;
+}
+
+function remoteProtocolError(
+  jobId: string,
+  message: string,
+  cause?: unknown,
+): CloudWorkspaceForkRuntimeError {
+  return new CloudWorkspaceForkRuntimeError(
+    "remote_protocol_error",
+    jobId,
+    message,
+    {
+      ...(cause === undefined ? {} : { cause }),
+    },
+  );
+}
+
+/** Validate the immutable descriptor written by the export worker. This is a
+ * separate canonical document from a checkpoint projection manifest: its hash
+ * pins export identity/revisions/totals, while the checkpoint manifest binds
+ * every path and mode. Never compare either remote hash to the locally
+ * materialized DatabaseCloudReplicaState.manifestSha256, whose canonical form
+ * intentionally differs. */
+function assertCanonicalExportManifest(input: {
+  bytes: Uint8Array;
+  sha256: string;
+  job: CloudWorkspaceForkJob;
+  page: CloudWorkspaceForkManifestPage;
+}): void {
+  if (
+    !SHA256_PATTERN.test(input.sha256) ||
+    createHash("sha256").update(input.bytes).digest("hex") !== input.sha256
+  ) {
+    throw remoteProtocolError(
+      input.job.jobId,
+      "Cloud canonical export manifest integrity is invalid",
+    );
+  }
+  let document: unknown;
+  try {
+    document = JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(input.bytes),
+    ) as unknown;
+  } catch (error) {
+    throw remoteProtocolError(
+      input.job.jobId,
+      "Cloud canonical export manifest is unreadable",
+      error,
+    );
+  }
+  if (!isRecord(document)) {
+    throw remoteProtocolError(
+      input.job.jobId,
+      "Cloud canonical export manifest is invalid",
+    );
+  }
+  const expected = {
+    audience: EXPORT_MANIFEST_AUDIENCE,
+    forkIntentId: input.job.remoteForkIntentId,
+    sourceCloudWorkspaceId: input.job.sourceWorkspaceId,
+    targetLocalWorkspaceId: input.job.targetWorkspaceId,
+    checkpointId: input.page.checkpointId,
+    contentRevision: input.page.contentRevision,
+    recordRevision: input.page.recordRevision,
+    includeChats: input.page.includeChats,
+    fileCount: input.page.fileCount,
+    totalBytes: input.page.totalBytes,
+  };
+  const expectedKeys = Object.keys(expected).sort();
+  const actualKeys = Object.keys(document).sort();
+  if (
+    actualKeys.length !== expectedKeys.length ||
+    actualKeys.some((key, index) => key !== expectedKeys[index]) ||
+    expectedKeys.some(
+      (key) => document[key] !== expected[key as keyof typeof expected],
+    )
+  ) {
+    throw remoteProtocolError(
+      input.job.jobId,
+      "Cloud canonical export manifest does not bind this fork",
+    );
+  }
+  let canonical: Buffer | undefined;
+  try {
+    canonical = Buffer.from(canonicalJson(document), "utf8");
+    if (!canonical.equals(Buffer.from(input.bytes))) {
+      throw remoteProtocolError(
+        input.job.jobId,
+        "Cloud canonical export manifest is not canonical",
+      );
+    }
+  } finally {
+    canonical?.fill(0);
+  }
+}
+
 function runtimeCode(error: unknown): string {
   if (error instanceof CloudReplicaClientError) return error.code;
   if (error instanceof CloudWorkspaceForkRuntimeError) return error.code;
@@ -235,6 +354,32 @@ function runtimeCode(error: unknown): string {
 
 function runtimeMessage(error: unknown): string {
   return error instanceof Error ? error.message : "Cloud workspace copy failed";
+}
+
+/** Server validation, identity, and immutable source conflicts cannot improve
+ * with a retry. Network, export-readiness, and short-lived grant failures are
+ * intentionally left resumable. */
+export function isPermanentCloudWorkspaceForkFailure(error: unknown): boolean {
+  const code = runtimeCode(error);
+  return new Set([
+    "invalid_request",
+    "identity_mismatch",
+    "not_found",
+    "forbidden",
+    "cloud_workspace_scope_not_found",
+    "cloud_workspace_owner_required",
+    "cloud_workspaces_not_allowed",
+    "cloud_account_entitlement_required",
+    "cloud_organization_entitlement_required",
+    "workspace_fork_not_found",
+    "workspace_fork_idempotency_conflict",
+    "workspace_fork_import_conflict",
+    "workspace_fork_device_proof_rejected",
+    "workspace_fork_device_proof_replayed",
+    "workspace_fork_blob_unavailable",
+    "invalid_response",
+    "remote_protocol_error",
+  ]).has(code);
 }
 
 function entryDocument(entry: CloudWorkspaceForkJobEntry) {
@@ -263,6 +408,7 @@ export class CloudWorkspaceForkRuntime {
   private readonly state: DatabaseCloudWorkspaceForkState;
   private readonly now: () => number;
   private readonly active = new Map<string, Promise<CloudWorkspaceForkJob>>();
+  private readonly activeControllers = new Map<string, AbortController>();
   private timer: NodeJS.Timeout | null = null;
   private disposed = false;
 
@@ -291,6 +437,40 @@ export class CloudWorkspaceForkRuntime {
     ) {
       throw new Error("Cloud copy scheduler interval is invalid");
     }
+    void this.collectStagedData().catch((error) => {
+      this.dependencies.logger?.warn(
+        `[cloud-fork] staged-data cleanup deferred (${runtimeCode(error)})`,
+      );
+    });
+  }
+
+  private async collectStagedData(): Promise<void> {
+    await collectCloudWorkspaceForkStages({
+      retainJobIds: new Set(this.state.resumableStageJobIds()),
+    });
+  }
+
+  private assertJobActive(jobId: string): void {
+    const job = this.state.job(jobId);
+    if (
+      this.disposed ||
+      this.activeControllers.get(jobId)?.signal.aborted ||
+      job?.state === "cancelled"
+    ) {
+      throw new CloudWorkspaceForkCancelledError();
+    }
+  }
+
+  private async cleanupStage(jobId: string): Promise<void> {
+    try {
+      await removeCloudWorkspaceForkStage(jobId);
+    } catch (error) {
+      // The terminal journal prevents retrying remote side effects. Startup GC
+      // will make a second safe attempt if a local AV/filesystem race wins.
+      this.dependencies.logger?.warn(
+        `[cloud-fork] staged-data cleanup deferred (${runtimeCode(error)})`,
+      );
+    }
   }
 
   private schedule(delay: number): void {
@@ -298,11 +478,22 @@ export class CloudWorkspaceForkRuntime {
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.tick().finally(() =>
-        this.schedule(
-          this.dependencies.schedulerIntervalMs ?? SCHEDULER_INTERVAL_MS,
-        ),
-      );
+      void this.tick()
+        .catch((error) => {
+          this.dependencies.logger?.warn(
+            `[cloud-fork] scheduler failed (${runtimeCode(error)})`,
+          );
+        })
+        .finally(() => {
+          this.schedule(
+            this.dependencies.schedulerIntervalMs ?? SCHEDULER_INTERVAL_MS,
+          );
+        })
+        .catch((error) => {
+          this.dependencies.logger?.warn(
+            `[cloud-fork] scheduler reschedule failed (${runtimeCode(error)})`,
+          );
+        });
     }, delay);
     this.timer.unref?.();
   }
@@ -434,11 +625,60 @@ export class CloudWorkspaceForkRuntime {
     }
     const existing = this.active.get(jobId);
     if (existing) return existing;
+    const controller = new AbortController();
+    this.activeControllers.set(jobId, controller);
     const operation = this.runExclusive(jobId).finally(() => {
       if (this.active.get(jobId) === operation) this.active.delete(jobId);
+      if (this.activeControllers.get(jobId) === controller) {
+        this.activeControllers.delete(jobId);
+      }
     });
     this.active.set(jobId, operation);
     return operation;
+  }
+
+  async cancel(jobId: string): Promise<CloudWorkspaceForkJob> {
+    if (!UUID_PATTERN.test(jobId)) {
+      throw new CloudWorkspaceForkRuntimeError(
+        "invalid_request",
+        null,
+        "Cloud copy job identity is invalid",
+      );
+    }
+    const job = this.state.job(jobId);
+    if (!job) {
+      throw new CloudWorkspaceForkRuntimeError(
+        "not_found",
+        jobId,
+        "Cloud copy job was not found",
+      );
+    }
+    const context = this.dependencies.context();
+    if (context.accountUserId !== job.accountUserId) {
+      throw new CloudWorkspaceForkRuntimeError(
+        "identity_mismatch",
+        jobId,
+        "Cloud copy job belongs to another account",
+      );
+    }
+    const cancelled = this.state.cancel({
+      jobId,
+      code: "cancelled_by_user",
+      message: "Cloud workspace copy was cancelled",
+      now: this.now(),
+    });
+    this.activeControllers.get(jobId)?.abort();
+    await this.active.get(jobId)?.catch(() => undefined);
+    await this.cleanupStage(jobId);
+    return this.state.job(jobId) ?? cancelled;
+  }
+
+  /** Session replacement and shutdown abort only in-memory work. The persisted
+   * job remains resumable if the same account returns later. */
+  async cancelActiveWork(): Promise<void> {
+    for (const controller of this.activeControllers.values())
+      controller.abort();
+    await Promise.allSettled(this.active.values());
   }
 
   private async runExclusive(jobId: string): Promise<CloudWorkspaceForkJob> {
@@ -451,21 +691,38 @@ export class CloudWorkspaceForkRuntime {
       );
     }
     if (job.state === "succeeded" || job.state === "cancelled") return job;
-    const context = this.dependencies.context();
-    if (context.accountUserId !== job.accountUserId) {
-      throw new CloudWorkspaceForkRuntimeError(
-        "identity_mismatch",
-        jobId,
-        "Cloud copy job belongs to another account",
-      );
-    }
     try {
+      this.assertJobActive(jobId);
+      const context = this.dependencies.context();
+      if (context.accountUserId !== job.accountUserId) {
+        throw new CloudWorkspaceForkRuntimeError(
+          "identity_mismatch",
+          jobId,
+          "Cloud copy job belongs to another account",
+        );
+      }
       return job.operation === "local_to_cloud"
         ? await this.resumeLocalToCloud(job, context)
         : await this.resumeCloudToLocal(job, context);
     } catch (error) {
       job = this.state.job(jobId) ?? job;
       if (job.state === "succeeded" || job.state === "cancelled") return job;
+      if (error instanceof CloudWorkspaceForkCancelledError) return job;
+      if (isPermanentCloudWorkspaceForkFailure(error)) {
+        const failed = this.state.failPermanent({
+          jobId,
+          code: runtimeCode(error),
+          message: runtimeMessage(error),
+          now: this.now(),
+        });
+        await this.cleanupStage(jobId);
+        throw new CloudWorkspaceForkRuntimeError(
+          failed.lastErrorCode ?? "permanent.failed",
+          jobId,
+          failed.lastErrorMessage ?? "Cloud workspace copy failed",
+          { cause: error },
+        );
+      }
       const failed = this.state.fail({
         jobId,
         code: runtimeCode(error),
@@ -502,6 +759,7 @@ export class CloudWorkspaceForkRuntime {
   private async snapshotLocal(
     job: CloudWorkspaceForkJob,
   ): Promise<CloudWorkspaceForkJob> {
+    this.assertJobActive(job.jobId);
     const request = asLocalRequest(job);
     const source = job.sourceWorkspaceAlias
       ? getWorkspaceById(job.sourceWorkspaceAlias)
@@ -523,6 +781,7 @@ export class CloudWorkspaceForkRuntime {
       includeRepositorySettings: request.includeSettings,
     });
     try {
+      this.assertJobActive(job.jobId);
       const records = request.includeChats
         ? exportCloudWorkspaceForkRecords({
             sourceRoot: job.repoRoot,
@@ -535,6 +794,7 @@ export class CloudWorkspaceForkRuntime {
       ].sort();
       const entries: CloudWorkspaceForkJobEntry[] = [];
       for (let ordinal = 0; ordinal < paths.length; ordinal += 1) {
+        this.assertJobActive(job.jobId);
         const entryPath = paths[ordinal]!;
         const scanned = scan.entries.get(entryPath);
         if (!scanned) {
@@ -557,6 +817,7 @@ export class CloudWorkspaceForkRuntime {
           sha256: scanned.contentSha256,
           bytes: scanned.bytes,
         });
+        this.assertJobActive(job.jobId);
         entries.push({
           ordinal,
           path: entryPath,
@@ -575,6 +836,7 @@ export class CloudWorkspaceForkRuntime {
         entries,
         records: records as unknown as Record<string, unknown>[],
       });
+      this.assertJobActive(job.jobId);
       return this.move(job, "creating_remote", {
         sourceSnapshotSha256: cloudWorkspaceForkSnapshotSha256(
           scan.fingerprint,
@@ -596,8 +858,10 @@ export class CloudWorkspaceForkRuntime {
     context: DesktopContext,
   ): Promise<CloudWorkspaceForkJob> {
     let job = initial;
+    this.assertJobActive(job.jobId);
     const request = asLocalRequest(job);
     if (!job.sourceSnapshotSha256) job = await this.snapshotLocal(job);
+    this.assertJobActive(job.jobId);
     if (!job.remoteForkIntentId) {
       job = this.move(job, "creating_remote");
       const created = await context.api.createCloudFromLocal({
@@ -624,6 +888,7 @@ export class CloudWorkspaceForkRuntime {
         includeSettings: request.includeSettings,
         idempotencyKey: `fork.${job.jobId}.create`,
       });
+      this.assertJobActive(job.jobId);
       job = this.move(job, "uploading", {
         remoteForkIntentId: created.forkIntentId,
         remoteLifecycleIntentId: created.lifecycleIntentId,
@@ -635,6 +900,7 @@ export class CloudWorkspaceForkRuntime {
     let entries = this.state.entries(job.jobId);
     const byStage = new Map<string, string>();
     for (const entry of entries) {
+      this.assertJobActive(job.jobId);
       if (entry.operation !== "upsert") continue;
       const known = entry.remoteBlobId ?? byStage.get(entry.stageName);
       if (known) {
@@ -649,6 +915,7 @@ export class CloudWorkspaceForkRuntime {
         sha256: entry.contentSha256,
         sizeBytes: entry.sizeBytes,
       });
+      this.assertJobActive(job.jobId);
       try {
         const uploaded = await context.api.uploadForkBlob({
           organizationId: job.organizationId,
@@ -656,6 +923,7 @@ export class CloudWorkspaceForkRuntime {
           forkIntentId: job.remoteForkIntentId!,
           bytes,
         });
+        this.assertJobActive(job.jobId);
         this.state.setRemoteBlob(job.jobId, entry.ordinal, uploaded.id);
         byStage.set(entry.stageName, uploaded.id);
       } finally {
@@ -664,6 +932,7 @@ export class CloudWorkspaceForkRuntime {
     }
     entries = this.state.entries(job.jobId);
     for (let offset = 0; offset < entries.length; offset += 1_000) {
+      this.assertJobActive(job.jobId);
       const page = entries.slice(offset, offset + 1_000);
       if (
         page.some(
@@ -678,17 +947,20 @@ export class CloudWorkspaceForkRuntime {
         forkIntentId: job.remoteForkIntentId!,
         entries: page.map(entryDocument),
       });
+      this.assertJobActive(job.jobId);
     }
     const records = this.state.records(
       job.jobId,
     ) as unknown as CloudWorkspaceForkRecord[];
     for (let offset = 0; offset < records.length; offset += 20) {
+      this.assertJobActive(job.jobId);
       await context.api.stageForkRecords({
         organizationId: job.organizationId,
         workspaceId: job.targetWorkspaceId,
         forkIntentId: job.remoteForkIntentId!,
         records: records.slice(offset, offset + 20),
       });
+      this.assertJobActive(job.jobId);
     }
     job = this.move(job, "finalizing");
     const finalized = await context.api.finalizeForkImport({
@@ -697,8 +969,9 @@ export class CloudWorkspaceForkRuntime {
       forkIntentId: job.remoteForkIntentId!,
       idempotencyKey: `fork.${job.jobId}.finalize`,
     });
+    this.assertJobActive(job.jobId);
     job = this.move(job, "succeeded", { checkpointId: finalized.checkpointId });
-    await removeCloudWorkspaceForkStage(job.jobId).catch(() => undefined);
+    await this.cleanupStage(job.jobId);
     return job;
   }
 
@@ -706,12 +979,14 @@ export class CloudWorkspaceForkRuntime {
     job: CloudWorkspaceForkJob,
     context: DesktopContext,
   ): Promise<{ token: string; expiresAt: number } | null> {
+    this.assertJobActive(job.jobId);
     try {
       const grant = await context.api.issueExportGrant({
         organizationId: job.organizationId,
         workspaceId: job.sourceWorkspaceId,
         forkIntentId: job.remoteForkIntentId!,
       });
+      this.assertJobActive(job.jobId);
       return {
         token: grant.grantToken,
         expiresAt: Date.parse(grant.expiresAt),
@@ -736,6 +1011,7 @@ export class CloudWorkspaceForkRuntime {
     records: CloudWorkspaceForkRecordEvent[];
   } | null> {
     let grant = await this.exportGrant(job, context);
+    this.assertJobActive(job.jobId);
     if (!grant) return null;
     const withGrant = async <T>(
       operation: (token: string) => Promise<T>,
@@ -746,7 +1022,9 @@ export class CloudWorkspaceForkRuntime {
           throw new Error("Cloud workspace export became unavailable");
       }
       try {
-        return await operation(grant!.token);
+        const result = await operation(grant!.token);
+        this.assertJobActive(job.jobId);
+        return result;
       } catch (error) {
         if (
           error instanceof CloudReplicaClientError &&
@@ -754,7 +1032,9 @@ export class CloudWorkspaceForkRuntime {
         ) {
           grant = await this.exportGrant(job, context);
           if (!grant) throw error;
-          return operation(grant.token);
+          const result = await operation(grant.token);
+          this.assertJobActive(job.jobId);
+          return result;
         }
         throw error;
       }
@@ -762,10 +1042,13 @@ export class CloudWorkspaceForkRuntime {
 
     let afterPath: string | null = null;
     let manifest: ExportManifest | null = null;
+    let exportManifestBound = false;
+    let checkpointBinding: BootstrapManifestBinding | null = null;
     const entries: CloudWorkspaceForkJobEntry[] = [];
     const seenPaths = new Set<string>();
     const seenPortable = new Set<string>();
     do {
+      this.assertJobActive(job.jobId);
       const page = await withGrant((token) =>
         context.api.readForkManifest({
           organizationId: job.organizationId,
@@ -776,18 +1059,117 @@ export class CloudWorkspaceForkRuntime {
           limit: 1_000,
         }),
       );
+      this.assertJobActive(job.jobId);
       if (page.targetLocalWorkspaceId !== job.targetWorkspaceId) {
-        throw new Error("Cloud export target identity changed");
+        throw remoteProtocolError(
+          job.jobId,
+          "Cloud export target identity changed",
+        );
       }
       const document = manifestDocument(page);
       if (manifest && !sameManifest(manifest, document)) {
-        throw new Error("Cloud export manifest changed during pagination");
+        throw remoteProtocolError(
+          job.jobId,
+          "Cloud export manifest changed during pagination",
+        );
       }
       manifest ??= document;
+      if (
+        (page.exportManifestBlobId === undefined) !==
+        (page.exportManifestSha256 === undefined)
+      ) {
+        throw remoteProtocolError(
+          job.jobId,
+          "Cloud export canonical manifest advertisement is incomplete",
+        );
+      }
+      if (
+        !exportManifestBound &&
+        page.exportManifestBlobId &&
+        page.exportManifestSha256
+      ) {
+        const bytes = await withGrant((token) =>
+          context.api.readForkBlob({
+            organizationId: job.organizationId,
+            workspaceId: job.sourceWorkspaceId,
+            forkIntentId: job.remoteForkIntentId!,
+            grantToken: token,
+            blobId: page.exportManifestBlobId!,
+          }),
+        );
+        try {
+          assertCanonicalExportManifest({
+            bytes,
+            sha256: page.exportManifestSha256,
+            job,
+            page,
+          });
+          exportManifestBound = true;
+        } finally {
+          bytes.fill(0);
+        }
+      }
+      if (
+        (page.manifestBlobId === undefined) !==
+        (page.integritySha256 === undefined)
+      ) {
+        throw remoteProtocolError(
+          job.jobId,
+          "Cloud checkpoint manifest advertisement is incomplete",
+        );
+      }
+      if (!checkpointBinding && page.manifestBlobId && page.integritySha256) {
+        const bytes = await withGrant((token) =>
+          context.api.readForkBlob({
+            organizationId: job.organizationId,
+            workspaceId: job.sourceWorkspaceId,
+            forkIntentId: job.remoteForkIntentId!,
+            grantToken: token,
+            blobId: page.manifestBlobId!,
+          }),
+        );
+        try {
+          try {
+            checkpointBinding = parseBootstrapManifest({
+              bytes,
+              page: {
+                integritySha256: page.integritySha256,
+                fileCount: page.fileCount,
+                totalBytes: page.totalBytes,
+                gitBaseCommit: page.gitBaseCommit,
+                gitHeadRef: page.gitHeadRef,
+              },
+            });
+          } catch (error) {
+            throw remoteProtocolError(
+              job.jobId,
+              "Cloud checkpoint manifest is invalid",
+              error,
+            );
+          }
+        } finally {
+          bytes.fill(0);
+        }
+      }
       for (const candidate of page.entries) {
+        this.assertJobActive(job.jobId);
+        if (checkpointBinding) {
+          try {
+            assertBootstrapEntryMatchesManifest(checkpointBinding, candidate);
+          } catch (error) {
+            throw remoteProtocolError(
+              job.jobId,
+              "Cloud checkpoint manifest does not match its export page",
+              error,
+            );
+          }
+        }
         const portable = portablePathKey(candidate.path);
         if (seenPaths.has(candidate.path) || seenPortable.has(portable)) {
-          throw new Error("Cloud export contains colliding paths");
+          throw remoteProtocolError(
+            job.jobId,
+            "Cloud export contains colliding paths",
+          );
         }
         seenPaths.add(candidate.path);
         seenPortable.add(portable);
@@ -820,7 +1202,7 @@ export class CloudWorkspaceForkRuntime {
         );
       }
       if (entries.length > MAX_ENTRIES)
-        throw new Error("Cloud export is too large");
+        throw remoteProtocolError(job.jobId, "Cloud export is too large");
       afterPath = page.nextAfterPath;
     } while (afterPath !== null);
     const liveEntries = entries.filter((entry) => entry.operation === "upsert");
@@ -831,7 +1213,26 @@ export class CloudWorkspaceForkRuntime {
       liveEntries.reduce((sum, entry) => sum + entry.sizeBytes, 0) !==
         manifest.totalBytes
     ) {
-      throw new Error("Cloud export manifest summary is invalid");
+      throw remoteProtocolError(
+        job.jobId,
+        "Cloud export manifest summary is invalid",
+      );
+    }
+    if (
+      checkpointBinding?.kind === "projection-v1" &&
+      (seenPaths.size !==
+        checkpointBinding.entries.size + checkpointBinding.deletions.size ||
+        [...checkpointBinding.entries.keys()].some(
+          (entryPath) => !seenPaths.has(entryPath),
+        ) ||
+        [...checkpointBinding.deletions].some(
+          (entryPath) => !seenPaths.has(entryPath),
+        ))
+    ) {
+      throw remoteProtocolError(
+        job.jobId,
+        "Cloud export pages do not match their checkpoint manifest",
+      );
     }
 
     const records: CloudWorkspaceForkRecordEvent[] = [];
@@ -839,6 +1240,7 @@ export class CloudWorkspaceForkRuntime {
       let afterRevision = 0;
       let hasMore = true;
       while (hasMore) {
+        this.assertJobActive(job.jobId);
         const page: CloudWorkspaceForkRecordPage = await withGrant((token) =>
           context.api.readForkRecords({
             organizationId: job.organizationId,
@@ -849,25 +1251,41 @@ export class CloudWorkspaceForkRuntime {
             limit: 20,
           }),
         );
+        this.assertJobActive(job.jobId);
         if (page.recordRevision !== manifest.recordRevision) {
-          throw new Error("Cloud export record head changed");
+          throw remoteProtocolError(
+            job.jobId,
+            "Cloud export record head changed",
+          );
         }
         if (page.hasMore && page.events.length === 0) {
-          throw new Error("Cloud export record pagination made no progress");
+          throw remoteProtocolError(
+            job.jobId,
+            "Cloud export record pagination made no progress",
+          );
         }
         for (const event of page.events) {
           if (event.revision !== afterRevision + 1) {
-            throw new Error("Cloud export record stream is discontinuous");
+            throw remoteProtocolError(
+              job.jobId,
+              "Cloud export record stream is discontinuous",
+            );
           }
           records.push(event);
           afterRevision = event.revision;
         }
         if (records.length > MAX_RECORDS)
-          throw new Error("Cloud export has too many records");
+          throw remoteProtocolError(
+            job.jobId,
+            "Cloud export has too many records",
+          );
         hasMore = page.hasMore;
       }
       if (afterRevision !== manifest.recordRevision) {
-        throw new Error("Cloud export record stream is incomplete");
+        throw remoteProtocolError(
+          job.jobId,
+          "Cloud export record stream is incomplete",
+        );
       }
     }
 
@@ -888,11 +1306,15 @@ export class CloudWorkspaceForkRuntime {
         (prior.contentSha256 !== entry.contentSha256 ||
           prior.sizeBytes !== entry.sizeBytes)
       ) {
-        throw new Error("Cloud export blob descriptor is inconsistent");
+        throw remoteProtocolError(
+          job.jobId,
+          "Cloud export blob descriptor is inconsistent",
+        );
       }
       unique.set(entry.remoteBlobId!, entry);
     }
     for (const entry of unique.values()) {
+      this.assertJobActive(job.jobId);
       try {
         const staged = await readCloudWorkspaceForkBlob({
           jobId: job.jobId,
@@ -900,6 +1322,7 @@ export class CloudWorkspaceForkRuntime {
           sha256: entry.contentSha256,
           sizeBytes: entry.sizeBytes,
         });
+        this.assertJobActive(job.jobId);
         staged.fill(0);
         continue;
       } catch (error) {
@@ -916,12 +1339,14 @@ export class CloudWorkspaceForkRuntime {
           expectedSha256: entry.contentSha256,
         }),
       );
+      this.assertJobActive(job.jobId);
       try {
         await stageCloudWorkspaceForkBlob({
           jobId: job.jobId,
           sha256: entry.contentSha256,
           bytes,
         });
+        this.assertJobActive(job.jobId);
       } finally {
         bytes.fill(0);
       }
@@ -955,6 +1380,7 @@ export class CloudWorkspaceForkRuntime {
   ): Promise<CloudWorkspaceForkJob> {
     let job = initial;
     let request = asCloudRequest(job);
+    this.assertJobActive(job.jobId);
     if (!job.remoteForkIntentId) {
       job = this.move(job, "requesting_export");
       const requested = await context.api.requestCloudToLocal({
@@ -964,6 +1390,7 @@ export class CloudWorkspaceForkRuntime {
         includeChats: request.includeChats,
         idempotencyKey: `fork.${job.jobId}.export`,
       });
+      this.assertJobActive(job.jobId);
       job = this.move(job, "waiting_export", {
         remoteForkIntentId: requested.forkIntentId,
         checkpointRequestId: requested.checkpointRequestId,
@@ -972,9 +1399,11 @@ export class CloudWorkspaceForkRuntime {
       job = this.move(job, "waiting_export");
     }
     const downloaded = await this.downloadExport(job, context);
+    this.assertJobActive(job.jobId);
     if (!downloaded) return job;
     await (this.dependencies.validateRepository?.(job, downloaded.manifest) ??
       this.validateRepository(job, downloaded.manifest));
+    this.assertJobActive(job.jobId);
     job = this.move(job, "downloading", {
       checkpointId: downloaded.manifest.checkpointId,
       manifest: downloaded.manifest as unknown as Record<string, unknown>,
@@ -984,6 +1413,7 @@ export class CloudWorkspaceForkRuntime {
       const prepared = await (
         this.dependencies.prepareWorkspaceCreate ?? prepareWorkspaceCreate
       )({ repoRoot: job.repoRoot });
+      this.assertJobActive(job.jobId);
       request = {
         ...request,
         prepared: {
@@ -1025,6 +1455,10 @@ export class CloudWorkspaceForkRuntime {
             entries,
           }),
         beforePublish: ({ workspaceId, canonicalId, workspacePath }) => {
+          // Session replacement/shutdown may race materialization. This is the
+          // last reversible boundary before the new local workspace identity
+          // becomes visible, so never publish a cancelled cloud export.
+          this.assertJobActive(job.jobId);
           if (request.includeChats) {
             importCloudWorkspaceForkRecords({
               targetRoot: workspacePath,
@@ -1039,7 +1473,8 @@ export class CloudWorkspaceForkRuntime {
         },
       },
     );
-    await removeCloudWorkspaceForkStage(job.jobId).catch(() => undefined);
+    this.assertJobActive(job.jobId);
+    await this.cleanupStage(job.jobId);
     return this.state.job(job.jobId)!;
   }
 
@@ -1068,7 +1503,8 @@ export class CloudWorkspaceForkRuntime {
     this.disposed = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    await Promise.allSettled(this.active.values());
+    await this.cancelActiveWork();
     this.active.clear();
+    this.activeControllers.clear();
   }
 }

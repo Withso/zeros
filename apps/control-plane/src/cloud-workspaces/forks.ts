@@ -1,4 +1,9 @@
-import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import path from "node:path";
 
 import type pg from "pg";
@@ -103,12 +108,15 @@ function normalizedRelativePath(value: string): string {
     value.startsWith("/") ||
     value.endsWith("/") ||
     path.posix.normalize(value) !== value ||
-    value.split("/").some((component) =>
-      component.length < 1 ||
-      component === "." ||
-      component === ".." ||
-      component.toLocaleLowerCase("en-US") === ".git"
-    )
+    value
+      .split("/")
+      .some(
+        (component) =>
+          component.length < 1 ||
+          component === "." ||
+          component === ".." ||
+          component.toLocaleLowerCase("en-US") === ".git",
+      )
   ) {
     throw new WorkspaceForkError("invalid_input", "Fork path is invalid");
   }
@@ -178,12 +186,16 @@ function validatePortableImportRecord(
       ) !== record.entityId ||
       !portableFolder((chat as Record<string, unknown>).folder) ||
       !Array.isArray((chat as Record<string, unknown>).additionalDirectories) ||
-      ((chat as Record<string, unknown>).additionalDirectories as unknown[]).length !== 0 ||
+      ((chat as Record<string, unknown>).additionalDirectories as unknown[])
+        .length !== 0 ||
       (chat as Record<string, unknown>).sessionId !== null ||
       (chat as Record<string, unknown>).providerBinding !== null ||
       (chat as Record<string, unknown>).providerMetadata !== null
     ) {
-      throw new WorkspaceForkError("invalid_input", "Fork chat record is not portable");
+      throw new WorkspaceForkError(
+        "invalid_input",
+        "Fork chat record is not portable",
+      );
     }
     return;
   }
@@ -193,13 +205,17 @@ function validatePortableImportRecord(
       typeof document.chatId !== "string" ||
       typeof document.msgId !== "string" ||
       document.msgId.length < 1 ||
-      compoundRecordId("m", document.chatId, document.msgId) !== record.entityId ||
+      compoundRecordId("m", document.chatId, document.msgId) !==
+        record.entityId ||
       !natural(document.ord) ||
       typeof document.kind !== "string" ||
       typeof document.payload !== "string" ||
       !natural(document.createdAt)
     ) {
-      throw new WorkspaceForkError("invalid_input", "Fork message record is invalid");
+      throw new WorkspaceForkError(
+        "invalid_input",
+        "Fork message record is invalid",
+      );
     }
     return;
   }
@@ -225,7 +241,10 @@ function validatePortableImportRecord(
     (row as Record<string, unknown>).pre_snapshot !== null ||
     (row as Record<string, unknown>).post_snapshot !== null
   ) {
-    throw new WorkspaceForkError("invalid_input", "Fork turn record is not portable");
+    throw new WorkspaceForkError(
+      "invalid_input",
+      "Fork turn record is not portable",
+    );
   }
 }
 
@@ -257,7 +276,8 @@ function validateJson(value: unknown, depth = 0, state = { nodes: 0 }): void {
     typeof value === "string" ||
     typeof value === "boolean" ||
     (typeof value === "number" && Number.isFinite(value))
-  ) return;
+  )
+    return;
   if (Array.isArray(value)) {
     for (const entry of value) validateJson(entry, depth + 1, state);
     return;
@@ -301,6 +321,8 @@ type ExportGrantAuthority = {
   device_id: string;
   device_key_version: string | number;
   export_id: string;
+  export_manifest_blob_id: string;
+  export_manifest_sha256: Buffer;
   source_cloud_workspace_id: string;
   source_checkpoint_id: string;
   target_local_workspace_id: string;
@@ -317,6 +339,8 @@ type ExportGrantAuthority = {
   total_bytes: string | number;
   git_base_commit: string | null;
   git_head_ref: string | null;
+  manifest_blob_id: string;
+  integrity_sha256: Buffer;
 };
 
 async function lockImportAuthority(
@@ -436,7 +460,9 @@ async function releaseForkImportStaging(
       [reference.blob_id, reference.org_id],
     );
     if ((decremented.rowCount ?? 0) !== 1) {
-      throw new Error("workspace fork object reference accounting is inconsistent");
+      throw new Error(
+        "workspace fork object reference accounting is inconsistent",
+      );
     }
   }
   await tx.query(
@@ -662,7 +688,10 @@ export class DatabaseCloudWorkspaceForkService {
     entries: readonly WorkspaceForkImportEntry[];
   }): Promise<{ accepted: number }> {
     if (input.entries.length < 1 || input.entries.length > 1_000) {
-      throw new WorkspaceForkError("invalid_input", "Fork entry batch is invalid");
+      throw new WorkspaceForkError(
+        "invalid_input",
+        "Fork entry batch is invalid",
+      );
     }
     let entries: WorkspaceForkImportEntry[];
     try {
@@ -681,7 +710,9 @@ export class DatabaseCloudWorkspaceForkService {
       });
       const proposedPortablePaths = entries
         .filter((entry) => entry.operation === "upsert")
-        .map((entry) => entry.path.normalize("NFKC").toLocaleLowerCase("en-US"));
+        .map((entry) =>
+          entry.path.normalize("NFKC").toLocaleLowerCase("en-US"),
+        );
       if (proposedPortablePaths.length > 0) {
         const proposedAncestorPaths = [
           ...new Set(
@@ -865,7 +896,10 @@ export class DatabaseCloudWorkspaceForkService {
     records: readonly WorkspaceForkImportRecord[];
   }): Promise<{ accepted: number }> {
     if (input.records.length < 1 || input.records.length > 20) {
-      throw new WorkspaceForkError("invalid_input", "Fork record batch is invalid");
+      throw new WorkspaceForkError(
+        "invalid_input",
+        "Fork record batch is invalid",
+      );
     }
     for (const record of input.records) {
       const occurredAt = new Date(record.occurredAt);
@@ -886,8 +920,13 @@ export class DatabaseCloudWorkspaceForkService {
       }
       if (record.document) {
         validateJson(record.document);
-        if (Buffer.byteLength(canonicalJson(record.document), "utf8") > 524_288) {
-          throw new WorkspaceForkError("invalid_input", "Fork record is too large");
+        if (
+          Buffer.byteLength(canonicalJson(record.document), "utf8") > 524_288
+        ) {
+          throw new WorkspaceForkError(
+            "invalid_input",
+            "Fork record is too large",
+          );
         }
       }
       validatePortableImportRecord(input.workspaceId, record);
@@ -948,7 +987,8 @@ export class DatabaseCloudWorkspaceForkService {
             row.operation !== record.operation ||
             row.schema_version !== record.schemaVersion ||
             canonicalJson(row.document) !== canonicalJson(record.document) ||
-            row.occurred_at.toISOString() !== new Date(record.occurredAt).toISOString()
+            row.occurred_at.toISOString() !==
+              new Date(record.occurredAt).toISOString()
           ) {
             throw new WorkspaceForkError(
               "import_conflict",
@@ -969,7 +1009,8 @@ export class DatabaseCloudWorkspaceForkService {
       );
       if (
         aggregate.rows[0]!.record_count > this.limits.maxImportRecords ||
-        Number(aggregate.rows[0]!.total_bytes) > this.limits.maxImportRecordBytes
+        Number(aggregate.rows[0]!.total_bytes) >
+          this.limits.maxImportRecordBytes
       ) {
         throw new WorkspaceForkError(
           "invalid_input",
@@ -988,7 +1029,10 @@ export class DatabaseCloudWorkspaceForkService {
     idempotencyKey: string;
   }): Promise<{ checkpointId: string; replayed: boolean }> {
     if (!SAFE_KEY.test(input.idempotencyKey)) {
-      throw new WorkspaceForkError("invalid_input", "Fork idempotency key is invalid");
+      throw new WorkspaceForkError(
+        "invalid_input",
+        "Fork idempotency key is invalid",
+      );
     }
     const claimed = await withSystemTx(this.pool, async (tx) => {
       const fork = await lockImportAuthority(tx, {
@@ -997,16 +1041,25 @@ export class DatabaseCloudWorkspaceForkService {
         workosEnabled: this.workosEnabled,
       });
       if (fork.state === "succeeded") {
-        const checkpoint = await tx.query<{ recovery_checkpoint_id: string | null }>(
+        const checkpoint = await tx.query<{
+          recovery_checkpoint_id: string | null;
+        }>(
           `SELECT recovery_checkpoint_id FROM cloud_workspace_generations
            WHERE workspace_id = $1 AND generation = 1 AND org_id = $2`,
           [input.workspaceId, input.organizationId],
         );
         const checkpointId = checkpoint.rows[0]?.recovery_checkpoint_id;
         if (!checkpointId) {
-          throw new WorkspaceForkError("not_ready", "Fork import result is incomplete");
+          throw new WorkspaceForkError(
+            "not_ready",
+            "Fork import result is incomplete",
+          );
         }
-        return { rejected: false as const, replayed: true as const, checkpointId };
+        return {
+          rejected: false as const,
+          replayed: true as const,
+          checkpointId,
+        };
       }
       if (fork.state === "importing") {
         const reclaim = await tx.query(
@@ -1018,7 +1071,10 @@ export class DatabaseCloudWorkspaceForkService {
           [input.forkIntentId, input.idempotencyKey],
         );
         if ((reclaim.rowCount ?? 0) !== 1) {
-          throw new WorkspaceForkError("not_ready", "Fork import is already finalizing");
+          throw new WorkspaceForkError(
+            "not_ready",
+            "Fork import is already finalizing",
+          );
         }
       } else {
         await tx.query(
@@ -1167,25 +1223,92 @@ export class DatabaseCloudWorkspaceForkService {
       return { checkpointId: claimed.checkpointId, replayed: true };
     }
 
-    const descriptor = {
-      audience: "zeros-local-to-cloud-fork-v1",
-      forkIntentId: input.forkIntentId,
-      sourceLocalWorkspaceId: claimed.fork.source_local_workspace_id,
-      sourceRevision: Number(claimed.fork.source_revision),
-      sourceSnapshotSha256: claimed.fork.source_snapshot_sha256!.toString("hex"),
-      gitBaseCommit: claimed.fork.source_git_base_commit,
-      gitHeadRef: claimed.fork.source_git_head_ref,
-      targetCloudWorkspaceId: input.workspaceId,
-      entryCount: claimed.entryCount,
-      fileCount: claimed.fileCount,
-      totalBytes: claimed.totalBytes,
-      recordCount: claimed.recordCount,
-    };
-    let manifest: Awaited<ReturnType<DatabaseCloudWorkspaceBlobService["putCoordinator"]>>;
+    // This blob is later served to bootstrap and cloud-to-local export
+    // clients. It must describe every durable entry, not merely summarize the
+    // import: replica-local DatabaseCloudReplicaState.manifestSha256 uses a
+    // different canonicalization and is deliberately never compared here.
+    const checkpointManifest = await withSystemTx(this.pool, async (tx) => {
+      const lease = await tx.query<{ lease_owner: string | null }>(
+        `SELECT lease_owner FROM workspace_fork_intents
+         WHERE id = $1 AND org_id = $2 AND state = 'importing'`,
+        [input.forkIntentId, input.organizationId],
+      );
+      if (lease.rows[0]?.lease_owner !== input.idempotencyKey) {
+        throw new WorkspaceForkError("not_ready", "Fork import lease changed");
+      }
+      const entries = await tx.query<{
+        normalized_path: string;
+        operation: "upsert" | "delete";
+        entry_type: "file" | "symlink" | null;
+        mode: number | null;
+        content_sha256: Buffer | null;
+        size_bytes: string | number | null;
+      }>(
+        `SELECT normalized_path, operation, entry_type, mode, content_sha256,
+                size_bytes
+         FROM workspace_fork_import_entries
+         WHERE fork_intent_id = $1
+         ORDER BY normalized_path COLLATE "C"`,
+        [input.forkIntentId],
+      );
+      const upserts = entries.rows.filter(
+        (entry) => entry.operation === "upsert",
+      );
+      if (
+        upserts.some(
+          (entry) =>
+            !["file", "symlink"].includes(entry.entry_type ?? "") ||
+            ![33188, 33261, 40960].includes(entry.mode ?? 0) ||
+            (entry.entry_type === "symlink") !== (entry.mode === 40960) ||
+            !entry.content_sha256 ||
+            entry.size_bytes === null ||
+            !Number.isSafeInteger(Number(entry.size_bytes)) ||
+            Number(entry.size_bytes) < 0,
+        )
+      ) {
+        throw new WorkspaceForkError(
+          "import_conflict",
+          "Fork import has an invalid checkpoint entry",
+        );
+      }
+      const totalBytes = upserts.reduce(
+        (total, entry) => total + Number(entry.size_bytes),
+        0,
+      );
+      if (
+        upserts.length !== claimed.fileCount ||
+        totalBytes !== claimed.totalBytes ||
+        entries.rows.length !== claimed.entryCount
+      ) {
+        throw new WorkspaceForkError(
+          "import_conflict",
+          "Fork import changed while sealing its manifest",
+        );
+      }
+      return {
+        version: 1,
+        audience: "zeros-cloud-workspace-checkpoint-manifest-v1",
+        gitBaseCommit: claimed.fork.source_git_base_commit,
+        gitHeadRef: claimed.fork.source_git_head_ref,
+        entries: upserts.map((entry) => ({
+          path: entry.normalized_path,
+          entryType: entry.entry_type,
+          mode: entry.mode,
+          contentSha256: entry.content_sha256!.toString("hex"),
+          sizeBytes: Number(entry.size_bytes),
+        })),
+        deletions: entries.rows
+          .filter((entry) => entry.operation === "delete")
+          .map((entry) => entry.normalized_path),
+      };
+    });
+    let manifest: Awaited<
+      ReturnType<DatabaseCloudWorkspaceBlobService["putCoordinator"]>
+    >;
     try {
       manifest = await this.blobs.putCoordinator({
         organizationId: input.organizationId,
-        bytes: Buffer.from(canonicalJson(descriptor), "utf8"),
+        bytes: Buffer.from(canonicalJson(checkpointManifest), "utf8"),
       });
     } catch (error) {
       await withSystemTx(this.pool, (tx) =>
@@ -1239,7 +1362,10 @@ export class DatabaseCloudWorkspaceForkService {
         fileSummary.rows[0]?.count !== claimed.entryCount ||
         Number(fileSummary.rows[0]?.total) !== claimed.totalBytes
       ) {
-        throw new WorkspaceForkError("import_conflict", "Fork import changed while sealing");
+        throw new WorkspaceForkError(
+          "import_conflict",
+          "Fork import changed while sealing",
+        );
       }
 
       await tx.query(
@@ -1441,7 +1567,7 @@ export class DatabaseCloudWorkspaceForkService {
           input.workspaceId,
           input.organizationId,
           `fork.${input.forkIntentId}.checkpoint`,
-          digest(descriptor),
+          digest(checkpointManifest),
           revisionCount,
           recordCount,
           manifest.id,
@@ -1546,15 +1672,21 @@ export class DatabaseCloudWorkspaceForkService {
           }),
         ],
       );
-      await audit(tx, input.organizationId, input.accountUserId, "cloud_workspace.fork_imported", {
-        forkIntentId: input.forkIntentId,
-        sourceLocalWorkspaceId: fork.source_local_workspace_id,
-        targetCloudWorkspaceId: input.workspaceId,
-        checkpointId,
-        entryCount: claimed.entryCount,
-        fileCount: claimed.fileCount,
-        recordCount,
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.accountUserId,
+        "cloud_workspace.fork_imported",
+        {
+          forkIntentId: input.forkIntentId,
+          sourceLocalWorkspaceId: fork.source_local_workspace_id,
+          targetCloudWorkspaceId: input.workspaceId,
+          checkpointId,
+          entryCount: claimed.entryCount,
+          fileCount: claimed.fileCount,
+          recordCount,
+        },
+      );
       return { checkpointId, replayed: false };
     });
   }
@@ -1566,12 +1698,19 @@ export class DatabaseCloudWorkspaceForkService {
     accountUserId: string;
     idempotencyKey: string;
     includeChats: boolean;
-  }): Promise<{ forkIntentId: string; checkpointRequestId: string; replayed: boolean }> {
+  }): Promise<{
+    forkIntentId: string;
+    checkpointRequestId: string;
+    replayed: boolean;
+  }> {
     if (
       !UUID_PATTERN.test(input.targetLocalWorkspaceId) ||
       !SAFE_KEY.test(input.idempotencyKey)
     ) {
-      throw new WorkspaceForkError("invalid_input", "Cloud copy request is invalid");
+      throw new WorkspaceForkError(
+        "invalid_input",
+        "Cloud copy request is invalid",
+      );
     }
     if (input.targetLocalWorkspaceId === input.workspaceId) {
       throw new WorkspaceForkError(
@@ -1591,12 +1730,9 @@ export class DatabaseCloudWorkspaceForkService {
       // workspace id. The workspace authorization is intentionally checked
       // before returning an existing result: idempotency is not an access
       // capability after Team membership or ownership is revoked.
-      await tx.query(
-        `SELECT pg_advisory_xact_lock(hashtextextended($1, 31))`,
-        [
-          `cloud-to-local-fork:${input.organizationId}:${input.accountUserId}:${input.idempotencyKey}`,
-        ],
-      );
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 31))`, [
+        `cloud-to-local-fork:${input.organizationId}:${input.accountUserId}:${input.idempotencyKey}`,
+      ]);
       const workspace = await tx.query<{
         team_id: string;
         owner_user_id: string;
@@ -1611,7 +1747,8 @@ export class DatabaseCloudWorkspaceForkService {
         [input.workspaceId, input.organizationId],
       );
       const row = workspace.rows[0];
-      if (!row) throw new WorkspaceForkError("not_found", "Cloud workspace not found");
+      if (!row)
+        throw new WorkspaceForkError("not_found", "Cloud workspace not found");
       await authorizeCloudWorkspaceDataAccess(tx, {
         organizationId: input.organizationId,
         teamId: row.team_id,
@@ -1640,7 +1777,10 @@ export class DatabaseCloudWorkspaceForkService {
           [existing.rows[0].id],
         );
         if (!checkpoint.rows[0]) {
-          throw new WorkspaceForkError("not_ready", "Fork checkpoint request is incomplete");
+          throw new WorkspaceForkError(
+            "not_ready",
+            "Fork checkpoint request is incomplete",
+          );
         }
         return {
           forkIntentId: existing.rows[0].id,
@@ -1651,10 +1791,7 @@ export class DatabaseCloudWorkspaceForkService {
       const running =
         row.desired_state === "running" &&
         ["ready", "busy"].includes(row.status);
-      if (
-        !running &&
-        !["stopped", "archived", "failed"].includes(row.status)
-      ) {
+      if (!running && !["stopped", "archived", "failed"].includes(row.status)) {
         throw new WorkspaceForkError(
           "not_ready",
           "Cloud workspace must be stable before making a local copy",
@@ -1681,7 +1818,10 @@ export class DatabaseCloudWorkspaceForkService {
         [input.workspaceId],
       );
       const head = heads.rows[0];
-      if (!running && (!head?.checkpoint_id || head.checkpoint_revision === null)) {
+      if (
+        !running &&
+        (!head?.checkpoint_id || head.checkpoint_revision === null)
+      ) {
         throw new WorkspaceForkError(
           "not_ready",
           "No durable checkpoint is available for this cloud workspace",
@@ -1742,13 +1882,19 @@ export class DatabaseCloudWorkspaceForkService {
          WHERE id = $1`,
         [checkpoint.id, forkIntentId],
       );
-      await audit(tx, input.organizationId, input.accountUserId, "cloud_workspace.local_copy_requested", {
-        workspaceId: input.workspaceId,
-        targetLocalWorkspaceId: input.targetLocalWorkspaceId,
-        forkIntentId,
-        checkpointRequestId: checkpoint.id,
-        checkpointSource: running ? "fresh" : "last_durable",
-      });
+      await audit(
+        tx,
+        input.organizationId,
+        input.accountUserId,
+        "cloud_workspace.local_copy_requested",
+        {
+          workspaceId: input.workspaceId,
+          targetLocalWorkspaceId: input.targetLocalWorkspaceId,
+          forkIntentId,
+          checkpointRequestId: checkpoint.id,
+          checkpointSource: running ? "fresh" : "last_durable",
+        },
+      );
       return {
         forkIntentId,
         checkpointRequestId: checkpoint.id,
@@ -1775,7 +1921,10 @@ export class DatabaseCloudWorkspaceForkService {
       !UUID_PATTERN.test(input.workspaceId) ||
       !UUID_PATTERN.test(input.accountUserId)
     ) {
-      throw new WorkspaceForkError("invalid_input", "Export grant input is invalid");
+      throw new WorkspaceForkError(
+        "invalid_input",
+        "Export grant input is invalid",
+      );
     }
     const payload = {
       organizationId: input.organizationId,
@@ -1784,7 +1933,9 @@ export class DatabaseCloudWorkspaceForkService {
     };
     const secret = randomBytes(32);
     const grantToken = `zwe_${secret.toString("base64url")}`;
-    const tokenSha256 = createHash("sha256").update(grantToken, "utf8").digest();
+    const tokenSha256 = createHash("sha256")
+      .update(grantToken, "utf8")
+      .digest();
     secret.fill(0);
     try {
       return await withSystemTx(this.pool, async (tx) => {
@@ -1935,6 +2086,8 @@ export class DatabaseCloudWorkspaceForkService {
         await tx.query<ExportGrantAuthority>(
           `SELECT export_grant.id AS grant_id, export_grant.device_id,
                   export_grant.device_key_version, export.id AS export_id,
+                  export.export_blob_id AS export_manifest_blob_id,
+                  export_blob.plaintext_sha256 AS export_manifest_sha256,
                   fork.source_cloud_workspace_id, fork.source_checkpoint_id,
                   fork.target_local_workspace_id, fork.include_chats,
                   workspace.team_id, workspace.owner_user_id,
@@ -1942,7 +2095,8 @@ export class DatabaseCloudWorkspaceForkService {
                   workspace.repository_name, workspace.repository_revision,
                   checkpoint.content_revision, checkpoint.record_revision,
                   checkpoint.file_count, checkpoint.total_bytes,
-                  checkpoint.git_base_commit, checkpoint.git_head_ref
+                  checkpoint.git_base_commit, checkpoint.git_head_ref,
+                  checkpoint.manifest_blob_id, checkpoint.integrity_sha256
            FROM workspace_export_grants export_grant
            JOIN workspace_exports export
              ON export.id = export_grant.export_id
@@ -1951,6 +2105,10 @@ export class DatabaseCloudWorkspaceForkService {
              ON fork.id = export_grant.fork_intent_id
             AND fork.org_id = export_grant.org_id
             AND fork.export_id = export.id
+           JOIN workspace_blobs export_blob
+             ON export_blob.id = export.export_blob_id
+            AND export_blob.org_id = export.org_id
+            AND export_blob.state = 'available'
            JOIN cloud_workspaces workspace
              ON workspace.id = export_grant.workspace_id
             AND workspace.org_id = export_grant.org_id
@@ -1983,7 +2141,10 @@ export class DatabaseCloudWorkspaceForkService {
         )
       ).rows[0];
       if (!authority || authority.device_id !== input.proof.deviceId) {
-        throw new WorkspaceForkError("grant_rejected", "Export grant is invalid");
+        throw new WorkspaceForkError(
+          "grant_rejected",
+          "Export grant is invalid",
+        );
       }
       await authorizeCloudWorkspaceDataAccess(tx, {
         organizationId: input.organizationId,
@@ -2038,7 +2199,10 @@ export class DatabaseCloudWorkspaceForkService {
   }) {
     const limit = input.limit ?? 500;
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 1_000) {
-      throw new WorkspaceForkError("invalid_input", "Export page size is invalid");
+      throw new WorkspaceForkError(
+        "invalid_input",
+        "Export page size is invalid",
+      );
     }
     const afterPath =
       input.afterPath === null ? null : normalizedRelativePath(input.afterPath);
@@ -2078,6 +2242,10 @@ export class DatabaseCloudWorkspaceForkService {
         sourceCloudWorkspaceId: authority.source_cloud_workspace_id,
         targetLocalWorkspaceId: authority.target_local_workspace_id,
         checkpointId: authority.source_checkpoint_id,
+        exportManifestBlobId: authority.export_manifest_blob_id,
+        exportManifestSha256: authority.export_manifest_sha256.toString("hex"),
+        manifestBlobId: authority.manifest_blob_id,
+        integritySha256: authority.integrity_sha256.toString("hex"),
         contentRevision: Number(authority.content_revision),
         recordRevision: Number(authority.record_revision),
         includeChats: authority.include_chats,
@@ -2098,10 +2266,13 @@ export class DatabaseCloudWorkspaceForkService {
           mode: entry.mode,
           blobId: entry.blob_id,
           contentSha256: entry.content_sha256?.toString("hex") ?? null,
-          sizeBytes: entry.size_bytes === null ? null : Number(entry.size_bytes),
+          sizeBytes:
+            entry.size_bytes === null ? null : Number(entry.size_bytes),
         })),
         nextAfterPath:
-          entries.rows.length > limit ? page[page.length - 1]!.normalized_path : null,
+          entries.rows.length > limit
+            ? page[page.length - 1]!.normalized_path
+            : null,
       };
     });
   }
@@ -2125,7 +2296,10 @@ export class DatabaseCloudWorkspaceForkService {
       limit < 1 ||
       limit > 20
     ) {
-      throw new WorkspaceForkError("invalid_input", "Export record cursor is invalid");
+      throw new WorkspaceForkError(
+        "invalid_input",
+        "Export record cursor is invalid",
+      );
     }
     const payload = {
       organizationId: input.organizationId,
@@ -2141,7 +2315,10 @@ export class DatabaseCloudWorkspaceForkService {
         payload,
       });
       if (!authority.include_chats) {
-        throw new WorkspaceForkError("export_unavailable", "Workspace records are unavailable");
+        throw new WorkspaceForkError(
+          "export_unavailable",
+          "Workspace records are unavailable",
+        );
       }
       const highWatermark = Number(authority.record_revision);
       const events = await tx.query<{
@@ -2214,18 +2391,31 @@ export class DatabaseCloudWorkspaceForkService {
          WHERE entry.checkpoint_id = $1
            AND entry.workspace_id = $2 AND entry.org_id = $3
            AND entry.operation = 'upsert' AND entry.blob_id = $4
+         UNION ALL
+         SELECT 1 FROM workspace_checkpoints checkpoint
+         WHERE checkpoint.id = $1 AND checkpoint.workspace_id = $2
+           AND checkpoint.org_id = $3 AND checkpoint.state = 'durable'
+           AND checkpoint.manifest_blob_id = $4
+         UNION ALL
+         SELECT 1 FROM workspace_exports export
+         WHERE export.id = $5 AND export.org_id = $3
+           AND export.workspace_id = $2 AND export.export_blob_id = $4
          LIMIT 1`,
         [
           authority.source_checkpoint_id,
           authority.source_cloud_workspace_id,
           input.organizationId,
           input.blobId,
+          authority.export_id,
         ],
       );
       return (result.rowCount ?? 0) === 1;
     });
     if (!authorized) {
-      throw new WorkspaceForkError("not_found", "Workspace export blob not found");
+      throw new WorkspaceForkError(
+        "not_found",
+        "Workspace export blob not found",
+      );
     }
     try {
       return await this.blobs.getSystem({
@@ -2346,14 +2536,20 @@ export class CloudWorkspaceForkWorker {
     const intervalMs = options.intervalMs ?? 2_000;
     const leaseMs = options.leaseMs ?? 60_000;
     if (
-      !Number.isSafeInteger(intervalMs) || intervalMs < 250 || intervalMs > 300_000 ||
-      !Number.isSafeInteger(leaseMs) || leaseMs < 5_000 || leaseMs > 3_600_000
-    ) throw new Error("cloud workspace fork worker timing is invalid");
+      !Number.isSafeInteger(intervalMs) ||
+      intervalMs < 250 ||
+      intervalMs > 300_000 ||
+      !Number.isSafeInteger(leaseMs) ||
+      leaseMs < 5_000 ||
+      leaseMs > 3_600_000
+    )
+      throw new Error("cloud workspace fork worker timing is invalid");
     this.workerId = options.workerId ?? `cloud-fork:${randomUUID()}`;
   }
 
   start(): () => Promise<void> {
-    if (this.started || this.stopped) throw new Error("fork worker lifecycle is invalid");
+    if (this.started || this.stopped)
+      throw new Error("fork worker lifecycle is invalid");
     this.started = true;
     const run = () => {
       if (this.stopped) return;
@@ -2526,13 +2722,19 @@ export class CloudWorkspaceForkWorker {
             this.workerId,
           ],
         );
-        await audit(tx, row.org_id, row.requested_by, "cloud_workspace.local_copy_ready", {
-          forkIntentId: row.id,
-          sourceCloudWorkspaceId: row.source_cloud_workspace_id,
-          targetLocalWorkspaceId: row.target_local_workspace_id,
-          checkpointId: row.checkpoint_id,
-          exportId: stored.rows[0]!.id,
-        });
+        await audit(
+          tx,
+          row.org_id,
+          row.requested_by,
+          "cloud_workspace.local_copy_ready",
+          {
+            forkIntentId: row.id,
+            sourceCloudWorkspaceId: row.source_cloud_workspace_id,
+            targetLocalWorkspaceId: row.target_local_workspace_id,
+            checkpointId: row.checkpoint_id,
+            exportId: stored.rows[0]!.id,
+          },
+        );
       });
     } catch {
       await withSystemTx(this.pool, (tx) =>
@@ -2553,9 +2755,12 @@ export class CloudWorkspaceForkWorker {
 
 export function forkErrorToHttp(error: WorkspaceForkError): HttpError {
   const status: 403 | 404 | 409 | 422 =
-    error.code === "not_found" ? 404 :
-      ["device_proof_rejected", "grant_rejected"].includes(error.code) ? 403 :
-      error.code === "invalid_input" ? 422 :
-        409;
+    error.code === "not_found"
+      ? 404
+      : ["device_proof_rejected", "grant_rejected"].includes(error.code)
+        ? 403
+        : error.code === "invalid_input"
+          ? 422
+          : 409;
   return new HttpError(status, `workspace_fork_${error.code}`, error.message);
 }

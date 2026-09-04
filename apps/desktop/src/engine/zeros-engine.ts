@@ -7755,6 +7755,8 @@ export class ZerosEngine {
         return runtime.list();
       case "cloudFork.resume":
         return runtime.run(required("jobId"));
+      case "cloudFork.cancel":
+        return runtime.cancel(required("jobId"));
       case "cloudFork.localToCloud":
         if (!params.repository || typeof params.repository !== "object") {
           throw new Error("repository is required");
@@ -8423,7 +8425,13 @@ export class ZerosEngine {
     if (prompt.cancelSettleTimer || prompt.adapterSettled) return;
     const timer = setTimeout(() => {
       prompt.cancelSettleTimer = undefined;
-      void this.settleCancelledPrompt(prompt, CANCEL_SETTLE_DEADLINE_MS);
+      void this.settleCancelledPrompt(prompt, CANCEL_SETTLE_DEADLINE_MS).catch(
+        (error: unknown) => {
+          console.warn(
+            `[engine] cancelled prompt settlement failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        },
+      );
     }, CANCEL_SETTLE_DEADLINE_MS);
     // Never hold the engine's event loop open for a stop deadline.
     timer.unref?.();
@@ -9507,14 +9515,18 @@ export class ZerosEngine {
       // A malformed authority refresh clears the prior bearer instead of
       // leaving stale access active. Other host-control message types return
       // `undefined` but cannot reach this branch.
-      void this.cloudReplicaRuntime
-        ?.updateSession(session ?? null)
-        .then(() => this.cloudWorkspaceForkRuntime?.wake())
-        .catch((error) =>
-          console.warn(
-            `[cloud-replica] host session rejected (${error instanceof Error ? error.name : "unknown"})`,
-          ),
-        );
+      void (async () => {
+        // A replacement host session must not let a prior account's copy
+        // continue after its next network/filesystem await. Jobs remain
+        // resumable for their owner; the new account cannot claim them.
+        await this.cloudWorkspaceForkRuntime?.cancelActiveWork();
+        await this.cloudReplicaRuntime?.updateSession(session ?? null);
+        this.cloudWorkspaceForkRuntime?.wake();
+      })().catch((error) =>
+        console.warn(
+          `[cloud-replica] host session rejected (${error instanceof Error ? error.name : "unknown"})`,
+        ),
+      );
       return;
     }
     if (msg.type === "host.cloudReplicaProofResponse") {

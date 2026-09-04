@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 import { generateKeyPairSync, randomBytes } from "node:crypto";
 
 import { loadConfig } from "./config.js";
+import {
+  CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+  MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+} from "./cloud-workspaces/engine-protocol-version.js";
 
 function baseEnv(): NodeJS.ProcessEnv {
   return {
@@ -47,7 +51,6 @@ function cloudSetupEnv(): NodeJS.ProcessEnv {
     CLOUD_WORKSPACE_SECRET_KEY_V1: setupKey,
     CLOUD_WORKSPACE_OBJECT_KEY_V1: setupKey,
     CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: "/var/lib/zeros/workspace-objects",
-    CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: "11",
   };
 }
 
@@ -624,7 +627,7 @@ describe("cloud workspace backend configuration", () => {
           "https://proxy-b.example.test",
         ],
         setupSecretKeyV1: setupKey,
-        engineProtocolVersion: 11,
+        engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
         enginePort: 39_393,
         intervalMs: 1_000,
         timeoutSeconds: 1_800,
@@ -632,6 +635,21 @@ describe("cloud workspace backend configuration", () => {
         admissionTtlSeconds: 120,
       },
     });
+  });
+
+  it("defaults cloud setup to the shared engine protocol while retaining an explicit compatible-image override", () => {
+    expect(
+      loadConfig(cloudSetupEnv()).cloudWorkspaces?.setupExecution
+        ?.engineProtocolVersion,
+    ).toBe(CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION);
+    expect(
+      loadConfig({
+        ...cloudSetupEnv(),
+        CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: String(
+          MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+        ),
+      }).cloudWorkspaces?.setupExecution?.engineProtocolVersion,
+    ).toBe(MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION);
   });
 
   it("keeps durable fork and recovery storage available while setup stays paused", () => {

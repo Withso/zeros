@@ -50,7 +50,9 @@ function jwtExpiryMs(token: string): number | null {
   try {
     const pieces = token.split(".");
     if (pieces.length !== 3 || !pieces[1]) return null;
-    const claims = JSON.parse(Buffer.from(pieces[1], "base64url").toString("utf8")) as {
+    const claims = JSON.parse(
+      Buffer.from(pieces[1], "base64url").toString("utf8"),
+    ) as {
       exp?: unknown;
     };
     return typeof claims.exp === "number" && Number.isSafeInteger(claims.exp)
@@ -85,6 +87,17 @@ type CloudAccessDeviceAuthorityDependencies = {
   }) => Promise<RegisteredCloudDevice>;
 };
 
+export type CloudReplicaEngineControlDependencies = {
+  store: () => CloudReplicaDeviceSecretStore;
+  getSession: () => Promise<MainAuthSession | null>;
+};
+
+const defaultEngineControlDependencies: CloudReplicaEngineControlDependencies =
+  {
+    store,
+    getSession: getValidSessionForMain,
+  };
+
 function workosAccountSession(
   session: MainAuthSession | null,
 ): (MainAuthSession & { provider: "workos"; accountId: string }) | null {
@@ -104,11 +117,14 @@ function workosAccountSession(
  * Enrollment is coalesced by the exact account/key tuple; safeStorage remains
  * the only private-key owner and no key material crosses IPC or HTTP. */
 export class CloudAccessDeviceAuthority {
-  private pending:
-    | { key: string; promise: Promise<{ accountUserId: string; deviceId: string }> }
-    | null = null;
+  private pending: {
+    key: string;
+    promise: Promise<{ accountUserId: string; deviceId: string }>;
+  } | null = null;
 
-  constructor(private readonly dependencies: CloudAccessDeviceAuthorityDependencies) {}
+  constructor(
+    private readonly dependencies: CloudAccessDeviceAuthorityDependencies,
+  ) {}
 
   async ensure(): Promise<{ accountUserId: string; deviceId: string }> {
     const session = workosAccountSession(await this.dependencies.getSession());
@@ -125,9 +141,11 @@ export class CloudAccessDeviceAuthority {
     const key = `${session.accountId}\0${envelope.active.publicKey}`;
     if (this.pending?.key === key) return this.pending.promise;
 
-    const promise = this.register(session, envelope.active.publicKey).finally(() => {
-      if (this.pending?.promise === promise) this.pending = null;
-    });
+    const promise = this.register(session, envelope.active.publicKey).finally(
+      () => {
+        if (this.pending?.promise === promise) this.pending = null;
+      },
+    );
     this.pending = { key, promise };
     return promise;
   }
@@ -154,6 +172,12 @@ export class CloudAccessDeviceAuthority {
       remote.trustState !== "trusted"
     ) {
       throw new Error("Cloud device enrollment did not match this Mac");
+    }
+    // The registration request can outlive an account replacement. Do not
+    // attach its device to a now-different signed-in account after the await.
+    const current = workosAccountSession(await this.dependencies.getSession());
+    if (!current || current.accountId !== session.accountId) {
+      throw new Error("Cloud device enrollment session changed");
     }
     try {
       this.dependencies.store.bindRegistration({
@@ -252,18 +276,43 @@ function proofFailure(
 
 /** Handle one parsed engine→host control message. Returns true only for the
  * replica protocol so the sidecar can continue routing MCP/launch messages. */
-export function handleCloudReplicaEngineControl(
+export async function handleCloudReplicaEngineControl(
   value: unknown,
   writeToEngine: (line: string) => void,
-): boolean {
+  dependencies: CloudReplicaEngineControlDependencies = defaultEngineControlDependencies,
+): Promise<boolean> {
   const proofRequest = parseCloudReplicaProofRequest(value);
   if (proofRequest) {
     if (!SIGNABLE_ACTIONS.has(proofRequest.action)) {
       writeToEngine(proofFailure(proofRequest.requestId, "signing_failed"));
       return true;
     }
+    let session:
+      | (MainAuthSession & {
+          provider: "workos";
+          accountId: string;
+        })
+      | null;
     try {
-      const envelope = store().load(proofRequest.accountUserId);
+      session = workosAccountSession(await dependencies.getSession());
+    } catch {
+      writeToEngine(proofFailure(proofRequest.requestId, "signed_out"));
+      return true;
+    }
+    if (
+      !session ||
+      jwtExpiryMs(session.accessToken) === null ||
+      jwtExpiryMs(session.accessToken)! <= Date.now()
+    ) {
+      writeToEngine(proofFailure(proofRequest.requestId, "signed_out"));
+      return true;
+    }
+    if (session.accountId !== proofRequest.accountUserId) {
+      writeToEngine(proofFailure(proofRequest.requestId, "identity_mismatch"));
+      return true;
+    }
+    try {
+      const envelope = dependencies.store().load(proofRequest.accountUserId);
       if (!envelope) {
         writeToEngine(proofFailure(proofRequest.requestId, "signed_out"));
         return true;
@@ -272,7 +321,9 @@ export function handleCloudReplicaEngineControl(
         envelope.active.deviceId !== proofRequest.deviceId ||
         envelope.active.keyVersion !== proofRequest.keyVersion
       ) {
-        writeToEngine(proofFailure(proofRequest.requestId, "identity_mismatch"));
+        writeToEngine(
+          proofFailure(proofRequest.requestId, "identity_mismatch"),
+        );
         return true;
       }
       const proof = new CloudReplicaDeviceSigner(envelope.active).proof(
@@ -302,17 +353,19 @@ export function handleCloudReplicaEngineControl(
     ) {
       return true;
     }
-    store().bindRegistration(registration);
+    dependencies.store().bindRegistration(registration);
     // Re-seed immediately with the now-bound safeStorage identity. The engine
     // remains unable to request signatures until it receives this message.
-    void cloudReplicaSessionControlLine().then(writeToEngine).catch(() => {
-      writeToEngine(
-        cloudReplicaHostControlLine({
-          type: "host.cloudReplicaSession",
-          session: null,
-        }),
-      );
-    });
+    void cloudReplicaSessionControlLine()
+      .then(writeToEngine)
+      .catch(() => {
+        writeToEngine(
+          cloudReplicaHostControlLine({
+            type: "host.cloudReplicaSession",
+            session: null,
+          }),
+        );
+      });
   } catch {
     // A CAS/identity mismatch must not be repaired by silently creating a new
     // key. The next explicit auth/session seed will retry deterministic

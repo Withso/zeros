@@ -242,6 +242,58 @@ describe("CloudWorkspaceSshRuntime", () => {
     expect(tunnelChild.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
+  it("handles rejected tunnel expiry cleanup without an unhandled timer promise", async () => {
+    vi.useFakeTimers();
+    const warning = vi
+      .spyOn(console, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      vi.setSystemTime(new Date("2026-01-01T00:00:00.000Z"));
+      const { runtimeRoot, knownHostsPath } = await fixture();
+      const tunnelChild = child();
+      const spawnProcess = vi.fn((..._args: Parameters<SpawnCloudProcess>) => {
+        queueMicrotask(() => tunnelChild.emit("spawn"));
+        return tunnelChild;
+      }) as unknown as SpawnCloudProcess;
+      const runtime = new CloudWorkspaceSshRuntime({
+        runtimeRoot,
+        knownHostsPath,
+        spawn: spawnProcess,
+        checkTunnel: async () => true,
+        allowTrustOnFirstUse: true,
+      });
+      const removePreparedDirectory = vi
+        .spyOn(
+          runtime as unknown as {
+            removePreparedDirectory(directory: string): Promise<void>;
+          },
+          "removePreparedDirectory",
+        )
+        .mockRejectedValue(new Error("disk cleanup failed"));
+
+      await runtime.startTunnel({
+        localHost: "127.0.0.1",
+        localPort: 54174,
+        remoteHost: "127.0.0.1",
+        remotePort: 4173,
+        sshUsername: SSH_CREDENTIAL,
+        sshHost: "ssh.app.daytona.io",
+        expiresAt: new Date(Date.now() + 1_000).toISOString(),
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(removePreparedDirectory).toHaveBeenCalled();
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining("expiry cleanup failed"),
+      );
+      removePreparedDirectory.mockRestore();
+      await runtime.dispose();
+    } finally {
+      warning.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it("atomically selects a loopback port and proxies it through fixed ssh stdio forwarding", async () => {
     const { runtimeRoot, knownHostsPath } = await fixture();
     const proxyChild = child();

@@ -12,9 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { withSystemTx } from "../db.js";
 import { runMigrations } from "../migrate.js";
-import {
-  deliverWorkspaceCheckpointRequest,
-} from "./checkpoint-requests.js";
+import { deliverWorkspaceCheckpointRequest } from "./checkpoint-requests.js";
 import { DatabaseCloudWorkspaceContentService } from "./content-record.js";
 import { DatabaseCloudWorkspaceDurableRecordService } from "./durable-record.js";
 import {
@@ -76,7 +74,9 @@ function localForkSnapshotSha256(input: {
 }): string {
   const upserts = input.entries
     .filter((entry) => entry.operation === "upsert")
-    .sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)))
+    .sort((left, right) =>
+      Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)),
+    )
     .map((entry) => ({
       path: entry.path,
       entryType: entry.entryType,
@@ -87,7 +87,9 @@ function localForkSnapshotSha256(input: {
   const deletions = input.entries
     .filter((entry) => entry.operation === "delete")
     .map((entry) => entry.path)
-    .sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+    .sort((left, right) =>
+      Buffer.compare(Buffer.from(left), Buffer.from(right)),
+    );
   const fileFingerprint = createHash("sha256")
     .update(input.gitBaseCommit, "utf8")
     .update("\0", "utf8")
@@ -100,7 +102,9 @@ function localForkSnapshotSha256(input: {
   const snapshot = createHash("sha256")
     .update("zeros-local-to-cloud-snapshot-v1\0", "utf8")
     .update(fileFingerprint, "utf8");
-  for (const record of input.records.sort((left, right) => left.ordinal - right.ordinal)) {
+  for (const record of input.records.sort(
+    (left, right) => left.ordinal - right.ordinal,
+  )) {
     snapshot
       .update("\0", "utf8")
       .update(record.entityKind, "utf8")
@@ -173,7 +177,8 @@ d("cloud workspace immutable forks", () => {
   async function registerDevice(): Promise<DeviceSigner> {
     const pair = generateKeyPairSync("ed25519");
     const jwk = pair.publicKey.export({ format: "jwk" });
-    if (typeof jwk.x !== "string") throw new Error("missing Ed25519 public key");
+    if (typeof jwk.x !== "string")
+      throw new Error("missing Ed25519 public key");
     const registered = await replicas.registerDevice({
       accountUserId: fixture.userId,
       label: "Fork export test Mac",
@@ -219,7 +224,9 @@ d("cloud workspace immutable forks", () => {
   }
 
   async function seedLocalToCloudFork(
-    sourceSnapshotSha256 = createHash("sha256").update("local-snapshot").digest("hex"),
+    sourceSnapshotSha256 = createHash("sha256")
+      .update("local-snapshot")
+      .digest("hex"),
   ) {
     const forkIntentId = randomUUID();
     const sourceLocalWorkspaceId = randomUUID();
@@ -404,6 +411,39 @@ d("cloud workspace immutable forks", () => {
       normalized_path: "src/copied.ts",
       entity_id: targetChatId,
     });
+    const checkpointManifest = (
+      await pool.query<{
+        manifest_blob_id: string;
+        integrity_sha256: Buffer;
+      }>(
+        `SELECT manifest_blob_id, integrity_sha256
+         FROM workspace_checkpoints WHERE id = $1`,
+        [finalized.checkpointId],
+      )
+    ).rows[0]!;
+    const checkpointManifestBytes = await blobs.getSystem({
+      blobId: checkpointManifest.manifest_blob_id,
+      organizationId: fixture.organizationId,
+    });
+    expect(
+      createHash("sha256").update(checkpointManifestBytes).digest(),
+    ).toEqual(checkpointManifest.integrity_sha256);
+    expect(JSON.parse(checkpointManifestBytes.toString("utf8"))).toEqual({
+      version: 1,
+      audience: "zeros-cloud-workspace-checkpoint-manifest-v1",
+      gitBaseCommit: "c".repeat(40),
+      gitHeadRef: "refs/heads/zeros-copy",
+      entries: [
+        {
+          path: "src/copied.ts",
+          entryType: "file",
+          mode: 33188,
+          contentSha256: blob.plaintextSha256,
+          sizeBytes: bytes.length,
+        },
+      ],
+      deletions: ["src/removed.ts"],
+    });
     await expect(
       pool.query(
         `SELECT checkpoint.file_count, checkpoint.total_bytes,
@@ -552,12 +592,17 @@ d("cloud workspace immutable forks", () => {
 
   it("bounds uploaded objects, staged entries, and portable records before finalization", async () => {
     const source = await seedLocalToCloudFork();
-    const uploadLimited = new DatabaseCloudWorkspaceForkService(pool, blobs, false, {
-      maxImportEntries: 10,
-      maxImportBytes: 5,
-      maxImportRecords: 10,
-      maxImportRecordBytes: 1_000_000,
-    });
+    const uploadLimited = new DatabaseCloudWorkspaceForkService(
+      pool,
+      blobs,
+      false,
+      {
+        maxImportEntries: 10,
+        maxImportBytes: 5,
+        maxImportRecords: 10,
+        maxImportRecordBytes: 1_000_000,
+      },
+    );
     const first = await uploadLimited.uploadImportBlob({
       forkIntentId: source.forkIntentId,
       organizationId: fixture.organizationId,
@@ -582,12 +627,17 @@ d("cloud workspace immutable forks", () => {
     );
     expect(rejectedUpload.rows[0]!.count).toBe("0");
 
-    const entryLimited = new DatabaseCloudWorkspaceForkService(pool, blobs, false, {
-      maxImportEntries: 1,
-      maxImportBytes: 1_000,
-      maxImportRecords: 10,
-      maxImportRecordBytes: 1_000_000,
-    });
+    const entryLimited = new DatabaseCloudWorkspaceForkService(
+      pool,
+      blobs,
+      false,
+      {
+        maxImportEntries: 1,
+        maxImportBytes: 1_000,
+        maxImportRecords: 10,
+        maxImportRecordBytes: 1_000_000,
+      },
+    );
     await expect(
       entryLimited.stageImportEntries({
         forkIntentId: source.forkIntentId,
@@ -606,12 +656,17 @@ d("cloud workspace immutable forks", () => {
       }),
     ).rejects.toMatchObject({ code: "invalid_input" });
 
-    const recordLimited = new DatabaseCloudWorkspaceForkService(pool, blobs, false, {
-      maxImportEntries: 10,
-      maxImportBytes: 1_000,
-      maxImportRecords: 1,
-      maxImportRecordBytes: 1_000_000,
-    });
+    const recordLimited = new DatabaseCloudWorkspaceForkService(
+      pool,
+      blobs,
+      false,
+      {
+        maxImportEntries: 10,
+        maxImportBytes: 1_000,
+        maxImportRecords: 1,
+        maxImportRecordBytes: 1_000_000,
+      },
+    );
     const occurredAt = new Date().toISOString();
     const chatRecord = (sourceChatId: string, ordinal: number) => {
       const entityId = copiedChatId(fixture.workspaceId, sourceChatId);
@@ -661,12 +716,17 @@ d("cloud workspace immutable forks", () => {
 
   it("serializes concurrent fork uploads before publishing aggregate over-quota objects", async () => {
     const source = await seedLocalToCloudFork();
-    const uploadLimited = new DatabaseCloudWorkspaceForkService(pool, blobs, false, {
-      maxImportEntries: 10,
-      maxImportBytes: 5,
-      maxImportRecords: 10,
-      maxImportRecordBytes: 1_000_000,
-    });
+    const uploadLimited = new DatabaseCloudWorkspaceForkService(
+      pool,
+      blobs,
+      false,
+      {
+        maxImportEntries: 10,
+        maxImportBytes: 5,
+        maxImportRecords: 10,
+        maxImportRecordBytes: 1_000_000,
+      },
+    );
     const attempts = await Promise.allSettled(
       [Buffer.from("race"), Buffer.from("lock")].map((bytes) =>
         uploadLimited.uploadImportBlob({
@@ -678,8 +738,12 @@ d("cloud workspace immutable forks", () => {
         }),
       ),
     );
-    expect(attempts.filter((attempt) => attempt.status === "fulfilled")).toHaveLength(1);
-    expect(attempts.filter((attempt) => attempt.status === "rejected")).toHaveLength(1);
+    expect(
+      attempts.filter((attempt) => attempt.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      attempts.filter((attempt) => attempt.status === "rejected"),
+    ).toHaveLength(1);
     expect(
       attempts.find((attempt) => attempt.status === "rejected"),
     ).toMatchObject({ reason: { code: "invalid_input" } });
@@ -912,6 +976,10 @@ d("cloud workspace immutable forks", () => {
       sourceCloudWorkspaceId: fixture.workspaceId,
       targetLocalWorkspaceId,
       checkpointId: committed.checkpointId,
+      exportManifestBlobId: expect.any(String),
+      exportManifestSha256: expect.any(String),
+      manifestBlobId: manifestBlob.id,
+      integritySha256: createHash("sha256").update(manifestBytes).digest("hex"),
       contentRevision: 1,
       recordRevision: 1,
       gitBaseCommit: "a".repeat(40),
@@ -939,6 +1007,52 @@ d("cloud workspace immutable forks", () => {
         }),
       }),
     ).resolves.toEqual(file);
+    await expect(
+      forks.readExportBlob({
+        forkIntentId: requested.forkIntentId,
+        organizationId: fixture.organizationId,
+        workspaceId: fixture.workspaceId,
+        accountUserId: fixture.userId,
+        grantToken: grant.grantToken,
+        blobId: manifestBlob.id,
+        proof: proof(device, "fork.export.blob.read", {
+          ...grantPayload,
+          blobId: manifestBlob.id,
+        }),
+      }),
+    ).resolves.toEqual(manifestBytes);
+    const exportManifestBytes = await forks.readExportBlob({
+      forkIntentId: requested.forkIntentId,
+      organizationId: fixture.organizationId,
+      workspaceId: fixture.workspaceId,
+      accountUserId: fixture.userId,
+      grantToken: grant.grantToken,
+      blobId: exported.exportManifestBlobId,
+      proof: proof(device, "fork.export.blob.read", {
+        ...grantPayload,
+        blobId: exported.exportManifestBlobId,
+      }),
+    });
+    expect(exportManifestBytes).toEqual(
+      Buffer.from(
+        canonicalJson({
+          audience: "zeros-cloud-to-local-fork-v1",
+          forkIntentId: requested.forkIntentId,
+          sourceCloudWorkspaceId: fixture.workspaceId,
+          targetLocalWorkspaceId,
+          checkpointId: committed.checkpointId,
+          contentRevision: 1,
+          recordRevision: 1,
+          includeChats: true,
+          fileCount: 1,
+          totalBytes: file.length,
+        }),
+        "utf8",
+      ),
+    );
+    expect(exported.exportManifestSha256).toBe(
+      createHash("sha256").update(exportManifestBytes).digest("hex"),
+    );
     await expect(
       forks.readExportRecords({
         forkIntentId: requested.forkIntentId,

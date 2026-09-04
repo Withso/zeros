@@ -26,6 +26,7 @@ import {
   seedCanonicalWorkspaceSettingsVersion,
 } from "./test-fixtures.js";
 import type { CloudWorkspaceSetupExecution } from "./setup-worker.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const d = databaseUrl ? describe : describe.skip;
@@ -59,7 +60,7 @@ describe("cloud workspace setup material configuration", () => {
       setupAudience: SETUP_AUDIENCE,
       engineRegistrationAudience: ENGINE_AUDIENCE,
       engineHeartbeatAudience: HEARTBEAT_AUDIENCE,
-      engineProtocolVersion: 11,
+      engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
       enginePort: 39_393,
       setupSecretKeyV1: SECRET_KEY,
       github,
@@ -229,13 +230,16 @@ d("cloud workspace setup material redemption", () => {
          ) VALUES ($1, 1, $2, 'daytona', $3, 'running')`,
         [workspaceId, organizationId, `sandbox-${workspaceId}`],
       );
-      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(tx, {
-        workspaceId,
-        organizationId,
-        generation: 1,
-        createdBy: accountUserId,
-        effectiveDocument: settings,
-      });
+      const settingsVersionId = await seedCanonicalWorkspaceSettingsVersion(
+        tx,
+        {
+          workspaceId,
+          organizationId,
+          generation: 1,
+          createdBy: accountUserId,
+          effectiveDocument: settings,
+        },
+      );
       await tx.query(
         `INSERT INTO cloud_workspace_setup_specs (
            workspace_id, generation, org_id, repository_forge,
@@ -349,7 +353,7 @@ d("cloud workspace setup material redemption", () => {
       setupAudience: SETUP_AUDIENCE,
       engineRegistrationAudience: ENGINE_AUDIENCE,
       engineHeartbeatAudience: HEARTBEAT_AUDIENCE,
-      engineProtocolVersion: 11,
+      engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
       enginePort: 39_393,
       setupSecretKeyV1: SECRET_KEY,
       github,
@@ -414,7 +418,7 @@ d("cloud workspace setup material redemption", () => {
         setupCommands: [{ command: "node --version", timeoutSeconds: 30 }],
       },
       engine: {
-        protocolVersion: 11,
+        protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
         port: 39_393,
         ownerSubject: `identity|${seed.execution.authority.accountUserId}`,
         accountAuth: {
@@ -590,7 +594,7 @@ d("cloud workspace setup material redemption", () => {
       setupRunId: seed.execution.setupRunId,
       executionFence: seed.execution.executionFence,
       engineInstanceId: materials.engine.instanceId,
-      protocolVersion: 11,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
     });
     expect(registration).toMatchObject({
       version: 1,
@@ -610,7 +614,7 @@ d("cloud workspace setup material redemption", () => {
         setupRunId: seed.execution.setupRunId,
         executionFence: seed.execution.executionFence,
         engineInstanceId: materials.engine.instanceId,
-        protocolVersion: 11,
+        protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
       }),
     ).rejects.toMatchObject({ code: "engine_registration_rejected" });
 
@@ -852,7 +856,7 @@ d("cloud workspace setup material redemption", () => {
       setupAudience: SETUP_AUDIENCE,
       engineRegistrationAudience: ENGINE_AUDIENCE,
       engineHeartbeatAudience: HEARTBEAT_AUDIENCE,
-      engineProtocolVersion: 11,
+      engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
       enginePort: 39_393,
       setupSecretKeyV1: SECRET_KEY,
       github,
@@ -873,7 +877,7 @@ d("cloud workspace setup material redemption", () => {
       setupRunId: seed.execution.setupRunId,
       executionFence: seed.execution.executionFence,
       engineInstanceId: materials.engine.instanceId,
-      protocolVersion: 11,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
     });
     const membershipOwner = await pool.connect();
     let removal: ReturnType<typeof membershipOwner.query> | null = null;
@@ -933,7 +937,7 @@ d("cloud workspace setup material redemption", () => {
       setupRunId: seed.execution.setupRunId,
       executionFence: seed.execution.executionFence,
       engineInstanceId: materials.engine.instanceId,
-      protocolVersion: 11,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
     });
 
     await pool.query(
@@ -977,7 +981,7 @@ d("cloud workspace setup material redemption", () => {
       setupRunId: seed.execution.setupRunId,
       executionFence: seed.execution.executionFence,
       engineInstanceId: materials.engine.instanceId,
-      protocolVersion: 11,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
     });
 
     await pool.query(`UPDATE users SET deleted_at = now() WHERE id = $1`, [
@@ -1014,7 +1018,7 @@ d("cloud workspace setup material redemption", () => {
       setupRunId: seed.execution.setupRunId,
       executionFence: seed.execution.executionFence,
       engineInstanceId: materials.engine.instanceId,
-      protocolVersion: 11,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
     });
 
     await pool.query(

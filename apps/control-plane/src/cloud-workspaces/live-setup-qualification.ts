@@ -5,11 +5,7 @@ import {
   randomBytes,
   randomUUID,
 } from "node:crypto";
-import {
-  lstatSync,
-  readFileSync,
-  realpathSync,
-} from "node:fs";
+import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -38,8 +34,16 @@ import {
   sealCloudWorkspaceSetupSecret,
 } from "./setup-materials.js";
 import { CloudWorkspaceSetupWorker } from "./setup-worker.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
-const ENGINE_PROTOCOL_VERSION = 11;
+/** The qualification image runs this repository's bundled engine. Keep this
+ * derived so the image/materials/registration contract cannot lag the shared
+ * bridge version again. Explicit older-image compatibility remains an
+ * environment-only control-plane configuration path. */
+export const CLOUD_WORKSPACE_QUALIFICATION_ENGINE_PROTOCOL_VERSION =
+  CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION;
+const ENGINE_PROTOCOL_VERSION =
+  CLOUD_WORKSPACE_QUALIFICATION_ENGINE_PROTOCOL_VERSION;
 const ENGINE_PORT = 39_393;
 const LOCAL_SERVER_PORT = 8_788;
 const UUID_PATTERN =
@@ -178,8 +182,8 @@ function qualificationPreviewSuffixes(raw: string | undefined): string[] {
 
 export function validateQualificationPrivateState(
   raw: unknown,
-  previewSuffixesRaw: string | undefined =
-    process.env.DAYTONA_PREVIEW_HOST_SUFFIXES,
+  previewSuffixesRaw: string | undefined = process.env
+    .DAYTONA_PREVIEW_HOST_SUFFIXES,
 ): PrivateValidationState {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw new Error("qualification private state is invalid");
@@ -202,9 +206,7 @@ export function validateQualificationPrivateState(
   const expectedHostPrefix = `${ENGINE_PORT}-${previewToken.toLowerCase()}`;
   const exactProviderHost = qualificationPreviewSuffixes(
     previewSuffixesRaw,
-  ).some(
-    (suffix) => previewUrl.hostname === `${expectedHostPrefix}.${suffix}`,
-  );
+  ).some((suffix) => previewUrl.hostname === `${expectedHostPrefix}.${suffix}`);
   if (
     typeof state.sandboxId !== "string" ||
     state.sandboxId.length < 1 ||
@@ -406,13 +408,10 @@ async function seedQualification(input: {
   const settings = {
     schemaVersion: 1,
     values: { cloud: { qualification: true } },
-    secretRefs: [
-      { id: setupSecretId, name: "QUALIFICATION_SETUP_SECRET" },
-    ],
+    secretRefs: [{ id: setupSecretId, name: "QUALIFICATION_SETUP_SECRET" }],
     setupCommands: [
       {
-        command:
-          "test -n \"${QUALIFICATION_SETUP_SECRET:-}\" && test -d .git",
+        command: 'test -n "${QUALIFICATION_SETUP_SECRET:-}" && test -d .git',
         timeoutSeconds: 30,
       },
     ],
@@ -640,9 +639,8 @@ async function waitForTunnel(input: {
       });
       if (
         response.ok &&
-        response.headers.get("content-type")
-          ?.split(";", 1)[0]
-          ?.trim() === "application/json"
+        response.headers.get("content-type")?.split(";", 1)[0]?.trim() ===
+          "application/json"
       ) {
         const body = (await response.json()) as Record<string, unknown>;
         if (
@@ -718,7 +716,10 @@ async function main(): Promise<void> {
   }
   const runId = required("GITHUB_RUN_ID", 32);
   const runAttempt = required("GITHUB_RUN_ATTEMPT", 16);
-  if (!/^[1-9][0-9]{0,19}$/.test(runId) || !/^[1-9][0-9]{0,19}$/.test(runAttempt)) {
+  if (
+    !/^[1-9][0-9]{0,19}$/.test(runId) ||
+    !/^[1-9][0-9]{0,19}$/.test(runAttempt)
+  ) {
     throw new Error("qualification workflow identity is invalid");
   }
   const databaseUrl = qualificationDatabaseUrl(
@@ -727,16 +728,15 @@ async function main(): Promise<void> {
   const origin = exactHttpsOrigin(
     required("ZEROS_CLOUD_QUALIFICATION_TUNNEL_ORIGIN", 4_096),
   );
-  const stateDirectory = required(
-    "ZEROS_CLOUD_VALIDATION_STATE_DIR",
-    4_096,
-  );
+  const stateDirectory = required("ZEROS_CLOUD_VALIDATION_STATE_DIR", 4_096);
   const { state, snapshot } = privateValidationState(stateDirectory);
   if (
     snapshot.sourceCommit !== required("GITHUB_SHA", 128) ||
     state.region !== required("DAYTONA_TARGET", 64)
   ) {
-    throw new Error("qualification provider state is from another workflow source");
+    throw new Error(
+      "qualification provider state is from another workflow source",
+    );
   }
   const repository = repositoryIdentity(
     required("ZEROS_CLOUD_GITHUB_REPOSITORY", 256),
@@ -766,11 +766,9 @@ async function main(): Promise<void> {
   }
   const ownerSubject = required("ZEROS_CLOUD_OWNER_SUB", 512);
   const accountToken = required("ZEROS_ACCOUNT_ACCESS_TOKEN", 16 * 1024);
-  const accountPublicKey = required(
-    "ZEROS_ACCOUNT_JWT_PUBLIC_KEY",
-    16 * 1024,
-    { multiline: true },
-  );
+  const accountPublicKey = required("ZEROS_ACCOUNT_JWT_PUBLIC_KEY", 16 * 1024, {
+    multiline: true,
+  });
   const accountKeyId = required("ZEROS_ACCOUNT_JWT_KID", 128);
   const accountIssuer = required("ZEROS_ACCOUNT_JWT_ISS", 4_096);
   const accountAudience = required("ZEROS_ACCOUNT_JWT_AUD", 512);
@@ -874,9 +872,7 @@ async function main(): Promise<void> {
       return c.json({ keys: [accountJwk] });
     });
     app.route("/", createCloudWorkspaceInternalRoutes(service));
-    app.onError((_error, c) =>
-      c.json({ error: { code: "internal" } }, 500),
-    );
+    app.onError((_error, c) => c.json({ error: { code: "internal" } }, 500));
     await new Promise<void>((resolve) => {
       server = serve(
         {

@@ -1,11 +1,19 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  CLOUD_WORKSPACE_QUALIFICATION_ENGINE_PROTOCOL_VERSION,
   qualificationDatabaseUrl,
   validateQualificationPrivateState,
 } from "./live-setup-qualification.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 describe("live setup qualification safety gate", () => {
+  it("derives its image/setup protocol from the shared bridge contract", () => {
+    expect(CLOUD_WORKSPACE_QUALIFICATION_ENGINE_PROTOCOL_VERSION).toBe(
+      CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+    );
+  });
+
   it("accepts only an explicitly named loopback PostgreSQL database", () => {
     expect(
       qualificationDatabaseUrl(

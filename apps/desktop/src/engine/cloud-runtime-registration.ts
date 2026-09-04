@@ -98,8 +98,7 @@ export type CloudRuntimeRegistrationDependencies = {
   /** `undefined` means observation was unavailable; `[]` is an authoritative
    * empty listener scan. Only ports/protocols cross the control-plane boundary. */
   readObservedPorts?: () => Promise<
-    | readonly { port: number; protocol: "tcp" }[]
-    | undefined
+    readonly { port: number; protocol: "tcp" }[] | undefined
   >;
 };
 
@@ -528,7 +527,19 @@ export class CloudRuntimeRegistration {
 
   private scheduleHeartbeat(delayMs: number): void {
     if (this.stopped || this.authorityLost) return;
-    this.timer = setTimeout(() => void this.runHeartbeat(), delayMs);
+    this.timer = setTimeout(() => {
+      // A timer callback has no caller to observe a rejected heartbeat. The
+      // normal path handles protocol/network failures in runHeartbeat; this
+      // final boundary also contains host authority-cleanup failures.
+      void this.runHeartbeat().catch(() => {
+        try {
+          this.loseAuthority();
+        } catch {
+          // The timer boundary is terminal; never surface a host callback as
+          // an unhandled rejection from the engine event loop.
+        }
+      });
+    }, delayMs);
     this.timer.unref?.();
   }
 

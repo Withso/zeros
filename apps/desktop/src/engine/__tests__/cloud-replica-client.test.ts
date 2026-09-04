@@ -1,8 +1,4 @@
-import {
-  createPublicKey,
-  randomUUID,
-  verify,
-} from "node:crypto";
+import { createPublicKey, randomUUID, verify } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
 
@@ -41,7 +37,11 @@ describe("cloud replica device possession", () => {
     const parsed = parseCloudReplicaDeviceCredential(credential);
     const signer = new CloudReplicaDeviceSigner(parsed);
     const payload = { afterRevision: 3, limit: 100 };
-    const proof = signer.proof("replica.events.read", payload, 1_700_000_000_000);
+    const proof = signer.proof(
+      "replica.events.read",
+      payload,
+      1_700_000_000_000,
+    );
     expect(
       verify(
         null,
@@ -151,13 +151,14 @@ describe("cloud replica bounded HTTP client", () => {
       baseUrl: "https://api.zeros.build",
       getAccessToken: async () => "workos-access-token",
       signer: new CloudReplicaDeviceSigner(credential),
-      fetch: vi.fn<typeof fetch>(async () =>
-        new Response(response, {
-          headers: {
-            "content-type": "application/json",
-            "content-length": String(Buffer.byteLength(response)),
-          },
-        }),
+      fetch: vi.fn<typeof fetch>(
+        async () =>
+          new Response(response, {
+            headers: {
+              "content-type": "application/json",
+              "content-length": String(Buffer.byteLength(response)),
+            },
+          }),
       ),
     });
 
@@ -231,6 +232,52 @@ describe("cloud replica bounded HTTP client", () => {
     expect(String(requestFetch.mock.calls[0]![0])).toBe(
       `https://api.zeros.build/v1/organizations/${organizationId}/cloud-workspaces/${workspaceId}/replicas/${replicaId}/events?afterRevision=4&limit=100`,
     );
+  });
+
+  it("rejects an event page whose first mutation does not start its revision sequence", async () => {
+    const credential = registeredCredential();
+    const ids = {
+      organizationId: randomUUID(),
+      workspaceId: randomUUID(),
+      replicaId: randomUUID(),
+    };
+    const client = new HttpCloudReplicaApi({
+      baseUrl: "https://api.zeros.build",
+      getAccessToken: async () => "workos-access-token",
+      signer: new CloudReplicaDeviceSigner(credential),
+      fetch: vi.fn<typeof fetch>(async () =>
+        responseJson({
+          currentRevision: 2,
+          minimumRetainedRevision: 0,
+          snapshotRequired: false,
+          fromRevision: 1,
+          toRevision: 2,
+          events: [
+            {
+              revision: 2,
+              sequence: 2,
+              path: "skipped-sequence.txt",
+              operation: "upsert",
+              entryType: "file",
+              mode: 33188,
+              blobId: randomUUID(),
+              contentSha256: "a".repeat(64),
+              sizeBytes: 1,
+            },
+          ],
+          hasMore: false,
+        }),
+      ),
+    });
+
+    await expect(
+      client.readEvents({
+        ...ids,
+        grantToken: `zwr_${Buffer.alloc(32, 6).toString("base64url")}`,
+        afterRevision: 1,
+        limit: 100,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
   });
 
   it("signs the receipt idempotency identity and refuses an unbounded blob", async () => {

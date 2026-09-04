@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 
 import {
   CLOUD_RUNTIME_ENV,
@@ -33,7 +34,7 @@ function encodedRuntime(overrides: Record<string, unknown> = {}): string {
       },
       engine: {
         instanceId: "44444444-4444-4444-8444-444444444444",
-        protocolVersion: 11,
+        protocolVersion: PROTOCOL_VERSION,
         readinessProbeToken: `zwr_${"R".repeat(43)}`,
       },
       registration: {
@@ -73,7 +74,7 @@ describe("cloud runtime registration", () => {
     expect(env).not.toHaveProperty(CLOUD_RUNTIME_ENV);
     expect(runtime).toMatchObject({
       execution: { generation: 3, executionFence: 7 },
-      engine: { protocolVersion: 11 },
+      engine: { protocolVersion: PROTOCOL_VERSION },
       registration: { endpoint: registrationEndpoint },
     });
   });
@@ -105,7 +106,7 @@ describe("cloud runtime registration", () => {
     expect(registration.readiness()).toEqual({
       version: 1,
       instanceId: runtime.engine.instanceId,
-      protocolVersion: 11,
+      protocolVersion: PROTOCOL_VERSION,
       health: "ready",
       durableRecordConnected: true,
     });
@@ -160,6 +161,37 @@ describe("cloud runtime registration", () => {
     expect(fetch.mock.calls[1]![0]).toBe(heartbeatEndpoint);
     expect(onAuthorityLost).toHaveBeenCalledTimes(1);
     expect(registration.readiness()).toBeNull();
+    await registration.stop();
+  });
+
+  it("contains a rejected heartbeat timer task when authority cleanup throws", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const runtime = consumeCloudRuntimeEnvironment(
+      { [CLOUD_RUNTIME_ENV]: encodedRuntime() },
+      Date.now,
+    )!;
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json(registrationResponse()))
+      .mockResolvedValueOnce(
+        Response.json(
+          { error: { code: "engine_heartbeat_rejected" } },
+          { status: 401 },
+        ),
+      );
+    const registration = new CloudRuntimeRegistration(runtime, {
+      fetch: fetch as typeof globalThis.fetch,
+      now: Date.now,
+      onAuthorityLost: () => {
+        throw new Error("host teardown failed");
+      },
+      onDurableRecordSync: completedDurableRecordSync(),
+    });
+    await registration.start();
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(fetch).toHaveBeenCalledTimes(2);
     await registration.stop();
   });
 

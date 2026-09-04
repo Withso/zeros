@@ -5,6 +5,7 @@ import {
   lstat,
   mkdir,
   open,
+  readdir,
   realpath,
   rename,
   rm,
@@ -15,7 +16,10 @@ import {
 } from "node:fs/promises";
 import path from "node:path";
 
-import { normalizeCloudReplicaPath, inspectCloudReplicaEntry } from "./cloud-replica-apply";
+import {
+  normalizeCloudReplicaPath,
+  inspectCloudReplicaEntry,
+} from "./cloud-replica-apply";
 import type { CloudWorkspaceForkJobEntry } from "./cloud-workspace-fork-state";
 import { zerosDataDir } from "./db/paths";
 
@@ -25,7 +29,8 @@ const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const MAX_BLOB_BYTES = 64 * 1024 * 1024;
 
 function assertJobId(jobId: string): void {
-  if (!UUID_PATTERN.test(jobId)) throw new Error("Cloud copy job identity is invalid");
+  if (!UUID_PATTERN.test(jobId))
+    throw new Error("Cloud copy job identity is invalid");
 }
 
 async function baseRoot(): Promise<string> {
@@ -66,16 +71,22 @@ async function blobRoot(jobId: string): Promise<string> {
   const root = await cloudWorkspaceForkStageRoot(jobId, { create: true });
   const blobs = path.join(root, "blobs");
   await mkdir(blobs, { recursive: true, mode: 0o700 });
-  if ((await realpath(blobs)) !== blobs || !(await lstat(blobs)).isDirectory()) {
+  if (
+    (await realpath(blobs)) !== blobs ||
+    !(await lstat(blobs)).isDirectory()
+  ) {
     throw new Error("Cloud copy blob staging directory is unsafe");
   }
   return blobs;
 }
 
-async function readExactFile(target: string, expected: {
-  sha256: string;
-  sizeBytes: number;
-}): Promise<Buffer> {
+async function readExactFile(
+  target: string,
+  expected: {
+    sha256: string;
+    sizeBytes: number;
+  },
+): Promise<Buffer> {
   const handle = await open(
     target,
     fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
@@ -185,7 +196,10 @@ function targetPath(root: string, relativePath: string): string {
   return target;
 }
 
-async function ensureSafeParents(root: string, relativePath: string): Promise<void> {
+async function ensureSafeParents(
+  root: string,
+  relativePath: string,
+): Promise<void> {
   let current = root;
   for (const component of relativePath.split("/").slice(0, -1)) {
     current = path.join(current, component);
@@ -205,7 +219,11 @@ async function ensureSafeParents(root: string, relativePath: string): Promise<vo
   }
 }
 
-function safeSymlinkTarget(root: string, linkPath: string, bytes: Uint8Array): string {
+function safeSymlinkTarget(
+  root: string,
+  linkPath: string,
+  bytes: Uint8Array,
+): string {
   let value: string;
   try {
     value = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -268,21 +286,32 @@ export async function materializeCloudWorkspaceFork(input: {
   }
   const deletions = entries
     .filter((entry) => entry.operation === "delete")
-    .sort((left, right) => right.path.split("/").length - left.path.split("/").length);
+    .sort(
+      (left, right) =>
+        right.path.split("/").length - left.path.split("/").length,
+    );
   for (const entry of deletions) await removeLeaf(root, entry.path);
 
   const upserts = entries
     .filter(
-      (entry): entry is Extract<CloudWorkspaceForkJobEntry, { operation: "upsert" }> =>
-        entry.operation === "upsert",
+      (
+        entry,
+      ): entry is Extract<
+        CloudWorkspaceForkJobEntry,
+        { operation: "upsert" }
+      > => entry.operation === "upsert",
     )
-    .sort((left, right) => left.path.split("/").length - right.path.split("/").length);
+    .sort(
+      (left, right) =>
+        left.path.split("/").length - right.path.split("/").length,
+    );
   for (const entry of upserts) {
     await ensureSafeParents(root, entry.path);
     const target = targetPath(root, entry.path);
     try {
       const existing = await lstat(target);
-      if (existing.isDirectory() && !existing.isSymbolicLink()) await rmdir(target);
+      if (existing.isDirectory() && !existing.isSymbolicLink())
+        await rmdir(target);
       else if (!existing.isFile() && !existing.isSymbolicLink()) {
         throw new Error("Cloud copy target has an unsupported local type");
       }
@@ -295,7 +324,10 @@ export async function materializeCloudWorkspaceFork(input: {
       sha256: entry.contentSha256,
       sizeBytes: entry.sizeBytes,
     });
-    const temporary = path.join(path.dirname(target), `.zeros-fork-${randomUUID()}.tmp`);
+    const temporary = path.join(
+      path.dirname(target),
+      `.zeros-fork-${randomUUID()}.tmp`,
+    );
     try {
       if (entry.entryType === "symlink") {
         await symlink(safeSymlinkTarget(root, target, bytes), temporary);
@@ -325,7 +357,9 @@ export async function materializeCloudWorkspaceFork(input: {
   }
 }
 
-export async function removeCloudWorkspaceForkStage(jobId: string): Promise<void> {
+export async function removeCloudWorkspaceForkStage(
+  jobId: string,
+): Promise<void> {
   assertJobId(jobId);
   const base = await baseRoot();
   const target = path.join(base, jobId);
@@ -334,8 +368,51 @@ export async function removeCloudWorkspaceForkStage(jobId: string): Promise<void
     throw error;
   });
   if (!stat) return;
-  if (!stat.isDirectory() || stat.isSymbolicLink() || (await realpath(target)) !== target) {
+  if (
+    !stat.isDirectory() ||
+    stat.isSymbolicLink() ||
+    (await realpath(target)) !== target
+  ) {
     throw new Error("Cloud copy staging directory is unsafe");
   }
   await rm(target, { recursive: true, force: false });
+}
+
+/** Remove plaintext stages that no current resumable job owns. The retain set
+ * comes from the SQLite journal at startup, so a crashed/terminal job cannot
+ * leave its overlay behind while an ordinary failed-but-resumable job remains
+ * intact for a later authenticated retry. */
+export async function collectCloudWorkspaceForkStages(input: {
+  retainJobIds: ReadonlySet<string>;
+}): Promise<string[]> {
+  const base = await baseRoot();
+  const removed: string[] = [];
+  const children = await readdir(base, { withFileTypes: true });
+  for (const child of children) {
+    if (!UUID_PATTERN.test(child.name) || input.retainJobIds.has(child.name)) {
+      continue;
+    }
+    const target = path.join(base, child.name);
+    const stat = await lstat(target).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (!stat) continue;
+    // A symlink is never traversed. It is safe to unlink an orphaned stage
+    // name, but leave unexpected non-directory objects for diagnostics.
+    if (stat.isSymbolicLink()) {
+      await unlink(target);
+      removed.push(child.name);
+      continue;
+    }
+    if (
+      !stat.isDirectory() ||
+      (await realpath(target).catch(() => null)) !== target
+    ) {
+      continue;
+    }
+    await rm(target, { recursive: true, force: false });
+    removed.push(child.name);
+  }
+  return removed;
 }

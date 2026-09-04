@@ -39,7 +39,11 @@ describe("device-private cloud workspace copy journal", () => {
       request: { version: 1, includeChats: true },
       now: 100,
     });
-    expect(created).toMatchObject({ ...ids, state: "prepared", attemptCount: 0 });
+    expect(created).toMatchObject({
+      ...ids,
+      state: "prepared",
+      attemptCount: 0,
+    });
 
     state.replacePayload({
       jobId: ids.jobId,
@@ -72,7 +76,9 @@ describe("device-private cloud workspace copy journal", () => {
       records: [{ ordinal: 0, entityKind: "chat" }],
     });
     expect(state.entries(ids.jobId)).toHaveLength(2);
-    expect(state.records(ids.jobId)).toEqual([{ ordinal: 0, entityKind: "chat" }]);
+    expect(state.records(ids.jobId)).toEqual([
+      { ordinal: 0, entityKind: "chat" },
+    ]);
 
     const blobId = randomUUID();
     state.setRemoteBlob(ids.jobId, 0, blobId);
@@ -159,5 +165,62 @@ describe("device-private cloud workspace copy journal", () => {
         now: 2,
       }),
     ).toThrow(/concurrently/);
+  });
+
+  it("keeps transient failures resumable but makes cancellation and permanent failures terminal", () => {
+    const state = new DatabaseCloudWorkspaceForkState(database());
+    const ids = {
+      jobId: randomUUID(),
+      accountUserId: randomUUID(),
+      organizationId: randomUUID(),
+      sourceWorkspaceId: randomUUID(),
+      targetWorkspaceId: randomUUID(),
+    };
+    state.create({
+      ...ids,
+      operation: "local_to_cloud",
+      repoRoot: "/safe/repository",
+      request: { version: 1 },
+      now: 10,
+    });
+    expect(
+      state.failPermanent({
+        jobId: ids.jobId,
+        code: "identity_mismatch",
+        message: "Account changed",
+        now: 20,
+      }),
+    ).toMatchObject({
+      state: "failed",
+      lastErrorCode: "permanent.identity_mismatch",
+    });
+    expect(state.resumable(ids.accountUserId, Number.MAX_SAFE_INTEGER)).toEqual(
+      [],
+    );
+    expect(state.terminalStageJobIds()).toEqual([ids.jobId]);
+
+    const cancelledIds = {
+      ...ids,
+      jobId: randomUUID(),
+      targetWorkspaceId: randomUUID(),
+    };
+    state.create({
+      ...cancelledIds,
+      operation: "local_to_cloud",
+      repoRoot: "/safe/repository",
+      request: { version: 1 },
+      now: 30,
+    });
+    expect(
+      state.cancel({
+        jobId: cancelledIds.jobId,
+        code: "cancelled_by_user",
+        message: "Cancelled by user",
+        now: 40,
+      }),
+    ).toMatchObject({ state: "cancelled", completedAt: 40 });
+    expect(state.terminalStageJobIds()).toEqual(
+      expect.arrayContaining([ids.jobId, cancelledIds.jobId]),
+    );
   });
 });
