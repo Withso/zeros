@@ -51,16 +51,23 @@
   vertical-align: baseline;
 }
 
-/* Designers pass only: one shared ground for A-Z, marks, and keys.
-   A 1em flex row with flex-end so every slot sits on the same floor.
-   Letter boxes trim to the alphabetic baseline so feet match icon bottoms. */
+/* Designers pass only: one shared ground on the headline baseline.
+   Fill the sizer (not a shorter top-pinned band) so the row does not
+   sit high during scramble and drop when `designers` settles. */
 .hero-role-word.scramble-developers.is-scrambling {
   display: flex;
   flex-wrap: nowrap;
-  align-items: flex-end;
-  top: 0;
-  bottom: auto;
-  height: 1em;
+  align-items: baseline;
+}
+
+.hero-role-word.scramble-developers.is-scrambling::before {
+  content: "A";
+  flex: 0 0 auto;
+  width: 0;
+  color: transparent;
+  font: inherit;
+  line-height: inherit;
+  pointer-events: none;
 }
 
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol,
@@ -71,14 +78,9 @@
 }
 
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol {
-  display: flex;
-  align-items: flex-end;
-  height: min(50px, 1em);
   font-size: min(60px, 1em);
   line-height: 1;
   margin: 0 2px 0 0;
-  overflow: hidden;
-  transform: translateY(0.16em);
 }
 
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol:last-child {
