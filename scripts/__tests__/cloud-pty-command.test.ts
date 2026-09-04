@@ -25,10 +25,12 @@ describe("cloud qualification PTY commands", () => {
   it("does not accept the terminal's echoed input as a success marker", async () => {
     vi.useFakeTimers();
     let onData: ((sessionId: string, data: string) => void) | undefined;
+    const unsubscribe = vi.fn();
     const client = {
       onPtyData: vi.fn(
         (listener: (sessionId: string, data: string) => void) => {
           onData = listener;
+          return unsubscribe;
         },
       ),
       ptyCreate: vi.fn().mockResolvedValue({ type: "PTY_CREATED" }),
@@ -64,14 +66,76 @@ describe("cloud qualification PTY commands", () => {
 
     onData?.(sessionId, `\r\n${success}\r\n`);
     await expect(completion).resolves.toBeUndefined();
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("unsubscribes after a PTY command failure marker", async () => {
+    vi.useFakeTimers();
+    let onData: ((sessionId: string, data: string) => void) | undefined;
+    const unsubscribe = vi.fn();
+    const client = {
+      onPtyData: vi.fn(
+        (listener: (sessionId: string, data: string) => void) => {
+          onData = listener;
+          return unsubscribe;
+        },
+      ),
+      ptyCreate: vi.fn().mockResolvedValue({ type: "PTY_CREATED" }),
+      ptyWrite: vi.fn(),
+    } as unknown as PtyCommandClient;
+
+    const completion = runPtyCommand(
+      client,
+      "workspace-id",
+      "git remote remove temporary",
+    );
+    await vi.waitFor(() => expect(client.ptyWrite).toHaveBeenCalledOnce());
+
+    const [sessionId] = vi.mocked(client.ptyWrite).mock.calls[0]!;
+    onData?.(
+      sessionId,
+      "\r\nZEROS_COMMAND_FAILED_33333333333343338333333333333333\r\n",
+    );
+
+    await expect(completion).rejects.toThrow(
+      "PTY qualification command failed",
+    );
+    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("unsubscribes after a PTY command timeout", async () => {
+    vi.useFakeTimers();
+    const unsubscribe = vi.fn();
+    const client = {
+      onPtyData: vi.fn(() => unsubscribe),
+      ptyCreate: vi.fn().mockResolvedValue({ type: "PTY_CREATED" }),
+      ptyWrite: vi.fn(),
+    } as unknown as PtyCommandClient;
+
+    const completion = runPtyCommand(
+      client,
+      "workspace-id",
+      "git remote remove temporary",
+    );
+    await vi.waitFor(() => expect(client.ptyWrite).toHaveBeenCalledOnce());
+    const rejection = expect(completion).rejects.toThrow(
+      "PTY qualification command timed out",
+    );
+    await vi.advanceTimersByTimeAsync(20_000);
+
+    await rejection;
+    expect(unsubscribe).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
 
   it("clears its timeout when an immediate PTY write fails", async () => {
     vi.useFakeTimers();
     const writeFailure = new Error("bridge closed before PTY write");
+    const unsubscribe = vi.fn();
     const client = {
-      onPtyData: vi.fn(),
+      onPtyData: vi.fn(() => unsubscribe),
       ptyCreate: vi.fn().mockResolvedValue({ type: "PTY_CREATED" }),
       ptyWrite: vi.fn(() => {
         throw writeFailure;
@@ -83,6 +147,7 @@ describe("cloud qualification PTY commands", () => {
     ).rejects.toBe(writeFailure);
 
     expect(client.ptyWrite).toHaveBeenCalledOnce();
+    expect(unsubscribe).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
   });
 });
