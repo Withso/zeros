@@ -7,7 +7,21 @@ import {
   CloudReplicaDeviceSecretStore,
   type CloudReplicaSecretStoreDependencies,
 } from "../cloud-replica-device-store";
-import { CloudAccessDeviceAuthority } from "../cloud-replica-host-runtime";
+import {
+  CloudAccessDeviceAuthority,
+  handleCloudReplicaEngineControl,
+} from "../cloud-replica-host-runtime";
+
+function unexpiredAccessToken(): string {
+  return [
+    Buffer.from('{"alg":"none"}', "utf8").toString("base64url"),
+    Buffer.from(
+      JSON.stringify({ exp: Math.floor(Date.now() / 1_000) + 3_600 }),
+      "utf8",
+    ).toString("base64url"),
+    "signature",
+  ].join(".");
+}
 
 function memoryStore(): CloudReplicaDeviceSecretStore {
   const values = new Map<string, string>();
@@ -86,5 +100,52 @@ describe("main cloud access device authority", () => {
 
     await expect(authority.ensure()).rejects.toThrow(/did not match/i);
     expect(store.load(accountId)?.active.deviceId).toBeNull();
+  });
+
+  it("rechecks the current WorkOS account before signing an engine proof", async () => {
+    const accountId = randomUUID();
+    const replacementAccountId = randomUUID();
+    const store = memoryStore();
+    const pending = store.ensure(accountId);
+    const deviceId = randomUUID();
+    store.bindRegistration({
+      accountUserId: accountId,
+      deviceId,
+      keyVersion: pending.active.keyVersion,
+      publicKey: pending.active.publicKey,
+    });
+    const lines: string[] = [];
+    const handled = await handleCloudReplicaEngineControl(
+      {
+        type: "engine.cloudReplicaProofRequest",
+        requestId: `crp_${Buffer.alloc(16, 7).toString("base64url")}`,
+        accountUserId: accountId,
+        deviceId,
+        keyVersion: 1,
+        action: "replica.events.read",
+        payload: { afterRevision: 0, limit: 100 },
+      },
+      (line) => lines.push(line),
+      {
+        store: () => store,
+        getSession: async () => ({
+          provider: "workos" as const,
+          accountId: replacementAccountId,
+          accessToken: unexpiredAccessToken(),
+          sub: "user_replaced",
+          email: "replacement@example.test",
+          name: "Replacement",
+          clientKind: "desktop" as const,
+        }),
+      },
+    );
+
+    expect(handled).toBe(true);
+    expect(lines).toHaveLength(1);
+    expect(JSON.parse(lines[0]!)).toMatchObject({
+      type: "host.cloudReplicaProofResponse",
+      proof: null,
+      errorCode: "identity_mismatch",
+    });
   });
 });

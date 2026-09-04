@@ -83,10 +83,7 @@ function decodeCanonicalBase64url(
     throw new WorkspaceReplicaError("invalid_input", `${label} is invalid`);
   }
   const decoded = Buffer.from(value, "base64url");
-  if (
-    decoded.length !== bytes ||
-    decoded.toString("base64url") !== value
-  ) {
+  if (decoded.length !== bytes || decoded.toString("base64url") !== value) {
     decoded.fill(0);
     throw new WorkspaceReplicaError("invalid_input", `${label} is invalid`);
   }
@@ -323,8 +320,7 @@ function replicaDocument(row: ReplicaRow) {
       row.manifest_revision === null ? null : Number(row.manifest_revision),
     eventCursor: Number(row.event_cursor),
     ignorePolicySha256: row.ignore_policy_sha256?.toString("hex") ?? null,
-    clientManifestSha256:
-      row.client_manifest_sha256?.toString("hex") ?? null,
+    clientManifestSha256: row.client_manifest_sha256?.toString("hex") ?? null,
     lastAppliedAt: row.last_applied_at?.toISOString() ?? null,
     lastErrorCode: row.last_error_code,
     version: Number(row.version),
@@ -383,7 +379,10 @@ export class DatabaseCloudWorkspaceReplicaService {
       input.label.length > 120 ||
       /[\u0000-\u001f\u007f]/u.test(input.label)
     ) {
-      throw new WorkspaceReplicaError("invalid_input", "Device input is invalid");
+      throw new WorkspaceReplicaError(
+        "invalid_input",
+        "Device input is invalid",
+      );
     }
     const publicKey = decodePublicKey(input.publicKey);
     const keyFingerprint = fingerprint(publicKey);
@@ -415,9 +414,7 @@ export class DatabaseCloudWorkspaceReplicaService {
           [input.accountUserId, input.idempotencyKey],
         );
         if (replay.rows[0]) {
-          if (
-            !replay.rows[0].registration_request_sha256.equals(digest)
-          ) {
+          if (!replay.rows[0].registration_request_sha256.equals(digest)) {
             throw new WorkspaceReplicaError(
               "idempotency_conflict",
               "Device idempotency key was reused",
@@ -472,7 +469,10 @@ export class DatabaseCloudWorkspaceReplicaService {
     proof: CloudWorkspaceDeviceProof;
   }) {
     if (!IDEMPOTENCY_PATTERN.test(input.idempotencyKey)) {
-      throw new WorkspaceReplicaError("invalid_input", "Device rotation is invalid");
+      throw new WorkspaceReplicaError(
+        "invalid_input",
+        "Device rotation is invalid",
+      );
     }
     const newPublicKey = decodePublicKey(input.newPublicKey);
     const nextFingerprint = fingerprint(newPublicKey);
@@ -485,7 +485,9 @@ export class DatabaseCloudWorkspaceReplicaService {
       return await withSystemTx(this.pool, async (tx) => {
         await tx.query(
           `SELECT pg_advisory_xact_lock(hashtextextended($1, 30))`,
-          [`device-key-rotation:${input.proof.deviceId}:${input.idempotencyKey}`],
+          [
+            `device-key-rotation:${input.proof.deviceId}:${input.idempotencyKey}`,
+          ],
         );
         const current = await this.consumeDeviceProof(tx, {
           accountUserId: input.accountUserId,
@@ -506,7 +508,8 @@ export class DatabaseCloudWorkspaceReplicaService {
         if (replay.rows[0]) {
           if (
             !replay.rows[0].request_sha256.equals(digest) ||
-            Number(replay.rows[0].to_key_version) !== Number(current.key_version) ||
+            Number(replay.rows[0].to_key_version) !==
+              Number(current.key_version) ||
             !current.key_fingerprint.equals(nextFingerprint)
           ) {
             throw new WorkspaceReplicaError(
@@ -570,7 +573,9 @@ export class DatabaseCloudWorkspaceReplicaService {
             [
               replica.id,
               replica.org_id,
-              JSON.stringify({ keyVersion: Number(updated.rows[0]!.key_version) }),
+              JSON.stringify({
+                keyVersion: Number(updated.rows[0]!.key_version),
+              }),
             ],
           );
         }
@@ -600,7 +605,10 @@ export class DatabaseCloudWorkspaceReplicaService {
       !UUID_PATTERN.test(input.accountUserId) ||
       !UUID_PATTERN.test(input.deviceId)
     ) {
-      throw new WorkspaceReplicaError("invalid_input", "Device identity is invalid");
+      throw new WorkspaceReplicaError(
+        "invalid_input",
+        "Device identity is invalid",
+      );
     }
     return withSystemTx(this.pool, async (tx) => {
       const device = await tx.query<DeviceRow>(
@@ -694,7 +702,8 @@ export class DatabaseCloudWorkspaceReplicaService {
       [input.workspaceId, input.organizationId],
     );
     const row = workspace.rows[0];
-    if (!row) throw new WorkspaceReplicaError("not_found", "Workspace not found");
+    if (!row)
+      throw new WorkspaceReplicaError("not_found", "Workspace not found");
     if (input.access === "data") {
       await authorizeCloudWorkspaceDataAccess(tx, {
         organizationId: input.organizationId,
@@ -769,7 +778,10 @@ export class DatabaseCloudWorkspaceReplicaService {
           input.pathLabel.trim() !== input.pathLabel ||
           /[\u0000-\u001f\u007f]/u.test(input.pathLabel)))
     ) {
-      throw new WorkspaceReplicaError("invalid_input", "Replica input is invalid");
+      throw new WorkspaceReplicaError(
+        "invalid_input",
+        "Replica input is invalid",
+      );
     }
     const payload = {
       organizationId: input.organizationId,
@@ -786,7 +798,10 @@ export class DatabaseCloudWorkspaceReplicaService {
         payload,
         proof: input.proof,
       });
-      const authority = await this.authorizeWorkspace(tx, { ...input, lock: true });
+      const authority = await this.authorizeWorkspace(tx, {
+        ...input,
+        lock: true,
+      });
       if (
         authority.desired_state !== "running" ||
         !["ready", "busy"].includes(authority.status) ||
@@ -953,7 +968,10 @@ export class DatabaseCloudWorkspaceReplicaService {
     proof: CloudWorkspaceDeviceProof;
   }) {
     if (!IDEMPOTENCY_PATTERN.test(input.idempotencyKey)) {
-      throw new WorkspaceReplicaError("invalid_input", "Replica command is invalid");
+      throw new WorkspaceReplicaError(
+        "invalid_input",
+        "Replica command is invalid",
+      );
     }
     const payload = {
       operation: input.operation,
@@ -962,10 +980,9 @@ export class DatabaseCloudWorkspaceReplicaService {
     };
     const digest = requestDigest(payload);
     return withSystemTx(this.pool, async (tx) => {
-      await tx.query(
-        `SELECT pg_advisory_xact_lock(hashtextextended($1, 29))`,
-        [`workspace-replica-command:${input.replicaId}:${input.idempotencyKey}`],
-      );
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 29))`, [
+        `workspace-replica-command:${input.replicaId}:${input.idempotencyKey}`,
+      ]);
       const { replica, device } = await this.lockReplicaForDevice(tx, {
         ...input,
         action: `replica.${input.operation}`,
@@ -993,9 +1010,9 @@ export class DatabaseCloudWorkspaceReplicaService {
             "Replica command idempotency key was reused",
           );
         }
-        const stored = replay.rows[0].response_json as
-          | { replica?: ReturnType<typeof replicaDocument> }
-          | null;
+        const stored = replay.rows[0].response_json as {
+          replica?: ReturnType<typeof replicaDocument>;
+        } | null;
         if (
           stored !== null &&
           (typeof stored !== "object" ||
@@ -1012,7 +1029,9 @@ export class DatabaseCloudWorkspaceReplicaService {
           grant:
             input.operation === "resume" &&
             replica.desired_state === "active" &&
-            !["diverged", "detached", "removed"].includes(replica.observed_state)
+            !["diverged", "detached", "removed"].includes(
+              replica.observed_state,
+            )
               ? await this.issueGrant(tx, {
                   replica,
                   deviceKeyVersion: Number(device.key_version),
@@ -1025,7 +1044,11 @@ export class DatabaseCloudWorkspaceReplicaService {
         if (input.operation !== "remove") {
           throw new WorkspaceReplicaError("not_ready", "Replica was removed");
         }
-        return { replica: replicaDocument(replica), grant: null, replayed: false };
+        return {
+          replica: replicaDocument(replica),
+          grant: null,
+          replayed: false,
+        };
       }
       if (
         input.operation === "resume" &&
@@ -1046,8 +1069,16 @@ export class DatabaseCloudWorkspaceReplicaService {
         input.operation === "pause"
           ? { desired: "paused", observed: "paused", event: "replica.paused" }
           : input.operation === "remove"
-            ? { desired: "removed", observed: "removed", event: "replica.removed" }
-            : { desired: "active", observed: "syncing", event: "replica.resumed" };
+            ? {
+                desired: "removed",
+                observed: "removed",
+                event: "replica.removed",
+              }
+            : {
+                desired: "active",
+                observed: "syncing",
+                event: "replica.resumed",
+              };
       const authority = await this.authorizeWorkspace(tx, {
         ...input,
         lock: true,
@@ -1058,14 +1089,20 @@ export class DatabaseCloudWorkspaceReplicaService {
         (authority.desired_state !== "running" ||
           !["ready", "busy"].includes(authority.status))
       ) {
-        throw new WorkspaceReplicaError("not_ready", "Workspace is not running");
+        throw new WorkspaceReplicaError(
+          "not_ready",
+          "Workspace is not running",
+        );
       }
       const replaceFromCloud =
         input.operation === "resume" &&
         replica.observed_state === "diverged" &&
         input.replaceDiverged === true;
       if (replaceFromCloud) {
-        if (!authority.checkpoint_id || authority.checkpoint_revision === null) {
+        if (
+          !authority.checkpoint_id ||
+          authority.checkpoint_revision === null
+        ) {
           throw new WorkspaceReplicaError(
             "not_ready",
             "A current durable checkpoint is required for cloud replacement",
@@ -1128,11 +1165,17 @@ export class DatabaseCloudWorkspaceReplicaService {
           JSON.stringify({ replaceDiverged: input.replaceDiverged === true }),
         ],
       );
-      await audit(tx, replica.org_id, input.accountUserId, `cloud_workspace.${state.event}`, {
-        workspaceId: replica.workspace_id,
-        replicaId: replica.id,
-        deviceId: replica.device_id,
-      });
+      await audit(
+        tx,
+        replica.org_id,
+        input.accountUserId,
+        `cloud_workspace.${state.event}`,
+        {
+          workspaceId: replica.workspace_id,
+          replicaId: replica.id,
+          deviceId: replica.device_id,
+        },
+      );
       const current = updated.rows[0]!;
       const response = { replica: replicaDocument(current) };
       await tx.query(
@@ -1211,7 +1254,10 @@ export class DatabaseCloudWorkspaceReplicaService {
       if (replica.desired_state !== "active") {
         throw new WorkspaceReplicaError("not_ready", "Replica is not active");
       }
-      const authority = await this.authorizeWorkspace(tx, { ...input, lock: true });
+      const authority = await this.authorizeWorkspace(tx, {
+        ...input,
+        lock: true,
+      });
       if (
         authority.desired_state !== "running" ||
         !["ready", "busy"].includes(authority.status) ||
@@ -1303,7 +1349,10 @@ export class DatabaseCloudWorkspaceReplicaService {
       !/^zwr_[A-Za-z0-9_-]{43}$/.test(input.grantToken) ||
       !UUID_PATTERN.test(input.replicaId)
     ) {
-      throw new WorkspaceReplicaError("grant_rejected", "Replica grant is invalid");
+      throw new WorkspaceReplicaError(
+        "grant_rejected",
+        "Replica grant is invalid",
+      );
     }
     const grant = await tx.query<{
       device_id: string;
@@ -1328,7 +1377,10 @@ export class DatabaseCloudWorkspaceReplicaService {
     );
     const row = grant.rows[0];
     if (!row || row.device_id !== input.proof.deviceId) {
-      throw new WorkspaceReplicaError("grant_rejected", "Replica grant is invalid");
+      throw new WorkspaceReplicaError(
+        "grant_rejected",
+        "Replica grant is invalid",
+      );
     }
     const device = await this.consumeDeviceProof(tx, {
       accountUserId: input.accountUserId,
@@ -1337,7 +1389,10 @@ export class DatabaseCloudWorkspaceReplicaService {
       proof: input.proof,
     });
     if (Number(row.device_key_version) !== Number(device.key_version)) {
-      throw new WorkspaceReplicaError("grant_rejected", "Replica grant is stale");
+      throw new WorkspaceReplicaError(
+        "grant_rejected",
+        "Replica grant is stale",
+      );
     }
     const replica = await tx.query<ReplicaRow>(
       `SELECT ${REPLICA_COLUMNS}
@@ -1360,13 +1415,22 @@ export class DatabaseCloudWorkspaceReplicaService {
       replicaRow.desired_state !== "active" ||
       (!input.allowDiverged && replicaRow.observed_state === "diverged") ||
       Number(row.authority_epoch) !== Number(replicaRow.grant_epoch) ||
-      Number(row.workspace_authority_epoch) !== Number(replicaRow.authority_epoch)
+      Number(row.workspace_authority_epoch) !==
+        Number(replicaRow.authority_epoch)
     ) {
-      throw new WorkspaceReplicaError("grant_rejected", "Replica grant is stale");
+      throw new WorkspaceReplicaError(
+        "grant_rejected",
+        "Replica grant is stale",
+      );
     }
     const authority = await this.authorizeWorkspace(tx, { ...input });
-    if (Number(authority.authority_epoch) !== Number(replicaRow.authority_epoch)) {
-      throw new WorkspaceReplicaError("grant_rejected", "Replica grant is stale");
+    if (
+      Number(authority.authority_epoch) !== Number(replicaRow.authority_epoch)
+    ) {
+      throw new WorkspaceReplicaError(
+        "grant_rejected",
+        "Replica grant is stale",
+      );
     }
     await tx.query(
       `UPDATE workspace_replica_grants SET last_used_at = now()
@@ -1393,9 +1457,13 @@ export class DatabaseCloudWorkspaceReplicaService {
       !Number.isSafeInteger(input.limit) ||
       input.limit < 1 ||
       input.limit > 1_000 ||
-      (input.afterPath !== null && Buffer.byteLength(input.afterPath, "utf8") > 4_096)
+      (input.afterPath !== null &&
+        Buffer.byteLength(input.afterPath, "utf8") > 4_096)
     ) {
-      throw new WorkspaceReplicaError("invalid_input", "Bootstrap cursor is invalid");
+      throw new WorkspaceReplicaError(
+        "invalid_input",
+        "Bootstrap cursor is invalid",
+      );
     }
     const payload = { afterPath: input.afterPath, limit: input.limit };
     return withSystemTx(this.pool, async (tx) => {
@@ -1405,7 +1473,10 @@ export class DatabaseCloudWorkspaceReplicaService {
         payload,
       });
       if (!replica.checkpoint_id || replica.manifest_revision === null) {
-        throw new WorkspaceReplicaError("not_ready", "Replica checkpoint is unavailable");
+        throw new WorkspaceReplicaError(
+          "not_ready",
+          "Replica checkpoint is unavailable",
+        );
       }
       const checkpoint = await tx.query<{
         manifest_blob_id: string;
@@ -1423,7 +1494,10 @@ export class DatabaseCloudWorkspaceReplicaService {
         [replica.checkpoint_id, input.workspaceId, input.organizationId],
       );
       if (!checkpoint.rows[0]) {
-        throw new WorkspaceReplicaError("not_ready", "Replica checkpoint is unavailable");
+        throw new WorkspaceReplicaError(
+          "not_ready",
+          "Replica checkpoint is unavailable",
+        );
       }
       const entries = await tx.query<{
         normalized_path: string;
@@ -1460,7 +1534,8 @@ export class DatabaseCloudWorkspaceReplicaService {
           mode: entry.mode,
           blobId: entry.blob_id,
           contentSha256: entry.content_sha256?.toString("hex") ?? null,
-          sizeBytes: entry.size_bytes === null ? null : Number(entry.size_bytes),
+          sizeBytes:
+            entry.size_bytes === null ? null : Number(entry.size_bytes),
         })),
         nextAfterPath:
           entries.rows.length > input.limit
@@ -1487,7 +1562,10 @@ export class DatabaseCloudWorkspaceReplicaService {
       input.limit < 1 ||
       input.limit > 200
     ) {
-      throw new WorkspaceReplicaError("invalid_input", "Replica cursor is invalid");
+      throw new WorkspaceReplicaError(
+        "invalid_input",
+        "Replica cursor is invalid",
+      );
     }
     const payload = { afterRevision: input.afterRevision, limit: input.limit };
     return withSystemTx(this.pool, async (tx) => {
@@ -1496,7 +1574,9 @@ export class DatabaseCloudWorkspaceReplicaService {
         action: "replica.events.read",
         payload,
       });
-      if (Number(replica.event_cursor) < Number(replica.manifest_revision ?? 0)) {
+      if (
+        Number(replica.event_cursor) < Number(replica.manifest_revision ?? 0)
+      ) {
         throw new WorkspaceReplicaError(
           "bootstrap_required",
           "Replica checkpoint must be applied first",
@@ -1522,7 +1602,10 @@ export class DatabaseCloudWorkspaceReplicaService {
         head.rows[0]?.minimum_retained_revision ?? 0,
       );
       if (input.afterRevision > currentRevision) {
-        throw new WorkspaceReplicaError("cursor_conflict", "Replica cursor is ahead");
+        throw new WorkspaceReplicaError(
+          "cursor_conflict",
+          "Replica cursor is ahead",
+        );
       }
       if (input.afterRevision < minimumRetainedRevision) {
         return {
@@ -1540,8 +1623,30 @@ export class DatabaseCloudWorkspaceReplicaService {
          FROM workspace_content_revisions
          WHERE workspace_id = $1 AND org_id = $2 AND revision > $3
          ORDER BY revision LIMIT $4`,
-        [input.workspaceId, input.organizationId, input.afterRevision, input.limit],
+        [
+          input.workspaceId,
+          input.organizationId,
+          input.afterRevision,
+          input.limit,
+        ],
       );
+      for (const [index, row] of pageRevisions.rows.entries()) {
+        if (Number(row.revision) !== input.afterRevision + index + 1) {
+          throw new WorkspaceReplicaError(
+            "not_ready",
+            "Replica revision history is not contiguous",
+          );
+        }
+      }
+      if (
+        input.afterRevision < currentRevision &&
+        pageRevisions.rows.length === 0
+      ) {
+        throw new WorkspaceReplicaError(
+          "not_ready",
+          "Replica revision history is not contiguous",
+        );
+      }
       const toRevision =
         pageRevisions.rows.length > 0
           ? Number(pageRevisions.rows[pageRevisions.rows.length - 1]!.revision)
@@ -1564,8 +1669,33 @@ export class DatabaseCloudWorkspaceReplicaService {
          WHERE event.workspace_id = $1 AND event.org_id = $2
            AND event.revision > $3 AND event.revision <= $4
          ORDER BY event.revision, event.sequence`,
-        [input.workspaceId, input.organizationId, input.afterRevision, toRevision],
+        [
+          input.workspaceId,
+          input.organizationId,
+          input.afterRevision,
+          toRevision,
+        ],
       );
+      let previousRevision = input.afterRevision;
+      let previousSequence = 0;
+      for (const event of events.rows) {
+        const revision = Number(event.revision);
+        const expectedSequence =
+          revision === previousRevision ? previousSequence + 1 : 1;
+        if (
+          revision <= input.afterRevision ||
+          revision > toRevision ||
+          revision < previousRevision ||
+          event.sequence !== expectedSequence
+        ) {
+          throw new WorkspaceReplicaError(
+            "not_ready",
+            "Replica event history is not contiguous",
+          );
+        }
+        previousRevision = revision;
+        previousSequence = event.sequence;
+      }
       return {
         currentRevision,
         minimumRetainedRevision,
@@ -1581,7 +1711,8 @@ export class DatabaseCloudWorkspaceReplicaService {
           mode: event.mode,
           blobId: event.blob_id,
           contentSha256: event.content_sha256?.toString("hex") ?? null,
-          sizeBytes: event.size_bytes === null ? null : Number(event.size_bytes),
+          sizeBytes:
+            event.size_bytes === null ? null : Number(event.size_bytes),
         })),
         hasMore: toRevision < currentRevision,
       };
@@ -1598,7 +1729,10 @@ export class DatabaseCloudWorkspaceReplicaService {
     proof: CloudWorkspaceDeviceProof;
   }): Promise<Buffer> {
     if (!UUID_PATTERN.test(input.blobId)) {
-      throw new WorkspaceReplicaError("invalid_input", "Replica blob is invalid");
+      throw new WorkspaceReplicaError(
+        "invalid_input",
+        "Replica blob is invalid",
+      );
     }
     const payload = { blobId: input.blobId };
     return withSystemTx(this.pool, async (tx) => {
@@ -1612,6 +1746,12 @@ export class DatabaseCloudWorkspaceReplicaService {
          FROM workspace_checkpoint_entries entry
          WHERE entry.checkpoint_id = $1 AND entry.workspace_id = $2
            AND entry.org_id = $3 AND entry.blob_id = $4
+         UNION ALL
+         SELECT 1
+         FROM workspace_checkpoints checkpoint
+         WHERE checkpoint.id = $1 AND checkpoint.workspace_id = $2
+           AND checkpoint.org_id = $3 AND checkpoint.state = 'durable'
+           AND checkpoint.manifest_blob_id = $4
          UNION ALL
          SELECT 1
          FROM workspace_file_events event
@@ -1667,10 +1807,13 @@ export class DatabaseCloudWorkspaceReplicaService {
       input.toRevision < input.fromRevision ||
       !IDEMPOTENCY_PATTERN.test(input.idempotencyKey) ||
       !HEX_SHA256_PATTERN.test(input.manifestSha256) ||
-      ((input.outcome === "applied") !== (input.errorCode === null)) ||
+      (input.outcome === "applied") !== (input.errorCode === null) ||
       (input.errorCode !== null && !ERROR_CODE_PATTERN.test(input.errorCode))
     ) {
-      throw new WorkspaceReplicaError("invalid_input", "Replica receipt is invalid");
+      throw new WorkspaceReplicaError(
+        "invalid_input",
+        "Replica receipt is invalid",
+      );
     }
     const payload = {
       fromRevision: input.fromRevision,
@@ -1686,10 +1829,9 @@ export class DatabaseCloudWorkspaceReplicaService {
       // replica/key pair so concurrent retries cannot both cross the cursor
       // check, and so a lost response after a diverged receipt can still be
       // replayed after its original grant was intentionally revoked.
-      await tx.query(
-        `SELECT pg_advisory_xact_lock(hashtextextended($1, 31))`,
-        [`workspace-replica-receipt:${input.replicaId}:${input.idempotencyKey}`],
-      );
+      await tx.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 31))`, [
+        `workspace-replica-receipt:${input.replicaId}:${input.idempotencyKey}`,
+      ]);
       const replay = await tx.query<{
         request_sha256: Buffer;
         response_json: unknown;
@@ -1820,8 +1962,16 @@ export class DatabaseCloudWorkspaceReplicaService {
 
 export function replicaErrorToHttp(error: WorkspaceReplicaError): HttpError {
   const status: 403 | 404 | 409 | 422 =
-    error.code === "not_found" ? 404 :
-      ["device_proof_rejected", "grant_rejected"].includes(error.code) ? 403 :
-        error.code === "invalid_input" ? 422 : 409;
-  return new HttpError(status, `workspace_replica_${error.code}`, error.message);
+    error.code === "not_found"
+      ? 404
+      : ["device_proof_rejected", "grant_rejected"].includes(error.code)
+        ? 403
+        : error.code === "invalid_input"
+          ? 422
+          : 409;
+  return new HttpError(
+    status,
+    `workspace_replica_${error.code}`,
+    error.message,
+  );
 }

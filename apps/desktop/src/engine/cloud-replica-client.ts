@@ -1,8 +1,6 @@
 import { createHash } from "node:crypto";
 
-import type {
-  CloudReplicaDeviceProof,
-} from "./cloud-replica-device";
+import type { CloudReplicaDeviceProof } from "./cloud-replica-device";
 import {
   normalizeCloudReplicaPath,
   type CloudReplicaMutation,
@@ -115,7 +113,9 @@ export interface CloudReplicaApi {
     replicaId: string;
     grantToken: string;
     blobId: string;
-    expectedSizeBytes: number;
+    /** Content mutations have an exact durable size. Checkpoint manifests are
+     * self-describing, so they are bounded by the client maximum instead. */
+    expectedSizeBytes?: number;
   }): Promise<Uint8Array>;
   recordReceipt(input: {
     organizationId: string;
@@ -173,6 +173,16 @@ export type CloudWorkspaceForkManifestPage = {
   sourceCloudWorkspaceId: string;
   targetLocalWorkspaceId: string;
   checkpointId: string;
+  /** The cloud-to-local worker seals this canonical descriptor before it
+   * advertises an export. Both fields are optional only while a rolling
+   * deployment still serves export records created by the prior version. */
+  exportManifestBlobId?: string;
+  exportManifestSha256?: string;
+  /** Current export servers advertise the immutable checkpoint-manifest blob.
+   * Omitted only by an older rolling-deploy peer, which retains the summary
+   * compatibility path until that checkpoint expires. */
+  manifestBlobId?: string;
+  integritySha256?: string;
   contentRevision: number;
   recordRevision: number;
   includeChats: boolean;
@@ -294,14 +304,13 @@ export interface CloudWorkspaceForkApi {
     forkIntentId: string;
     grantToken: string;
     blobId: string;
-    expectedSizeBytes: number;
-    expectedSha256: string;
+    expectedSizeBytes?: number;
+    expectedSha256?: string;
   }): Promise<Uint8Array>;
 }
 
 export interface CloudWorkspaceDesktopApi
-  extends CloudReplicaManagementApi,
-    CloudWorkspaceForkApi {}
+  extends CloudReplicaManagementApi, CloudWorkspaceForkApi {}
 
 /** Signing may remain synchronous for an in-process credential or cross the
  * private Electron host channel. The HTTP client awaits either shape so the
@@ -358,21 +367,33 @@ function secureBaseUrl(value: string, allowInsecureLoopback: boolean): string {
 
 function uuid(value: string, label: string): string {
   if (!UUID_PATTERN.test(value)) {
-    throw new CloudReplicaClientError(0, "invalid_request", `${label} is invalid`);
+    throw new CloudReplicaClientError(
+      0,
+      "invalid_request",
+      `${label} is invalid`,
+    );
   }
   return value;
 }
 
 function grant(value: string): string {
   if (!GRANT_PATTERN.test(value)) {
-    throw new CloudReplicaClientError(0, "invalid_request", "Replica grant is invalid");
+    throw new CloudReplicaClientError(
+      0,
+      "invalid_request",
+      "Replica grant is invalid",
+    );
   }
   return value;
 }
 
 function exportGrant(value: string): string {
   if (!EXPORT_GRANT_PATTERN.test(value)) {
-    throw new CloudReplicaClientError(0, "invalid_request", "Export grant is invalid");
+    throw new CloudReplicaClientError(
+      0,
+      "invalid_request",
+      "Export grant is invalid",
+    );
   }
   return value;
 }
@@ -405,10 +426,16 @@ function bearer(value: string | null): string {
   return value;
 }
 
-async function boundedBytes(response: Response, maximum: number): Promise<Uint8Array> {
+async function boundedBytes(
+  response: Response,
+  maximum: number,
+): Promise<Uint8Array> {
   const rawLength = response.headers.get("content-length");
   if (rawLength !== null) {
-    if (!/^(?:0|[1-9][0-9]{0,15})$/.test(rawLength) || Number(rawLength) > maximum) {
+    if (
+      !/^(?:0|[1-9][0-9]{0,15})$/.test(rawLength) ||
+      Number(rawLength) > maximum
+    ) {
       throw new Error("Cloud replica response is too large");
     }
   }
@@ -437,7 +464,9 @@ async function boundedBytes(response: Response, maximum: number): Promise<Uint8A
 
 async function boundedJson(response: Response): Promise<unknown> {
   const bytes = await boundedBytes(response, MAX_JSON_BYTES);
-  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+  return JSON.parse(
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+  ) as unknown;
 }
 
 const SAFE_ERRORS: Readonly<Record<string, string>> = {
@@ -450,14 +479,17 @@ const SAFE_ERRORS: Readonly<Record<string, string>> = {
   workspace_fork_device_proof_rejected: "Cloud device proof was rejected",
   workspace_fork_device_proof_replayed: "Cloud device proof was already used",
   workspace_fork_grant_rejected: "Cloud export access expired or was revoked",
-  cloud_workspace_identity_conflict: "Cloud workspace identity is already in use",
+  cloud_workspace_identity_conflict:
+    "Cloud workspace identity is already in use",
   cloud_workspace_scope_not_found: "Cloud workspace access is not permitted",
   cloud_workspace_owner_required: "Only the cloud workspace owner can copy it",
-  cloud_workspaces_not_allowed: "Cloud workspaces are not enabled for this account",
+  cloud_workspaces_not_allowed:
+    "Cloud workspaces are not enabled for this account",
   cloud_account_entitlement_required: "A current Pro entitlement is required",
   cloud_organization_entitlement_required:
     "A current Organization cloud entitlement is required",
-  organization_identity_not_ready: "Organization identity is still synchronizing",
+  organization_identity_not_ready:
+    "Organization identity is still synchronizing",
   invalid_input: "Cloud workspace request is invalid",
   idempotency_key_required: "Cloud workspace request identity is invalid",
   workspace_replica_not_found: "Cloud replica was not found",
@@ -465,8 +497,10 @@ const SAFE_ERRORS: Readonly<Record<string, string>> = {
   workspace_replica_idempotency_conflict: "Replica request identity was reused",
   workspace_replica_device_key_conflict: "Cloud device key is already in use",
   workspace_replica_device_proof_rejected: "Cloud device proof was rejected",
-  workspace_replica_device_proof_replayed: "Cloud device proof was already used",
-  workspace_replica_grant_rejected: "Cloud replica access expired or was revoked",
+  workspace_replica_device_proof_replayed:
+    "Cloud device proof was already used",
+  workspace_replica_grant_rejected:
+    "Cloud replica access expired or was revoked",
   workspace_replica_cursor_conflict: "Cloud replica cursor changed",
   workspace_replica_bootstrap_required: "Cloud replica needs a fresh snapshot",
   workspace_replica_divergence_resolution_required:
@@ -478,12 +512,19 @@ const SAFE_ERRORS: Readonly<Record<string, string>> = {
   rate_limited: "Too many cloud replica requests; try again shortly",
 };
 
-function responseError(response: Response, body: unknown): CloudReplicaClientError {
+function responseError(
+  response: Response,
+  body: unknown,
+): CloudReplicaClientError {
   const candidate =
-    isRecord(body) && isRecord(body.error) && typeof body.error.code === "string"
+    isRecord(body) &&
+    isRecord(body.error) &&
+    typeof body.error.code === "string"
       ? body.error.code
       : "request_failed";
-  const code = Object.hasOwn(SAFE_ERRORS, candidate) ? candidate : "request_failed";
+  const code = Object.hasOwn(SAFE_ERRORS, candidate)
+    ? candidate
+    : "request_failed";
   return new CloudReplicaClientError(
     response.status,
     code,
@@ -492,11 +533,74 @@ function responseError(response: Response, body: unknown): CloudReplicaClientErr
 }
 
 function natural(value: unknown): number | null {
-  return Number.isSafeInteger(value) && Number(value) >= 0 ? Number(value) : null;
+  return Number.isSafeInteger(value) && Number(value) >= 0
+    ? Number(value)
+    : null;
 }
 
 function positive(value: unknown): number | null {
-  return Number.isSafeInteger(value) && Number(value) > 0 ? Number(value) : null;
+  return Number.isSafeInteger(value) && Number(value) > 0
+    ? Number(value)
+    : null;
+}
+
+/** Verify the wire's revision envelope independently from filesystem apply.
+ * Empty durable revisions intentionally emit no mutations, so mutation
+ * revisions may skip; their enclosing [from, to] range remains contiguous and
+ * every emitted revision must begin at sequence one with no sequence holes. */
+export function assertCloudReplicaEventPage(
+  page: CloudReplicaEventPage,
+  input: { afterRevision: number; limit: number },
+): void {
+  const invalid = (message: string): never => {
+    throw new CloudReplicaClientError(0, "invalid_response", message);
+  };
+  if (
+    page.fromRevision !== input.afterRevision ||
+    page.minimumRetainedRevision > page.currentRevision ||
+    page.toRevision < page.fromRevision ||
+    page.toRevision > page.currentRevision ||
+    page.toRevision - page.fromRevision > input.limit
+  ) {
+    invalid("Event response revision range is invalid");
+  }
+  if (page.snapshotRequired) {
+    if (
+      page.events.length !== 0 ||
+      page.fromRevision !== page.toRevision ||
+      page.hasMore ||
+      page.fromRevision >= page.minimumRetainedRevision
+    ) {
+      invalid("Snapshot-required event response is invalid");
+    }
+    return;
+  }
+  if (
+    page.fromRevision < page.minimumRetainedRevision ||
+    page.hasMore !== page.toRevision < page.currentRevision ||
+    (page.events.length === 0 &&
+      page.toRevision !== page.fromRevision &&
+      page.toRevision - page.fromRevision > input.limit)
+  ) {
+    invalid("Event response is not contiguous");
+  }
+
+  let previousRevision = page.fromRevision;
+  let previousSequence = 0;
+  for (const mutation of page.events) {
+    const expectedSequence =
+      mutation.revision === previousRevision ? previousSequence + 1 : 1;
+    if (
+      mutation.revision <= page.fromRevision ||
+      mutation.revision > page.toRevision ||
+      mutation.revision < previousRevision ||
+      mutation.sequence !== expectedSequence
+    ) {
+      invalid("Event response mutation sequence is not contiguous");
+    }
+    previousRevision = mutation.revision;
+    previousSequence = mutation.sequence;
+  }
 }
 
 function nullableHash(value: unknown): string | null | undefined {
@@ -541,11 +645,12 @@ function parseReplica(value: unknown): CloudReplicaRemoteState {
     authority === null ||
     grantEpoch === null ||
     cursor === null ||
-    manifestRevision === null && value.manifestRevision !== null ||
+    (manifestRevision === null && value.manifestRevision !== null) ||
     ignoreHash === undefined ||
     clientHash === undefined ||
     (value.checkpointId !== null &&
-      (typeof value.checkpointId !== "string" || !UUID_PATTERN.test(value.checkpointId))) ||
+      (typeof value.checkpointId !== "string" ||
+        !UUID_PATTERN.test(value.checkpointId))) ||
     (value.lastErrorCode !== null && typeof value.lastErrorCode !== "string")
   ) {
     throw new Error("Cloud replica response is invalid");
@@ -629,9 +734,13 @@ function parseMutation(
   if (
     !["upsert", "delete"].includes(String(operation)) ||
     (operation === "delete" &&
-      [base.entryType, base.mode, base.blobId, base.contentSha256, base.sizeBytes].some(
-        (part) => part !== null,
-      )) ||
+      [
+        base.entryType,
+        base.mode,
+        base.blobId,
+        base.contentSha256,
+        base.sizeBytes,
+      ].some((part) => part !== null)) ||
     (operation === "upsert" &&
       (!(["file", "symlink"] as unknown[]).includes(base.entryType) ||
         !([33188, 33261, 40960] as unknown[]).includes(base.mode) ||
@@ -671,7 +780,8 @@ function proofHeaders(proof: CloudReplicaDeviceProof): Record<string, string> {
 function exactIso(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) && new Date(timestamp).toISOString() === value
+  return Number.isFinite(timestamp) &&
+    new Date(timestamp).toISOString() === value
     ? value
     : null;
 }
@@ -689,9 +799,14 @@ function safeReplicaPath(value: string, label: string): string {
   try {
     return normalizeCloudReplicaPath(value);
   } catch (error) {
-    throw new CloudReplicaClientError(0, "invalid_response", `${label} is invalid`, {
-      cause: error,
-    });
+    throw new CloudReplicaClientError(
+      0,
+      "invalid_response",
+      `${label} is invalid`,
+      {
+        cause: error,
+      },
+    );
   }
 }
 
@@ -756,15 +871,13 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
   private readonly baseUrl: string;
   private readonly requestFetch: typeof fetch;
 
-  constructor(
-    options: {
-      baseUrl: string;
-      getAccessToken: () => Promise<string | null>;
-      signer: CloudReplicaProofSigner;
-      fetch?: typeof fetch;
-      allowInsecureLoopback?: boolean;
-    },
-  ) {
+  constructor(options: {
+    baseUrl: string;
+    getAccessToken: () => Promise<string | null>;
+    signer: CloudReplicaProofSigner;
+    fetch?: typeof fetch;
+    allowInsecureLoopback?: boolean;
+  }) {
     this.baseUrl = secureBaseUrl(
       options.baseUrl,
       options.allowInsecureLoopback === true,
@@ -826,12 +939,20 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       timeoutMs < 1_000 ||
       timeoutMs > 120_000
     ) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Cloud timeout is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Cloud timeout is invalid",
+      );
     }
     const jsonBody =
       input.body === undefined ? null : JSON.stringify(input.body);
     if (input.body !== undefined && typeof jsonBody !== "string") {
-      throw new CloudReplicaClientError(0, "invalid_request", "Cloud request body is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Cloud request body is invalid",
+      );
     }
     const proof = input.action
       ? await this.signer.proof(input.action, input.payload)
@@ -869,8 +990,7 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
             ? { "idempotency-key": idempotency(input.idempotencyKey) }
             : {}),
         },
-        body:
-          input.body === undefined ? (binary ?? undefined) : jsonBody!,
+        body: input.body === undefined ? (binary ?? undefined) : jsonBody!,
         redirect: "error",
         signal: controller.signal,
       });
@@ -887,7 +1007,9 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
     }
   }
 
-  private async json<T>(input: Parameters<HttpCloudReplicaApi["request"]>[0]): Promise<T> {
+  private async json<T>(
+    input: Parameters<HttpCloudReplicaApi["request"]>[0],
+  ): Promise<T> {
     const response = await this.request(input);
     let body: unknown;
     try {
@@ -920,7 +1042,9 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       !safeGithubName(input.repository.owner) ||
       !safeGithubName(input.repository.name) ||
       (input.name !== undefined &&
-        (input.name.trim() !== input.name || input.name.length < 1 || input.name.length > 120)) ||
+        (input.name.trim() !== input.name ||
+          input.name.length < 1 ||
+          input.name.length > 120)) ||
       (input.teamId !== undefined && !UUID_PATTERN.test(input.teamId)) ||
       (input.sourceGitHeadRef !== null &&
         (input.sourceGitHeadRef.length < 1 ||
@@ -928,7 +1052,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
           // eslint-disable-next-line no-control-regex -- Git refs reject C0, space, and DEL
           /[\u0000-\u0020\u007f]/u.test(input.sourceGitHeadRef)))
     ) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Cloud copy input is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Cloud copy input is invalid",
+      );
     }
     const body = {
       ...(input.name === undefined ? {} : { name: input.name }),
@@ -967,7 +1095,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       value.fork.targetCloudWorkspaceId !== input.targetWorkspaceId ||
       typeof value.replayed !== "boolean"
     ) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Cloud copy response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Cloud copy response is invalid",
+      );
     }
     return {
       workspaceId: input.targetWorkspaceId,
@@ -981,9 +1113,15 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
     input: Parameters<CloudWorkspaceForkApi["uploadForkBlob"]>[0],
   ) {
     if (input.bytes.byteLength > MAX_BLOB_BYTES) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Fork blob is too large");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Fork blob is too large",
+      );
     }
-    const expectedSha256 = createHash("sha256").update(input.bytes).digest("hex");
+    const expectedSha256 = createHash("sha256")
+      .update(input.bytes)
+      .digest("hex");
     const value = await this.json<unknown>({
       method: "POST",
       path: `${this.forkPath(input)}/import/blobs`,
@@ -991,7 +1129,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       timeoutMs: 120_000,
     });
     if (!isRecord(value) || !isRecord(value.blob)) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Fork blob response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Fork blob response is invalid",
+      );
     }
     const bytes = natural(value.blob.plaintextBytes);
     if (
@@ -1001,7 +1143,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       bytes !== input.bytes.byteLength ||
       typeof value.blob.reused !== "boolean"
     ) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Fork blob response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Fork blob response is invalid",
+      );
     }
     return {
       id: value.blob.id,
@@ -1015,7 +1161,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
     input: Parameters<CloudWorkspaceForkApi["stageForkEntries"]>[0],
   ) {
     if (input.entries.length < 1 || input.entries.length > 1_000) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Fork entry batch is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Fork entry batch is invalid",
+      );
     }
     const value = await this.json<unknown>({
       method: "PUT",
@@ -1023,7 +1173,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       body: { entries: input.entries },
     });
     if (!isRecord(value) || value.accepted !== input.entries.length) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Fork entry response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Fork entry response is invalid",
+      );
     }
     return { accepted: input.entries.length };
   }
@@ -1032,7 +1186,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
     input: Parameters<CloudWorkspaceForkApi["stageForkRecords"]>[0],
   ) {
     if (input.records.length < 1 || input.records.length > 20) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Fork record batch is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Fork record batch is invalid",
+      );
     }
     const value = await this.json<unknown>({
       method: "PUT",
@@ -1040,7 +1198,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       body: { records: input.records },
     });
     if (!isRecord(value) || value.accepted !== input.records.length) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Fork record response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Fork record response is invalid",
+      );
     }
     return { accepted: input.records.length };
   }
@@ -1059,7 +1221,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       !UUID_PATTERN.test(value.checkpointId) ||
       typeof value.replayed !== "boolean"
     ) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Fork finalize response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Fork finalize response is invalid",
+      );
     }
     return { checkpointId: value.checkpointId, replayed: value.replayed };
   }
@@ -1071,7 +1237,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       !UUID_PATTERN.test(input.targetLocalWorkspaceId) ||
       input.targetLocalWorkspaceId === input.workspaceId
     ) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Local copy identity is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Local copy identity is invalid",
+      );
     }
     const value = await this.json<unknown>({
       method: "POST",
@@ -1090,7 +1260,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       !UUID_PATTERN.test(value.checkpointRequestId) ||
       typeof value.replayed !== "boolean"
     ) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Local copy response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Local copy response is invalid",
+      );
     }
     return {
       forkIntentId: value.forkIntentId,
@@ -1123,7 +1297,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       expiresAt === null ||
       Date.parse(expiresAt) <= Date.now()
     ) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Export grant response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Export grant response is invalid",
+      );
     }
     return {
       grantToken: value.grantToken,
@@ -1136,8 +1314,16 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
   async readForkManifest(
     input: Parameters<CloudWorkspaceForkApi["readForkManifest"]>[0],
   ): Promise<CloudWorkspaceForkManifestPage> {
-    if (!Number.isSafeInteger(input.limit) || input.limit < 1 || input.limit > 1_000) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Export page size is invalid");
+    if (
+      !Number.isSafeInteger(input.limit) ||
+      input.limit < 1 ||
+      input.limit > 1_000
+    ) {
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Export page size is invalid",
+      );
     }
     const afterPath =
       input.afterPath === null
@@ -1160,19 +1346,62 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       payload,
       exportGrantToken: input.grantToken,
     });
-    if (!isRecord(value) || !Array.isArray(value.entries) || !isRecord(value.repository)) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Export manifest is invalid");
+    if (
+      !isRecord(value) ||
+      !Array.isArray(value.entries) ||
+      !isRecord(value.repository)
+    ) {
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Export manifest is invalid",
+      );
     }
     const contentRevision = natural(value.contentRevision);
     const recordRevision = natural(value.recordRevision);
     const fileCount = natural(value.fileCount);
     const totalBytes = natural(value.totalBytes);
+    const exportManifestBlobId =
+      value.exportManifestBlobId === undefined
+        ? undefined
+        : typeof value.exportManifestBlobId === "string" &&
+            UUID_PATTERN.test(value.exportManifestBlobId)
+          ? value.exportManifestBlobId
+          : null;
+    const exportManifestSha256 =
+      value.exportManifestSha256 === undefined
+        ? undefined
+        : typeof value.exportManifestSha256 === "string" &&
+            SHA256_PATTERN.test(value.exportManifestSha256)
+          ? value.exportManifestSha256
+          : null;
+    const manifestBlobId =
+      value.manifestBlobId === undefined
+        ? undefined
+        : typeof value.manifestBlobId === "string" &&
+            UUID_PATTERN.test(value.manifestBlobId)
+          ? value.manifestBlobId
+          : null;
+    const integritySha256 =
+      value.integritySha256 === undefined
+        ? undefined
+        : typeof value.integritySha256 === "string" &&
+            SHA256_PATTERN.test(value.integritySha256)
+          ? value.integritySha256
+          : null;
     if (
       value.sourceCloudWorkspaceId !== input.workspaceId ||
       typeof value.targetLocalWorkspaceId !== "string" ||
       !UUID_PATTERN.test(value.targetLocalWorkspaceId) ||
       typeof value.checkpointId !== "string" ||
       !UUID_PATTERN.test(value.checkpointId) ||
+      exportManifestBlobId === null ||
+      exportManifestSha256 === null ||
+      (exportManifestBlobId === undefined) !==
+        (exportManifestSha256 === undefined) ||
+      manifestBlobId === null ||
+      integritySha256 === null ||
+      (manifestBlobId === undefined) !== (integritySha256 === undefined) ||
       contentRevision === null ||
       recordRevision === null ||
       typeof value.includeChats !== "boolean" ||
@@ -1181,7 +1410,8 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       typeof value.gitBaseCommit !== "string" ||
       !FULL_COMMIT_PATTERN.test(value.gitBaseCommit) ||
       (value.gitHeadRef !== null &&
-        (typeof value.gitHeadRef !== "string" || value.gitHeadRef.length > 512)) ||
+        (typeof value.gitHeadRef !== "string" ||
+          value.gitHeadRef.length > 512)) ||
       value.repository.forge !== "github.com" ||
       !safeGithubName(value.repository.owner) ||
       !safeGithubName(value.repository.name) ||
@@ -1190,15 +1420,24 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       value.repository.revision.length > 512 ||
       (value.nextAfterPath !== null && typeof value.nextAfterPath !== "string")
     ) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Export manifest is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Export manifest is invalid",
+      );
     }
     let entries: CloudWorkspaceForkImportEntry[];
     try {
       entries = value.entries.map(parseForkEntry);
     } catch (error) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Export manifest is invalid", {
-        cause: error,
-      });
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Export manifest is invalid",
+        {
+          cause: error,
+        },
+      );
     }
     const nextAfterPath =
       value.nextAfterPath === null
@@ -1207,16 +1446,30 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
     const uniquePaths = new Set(entries.map((entry) => entry.path));
     if (
       uniquePaths.size !== entries.length ||
-      (afterPath !== null && entries.some((entry) => entry.path === afterPath)) ||
+      (afterPath !== null &&
+        entries.some((entry) => entry.path === afterPath)) ||
       (nextAfterPath !== null &&
         (entries.length === 0 || nextAfterPath !== entries.at(-1)!.path))
     ) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Export manifest is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Export manifest is invalid",
+      );
     }
     return {
       sourceCloudWorkspaceId: input.workspaceId,
       targetLocalWorkspaceId: value.targetLocalWorkspaceId,
       checkpointId: value.checkpointId,
+      ...(exportManifestBlobId === undefined
+        ? {}
+        : {
+            exportManifestBlobId,
+            exportManifestSha256: exportManifestSha256!,
+          }),
+      ...(manifestBlobId === undefined
+        ? {}
+        : { manifestBlobId, integritySha256: integritySha256! }),
       contentRevision,
       recordRevision,
       includeChats: value.includeChats,
@@ -1244,7 +1497,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       input.limit < 1 ||
       input.limit > 20
     ) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Export record cursor is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Export record cursor is invalid",
+      );
     }
     const payload = {
       organizationId: input.organizationId,
@@ -1260,30 +1517,48 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       payload,
       exportGrantToken: input.grantToken,
     });
-    if (!isRecord(value) || !Array.isArray(value.events) || typeof value.hasMore !== "boolean") {
-      throw new CloudReplicaClientError(0, "invalid_response", "Export records are invalid");
+    if (
+      !isRecord(value) ||
+      !Array.isArray(value.events) ||
+      typeof value.hasMore !== "boolean"
+    ) {
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Export records are invalid",
+      );
     }
     const recordRevision = natural(value.recordRevision);
     let events: CloudWorkspaceForkRecordEvent[];
     try {
       events = value.events.map(parseForkRecordEvent);
     } catch (error) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Export records are invalid", {
-        cause: error,
-      });
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Export records are invalid",
+        {
+          cause: error,
+        },
+      );
     }
     let previous = input.afterRevision;
     if (
       recordRevision === null ||
       input.afterRevision > recordRevision ||
       events.some((event) => {
-        const invalid = event.revision <= previous || event.revision > recordRevision;
+        const invalid =
+          event.revision <= previous || event.revision > recordRevision;
         previous = event.revision;
         return invalid;
       }) ||
       (value.hasMore && events.length === 0)
     ) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Export records are invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Export records are invalid",
+      );
     }
     return { recordRevision, events, hasMore: value.hasMore };
   }
@@ -1293,12 +1568,19 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
   ): Promise<Uint8Array> {
     uuid(input.blobId, "Blob");
     if (
-      !Number.isSafeInteger(input.expectedSizeBytes) ||
-      input.expectedSizeBytes < 0 ||
-      input.expectedSizeBytes > MAX_BLOB_BYTES ||
-      !SHA256_PATTERN.test(input.expectedSha256)
+      (input.expectedSizeBytes === undefined) !==
+        (input.expectedSha256 === undefined) ||
+      (input.expectedSizeBytes !== undefined &&
+        (!Number.isSafeInteger(input.expectedSizeBytes) ||
+          input.expectedSizeBytes < 0 ||
+          input.expectedSizeBytes > MAX_BLOB_BYTES ||
+          !SHA256_PATTERN.test(input.expectedSha256!)))
     ) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Export blob input is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Export blob input is invalid",
+      );
     }
     const payload = {
       organizationId: input.organizationId,
@@ -1323,16 +1605,32 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       }
       throw responseError(response, body);
     }
-    if (response.headers.get("content-length") !== String(input.expectedSizeBytes)) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Export blob length is invalid");
-    }
-    const bytes = await boundedBytes(response, input.expectedSizeBytes);
     if (
-      bytes.byteLength !== input.expectedSizeBytes ||
-      createHash("sha256").update(bytes).digest("hex") !== input.expectedSha256
+      input.expectedSizeBytes !== undefined &&
+      response.headers.get("content-length") !== String(input.expectedSizeBytes)
+    ) {
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Export blob length is invalid",
+      );
+    }
+    const bytes = await boundedBytes(
+      response,
+      input.expectedSizeBytes ?? MAX_BLOB_BYTES,
+    );
+    if (
+      input.expectedSizeBytes !== undefined &&
+      (bytes.byteLength !== input.expectedSizeBytes ||
+        createHash("sha256").update(bytes).digest("hex") !==
+          input.expectedSha256)
     ) {
       bytes.fill(0);
-      throw new CloudReplicaClientError(0, "invalid_response", "Export blob integrity is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Export blob integrity is invalid",
+      );
     }
     return bytes;
   }
@@ -1344,7 +1642,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       input.limit < 1 ||
       input.limit > 1_000
     ) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Bootstrap limit is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Bootstrap limit is invalid",
+      );
     }
     const cursor = input.afterPath
       ? `&after=${Buffer.from(input.afterPath, "utf8").toString("base64url")}`
@@ -1357,7 +1659,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       grantToken: input.grantToken,
     });
     if (!isRecord(value) || !Array.isArray(value.entries)) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Bootstrap response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Bootstrap response is invalid",
+      );
     }
     const revision = natural(value.manifestRevision);
     const fileCount = natural(value.fileCount);
@@ -1393,7 +1699,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       gitHeadRef === undefined ||
       (value.nextAfterPath !== null && typeof value.nextAfterPath !== "string")
     ) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Bootstrap response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Bootstrap response is invalid",
+      );
     }
     return {
       checkpointId: value.checkpointId,
@@ -1404,7 +1714,9 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       totalBytes,
       gitBaseCommit,
       gitHeadRef,
-      entries: value.entries.map((entry) => parseMutation(entry, false)) as CloudReplicaBootstrapPage["entries"],
+      entries: value.entries.map((entry) =>
+        parseMutation(entry, false),
+      ) as CloudReplicaBootstrapPage["entries"],
       nextAfterPath: value.nextAfterPath as string | null,
     };
   }
@@ -1421,7 +1733,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
     replayed: boolean;
   }> {
     if (!SHA256_PATTERN.test(input.ignorePolicySha256)) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Ignore policy is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Ignore policy is invalid",
+      );
     }
     const body = {
       pathLabel: input.pathLabel,
@@ -1442,7 +1758,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       idempotencyKey: input.idempotencyKey,
     });
     if (!isRecord(value) || typeof value.replayed !== "boolean") {
-      throw new CloudReplicaClientError(0, "invalid_response", "Replica response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Replica response is invalid",
+      );
     }
     return {
       replica: parseReplica(value.replica),
@@ -1456,7 +1776,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
     idempotencyKey: string;
   }): Promise<{ device: CloudReplicaRemoteDevice; replayed: boolean }> {
     if (!/^[A-Za-z0-9_-]{43}$/.test(input.newPublicKey)) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Device key is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Device key is invalid",
+      );
     }
     const payload = {
       newPublicKey: input.newPublicKey,
@@ -1471,7 +1795,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       idempotencyKey: input.idempotencyKey,
     });
     if (!isRecord(value) || typeof value.replayed !== "boolean") {
-      throw new CloudReplicaClientError(0, "invalid_response", "Device response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Device response is invalid",
+      );
     }
     return { device: parseDevice(value.device), replayed: value.replayed };
   }
@@ -1506,7 +1834,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       idempotencyKey: input.idempotencyKey,
     });
     if (!isRecord(value) || typeof value.replayed !== "boolean") {
-      throw new CloudReplicaClientError(0, "invalid_response", "Replica state response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Replica state response is invalid",
+      );
     }
     return {
       replica: parseReplica(value.replica),
@@ -1515,7 +1847,9 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
     };
   }
 
-  async refreshSnapshot(input: Parameters<CloudReplicaApi["refreshSnapshot"]>[0]) {
+  async refreshSnapshot(
+    input: Parameters<CloudReplicaApi["refreshSnapshot"]>[0],
+  ) {
     const payload = { replicaId: input.replicaId };
     const value = await this.json<unknown>({
       method: "POST",
@@ -1524,9 +1858,16 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       payload,
     });
     if (!isRecord(value)) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Snapshot response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Snapshot response is invalid",
+      );
     }
-    return { replica: parseReplica(value.replica), grant: parseGrant(value.grant) };
+    return {
+      replica: parseReplica(value.replica),
+      grant: parseGrant(value.grant),
+    };
   }
 
   async renewGrant(input: Parameters<CloudReplicaApi["renewGrant"]>[0]) {
@@ -1538,9 +1879,16 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       payload,
     });
     if (!isRecord(value)) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Grant response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Grant response is invalid",
+      );
     }
-    return { replica: parseReplica(value.replica), grant: parseGrant(value.grant) };
+    return {
+      replica: parseReplica(value.replica),
+      grant: parseGrant(value.grant),
+    };
   }
 
   async readEvents(input: Parameters<CloudReplicaApi["readEvents"]>[0]) {
@@ -1551,7 +1899,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       input.limit < 1 ||
       input.limit > 200
     ) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Event cursor is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Event cursor is invalid",
+      );
     }
     const value = await this.json<unknown>({
       method: "GET",
@@ -1561,7 +1913,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       grantToken: input.grantToken,
     });
     if (!isRecord(value) || !Array.isArray(value.events)) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Event response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Event response is invalid",
+      );
     }
     const current = natural(value.currentRevision);
     const minimum = natural(value.minimumRetainedRevision);
@@ -1575,27 +1931,40 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       typeof value.snapshotRequired !== "boolean" ||
       typeof value.hasMore !== "boolean"
     ) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Event response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Event response is invalid",
+      );
     }
-    return {
+    const page = {
       currentRevision: current,
       minimumRetainedRevision: minimum,
       snapshotRequired: value.snapshotRequired,
       fromRevision: from,
       toRevision: to,
-      events: value.events.map((event) => parseMutation(event, true)) as CloudReplicaMutation[],
+      events: value.events.map((event) =>
+        parseMutation(event, true),
+      ) as CloudReplicaMutation[],
       hasMore: value.hasMore,
     };
+    assertCloudReplicaEventPage(page, input);
+    return page;
   }
 
   async readBlob(input: Parameters<CloudReplicaApi["readBlob"]>[0]) {
     uuid(input.blobId, "Blob");
     if (
-      !Number.isSafeInteger(input.expectedSizeBytes) ||
-      input.expectedSizeBytes < 0 ||
-      input.expectedSizeBytes > MAX_BLOB_BYTES
+      input.expectedSizeBytes !== undefined &&
+      (!Number.isSafeInteger(input.expectedSizeBytes) ||
+        input.expectedSizeBytes < 0 ||
+        input.expectedSizeBytes > MAX_BLOB_BYTES)
     ) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Blob size is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Blob size is invalid",
+      );
     }
     const payload = { blobId: input.blobId };
     const response = await this.request({
@@ -1615,12 +1984,29 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       throw responseError(response, body);
     }
     const declared = response.headers.get("content-length");
-    if (declared !== String(input.expectedSizeBytes)) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Blob length is invalid");
+    if (
+      input.expectedSizeBytes !== undefined &&
+      declared !== String(input.expectedSizeBytes)
+    ) {
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Blob length is invalid",
+      );
     }
-    const bytes = await boundedBytes(response, input.expectedSizeBytes);
-    if (bytes.byteLength !== input.expectedSizeBytes) {
-      throw new CloudReplicaClientError(0, "invalid_response", "Blob length is invalid");
+    const bytes = await boundedBytes(
+      response,
+      input.expectedSizeBytes ?? MAX_BLOB_BYTES,
+    );
+    if (
+      input.expectedSizeBytes !== undefined &&
+      bytes.byteLength !== input.expectedSizeBytes
+    ) {
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Blob length is invalid",
+      );
     }
     return bytes;
   }
@@ -1644,7 +2030,11 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
       idempotencyKey: input.idempotencyKey,
     });
     if (!isRecord(value) || typeof value.replayed !== "boolean") {
-      throw new CloudReplicaClientError(0, "invalid_response", "Receipt response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Receipt response is invalid",
+      );
     }
     return { replica: parseReplica(value.replica), replayed: value.replayed };
   }
@@ -1684,7 +2074,11 @@ export class HttpCloudReplicaEnrollmentClient {
       input.label.length > 120 ||
       !/^[A-Za-z0-9_-]{43}$/.test(input.publicKey)
     ) {
-      throw new CloudReplicaClientError(0, "invalid_request", "Device input is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_request",
+        "Device input is invalid",
+      );
     }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -1730,7 +2124,11 @@ export class HttpCloudReplicaEnrollmentClient {
     }
     if (!response.ok) throw responseError(response, value);
     if (!isRecord(value) || typeof value.replayed !== "boolean") {
-      throw new CloudReplicaClientError(0, "invalid_response", "Device response is invalid");
+      throw new CloudReplicaClientError(
+        0,
+        "invalid_response",
+        "Device response is invalid",
+      );
     }
     return { device: parseDevice(value.device), replayed: value.replayed };
   }

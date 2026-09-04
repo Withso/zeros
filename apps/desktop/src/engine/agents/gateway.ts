@@ -3229,7 +3229,14 @@ export class AgentGateway {
     const delay = delays[attempt] ?? 300_000;
     const timer = setTimeout(() => {
       this.boundaryRetirementRecoveryTimers.delete(executionId);
-      void this.attemptBoundaryRetirementRecovery(executionId, attempt);
+      void this.attemptBoundaryRetirementRecovery(executionId, attempt).catch(
+        (error: unknown) => {
+          console.warn(
+            `[agents] boundary retirement timer failed for ${executionId}: ` +
+              (error instanceof Error ? error.message : String(error)),
+          );
+        },
+      );
     }, delay);
     timer.unref?.();
     this.boundaryRetirementRecoveryTimers.set(executionId, timer);

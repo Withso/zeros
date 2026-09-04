@@ -14,6 +14,7 @@ import {
   type CloudWorkspaceSetupAdmissionBroker,
   type DaytonaSetupCommandRunner,
 } from "./daytona-setup-executor.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 const NOW = 1_800_000_000_000;
 
@@ -75,7 +76,7 @@ function readiness(
     },
     engine: {
       instanceId: "55555555-5555-4555-8555-555555555555",
-      protocolVersion: 11,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
       health: "ready",
       durableRecordConnected: true,
     },
@@ -122,7 +123,7 @@ function harness(input = execution()) {
   const executor = new DaytonaCloudWorkspaceSetupExecutor({
     admissionBroker: broker,
     commandRunner: runner,
-    engineProtocolVersion: 11,
+    engineProtocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
     timeoutSeconds: 300,
     now: () => NOW,
   });

@@ -15,6 +15,7 @@ import {
 import { WorkspaceContentError } from "./content-record.js";
 import { CloudWorkspaceSetupMaterialError } from "./setup-materials.js";
 import { CLOUD_WORKSPACE_ENGINE_CLIENT_ADMISSION_PATH } from "./engine-client-admission.js";
+import { CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION } from "./engine-protocol-version.js";
 
 const SETUP_TOKEN = `zws_${"A".repeat(43)}`;
 const HEARTBEAT_TOKEN = `zwh_${"B".repeat(43)}`;
@@ -79,7 +80,7 @@ describe("cloud workspace internal setup routes", () => {
       setupRunId: body.setupRunId,
       executionFence: 4,
       engineInstanceId: "44444444-4444-4444-8444-444444444444",
-      protocolVersion: 11,
+      protocolVersion: CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
     };
     const registration = await app.request(
       CLOUD_WORKSPACE_ENGINE_REGISTRATION_PATH,

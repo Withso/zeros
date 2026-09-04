@@ -6,10 +6,14 @@
 // WorkOS and future providers must supply the exact issuer/JWKS contract.
 // ──────────────────────────────────────────────────────────
 
-import { z } from "zod";
+import {
+  CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+  MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+} from "./cloud-workspaces/engine-protocol-version.js";
 import { createPrivateKey } from "node:crypto";
 import { isIP } from "node:net";
 import path from "node:path";
+import { z } from "zod";
 
 import { FEEDBACK_TYPES, type FeedbackType } from "./feedback-types.js";
 
@@ -339,8 +343,13 @@ const CloudWorkspaceSetupEnvSchema = z.object({
   CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION: z.coerce
     .number()
     .int()
-    .min(1)
-    .max(65_535),
+    // The default tracks the engine bundled into the qualified image. An
+    // explicit value remains available only for an already-qualified older
+    // image during a rolling deployment, and must stay inside the bridge's
+    // advertised compatibility window.
+    .min(MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION)
+    .max(CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION)
+    .default(CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION),
   CLOUD_WORKSPACE_ENGINE_PORT: z.coerce
     .number()
     .int()
@@ -389,11 +398,7 @@ const CloudWorkspaceDurabilityEnvSchema = z.object({
     .min(1)
     .max(65_535)
     .default(1),
-  CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: z
-    .string()
-    .trim()
-    .min(2)
-    .max(4096),
+  CLOUD_WORKSPACE_OBJECT_STORE_DIRECTORY: z.string().trim().min(2).max(4096),
 });
 
 const CloudWorkspaceOutboxEnvSchema = z.object({
@@ -526,7 +531,8 @@ function loadInviteLinkBase(
   appOrigin: string | null,
   nodeEnv: string,
 ): string {
-  const candidate = raw?.trim() || `${appOrigin ?? "https://app.zeros.build"}/invite`;
+  const candidate =
+    raw?.trim() || `${appOrigin ?? "https://app.zeros.build"}/invite`;
   let url: URL;
   try {
     url = new URL(candidate);
@@ -1200,8 +1206,7 @@ function loadCloudWorkspaceConfig(
     }
     outbox = {
       endpoint,
-      signingSecret:
-        parsedOutbox.data.CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET,
+      signingSecret: parsedOutbox.data.CLOUD_WORKSPACE_OUTBOX_SIGNING_SECRET,
       timeoutMs: parsedOutbox.data.CLOUD_WORKSPACE_OUTBOX_TIMEOUT_MS,
     };
   }

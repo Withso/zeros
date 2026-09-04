@@ -2410,7 +2410,11 @@ export class CodexAppServerAdapter implements AgentAdapter {
     // teardown is harmless — the RPC rejects and is caught in refreshCommands.
     for (const delayMs of [0, 1500, 4000, 9000]) {
       if (delayMs === 0) void this.refreshCommands(session);
-      else setTimeout(() => void this.refreshCommands(session), delayMs);
+      else {
+        setTimeout(() => {
+          void this.refreshCommands(session).catch(() => undefined);
+        }, delayMs);
+      }
     }
     runtime.onNotification("skills/changed", () => {
       void this.refreshCommands(session);
@@ -2692,7 +2696,7 @@ export class CodexAppServerAdapter implements AgentAdapter {
     }
     session.backgroundPollTimer = setTimeout(() => {
       session.backgroundPollTimer = null;
-      void this.refreshBackgroundTasks(session);
+      void this.refreshBackgroundTasks(session).catch(() => undefined);
     }, BACKGROUND_TERMINAL_POLL_MS);
     session.backgroundPollTimer.unref?.();
   }

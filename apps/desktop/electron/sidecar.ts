@@ -1608,30 +1608,35 @@ async function doSpawnEngine(
       } catch {
         controlValue = null;
       }
-      if (
-        handleCloudReplicaEngineControl(controlValue, (responseLine) => {
-          if (
-            state.child === child &&
-            child.stdin &&
-            child.stdin.writable &&
-            !child.killed
-          ) {
-            child.stdin.write(responseLine);
+      void handleCloudReplicaEngineControl(controlValue, (responseLine) => {
+        if (
+          state.child === child &&
+          child.stdin &&
+          child.stdin.writable &&
+          !child.killed
+        ) {
+          child.stdin.write(responseLine);
+        }
+      })
+        .then((handled) => {
+          if (handled) return;
+          const snapshot = parseVaultControl(line);
+          if (!snapshot) return;
+          try {
+            setSecret(MCP_VAULT_ACCOUNT, JSON.stringify(snapshot));
+          } catch (err) {
+            console.warn(
+              "[Zeros] MCP vault persist failed:",
+              err instanceof Error ? err.message : String(err),
+            );
           }
         })
-      ) {
-        return;
-      }
-      const snapshot = parseVaultControl(line);
-      if (!snapshot) return;
-      try {
-        setSecret(MCP_VAULT_ACCOUNT, JSON.stringify(snapshot));
-      } catch (err) {
-        console.warn(
-          "[Zeros] MCP vault persist failed:",
-          err instanceof Error ? err.message : String(err),
-        );
-      }
+        .catch((error) => {
+          console.warn(
+            "[Zeros] engine cloud-control handling failed:",
+            error instanceof Error ? error.message : String(error),
+          );
+        });
     },
   );
 
@@ -2133,7 +2138,13 @@ export function startEngineCodeWatcher(): void {
         );
       }
       if (Date.now() - respawnDeferredSince < BUSY_MAX_DEFER_MS) {
-        setTimeout(() => void triggerRespawn(), BUSY_POLL_MS);
+        setTimeout(() => {
+          void triggerRespawn().catch((error: unknown) => {
+            console.warn(
+              `[Zeros] deferred engine respawn failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          });
+        }, BUSY_POLL_MS);
         return;
       }
       console.warn(
@@ -2300,7 +2311,11 @@ export function startEngineCodeWatcher(): void {
       const wait = isBurst() ? DEBOUNCE_BURST_MS : DEBOUNCE_NORMAL_MS;
       if (scheduled) clearTimeout(scheduled);
       scheduled = setTimeout(() => {
-        void triggerRespawn();
+        void triggerRespawn().catch((error: unknown) => {
+          console.warn(
+            `[Zeros] debounced engine respawn failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
       }, wait);
     };
     if (existsSync(cliSrc)) {
@@ -2364,95 +2379,101 @@ export function startWatchdog(): void {
   const RESPAWN_BACKOFF_CAP_MS = 5 * 60_000;
   let nextRespawnAllowedAt = 0;
 
-  state.watchdogTimer = setInterval(async () => {
-    if (state.shuttingDown) return;
+  state.watchdogTimer = setInterval(() => {
+    void (async () => {
+      if (state.shuttingDown) return;
 
-    const port = state.port;
-    const instance = state.instance;
-    if (port === null || instance === null) {
-      // No owned manifest — never spawned successfully, or a respawn is
-      // mid-flight. Nothing to monitor. Port and instance are published
-      // together after parseOwnedEngineManifest accepts our exact child.
+      const port = state.port;
+      const instance = state.instance;
+      if (port === null || instance === null) {
+        // No owned manifest — never spawned successfully, or a respawn is
+        // mid-flight. Nothing to monitor. Port and instance are published
+        // together after parseOwnedEngineManifest accepts our exact child.
+        fails = 0;
+        return;
+      }
+
+      if (await engineResponsive(port, instance)) {
+        fails = 0;
+        respawnsWithoutContact = 0;
+        nextRespawnAllowedAt = 0;
+        return;
+      }
+
+      fails += 1;
+      if (fails < FAIL_THRESHOLD) return;
+
+      const root = state.root;
+      if (!root) {
+        fails = 0;
+        return;
+      }
+
+      if (Date.now() < nextRespawnAllowedAt) {
+        // Hold-off window from a previous zero-contact respawn — keep probing
+        // (a recovered engine resets everything above) but don't kill/relaunch
+        // yet. Cap `fails` so the counter can't run away while we wait.
+        fails = FAIL_THRESHOLD;
+        return;
+      }
+
+      console.error(
+        `[Zeros] engine unreachable on port ${port} after ${FAIL_THRESHOLD} probes; respawning`,
+      );
       fails = 0;
-      return;
-    }
+      respawnsWithoutContact += 1;
+      if (respawnsWithoutContact >= 2) {
+        const backoffMs = zeroContactRespawnBackoffMs(respawnsWithoutContact, {
+          probeWindowMs: POLL_INTERVAL_MS * FAIL_THRESHOLD,
+          capMs: RESPAWN_BACKOFF_CAP_MS,
+        });
+        nextRespawnAllowedAt = Date.now() + backoffMs;
+        // The lsof evidence dump is throttled to the first few zero-contact
+        // cycles: it was logged on EVERY cycle, and during a storm the repeated
+        // multi-line listener tables were a major main.log flooder.
+        if (respawnsWithoutContact <= 3) {
+          console.error(
+            `[Zeros] ${respawnsWithoutContact} watchdog respawns in a row with zero successful probes — ` +
+              `respawning is not recovering this; a stale process may be black-holing the port. ` +
+              `Next attempt in ${Math.round(backoffMs / 1000)}s. ` +
+              `Listeners on ${currentEnginePortRange()}:\n` +
+              (await describeRangeListeners()),
+          );
+        } else {
+          console.error(
+            `[Zeros] watchdog zero-contact respawn #${respawnsWithoutContact}; ` +
+              `backing off ${Math.round(backoffMs / 1000)}s before the next attempt`,
+          );
+        }
+      }
 
-    if (await engineResponsive(port, instance)) {
-      fails = 0;
-      respawnsWithoutContact = 0;
-      nextRespawnAllowedAt = 0;
-      return;
-    }
-
-    fails += 1;
-    if (fails < FAIL_THRESHOLD) return;
-
-    const root = state.root;
-    if (!root) {
-      fails = 0;
-      return;
-    }
-
-    if (Date.now() < nextRespawnAllowedAt) {
-      // Hold-off window from a previous zero-contact respawn — keep probing
-      // (a recovered engine resets everything above) but don't kill/relaunch
-      // yet. Cap `fails` so the counter can't run away while we wait.
-      fails = FAIL_THRESHOLD;
-      return;
-    }
-
-    console.error(
-      `[Zeros] engine unreachable on port ${port} after ${FAIL_THRESHOLD} probes; respawning`,
-    );
-    fails = 0;
-    respawnsWithoutContact += 1;
-    if (respawnsWithoutContact >= 2) {
-      const backoffMs = zeroContactRespawnBackoffMs(respawnsWithoutContact, {
-        probeWindowMs: POLL_INTERVAL_MS * FAIL_THRESHOLD,
-        capMs: RESPAWN_BACKOFF_CAP_MS,
-      });
-      nextRespawnAllowedAt = Date.now() + backoffMs;
-      // The lsof evidence dump is throttled to the first few zero-contact
-      // cycles: it was logged on EVERY cycle, and during a storm the repeated
-      // multi-line listener tables were a major main.log flooder.
-      if (respawnsWithoutContact <= 3) {
+      try {
+        const newPort = await spawnEngine(root);
+        console.log(`[Zeros] watchdog respawned engine on port ${newPort}`);
+        emitEvent("engine-restarted", newPort);
+        // Belt-and-suspenders cleanup: even with killCurrentChild now
+        // doing SIGTERM→SIGKILL escalation, edge cases (a freshly-
+        // spawned child crashing before we got its handle, an engine
+        // that fork-exec'd a stuck subprocess on its port) can still
+        // leave a listener stranded in this channel's range. Reaping
+        // after every respawn — not just cold start — catches those.
+        // Skips the current `state.child` PID via lsof's process
+        // matching (the new engine is `bun apps/desktop/src/cli.ts` or the prod
+        // binary; both match the engine-pattern but we filter by PID
+        // below).
+        await reapOrphanEngines(state.child?.pid);
+      } catch (err) {
         console.error(
-          `[Zeros] ${respawnsWithoutContact} watchdog respawns in a row with zero successful probes — ` +
-            `respawning is not recovering this; a stale process may be black-holing the port. ` +
-            `Next attempt in ${Math.round(backoffMs / 1000)}s. ` +
-            `Listeners on ${currentEnginePortRange()}:\n` +
-            (await describeRangeListeners()),
-        );
-      } else {
-        console.error(
-          `[Zeros] watchdog zero-contact respawn #${respawnsWithoutContact}; ` +
-            `backing off ${Math.round(backoffMs / 1000)}s before the next attempt`,
+          `[Zeros] watchdog respawn failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
         );
       }
-    }
-
-    try {
-      const newPort = await spawnEngine(root);
-      console.log(`[Zeros] watchdog respawned engine on port ${newPort}`);
-      emitEvent("engine-restarted", newPort);
-      // Belt-and-suspenders cleanup: even with killCurrentChild now
-      // doing SIGTERM→SIGKILL escalation, edge cases (a freshly-
-      // spawned child crashing before we got its handle, an engine
-      // that fork-exec'd a stuck subprocess on its port) can still
-      // leave a listener stranded in this channel's range. Reaping
-      // after every respawn — not just cold start — catches those.
-      // Skips the current `state.child` PID via lsof's process
-      // matching (the new engine is `bun apps/desktop/src/cli.ts` or the prod
-      // binary; both match the engine-pattern but we filter by PID
-      // below).
-      await reapOrphanEngines(state.child?.pid);
-    } catch (err) {
+    })().catch((error: unknown) => {
       console.error(
-        `[Zeros] watchdog respawn failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
+        `[Zeros] watchdog timer failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-    }
+    });
   }, POLL_INTERVAL_MS);
 }
 

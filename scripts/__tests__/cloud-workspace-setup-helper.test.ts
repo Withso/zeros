@@ -7,6 +7,11 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 
 import { describe, expect, it } from "vitest";
+import { PROTOCOL_VERSION } from "@zeros/protocol/version";
+import {
+  CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+  MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION,
+} from "../../apps/control-plane/src/cloud-workspaces/engine-protocol-version";
 
 import {
   CLOUD_WORKSPACE_SETUP_AUDIENCE,
@@ -114,7 +119,7 @@ function materialDocument() {
     },
     engine: {
       instanceId: ENGINE_INSTANCE_ID,
-      protocolVersion: 11,
+      protocolVersion: PROTOCOL_VERSION,
       port: 39_393,
       bridgeToken: `zwb_${"B".repeat(43)}`,
       readinessProbeToken: `zwr_${"R".repeat(43)}`,
@@ -152,13 +157,28 @@ function runtimeB64() {
 }
 
 describe("cloud workspace image setup protocol", () => {
+  it("keeps the independently deployed setup default aligned with the shared protocol", () => {
+    expect(CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION).toBe(PROTOCOL_VERSION);
+    expect(MIN_CLOUD_WORKSPACE_ENGINE_PROTOCOL_VERSION).toBeLessThanOrEqual(
+      PROTOCOL_VERSION,
+    );
+  });
+
   it("uses the server's UTF-8 byte order for recovery manifest cursors", () => {
     const bmpPrivateUse = "\ue000.txt";
     const supplementary = "\u{10000}.txt";
-    expect(Buffer.compare(Buffer.from(bmpPrivateUse), Buffer.from(supplementary))).toBeLessThan(0);
-    expect(compareCloudWorkspaceRecoveryPath(bmpPrivateUse, supplementary)).toBeLessThan(0);
-    expect(compareCloudWorkspaceRecoveryPath(supplementary, bmpPrivateUse)).toBeGreaterThan(0);
-    expect(compareCloudWorkspaceRecoveryPath(bmpPrivateUse, bmpPrivateUse)).toBe(0);
+    expect(
+      Buffer.compare(Buffer.from(bmpPrivateUse), Buffer.from(supplementary)),
+    ).toBeLessThan(0);
+    expect(
+      compareCloudWorkspaceRecoveryPath(bmpPrivateUse, supplementary),
+    ).toBeLessThan(0);
+    expect(
+      compareCloudWorkspaceRecoveryPath(supplementary, bmpPrivateUse),
+    ).toBeGreaterThan(0);
+    expect(
+      compareCloudWorkspaceRecoveryPath(bmpPrivateUse, bmpPrivateUse),
+    ).toBe(0);
   });
 
   it("prevents setup and Git subprocesses from regaining image privileges", () => {
@@ -341,7 +361,7 @@ describe("cloud workspace image setup protocol", () => {
       engine: {
         version: 1,
         instanceId: ENGINE_INSTANCE_ID,
-        protocolVersion: 11,
+        protocolVersion: PROTOCOL_VERSION,
         health: "ready",
         durableRecordConnected: true,
       },

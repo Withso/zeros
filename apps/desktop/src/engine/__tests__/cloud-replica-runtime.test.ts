@@ -28,6 +28,7 @@ import {
   cloudReplicaDetachmentCode,
   CloudReplicaRuntime,
   preserveCloudReplicaDivergences,
+  selectFairCloudReplicaBatch,
   validateCloudReplicaDestination,
 } from "../cloud-replica-runtime";
 import { CloudReplicaClientError } from "../cloud-replica-client";
@@ -55,14 +56,30 @@ function jsonResponse(value: unknown, status = 200): Response {
 }
 
 describe("desktop cloud replica runtime", () => {
+  it("round-robins more than four due replicas instead of starving the fifth", () => {
+    const replicas = ["a", "b", "c", "d", "e", "f"].map((replicaId) => ({
+      replicaId,
+    }));
+    const first = selectFairCloudReplicaBatch(replicas, null, 4);
+    expect(first.replicas.map((replica) => replica.replicaId)).toEqual([
+      "a",
+      "b",
+      "c",
+      "d",
+    ]);
+    const second = selectFairCloudReplicaBatch(replicas, first.cursor, 4);
+    expect(second.replicas.map((replica) => replica.replicaId)).toEqual([
+      "e",
+      "f",
+      "a",
+      "b",
+    ]);
+  });
+
   it("classifies permanent remote authority loss as local detachment", () => {
     expect(
       cloudReplicaDetachmentCode(
-        new CloudReplicaClientError(
-          404,
-          "workspace_replica_not_found",
-          "gone",
-        ),
+        new CloudReplicaClientError(404, "workspace_replica_not_found", "gone"),
       ),
     ).toBe("workspace_deleted");
     expect(
@@ -82,7 +99,9 @@ describe("desktop cloud replica runtime", () => {
   });
 
   it("requires an empty real directory for a new receive-only replica", async () => {
-    const root = await mkdtemp(path.join(tmpdir(), "zeros-cloud-replica-root-"));
+    const root = await mkdtemp(
+      path.join(tmpdir(), "zeros-cloud-replica-root-"),
+    );
     roots.push(root);
     await expect(
       validateCloudReplicaDestination(root, { allowPopulated: false }),
@@ -110,7 +129,10 @@ describe("desktop cloud replica runtime", () => {
     await writeFile(path.join(root, "src", "changed.txt"), "local change\n");
     const backupRoot = `${root}.zeros-local-changes`;
     await mkdir(path.join(backupRoot, replicaId), { recursive: true });
-    await symlink(external, path.join(backupRoot, replicaId, String(detectedAt)));
+    await symlink(
+      external,
+      path.join(backupRoot, replicaId, String(detectedAt)),
+    );
 
     await expect(
       preserveCloudReplicaDivergences({
@@ -126,10 +148,12 @@ describe("desktop cloud replica runtime", () => {
       }),
     ).rejects.toThrow("unsafe");
 
-    await expect(readFile(path.join(root, "src", "changed.txt"), "utf8")).resolves.toBe(
-      "local change\n",
-    );
-    await expect(lstat(path.join(external, "src", "changed.txt"))).rejects.toMatchObject({
+    await expect(
+      readFile(path.join(root, "src", "changed.txt"), "utf8"),
+    ).resolves.toBe("local change\n");
+    await expect(
+      lstat(path.join(external, "src", "changed.txt")),
+    ).rejects.toMatchObject({
       code: "ENOENT",
     });
   });
@@ -227,7 +251,10 @@ describe("desktop cloud replica runtime", () => {
         errorCode: null,
       }),
     ).toBe(true);
-    await expect(proofPromise).resolves.toMatchObject({ deviceId, keyVersion: 1 });
+    await expect(proofPromise).resolves.toMatchObject({
+      deviceId,
+      keyVersion: 1,
+    });
     await runtime.dispose();
   });
 

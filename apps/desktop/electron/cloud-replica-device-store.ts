@@ -38,7 +38,10 @@ export class CloudReplicaDeviceStoreError extends Error {
   }
 }
 
-function parseEnvelope(raw: string, accountUserId: string): DeviceSecretEnvelope {
+function parseEnvelope(
+  raw: string,
+  accountUserId: string,
+): DeviceSecretEnvelope {
   let value: unknown;
   try {
     value = JSON.parse(raw) as unknown;
@@ -91,7 +94,8 @@ function parseEnvelope(raw: string, accountUserId: string): DeviceSecretEnvelope
       Array.isArray(pending) ||
       Object.keys(pending).sort().join("\0") !==
         ["candidate", "idempotencyKey"].sort().join("\0") ||
-      typeof (pending as { idempotencyKey?: unknown }).idempotencyKey !== "string" ||
+      typeof (pending as { idempotencyKey?: unknown }).idempotencyKey !==
+        "string" ||
       !/^[A-Za-z0-9._:-]{8,128}$/.test(
         (pending as { idempotencyKey: string }).idempotencyKey,
       )
@@ -150,8 +154,7 @@ const defaultDependencies: CloudReplicaSecretStoreDependencies = {
  * bound to the old public key. */
 export class CloudReplicaDeviceSecretStore {
   constructor(
-    private readonly secrets: CloudReplicaSecretStoreDependencies =
-      defaultDependencies,
+    private readonly secrets: CloudReplicaSecretStoreDependencies = defaultDependencies,
   ) {}
 
   private readRaw(accountUserId: string): {
@@ -160,9 +163,28 @@ export class CloudReplicaDeviceSecretStore {
     envelope: DeviceSecretEnvelope | null;
   } {
     const account = cloudReplicaDeviceSecretAccount(accountUserId);
-    const raw = this.secrets.read(account);
+    let raw: string | null;
+    try {
+      raw = this.secrets.read(account);
+    } catch (error) {
+      throw new CloudReplicaDeviceStoreError(
+        "secret_unavailable",
+        "Cloud device credential store cannot be read",
+        { cause: error },
+      );
+    }
     if (raw === null) {
-      if (this.secrets.has(account)) {
+      let present: boolean;
+      try {
+        present = this.secrets.has(account);
+      } catch (error) {
+        throw new CloudReplicaDeviceStoreError(
+          "secret_unavailable",
+          "Cloud device credential store cannot be read",
+          { cause: error },
+        );
+      }
+      if (present) {
         throw new CloudReplicaDeviceStoreError(
           "secret_unavailable",
           "Cloud device credential cannot be decrypted",
@@ -218,7 +240,9 @@ export class CloudReplicaDeviceSecretStore {
       active: { ...current.envelope.active, deviceId: input.deviceId },
       pendingRotation: null,
     };
-    if (!this.secrets.replace(current.account, current.raw, JSON.stringify(next))) {
+    if (
+      !this.secrets.replace(current.account, current.raw, JSON.stringify(next))
+    ) {
       throw new CloudReplicaDeviceStoreError(
         "concurrent_update",
         "Cloud device credential changed concurrently",
@@ -243,7 +267,9 @@ export class CloudReplicaDeviceSecretStore {
         candidate: rotateCloudReplicaDeviceCredential(current.envelope.active),
       },
     };
-    if (!this.secrets.replace(current.account, current.raw, JSON.stringify(next))) {
+    if (
+      !this.secrets.replace(current.account, current.raw, JSON.stringify(next))
+    ) {
       throw new CloudReplicaDeviceStoreError(
         "concurrent_update",
         "Cloud device credential changed concurrently",
@@ -276,7 +302,9 @@ export class CloudReplicaDeviceSecretStore {
       active: pending.candidate,
       pendingRotation: null,
     };
-    if (!this.secrets.replace(current.account, current.raw, JSON.stringify(next))) {
+    if (
+      !this.secrets.replace(current.account, current.raw, JSON.stringify(next))
+    ) {
       throw new CloudReplicaDeviceStoreError(
         "concurrent_update",
         "Cloud device credential changed concurrently",

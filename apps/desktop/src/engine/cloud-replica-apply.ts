@@ -152,7 +152,10 @@ export function normalizeCloudReplicaPath(value: string): string {
     path.posix.normalize(value) !== value ||
     enginePrivatePath(value)
   ) {
-    throw new CloudReplicaApplyError("path_rejected", "Replica path is invalid");
+    throw new CloudReplicaApplyError(
+      "path_rejected",
+      "Replica path is invalid",
+    );
   }
   const components = value.split("/");
   if (
@@ -182,7 +185,10 @@ function boundedRoot(value: string): string {
     // eslint-disable-next-line no-control-regex -- replica roots reject C0 and DEL
     /[\u0000-\u001f\u007f]/u.test(value)
   ) {
-    throw new CloudReplicaApplyError("path_rejected", "Replica root is invalid");
+    throw new CloudReplicaApplyError(
+      "path_rejected",
+      "Replica root is invalid",
+    );
   }
   return resolved;
 }
@@ -190,7 +196,10 @@ function boundedRoot(value: string): string {
 function targetPath(root: string, relative: string): string {
   const target = path.resolve(root, ...relative.split("/"));
   if (!target.startsWith(`${root}${path.sep}`)) {
-    throw new CloudReplicaApplyError("path_rejected", "Replica path escaped its root");
+    throw new CloudReplicaApplyError(
+      "path_rejected",
+      "Replica path escaped its root",
+    );
   }
   return target;
 }
@@ -283,7 +292,9 @@ async function observedEntry(target: string): Promise<{
   };
 }
 
-export type CloudReplicaObservedEntry = Awaited<ReturnType<typeof observedEntry>> & {
+export type CloudReplicaObservedEntry = Awaited<
+  ReturnType<typeof observedEntry>
+> & {
   mode: 33188 | 33261 | 40960 | null;
 };
 
@@ -340,7 +351,10 @@ export async function inspectCloudReplicaEntry(
   };
 }
 
-async function ensureSafeParents(root: string, relative: string): Promise<void> {
+async function ensureSafeParents(
+  root: string,
+  relative: string,
+): Promise<void> {
   const rootReal = await realpath(root);
   if (rootReal !== root) {
     throw new CloudReplicaApplyError(
@@ -377,7 +391,9 @@ async function ensureSafeParents(root: string, relative: string): Promise<void> 
   }
 }
 
-function validateMutation(mutation: CloudReplicaMutation): CloudReplicaMutation {
+function validateMutation(
+  mutation: CloudReplicaMutation,
+): CloudReplicaMutation {
   const normalizedPath = normalizeCloudReplicaPath(mutation.path);
   if (
     !Number.isSafeInteger(mutation.revision) ||
@@ -385,7 +401,10 @@ function validateMutation(mutation: CloudReplicaMutation): CloudReplicaMutation 
     !Number.isSafeInteger(mutation.sequence) ||
     mutation.sequence < 1
   ) {
-    throw new CloudReplicaApplyError("invalid_batch", "Replica revision is invalid");
+    throw new CloudReplicaApplyError(
+      "invalid_batch",
+      "Replica revision is invalid",
+    );
   }
   if (mutation.operation === "delete") {
     if (
@@ -395,7 +414,10 @@ function validateMutation(mutation: CloudReplicaMutation): CloudReplicaMutation 
       mutation.contentSha256 !== null ||
       mutation.sizeBytes !== null
     ) {
-      throw new CloudReplicaApplyError("invalid_batch", "Replica deletion is invalid");
+      throw new CloudReplicaApplyError(
+        "invalid_batch",
+        "Replica deletion is invalid",
+      );
     }
   } else if (
     !["file", "symlink"].includes(mutation.entryType ?? "") ||
@@ -408,12 +430,19 @@ function validateMutation(mutation: CloudReplicaMutation): CloudReplicaMutation 
     mutation.sizeBytes! < 0 ||
     mutation.sizeBytes! > MAX_FILE_BYTES
   ) {
-    throw new CloudReplicaApplyError("invalid_batch", "Replica upsert is invalid");
+    throw new CloudReplicaApplyError(
+      "invalid_batch",
+      "Replica upsert is invalid",
+    );
   }
   return { ...mutation, path: normalizedPath };
 }
 
-function safeSymlinkTarget(root: string, linkPath: string, bytes: Uint8Array): string {
+function safeSymlinkTarget(
+  root: string,
+  linkPath: string,
+  bytes: Uint8Array,
+): string {
   let value: string;
   try {
     value = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
@@ -444,7 +473,10 @@ function safeSymlinkTarget(root: string, linkPath: string, bytes: Uint8Array): s
       "Replica symbolic link escapes its root",
     );
   }
-  const relativeTarget = path.relative(root, resolved).split(path.sep).join("/");
+  const relativeTarget = path
+    .relative(root, resolved)
+    .split(path.sep)
+    .join("/");
   if (relativeTarget && relativeTarget !== ".") {
     normalizeCloudReplicaPath(relativeTarget);
   }
@@ -480,12 +512,18 @@ export class CloudReplicaApplyEngine {
       !Number.isSafeInteger(input.toRevision) ||
       input.toRevision < input.fromRevision
     ) {
-      throw new CloudReplicaApplyError("invalid_batch", "Replica batch is invalid");
+      throw new CloudReplicaApplyError(
+        "invalid_batch",
+        "Replica batch is invalid",
+      );
     }
     const root = boundedRoot(input.rootPath);
     await mkdir(root, { recursive: true, mode: 0o700 });
     if ((await existingType(root)) !== "directory") {
-      throw new CloudReplicaApplyError("path_rejected", "Replica root is not a directory");
+      throw new CloudReplicaApplyError(
+        "path_rejected",
+        "Replica root is not a directory",
+      );
     }
     const mutations = input.mutations.map(validateMutation);
     let totalBytes = 0;
@@ -494,21 +532,27 @@ export class CloudReplicaApplyEngine {
     let previousRevision = input.fromRevision;
     let previousSequence = 0;
     for (const mutation of mutations) {
+      const expectedSequence =
+        mutation.revision === previousRevision ? previousSequence + 1 : 1;
       if (
         mutation.revision <= input.fromRevision ||
         mutation.revision > input.toRevision ||
         mutation.revision < previousRevision ||
-        (mutation.revision === previousRevision &&
-          mutation.sequence <= previousSequence)
+        mutation.sequence !== expectedSequence
       ) {
-        throw new CloudReplicaApplyError("invalid_batch", "Replica page is not bounded");
+        throw new CloudReplicaApplyError(
+          "invalid_batch",
+          "Replica page revision sequence is not contiguous",
+        );
       }
-      if (mutation.revision !== previousRevision) previousSequence = 0;
       previousRevision = mutation.revision;
       previousSequence = mutation.sequence;
       totalBytes += mutation.sizeBytes ?? 0;
       if (totalBytes > MAX_BATCH_BYTES) {
-        throw new CloudReplicaApplyError("invalid_batch", "Replica batch is too large");
+        throw new CloudReplicaApplyError(
+          "invalid_batch",
+          "Replica batch is too large",
+        );
       }
       const key = portablePathKey(mutation.path);
       const prior = portable.get(key);
@@ -530,7 +574,11 @@ export class CloudReplicaApplyEngine {
     }
     upsertPortablePaths.sort();
     for (let index = 1; index < upsertPortablePaths.length; index += 1) {
-      if (upsertPortablePaths[index]!.startsWith(`${upsertPortablePaths[index - 1]!}/`)) {
+      if (
+        upsertPortablePaths[index]!.startsWith(
+          `${upsertPortablePaths[index - 1]!}/`,
+        )
+      ) {
         throw new CloudReplicaApplyError(
           "path_rejected",
           "Replica paths collide as a file and directory",
@@ -697,7 +745,9 @@ export class CloudReplicaApplyEngine {
         manifestSha256: this.store.manifestSha256(),
       };
     } finally {
-      await rm(stageRoot, { recursive: true, force: true }).catch(() => undefined);
+      await rm(stageRoot, { recursive: true, force: true }).catch(
+        () => undefined,
+      );
     }
   }
 }

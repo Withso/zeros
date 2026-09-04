@@ -203,7 +203,10 @@ function toEntry(row: EntryRow): CloudWorkspaceForkJobEntry {
 
 function safeJson(value: Record<string, unknown>, label: string): string {
   const encoded = JSON.stringify(value);
-  if (typeof encoded !== "string" || Buffer.byteLength(encoded, "utf8") > 1024 * 1024) {
+  if (
+    typeof encoded !== "string" ||
+    Buffer.byteLength(encoded, "utf8") > 1024 * 1024
+  ) {
     throw new Error(`${label} is invalid`);
   }
   return encoded;
@@ -232,7 +235,8 @@ export class DatabaseCloudWorkspaceForkState {
       input.sourceWorkspaceId,
       input.targetWorkspaceId,
     ]) {
-      if (!UUID_PATTERN.test(value)) throw new Error("Cloud copy identity is invalid");
+      if (!UUID_PATTERN.test(value))
+        throw new Error("Cloud copy identity is invalid");
     }
     if (
       input.sourceWorkspaceId === input.targetWorkspaceId ||
@@ -270,9 +274,10 @@ export class DatabaseCloudWorkspaceForkState {
 
   job(jobId: string): CloudWorkspaceForkJob | null {
     const row = this.db
-      .prepare<[string], JobRow>(
-        `SELECT * FROM cloud_workspace_fork_jobs WHERE job_id = ?`,
-      )
+      .prepare<
+        [string],
+        JobRow
+      >(`SELECT * FROM cloud_workspace_fork_jobs WHERE job_id = ?`)
       .get(jobId);
     return row ? toJob(row) : null;
   }
@@ -293,6 +298,8 @@ export class DatabaseCloudWorkspaceForkState {
         `SELECT * FROM cloud_workspace_fork_jobs
          WHERE account_user_id = ?
            AND state NOT IN ('succeeded', 'cancelled')
+           AND (state <> 'failed' OR last_error_code IS NULL
+                OR last_error_code NOT GLOB 'permanent.*')
            AND next_attempt_at <= ?
          ORDER BY updated_at, job_id`,
       )
@@ -313,7 +320,8 @@ export class DatabaseCloudWorkspaceForkState {
     sourceRevision?: number | null;
     manifest?: Record<string, unknown> | null;
   }): CloudWorkspaceForkJob {
-    if (input.from.length < 1) throw new Error("Cloud copy transition is invalid");
+    if (input.from.length < 1)
+      throw new Error("Cloud copy transition is invalid");
     const placeholders = input.from.map(() => "?").join(", ");
     const current = this.job(input.jobId);
     if (!current || !input.from.includes(current.state)) {
@@ -346,7 +354,9 @@ export class DatabaseCloudWorkspaceForkState {
         input.checkpointRequestId === undefined
           ? current.checkpointRequestId
           : input.checkpointRequestId,
-        input.checkpointId === undefined ? current.checkpointId : input.checkpointId,
+        input.checkpointId === undefined
+          ? current.checkpointId
+          : input.checkpointId,
         input.sourceSnapshotSha256 === undefined
           ? current.sourceSnapshotSha256
           : input.sourceSnapshotSha256,
@@ -365,7 +375,8 @@ export class DatabaseCloudWorkspaceForkState {
         input.jobId,
         ...input.from,
       );
-    if (result.changes !== 1) throw new Error("Cloud copy state changed concurrently");
+    if (result.changes !== 1)
+      throw new Error("Cloud copy state changed concurrently");
     return this.job(input.jobId)!;
   }
 
@@ -376,9 +387,12 @@ export class DatabaseCloudWorkspaceForkState {
     now: number;
     retryAt: number;
   }): CloudWorkspaceForkJob {
-    const code = input.code.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 96) || "failed";
+    const code =
+      input.code.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 96) || "failed";
     // eslint-disable-next-line no-control-regex -- persisted error text strips C0 and DEL
-    const message = input.message.replace(/[\u0000-\u001f\u007f]/gu, " ").slice(0, 512);
+    const message = input.message
+      .replace(/[\u0000-\u001f\u007f]/gu, " ")
+      .slice(0, 512);
     const result = this.db
       .prepare(
         `UPDATE cloud_workspace_fork_jobs
@@ -387,8 +401,93 @@ export class DatabaseCloudWorkspaceForkState {
          WHERE job_id = ? AND state NOT IN ('succeeded', 'cancelled')`,
       )
       .run(input.now, input.retryAt, code, message, input.jobId);
-    if (result.changes !== 1) throw new Error("Cloud copy state changed concurrently");
+    if (result.changes !== 1)
+      throw new Error("Cloud copy state changed concurrently");
     return this.job(input.jobId)!;
+  }
+
+  /** A permanent remote/input failure remains visibly failed, but is excluded
+   * from the resumable scheduler and has no plaintext stage left to retry. */
+  failPermanent(input: {
+    jobId: string;
+    code: string;
+    message: string;
+    now: number;
+  }): CloudWorkspaceForkJob {
+    const suffix =
+      input.code.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 80) || "failed";
+    const code = `permanent.${suffix}`;
+    // eslint-disable-next-line no-control-regex -- persisted error text strips C0 and DEL
+    const message = input.message
+      .replace(/[\u0000-\u001f\u007f]/gu, " ")
+      .slice(0, 512);
+    const result = this.db
+      .prepare(
+        `UPDATE cloud_workspace_fork_jobs
+         SET state = 'failed', updated_at = ?, next_attempt_at = ?,
+             last_error_code = ?, last_error_message = ?, completed_at = NULL
+         WHERE job_id = ? AND state NOT IN ('succeeded', 'cancelled')`,
+      )
+      .run(input.now, Number.MAX_SAFE_INTEGER, code, message, input.jobId);
+    if (result.changes !== 1)
+      throw new Error("Cloud copy state changed concurrently");
+    return this.job(input.jobId)!;
+  }
+
+  /** Cancellation is a terminal local decision. It never deletes the remote
+   * fork intent, which may already be durable, but it prevents any later
+   * background resume and marks its staged plaintext eligible for removal. */
+  cancel(input: {
+    jobId: string;
+    code: string;
+    message: string;
+    now: number;
+  }): CloudWorkspaceForkJob {
+    const code =
+      input.code.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 96) || "cancelled";
+    // eslint-disable-next-line no-control-regex -- persisted error text strips C0 and DEL
+    const message = input.message
+      .replace(/[\u0000-\u001f\u007f]/gu, " ")
+      .slice(0, 512);
+    const current = this.job(input.jobId);
+    if (!current) throw new Error("Cloud copy job was not found");
+    if (current.state === "cancelled") return current;
+    if (current.state === "succeeded") {
+      throw new Error("Cloud copy job is already complete");
+    }
+    const result = this.db
+      .prepare(
+        `UPDATE cloud_workspace_fork_jobs
+         SET state = 'cancelled', updated_at = ?, next_attempt_at = ?,
+             last_error_code = ?, last_error_message = ?, completed_at = ?
+         WHERE job_id = ? AND state NOT IN ('succeeded', 'cancelled')`,
+      )
+      .run(input.now, input.now, code, message, input.now, input.jobId);
+    if (result.changes !== 1)
+      throw new Error("Cloud copy state changed concurrently");
+    return this.job(input.jobId)!;
+  }
+
+  terminalStageJobIds(): string[] {
+    return this.db
+      .prepare<[], { job_id: string }>(
+        `SELECT job_id FROM cloud_workspace_fork_jobs
+         WHERE state IN ('succeeded', 'cancelled')
+            OR (state = 'failed' AND last_error_code GLOB 'permanent.*')`,
+      )
+      .all()
+      .map((row) => row.job_id);
+  }
+
+  resumableStageJobIds(): string[] {
+    return this.db
+      .prepare<[], { job_id: string }>(
+        `SELECT job_id FROM cloud_workspace_fork_jobs
+         WHERE state NOT IN ('succeeded', 'cancelled')
+           AND NOT (state = 'failed' AND last_error_code GLOB 'permanent.*')`,
+      )
+      .all()
+      .map((row) => row.job_id);
   }
 
   setLocalTarget(input: {
@@ -419,7 +518,8 @@ export class DatabaseCloudWorkspaceForkState {
         input.jobId,
         input.targetWorkspaceAlias,
       );
-    if (result.changes !== 1) throw new Error("Cloud copy local target changed");
+    if (result.changes !== 1)
+      throw new Error("Cloud copy local target changed");
     return this.job(input.jobId)!;
   }
 
@@ -439,14 +539,19 @@ export class DatabaseCloudWorkspaceForkState {
        VALUES (?, ?, ?)`,
     );
     this.db.transaction(() => {
-      this.db.prepare(`DELETE FROM cloud_workspace_fork_job_entries WHERE job_id = ?`).run(
-        input.jobId,
-      );
-      this.db.prepare(`DELETE FROM cloud_workspace_fork_job_records WHERE job_id = ?`).run(
-        input.jobId,
-      );
+      this.db
+        .prepare(
+          `DELETE FROM cloud_workspace_fork_job_entries WHERE job_id = ?`,
+        )
+        .run(input.jobId);
+      this.db
+        .prepare(
+          `DELETE FROM cloud_workspace_fork_job_records WHERE job_id = ?`,
+        )
+        .run(input.jobId);
       input.entries.forEach((entry, index) => {
-        if (entry.ordinal !== index) throw new Error("Cloud copy entry order is invalid");
+        if (entry.ordinal !== index)
+          throw new Error("Cloud copy entry order is invalid");
         insertEntry.run(
           input.jobId,
           entry.ordinal,
@@ -495,7 +600,8 @@ export class DatabaseCloudWorkspaceForkState {
   }
 
   setRemoteBlob(jobId: string, ordinal: number, blobId: string): void {
-    if (!UUID_PATTERN.test(blobId)) throw new Error("Cloud copy blob identity is invalid");
+    if (!UUID_PATTERN.test(blobId))
+      throw new Error("Cloud copy blob identity is invalid");
     const result = this.db
       .prepare(
         `UPDATE cloud_workspace_fork_job_entries SET remote_blob_id = ?
@@ -507,6 +613,8 @@ export class DatabaseCloudWorkspaceForkState {
   }
 
   remove(jobId: string): void {
-    this.db.prepare(`DELETE FROM cloud_workspace_fork_jobs WHERE job_id = ?`).run(jobId);
+    this.db
+      .prepare(`DELETE FROM cloud_workspace_fork_jobs WHERE job_id = ?`)
+      .run(jobId);
   }
 }

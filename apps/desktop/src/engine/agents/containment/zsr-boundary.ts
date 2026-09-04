@@ -1198,9 +1198,9 @@ class PreparedZsrBoundary implements PreparedBoundary {
         : PORT_DISCOVERY_IDLE_INTERVAL_MS;
     const timer = setTimeout(() => {
       this.portDiscoveryTimer = null;
-      void this.pollPortDiscovery().finally(() =>
-        this.schedulePortDiscoveryPoll(),
-      );
+      void this.pollPortDiscovery()
+        .finally(() => this.schedulePortDiscoveryPoll())
+        .catch(() => undefined);
     }, delay);
     timer.unref();
     this.portDiscoveryTimer = timer;
@@ -1213,9 +1213,9 @@ class PreparedZsrBoundary implements PreparedBoundary {
     this.portDiscoveryState = "discovering";
     this.portDiscoveryIssue = null;
     this.publishPorts();
-    void this.pollPortDiscovery().finally(() =>
-      this.schedulePortDiscoveryPoll(),
-    );
+    void this.pollPortDiscovery()
+      .finally(() => this.schedulePortDiscoveryPoll())
+      .catch(() => undefined);
   }
 
   private async listDiscoveredTcpListeners(): Promise<

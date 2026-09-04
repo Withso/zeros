@@ -48,6 +48,33 @@ const MAX_REPLICAS_PER_TICK = 4;
 const MAX_PENDING_PROOFS = 32;
 const MAX_BACKOFF_MS = 5 * 60_000;
 
+/** Select a deterministic round-robin batch. Replica state is ordered for
+ * database efficiency, but a fixed `.slice(0, 4)` would permanently starve
+ * every later replica whenever the first four are continuously due. */
+export function selectFairCloudReplicaBatch<T extends { replicaId: string }>(
+  replicas: readonly T[],
+  cursor: string | null,
+  maximum: number = MAX_REPLICAS_PER_TICK,
+): { replicas: T[]; cursor: string | null } {
+  if (!Number.isSafeInteger(maximum) || maximum < 1) {
+    throw new Error("Cloud replica scheduler batch size is invalid");
+  }
+  const ordered = [...replicas].sort((left, right) =>
+    left.replicaId.localeCompare(right.replicaId),
+  );
+  if (ordered.length === 0) return { replicas: [], cursor: null };
+  let start = 0;
+  if (cursor !== null) {
+    const next = ordered.findIndex((replica) => replica.replicaId > cursor);
+    start = next === -1 ? 0 : next;
+  }
+  const selected = Array.from(
+    { length: Math.min(maximum, ordered.length) },
+    (_, offset) => ordered[(start + offset) % ordered.length]!,
+  );
+  return { replicas: selected, cursor: selected.at(-1)!.replicaId };
+}
+
 export function cloudReplicaDetachmentCode(error: unknown): string | null {
   if (!(error instanceof CloudReplicaClientError)) return null;
   if (error.code === "workspace_replica_not_found") return "workspace_deleted";
@@ -123,7 +150,10 @@ export async function validateCloudReplicaDestination(
   return root;
 }
 
-async function requireRealDirectory(directory: string, root: string): Promise<void> {
+async function requireRealDirectory(
+  directory: string,
+  root: string,
+): Promise<void> {
   const stat = await lstat(directory).catch(() => null);
   const physical = await realpath(directory).catch(() => null);
   if (
@@ -243,7 +273,8 @@ export async function preserveCloudReplicaDivergences(input: {
     if (sourceStat && destinationStat) {
       throw new Error("Replica recovery destination is already occupied");
     }
-    if (source && sourceStat && !destinationStat) await rename(source, destination);
+    if (source && sourceStat && !destinationStat)
+      await rename(source, destination);
     if (!sourceStat && !destinationStat && divergence.observedSha256 !== null) {
       throw new Error("Diverged local content disappeared before preservation");
     }
@@ -325,8 +356,12 @@ export class CloudReplicaRuntime {
   private readonly now: () => number;
   private readonly random: () => number;
   private readonly pendingProofs = new Map<string, PendingProof>();
-  private readonly retry = new Map<string, { attempts: number; nextAt: number }>();
+  private readonly retry = new Map<
+    string,
+    { attempts: number; nextAt: number }
+  >();
   private readonly scanCursor = new Map<string, number>();
+  private replicaScheduleCursor: string | null = null;
   private session: CloudReplicaHostSession | null = null;
   private sessionEpoch = 0;
   private api: CloudWorkspaceDesktopApi | null = null;
@@ -344,12 +379,18 @@ export class CloudReplicaRuntime {
     this.now = dependencies.now ?? Date.now;
     this.random = dependencies.random ?? Math.random;
     const interval = dependencies.syncIntervalMs ?? SYNC_INTERVAL_MS;
-    if (!Number.isSafeInteger(interval) || interval < 1_000 || interval > 300_000) {
+    if (
+      !Number.isSafeInteger(interval) ||
+      interval < 1_000 ||
+      interval > 300_000
+    ) {
       throw new Error("Cloud replica scheduler interval is invalid");
     }
   }
 
-  private emit(value: CloudReplicaProofRequest | CloudReplicaDeviceRegistered): void {
+  private emit(
+    value: CloudReplicaProofRequest | CloudReplicaDeviceRegistered,
+  ): void {
     this.dependencies.emitHostControl(cloudReplicaHostControlLine(value));
   }
 
@@ -364,24 +405,33 @@ export class CloudReplicaRuntime {
   /** Called only with a message already validated by the private stdin parser. */
   async updateSession(next: CloudReplicaHostSession | null): Promise<void> {
     if (this.disposed) return;
+    const priorBroker = this.broker;
+    const priorTick = this.tick;
+    const priorEnrollment = this.enrollment;
     this.sessionEpoch += 1;
     const epoch = this.sessionEpoch;
     this.clearTimer();
+    priorBroker?.cancel();
     this.api = null;
     this.broker = null;
     this.retry.clear();
+    this.scanCursor.clear();
+    this.replicaScheduleCursor = null;
     this.rejectPendingProofs("cloud replica session changed");
+    // A stale broker may be between network and filesystem/SQLite phases.
+    // Wait for its cancellation boundary before binding a replacement account.
+    this.session = null;
+    await Promise.all([
+      priorTick?.catch(() => undefined),
+      priorEnrollment?.catch(() => undefined),
+    ]);
+    if (this.disposed || this.sessionEpoch !== epoch) return;
     this.session = next && next.expiresAtMs > this.now() ? next : null;
     if (!this.session) return;
 
     // Construction validates HTTPS/origin policy before any request leaves the
     // process. A malformed host seed therefore disables only this subsystem.
     if (!this.session.device.deviceId) {
-      // A replacement auth seed may arrive while the prior enrollment request
-      // is still settling. Let that request finish, then let the newest epoch
-      // retry the same deterministic registration key; the stale epoch exits.
-      await this.enrollment?.catch(() => undefined);
-      if (this.sessionEpoch !== epoch || this.session !== next) return;
       const session = this.session;
       const work = this.enrollDevice(session, epoch).finally(() => {
         if (this.enrollment === work) this.enrollment = null;
@@ -500,7 +550,9 @@ export class CloudReplicaRuntime {
       : null;
   }
 
-  requestHostProof(input: Omit<CloudReplicaProofRequest, "type" | "requestId">) {
+  requestHostProof(
+    input: Omit<CloudReplicaProofRequest, "type" | "requestId">,
+  ) {
     if (
       this.disposed ||
       !this.session ||
@@ -510,7 +562,10 @@ export class CloudReplicaRuntime {
       this.currentAccessToken() === null
     ) {
       return Promise.reject(
-        new CloudReplicaRuntimeError("signed_out", "Cloud account session is unavailable"),
+        new CloudReplicaRuntimeError(
+          "signed_out",
+          "Cloud account session is unavailable",
+        ),
       );
     }
     if (this.pendingProofs.size >= MAX_PENDING_PROOFS) {
@@ -572,7 +627,12 @@ export class CloudReplicaRuntime {
     api: CloudWorkspaceDesktopApi;
     broker: CloudReplicaSyncBroker;
   } {
-    if (!this.session || !this.api || !this.broker || !this.session.device.deviceId) {
+    if (
+      !this.session ||
+      !this.api ||
+      !this.broker ||
+      !this.session.device.deviceId
+    ) {
       throw new CloudReplicaRuntimeError(
         this.session ? "device_enrollment_pending" : "signed_out",
         this.session
@@ -656,8 +716,16 @@ export class CloudReplicaRuntime {
       ignorePolicySha256: cloudReplicaIgnorePolicySha256(policy),
       idempotencyKey: input.idempotencyKey,
     });
-    assertRemoteIdentity(runtime.session, existingBinding ?? null, result.replica, input);
-    if (!result.replica.checkpointId || result.replica.manifestRevision === null) {
+    assertRemoteIdentity(
+      runtime.session,
+      existingBinding ?? null,
+      result.replica,
+      input,
+    );
+    if (
+      !result.replica.checkpointId ||
+      result.replica.manifestRevision === null
+    ) {
       throw new CloudReplicaRuntimeError(
         "identity_mismatch",
         "Cloud replica did not include a durable checkpoint",
@@ -725,7 +793,12 @@ export class CloudReplicaRuntime {
     idempotencyKey: string,
     replaceDiverged = false,
   ) {
-    return this.changeState(replicaId, "resume", idempotencyKey, replaceDiverged);
+    return this.changeState(
+      replicaId,
+      "resume",
+      idempotencyKey,
+      replaceDiverged,
+    );
   }
 
   private async changeState(
@@ -738,7 +811,10 @@ export class CloudReplicaRuntime {
     assertIdempotency(idempotencyKey);
     const local = this.state.replica(replicaId);
     if (!local) {
-      throw new CloudReplicaRuntimeError("replica_not_found", "Cloud replica was not found");
+      throw new CloudReplicaRuntimeError(
+        "replica_not_found",
+        "Cloud replica was not found",
+      );
     }
     if (
       local.accountUserId !== runtime.session.accountUserId ||
@@ -791,7 +867,8 @@ export class CloudReplicaRuntime {
     let updated = this.state.updateRemoteState({
       replicaId,
       desiredState: response.replica.desiredState,
-      observedState: response.replica.observedState as CloudReplicaLocalState["observedState"],
+      observedState: response.replica
+        .observedState as CloudReplicaLocalState["observedState"],
       workspaceAuthorityEpoch: response.replica.workspaceAuthorityEpoch,
       grantEpoch: response.replica.grantEpoch,
       checkpointId: response.replica.checkpointId,
@@ -815,10 +892,16 @@ export class CloudReplicaRuntime {
     return updated;
   }
 
-  async relocate(replicaId: string, nextRootPath: string): Promise<CloudReplicaLocalState> {
+  async relocate(
+    replicaId: string,
+    nextRootPath: string,
+  ): Promise<CloudReplicaLocalState> {
     const local = this.state.replica(replicaId);
     if (!local) {
-      throw new CloudReplicaRuntimeError("replica_not_found", "Cloud replica was not found");
+      throw new CloudReplicaRuntimeError(
+        "replica_not_found",
+        "Cloud replica was not found",
+      );
     }
     if (local.desiredState === "active") {
       throw new CloudReplicaRuntimeError(
@@ -831,7 +914,8 @@ export class CloudReplicaRuntime {
       next !== nextRootPath ||
       next === path.parse(next).root ||
       (await lstat(next).catch(() => null)) !== null ||
-      (await realpath(path.dirname(next)).catch(() => null)) !== path.dirname(next)
+      (await realpath(path.dirname(next)).catch(() => null)) !==
+        path.dirname(next)
     ) {
       throw new CloudReplicaRuntimeError(
         "invalid_request",
@@ -847,7 +931,9 @@ export class CloudReplicaRuntime {
     }
   }
 
-  private async preserveOpenDivergences(local: CloudReplicaLocalState): Promise<void> {
+  private async preserveOpenDivergences(
+    local: CloudReplicaLocalState,
+  ): Promise<void> {
     const divergences = this.state.openDivergences(local.replicaId);
     if (divergences.length === 0) return;
     await preserveCloudReplicaDivergences({
@@ -867,15 +953,31 @@ export class CloudReplicaRuntime {
 
   async syncNow(replicaId: string): Promise<CloudReplicaLocalState> {
     const runtime = this.currentRuntime();
+    const epoch = this.sessionEpoch;
     const local = this.state.replica(replicaId);
     if (!local) {
-      throw new CloudReplicaRuntimeError("replica_not_found", "Cloud replica was not found");
+      throw new CloudReplicaRuntimeError(
+        "replica_not_found",
+        "Cloud replica was not found",
+      );
     }
     await this.scanLocalProjection(local);
+    if (
+      this.disposed ||
+      this.sessionEpoch !== epoch ||
+      this.broker !== runtime.broker
+    ) {
+      throw new CloudReplicaRuntimeError(
+        "signed_out",
+        "Cloud account session changed during synchronization",
+      );
+    }
     return runtime.broker.sync(replicaId);
   }
 
-  private async scanLocalProjection(local: CloudReplicaLocalState): Promise<void> {
+  private async scanLocalProjection(
+    local: CloudReplicaLocalState,
+  ): Promise<void> {
     const entries = this.state.projectionEntries(local.replicaId);
     if (entries.length === 0) {
       this.scanCursor.delete(local.replicaId);
@@ -890,7 +992,10 @@ export class CloudReplicaRuntime {
     for (let offset = 0; offset < count; offset += 1) {
       const entry = entries[(start + offset) % entries.length]!;
       try {
-        const observed = await inspectCloudReplicaEntry(local.rootPath, entry.path);
+        const observed = await inspectCloudReplicaEntry(
+          local.rootPath,
+          entry.path,
+        );
         if (
           observed.type !== entry.entryType ||
           observed.mode !== entry.mode ||
@@ -924,18 +1029,31 @@ export class CloudReplicaRuntime {
   private schedule(delayMs: number): void {
     this.clearTimer();
     if (this.disposed || !this.broker || !this.session) return;
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      void this.runTick();
-    }, Math.max(0, delayMs));
+    this.timer = setTimeout(
+      () => {
+        this.timer = null;
+        void this.runTick().catch((error) => {
+          this.dependencies.logger?.warn(
+            `[cloud-replica] scheduler failed (${error instanceof Error ? error.message : "unknown"})`,
+          );
+        });
+      },
+      Math.max(0, delayMs),
+    );
     this.timer.unref?.();
   }
 
   private runTick(): Promise<void> {
     if (this.tick) return this.tick;
-    const work = this.runTickExclusive().finally(() => {
+    const epoch = this.sessionEpoch;
+    const work = this.runTickExclusive(epoch).finally(() => {
       if (this.tick === work) this.tick = null;
-      if (!this.disposed && this.session && this.broker) {
+      if (
+        !this.disposed &&
+        this.sessionEpoch === epoch &&
+        this.session &&
+        this.broker
+      ) {
         this.schedule(this.dependencies.syncIntervalMs ?? SYNC_INTERVAL_MS);
       }
     });
@@ -943,21 +1061,59 @@ export class CloudReplicaRuntime {
     return work;
   }
 
-  private async runTickExclusive(): Promise<void> {
+  private async runTickExclusive(epoch: number): Promise<void> {
+    if (this.disposed || this.sessionEpoch !== epoch) return;
     const runtime = this.currentRuntime();
-    const replicas = this.state
+    const due = this.state
       .activeReplicas({
         accountUserId: runtime.session.accountUserId,
         deviceId: runtime.session.device.deviceId!,
       })
-      .filter((replica) => (this.retry.get(replica.replicaId)?.nextAt ?? 0) <= this.now())
-      .slice(0, MAX_REPLICAS_PER_TICK);
+      .filter(
+        (replica) =>
+          (this.retry.get(replica.replicaId)?.nextAt ?? 0) <= this.now(),
+      );
+    const selected = selectFairCloudReplicaBatch(
+      due,
+      this.replicaScheduleCursor,
+      MAX_REPLICAS_PER_TICK,
+    );
+    this.replicaScheduleCursor = selected.cursor;
+    const replicas = selected.replicas;
     for (const replica of replicas) {
+      if (
+        this.disposed ||
+        this.sessionEpoch !== epoch ||
+        this.broker !== runtime.broker
+      ) {
+        return;
+      }
       try {
         await this.scanLocalProjection(replica);
+        if (
+          this.disposed ||
+          this.sessionEpoch !== epoch ||
+          this.broker !== runtime.broker
+        ) {
+          return;
+        }
         await runtime.broker.sync(replica.replicaId);
+        if (
+          this.disposed ||
+          this.sessionEpoch !== epoch ||
+          this.broker !== runtime.broker
+        ) {
+          return;
+        }
         this.retry.delete(replica.replicaId);
       } catch (error) {
+        if (
+          this.disposed ||
+          this.sessionEpoch !== epoch ||
+          this.broker !== runtime.broker
+        ) {
+          return;
+        }
         const detached = cloudReplicaDetachmentCode(error);
         if (detached) {
           runtime.broker.revokeLocalGrant(replica.replicaId);
@@ -967,7 +1123,10 @@ export class CloudReplicaRuntime {
         }
         const prior = this.retry.get(replica.replicaId)?.attempts ?? 0;
         const attempts = Math.min(prior + 1, 16);
-        const base = Math.min(MAX_BACKOFF_MS, 1_000 * 2 ** Math.min(attempts, 8));
+        const base = Math.min(
+          MAX_BACKOFF_MS,
+          1_000 * 2 ** Math.min(attempts, 8),
+        );
         const jitter = Math.floor(base * 0.2 * this.random());
         this.retry.set(replica.replicaId, {
           attempts,
@@ -986,10 +1145,12 @@ export class CloudReplicaRuntime {
     this.session = null;
     this.sessionEpoch += 1;
     this.clearTimer();
+    this.broker?.cancel();
     this.api = null;
     this.broker = null;
     this.retry.clear();
     this.scanCursor.clear();
+    this.replicaScheduleCursor = null;
     this.rejectPendingProofs("cloud replica runtime stopped");
     await this.tick?.catch(() => undefined);
     await this.enrollment?.catch(() => undefined);

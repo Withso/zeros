@@ -23,6 +23,10 @@ import type { BridgeMessage } from "./messages";
 import { createMessageId } from "./messages";
 import { PROTOCOL_VERSION } from "@zeros/protocol/version";
 import {
+  MAX_BRIDGE_FRAME_BYTES,
+  safeParseBridgeMessage,
+} from "@zeros/protocol/schemas";
+import {
   ENGINE_BASE_PORT_ALPHA,
   ENGINE_BASE_PORT_BETA,
   ENGINE_BASE_PORT_DEV,
@@ -75,6 +79,27 @@ const RECONNECT_GRACE_MS = 20_000;
  *  meaningful memory. The deadline check still expires entries so a
  *  stuck reconnect doesn't grow the queue forever. */
 const MAX_QUEUED_REQUESTS = 256;
+
+/** Parse the untrusted local/cloud WebSocket boundary. The protocol schema
+ * keeps per-message validation centralized; unknown future message types are
+ * deliberately ignored (as dispatch already did) so a rolling engine update
+ * does not sever a mixed-version renderer connection. */
+export function parseInboundBridgeWebSocketFrame(
+  raw: unknown,
+): BridgeMessage | null {
+  if (
+    typeof raw !== "string" ||
+    new TextEncoder().encode(raw).byteLength > MAX_BRIDGE_FRAME_BYTES
+  ) {
+    return null;
+  }
+  try {
+    const message = safeParseBridgeMessage(JSON.parse(raw) as unknown);
+    return message?.source === "engine" ? message : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Per-type cap on queued requests for high-fan-out
  *  message types that React effects can re-fire while disconnected.
@@ -248,7 +273,9 @@ export function runtimeExecutionIdentity(
       };
 }
 
-export function runtimeExecutionKey(identity: RuntimeExecutionIdentity): string {
+export function runtimeExecutionKey(
+  identity: RuntimeExecutionIdentity,
+): string {
   return identity.kind === "local"
     ? "local:sidecar"
     : [
@@ -679,13 +706,8 @@ export class RuntimeClient {
     };
 
     ws.onmessage = (event) => {
-      let msg: BridgeMessage;
-      try {
-        msg = JSON.parse(event.data);
-      } catch {
-        return;
-      }
-      this.handleIncoming(msg);
+      const msg = parseInboundBridgeWebSocketFrame(event.data);
+      if (msg) this.handleIncoming(msg);
     };
 
     ws.onclose = () => {
@@ -754,7 +776,10 @@ export class RuntimeClient {
       try {
         listener(identity);
       } catch (error) {
-        console.error("[Zeros] runtime execution identity listener failed:", error);
+        console.error(
+          "[Zeros] runtime execution identity listener failed:",
+          error,
+        );
       }
     }
   }

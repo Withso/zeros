@@ -531,13 +531,25 @@ export class CloudWorkspaceSshRuntime {
     await rm(directory, { recursive: true, force: true });
   }
 
+  /** Timer and EventEmitter callbacks cannot return a rejected promise to
+   * Electron. Keep cleanup failures observable without turning expiry or a
+   * socket error into an unhandled rejection in the main process. */
+  private runAsyncCleanup(label: string, task: () => Promise<void>): void {
+    void Promise.resolve()
+      .then(task)
+      .catch((error: unknown) => {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.warn(`[cloud-ssh] ${label} cleanup failed: ${detail}`);
+      });
+  }
+
   private cleanupAtExpiry(directory: string, expiresAt: string): void {
     const delay = Math.max(1_000, Date.parse(expiresAt) - Date.now() + 60_000);
     const timer = setTimeout(
       () => {
-        this.cleanupTimers.delete(directory);
-        this.activeDirectories.delete(directory);
-        void rm(directory, { recursive: true, force: true });
+        this.runAsyncCleanup("expiry", () =>
+          this.removePreparedDirectory(directory),
+        );
       },
       Math.min(delay, 2_147_000_000),
     );
@@ -782,7 +794,7 @@ export class CloudWorkspaceSshRuntime {
         .catch(closePair);
     });
     server.on("error", () => {
-      if (!stopping) void stop();
+      if (!stopping) this.runAsyncCleanup("server-error", stop);
     });
 
     let localPort: number;
@@ -793,7 +805,7 @@ export class CloudWorkspaceSshRuntime {
       throw error;
     }
     const expiryTimer = setTimeout(
-      () => void stop(),
+      () => this.runAsyncCleanup("expiry", stop),
       Math.max(1_000, Date.parse(input.expiresAt) - Date.now()),
     );
     expiryTimer.unref?.();
@@ -896,10 +908,12 @@ export class CloudWorkspaceSshRuntime {
       return stopPromise;
     };
     tunnelChild.once("close", () => {
-      void this.removePreparedDirectory(prepared.directory);
+      this.runAsyncCleanup("tunnel-close", () =>
+        this.removePreparedDirectory(prepared.directory),
+      );
     });
     const expiryTimer = setTimeout(
-      () => void stop(),
+      () => this.runAsyncCleanup("expiry", stop),
       Math.max(1_000, Date.parse(input.expiresAt) - Date.now()),
     );
     expiryTimer.unref?.();

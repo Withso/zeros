@@ -79,6 +79,28 @@ describe("main-owned cloud replica device secret", () => {
     );
   });
 
+  it("does not create a replacement key when the whole secret store is unreadable", () => {
+    let wrote = false;
+    const dependencies: CloudReplicaSecretStoreDependencies = {
+      read: () => {
+        throw new Error("secrets.json is unreadable");
+      },
+      has: () => false,
+      write: () => {
+        wrote = true;
+      },
+      replace: () => false,
+    };
+    expect(() =>
+      new CloudReplicaDeviceSecretStore(dependencies).ensure(randomUUID()),
+    ).toThrowError(
+      expect.objectContaining<Partial<CloudReplicaDeviceStoreError>>({
+        code: "secret_unavailable",
+      }),
+    );
+    expect(wrote).toBe(false);
+  });
+
   it("rejects a server registration for a different public key", () => {
     const memory = memorySecrets();
     const store = new CloudReplicaDeviceSecretStore(memory.dependencies);

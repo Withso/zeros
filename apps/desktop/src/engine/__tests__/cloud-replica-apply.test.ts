@@ -1,5 +1,12 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -82,9 +89,9 @@ async function root(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    roots.splice(0).map((directory) =>
-      rm(directory, { recursive: true, force: true }),
-    ),
+    roots
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
   );
 });
 
@@ -176,7 +183,9 @@ describe("receive-only cloud replica filesystem apply", () => {
         mutations: [upsert("src/escape.ts", bytes)],
       }),
     ).rejects.toMatchObject({ code: "path_rejected" });
-    await expect(readFile(path.join(outside, "escape.ts"))).rejects.toMatchObject({
+    await expect(
+      readFile(path.join(outside, "escape.ts")),
+    ).rejects.toMatchObject({
       code: "ENOENT",
     });
 
@@ -281,7 +290,9 @@ describe("receive-only cloud replica filesystem apply", () => {
         ],
       }),
     ).resolves.toMatchObject({ applied: 1, toRevision: 2 });
-    await expect(readFile(path.join(workspace, "old.txt"))).rejects.toMatchObject({
+    await expect(
+      readFile(path.join(workspace, "old.txt")),
+    ).rejects.toMatchObject({
       code: "ENOENT",
     });
   });
@@ -363,6 +374,15 @@ describe("receive-only cloud replica filesystem apply", () => {
         fromRevision: 1,
         toRevision: 3,
         mutations: [upsert("truncated.txt", bytes, 2)],
+      }),
+    ).rejects.toMatchObject({ code: "invalid_batch" });
+    await expect(
+      engine.apply({
+        replicaId: "replica-a",
+        rootPath: workspace,
+        fromRevision: 1,
+        toRevision: 2,
+        mutations: [upsert("skipped-sequence.txt", bytes, 2, 2)],
       }),
     ).rejects.toMatchObject({ code: "invalid_batch" });
   });
