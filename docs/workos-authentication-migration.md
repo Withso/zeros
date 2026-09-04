@@ -157,15 +157,17 @@ validation and must not be exported as ordinary customer data.
 
 Webhook and Events API ingestion resolve all currently linked targets before
 taking those same sorted locks, then recheck the durable digest fence before
-persisting any raw payload. A matching late event is acknowledged with only a
-redacted deduplication row (`data={}`, no object, User, or Organization ID) and
-cannot recreate an identity event, session, or membership projection. Final
-account erasure also removes provider-event rows for the captured subjects or
-current email and session tombstones for either the local account or captured
-subjects. Organization-owned invitation records and their audit history remain
-Organization data even when the recipient later deletes a Zeros account; they
-are removed by the Organization's deletion/retention policy, not silently by
-account erasure.
+persisting any raw payload. A matching late event creates only a redacted
+deduplication row (`data={}`, no object, User, or Organization ID) and cannot
+recreate an identity event, session, or membership projection. The separate
+provider-erasure fences and reconciliation evidence remain indefinitely under
+the retention contract above. Final account erasure also removes provider-event
+rows for the captured subjects or current email and session tombstones for
+either the local account or captured subjects. Organization-owned invitation
+records and their audit history remain Organization data while the Organization
+exists, even when the recipient later deletes a Zeros account; an Organization
+purge removes them under that Organization's own deletion/retention policy, not
+silently as part of account erasure.
 
 After applying `0061`, a database owner must inspect historical readiness from
 a controlled shell before accepting new subjects:
@@ -747,7 +749,11 @@ Manual Alpha acceptance must verify:
   repair;
 - account and Organization purge racing event ingress, plus delayed User,
   session, membership, invitation, and Organization events after final
-  erasure, proving that only redacted deduplication evidence survives;
+  erasure, proving that rejected late events create only redacted deduplication
+  rows while provider-erasure fences and reconciliation evidence remain under
+  their indefinite retention contract, and Organization-owned invitation/audit
+  records survive account erasure under the Organization's own retention
+  policy;
 - one and only one native WorkOS invitation email, proving there is no Zepto
   duplicate and `invitation_token` accepts through exact server-side
   correlation, strict state/PKCE on web, and the exact release-channel deep

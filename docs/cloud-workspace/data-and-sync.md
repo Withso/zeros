@@ -12,11 +12,11 @@ release work.
 Do not encode ownership, immutable workspace placement, and replication in one
 `location` field. They answer different questions:
 
-| Dimension           | Values                                            | Meaning                                                                                    |
-| ------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Tenant ownership    | Personal or Organization/Team                     | Who owns policy, repository access, retention, and the workspace record                    |
-| Workspace placement | This Mac or Cloud                                 | Where this workspace's single authoritative engine is created; it does not change in place |
-| Device replica      | Off, Syncing, In sync, Paused, Diverged, or Error | Whether one member's device has a private local mirror of a cloud-authoritative workspace  |
+| Dimension           | Values                                                      | Meaning                                                                                    |
+| ------------------- | ----------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Tenant ownership    | Personal or Organization/Team                               | Who owns policy, repository access, retention, and the workspace record                    |
+| Workspace placement | This Mac or Cloud                                           | Where this workspace's single authoritative engine is created; it does not change in place |
+| Device replica      | Off, Syncing, In sync, Paused, Diverged, Detached, or Error | Whether one member's device has a private local mirror of a cloud-authoritative workspace  |
 
 Local placement does **not** imply Personal ownership. An Organization workspace
 may be created on one member's Mac and inherit Organization repository policy
@@ -77,6 +77,14 @@ The workspace-details actions use verbs that state their consequence:
 - The destination tenant is selected explicitly. Copying Organization-owned
   work to Personal is a policy-checked export, never an implicit side effect of
   choosing a Mac path.
+
+`Detached` is not another paused state: the local bytes remain on disk, but the
+replica identity has no live authority or grant. A replica paused only for an
+approved destination relocation may obtain fresh authorization and transition
+back through `Syncing`. Detachment caused by workspace deletion, membership or
+device revocation, or a replica tombstone can never reactivate the original
+replica identity; the member may remove the retained local copy or create a
+separately authorized new fork.
 
 Routine remote editing uses **Open via SSH**. A local copy is an independent
 workspace, not a way to make one Mac authoritative for the cloud source.
@@ -247,16 +255,20 @@ Two independent counters apply:
 
 A retry or duplicate upload of the same tenant/workspace/hash refreshes the
 existing reservation instead of charging again. A successful immutable
-reference promotes the upload reservation to a non-expiring referenced row;
-the last reference deletion releases it. Interrupted uploads receive a
-24-hour recovery lease that a retry refreshes. If another workspace still has
-an immutable reference to an available deduplicated blob, maintenance can
-expire only the abandoned workspace's logical reservation; the shared physical
-blob remains charged to the Organization. A unique abandoned blob keeps both
-its logical reservation and Organization physical charge until physical
-collection succeeds. Maintenance also repairs stale reference reservations,
-reconciles reference counts, and applies the existing
-age/retention/legal-hold garbage-collection rules.
+reference promotes the upload reservation to a non-expiring referenced row.
+Deleting the last `workspace_blob_references` row for one
+`(workspace_id, blob_id)` releases that workspace's corresponding
+`workspace_blob_storage_reservations` row and logical `reserved_bytes`; it does
+not release the Organization physical charge, which remains until physical
+collection succeeds. Interrupted uploads receive a 24-hour recovery lease that
+a retry refreshes. If another workspace still has an immutable reference to an
+available deduplicated blob, maintenance can expire only the abandoned
+workspace's logical reservation; the shared physical blob remains charged to
+the Organization. A unique abandoned upload keeps both its logical reservation
+and Organization physical charge until physical collection succeeds.
+Maintenance also repairs stale reference reservations, reconciles reference
+counts, and applies the existing age/retention/legal-hold garbage-collection
+rules.
 
 Key rotation reserves one additional physical object before writing the target
 ciphertext. A failed or crashed attempt keeps that reservation for a safe retry;
