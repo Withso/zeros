@@ -1067,6 +1067,15 @@ export class CloudWorkspaceAccessBroker {
       this.remember(replacement);
       await current.tunnel.stop().catch(() => undefined);
       current.tunnel = undefined;
+      if (current.generation !== replacement.generation) {
+        if (this.leases.get(current.grantId) === current) {
+          this.forgetLease(current.grantId, current);
+        }
+        // Provider revocation is generation-wide. It is safe and necessary
+        // once the replacement belongs to a newer generation, but revoking a
+        // same-generation predecessor would also retire the replacement.
+        await this.cleanupSsh(token, current).catch(() => undefined);
+      }
       return this.runtimeTarget(replacement, admission);
     } finally {
       releaseCapacity();

@@ -8,10 +8,10 @@ import {
   type CloudReplicaDeviceCredential,
 } from "../src/engine/cloud-replica-device";
 import {
+  createSecretIfAbsent,
   getSecret,
   hasSecret,
   replaceSecretIfUnchanged,
-  setSecret,
 } from "./secret-store";
 
 export type DeviceSecretEnvelope = {
@@ -138,14 +138,14 @@ function parseEnvelope(
 export interface CloudReplicaSecretStoreDependencies {
   read(account: string): string | null;
   has(account: string): boolean;
-  write(account: string, value: string): void;
+  create(account: string, value: string): boolean;
   replace(account: string, expected: string, next: string | null): boolean;
 }
 
 const defaultDependencies: CloudReplicaSecretStoreDependencies = {
   read: getSecret,
   has: hasSecret,
-  write: setSecret,
+  create: createSecretIfAbsent,
   replace: replaceSecretIfUnchanged,
 };
 
@@ -207,8 +207,28 @@ export class CloudReplicaDeviceSecretStore {
       active: createCloudReplicaDeviceCredential(accountUserId),
       pendingRotation: null,
     };
-    this.secrets.write(current.account, JSON.stringify(envelope));
-    return envelope;
+    let created: boolean;
+    try {
+      created = this.secrets.create(current.account, JSON.stringify(envelope));
+    } catch (error) {
+      throw new CloudReplicaDeviceStoreError(
+        "secret_unavailable",
+        "Cloud device credential store cannot be written",
+        { cause: error },
+      );
+    }
+    if (created) return envelope;
+
+    // Another Electron main process won the create-if-absent race. Its exact
+    // durable identity is authoritative; never return the losing candidate.
+    const winner = this.readRaw(accountUserId).envelope;
+    if (!winner) {
+      throw new CloudReplicaDeviceStoreError(
+        "concurrent_update",
+        "Cloud device credential disappeared during creation",
+      );
+    }
+    return winner;
   }
 
   bindRegistration(input: {

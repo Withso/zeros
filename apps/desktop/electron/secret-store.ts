@@ -180,6 +180,22 @@ export function setSecret(account: string, value: string): void {
   });
 }
 
+/** Create one encrypted value only when the account is still absent. The
+ * absence check and whole-file update share the cross-process mutation lock,
+ * so sibling Electron main processes cannot both publish different device
+ * identities after observing the same earlier snapshot. */
+export function createSecretIfAbsent(account: string, value: string): boolean {
+  ensureEncryptionAvailable();
+  const encrypted = safeStorage.encryptString(value).toString("base64");
+  return withSecretsLock(() => {
+    const data = readAll();
+    if (account in data) return false;
+    data[account] = encrypted;
+    writeAll(data);
+    return true;
+  });
+}
+
 export function getSecret(account: string): string | null {
   const data = readAll();
   const b64 = data[account];

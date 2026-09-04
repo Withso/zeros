@@ -14,7 +14,7 @@ vi.mock("electron", () => ({
   },
 }));
 
-import { setSecret } from "../secret-store";
+import { createSecretIfAbsent, getSecret, setSecret } from "../secret-store";
 
 const directories: string[] = [];
 const originalSharedDirectory = process.env.ZEROS_SHARED_SECRETS_DIR;
@@ -26,9 +26,9 @@ afterEach(async () => {
     process.env.ZEROS_SHARED_SECRETS_DIR = originalSharedDirectory;
   }
   await Promise.all(
-    directories.splice(0).map((directory) =>
-      rm(directory, { recursive: true, force: true }),
-    ),
+    directories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
   );
 });
 
@@ -40,6 +40,18 @@ async function secretDirectory(): Promise<string> {
 }
 
 describe("encrypted secret store whole-file safety", () => {
+  it("creates a secret only once under the store mutation lock", async () => {
+    await secretDirectory();
+
+    expect(createSecretIfAbsent("cloud_replica_device:test", "winner")).toBe(
+      true,
+    );
+    expect(createSecretIfAbsent("cloud_replica_device:test", "loser")).toBe(
+      false,
+    );
+    expect(getSecret("cloud_replica_device:test")).toBe("winner");
+  });
+
   it("never rewrites a malformed whole store during a secret mutation", async () => {
     const directory = await secretDirectory();
     const file = path.join(directory, "secrets.json");
@@ -60,6 +72,8 @@ describe("encrypted secret store whole-file safety", () => {
     expect(() => setSecret("cloud_replica_device:test", "new-value")).toThrow(
       /unreadable/u,
     );
-    await expect(readFile(file, "utf8")).rejects.toMatchObject({ code: "EISDIR" });
+    await expect(readFile(file, "utf8")).rejects.toMatchObject({
+      code: "EISDIR",
+    });
   });
 });

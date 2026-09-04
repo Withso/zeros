@@ -1528,8 +1528,12 @@ app.whenReady().then(async () => {
   const disposeGithubSessionSync = onMainAuthSessionChanged(async () => {
     emitEvent("auth-store-changed", {});
     void authSecurityMonitor.revalidate("session_changed", true);
+    // Start the cloud-session update first: its writer advances the generation
+    // synchronously, so an older bearer can no longer publish while unrelated
+    // GitHub credential work is awaited.
+    const cloudReplicaSessionUpdate = pushCloudReplicaSessionToEngine();
     await pushGithubCredentialToEngine();
-    await pushCloudReplicaSessionToEngine();
+    await cloudReplicaSessionUpdate;
     await scheduleGithubAppRefresh();
     emitEvent("github-credential-store-changed", {});
   });
@@ -1604,8 +1608,8 @@ app.whenReady().then(async () => {
     const disposeSecretsWatch = watchSecrets((changedAccounts) => {
       if (changedAccounts.includes("auth-session:tokens")) {
         emitEvent("auth-store-changed", {});
-        void pushGithubCredentialToEngine();
         void pushCloudReplicaSessionToEngine();
+        void pushGithubCredentialToEngine();
         void scheduleGithubAppRefresh();
       }
       if (

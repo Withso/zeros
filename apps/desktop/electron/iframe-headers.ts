@@ -55,12 +55,18 @@ function frameTreeNodeIds(frame: WebFrameMain | null | undefined): number[] {
   let current = frame ?? null;
   // A malicious preview can create nested frames, but it cannot make header
   // admission walk an unbounded or cyclic frame graph.
-  while (current && ids.length < 32) {
-    const id = current.frameTreeNodeId;
-    if (!Number.isSafeInteger(id) || id < 1 || seen.has(id)) break;
-    ids.push(id);
-    seen.add(id);
-    current = current.parent;
+  try {
+    while (current && ids.length < 32) {
+      const id = current.frameTreeNodeId;
+      if (!Number.isSafeInteger(id) || id < 1 || seen.has(id)) break;
+      ids.push(id);
+      seen.add(id);
+      current = current.parent;
+    }
+  } catch {
+    // WebFrameMain can be disposed between any two native property reads.
+    // Partial ancestry is unsafe because it could contain an authorized frame.
+    return [];
   }
   return ids;
 }
@@ -72,9 +78,15 @@ export function installIframeHeaderStripping(session: Session): void {
   session.webRequest.onBeforeSendHeaders(
     { urls: ["https://*/*"] },
     (details, callback) => {
+      let ancestry: number[] = [];
+      try {
+        ancestry = frameTreeNodeIds(details.frame);
+      } catch {
+        // `details.frame` itself may be backed by a disposed native frame.
+      }
       const extraHeaders = previewFrameAuthorizations.requestHeaders(
         details.url,
-        frameTreeNodeIds(details.frame),
+        ancestry,
       );
       if (!extraHeaders) {
         callback({ cancel: false });

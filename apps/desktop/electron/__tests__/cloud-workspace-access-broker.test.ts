@@ -685,6 +685,147 @@ describe("CloudWorkspaceAccessBroker", () => {
     expect(tunnel.stop).toHaveBeenCalledOnce();
   });
 
+  it("forgets and best-effort revokes a superseded runtime generation", async () => {
+    const accessApi = api();
+    const firstAdmission = await accessApi.issueEngineAdmission(
+      "",
+      {} as never,
+    );
+    const firstTunnelResponse = await accessApi.issueTunnel("", {
+      organizationId: ORGANIZATION_ID,
+      workspaceId: WORKSPACE_ID,
+      remotePort: firstAdmission.remotePort,
+      deviceId: DEVICE_ID,
+      expiresInMinutes: 30,
+      idempotencyKey: "test:runtime:first",
+    });
+    const nextAdmission = {
+      ...firstAdmission,
+      generation: firstAdmission.generation + 1,
+      authorityEpoch: firstAdmission.authorityEpoch + 1,
+      grantToken: `zws_${"d".repeat(43)}`,
+    };
+    const nextTunnelResponse = {
+      ...firstTunnelResponse,
+      grant: {
+        ...firstTunnelResponse.grant,
+        id: SECOND_GRANT_ID,
+        generation: nextAdmission.generation,
+      },
+    };
+    vi.mocked(accessApi.issueEngineAdmission)
+      .mockReset()
+      .mockResolvedValueOnce(firstAdmission)
+      .mockResolvedValueOnce(nextAdmission);
+    vi.mocked(accessApi.issueTunnel)
+      .mockReset()
+      .mockResolvedValueOnce(firstTunnelResponse)
+      .mockResolvedValueOnce(nextTunnelResponse);
+    vi.mocked(accessApi.revoke).mockRejectedValueOnce(
+      new Error("old generation revoke unavailable"),
+    );
+    const oldTunnel: CloudWorkspaceTunnelHandle = {
+      localPort: 55_123,
+      stop: vi.fn(async () => undefined),
+    };
+    const replacementTunnel: CloudWorkspaceTunnelHandle = {
+      localPort: 55_124,
+      stop: vi.fn(async () => undefined),
+    };
+    const startDynamicTunnel = vi
+      .fn()
+      .mockResolvedValueOnce(oldTunnel)
+      .mockResolvedValueOnce(replacementTunnel);
+    const accessBroker = broker(accessApi, { startDynamicTunnel });
+
+    const first = await accessBroker.openRuntime({
+      organizationId: ORGANIZATION_ID,
+      workspaceId: WORKSPACE_ID,
+    });
+    const refreshed = await accessBroker.refreshRuntime(first);
+
+    expect(refreshed).toMatchObject({
+      generation: nextAdmission.generation,
+      connectionSequence: 2,
+    });
+    expect(oldTunnel.stop).toHaveBeenCalledOnce();
+    expect(accessApi.revoke).toHaveBeenCalledWith("account-access-token", {
+      organizationId: ORGANIZATION_ID,
+      workspaceId: WORKSPACE_ID,
+      grantId: GRANT_ID,
+      credential: SSH_CREDENTIAL,
+    });
+
+    await accessBroker.dispose();
+    expect(oldTunnel.stop).toHaveBeenCalledOnce();
+    expect(replacementTunnel.stop).toHaveBeenCalledOnce();
+    expect(accessApi.revoke).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not revoke a same-generation runtime tunnel rotation", async () => {
+    const accessApi = api();
+    const firstAdmission = await accessApi.issueEngineAdmission(
+      "",
+      {} as never,
+    );
+    const firstTunnelResponse = await accessApi.issueTunnel("", {
+      organizationId: ORGANIZATION_ID,
+      workspaceId: WORKSPACE_ID,
+      remotePort: firstAdmission.remotePort,
+      deviceId: DEVICE_ID,
+      expiresInMinutes: 30,
+      idempotencyKey: "test:runtime:first",
+    });
+    const nextAdmission = {
+      ...firstAdmission,
+      remotePort: firstAdmission.remotePort + 1,
+      grantToken: `zws_${"d".repeat(43)}`,
+    };
+    const nextTunnelResponse = {
+      ...firstTunnelResponse,
+      grant: { ...firstTunnelResponse.grant, id: SECOND_GRANT_ID },
+      tunnel: {
+        ...firstTunnelResponse.tunnel,
+        remotePort: nextAdmission.remotePort,
+      },
+    };
+    vi.mocked(accessApi.issueEngineAdmission)
+      .mockReset()
+      .mockResolvedValueOnce(firstAdmission)
+      .mockResolvedValueOnce(nextAdmission);
+    vi.mocked(accessApi.issueTunnel)
+      .mockReset()
+      .mockResolvedValueOnce(firstTunnelResponse)
+      .mockResolvedValueOnce(nextTunnelResponse);
+    const oldTunnel: CloudWorkspaceTunnelHandle = {
+      localPort: 55_123,
+      stop: vi.fn(async () => undefined),
+    };
+    const replacementTunnel: CloudWorkspaceTunnelHandle = {
+      localPort: 55_124,
+      stop: vi.fn(async () => undefined),
+    };
+    const accessBroker = broker(accessApi, {
+      startDynamicTunnel: vi
+        .fn()
+        .mockResolvedValueOnce(oldTunnel)
+        .mockResolvedValueOnce(replacementTunnel),
+    });
+
+    const first = await accessBroker.openRuntime({
+      organizationId: ORGANIZATION_ID,
+      workspaceId: WORKSPACE_ID,
+    });
+    const refreshed = await accessBroker.refreshRuntime(first);
+
+    expect(refreshed).toMatchObject({ generation: first.generation });
+    expect(oldTunnel.stop).toHaveBeenCalledOnce();
+    expect(accessApi.revoke).not.toHaveBeenCalled();
+
+    await accessBroker.closeRuntime(first.runtimeId);
+    expect(accessApi.revoke).toHaveBeenCalledOnce();
+  });
+
   it("revokes a mismatched runtime tunnel before it can cross IPC", async () => {
     const accessApi = api();
     const issued = await accessApi.issueTunnel("", {

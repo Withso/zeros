@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { cloudDevicePublicKeyFingerprint } from "../../src/engine/cloud-device-enrollment";
 import {
   CloudReplicaDeviceSecretStore,
+  CloudReplicaDeviceStoreError,
   type CloudReplicaSecretStoreDependencies,
 } from "../cloud-replica-device-store";
 import {
@@ -29,7 +30,11 @@ function memoryStore(): CloudReplicaDeviceSecretStore {
   const dependencies: CloudReplicaSecretStoreDependencies = {
     read: (account) => values.get(account) ?? null,
     has: (account) => values.has(account),
-    write: (account, value) => void values.set(account, value),
+    create: (account, value) => {
+      if (values.has(account)) return false;
+      values.set(account, value);
+      return true;
+    },
     replace: (account, expected, next) => {
       if (values.get(account) !== expected) return false;
       if (next === null) values.delete(account);
@@ -257,5 +262,130 @@ describe("main cloud access device authority", () => {
     expect(handled).toBe(true);
     expect(getSession).not.toHaveBeenCalled();
     expect(getStore).not.toHaveBeenCalled();
+  });
+
+  it("reports a fingerprint rejection with only a stable reason code", async () => {
+    const accountUserId = randomUUID();
+    const deviceId = randomUUID();
+    const publicKey = Buffer.alloc(32, 4).toString("base64url");
+    const warning = vi.fn();
+    const reseedSession = vi.fn(async () => undefined);
+
+    const handled = await handleCloudReplicaEngineControl(
+      {
+        type: "engine.cloudReplicaDeviceRegistered",
+        accountUserId,
+        deviceId,
+        keyVersion: 1,
+        publicKey,
+        keyFingerprint: "0".repeat(64),
+      },
+      vi.fn(),
+      {
+        capabilityEnabled: () => true,
+        getSession: vi.fn(),
+        store: () => memoryStore(),
+        warn: warning,
+      },
+      reseedSession,
+    );
+
+    expect(handled).toBe(true);
+    expect(reseedSession).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith(
+      "device_registration_fingerprint_mismatch",
+    );
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(accountUserId);
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(deviceId);
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(publicKey);
+  });
+
+  it.each([
+    ["secret_unavailable", "device_registration_secret_unavailable"],
+    ["secret_corrupt", "device_registration_secret_corrupt"],
+    ["concurrent_update", "device_registration_concurrent_update"],
+    ["identity_mismatch", "device_registration_identity_mismatch"],
+  ] as const)(
+    "reports only the allowlisted %s store reason when device binding fails",
+    async (storeCode, warningCode) => {
+      const accountUserId = randomUUID();
+      const deviceId = randomUUID();
+      const store = memoryStore();
+      const pending = store.ensure(accountUserId);
+      vi.spyOn(store, "bindRegistration").mockImplementation(() => {
+        throw new CloudReplicaDeviceStoreError(
+          storeCode,
+          `do not log ${pending.active.privateKey}`,
+        );
+      });
+      const warning = vi.fn();
+
+      const handled = await handleCloudReplicaEngineControl(
+        {
+          type: "engine.cloudReplicaDeviceRegistered",
+          accountUserId,
+          deviceId,
+          keyVersion: 1,
+          publicKey: pending.active.publicKey,
+          keyFingerprint: cloudDevicePublicKeyFingerprint(
+            pending.active.publicKey,
+          ),
+        },
+        vi.fn(),
+        {
+          capabilityEnabled: () => true,
+          getSession: vi.fn(),
+          store: () => store,
+          warn: warning,
+        },
+        vi.fn(async () => undefined),
+      );
+
+      expect(handled).toBe(true);
+      expect(warning).toHaveBeenCalledWith(warningCode);
+      expect(JSON.stringify(warning.mock.calls)).not.toContain(
+        pending.active.privateKey,
+      );
+    },
+  );
+
+  it("contains a synchronous registration reseed writer failure", async () => {
+    const accountUserId = randomUUID();
+    const deviceId = randomUUID();
+    const store = memoryStore();
+    const pending = store.ensure(accountUserId);
+    const warning = vi.fn();
+    const writeToEngine = vi.fn();
+
+    await expect(
+      handleCloudReplicaEngineControl(
+        {
+          type: "engine.cloudReplicaDeviceRegistered",
+          accountUserId,
+          deviceId,
+          keyVersion: 1,
+          publicKey: pending.active.publicKey,
+          keyFingerprint: cloudDevicePublicKeyFingerprint(
+            pending.active.publicKey,
+          ),
+        },
+        writeToEngine,
+        {
+          capabilityEnabled: () => true,
+          getSession: vi.fn(),
+          store: () => store,
+          warn: warning,
+        },
+        () => {
+          throw new Error(`do not log ${pending.active.privateKey}`);
+        },
+      ),
+    ).resolves.toBe(true);
+
+    expect(writeToEngine).not.toHaveBeenCalled();
+    expect(warning).toHaveBeenCalledWith("device_registration_reseed_failed");
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(
+      pending.active.privateKey,
+    );
   });
 });

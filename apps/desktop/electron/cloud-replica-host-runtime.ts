@@ -14,7 +14,10 @@ import {
   type CloudReplicaHostSession,
   type CloudReplicaProofResponse,
 } from "../src/engine/cloud-replica-host-control";
-import { CloudReplicaDeviceSecretStore } from "./cloud-replica-device-store";
+import {
+  CloudReplicaDeviceSecretStore,
+  CloudReplicaDeviceStoreError,
+} from "./cloud-replica-device-store";
 import {
   getValidSessionForMain,
   type MainAuthSession,
@@ -93,7 +96,17 @@ export type CloudReplicaEngineControlDependencies = {
   capabilityEnabled: () => boolean;
   store: () => CloudReplicaDeviceSecretStore;
   getSession: () => Promise<MainAuthSession | null>;
+  warn?: (reason: CloudReplicaHostWarningReason) => void;
 };
+
+export type CloudReplicaHostWarningReason =
+  | "device_registration_fingerprint_mismatch"
+  | "device_registration_secret_unavailable"
+  | "device_registration_secret_corrupt"
+  | "device_registration_concurrent_update"
+  | "device_registration_identity_mismatch"
+  | "device_registration_store_failed"
+  | "device_registration_reseed_failed";
 
 const defaultEngineControlDependencies: CloudReplicaEngineControlDependencies =
   {
@@ -101,6 +114,35 @@ const defaultEngineControlDependencies: CloudReplicaEngineControlDependencies =
     store,
     getSession: getValidSessionForMain,
   };
+
+function hostWarning(
+  dependencies: CloudReplicaEngineControlDependencies,
+  reason: CloudReplicaHostWarningReason,
+): void {
+  if (dependencies.warn) {
+    dependencies.warn(reason);
+    return;
+  }
+  console.warn(`[cloud-replica] host operation failed (${reason})`);
+}
+
+function deviceRegistrationStoreReason(
+  error: unknown,
+): CloudReplicaHostWarningReason {
+  if (!(error instanceof CloudReplicaDeviceStoreError)) {
+    return "device_registration_store_failed";
+  }
+  switch (error.code) {
+    case "secret_unavailable":
+      return "device_registration_secret_unavailable";
+    case "secret_corrupt":
+      return "device_registration_secret_corrupt";
+    case "concurrent_update":
+      return "device_registration_concurrent_update";
+    case "identity_mismatch":
+      return "device_registration_identity_mismatch";
+  }
+}
 
 function workosAccountSession(
   session: MainAuthSession | null,
@@ -301,6 +343,7 @@ export async function handleCloudReplicaEngineControl(
   value: unknown,
   writeToEngine: (line: string) => void,
   dependencies: CloudReplicaEngineControlDependencies = defaultEngineControlDependencies,
+  reseedSession?: () => Promise<void> | void,
 ): Promise<boolean> {
   const proofRequest = parseCloudReplicaProofRequest(value);
   if (!dependencies.capabilityEnabled()) {
@@ -379,25 +422,28 @@ export async function handleCloudReplicaEngineControl(
       publicKeyFingerprint(registration.publicKey) !==
       registration.keyFingerprint
     ) {
+      hostWarning(dependencies, "device_registration_fingerprint_mismatch");
       return true;
     }
     dependencies.store().bindRegistration(registration);
-    // Re-seed immediately with the now-bound safeStorage identity. The engine
-    // remains unable to request signatures until it receives this message.
-    void cloudReplicaSessionControlLine(dependencies)
-      .then(writeToEngine)
-      .catch(() => {
-        writeToEngine(
-          cloudReplicaHostControlLine({
-            type: "host.cloudReplicaSession",
-            session: null,
-          }),
-        );
-      });
-  } catch {
+  } catch (error) {
     // A CAS/identity mismatch must not be repaired by silently creating a new
     // key. The next explicit auth/session seed will retry deterministic
     // enrollment or surface the protected credential error.
+    hostWarning(dependencies, deviceRegistrationStoreReason(error));
+    return true;
+  }
+  try {
+    // Production routes registration through the sidecar's shared latest-wins
+    // writer. The fallback keeps the helper self-contained for non-sidecar
+    // callers while still containing synchronous pipe failures.
+    if (reseedSession) {
+      await reseedSession();
+    } else {
+      writeToEngine(await cloudReplicaSessionControlLine(dependencies));
+    }
+  } catch {
+    hostWarning(dependencies, "device_registration_reseed_failed");
   }
   return true;
 }

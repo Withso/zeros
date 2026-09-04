@@ -14,7 +14,11 @@ function memorySecrets() {
   const dependencies: CloudReplicaSecretStoreDependencies = {
     read: (account) => values.get(account) ?? null,
     has: (account) => values.has(account),
-    write: (account, value) => void values.set(account, value),
+    create: (account, value) => {
+      if (values.has(account)) return false;
+      values.set(account, value);
+      return true;
+    },
     replace: (account, expected, next) => {
       if (values.get(account) !== expected) return false;
       if (next === null) values.delete(account);
@@ -65,7 +69,7 @@ describe("main-owned cloud replica device secret", () => {
     const dependencies: CloudReplicaSecretStoreDependencies = {
       read: () => null,
       has: (candidate) => candidate === account,
-      write: () => {
+      create: () => {
         throw new Error("must not overwrite");
       },
       replace: () => false,
@@ -86,8 +90,9 @@ describe("main-owned cloud replica device secret", () => {
         throw new Error("secrets.json is unreadable");
       },
       has: () => false,
-      write: () => {
+      create: () => {
         wrote = true;
+        return true;
       },
       replace: () => false,
     };
@@ -99,6 +104,64 @@ describe("main-owned cloud replica device secret", () => {
       }),
     );
     expect(wrote).toBe(false);
+  });
+
+  it("returns the envelope created by the winner of a concurrent ensure", () => {
+    const accountUserId = randomUUID();
+    const winner = memorySecrets();
+    const winnerStore = new CloudReplicaDeviceSecretStore(winner.dependencies);
+    const winnerEnvelope = winnerStore.ensure(accountUserId);
+    const account = cloudReplicaDeviceSecretAccount(accountUserId);
+    const values = new Map<string, string>();
+    const dependencies: CloudReplicaSecretStoreDependencies = {
+      read: (candidate) => values.get(candidate) ?? null,
+      has: (candidate) => values.has(candidate),
+      create: (candidate) => {
+        values.set(candidate, winner.values.get(account)!);
+        return false;
+      },
+      replace: () => false,
+    };
+
+    const result = new CloudReplicaDeviceSecretStore(dependencies).ensure(
+      accountUserId,
+    );
+
+    expect(result).toEqual(winnerEnvelope);
+  });
+
+  it("fails closed when a concurrent ensure winner vanishes before re-read", () => {
+    const dependencies: CloudReplicaSecretStoreDependencies = {
+      read: () => null,
+      has: () => false,
+      create: () => false,
+      replace: () => false,
+    };
+
+    expect(() =>
+      new CloudReplicaDeviceSecretStore(dependencies).ensure(randomUUID()),
+    ).toThrowError(
+      expect.objectContaining<Partial<CloudReplicaDeviceStoreError>>({
+        code: "concurrent_update",
+      }),
+    );
+  });
+
+  it("fails closed when a concurrent ensure winner is corrupt", () => {
+    const dependencies: CloudReplicaSecretStoreDependencies = {
+      read: () => "not-json",
+      has: () => true,
+      create: () => false,
+      replace: () => false,
+    };
+
+    expect(() =>
+      new CloudReplicaDeviceSecretStore(dependencies).ensure(randomUUID()),
+    ).toThrowError(
+      expect.objectContaining<Partial<CloudReplicaDeviceStoreError>>({
+        code: "secret_corrupt",
+      }),
+    );
   });
 
   it("rejects a server registration for a different public key", () => {

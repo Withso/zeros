@@ -525,7 +525,7 @@ describe("CloudWorkspaceSshRuntime", () => {
     expect(await readdir(runtimeRoot)).toEqual([]);
   });
 
-  it("fails before spawning on an injected SSH host or privileged port", async () => {
+  it("fails before spawning on a privileged port or injected SSH host", async () => {
     const { runtimeRoot, knownHostsPath } = await fixture();
     const spawnProcess = vi.fn() as unknown as SpawnCloudProcess;
     const runtime = new CloudWorkspaceSshRuntime({
@@ -541,6 +541,18 @@ describe("CloudWorkspaceSshRuntime", () => {
         localPort: 54173,
         remoteHost: "127.0.0.1",
         remotePort: 22,
+        sshUsername: SSH_CREDENTIAL,
+        sshHost: "ssh.app.daytona.io",
+        expiresAt: EXPIRES_AT,
+      }),
+    ).rejects.toThrow(/invalid/i);
+
+    await expect(
+      runtime.startTunnel({
+        localHost: "127.0.0.1",
+        localPort: 54173,
+        remoteHost: "127.0.0.1",
+        remotePort: 4173,
         sshUsername: SSH_CREDENTIAL,
         sshHost: "ssh.app.daytona.io\nProxyCommand evil",
         expiresAt: EXPIRES_AT,
