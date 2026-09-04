@@ -77,6 +77,8 @@
   font-size: min(60px, 1em);
   line-height: 1;
   margin: 0 2px 0 0;
+  overflow: hidden;
+  transform: translateY(0.16em);
 }
 
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol:last-child {
