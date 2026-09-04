@@ -41,6 +41,31 @@ function turnEntityId(chatId: string, turnId: string): string {
     .digest("hex")}`;
 }
 
+function messageEntityId(chatId: string, messageId: string): string {
+  return `m:${createHash("sha256")
+    .update(`${chatId}\0${messageId}`, "utf8")
+    .digest("hex")}`;
+}
+
+function remoteMessage(chatId: string, messageId: string): RemoteEntry {
+  return {
+    entityKind: "message",
+    entityId: messageEntityId(chatId, messageId),
+    revision: 1,
+    schemaVersion: 1,
+    document: {
+      version: 1,
+      chatId,
+      msgId: messageId,
+      ord: 1,
+      kind: "text",
+      payload: JSON.stringify({ role: "assistant", text: "remote message" }),
+      createdAt: NOW,
+    },
+    tombstonedAt: null,
+  };
+}
+
 function remoteConversation(status: unknown): RemoteEntry[] {
   return [
     {
@@ -305,6 +330,101 @@ describe("cloud durable record runtime", () => {
     expect(listChats()).toMatchObject([
       { id: "chat-1", folder: outside, title: "Keep original" },
     ]);
+  });
+
+  it("never admits an orphan remote child through an out-of-repository chat", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-record-child-collision-"),
+    );
+    const outside = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-record-child-collision-outside-"),
+    );
+    roots.push(root, outside);
+    setZerosDbPathForTesting(":memory:");
+    openZerosDb();
+    upsertChat(localChat("owned-chat", root, "Owned conversation"));
+    upsertChat(localChat("outside-chat", outside, "Keep original"));
+    const server = createRecordServer([
+      remoteMessage("outside-chat", "remote-message"),
+    ]);
+
+    await expect(
+      new CloudWorkspaceRecordRuntime(root, {
+        fetch: server.requestFetch,
+      }).synchronize(authority),
+    ).rejects.toThrow("cloud message document is invalid");
+    expect(listChatMessagesSince(0)).not.toContainEqual(
+      expect.objectContaining({
+        chatId: "outside-chat",
+        msgId: "remote-message",
+      }),
+    );
+    expect(listChats()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "outside-chat",
+          folder: outside,
+          title: "Keep original",
+        }),
+      ]),
+    );
+  });
+
+  it("retains missing-mode imports whose parent is locally owned", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-record-owned-child-"),
+    );
+    roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    openZerosDb();
+    upsertChat(localChat("owned-chat", root, "Owned conversation"));
+    const server = createRecordServer([
+      remoteMessage("owned-chat", "remote-message"),
+    ]);
+
+    await new CloudWorkspaceRecordRuntime(root, {
+      fetch: server.requestFetch,
+    }).synchronize(authority);
+
+    expect(listChatMessagesSince(0)).toContainEqual(
+      expect.objectContaining({
+        chatId: "owned-chat",
+        msgId: "remote-message",
+      }),
+    );
+  });
+
+  it("rejects a live remote child whose parent chat is tombstoned", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-record-tombstoned-parent-"),
+    );
+    roots.push(root);
+    setZerosDbPathForTesting(":memory:");
+    openZerosDb();
+    upsertChat(localChat("owned-chat", root, "Locally edited conversation"));
+    const message = remoteMessage("owned-chat", "remote-message");
+    message.revision = 2;
+    const server = createRecordServer([
+      {
+        entityKind: "chat",
+        entityId: "owned-chat",
+        revision: 1,
+        schemaVersion: 1,
+        document: null,
+        tombstonedAt: "2026-09-04T11:59:00.000Z",
+      },
+      message,
+    ]);
+
+    await expect(
+      new CloudWorkspaceRecordRuntime(root, {
+        fetch: server.requestFetch,
+      }).synchronize(authority),
+    ).rejects.toThrow("cloud message document is invalid");
+    expect(listChats()).toMatchObject([
+      { id: "owned-chat", title: "Locally edited conversation" },
+    ]);
+    expect(listChatMessagesSince(0)).toEqual([]);
   });
 
   it("writes through chats and restores them before a fresh engine becomes ready", async () => {

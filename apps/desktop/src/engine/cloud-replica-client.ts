@@ -363,6 +363,13 @@ export class CloudReplicaClientError extends Error {
   }
 }
 
+class CloudReplicaResponseValidationError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options);
+    this.name = "CloudReplicaResponseValidationError";
+  }
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -485,37 +492,86 @@ async function boundedBytes(
       Number(rawLength) > maximum
     ) {
       await response.body?.cancel().catch(() => undefined);
-      throw new Error("Cloud replica response is too large");
+      throw new CloudReplicaResponseValidationError(
+        "Cloud replica response is too large",
+      );
     }
   }
-  if (!response.body) throw new Error("Cloud replica response is missing");
+  if (!response.body) {
+    throw new CloudReplicaResponseValidationError(
+      "Cloud replica response is missing",
+    );
+  }
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
-  while (true) {
-    const chunk = await reader.read();
-    if (chunk.done) break;
-    total += chunk.value.byteLength;
-    if (total > maximum) {
-      await reader.cancel().catch(() => undefined);
-      throw new Error("Cloud replica response is too large");
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      total += chunk.value.byteLength;
+      if (total > maximum) {
+        chunk.value.fill(0);
+        await reader.cancel().catch(() => undefined);
+        throw new CloudReplicaResponseValidationError(
+          "Cloud replica response is too large",
+        );
+      }
+      chunks.push(chunk.value);
     }
-    chunks.push(chunk.value);
+    const result = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) {
+      result.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+    return result;
+  } finally {
+    for (const chunk of chunks) chunk.fill(0);
+    reader.releaseLock();
   }
-  const result = new Uint8Array(total);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return result;
 }
 
 async function boundedJson(response: Response): Promise<unknown> {
+  if (
+    response.headers
+      .get("content-type")
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase() !== "application/json"
+  ) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new CloudReplicaResponseValidationError(
+      "Cloud replica response content type is invalid",
+    );
+  }
   const bytes = await boundedBytes(response, MAX_JSON_BYTES);
-  return JSON.parse(
-    new TextDecoder("utf-8", { fatal: true }).decode(bytes),
-  ) as unknown;
+  try {
+    return JSON.parse(
+      new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+    ) as unknown;
+  } catch (error) {
+    throw new CloudReplicaResponseValidationError(
+      "Cloud replica response JSON is invalid",
+      { cause: error },
+    );
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+function responseBodyError(
+  response: Response,
+  error: unknown,
+  messages: { invalid: string; unavailable: string },
+): CloudReplicaClientError {
+  const invalid = error instanceof CloudReplicaResponseValidationError;
+  return new CloudReplicaClientError(
+    invalid ? response.status : 0,
+    invalid ? "invalid_response" : "network_error",
+    invalid ? messages.invalid : messages.unavailable,
+    { cause: error },
+  );
 }
 
 const SAFE_ERRORS: Readonly<Record<string, string>> = {
@@ -1087,12 +1143,10 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
     try {
       body = await boundedJson(response);
     } catch (error) {
-      throw new CloudReplicaClientError(
-        response.status,
-        "invalid_response",
-        "Cloud replica service returned an invalid response",
-        { cause: error },
-      );
+      throw responseBodyError(response, error, {
+        invalid: "Cloud replica service returned an invalid response",
+        unavailable: "Cloud workspace service is unavailable",
+      });
     } finally {
       await response.body?.cancel().catch(() => undefined);
       done();
@@ -1676,7 +1730,13 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
         let body: unknown = null;
         try {
           body = await boundedJson(response);
-        } catch {
+        } catch (error) {
+          if (!(error instanceof CloudReplicaResponseValidationError)) {
+            throw responseBodyError(response, error, {
+              invalid: "Cloud replica service returned an invalid response",
+              unavailable: "Cloud workspace service is unavailable",
+            });
+          }
           // Only the mapped error below crosses the engine boundary.
         }
         throw responseError(response, body);
@@ -1692,10 +1752,18 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
           "Export blob length is invalid",
         );
       }
-      const bytes = await boundedBytes(
-        response,
-        input.expectedSizeBytes ?? MAX_BLOB_BYTES,
-      );
+      let bytes: Uint8Array;
+      try {
+        bytes = await boundedBytes(
+          response,
+          input.expectedSizeBytes ?? MAX_BLOB_BYTES,
+        );
+      } catch (error) {
+        throw responseBodyError(response, error, {
+          invalid: "Cloud replica service returned an invalid response",
+          unavailable: "Cloud workspace service is unavailable",
+        });
+      }
       if (
         input.expectedSizeBytes !== undefined &&
         (bytes.byteLength !== input.expectedSizeBytes ||
@@ -2060,7 +2128,13 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
         let body: unknown = null;
         try {
           body = await boundedJson(response);
-        } catch {
+        } catch (error) {
+          if (!(error instanceof CloudReplicaResponseValidationError)) {
+            throw responseBodyError(response, error, {
+              invalid: "Cloud replica service returned an invalid response",
+              unavailable: "Cloud workspace service is unavailable",
+            });
+          }
           // Safe mapped error below; never reflect the provider body.
         }
         throw responseError(response, body);
@@ -2076,10 +2150,18 @@ export class HttpCloudReplicaApi implements CloudWorkspaceDesktopApi {
           "Blob length is invalid",
         );
       }
-      const bytes = await boundedBytes(
-        response,
-        input.expectedSizeBytes ?? MAX_BLOB_BYTES,
-      );
+      let bytes: Uint8Array;
+      try {
+        bytes = await boundedBytes(
+          response,
+          input.expectedSizeBytes ?? MAX_BLOB_BYTES,
+        );
+      } catch (error) {
+        throw responseBodyError(response, error, {
+          invalid: "Cloud replica service returned an invalid response",
+          unavailable: "Cloud workspace service is unavailable",
+        });
+      }
       if (
         input.expectedSizeBytes !== undefined &&
         bytes.byteLength !== input.expectedSizeBytes
@@ -2201,12 +2283,10 @@ export class HttpCloudReplicaEnrollmentClient {
     try {
       value = await boundedJson(response);
     } catch (error) {
-      throw new CloudReplicaClientError(
-        response.status,
-        "invalid_response",
-        "Cloud device service returned an invalid response",
-        { cause: error },
-      );
+      throw responseBodyError(response, error, {
+        invalid: "Cloud device service returned an invalid response",
+        unavailable: "Cloud device registration is unavailable",
+      });
     } finally {
       clearTimeout(timeout);
     }

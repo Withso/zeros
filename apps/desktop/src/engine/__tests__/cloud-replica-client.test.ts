@@ -7,6 +7,7 @@ import {
   HttpCloudReplicaApi,
   HttpCloudReplicaEnrollmentClient,
 } from "../cloud-replica-client";
+import { isPermanentCloudWorkspaceForkFailure } from "../cloud-workspace-fork-runtime";
 import {
   cloudReplicaDeviceProofMessage,
   cloudReplicaDeviceSecretAccount,
@@ -160,7 +161,9 @@ describe("cloud replica bounded HTTP client", () => {
         await vi.advanceTimersByTimeAsync(timeoutMs);
 
         expect(requestSignal?.aborted).toBe(true);
-        await expect(settled).resolves.toBeInstanceOf(Error);
+        const error = await settled;
+        expect(error).toMatchObject({ code: "network_error" });
+        expect(isPermanentCloudWorkspaceForkFailure(error)).toBe(false);
       } finally {
         if (!requestSignal?.aborted) {
           bodyController?.error(new Error("test cleanup"));
@@ -170,6 +173,88 @@ describe("cloud replica bounded HTTP client", () => {
       }
     },
   );
+
+  it("classifies a response-stream I/O failure as retryable", async () => {
+    const credential = registeredCredential();
+    const client = new HttpCloudReplicaApi({
+      baseUrl: "https://api.zeros.build",
+      getAccessToken: async () => "workos-access-token",
+      signer: new CloudReplicaDeviceSigner(credential),
+      fetch: vi.fn<typeof fetch>(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.error(new Error("socket reset"));
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          ),
+      ),
+    });
+
+    const error = await client
+      .readEvents({
+        organizationId: randomUUID(),
+        workspaceId: randomUUID(),
+        replicaId: randomUUID(),
+        grantToken: `zwr_${Buffer.alloc(32, 7).toString("base64url")}`,
+        afterRevision: 0,
+        limit: 100,
+      })
+      .then(
+        () => null,
+        (failure: unknown) => failure,
+      );
+
+    expect(error).toMatchObject({ code: "network_error" });
+    expect(isPermanentCloudWorkspaceForkFailure(error)).toBe(false);
+  });
+
+  it.each([
+    [
+      "an invalid content type",
+      new Response("{}", { headers: { "content-type": "text/plain" } }),
+    ],
+    [
+      "an oversized declared body",
+      new Response("{}", {
+        headers: {
+          "content-type": "application/json",
+          "content-length": String(8 * 1024 * 1024 + 1),
+        },
+      }),
+    ],
+    [
+      "invalid UTF-8",
+      new Response(new Uint8Array([0xff]), {
+        headers: { "content-type": "application/json" },
+      }),
+    ],
+    [
+      "malformed JSON",
+      new Response("{", { headers: { "content-type": "application/json" } }),
+    ],
+  ])("classifies %s as an invalid response", async (_label, response) => {
+    const credential = registeredCredential();
+    const client = new HttpCloudReplicaApi({
+      baseUrl: "https://api.zeros.build",
+      getAccessToken: async () => "workos-access-token",
+      signer: new CloudReplicaDeviceSigner(credential),
+      fetch: vi.fn<typeof fetch>(async () => response),
+    });
+
+    await expect(
+      client.readEvents({
+        organizationId: randomUUID(),
+        workspaceId: randomUUID(),
+        replicaId: randomUUID(),
+        grantToken: `zwr_${Buffer.alloc(32, 8).toString("base64url")}`,
+        afterRevision: 0,
+        limit: 100,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+  });
 
   it.each([
     { entryType: "symlink", mode: 33188, sizeBytes: 1 },

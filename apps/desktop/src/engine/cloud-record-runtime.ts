@@ -464,6 +464,13 @@ export class CloudWorkspaceRecordRuntime {
         .filter((entry) => entry.entityKind === "chat")
         .map((entry) => entry.entityId),
     );
+    const remoteTombstonedChatIds = new Set(
+      [...remote.values()]
+        .filter(
+          (entry) => entry.entityKind === "chat" && entry.tombstonedAt !== null,
+        )
+        .map((entry) => entry.entityId),
+    );
     for (const chat of localChats) {
       if (remoteChatIds.has(chat.id) && !projectedChatIds.has(chat.id)) {
         throw new Error("cloud chat identity belongs to another repository");
@@ -499,7 +506,11 @@ export class CloudWorkspaceRecordRuntime {
         return chat;
       });
     const availableChats = new Set(
-      mode === "replace" ? [] : localChats.map((chat) => chat.id),
+      mode === "replace"
+        ? []
+        : [...projectedChatIds].filter(
+            (chatId) => !remoteTombstonedChatIds.has(chatId),
+          ),
     );
     for (const chat of chatDocuments) availableChats.add(chat.id);
     const messages = new Map<string, PersistedMessageRow[]>();
