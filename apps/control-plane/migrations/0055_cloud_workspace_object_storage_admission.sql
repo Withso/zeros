@@ -15,7 +15,9 @@ CREATE TABLE cloud_workspace_object_storage_limits (
                               max_workspace_bytes BETWEEN 1 AND 9007199254740991
                             ),
   updated_by                uuid REFERENCES users(id) ON DELETE SET NULL,
-  updated_at                timestamptz NOT NULL DEFAULT now()
+  updated_at                timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT cloud_workspace_object_storage_limits_coherent_check
+    CHECK (max_workspace_bytes <= max_organization_bytes)
 );
 
 CREATE TABLE cloud_workspace_object_storage_limit_changes (
@@ -52,8 +54,11 @@ CREATE TABLE cloud_workspace_object_storage_limit_changes (
     OR (
       previous_organization_bytes BETWEEN 1 AND 9007199254740991
       AND previous_workspace_bytes BETWEEN 1 AND 9007199254740991
+      AND previous_workspace_bytes <= previous_organization_bytes
     )
-  )
+  ),
+  CONSTRAINT cloud_workspace_object_storage_limit_changes_coherent_check
+    CHECK (next_workspace_bytes <= next_organization_bytes)
 );
 CREATE INDEX cloud_workspace_object_storage_limit_changes_org_idx
   ON cloud_workspace_object_storage_limit_changes

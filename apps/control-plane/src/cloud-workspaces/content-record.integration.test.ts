@@ -123,7 +123,7 @@ d("cloud workspace content durability", () => {
   it("serializes cumulative organization admission without double-charging retries", async () => {
     await pool.query(
       `UPDATE cloud_workspace_object_storage_limits
-       SET max_organization_bytes = 9, max_workspace_bytes = 64,
+       SET max_organization_bytes = 9, max_workspace_bytes = 9,
            updated_by = $2, updated_at = now()
        WHERE org_id = $1`,
       [fixture.organizationId, fixture.userId],

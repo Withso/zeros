@@ -355,6 +355,7 @@ d("migration ladder", () => {
       "0055_cloud_workspace_object_storage_admission.sql",
       "0056_cloud_workspace_secret_verifiers.sql",
       "0057_cloud_workspace_storage_worker_indexes.sql",
+      "0058_cloud_workspace_storage_invariants.sql",
     ]);
     await expect(
       pool.query(

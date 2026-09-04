@@ -59,4 +59,13 @@ describe("cloud-workspace object-storage owner command", () => {
       }),
     ).toThrow(/production confirmation/i);
   });
+
+  it("rejects a workspace ceiling above its Organization ceiling", () => {
+    expect(() =>
+      request({
+        maxOrganizationBytes: "67108864",
+        maxWorkspaceBytes: "67108865",
+      }),
+    ).toThrow(/workspace.*must not exceed.*organization/i);
+  });
 });

@@ -199,6 +199,11 @@ export function validateCloudWorkspaceObjectStorageRequest(
       "CONTROL_PLANE_CLOUD_OBJECT_STORAGE_MAX_WORKSPACE_BYTES",
     ),
   };
+  if (next.maxWorkspaceBytes > next.maxOrganizationBytes) {
+    throw new CloudWorkspaceObjectStorageManagementError(
+      "Workspace object-storage limit must not exceed the Organization object-storage limit",
+    );
+  }
   return {
     databaseUrl: input.databaseUrl,
     channel: channel as ValidatedCloudWorkspaceObjectStorageRequest["channel"],

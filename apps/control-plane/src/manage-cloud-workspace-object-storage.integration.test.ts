@@ -134,7 +134,7 @@ d("owner-managed cloud-workspace object storage", () => {
         validateCloudWorkspaceObjectStorageRequest({
           ...base,
           maxOrganizationBytes: "127",
-          maxWorkspaceBytes: "128",
+          maxWorkspaceBytes: "127",
         }),
       ),
     ).rejects.toThrow(/below current durable usage/i);

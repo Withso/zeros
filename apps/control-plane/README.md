@@ -440,7 +440,8 @@ Use the database-owner command from a controlled shell. Set `DATABASE_URL` and:
   `platform_owner` UUID;
 - `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_MAX_ORGANIZATION_BYTES` and
   `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_MAX_WORKSPACE_BYTES` — positive exact
-  byte counts, not MiB values; and
+  byte counts, not MiB values; the workspace ceiling must not exceed the
+  Organization ceiling; and
 - `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_REASON` — a 16–512 character audit
   reason.
 

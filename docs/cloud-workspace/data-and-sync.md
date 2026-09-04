@@ -247,18 +247,21 @@ A retry or duplicate upload of the same tenant/workspace/hash refreshes the
 existing reservation instead of charging again. A successful immutable
 reference promotes the upload reservation to a non-expiring referenced row;
 the last reference deletion releases it. Interrupted uploads receive a
-24-hour recovery lease that a retry refreshes. Lease expiry makes an abandoned
-blob eligible for garbage collection; it does not independently free workspace
-capacity while bytes still exist. Maintenance repairs stale reference
-reservations, reconciles reference counts, applies the existing
-age/retention/legal-hold garbage-collection rules, and releases the upload
-reservation only when collection succeeds.
+24-hour recovery lease that a retry refreshes. If another workspace still has
+an immutable reference to an available deduplicated blob, maintenance can
+expire only the abandoned workspace's logical reservation; the shared physical
+blob remains charged to the Organization. A unique abandoned blob keeps both
+its logical reservation and Organization physical charge until physical
+collection succeeds. Maintenance also repairs stale reference reservations,
+reconciles reference counts, and applies the existing
+age/retention/legal-hold garbage-collection rules.
 
 Key rotation reserves one additional physical object before writing the target
 ciphertext. A failed or crashed attempt keeps that reservation for a safe retry;
 success deletes the source and releases the duplicate-byte allowance. Missing
 Organization limits fail closed, and limits are never inferred from sandbox
-disk allocation or the object-store provider's volume size.
+disk allocation or the object-store provider's volume size. The per-workspace
+logical ceiling cannot exceed the Organization physical ceiling.
 
 ## Phase-5 local replica contract
 

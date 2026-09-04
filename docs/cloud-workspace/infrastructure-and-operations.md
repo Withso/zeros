@@ -128,8 +128,9 @@ Provision or change them with
 read-only-plan/exact-approval pattern and active platform-owner attribution.
 The Organization byte limit covers physical tenant blobs plus copy-on-write
 rotation reservations; the workspace byte limit covers logical unique blob
-reservations. The command rejects a limit below either current measure and
-writes append-only evidence. It does not change provider sandbox
+reservations and cannot exceed the Organization byte limit. The command
+rejects an incoherent pair or a limit below either current measure and writes
+append-only evidence. It does not change provider sandbox
 `storage_mib`, resize the Railway volume, or enable either cloud feature gate.
 
 The physical object-store quota remains an infrastructure backstop. Keep it
@@ -170,6 +171,8 @@ rotation writes a keyed verifier. Keep version 1 in the deployment keyring while
 those ciphertexts or backups remain readable. Migration `0057` adds only the
 blob-deletion foreign-key and previously uncovered `SKIP LOCKED` claim indexes
 identified by the catalog/query audit; it changes no serialized state.
+Migration `0058` forward-applies the object-storage ceiling relationship for
+databases that recorded an earlier feature-branch draft of `0055`.
 
 `0025_cloud_workspace_engine_authority.sql` is deliberately marked
 `zeros:requires-controlled-downtime`. It takes an `EXCLUSIVE` lock on

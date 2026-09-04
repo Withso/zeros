@@ -517,7 +517,11 @@ export class DatabaseCloudWorkspaceBlobService {
                   encryption_key_version, state
            FROM workspace_blobs
            WHERE org_id = $1 AND plaintext_sha256 = $2
-           FOR UPDATE`,
+           -- Blob lifecycle and key-version changes need a write-strength row
+           -- lock, but neither changes this row's FK identity. NO KEY UPDATE
+           -- remains compatible with a reference INSERT's FK KEY SHARE while
+           -- still fencing GC and concurrent upload/key-version mutation.
+           FOR NO KEY UPDATE`,
           [input.organizationId, plaintextSha256],
         );
       let row = (await load()).rows[0];
@@ -1320,11 +1324,33 @@ export class DatabaseCloudWorkspaceBlobService {
         `DELETE FROM workspace_blob_storage_reservations reservation
          WHERE (
              reservation.state = 'uploading'
-             AND EXISTS (
-               SELECT 1 FROM workspace_blobs blob
-               WHERE blob.id = reservation.blob_id
-                 AND blob.org_id = reservation.org_id
-                 AND blob.state = 'deleted'
+             AND (
+               EXISTS (
+                 SELECT 1 FROM workspace_blobs blob
+                 WHERE blob.id = reservation.blob_id
+                   AND blob.org_id = reservation.org_id
+                   AND blob.state = 'deleted'
+               )
+               OR (
+                 reservation.expires_at <= now()
+                 AND EXISTS (
+                   SELECT 1
+                   FROM workspace_blobs blob
+                   JOIN workspace_blob_references physical_reference
+                     ON physical_reference.blob_id = blob.id
+                    AND physical_reference.org_id = blob.org_id
+                   WHERE blob.id = reservation.blob_id
+                     AND blob.org_id = reservation.org_id
+                     AND blob.state = 'available'
+                 )
+                 AND NOT EXISTS (
+                   SELECT 1 FROM workspace_blob_references logical_reference
+                   WHERE logical_reference.workspace_id =
+                           reservation.workspace_id
+                     AND logical_reference.org_id = reservation.org_id
+                     AND logical_reference.blob_id = reservation.blob_id
+                 )
+               )
              )
            ) OR (
              reservation.state = 'referenced'
