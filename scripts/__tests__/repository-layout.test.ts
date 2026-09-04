@@ -461,8 +461,8 @@ describe("repository layout contracts", () => {
       // so its platform package must carry terms — not just the JS wrapper.
       // npm publishes it as an alias, hence the platform-suffixed version.
       "@openai/codex@0.149.0-darwin-arm64",
-      "@tiptap/extension-bubble-menu@3.26.0",
-      "@tiptap/extension-floating-menu@3.26.0",
+      "@tiptap/extension-bubble-menu@3.31.2",
+      "@tiptap/extension-floating-menu@3.31.2",
       "@types/trusted-types@2.0.7",
       "@workos-inc/node@10.12.0",
     ]) {
