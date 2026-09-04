@@ -185,6 +185,9 @@ describe("buildPtyEnv sheds the dev-instance identity", () => {
       VITE_CONTROL_PLANE_URL: "https://api.zeros.build",
       ZEROS_AUTH_PROVIDER: "workos",
     };
+    const previousAuth = Object.fromEntries(
+      Object.keys(parentAuth).map((key) => [key, process.env[key]]),
+    );
     Object.assign(process.env, parentAuth);
     try {
       for (const env of [buildPtyEnv(), buildPtyEnv({ scrub: true })]) {
@@ -196,7 +199,10 @@ describe("buildPtyEnv sheds the dev-instance identity", () => {
         }
       }
     } finally {
-      for (const key of Object.keys(parentAuth)) delete process.env[key];
+      for (const [key, value] of Object.entries(previousAuth)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
     }
   });
 
