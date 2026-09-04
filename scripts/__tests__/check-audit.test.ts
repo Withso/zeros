@@ -36,6 +36,7 @@ describe("root production audit retries", () => {
     for (const output of [
       "found 1 high severity vulnerability",
       "GHSA-vrm6-8vpv-qv8q",
+      "HTTP 503 retry metadata\nfound 1 high severity vulnerability",
       "HTTP 400 Bad Request",
       "audit command timed out after 60000ms",
       "network unavailable",

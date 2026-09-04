@@ -12,9 +12,14 @@ export const AUDIT_RETRY_DELAY_MS = 5_000;
 
 const TRANSPORT_FAILURE_RX =
   /\b(?:ERR_SOCKET_TIMEOUT|ECONNRESET|ETIMEDOUT|EAI_AGAIN)\b|\bHTTP\s+(?:408|429|5\d{2})\b/i;
+const AUDIT_FINDING_RX =
+  /\bGHSA-[a-z0-9-]+\b|\bfound\s+[1-9]\d*\s+(?:(?:low|moderate|high|critical)\s+severity\s+)?vulnerabilit(?:y|ies)\b|\b[1-9]\d*\s+vulnerabilit(?:y|ies)\s+found\b/i;
 
 export function isRetryableAuditTransportFailure(output) {
-  return TRANSPORT_FAILURE_RX.test(output);
+  // A registry/proxy status can appear in advisory details or surrounding CI
+  // output. Findings always win: retries are only for a transport-only failure
+  // and must never turn a real audit failure into a later success.
+  return !AUDIT_FINDING_RX.test(output) && TRANSPORT_FAILURE_RX.test(output);
 }
 
 function stopProcess(child) {
