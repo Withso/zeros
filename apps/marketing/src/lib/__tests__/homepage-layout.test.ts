@@ -105,7 +105,11 @@ describe("marketing homepage layout", () => {
     expect(css).toMatch(
       /\.hero-role-word\.scramble-developers\.is-scrambling \{\n  display: flex;/,
     );
-    expect(css).not.toMatch(/\.hero-role-word::before/);
+    expect(css).toMatch(
+      /\.hero-role-word\.scramble-developers\.is-scrambling::before/,
+    );
+    expect(css).toMatch(/text-box-trim: trim-end/);
+    expect(css).not.toMatch(/\.hero-role-word::before \{/);
     expect(css).toMatch(/letter-spacing: inherit/);
     expect(css).toMatch(/font-variant-numeric: normal/);
     expect(css).toMatch(/position: relative/);
@@ -155,7 +159,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-66/);
+    expect(cycle).toMatch(/hero-role\.css\?v=scramble-67/);
     expect(css).toMatch(/is-key/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);

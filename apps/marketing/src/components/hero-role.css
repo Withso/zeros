@@ -52,11 +52,22 @@
 }
 
 /* Designers pass only: one shared ground for A-Z, marks, and keys.
-   Letters use the alphabetic baseline; SVG baseline is the box bottom. */
+   A headline strut locks the flex baseline to `for`; SVG box bottoms
+   and trimmed letter bottoms sit on that line. */
 .hero-role-word.scramble-developers.is-scrambling {
   display: flex;
   flex-wrap: nowrap;
   align-items: baseline;
+}
+
+.hero-role-word.scramble-developers.is-scrambling::before {
+  content: "A";
+  flex: 0 0 auto;
+  width: 0;
+  color: transparent;
+  font: inherit;
+  line-height: inherit;
+  pointer-events: none;
 }
 
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol,
@@ -70,6 +81,8 @@
   font-size: min(60px, 1em);
   margin: 0 2px 0 0;
   vertical-align: baseline;
+  text-box-trim: trim-end;
+  text-box-edge: alphabetic;
 }
 
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol:last-child {
