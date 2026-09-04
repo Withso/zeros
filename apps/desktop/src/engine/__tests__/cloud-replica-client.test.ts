@@ -118,6 +118,180 @@ describe("cloud replica bounded HTTP client", () => {
     ).rejects.toThrow("Cloud replica mutation is invalid");
   });
 
+  it.each([
+    ["desiredState", ["active"]],
+    ["observedState", ["in_sync"]],
+  ] as const)("rejects an array-encoded replica %s", async (field, value) => {
+    const credential = registeredCredential();
+    const ids = {
+      organizationId: randomUUID(),
+      workspaceId: randomUUID(),
+      replicaId: randomUUID(),
+    };
+    const client = new HttpCloudReplicaApi({
+      baseUrl: "https://api.zeros.build",
+      getAccessToken: async () => "workos-access-token",
+      signer: new CloudReplicaDeviceSigner(credential),
+      fetch: vi.fn<typeof fetch>(async () =>
+        responseJson({
+          replica: {
+            id: ids.replicaId,
+            workspaceId: ids.workspaceId,
+            organizationId: ids.organizationId,
+            deviceId: credential.deviceId,
+            mode: "receive_only",
+            desiredState: "active",
+            observedState: "in_sync",
+            workspaceAuthorityEpoch: 1,
+            grantEpoch: 1,
+            checkpointId: null,
+            manifestRevision: 1,
+            eventCursor: 1,
+            ignorePolicySha256: "a".repeat(64),
+            clientManifestSha256: null,
+            lastErrorCode: null,
+            [field]: value,
+          },
+          replayed: false,
+        }),
+      ),
+    });
+
+    await expect(
+      client.recordReceipt({
+        ...ids,
+        grantToken: `zwr_${Buffer.alloc(32, 4).toString("base64url")}`,
+        idempotencyKey: "receipt-array-field-0001",
+        fromRevision: 0,
+        toRevision: 1,
+        manifestSha256: "a".repeat(64),
+        outcome: "applied",
+        errorCode: null,
+      }),
+    ).rejects.toThrow("Cloud replica response is invalid");
+  });
+
+  it("rejects an array-encoded remote device platform", async () => {
+    const credential = registeredCredential();
+    const client = new HttpCloudReplicaApi({
+      baseUrl: "https://api.zeros.build",
+      getAccessToken: async () => "workos-access-token",
+      signer: new CloudReplicaDeviceSigner(credential),
+      fetch: vi.fn<typeof fetch>(async () =>
+        responseJson({
+          device: {
+            id: randomUUID(),
+            label: "Desktop",
+            platform: ["macos"],
+            keyAlgorithm: "ed25519",
+            keyFingerprint: "a".repeat(64),
+            keyVersion: 1,
+            trustState: "active",
+          },
+          replayed: false,
+        }),
+      ),
+    });
+
+    await expect(
+      client.rotateDeviceKey({
+        newPublicKey: "a".repeat(43),
+        idempotencyKey: "device-array-platform-0001",
+      }),
+    ).rejects.toThrow("Cloud device response is invalid");
+  });
+
+  it.each([
+    ["path", ["entry.txt"]],
+    ["operation", ["upsert"]],
+  ] as const)("rejects an array-encoded mutation %s", async (field, value) => {
+    const credential = registeredCredential();
+    const ids = {
+      organizationId: randomUUID(),
+      workspaceId: randomUUID(),
+      replicaId: randomUUID(),
+    };
+    const client = new HttpCloudReplicaApi({
+      baseUrl: "https://api.zeros.build",
+      getAccessToken: async () => "workos-access-token",
+      signer: new CloudReplicaDeviceSigner(credential),
+      fetch: vi.fn<typeof fetch>(async () =>
+        responseJson({
+          currentRevision: 1,
+          minimumRetainedRevision: 0,
+          snapshotRequired: false,
+          fromRevision: 0,
+          toRevision: 1,
+          events: [
+            {
+              revision: 1,
+              sequence: 1,
+              path: "entry.txt",
+              operation: "upsert",
+              entryType: "file",
+              mode: 33188,
+              blobId: randomUUID(),
+              contentSha256: "a".repeat(64),
+              sizeBytes: 1,
+              [field]: value,
+            },
+          ],
+          hasMore: false,
+        }),
+      ),
+    });
+
+    await expect(
+      client.readEvents({
+        ...ids,
+        grantToken: `zwr_${Buffer.alloc(32, 5).toString("base64url")}`,
+        afterRevision: 0,
+        limit: 100,
+      }),
+    ).rejects.toThrow("Cloud replica mutation is invalid");
+  });
+
+  it.each([
+    ["entityKind", ["chat"]],
+    ["operation", ["upsert"]],
+  ] as const)("rejects an array-encoded fork record %s", async (field, value) => {
+    const credential = registeredCredential();
+    const client = new HttpCloudReplicaApi({
+      baseUrl: "https://api.zeros.build",
+      getAccessToken: async () => "workos-access-token",
+      signer: new CloudReplicaDeviceSigner(credential),
+      fetch: vi.fn<typeof fetch>(async () =>
+        responseJson({
+          recordRevision: 1,
+          events: [
+            {
+              revision: 1,
+              entityKind: "chat",
+              entityId: "chat-1",
+              operation: "upsert",
+              schemaVersion: 1,
+              document: {},
+              occurredAt: "2027-01-15T08:00:00.000Z",
+              [field]: value,
+            },
+          ],
+          hasMore: false,
+        }),
+      ),
+    });
+
+    await expect(
+      client.readForkRecords({
+        organizationId: randomUUID(),
+        workspaceId: randomUUID(),
+        forkIntentId: randomUUID(),
+        grantToken: `zwe_${Buffer.alloc(32, 6).toString("base64url")}`,
+        afterRevision: 0,
+        limit: 20,
+      }),
+    ).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("accepts a legal bootstrap page larger than the old 2 MiB ceiling", async () => {
     const credential = registeredCredential();
     const ids = {

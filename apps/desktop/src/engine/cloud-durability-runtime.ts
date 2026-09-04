@@ -546,8 +546,13 @@ export class CloudWorkspaceDurabilityRuntime {
         ) {
           throw new Error("cloud durability projection is invalid");
         }
-        const entryPath = normalizedPath(String(candidate.path));
+        if (typeof candidate.path !== "string") {
+          throw new Error("cloud durability projection is invalid");
+        }
+        const entryPath = normalizedPath(candidate.path);
         if (entries.has(entryPath)) throw new Error("cloud durability projection is invalid");
+        const blobId = candidate.blobId;
+        const contentSha256 = candidate.contentSha256;
         if (candidate.operation === "delete") {
           if (
             candidate.entryType !== null ||
@@ -569,8 +574,10 @@ export class CloudWorkspaceDurabilityRuntime {
           });
         } else if (
           candidate.operation === "upsert" &&
-          UUID_PATTERN.test(String(candidate.blobId ?? "")) &&
-          SHA256_PATTERN.test(String(candidate.contentSha256 ?? "")) &&
+          typeof blobId === "string" &&
+          UUID_PATTERN.test(blobId) &&
+          typeof contentSha256 === "string" &&
+          SHA256_PATTERN.test(contentSha256) &&
           Number.isSafeInteger(candidate.sizeBytes) &&
           ((candidate.entryType === "symlink" &&
             candidate.mode === 40960 &&
@@ -586,8 +593,8 @@ export class CloudWorkspaceDurabilityRuntime {
             path: entryPath,
             entryType: candidate.entryType as "file" | "symlink",
             mode: candidate.mode as 33188 | 33261 | 40960,
-            blobId: String(candidate.blobId),
-            contentSha256: String(candidate.contentSha256),
+            blobId,
+            contentSha256,
             sizeBytes: Number(candidate.sizeBytes),
           });
         } else {
@@ -620,9 +627,11 @@ export class CloudWorkspaceDurabilityRuntime {
         body: new Uint8Array(entry.bytes),
       }),
     );
+    const blobId = isRecord(raw) ? raw.id : null;
     if (
       !isRecord(raw) ||
-      !UUID_PATTERN.test(String(raw.id ?? "")) ||
+      typeof blobId !== "string" ||
+      !UUID_PATTERN.test(blobId) ||
       raw.plaintextSha256 !== entry.contentSha256 ||
       raw.sizeBytes !== entry.sizeBytes
     ) {
@@ -633,7 +642,7 @@ export class CloudWorkspaceDurabilityRuntime {
       path: entry.path,
       entryType: entry.entryType,
       mode: entry.mode,
-      blobId: String(raw.id),
+      blobId,
       contentSha256: entry.contentSha256,
       sizeBytes: entry.sizeBytes,
     };
@@ -798,7 +807,11 @@ export class CloudWorkspaceDurabilityRuntime {
         totalBytes: finalScan.totalBytes,
         integritySha256: manifest.contentSha256,
       });
-      if (!isRecord(committed) || !UUID_PATTERN.test(String(committed.checkpointId ?? ""))) {
+      if (
+        !isRecord(committed) ||
+        typeof committed.checkpointId !== "string" ||
+        !UUID_PATTERN.test(committed.checkpointId)
+      ) {
         throw new Error("cloud checkpoint commit response is invalid");
       }
     } finally {

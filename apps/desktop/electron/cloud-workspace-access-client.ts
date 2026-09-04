@@ -611,12 +611,14 @@ export class CloudWorkspaceAccessClient {
     });
     const tunnel = isRecord(record?.tunnel) ? record.tunnel : null;
     const session = isRecord(tunnel?.session) ? tunnel.session : null;
+    const sshUsername = tunnel?.sshUsername;
+    const sshHost = tunnel?.sshHost;
     const ssh = this.validateSshFields(
-      tunnel
+      typeof sshUsername === "string" && typeof sshHost === "string"
         ? {
-            username: tunnel.sshUsername,
-            host: tunnel.sshHost,
-            command: `ssh ${String(tunnel.sshUsername)}@${String(tunnel.sshHost)}`,
+            username: sshUsername,
+            host: sshHost,
+            command: `ssh ${sshUsername}@${sshHost}`,
           }
         : null,
     );
@@ -735,10 +737,13 @@ export class CloudWorkspaceAccessClient {
       now: this.now(),
     });
     const preview = isRecord(record?.preview) ? record.preview : null;
+    const logicalUrl = preview?.logicalUrl;
+    const previewOrigin = preview?.origin;
+    const capability = preview?.capability;
     let origin: URL | null = null;
     try {
       origin =
-        typeof preview?.origin === "string" ? new URL(preview.origin) : null;
+        typeof previewOrigin === "string" ? new URL(previewOrigin) : null;
     } catch {
       origin = null;
     }
@@ -755,14 +760,16 @@ export class CloudWorkspaceAccessClient {
     if (
       !grant ||
       !preview ||
-      preview.logicalUrl !== `http://localhost:${remotePort}/` ||
+      logicalUrl !== `http://localhost:${remotePort}/` ||
+      typeof previewOrigin !== "string" ||
       !origin ||
       origin.protocol !== "https:" ||
       origin.username ||
       origin.password ||
-      origin.origin !== preview.origin ||
+      origin.origin !== previewOrigin ||
       !previewOriginAllowed ||
-      !PREVIEW_CAPABILITY_PATTERN.test(String(preview.capability ?? "")) ||
+      typeof capability !== "string" ||
+      !PREVIEW_CAPABILITY_PATTERN.test(capability) ||
       preview.headerName !== "x-zeros-preview-capability"
     ) {
       return await this.rejectInvalidPublishedAccess({
@@ -778,9 +785,9 @@ export class CloudWorkspaceAccessClient {
     return {
       grant: { ...grant, kind: "preview", remotePort },
       preview: {
-        logicalUrl: preview.logicalUrl,
-        origin: preview.origin as string,
-        capability: preview.capability as string,
+        logicalUrl,
+        origin: previewOrigin,
+        capability,
         headerName: "x-zeros-preview-capability",
       },
     };

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -23,6 +24,18 @@ async function git(root: string, ...args: string[]): Promise<void> {
     cwd: root,
     env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1" },
   });
+}
+
+async function checkpointRepository(): Promise<string> {
+  const root = await mkdtemp(path.join(tmpdir(), "zeros-cloud-runtime-"));
+  roots.push(root);
+  await git(root, "init", "--quiet");
+  await git(root, "config", "user.email", "cloud@example.test");
+  await git(root, "config", "user.name", "Cloud Test");
+  await writeFile(path.join(root, "README.md"), "checkpoint\n");
+  await git(root, "add", "README.md");
+  await git(root, "commit", "--quiet", "-m", "base");
+  return root;
 }
 
 describe("cloud durability scanner", () => {
@@ -180,5 +193,110 @@ describe("cloud durability projection validation", () => {
       ),
     ).rejects.toThrow("cloud durability projection is invalid");
     expect(calls).toBe(1);
+  });
+
+  it.each([
+    ["path", ["entry.txt"]],
+    ["blobId", ["44444444-4444-4444-8444-444444444444"]],
+    ["contentSha256", ["a".repeat(64)]],
+  ] as const)(
+    "rejects an array-encoded remote projection %s before scanning",
+    async (field, value) => {
+      let calls = 0;
+      const runtime = new CloudWorkspaceDurabilityRuntime("/unused", {
+        fetch: (async () => {
+          calls += 1;
+          return Response.json({
+            checkpointId: null,
+            currentRevision: 1,
+            durableRevision: 1,
+            entries: [
+              {
+                operation: "upsert",
+                path: "entry.txt",
+                entryType: "file",
+                mode: 33188,
+                blobId: "44444444-4444-4444-8444-444444444444",
+                contentSha256: "a".repeat(64),
+                sizeBytes: 1,
+                [field]: value,
+              },
+            ],
+            nextAfterPath: null,
+          });
+        }) as typeof fetch,
+      });
+
+      await expect(
+        runtime.checkpoint(
+          {
+            id: "55555555-5555-4555-8555-555555555555",
+            reason: "manual",
+            deadlineAtMs: Date.now() + 60_000,
+          },
+          authority,
+        ),
+      ).rejects.toThrow("cloud durability projection is invalid");
+      expect(calls).toBe(1);
+    },
+  );
+
+  it.each([
+    ["blob id", "blob"],
+    ["checkpoint id", "checkpoint"],
+  ] as const)("rejects an array-encoded remote %s", async (_label, target) => {
+    const root = await checkpointRepository();
+    const blobId = "77777777-7777-4777-8777-777777777777";
+    const checkpointId = "88888888-8888-4888-8888-888888888888";
+    const runtime = new CloudWorkspaceDurabilityRuntime(root, {
+      fetch: (async (input, init) => {
+        const pathname = new URL(String(input)).pathname;
+        if (pathname.endsWith("/content/head")) {
+          return Response.json({
+            checkpointId: null,
+            currentRevision: 0,
+            durableRevision: 0,
+            entries: [],
+            nextAfterPath: null,
+          });
+        }
+        if (pathname.endsWith("/blobs")) {
+          const bytes = init?.body;
+          if (!(bytes instanceof Uint8Array)) {
+            throw new Error("expected binary upload");
+          }
+          return Response.json({
+            id: target === "blob" ? [blobId] : blobId,
+            plaintextSha256: createHash("sha256").update(bytes).digest("hex"),
+            sizeBytes: bytes.byteLength,
+          });
+        }
+        if (pathname.endsWith("/content/append")) {
+          return Response.json({ revision: 1 });
+        }
+        if (pathname.endsWith("/checkpoints/commit")) {
+          return Response.json({
+            checkpointId:
+              target === "checkpoint" ? [checkpointId] : checkpointId,
+          });
+        }
+        throw new Error(`unexpected durability request: ${pathname}`);
+      }) as typeof fetch,
+    });
+
+    await expect(
+      runtime.checkpoint(
+        {
+          id: "99999999-9999-4999-8999-999999999999",
+          reason: "manual",
+          deadlineAtMs: Date.now() + 60_000,
+        },
+        authority,
+      ),
+    ).rejects.toThrow(
+      target === "blob"
+        ? "cloud durability blob response is invalid"
+        : "cloud checkpoint commit response is invalid",
+    );
   });
 });

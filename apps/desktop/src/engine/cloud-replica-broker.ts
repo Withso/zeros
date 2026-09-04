@@ -24,6 +24,8 @@ const MAX_BOOTSTRAP_PAGES = 1_001;
 const MAX_EVENT_PAGES_PER_RUN = 100;
 const CHECKPOINT_MANIFEST_AUDIENCE =
   "zeros-cloud-workspace-checkpoint-manifest-v1";
+const LEGACY_CHECKPOINT_MANIFEST_AUDIENCE =
+  "zeros-local-to-cloud-fork-v1";
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const FULL_COMMIT_PATTERN = /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/;
 
@@ -46,6 +48,39 @@ export type BootstrapManifestBinding =
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function isGitBaseCommit(value: unknown): value is string | null {
+  return (
+    value === null ||
+    (typeof value === "string" && FULL_COMMIT_PATTERN.test(value))
+  );
+}
+
+function isGitHeadRef(value: unknown): value is string | null {
+  return (
+    value === null ||
+    (typeof value === "string" &&
+      value.length >= 1 &&
+      value.length <= 512 &&
+      // eslint-disable-next-line no-control-regex -- Git refs reject controls
+      !/[\u0000-\u001f\u007f]/u.test(value))
+  );
+}
+
+function isBootstrapEntryType(
+  value: unknown,
+): value is BootstrapManifestEntry["entryType"] {
+  return typeof value === "string" && (value === "file" || value === "symlink");
+}
+
+function isBootstrapEntryMode(
+  value: unknown,
+): value is BootstrapManifestEntry["mode"] {
+  return (
+    typeof value === "number" &&
+    (value === 33188 || value === 33261 || value === 40960)
+  );
 }
 
 function compareUtf8Path(left: string, right: string): number {
@@ -90,29 +125,32 @@ export function parseBootstrapManifest(input: {
     bootstrapProtocolError("Cloud bootstrap manifest is invalid");
   }
 
-  if (document.audience !== CHECKPOINT_MANIFEST_AUDIENCE) {
-    // Existing durable checkpoints predate the self-describing projection
-    // manifest. Their advertised SHA still pins these bytes and the existing
+  const audience = document.audience;
+  if (typeof audience !== "string") {
+    bootstrapProtocolError("Cloud bootstrap manifest audience is invalid");
+  }
+  if (audience === LEGACY_CHECKPOINT_MANIFEST_AUDIENCE) {
+    // Existing local-to-cloud fork descriptors predate the self-describing
+    // projection manifest. Their advertised SHA still pins these bytes and
     // page/count checks remain in force, but only the v1 audience can bind
-    // each path descriptor. Keep this explicit rolling-upgrade behavior until
-    // all retained legacy checkpoints expire.
+    // each path descriptor. Keep this exact compatibility contract until all
+    // retained descriptors under this audience expire.
     return { kind: "legacy" };
   }
+  if (audience !== CHECKPOINT_MANIFEST_AUDIENCE) {
+    bootstrapProtocolError("Cloud bootstrap manifest audience is invalid");
+  }
+
+  const gitBaseCommit = document.gitBaseCommit;
+  const gitHeadRef = document.gitHeadRef;
   if (
     document.version !== 1 ||
     !Array.isArray(document.entries) ||
     !Array.isArray(document.deletions) ||
-    document.gitBaseCommit !== (input.page.gitBaseCommit ?? null) ||
-    document.gitHeadRef !== (input.page.gitHeadRef ?? null) ||
-    (document.gitBaseCommit !== null &&
-      (!FULL_COMMIT_PATTERN.test(String(document.gitBaseCommit)) ||
-        typeof document.gitBaseCommit !== "string")) ||
-    (document.gitHeadRef !== null &&
-      (typeof document.gitHeadRef !== "string" ||
-        document.gitHeadRef.length < 1 ||
-        document.gitHeadRef.length > 512 ||
-        // eslint-disable-next-line no-control-regex -- Git refs reject controls
-        /[\u0000-\u001f\u007f]/u.test(document.gitHeadRef)))
+    !isGitBaseCommit(gitBaseCommit) ||
+    !isGitHeadRef(gitHeadRef) ||
+    gitBaseCommit !== (input.page.gitBaseCommit ?? null) ||
+    gitHeadRef !== (input.page.gitHeadRef ?? null)
   ) {
     bootstrapProtocolError("Cloud bootstrap manifest metadata is invalid");
   }
@@ -123,9 +161,13 @@ export function parseBootstrapManifest(input: {
     if (!isRecord(entry)) {
       bootstrapProtocolError("Cloud bootstrap manifest entry is invalid");
     }
+    const entryPathValue = entry.path;
+    if (typeof entryPathValue !== "string") {
+      bootstrapProtocolError("Cloud bootstrap manifest path is invalid");
+    }
     let entryPath: string;
     try {
-      entryPath = normalizeCloudReplicaPath(String(entry.path ?? ""));
+      entryPath = normalizeCloudReplicaPath(entryPathValue);
     } catch {
       bootstrapProtocolError("Cloud bootstrap manifest path is invalid");
     }
@@ -135,8 +177,8 @@ export function parseBootstrapManifest(input: {
     const sizeBytes = entry.sizeBytes;
     if (
       entries.has(entryPath) ||
-      !["file", "symlink"].includes(String(entryType)) ||
-      ![33188, 33261, 40960].includes(Number(mode)) ||
+      !isBootstrapEntryType(entryType) ||
+      !isBootstrapEntryMode(mode) ||
       (entryType === "symlink") !== (mode === 40960) ||
       typeof contentSha256 !== "string" ||
       !SHA256_PATTERN.test(contentSha256) ||
@@ -164,9 +206,12 @@ export function parseBootstrapManifest(input: {
   }
   const deletions = new Set<string>();
   for (const deletion of document.deletions) {
+    if (typeof deletion !== "string") {
+      bootstrapProtocolError("Cloud bootstrap manifest deletion is invalid");
+    }
     let deletionPath: string;
     try {
-      deletionPath = normalizeCloudReplicaPath(String(deletion));
+      deletionPath = normalizeCloudReplicaPath(deletion);
     } catch {
       bootstrapProtocolError("Cloud bootstrap manifest deletion is invalid");
     }
