@@ -144,6 +144,11 @@ session lock used by WorkOS commands and event ingress, drains every command it
 can associate by local UUID, provider subject, session, or current email, and
 then appends one `purge.provider_erasure_fenced` lifecycle event per erased
 WorkOS User or Organization identifier before requesting provider deletion.
+Email matching is a bounded cleanup fallback used only after the stable UUID
+target is fixed, for unbound browser shells and ephemeral commands or events
+containing the target's still-live profile data. It never selects ownership or
+expands exact-subject provider deletion, which excludes subjects bound to
+another local account.
 Each fence contains only a domain-separated SHA-256 digest of the
 provider-issued opaque identifier; it never stores the raw identifier or an
 email digest. Migration `0061` projects that evidence into an exact-key,
@@ -242,11 +247,11 @@ does not reset the server-side account.
 Do not delete WorkOS Users as setup for ordinary signup tests. Deleting only
 the provider User leaves the durable Zeros account and compatibility Personal
 records in place. It also does not reset the device-local Personal collection.
-Before final Zeros purge, signing in or signing up again with that same email
-creates a new provider identity and must enter reviewed recovery, not a new
-empty account. After a separately requested and completed final purge, a new
-provider subject follows the fresh-signup rule above. Neither choice of AuthKit
-entry screen bypasses these boundaries.
+Before final Zeros purge, authenticating through a newly created WorkOS User
+whose new provider subject reuses that email must enter reviewed recovery, not
+a new empty account. After a separately requested and completed final purge, a
+new provider subject follows the fresh-signup rule above. Neither choice of
+AuthKit entry screen bypasses these boundaries.
 
 Test provider deletion separately, using a disposable account with both clients
 open. Expect access revocation, followed by a recovery-required state on a new

@@ -249,7 +249,9 @@ Two independent counters apply:
 
 - the Organization counter measures physical tenant-deduplicated blobs in
   `pending_upload`, `available`, `quarantined`, or `deleting` state, plus bytes
-  reserved for a second ciphertext during key rotation; and
+  reserved for a second ciphertext during key rotation and detached-object
+  deletion tombstones' `reserved_bytes`. A tombstone releases its byte
+  reservation only after physical deletion and permanent fencing succeed; and
 - the workspace counter measures logical unique `(workspace_id, blob_id)`
   reservations, regardless of whether another workspace reuses the same
   tenant blob.
@@ -271,12 +273,17 @@ Maintenance also repairs stale reference reservations, reconciles reference
 counts, and applies the existing age/retention/legal-hold garbage-collection
 rules.
 
-Key rotation reserves one additional physical object before writing the target
-ciphertext. A failed or crashed attempt keeps that reservation for a safe retry;
-success deletes the source and releases the duplicate-byte allowance. Missing
-Organization limits fail closed, and limits are never inferred from sandbox
-disk allocation or the object-store provider's volume size. The per-workspace
-logical ceiling cannot exceed the Organization physical ceiling.
+Key rotation reserves one additional physical object before conditionally
+writing the target ciphertext. A failed or crashed attempt keeps that
+reservation for a safe retry. The target becomes authoritative only after a
+strong read-back verifies its ciphertext digest and authenticated envelope in
+the expected Organization/blob context under the configured target key version.
+The worker deletes and permanently fences the source, and marks the rotation
+successful and releases the duplicate-byte allowance, only after that
+verification and confirmed source deletion. Missing Organization limits fail
+closed, and limits are never inferred from sandbox disk allocation or the
+object-store provider's volume size. The per-workspace logical ceiling cannot
+exceed the Organization physical ceiling.
 
 ## Phase-5 local replica contract
 
@@ -521,8 +528,22 @@ Restore must be repeatable into a fresh environment:
 5. Start the bridge and publish readiness only after integrity checks pass.
 6. Let clients reconcile from the returned exact revision.
 
-A provider snapshot can accelerate startup, but the product needs a documented
-recovery path when that snapshot is corrupt, expired, or unavailable.
+A provider snapshot is an optimization, not a recovery authority. If it is
+corrupt, expired, or unavailable:
+
+1. Provision a fresh provider resource. Use the still-authoritative PostgreSQL
+   and object store, or first restore PostgreSQL from its approved PITR/logical
+   backup and encrypted payloads from the independently retained object-store
+   backup to a mutually consistent recovery point.
+2. Resolve the generation's pinned durable checkpoint and verify its manifest,
+   every referenced blob's Organization scope, hash, size, and encryption
+   context, and the exact content and record revisions. Keep any missing or
+   corrupt reference unavailable for repair instead of starting partially.
+3. Clone and verify the recorded Git base, apply checkpoint deletes and upserts
+   in canonical path order, then replay durable record changes after the pinned
+   revision and reconcile references/reservations before garbage collection.
+4. Do not publish bridge or workspace readiness until checkpoint/repository
+   integrity, durable-record connectivity, and exact revision convergence pass.
 
 Local and cloud workspaces are not bidirectionally merged. “Create cloud from
 local” and “create local from cloud” produce new identities through the fork
