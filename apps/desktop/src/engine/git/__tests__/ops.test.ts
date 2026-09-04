@@ -185,6 +185,45 @@ describe("write ops", () => {
     expect(stillStaged).not.toContain("code.txt");
   });
 
+  it("commits the Code lane from an unborn HEAD while leaving staged Design changes intact", async () => {
+    const ws = getWorkspace(workspaceId);
+    const designName = designDirectoryNameFor(ws.path);
+    await execFileAsync(
+      "git",
+      ["update-ref", "-d", `refs/heads/${ws.branch}`],
+      { cwd: ws.path },
+    );
+    await mkdir(path.join(ws.path, designName), { recursive: true });
+    await Promise.all([
+      writeFile(path.join(ws.path, "code.txt"), "code\n"),
+      writeFile(path.join(ws.path, designName, ".zeros-canvas.json"), "{}\n"),
+      writeFile(path.join(ws.path, designName, "frame.html"), "<main />\n"),
+    ]);
+    await execFileAsync("git", ["add", "--", "code.txt", designName], {
+      cwd: ws.path,
+    });
+
+    await expect(
+      commit({ workspaceId, message: "Initial Code lane", authority: "code" }),
+    ).resolves.toMatchObject({ sha: expect.any(String) });
+
+    const committed = (
+      await execFileAsync(
+        "git",
+        ["show", "--pretty=format:", "--name-only", "HEAD"],
+        { cwd: ws.path },
+      )
+    ).stdout;
+    const stillStaged = (
+      await execFileAsync("git", ["diff", "--cached", "--name-only"], {
+        cwd: ws.path,
+      })
+    ).stdout;
+    expect(committed).toContain("code.txt");
+    expect(committed).not.toContain(`${designName}/`);
+    expect(stillStaged).toContain(`${designName}/frame.html`);
+  });
+
   it("commits only the staged Design lane while leaving staged Code changes intact", async () => {
     const ws = getWorkspace(workspaceId);
     const designName = designDirectoryNameFor(ws.path);

@@ -267,7 +267,7 @@ async function resetSnapshotPaths(
       cwd,
       expectedHead
         ? ["reset", "-q", expectedHead, "--", ...literals]
-        : ["rm", "--cached", "-q", "--ignore-unmatch", "--", ...literals],
+        : ["update-index", "--force-remove", "--ignore-missing", "--", ...batch],
       { env: snapshot.env },
     );
   }

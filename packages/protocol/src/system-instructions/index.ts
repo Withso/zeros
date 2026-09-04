@@ -25,6 +25,7 @@ export {
   buildAdditionalDirsSystemInstruction,
   buildCodeAgentDesignTerritoryNotice,
   buildDesignAgentNotice,
+  effectiveCodeAgentDesignDirectories,
   buildFirstTurnInstructionBody,
   buildFirstTurnSystemInstruction,
   buildWorkspacePreamble,

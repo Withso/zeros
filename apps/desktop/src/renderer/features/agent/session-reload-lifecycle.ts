@@ -13,6 +13,29 @@ import type {
 } from "@zeros/protocol/containment";
 import type { AgentGoal } from "@zeros/protocol/agent-events";
 
+export interface SessionExecutionActor {
+  agentRole?: "code" | "design";
+  designDocumentId?: string | null;
+}
+
+/** Retain the immutable execution actor across renderer-owned rebuilds. An
+ * explicit Code admission clears any stale Design document identity. */
+export function executionActorForRecovery(
+  previous: SessionExecutionActor | null | undefined,
+  requested?: SessionExecutionActor | null,
+): { agentRole?: "code" | "design"; designDocumentId?: string } {
+  const agentRole = requested?.agentRole ?? previous?.agentRole;
+  if (agentRole === "design") {
+    const designDocumentId =
+      requested?.designDocumentId ?? previous?.designDocumentId;
+    return {
+      agentRole,
+      ...(designDocumentId ? { designDocumentId } : {}),
+    };
+  }
+  return agentRole === "code" ? { agentRole } : {};
+}
+
 /** Resolve the exact live route that may be torn down and resumed to pick up a
  * provider boot capability. This is intentionally narrower than ordinary
  * session recovery: only native Codex and Claude bindings for the same adapter

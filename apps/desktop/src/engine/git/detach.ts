@@ -397,23 +397,31 @@ export async function detachStop(): Promise<DetachStopResult> {
   }
   if (active.debounceTimer) clearTimeout(active.debounceTimer);
   await active.syncTail;
-  active = null;
 
   const ws = getWorkspace(state.workspaceId);
   // Restore the root's working tree to what it was before detach.
-  await withWorkspaceGitMutation(ws.path, async () => {
-    await runGit(ws.repoRoot, [
-      "read-tree",
-      "--reset",
-      "-u",
-      state.preRootHead,
-    ]);
-    await runGit(ws.path, [
-      "update-ref",
-      "-d",
-      detachCheckpointRef(state.workspaceId),
-    ]).catch(() => {});
-  });
+  try {
+    await withWorkspaceGitMutation(ws.path, async () => {
+      await runGit(ws.repoRoot, [
+        "read-tree",
+        "--reset",
+        "-u",
+        state.preRootHead,
+      ]);
+      await runGit(ws.path, [
+        "update-ref",
+        "-d",
+        detachCheckpointRef(state.workspaceId),
+      ]).catch(() => {});
+    });
+  } catch (error) {
+    // The watcher is already closed, but retaining the handle and durable
+    // state lets the user retry restoration instead of stranding the root on
+    // the checkpoint tree behind a same-process lockfile.
+    active.stopping = false;
+    throw error;
+  }
+  active = null;
   clearDetachState();
   removeLock();
   return { stoppedAt: Date.now(), restoredHead: state.preRootHead };

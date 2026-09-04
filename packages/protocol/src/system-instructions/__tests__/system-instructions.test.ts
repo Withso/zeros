@@ -145,6 +145,15 @@ describe("buildFirstTurnSystemInstruction", () => {
       out.indexOf("Edit every file I mention."),
     );
   });
+  it("falls back to the active Design directory when recognition returns an empty set", () => {
+    const out = buildFirstTurnSystemInstruction({
+      workspaceDir: "/ws",
+      designDirectory: "/ws/Zeros Design",
+      designDirectories: [],
+    });
+    expect(out).toContain("/ws/Zeros Design");
+    expect(out).toContain("read-only to you");
+  });
   it("builds a Design-agent instruction without granting Code or Git mutation", () => {
     const out = buildFirstTurnSystemInstruction({
       workspaceDir: "/ws",

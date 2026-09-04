@@ -123,6 +123,17 @@ export async function withWorkspaceGitMutation<T>(
     workspaceMutationKey(workspacePath),
     repositoryMutationKey(workspacePath),
   ]);
+  const inherited = workspaceMutationAdmissions.getStore();
+  const activeWorktreeKey = inherited
+    ? [...inherited].find(
+        ([key, admission]) => key.startsWith("worktree:") && admission.active,
+      )?.[0]
+    : undefined;
+  if (activeWorktreeKey && activeWorktreeKey !== worktreeKey) {
+    throw new Error(
+      "A nested Git mutation cannot target a different worktree; finish the current workspace mutation first.",
+    );
+  }
   return withMutationKey(worktreeKey, () =>
     repositoryKey ? withMutationKey(repositoryKey, run) : run(),
   );

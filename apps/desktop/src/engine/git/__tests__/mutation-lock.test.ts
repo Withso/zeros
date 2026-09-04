@@ -120,4 +120,61 @@ describe("workspace Git mutation lane", () => {
       await rm(root, { recursive: true, force: true });
     }
   });
+
+  it("rejects cross-worktree nested mutation instead of deadlocking behind repository ownership", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "zeros-repo-nested-lane-"));
+    const commonGitDir = path.join(root, "repo", ".git");
+    const firstWorktree = path.join(root, "first");
+    const secondWorktree = path.join(root, "second");
+    const firstGitDir = path.join(commonGitDir, "worktrees", "first");
+    const secondGitDir = path.join(commonGitDir, "worktrees", "second");
+    await Promise.all([
+      mkdir(firstGitDir, { recursive: true }),
+      mkdir(secondGitDir, { recursive: true }),
+      mkdir(firstWorktree, { recursive: true }),
+      mkdir(secondWorktree, { recursive: true }),
+    ]);
+    await Promise.all([
+      writeFile(path.join(firstWorktree, ".git"), `gitdir: ${firstGitDir}\n`),
+      writeFile(path.join(secondWorktree, ".git"), `gitdir: ${secondGitDir}\n`),
+      writeFile(path.join(firstGitDir, "commondir"), "../..\n"),
+      writeFile(path.join(secondGitDir, "commondir"), "../..\n"),
+    ]);
+
+    const firstEntered = deferred();
+    const attemptNested = deferred();
+    const first = withWorkspaceGitMutation(firstWorktree, async () => {
+      firstEntered.resolve();
+      await attemptNested.promise;
+      return withWorkspaceGitMutation(secondWorktree, async () => undefined);
+    });
+    await firstEntered.promise;
+    const second = withWorkspaceGitMutation(
+      secondWorktree,
+      async () => undefined,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    attemptNested.resolve();
+
+    try {
+      const outcome = await Promise.race([
+        first.then(
+          () => ({ state: "resolved" as const }),
+          (error: unknown) => ({ state: "rejected" as const, error }),
+        ),
+        new Promise<{ state: "timed-out" }>((resolve) =>
+          setTimeout(() => resolve({ state: "timed-out" }), 100),
+        ),
+      ]);
+      expect(outcome.state).toBe("rejected");
+      expect(outcome).toMatchObject({
+        error: expect.objectContaining({
+          message: expect.stringMatching(/nested.*different worktree/i),
+        }),
+      });
+      await second;
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
 });

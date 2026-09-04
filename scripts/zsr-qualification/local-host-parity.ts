@@ -26,6 +26,7 @@ import {
 import { loadCloudWorkerConfiguration } from "../../apps/desktop/src/engine/agents/containment/cloud-worker-config";
 import { HostExecutionBoundary } from "../../apps/desktop/src/engine/agents/containment/host-boundary";
 import { RoutingExecutionBoundary } from "../../apps/desktop/src/engine/agents/containment/routing-boundary";
+import { QUALIFICATION_WRITE_PROBE_SOURCE } from "./write-probe-source";
 
 const projectRoot = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -644,6 +645,7 @@ connection.once("error", (error) => { throw error; });
         String.raw`
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
+${QUALIFICATION_WRITE_PROBE_SOURCE}
 const [codeFile, primary, secondary, outside, authorityFilesJson, authorityAliasRoot] = process.argv.slice(1);
 const authorityFiles = JSON.parse(authorityFilesJson);
 function denied(operation) { try { operation(); return false; } catch { return true; } }
@@ -666,8 +668,13 @@ const gitDirectoryWriteDenied = denied(() => {
   fs.writeFileSync(".git/qualification-write", "ok\n");
   fs.unlinkSync(".git/qualification-write");
 });
-const scratchFile = require("node:path").join(process.env.TMPDIR, "design-scratch.txt");
-fs.writeFileSync(scratchFile, "scratch-write\n");
+const pathApi = require("node:path");
+const scratchWrite = qualificationWriteProbe(
+  fs,
+  pathApi,
+  process.env.TMPDIR,
+  "design-scratch.txt",
+);
 const providerRoots = [
   process.env.XDG_CACHE_HOME,
   process.env.XDG_CONFIG_HOME,
@@ -675,10 +682,12 @@ const providerRoots = [
   process.env.XDG_STATE_HOME,
 ];
 const providerStateWrites = providerRoots.map((root, index) => {
-  fs.mkdirSync(root, { recursive: true });
-  const file = require("node:path").join(root, "qualification-" + index + ".txt");
-  fs.writeFileSync(file, "provider-write\n");
-  return fs.readFileSync(file, "utf8") === "provider-write\n";
+  return qualificationWriteProbe(
+    fs,
+    pathApi,
+    root,
+    "qualification-" + index + ".txt",
+  );
 });
 const git = spawnSync("git", ["add", "--", "Zeros Design/canvas.json", "examples/Product Design/tokens.json"], { encoding: "utf8" });
 process.stdout.write(JSON.stringify({
@@ -690,7 +699,7 @@ process.stdout.write(JSON.stringify({
   outsideDenied,
   gitDirectoryWriteDenied,
   canonicalGitWriteDenied: git.status !== 0,
-  scratchWrite: fs.readFileSync(scratchFile, "utf8") === "scratch-write\n",
+  scratchWrite,
   providerStateWrites,
   engineAuthorityReadDenied,
   engineAuthorityWriteDenied,

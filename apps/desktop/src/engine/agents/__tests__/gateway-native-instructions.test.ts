@@ -48,9 +48,11 @@ type GwInternals = {
     string,
     {
       additionalDirectories: string[];
-      designContextDirectories?: string[];
+      designDirectory?: string;
+      designDirectories?: string[];
     }
   >;
+  sessionsTerritoryNoticePending: Set<string>;
   prepareCodeAgentTerritory(
     ...args: unknown[]
   ): Promise<AgentFilesystemTerritory | undefined>;
@@ -318,6 +320,7 @@ describe("gateway native system-instruction routing", () => {
     const gw = makeGateway(
       testExecutionBoundary({ onPrepare: (request) => requests.push(request) }),
     );
+    gw.setGatewayServer("http://127.0.0.1:45291/mcp");
     const c = calls();
     const territory: AgentFilesystemTerritory = {
       agentRole: "code",
@@ -368,6 +371,7 @@ describe("gateway native system-instruction routing", () => {
       },
       {
         cwd: CWD,
+        workspaceId: "workspace-1",
         env: {
           ZEROS_DESIGN_AGENT_CAPABILITY: "untrusted-override",
           ZEROS_ADDITIONAL_DIRS: '["/work/reference"]',
@@ -422,6 +426,48 @@ describe("gateway native system-instruction routing", () => {
         actor: "design-agent",
       }),
     ).toBe(true);
+  });
+
+  it("falls back to the active Design directory when a native Code refresh carries an empty recognized set", async () => {
+    const gw = makeGateway({ ...testExecutionBoundary(), backend: "none" });
+    const c = calls();
+    const internals = gw as unknown as GwInternals;
+    internals.adapters.set(
+      "codex",
+      fakeAdapter({
+        agentId: "codex",
+        native: true,
+        sessionId: "native-empty-design-set",
+        calls: c,
+      }),
+    );
+    const designDirectory = `${CWD}/Zeros Design`;
+    internals.prepareCodeAgentTerritory = async () => ({
+      agentRole: "code",
+      workspaceRoot: CWD,
+      designDirectory,
+      protectedDesignDirectories: [designDirectory],
+      designRecognitionPaths: [],
+      writeCapabilities: {
+        workspace: "write",
+        deniedPaths: [designDirectory],
+      },
+    });
+
+    const session = await gw.newSession("codex", { cwd: CWD });
+    const ctx = internals.executionToInstructionCtx.get(session.executionId)!;
+    internals.executionToInstructionCtx.set(session.executionId, {
+      ...ctx,
+      designDirectories: [],
+    });
+    internals.sessionsTerritoryNoticePending.add(session.executionId);
+
+    await gw.prompt("codex", session.executionId, [text("continue")]);
+
+    expect((c.prompts[0]![0] as { text: string }).text).toContain(
+      designDirectory,
+    );
+    await gw.dispose();
   });
 
   it("preserves the normal provider surface while ZSR subtracts Design authority", async () => {

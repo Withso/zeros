@@ -128,6 +128,7 @@ import {
   cancelledSince,
   clearPrebindGoalSnapshotsForChat,
   detachAdmissionFlight,
+  executionActorForRecovery,
   loadedSessionStatus,
   markPrebindGoalSnapshot,
   markPrebindDirty,
@@ -1615,6 +1616,7 @@ export function AgentSessionsProvider({
           agentName: options?.agentName ?? existing?.agentName ?? agentId,
           cwd: options?.cwd ?? existing?.cwd ?? undefined,
           env: options?.env,
+          ...executionActorForRecovery(existing, options),
         });
         if (adopted) return;
         existing = getStore().sessions[chatId];
@@ -1630,6 +1632,7 @@ export function AgentSessionsProvider({
       // OWN folder / active scope from the store, so a spawn from ANY
       // recovery path lands in the right folder instead of throwing.
       const resolvedCwd = resolveSpawnCwd(chatId, options?.cwd, existing?.cwd);
+      const executionActor = executionActorForRecovery(existing, options);
 
       let bindWasSuperseded = false;
       const work = (async () => {
@@ -1637,6 +1640,8 @@ export function AgentSessionsProvider({
           ...BLANK,
           agentId,
           agentName: options?.agentName ?? agentId,
+          agentRole: executionActor.agentRole ?? "code",
+          designDocumentId: executionActor.designDocumentId ?? null,
           cwd: resolvedCwd,
           status: "warming",
           transcriptState: existing?.transcriptState ?? BLANK.transcriptState,
@@ -1711,8 +1716,7 @@ export function AgentSessionsProvider({
             {
               type: "AGENT_NEW_SESSION",
               agentId,
-              agentRole: options?.agentRole,
-              designDocumentId: options?.designDocumentId,
+              ...executionActor,
               chatId, // Bind the session to its chat for engine persistence.
               cwd: resolvedCwd ?? undefined,
               workspaceId: spawnWorkspaceId ?? undefined,
@@ -2152,6 +2156,7 @@ export function AgentSessionsProvider({
             .current(chatId, slot.agentId, {
               cwd: slot.cwd ?? undefined,
               env: expectedEnv,
+              ...executionActorForRecovery(slot),
               ...(park === "drift-respawn" ? { force: true } : {}),
             })
             .catch(() => {});
@@ -2236,6 +2241,7 @@ export function AgentSessionsProvider({
             await ensureSessionRef.current(chatId, current.agentId, {
               cwd: current.cwd ?? undefined,
               env: chatComposerEnv(chatId, current.initialize),
+              ...executionActorForRecovery(current),
             });
           } catch {
             /* ensureSession patches the slot with the failure */
@@ -2270,6 +2276,7 @@ export function AgentSessionsProvider({
               await ensureSessionRef.current(chatId, current.agentId, {
                 cwd: current.cwd ?? undefined,
                 env: expected,
+                ...executionActorForRecovery(current),
                 force: true,
               });
             } catch {
@@ -2745,6 +2752,7 @@ export function AgentSessionsProvider({
               replaceProviderConversation: true,
               cwd: current.cwd ?? undefined,
               env: chatComposerEnv(chatId, current.initialize),
+              ...executionActorForRecovery(current),
             });
           } catch {
             /* surfaces via store below */
@@ -4569,10 +4577,13 @@ export function AgentSessionsProvider({
       // rebuild minutes later threw "chat has no project folder bound."
       // resolveSpawnCwd also recovers the chat's own folder from the store.
       const resolvedCwd = resolveSpawnCwd(chatId, options?.cwd, existing?.cwd);
+      const executionActor = executionActorForRecovery(existing, options);
       getStore().setSession(chatId, {
         ...BLANK,
         agentId,
         agentName: options?.agentName ?? agentId,
+        agentRole: executionActor.agentRole ?? "code",
+        designDocumentId: executionActor.designDocumentId ?? null,
         executionId: null,
         sessionId: null,
         providerBinding: providerBinding ?? null,

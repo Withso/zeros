@@ -9,12 +9,12 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const LAUNCHER = path.join(
-  process.cwd(),
-  "apps/desktop/src/engine/agents/containment/cloud-container-worker.mjs",
+const LAUNCHER = fileURLToPath(
+  new URL("../cloud-container-worker.mjs", import.meta.url),
 );
 
 describe.skipIf(process.platform !== "linux")("cloud container worker", () => {

@@ -86,6 +86,7 @@ import { removeSessionDir, sessionsRoot } from "./session-paths";
 import {
   buildCodeAgentDesignTerritoryNotice,
   buildDesignAgentNotice,
+  effectiveCodeAgentDesignDirectories,
   buildFirstTurnInstructionBody,
   buildFirstTurnSystemInstruction,
   wrapSystemInstruction,
@@ -1792,10 +1793,11 @@ export class AgentGateway {
         ordered.filter((candidate) => candidate !== primary),
       );
       const previousDirectories = [
-        ...(instructionCtx.designDirectories ??
-          (instructionCtx.designDirectory
+        ...(instructionCtx.designDirectories?.length
+          ? instructionCtx.designDirectories
+          : instructionCtx.designDirectory
             ? [instructionCtx.designDirectory]
-            : [])),
+            : []),
       ]
         .map((candidate) => path.resolve(candidate))
         .sort();
@@ -2628,7 +2630,9 @@ export class AgentGateway {
       trustedLocalPorts: includeSessionCapabilities
         ? [
             ...new Set([
-              ...this.trustedLocalServicePorts(),
+              ...(actor === "agent-code"
+                ? this.trustedLocalServicePorts()
+                : []),
               ...trustedLocalPorts,
             ]),
           ].sort((left, right) => left - right)
@@ -5756,7 +5760,10 @@ export class AgentGateway {
         ctx?.agentRole === "design"
           ? buildDesignAgentNotice(ctx.designDirectory ?? null)
           : buildCodeAgentDesignTerritoryNotice(
-              ctx?.designDirectories ?? ctx?.designDirectory ?? null,
+              effectiveCodeAgentDesignDirectories(
+                ctx?.designDirectories,
+                ctx?.designDirectory,
+              ),
             ),
       );
       return isolationBlock

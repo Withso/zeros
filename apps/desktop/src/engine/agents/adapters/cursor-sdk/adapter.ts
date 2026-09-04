@@ -1187,22 +1187,29 @@ export class CursorSdkAdapter implements AgentAdapter {
     autoReview: boolean = autoReviewFor(CURSOR_DEFAULT_MODE),
   ): void {
     if (!sdk.platform?.prewarm) return;
-    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
-    void sdk.platform
-      .prewarm({
-        apiKey,
-        cwd: opts.cwd,
-        local: this.buildLocalOpts(opts.cwd, opts.env, autoReview),
-        ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
-      })
-      .catch((error: unknown) => {
-        this.ctx.emit.onAgentStderr(
-          AGENT_ID,
-          `[cursor-sdk] workspace prewarm skipped: ${
-            error instanceof Error ? error.message : String(error)
-          }`,
-        );
-      });
+    const reportSkipped = (error: unknown) => {
+      this.ctx.emit.onAgentStderr(
+        AGENT_ID,
+        `[cursor-sdk] workspace prewarm skipped: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    };
+    try {
+      const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
+      void Promise.resolve(
+        sdk.platform.prewarm({
+          apiKey,
+          cwd: opts.cwd,
+          local: this.buildLocalOpts(opts.cwd, opts.env, autoReview),
+          ...(sessionMcp ? { mcpServers: sessionMcp } : {}),
+        }),
+      ).catch(reportSkipped);
+    } catch (error) {
+      // Both option materialization and an SDK implementation may throw before
+      // returning a promise. Prewarm is best-effort in either case.
+      reportSkipped(error);
+    }
   }
 
   /** Build the executor a mode change is going to need, at the moment the mode
@@ -1416,9 +1423,9 @@ export class CursorSdkAdapter implements AgentAdapter {
       modelState,
     );
     const sdk = runtime.sdk;
-    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
     let agent: SdkAgent;
     try {
+      const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
       agent = await sdk.Agent.create({
         apiKey,
         model: this.modelSelection(modelId, modelState),
@@ -1522,13 +1529,14 @@ export class CursorSdkAdapter implements AgentAdapter {
     // on resume too. Without this, a resumed chat kept whatever MCP set it was
     // first created with, so a server the user ADDED after the chat opened never
     // appeared until they started a brand-new chat.
-    const sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
+    let sessionMcp: Record<string, CursorMcpConfig> | null = null;
     let agent: SdkAgent;
     // True when resume failed and we seeded a FRESH agent below — the gateway
     // re-injects the first-turn <system_instruction> (the fresh agent has no
     // prior transcript carrying it).
     let resumedFresh = false;
     try {
+      sessionMcp = this.mcpServers(opts.mcpServers, opts.env);
       agent = await sdk.Agent.resume(providerResumeId, {
         apiKey,
         // Bind the resolved model on resume too. `Agent.resume` reconstructs

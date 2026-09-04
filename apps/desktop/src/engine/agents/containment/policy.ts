@@ -502,11 +502,15 @@ export async function prepareZsrPolicy(
     await Promise.all(additionalReadOnlyInputs.map(canonicalExistingOrLexical)),
   );
   for (const root of additionalReadOnly) {
-    const metadata = await lstat(root);
-    if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-      throw new Error(
-        "additional read-only roots must be physical directories",
-      );
+    try {
+      const metadata = await lstat(root);
+      if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+        throw new Error(
+          "additional read-only roots must be physical directories",
+        );
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
   }
   const protectedWorkspaceInputs = request.protectedWorkspaceDirectories ?? [];

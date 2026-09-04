@@ -103,6 +103,17 @@ export function buildCodeAgentDesignTerritoryNotice(
   );
 }
 
+/** Prefer the complete recognized Design-root set, but retain the active root
+ * when discovery produced an explicitly empty snapshot. */
+export function effectiveCodeAgentDesignDirectories(
+  designDirectories: readonly string[] | undefined,
+  designDirectory: string | null | undefined,
+): readonly string[] | string | null | undefined {
+  return designDirectories && designDirectories.length > 0
+    ? designDirectories
+    : designDirectory;
+}
+
 /** Wrap a non-empty body in <system_instruction>…</system_instruction>.
  *  Returns "" for an empty/whitespace body (nothing to inject). */
 export function wrapSystemInstruction(body: string): string {
@@ -136,7 +147,10 @@ export function buildFirstTurnInstructionBody(
   const territory = designAgent
     ? buildDesignAgentNotice(input.designDirectory)
     : buildCodeAgentDesignTerritoryNotice(
-        input.designDirectories ?? input.designDirectory,
+        effectiveCodeAgentDesignDirectories(
+          input.designDirectories,
+          input.designDirectory,
+        ),
       );
   if (territory) parts.push(territory);
   return parts.join("\n\n").trim();

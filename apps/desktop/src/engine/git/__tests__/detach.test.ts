@@ -11,6 +11,7 @@ import {
   mkdtemp,
   mkdir,
   rm,
+  rename,
   writeFile,
   readFile,
 } from "node:fs/promises";
@@ -184,6 +185,23 @@ describe("detach mode", () => {
     expect(
       await readFile(path.join(repoRoot, "src.txt"), "utf8"),
     ).toBe("root content\n");
+    expect(detachStatus().active).toBe(false);
+  });
+
+  it("retains active state and permits retry when root restoration fails", async () => {
+    await detachStart({ workspaceId });
+    const displacedRoot = `${repoRoot}-temporarily-unavailable`;
+    await rename(repoRoot, displacedRoot);
+    try {
+      await expect(detachStop()).rejects.toBeTruthy();
+      expect(detachStatus()).toMatchObject({ active: true, workspaceId });
+    } finally {
+      await rename(displacedRoot, repoRoot);
+    }
+
+    await expect(detachStop()).resolves.toMatchObject({
+      restoredHead: expect.stringMatching(/^[0-9a-f]{40}$/),
+    });
     expect(detachStatus().active).toBe(false);
   });
 

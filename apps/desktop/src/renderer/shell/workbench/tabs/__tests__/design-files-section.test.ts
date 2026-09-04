@@ -400,10 +400,11 @@ describe("Files tab wiring", () => {
     // @pierre/trees derives its own scroll maximum from `itemCount × itemHeight`
     // and writes scrollTop back to it, so padding inside that box is range the
     // library takes away again. The gaps live on the light-DOM root instead.
-    const css = tree.slice(
-      tree.indexOf("const TREE_SHADOW_CSS"),
-      tree.indexOf("const EMPTY_FILE_PATHS"),
-    );
+    const cssStart = tree.indexOf("const TREE_SHADOW_CSS");
+    const cssEnd = tree.indexOf("const EMPTY_FILE_PATHS");
+    expect(cssStart).toBeGreaterThanOrEqual(0);
+    expect(cssEnd).toBeGreaterThan(cssStart);
+    const css = tree.slice(cssStart, cssEnd);
     const scrollerRule =
       css.match(
         /\[data-file-tree-virtualized-scroll='true'\] \{([^}]*)\}/,

@@ -896,18 +896,17 @@ if [ -n "$broker_pid" ]; then
   if ! kill -0 "$broker_pid" 2>/dev/null; then
     exec "$real" "$@"
   fi
-else
-  set +e
-  curl --silent --fail \\
-    --connect-timeout 1 \\
-    --max-time 2 \\
-    --unix-socket "$ZEROS_GIT_AUTH_SOCKET" \\
-    "http://localhost/health" >/dev/null 2>&1
-  broker_status="$?"
-  set -e
-  if [ "$broker_status" -eq 7 ]; then
-    exec "$real" "$@"
-  fi
+fi
+set +e
+curl --silent --fail \\
+  --connect-timeout 1 \\
+  --max-time 2 \\
+  --unix-socket "$ZEROS_GIT_AUTH_SOCKET" \\
+  "http://localhost/health" >/dev/null 2>&1
+broker_status="$?"
+set -e
+if [ "$broker_status" -eq 7 ]; then
+  exec "$real" "$@"
 fi
 
 # Apply the reset and broker only to github.com. Git's URL matching means a

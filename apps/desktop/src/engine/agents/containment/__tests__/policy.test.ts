@@ -214,6 +214,24 @@ describe("ZSR host-parity policy builder", () => {
     expect(prepared.document.filesystem.allowWrite).not.toContain(context);
   });
 
+  it("retains a permitted future read-only root without requiring it to exist yet", async () => {
+    const workspace = path.join(temporaryRoot, "future-context-workspace");
+    const futureContext = path.join(temporaryRoot, "future-context");
+    await mkdir(workspace, { recursive: true });
+    await expect(stat(futureContext)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const prepared = await prepare({
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      additionalReadOnlyRoots: [futureContext],
+    });
+
+    expect(prepared.document.filesystem.allowRead).toContain(futureContext);
+    expect(prepared.document.filesystem.denyWrite).toContain(futureContext);
+    await expect(stat(futureContext)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("allocates private Podman state only for the qualified cloud worker", async () => {
     const workspace = path.join(temporaryRoot, "cloud-container-workspace");
     await mkdir(workspace, { recursive: true });
