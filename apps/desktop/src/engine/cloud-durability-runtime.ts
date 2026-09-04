@@ -590,11 +590,10 @@ async function readPortableBoundLeaf(
     // Portable capture is a non-privileged desktop compatibility path. The
     // opened descriptor is identity-checked before any read, and O_NONBLOCK
     // prevents a raced FIFO from stalling; privileged capture is Linux-only.
-    // codeql[js/file-system-race]
     const handle = await fs.open(
       leafPath,
       fsConstants.O_RDONLY | noFollowFlag() | nonBlockingFlag(),
-    );
+    ); // lgtm[js/file-system-race]
     try {
       const opened = await handle.stat();
       if (
