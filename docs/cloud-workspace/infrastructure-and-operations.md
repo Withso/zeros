@@ -113,12 +113,14 @@ not diverge.
 
 Organization compute quotas are operator-approved admission records, not
 Organization-admin settings. Provision or change them only through
-`pnpm --dir apps/control-plane cloud-quota:manage`: first generate a read-only
-target-bound plan, then execute its exact approval from a controlled
-database-owner shell. The command refuses Personal/deleted/ineligible tenants,
-non-platform-owner attribution, stale plans, and limits below current usage;
-the same transaction writes append-only owner evidence. Quota provisioning is
-independent of `CLOUD_WORKSPACES_ENABLED` and
+`pnpm --dir apps/control-plane cloud-quota:manage` from a source checkout, or
+the supported `node dist/manage-cloud-workspace-quota.js` entrypoint in the
+production image. First generate a read-only target-bound plan, then execute
+its exact approval with `--execute` from a controlled database-owner shell. The
+command refuses Personal/deleted/ineligible tenants, non-platform-owner
+attribution, stale plans, and limits below current usage; the same transaction
+writes append-only owner evidence. Quota provisioning is independent of
+`CLOUD_WORKSPACES_ENABLED` and
 `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED`.
 
 The hosted Railway deployment keeps database, object-storage, worker, and
@@ -128,11 +130,13 @@ deploy button by itself is not a supported self-hosted product.
 
 ## Controlled migration rollout
 
-Cloud migration filenames `0018`–`0050` existed on the feature branch before
-main released its own `0018` and `0019`. The merged runner records those legacy
-names as aliases for `0020`–`0052` instead of replaying their DDL. Migration
-`0053` then restores the permanent Personal local-only constraint. If it finds
-a legacy Personal-owned cloud workspace, it stops without deleting or
+Two exact cloud migration ladders existed before their main merge: commit
+`a80ac25` used `0013`–`0018`, and commit `c2b7418` used `0018`–`0050`. The
+runner has explicit filename maps from those two histories to canonical
+`0020`–`0052`; it does not guess by subtracting a sequence number or matching a
+cloud prefix. It records a checksummed canonical alias instead of replaying DDL.
+Migration `0053` then restores the permanent Personal local-only constraint. If
+it finds a legacy Personal-owned cloud workspace, it stops without deleting or
 reassigning data; move that workspace to an Organization before retrying.
 
 `0025_cloud_workspace_engine_authority.sql` is deliberately marked
@@ -143,23 +147,61 @@ workspace row lockers are drained and blocked until that migration commits.
 
 For every environment that has not yet applied `0025`:
 
-1. stop API, reconciler, setup, and access-revocation processes that can mutate
-   cloud workspace tables; do not use a rolling old/new process overlap;
-2. take and verify a PostgreSQL backup and record the currently deployed commit
-   and migration ledger;
-3. set
-   `CONTROL_PLANE_MIGRATION_APPROVALS=0025_cloud_workspace_engine_authority.sql`
-   only on the one migration runner and apply the same reviewed commit that will
-   be deployed;
-4. verify `schema_migrations`, the authority-retirement triggers, queued provider
-   deletion for any already-deleted owner scope, and normal health checks;
-5. remove the one-time approval, deploy the matching processes, and monitor lock
-   waits, lifecycle/setup queues, access-revocation backlog, and provider drift.
+1. Set both `CLOUD_WORKSPACES_ENABLED=false` and
+   `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`. Do not put
+   `CONTROL_PLANE_MIGRATION_APPROVALS` on the Railway web service; production
+   boot ignores it even if it leaked from an earlier operation.
+2. Determine whether any pre-`0025` cloud state exists, including a quota,
+   workspace, generation, provider resource/orphan, lifecycle intent, endpoint
+   or client grant, setup record/material, engine instance, or generation
+   transition. The boot runner repeats this under system RLS context and fails
+   closed if it finds any row.
+3. Stop any older API, reconciler, setup, access-revocation, or other process
+   that can mutate cloud workspace tables. Take and verify a PostgreSQL backup;
+   record the deployed commit, full migration ledger, and runtime flags. Do not
+   use an old/new process overlap at the migration boundary.
+4. If the state check is empty, deploy the reviewed release with no approval on
+   the service. This is Alpha's safe `main` autodeploy path: boot applies only
+   the safe prefix, stops before `0025`, and serves the non-cloud API. Require
+   `/healthz` to return HTTP 200 with
+   `migrations.state=controlled_migration_pending` and the exact filename.
+   Every public/internal cloud route must return the non-cacheable
+   `503 controlled_migration_pending` response, while unrelated API smoke tests
+   pass. Confirm the canonical ledger has no row beyond `0024`.
+5. If any pre-boundary cloud state exists, the new web process intentionally
+   cannot enter that healthy-pending mode. Keep the environment drained and
+   proceed directly with the strict migrator from the reviewed production image.
+6. From a controlled database-owner shell in that exact image, run the compiled
+   one-off command with the approval scoped to that process only:
+
+   ```bash
+   NODE_ENV=production \
+   CONTROL_PLANE_MIGRATION_APPROVALS=0025_cloud_workspace_engine_authority.sql \
+   node dist/migrate.js
+   ```
+
+   (`pnpm --dir apps/control-plane migrate` is the source-checkout equivalent.)
+   The command serializes against every boot runner. Without the exact approval
+   it fails; it never skips `0025` to apply a suffix. Service boot cannot use
+   this approval to execute the migration.
+
+7. Verify that canonical `schema_migrations` now runs contiguously through the
+   release tip with non-null checksums, then inspect the authority-retirement
+   triggers and queued provider deletion for any already-deleted owner scope.
+8. Remove the one-time approval everywhere and restart/redeploy the same commit.
+   Require `/healthz` to omit the pending migration state and pass normal API
+   smoke tests.
+9. Enable cloud runtime, if planned, only in a separate deployment after its
+   live qualification. Monitor lock waits, lifecycle/setup queues,
+   access-revocation backlog, and provider drift.
 
 If the migration cannot obtain its boundary in the approved window, stop it and
 investigate the remaining workspace transaction. Do not bypass the marker or
 start a second migrator. PostgreSQL rolls an uncommitted migration back; service
 rollback must still use binaries compatible with the ledger actually observed.
+The migration client deliberately has no ordinary request statement timeout;
+operator cancellation or the deployment window is the boundary for this
+controlled lock wait.
 
 ## Current validation harness
 

@@ -33,7 +33,14 @@ import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import pg from "pg";
-import { runMigrations } from "./migrate.js";
+import { createApp } from "./app.js";
+import type { Config } from "./config.js";
+import {
+  migrationChecksum,
+  renamedMigrationAliasesFor,
+  runMigrations,
+  runServiceBootMigrations,
+} from "./migrate.js";
 
 const url = process.env.TEST_DATABASE_URL;
 const d = url ? describe : describe.skip;
@@ -254,6 +261,207 @@ d("migration ladder", () => {
     expect(await ledger()).toEqual(LADDER);
   });
 
+  it("serializes concurrent startup runners across the whole ladder", async () => {
+    const results = await Promise.all([
+      runMigrations(pool),
+      runMigrations(pool),
+    ]);
+    expect(results.map((ran) => ran.length).sort((a, b) => a - b)).toEqual([
+      0,
+      LADDER.length,
+    ]);
+    expect(await ledger()).toEqual(LADDER);
+  });
+
+  it("backfills checksums on an existing filename-only ledger", async () => {
+    await applyThrough(3);
+
+    await runMigrations(pool);
+
+    const checksums = await pool.query<{
+      name: string;
+      checksum: string | null;
+    }>("SELECT name, checksum FROM schema_migrations ORDER BY name");
+    expect(checksums.rows).toEqual(
+      LADDER.map((name) => ({
+        name,
+        checksum: migrationChecksum(
+          readFileSync(path.join(MIGRATIONS_DIR, name), "utf8"),
+        ),
+      })),
+    );
+  });
+
+  it("refuses an applied migration whose durable checksum changed", async () => {
+    await runMigrations(pool);
+    await pool.query(
+      `UPDATE schema_migrations
+       SET checksum = $2
+       WHERE name = $1`,
+      ["0001_init.sql", `sha256:${"0".repeat(64)}`],
+    );
+
+    await expect(runMigrations(pool)).rejects.toThrow(
+      /0001_init\.sql.*checksum mismatch/i,
+    );
+  });
+
+  it("leaves a controlled boundary and every suffix pending at safe service boot", async () => {
+    const boundary = "0025_cloud_workspace_engine_authority.sql";
+    const boundaryIndex = LADDER.indexOf(boundary);
+    expect(boundaryIndex).toBeGreaterThan(0);
+    await applyThrough(boundaryIndex);
+
+    const result = await runServiceBootMigrations(pool, {
+      cloudWorkspacesEnabled: false,
+      env: { NODE_ENV: "production" },
+    });
+
+    expect(result).toEqual({
+      ran: [],
+      status: {
+        state: "controlled_migration_pending",
+        migration: boundary,
+        dependentRuntime: "cloud_workspaces",
+      },
+    });
+    expect(await ledger()).toEqual(LADDER.slice(0, boundaryIndex));
+    expect(
+      (
+        await pool.query<{ relation: string | null }>(
+          "SELECT to_regclass('public.account_entitlements')::text AS relation",
+        )
+      ).rows[0]?.relation,
+    ).toBeNull();
+
+    const bootConfig: Config = {
+      databaseUrl: url!,
+      auth: {
+        provider: "auth0",
+        issuers: ["https://tenant.example.test/"],
+        jwksUrl: "https://tenant.example.test/.well-known/jwks.json",
+        audience: "https://api.example.test",
+      },
+      workos: null,
+      inviteLinkBase: "https://app.example.test/invite",
+      port: 8080,
+      isProduction: true,
+      deploymentChannel: "alpha",
+      github: null,
+      feedback: null,
+      cloudWorkspaces: null,
+    };
+    const app = createApp(
+      bootConfig,
+      pool,
+      { from: null, token: null, apiUrl: "", inviteLinkBase: "" },
+      { migrationStatus: result.status },
+    );
+    const health = await app.request("/healthz");
+    expect(health.status).toBe(200);
+    expect(await health.json()).toMatchObject({
+      ok: true,
+      migrations: {
+        state: "controlled_migration_pending",
+        migration: boundary,
+      },
+    });
+    const cloud = await app.request("/v1/devices");
+    expect(cloud.status).toBe(503);
+    expect(await cloud.json()).toMatchObject({
+      error: { code: "controlled_migration_pending", migration: boundary },
+    });
+    expect((await app.request("/v1/me")).status).toBe(401);
+
+    await expect(
+      runMigrations(pool, { env: { NODE_ENV: "production" } }),
+    ).rejects.toThrow(
+      /0025_cloud_workspace_engine_authority\.sql.*not approved/i,
+    );
+    expect(await ledger()).toEqual(LADDER.slice(0, boundaryIndex));
+  });
+
+  it("refuses deferred boot when any pre-boundary cloud resource exists", async () => {
+    const boundary = "0025_cloud_workspace_engine_authority.sql";
+    const boundaryIndex = LADDER.indexOf(boundary);
+    await applyThrough(boundaryIndex);
+    await pool.query(
+      `INSERT INTO cloud_workspace_provider_orphans (
+         provider, provider_resource_id
+       ) VALUES ('daytona', 'sandbox-left-from-an-earlier-release')`,
+    );
+
+    await expect(
+      runServiceBootMigrations(pool, {
+        cloudWorkspacesEnabled: false,
+        env: { NODE_ENV: "production" },
+      }),
+    ).rejects.toThrow(
+      /cannot defer.*0025_cloud_workspace_engine_authority\.sql.*cloud_workspace_provider_orphans/i,
+    );
+    expect(await ledger()).toEqual(LADDER.slice(0, boundaryIndex));
+  });
+
+  it("upgrades databases that recorded the a80ac25 0013-0018 filenames", async () => {
+    const authStart = LADDER.indexOf("0013_auth_lifecycle.sql");
+    expect(authStart).toBe(12);
+    await applyThrough(authStart);
+
+    const historicalPairs = [
+      [
+        "0020_cloud_workspace_setup_worker.sql",
+        "0013_cloud_workspace_setup_worker.sql",
+      ],
+      [
+        "0021_cloud_workspace_setup_authority.sql",
+        "0014_cloud_workspace_setup_authority.sql",
+      ],
+      [
+        "0022_cloud_workspace_setup_materials.sql",
+        "0015_cloud_workspace_setup_materials.sql",
+      ],
+      [
+        "0023_cloud_workspace_generation_transitions.sql",
+        "0016_cloud_workspace_generation_transitions.sql",
+      ],
+      [
+        "0024_cloud_workspace_client_access.sql",
+        "0017_cloud_workspace_client_access.sql",
+      ],
+      [
+        "0025_cloud_workspace_engine_authority.sql",
+        "0018_cloud_workspace_engine_authority.sql",
+      ],
+    ] as const;
+    for (const [currentFile, historicalFile] of historicalPairs) {
+      expect(renamedMigrationAliasesFor(currentFile)).toContain(historicalFile);
+      const sql = readFileSync(path.join(MIGRATIONS_DIR, currentFile), "utf8");
+      await pool.query("BEGIN");
+      try {
+        await pool.query(sql);
+        await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
+          historicalFile,
+        ]);
+        await pool.query("COMMIT");
+      } catch (error) {
+        await pool.query("ROLLBACK");
+        throw error;
+      }
+    }
+
+    const ran = await runMigrations(pool);
+    const alreadyAppliedCurrentNames = new Set<string>(
+      historicalPairs.map(([currentFile]) => currentFile),
+    );
+    expect(ran).toEqual(
+      LADDER.slice(authStart).filter(
+        (file) => !alreadyAppliedCurrentNames.has(file),
+      ),
+    );
+    const recorded = await ledger();
+    for (const file of LADDER) expect(recorded).toContain(file);
+  });
+
   it("upgrades databases that recorded the pre-merge cloud migration filenames", async () => {
     const firstMainCollision = LADDER.indexOf("0018_deletion_lifecycle.sql");
     expect(firstMainCollision).toBeGreaterThan(0);
@@ -279,14 +487,14 @@ d("migration ladder", () => {
     });
     expect(renamedCloudMigrations).toHaveLength(33);
     for (const currentFile of renamedCloudMigrations) {
-      const currentSequence = Number(currentFile.slice(0, 4));
-      const legacyFile = `${String(currentSequence - 2).padStart(4, "0")}${currentFile.slice(4)}`;
+      const legacyFile = renamedMigrationAliasesFor(currentFile).at(-1);
+      expect(legacyFile, currentFile).toBeDefined();
       const sql = readFileSync(path.join(MIGRATIONS_DIR, currentFile), "utf8");
       await pool.query("BEGIN");
       try {
         await pool.query(sql);
         await pool.query("INSERT INTO schema_migrations (name) VALUES ($1)", [
-          legacyFile,
+          legacyFile!,
         ]);
         await pool.query("COMMIT");
       } catch (error) {

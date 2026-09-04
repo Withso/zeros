@@ -150,8 +150,10 @@ For the clean-slate identity cutover, prefer provisioning a fresh database and
 running all migrations. An Alpha/Beta in-place reset must use the guarded
 `pnpm --dir apps/control-plane reset:database` procedure in the control-plane
 README. It is dry-run by default, requires a backup confirmation plus an exact
-target fingerprint, and refuses Production; Production always receives a fresh
-database service.
+target fingerprint, uses the strict migration runner, and currently requires
+the comma-separated `0009_organization_team_hierarchy.sql` and
+`0025_cloud_workspace_engine_authority.sql` migration approvals. It refuses
+Production; Production always receives a fresh database service.
 
 ### WorkOS application callbacks
 
@@ -429,6 +431,30 @@ For Production:
 
 Do not use Railway image rollback after `0009`: the old image expects the old
 schema. Restore the database backup or roll forward with corrected new code.
+
+## One-time cloud authority migration `0025`
+
+Alpha tracks `main`, so an unapproved controlled migration must not turn its
+automatic deploy into a restart loop. The service-boot runner may stop before
+`0025_cloud_workspace_engine_authority.sql` only while both cloud runtime flags
+are false, every pre-boundary cloud state table is empty, and no later migration
+is recorded. Railway then receives a healthy HTTP response whose `/healthz`
+body contains `migrations.state=controlled_migration_pending`; every cloud API
+returns `503 controlled_migration_pending`, unrelated APIs remain available,
+and no migration after `0024` is recorded or applied. Existing cloud state or
+an enabled cloud flag makes startup fail closed instead.
+
+That state is a maintenance signal, not approval and not cloud readiness.
+Production service boot never honors `CONTROL_PLANE_MIGRATION_APPROVALS` and
+never executes a controlled boundary; in particular, unapproved `0009` remains
+a startup failure because it changes core schema. Drain old processes, take a
+verified backup, record the commit and checksummed ledger, and run
+`node dist/migrate.js` inside that exact production image with
+`NODE_ENV=production` and the exact one-process approval for `0025`. Never put
+the approval on the web service. Remove it, restart the same commit, and require
+the pending state to disappear before enabling either cloud flag. The complete
+empty-state and existing-state sequences are in
+[`cloud-workspace/infrastructure-and-operations.md`](cloud-workspace/infrastructure-and-operations.md#controlled-migration-rollout).
 
 ## Normal promotion after the one-time migration
 
