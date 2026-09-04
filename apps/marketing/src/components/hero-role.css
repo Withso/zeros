@@ -71,11 +71,12 @@
 }
 
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol {
+  display: flex;
+  align-items: flex-end;
+  height: min(50px, 1em);
   font-size: min(60px, 1em);
   line-height: 1;
   margin: 0 2px 0 0;
-  text-box-trim: trim-end;
-  text-box-edge: alphabetic;
 }
 
 .hero-role-word.scramble-developers.is-scrambling .hero-scramble-symbol:last-child {
