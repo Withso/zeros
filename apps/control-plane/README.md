@@ -138,7 +138,7 @@ disabled (`CLOUD_WORKSPACES_ENABLED=false` and
 table is empty, and no later migration is recorded. A leaked or standing
 `CONTROL_PLANE_MIGRATION_APPROVALS` value does not change that decision. Boot
 neither records `0025` nor applies any suffix; only a completed strict operator
-run can advance the ledger. The current `0025`–`0054` cloud-only suffix is
+run can advance the ledger. The current `0025`–`0058` cloud-only suffix is
 classified explicitly; appending any migration makes this pause fail closed
 until its runtime dependency is reviewed. `/healthz` remains HTTP 200 for
 Railway but exposes the incomplete schema explicitly:
@@ -403,16 +403,21 @@ all required at boot. Each approved Organization additionally needs a quota row
 and a durable object-storage limit row created through their respective owner
 commands; neither has a permissive default.
 
+The Phase 5 surface is single-owner even when the Organization has other
+members. Organization membership or administration alone does not authorize a
+member to list, connect to, prompt, copy, synchronize, or manage the owner's
+workspace. Those collaborative permissions belong to Phase 6A.
+
 The authenticated Organization surface is:
 
-| Route                                                   | Purpose                                                     |
-| ------------------------------------------------------- | ----------------------------------------------------------- |
-| `GET/POST /v1/organizations/:id/cloud-workspaces`       | List authorized workspaces or request an idempotent create  |
-| `GET /v1/organizations/:id/cloud-workspaces/:workspace` | Read one team-authorized workspace                          |
-| `POST .../:workspace/stop`                              | Request a durable stop intent                               |
-| `POST .../:workspace/wake`                              | Request wake after rechecking current eligibility and quota |
-| `POST .../:workspace/archive`                           | Request stop-plus-archive reconciliation                    |
-| `DELETE .../:workspace`                                 | Revoke endpoint grants, then request verified deletion      |
+| Route                                                   | Purpose                                                          |
+| ------------------------------------------------------- | ---------------------------------------------------------------- |
+| `GET/POST /v1/organizations/:id/cloud-workspaces`       | List owner-authorized workspaces or request an idempotent create |
+| `GET /v1/organizations/:id/cloud-workspaces/:workspace` | Read one owner-authorized workspace                              |
+| `POST .../:workspace/stop`                              | Request a durable stop intent                                    |
+| `POST .../:workspace/wake`                              | Request wake after rechecking current eligibility and quota      |
+| `POST .../:workspace/archive`                           | Request stop-plus-archive reconciliation                         |
+| `DELETE .../:workspace`                                 | Revoke endpoint grants, then request verified deletion           |
 
 Mutating requests require an `Idempotency-Key`; replaying the same key and
 semantic request returns the original workspace/intent, while reusing it for
@@ -514,8 +519,17 @@ Generate a target-bound read-only plan, copy its approval value into
 `CONTROL_PLANE_CLOUD_OBJECT_STORAGE_APPROVAL`, then execute the same request:
 
 ```sh
+# Source checkout
 pnpm --dir apps/control-plane cloud-object-storage:manage
+
+# Production image (/app)
+node dist/manage-cloud-workspace-object-storage.js
+
+# Source checkout
 pnpm --dir apps/control-plane cloud-object-storage:manage --execute
+
+# Production image (/app)
+node dist/manage-cloud-workspace-object-storage.js --execute
 ```
 
 Production execution additionally requires

@@ -16,6 +16,10 @@ const DIST_QUOTA_MANAGER = path.join(
   PACKAGE_ROOT,
   "dist/manage-cloud-workspace-quota.js",
 );
+const DIST_OBJECT_STORAGE_MANAGER = path.join(
+  PACKAGE_ROOT,
+  "dist/manage-cloud-workspace-object-storage.js",
+);
 const LADDER = readdirSync(MIGRATIONS_DIR)
   .filter((file) => /^\d{4}_.+\.sql$/.test(file))
   .sort();
@@ -39,6 +43,19 @@ it("runs the compiled quota manager as the documented production entrypoint", ()
   expect(result.status).toBe(1);
   expect(result.stderr).toContain(
     "[cloud-quota] failed: DATABASE_URL is required",
+  );
+});
+
+it("runs the compiled object-storage manager as the documented production entrypoint", () => {
+  const result = spawnSync(process.execPath, [DIST_OBJECT_STORAGE_MANAGER], {
+    cwd: PACKAGE_ROOT,
+    encoding: "utf8",
+    env: { ...process.env, DATABASE_URL: "" },
+  });
+
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain(
+    "[cloud-object-storage] failed: DATABASE_URL is required",
   );
 });
 

@@ -278,7 +278,7 @@ RLS only through a narrowly privileged fixed-search-path function, so a normal
 user-context self-leave cannot retain a provider bearer.
 WorkOS identity, account lifecycle, and notification migrations own `0011`
 through `0019`; cloud workspace additions resume at `0020` and continue
-forward through `0054`. The migration runner explicitly recognizes the
+forward through `0058`. The migration runner explicitly recognizes the
 `a80ac25` `0013`–`0018` and `c2b7418` `0018`–`0050` histories as aliases for
 their canonical `0020`–`0052` equivalents. `0053` repairs the Personal
 local-only constraint for those databases.

@@ -3,7 +3,7 @@
 This document defines the product and engineering contract for creating a
 Zeros workspace locally or in cloud, making integrity-checked copies between
 those placements, and keeping private device replicas. Migrations `0026`
-through `0053` and the desktop engine services implement the non-UI
+through `0058` and the desktop engine services implement the non-UI
 foundation. End-user wiring and protected live qualification remain separate
 release work.
 
@@ -26,10 +26,10 @@ workspaces are permanently device-local.
 
 This separation produces three valid creation combinations:
 
-| Tenant       | Runs on this Mac                                         | Runs in cloud                                        |
-| ------------ | -------------------------------------------------------- | ---------------------------------------------------- |
-| Personal     | Private local workspace                                  | Not supported                                        |
-| Organization | Organization-governed but device-private local workspace | Shared cloud workspace when collaboration is enabled |
+| Tenant       | Runs on this Mac                                         | Runs in cloud                                                             |
+| ------------ | -------------------------------------------------------- | ------------------------------------------------------------------------- |
+| Personal     | Private local workspace                                  | Not supported                                                             |
+| Organization | Organization-governed but device-private local workspace | Single-owner cloud workspace in Phase 5; member collaboration is Phase 6A |
 
 ## Sources of truth
 
@@ -68,7 +68,7 @@ The workspace-details actions use verbs that state their consequence:
   source.
 - **Create local copy** forks a new private local workspace and retains the
   cloud source.
-- **Sync to this Mac** creates or resumes this member's receive-only local
+- **Sync to this Mac** creates or resumes the owner's receive-only local
   replica; cloud remains authoritative.
 - **Pause sync on this Mac** affects only that replica and leaves its files on
   disk.
@@ -102,9 +102,11 @@ workspace, not a way to make one Mac authoritative for the cloud source.
   process state. If Organization policy requires a minimal placement audit
   registration, disclose that before creation and store only identity/policy
   metadata.
-- An Organization cloud workspace is the only initial multiplayer execution
-  mode. Every member sees the same cloud engine state according to role.
-- Forking a shared Organization cloud workspace to one Mac does not suspend or
+- A Phase 5 Organization cloud workspace is single-owner: Organization
+  membership alone does not grant runtime, replica, access, export, or
+  lifecycle authority. Member collaboration and role-based workspace access
+  are deferred to Phase 6A.
+- Forking an Organization cloud workspace to one Mac does not suspend or
   modify the source. The destination is a new local workspace in Personal or an
   authorized Organization, subject to export and destination-creation policy.
 - A local Organization copy remains Organization-owned. Its new source, chats,
@@ -288,7 +290,7 @@ The first production sync mode is **cloud-to-device, receive-only, safe**:
    pauses that path, and offers **Save as patch/copy** or **Replace from cloud**.
 7. Generated or ignored local artifacts may be changed by local commands and
    are never uploaded.
-8. Pausing one replica revokes only that replica's live grant. Other members,
+8. Pausing one replica revokes only that replica's live grant. The owner's other
    devices, cloud agents, terminals, previews, and replicas continue normally.
 
 The deferred UI may offer a Local terminal only when that device has an
@@ -366,16 +368,17 @@ This is a copy, not an authority handoff:
    path, type, size, Git identity, and snapshot digest, then atomically
    materializes the new local workspace and imports selected portable records.
 6. Replay resumes from durable local job state. Any partial target is preserved
-   for diagnosis or removed by an explicit cleanup; the cloud source and its
-   collaborators are unaffected.
+   for diagnosis or removed by an explicit cleanup; the cloud source and the
+   owner's other sessions and devices are unaffected.
 
 The cloud owner may later archive or delete the source through its normal
 lifecycle controls. That decision is not part of the copy transaction.
 
-## Multiplayer replica behavior
+## Deferred Phase 6A multiplayer replica behavior
 
-For an Organization cloud workspace, the cloud engine remains authoritative
-for every member:
+The following is a Phase 6A design contract, not current Phase 5 behavior. Once
+Organization-member collaboration is implemented, the cloud engine remains
+authoritative for every admitted member:
 
 ```text
                          cloud engine
@@ -437,7 +440,7 @@ own local engine/Design API and does not share the cloud workspace identity.
 ## Durable data model
 
 The main implemented relations are below. Exact SQL names in migrations
-`0026`–`0057` are compatibility contracts.
+`0026`–`0058` are compatibility contracts.
 
 | Relation                                                          | Purpose and important constraints                                                                                                                                            |
 | ----------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

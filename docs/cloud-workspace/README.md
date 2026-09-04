@@ -24,16 +24,17 @@ foundations through Phase 5 are implemented behind release gates:
   filesystem adapter is hardened for a private mounted Railway volume.
 - Local-to-cloud and cloud-to-local are immutable copy/fork workflows. The
   destination always receives a new workspace UUID and the source remains
-  unchanged. A per-user/per-device receive-only replica may mirror a cloud
-  workspace, but never becomes cloud authority or uploads local edits.
+  unchanged. An owner/device receive-only replica may mirror a cloud workspace
+  in Phase 5, but never becomes cloud authority or uploads local edits.
 - Electron main owns exact-execution remote connection leases, short-lived SSH,
   authenticated previews, and `127.0.0.1` forwards. Raw provider capabilities
   do not enter renderer state.
 
-`CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` must remain `false` until the exact
-Daytona image, lifecycle/rollback/delete paths, root-coordinator exception, and
-signed macOS SSH/preview/tunnel flow have passed their protected qualification.
-Repository tests are not substitutes for that evidence.
+`CLOUD_WORKSPACES_ENABLED` and `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` must
+remain `false` until the exact Daytona image, lifecycle/rollback/delete paths,
+root-coordinator exception, and signed macOS SSH/preview/tunnel flow have passed
+their protected qualification. Repository tests are not substitutes for that
+evidence.
 
 End-user cloud creation/catalog/details UI is deliberately not wired yet.
 Organization multiplayer, presence, ownership transfer execution, mobile apps,

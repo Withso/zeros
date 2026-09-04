@@ -128,6 +128,10 @@ Durable object-storage limits are a second, independent owner-managed boundary.
 Provision or change them with
 `pnpm --dir apps/control-plane cloud-object-storage:manage`, using the same
 read-only-plan/exact-approval pattern and active platform-owner attribution.
+Inside the production image use the supported
+`node dist/manage-cloud-workspace-object-storage.js` entrypoint. Append
+`--execute` only after copying the exact target-bound approval from the
+read-only plan.
 The Organization byte limit covers physical tenant blobs plus copy-on-write
 rotation reservations; the workspace byte limit covers logical unique blob
 reservations and cannot exceed the Organization byte limit. The command

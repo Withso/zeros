@@ -44,13 +44,15 @@ chat, paths, and processes remain private to its device. See
 
 ## Initial product scope
 
-The target product permits Organization-owned cloud workspaces only. Personal
-is permanently device-local and cannot own a `cloud_workspaces` row; migrations
-`0018_deletion_lifecycle.sql` and
+The Phase 0–5 product permits single-owner Organization cloud workspaces only.
+Personal is permanently device-local and cannot own a `cloud_workspaces` row;
+migrations `0018_deletion_lifecycle.sql` and
 `0053_cloud_workspace_personal_organization_invariant.sql`, together with the
-authorization layer, enforce that boundary. Organization capability metadata is necessary but never replaces
-server-side membership, role, plan, quota, repository, provider-connection, and
-policy authorization.
+authorization layer, enforce that boundary. Organization capability metadata is
+necessary but never replaces server-side membership, role, plan, quota,
+repository, provider-connection, and policy authorization. Organization
+membership does not grant access to another member's cloud workspace;
+collaboration is deferred to Phase 6A.
 
 For Organization paid admission, Pro Organizations are limited to five
 collaborators and require every collaborator to have Pro; Business/Enterprise
@@ -96,6 +98,6 @@ guess around a version mismatch.
   transparent migration between providers.
 - A cloud-to-Mac replica is not an automatic bidirectional merge and is not a
   second place to commit Git history.
-- A local fork of a shared cloud workspace is a private, independently
+- A local fork of an Organization cloud workspace is a private, independently
   identified workspace. It never removes, relocates, or takes authority from
-  the shared cloud source.
+  the Organization cloud source.

@@ -23,8 +23,9 @@ Local-to-cloud and cloud-to-local are immutable copy/fork operations:
   source of truth remains cloud.
 
 The repository foundations through Phase 5 are implemented. Production release
-remains blocked on the external qualifications listed below, and
-CLOUD_WORKSPACE_SETUP_WORKER_ENABLED must remain false until they pass.
+remains blocked on the external qualifications listed below, and both
+`CLOUD_WORKSPACES_ENABLED` and `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED` must
+remain false until they pass.
 
 ## Phase 0 — Contract and qualification foundation
 
@@ -54,7 +55,7 @@ External exit evidence:
 ## Phase 1 — Identity, authorization, settings, and paid authority
 
 Repository status: implemented by forward migrations 0026–0027, 0041–0047,
-and 0053–0056, plus their control-plane services and tests.
+and 0053–0058, plus their control-plane services and tests.
 
 - WorkOS is the identity and Organization-membership source. Zeros maps WorkOS
   identities to canonical database UUIDs and remains authoritative for Team,

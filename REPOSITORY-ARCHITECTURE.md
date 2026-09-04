@@ -208,13 +208,15 @@ does not live in the coding workbench folder.
 
 ## Cloud workspaces and future clients
 
-Cloud workspaces are not a shipping product in this snapshot. The control plane
-now contains a gated pre-production registry, lifecycle/setup orchestration, and
-SSH/preview/tunnel access boundary. Electron main contains the corresponding
-native access client, credential broker, frame-scoped preview admission, and
-SSH process/configuration owner; renderer platform code exposes only narrow
-bearer-free receipts. The engine bridge selection, workspace management UI,
-durable record, placement moves, and replicas remain future work.
+Cloud workspaces are not a shipping product in this snapshot. The gated,
+disabled-by-default non-UI foundation now includes the control-plane registry,
+lifecycle/setup orchestration, durable record, encrypted object storage,
+integrity-checked local/cloud forks, and owner-only device replicas. The desktop
+engine and Electron main contain the corresponding remote transport, native
+access client, credential broker, frame-scoped preview admission, SSH owner,
+fork, and replica boundaries; renderer platform code exposes only narrow
+bearer-free receipts. Workspace management UI and Organization-member
+collaboration remain future work, with the latter owned by Phase 6A.
 
 The provider qualification harness remains isolated in
 `scripts/cloud-workspace-validation/`; it is not imported by an app or included
@@ -227,8 +229,8 @@ research pack is not authoritative. `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED`
 remains false until the exact image, root exception, lifecycle/rollback, access,
 and provider-edge qualification gates are satisfied.
 
-When the product is implemented, use existing boundaries before creating new
-ones:
+As the product is wired into end-user surfaces, use existing boundaries before
+creating new ones:
 
 - External workspace-control APIs belong in `apps/control-plane`.
 - A browser management surface can grow in `apps/web` while it shares that
