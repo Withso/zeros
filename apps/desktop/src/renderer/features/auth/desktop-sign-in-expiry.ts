@@ -6,6 +6,14 @@ export function desktopSignInSecondsRemaining(
   return Math.max(0, Math.ceil((expiresAt - now) / 1_000));
 }
 
+export function desktopSignInDeadlineReached(
+  expiresAt: number,
+  now = Date.now(),
+): boolean {
+  if (!Number.isFinite(expiresAt) || !Number.isFinite(now)) return true;
+  return now >= expiresAt;
+}
+
 export function desktopSignInExpiryLabel(secondsRemaining: number): string {
   const bounded = Number.isFinite(secondsRemaining)
     ? Math.max(0, Math.floor(secondsRemaining))
