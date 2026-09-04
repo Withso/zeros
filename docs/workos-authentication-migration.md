@@ -138,18 +138,81 @@ its provider memberships, revokes sessions/grants, emits durable security
 events, and queues a bounded notification email. Product rows continue to use
 the unchanged Zeros UUID.
 
-If someone later signs in with a newly created WorkOS User that has the same
-email, Zeros does **not** relink it. A recent provider authentication creates a
-24-hour recovery request and displays only its public `ZR-…` locator. An exact
-`platform_owner` must reauthenticate with WorkOS within five minutes, verify the
-evidence out of band, and approve the exact request. Developers have no standing
+A customer-requested final purge uses a separate provider-erasure protocol.
+After the grace period, the lifecycle worker acquires the same stable-target
+session lock used by WorkOS commands and event ingress, drains every command it
+can associate by local UUID, provider subject, session, or current email, and
+then appends one `purge.provider_erasure_fenced` lifecycle event per erased
+WorkOS User or Organization identifier before requesting provider deletion.
+Each fence contains only a domain-separated SHA-256 digest of the
+provider-issued opaque identifier; it never stores the raw identifier or an
+email digest. Migration `0061` projects that evidence into an exact-key,
+append-only fence and records whether every historical purge was reconciled.
+The digest is pseudonymous and can still link repeated appearances of the same
+opaque provider subject, so access is limited to the system role and database
+owner. Retain fences and reconciliation evidence indefinitely: they are the
+minimum denial record that prevents a delayed token, callback, or event from
+recreating an erased subject. They must be included in backup and restore
+validation and must not be exported as ordinary customer data.
+
+Webhook and Events API ingestion resolve all currently linked targets before
+taking those same sorted locks, then recheck the durable digest fence before
+persisting any raw payload. A matching late event is acknowledged with only a
+redacted deduplication row (`data={}`, no object, User, or Organization ID) and
+cannot recreate an identity event, session, or membership projection. Final
+account erasure also removes provider-event rows for the captured subjects or
+current email and session tombstones for either the local account or captured
+subjects. Organization-owned invitation records and their audit history remain
+Organization data even when the recipient later deletes a Zeros account; they
+are removed by the Organization's deletion/retention policy, not silently by
+account erasure.
+
+After applying `0061`, a database owner must inspect historical readiness from
+a controlled shell before accepting new subjects:
+
+```sh
+# Source checkout
+pnpm --dir apps/control-plane workos-erasure:manage --status
+
+# Production image (/app)
+node dist/manage-workos-provider-erasure.js --status
+```
+
+For each unresolved deletion request, use retained provider-side audit evidence
+to identify either every exact erased WorkOS User/Organization ID or that no
+WorkOS subject existed. Set the exact deployment channel, deletion-request UUID,
+an active `platform_owner` actor UUID, `fenced` or `no_workos_subject`
+disposition, the bounded subject JSON, and a non-sensitive incident/evidence
+reference in the corresponding `CONTROL_PLANE_WORKOS_ERASURE_*` variables. Run
+the command without `--execute`, copy its target-bound approval, and rerun the
+unchanged request with `CONTROL_PLANE_WORKOS_ERASURE_APPROVAL` plus `--execute`.
+Production also requires
+`CONTROL_PLANE_WORKOS_ERASURE_PRODUCTION_CONFIRMED=true`. The command refuses
+the application role, hashes raw provider IDs before persistence, takes the same
+stable subject locks as runtime ingress, and appends evidence atomically. Do not
+save these one-shot variables on the web service or place raw IDs in the
+evidence reference. If evidence cannot establish a disposition, leave the
+request unresolved: unknown-subject login and ingestion must remain retryably
+unavailable rather than guessing.
+
+Before a customer-requested final purge, someone signing in with a newly
+created WorkOS User that has the same email is **not** relinked automatically.
+A recent provider authentication creates a 24-hour recovery request and
+displays only its public `ZR-…` locator. An exact `platform_owner` must
+reauthenticate with WorkOS within five minutes, verify the evidence out of
+band, and approve the exact request. Developers have no standing
 account-recovery authority. The historical `support_admin` enum value remains
 readable only for already-persisted compatibility data and cannot be newly
-granted. Approval supersedes the deleted identity,
-binds the new subject to the original UUID, increments the account revision,
-audits the operation, and sends a notification. It does not silently restore
-collaborative memberships; those must be re-provisioned by the organization or
-enterprise directory.
+granted. Approval supersedes the deleted identity, binds the new subject to the
+original UUID, increments the account revision, audits the operation, and
+sends a notification. It does not silently restore collaborative memberships;
+those must be re-provisioned by the organization or enterprise directory.
+
+After final Zeros account purge, there is no retained account to recover: its
+email is anonymized and its provider mapping is erased. A genuinely new WorkOS
+User with the same email is therefore a fresh signup once all historical purge
+evidence is reconciled. The exact old WorkOS subject remains fenced and can
+never sign up again, even if a stale token or provider replay presents it.
 
 During the declared Auth0-to-WorkOS cutover, an active account whose eligible
 sign-in identity is still an active Auth0 mapping uses the same reviewed
@@ -177,9 +240,11 @@ does not reset the server-side account.
 Do not delete WorkOS Users as setup for ordinary signup tests. Deleting only
 the provider User leaves the durable Zeros account and compatibility Personal
 records in place. It also does not reset the device-local Personal collection.
-Signing in or signing up again with that same email creates a new provider
-identity and must enter reviewed recovery, not a new empty account. Neither
-choice of AuthKit entry screen bypasses this ownership boundary.
+Before final Zeros purge, signing in or signing up again with that same email
+creates a new provider identity and must enter reviewed recovery, not a new
+empty account. After a separately requested and completed final purge, a new
+provider subject follows the fresh-signup rule above. Neither choice of AuthKit
+entry screen bypasses these boundaries.
 
 Test provider deletion separately, using a disposable account with both clients
 open. Expect access revocation, followed by a recovery-required state on a new
@@ -680,6 +745,9 @@ Manual Alpha acceptance must verify:
 - user profile update/deletion, session revocation, organization/member/invite
   webhook idempotency, reordering, lost-response recovery, and Events API
   repair;
+- account and Organization purge racing event ingress, plus delayed User,
+  session, membership, invitation, and Organization events after final
+  erasure, proving that only redacted deduplication evidence survives;
 - one and only one native WorkOS invitation email, proving there is no Zepto
   duplicate and `invitation_token` accepts through exact server-side
   correlation, strict state/PKCE on web, and the exact release-channel deep

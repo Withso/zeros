@@ -722,6 +722,7 @@ describe("repository layout contracts", () => {
       "implementation-roadmap.md",
       "infrastructure-and-operations.md",
       "product-contract.md",
+      "root-coordinator-threat-model.md",
       "security.md",
     ];
 
