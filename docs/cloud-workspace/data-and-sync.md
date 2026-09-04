@@ -585,8 +585,10 @@ flow, and it never uploads local source changes.
 - A device is lost: revoke the device and its grants, make that device's replica
   identity terminal, and disclose that already-downloaded bytes cannot be
   recalled.
-- A workspace is deleted while a replica is offline: deletion tombstone outranks
-  late events; the returning device becomes `Detached`, never authoritative.
+- A workspace is deleted while a replica is offline: the deletion tombstone
+  outranks late events; the original server replica binding is terminal and
+  cannot resume or become authoritative. Any retained on-disk bytes are only a
+  `Detached` local copy, not a live replica.
 - Ownership transfers across provider accounts are Phase 6A work: checkpoint
   and reprovision; changing an owner column alone is forbidden.
 - A fork request times out: replay the same idempotency key and source snapshot.
@@ -609,7 +611,9 @@ end-to-end tests cover:
 - cloud-to-local fork while the source remains active, with degraded
   durability, device/grant replay, and ownership/policy restrictions;
 - one member syncing separate trusted devices, independent
-  pause/remove/reconnect, device revocation, and offline deletion tombstones;
+  pause/remove/reconnect, device revocation, and offline deletion tombstones,
+  proving a deleted workspace's replica binding cannot resume or become
+  authoritative while retained bytes remain only a `Detached` local copy;
 - local divergence preservation and explicit replace/export resolution;
 - exact-revision Design writes followed by local replica convergence;
 - SSH expiry/revocation, Cursor/terminal launch, localhost-only port forwarding,

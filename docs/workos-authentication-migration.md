@@ -757,8 +757,8 @@ Manual Alpha acceptance must verify:
   erasure, proving that rejected late events create only redacted deduplication
   rows while provider-erasure fences and reconciliation evidence remain under
   their indefinite retention contract, and Organization-owned invitation/audit
-  records survive account erasure under the Organization's own retention
-  policy;
+  records survive account erasure while an Organization purge removes them
+  under the Organization's own deletion/retention policy;
 - one and only one native WorkOS invitation email, proving there is no Zepto
   duplicate and `invitation_token` accepts through exact server-side
   correlation, strict state/PKCE on web, and the exact release-channel deep
