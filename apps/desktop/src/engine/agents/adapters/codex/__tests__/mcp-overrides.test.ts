@@ -16,6 +16,24 @@ describe("buildMcpServerOverrides — Codex -c MCP config", () => {
     expect(args.join(" ")).not.toContain(".type=");
   });
 
+  it("references secret HTTP headers by environment name without placing their value in argv", () => {
+    const args = buildMcpServerOverrides([
+      {
+        name: "draft_api",
+        transport: "http",
+        url: "http://127.0.0.1:43123/mcp",
+        headersFromEnv: { Authorization: "ZEROS_DESIGN_AGENT_CAPABILITY" },
+      },
+    ]);
+    expect(args).toEqual([
+      "-c",
+      'mcp_servers.draft_api.url="http://127.0.0.1:43123/mcp"',
+      "-c",
+      'mcp_servers.draft_api.env_http_headers={ "Authorization" = "ZEROS_DESIGN_AGENT_CAPABILITY" }',
+    ]);
+    expect(args.join(" ")).not.toContain("Bearer");
+  });
+
   it("emits command/args/env for a stdio server", () => {
     const args = buildMcpServerOverrides([
       { name: "ctx7", transport: "stdio", command: "npx", args: ["-y", "@upstash/context7-mcp"], env: { DEBUG: "1" }, startupTimeoutSec: 120 },

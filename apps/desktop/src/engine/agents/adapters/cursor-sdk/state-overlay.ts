@@ -254,12 +254,10 @@ async function withPromotionLock<T>(
 
 /** The durable per-workspace store itself, ready to be written directly.
  *
- * This is the host-parity path for local and cloud: no per-execution overlay, no merge
- * baseline, no crash-recovery hold — because there is nothing transient to
- * reconcile. It restores the pre-ZSR arrangement, where every session in a
- * workspace shared one on-disk agent store, and it keeps the location Zeros has
- * been using so existing chats resume against their own history instead of
- * starting from an empty store.
+ * This is the host-parity path for local and cloud: no per-execution overlay,
+ * merge baseline, or crash-recovery hold, because there is nothing transient
+ * to reconcile. Every session in a workspace shares this on-disk agent store,
+ * and its existing location keeps prior chats attached to their history.
  * The overlay code below is legacy crash-recovery compatibility and is not
  * used to create new session state. */
 export async function durableCursorStateRoot(cwd: string): Promise<string> {
@@ -532,8 +530,8 @@ async function readCursorRecoveryKey(markerPath: string): Promise<string> {
 }
 
 /** Reconcile Cursor JSONL state left by a hard engine crash. The caller must
- * first prove host process domains and external VM mounts retired. Malformed or
- * unreadable state is retained as a GC hold for a later retry. */
+ * first prove every process domain that could still write it has retired.
+ * Malformed or unreadable state remains a GC hold for a later retry. */
 export async function recoverCursorStateOverlays(options: {
   readonly sessionsRoot: string;
 }): Promise<CursorStateRecoveryResult> {

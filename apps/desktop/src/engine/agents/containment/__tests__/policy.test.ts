@@ -193,6 +193,74 @@ describe("ZSR host-parity policy builder", () => {
     }
   });
 
+  it("admits engine context for reads while subtracting its write authority", async () => {
+    const workspace = path.join(temporaryRoot, "context-workspace");
+    const context = path.join(temporaryRoot, "engine", "context", "design");
+    await Promise.all(
+      [workspace, context].map((directory) =>
+        mkdir(directory, { recursive: true }),
+      ),
+    );
+
+    const prepared = await prepare({
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      additionalReadOnlyRoots: [context],
+    });
+
+    expect(prepared.document.filesystem.allowRead).toContain(context);
+    expect(prepared.document.filesystem.denyWrite).toContain(context);
+    expect(prepared.document.filesystem.allowWrite).not.toContain(context);
+  });
+
+  it("retains a permitted future read-only root without requiring it to exist yet", async () => {
+    const workspace = path.join(temporaryRoot, "future-context-workspace");
+    const futureContext = path.join(temporaryRoot, "future-context");
+    await mkdir(workspace, { recursive: true });
+    await expect(stat(futureContext)).rejects.toMatchObject({ code: "ENOENT" });
+
+    const prepared = await prepare({
+      actor: "agent-code",
+      cwd: workspace,
+      workspaceRoot: workspace,
+      additionalReadOnlyRoots: [futureContext],
+    });
+
+    expect(prepared.document.filesystem.allowRead).toContain(futureContext);
+    expect(prepared.document.filesystem.denyWrite).toContain(futureContext);
+    await expect(stat(futureContext)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it.runIf(process.platform === "linux")(
+    "allocates private Podman state only for the qualified cloud worker",
+    async () => {
+      const workspace = path.join(temporaryRoot, "cloud-container-workspace");
+      await mkdir(workspace, { recursive: true });
+
+      const prepared = await prepare(
+        {
+          actor: "agent-code",
+          cwd: workspace,
+          workspaceRoot: workspace,
+        },
+        {
+          cloudWorker: { uid: 10_001, gid: 10_001 },
+          cloudContainerWorker: true,
+        },
+      );
+
+      const state = prepared.paths.containerState;
+      expect(state).toBeDefined();
+      expect((await stat(state!)).isDirectory()).toBe(true);
+      expect(prepared.document.filesystem.allowRead).toContain(state);
+      expect(prepared.document.filesystem.allowWrite).toContain(state);
+      expect(prepared.document.runtime.allowedUnixSockets).toContain(
+        path.join(state!, "podman.sock"),
+      );
+    },
+  );
+
   it("pre-denies future managed siblings while reopening the current workspace", async () => {
     const managed = path.join(temporaryRoot, "workspaces");
     const workspace = path.join(managed, "repo", "Shocking");
@@ -334,7 +402,7 @@ describe("ZSR host-parity policy builder", () => {
     ).resolves.toBeDefined();
   });
 
-  it("makes Design authority app-wide and exactly inverse to code authority", async () => {
+  it("gives Design agents API-only mutation authority", async () => {
     const workspace = path.join(temporaryRoot, "workspace");
     const design = path.join(workspace, "Zeros Design");
     const siblingWorkspace = path.join(temporaryRoot, "sibling-workspace");
@@ -363,26 +431,34 @@ describe("ZSR host-parity policy builder", () => {
       { localHostParityWriteIslands: [git] },
     );
     expect(designPolicy.document.filesystem.allowWrite).toEqual(
+      [designPolicy.paths.providerState, designPolicy.paths.scratch].sort(),
+    );
+    expect(designPolicy.document.filesystem.denyRead).toContain(
+      process.env.ZEROS_DATA_DIR,
+    );
+    expect(designPolicy.document.filesystem.allowRead).toContain(
+      designPolicy.paths.processIdentityMarker,
+    );
+    expect(designPolicy.document.filesystem.allowRead).toEqual(
       expect.arrayContaining([
-        path.parse(workspace).root,
-        design,
-        siblingDesign,
-        git,
+        workspace,
+        extra,
+        designPolicy.paths.providerState,
+        designPolicy.paths.scratch,
       ]),
     );
     expect(designPolicy.document.filesystem.denyWrite).toEqual(
       expect.arrayContaining([
+        path.parse(workspace).root,
         workspace,
+        design,
         siblingWorkspace,
+        siblingDesign,
+        git,
         extra,
         managedWorkspaces,
       ]),
     );
-    expect(designPolicy.document.filesystem.denyWrite).not.toContain(design);
-    expect(designPolicy.document.filesystem.denyWrite).not.toContain(
-      siblingDesign,
-    );
-    expect(designPolicy.document.filesystem.denyWrite).not.toContain(git);
     expect(designPolicy.document.runtime.allowedLocalPorts).toEqual([
       3000, 5432,
     ]);
@@ -554,30 +630,5 @@ describe("ZSR host-parity policy builder", () => {
       unsupportedSocketRealpaths.delete(socket);
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
-  });
-
-  it("records exact embedded-container state roots for descriptor validation", async () => {
-    const workspace = path.join(temporaryRoot, "container-workspace");
-    await mkdir(workspace, { recursive: true });
-    const prepared = await prepare({
-      actor: "agent-code",
-      cwd: workspace,
-      workspaceRoot: workspace,
-      containerWorker: {
-        runtime: "podman",
-        backend: "embedded-linux",
-        executable: process.execPath,
-      },
-    });
-    expect(prepared.paths.containerState).toBeDefined();
-    expect(prepared.document.filesystem.allowRead).toContain(
-      prepared.paths.containerState,
-    );
-    expect(prepared.document.filesystem.allowWrite).toContain(
-      prepared.paths.containerState,
-    );
-    expect(prepared.document.runtime.allowedUnixSockets).toContain(
-      path.join(prepared.paths.containerState!, "podman.sock"),
-    );
   });
 });

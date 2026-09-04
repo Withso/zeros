@@ -9,6 +9,7 @@
 //     live `Cursor.models.list()` catalog (resolveValidModelId) before spawn.
 
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import path from "node:path";
 
 import {
   CursorSdkAdapter,
@@ -18,6 +19,7 @@ import {
   cursorAgentUsageDelta,
   cursorModelStateFingerprint,
   cursorRipgrepPathFromEnvironment,
+  parseCursorAdditionalDirs,
 } from "../adapter";
 import type { AgentAdapterContext, ContentBlock } from "../../../types";
 
@@ -1173,6 +1175,15 @@ describe("CursorSdkAdapter — reject-recovery on a model the account can't run"
 });
 
 describe("CursorSdkAdapter — multi-root workspaces (@cursor/sdk 1.0.28 local.dirs)", () => {
+  it("accepts native absolute paths on Windows as well as POSIX", () => {
+    expect(
+      parseCursorAdditionalDirs(
+        '["C:\\\\work\\\\api","relative\\\\path"]',
+        path.win32,
+      ),
+    ).toEqual(["C:\\work\\api"]);
+  });
+
   it("carries /add-dir directories into local.dirs with cwd first", async () => {
     const adapter = new CursorSdkAdapter(makeCtx());
     await adapter.newSession({

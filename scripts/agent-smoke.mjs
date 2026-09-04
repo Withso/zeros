@@ -70,8 +70,8 @@ import {
   agentSmokeProviderCwd,
   agentSmokeSkipReason,
   canonicalAgentSmokeWorkspace,
-  installAgentSmokeZsrEnvironment,
-} from "./agent-smoke-zsr-assets.mjs";
+  installAgentSmokeRuntimeEnvironment,
+} from "./agent-smoke-runtime-assets.mjs";
 import {
   formatAdmissionFailures,
   parseAdmissionCopies,
@@ -81,11 +81,11 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
 const TMP = path.join(ROOT, ".zeros", "agent-smoke");
 
-// The gateway serves a throwaway repository below, while its ZSR executables
-// belong to this source checkout. Electron's sidecar normally exports these
-// exact paths; the standalone smoke must do the same before it constructs the
-// gateway or every contained provider probe fails before reaching the CLI.
-installAgentSmokeZsrEnvironment(ROOT);
+// The gateway serves a throwaway repository below, while its native process
+// owner and pinned provider executables belong to this source checkout.
+// Electron's sidecar normally exports these exact paths; the standalone smoke
+// must do the same before it constructs the gateway.
+installAgentSmokeRuntimeEnvironment(ROOT);
 
 // ── args ─────────────────────────────────────────────────
 const argv = process.argv.slice(2);

@@ -59,6 +59,18 @@ export const openPrsCache = new KeyedAsyncCache<PR[]>(32);
  *  pickers that only need branch/name rows, not the live board collections. */
 export const pickerWorkspacesCache = new KeyedAsyncCache<Workspace[]>(16);
 
+/** The folder Design mode would open (or create) for a checkout — see
+ *  state/design-directory-target.ts for the key shape and fetcher. Null data
+ *  means the engine could not preview it. */
+export const designDirectoryTargetCache = new KeyedAsyncCache<{
+  directory: string;
+  exists: boolean;
+} | null>(64);
+/** Design folders change on Git timescales (a commit, a pull). The exact
+ *  signals — a confirmed mode switch, external ref changes — patch or
+ *  invalidate the key; this window only catches out-of-band edits. */
+export const DESIGN_DIRECTORY_TARGET_MAX_AGE_MS = 30_000;
+
 /** Top-level sparse-checkout candidates, keyed by both the worktree path used
  * for the request and its opaque workspace identity. The modest hard bound is
  * several times larger than the retained workbench deck while preventing old
@@ -286,6 +298,17 @@ export function invalidateExternalGitRefCaches(
   // not travel on the watcher event. Its hard bound makes exact retained-key
   // invalidation cheap and privacy-preserving.
   allBranchesCache.invalidateAll();
+  // A pull/checkout can bring a committed design folder into (or out of) a
+  // checkout, which flips the mode toggle between "switch" and "create".
+  invalidateDesignDirectoryTargetReadCache();
+}
+
+/** Design-directory previews are keyed by an opaque workspace id or a local
+ * repository root. Recognition watcher events carry neither repository roots
+ * nor project slugs, so their safe exact semantic boundary is the bounded
+ * cache itself. */
+export function invalidateDesignDirectoryTargetReadCache(): void {
+  designDirectoryTargetCache.invalidateAll();
 }
 
 /** A NON-initial bridge (re)connection — engine restart, crash recovery, a
@@ -307,6 +330,8 @@ export function invalidateAllEngineReadCaches(): void {
   providerMemorySettingsCache.invalidateAll();
   filesToCopyPreviewCache.invalidateAll();
   workingDirectoriesCache.invalidateAll();
+  designDirectoryTargetCache.invalidateAll();
+
   // Turn rows are engine state too: a reset (or a turn settling) on ANOTHER
   // device lands while this renderer is deaf to DB_CHANGED.
   turnRowCache.invalidateAll();

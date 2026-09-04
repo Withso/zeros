@@ -9,6 +9,7 @@
 
 import {
   designApplyTransaction,
+  designCommit,
   designCreateFrame,
   designDeleteFrame,
   designDuplicateFrame,
@@ -1271,7 +1272,7 @@ export async function insertDesignAssetCached(
 
 export async function saveDesigns(
   workspaceId: string,
-): Promise<{ sha: string; branch: string }> {
+): Promise<{ ok: true }> {
   return runLocalDesignMutation(workspaceId, async () => {
     const result = await designSave(workspaceId);
     invalidateDesignWorkspaceSnapshot(workspaceId);
@@ -1281,6 +1282,17 @@ export async function saveDesigns(
 
 export async function stageDesigns(workspaceId: string): Promise<{ ok: true }> {
   return runLocalDesignMutation(workspaceId, () => designStage(workspaceId));
+}
+
+export async function commitDesigns(
+  workspaceId: string,
+  message?: string,
+): Promise<{ sha: string; branch: string }> {
+  return runLocalDesignMutation(workspaceId, async () => {
+    const result = await designCommit(workspaceId, message);
+    invalidateDesignWorkspaceSnapshot(workspaceId);
+    return result;
+  });
 }
 
 export async function updateDesignTokenCached(

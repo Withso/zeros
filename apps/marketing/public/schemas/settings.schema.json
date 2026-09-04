@@ -494,6 +494,10 @@
                 }
               ],
               "description": "How long an idle Claude session stays warm (30 minutes to 5 hours)."
+            },
+            "auto_memory_enabled": {
+              "type": "boolean",
+              "description": "Allow Claude Code to maintain its native repository memory."
             }
           },
           "description": "Claude-specific model defaults."

@@ -193,7 +193,7 @@ async function stop(child) {
 
 async function main() {
   if (process.platform !== "linux") {
-    throw new Error("embedded container workers require Linux");
+    throw new Error("cloud container workers require Linux");
   }
   const request = parseArguments();
   const state = prepareState(request.state, request.socket);
@@ -321,6 +321,6 @@ async function main() {
 
 await main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`[zsr-container-worker] ${message.slice(0, 1_000)}\n`);
+  process.stderr.write(`[cloud-container-worker] ${message.slice(0, 1_000)}\n`);
   process.exitCode = 125;
 });

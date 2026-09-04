@@ -53,11 +53,22 @@ Do not rename the current branch unless the user explicitly tells you to do so.`
 export const ADDITIONAL_DIRS_NOTICE = `You also have access to these additional directories (read from them with your tools as needed): {DIRS}.`;
 
 /** [SYS-INSTR: code-agent-design-territory]
- *  Behavioral defense in depth for the code actor. The runtime filesystem
- *  policy is the actual boundary; this notice keeps the model from wasting
- *  turns attempting a forbidden mutation and makes the handoff semantics
- *  explicit. Substitution: {DESIGN_DIR} (absolute path). */
-export const CODE_AGENT_DESIGN_TERRITORY_NOTICE = `You are a coding agent. The active Design directory is {DESIGN_DIR}. Read access is allowed: you may and should read it when relevant, and you must never tell the user that protected Design files are unreadable. You must never create, edit, append, truncate, replace, move, delete, stage, or commit anything in that directory through shell, patch, editor, filesystem, or generic Git tools—even if the user asks. Do not change permissions, ACLs, links, or sandbox settings to work around this boundary. When you create or edit a dev-server or file-watcher configuration, exclude this directory from its watch scope so Design edits do not trigger code-server reloads or restarts. Design changes require the Design surface or a separately contained design specialist; no Design mutation API is available to you. Continue code work outside that directory.`;
+ * Behavioral contract for the native Code actor. Identified Design subtrees
+ * are live and readable in the same worktree; Code execution itself remains
+ * native and unrestricted. Substitution: {DESIGN_DIRS} (absolute paths). */
+export const CODE_AGENT_DESIGN_TERRITORY_NOTICE = `You are a coding agent. The Design directories identified in this workspace are: {DESIGN_DIRS}. They are live, readable product context in this worktree, but they are read-only to you. You must never create, edit, append, truncate, replace, move, delete, stage, or commit anything in those directories through shell, patch, editor, filesystem, or generic Git tools—even if the user asks. Do not change permissions, ACLs, links, or provider policy to work around this boundary. This Code session has no Design mutation capability and cannot turn itself into a Design agent. When you create or edit a dev-server or file-watcher configuration, exclude the Design directories from its watched paths so Design edits do not trigger code-server reloads or restarts. Design changes require the Design surface or a future separately contained Design agent using the Design API. Continue normal Code work, builds, tests, Git operations, tools, hooks, plugins, and MCP use outside those directories.`;
+
+/** [SYS-INSTR: design-agent-workspace]
+ *  Orientation for a persistent Design-agent process. Mutation authority is
+ *  stated separately and last so repository-authored prompts cannot widen it. */
+export const DESIGN_AGENT_WORKSPACE_PREAMBLE = `You are a persistent Design agent working inside Zeros. Use {WORKSPACE_DIR} as read-only product context. Analyze the Code workspace and the active Design draft, but treat every filesystem path as read-only.`;
+
+/** [SYS-INSTR: design-agent-authority]
+ *  Engine-owned, last-word capability boundary for autonomous Design work.
+ *  Substitution: {DESIGN_DIR}. */
+export const DESIGN_AGENT_AUTHORITY_NOTICE = `You are a Design agent. The active Design directory is {DESIGN_DIR}. Code files, Design files, draft-store bytes, and Git metadata are read-only from your process. Use only the scoped Design MCP tools for durable Design changes, especially design_document_open to refresh and design_transaction_apply to validate and atomically apply semantic edits. You must not write through shell, patch, editor, filesystem, or generic Git commands, and you must not stage, commit, pull, merge, or push. A successful Design transaction updates the shared draft and remains uncommitted until the user explicitly performs a Git action. On a revision conflict, reopen the document, inspect the new revision, and construct a new semantic transaction; never overwrite or bypass the conflict. Never print, persist, or disclose the Design capability credential.`;
+
+export const DESIGN_AGENT_CONTEXT_NOTICE = `These additional directories are read-only context for this Design run: {DIRS}. Read them when relevant, but never modify their contents or Git state.`;
 
 /** The XML-ish wrapper tag for mechanism "A". Agents reliably read an
  *  angle-bracketed block like this as out-of-band orientation rather than as

@@ -33,6 +33,7 @@ import React, {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 
 import { cn } from "../../shared/ui/cn";
@@ -76,13 +77,19 @@ import {
   leafIds,
   paneForChat,
   resolvePaneActiveChatId,
+  topRightLeafId,
 } from "../../state/chat-panes";
 import {
   getPaneLayout,
   useChatPanesStore,
   usePaneLayout,
 } from "../../state/chat-panes-store";
-import { ChatTabs } from "./chat-tabs";
+import {
+  CHAT_STRIP_LEADING_CLS,
+  CHAT_STRIP_SHELL_CLS,
+  CHAT_STRIP_TRAILING_CLS,
+  ChatTabs,
+} from "./chat-tabs";
 import {
   chatCloseConfirmation,
   isChatDiscardableOnClose,
@@ -160,11 +167,6 @@ function measureSplitCapacity(surface: HTMLElement | null): {
   };
 }
 
-/** No-workspace placeholder band — matches the per-pane tab strip height
- *  (STRIP_SHELL_CLS in conversation/chat-tabs.tsx) so the top chrome doesn't jump
- *  when a workspace loads. */
-const STRIP_SHELL_CLS = "flex h-11 shrink-0 items-center overflow-hidden";
-
 // ── Workspace resolution (moved from conversation/chat-tabs) ──
 
 /** Resolve the workspace that owns the given folder path, including chats
@@ -189,6 +191,12 @@ type DropZone = "center" | "right" | "down";
 interface PaneCtx {
   folder: string;
   layout: PaneLayout;
+  /** Column-level strip controls. Every pane sees them, but only the pane that
+   *  owns the matching corner renders one: `stripLeading` (the Code/Design mode
+   *  toggle) goes to the FIRST leaf, `stripTrailing` (the collapsed-workbench
+   *  expand control) to the TOP-RIGHT leaf. */
+  stripLeading: ReactNode;
+  stripTrailing: ReactNode;
   chatsByPane: Map<string, ChatThread[]>;
   focusedPaneId: string;
   globalActiveChatId: string | null;
@@ -210,8 +218,16 @@ const EMPTY_CHATS: ChatThread[] = [];
 
 export function ConversationPaneLayout({
   onMinimumSizeChange,
+  stripLeading = null,
+  stripTrailing = null,
 }: {
   onMinimumSizeChange?: (minimumSize: PaneTreeMinimumSize) => void;
+  /** Pinned to the leading edge of the first pane's chat strip — Code's
+   *  conversation column passes its mode toggle here now that the column has no
+   *  header row of its own. */
+  stripLeading?: ReactNode;
+  /** Pinned to the trailing edge of the top-right pane's chat strip. */
+  stripTrailing?: ReactNode;
 } = {}) {
   const paneSurfaceRef = useRef<HTMLDivElement | null>(null);
   const activeChatId = useActiveChatId();
@@ -673,6 +689,8 @@ export function ConversationPaneLayout({
     () => ({
       folder: activeWorkspacePath ?? "",
       layout,
+      stripLeading,
+      stripTrailing,
       chatsByPane,
       focusedPaneId,
       globalActiveChatId: activeChatId,
@@ -690,6 +708,8 @@ export function ConversationPaneLayout({
     [
       activeWorkspacePath,
       layout,
+      stripLeading,
+      stripTrailing,
       chatsByPane,
       focusedPaneId,
       activeChatId,
@@ -714,7 +734,27 @@ export function ConversationPaneLayout({
     return (
       <>
         <div ref={paneSurfaceRef} className="flex min-h-0 flex-1 flex-col">
-          <div className={STRIP_SHELL_CLS} data-tauri-drag-region />
+          {/* No-workspace placeholder band — the tab strip's own shell class,
+              so the top chrome cannot jump height when a workspace loads. */}
+          <div className={CHAT_STRIP_SHELL_CLS} data-tauri-drag-region>
+            {stripLeading ? (
+              <div
+                className={CHAT_STRIP_LEADING_CLS}
+                data-chat-strip-leading=""
+              >
+                {stripLeading}
+              </div>
+            ) : null}
+            <div className="min-w-0 flex-1" aria-hidden="true" />
+            {stripTrailing ? (
+              <div
+                className={CHAT_STRIP_TRAILING_CLS}
+                data-chat-strip-trailing=""
+              >
+                {stripTrailing}
+              </div>
+            ) : null}
+          </div>
           <div className="min-h-0 flex-1" />
         </div>
         {pendingChatClose && (
@@ -1174,10 +1214,18 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
   // no chats (the keeper is mid-spawn) — and only in the FIRST pane,
   // where the keeper's spawn will land; a persisted split revisited
   // with all chats archived would otherwise show one pill per pane.
+  const isFirstPane = paneId === firstLeafId(ctx.layout.root);
   const showSyntheticUntitled =
-    paneChats.length === 0 &&
-    !ctx.workspaceHasChats &&
-    paneId === firstLeafId(ctx.layout.root);
+    paneChats.length === 0 && !ctx.workspaceHasChats && isFirstPane;
+
+  // The column's own controls belong to ONE strip each, or a split would
+  // duplicate them: the mode toggle rides the first pane (the column's
+  // top-left corner) and the workbench expand control the top-right pane, the
+  // seat it already occupies inside Workbench's header while that panel is
+  // open.
+  const stripLeading = isFirstPane ? ctx.stripLeading : null;
+  const stripTrailing =
+    paneId === topRightLeafId(ctx.layout.root) ? ctx.stripTrailing : null;
 
   const splitRightAllowed = canSplit.right && !atPaneCap;
   const splitDownAllowed = canSplit.down && !atPaneCap;
@@ -1214,6 +1262,8 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
         onSplit={(dir) => ctx.onSplit(paneId, dir)}
         canSplitRight={splitRightAllowed}
         canSplitDown={splitDownAllowed}
+        leading={stripLeading}
+        trailing={stripTrailing}
       />
       <div className="relative min-h-0 min-w-0 flex-1">
         {/* Mount point for the store-owned content host. Persistent chat and
@@ -1232,7 +1282,12 @@ function ChatPane({ paneId, ctx }: { paneId: string; ctx: PaneCtx }) {
           chat/terminal layer (z-auto) but below the drag drop overlay (z-40).
           Pointer-transparent, so clicking a dimmed pane still activates it
           via the section's native capture listeners — the wash then lifts on
-          the next render as this pane becomes focused. */}
+          the next render as this pane becomes focused.
+          EXCEPTION: the two column-level strip slots above ride at z-40, so the
+          mode toggle and the workbench expand control stay at full brightness
+          no matter which pane owns them (CHAT_STRIP_LEADING_CLS /
+          CHAT_STRIP_TRAILING_CLS in conversation/chat-tabs.tsx). They are
+          workspace/column controls, not this pane's chrome. */}
       {!isFocused && (
         <div
           className="bg-bg0/30 pointer-events-none absolute inset-0 z-30"

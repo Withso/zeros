@@ -220,6 +220,53 @@ describe("advanced Git operations", () => {
       const s = await status(workspaceId);
       expect(s.conflictState).toBeNull();
     });
+
+    it("refuses a merge that would leave committed Design content conflicted", async () => {
+      const designDir = path.join(wsPath, "Zeros Design");
+      await mkdir(designDir, { recursive: true });
+      await Promise.all([
+        writeFile(path.join(designDir, ".zeros-canvas.json"), "{}\n"),
+        writeFile(path.join(designDir, "frame.html"), "<main>base</main>\n"),
+      ]);
+      await git(wsPath, "add", "Zeros Design");
+      await git(wsPath, "commit", "-qm", "base design");
+      const workspaceBranch = getWorkspace(workspaceId).branch;
+
+      await git(
+        repoRoot,
+        "checkout",
+        "-q",
+        "-b",
+        "design-other",
+        workspaceBranch,
+      );
+      await writeFile(
+        path.join(repoRoot, "Zeros Design", "frame.html"),
+        "<main>theirs</main>\n",
+      );
+      await git(repoRoot, "commit", "-aqm", "theirs design");
+      await git(repoRoot, "checkout", "-q", "main");
+
+      await writeFile(
+        path.join(designDir, "frame.html"),
+        "<main>ours</main>\n",
+      );
+      await git(wsPath, "commit", "-aqm", "ours design");
+
+      await expect(
+        merge({ workspaceId, branch: "design-other" }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        message: expect.stringMatching(/Design.*conflict/i),
+      });
+      await expect(
+        readFile(path.join(designDir, "frame.html"), "utf8"),
+      ).resolves.toBe("<main>ours</main>\n");
+      await expect(status(workspaceId)).resolves.toMatchObject({
+        conflictState: null,
+        conflicted: [],
+      });
+    });
   });
 
   describe("reset, discard, and clean", () => {
@@ -261,6 +308,37 @@ describe("advanced Git operations", () => {
     it("reset --hard requires confirm", async () => {
       await expect(reset({ workspaceId, mode: "hard" })).rejects.toThrow(
         /confirm/,
+      );
+    });
+
+    it("refuses hard reset before it can overwrite an ignored live Design draft", async () => {
+      await writeFile(path.join(wsPath, ".gitignore"), "Zeros Design/\n");
+      await git(wsPath, "add", ".gitignore");
+      await git(wsPath, "commit", "-qm", "ignore design");
+      await mkdir(path.join(wsPath, "Zeros Design"), { recursive: true });
+      const draft = path.join(wsPath, "Zeros Design", "draft.html");
+      await writeFile(draft, "<main>local ignored draft</main>\n");
+
+      await git(repoRoot, "checkout", "-q", "-b", "reset-design-target");
+      await mkdir(path.join(repoRoot, "Zeros Design"), { recursive: true });
+      await writeFile(
+        path.join(repoRoot, "Zeros Design", ".zeros-canvas.json"),
+        "{}\n",
+      );
+      await writeFile(
+        path.join(repoRoot, "Zeros Design", "draft.html"),
+        "<main>reset target</main>\n",
+      );
+      await git(repoRoot, "add", "Zeros Design");
+      await git(repoRoot, "commit", "-qm", "reset target design");
+      const target = (await git(repoRoot, "rev-parse", "HEAD")).trim();
+      await git(repoRoot, "checkout", "-q", "main");
+
+      await expect(
+        reset({ workspaceId, mode: "hard", ref: target, confirm: true }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      await expect(readFile(draft, "utf8")).resolves.toBe(
+        "<main>local ignored draft</main>\n",
       );
     });
 
@@ -307,6 +385,147 @@ describe("advanced Git operations", () => {
       expect(existsSync(path.join(wsPath, "cp.txt"))).toBe(true);
     });
 
+    it("refuses a cherry-pick that would leave committed Design content conflicted", async () => {
+      const designDir = path.join(wsPath, "Zeros Design");
+      await mkdir(designDir, { recursive: true });
+      await Promise.all([
+        writeFile(path.join(designDir, ".zeros-canvas.json"), "{}\n"),
+        writeFile(path.join(designDir, "frame.html"), "<main>base</main>\n"),
+      ]);
+      await git(wsPath, "add", "Zeros Design");
+      await git(wsPath, "commit", "-qm", "base design");
+      const workspaceBranch = getWorkspace(workspaceId).branch;
+
+      await git(
+        repoRoot,
+        "checkout",
+        "-q",
+        "-b",
+        "design-pick",
+        workspaceBranch,
+      );
+      await writeFile(
+        path.join(repoRoot, "Zeros Design", "frame.html"),
+        "<main>theirs</main>\n",
+      );
+      await git(repoRoot, "commit", "-aqm", "picked design");
+      const picked = (await git(repoRoot, "rev-parse", "HEAD")).trim();
+      await git(repoRoot, "checkout", "-q", "main");
+
+      await writeFile(
+        path.join(designDir, "frame.html"),
+        "<main>ours</main>\n",
+      );
+      await git(wsPath, "commit", "-aqm", "ours design");
+
+      await expect(
+        cherryPick({ workspaceId, sha: picked }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        message: expect.stringMatching(/Design.*conflict/i),
+      });
+      await expect(
+        readFile(path.join(designDir, "frame.html"), "utf8"),
+      ).resolves.toBe("<main>ours</main>\n");
+      await expect(status(workspaceId)).resolves.toMatchObject({
+        conflictState: null,
+        conflicted: [],
+      });
+    });
+
+    it("refuses a revert that would leave newer committed Design content conflicted", async () => {
+      const designDir = path.join(wsPath, "Zeros Design");
+      await mkdir(designDir, { recursive: true });
+      await Promise.all([
+        writeFile(path.join(designDir, ".zeros-canvas.json"), "{}\n"),
+        writeFile(path.join(designDir, "frame.html"), "<main>base</main>\n"),
+      ]);
+      await git(wsPath, "add", "Zeros Design");
+      await git(wsPath, "commit", "-qm", "base design");
+      await writeFile(
+        path.join(designDir, "frame.html"),
+        "<main>checkpoint</main>\n",
+      );
+      await git(wsPath, "commit", "-aqm", "design checkpoint");
+      const checkpoint = (await git(wsPath, "rev-parse", "HEAD")).trim();
+      await writeFile(
+        path.join(designDir, "frame.html"),
+        "<main>newer</main>\n",
+      );
+      await git(wsPath, "commit", "-aqm", "newer design");
+
+      await expect(
+        revert({ workspaceId, sha: checkpoint }),
+      ).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+        message: expect.stringMatching(/Design.*conflict/i),
+      });
+      await expect(
+        readFile(path.join(designDir, "frame.html"), "utf8"),
+      ).resolves.toBe("<main>newer</main>\n");
+      await expect(status(workspaceId)).resolves.toMatchObject({
+        conflictState: null,
+        conflicted: [],
+      });
+    });
+
+    it("refuses merge and cherry-pick before either can overwrite an ignored Design draft", async () => {
+      await writeFile(path.join(wsPath, ".gitignore"), "Zeros Design/\n");
+      await git(wsPath, "add", ".gitignore");
+      await git(wsPath, "commit", "-qm", "ignore design");
+      await mkdir(path.join(wsPath, "Zeros Design"), { recursive: true });
+      const draft = path.join(wsPath, "Zeros Design", "draft.html");
+      await writeFile(draft, "<main>local ignored draft</main>\n");
+
+      await git(repoRoot, "checkout", "-q", "-b", "incoming-design");
+      await mkdir(path.join(repoRoot, "Zeros Design"), { recursive: true });
+      await writeFile(
+        path.join(repoRoot, "Zeros Design", ".zeros-canvas.json"),
+        "{}\n",
+      );
+      await writeFile(
+        path.join(repoRoot, "Zeros Design", "draft.html"),
+        "<main>incoming design</main>\n",
+      );
+      await git(repoRoot, "add", "Zeros Design");
+      await git(repoRoot, "commit", "-qm", "incoming design");
+      const sha = (await git(repoRoot, "rev-parse", "HEAD")).trim();
+      await git(repoRoot, "checkout", "-q", "main");
+
+      await expect(
+        merge({ workspaceId, branch: "incoming-design" }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+      await expect(cherryPick({ workspaceId, sha })).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+      });
+      await expect(readFile(draft, "utf8")).resolves.toBe(
+        "<main>local ignored draft</main>\n",
+      );
+    });
+
+    it("refuses revert before it can discard a live Design draft", async () => {
+      await mkdir(path.join(wsPath, "Zeros Design"), { recursive: true });
+      const draft = path.join(wsPath, "Zeros Design", "draft.html");
+      await Promise.all([
+        writeFile(
+          path.join(wsPath, "Zeros Design", ".zeros-canvas.json"),
+          "{}\n",
+        ),
+        writeFile(draft, "<main>committed design</main>\n"),
+      ]);
+      await git(wsPath, "add", "Zeros Design");
+      await git(wsPath, "commit", "-qm", "committed design");
+      const sha = (await git(wsPath, "rev-parse", "HEAD")).trim();
+      await writeFile(draft, "<main>live draft</main>\n");
+
+      await expect(revert({ workspaceId, sha })).rejects.toMatchObject({
+        code: "VALIDATION_FAILED",
+      });
+      await expect(readFile(draft, "utf8")).resolves.toBe(
+        "<main>live draft</main>\n",
+      );
+    });
+
     it("stash list / apply / drop round-trips", async () => {
       await appendFile(path.join(wsPath, "README.md"), "stashme\n");
       const { stashRef } = await stashSave({ workspaceId, message: "wip" });
@@ -319,6 +538,38 @@ describe("advanced Git operations", () => {
       );
       await dropStash({ workspaceId, stashRef });
       expect((await listStashes(workspaceId)).length).toBe(0);
+    });
+
+    it("refuses to apply an external stash that contains Design changes", async () => {
+      await mkdir(path.join(wsPath, "Zeros Design"), { recursive: true });
+      const draft = path.join(wsPath, "Zeros Design", "draft.html");
+      await Promise.all([
+        writeFile(
+          path.join(wsPath, "Zeros Design", ".zeros-canvas.json"),
+          "{}\n",
+        ),
+        writeFile(draft, "<main>baseline</main>\n"),
+      ]);
+      await git(wsPath, "add", "Zeros Design");
+      await git(wsPath, "commit", "-qm", "design baseline");
+      await writeFile(draft, "<main>external stash</main>\n");
+      await git(
+        wsPath,
+        "stash",
+        "push",
+        "-m",
+        "external design stash",
+        "--",
+        "Zeros Design",
+      );
+      const stashRef = (await git(wsPath, "rev-parse", "stash@{0}")).trim();
+
+      await expect(applyStash({ workspaceId, stashRef })).rejects.toMatchObject(
+        { code: "VALIDATION_FAILED" },
+      );
+      await expect(readFile(draft, "utf8")).resolves.toBe(
+        "<main>baseline</main>\n",
+      );
     });
 
     it("deleteBranch removes a branch but refuses the checked-out one", async () => {

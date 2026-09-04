@@ -78,7 +78,9 @@ describe("ZSR host-parity supervisor", () => {
     // is the generated profile, not the monitor, and the supervisor never
     // reads the violation store — so production spawns must not pay for it.
     expect(source).toContain("const enableViolationMonitor =");
-    expect(source).not.toContain("SandboxManager.initialize(parsedConfig.data, undefined, true)");
+    expect(source).not.toContain(
+      "SandboxManager.initialize(parsedConfig.data, undefined, true)",
+    );
     expect(source).toContain("ZEROS_ZSR_RIPGREP_PATH");
     expect(source).toContain("ripgrep:");
     expect(source).not.toContain("allowAppleEvents: true");
@@ -302,7 +304,7 @@ describe("ZSR supervisor launch contract", () => {
   });
 
   it.runIf(process.platform === "linux")(
-    "still rejects a container launcher outside immutable private tools",
+    "rejects cloud container authority from a desktop boundary",
     async () => {
       const result = await rejectCommand({
         containerWorker: {
@@ -310,13 +312,19 @@ describe("ZSR supervisor launch contract", () => {
           runtime: "podman",
           node: process.execPath,
           engine: process.execPath,
-          launcher: path.join(privateRoot, "attacker.mjs"),
+          launcher: path.join(
+            privateRoot,
+            "tools",
+            "cloud-container-worker.mjs",
+          ),
           state: path.join(privateRoot, "container"),
           socket: path.join(privateRoot, "container", "podman.sock"),
         },
       });
       expect(result.status).toBe(125);
-      expect(result.stderr).toContain("outside private tools");
+      expect(result.stderr).toContain(
+        "invalid cloud container-worker descriptor",
+      );
     },
   );
 });

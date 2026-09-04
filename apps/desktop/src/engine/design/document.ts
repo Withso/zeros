@@ -18,9 +18,11 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
   mkdir,
+  open,
   realpath,
   readdir,
   rename,
+  rm,
   stat,
   unlink,
   writeFile,
@@ -41,6 +43,7 @@ import {
 } from "@zeros/design-web";
 import { DESIGN_RUNTIME_SOURCE } from "@zeros/protocol/design-runtime";
 import { withDesignDocumentWrite as withDocumentWrite } from "./document-write-lock";
+import { zerosDataDir } from "../db/paths";
 import { parse, type DefaultTreeAdapterTypes } from "parse5";
 import type { ParserError } from "parse5";
 import postcss from "postcss";
@@ -709,13 +712,11 @@ async function writeCanvas(
 ): Promise<void> {
   const target = canvasPath(workspacePath);
   await assertSafeDesignWriteTarget(workspacePath, target);
-  const temporary = `${target}.${process.pid}.${randomUUID()}.zeros-tmp`;
   const source = `${JSON.stringify(canvas, null, 2)}\n`;
   if (utf8Bytes(source) > MAX_DESIGN_METADATA_BYTES) {
     throw new Error("Design canvas metadata exceeds the 16 MiB limit.");
   }
-  await writeFile(temporary, source, "utf8");
-  await rename(temporary, target);
+  await atomicWriteDesignSource(target, source);
 }
 
 async function writeIfMissing(
@@ -1633,8 +1634,138 @@ async function atomicWriteDesignSource(
   source: string,
 ): Promise<void> {
   const temporary = `${target}.${process.pid}.${randomUUID()}.zeros-tmp`;
-  await writeFile(temporary, source, "utf8");
-  await rename(temporary, target);
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(source, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await rename(temporary, target);
+    await syncDirectory(path.dirname(target));
+  } catch (error) {
+    await handle?.close().catch(() => {});
+    await rm(temporary, { force: true }).catch(() => {});
+    throw error;
+  }
+}
+
+async function syncDirectory(directory: string): Promise<void> {
+  const handle = await open(directory, "r").catch(() => null);
+  if (!handle) return;
+  try {
+    await handle.sync().catch(() => {
+      // Some filesystems do not permit fsync on directories. The file itself
+      // was still synced before rename, so retain portability while taking the
+      // stronger durability guarantee wherever the host supports it.
+    });
+  } finally {
+    await handle.close().catch(() => {});
+  }
+}
+
+const MAX_QUARANTINED_DESIGN_TRANSACTIONS = 16;
+
+/** Engine-owned recovery records are deliberately outside the repository so a
+ * stale write-ahead journal can never be swept into a Design commit. */
+export function designTransactionRecoveryDirectory(
+  workspacePath: string,
+): string {
+  const workspaceKey = createHash("sha256")
+    .update(path.resolve(workspacePath))
+    .digest("hex")
+    .slice(0, 32);
+  return path.join(
+    zerosDataDir(),
+    "design-transaction-recovery",
+    workspaceKey,
+  );
+}
+
+async function quarantineDesignRecoveryArtifact(opts: {
+  workspacePath: string;
+  artifactPath: string;
+  reason: string;
+  source: string | null;
+}): Promise<void> {
+  const directory = designTransactionRecoveryDirectory(opts.workspacePath);
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const recoveryPath = path.join(
+    directory,
+    `${Date.now().toString().padStart(13, "0")}-${randomUUID()}.json`,
+  );
+  await atomicWriteDesignSource(
+    recoveryPath,
+    `${JSON.stringify({
+      version: 1,
+      workspacePath: path.resolve(opts.workspacePath),
+      capturedAt: Date.now(),
+      reason: opts.reason,
+      artifactSource: opts.source,
+    })}\n`,
+  );
+  await unlink(opts.artifactPath).catch((error: unknown) => {
+    if (
+      !error ||
+      typeof error !== "object" ||
+      !("code" in error) ||
+      String(error.code) !== "ENOENT"
+    ) {
+      throw error;
+    }
+  });
+  await syncDirectory(path.dirname(opts.artifactPath));
+
+  const retained = (await readdir(directory).catch(() => []))
+    .filter((candidate) => candidate.endsWith(".json"))
+    .sort((left, right) => right.localeCompare(left));
+  await Promise.all(
+    retained
+      .slice(MAX_QUARANTINED_DESIGN_TRANSACTIONS)
+      .map((candidate) => rm(path.join(directory, candidate), { force: true })),
+  );
+}
+
+async function quarantineDesignTransactionJournal(opts: {
+  workspacePath: string;
+  journalPath: string;
+  reason: string;
+  source: string | null;
+}): Promise<void> {
+  return quarantineDesignRecoveryArtifact({
+    workspacePath: opts.workspacePath,
+    artifactPath: opts.journalPath,
+    reason: opts.reason,
+    source: opts.source,
+  });
+}
+
+async function quarantineOrphanedDesignTempsUnlocked(
+  workspacePath: string,
+): Promise<void> {
+  const directory = designDirectory(workspacePath);
+  const candidateDirectories = [directory, path.join(directory, "components")];
+  for (const candidateDirectory of candidateDirectories) {
+    const entries = await readdir(candidateDirectory, {
+      withFileTypes: true,
+    }).catch(() => []);
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(".zeros-tmp")) continue;
+      const artifactPath = path.join(candidateDirectory, entry.name);
+      const safe = await readSafeRegularFile(
+        candidateDirectory,
+        artifactPath,
+        MAX_DESIGN_JOURNAL_BYTES,
+      );
+      await quarantineDesignRecoveryArtifact({
+        workspacePath,
+        artifactPath,
+        reason:
+          "Orphaned atomic Design write found without an active transaction.",
+        source: safe ? safe.body.toString("utf8") : null,
+      });
+    }
+  }
 }
 
 interface DesignTransactionJournal {
@@ -1927,23 +2058,62 @@ async function recoverPendingDesignTransactionUnlocked(
   );
   if (!safe) {
     if (existsSync(target)) {
-      throw new Error(
-        "Design transaction journal is unsafe or exceeds the 32 MiB limit.",
-      );
+      await quarantineDesignTransactionJournal({
+        workspacePath,
+        journalPath: target,
+        reason:
+          "Design transaction journal was unsafe or exceeded the 32 MiB limit.",
+        source: null,
+      });
     }
+    await quarantineOrphanedDesignTempsUnlocked(workspacePath);
     return false;
   }
+  const journalSource = safe.body.toString("utf8");
   let parsed: unknown;
   try {
-    parsed = JSON.parse(safe.body.toString("utf8")) as unknown;
+    parsed = JSON.parse(journalSource) as unknown;
   } catch {
-    throw new Error("Design transaction journal contains invalid JSON.");
+    await quarantineDesignTransactionJournal({
+      workspacePath,
+      journalPath: target,
+      reason: "Design transaction journal contained invalid JSON.",
+      source: journalSource,
+    });
+    await quarantineOrphanedDesignTempsUnlocked(workspacePath);
+    return false;
   }
-  const journal = parseDesignTransactionJournal(workspacePath, parsed);
-  const current = await readDesignWebDocumentStateUnlocked(
-    workspacePath,
-    journal.entryFile,
-  );
+  let journal: DesignTransactionJournal;
+  try {
+    journal = parseDesignTransactionJournal(workspacePath, parsed);
+  } catch (error) {
+    await quarantineDesignTransactionJournal({
+      workspacePath,
+      journalPath: target,
+      reason: error instanceof Error ? error.message : String(error),
+      source: journalSource,
+    });
+    await quarantineOrphanedDesignTempsUnlocked(workspacePath);
+    return false;
+  }
+  let current: DesignWebDocumentState;
+  try {
+    current = await readDesignWebDocumentStateUnlocked(
+      workspacePath,
+      journal.entryFile,
+    );
+  } catch (error) {
+    await quarantineDesignTransactionJournal({
+      workspacePath,
+      journalPath: target,
+      reason: `The journal's base document could not be read: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+      source: journalSource,
+    });
+    await quarantineOrphanedDesignTempsUnlocked(workspacePath);
+    return false;
+  }
   const files = { ...current.files };
   for (const change of journal.files) {
     if (change.content === null) delete files[change.file];
@@ -1966,9 +2136,14 @@ async function recoverPendingDesignTransactionUnlocked(
     },
   });
   if (targetState.revision !== journal.nextRevision) {
-    throw new Error(
-      `Design transaction journal target revision is invalid: expected ${journal.nextRevision}, derived ${targetState.revision}.`,
-    );
+    await quarantineDesignTransactionJournal({
+      workspacePath,
+      journalPath: target,
+      reason: `Design transaction journal target revision was invalid: expected ${journal.nextRevision}, derived ${targetState.revision}.`,
+      source: journalSource,
+    });
+    await quarantineOrphanedDesignTempsUnlocked(workspacePath);
+    return false;
   }
   await applyDesignTransactionJournalUnlocked(workspacePath, journal);
   const committed = await readDesignWebDocumentStateUnlocked(
@@ -1976,9 +2151,14 @@ async function recoverPendingDesignTransactionUnlocked(
     journal.entryFile,
   );
   if (committed.revision !== journal.nextRevision) {
-    throw new Error(
-      "Recovered design transaction did not reach its target revision.",
-    );
+    await quarantineDesignTransactionJournal({
+      workspacePath,
+      journalPath: target,
+      reason: "Recovered design transaction did not reach its target revision.",
+      source: journalSource,
+    });
+    await quarantineOrphanedDesignTempsUnlocked(workspacePath);
+    return false;
   }
   await unlink(target).catch((error: unknown) => {
     if (
@@ -1990,6 +2170,8 @@ async function recoverPendingDesignTransactionUnlocked(
       throw error;
     }
   });
+  await syncDirectory(path.dirname(target));
+  await quarantineOrphanedDesignTempsUnlocked(workspacePath);
   return true;
 }
 

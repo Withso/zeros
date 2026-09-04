@@ -90,7 +90,7 @@ describe("requestWorkspaceList", () => {
     expect(out).toEqual(workspaces);
   });
 
-  it("keeps design rows out of the coding-agent workspace resolver", async () => {
+  it("keeps the same workspace resolvable by Code agents in either visible mode", async () => {
     const code = {
       id: "code",
       kind: "code" as const,
@@ -108,7 +108,7 @@ describe("requestWorkspaceList", () => {
         result: { workspaces: [code, design] },
       }),
     );
-    expect(out).toEqual([code]);
+    expect(out).toEqual([code, design]);
   });
 
   it("returns [] when the result carries no workspaces array", async () => {

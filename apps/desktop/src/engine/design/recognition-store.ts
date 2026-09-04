@@ -7,29 +7,24 @@
 // `[design] directory` pointer in `.zeros/settings*.toml`. Both are ordinary
 // files in the checkout.
 //
-// Under the local host-parity contract a code agent writes the whole workspace
-// except recognized Design directories — which means it CAN edit the two things
-// that decide what "recognized" means. `git rm --cached "My Design/.zeros-canvas.json"`
-// plus a settings edit removes every trace of recognition from the repository,
-// and the NEXT session then admits with that folder unprotected. Nothing in the
-// current session is breached (the fence held all along); the loss is deferred to
-// the following admission, which is what makes it easy to miss.
+// Native Code has normal same-user authority, so it can edit the two things
+// that decide what "recognized" means. `git rm --cached
+// "My Design/.zeros-canvas.json"` plus a settings edit removes every trace of
+// recognition from the repository.
 //
-// So recognition also becomes engine-side state: once Zeros has admitted a
-// session that protected a folder, it keeps protecting it.
+// Recognition therefore also becomes engine-side state: once Zeros observes a
+// Design root, its own path guards and later Design-agent admission continue to
+// recognize that existing directory while repository evidence is in flight.
 //
-// THE ONE RULE THAT KEEPS THIS SAFE: a remembered name is honoured only while
-// that directory still EXISTS on disk. Without it, a user who legitimately
-// deletes a Design folder would hit "the recognized Design folder is missing from
-// this checkout" on every future session — sticky protection would have bricked
-// the workspace. With it, the store can only ever protect content that is
-// actually there, and deleting the directory is not an escape route because
-// deleting it requires writing inside it, which the fence denies.
+// THE ONE RULE THAT KEEPS THIS SAFE: a remembered name is normally honoured
+// only while that directory still EXISTS on disk. Without it, a user who
+// legitimately deletes a Design folder would hit "the recognized Design folder
+// is missing from this checkout" on every future session.
 //
-// The store itself is engine data, not repository content. Local agents can write
-// Zeros' data dir by design (they are the user), so policy.ts additionally puts
-// THIS FILE in the parity write-deny list — otherwise the memory would be as
-// editable as the evidence it backstops.
+// The store itself is engine data, not repository content. Design-agent ZSR
+// cannot read or write it. Native Code remains unrestricted and could change it,
+// so this memory is an application-safety backstop, not a hostile-Code security
+// boundary.
 // ──────────────────────────────────────────────────────────
 
 import { existsSync } from "node:fs";
@@ -58,8 +53,8 @@ interface StoredRecognition {
   readonly workspaces: Record<string, StoredWorkspace>;
 }
 
-/** The file policy.ts denies writes to under host parity. Exported (rather than
- * inlined there) so the two can never disagree about which path is protected. */
+/** Exported so the Design-agent policy and store cannot disagree about which
+ * engine-owned path must be inaccessible. */
 export function designRecognitionStorePath(): string {
   return path.join(zerosDataDir(), "design-recognition.json");
 }
@@ -118,7 +113,8 @@ async function readStore(): Promise<StoredRecognition> {
     if (sanitized.length === 0) continue;
     cleaned[key] = {
       names: sanitized,
-      seenAt: typeof seenAt === "number" && Number.isFinite(seenAt) ? seenAt : 0,
+      seenAt:
+        typeof seenAt === "number" && Number.isFinite(seenAt) ? seenAt : 0,
     };
   }
   return { version: 1, workspaces: cleaned };

@@ -40,12 +40,10 @@ import {
 import { Button, Input } from "../../shared/ui";
 import { toast } from "../../shared/ui/primitives/elements";
 import { cn } from "../../shared/ui/cn";
-
-interface DirectoryListing {
-  directories: string[];
-  pointer: string;
-  active: string;
-}
+import {
+  deriveDesignDirectoryOptions,
+  type DesignDirectoryListing,
+} from "./design-directory-options";
 
 /** Read `design.directory` out of the resolved tree with its provenance. */
 function pickPointer(resolved: {
@@ -84,7 +82,7 @@ export function DesignSection({
     sources: resolved.resolved?.sources,
   });
 
-  const [listing, setListing] = useState<DirectoryListing | null>(null);
+  const [listing, setListing] = useState<DesignDirectoryListing | null>(null);
   const [listingError, setListingError] = useState<string | null>(null);
   const refreshListing = useCallback(() => {
     if (!bridge || bridgeStatus !== "connected") return;
@@ -106,11 +104,24 @@ export function DesignSection({
     refreshListing();
   }, [surfaceActive, refreshListing]);
 
-  const activeName = pointer.value ?? listing?.pointer ?? "Zeros Design";
+  // With no explicit pointer, the engine's entry preview is the honest answer:
+  // the single committed folder it would adopt, or the first-use name it
+  // would create — not the unconfigured pointer default.
+  const directoryPresentation = deriveDesignDirectoryOptions({
+    pointer: pointer.value,
+    listing,
+  });
+  const { activeName } = directoryPresentation;
 
   const [saving, setSaving] = useState(false);
   const choose = async (name: string) => {
-    if (saving || name === activeName) return;
+    if (
+      saving ||
+      !directoryPresentation.options.some(
+        (option) => option.name === name && option.selectable,
+      )
+    )
+      return;
     setSaving(true);
     try {
       // Clicking an already-discovered row is the human confirmation the
@@ -158,11 +169,6 @@ export function DesignSection({
 
   // Offer every recognized folder, plus the pointer itself when it names a
   // folder that doesn't exist yet (first design use — created on first entry).
-  const options = listing
-    ? [...new Set([activeName, ...listing.directories])].sort((a, b) =>
-        a.localeCompare(b),
-      )
-    : [activeName];
   const inherited = isInheritedSource(pointer.source);
 
   return (
@@ -172,9 +178,8 @@ export function DesignSection({
         description="Where this repo's designs live. The folder is committed content — this choice is the team default (.zeros/settings.toml, committed). A workspace can pin a different folder in its own local settings."
       >
         <SettingsList>
-          {options.map((name) => {
-            const isActive = name === activeName;
-            const discovered = listing?.directories.includes(name) ?? false;
+          {directoryPresentation.options.map((option) => {
+            const { name, active: isActive, exists, selectable } = option;
             return (
               <SettingsRow
                 key={name}
@@ -195,7 +200,7 @@ export function DesignSection({
                         {inherited && <SourceTag source={pointer.source} />}
                       </span>
                     )}
-                    {!discovered && (
+                    {!exists && (
                       <span className="text-muted-fg text-xs italic">
                         created on first design use
                       </span>
@@ -203,7 +208,7 @@ export function DesignSection({
                   </span>
                 }
               >
-                {!isActive && (
+                {selectable && (
                   <Button
                     variant="secondary"
                     size="sm"

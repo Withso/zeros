@@ -51,7 +51,7 @@ describe("repository layout contracts", () => {
     );
   });
 
-  it("keeps required source-sync red until every ZSR architecture qualifies", () => {
+  it("keeps required source-sync red until every ZSR runtime architecture qualifies", () => {
     const preflight = read(".github/workflows/preflight.yml");
 
     expect(preflight).toContain("  source-sync-workload:");
@@ -61,6 +61,20 @@ describe("repository layout contracts", () => {
     expect(preflight).toContain("SOURCE_SYNC_RESULT:");
     expect(preflight).toContain("ZSR_MACOS_INTEL_RESULT:");
     expect(preflight).toContain("ZSR_LINUX_ARM64_RESULT:");
+    // The broad test job already owns every source-level ZSR contract. These
+    // architecture jobs must exercise only the real target kernel/runtime so a
+    // host-specific unit fixture cannot mask or duplicate that evidence.
+    expect(preflight.match(/pnpm check:zsr:runtime/g)).toHaveLength(3);
+    expect(preflight).not.toMatch(/run: .*pnpm check:zsr$/m);
+  });
+
+  it("retries only transient control-plane audit transport failures", () => {
+    const preflight = read(".github/workflows/preflight.yml");
+
+    expect(preflight).toContain('CONTROL_PLANE_AUDIT_ATTEMPTS: "3"');
+    expect(preflight).toContain("ERR_SOCKET_TIMEOUT");
+    expect(preflight).toContain("pnpm audit:prod");
+    expect(preflight).toContain('exit "$status"');
   });
 
   it("uses the HTTPS Ubuntu archive before the amd64 containment install", () => {
@@ -123,9 +137,17 @@ describe("repository layout contracts", () => {
       .filter((token) => /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(token));
     expect(files.length).toBeGreaterThan(0);
     expect(files.filter((file) => !existsSync(file))).toEqual([]);
+    for (const lightweightContract of [
+      "apps/desktop/src/engine/design/__tests__/design-agent-capability.test.ts",
+      "apps/desktop/src/engine/design/__tests__/design-agent-admission.test.ts",
+      "apps/desktop/src/engine/design/__tests__/design-agent-mcp.test.ts",
+      "apps/desktop/src/engine/git/__tests__/mutation-lock.test.ts",
+    ]) {
+      expect(files).toContain(lightweightContract);
+    }
   });
 
-  it("gates every ZSR boundary suite plus interactive init/resume contracts", () => {
+  it("gates every execution-boundary suite plus interactive init/resume contracts", () => {
     const rootPackage = JSON.parse(read("package.json")) as {
       scripts: Record<string, string>;
     };
@@ -169,7 +191,9 @@ describe("repository layout contracts", () => {
       ...automaticallyRequired,
       ...interactiveContracts,
     ]) {
-      expect(runner, `${testFile} must be ZSR-gated`).toContain(testFile);
+      expect(runner, `${testFile} must be execution-boundary-gated`).toContain(
+        testFile,
+      );
     }
   });
 
@@ -491,6 +515,21 @@ describe("repository layout contracts", () => {
     expect(read("scripts/generate-third-party-licenses.mjs")).toContain(
       'packageName: "@openai/codex-darwin-arm64"',
     );
+  });
+
+  it("packages and exports the native host process supervisor", () => {
+    const packaging = read("electron-builder.yml");
+    const sidecar = read("apps/desktop/electron/sidecar.ts");
+    const packagingCheck = read("scripts/check-packaging-paths.mjs");
+    const source =
+      "apps/desktop/src/engine/agents/containment/host-process-supervisor.mjs";
+
+    expect(existsSync(source)).toBe(true);
+    expect(packaging).toContain(`from: ${source}`);
+    expect(sidecar).toContain("ZEROS_HOST_SUPERVISOR_RUNTIME");
+    expect(sidecar).toContain("ZEROS_HOST_SUPERVISOR_SCRIPT");
+    expect(packagingCheck).toContain(source);
+    expect(packagingCheck).toContain("ZEROS_HOST_SUPERVISOR_SCRIPT");
   });
 
   it("does not let an enclosing Zeros parent watchdog kill the engine smoke", () => {

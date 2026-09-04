@@ -53,6 +53,7 @@ import {
 } from "../shared/stdio-process";
 import type { McpServerRegistration } from "../../types";
 import type { PreparedBoundary } from "../../containment/types";
+import { hasKernelExecutionBoundary } from "../../containment/status";
 import {
   JSON_RPC_NO_RESPONSE,
   JsonRpcStdioClient,
@@ -547,7 +548,7 @@ const APPROVAL_TIMEOUT_MS = PERMISSION_RESPONSE_TIMEOUT_MS;
 
 /** Per-process Codex configuration. A ZSR child cannot access the host
  * keychain by design, so both Codex and MCP OAuth refreshes must remain in the
- * private CODEX_HOME that the outer boundary owns and promotes atomically. */
+ * generation-private CODEX_HOME owned for that contained session. */
 export function codexAppServerFeatureArgs(contained: boolean): string[] {
   return [
     "-c",
@@ -603,7 +604,7 @@ export async function bootCodexAppServerRuntime(
   //     turn's output. We enabled the feature deliberately; the per-turn
   //     banner is pure noise for the user.
   const featureArgs = codexAppServerFeatureArgs(
-    Boolean(opts.executionBoundary),
+    hasKernelExecutionBoundary(opts.executionBoundary),
   );
 
   const proc = spawnStdioAgent({
@@ -1499,6 +1500,15 @@ export function buildMcpServerOverrides(
       args.push("-c", `${base}.url="${escapeTomlString(s.url)}"`);
       if (s.headers && Object.keys(s.headers).length > 0) {
         args.push("-c", `${base}.http_headers=${tomlInlineTable(s.headers)}`);
+      }
+      if (
+        s.headersFromEnv &&
+        Object.keys(s.headersFromEnv).length > 0
+      ) {
+        args.push(
+          "-c",
+          `${base}.env_http_headers=${tomlInlineTable(s.headersFromEnv)}`,
+        );
       }
     } else {
       args.push("-c", `${base}.command="${escapeTomlString(s.command)}"`);

@@ -44,6 +44,15 @@ function makeGateway(
 type GwInternals = {
   adapters: Map<string, AgentAdapter>;
   sessionsInstructed: Set<string>;
+  executionToInstructionCtx: Map<
+    string,
+    {
+      additionalDirectories: string[];
+      designDirectory?: string;
+      designDirectories?: string[];
+    }
+  >;
+  sessionsTerritoryNoticePending: Set<string>;
   prepareCodeAgentTerritory(
     ...args: unknown[]
   ): Promise<AgentFilesystemTerritory | undefined>;
@@ -94,6 +103,7 @@ function fakeAdapter(opts: {
       opts.calls.prompts.push(prompt);
       return { response: {} as PromptResponse };
     },
+    dispose: async () => {},
   } as unknown as AgentAdapter;
 }
 
@@ -192,6 +202,268 @@ describe("gateway native system-instruction routing", () => {
     expect(c.prompts[0]![1]).toEqual(text("hello"));
     // Second prompt: one-shot spent.
     expect(c.prompts[1]).toEqual([text("again")]);
+  });
+
+  it("keeps Design context in native Code instructions, not host boundary policy", async () => {
+    const requests: BoundaryRequest[] = [];
+    const testBoundary = testExecutionBoundary({
+      onPrepare: (request) => requests.push(request),
+    });
+    const gw = makeGateway({ ...testBoundary, backend: "none" });
+    const c = calls();
+    const territory: AgentFilesystemTerritory = {
+      agentRole: "code",
+      workspaceRoot: CWD,
+      designDirectory: `${CWD}/Zeros Design`,
+      protectedDesignDirectories: [`${CWD}/Zeros Design`],
+      designRecognitionPaths: [],
+      writeCapabilities: {
+        workspace: "write",
+        deniedPaths: [`${CWD}/Zeros Design`],
+      },
+    };
+    const internals = gw as unknown as GwInternals;
+    internals.adapters.set(
+      "codex",
+      fakeAdapter({
+        agentId: "codex",
+        native: true,
+        sessionId: "native-context",
+        calls: c,
+      }),
+    );
+    internals.prepareCodeAgentTerritory = async () => territory;
+
+    await gw.newSession("codex", { cwd: CWD });
+
+    expect(c.newSessionOpts[0]!.systemInstruction).toContain(
+      `${CWD}/Zeros Design`,
+    );
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      actor: "agent-code",
+      backendHint: "none",
+    });
+    expect(requests[0]).not.toHaveProperty("territory");
+    expect(requests[0]).not.toHaveProperty("protectedCodeDirectories");
+    expect(requests[0]).not.toHaveProperty("protectedWorkspaceDirectories");
+    expect(requests[0]).not.toHaveProperty("gitIntegrationRoots");
+    await gw.dispose();
+  });
+
+  it("reasserts a changed Design territory to an already-live native Code session", async () => {
+    const gw = makeGateway({ ...testExecutionBoundary(), backend: "none" });
+    const c = calls();
+    const firstDesign = `${CWD}/Zeros Design`;
+    const nextDesign = `${CWD}/Product Design`;
+    const initialTerritory: AgentFilesystemTerritory = {
+      agentRole: "code",
+      workspaceRoot: CWD,
+      designDirectory: firstDesign,
+      protectedDesignDirectories: [firstDesign],
+      designRecognitionPaths: [],
+      writeCapabilities: {
+        workspace: "write",
+        deniedPaths: [firstDesign],
+      },
+    };
+    const nextTerritory: AgentFilesystemTerritory = {
+      ...initialTerritory,
+      designDirectory: nextDesign,
+      protectedDesignDirectories: [nextDesign],
+      writeCapabilities: {
+        workspace: "write",
+        deniedPaths: [nextDesign],
+      },
+    };
+    const internals = gw as unknown as GwInternals;
+    internals.adapters.set(
+      "codex",
+      fakeAdapter({
+        agentId: "codex",
+        native: true,
+        sessionId: "native-context-refresh",
+        calls: c,
+      }),
+    );
+    internals.prepareCodeAgentTerritory = async () => initialTerritory;
+
+    const session = await gw.newSession("codex", {
+      cwd: CWD,
+      workspaceId: "workspace-1",
+    });
+    expect(c.newSessionOpts[0]!.systemInstruction).toContain(firstDesign);
+
+    expect(
+      gw.refreshNativeCodeTerritoryContext("workspace-1", CWD, nextTerritory),
+    ).toBe(1);
+
+    await gw.prompt("codex", session.executionId, [text("continue")]);
+    await gw.prompt("codex", session.executionId, [text("again")]);
+
+    const refresh = (c.prompts[0]![0] as { text: string }).text;
+    expect(refresh).toContain("<system_instruction>");
+    expect(refresh).toContain(nextDesign);
+    expect(refresh).not.toContain(firstDesign);
+    expect(c.prompts[0]![1]).toEqual(text("continue"));
+    expect(c.prompts[1]).toEqual([text("again")]);
+
+    await gw.dispose();
+  });
+
+  it("admits a persistent Design session with only its scoped MCP and ZSR actor", async () => {
+    const requests: BoundaryRequest[] = [];
+    const gw = makeGateway(
+      testExecutionBoundary({ onPrepare: (request) => requests.push(request) }),
+    );
+    gw.setGatewayServer("http://127.0.0.1:45291/mcp");
+    const c = calls();
+    const territory: AgentFilesystemTerritory = {
+      agentRole: "code",
+      workspaceRoot: CWD,
+      designDirectory: `${CWD}/Zeros Design`,
+      protectedDesignDirectories: [`${CWD}/Zeros Design`],
+      designRecognitionPaths: [],
+      writeCapabilities: {
+        workspace: "write",
+        deniedPaths: [`${CWD}/Zeros Design`, `${CWD}/.git`],
+      },
+    };
+    const internals = gw as unknown as GwInternals;
+    internals.adapters.set(
+      "codex",
+      fakeAdapter({
+        agentId: "codex",
+        native: true,
+        sessionId: "design-session",
+        calls: c,
+      }),
+    );
+    internals.prepareCodeAgentTerritory = async () => territory;
+    const resolveMcp = vi.fn(async () => [
+      { name: "user-server", transport: "stdio", command: "unsafe" },
+    ]);
+    internals.resolveSessionMcp = resolveMcp;
+
+    const session = await gw.newDesignSession(
+      "codex",
+      {
+        actor: "design-agent",
+        agentRunId: "design-run-1",
+        env: {
+          ZEROS_DESIGN_AGENT_CAPABILITY: `Bearer ${"a".repeat(64)}`,
+        },
+        mcpServers: [
+          {
+            name: "design-draft",
+            transport: "http",
+            url: "http://127.0.0.1:43123/mcp",
+            headersFromEnv: {
+              Authorization: "ZEROS_DESIGN_AGENT_CAPABILITY",
+            },
+          },
+        ],
+        trustedLocalPorts: [43123],
+      },
+      {
+        cwd: CWD,
+        workspaceId: "workspace-1",
+        env: {
+          ZEROS_DESIGN_AGENT_CAPABILITY: "untrusted-override",
+          ZEROS_ADDITIONAL_DIRS: '["/work/reference"]',
+        },
+      },
+    );
+
+    expect(resolveMcp).not.toHaveBeenCalled();
+    expect(c.newSessionOpts[0]).toMatchObject({
+      env: {
+        ZEROS_DESIGN_AGENT_CAPABILITY: `Bearer ${"a".repeat(64)}`,
+        ZEROS_ADDITIONAL_DIRS: '["/work/reference"]',
+      },
+      mcpServers: [
+        {
+          name: "design-draft",
+          transport: "http",
+          url: "http://127.0.0.1:43123/mcp",
+        },
+      ],
+    });
+    expect(c.newSessionOpts[0]!.territory).toBeUndefined();
+    const instruction = c.newSessionOpts[0]!.systemInstruction as string;
+    expect(instruction).toContain("Design agent");
+    expect(instruction).toContain("design_transaction_apply");
+    expect(instruction).not.toContain("You are a coding agent");
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toMatchObject({
+      actor: "design-agent",
+      allowedLocalPorts: [43123],
+      trustedLocalPorts: [43123],
+    });
+    expect(session.executionId).toBeTruthy();
+    expect(gw.sessionActor(session.executionId)).toBe("design-agent");
+    expect(
+      gw.workspaceSessionIds("workspace-1", CWD, {
+        actor: "agent-code",
+      }),
+    ).toEqual([]);
+    expect(
+      gw.workspaceSessionIds("workspace-1", CWD, {
+        actor: "design-agent",
+      }),
+    ).toEqual([session.executionId]);
+    expect(
+      gw.workspaceTerritoryChanged("workspace-1", CWD, undefined, {
+        actor: "agent-code",
+      }),
+    ).toBe(false);
+    expect(
+      gw.workspaceTerritoryChanged("workspace-1", CWD, undefined, {
+        actor: "design-agent",
+      }),
+    ).toBe(true);
+  });
+
+  it("falls back to the active Design directory when a native Code refresh carries an empty recognized set", async () => {
+    const gw = makeGateway({ ...testExecutionBoundary(), backend: "none" });
+    const c = calls();
+    const internals = gw as unknown as GwInternals;
+    internals.adapters.set(
+      "codex",
+      fakeAdapter({
+        agentId: "codex",
+        native: true,
+        sessionId: "native-empty-design-set",
+        calls: c,
+      }),
+    );
+    const designDirectory = `${CWD}/Zeros Design`;
+    internals.prepareCodeAgentTerritory = async () => ({
+      agentRole: "code",
+      workspaceRoot: CWD,
+      designDirectory,
+      protectedDesignDirectories: [designDirectory],
+      designRecognitionPaths: [],
+      writeCapabilities: {
+        workspace: "write",
+        deniedPaths: [designDirectory],
+      },
+    });
+
+    const session = await gw.newSession("codex", { cwd: CWD });
+    const ctx = internals.executionToInstructionCtx.get(session.executionId)!;
+    internals.executionToInstructionCtx.set(session.executionId, {
+      ...ctx,
+      designDirectories: [],
+    });
+    internals.sessionsTerritoryNoticePending.add(session.executionId);
+
+    await gw.prompt("codex", session.executionId, [text("continue")]);
+
+    expect((c.prompts[0]![0] as { text: string }).text).toContain(
+      designDirectory,
+    );
+    await gw.dispose();
   });
 
   it("preserves the normal provider surface while ZSR subtracts Design authority", async () => {
@@ -315,6 +587,7 @@ describe("gateway native system-instruction routing", () => {
       cwd: CWD,
       env: {
         ZEROS_ADDITIONAL_DIRS: '["/work/context"]',
+        ZEROS_ISOLATION_CONTEXT_DIRS: '["/work/spoofed-context"]',
         PATH: "/work/bin",
         CLAUDE_CODE_PROCESS_WRAPPER: "/work/wrapper",
       },
@@ -324,6 +597,40 @@ describe("gateway native system-instruction routing", () => {
       ZEROS_ADDITIONAL_DIRS: '["/work/context"]',
       PATH: "/work/bin",
       CLAUDE_CODE_PROCESS_WRAPPER: "/work/wrapper",
+    });
+    expect(c.newSessionOpts[0]!.env).not.toHaveProperty(
+      "ZEROS_ISOLATION_CONTEXT_DIRS",
+    );
+  });
+
+  it("drops the retired isolation-context courier across live config updates", async () => {
+    const gw = makeGateway();
+    const c = calls();
+    const internals = gw as unknown as GwInternals;
+    internals.adapters.set(
+      "codex",
+      fakeAdapter({
+        agentId: "codex",
+        native: true,
+        sessionId: "s-context-update",
+        calls: c,
+      }),
+    );
+    internals.prepareCodeAgentTerritory = async () => undefined;
+    const session = await gw.newSession("codex", { cwd: CWD });
+
+    await gw.updateConfig("codex", session.executionId, {
+      ZEROS_ADDITIONAL_DIRS: JSON.stringify(["/work/user-root"]),
+      ZEROS_ISOLATION_CONTEXT_DIRS: JSON.stringify(["/work/spoofed-context"]),
+      ZEROS_FAST_MODE: "1",
+    });
+
+    expect(c.updateConfigOpts.at(-1)).toEqual({
+      sessionId: session.executionId,
+      env: {
+        ZEROS_ADDITIONAL_DIRS: JSON.stringify(["/work/user-root"]),
+        ZEROS_FAST_MODE: "1",
+      },
     });
   });
 
@@ -436,7 +743,7 @@ describe("gateway native system-instruction routing", () => {
     expect(c.prompts[0]).toEqual([text("continue")]);
   });
 
-  it("keeps MCP inside ZSR for a Design-contained resumed session", async () => {
+  it("keeps MCP inside the execution boundary for a Design-aware resumed session", async () => {
     const requests: BoundaryRequest[] = [];
     const gw = makeGateway(
       testExecutionBoundary({ onPrepare: (request) => requests.push(request) }),
@@ -472,6 +779,17 @@ describe("gateway native system-instruction routing", () => {
 
     const loaded = await gw.loadSession("codex", "s-contained-resume", {
       cwd: CWD,
+      // This routing test asserts the no-container parity shape. Do not let a
+      // Docker/Podman binary installed on the test runner change its meaning;
+      // boundary status tests cover the advertised-container restriction.
+      env: {
+        PATH: "",
+        DOCKER_HOST: "",
+        CONTAINER_HOST: "",
+        DOCKER_CONTEXT: "",
+        PODMAN_HOST: "",
+        CONTAINER_CONNECTION: "",
+      },
     });
 
     expect(resolveMcp).toHaveBeenCalledOnce();

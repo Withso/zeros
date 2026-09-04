@@ -414,6 +414,12 @@ export async function prepareGitCredentialShellEnvironment(
       ZEROS_GIT_AUTH_HELPER: activeBroker.helperPath,
       ZEROS_GIT_AUTH_ASKPASS: activeBroker.askpassPath,
       ZEROS_REAL_GIT_PATH: realGit,
+      // Same-host native shells can prove a hard-killed engine cheaply with
+      // kill(0). A qualified cloud consumer may have another PID namespace,
+      // so it uses the socket health check in the shim instead.
+      ...(!consumerIdentity
+        ? { ZEROS_GIT_AUTH_BROKER_PID: String(process.pid) }
+        : {}),
       ...(realGh ? { ZEROS_REAL_GH_PATH: realGh } : {}),
       PATH: `${activeBroker.helpersDir}${path.delimiter}${pathValue}`,
     },
@@ -629,6 +635,12 @@ class GitCredentialBroker {
         return;
       }
       const url = new URL(req.url, "http://localhost");
+      if (url.pathname === "/health") {
+        res.statusCode = 204;
+        res.setHeader("Cache-Control", "no-store");
+        res.end();
+        return;
+      }
       if (url.pathname !== "/credential") {
         res.statusCode = 404;
         res.end();
@@ -818,6 +830,8 @@ esac
 [ -n "$host" ] || exit 0
 
 exec curl --silent --show-error --fail \\
+  --connect-timeout 1 \\
+  --max-time 5 \\
   --unix-socket "$ZEROS_GIT_AUTH_SOCKET" \\
   --get \\
   --data-urlencode "context=$ZEROS_GIT_AUTH_CONTEXT" \\
@@ -846,6 +860,8 @@ esac
 
 credential="$(
   curl --silent --show-error --fail \\
+    --connect-timeout 1 \\
+    --max-time 5 \\
     --unix-socket "$ZEROS_GIT_AUTH_SOCKET" \\
     --get \\
     --data-urlencode "context=$ZEROS_GIT_AUTH_CONTEXT" \\
@@ -869,6 +885,29 @@ set -eu
 
 real="\${ZEROS_REAL_GIT_PATH:?}"
 helper="\${ZEROS_GIT_AUTH_HELPER:?}"
+
+# A hard-killed engine can leave this shim and its unix-socket inode on PATH.
+# Native same-host shells use a cheap PID liveness check. Consumers in another
+# PID namespace probe the projected socket. Only a dead process or
+# connection-refused falls back; a timeout/HTTP error retains fail-closed
+# broker behavior so a busy engine cannot select another ambient account.
+broker_pid="\${ZEROS_GIT_AUTH_BROKER_PID:-}"
+if [ -n "$broker_pid" ]; then
+  if ! kill -0 "$broker_pid" 2>/dev/null; then
+    exec "$real" "$@"
+  fi
+fi
+set +e
+curl --silent --fail \\
+  --connect-timeout 1 \\
+  --max-time 2 \\
+  --unix-socket "$ZEROS_GIT_AUTH_SOCKET" \\
+  "http://localhost/health" >/dev/null 2>&1
+broker_status="$?"
+set -e
+if [ "$broker_status" -eq 7 ]; then
+  exec "$real" "$@"
+fi
 
 # Apply the reset and broker only to github.com. Git's URL matching means a
 # GitLab/Bitbucket/self-hosted request in the same command retains its normal
