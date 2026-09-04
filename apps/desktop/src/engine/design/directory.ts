@@ -237,7 +237,12 @@ export async function assertSafeProspectiveDesignDirectory(
       "The prospective Design path is not a safe repo-relative directory.",
     );
   }
-  let parent = path.resolve(workspacePath);
+  // Validate child entries from the physical root. macOS exposes temporary
+  // paths through `/var` while realpath reports `/private/var`; comparing a
+  // physical child with that harmless caller spelling would otherwise reject
+  // an ordinary empty reservation. Callers that require a canonical workspace
+  // identity (agent admission and vnode reservation) enforce that separately.
+  let parent = await realpath(path.resolve(workspacePath));
   for (const segment of sanitized.split("/")) {
     const entries = await readdir(parent);
     const aliases = entries.filter(
