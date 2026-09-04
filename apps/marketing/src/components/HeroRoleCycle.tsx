@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { playScramble, SCRAMBLE_FROM, SCRAMBLE_MS } from './scramble-text'
-import './hero-role.css?v=role-pixelscript-2'
+import './hero-role.css?v=role-doto-1'
 
 const ROLES = ['builders', 'developers', 'designers'] as const
 
@@ -18,8 +18,7 @@ type Role = (typeof ROLES)[number]
  * scramble glyphs and designers A-Z are 60px; designers marks are 50px.
  * The live word is clipped to the hidden `developers` sizer so
  * scramble cannot wrap, leak, or resize the headline. Settled
- * role words use PF Pixelscript / the role script face; scramble
- * text stays on Geist.
+ * role words and scramble text use Doto ExtraBold 800.
  */
 export function HeroRoleCycle() {
   const textRef = useRef<HTMLSpanElement>(null)

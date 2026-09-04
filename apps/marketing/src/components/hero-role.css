@@ -2,32 +2,16 @@
  * The hidden sizer is the only in-flow size. The live word paints inside
  * that box so scramble glyphs cannot grow, wrap, or leak the headline.
  *
- * Settled builders / developers / designers use PF Pixelscript when a
- * licensed Parachute Web woff2 is present, then the original 10x7 role
- * script. Scramble glyphs stay on Geist. */
-
-@font-face {
-  font-family: "Zeros Role Script";
-  src: url("/fonts/zeros-role-script.woff2") format("woff2");
-  font-weight: 400;
-  font-style: normal;
-  font-display: block;
-}
+ * Settled builders / developers / designers and scramble text use
+ * Doto ExtraBold 800. Design marks stay SVG. */
 
 .hero-role {
   position: relative;
   display: inline-block;
   vertical-align: baseline;
-}
-
-.hero-role-sizer,
-.hero-role-word:not(.is-scrambling) {
-  font-family: "PF Pixelscript", "Pixelscript", "Zeros Role Script", "Geist",
-    ui-sans-serif, system-ui, sans-serif;
-  font-weight: 400;
+  font-family: "Doto", "Geist", ui-sans-serif, system-ui, sans-serif;
+  font-weight: 800;
   font-style: normal;
-  letter-spacing: 0;
-  line-height: 1;
   font-synthesis: none;
 }
 
@@ -43,16 +27,6 @@
   inset: 0;
   overflow: hidden;
   white-space: nowrap;
-}
-
-.hero-role-word.is-scrambling,
-.hero-role-word.is-scrambling .hero-scramble-text,
-.hero-role-word.is-scrambling .hero-scramble-symbol,
-.hero-role-word.is-scrambling .hero-role-revealed {
-  font-family: "Geist", ui-sans-serif, system-ui, sans-serif;
-  font-weight: inherit;
-  letter-spacing: inherit;
-  font-synthesis: none;
 }
 
 .hero-role-word.is-scrambling {
