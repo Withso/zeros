@@ -166,7 +166,7 @@ CREATE OR REPLACE FUNCTION purge_cloud_workspace_operator_configuration(
 ) RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF NOT public.app_is_system() THEN
@@ -202,7 +202,7 @@ CREATE OR REPLACE FUNCTION personal_organization_has_cloud_configuration(
 LANGUAGE plpgsql
 STABLE
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF NOT public.app_is_system() THEN

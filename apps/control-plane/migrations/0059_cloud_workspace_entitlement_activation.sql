@@ -14,7 +14,7 @@ CREATE OR REPLACE FUNCTION cloud_workspace_paid_authority_live(
 ) RETURNS boolean
 LANGUAGE sql
 STABLE
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
   SELECT EXISTS (
     SELECT 1

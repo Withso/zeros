@@ -228,7 +228,7 @@ ALTER TABLE cloud_workspaces
 -- then revoke runtime authority while the historical owner UUID remains.
 CREATE FUNCTION enforce_cloud_workspace_member_owners() RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF NOT EXISTS (
@@ -350,7 +350,7 @@ CREATE FUNCTION cloud_workspace_paid_authority_live(
 ) RETURNS boolean
 LANGUAGE sql
 STABLE
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
   SELECT EXISTS (
     SELECT 1

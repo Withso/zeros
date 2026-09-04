@@ -61,6 +61,22 @@ function migrationSource(file: string): string {
 }
 
 describe("cloud migration regression contracts", () => {
+  it("places temporary schemas last in every pg_catalog/public function path", () => {
+    const unsafePaths = LADDER.filter((file) => file >= "0020_").flatMap(
+      (file) =>
+        migrationSource(file)
+          .split("\n")
+          .map((line, index) => ({ file, line: index + 1, sql: line.trim() }))
+          .filter(
+            ({ sql }) =>
+              /^SET search_path\s*=\s*pg_catalog\s*,\s*public\b/iu.test(sql) &&
+              !/,\s*pg_temp\b/iu.test(sql),
+          ),
+    );
+
+    expect(unsafePaths).toEqual([]);
+  });
+
   it("case-folds both sides of the legacy repository identity backfill", () => {
     const sql = migrationSource(
       "0026_cloud_workspace_identity_and_entitlements.sql",
@@ -306,6 +322,36 @@ d("migration ladder", () => {
     const ran = await runMigrations(pool);
     expect(ran).toEqual(LADDER);
     expect(await ledger()).toEqual(LADDER);
+  });
+
+  it("keeps temporary relations behind public in pinned function paths", async () => {
+    await runMigrations(pool);
+
+    const unsafeFunctions = await pool.query<{ name: string }>(
+      `SELECT p.oid::regprocedure::text AS name
+       FROM pg_proc p
+       CROSS JOIN LATERAL unnest(coalesce(p.proconfig, ARRAY[]::text[])) setting
+       WHERE p.pronamespace = 'public'::regnamespace
+         AND setting = 'search_path=pg_catalog, public'`,
+    );
+    expect(unsafeFunctions.rows).toEqual([]);
+
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "CREATE TEMP TABLE cloud_workspace_setup_runs (id uuid)",
+      );
+      await client.query("SET LOCAL search_path = pg_catalog, public, pg_temp");
+      const resolved = await client.query<{ public_wins: boolean }>(
+        `SELECT 'cloud_workspace_setup_runs'::regclass =
+                'public.cloud_workspace_setup_runs'::regclass AS public_wins`,
+      );
+      expect(resolved.rows).toEqual([{ public_wins: true }]);
+    } finally {
+      await client.query("ROLLBACK");
+      client.release();
+    }
   });
 
   it("upgrades case-aliased repository identities without leaving an unmatched workspace", async () => {

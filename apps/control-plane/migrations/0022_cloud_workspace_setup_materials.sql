@@ -112,7 +112,7 @@ ALTER TABLE cloud_workspace_setup_attestations
 CREATE FUNCTION enforce_cloud_workspace_setup_engine_attestation()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF NOT EXISTS (

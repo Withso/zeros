@@ -56,7 +56,7 @@ ALTER TABLE cloud_workspace_endpoint_grants
 CREATE FUNCTION enforce_cloud_workspace_setup_grant_binding()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF NEW.purpose = 'setup' THEN
@@ -145,7 +145,7 @@ CREATE TABLE cloud_workspace_setup_attestations (
 CREATE FUNCTION enforce_cloud_workspace_setup_attestation_binding()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF NOT EXISTS (

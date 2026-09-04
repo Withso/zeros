@@ -36,7 +36,7 @@ CREATE OR REPLACE FUNCTION revoke_cloud_workspace_access_for_org_member()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   UPDATE cloud_workspace_client_access_grants
@@ -64,7 +64,7 @@ CREATE OR REPLACE FUNCTION revoke_cloud_workspace_access_for_team_member()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   UPDATE cloud_workspace_client_access_grants access
@@ -130,7 +130,7 @@ CREATE FUNCTION drain_cloud_workspaces_for_deleted_scope(
 RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF retirement_reason NOT IN (
@@ -339,7 +339,7 @@ CREATE FUNCTION drain_cloud_workspaces_for_deleted_organization()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   PERFORM drain_cloud_workspaces_for_deleted_scope(
@@ -359,7 +359,7 @@ CREATE FUNCTION drain_cloud_workspaces_for_deleted_team()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   PERFORM drain_cloud_workspaces_for_deleted_scope(
@@ -385,7 +385,7 @@ CREATE FUNCTION retire_cloud_workspace_authority_for_deleted_user()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   PERFORM drain_cloud_workspaces_for_deleted_scope(

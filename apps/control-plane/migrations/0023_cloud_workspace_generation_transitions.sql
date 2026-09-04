@@ -51,7 +51,7 @@ ALTER TABLE cloud_workspace_lifecycle_intents
 CREATE FUNCTION bind_cloud_workspace_intent_generation()
 RETURNS trigger
 LANGUAGE plpgsql
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF NEW.generation IS NULL THEN

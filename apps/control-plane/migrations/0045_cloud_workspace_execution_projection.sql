@@ -87,7 +87,7 @@ CREATE FUNCTION sync_cloud_workspace_execution_projection()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   projected_state text;
@@ -165,7 +165,7 @@ CREATE FUNCTION retire_cloud_workspace_execution_projection()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   UPDATE workspace_executions

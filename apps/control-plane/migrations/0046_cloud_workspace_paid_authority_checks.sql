@@ -18,7 +18,7 @@ CREATE OR REPLACE FUNCTION cloud_workspace_paid_authority_live(
 ) RETURNS boolean
 LANGUAGE sql
 STABLE
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
   SELECT EXISTS (
     SELECT 1
@@ -182,7 +182,7 @@ CREATE FUNCTION enqueue_cloud_workspace_paid_authority_checks(
 ) RETURNS void
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF (scope_org_id IS NULL AND scope_user_id IS NULL)
@@ -232,7 +232,7 @@ CREATE FUNCTION enqueue_cloud_authority_for_account_change()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   affected_user_id uuid;
@@ -252,7 +252,7 @@ CREATE FUNCTION enqueue_cloud_authority_for_organization_entitlement_change()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   affected_org_id uuid;
@@ -273,7 +273,7 @@ CREATE FUNCTION enqueue_cloud_authority_for_seat_change()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   affected_org_id uuid;
@@ -293,7 +293,7 @@ CREATE FUNCTION enqueue_cloud_authority_for_membership_change()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   affected_org_id uuid;
@@ -318,7 +318,7 @@ CREATE FUNCTION enqueue_cloud_authority_for_team_membership_change()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   affected_org_id uuid;
@@ -344,7 +344,7 @@ CREATE FUNCTION enqueue_cloud_authority_for_workspace_membership_change()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   affected_org_id uuid;
@@ -365,7 +365,7 @@ CREATE FUNCTION enqueue_cloud_authority_for_user_auth_change()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   PERFORM enqueue_cloud_workspace_paid_authority_checks(
@@ -387,7 +387,7 @@ CREATE FUNCTION enqueue_cloud_authority_for_workos_link_change()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 DECLARE
   affected_org_id uuid;
@@ -410,7 +410,7 @@ CREATE FUNCTION enqueue_cloud_authority_for_organization_change()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   PERFORM enqueue_cloud_workspace_paid_authority_checks(
@@ -432,7 +432,7 @@ CREATE FUNCTION maintain_cloud_workspace_authority_check()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF TG_OP = 'INSERT'

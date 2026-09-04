@@ -15,7 +15,7 @@ CREATE FUNCTION cloud_workspace_generation_policy_current(
 ) RETURNS boolean
 LANGUAGE sql
 STABLE
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
   SELECT EXISTS (
     SELECT 1
@@ -40,7 +40,7 @@ CREATE FUNCTION retire_cloud_workspace_managed_policy_authority()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF TG_OP = 'INSERT'

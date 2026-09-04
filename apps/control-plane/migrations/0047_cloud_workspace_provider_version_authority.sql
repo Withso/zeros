@@ -25,7 +25,7 @@ CREATE FUNCTION parse_legacy_cloud_provider_expiry(raw_value text)
 RETURNS timestamptz
 LANGUAGE plpgsql
 IMMUTABLE
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF raw_value IS NULL THEN
@@ -62,7 +62,7 @@ CREATE FUNCTION cloud_workspace_generation_provider_authority_live(
 ) RETURNS boolean
 LANGUAGE sql
 STABLE
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
   SELECT minimum_remaining_seconds BETWEEN 0 AND 3600
     AND EXISTS (
@@ -104,7 +104,7 @@ CREATE FUNCTION cloud_workspace_runtime_authority_live(
 ) RETURNS boolean
 LANGUAGE sql
 STABLE
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
   SELECT cloud_workspace_paid_authority_live(
            target_workspace_id, target_user_id, require_workos
@@ -118,7 +118,7 @@ CREATE FUNCTION enqueue_cloud_provider_version_authority_check()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   INSERT INTO cloud_workspace_paid_authority_checks (
@@ -151,7 +151,7 @@ CREATE FUNCTION enqueue_cloud_generation_provider_authority_check()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   INSERT INTO cloud_workspace_paid_authority_checks (
@@ -179,7 +179,7 @@ CREATE FUNCTION enqueue_cloud_provider_connection_authority_check()
 RETURNS trigger
 LANGUAGE plpgsql
 SECURITY DEFINER
-SET search_path = pg_catalog, public
+SET search_path = pg_catalog, public, pg_temp
 AS $$
 BEGIN
   IF OLD.state IS DISTINCT FROM NEW.state THEN
