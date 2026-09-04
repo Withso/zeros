@@ -11,6 +11,7 @@
   },
   "scripts": {
     "auth:probe": "tsx src/auth-contract-probe.ts",
+    "cloud-quota:manage": "tsx src/manage-cloud-workspace-quota.ts",
     "staff:manage": "tsx src/manage-staff.ts",
     "reset:database": "tsx src/reset-database.ts",
     "dev": "tsx watch src/index.ts",

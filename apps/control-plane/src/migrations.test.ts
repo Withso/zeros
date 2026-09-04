@@ -311,6 +311,7 @@ d("migration ladder", () => {
       "0018_deletion_lifecycle.sql",
       "0019_resend_product_notifications.sql",
       "0053_cloud_workspace_personal_organization_invariant.sql",
+      "0054_cloud_workspace_quota_operations.sql",
     ]);
     await expect(
       pool.query(

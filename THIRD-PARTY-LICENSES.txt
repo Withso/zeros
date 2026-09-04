@@ -1184,67 +1184,67 @@ PACKAGE INVENTORY (602 resolved package/version records)
   Source: https://github.com/statsig-io/js-client-monorepo
   License documents: 27cc00620b2a
 
-@tiptap/core@3.26.0
+@tiptap/core@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-bubble-menu@3.26.0
+@tiptap/extension-bubble-menu@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-document@3.26.0
+@tiptap/extension-document@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-floating-menu@3.26.0
+@tiptap/extension-floating-menu@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-mention@3.26.0
+@tiptap/extension-mention@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-paragraph@3.26.0
+@tiptap/extension-paragraph@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extension-text@3.26.0
+@tiptap/extension-text@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/extensions@3.26.0
+@tiptap/extensions@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/pm@3.26.0
+@tiptap/pm@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/react@3.26.0
+@tiptap/react@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
   License documents: c96e5ecb55ac
 
-@tiptap/suggestion@3.26.0
+@tiptap/suggestion@3.31.2
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://github.com/ueberdosis/tiptap
@@ -2050,7 +2050,7 @@ fdir@6.5.0
   Source: https://github.com/thecodrr/fdir
   License documents: 9a39f2aadab1
 
-fflate@0.4.8
+fflate@0.4.9
   License: MIT
   Surfaces: root pnpm workspace
   Author: Arjun Barrett
@@ -3301,7 +3301,7 @@ prosemirror-keymap@1.2.3
   Source: https://github.com/prosemirror/prosemirror-keymap
   License documents: ef0b452ced63
 
-prosemirror-model@1.25.7
+prosemirror-model@1.25.11
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://code.haverbeke.berlin/prosemirror/prosemirror-model
@@ -3331,7 +3331,7 @@ prosemirror-transform@1.12.0
   Source: https://github.com/prosemirror/prosemirror-transform
   License documents: ef0b452ced63
 
-prosemirror-view@1.41.8
+prosemirror-view@1.42.3
   License: MIT
   Surfaces: root pnpm workspace
   Source: https://code.haverbeke.berlin/prosemirror/prosemirror-view
@@ -3358,7 +3358,7 @@ qrcode.react@4.2.0
   Source: https://github.com/zpao/qrcode.react
   License documents: 908a4454d01d
 
-qs@6.15.2
+qs@6.16.0
   License: BSD-3-Clause
   Surfaces: root pnpm workspace
   Source: https://github.com/ljharb/qs
@@ -3646,7 +3646,7 @@ side-channel-weakmap@1.0.2
   Source: https://github.com/ljharb/side-channel-weakmap
   License documents: cfc3f455254c
 
-side-channel@1.1.0
+side-channel@1.1.1
   License: MIT
   Surfaces: root pnpm workspace
   Author: Jordan Harband <ljharb@gmail.com>
@@ -4626,8 +4626,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT 09edb7d11197
 SHA-256: 09edb7d111972cbb9e4c633627d8f7ced76c5a0b88941238def940d930d2d336
-Applies to: fflate@0.4.8
-Source labels: fflate@0.4.8 — LICENSE
+Applies to: fflate@0.4.9
+Source labels: fflate@0.4.9 — LICENSE
 ================================================================================
 
 MIT License
@@ -12169,8 +12169,8 @@ SOFTWARE.
 ================================================================================
 DOCUMENT c96e5ecb55ac
 SHA-256: c96e5ecb55ac593157ad1d21d1f44a611187f494a0f04c235a1ae692c88d6ba9
-Applies to: @tiptap/core@3.26.0, @tiptap/extension-bubble-menu@3.26.0, @tiptap/extension-document@3.26.0, @tiptap/extension-floating-menu@3.26.0, @tiptap/extension-mention@3.26.0, @tiptap/extension-paragraph@3.26.0, @tiptap/extension-text@3.26.0, @tiptap/extensions@3.26.0, @tiptap/pm@3.26.0, @tiptap/react@3.26.0, @tiptap/suggestion@3.26.0
-Source labels: @tiptap/core@3.26.0 — LICENSE.md; @tiptap/extension-bubble-menu@3.26.0 — LICENSE.md; @tiptap/extension-document@3.26.0 — LICENSE.md; @tiptap/extension-floating-menu@3.26.0 — LICENSE.md; @tiptap/extension-mention@3.26.0 — LICENSE.md; @tiptap/extension-paragraph@3.26.0 — LICENSE.md; @tiptap/extension-text@3.26.0 — LICENSE.md; @tiptap/extensions@3.26.0 — LICENSE.md; @tiptap/pm@3.26.0 — LICENSE; @tiptap/react@3.26.0 — LICENSE.md; @tiptap/suggestion@3.26.0 — LICENSE.md
+Applies to: @tiptap/core@3.31.2, @tiptap/extension-bubble-menu@3.31.2, @tiptap/extension-document@3.31.2, @tiptap/extension-floating-menu@3.31.2, @tiptap/extension-mention@3.31.2, @tiptap/extension-paragraph@3.31.2, @tiptap/extension-text@3.31.2, @tiptap/extensions@3.31.2, @tiptap/pm@3.31.2, @tiptap/react@3.31.2, @tiptap/suggestion@3.31.2
+Source labels: @tiptap/core@3.31.2 — LICENSE.md; @tiptap/extension-bubble-menu@3.31.2 — LICENSE.md; @tiptap/extension-document@3.31.2 — LICENSE.md; @tiptap/extension-floating-menu@3.31.2 — LICENSE.md; @tiptap/extension-mention@3.31.2 — LICENSE.md; @tiptap/extension-paragraph@3.31.2 — LICENSE.md; @tiptap/extension-text@3.31.2 — LICENSE.md; @tiptap/extensions@3.31.2 — LICENSE.md; @tiptap/pm@3.31.2 — LICENSE; @tiptap/react@3.31.2 — LICENSE.md; @tiptap/suggestion@3.31.2 — LICENSE.md
 ================================================================================
 
 MIT License
@@ -12485,8 +12485,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT cfc3f455254c
 SHA-256: cfc3f455254c0af0655cc3ff46a41ed644b67599f6043346169d285bf2b3cf3b
-Applies to: side-channel-weakmap@1.0.2, side-channel@1.1.0
-Source labels: side-channel-weakmap@1.0.2 — LICENSE; side-channel@1.1.0 — LICENSE
+Applies to: side-channel-weakmap@1.0.2, side-channel@1.1.1
+Source labels: side-channel-weakmap@1.0.2 — LICENSE; side-channel@1.1.1 — LICENSE
 ================================================================================
 
 MIT License
@@ -14000,8 +14000,8 @@ Copyright (c) 2012 Felix Geisendörfer (felix@debuggable.com) and contributors
 ================================================================================
 DOCUMENT e7dc37bf662d
 SHA-256: e7dc37bf662d7f786efcb46c545615e70c1daf458a38385521c63cf6607cdfe1
-Applies to: qs@6.15.2
-Source labels: qs@6.15.2 — LICENSE.md
+Applies to: qs@6.16.0
+Source labels: qs@6.16.0 — LICENSE.md
 ================================================================================
 
 BSD 3-Clause License
@@ -14397,8 +14397,8 @@ THE SOFTWARE.
 ================================================================================
 DOCUMENT ef0b452ced63
 SHA-256: ef0b452ced6304db2ce78ca66de1fc7b97bab05bc1750c95df359ed3fe1d65c8
-Applies to: prosemirror-commands@1.7.1, prosemirror-dropcursor@1.8.2, prosemirror-gapcursor@1.4.1, prosemirror-history@1.5.0, prosemirror-inputrules@1.5.1, prosemirror-keymap@1.2.3, prosemirror-model@1.25.7, prosemirror-schema-list@1.5.1, prosemirror-state@1.4.4, prosemirror-transform@1.12.0, prosemirror-view@1.41.8
-Source labels: prosemirror-commands@1.7.1 — LICENSE; prosemirror-dropcursor@1.8.2 — LICENSE; prosemirror-gapcursor@1.4.1 — LICENSE; prosemirror-history@1.5.0 — LICENSE; prosemirror-inputrules@1.5.1 — LICENSE; prosemirror-keymap@1.2.3 — LICENSE; prosemirror-model@1.25.7 — LICENSE; prosemirror-schema-list@1.5.1 — LICENSE; prosemirror-state@1.4.4 — LICENSE; prosemirror-transform@1.12.0 — LICENSE; prosemirror-view@1.41.8 — LICENSE
+Applies to: prosemirror-commands@1.7.1, prosemirror-dropcursor@1.8.2, prosemirror-gapcursor@1.4.1, prosemirror-history@1.5.0, prosemirror-inputrules@1.5.1, prosemirror-keymap@1.2.3, prosemirror-model@1.25.11, prosemirror-schema-list@1.5.1, prosemirror-state@1.4.4, prosemirror-transform@1.12.0, prosemirror-view@1.42.3
+Source labels: prosemirror-commands@1.7.1 — LICENSE; prosemirror-dropcursor@1.8.2 — LICENSE; prosemirror-gapcursor@1.4.1 — LICENSE; prosemirror-history@1.5.0 — LICENSE; prosemirror-inputrules@1.5.1 — LICENSE; prosemirror-keymap@1.2.3 — LICENSE; prosemirror-model@1.25.11 — LICENSE; prosemirror-schema-list@1.5.1 — LICENSE; prosemirror-state@1.4.4 — LICENSE; prosemirror-transform@1.12.0 — LICENSE; prosemirror-view@1.42.3 — LICENSE
 ================================================================================
 
 Copyright (C) 2015-2017 by Marijn Haverbeke <marijn@haverbeke.berlin> and others

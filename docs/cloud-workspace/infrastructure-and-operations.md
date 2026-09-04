@@ -111,6 +111,16 @@ An optional queue/cache may accelerate workers but cannot be the sole durable
 record. Use a transactional outbox so database commits and asynchronous work do
 not diverge.
 
+Organization compute quotas are operator-approved admission records, not
+Organization-admin settings. Provision or change them only through
+`pnpm --dir apps/control-plane cloud-quota:manage`: first generate a read-only
+target-bound plan, then execute its exact approval from a controlled
+database-owner shell. The command refuses Personal/deleted/ineligible tenants,
+non-platform-owner attribution, stale plans, and limits below current usage;
+the same transaction writes append-only owner evidence. Quota provisioning is
+independent of `CLOUD_WORKSPACES_ENABLED` and
+`CLOUD_WORKSPACE_SETUP_WORKER_ENABLED`.
+
 The hosted Railway deployment keeps database, object-storage, worker, and
 encryption endpoints configurable. A future template must ship health,
 migration, upgrade, backup/restore, key-rotation, and deletion procedures; a

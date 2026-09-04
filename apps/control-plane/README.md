@@ -365,10 +365,63 @@ The provider reconciler uses leases, observes before mutating, recovers lost
 create responses, converges drift, and only deletes a managed true orphan after
 repeat observation plus a grace period.
 
-Provider creation currently queues a setup run and leaves the workspace in
-`setting_up`. Until the Phase 2 non-root setup worker and workspace-bound engine
-grant issuer exist, this API is not a shipping remote workspace experience.
-Configuration and safe defaults are documented in [`.env.example`](.env.example).
+### Cloud-workspace quota provisioning
+
+`cloud_workspace_quotas` is an explicit paid-resource admission gate. Never
+create or edit its rows with ad-hoc SQL. Use the database-owner command from a
+controlled Railway shell or equivalent operator workstation, and do not persist
+its one-shot variables on the service. The target Organization must be active,
+non-Personal, cloud-enabled, and have a current cloud entitlement. The
+accountable actor must be an active `platform_owner`.
+
+Set `DATABASE_URL` plus these target-bound inputs:
+
+- `CONTROL_PLANE_CLOUD_QUOTA_CHANNEL` — `development`, `alpha`, `beta`, or
+  `production`; it must match `RAILWAY_ENVIRONMENT_NAME` when present.
+- `CONTROL_PLANE_CLOUD_QUOTA_ORGANIZATION_ID` and
+  `CONTROL_PLANE_CLOUD_QUOTA_EXPECTED_ORGANIZATION_SLUG` — both must resolve to
+  the same exact Organization.
+- `CONTROL_PLANE_CLOUD_QUOTA_ACTOR_USER_ID` — the accountable platform owner's
+  Zeros UUID.
+- `CONTROL_PLANE_CLOUD_QUOTA_MAX_WORKSPACES` and
+  `CONTROL_PLANE_CLOUD_QUOTA_MAX_RUNNING_WORKSPACES` — positive limits, with
+  running no greater than total.
+- `CONTROL_PLANE_CLOUD_QUOTA_MAX_CPU_MILLICORES`,
+  `CONTROL_PLANE_CLOUD_QUOTA_MAX_MEMORY_MIB`, and
+  `CONTROL_PLANE_CLOUD_QUOTA_MAX_STORAGE_MIB` — aggregate limits large enough
+  for current usage and the deployment's pinned per-generation resources.
+- `CONTROL_PLANE_CLOUD_QUOTA_REASON` — a 16–512 character audit reason.
+
+Generate a read-only plan first:
+
+```sh
+pnpm --dir apps/control-plane cloud-quota:manage
+```
+
+The command prints an approval string bound to the database fingerprint,
+channel, Organization, actor, current quota, requested quota, and a hash of the
+reason. Copy the exact value into `CONTROL_PLANE_CLOUD_QUOTA_APPROVAL`, then
+execute:
+
+```sh
+pnpm --dir apps/control-plane cloud-quota:manage --execute
+```
+
+Production additionally requires
+`CONTROL_PLANE_CLOUD_QUOTA_PRODUCTION_CONFIRMED=true`. Execution re-locks and
+revalidates every fact, rejects a stale plan or a quota below current usage,
+and appends an immutable `cloud_workspace_quota_changes` record in the same
+transaction. Creating a quota does not enable cloud routes or setup execution;
+the two feature gates remain separate release decisions.
+
+Provider creation queues a setup run and leaves the workspace in `setting_up`
+while `CLOUD_WORKSPACE_SETUP_WORKER_ENABLED=false`. The setup worker,
+workspace-bound admission and engine grant issuer are implemented, but remain
+behind that separate operator gate until the exact Daytona image, lifecycle,
+root-coordinator decision, and signed macOS access paths complete protected
+qualification. End-user cloud catalog, creation, details, and management UI is
+also intentionally unwired. Configuration and safe defaults are documented in
+[`.env.example`](.env.example).
 
 ## Optional feedback destinations
 

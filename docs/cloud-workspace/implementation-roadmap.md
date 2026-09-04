@@ -54,11 +54,15 @@ External exit evidence:
 ## Phase 1 — Identity, authorization, settings, and paid authority
 
 Repository status: implemented by forward migrations 0026–0027, 0041–0047,
-and 0053, plus their control-plane services and tests.
+and 0053–0054, plus their control-plane services and tests.
 
 - WorkOS is the identity and Organization-membership source. Zeros maps WorkOS
   identities to canonical database UUIDs and remains authoritative for Team,
   repository, workspace, role, entitlement, seat, quota, and billing policy.
+- Quota creation and updates use a database-target-bound, two-step operator
+  command with platform-owner attribution, current-usage protection, and an
+  owner-only append-only change record. A quota never enables either cloud
+  feature gate by itself.
 - Personal is permanently device-local and is rejected as a cloud-workspace
   owner by both authorization and database constraints.
 - A Pro Organization supports at most five collaborators and requires every
