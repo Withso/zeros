@@ -2,8 +2,12 @@ import { shell } from "electron";
 
 import { channel, schemeForChannel } from "../../../src/engine/runtime";
 import { appBaseUrl } from "../../app-base-url";
+import { devWorkOSConfigurationIssue } from "../../dev-workos-auth-policy";
 import { desktopAuthConfig } from "../../workos-desktop-config";
-import { resolveWorkOSDesktopAccountId } from "../../workos-desktop-account";
+import {
+  controlPlaneBaseUrl,
+  resolveWorkOSDesktopAccountId,
+} from "../../workos-desktop-account";
 import { WorkOSDesktopAuthorizationFlow } from "../../workos-desktop-flow";
 import { workOSDesktopClientForMain } from "../../workos-desktop-runtime";
 import { requestWorkOSDesktopRevocation } from "../../workos-desktop-revocation";
@@ -45,7 +49,32 @@ export function acceptWorkOSDesktopCallback(input: {
 /** Unified entry point: WorkOS stays entirely in Electron main; Auth0 tells the
  * renderer to continue through the compatibility handoff until Phase 5. */
 export const authStartSignIn: CommandHandler = async () => {
-  const config = desktopAuthConfig();
+  let config: ReturnType<typeof desktopAuthConfig>;
+  try {
+    config = desktopAuthConfig();
+  } catch (error) {
+    // A partial public-client profile is still a configuration failure, not a
+    // reason to fall through to the retired provider. Keep the renderer copy
+    // fixed so no identifiers or URLs cross IPC.
+    if (channel() === "dev") return { mode: "unconfigured" };
+    throw error;
+  }
+  if (channel() === "dev") {
+    let issue: ReturnType<typeof devWorkOSConfigurationIssue> = "provider";
+    try {
+      issue = devWorkOSConfigurationIssue({
+        auth: config,
+        appOrigin: appBaseUrl(),
+        controlPlaneOrigin: controlPlaneBaseUrl(),
+      });
+    } catch {
+      issue = "token_contract";
+    }
+    if (issue) {
+      console.warn(`[Zeros] Dev WorkOS configuration rejected: ${issue}`);
+      return { mode: "unconfigured" };
+    }
+  }
   if (config.provider === "auth0") return { mode: "auth0" };
   cancelLegacyAuthHandoff();
   const attempt = await workOSFlow().start();
