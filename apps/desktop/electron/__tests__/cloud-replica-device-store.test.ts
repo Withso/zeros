@@ -130,6 +130,37 @@ describe("main-owned cloud replica device secret", () => {
     expect(result).toEqual(winnerEnvelope);
   });
 
+  it("re-reads a winner created between the absence and presence checks", () => {
+    const accountUserId = randomUUID();
+    const winner = memorySecrets();
+    const winnerEnvelope = new CloudReplicaDeviceSecretStore(
+      winner.dependencies,
+    ).ensure(accountUserId);
+    const account = cloudReplicaDeviceSecretAccount(accountUserId);
+    let reads = 0;
+    let creates = 0;
+    const dependencies: CloudReplicaSecretStoreDependencies = {
+      read: () => {
+        reads += 1;
+        return reads === 1 ? null : winner.values.get(account)!;
+      },
+      has: () => true,
+      create: () => {
+        creates += 1;
+        return false;
+      },
+      replace: () => false,
+    };
+
+    const result = new CloudReplicaDeviceSecretStore(dependencies).ensure(
+      accountUserId,
+    );
+
+    expect(result).toEqual(winnerEnvelope);
+    expect(reads).toBe(2);
+    expect(creates).toBe(0);
+  });
+
   it("fails closed when a concurrent ensure winner vanishes before re-read", () => {
     const dependencies: CloudReplicaSecretStoreDependencies = {
       read: () => null,
@@ -148,10 +179,18 @@ describe("main-owned cloud replica device secret", () => {
   });
 
   it("fails closed when a concurrent ensure winner is corrupt", () => {
+    let reads = 0;
+    let creates = 0;
     const dependencies: CloudReplicaSecretStoreDependencies = {
-      read: () => "not-json",
-      has: () => true,
-      create: () => false,
+      read: () => {
+        reads += 1;
+        return reads === 1 ? null : "not-json";
+      },
+      has: () => false,
+      create: () => {
+        creates += 1;
+        return false;
+      },
       replace: () => false,
     };
 
@@ -162,6 +201,8 @@ describe("main-owned cloud replica device secret", () => {
         code: "secret_corrupt",
       }),
     );
+    expect(reads).toBe(2);
+    expect(creates).toBe(1);
   });
 
   it("rejects a server registration for a different public key", () => {

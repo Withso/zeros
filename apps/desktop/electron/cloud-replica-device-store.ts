@@ -163,16 +163,18 @@ export class CloudReplicaDeviceSecretStore {
     envelope: DeviceSecretEnvelope | null;
   } {
     const account = cloudReplicaDeviceSecretAccount(accountUserId);
-    let raw: string | null;
-    try {
-      raw = this.secrets.read(account);
-    } catch (error) {
-      throw new CloudReplicaDeviceStoreError(
-        "secret_unavailable",
-        "Cloud device credential store cannot be read",
-        { cause: error },
-      );
-    }
+    const read = (): string | null => {
+      try {
+        return this.secrets.read(account);
+      } catch (error) {
+        throw new CloudReplicaDeviceStoreError(
+          "secret_unavailable",
+          "Cloud device credential store cannot be read",
+          { cause: error },
+        );
+      }
+    };
+    let raw = read();
     if (raw === null) {
       let present: boolean;
       try {
@@ -185,6 +187,13 @@ export class CloudReplicaDeviceSecretStore {
         );
       }
       if (present) {
+        // Presence can become visible after the first read when a sibling
+        // Electron process wins creation. Re-read that winner before treating
+        // the null value as an undecryptable durable entry.
+        raw = read();
+        if (raw !== null) {
+          return { account, raw, envelope: parseEnvelope(raw, accountUserId) };
+        }
         throw new CloudReplicaDeviceStoreError(
           "secret_unavailable",
           "Cloud device credential cannot be decrypted",

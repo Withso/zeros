@@ -433,16 +433,45 @@ export async function handleCloudReplicaEngineControl(
     hostWarning(dependencies, deviceRegistrationStoreReason(error));
     return true;
   }
-  try {
-    // Production routes registration through the sidecar's shared latest-wins
-    // writer. The fallback keeps the helper self-contained for non-sidecar
-    // callers while still containing synchronous pipe failures.
-    if (reseedSession) {
+  // Production routes registration through the sidecar's shared latest-wins
+  // writer. The fallback keeps the helper self-contained for non-sidecar
+  // callers while still containing synchronous pipe failures.
+  if (reseedSession) {
+    try {
       await reseedSession();
-    } else {
-      writeToEngine(await cloudReplicaSessionControlLine(dependencies));
+    } catch {
+      hostWarning(dependencies, "device_registration_reseed_failed");
     }
+    return true;
+  }
+
+  const signedOutLine = cloudReplicaHostControlLine({
+    type: "host.cloudReplicaSession",
+    session: null,
+  });
+  let line: string;
+  let fallback = false;
+  try {
+    line = await cloudReplicaSessionControlLine(dependencies);
   } catch {
+    fallback = true;
+    line = signedOutLine;
+  }
+  try {
+    writeToEngine(line);
+  } catch {
+    // Preserve the prior fail-closed retry when the normal write throws, but
+    // contain a second synchronous pipe failure as well.
+    if (!fallback) {
+      try {
+        writeToEngine(signedOutLine);
+      } catch {
+        // The active engine is exiting; its replacement receives a fresh seed.
+      }
+    }
+    fallback = true;
+  }
+  if (fallback) {
     hostWarning(dependencies, "device_registration_reseed_failed");
   }
   return true;

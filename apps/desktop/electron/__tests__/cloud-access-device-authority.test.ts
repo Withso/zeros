@@ -388,4 +388,61 @@ describe("main cloud access device authority", () => {
       pending.active.privateKey,
     );
   });
+
+  it("writes a signed-out fallback and contains its synchronous writer failure", async () => {
+    const accountUserId = randomUUID();
+    const deviceId = randomUUID();
+    const store = memoryStore();
+    const pending = store.ensure(accountUserId);
+    vi.spyOn(store, "ensure").mockImplementation(() => {
+      throw new CloudReplicaDeviceStoreError(
+        "secret_unavailable",
+        `do not log ${pending.active.privateKey}`,
+      );
+    });
+    const warning = vi.fn();
+    const writeToEngine = vi.fn((line: string) => {
+      expect(JSON.parse(line)).toEqual({
+        type: "host.cloudReplicaSession",
+        session: null,
+      });
+      throw new Error(`do not log ${pending.active.privateKey}`);
+    });
+
+    await expect(
+      handleCloudReplicaEngineControl(
+        {
+          type: "engine.cloudReplicaDeviceRegistered",
+          accountUserId,
+          deviceId,
+          keyVersion: 1,
+          publicKey: pending.active.publicKey,
+          keyFingerprint: cloudDevicePublicKeyFingerprint(
+            pending.active.publicKey,
+          ),
+        },
+        writeToEngine,
+        {
+          capabilityEnabled: () => true,
+          getSession: async () => ({
+            provider: "workos" as const,
+            accountId: accountUserId,
+            accessToken: unexpiredAccessToken(),
+            sub: "user_fallback",
+            email: "fallback@example.test",
+            name: null,
+            clientKind: "desktop" as const,
+          }),
+          store: () => store,
+          warn: warning,
+        },
+      ),
+    ).resolves.toBe(true);
+
+    expect(writeToEngine).toHaveBeenCalledOnce();
+    expect(warning).toHaveBeenCalledWith("device_registration_reseed_failed");
+    expect(JSON.stringify(warning.mock.calls)).not.toContain(
+      pending.active.privateKey,
+    );
+  });
 });
