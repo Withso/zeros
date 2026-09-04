@@ -943,7 +943,11 @@ export class CloudWorkspaceDurabilityRuntime {
     directive: CloudCheckpointDirective,
     authority: CloudDurabilityAuthority,
   ): Promise<void> {
-    if (this.active) return this.active;
+    if (this.active) {
+      return Promise.reject(
+        new Error("cloud checkpoint is already in progress"),
+      );
+    }
     const task = this.runCheckpoint(directive, authority).finally(() => {
       if (this.active === task) this.active = null;
     });
@@ -1252,12 +1256,15 @@ export class CloudWorkspaceDurabilityRuntime {
             path: ".zeros-empty-baseline",
           });
         }
+        // A directive may be redelivered after an ambiguous response. Binding
+        // the key to its exact revision keeps only the same request replayable.
         for (let offset = 0; offset < mutations.length; offset += 10_000) {
           const chunk = mutations.slice(offset, offset + 10_000);
+          const expectedRevision = projection.currentRevision;
           const raw = await this.postJson(authority, CONTENT_APPEND_PATH, {
             ...this.scope(authority),
-            expectedRevision: projection.currentRevision,
-            idempotencyKey: `checkpoint.${directive.id}.${offset / 10_000}`,
+            expectedRevision,
+            idempotencyKey: `checkpoint.${directive.id}.revision.${expectedRevision}.chunk.${offset / 10_000}`,
             gitBaseCommit: confirmation.gitBaseCommit,
             gitHeadRef: confirmation.gitHeadRef,
             mutations: chunk,
@@ -1268,10 +1275,11 @@ export class CloudWorkspaceDurabilityRuntime {
           projection.currentRevision = Number(raw.revision);
         }
         if (mutations.length === 0) {
+          const expectedRevision = projection.currentRevision;
           const raw = await this.postJson(authority, CONTENT_APPEND_PATH, {
             ...this.scope(authority),
-            expectedRevision: projection.currentRevision,
-            idempotencyKey: `checkpoint.${directive.id}.metadata`,
+            expectedRevision,
+            idempotencyKey: `checkpoint.${directive.id}.revision.${expectedRevision}.metadata`,
             gitBaseCommit: confirmation.gitBaseCommit,
             gitHeadRef: confirmation.gitHeadRef,
             mutations: [],

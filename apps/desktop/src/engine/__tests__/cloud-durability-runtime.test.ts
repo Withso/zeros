@@ -87,6 +87,88 @@ function recordingCheckpointFetch(writes: string[]): typeof fetch {
   }) as typeof fetch;
 }
 
+function checkpointFetchHarness(options: {
+  initialRevision: number;
+  projectionEntries: ReadonlyArray<Record<string, unknown>>;
+  afterFirstAppend?: () => Promise<void>;
+  firstAppendFailure?: "before_commit" | "after_commit";
+}): {
+  fetch: typeof fetch;
+  appendBodies: Array<Record<string, unknown>>;
+} {
+  const blobId = "77777777-7777-4777-8777-777777777777";
+  const checkpointId = "88888888-8888-4888-8888-888888888888";
+  let currentRevision = options.initialRevision;
+  let firstFailure = options.firstAppendFailure;
+  const appendBodies: Array<Record<string, unknown>> = [];
+  const committedRequests = new Map<
+    string,
+    { body: string; revision: number }
+  >();
+  const fetchImpl = (async (input, init) => {
+    const pathname = new URL(String(input)).pathname;
+    if (pathname.endsWith("/content/head")) {
+      return Response.json({
+        checkpointId: null,
+        currentRevision,
+        durableRevision: currentRevision,
+        entries: options.projectionEntries,
+        nextAfterPath: null,
+      });
+    }
+    if (pathname.endsWith("/blobs")) {
+      const bytes = init?.body;
+      if (!(bytes instanceof Uint8Array)) {
+        throw new Error("expected binary upload");
+      }
+      return Response.json({
+        id: blobId,
+        plaintextSha256: createHash("sha256").update(bytes).digest("hex"),
+        sizeBytes: bytes.byteLength,
+      });
+    }
+    if (pathname.endsWith("/content/append")) {
+      if (typeof init?.body !== "string") {
+        throw new Error("expected JSON append body");
+      }
+      const firstAppend = appendBodies.length === 0;
+      const serializedBody = init.body;
+      const body = JSON.parse(serializedBody) as Record<string, unknown>;
+      appendBodies.push(body);
+      const key = String(body.idempotencyKey);
+      const prior = committedRequests.get(key);
+      if (prior) {
+        if (prior.body !== serializedBody) {
+          return Response.json(
+            { error: "idempotency_conflict" },
+            { status: 409 },
+          );
+        }
+        return Response.json({ revision: prior.revision });
+      }
+      const revision = Number(body.expectedRevision) + 1;
+      const commit = (): void => {
+        committedRequests.set(key, { body: serializedBody, revision });
+        currentRevision = revision;
+      };
+      if (firstAppend && firstFailure) {
+        const failure = firstFailure;
+        firstFailure = undefined;
+        if (failure === "after_commit") commit();
+        throw new Error("ambiguous append response");
+      }
+      commit();
+      if (firstAppend) await options.afterFirstAppend?.();
+      return Response.json({ revision });
+    }
+    if (pathname.endsWith("/checkpoints/commit")) {
+      return Response.json({ checkpointId });
+    }
+    throw new Error(`unexpected durability request: ${pathname}`);
+  }) as typeof fetch;
+  return { fetch: fetchImpl, appendBodies };
+}
+
 async function expectUnsafeCheckpointWithoutWrites(
   root: string,
   expected: RegExp,
@@ -624,6 +706,198 @@ describe("cloud durability scanner", () => {
       }
     }
   });
+});
+
+describe("cloud durability checkpoint coordination", () => {
+  checkpointIt(
+    "rejects an unrelated directive while a checkpoint is active",
+    async () => {
+      let projectionCalls = 0;
+      let releaseProjection: ((response: Response) => void) | undefined;
+      const runtime = new CloudWorkspaceDurabilityRuntime("/unused", {
+        fetch: ((input, init) => {
+          const pathname = new URL(String(input)).pathname;
+          if (!pathname.endsWith("/content/head") || init?.method !== "GET") {
+            throw new Error(`unexpected durability request: ${pathname}`);
+          }
+          projectionCalls += 1;
+          return new Promise<Response>((resolve) => {
+            releaseProjection = resolve;
+          });
+        }) as typeof fetch,
+      });
+
+      const active = runtime.checkpoint(
+        {
+          id: "55555555-5555-4555-8555-555555555555",
+          reason: "manual",
+          deadlineAtMs: Date.now() + 60_000,
+        },
+        authority,
+      );
+      const unrelated = runtime.checkpoint(
+        {
+          id: "66666666-6666-4666-8666-666666666666",
+          reason: "before_delete",
+          deadlineAtMs: Date.now() + 60_000,
+        },
+        authority,
+      );
+      const activeFailure = expect(active).rejects.toThrow(
+        "cloud durability projection is invalid",
+      );
+      const unrelatedFailure = expect(unrelated).rejects.toThrow(
+        "cloud checkpoint is already in progress",
+      );
+
+      expect(releaseProjection).toBeTypeOf("function");
+      releaseProjection!(
+        Response.json({
+          checkpointId: null,
+          currentRevision: -1,
+          durableRevision: 0,
+          entries: [],
+          nextAfterPath: null,
+        }),
+      );
+
+      await Promise.all([activeFailure, unrelatedFailure]);
+      expect(projectionCalls).toBe(1);
+    },
+  );
+
+  checkpointIt.each(["mutation", "metadata"] as const)(
+    "uses a fresh idempotency key when a %s append retries at a new revision",
+    async (kind) => {
+      const root = await checkpointRepository();
+      const directiveId = "99999999-9999-4999-8999-999999999999";
+      const readme = Buffer.from("checkpoint\n");
+      const blobId = "77777777-7777-4777-8777-777777777777";
+      const projectionEntries =
+        kind === "metadata"
+          ? [
+              {
+                operation: "upsert",
+                path: "README.md",
+                entryType: "file",
+                mode: 33188,
+                blobId,
+                contentSha256: createHash("sha256")
+                  .update(readme)
+                  .digest("hex"),
+                sizeBytes: readme.length,
+              },
+            ]
+          : [];
+      const { fetch, appendBodies } = checkpointFetchHarness({
+        initialRevision: kind === "metadata" ? 7 : 0,
+        projectionEntries,
+        afterFirstAppend: async () => {
+          if (kind === "mutation") {
+            await writeFile(
+              path.join(root, "README.md"),
+              "changed during checkpoint\n",
+            );
+          } else {
+            await git(
+              root,
+              "commit",
+              "--quiet",
+              "--allow-empty",
+              "-m",
+              "move head during checkpoint",
+            );
+          }
+        },
+      });
+      const runtime = new CloudWorkspaceDurabilityRuntime(root, {
+        fetch,
+      });
+
+      await expect(
+        runtime.checkpoint(
+          {
+            id: directiveId,
+            reason: "manual",
+            deadlineAtMs: Date.now() + 60_000,
+          },
+          authority,
+        ),
+      ).resolves.toBeUndefined();
+
+      expect(appendBodies).toHaveLength(2);
+      expect(appendBodies.map((body) => body.expectedRevision)).toEqual(
+        kind === "metadata" ? [7, 8] : [0, 1],
+      );
+      expect(appendBodies.map((body) => body.idempotencyKey)).toEqual(
+        kind === "metadata"
+          ? [
+              `checkpoint.${directiveId}.revision.7.metadata`,
+              `checkpoint.${directiveId}.revision.8.metadata`,
+            ]
+          : [
+              `checkpoint.${directiveId}.revision.0.chunk.0`,
+              `checkpoint.${directiveId}.revision.1.chunk.0`,
+            ],
+      );
+    },
+  );
+
+  checkpointIt.each(["not committed", "committed"] as const)(
+    "reuses only the exact append request after an ambiguous %s response",
+    async (outcome) => {
+      const root = await checkpointRepository();
+      const directiveId = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+      const readme = Buffer.from("checkpoint\n");
+      const blobId = "77777777-7777-4777-8777-777777777777";
+      const projectionEntry = {
+        operation: "upsert",
+        path: "README.md",
+        entryType: "file",
+        mode: 33188,
+        blobId,
+        contentSha256: createHash("sha256").update(readme).digest("hex"),
+        sizeBytes: readme.length,
+      };
+      const { fetch, appendBodies } = checkpointFetchHarness({
+        initialRevision: 7,
+        projectionEntries: [projectionEntry],
+        firstAppendFailure:
+          outcome === "committed" ? "after_commit" : "before_commit",
+      });
+      const runtime = new CloudWorkspaceDurabilityRuntime(root, {
+        fetch,
+      });
+      const directive = {
+        id: directiveId,
+        reason: "manual" as const,
+        deadlineAtMs: Date.now() + 60_000,
+      };
+
+      await expect(runtime.checkpoint(directive, authority)).rejects.toThrow(
+        "ambiguous append response",
+      );
+      await expect(
+        runtime.checkpoint(directive, authority),
+      ).resolves.toBeUndefined();
+
+      expect(appendBodies).toHaveLength(2);
+      expect(appendBodies.map((body) => body.expectedRevision)).toEqual(
+        outcome === "committed" ? [7, 8] : [7, 7],
+      );
+      expect(appendBodies.map((body) => body.idempotencyKey)).toEqual(
+        outcome === "committed"
+          ? [
+              `checkpoint.${directiveId}.revision.7.metadata`,
+              `checkpoint.${directiveId}.revision.8.metadata`,
+            ]
+          : [
+              `checkpoint.${directiveId}.revision.7.metadata`,
+              `checkpoint.${directiveId}.revision.7.metadata`,
+            ],
+      );
+    },
+  );
 });
 
 describe("cloud durability projection validation", () => {
