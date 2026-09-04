@@ -389,8 +389,8 @@ export class DatabaseCloudWorkspaceForkState {
   }): CloudWorkspaceForkJob {
     const code =
       input.code.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 96) || "failed";
-    // eslint-disable-next-line no-control-regex -- persisted error text strips C0 and DEL
     const message = input.message
+      // eslint-disable-next-line no-control-regex -- persisted error text strips C0 and DEL
       .replace(/[\u0000-\u001f\u007f]/gu, " ")
       .slice(0, 512);
     const result = this.db
@@ -417,8 +417,8 @@ export class DatabaseCloudWorkspaceForkState {
     const suffix =
       input.code.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 80) || "failed";
     const code = `permanent.${suffix}`;
-    // eslint-disable-next-line no-control-regex -- persisted error text strips C0 and DEL
     const message = input.message
+      // eslint-disable-next-line no-control-regex -- persisted error text strips C0 and DEL
       .replace(/[\u0000-\u001f\u007f]/gu, " ")
       .slice(0, 512);
     const result = this.db
@@ -445,8 +445,8 @@ export class DatabaseCloudWorkspaceForkState {
   }): CloudWorkspaceForkJob {
     const code =
       input.code.replace(/[^a-z0-9_.-]/gi, "_").slice(0, 96) || "cancelled";
-    // eslint-disable-next-line no-control-regex -- persisted error text strips C0 and DEL
     const message = input.message
+      // eslint-disable-next-line no-control-regex -- persisted error text strips C0 and DEL
       .replace(/[\u0000-\u001f\u007f]/gu, " ")
       .slice(0, 512);
     const current = this.job(input.jobId);
