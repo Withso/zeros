@@ -19,18 +19,19 @@ const snapshot = {
 
 describe("cloud qualification attestation", () => {
   it("publishes only deployable identity and sanitized evidence", () => {
+    const bearerBearingRuntime = {
+      region: "eu",
+      snapshotId: snapshot.snapshotId,
+      snapshotImageName: snapshot.snapshotImageName,
+      runtimeAttestationSha256: "d".repeat(64),
+      // Deliberate extra properties model the bearer-bearing private state.
+      cloudToken: "must-not-escape",
+      previewToken: "must-not-escape",
+    };
     const attestation = createCloudQualificationAttestation({
       disposition: "release-candidate",
       snapshot,
-      runtime: {
-        region: "eu",
-        snapshotId: snapshot.snapshotId,
-        snapshotImageName: snapshot.snapshotImageName,
-        runtimeAttestationSha256: "d".repeat(64),
-        // Deliberate extra properties model the bearer-bearing private state.
-        cloudToken: "must-not-escape",
-        previewToken: "must-not-escape",
-      },
+      runtime: bearerBearingRuntime,
       workflow: {
         repository: "withso/zeros",
         runId: "123",

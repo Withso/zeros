@@ -80,10 +80,9 @@ export function parseDaytonaPreviewHostSuffixes(
   return Object.freeze([...new Set(values)]);
 }
 
-export const DAYTONA_PREVIEW_HOST_SUFFIXES =
-  parseDaytonaPreviewHostSuffixes(
-    process.env.DAYTONA_PREVIEW_HOST_SUFFIXES,
-  );
+export const DAYTONA_PREVIEW_HOST_SUFFIXES = parseDaytonaPreviewHostSuffixes(
+  process.env.DAYTONA_PREVIEW_HOST_SUFFIXES,
+);
 
 export function isAllowedDaytonaPreviewHost(
   hostname: string,
@@ -306,10 +305,10 @@ export function collectCloudAccountBindingEnv(
         "qualified cloud token contract requires one exact issuer",
       );
     }
-    exactContractIssuer = secureIdentityUrl(
-      acceptedIssuers,
-      "ZEROS_ACCOUNT_JWT_ISS",
-    );
+    secureIdentityUrl(acceptedIssuers, "ZEROS_ACCOUNT_JWT_ISS");
+    // JWT issuer comparison is exact. Validate the configured value as a
+    // secure URL without replacing it with URL's canonical serialization.
+    exactContractIssuer = acceptedIssuers;
   }
   const skew = boundedEnvValue(env, "ZEROS_ACCOUNT_JWT_SKEW", 16);
   if (skew !== undefined) {

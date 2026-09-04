@@ -23,6 +23,7 @@ import {
   parseCloudWorkspaceSetupRequest,
   recoverInterruptedCloudWorkspaceClone,
   repositoryIdentityMatchesSetup,
+  writeAllSync,
 } from "../cloud-workspace-validation/sandbox/setup-cloud-workspace.mjs";
 import {
   CLOUD_WORKER_SUPERVISOR_AUDIENCE,
@@ -179,6 +180,31 @@ describe("cloud workspace image setup protocol", () => {
     expect(
       compareCloudWorkspaceRecoveryPath(bmpPrivateUse, bmpPrivateUse),
     ).toBe(0);
+  });
+
+  it("writes every byte when a synchronous write makes partial progress", () => {
+    const bytes = new Uint8Array([1, 2, 3, 4, 5]);
+    const written: number[] = [];
+
+    writeAllSync(17, bytes, (_descriptor, value, offset, length) => {
+      const progress = Math.min(2, length);
+      written.push(...value.subarray(offset, offset + progress));
+      return progress;
+    });
+
+    expect(written).toEqual([...bytes]);
+  });
+
+  it("rejects invalid synchronous write progress", () => {
+    for (const progress of [0, -1, 0.5, 2]) {
+      let caught: unknown;
+      try {
+        writeAllSync(17, new Uint8Array([1]), () => progress);
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toMatchObject({ code: "checkpoint_restore_invalid" });
+    }
   });
 
   it("prevents setup and Git subprocesses from regaining image privileges", () => {

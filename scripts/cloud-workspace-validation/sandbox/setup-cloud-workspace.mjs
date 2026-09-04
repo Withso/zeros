@@ -49,8 +49,7 @@ export const CLOUD_WORKSPACE_SETUP_RESULT_AUDIENCE =
 const SETUP_ADMISSION_PATH = "/internal/v1/cloud-workspaces/setup/admission";
 const ENGINE_REGISTRATION_PATH =
   "/internal/v1/cloud-workspaces/engine/register";
-const SETUP_RECOVERY_PATH =
-  "/internal/v1/cloud-workspaces/setup/recovery";
+const SETUP_RECOVERY_PATH = "/internal/v1/cloud-workspaces/setup/recovery";
 const TARGET_REPOSITORY = "/workspace/zeros";
 const SEEDED_REPOSITORY_BACKUP = "/workspace/.zeros-image-seed";
 const SETUP_STATE_DIRECTORY = "/var/lib/zeros/setup";
@@ -814,7 +813,8 @@ async function loadRecoveryManifest(recovery) {
       totalBytes: page.totalBytes,
     });
     if (metadata === null) metadata = pageMetadata;
-    else if (metadata !== pageMetadata) throw failure("checkpoint_restore_invalid");
+    else if (metadata !== pageMetadata)
+      throw failure("checkpoint_restore_invalid");
     for (const entry of page.entries) {
       const collision = entry.path.normalize("NFKC").toLocaleLowerCase("en-US");
       if (collisionKeys.has(collision)) {
@@ -912,6 +912,18 @@ function recoveryParentsExistSafely(repositoryDirectory, relativePath) {
   return true;
 }
 
+export function writeAllSync(descriptor, value, write = writeSync) {
+  let offset = 0;
+  while (offset < value.byteLength) {
+    const remaining = value.byteLength - offset;
+    const written = write(descriptor, value, offset, remaining, null);
+    if (!Number.isInteger(written) || written <= 0 || written > remaining) {
+      throw failure("checkpoint_restore_invalid");
+    }
+    offset += written;
+  }
+}
+
 async function downloadRecoveryBlob(recovery, entry, destination) {
   const response = await recoveryFetch(
     `${recovery.endpoint}/blobs/${entry.blobId}`,
@@ -952,14 +964,17 @@ async function downloadRecoveryBlob(recovery, entry, destination) {
         throw failure("checkpoint_restore_invalid");
       }
       digest.update(value);
-      writeSync(descriptor, value);
+      writeAllSync(descriptor, value);
     }
     fsyncSync(descriptor);
   } finally {
     reader.releaseLock();
     closeSync(descriptor);
   }
-  if (size !== entry.sizeBytes || digest.digest("hex") !== entry.contentSha256) {
+  if (
+    size !== entry.sizeBytes ||
+    digest.digest("hex") !== entry.contentSha256
+  ) {
     rmSync(destination, { force: true });
     throw failure("checkpoint_restore_invalid");
   }

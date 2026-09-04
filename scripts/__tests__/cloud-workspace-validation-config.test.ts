@@ -141,6 +141,21 @@ describe("qualified cloud owner and GitHub credential inputs", () => {
     ).toThrow(/client id/i);
   });
 
+  it("preserves the exact slashless token issuer after URL validation", () => {
+    const issuer = "https://issuer.example.test";
+    expect(
+      collectCloudAccountBindingEnv({
+        ZEROS_CLOUD_OWNER_SUB: "user_workos_owner",
+        ZEROS_ACCOUNT_JWT_JWKS_URL:
+          "https://issuer.example.test/.well-known/jwks.json",
+        ZEROS_ACCOUNT_JWT_ISS: issuer,
+        ZEROS_ACCOUNT_JWT_AUD: "https://api.zeros.build",
+        ZEROS_ACCOUNT_JWT_CONTRACT: "zeros-access-v1",
+        ZEROS_ACCOUNT_JWT_CLIENT_ID: "client_desktop_example",
+      }).ZEROS_ACCOUNT_JWT_ISS,
+    ).toBe(issuer);
+  });
+
   it("parses a working GitHub credential without putting it in cloud state", () => {
     expect(
       collectCloudGithubCredential({
