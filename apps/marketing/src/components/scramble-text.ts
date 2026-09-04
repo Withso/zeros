@@ -232,6 +232,23 @@ export function scrambleGlyphKind(i: number, t: number, count: number): 'from' |
   return 'to'
 }
 
+/** Crop each mark to its ink so small Lucide drawings sit on the same floor. */
+export function fitScrambleIconInk(root: ParentNode) {
+  for (const svg of root.querySelectorAll<SVGSVGElement>('svg.hero-scramble-icon')) {
+    try {
+      const box = svg.getBBox()
+      if (!(box.width > 0 && box.height > 0)) continue
+      const pad = Math.max(box.width, box.height) * 0.08
+      svg.setAttribute(
+        'viewBox',
+        `${box.x - pad} ${box.y - pad} ${box.width + pad * 2} ${box.height + pad * 2}`,
+      )
+    } catch {
+      /* getBBox throws when the svg is not rendered */
+    }
+  }
+}
+
 export function renderGlyphRun(glyphs: readonly Glyph[]): string {
   let html = ''
   let i = 0
@@ -609,6 +626,7 @@ export function playScramble(
       if (html !== lastHtml) {
         lastHtml = html
         el.innerHTML = html
+        if (iconCount > 0) fitScrambleIconInk(el)
       }
     },
     onComplete: () => {

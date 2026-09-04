@@ -143,6 +143,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/DESIGN_VISIBLE = 5/);
     expect(scramble).toMatch(/DESIGN_KEY_SLOTS = 1/);
     expect(scramble).toMatch(/isIconScramble/);
+    expect(scramble).toMatch(/fitScrambleIconInk/);
     expect(scramble).toMatch(/buildScrambleGlyphs/);
     expect(scramble).toMatch(/iconDecodeKind/);
     expect(scramble).toMatch(/KEYBOARD_ICONS/);
@@ -157,7 +158,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-69/);
+    expect(cycle).toMatch(/hero-role\.css\?v=scramble-70/);
     expect(css).toMatch(/is-key/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);

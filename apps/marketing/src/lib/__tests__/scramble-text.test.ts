@@ -15,6 +15,7 @@ import {
   buildScrambleGlyphs,
   escapeHtml,
   fillScrambleCells,
+  fitScrambleIconInk,
   iconDecodeKind,
   isIconScramble,
   MATRIX_SCRAMBLE,
@@ -470,5 +471,18 @@ describe("hero scramble fill", () => {
     expect(html).toBe(
       '<span class="hero-scramble-text hero-role-revealed">de</span><span class="hero-scramble-symbol" style="color:#68E098">#</span><svg class="hero-scramble-icon"></svg>',
     );
+  });
+
+  it("crops scramble icon viewBoxes to their ink", () => {
+    const root = { querySelectorAll: (sel: string) => (sel.includes("hero-scramble-icon") ? [svg] : []) };
+    const svg = {
+      getBBox: () => ({ x: 6, y: 8, width: 10, height: 6 }),
+      setAttribute: (name: string, value: string) => {
+        attrs[name] = value;
+      },
+    };
+    const attrs: Record<string, string> = {};
+    fitScrambleIconInk(root as unknown as ParentNode);
+    expect(attrs.viewBox).toBe("5.2 7.2 11.6 7.6");
   });
 });
