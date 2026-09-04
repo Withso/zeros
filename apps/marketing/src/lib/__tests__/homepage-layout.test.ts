@@ -100,7 +100,11 @@ describe("marketing homepage layout", () => {
     expect(css).not.toMatch(/letter-spacing: 0/);
     expect(css).not.toMatch(/vertical-align: -2px/);
     expect(css).not.toMatch(/vertical-align: middle/);
-    expect(css).toMatch(/vertical-align: text-bottom/);
+    expect(css).not.toMatch(/vertical-align: text-bottom/);
+    expect(css).toMatch(/align-items: baseline/);
+    expect(css).toMatch(
+      /\.hero-role-word\.scramble-developers\.is-scrambling \{\n  display: flex;/,
+    );
     expect(css).not.toMatch(/\.hero-role-word::before/);
     expect(css).toMatch(/letter-spacing: inherit/);
     expect(css).toMatch(/font-variant-numeric: normal/);
@@ -151,7 +155,7 @@ describe("marketing homepage layout", () => {
     expect(scramble).toMatch(/lucide\('key-c'/);
     expect(scramble).toMatch(/lucide\('key-v'/);
     expect(scramble).toMatch(/is-key/);
-    expect(cycle).toMatch(/hero-role\.css\?v=scramble-65/);
+    expect(cycle).toMatch(/hero-role\.css\?v=scramble-66/);
     expect(css).toMatch(/is-key/);
     expect(css).not.toMatch(/hero-scramble-stack/);
     expect(css).not.toMatch(/is-overlay/);
