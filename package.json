@@ -60,7 +60,7 @@
     "check:cursor-asar": "node scripts/check-cursor-asar-unpack.mjs",
     "check:migrations": "tsx scripts/check-migrations-forward-only.mts",
     "check:secrets": "node scripts/check-secrets.mjs",
-    "check:audit": "pnpm audit --prod --audit-level=high",
+    "check:audit": "node scripts/check-audit.mjs",
     "licenses:prepare": "node scripts/prepare-third-party-license-graphs.mjs",
     "licenses:generate": "pnpm licenses:prepare && node scripts/generate-third-party-licenses.mjs",
     "check:licenses": "pnpm licenses:prepare && node scripts/generate-third-party-licenses.mjs --check",
