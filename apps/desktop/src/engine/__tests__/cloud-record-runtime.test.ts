@@ -13,7 +13,7 @@ import {
 import { closeZerosDb, openZerosDb, setZerosDbPathForTesting } from "../db";
 import { listChats, upsertChat } from "../db/chats";
 import { listChatMessagesSince, upsertChatMessage } from "../db/messages";
-import { getTurn } from "../db/turns";
+import { getTurn, startTurn } from "../db/turns";
 
 const NOW = Date.parse("2026-09-04T12:00:00.000Z");
 const authority = {
@@ -106,6 +106,32 @@ function remoteConversation(status: unknown): RemoteEntry[] {
   ];
 }
 
+function localChat(id: string, folder: string, title: string) {
+  return {
+    id,
+    folder,
+    agentId: "codex",
+    agentName: "Codex",
+    model: "gpt-test",
+    effort: "medium",
+    permissionMode: "default",
+    lastModeId: null,
+    prePlanModeId: null,
+    fast: false,
+    additionalDirectories: [],
+    title,
+    createdAt: NOW - 2_000,
+    updatedAt: NOW - 1_000,
+    sessionId: null,
+    providerBinding: null,
+    providerMetadata: null,
+    pinned: false,
+    archived: false,
+    sourceChatId: null,
+    kind: "code" as const,
+  };
+}
+
 function createRecordServer(initialEntries: readonly RemoteEntry[] = []) {
   let revision = initialEntries.reduce(
     (maximum, entry) => Math.max(maximum, entry.revision),
@@ -189,6 +215,98 @@ afterEach(async () => {
 });
 
 describe("cloud durable record runtime", () => {
+  it("preserves conversations outside the synchronized repository during a clean restore", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-owned-"));
+    const outside = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-record-outside-"),
+    );
+    roots.push(root, outside);
+    setZerosDbPathForTesting(":memory:");
+    const db = openZerosDb();
+    upsertChat(localChat("outside-chat", outside, "Unrelated conversation"));
+    upsertChatMessage("outside-chat", {
+      msgId: "outside-message",
+      kind: "text",
+      payload: JSON.stringify({ role: "user", text: "keep me" }),
+      createdAt: NOW,
+    });
+    startTurn({
+      chatId: "outside-chat",
+      turnId: "outside-turn",
+      workspaceId: null,
+      folder: outside,
+      agentId: "codex",
+      summary: null,
+      startedAt: NOW,
+      preSnapshot: null,
+    });
+    db.prepare(
+      "INSERT INTO sync_tombstones (kind, id, rev) VALUES ('msgreset', ?, 500)",
+    ).run("outside-chat");
+    db.prepare(
+      "INSERT INTO sync_tombstones (kind, id, rev) VALUES ('chat', ?, 501)",
+    ).run("outside-deleted-chat");
+
+    const server = createRecordServer(remoteConversation("completed"));
+    await new CloudWorkspaceRecordRuntime(root, {
+      fetch: server.requestFetch,
+    }).synchronize(authority);
+
+    expect(listChats()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: "outside-chat",
+          folder: outside,
+          title: "Unrelated conversation",
+        }),
+        expect.objectContaining({ id: "chat-1", folder: root }),
+      ]),
+    );
+    expect(listChatMessagesSince(0)).toContainEqual(
+      expect.objectContaining({
+        chatId: "outside-chat",
+        msgId: "outside-message",
+      }),
+    );
+    expect(getTurn("outside-chat", "outside-turn")).toMatchObject({
+      folder: outside,
+      status: "running",
+    });
+    expect(
+      db
+        .prepare("SELECT kind, id FROM sync_tombstones ORDER BY kind, id")
+        .all(),
+    ).toEqual(
+      expect.arrayContaining([
+        { kind: "chat", id: "outside-deleted-chat" },
+        { kind: "msgreset", id: "outside-chat" },
+      ]),
+    );
+  });
+
+  it("fails closed when a remote conversation id belongs to another local repository", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-record-collision-"),
+    );
+    const outside = await mkdtemp(
+      path.join(os.tmpdir(), "zeros-record-collision-outside-"),
+    );
+    roots.push(root, outside);
+    setZerosDbPathForTesting(":memory:");
+    openZerosDb();
+    upsertChat(localChat("chat-1", outside, "Keep original"));
+    const server = createRecordServer(remoteConversation("completed"));
+
+    await expect(
+      new CloudWorkspaceRecordRuntime(root, {
+        fetch: server.requestFetch,
+      }).synchronize(authority),
+    ).rejects.toThrow("cloud chat identity belongs to another repository");
+    expect(listChats()).toMatchObject([
+      { id: "chat-1", folder: outside, title: "Keep original" },
+    ]);
+  });
+
   it("writes through chats and restores them before a fresh engine becomes ready", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "zeros-record-runtime-"));
     roots.push(root);

@@ -13,6 +13,7 @@ import { PTY_AGENT_AUTH_CWD } from "@zeros/protocol/messages";
 import { ZerosEngine } from "../index";
 import type { TransportClient } from "../transport/types";
 import type { CloudWorkerConfiguration } from "../agents/containment/cloud-worker-config";
+import type { CloudReplicaHostSession } from "../cloud-replica-host-control";
 import { NODE_DESIGN_WATCH_GUARD_FILENAME } from "../agents/containment/design-watch-isolation";
 import * as gitState from "../git/state";
 import {
@@ -21,6 +22,15 @@ import {
 } from "../design/document";
 
 interface ReaperInternals {
+  cloudReplicaRuntime: {
+    updateSession(session: CloudReplicaHostSession | null): Promise<void>;
+  } | null;
+  cloudWorkspaceForkRuntime: {
+    cancelActiveWork(): Promise<void>;
+    wake(): void;
+  } | null;
+  cloudReplicaSessionChain: Promise<void>;
+  handleHostControlLine(line: string): void;
   router: {
     register(client: TransportClient): void;
   };
@@ -314,6 +324,77 @@ async function canAssignCloudWorkerOwnership(
 }
 
 describe("workspace process reaper", () => {
+  it("applies consecutive cloud replica sessions in host-control order", async () => {
+    const state = internals(
+      new ZerosEngine({ root: "/tmp/zeros-cloud-session-order", port: 29_894 }),
+    );
+    let releaseFirst!: () => void;
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const order: string[] = [];
+    let cancellation = 0;
+    state.cloudWorkspaceForkRuntime = {
+      cancelActiveWork: vi.fn(async () => {
+        cancellation += 1;
+        order.push(`cancel:${cancellation}`);
+        if (cancellation === 1) await firstGate;
+      }),
+      wake: vi.fn(() => order.push("wake")),
+    };
+    state.cloudReplicaRuntime = {
+      updateSession: vi.fn(async (session) => {
+        order.push(`update:${session?.accountUserId ?? "none"}`);
+      }),
+    };
+    const session = (accountUserId: string): CloudReplicaHostSession => ({
+      version: 1,
+      accountUserId,
+      accessToken: "header.payload.signature",
+      expiresAtMs: 60_000,
+      baseUrl: "http://127.0.0.1:9999",
+      allowInsecureLoopback: true,
+      device: {
+        deviceId: null,
+        keyVersion: 1,
+        publicKey: "a".repeat(43),
+      },
+    });
+    const firstAccount = "11111111-1111-4111-8111-111111111111";
+    const secondAccount = "22222222-2222-4222-8222-222222222222";
+    try {
+      state.handleHostControlLine(
+        JSON.stringify({
+          type: "host.cloudReplicaSession",
+          session: session(firstAccount),
+        }),
+      );
+      state.handleHostControlLine(
+        JSON.stringify({
+          type: "host.cloudReplicaSession",
+          session: session(secondAccount),
+        }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(order).toEqual(["cancel:1"]);
+
+      releaseFirst();
+      await state.cloudReplicaSessionChain;
+      expect(order).toEqual([
+        "cancel:1",
+        `update:${firstAccount}`,
+        "wake",
+        "cancel:2",
+        `update:${secondAccount}`,
+        "wake",
+      ]);
+    } finally {
+      releaseFirst();
+    }
+  });
+
   it("kills only processes owned by the archived workspace and disposes agents fail-closed", async () => {
     const state = internals(
       new ZerosEngine({ root: "/tmp/zeros-lifecycle-root", port: 29_895 }),

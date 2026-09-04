@@ -146,7 +146,7 @@ export async function stageCloudWorkspaceForkBlob(input: {
   const temporary = path.join(root, `.${input.sha256}.${randomUUID()}.tmp`);
   try {
     await writeFile(temporary, input.bytes, { flag: "wx", mode: 0o600 });
-    const handle = await open(temporary, "r");
+    const handle = await open(temporary, "r+");
     try {
       await handle.sync();
     } finally {

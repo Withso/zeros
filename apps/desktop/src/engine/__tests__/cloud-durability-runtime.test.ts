@@ -32,6 +32,7 @@ const authority = {
   generation: 1,
   engineInstanceId: "33333333-3333-4333-8333-333333333333",
 };
+const checkpointIt = it.runIf(process.platform === "linux");
 
 afterEach(async () => {
   await Promise.all(
@@ -219,19 +220,22 @@ describe("cloud durability scanner", () => {
     }
   });
 
-  it("rejects invalid UTF-8 Git path bytes before any remote write", async () => {
-    const root = await checkpointRepository();
-    const invalidPath = Buffer.concat([
-      Buffer.from(`${root}${path.sep}invalid-`),
-      Buffer.from([0xff]),
-    ]);
-    await writeFile(invalidPath, "invalid path bytes\n");
-    await git(root, "add", "-A");
+  checkpointIt(
+    "rejects invalid UTF-8 Git path bytes before any remote write",
+    async () => {
+      const root = await checkpointRepository();
+      const invalidPath = Buffer.concat([
+        Buffer.from(`${root}${path.sep}invalid-`),
+        Buffer.from([0xff]),
+      ]);
+      await writeFile(invalidPath, "invalid path bytes\n");
+      await git(root, "add", "-A");
 
-    await expectUnsafeCheckpointWithoutWrites(root, /not valid UTF-8/);
-  });
+      await expectUnsafeCheckpointWithoutWrites(root, /not valid UTF-8/);
+    },
+  );
 
-  it.each([
+  checkpointIt.each([
     ["an absolute target", "/etc/passwd", /target is unsafe/],
     ["an escaping target", "../../outside", /escaped the repository/],
     ["the repository root", "..", /escaped the repository/],
@@ -256,16 +260,19 @@ describe("cloud durability scanner", () => {
     },
   );
 
-  it("rejects a non-UTF-8 symlink target before any remote write", async () => {
-    const root = await checkpointRepository();
-    await mkdir(path.join(root, "nested"));
-    await symlink(
-      Buffer.from([0xff]),
-      Buffer.from(path.join(root, "nested", "link")),
-    );
+  checkpointIt(
+    "rejects a non-UTF-8 symlink target before any remote write",
+    async () => {
+      const root = await checkpointRepository();
+      await mkdir(path.join(root, "nested"));
+      await symlink(
+        Buffer.from([0xff]),
+        Buffer.from(path.join(root, "nested", "link")),
+      );
 
-    await expectUnsafeCheckpointWithoutWrites(root, /not valid UTF-8/);
-  });
+      await expectUnsafeCheckpointWithoutWrites(root, /not valid UTF-8/);
+    },
+  );
 
   it.runIf(process.platform === "linux")(
     "rejects a regular leaf replacement after pinning its identity",
@@ -435,51 +442,60 @@ describe("cloud durability scanner", () => {
     },
   );
 
-  it("rejects a symlinked parent before upload, append, or checkpoint commit", async () => {
-    const root = await checkpointRepository();
-    const nested = await addTrackedNestedFile(root);
-    const relocated = path.join(
-      path.dirname(root),
-      `${path.basename(root)}-outside`,
-    );
-    roots.push(relocated);
-    await rename(nested, relocated);
-    await symlink(relocated, nested);
+  checkpointIt(
+    "rejects a symlinked parent before upload, append, or checkpoint commit",
+    async () => {
+      const root = await checkpointRepository();
+      const nested = await addTrackedNestedFile(root);
+      const relocated = path.join(
+        path.dirname(root),
+        `${path.basename(root)}-outside`,
+      );
+      roots.push(relocated);
+      await rename(nested, relocated);
+      await symlink(relocated, nested);
 
-    await expectUnsafeCheckpointWithoutWrites(root, /ENOTDIR|ELOOP|parent/);
-  });
+      await expectUnsafeCheckpointWithoutWrites(root, /ENOTDIR|ELOOP|parent/);
+    },
+  );
 
-  it("pins an inspected parent against a symlink swap before any remote write", async () => {
-    const root = await checkpointRepository();
-    const nested = await addTrackedNestedFile(root);
-    const leaf = path.join(nested, "entry.txt");
-    const relocated = path.join(
-      path.dirname(root),
-      `${path.basename(root)}-swapped`,
-    );
-    roots.push(relocated);
-    const originalOpen = fs.open.bind(fs);
-    let swapped = false;
-    const open = vi.spyOn(fs, "open").mockImplementation(async (...args) => {
-      const result = await originalOpen(...args);
-      if (path.basename(String(args[0])) === path.basename(leaf) && !swapped) {
-        swapped = true;
-        await rename(nested, relocated);
-        await symlink(relocated, nested);
+  checkpointIt(
+    "pins an inspected parent against a symlink swap before any remote write",
+    async () => {
+      const root = await checkpointRepository();
+      const nested = await addTrackedNestedFile(root);
+      const leaf = path.join(nested, "entry.txt");
+      const relocated = path.join(
+        path.dirname(root),
+        `${path.basename(root)}-swapped`,
+      );
+      roots.push(relocated);
+      const originalOpen = fs.open.bind(fs);
+      let swapped = false;
+      const open = vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+        const result = await originalOpen(...args);
+        if (
+          path.basename(String(args[0])) === path.basename(leaf) &&
+          !swapped
+        ) {
+          swapped = true;
+          await rename(nested, relocated);
+          await symlink(relocated, nested);
+        }
+        return result;
+      });
+      try {
+        await expectUnsafeCheckpointWithoutWrites(root, /parent changed/);
+        expect(swapped).toBe(true);
+      } finally {
+        open.mockRestore();
+        if (swapped) {
+          await unlink(nested);
+          await rename(relocated, nested);
+        }
       }
-      return result;
-    });
-    try {
-      await expectUnsafeCheckpointWithoutWrites(root, /parent changed/);
-      expect(swapped).toBe(true);
-    } finally {
-      open.mockRestore();
-      if (swapped) {
-        await unlink(nested);
-        await rename(relocated, nested);
-      }
-    }
-  });
+    },
+  );
 
   it("never combines Git metadata from one repository root with files from another", async () => {
     const root = await checkpointRepository();
@@ -546,7 +562,44 @@ describe("cloud durability scanner", () => {
 });
 
 describe("cloud durability projection validation", () => {
-  it.each([
+  checkpointIt(
+    "cancels a chunked response as soon as it crosses the JSON byte limit",
+    async () => {
+      let pulls = 0;
+      let cancelled = false;
+      const runtime = new CloudWorkspaceDurabilityRuntime("/unused", {
+        fetch: (async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              pull(controller) {
+                pulls += 1;
+                controller.enqueue(new Uint8Array(1024 * 1024));
+                if (pulls === 8) controller.close();
+              },
+              cancel() {
+                cancelled = true;
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          )) as typeof fetch,
+      });
+
+      await expect(
+        runtime.checkpoint(
+          {
+            id: "55555555-5555-4555-8555-555555555555",
+            reason: "manual",
+            deadlineAtMs: Date.now() + 60_000,
+          },
+          authority,
+        ),
+      ).rejects.toThrow("cloud durability response is too large");
+      expect(cancelled).toBe(true);
+      expect(pulls).toBeLessThan(8);
+    },
+  );
+
+  checkpointIt.each([
     ["a symlink encoded with a file mode", "symlink", 33188, 4],
     ["a file encoded with a symlink mode", "file", 40960, 4],
     ["an empty symlink target", "symlink", 40960, 0],
@@ -594,7 +647,7 @@ describe("cloud durability projection validation", () => {
     },
   );
 
-  it.each([
+  checkpointIt.each([
     ["path", ["entry.txt"]],
     ["blobId", ["44444444-4444-4444-8444-444444444444"]],
     ["contentSha256", ["a".repeat(64)]],
@@ -640,7 +693,7 @@ describe("cloud durability projection validation", () => {
     },
   );
 
-  it.each([
+  checkpointIt.each([
     ["blob id", "blob"],
     ["checkpoint id", "checkpoint"],
   ] as const)("rejects an array-encoded remote %s", async (_label, target) => {

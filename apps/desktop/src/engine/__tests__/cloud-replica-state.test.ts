@@ -83,9 +83,10 @@ describe("device-private cloud replica SQLite state", () => {
     const columns = db
       .prepare("PRAGMA table_info(cloud_device_registrations)")
       .all() as Array<{ name: string }>;
-    expect(columns.map((column) => column.name)).not.toEqual(
-      expect.arrayContaining(["private_key", "grant", "access_token"]),
-    );
+    const names = columns.map((column) => column.name);
+    for (const forbidden of ["private_key", "grant", "access_token"]) {
+      expect(names).not.toContain(forbidden);
+    }
   });
 
   it("persists an exact projection and advances its cursor only by CAS receipt", async () => {

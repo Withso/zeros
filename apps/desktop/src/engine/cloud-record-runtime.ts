@@ -453,6 +453,23 @@ export class CloudWorkspaceRecordRuntime {
   ): void {
     const db = openZerosDb();
     const existing = this.localProjection();
+    const localChats = listChats();
+    const projectedChatIds = new Set(
+      [...existing.values()]
+        .filter((entry) => entry.entityKind === "chat")
+        .map((entry) => entry.entityId),
+    );
+    const remoteChatIds = new Set(
+      [...remote.values()]
+        .filter((entry) => entry.entityKind === "chat")
+        .map((entry) => entry.entityId),
+    );
+    for (const chat of localChats) {
+      if (remoteChatIds.has(chat.id) && !projectedChatIds.has(chat.id)) {
+        throw new Error("cloud chat identity belongs to another repository");
+      }
+    }
+    const ownedChatIds = new Set([...projectedChatIds, ...remoteChatIds]);
     const chatDocuments = [...remote.values()]
       .filter(
         (entry) =>
@@ -482,7 +499,7 @@ export class CloudWorkspaceRecordRuntime {
         return chat;
       });
     const availableChats = new Set(
-      mode === "replace" ? [] : listChats().map((chat) => chat.id),
+      mode === "replace" ? [] : localChats.map((chat) => chat.id),
     );
     for (const chat of chatDocuments) availableChats.add(chat.id);
     const messages = new Map<string, PersistedMessageRow[]>();
@@ -615,12 +632,21 @@ export class CloudWorkspaceRecordRuntime {
     }
     const apply = db.transaction(() => {
       if (mode === "replace") {
-        db.prepare("DELETE FROM turns").run();
-        db.prepare("DELETE FROM chat_messages").run();
-        db.prepare("DELETE FROM chats").run();
-        db.prepare(
-          "DELETE FROM sync_tombstones WHERE kind IN ('chat', 'msgreset')",
-        ).run();
+        const deleteTurns = db.prepare("DELETE FROM turns WHERE chat_id = ?");
+        const deleteMessages = db.prepare(
+          "DELETE FROM chat_messages WHERE chat_id = ?",
+        );
+        const deleteChat = db.prepare("DELETE FROM chats WHERE id = ?");
+        const deleteTombstone = db.prepare(
+          "DELETE FROM sync_tombstones WHERE kind = ? AND id = ?",
+        );
+        for (const chatId of ownedChatIds) {
+          deleteTurns.run(chatId);
+          deleteMessages.run(chatId);
+          deleteChat.run(chatId);
+          deleteTombstone.run("chat", chatId);
+          deleteTombstone.run("msgreset", chatId);
+        }
       }
       if (chatDocuments.length > 0) bulkUpsertChats(chatDocuments);
       for (const [chatId, rows] of messages) {

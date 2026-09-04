@@ -11,6 +11,7 @@ import {
   cloudDevicePublicKeyFingerprint,
 } from "./cloud-device-enrollment";
 import {
+  CloudReplicaApplyError,
   inspectCloudReplicaEntry,
   normalizeCloudReplicaPath,
 } from "./cloud-replica-apply";
@@ -339,6 +340,7 @@ class HostCloudReplicaSigner implements CloudReplicaProofSigner {
 
 export type CloudReplicaRuntimeDependencies = {
   fetch?: typeof fetch;
+  inspectEntry?: typeof inspectCloudReplicaEntry;
   emitHostControl: (line: string) => void;
   now?: () => number;
   random?: () => number;
@@ -1174,10 +1176,9 @@ export class CloudReplicaRuntime {
     for (let offset = 0; offset < count; offset += 1) {
       const entry = entries[(start + offset) % entries.length]!;
       try {
-        const observed = await inspectCloudReplicaEntry(
-          local.rootPath,
-          entry.path,
-        );
+        const observed = await (
+          this.dependencies.inspectEntry ?? inspectCloudReplicaEntry
+        )(local.rootPath, entry.path);
         if (
           observed.type !== entry.entryType ||
           observed.mode !== entry.mode ||
@@ -1191,7 +1192,13 @@ export class CloudReplicaRuntime {
             cloudSha256: entry.contentSha256,
           });
         }
-      } catch {
+      } catch (error) {
+        if (
+          !(error instanceof CloudReplicaApplyError) ||
+          error.code !== "path_rejected"
+        ) {
+          throw error;
+        }
         projection.divergence({
           path: entry.path,
           expectedSha256: entry.contentSha256,

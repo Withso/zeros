@@ -885,13 +885,41 @@ async function boundedJson(response: Response): Promise<unknown> {
     await response.body?.cancel().catch(() => undefined);
     throw new Error("cloud durability response is too large");
   }
-  const bytes = Buffer.from(await response.arrayBuffer());
+  if (!response.body) {
+    throw new Error("cloud durability response is invalid");
+  }
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let total = 0;
   try {
-    if (bytes.length > MAX_JSON_BYTES)
-      throw new Error("cloud durability response is too large");
-    return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      total += chunk.value.byteLength;
+      if (total > MAX_JSON_BYTES) {
+        chunk.value.fill(0);
+        await reader.cancel().catch(() => undefined);
+        throw new Error("cloud durability response is too large");
+      }
+      chunks.push(
+        Buffer.from(
+          chunk.value.buffer,
+          chunk.value.byteOffset,
+          chunk.value.byteLength,
+        ),
+      );
+    }
+    const bytes = Buffer.concat(chunks, total);
+    try {
+      return JSON.parse(
+        new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+      );
+    } finally {
+      bytes.fill(0);
+    }
   } finally {
-    bytes.fill(0);
+    for (const chunk of chunks) chunk.fill(0);
+    reader.releaseLock();
   }
 }
 

@@ -12,8 +12,8 @@ export type CloudObservedWorkspacePort = {
 
 type ProcReader = (path: string, encoding: "utf8") => Promise<string>;
 
-function portsFromProcTable(table: string): number[] {
-  if (Buffer.byteLength(table, "utf8") > MAX_PROC_TABLE_BYTES) return [];
+function portsFromProcTable(table: string): number[] | null {
+  if (Buffer.byteLength(table, "utf8") > MAX_PROC_TABLE_BYTES) return null;
   const ports: number[] = [];
   for (const line of table.split("\n").slice(1)) {
     const fields = line.trim().split(/\s+/u);
@@ -45,16 +45,21 @@ export async function readObservedCloudWorkspacePorts(
   const results = await Promise.allSettled(
     PROC_TCP_PATHS.map((path) => readFile(path, "utf8")),
   );
-  const readable = results.filter(
-    (result): result is PromiseFulfilledResult<string> =>
-      result.status === "fulfilled" && typeof result.value === "string",
-  );
-  if (readable.length === 0) return undefined;
+  if (
+    results.some(
+      (result) =>
+        result.status !== "fulfilled" || typeof result.value !== "string",
+    )
+  ) {
+    return undefined;
+  }
 
   const excluded = new Set(options.excludedPorts ?? [22_222, 39_393]);
   const ports = new Set<number>();
-  for (const result of readable) {
-    for (const port of portsFromProcTable(result.value)) {
+  for (const result of results as PromiseFulfilledResult<string>[]) {
+    const parsed = portsFromProcTable(result.value);
+    if (parsed === null) return undefined;
+    for (const port of parsed) {
       if (port >= 1_024 && port <= 65_535 && !excluded.has(port)) {
         ports.add(port);
       }

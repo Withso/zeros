@@ -4,6 +4,7 @@ import {
   closeSync,
   constants as fsConstants,
   fsyncSync,
+  fstatSync,
   linkSync,
   lstatSync,
   openSync,
@@ -107,6 +108,48 @@ function parseRequest(raw: unknown): CloudGithubCredentialRefreshRequest {
     method: value.method as GithubAuthMethod,
     reason: "credential-invalid",
   };
+}
+
+/** A quarantined marker may temporarily have more than one hard link while a
+ * second engine restores the canonical name. Read the random private path from
+ * a pinned no-follow descriptor instead of applying the canonical nlink=1
+ * invariant, which would make both acknowledgements delete the marker. */
+function readQuarantinedRequest(
+  file: string,
+  expectedUid: number,
+): CloudGithubCredentialRefreshRequest {
+  const descriptor = openSync(
+    file,
+    fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0),
+  );
+  try {
+    const metadata = fstatSync(descriptor);
+    const current = lstatSync(file);
+    if (
+      !metadata.isFile() ||
+      current.isSymbolicLink() ||
+      current.dev !== metadata.dev ||
+      current.ino !== metadata.ino ||
+      metadata.uid !== expectedUid ||
+      (metadata.mode & 0o777) !== 0o600 ||
+      metadata.size < 2 ||
+      metadata.size > MAX_DOCUMENT_BYTES
+    ) {
+      throw new Error("cloud GitHub refresh request is unsafe");
+    }
+    try {
+      return parseRequest(
+        JSON.parse(readFileSync(descriptor, "utf8")) as unknown,
+      );
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error("cloud GitHub refresh request is invalid");
+      }
+      throw error;
+    }
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 export function readCloudGithubCredentialRefreshRequest(
@@ -269,11 +312,8 @@ export function acknowledgeCloudGithubCredentialRefreshRequest(options: {
   };
   try {
     chmodSync(quarantine, 0o600);
-    const current = readCloudGithubCredentialRefreshRequest({
-      file: quarantine,
-      expectedUid,
-    });
-    acknowledged = current?.generation === options.generation;
+    const current = readQuarantinedRequest(quarantine, expectedUid);
+    acknowledged = current.generation === options.generation;
     if (!acknowledged) {
       try {
         linkSync(quarantine, file);

@@ -50,4 +50,29 @@ describe("readObservedCloudWorkspacePorts", () => {
       }),
     ).resolves.toEqual([]);
   });
+
+  it.each([
+    [
+      "both tables exceed the byte cap",
+      [" ".repeat(4 * 1024 * 1024 + 1), " ".repeat(4 * 1024 * 1024 + 1)],
+    ],
+    [
+      "one table exceeds the byte cap",
+      [HEADER, " ".repeat(4 * 1024 * 1024 + 1)],
+    ],
+    ["one table cannot be read", [HEADER, new Error("proc unavailable")]],
+  ] as const)(
+    "retains the last observation when %s",
+    async (_label, values) => {
+      const readFile = vi.fn(async () => {
+        const next = values[readFile.mock.calls.length - 1];
+        if (next instanceof Error) throw next;
+        return next;
+      });
+
+      await expect(
+        readObservedCloudWorkspacePorts({ readFile }),
+      ).resolves.toBeUndefined();
+    },
+  );
 });

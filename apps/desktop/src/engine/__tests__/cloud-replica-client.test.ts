@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CloudReplicaClientError,
   HttpCloudReplicaApi,
+  HttpCloudReplicaEnrollmentClient,
 } from "../cloud-replica-client";
 import {
   cloudReplicaDeviceProofMessage,
@@ -72,6 +73,104 @@ describe("cloud replica device possession", () => {
 });
 
 describe("cloud replica bounded HTTP client", () => {
+  it.each([
+    ["JSON", 30_000],
+    ["blob", 30_000],
+    ["fork blob", 120_000],
+    ["device enrollment", 30_000],
+  ] as const)(
+    "keeps the request deadline active while a %s response body is stalled",
+    async (operation, timeoutMs) => {
+      vi.useFakeTimers();
+      let requestSignal: AbortSignal | undefined;
+      let bodyController:
+        | ReadableStreamDefaultController<Uint8Array>
+        | undefined;
+      let settled: Promise<unknown> | undefined;
+      try {
+        const requestFetch = vi.fn<typeof fetch>(async (_url, init) => {
+          requestSignal = init?.signal ?? undefined;
+          return new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                bodyController = controller;
+                requestSignal?.addEventListener(
+                  "abort",
+                  () => controller.error(new Error("request aborted")),
+                  { once: true },
+                );
+              },
+            }),
+            { headers: { "content-type": "application/json" } },
+          );
+        });
+        const credential = registeredCredential();
+        const ids = {
+          organizationId: randomUUID(),
+          workspaceId: randomUUID(),
+          replicaId: randomUUID(),
+        };
+        const replica = new HttpCloudReplicaApi({
+          baseUrl: "https://api.zeros.build",
+          getAccessToken: async () => "workos-access-token",
+          signer: new CloudReplicaDeviceSigner(credential),
+          fetch: requestFetch,
+        });
+        const pending =
+          operation === "JSON"
+            ? replica.readEvents({
+                ...ids,
+                grantToken: `zwr_${Buffer.alloc(32, 1).toString("base64url")}`,
+                afterRevision: 0,
+                limit: 100,
+              })
+            : operation === "blob"
+              ? replica.readBlob({
+                  ...ids,
+                  grantToken: `zwr_${Buffer.alloc(32, 2).toString("base64url")}`,
+                  blobId: randomUUID(),
+                })
+              : operation === "fork blob"
+                ? replica.readForkBlob({
+                    organizationId: ids.organizationId,
+                    workspaceId: ids.workspaceId,
+                    forkIntentId: randomUUID(),
+                    grantToken: `zwe_${Buffer.alloc(32, 3).toString("base64url")}`,
+                    blobId: randomUUID(),
+                  })
+                : new HttpCloudReplicaEnrollmentClient({
+                    baseUrl: "https://api.zeros.build",
+                    getAccessToken: async () => "workos-access-token",
+                    fetch: requestFetch,
+                  }).registerDevice({
+                    label: "Test device",
+                    platform: "linux",
+                    publicKey: credential.publicKey,
+                    idempotencyKey: "deadline-test-0001",
+                  });
+        settled = pending.then(
+          () => null,
+          (error: unknown) => error,
+        );
+        for (let attempt = 0; attempt < 10 && !requestSignal; attempt += 1) {
+          await Promise.resolve();
+        }
+        expect(requestSignal).toBeDefined();
+
+        await vi.advanceTimersByTimeAsync(timeoutMs);
+
+        expect(requestSignal?.aborted).toBe(true);
+        await expect(settled).resolves.toBeInstanceOf(Error);
+      } finally {
+        if (!requestSignal?.aborted) {
+          bodyController?.error(new Error("test cleanup"));
+        }
+        await settled?.catch(() => undefined);
+        vi.useRealTimers();
+      }
+    },
+  );
+
   it.each([
     { entryType: "symlink", mode: 33188, sizeBytes: 1 },
     { entryType: "symlink", mode: 40960, sizeBytes: 4_097 },
@@ -345,6 +444,51 @@ describe("cloud replica bounded HTTP client", () => {
       }),
     ).resolves.toMatchObject({ checkpointId, entries: { length: 700 } });
   });
+
+  it.each(["replica", "fork"] as const)(
+    "cancels a rejected %s blob body before releasing its request deadline",
+    async (kind) => {
+      let cancelled = false;
+      const credential = registeredCredential();
+      const client = new HttpCloudReplicaApi({
+        baseUrl: "https://api.zeros.build",
+        getAccessToken: async () => "workos-access-token",
+        signer: new CloudReplicaDeviceSigner(credential),
+        fetch: vi.fn<typeof fetch>(async () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              cancel() {
+                cancelled = true;
+              },
+            }),
+            { headers: { "content-length": "2" } },
+          ),
+        ),
+      });
+      const common = {
+        organizationId: randomUUID(),
+        workspaceId: randomUUID(),
+        blobId: randomUUID(),
+        expectedSizeBytes: 1,
+      };
+
+      await expect(
+        kind === "replica"
+          ? client.readBlob({
+              ...common,
+              replicaId: randomUUID(),
+              grantToken: `zwr_${Buffer.alloc(32, 4).toString("base64url")}`,
+            })
+          : client.readForkBlob({
+              ...common,
+              forkIntentId: randomUUID(),
+              grantToken: `zwe_${Buffer.alloc(32, 5).toString("base64url")}`,
+              expectedSha256: "a".repeat(64),
+            }),
+      ).rejects.toMatchObject({ code: "invalid_response" });
+      expect(cancelled).toBe(true);
+    },
+  );
 
   it("binds every data read to WorkOS bearer, device proof, replica grant, and cursor", async () => {
     const credential = registeredCredential();

@@ -990,6 +990,9 @@ export class ZerosEngine {
   /** Desktop-only, restart-safe local↔cloud copy coordinator. Sources remain
    * untouched and every destination receives a distinct canonical UUID. */
   private readonly cloudWorkspaceForkRuntime: CloudWorkspaceForkRuntime | null;
+  /** Host session changes may arrive back-to-back on one stdin chunk. Preserve
+   * their wire order across asynchronous fork cancellation/session rotation. */
+  private cloudReplicaSessionChain: Promise<void> = Promise.resolve();
   private cloudRuntimeAuthorityStopping = false;
   private cloudRuntimeCheckpointQuiescing = false;
   // Native per-CLI adapter runtime — multiplexes the per-agent
@@ -2775,9 +2778,11 @@ export class ZerosEngine {
     this.running = true;
     try {
       await this.cloudRuntimeRegistration?.start();
-    } catch {
+    } catch (error) {
       await this.stop().catch(() => undefined);
-      throw new Error("cloud engine durable registration failed");
+      throw new Error("cloud engine durable registration failed", {
+        cause: error,
+      });
     }
     const elapsed = Date.now() - startTime;
     console.log(
@@ -9521,18 +9526,21 @@ export class ZerosEngine {
       // A malformed authority refresh clears the prior bearer instead of
       // leaving stale access active. Other host-control message types return
       // `undefined` but cannot reach this branch.
-      void (async () => {
+      const apply = async () => {
         // A replacement host session must not let a prior account's copy
         // continue after its next network/filesystem await. Jobs remain
         // resumable for their owner; the new account cannot claim them.
         await this.cloudWorkspaceForkRuntime?.cancelActiveWork();
         await this.cloudReplicaRuntime?.updateSession(session ?? null);
         this.cloudWorkspaceForkRuntime?.wake();
-      })().catch((error) =>
-        console.warn(
-          `[cloud-replica] host session rejected (${error instanceof Error ? error.name : "unknown"})`,
-        ),
-      );
+      };
+      this.cloudReplicaSessionChain = this.cloudReplicaSessionChain
+        .then(apply, apply)
+        .catch((error) =>
+          console.warn(
+            `[cloud-replica] host session rejected (${error instanceof Error ? error.name : "unknown"})`,
+          ),
+        );
       return;
     }
     if (msg.type === "host.cloudReplicaProofResponse") {

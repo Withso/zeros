@@ -99,14 +99,15 @@ describe("device-private cloud workspace copy journal", () => {
     const columns = db
       .prepare("PRAGMA table_info(cloud_workspace_fork_jobs)")
       .all() as Array<{ name: string }>;
-    expect(columns.map(({ name }) => name)).not.toEqual(
-      expect.arrayContaining([
-        "access_token",
-        "export_grant",
-        "private_key",
-        "provider_credential",
-      ]),
-    );
+    const names = columns.map(({ name }) => name);
+    for (const forbidden of [
+      "access_token",
+      "export_grant",
+      "private_key",
+      "provider_credential",
+    ]) {
+      expect(names).not.toContain(forbidden);
+    }
   });
 
   it("rejects duplicate portable paths and stale transitions", () => {

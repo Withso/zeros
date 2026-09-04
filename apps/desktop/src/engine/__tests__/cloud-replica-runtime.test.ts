@@ -32,6 +32,7 @@ import {
   preserveCloudReplicaDivergences,
   selectFairCloudReplicaBatch,
   validateCloudReplicaDestination,
+  type CloudReplicaRuntimeDependencies,
 } from "../cloud-replica-runtime";
 import {
   CloudReplicaClientError,
@@ -64,7 +65,10 @@ function jsonResponse(value: unknown, status = 200): Response {
   });
 }
 
-async function activeRuntimeFixture(manifestRevision = 0) {
+async function activeRuntimeFixture(
+  manifestRevision = 0,
+  dependencies: Partial<CloudReplicaRuntimeDependencies> = {},
+) {
   const db = new Database(":memory:");
   databases.push(db);
   runMigrations(db);
@@ -116,6 +120,7 @@ async function activeRuntimeFixture(manifestRevision = 0) {
     emitHostControl: () => undefined,
     syncIntervalMs: 300_000,
     now: () => 1_000,
+    ...dependencies,
   });
   return {
     runtime,
@@ -132,6 +137,41 @@ async function activeRuntimeFixture(manifestRevision = 0) {
 }
 
 describe("desktop cloud replica runtime", () => {
+  it("retries a transient unreadable projection without recording a local edit", async () => {
+    const transient = Object.assign(new Error("temporarily unreadable"), {
+      code: "EACCES",
+    });
+    const fixture = await activeRuntimeFixture(1, {
+      inspectEntry: async () => {
+        throw transient;
+      },
+    });
+    const relativePath = "blocked/entry.txt";
+    const bytes = Buffer.from("projected contents\n");
+    fixture.state.projection(fixture.replicaId).commitEntry({
+      path: relativePath,
+      portablePathKey: relativePath,
+      revision: 1,
+      entryType: "file",
+      mode: 33188,
+      contentSha256: createHash("sha256").update(bytes).digest("hex"),
+      sizeBytes: bytes.byteLength,
+    });
+    try {
+      const local = fixture.state.replica(fixture.replicaId)!;
+      await expect(
+        (
+          fixture.runtime as unknown as {
+            scanLocalProjection(value: CloudReplicaLocalState): Promise<void>;
+          }
+        ).scanLocalProjection(local),
+      ).rejects.toBe(transient);
+      expect(fixture.state.openDivergences(fixture.replicaId)).toEqual([]);
+    } finally {
+      await fixture.runtime.dispose();
+    }
+  });
+
   it("round-robins more than four due replicas instead of starving the fifth", () => {
     const replicas = ["a", "b", "c", "d", "e", "f"].map((replicaId) => ({
       replicaId,
