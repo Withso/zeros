@@ -14,7 +14,9 @@ import { z } from "zod";
 import type pg from "pg";
 import { withUserTx, withSystemTx, type Tx } from "./db.js";
 import {
+  canCreateOrganization,
   HttpError,
+  requireOrganizationCreationCapability,
   requireOrganizationMembership,
   requireOrganizationRole,
   type OrganizationRole,
@@ -425,7 +427,14 @@ export function createRoutes(
       avatarUrl: user.avatarUrl,
       staffRole: user.staffRole,
     };
-    return c.json({ user: publicUser, organizations, teams: organizations });
+    return c.json({
+      user: publicUser,
+      capabilities: {
+        createOrganization: canCreateOrganization(user.staffRole),
+      },
+      organizations,
+      teams: organizations,
+    });
   });
 
   app.route(
@@ -691,6 +700,7 @@ function createOrganizationRouter(
 
   app.post("/", async (c) => {
     const user = c.get("user");
+    requireOrganizationCreationCapability(user.staffRole);
     const body = (await c.req.json().catch(() => ({}))) as Record<
       string,
       unknown
@@ -873,108 +883,6 @@ function createOrganizationRouter(
     return legacy
       ? c.json({ team: organization })
       : c.json({ organization });
-  });
-
-  app.delete("/:organization", async (c) => {
-    const user = c.get("user");
-    const orgId = param(c);
-    // Soft deletion intentionally removes this org from app_user_org_ids(). Use
-    // the system transaction only after explicit owner authorization so the
-    // revocation, audit, and final tombstone remain one atomic operation.
-    await withSystemTx(pool, async (tx) => {
-      await requireOrganizationRole(tx, orgId, user.id, "owner");
-      await assertCollaborativeOrganization(tx, orgId);
-      const retainedCloudWorkspace = await tx.query(
-        `SELECT 1 FROM cloud_workspaces
-         WHERE org_id = $1 AND status <> 'deleted'
-         LIMIT 1`,
-        [orgId],
-      );
-      if (retainedCloudWorkspace.rows[0]) {
-        throw new HttpError(
-          409,
-          "organization_has_cloud_workspaces",
-          "Delete every cloud workspace before deleting the organization",
-        );
-      }
-      const affected = await tx.query<{ user_id: string }>(
-        `SELECT user_id FROM organization_members WHERE org_id = $1`,
-        [orgId],
-      );
-      const providerLink = await tx.query<{
-        workos_organization_id: string | null;
-      }>(
-        `SELECT workos_organization_id FROM workos_organization_links
-         WHERE organization_id = $1 FOR UPDATE`,
-        [orgId],
-      );
-      await tx.query(
-        `UPDATE invitations SET revoked_at = now()
-         WHERE org_id = $1 AND accepted_at IS NULL AND revoked_at IS NULL`,
-        [orgId],
-      );
-      await audit(tx, orgId, user.id, "organization.deleted", {});
-      const result = await tx.query<{
-        authorization_revision: string | number;
-        data_revision: string | number;
-        workos_sync_revision: string | number;
-      }>(
-        `UPDATE organizations
-         SET deleted_at = now(),
-             authorization_revision = authorization_revision + 1,
-             data_revision = data_revision + 1,
-             workos_sync_revision = workos_sync_revision + 1
-         WHERE id = $1 AND deleted_at IS NULL
-         RETURNING authorization_revision, data_revision, workos_sync_revision`,
-        [orgId],
-      );
-      const revisions = result.rows[0];
-      if (!revisions) {
-        throw new HttpError(404, "not_found", "Organization not found");
-      }
-      await tx.query(
-        `UPDATE cloud_workspace_endpoint_grants
-         SET revoked_at = COALESCE(revoked_at, now())
-         WHERE org_id = $1 AND revoked_at IS NULL`,
-        [orgId],
-      );
-      for (const member of affected.rows) {
-        await tx.query(
-          `INSERT INTO security_events (
-             kind, user_id, org_id, authorization_revision,
-             data_revision, payload
-           ) VALUES (
-             'organization.access_revoked', $1, $2, $3, $4,
-             jsonb_build_object('reason', 'zeros_organization_deleted')
-           )`,
-          [
-            member.user_id,
-            orgId,
-            Number(revisions.authorization_revision),
-            Number(revisions.data_revision),
-          ],
-        );
-      }
-      if (workosEnabled && providerLink.rows[0]) {
-        await tx.query(
-          `UPDATE workos_organization_links
-           SET state = 'deleting', updated_at = now()
-           WHERE organization_id = $1`,
-          [orgId],
-        );
-        await enqueueWorkOSCommand(tx, {
-          operation: "organization.delete",
-          idempotencyKey: `organization.${orgId}.${revisions.workos_sync_revision}`,
-          aggregateKey: `organization:${orgId}`,
-          aggregateRevision: Number(revisions.workos_sync_revision),
-          organizationId: orgId,
-          providerObjectId:
-            providerLink.rows[0].workos_organization_id ?? null,
-          payload: {},
-        });
-      }
-    });
-    return c.json({ ok: true });
   });
 
   app.get("/:organization/members", async (c) => {

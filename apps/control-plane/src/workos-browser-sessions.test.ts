@@ -275,6 +275,21 @@ describe("Railway WorkOS browser-session coordinator", () => {
     );
   });
 
+  it("forwards only the fixed five-minute step-up request", async () => {
+    const authorizationUrl = vi.fn(
+      ({ state, codeChallenge }: { state: string; codeChallenge: string }) =>
+        `https://api.workos.test/authorize?state=${state}&code_challenge=${codeChallenge}`,
+    );
+    const value = subject({ provider: provider({ authorizationUrl }) });
+    const app = createWorkOSBrowserSessionRoutes(value.sessions, APP_ORIGIN);
+
+    expect((await app.request("/auth/start?max_age=300")).status).toBe(303);
+    expect(authorizationUrl.mock.calls[0]?.[0]).toMatchObject({ maxAge: 300 });
+
+    expect((await app.request("/auth/start?max_age=86400")).status).toBe(303);
+    expect(authorizationUrl.mock.calls[1]?.[0]).not.toHaveProperty("maxAge");
+  });
+
   it("stores only hashes of the opaque browser credential and OAuth state", async () => {
     const value = subject();
     const started = await value.sessions.start({

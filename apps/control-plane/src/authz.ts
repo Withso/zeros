@@ -27,7 +27,7 @@ export function roleAtLeast(
 /** Staff role — product-wide, NOT team-scoped, and deliberately NOT ranked
  *  against OrganizationRole (see migrations 0007/0009 for why the
  *  two must not share an axis). null ⇒ not staff. */
-export type StaffRole = "developer" | "support_admin";
+export type StaffRole = "platform_owner" | "developer" | "support_admin";
 
 export class HttpError extends Error {
   constructor(
@@ -85,6 +85,32 @@ export function requireStaffRole(
   required: StaffRole,
 ): StaffRole {
   if (staffRole !== required) {
+    throw new HttpError(404, "not_found", "Not found");
+  }
+  return staffRole;
+}
+
+export type OrganizationCreationStaffRole = Extract<
+  StaffRole,
+  "platform_owner" | "developer"
+>;
+
+/** Initial-launch organization creation is a standing-staff dogfood
+ * capability. It is deliberately independent from tenant membership and from
+ * the deprecated support-only compatibility role. */
+export function canCreateOrganization(
+  staffRole: StaffRole | null,
+): staffRole is OrganizationCreationStaffRole {
+  return staffRole === "platform_owner" || staffRole === "developer";
+}
+
+/** Authoritative API boundary for collaborative organization creation. Use a
+ * 404 so an ordinary account cannot discover an unavailable staff surface by
+ * probing the legacy or current route. */
+export function requireOrganizationCreationCapability(
+  staffRole: StaffRole | null,
+): OrganizationCreationStaffRole {
+  if (!canCreateOrganization(staffRole)) {
     throw new HttpError(404, "not_found", "Not found");
   }
   return staffRole;

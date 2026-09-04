@@ -34,6 +34,7 @@ import {
   type AuthTokenContractConfig,
 } from "./auth-token-contract.js";
 import { materializeProjectedMemberships } from "./workos-sync-events.js";
+import { isDeletionRecoveryRequest } from "./deletion-lifecycle.js";
 
 export type IdentityProvider = "auth0" | "workos";
 
@@ -67,6 +68,14 @@ export type AuthedUser = {
   displayName: string | null;
   avatarUrl: string | null;
   accountRevision: number;
+  /** Server-only lifecycle state. Public account responses expose only
+   * deliberately bounded deletion details from the lifecycle routes. */
+  accountStatus:
+    | "active"
+    | "identity_disabled"
+    | "suspended"
+    | "deletion_pending"
+    | "deleted";
   /** Server-only verified session context. Never serialize this object as part
    * of a public account response. */
   authentication: {
@@ -284,9 +293,16 @@ export function createAuthMiddleware(
       };
     }
 
-    const user = await resolveAuthenticatedUser(pool, {
-      ...identity,
-    });
+    const user = await resolveAuthenticatedUser(
+      pool,
+      { ...identity },
+      {
+        allowDeletionPending: isDeletionRecoveryRequest(
+          c.req.method,
+          c.req.path,
+        ),
+      },
+    );
     c.set("user", user);
     await next();
   };
@@ -379,6 +395,7 @@ function authenticationContext(
 function activePrincipal(
   row: PrincipalRow,
   input: AuthenticatedIdentityInput,
+  options: { allowDeletionPending: boolean },
 ): AuthedUser {
   if (row.identity_status !== "active") {
     throw new HttpError(
@@ -389,7 +406,9 @@ function activePrincipal(
       "This sign-in identity is no longer active.",
     );
   }
-  if (row.deleted_at || row.auth_status !== "active") {
+  const deletionRecovery =
+    options.allowDeletionPending && row.auth_status === "deletion_pending";
+  if (!deletionRecovery && (row.deleted_at || row.auth_status !== "active")) {
     throw new HttpError(
       401,
       row.auth_status === "suspended"
@@ -411,6 +430,7 @@ function activePrincipal(
     avatarUrl: row.avatar_url,
     staffRole: row.staff_role,
     accountRevision: Number(row.auth_revision),
+    accountStatus: row.auth_status,
     authentication: authenticationContext(input),
   };
 }
@@ -510,6 +530,7 @@ async function registerAuthenticatedSession(
 export async function resolveAuthenticatedUser(
   pool: pg.Pool,
   input: AuthenticatedIdentityInput,
+  options: { allowDeletionPending?: boolean } = {},
 ): Promise<AuthedUser> {
   const existing = await withSystemTx(pool, async (tx) => {
     const result = await tx.query<PrincipalRow>(
@@ -522,7 +543,9 @@ export async function resolveAuthenticatedUser(
       [input.provider, input.providerSubject],
     );
     if (!result.rows[0]) return null;
-    const user = activePrincipal(result.rows[0], input);
+    const user = activePrincipal(result.rows[0], input, {
+      allowDeletionPending: options.allowDeletionPending === true,
+    });
     await registerAuthenticatedSession(tx, user, input);
     return user;
   });
@@ -686,7 +709,8 @@ export async function ensureUser(
         const owner = emailOwner.rows[0];
         if (
           input.provider === "workos" &&
-          owner.auth_status === "identity_disabled" &&
+          (owner.auth_status === "identity_disabled" ||
+            owner.auth_status === "deletion_pending") &&
           owner.recovery_identity_id
         ) {
           if (!input.session) {
@@ -783,6 +807,7 @@ export async function ensureUser(
         avatarUrl: row.avatar_url,
         staffRole: row.staff_role,
         accountRevision: Number(row.auth_revision),
+        accountStatus: row.auth_status,
         authentication: authenticationContext(input),
       },
     };

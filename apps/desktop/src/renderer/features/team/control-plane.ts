@@ -35,6 +35,9 @@ export type OrganizationSummary = {
   logo: string | null;
   role: OrganizationRole;
   isPersonal: boolean;
+  /** Renderer-only compatibility evidence for device Personal. Never sent as
+   * server ownership; changing this snapshot invalidates local list memos. */
+  legacyPersonalOrganizationIds?: readonly string[];
   /** Mixed-version marker for a pre-hierarchy flat Team response. */
   legacyFlat?: boolean;
   defaultTeamId: string | null;
@@ -48,7 +51,7 @@ export type TeamSummary = OrganizationSummary;
  *  null ⇒ ordinary user.
  *  Backed by `users.staff_role` and re-read from Postgres on every request;
  *  see apps/control-plane/migrations/0007_staff_role.sql. */
-export type StaffRole = "developer" | "support_admin";
+export type StaffRole = "platform_owner" | "developer" | "support_admin";
 
 export type Me = {
   user: {
@@ -57,6 +60,11 @@ export type Me = {
     displayName: string | null;
     avatarUrl?: string | null;
     staffRole: StaffRole | null;
+  };
+  /** Server-computed product capabilities. Optional only for safe compatibility
+   * with an older control plane; absence always means disabled. */
+  capabilities?: {
+    createOrganization: boolean;
   };
   organizations?: OrganizationSummary[];
   /** Compatibility mirror returned by the control plane. */

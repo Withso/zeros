@@ -23,7 +23,7 @@
  *   npm run build:standalone
  */
 
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import {
   copyFileSync,
   cpSync,
@@ -35,6 +35,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { pagesFunctionRoutes } from "../lib/pages-routes.mjs";
+import {
+  createDeploymentManifest,
+  DEPLOYMENT_MANIFEST_PATH,
+} from "../lib/deployment-manifest.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_APP = path.resolve(HERE, "..");
@@ -138,12 +143,40 @@ function assemble() {
     "404.html",
     "dashboard.css",
     "dashboard.js",
+    "account-deletion.js",
+    "ops.css",
+    "ops.js",
   ]) {
     const src = path.join(PUBLIC_SRC, name);
     if (existsSync(src)) {
       writeFileSync(path.join(OUT, name), readFileSync(src));
     }
   }
+
+  // Cloudflare auto-excludes static files from Functions. Keep stable hosted
+  // UI assets inside host middleware so its runtime cache/CSP policy applies.
+  // The isolated Ops deployment routes every path through its deny-by-default
+  // allowlist; public web deployments retain free delivery for immutable files.
+  const surface = process.env.ZEROS_SURFACE === "ops" ? "ops" : "app";
+  writeFileSync(
+    path.join(OUT, "_routes.json"),
+    `${JSON.stringify(pagesFunctionRoutes(surface), null, 2)}\n`,
+  );
+
+  // Pages injects the source revision into every hosted build. Local builds
+  // use the checked-out commit so the artifact remains inspectable without
+  // inventing a placeholder that could accidentally pass deployment checks.
+  const commitSha =
+    (process.env.CF_PAGES_COMMIT_SHA || "").trim() ||
+    execFileSync("git", ["rev-parse", "HEAD"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    }).trim();
+  const deploymentManifest = createDeploymentManifest(commitSha, surface);
+  writeFileSync(
+    path.join(OUT, DEPLOYMENT_MANIFEST_PATH.slice(1)),
+    `${JSON.stringify(deploymentManifest)}\n`,
+  );
 
   // The dashboard consumes the SAME primitive values as the desktop. Strip
   // Tailwind's build-only setup (`@theme`, package imports, source scanning)

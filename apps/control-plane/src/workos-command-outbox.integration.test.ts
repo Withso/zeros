@@ -27,6 +27,14 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
   nextMembershipCreateFailure: { name: string; status: number } | null = null;
   readonly memberships: WorkOSMembershipRecord[] = [];
   readonly invitations: WorkOSInvitationRecord[] = [];
+  readonly sessions: Array<{
+    id: string;
+    userId: string;
+    status: string;
+    createdAt: string;
+  }> = [];
+  readonly missingSessionUserIds = new Set<string>();
+  readonly deletedUsers: string[] = [];
   lastInvitationOptions: {
     organizationId: string;
     email: string;
@@ -274,7 +282,52 @@ class FakeWorkOSProvider implements WorkOSManagementProvider {
     return invitation;
   }
 
-  async revokeSession(): Promise<void> {}
+  async listSessions(
+    subject: string,
+    options: { limit: number; after?: string },
+  ): Promise<{
+    data: Array<{ id: string; status: string; createdAt: string }>;
+    listMetadata: { after: string | null };
+  }> {
+    this.calls.push(`session.list:${subject}`);
+    if (this.missingSessionUserIds.has(subject)) {
+      const missing = new Error("WorkOS user not found") as Error & {
+        status: number;
+      };
+      missing.name = "NotFoundException";
+      missing.status = 404;
+      throw missing;
+    }
+    const offset = options.after ? Number(options.after) : 0;
+    const rows = this.sessions
+      .filter((session) => session.userId === subject)
+      .slice(offset, offset + options.limit);
+    const next = offset + rows.length;
+    return {
+      data: rows.map(({ id, status, createdAt }) => ({
+        id,
+        status,
+        createdAt,
+      })),
+      listMetadata: {
+        after:
+          next < this.sessions.filter((session) => session.userId === subject).length
+            ? String(next)
+            : null,
+      },
+    };
+  }
+
+  async revokeSession(sessionId: string): Promise<void> {
+    this.calls.push(`session.revoke:${sessionId}`);
+    const session = this.sessions.find((candidate) => candidate.id === sessionId);
+    if (session) session.status = "revoked";
+  }
+
+  async deleteUser(userId: string): Promise<void> {
+    this.calls.push(`user.delete:${userId}`);
+    this.deletedUsers.push(userId);
+  }
 }
 
 async function seedOrganization(pool: pg.Pool, suffix: string) {
@@ -317,6 +370,116 @@ d("WorkOS command outbox", () => {
   });
 
   afterAll(async () => pool.end());
+
+  it("revokes only pre-deletion sessions before deleting the WorkOS user", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const workosUserId = `user_${suffix}`;
+    const user = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: workosUserId,
+      email: `account-delete-${suffix}@example.com`,
+      displayName: "Account deletion",
+    });
+    const cutoff = "2026-09-01T00:00:01.000Z";
+    await withSystemTx(pool, async (tx) => {
+      await enqueueWorkOSCommand(tx, {
+        operation: "sessions.revoke_all",
+        idempotencyKey: `account.sessions.${user.id}.1`,
+        aggregateKey: `account-sessions:${user.id}`,
+        orderingKey: `account:${user.id}`,
+        aggregateRevision: 1,
+        userId: user.id,
+        providerObjectId: workosUserId,
+        payload: { workosUserId, createdBefore: cutoff },
+      });
+      await enqueueWorkOSCommand(tx, {
+        operation: "user.delete",
+        idempotencyKey: `account.delete.${user.id}`,
+        aggregateKey: `account-delete:${user.id}`,
+        orderingKey: `account:${user.id}`,
+        aggregateRevision: 1,
+        userId: user.id,
+        providerObjectId: workosUserId,
+        payload: { workosUserId },
+      });
+    });
+
+    const provider = new FakeWorkOSProvider();
+    provider.sessions.push(
+      {
+        id: `session_old_${suffix}`,
+        userId: workosUserId,
+        status: "active",
+        createdAt: "2026-09-01T00:00:00.000Z",
+      },
+      {
+        id: `session_recovery_${suffix}`,
+        userId: workosUserId,
+        status: "active",
+        createdAt: "2026-09-01T00:00:02.000Z",
+      },
+    );
+
+    expect(await new WorkOSCommandProcessor(pool, provider).tick()).toBe(2);
+    expect(provider.calls).toEqual([
+      `session.list:${workosUserId}`,
+      `session.revoke:session_old_${suffix}`,
+      `user.delete:${workosUserId}`,
+    ]);
+    expect(provider.sessions).toEqual([
+      expect.objectContaining({ id: `session_old_${suffix}`, status: "revoked" }),
+      expect.objectContaining({
+        id: `session_recovery_${suffix}`,
+        status: "active",
+      }),
+    ]);
+    expect(provider.deletedUsers).toEqual([workosUserId]);
+  });
+
+  it("converges session revocation when the WorkOS user is already absent", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const workosUserId = `user_${suffix}`;
+    const user = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: workosUserId,
+      email: `missing-session-user-${suffix}@example.com`,
+      displayName: "Missing session user",
+    });
+    await withSystemTx(pool, (tx) =>
+      enqueueWorkOSCommand(tx, {
+        operation: "sessions.revoke_all",
+        idempotencyKey: `account.sessions.${user.id}.1`,
+        aggregateKey: `account-sessions:${user.id}`,
+        orderingKey: `account:${user.id}`,
+        aggregateRevision: 1,
+        userId: user.id,
+        providerObjectId: workosUserId,
+        payload: {
+          workosUserId,
+          createdBefore: "2026-09-01T00:00:01.000Z",
+        },
+      }),
+    );
+
+    const provider = new FakeWorkOSProvider();
+    provider.missingSessionUserIds.add(workosUserId);
+
+    expect(await new WorkOSCommandProcessor(pool, provider).tick()).toBe(1);
+    expect(provider.calls).toEqual([`session.list:${workosUserId}`]);
+    const command = await pool.query<{
+      state: string;
+      last_error_code: string | null;
+    }>(
+      `SELECT state, last_error_code
+       FROM workos_command_outbox
+       WHERE idempotency_key = $1`,
+      [`account.sessions.${user.id}.1`],
+    );
+    expect(command.rows[0]).toEqual({
+      state: "succeeded",
+      last_error_code: null,
+    });
+  });
 
   it("provisions an organization before its membership and persists provider IDs", async () => {
     const seeded = await seedOrganization(

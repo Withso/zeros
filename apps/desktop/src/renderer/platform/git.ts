@@ -435,7 +435,7 @@ export async function workspaceCreate(
 
 export async function workspaceReassignLocalOrganization(args: {
   fromOrganizationId: string;
-  toOrganizationId: string;
+  toOrganizationId: string | null;
 }): Promise<{ changes: number; repoSlugs: string[] }> {
   return bridgeWorkspaceReassignLocalOrganization(
     requireBridge("repair local workspace ownership"),

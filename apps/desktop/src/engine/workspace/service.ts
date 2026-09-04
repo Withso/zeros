@@ -1584,6 +1584,13 @@ export class WorkspaceService {
     string,
     Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>
   >();
+  /** Claim an aggregate snapshot request before asynchronous pointer and
+   * discovery work. Otherwise a fast read can finish before a concurrent
+   * sibling reaches the lower-level parse flight. */
+  private readonly designSnapshotRequestFlights = new Map<
+    string,
+    Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }>
+  >();
   /** One bounded workspace-wide ordering layer sits above DesignApi's
    * per-frame stacks. It lets Command-Z restore a deleted frame even when the
    * selected frame changed—or when deletion left the canvas empty. */
@@ -2220,6 +2227,32 @@ export class WorkspaceService {
     }
   }
 
+  private async readDesignSnapshotRequest(
+    workspaceId: string,
+    remote: boolean,
+  ): Promise<DesignWorkspaceSnapshot & { protocolCapability: string | null }> {
+    const workspace = this.resolveDesignWorkspaceRecord(workspaceId, remote);
+    const key = `${workspace.id}\u0000${nodePath.resolve(workspace.path)}\u0000${
+      workspace.kind === "design" && !remote ? "write" : "read"
+    }\u0000${designDirectoryNameFor(workspace.path)}`;
+    const current = this.designSnapshotRequestFlights.get(key);
+    if (current) return current;
+    const request = this.withDesignReadWorkspace(
+      workspaceId,
+      remote,
+      ({ workspace: target, root, writeBack }) =>
+        this.readDesignSnapshot(target, remote, { root, writeBack }),
+    );
+    this.designSnapshotRequestFlights.set(key, request);
+    try {
+      return await request;
+    } finally {
+      if (this.designSnapshotRequestFlights.get(key) === request) {
+        this.designSnapshotRequestFlights.delete(key);
+      }
+    }
+  }
+
   /** Canonicalize a pty/agent cwd token to its managed workspace id. The token
    *  may be a workspace ID (the web's opaque form) OR a real host PATH — the
    *  relaxed redaction sends real paths to trusted devices, and the desktop
@@ -2815,16 +2848,12 @@ export class WorkspaceService {
         );
       }
       case "design.snapshot": {
-        return this.withDesignReadWorkspace(
-          reqStr(params, "workspaceId"),
-          remote,
-          async ({ workspace, root, writeBack }) => ({
-            snapshot: await this.readDesignSnapshot(workspace, remote, {
-              root,
-              writeBack,
-            }),
-          }),
-        );
+        return {
+          snapshot: await this.readDesignSnapshotRequest(
+            reqStr(params, "workspaceId"),
+            remote,
+          ),
+        };
       }
       case "design.tokens": {
         return this.withDesignReadWorkspace(
@@ -3905,7 +3934,8 @@ export class WorkspaceService {
       }
 
       // LOCAL-ONLY ownership repair after a confirmed organization leave or
-      // deletion. Local worktrees remain the user's files and move to Personal;
+      // deletion, or detaching a legacy Personal account ID. Local worktrees
+      // remain the user's files and move to device Personal (null owner);
       // cloud rows stay attached to their server tenant.
       case "workspace.reassignLocalOrganization": {
         if (remote) {
@@ -3916,7 +3946,9 @@ export class WorkspaceService {
         }
         return reassignLocalWorkspaceOrganization(
           reqStr(params, "fromOrganizationId"),
-          reqStr(params, "toOrganizationId"),
+          params.toOrganizationId === null
+            ? null
+            : reqStr(params, "toOrganizationId"),
         );
       }
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   accountAccessPage,
+  accountDeletionPage,
   accountRecoveryPage,
   dashboardPage,
   dashboardReturnUrl,
@@ -63,7 +64,11 @@ test("dashboard intent survives sign-in without carrying unrelated query state",
 test("dashboard renders Personal first-class, organization sections, and no bearer tokens", () => {
   const page = dashboardPage({
     session,
-    me: { user: { id: "u1", email: session.email, displayName: session.name }, organizations: [personal, org] },
+    me: {
+      user: { id: "u1", email: session.email, displayName: session.name },
+      capabilities: { createOrganization: true },
+      organizations: [personal, org],
+    },
     requestUrl: `https://app.zeros.build/?organization=${org.id}&section=members`,
     signOutHref: "/auth/logout",
   });
@@ -73,6 +78,70 @@ test("dashboard renders Personal first-class, organization sections, and no bear
   assert.doesNotMatch(page, /<script>Engines/);
   assert.doesNotMatch(page, /secret-token-must-not-render/);
   assert.doesNotMatch(page, /refresh-secret-must-not-render/);
+});
+
+test("ordinary accounts cannot discover or deep-link organization creation", () => {
+  const page = dashboardPage({
+    session,
+    me: {
+      user: { id: "u1", email: session.email, displayName: session.name },
+      capabilities: { createOrganization: false },
+      organizations: [personal],
+    },
+    requestUrl: "https://app.zeros.build/?action=create-organization",
+    signOutHref: "/auth/logout",
+  });
+  assert.doesNotMatch(page, /Create organization/);
+  assert.doesNotMatch(page, /create-organization-form/);
+  assert.doesNotMatch(page, /"action":"create-organization"/);
+});
+
+test("dialog cancellation uses explicit non-submitting close controls", () => {
+  const page = dashboardPage({
+    session,
+    me: {
+      user: { id: "u1", email: session.email, displayName: session.name },
+      capabilities: { createOrganization: true },
+      organizations: [personal, org],
+    },
+    requestUrl: "https://app.zeros.build/",
+    signOutHref: "/auth/logout",
+  });
+  const cancelControls = [
+    ...page.matchAll(/<button\b[^>]*\bvalue="cancel"[^>]*>/g),
+  ].map(([control]) => control);
+  assert.equal(cancelControls.length, 6);
+  for (const control of cancelControls) {
+    assert.match(control, /\btype="button"/);
+    assert.match(control, /\bdata-action="close-dialog"/);
+  }
+});
+
+test("dashboard shell uses revisioned static assets", () => {
+  const page = dashboardPage({
+    session,
+    me: {
+      user: { id: "u1", email: session.email, displayName: session.name },
+      organizations: [personal],
+    },
+    requestUrl: "https://app.zeros.build/",
+    signOutHref: "/auth/logout",
+  });
+  assert.match(page, /href="\/dashboard\.css\?v=[a-z0-9.-]+"/i);
+  assert.match(page, /src="\/dashboard\.js\?v=[a-z0-9.-]+"/i);
+
+  const deletionPage = accountDeletionPage({
+    session,
+    deletion: {
+      recoveryCode: "ZD-2345-WMGZ",
+      scheduledPurgeAt: "2026-10-01T00:00:00.000Z",
+    },
+    signOutHref: "/auth/logout",
+  });
+  assert.match(
+    deletionPage,
+    /src="\/account-deletion\.js\?v=[a-z0-9.-]+"/i,
+  );
 });
 
 test("Personal disables collaboration navigation and remains local-only", () => {
@@ -118,6 +187,30 @@ test("server Profile uses the same control-plane identity as hydration", () => {
     page,
     /avatar avatar-large">SN<\/span><div><strong>Stored Name<\/strong>/,
   );
+  assert.match(page, /Delete account/);
+  assert.match(page, /30 days/);
+  assert.match(page, /id="delete-account-dialog"/);
+  assert.match(
+    page,
+    /id="delete-account-form"[\s\S]*name="confirmation" maxlength="64"/,
+  );
+});
+
+test("a deletion-pending account gets an exact self-service restore page", () => {
+  const page = accountDeletionPage({
+    session,
+    deletion: {
+      id: "44444444-4444-4444-8444-444444444444",
+      recoveryCode: "ZD-ABCD-2345",
+      purgeAfter: "2026-10-01T00:00:00.000Z",
+      state: "scheduled",
+    },
+    signOutHref: "/auth/logout",
+  });
+  assert.match(page, /Restore account/);
+  assert.match(page, /ZD-ABCD-2345/);
+  assert.match(page, /44444444-4444-4444-8444-444444444444/);
+  assert.doesNotMatch(page, /secret-token-must-not-render/);
 });
 
 test("mobile navigation exposes a controlled sidebar and dismissing scrim", () => {
@@ -152,7 +245,7 @@ test("server-rendered organization identity uses safe raster logos only", () => 
   assert.match(page, /data-copy-organization-id/);
   assert.match(page, /Delete organization/);
   assert.match(page, /Capability metadata; cloud provisioning will still enforce plan and quota/);
-  assert.match(page, /provider cleanup verified first/);
+  assert.match(page, /deleted only after the grace period/);
 
   const unsafe = dashboardPage({
     session,

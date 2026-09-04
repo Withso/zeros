@@ -31,7 +31,9 @@ vi.mock("../../team/team-store", () => {
 });
 
 /** Point the mocked store at a signed-in user with the given staff role. */
-function signedInAs(staffRole: "developer" | "support_admin" | null): void {
+function signedInAs(
+  staffRole: "platform_owner" | "developer" | "support_admin" | null,
+): void {
   teamStore.me = {
     user: {
       id: "00000000-0000-0000-0000-000000000001",
@@ -70,10 +72,13 @@ beforeEach(() => {
 });
 
 describe("isInternalUser — the staff gate", () => {
-  it("is true only for the developer role, not an unrelated support capability", async () => {
+  it("is true for owners and developers, not a legacy support capability", async () => {
     const store = await freshStore();
 
     signedInAs("developer");
+    expect(store.isInternalUser()).toBe(true);
+
+    signedInAs("platform_owner");
     expect(store.isInternalUser()).toBe(true);
 
     signedInAs("support_admin");

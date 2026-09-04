@@ -89,6 +89,26 @@ describe("WorkspaceService", () => {
     expect(local!.path).toBe(dir);
   });
 
+  it("accepts explicit device-Personal detachment only over the local bridge", async () => {
+    const op = "workspace.reassignLocalOrganization";
+    const params = {
+      fromOrganizationId: "personal_old",
+      toOrganizationId: null,
+    };
+    await expect(svc.handle(op, params)).resolves.toEqual({
+      changes: 0,
+      repoSlugs: [],
+    });
+    await expect(
+      svc.handle(op, params, { remote: true }),
+    ).rejects.toMatchObject({ code: "REMOTE_RESTRICTED" });
+    for (const toOrganizationId of [undefined, "", false, 1]) {
+      await expect(
+        svc.handle(op, { ...params, toOrganizationId }),
+      ).rejects.toMatchObject({ code: "VALIDATION_FAILED" });
+    }
+  });
+
   it("reports exact local lifecycle status without inventing a missing operation", async () => {
     await expect(
       svc.handle("workspace.lifecycleStatus", { workspaceId: "ws_missing" }),
