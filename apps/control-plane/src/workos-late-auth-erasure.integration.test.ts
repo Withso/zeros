@@ -209,6 +209,51 @@ d("late WorkOS authentication during account erasure", () => {
     });
   });
 
+  it("fails closed for a late subject while erasure evidence is unavailable", async () => {
+    const suffix = randomUUID().replaceAll("-", "");
+    const target = await ensureUser(pool, {
+      provider: "workos",
+      providerSubject: `user_unavailable_original_${suffix}`,
+      email: `unavailable-${suffix}@example.test`,
+      displayName: "Unavailable evidence target",
+    });
+    const requestId = await stageAccountPurge(
+      pool,
+      target.id,
+      "provider_deleting",
+    );
+    const subject = `user_unavailable_candidate_${suffix}`;
+    const input = candidateInput(subject, target.email);
+    await pool.query("DROP TABLE workos_provider_erasure_reconciliations");
+    await pool.query("DROP TABLE workos_provider_erasure_fences");
+
+    await expect(resolveAuthenticatedUser(pool, input)).rejects.toMatchObject({
+      status: 503,
+      code: "authentication_temporarily_unavailable",
+    });
+    await expect(
+      pool.query(
+        `SELECT
+           (SELECT count(*)::int FROM user_identities
+            WHERE provider = 'workos' AND provider_sub = $1) AS identities,
+           (SELECT count(*)::int FROM auth_sessions
+            WHERE provider = 'workos' AND provider_sub = $1) AS sessions,
+           (SELECT count(*)::int FROM deletion_request_events
+            WHERE deletion_request_id = $2
+              AND metadata->'workosSubjectHashes' ? $3) AS events,
+           (SELECT count(*)::int FROM workos_command_outbox
+            WHERE provider_object_id = $1) AS commands`,
+        [
+          subject,
+          requestId,
+          workOSProviderSubjectHash({ kind: "user", id: subject }),
+        ],
+      ),
+    ).resolves.toMatchObject({
+      rows: [{ identities: 0, sessions: 0, events: 0, commands: 0 }],
+    });
+  });
+
   it("rejects a new late subject atomically at the per-request erasure bound", async () => {
     const suffix = randomUUID().replaceAll("-", "");
     const target = await ensureUser(pool, {

@@ -571,6 +571,7 @@ async function fenceAndQueueLatePurgingWorkOSCandidate(
   );
   const target = deletion.rows[0];
   if (!target) return false;
+  await requireUnfencedWorkOSIdentity(tx, input);
   try {
     await assertAccountWorkOSProviderErasureSubjectLimit(
       tx,
